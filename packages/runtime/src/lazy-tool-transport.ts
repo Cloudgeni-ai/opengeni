@@ -55,6 +55,7 @@ import {
   streamPreemptibleModelRequest,
 } from "./model-request-capture";
 import { isRecord } from "@opengeni/contracts/values";
+import { TOOL_DISCOVERY_CARD_META_KEY } from "@opengeni/contracts";
 import {
   integrationMentionsIn,
   integrationNameWords,
@@ -251,7 +252,51 @@ type SearchDecision = {
   result: GenericSearchMarker;
   query: string;
   names: readonly string[] | undefined;
+  /**
+   * Integrations the search names that the person can connect. Their notice
+   * is added once the call is accepted, after any Connect card is shown.
+   */
+  connectable?: ConnectableIntegrations;
 };
+
+/**
+ * The integrations a search names that the person can connect, and the one it
+ * clearly names when it names exactly one distinctively (see
+ * isDistinctiveIntegrationMention): only that one gets its Connect card from
+ * the search itself.
+ */
+type ConnectableIntegrations = {
+  named: ConnectableIntegration[];
+  clearlyNamed?: ConnectableIntegration;
+};
+
+/**
+ * A Connect card in the chat after a search showed it: shown now, or already
+ * shown since the person's latest message.
+ */
+export type ConnectCardReceipt = {
+  eventId: string;
+  alreadyShown: boolean;
+  /** What the card tool said about it, for the model. */
+  message?: string;
+};
+
+/**
+ * Whether a search's Connect card is in the chat: a receipt, null when the
+ * card tool answered without one, or "unknown" when the call failed or timed
+ * out and the card may or may not have been posted.
+ */
+export type ConnectCardOutcome = ConnectCardReceipt | null | "unknown";
+
+/**
+ * Shows an integration's Connect card in this chat, as a call of the card tool
+ * would, not again until the person writes. Null when the tool answered that
+ * no card is in the chat.
+ */
+export type ConnectCardRequest = (
+  integration: ConnectableIntegration,
+  signal?: AbortSignal,
+) => Promise<ConnectCardReceipt | null>;
 
 /**
  * A catalog integration the person can connect from a card in this chat, and
@@ -357,9 +402,13 @@ export function connectableIntegrationsNamedIn(
   return named;
 }
 
-/** The plain sentence a search result carries for connectable integrations. */
+/**
+ * The plain sentence a search result carries for connectable integrations,
+ * saying whether the search itself already put a Connect card in the chat.
+ */
 export function connectableIntegrationNotice(
   integrations: readonly ConnectableIntegration[],
+  card?: ConnectCardOutcome,
 ): string {
   const listed = integrations
     .map(
@@ -367,9 +416,40 @@ export function connectableIntegrationNotice(
         `${integration.name} (capabilityId ${JSON.stringify(integration.capabilityId)})`,
     )
     .join(", ");
+  if (card && card !== "unknown") {
+    // The card tool's own message says what the card does, and for a card
+    // already in the chat that it was not posted again.
+    const said = card.alreadyShown
+      ? (card.message ?? "Its Connect card is already in this chat.")
+      : `Its Connect card is now shown in this chat.${card.message ? ` ${card.message}` : ""}`;
+    return `Not connected yet: ${listed}. ${said}`;
+  }
+  // Whether a card was posted is unknown after a failed call, so the notice
+  // then says nothing about it.
+  const none = card === "unknown" ? "" : " No card is shown until you do.";
   return integrations.length === 1
-    ? `Not connected yet: ${listed}. If the task needs it, call capability_authorization_request with that capabilityId and a short rationale to show the person its Connect card.`
-    : `Not connected yet: ${listed}. If the task needs one, call capability_authorization_request with its capabilityId and a short rationale to show the person its Connect card.`;
+    ? `Not connected yet: ${listed}. If the task needs it, call capability_authorization_request with that capabilityId and a short rationale to show the person its Connect card.${none}`
+    : `Not connected yet: ${listed}. If the task needs one, call capability_authorization_request with its capabilityId and a short rationale to show the person its Connect card.${none}`;
+}
+
+/**
+ * The structured counterpart of connectableIntegrationNotice: whether a
+ * Connect card is in the chat, and which event shows it. A reply can rely on
+ * it instead of assuming a card was shown. Undefined when that is unknown.
+ */
+export function connectCardField(
+  integration: ConnectableIntegration | undefined,
+  card: ConnectCardOutcome | undefined,
+): Record<string, unknown> | undefined {
+  if (card === "unknown") return undefined;
+  return card && integration
+    ? {
+        shown: true,
+        capabilityId: integration.capabilityId,
+        eventId: card.eventId,
+        ...(card.alreadyShown ? { alreadyShown: true } : {}),
+      }
+    : { shown: false };
 }
 
 /**
@@ -560,6 +640,84 @@ export function catalogConnectableIntegrationLookup(server: {
 }
 
 /**
+ * How long an accepted search waits for its Connect card: posting it reads the
+ * catalog and writes the card, so it gets longer than the catalog read alone.
+ */
+const CONNECT_CARD_TIMEOUT_MS = 10_000;
+
+/** The person-facing reason on a Connect card a search shows. */
+function discoveryCardRationale(integration: ConnectableIntegration): string {
+  return `Connect ${integration.name} so the agent can use it for this task.`;
+}
+
+/**
+ * Shows a Connect card with the harness control server's card tool, through
+ * the same authorized call path, policy and card as a model call of that tool.
+ * The call says it comes from tool discovery, so the card is shown at most
+ * once per chat. A result without a card (ready, unavailable, input needed)
+ * or a failed call shows nothing.
+ */
+export function catalogConnectCardRequest(server: {
+  callTool(
+    toolName: string,
+    args: Record<string, unknown> | null,
+    meta?: Record<string, unknown> | null,
+    options?: { signal?: AbortSignal },
+  ): Promise<unknown>;
+  callToolResult?(
+    toolName: string,
+    args: Record<string, unknown> | null,
+    meta?: Record<string, unknown> | null,
+    options?: { signal?: AbortSignal },
+  ): Promise<unknown>;
+}): ConnectCardRequest {
+  return async (integration, signal) => {
+    const timeout = AbortSignal.timeout(CONNECT_CARD_TIMEOUT_MS);
+    const options = { signal: signal ? AbortSignal.any([signal, timeout]) : timeout };
+    const args = {
+      capabilityId: integration.capabilityId,
+      rationale: discoveryCardRationale(integration),
+    };
+    const meta = { [TOOL_DISCOVERY_CARD_META_KEY]: true };
+    const result = server.callToolResult
+      ? await server.callToolResult(INTEGRATION_CARD_TOOL_NAME, args, meta, options)
+      : await server.callTool(INTEGRATION_CARD_TOOL_NAME, args, meta, options);
+    return connectCardReceiptFromResult(result);
+  };
+}
+
+/**
+ * The card a capability_authorization_request result says is in the chat:
+ * only an explicit `cardShown: true` with the event that shows it counts.
+ * Accepts the MCP content array or a full result.
+ */
+export function connectCardReceiptFromResult(result: unknown): ConnectCardReceipt | null {
+  if (isRecord(result) && result.isError === true) return null;
+  const content = Array.isArray(result)
+    ? result
+    : isRecord(result) && Array.isArray(result.content)
+      ? result.content
+      : [];
+  for (const block of content) {
+    if (!isRecord(block) || block.type !== "text" || typeof block.text !== "string") continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(block.text);
+    } catch {
+      continue;
+    }
+    if (!isRecord(parsed) || parsed.cardShown !== true) continue;
+    if (typeof parsed.eventId !== "string" || !parsed.eventId) continue;
+    return {
+      eventId: parsed.eventId,
+      alreadyShown: parsed.alreadyShown === true,
+      ...(typeof parsed.message === "string" && parsed.message ? { message: parsed.message } : {}),
+    };
+  }
+  return null;
+}
+
+/**
  * Written once when the model calls an interaction entry tool (browser_open,
  * computer_open). The schemas are frozen at that moment so the disclosure the
  * provider sees after the step's results never changes on later requests,
@@ -697,6 +855,11 @@ export class LazyToolRuntime {
      * out searchable once prepared still expose it.
      */
     private readonly pendingPreparationDefers = true,
+    /**
+     * Shows the Connect card of an integration a search clearly names;
+     * absent means searches only name it.
+     */
+    private readonly connectCardRequest?: ConnectCardRequest,
   ) {
     this.routerWasExposed = routerInHistory;
     this.controlTools =
@@ -1162,7 +1325,53 @@ export class LazyToolRuntime {
     signal?: AbortSignal,
     decided?: Promise<SearchDecision>,
   ): Promise<GenericSearchMarker> {
-    return this.commitSearch(await (decided ?? this.decideSearch(rawArguments, signal)));
+    const decision = await (decided ?? this.decideSearch(rawArguments, signal));
+    return this.commitSearch(await this.withConnectableNotice(decision, signal));
+  }
+
+  /**
+   * Names the integrations an accepted search found that the person can
+   * connect. One the search clearly names gets its Connect card now, through
+   * the card tool (once per chat), so the card never depends on a second
+   * call; the result then says the card is shown. Showing it waits for the
+   * accepted call because an early decision may be dropped. Without a card in
+   * the chat, the result says none is shown.
+   */
+  private async withConnectableNotice(
+    decision: SearchDecision,
+    signal?: AbortSignal,
+  ): Promise<SearchDecision> {
+    const connectable = decision.connectable;
+    if (!connectable?.named.length) return decision;
+    const integration = connectable.clearlyNamed;
+    let card: ConnectCardOutcome = null;
+    if (integration && this.connectCardRequest) {
+      try {
+        card = await this.connectCardRequest(integration, signal);
+      } catch {
+        // Cancellation belongs to the owning turn. Any other failure (no card
+        // tool this attempt, a policy refusal, a timeout) leaves the search
+        // naming the integration as before, without saying whether a card was
+        // posted.
+        signal?.throwIfAborted();
+        card = "unknown";
+      }
+    }
+    const notice = this.withNotice(
+      decision.result,
+      "notConnected",
+      connectableIntegrationNotice(connectable.named, card),
+    );
+    const field = connectCardField(integration, card);
+    return {
+      ...decision,
+      result: field
+        ? {
+            ...notice,
+            output: JSON.stringify({ ...JSON.parse(notice.output), connectCard: field }),
+          }
+        : notice,
+    };
   }
 
   /**
@@ -1214,19 +1423,19 @@ export class LazyToolRuntime {
     // companions wait for it.
     const setup = integrationSetupToolNames(pool);
     const owners = this.integrationOwners(strong);
-    const lookup: Promise<ConnectableIntegration[]> =
+    const lookup: Promise<ConnectableIntegrations> =
       named.length ||
       setup.length < 2 ||
       owners.some((owner) => integrationNamedIn(query, owner)) ||
       (strong.length > 0 && !mayNameUninstalledIntegration(query, this.searchIndex))
-        ? Promise.resolve([])
+        ? Promise.resolve({ named: [] })
         : this.connectableIntegrations(query, owners, strong.length > 0, signal);
     // Rejects only on cancellation, which the search itself observes.
     lookup.catch(() => undefined);
     const setupFor = async (chosen: readonly string[]) =>
       (chosen.some(isIntegrationSetupToolName)
         ? setup
-        : (await lookup).length
+        : (await lookup).named.length
           ? [INTEGRATION_CARD_TOOL_NAME]
           : []
       ).filter((name) => !chosen.includes(name));
@@ -1250,11 +1459,10 @@ export class LazyToolRuntime {
         : this.withCandidatesNotice(ranked);
     const connectable = await lookup;
     return {
-      result: connectable.length
-        ? this.withNotice(result, "notConnected", connectableIntegrationNotice(connectable))
-        : result,
+      result,
       query,
       names: undefined,
+      ...(connectable.named.length ? { connectable } : {}),
     };
   }
 
@@ -1444,8 +1652,8 @@ export class LazyToolRuntime {
     owners: readonly IntegrationOwner[],
     besideStrongMatches: boolean,
     signal?: AbortSignal,
-  ): Promise<ConnectableIntegration[]> {
-    if (!this.connectableLookup) return [];
+  ): Promise<ConnectableIntegrations> {
+    if (!this.connectableLookup) return { named: [] };
     // A search that strongly matched installed tools is otherwise ready at
     // once, so it waits for the catalog only briefly, whether or not the
     // lookup observes its signal.
@@ -1460,14 +1668,27 @@ export class LazyToolRuntime {
         bounded && bounded !== signal ? await untilAborted(lookup, bounded) : await lookup;
       // Named among every match, so an installed sibling still shows that
       // its vendor domain is shared, then without the strong matches' own.
-      return connectableIntegrationsNamedIn(query, matches, besideStrongMatches).filter(
-        (integration) => !owners.some((owner) => ownsIntegration(owner, integration)),
+      const notOwned = (integration: ConnectableIntegration) =>
+        !owners.some((owner) => ownsIntegration(owner, integration));
+      const named = connectableIntegrationsNamedIn(query, matches, besideStrongMatches).filter(
+        notOwned,
       );
+      // Clearly named: the only one named, and named distinctively (which
+      // beside strong matches every named integration already is).
+      const clearlyNamed =
+        named.length === 1 &&
+        (besideStrongMatches ||
+          connectableIntegrationsNamedIn(query, matches, true).some(
+            (integration) => integration.capabilityId === named[0]!.capabilityId,
+          ))
+          ? named[0]
+          : undefined;
+      return { named, ...(clearlyNamed ? { clearlyNamed } : {}) };
     } catch {
       // Cancellation belongs to the owning turn; any other failure only means
       // this result names no connectable integration.
       signal?.throwIfAborted();
-      return [];
+      return { named: [] };
     }
   }
 
@@ -2152,6 +2373,7 @@ export function installLazyToolRuntime(
   meaningRanker?: ToolMeaningRanker,
   mcpToolNames?: () => ReadonlyMap<string, string>,
   pendingPreparationDefers = true,
+  connectCardRequest?: ConnectCardRequest,
 ): LazyToolRuntime {
   const runtime = new LazyToolRuntime(
     transport,
@@ -2172,6 +2394,7 @@ export function installLazyToolRuntime(
     meaningRanker,
     mcpToolNames,
     pendingPreparationDefers,
+    connectCardRequest,
   );
   installLazyToolRuntimeOnAgent(agent, runtime);
   return runtime;

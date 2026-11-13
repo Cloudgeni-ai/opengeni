@@ -557,6 +557,7 @@ export { parseSseStream } from "./sse";
 export { asVaultClient, vaultsApi, vaultErrorCode, vaultErrorDetail } from "./vaults-api";
 export type { VaultClientLike, VaultsApi } from "./vaults-api";
 export type * from "./vault-types";
+export type * from "@opengeni/contracts/console";
 export type { SseMessage } from "./sse";
 export { normalizeMcpOutput } from "./mcp-output";
 export type { NormalizedMcpOutput } from "./mcp-output";
@@ -1098,12 +1099,21 @@ export type {
   DeleteOrganizationProviderCustomModelRequest,
   OrganizationCompatibleEndpoint,
   OrganizationCompatibleEndpointsResponse,
+  OrganizationAnthropicApiKey,
+  OrganizationAnthropicApiKeysResponse,
+  AddOrganizationAnthropicApiKeyRequest,
+  UpdateOrganizationAnthropicApiKeyRequest,
   CreateOrganizationCompatibleEndpointRequest,
   ReplaceOrganizationCompatibleEndpointKeyRequest,
   CreateOrganizationCompatibleEndpointModelRequest,
   CompatibleModelReasoning,
   OrganizationCompatibleEndpointModel,
   SetOrganizationCompatibleEndpointModelReasoningRequest,
+  ConnectedModelListPricing,
+  ConnectedModelListPrice,
+  SetOrganizationCustomModelListPriceRequest,
+  SetWorkspaceModelKeyListPriceRequest,
+  ModelPriceBasisModelsResponse,
   WorkspaceModelAccessPolicy,
   OrganizationModelDefaults,
   UpdateOrganizationModelDefaultsRequest,

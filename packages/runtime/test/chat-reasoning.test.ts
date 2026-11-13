@@ -545,7 +545,6 @@ for (const field of ["reasoning", "reasoning_content"] as const) {
         ).map(canonicalizePersistedHistoryItem),
       );
       const before = JSON.stringify(history);
-      const expectedReason = "[Historical reasoning from another model]\nCompare the fixtures.";
       const provider: ResolvedModelProvider = {
         id: "fixture",
         label: "Fixture",
@@ -569,10 +568,9 @@ for (const field of ["reasoning", "reasoning_content"] as const) {
               const texts = body.input
                 .filter((item: any) => item.role === "assistant")
                 .flatMap((item: any) => item.content);
-              expect(texts).toEqual([
-                { type: "output_text", text: expectedReason, annotations: [] },
-                { type: "output_text", text: "Checking.", annotations: [] },
-              ]);
+              // Chat reasoning is left out, never resent as text.
+              expect(texts).toEqual([{ type: "output_text", text: "Checking.", annotations: [] }]);
+              expect(JSON.stringify(body)).not.toContain("Compare the fixtures.");
               expect(
                 body.input.filter((item: any) => item.type?.startsWith("function_call")),
               ).toEqual([
@@ -619,8 +617,8 @@ for (const field of ["reasoning", "reasoning_content"] as const) {
             "assistant",
             "user",
           ]);
+          expect(JSON.stringify(body)).not.toContain("Compare the fixtures.");
           expect(body.messages[1].content).toEqual([
-            { type: "text", text: expectedReason },
             { type: "text", text: "Checking." },
             { type: "tool_use", id: "call-fixture", name: "lookup", input: {} },
           ]);

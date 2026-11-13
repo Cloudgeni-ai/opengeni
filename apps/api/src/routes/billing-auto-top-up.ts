@@ -18,6 +18,7 @@ import { StripeAutoTopUps } from "../billing-auto-top-up";
 import { parseRequestBody } from "../http/request-body";
 import { managedCookieHuman } from "./codex";
 import {
+  billingReturnOrigins,
   checkoutReturnUrl,
   getOrCreateStripeCustomer,
   requireSelectedAccount,
@@ -106,6 +107,7 @@ export function registerBillingAutoTopUpRoutes(app: Hono, deps: ApiRouteDeps): v
       request.successUrl,
       "/billing?autoTopUp=setup",
       "successUrl",
+      billingReturnOrigins(deps.settings),
     );
     const cancelUrl = checkoutReturnUrl(
       deps.settings.publicBaseUrl,
@@ -113,6 +115,7 @@ export function registerBillingAutoTopUpRoutes(app: Hono, deps: ApiRouteDeps): v
       request.cancelUrl,
       "/billing",
       "cancelUrl",
+      billingReturnOrigins(deps.settings),
     );
     const stripe = stripeClient(deps);
     const store = billingAutoTopUpStore(deps.db);

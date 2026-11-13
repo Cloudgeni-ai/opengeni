@@ -71,6 +71,7 @@ import { sql } from "drizzle-orm";
 import type { Context, Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
+import { managedAuthRequestBaseUrl } from "../auth/managed-auth";
 import { SIGNUP_ATTRIBUTION_AUTH_FIELD } from "../auth/signup-funnel-metrics";
 import { ApiHttpError } from "../http/api-error";
 import { trustedBrowserOrigins } from "../http/browser-mutation-origin";
@@ -404,7 +405,10 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
         retryable: true,
       });
     }
-    const callbackURL = new URL("/account-auth", publicBaseUrl);
+    // Return to the host the sign-in started on (an allowed host such as the
+    // Console host), so Console sign-in never lands in the app.
+    const requestBaseUrl = managedAuthRequestBaseUrl(deps.settings, context.req.raw);
+    const callbackURL = new URL("/account-auth", requestBaseUrl);
     callbackURL.searchParams.set("transaction", body.transactionId);
     callbackURL.searchParams.set("social", "complete");
     const errorCallbackURL = new URL(callbackURL);
@@ -504,7 +508,7 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
               : deps.settings.managedAuthGithubClientId!,
           expectedCallbackUrl: new URL(
             `/v1/auth/callback/${body.provider}`,
-            publicBaseUrl,
+            requestBaseUrl,
           ).toString(),
         });
         const stateCookieName = authContext.createAuthCookie("state").name;

@@ -1,3 +1,4 @@
+import { ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE } from "@opengeni/contracts/managed-sign-in-methods";
 import { modelDisplayName } from "@opengeni/sdk/model-display";
 import type { ErrorDetail } from "./error-message";
 import { apiStatusInText, isExpectedApiStatus } from "./error-reference";
@@ -96,6 +97,13 @@ function readableServerSentence(message: string | undefined): string | undefined
  */
 export function apiErrorAdvice(error: unknown): string {
   const { status, serverMessage } = apiErrorFacts(error);
+  // An admin change waiting for a passkey (the prompt was closed): not a
+  // missing permission.
+  if (status === 403 && apiErrorDetailCode(error) === ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE) {
+    return passkeyStepUpDetails(error)?.passkeyRegistered === false
+      ? "Add a passkey to your account, then try again."
+      : "Confirm it's you with your passkey, then try again.";
+  }
   if (isPermissionDenied(error)) {
     return "You don't have permission to do this. Ask an admin for access.";
   }
@@ -174,6 +182,16 @@ export function apiErrorDetailCode(error: unknown): string | undefined {
   return typeof code === "string" && code ? code : undefined;
 }
 
+function passkeyStepUpDetails(error: unknown): { passkeyRegistered?: unknown } | undefined {
+  const details =
+    error !== null && typeof error === "object"
+      ? (error as { details?: unknown }).details
+      : undefined;
+  return details !== null && typeof details === "object"
+    ? (details as { passkeyRegistered?: unknown })
+    : undefined;
+}
+
 /**
  * The server's own sentence for an expected refusal (a 4xx) whose
  * `details.code` is one of `detailCodes`. A route that words each refusal for
@@ -196,7 +214,10 @@ export function serverRefusalText(
  * Props for `ErrorMessage`'s Technical details: the reference (with Copy),
  * then the status, code and the server's own message.
  */
-export function apiErrorDetails(error: unknown): { reference?: string; details: ErrorDetail[] } {
+export function apiErrorDetails(error: unknown): {
+  reference?: string;
+  details: ErrorDetail[];
+} {
   const { status, code, reference, serverMessage } = apiErrorFacts(error);
   const details: ErrorDetail[] = [];
   if (status !== undefined) details.push({ label: "Status", value: `HTTP ${status}` });

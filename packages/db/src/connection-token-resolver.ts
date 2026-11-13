@@ -19,7 +19,14 @@ import type {
 } from "@opengeni/contracts";
 
 import { type ConnectionUseAttribution } from "@opengeni/contracts/connection-authority";
-import { dataverseWebApiBase } from "@opengeni/contracts/microsoft-dynamics";
+import {
+  BUSINESS_CENTRAL_API_ROOT,
+  businessCentralApiBase,
+  dataverseWebApiBase,
+  FINANCE_OPERATIONS_DATA_PATH,
+  FINANCE_OPERATIONS_METADATA_PATH,
+  financeOperationsOrigin,
+} from "@opengeni/contracts/microsoft-dynamics";
 import {
   PERSONAL_GITHUB_REQUESTED_SCOPES,
   PERSONAL_GITHUB_PROVIDER_DOMAIN,
@@ -1013,7 +1020,9 @@ function connectionBindingMatches(
           binding === canonicalHttpUrl(OFFICIAL_SLACK_MCP_URL) &&
           isOfficialSlackRestDestination(destination, ref)
         ) &&
-        !isDataverseWebApiDestination(destination, binding, ref))
+        !isDataverseWebApiDestination(destination, binding, ref) &&
+        !isBusinessCentralApiDestination(destination, binding, ref) &&
+        !isFinanceOperationsDataDestination(destination, binding, ref))
     ) {
       return false;
     }
@@ -1047,6 +1056,33 @@ export function connectionMetadataMatchesBinding(
 }
 
 /**
+ * The Business Central bridge runs a Business Central connection's tools
+ * against the Business Central API. Every environment is the same Entra
+ * resource on one host, so a person's grant reaches each environment they
+ * connect, whichever of their Business Central connections is current.
+ */
+function isBusinessCentralApiDestination(
+  destinationUrl: string,
+  binding: string,
+  ref: McpServerConnectionRef,
+): boolean {
+  if (!businessCentralApiBase(binding) || ref.kind !== "oauth2") return false;
+  const url = new URL(destinationUrl);
+  const root = new URL(BUSINESS_CENTRAL_API_ROOT);
+  return (
+    url.origin === root.origin &&
+    ref.providerDomain.toLowerCase() === root.hostname &&
+    !url.username &&
+    !url.password &&
+    !url.hash &&
+    url.pathname.startsWith(root.pathname) &&
+    // The URL parser resolves literal dot segments; refuse encoded separators and
+    // dots that a server could decode into a path outside the API root.
+    !/%(?:2f|5c|2e)/iu.test(url.pathname)
+  );
+}
+
+/**
  * The Dataverse bridge runs a Dataverse MCP connection's tools against the same
  * environment's Web API: same origin as the bound MCP endpoint, under the Web
  * API root only.
@@ -1066,7 +1102,40 @@ function isDataverseWebApiDestination(
     !url.username &&
     !url.password &&
     !url.hash &&
-    url.pathname.startsWith(root.pathname)
+    url.pathname.startsWith(root.pathname) &&
+    // The URL parser resolves literal dot segments; refuse encoded separators and
+    // dots that a server could decode into a path outside the Web API root.
+    !/%(?:2f|5c|2e)/iu.test(url.pathname)
+  );
+}
+
+/**
+ * The Finance and Operations bridge runs a Finance and Operations MCP
+ * connection's tools against the same environment's OData data entities and
+ * metadata service: same origin as the bound MCP endpoint, under those roots
+ * only.
+ */
+function isFinanceOperationsDataDestination(
+  destinationUrl: string,
+  binding: string,
+  ref: McpServerConnectionRef,
+): boolean {
+  const origin = financeOperationsOrigin(binding);
+  if (!origin || ref.kind !== "oauth2") return false;
+  const url = new URL(destinationUrl);
+  // Destinations arrive canonicalized without a trailing slash, so a root
+  // itself (`/data/`) reads as `/data`.
+  const under = (root: string) =>
+    url.pathname === root.replace(/\/$/u, "") || url.pathname.startsWith(root);
+  return (
+    url.origin === origin &&
+    ref.providerDomain.toLowerCase() === url.hostname &&
+    !url.username &&
+    !url.password &&
+    !url.hash &&
+    // Encoded separators or dots could climb out of the root on the server.
+    !/%(?:2f|5c|2e)/iu.test(url.pathname) &&
+    (under(FINANCE_OPERATIONS_DATA_PATH) || under(FINANCE_OPERATIONS_METADATA_PATH))
   );
 }
 

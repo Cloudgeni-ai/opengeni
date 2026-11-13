@@ -62,7 +62,7 @@ export * from "./credential-profiles";
 export * from "./connected-machine-audience";
 export * from "./disconnect-audit";
 import { type ActiveSandboxPointer } from "./active-sandbox";
-import { sessionRetentionFromRow } from "./session-archive";
+import { ARCHIVED_CHAT_SANDBOX_KEPT_SECONDS, sessionRetentionFromRow } from "./session-archive";
 import { sessionQueueIsEmptyInTransaction } from "./empty-session-queue";
 import {
   subscriptionCapacityWaitReasonText,
@@ -6224,6 +6224,12 @@ export async function deleteGitHubInstallationBinding(
     eventRouteSecret: Uint8Array | null;
     /** Who removed the installation from the workspace: audited in the same transaction. */
     audit?: DisconnectAuditActor | null;
+    /**
+     * The installation that replaces this one (a reinstall on the same GitHub
+     * account). Its approval choices move to the replacement in the same
+     * transaction; a choice already made there wins.
+     */
+    replacedByInstallationId?: number | undefined;
   },
 ): Promise<boolean> {
   return await withRlsContext(
@@ -6240,6 +6246,17 @@ export async function deleteGitHubInstallationBinding(
         )
         .returning({ id: schema.githubInstallations.id });
       await syncGitHubEventRoutes(scopedDb, input.workspaceId, input.eventRouteSecret);
+      const replacedBy = input.replacedByInstallationId;
+      const moved =
+        rows.length > 0 && replacedBy !== undefined && replacedBy !== input.installationId
+          ? await moveConnectorActionPoliciesInScope(scopedDb, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              fromConnectionId: `github-app:${input.installationId}`,
+              toConnectionId: `github-app:${replacedBy}`,
+              auditSubjectId: input.audit?.subjectId ?? null,
+            })
+          : null;
       if (input.audit && rows.length > 0) {
         await insertDisconnectAuditEventInScope(scopedDb, {
           accountId: input.accountId,
@@ -6252,11 +6269,123 @@ export async function deleteGitHubInstallationBinding(
             provider: "github",
             providerDomain: "github.com",
           },
+          ...(moved
+            ? {
+                details: {
+                  replacedByInstallationId: String(replacedBy),
+                  approvalPoliciesMoved: moved.movedPolicyIds.length,
+                  approvalPoliciesRemoved: moved.removedPolicyIds,
+                },
+              }
+            : {}),
         });
       }
       return rows.length > 0;
     },
   );
+}
+
+/**
+ * Moves one connection's approval choices to the connection that replaced it,
+ * in the caller's scoped transaction, and removes them from the old one. A
+ * choice already made on the new connection wins. Moved rows keep who created
+ * and last changed them, and when; the actor doing the move is audited.
+ */
+async function moveConnectorActionPoliciesInScope(
+  scopedDb: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    fromConnectionId: string;
+    toConnectionId: string;
+    auditSubjectId: string | null;
+  },
+): Promise<{ movedPolicyIds: string[]; removedPolicyIds: string[] }> {
+  const fromConnection = and(
+    eq(schema.connectorActionPolicies.workspaceId, input.workspaceId),
+    eq(schema.connectorActionPolicies.connectionId, input.fromConnectionId),
+  );
+  const previous = await scopedDb
+    .select()
+    .from(schema.connectorActionPolicies)
+    .where(fromConnection)
+    .orderBy(asc(schema.connectorActionPolicies.id))
+    .for("update");
+  if (previous.length === 0) return { movedPolicyIds: [], removedPolicyIds: [] };
+  const moved: Array<typeof schema.connectorActionPolicies.$inferSelect & { from: string }> = [];
+  for (let offset = 0; offset < previous.length; offset += 128) {
+    const batch = previous.slice(offset, offset + 128);
+    const inserted = await scopedDb
+      .insert(schema.connectorActionPolicies)
+      .values(
+        batch.map((policy) => ({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          connectionId: input.toConnectionId,
+          serverId: policy.serverId,
+          toolName: policy.toolName,
+          actionName: policy.actionName,
+          policy: policy.policy,
+          createdBySubjectId: policy.createdBySubjectId,
+          updatedBySubjectId: policy.updatedBySubjectId,
+          createdAt: policy.createdAt,
+          updatedAt: policy.updatedAt,
+        })),
+      )
+      .onConflictDoNothing({
+        target: [
+          schema.connectorActionPolicies.workspaceId,
+          schema.connectorActionPolicies.connectionId,
+          schema.connectorActionPolicies.serverId,
+          schema.connectorActionPolicies.toolName,
+          schema.connectorActionPolicies.actionName,
+        ],
+      })
+      .returning();
+    const scope = (policy: { serverId: string; toolName: string; actionName: string }) =>
+      JSON.stringify([policy.serverId, policy.toolName, policy.actionName]);
+    const sources = new Map(batch.map((policy) => [scope(policy), policy.id]));
+    for (const row of inserted) moved.push({ ...row, from: sources.get(scope(row))! });
+  }
+  const removed = await scopedDb
+    .delete(schema.connectorActionPolicies)
+    .where(fromConnection)
+    .returning({ id: schema.connectorActionPolicies.id });
+  if (input.auditSubjectId && moved.length > 0) {
+    for (let offset = 0; offset < moved.length; offset += 128)
+      await scopedDb.insert(schema.auditEvents).values(
+        moved.slice(offset, offset + 128).map((row) =>
+          withLosslessContentWriteVersion(
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              subjectId: input.auditSubjectId!,
+              action: "connector.action.policy_changed",
+              targetType: "connector_action_policy",
+              targetId: row.id,
+              metadata: {
+                connectionId: row.connectionId,
+                serverId: row.serverId,
+                toolName: row.toolName,
+                actionName: row.actionName,
+                policy: row.policy,
+                version: row.version,
+                previousPolicy: null,
+                previousVersion: null,
+                movedFromConnectionId: input.fromConnectionId,
+                movedFromPolicyId: row.from,
+              },
+            },
+            "metadata",
+            "metadataCodecVersion",
+          ),
+        ),
+      );
+  }
+  return {
+    movedPolicyIds: moved.map((row) => row.id),
+    removedPolicyIds: removed.map((row) => row.id),
+  };
 }
 
 /**
@@ -41397,9 +41526,14 @@ export async function listSessionEventPage(
           // every recursion step. Keep the subsequent payload SELECT separate:
           // this is still metadata planning, not a new page-wide snapshot.
           // The recursive step reads its next ID through a scalar subquery so
-          // the lookup is always an index parameter. Joining `ordered` there
-          // lets the planner (PostgreSQL 16.16, 17.12, 18.7) put the payload
-          // scan below it and turn the ID match into a per-step session scan.
+          // the lookup compares the ID with a plain parameter (the subquery runs
+          // as an InitPlan). Under row-level security PostgreSQL uses a lookup
+          // as an index condition only when it is leakproof, and since the
+          // November 2026 minor releases (16.16, 17.12, 18.7; CVE-2026-116327)
+          // any non-leakproof function over a value from elsewhere in the query
+          // makes it leaky. `id = ordered.ids[bounded.row_number + 1]` written
+          // in the lookup itself is leaky because of `+`, and turns every step
+          // into a filtered scan of the whole session.
           const metadataRows = await rawRows<
             SessionEventProjectionMetadataRow & { sourceRowCount: number }
           >(
@@ -57391,8 +57525,8 @@ function computeLeaseStaysWarmWhenIdle(
 async function requestComputeGroupEndTx(
   tx: Database,
   input: { workspaceId: string; sandboxGroupIds?: readonly string[] },
-): Promise<void> {
-  if (input.sandboxGroupIds && input.sandboxGroupIds.length === 0) return;
+): Promise<number> {
+  if (input.sandboxGroupIds && input.sandboxGroupIds.length === 0) return 0;
   const groupFilter = input.sandboxGroupIds
     ? sql`and lease.sandbox_group_id in (${sql.join(
         input.sandboxGroupIds.map((id) => sql`${id}::uuid`),
@@ -57543,7 +57677,9 @@ async function requestComputeGroupEndTx(
       `);
     }
   }
-  await tx.execute(sql`
+  const ended = await rawRows<{ id: string }>(
+    tx,
+    sql`
     update sandbox_leases lease set
       liveness = 'draining',
       group_end_requested_at = now(),
@@ -57557,7 +57693,233 @@ async function requestComputeGroupEndTx(
       and lease.reaper_hold_id is null
       and lease.archive_capture_id is null
       and not exists (select 1 from sandbox_lease_holders h where h.lease_id = lease.id)
-  `);
+    returning lease.id
+  `,
+  );
+  return ended.length;
+}
+
+/**
+ * End the compute group of a sandbox every chat of which is archived, as
+ * deleting those chats would: its idle lease drains now, and the reaper
+ * deletes the sandbox and revokes its agent's enrollment without a capture.
+ * A sandbox is kept for the chats that work in it, and an archived chat does
+ * no work. One restored later starts on a new sandbox, as a chat does whose
+ * sandbox was never created.
+ *
+ * A chat is archived with its root (see `sessionArchivedSql`), and one that
+ * still has work under way counts as in use whatever its archive state. A
+ * group no chat names is left alone: it is not a chat's sandbox. True when the
+ * group's end was asked for now; false when a chat still uses the sandbox,
+ * its lease is held, or its end was already asked for. A turn that arrives
+ * before the reaper claims the sandbox keeps it (the lease is re-armed).
+ */
+export async function endComputeGroupOfArchivedChats(
+  db: Database,
+  input: { workspaceId: string; sandboxGroupId: string },
+  bound?: DatabaseWorkBound,
+): Promise<boolean> {
+  const scoped = withinWorkBound(db, bound, (boundedDb, limit) =>
+    withWorkspaceRls(boundedDb, input.workspaceId, async (scopedDb) => {
+      // The tenancy lock is held: the statements below get only the time left.
+      await limit(scopedDb);
+      const rows = await rawRows<{ unused: boolean }>(
+        scopedDb,
+        sql`select ${sandboxGroupOnlyOfArchivedChatsSql(input)} as unused`,
+      );
+      if (rows[0]?.unused !== true) return false;
+      const ended = await requestComputeGroupEndTx(scopedDb, {
+        workspaceId: input.workspaceId,
+        sandboxGroupIds: [input.sandboxGroupId],
+      });
+      return ended > 0;
+    }),
+  );
+  try {
+    return await scoped;
+  } catch (error) {
+    // A deleted workspace took its chats and leases with it.
+    if (error instanceof Error && error.message === `Workspace not found: ${input.workspaceId}`) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Whether a sandbox group is named by chats that are all archived (the rule
+ * of {@link endComputeGroupOfArchivedChats}): each archived by the Archive
+ * action at least {@link ARCHIVED_CHAT_SANDBOX_KEPT_SECONDS} ago or stored by
+ * the idle archiver, a sub-chat with its root, and none with work under way.
+ * False for a group no chat names. Migration 1404's inventory repeats it.
+ */
+function sandboxGroupOnlyOfArchivedChatsSql(input: {
+  workspaceId: string;
+  sandboxGroupId: string;
+}): SQL {
+  const chat = sql`chat`;
+  const root = sql`root`;
+  // Archived for a day: a chat restored sooner, by Undo or later, returns
+  // with the sandbox it had. One stored by the idle archiver (no archived_at)
+  // was unused for weeks already.
+  const archived = (alias: SQL) =>
+    sql`(${sessionArchivedSql(alias)} and (${alias}.archived_at is null
+      or ${alias}.archived_at <= now() - make_interval(secs => ${ARCHIVED_CHAT_SANDBOX_KEPT_SECONDS})))`;
+  return sql`(exists (
+      select 1 from sessions chat
+      where chat.workspace_id = ${input.workspaceId}
+        and chat.sandbox_group_id = ${input.sandboxGroupId}
+    ) and not exists (
+      select 1 from sessions chat
+      left join sessions root
+        on root.workspace_id = chat.workspace_id
+       and root.id = chat.root_session_id
+      where chat.workspace_id = ${input.workspaceId}
+        and chat.sandbox_group_id = ${input.sandboxGroupId}
+        and (
+          chat.status in ('queued', 'running', 'requires_action', 'recovering',
+            'waiting_capacity')
+          or not (
+            ${archived(chat)}
+            or (root.id is not null and ${archived(root)})
+          )
+        )
+    ))`;
+}
+
+/** Migration 1404's inventory, withheld from the runtime for one release. */
+export const COLD_SANDBOXES_OF_ARCHIVED_CHATS_ROUTINE =
+  "opengeni_private.cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)";
+
+export type ColdSandboxOfArchivedChats = {
+  accountId: string;
+  workspaceId: string;
+  sandboxGroupId: string;
+};
+
+/** False while the deployment's database withholds the inventory (1404). */
+export async function coldSandboxesOfArchivedChatsAvailable(db: Database): Promise<boolean> {
+  const [row] = await rawRows<{ granted: boolean | null }>(
+    db,
+    sql`select has_function_privilege(
+      to_regprocedure(${COLD_SANDBOXES_OF_ARCHIVED_CHATS_ROUTINE})::oid, 'EXECUTE') as granted`,
+  );
+  return row?.granted === true;
+}
+
+/**
+ * Cold sandboxes of a backend other than compute (a stopped Modal or Docker
+ * box with its saved workspace) whose chats are all archived, by
+ * {@link sandboxGroupOnlyOfArchivedChatsSql}'s rule, in key order after
+ * `after`. Routing ids only; {@link forgetColdSandboxOfArchivedChats} checks
+ * again before it forgets one.
+ */
+export async function listColdSandboxesOfArchivedChats(
+  db: Database,
+  input: { after?: { workspaceId: string; sandboxGroupId: string } | null; limit: number },
+): Promise<ColdSandboxOfArchivedChats[]> {
+  const rows = await rawRows<{
+    account_id: string;
+    workspace_id: string;
+    sandbox_group_id: string;
+  }>(
+    db,
+    sql`select account_id, workspace_id, sandbox_group_id
+      from opengeni_private.cold_sandboxes_of_archived_chats_v1(
+        ${ARCHIVED_CHAT_SANDBOX_KEPT_SECONDS}::integer,
+        ${input.after?.workspaceId ?? null}::uuid,
+        ${input.after?.sandboxGroupId ?? null}::uuid,
+        ${input.limit}::integer
+      )`,
+  );
+  return rows.map((row) => ({
+    accountId: row.account_id,
+    workspaceId: row.workspace_id,
+    sandboxGroupId: row.sandbox_group_id,
+  }));
+}
+
+/**
+ * Forget the cold sandbox of chats that are all archived, as deleting those
+ * chats does: its lease rows go, with the saved workspace they name. The
+ * checkpoint ledger then deletes the provider snapshots nothing names any
+ * more (`gcSandboxCheckpointArtifacts`), and a chat restored later starts on
+ * a new sandbox, as one does whose sandbox was never created.
+ *
+ * Only a group whose every lease is cold and unheld, with no unsettled
+ * workspace write, running command or open terminal, is forgotten; anything
+ * else (a turn that arrived, a lock another writer holds) leaves it for a
+ * later pass. True when it was forgotten now.
+ */
+export async function forgetColdSandboxOfArchivedChats(
+  db: Database,
+  input: ColdSandboxOfArchivedChats,
+): Promise<boolean> {
+  try {
+    return await withRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (scopedDb) =>
+        await scopedDb.transaction(async (txRaw) => {
+          const tx = txRaw as unknown as Database;
+          const leases = await rawRows<{ id: string; forgettable: boolean }>(
+            tx,
+            sql`
+            select lease.id,
+              (lease.liveness = 'cold' and lease.backend not in ('compute', 'selfhosted')
+                and lease.refcount = 0 and lease.turn_holders = 0 and lease.viewer_holders = 0
+                and lease.instance_id is null and lease.archive_capture_id is null
+                and lease.reaper_hold_id is null and lease.rotation_requested_at is null
+                and lease.provider_deadline_at is null) as forgettable
+            from sandbox_leases lease
+            where lease.workspace_id = ${input.workspaceId}
+              and lease.sandbox_group_id = ${input.sandboxGroupId}
+            for update nowait
+          `,
+          );
+          if (leases.length === 0 || leases.some((lease) => !lease.forgettable)) return false;
+          const leaseIds = sql`(${sql.join(
+            leases.map((lease) => sql`${lease.id}::uuid`),
+            sql`, `,
+          )})`;
+          const [state] = await rawRows<{ unused: boolean; busy: boolean }>(
+            tx,
+            sql`select ${sandboxGroupOnlyOfArchivedChatsSql(input)} as unused,
+              (exists (select 1 from sandbox_lease_holders h where h.lease_id in ${leaseIds})
+                or exists (select 1 from sandbox_workspace_mutation_admissions admission
+                  where admission.lease_id in ${leaseIds} and admission.settled_at is null)
+                or exists (select 1 from sandbox_retained_processes process
+                  where process.lease_id in ${leaseIds} and process.state = 'active')
+                or exists (select 1 from sandbox_pty_sessions pty
+                  where pty.workspace_id = ${input.workspaceId}
+                    and pty.sandbox_group_id = ${input.sandboxGroupId}
+                    and pty.status = 'open')) as busy`,
+          );
+          if (state?.unused !== true || state.busy) return false;
+          await tx.execute(sql`delete from sandbox_leases where id in ${leaseIds}`);
+          return true;
+        }),
+    );
+  } catch (error) {
+    // Another writer holds the lease (55P03), or a row still names it: leave it
+    // for a later pass, as deleting the chats would.
+    let current: unknown = error;
+    for (let depth = 0; depth < 8 && current; depth += 1) {
+      const code =
+        typeof current === "object" && "code" in current
+          ? (current as { code?: unknown }).code
+          : undefined;
+      if (code === "55P03" || code === "23503") return false;
+      current =
+        typeof current === "object" && "cause" in current
+          ? (current as { cause?: unknown }).cause
+          : undefined;
+    }
+    if (error instanceof Error && error.message === `Workspace not found: ${input.workspaceId}`) {
+      return false;
+    }
+    throw error;
+  }
 }
 
 /** The SQL twin of {@link computeLeaseStaysWarmWhenIdle} over alias `L`. */
@@ -84153,6 +84515,19 @@ export function repairMissingQuiescenceReceiptWakes(
   return repairMissingQuiescenceReceiptWakesWith(peekSessionWork, db, limit, after);
 }
 
+async function sessionRowExists(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<boolean> {
+  const [row] = await db
+    .select({ id: schema.sessions.id })
+    .from(schema.sessions)
+    .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+    .limit(1);
+  return row !== undefined;
+}
+
 export async function peekSessionWork(
   db: Database,
   workspaceId: string,
@@ -84171,9 +84546,25 @@ export async function peekSessionWork(
         .limit(1);
       if (!visible) return { kind: "unavailable" };
     }
-    const effectiveControl = await evaluateSessionControl(scopedDb, workspaceId, sessionId, {
-      lock: "share",
-    });
+    let effectiveControl: Awaited<ReturnType<typeof evaluateSessionControl>>;
+    try {
+      effectiveControl = await evaluateSessionControl(scopedDb, workspaceId, sessionId, {
+        lock: "share",
+      });
+    } catch (error) {
+      // The shared workspace-control lock waits for a concurrent deletion to
+      // commit, so the session can vanish between the read above and this one.
+      // That is an absent session, observed exactly like the read below
+      // observes it, not a broken invariant (which would fail the activity and
+      // retry until the next attempt saw the deletion).
+      if (
+        error instanceof SessionControlInvariantError &&
+        !(await sessionRowExists(scopedDb, workspaceId, sessionId))
+      ) {
+        return { kind: observerAccountId ? "unavailable" : "idle" };
+      }
+      throw error;
+    }
     // This is an advisory control observation, not a session/configuration
     // read. Do not transfer frozen prompts, tool catalogs or other payloads
     // that none of the decisions below consumes.
@@ -95655,6 +96046,12 @@ export async function appendSessionEventsForTurnAttempt(
  * the Chrome setup card, the same purpose). The lookup runs inside the attempt
  * write fence, which locks the session row, so parallel callers in one turn
  * cannot both append. Cards for other capabilities are never consulted.
+ * Only the same kind of card counts: a first connection, or a reconnect of the
+ * same connection. With `sinceLatestMessage`, a current card of any turn since
+ * the person's latest message counts instead of only this turn's: repeated
+ * requests do not stack cards while the person has not written, and a card
+ * from before their latest message, which may be stale, is not reused. A chat
+ * with no message from a person (a scheduled run) reuses only this turn's.
  */
 export async function appendTurnCapabilityCardOnce(
   db: Database,
@@ -95666,10 +96063,23 @@ export async function appendTurnCapabilityCardOnce(
   capabilityId: string,
   input: AppendEventInput,
   requestedSandboxId: string | null = null,
+  options: { sinceLatestMessage?: boolean } = {},
 ): Promise<{ events: SessionEvent[]; accepted: boolean; existingEventId: string | null }> {
   let existingEventId: string | null = null;
   const payloadPurpose = (input.payload as { purpose?: unknown } | undefined)?.purpose;
   const purpose = typeof payloadPurpose === "string" ? payloadPurpose : "";
+  const payloadText = (key: string) => {
+    const value = (input.payload as Record<string, unknown> | undefined)?.[key];
+    return typeof value === "string" ? value : "";
+  };
+  const scope = options.sinceLatestMessage
+    ? sql`and coalesce(sequence > (
+              select max(message.sequence) from session_events message
+              where message.workspace_id = ${workspaceId}::uuid
+                and message.session_id = ${sessionId}::uuid
+                and message.type = 'user.message'
+            ), turn_id = ${turnId}::uuid)`
+    : sql`and turn_id = ${turnId}::uuid`;
   const result = await mutateAndAppendSessionEventsForTurnAttempt(
     db,
     workspaceId,
@@ -95687,13 +96097,15 @@ export async function appendTurnCapabilityCardOnce(
           select id from session_events
           where workspace_id = ${workspaceId}::uuid
             and session_id = ${sessionId}::uuid
-            and turn_id = ${turnId}::uuid
+            ${scope}
             and type = 'tool.auth_needed'
             and duplicate_of_event_id is null
             and (turn_association is null or turn_association = 'current')
             and payload -> 'capability' ->> 'id' = ${capabilityId}
             and coalesce(payload ->> 'requestedSandboxId', '') = ${requestedSandboxId ?? ""}
             and coalesce(payload ->> 'purpose', '') = ${purpose}
+            and coalesce(payload ->> 'reason', '') = ${payloadText("reason")}
+            and coalesce(payload ->> 'connectionId', '') = ${payloadText("connectionId")}
           order by sequence
           limit 1
         `,
@@ -98333,6 +98745,8 @@ export * from "./event-source-feeds";
 export * from "./automation-templates";
 export * from "./organization-model-providers";
 export * from "./organization-compatible-model-endpoints";
+export * from "./organization-anthropic-api-keys";
+export * from "./workspace-model-key-list-price";
 export * from "./organization-model-defaults";
 export * from "./session-admin-access";
 export * from "./subscription-core-claude-oauth";
@@ -98350,6 +98764,7 @@ export async function listDueWorkspacePauseTimers(db: Database, limit = 100) {
 }
 
 export * from "./feedback";
+export * from "./console";
 export * from "./session-final-reply";
 export * from "./knowledge-entries";
 

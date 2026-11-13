@@ -711,12 +711,14 @@ const expectedTenancyCascadeRootDeletes: Record<string, string[]> = {
   "packages/db/src/index.ts#deleteSessionTreeIfQuiescent": ["sandbox_leases"],
   "packages/db/src/index.ts#deleteWorkspace": ["workspaces"],
   "packages/db/src/index.ts#deleteWorkspaceIfQuiescent": ["workspaces"],
+  "packages/db/src/index.ts#forgetColdSandboxOfArchivedChats": ["sandbox_leases"],
   "scripts/operator/turn-density-profile.ts#deleteDensityProfileAccount": ["managed_accounts"],
 };
 
 const expectedTenancyCascadeRootFenceCalls: Record<string, string> = {
   "packages/db/src/index.ts#deleteSessionTreeIfQuiescent": "withWorkspaceSubjectRls",
   "packages/db/src/index.ts#deleteWorkspaceIfQuiescent": "withRlsContext",
+  "packages/db/src/index.ts#forgetColdSandboxOfArchivedChats": "withRlsContext",
   "scripts/operator/turn-density-profile.ts#deleteDensityProfileAccount": "withWorkspaceRls",
 };
 

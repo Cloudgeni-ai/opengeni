@@ -2,7 +2,10 @@ import {
   capabilityCatalogItemIsTrustedForExposure,
   type CapabilityCatalogItem,
 } from "@opengeni/contracts";
-import { microsoftDynamicsProductForMcpUrl } from "@opengeni/contracts/microsoft-dynamics";
+import {
+  microsoftDynamicsEnvironmentAddress,
+  microsoftDynamicsProductForMcpUrl,
+} from "@opengeni/contracts/microsoft-dynamics";
 import { capabilityPresentation } from "../integration-presentation";
 
 /**
@@ -53,9 +56,9 @@ export function connectionCardSubtitle(
     | undefined,
 ): string {
   if (!item) return "";
-  // Each Dynamics connection is one environment; its host tells them apart.
-  if (item.endpointUrl && microsoftDynamicsProductForMcpUrl(item.endpointUrl))
-    return new URL(item.endpointUrl).hostname;
+  // Each Dynamics connection is one environment; its address tells them apart.
+  const environment = item.endpointUrl && microsoftDynamicsEnvironmentAddress(item.endpointUrl);
+  if (environment) return environment;
   if (showsMcpServerLabel(item)) return item.providerDomain ?? "";
   return capabilityPresentation(item.metadata)?.providerName ?? "";
 }

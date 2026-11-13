@@ -1,4 +1,5 @@
 import {
+  type ConnectedModelListPrice,
   type ConnectionKind,
   type ConnectionMetadata,
   type ConnectionStatus,
@@ -12,6 +13,7 @@ import {
 import { and, desc, eq, inArray, isNull, or, sql, type SQL } from "drizzle-orm";
 import { rawRows, withWorkspaceRls, withWorkspaceSubjectRls, type Database } from "./database";
 import * as schema from "./schema";
+import type { ConnectedModelListPricing } from "./schema";
 
 /** Server-owned verification facts; public schemas expose them read-only and nullable. */
 export type ConnectionMetadataWithVerification = ConnectionMetadata & {
@@ -38,6 +40,8 @@ export const connectionMetadataColumns = {
   verifiedInstallAt: schema.connections.verifiedInstallAt,
   verifiedInstallVersion: schema.connections.verifiedInstallVersion,
   metadata: schema.connections.metadata,
+  priceBasisModelId: schema.connections.priceBasisModelId,
+  listPricing: schema.connections.listPricing,
   createdBySubjectId: schema.connections.createdBySubjectId,
   updatedBySubjectId: schema.connections.updatedBySubjectId,
   createdAt: schema.connections.createdAt,
@@ -169,6 +173,16 @@ export async function getProviderConnectionHomeWorkspace(
   });
 }
 
+/** A workspace model key's stored price in its public shape, or null when unknown. */
+export function connectionListPrice(row: {
+  priceBasisModelId?: string | null;
+  listPricing?: ConnectedModelListPricing | null;
+}): ConnectedModelListPrice | null {
+  if (row.listPricing) return { basis: "custom", pricing: row.listPricing };
+  if (row.priceBasisModelId) return { basis: "model", modelId: row.priceBasisModelId };
+  return null;
+}
+
 export function mapConnectionMetadata(row: {
   id: string;
   authorityId?: string | null;
@@ -188,6 +202,8 @@ export function mapConnectionMetadata(row: {
   verifiedInstallAt: Date | null;
   verifiedInstallVersion: number | null;
   metadata: Record<string, unknown>;
+  priceBasisModelId?: string | null;
+  listPricing?: ConnectedModelListPricing | null;
   createdBySubjectId: string | null;
   updatedBySubjectId: string | null;
   createdAt: Date;
@@ -225,6 +241,10 @@ export function mapConnectionMetadata(row: {
     verifiedInstallAt: row.verifiedInstallAt?.toISOString() ?? null,
     verifiedInstallVersion: row.verifiedInstallVersion,
     metadata: publicMetadata,
+    // A workspace model key's price (see schema.connections.priceBasisModelId).
+    ...(row.metadata.directModelProvider === undefined
+      ? {}
+      : { listPrice: connectionListPrice(row) }),
     createdBySubjectId: row.createdBySubjectId,
     updatedBySubjectId: row.updatedBySubjectId,
     createdAt: row.createdAt.toISOString(),

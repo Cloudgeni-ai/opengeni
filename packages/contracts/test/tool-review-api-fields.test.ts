@@ -104,13 +104,15 @@ test("arguments that are not an HTTP request keep their usual fields", () => {
 });
 
 test("only an API integration's arguments read as an HTTP request", () => {
-  expect(rows({ body: { subject: "Hi" } }, { kind: "generic" })).toEqual([["Body", "1 field"]]);
+  expect(rows({ body: { subject: "Hi" } }, { kind: "generic" })).toEqual([
+    ["Body · Subject", "Hi"],
+  ]);
   expect(
     toolReviewFields({ query: { q: "x" } }, undefined, "search").fields.map((field) => [
       field.label,
       field.preview,
     ]),
-  ).toEqual([["Query", "1 field"]]);
+  ).toEqual([["Query · Q", "x"]]);
 });
 
 test("times keep their minutes, with seconds only when they matter", () => {

@@ -38,6 +38,10 @@ import {
   bindRetainedProcessProviderIdentity,
   claimWorkspaceArchiveCapture,
   computeSandboxNamed,
+  coldSandboxesOfArchivedChatsAvailable,
+  endComputeGroupOfArchivedChats,
+  forgetColdSandboxOfArchivedChats,
+  listColdSandboxesOfArchivedChats,
   computeSandboxOfEnrollment,
   leaseMayHaveUntrackedWriters,
   releaseWorkspaceArchiveCapture,
@@ -1450,6 +1454,14 @@ export function createSandboxLeaseActivities(
         });
       }
 
+      // Before the checkpoint GC, so the snapshots of a sandbox forgotten
+      // here go in the same pass.
+      await forgetColdSandboxesOfArchivedChats(db, observability).catch((error) => {
+        observability.warn("sandbox reaper: archived chats' sandbox sweep failed", {
+          error: errorMessage(error),
+        });
+      });
+
       const checkpointGc = await gcSandboxCheckpointArtifacts(db, settings, observability).catch(
         (error) => {
           observability.warn("sandbox reaper: checkpoint artifact GC failed", {
@@ -1750,6 +1762,89 @@ async function forEachWithConcurrency<T>(
       }
     }),
   );
+}
+
+/** Time one pass may spend forgetting archived chats' cold sandboxes. */
+const ARCHIVED_CHAT_SANDBOX_SWEEP_BUDGET_MS = 10_000;
+const ARCHIVED_CHAT_SANDBOX_SWEEP_PAGE = 100;
+
+/**
+ * A stopped sandbox of a backend other than compute (a Modal or Docker box
+ * kept as its saved workspace) is kept for the chats that work in it. Once
+ * they are all archived (see `forgetColdSandboxOfArchivedChats`) it is
+ * forgotten, as deleting those chats does, and the checkpoint GC that runs
+ * next deletes its provider snapshots. A compute sandbox is ended by the
+ * compute orphan sweep under the same rule. The chats are told on their
+ * timeline, and the model on its next turn if one is restored
+ * (`sandbox.box.terminated` with `drainReason: "group_end"`). Bounded by
+ * time; a pass walks the inventory once in key order.
+ */
+export async function forgetColdSandboxesOfArchivedChats(
+  db: ActivityServices["db"],
+  observability: ActivityServices["observability"],
+  options: { budgetMs?: number; pageSize?: number; now?: () => number } = {},
+): Promise<{ examined: number; forgotten: number; failed: number }> {
+  const result = { examined: 0, forgotten: 0, failed: 0 };
+  if (!(await coldSandboxesOfArchivedChatsAvailable(db))) return result;
+  const now = options.now ?? Date.now;
+  const deadline = now() + (options.budgetMs ?? ARCHIVED_CHAT_SANDBOX_SWEEP_BUDGET_MS);
+  const pageSize = options.pageSize ?? ARCHIVED_CHAT_SANDBOX_SWEEP_PAGE;
+  let after: { workspaceId: string; sandboxGroupId: string } | null = null;
+  while (now() < deadline) {
+    const page = await listColdSandboxesOfArchivedChats(db, { after, limit: pageSize });
+    for (const candidate of page) {
+      if (now() >= deadline) break;
+      result.examined += 1;
+      after = candidate;
+      try {
+        if (!(await forgetColdSandboxOfArchivedChats(db, candidate))) continue;
+      } catch (error) {
+        result.failed += 1;
+        observability.warn("sandbox reaper: forgetting an archived chats' sandbox failed", {
+          workspaceId: candidate.workspaceId,
+          sandboxGroupId: candidate.sandboxGroupId,
+          error: errorMessage(error),
+        });
+        continue;
+      }
+      result.forgotten += 1;
+      observability.info("sandbox reaper: forgot the stopped sandbox of archived chats", {
+        workspaceId: candidate.workspaceId,
+        sandboxGroupId: candidate.sandboxGroupId,
+      });
+      // Best-effort: the chats' record of it never affects the outcome.
+      try {
+        await appendSessionEventToSandboxGroup(
+          db,
+          candidate.workspaceId,
+          candidate.sandboxGroupId,
+          {
+            type: "sandbox.box.terminated",
+            payload: {
+              actor: "reaper",
+              persisted: false,
+              archiveRevision: null,
+              instanceId: null,
+              providerMissingBeforeCapture: false,
+              drainReason: "group_end",
+              providerStopped: true,
+            },
+          },
+        );
+      } catch (error) {
+        observability.warn("sandbox reaper: archived chats' sandbox event write failed", {
+          workspaceId: candidate.workspaceId,
+          sandboxGroupId: candidate.sandboxGroupId,
+          error: errorMessage(error),
+        });
+      }
+    }
+    if (page.length < pageSize) break;
+  }
+  if (result.examined > 0) {
+    observability.info("sandbox reaper: archived chats' sandbox sweep completed", result);
+  }
+  return result;
 }
 
 async function gcSandboxCheckpointArtifacts(
@@ -4344,6 +4439,10 @@ async function sweepComputeOrphansForConfiguredBackend(
     }),
     gateway: settings.computeLinkUrl,
     named: async (identity) => await computeSandboxNamed(db, identity, itemBound(bound)),
+    // A sandbox every chat of which is archived has no use left: end its
+    // group, and the drain deletes it as it does for a deleted chat.
+    endIfUnused: async (identity) =>
+      await endComputeGroupOfArchivedChats(db, identity, itemBound(bound)),
     revokeEnrollment: async (input) => {
       await revokeSandboxEnrollment(db, input, itemBound(bound));
     },
@@ -4354,10 +4453,16 @@ async function sweepComputeOrphansForConfiguredBackend(
   for (const deleted of result.deleted) {
     observability.warn("sandbox reaper: deleted compute orphan sandbox", { ...deleted });
   }
+  for (const ended of result.ended) {
+    observability.info("sandbox reaper: ending the compute sandbox of archived chats", {
+      ...ended,
+    });
+  }
   if (result.examined > 0) {
     observability.info("sandbox reaper: compute orphan sweep completed", {
       examined: result.examined,
       deleted: result.deleted.length,
+      ended: result.ended.length,
       failed: result.failed,
       stoppedEarly: signal.aborted,
     });
@@ -4517,15 +4622,20 @@ export type SandboxDrainReason =
   | "provider_deadline"
   | "operator"
   | "teardown_claim"
-  | "rotation_requested";
+  | "rotation_requested"
+  | "group_end";
 
-/** The bounded drain reason carried on `sandbox.box.terminated`: the lease's
- * rotation reason when a rotation was requested, otherwise the ordinary idle
- * drain. A requested rotation without a recorded reason (legacy rows) is
- * reported as `rotation_requested` rather than guessed. */
+/** The bounded drain reason carried on `sandbox.box.terminated`: `group_end`
+ * for a compute sandbox deleted without a capture because its group ended
+ * (nothing was saved, so a chat that goes on starts on a new sandbox), the
+ * lease's rotation reason when a rotation was requested, otherwise the
+ * ordinary idle drain. A requested rotation without a recorded reason (legacy
+ * rows) is reported as `rotation_requested` rather than guessed. */
 export function sandboxDrainReason(
   lease: Pick<LeaseSnapshot, "rotationRequestedAt" | "rotationReason">,
+  captureDisposition?: DrainCaptureDisposition,
 ): SandboxDrainReason {
+  if (captureDisposition === "discard") return "group_end";
   if (lease.rotationRequestedAt === null) return "idle";
   return lease.rotationReason ?? "rotation_requested";
 }
@@ -5171,7 +5281,7 @@ async function terminateDrainableBox(
     // was requested (provider deadline, operator/image conflict, teardown
     // claim), otherwise the ordinary idle drain. Additive diagnostic
     // fact; no identifiers beyond the ones already carried above.
-    drainReason: sandboxDrainReason(lease),
+    drainReason: sandboxDrainReason(lease, captureDisposition),
     // False when only the lease drained and no box was stopped (a
     // Connected Machine keeps running), so chats aren't told it stopped.
     providerStopped:

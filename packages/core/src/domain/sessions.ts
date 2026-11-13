@@ -50,6 +50,7 @@ import {
 } from "../product-usage-metrics";
 import { saveAgentLearningSettings } from "@opengeni/db";
 import { withSessionRlsActorContext } from "@opengeni/db";
+import { teamsOrganizationAgentIdFromSubject } from "@opengeni/db";
 import {
   fileOwnerContextForAccess,
   fileOwnerContextForAgent,
@@ -2767,7 +2768,11 @@ async function createSessionForRequestInFileScope(
         initialMessage: payload.initialMessage ?? "",
         creating: true,
         privateCreate: payload.visibility === "private",
-        personal: payload.visibility === "private",
+        // A 1:1 chat is Only me, except one an organization agent runs in
+        // its own workspace for someone outside it.
+        personal:
+          payload.visibility === "private" ||
+          teamsOrganizationAgentIdFromSubject(grant.subjectId) !== null,
         proof: teamsProof,
       })
     : undefined;

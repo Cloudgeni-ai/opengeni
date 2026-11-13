@@ -68,7 +68,14 @@ export {
   fitCompactionPrefix,
   compactionPrefixCuts,
 } from "./anthropic-compaction";
-export { AnthropicProviderRejection, AnthropicStreamInterruptedError } from "./anthropic-messages";
+export {
+  AnthropicProviderRejection,
+  AnthropicStreamInterruptedError,
+  ANTHROPIC_API_KEYS_OUT_OF_CREDITS,
+  anthropicApiKeyOrder,
+  isAnthropicApiKeyCreditRefusal,
+  withAnthropicApiKeyRefusals,
+} from "./anthropic-messages";
 export {
   createModelImageSizer,
   sniffModelImageType,
@@ -288,6 +295,7 @@ import {
 import {
   LazyToolModelProvider,
   catalogConnectableIntegrationLookup,
+  catalogConnectCardRequest,
   createResolveMissingFunctionTool,
   installLazyToolRuntime,
   lazyToolRuntimeForAgent,
@@ -328,6 +336,14 @@ import {
   DATAVERSE_WEB_API_MCP_BRIDGE_ADAPTER,
   type DataverseWebApiMcpBridgeContext,
 } from "./dataverse-web-api-mcp";
+import {
+  BUSINESS_CENTRAL_API_MCP_BRIDGE_ADAPTER,
+  type BusinessCentralApiMcpBridgeContext,
+} from "./business-central-api-mcp";
+import {
+  FINANCE_OPERATIONS_ODATA_MCP_BRIDGE_ADAPTER,
+  type FinanceOperationsODataMcpBridgeContext,
+} from "./finance-operations-odata-mcp";
 
 import { McpResultCustomDataBridge, unwrapSdkMcpResultProjection } from "./mcp-result-custom-data";
 import {
@@ -564,6 +580,11 @@ import {
   setOpenSandboxApplyDiff,
   setSelfhostedApplyDiff,
   codemodeTokenFileFromEnvironment,
+  GIT_SESSION_CONFIG_LINES,
+  gitSessionDirectoryExport,
+  gitSessionKey,
+  withGitSessionClient,
+  withGitSessionSession,
   withCodemodeTokenClient,
   withCodemodeTokenSession,
   withRunCredentialsClient,
@@ -632,6 +653,12 @@ export {
 } from "./input-wait-yield";
 import { withModelStepHandover } from "./model-step-handover";
 export { ModelStepHandover } from "./model-step-handover";
+import { contentlessModelResponseGuard } from "./contentless-model-response";
+export {
+  ContentlessModelResponseHandover,
+  isContentlessModelResponse,
+  stoppedAtOutputLimit,
+} from "./contentless-model-response";
 export {
   ModelPreemption,
   isModelPreempted,
@@ -1143,6 +1170,8 @@ type BuiltInMcpBridgeContext = GmailRestMcpBridgeContext &
   GoogleCalendarRestMcpBridgeContext &
   SlackRestMcpBridgeContext &
   DataverseWebApiMcpBridgeContext &
+  BusinessCentralApiMcpBridgeContext &
+  FinanceOperationsODataMcpBridgeContext &
   DriveMcpBridgeContext;
 const BUILT_IN_MCP_BRIDGE_ADAPTERS: readonly LocalMcpBridgeAdapter<
   GmailRestMcpBridgeConfig,
@@ -1152,6 +1181,8 @@ const BUILT_IN_MCP_BRIDGE_ADAPTERS: readonly LocalMcpBridgeAdapter<
   GOOGLE_CALENDAR_REST_MCP_BRIDGE_ADAPTER,
   SLACK_REST_MCP_BRIDGE_ADAPTER,
   DATAVERSE_WEB_API_MCP_BRIDGE_ADAPTER,
+  BUSINESS_CENTRAL_API_MCP_BRIDGE_ADAPTER,
+  FINANCE_OPERATIONS_ODATA_MCP_BRIDGE_ADAPTER,
   DRIVE_MCP_BRIDGE_ADAPTER,
 ]);
 const SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS = 120_000;
@@ -3560,6 +3591,7 @@ const agentGitTokenSeeds = new WeakMap<object, GitTokenSeeds>();
 const agentGitCredentialBindings = new WeakMap<object, GitCredentialBindingSeed[]>();
 const agentCodemodeTokenSeed = new WeakMap<object, string>();
 const agentCodemodeTokenSessionId = new WeakMap<object, string>();
+const agentGitSessionKey = new WeakMap<object, string>();
 const agentCodemodeClientDownload = new WeakMap<object, ManagedCodemodeClientDownload>();
 // A missing title is requested in the turn's operational notice (see
 // prepareRunInput). It must not change Agent.instructions: that would change
@@ -4524,6 +4556,7 @@ function maybeInstallLazyToolTransport(
       return published;
     },
     options.toolRouterExpected !== false,
+    harnessControlServer ? catalogConnectCardRequest(harnessControlServer) : undefined,
   );
   if (options.openingToolNames?.length) lazyRuntime.loadAtOpening(options.openingToolNames);
 }
@@ -11480,6 +11513,12 @@ export type RunAgentStreamOptions = {
   beforeModelRequest?: ModelCallLifecycle["beforeModelRequest"];
   /** Register terminal response settlement before the next producer model request. */
   onModelResponse?: ModelCallLifecycle["onModelResponse"];
+  /**
+   * Called when the run ends at a model-step boundary because the previous
+   * response had no text and no tool call (see contentlessModelResponseGuard).
+   * The run then finishes with an empty final output.
+   */
+  onContentlessModelResponse?: () => void;
   /** Lets a Steer cut the in-flight model request short (see streamWithPreemption). */
   modelPreemption?: ModelCallLifecycle["modelPreemption"];
   /** Abort the provider/tool loop when the owning activity is cancelled. */
@@ -11751,14 +11790,21 @@ export async function runAgentStream(
 ) {
   const gate = agentInputWaitYields.get(agent);
   const scope = gate?.beginStream(overrides.signal);
+  const contentless = contentlessModelResponseGuard(overrides.onContentlessModelResponse);
   try {
     if (scope) agent.toolUseBehavior = scope.toolUseBehavior;
     const stream = await withModelCallLifecycle(
       {
-        ...(overrides.beforeModelRequest
-          ? { beforeModelRequest: overrides.beforeModelRequest }
-          : {}),
-        ...(overrides.onModelResponse ? { onModelResponse: overrides.onModelResponse } : {}),
+        // The host's admission (a waiting Steer, cancellation) decides first;
+        // only then does a contentless previous response end the run.
+        beforeModelRequest: async (point) => {
+          await overrides.beforeModelRequest?.(point);
+          if (point === "model_entry") contentless.check();
+        },
+        onModelResponse: (event) => {
+          contentless.observe(event);
+          return overrides.onModelResponse?.(event) ?? Promise.resolve();
+        },
         ...(overrides.modelPreemption ? { modelPreemption: overrides.modelPreemption } : {}),
       },
       () =>
@@ -11829,9 +11875,13 @@ async function runAgentStreamInternal(
     // whose per-op pointer re-read could land these execs on a machine swapped in
     // mid-turn.
     const setupSession = (overrides.ownedSandbox.setupSession ?? session) as SandboxSessionLike;
-    const credentialAgentSession = overrides.runCredentialSessionId
+    const chatGitSessionKey = gitSessionKeyForAgent(agent);
+    const runCredentialAgentSession = overrides.runCredentialSessionId
       ? withRunCredentialsSession(session as SandboxSessionLike, overrides.runCredentialSessionId)
       : (session as SandboxSessionLike);
+    const credentialAgentSession = chatGitSessionKey
+      ? withGitSessionSession(runCredentialAgentSession, chatGitSessionKey)
+      : runCredentialAgentSession;
     const agentSession = codemodeTokenFile
       ? withCodemodeTokenSession(
           credentialAgentSession,
@@ -11840,9 +11890,12 @@ async function runAgentStreamInternal(
           codemodeClientDirectory,
         )
       : credentialAgentSession;
-    const credentialSetupSession = overrides.runCredentialSessionId
+    const runCredentialSetupSession = overrides.runCredentialSessionId
       ? withRunCredentialsSession(setupSession, overrides.runCredentialSessionId)
       : setupSession;
+    const credentialSetupSession = chatGitSessionKey
+      ? withGitSessionSession(runCredentialSetupSession, chatGitSessionKey)
+      : runCredentialSetupSession;
     const decoratedSetupSession = codemodeTokenFile
       ? withCodemodeTokenSession(
           credentialSetupSession,
@@ -11921,6 +11974,7 @@ async function runAgentStreamInternal(
       ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
       ...(ownedGitTokenSeeds ? { gitTokenSeeds: ownedGitTokenSeeds } : {}),
       ...(ownedGitCredentialBindings ? { gitCredentialBindings: ownedGitCredentialBindings } : {}),
+      ...(chatGitSessionKey ? { gitSessionKey: chatGitSessionKey } : {}),
       ...(ownedCodemodeTokenSeed ? { codemodeTokenSeed: ownedCodemodeTokenSeed } : {}),
       ...(codemodeTokenFile ? { codemodeTokenFile } : {}),
       ...(ownedCodemodeClientDownload
@@ -11932,13 +11986,16 @@ async function runAgentStreamInternal(
     // Keep both credential seeding and lifecycle decoration as a safety net for
     // any session the SDK does create/resume during this run. They are inert for
     // the provided session, which remains the normal ownership-inverted path.
-    const credentialResourceClient = overrides.runCredentialSessionId
+    const runCredentialResourceClient = overrides.runCredentialSessionId
       ? withRunCredentialsClient(
           resourceClient,
           overrides.runCredentialSessionId,
           overrides.onRunCredentialSessionReady,
         )
       : resourceClient;
+    const credentialResourceClient = chatGitSessionKey
+      ? withGitSessionClient(runCredentialResourceClient, chatGitSessionKey)
+      : runCredentialResourceClient;
     const codemodeResourceClient = codemodeTokenFile
       ? withCodemodeTokenClient(
           credentialResourceClient,
@@ -12069,7 +12126,7 @@ async function runAgentStreamInternal(
           ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
         })
       : refreshedClient;
-  const credentialClient =
+  const runCredentialClient =
     resourceClient && overrides.runCredentialSessionId
       ? withRunCredentialsClient(
           resourceClient,
@@ -12077,6 +12134,11 @@ async function runAgentStreamInternal(
           overrides.onRunCredentialSessionReady,
         )
       : resourceClient;
+  const chatGitSessionKey = gitSessionKeyForAgent(agent);
+  const credentialClient =
+    runCredentialClient && chatGitSessionKey
+      ? withGitSessionClient(runCredentialClient, chatGitSessionKey)
+      : runCredentialClient;
   const codemodeClient =
     credentialClient && codemodeTokenFile
       ? withCodemodeTokenClient(
@@ -12117,6 +12179,7 @@ async function runAgentStreamInternal(
           ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
           ...(gitTokenSeeds ? { gitTokenSeeds } : {}),
           ...(gitCredentialBindings ? { gitCredentialBindings } : {}),
+          ...(chatGitSessionKey ? { gitSessionKey: chatGitSessionKey } : {}),
           ...(codemodeTokenSeed ? { codemodeTokenSeed } : {}),
           ...(codemodeTokenFile ? { codemodeTokenFile } : {}),
           ...(legacyRigSetup ? { rigSetup: legacyRigSetup } : {}),
@@ -12791,7 +12854,7 @@ export async function pinProvidedSessionManifestEnvironment(
 export async function runOwnedSandboxSetup(
   agent: Agent<any, any>,
   session: SandboxSessionLike,
-  setupSession: SandboxSessionLike,
+  ownerSetupSession: SandboxSessionLike,
   opts: {
     settings: Settings;
     environment: Record<string, string>;
@@ -12820,6 +12883,12 @@ export async function runOwnedSandboxSetup(
   },
 ): Promise<void> {
   const { settings, environment } = opts;
+  // Every setup command (rig setup included) runs in this chat's own Git
+  // credential directory, never the one of the chat that set up last.
+  const setupChatGitSessionKey = gitSessionKeyForAgent(agent);
+  const setupSession = setupChatGitSessionKey
+    ? withGitSessionSession(ownerSetupSession, setupChatGitSessionKey)
+    : ownerSetupSession;
   // ENV PIN (provided sessions): the SDK validates the FULL recomputed manifest
   // env against the live box's baked env before applying its entry-only delta
   // (validateNoEnvironmentDelta — session-fatal on ANY difference). Adopt the
@@ -12860,6 +12929,7 @@ export async function runOwnedSandboxSetup(
     ...(opts.onRuntimeEvent ? { onRuntimeEvent: opts.onRuntimeEvent } : {}),
     ...(Object.keys(ownedGitTokenSeeds).length > 0 ? { gitTokenSeeds: ownedGitTokenSeeds } : {}),
     ...(ownedGitCredentialBindings ? { gitCredentialBindings: ownedGitCredentialBindings } : {}),
+    ...(gitSessionKeyForAgent(agent) ? { gitSessionKey: gitSessionKeyForAgent(agent)! } : {}),
     ...(ownedCodemodeTokenSeed ? { codemodeTokenSeed: ownedCodemodeTokenSeed } : {}),
     ...(ownedCodemodeTokenFile ? { codemodeTokenFile: ownedCodemodeTokenFile } : {}),
     ...(ownedCodemodeClientDownload ? { codemodeClientDownload: ownedCodemodeClientDownload } : {}),
@@ -13625,16 +13695,25 @@ function normalizeSandboxFileDownloads(downloads: SandboxFileDownload[]): Sandbo
   });
 }
 
+/**
+ * One path segment inside the file's own mount directory. Separators, NUL and
+ * the `.`/`..` segments are what can leave that directory; a name that only
+ * contains two dots (`notes..txt`, `v1..2.csv`) is an ordinary file name.
+ */
+function isSafeSandboxFilename(filename: string): boolean {
+  return (
+    filename.length > 0 &&
+    filename !== "." &&
+    filename !== ".." &&
+    !filename.includes("/") &&
+    !filename.includes("\\") &&
+    !filename.includes("\0")
+  );
+}
+
 function assertSafeSandboxFilename(filename: string, fileId: string): void {
-  if (
-    !filename ||
-    filename.includes("/") ||
-    filename.includes("\\") ||
-    filename === "." ||
-    filename === ".." ||
-    filename.includes("..")
-  ) {
-    throw new Error(`Invalid sandbox file name for ${fileId}: ${filename}`);
+  if (!isSafeSandboxFilename(filename)) {
+    throw new Error(`Invalid sandbox file name for ${fileId}`);
   }
 }
 
@@ -13744,6 +13823,12 @@ export type SandboxLifecycleHookContext = {
   // bearers use the private editor/file ingress and never enter command text.
   gitTokenSeeds?: GitTokenSeeds;
   gitCredentialBindings?: GitCredentialBindingSeed[];
+  /**
+   * The chat these credentials belong to (sandbox/git-session.ts gitSessionKey).
+   * Its Git credential files go to its own directory, so chats sharing the box
+   * keep their own.
+   */
+  gitSessionKey?: string;
   codemodeTokenSeed?: string;
   codemodeTokenFile?: string;
   codemodeClientDownload?: ManagedCodemodeClientDownload;
@@ -14073,6 +14158,22 @@ function gitCredentialBindingsForAgent(
 
 function codemodeTokenSeedForAgent(agent: Agent<any, any>): string | undefined {
   return agentCodemodeTokenSeed.get(agent);
+}
+
+function gitSessionKeyForAgent(agent: Agent<any, any>): string | undefined {
+  return agentGitSessionKey.get(agent);
+}
+
+/**
+ * Names the chat an agent runs for on a managed sandbox. Each chat sharing a
+ * box keeps its Git credential files (broker pass, routes, helper, gh
+ * selection) in its own directory, and every command of this chat, including
+ * setup, selects that directory (sandbox/git-session.ts). Read when the agent
+ * runs, so bind it after building and before running. Connected Machines get
+ * their Git credentials per exec instead; don't bind those.
+ */
+export function bindAgentGitCredentialSession(agent: Agent<any, any>, sessionId: string): void {
+  agentGitSessionKey.set(agent, gitSessionKey(sessionId));
 }
 
 function codemodeTokenSessionIdForAgent(agent: Agent<any, any>): string | undefined {
@@ -15038,6 +15139,28 @@ function sandboxGitProvisioningCommand(command: string): string {
   return ["set +x", SANDBOX_GIT_PROVISIONING_TARGET_ASSIGNMENT, command].join("\n");
 }
 
+/**
+ * In the box-wide dispatchers: the chat directory a command names, or for a
+ * process outside any chat (a person's terminal) the chat set up last.
+ */
+const GIT_SESSION_DIR_OR_LATEST =
+  "${OPENGENI_GIT_SESSION_DIR:-${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/sessions/latest}";
+
+/**
+ * The directory of the chat a setup or renewal command runs for (see
+ * sandbox/git-session.ts): named by OPENGENI_GIT_SESSION_DIR, which Opengeni
+ * exports for each chat's commands. A command without it (a direct caller)
+ * uses `sessions/default`.
+ */
+const GIT_SESSION_DIRECTORY_LINES: readonly string[] = [
+  'git_credentials_root="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}"',
+  'git_session_dir="${OPENGENI_GIT_SESSION_DIR:-$git_credentials_root/sessions/default}"',
+  'export OPENGENI_GIT_SESSION_DIR="$git_session_dir"',
+  // Touched on every use, so another chat's stale-directory cleanup never
+  // removes a directory this chat is writing again.
+  '(umask 077 && mkdir -p "$git_session_dir" && touch "$git_session_dir")',
+];
+
 function gitCredentialTokenWriterCommandLines(
   bindings: GitCredentialBindingSeed[] = [],
   stagedSeeds: StagedGitCredentialBindingSeed[] = [],
@@ -15076,11 +15199,14 @@ function gitCredentialTokenWriterCommandLines(
     "    *) printf '%s\\n' \"${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/$provider-token\" ;;",
     "  esac",
     "}",
+    // Binding tokens (and broker passes) belong to one chat: they go to the
+    // chat's own directory, so chats sharing the box never overwrite them.
+    ...GIT_SESSION_DIRECTORY_LINES,
     "write_git_binding_token() {",
     '  binding_hash="$1"',
     '  token="$2"',
     '  [ -n "$token" ] || return 0',
-    '  credential_dir="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}"',
+    '  credential_dir="$git_session_dir"',
     '  mkdir -p "$credential_dir"',
     '  token_file="$credential_dir/$binding_hash-token"',
     '  printf \'%s\' "$token" > "$token_file.tmp.$$"',
@@ -15090,7 +15216,7 @@ function gitCredentialTokenWriterCommandLines(
     '  binding_hash="$1"',
     '  seed_file="$2"',
     '  [ -f "$seed_file" ] && [ ! -L "$seed_file" ] || return 73',
-    '  credential_dir="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}"',
+    '  credential_dir="$git_session_dir"',
     '  mkdir -p "$credential_dir"',
     '  token_file="$credential_dir/$binding_hash-token"',
     '  command cat -- "$seed_file" > "$token_file.tmp.$$"',
@@ -15250,8 +15376,11 @@ function gitHttpBrokerConfigCommandLines(routes: RuntimeGitHttpBrokerRouteDescri
   const rewrites = gitHttpBrokerRewrites(routes);
   const brokeredRepositoryUris = new Set(rewrites.map((rewrite) => rewrite.repositoryUri));
   return [
-    'git_http_broker_config="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/http-broker.gitconfig"',
-    'mkdir -p "$(dirname "$git_http_broker_config")"',
+    // The chat's own routes. Its commands include them through
+    // GIT_CONFIG_PARAMETERS and the git wrapper, never the shared global
+    // config: Git takes the first of two equally long insteadOf rules, so a
+    // global rule would win over the chat's own.
+    'git_http_broker_config="$git_session_dir/http-broker.gitconfig"',
     'broker_umask="$(umask)"',
     "umask 077",
     ': > "$git_http_broker_config.tmp.$$"',
@@ -15277,11 +15406,8 @@ function gitHttpBrokerConfigCommandLines(routes: RuntimeGitHttpBrokerRouteDescri
     ),
     'mv -f "$git_http_broker_config.tmp.$$" "$git_http_broker_config"',
     'umask "$broker_umask"',
-    "include_git_http_broker_config() {",
-    '  git_global_config --unset-all include.path "$git_http_broker_config" >/dev/null 2>&1 || true',
-    '  git_global_config --add include.path "$git_http_broker_config"',
-    "}",
-    "with_git_global_config_lock include_git_http_broker_config",
+    // The repository clones below use the chat's routes too.
+    ...GIT_SESSION_CONFIG_LINES,
   ];
 }
 
@@ -15421,6 +15547,10 @@ const GIT_COMMAND_WRAPPER_TAIL_LINES = [
   'OPENGENI_GIT_WRAPPERS_SEEN="$OPENGENI_GIT_WRAPPERS_SEEN:$real_git"',
   "OPENGENI_GIT_WRAPPER_PID=$$",
   "export OPENGENI_GIT_WRAPPERS_SEEN OPENGENI_GIT_WRAPPER_PID",
+  // The broker routes of the chat this command runs for (see git-session.ts);
+  // Opengeni's own commands also carry them in GIT_CONFIG_PARAMETERS.
+  `opengeni_git_routes="${GIT_SESSION_DIR_OR_LATEST}/http-broker.gitconfig"`,
+  '[ ! -r "$opengeni_git_routes" ] || exec "$real_git" -c "include.path=$opengeni_git_routes" "$@"',
   'exec "$real_git" "$@"',
 ];
 
@@ -15628,6 +15758,25 @@ export function repositoryIdentityCommandLines(
   ];
 }
 
+/** Ends a provider CLI wrapper: run the next real tool of the same name on PATH. */
+const CLI_WRAPPER_EXEC_REAL_TOOL_LINES: readonly string[] = [
+  'self_real="$(readlink -f "$0" 2>/dev/null || printf \'%s\\n\' "$0")"',
+  'old_ifs="$IFS"',
+  "IFS=:",
+  "for dir in $PATH; do",
+  '  [ -n "$dir" ] || dir=.',
+  '  candidate="$dir/$tool"',
+  '  [ -x "$candidate" ] || continue',
+  '  candidate_real="$(readlink -f "$candidate" 2>/dev/null || printf \'%s\\n\' "$candidate")"',
+  '  [ "$candidate_real" = "$self_real" ] && continue',
+  '  IFS="$old_ifs"',
+  '  exec "$candidate" "$@"',
+  "done",
+  'IFS="$old_ifs"',
+  "printf '%s\\n' \"$tool: real command not found on PATH\" >&2",
+  "exit 127",
+];
+
 /**
  * `gh` as the person: when the session has a personal GitHub connection and
  * no attached App credential is selected (by OPENGENI_GIT_BINDING or the
@@ -15658,7 +15807,8 @@ const GH_GATEWAY_WRAPPER_LINES = [
   "  elif command -v bun >/dev/null 2>&1; then gw_js=bun",
   "  else printf '%s\\n' 'gh: Node.js or Bun is needed to use gh as you' >&2; return 127",
   "  fi",
-  '  gw_pass="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/$gh_gateway_binding-token"',
+  // The pass of the chat this command runs for (set by the wrapper on PATH).
+  '  gw_pass="$opengeni_git_session_dir/$gh_gateway_binding-token"',
   '  gw_dir="$(mktemp -d "${TMPDIR:-/tmp}/opengeni-gh.XXXXXX")"',
   '  gw_sock="$gw_dir/gateway.sock"',
   "  cat > \"$gw_dir/proxy.cjs\" <<'GH_GATEWAY_PROXY_EOF'",
@@ -15893,9 +16043,21 @@ function gitCredentialHelperCommandLines(
     "ASKPASS_EOF",
     'chmod 0755 "$git_askpass.tmp.$$"',
     'mv -f "$git_askpass.tmp.$$" "$git_askpass"',
-    'git_credential_helper="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/helper"',
+    // The global config names one box-wide helper. It only hands the request
+    // to the helper of the chat the command runs for (see git-session.ts);
+    // that one knows the chat's remotes and reads the chat's own tokens.
+    'git_credential_helper="$git_credentials_root/helper"',
     'mkdir -p "$(dirname "$git_credential_helper")"',
     "cat > \"$git_credential_helper.tmp.$$\" <<'GIT_CREDENTIAL_HELPER_EOF'",
+    "#!/usr/bin/env sh",
+    `session_helper="${GIT_SESSION_DIR_OR_LATEST}/helper"`,
+    '[ -x "$session_helper" ] || exit 0',
+    'exec "$session_helper" "$@"',
+    "GIT_CREDENTIAL_HELPER_EOF",
+    'chmod 0755 "$git_credential_helper.tmp.$$"',
+    'mv -f "$git_credential_helper.tmp.$$" "$git_credential_helper"',
+    'git_session_helper="$git_session_dir/helper"',
+    "cat > \"$git_session_helper.tmp.$$\" <<'GIT_CREDENTIAL_HELPER_EOF'",
     "#!/usr/bin/env sh",
     "set -eu",
     '[ "${1:-get}" = get ] || exit 0',
@@ -15907,7 +16069,8 @@ function gitCredentialHelperCommandLines(
     '    path) path="${value#/}" ;;',
     "  esac",
     "done",
-    'credential_dir="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}"',
+    // This chat's directory: the one holding this helper.
+    'credential_dir="${0%/*}"',
     "username= token_file=",
     'case "$protocol|$host|$path" in',
     ...bindingCases,
@@ -15918,12 +16081,14 @@ function gitCredentialHelperCommandLines(
     '[ -n "$password" ] || exit 0',
     'printf \'username=%s\\npassword=%s\\n\' "$username" "$password"',
     "GIT_CREDENTIAL_HELPER_EOF",
-    'chmod 0755 "$git_credential_helper.tmp.$$"',
-    'mv -f "$git_credential_helper.tmp.$$" "$git_credential_helper"',
+    'chmod 0755 "$git_session_helper.tmp.$$"',
+    'mv -f "$git_session_helper.tmp.$$" "$git_session_helper"',
     // Empty helper resets lower-priority/system helpers; our exact path-aware
     // helper returns no credential for an unbound remote, so multi-binding
     // sessions fail closed instead of falling through to ambient credentials.
     "install_git_credential_helper() {",
+    // Earlier releases included one box-wide copy of the broker routes.
+    '  git_global_config --unset-all include.path "$git_credentials_root/http-broker.gitconfig" >/dev/null 2>&1 || true',
     "  git_global_config --unset-all credential.helper >/dev/null 2>&1 || true",
     "  git_global_config --add credential.helper ''",
     '  git_global_config --add credential.helper "$git_credential_helper"',
@@ -15951,12 +16116,10 @@ function gitCredentialHelperCommandLines(
           "fi",
         ]
       : []),
-    "for opengeni_git_cli_tool in gh glab az; do",
-    '  wrapper="$wrapper_dir/$opengeni_git_cli_tool"',
-    "  cat > \"$wrapper.tmp.$$\" <<'CLI_WRAPPER_EOF'",
-    "#!/usr/bin/env sh",
-    "set -eu",
-    'tool="${0##*/}"',
+    // The chat's own credential selection for gh, glab and az, sourced by
+    // the box-wide wrappers below for commands of this chat.
+    'cli_session_wrapper="$git_session_dir/cli-wrapper.sh"',
+    "cat > \"$cli_session_wrapper.tmp.$$\" <<'CLI_WRAPPER_EOF'",
     'case "$tool" in',
     "  gh) provider=github; token_env=GH_TOKEN ;;",
     "  glab) provider=gitlab; token_env=GITLAB_TOKEN ;;",
@@ -16038,7 +16201,7 @@ function gitCredentialHelperCommandLines(
     "  fi",
     '  [ -n "$binding_hash" ] || binding_hash="$(sole_binding_hash 2>/dev/null || true)"',
     '  if [ -n "$binding_hash" ]; then',
-    '    token_file="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/$binding_hash-token"',
+    '    token_file="$opengeni_git_session_dir/$binding_hash-token"',
     "  else",
     '    case " $broker_only_providers " in',
     '      *" $provider "*) printf \'%s\\n\' "$tool provider API authentication is host-brokered for this session; use the configured provider MCP tools" >&2; exit 2 ;;',
@@ -16077,26 +16240,35 @@ function gitCredentialHelperCommandLines(
     "      esac",
     "    fi",
     "fi",
-    'self_real="$(readlink -f "$0" 2>/dev/null || printf \'%s\\n\' "$0")"',
-    'old_ifs="$IFS"',
-    "IFS=:",
-    "for dir in $PATH; do",
-    '  [ -n "$dir" ] || dir=.',
-    '  candidate="$dir/$tool"',
-    '  [ -x "$candidate" ] || continue',
-    '  candidate_real="$(readlink -f "$candidate" 2>/dev/null || printf \'%s\\n\' "$candidate")"',
-    '  [ "$candidate_real" = "$self_real" ] && continue',
-    '  IFS="$old_ifs"',
-    '  exec "$candidate" "$@"',
-    "done",
-    'IFS="$old_ifs"',
-    "printf '%s\\n' \"$tool: real command not found on PATH\" >&2",
-    "exit 127",
+    "CLI_WRAPPER_EOF",
+    'chmod 0600 "$cli_session_wrapper.tmp.$$"',
+    'mv -f "$cli_session_wrapper.tmp.$$" "$cli_session_wrapper"',
+    "for opengeni_git_cli_tool in gh glab az; do",
+    '  wrapper="$wrapper_dir/$opengeni_git_cli_tool"',
+    "  cat > \"$wrapper.tmp.$$\" <<'CLI_WRAPPER_EOF'",
+    "#!/usr/bin/env sh",
+    "set -eu",
+    `opengeni_git_session_dir="${GIT_SESSION_DIR_OR_LATEST}"`,
+    'tool="${0##*/}"',
+    // Sets the chat's credentials for the tool (or runs gh as the person and
+    // exits), then the real tool runs.
+    '[ ! -r "$opengeni_git_session_dir/cli-wrapper.sh" ] || . "$opengeni_git_session_dir/cli-wrapper.sh"',
+    ...CLI_WRAPPER_EXEC_REAL_TOOL_LINES,
     "CLI_WRAPPER_EOF",
     '  chmod 0755 "$wrapper.tmp.$$"',
     '  mv -f "$wrapper.tmp.$$" "$wrapper"',
     "done",
-    ...gitCommandWrapperCommandLines(personalGateway !== null),
+    // Box-wide, so the same for every chat: the gh gateway part only acts
+    // under a gh that runs as the person.
+    ...gitCommandWrapperCommandLines(true),
+    // Directories of chats idle for a day go: their passes expired long ago,
+    // and a chat's next setup writes its directory again.
+    'find "$git_credentials_root/sessions" -mindepth 1 -maxdepth 1 -type d ! -name "${git_session_dir##*/}" -mmin +1440 -exec rm -rf {} + 2>/dev/null || true',
+    // So do the box-wide binding files of earlier releases, once just as old.
+    'find "$git_credentials_root" -maxdepth 1 -type f \\( -name http-broker.gitconfig -o -name "????????????????????????????????-token" \\) -mmin +1440 -exec rm -f {} + 2>/dev/null || true',
+    // A process outside any chat (a person's terminal) uses the chat whose
+    // setup ran last.
+    'ln -sfn "${git_session_dir##*/}" "$git_credentials_root/sessions/latest" 2>/dev/null || true',
     "if [ -d /etc/profile.d ] && [ -w /etc/profile.d ]; then",
     '  printf \'%s\\n\' \'case ":$PATH:" in *":${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}:"*) ;; *) export PATH="${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}:$PATH" ;; esac\' > /etc/profile.d/opengeni-git-cli.sh',
     "fi",
@@ -16129,6 +16301,10 @@ export function gitProviderTokenRefreshCommand(seeds: GitTokenSeeds): string {
 export function gitCredentialBindingTokenRefreshCommand(
   bindings: GitCredentialBindingSeed[],
   stagedSeeds: StagedGitCredentialBindingSeed[] = [],
+  options: {
+    /** The chat whose tokens these are (gitSessionKey); renews into its directory. */
+    gitSessionKey?: string;
+  } = {},
 ): string {
   const seedPrefix = gitCredentialBindingSeedExportPrefix(bindings);
   if (!seedPrefix && stagedSeeds.length === 0) return "";
@@ -16138,6 +16314,7 @@ export function gitCredentialBindingTokenRefreshCommand(
     "set -eu",
     ...sandboxGitProvisioningGuardLines(),
     'export HOME="${HOME:-/workspace}"',
+    ...(options.gitSessionKey ? [gitSessionDirectoryExport(options.gitSessionKey)] : []),
     ...gitCredentialTokenWriterCommandLines(bindings, stagedSeeds),
   ].join("\n");
 }
@@ -16173,11 +16350,15 @@ export async function refreshGitCredentialBindingTokenFiles(
   options: {
     runAs?: string;
     commandRunner?: SandboxLifecycleCommandRunner;
+    /** The chat whose tokens these are (gitSessionKey). */
+    gitSessionKey?: string;
   } = {},
 ): Promise<void> {
   const { editor, staged } = await stageGitHttpBrokerBindingSeeds(session, bindings, options.runAs);
   try {
-    const command = gitCredentialBindingTokenRefreshCommand(bindings, staged);
+    const command = gitCredentialBindingTokenRefreshCommand(bindings, staged, {
+      ...(options.gitSessionKey ? { gitSessionKey: options.gitSessionKey } : {}),
+    });
     if (!command) return;
     const args = {
       cmd: sandboxGitProvisioningCommand(command),
@@ -16969,7 +17150,10 @@ const RIG_SETUP_INLINE_COMMAND_MAX_BYTES = 4 * 1024;
 // so 12 KiB leaves about 10 KiB under Modal's 64-KiB argv ceiling. Each staged
 // chunk costs one sandbox round trip, so chunks are as large as is safe.
 const RIG_SETUP_PAYLOAD_CHUNK_CHARS = 12 * 1024;
-const REPOSITORY_SETUP_SELF_INSTALL_MAX_BYTES = 12 * 1024;
+// A whole single-command setup program may take 13 KiB: (13 + 5.5) x 3 is
+// 55.5 KiB, still about 8.5 KiB under the ceiling. The usual one-repository
+// program with per-chat Git credentials compresses to about 12.1 KiB.
+const REPOSITORY_SETUP_SELF_INSTALL_MAX_BYTES = 13 * 1024;
 const REPOSITORY_SETUP_ONE_SHOT_PAYLOAD_ROOT = "/tmp/opengeni/repository-setup-payloads";
 const RIG_SETUP_PAYLOAD_ROOT = "/tmp/opengeni/rig-setup-payloads";
 const RIG_SETUP_GZIP_SENTINEL = "__OPENGENI_SETUP_GZIP__";
@@ -17548,6 +17732,8 @@ export async function runRepositoryCloneHook(
       gitTokenSeedExportPrefix(gitTokenSeeds),
       gitCredentialBindingSeedExportPrefix(gitCredentialBindings),
       `export OPENGENI_REPOSITORY_NOTICE_TOKEN=${noticeToken}`,
+      // The chat's own credential directory; per run, so the program stays shared.
+      ...(context.gitSessionKey ? [gitSessionDirectoryExport(context.gitSessionKey)] : []),
     ]
       .filter(Boolean)
       .join("\n");

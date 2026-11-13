@@ -21,6 +21,7 @@ import { readOrganizationInvitationContinuation } from "@/lib/organization-invit
 import { readSignInCallbackError } from "@/lib/sign-in-feedback";
 import { signupAttribution } from "@/lib/signup-attribution";
 import { SIGN_IN_EMAIL_NOT_ALLOWED_MESSAGE } from "@/lib/signups-paused";
+import { socialProvidersForHost } from "@/lib/console-route";
 
 const browserAccountsApiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/+$/, "");
 
@@ -149,7 +150,9 @@ export function AccountAuthRoute({
     void fetchClientConfig()
       .then((config) => {
         if (!active || config.auth.mode !== "managedSession") return;
-        setSocialProviders(config.auth.socialProviders ?? []);
+        setSocialProviders(
+          socialProvidersForHost(window.location.hostname, config.auth.socialProviders ?? []),
+        );
         if (config.auth.newSignupsEnabled !== false) {
           setChallengeSiteKey(config.auth.signupChallengeSiteKey);
         }

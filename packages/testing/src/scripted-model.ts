@@ -15,6 +15,8 @@ export type ScriptedModelStep = {
   inputTokens?: number;
   delayMs?: number;
   error?: unknown;
+  /** Provider data on the response, for example an output-limit stop. */
+  providerData?: Record<string, unknown>;
 };
 
 export class ScriptedModel implements Model {
@@ -147,6 +149,7 @@ function responseForStep(step: ScriptedModelStep, callNumber: number): ModelResp
     }),
     output: step.output ?? (text ? [assistantMessage(text)] : []),
     responseId: step.id ?? `scripted-response-${callNumber}`,
+    ...(step.providerData ? { providerData: step.providerData } : {}),
   };
 }
 

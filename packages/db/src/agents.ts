@@ -261,7 +261,7 @@ function mapInstall(row: InstallRow): AgentSlackInstallRecord {
  * flag decides only for an agent in no Slack installation, which the previous
  * release can't open.
  */
-const AGENT_ORGANIZATION_ACCESS_SQL = `(case when exists (select 1 from agent_slack_installs oi
+export const AGENT_ORGANIZATION_ACCESS_SQL = `(case when exists (select 1 from agent_slack_installs oi
     where oi.agent_id = a.id and oi.account_id = a.account_id)
   then not exists (select 1 from agent_slack_installs oi
     where oi.agent_id = a.id and oi.account_id = a.account_id and not oi.open)

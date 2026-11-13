@@ -1109,6 +1109,18 @@ export type ConnectionMetadata = {
    * connections and from older servers.
    */
   accountIdentity?: "verified" | "reconnect" | "single" | undefined;
+  /**
+   * A workspace's own OpenAI, Azure OpenAI or OpenAI-compatible model key
+   * only (those providers report no cost): the price its model was given, or
+   * null. Absent for other connections and from older servers.
+   */
+  listPrice?: ConnectedModelListPrice | null | undefined;
+  /**
+   * A workspace's own model key only, in workspace connection lists: whether
+   * its model's usage gets a cost estimate. False means its calls are
+   * recorded as unpriced and spend limits can't count them.
+   */
+  listPriceKnown?: boolean | undefined;
   createdBySubjectId: string | null;
   updatedBySubjectId: string | null;
   createdAt: string;
@@ -4970,9 +4982,58 @@ export type RevokeOrganizationModelProviderConnectionRequest = {
   expectedVersion: number;
 };
 
-export type OrganizationProviderCustomModel = WorkspaceGatewayCustomModel;
+/**
+ * An administrator's own list rate for a connected model, in USD micros
+ * (1 USD = 1,000,000) per 1M tokens. Without a cached-input rate, cached
+ * input is priced as input.
+ */
+export type ConnectedModelListPricing = {
+  inputMicrosPerMillionTokens: number;
+  cachedInputMicrosPerMillionTokens?: number | undefined;
+  cacheWriteMicrosPerMillionTokens?: number | undefined;
+  outputMicrosPerMillionTokens: number;
+};
+/**
+ * What a connected model's usage costs, for usage estimates, spend limits
+ * and Insights (never a charge): the catalogue model whose list rate it
+ * shares, such as an Azure deployment's base model, or an explicit rate.
+ */
+export type ConnectedModelListPrice =
+  | { basis: "model"; modelId: string }
+  | { basis: "custom"; pricing: ConnectedModelListPricing };
+export type OrganizationProviderCustomModel = WorkspaceGatewayCustomModel & {
+  /**
+   * OpenAI, Azure OpenAI and OpenAI-compatible models only (their providers
+   * report no cost): the price the model was given, or null.
+   */
+  listPrice?: ConnectedModelListPrice | null | undefined;
+  /**
+   * OpenAI, Azure OpenAI and OpenAI-compatible models only: whether its usage
+   * gets a cost estimate. False means its calls are recorded as unpriced and
+   * spend limits can't count them.
+   */
+  listPriceKnown?: boolean | undefined;
+};
 export type OrganizationProviderCustomModelsResponse = {
   models: OrganizationProviderCustomModel[];
+  /** OpenAI and Azure OpenAI only: catalogue models with a known list rate to price a model like. */
+  priceBasisModelIds?: string[] | undefined;
+};
+/** Set or clear (null) what an organization model's usage costs. */
+export type SetOrganizationCustomModelListPriceRequest = {
+  expectedVersion: number;
+  listPrice: ConnectedModelListPrice | null;
+};
+/**
+ * Set or clear (null) what a workspace model key's model costs. Its price is
+ * not part of the key's version, so no version is expected.
+ */
+export type SetWorkspaceModelKeyListPriceRequest = {
+  listPrice: ConnectedModelListPrice | null;
+};
+/** Catalogue models with a known list rate that a connected model can be priced like. */
+export type ModelPriceBasisModelsResponse = {
+  priceBasisModelIds: string[];
 };
 export type CreateOrganizationProviderCustomModelRequest = CreateWorkspaceGatewayCustomModelRequest;
 export type DeleteOrganizationProviderCustomModelRequest = DeleteWorkspaceGatewayCustomModelRequest;
@@ -5016,6 +5077,37 @@ export type OrganizationCompatibleEndpoint = {
 };
 export type OrganizationCompatibleEndpointsResponse = {
   endpoints: OrganizationCompatibleEndpoint[];
+  /** Catalogue models with a known list rate that a model can be priced like. */
+  priceBasisModelIds?: string[] | undefined;
+};
+/**
+ * One API key of an organization's Anthropic API connection, which can hold
+ * several. The connection's own key is the first; each session keeps one key
+ * while it serves. Never includes the key itself.
+ */
+export type OrganizationAnthropicApiKey = {
+  id: string;
+  /** Null for the connection's own key. */
+  label: string | null;
+  /** Whether this is the connection's own key (replaced or disconnected with the connection). */
+  connectionKey: boolean;
+  /** The Anthropic organization the key belongs to, when known. */
+  anthropicOrganizationId: string | null;
+  /** When Anthropic refused the key because its organization is out of credits; null while it serves. */
+  creditRefusedAt: string | null;
+  createdAt: string;
+};
+export type OrganizationAnthropicApiKeysResponse = {
+  connectionVersion: number;
+  keys: OrganizationAnthropicApiKey[];
+};
+/** Add a further key; the API checks it with Anthropic's free model listing first. */
+export type AddOrganizationAnthropicApiKeyRequest = {
+  apiKey: string;
+  label: string;
+};
+export type UpdateOrganizationAnthropicApiKeyRequest = {
+  label: string;
 };
 /**
  * Connect an endpoint with its first model; the API checks it with a short

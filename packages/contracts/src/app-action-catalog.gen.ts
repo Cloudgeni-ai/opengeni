@@ -189,6 +189,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "addOrganizationAnthropicApiKey",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/model-providers/anthropic/api-keys",
+    "request": [
+      "AddOrganizationAnthropicApiKeyRequest"
+    ],
+    "response": [
+      "OrganizationAnthropicApiKey"
+    ],
+    "secretFields": [
+      "request.apiKey"
+    ]
+  },
+  {
     "id": "addWorkspaceMember",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/members",
@@ -3545,6 +3559,52 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "workspace:read"
   },
   {
+    "id": "getConsoleApiKeyUsage",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/console/api-keys",
+    "request": [
+      "ConsoleRangeQuery"
+    ],
+    "query": [
+      "range"
+    ],
+    "response": [
+      "ConsoleApiKeyUsageResponse"
+    ]
+  },
+  {
+    "id": "getConsoleSession",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/console/workspaces/:workspaceId/sessions/:sessionId",
+    "request": [],
+    "response": [
+      "ConsoleSessionDetail"
+    ]
+  },
+  {
+    "id": "getConsoleSettings",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/console/settings",
+    "request": [],
+    "response": [
+      "ConsoleSettings"
+    ]
+  },
+  {
+    "id": "getConsoleSummary",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/console/summary",
+    "request": [
+      "ConsoleRangeQuery"
+    ],
+    "query": [
+      "range"
+    ],
+    "response": [
+      "ConsoleSummary"
+    ]
+  },
+  {
     "id": "getDocumentBase",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/document-bases/:baseId",
@@ -5445,6 +5505,69 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "workspace:read"
   },
   {
+    "id": "listConsoleAuditLog",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/console/audit-log",
+    "request": [
+      "ListConsoleAuditEventsQuery"
+    ],
+    "query": [
+      "cursor",
+      "limit",
+      "sessionId"
+    ],
+    "response": [
+      "ConsoleAuditEventListResponse"
+    ]
+  },
+  {
+    "id": "listConsoleSessionEvents",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/console/workspaces/:workspaceId/sessions/:sessionId/events",
+    "request": [
+      "ConsoleSessionEventsQuery"
+    ],
+    "query": [
+      "after",
+      "limit"
+    ],
+    "response": [
+      "SessionEvent"
+    ]
+  },
+  {
+    "id": "listConsoleSessions",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/console/sessions",
+    "request": [
+      "ListConsoleSessionsQuery"
+    ],
+    "query": [
+      "cursor",
+      "limit",
+      "q",
+      "workspaceId"
+    ],
+    "response": [
+      "ConsoleSessionListResponse"
+    ]
+  },
+  {
+    "id": "listConsoleWorkspaces",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/console/workspaces",
+    "request": [
+      "ListConsoleWorkspacesQuery"
+    ],
+    "query": [
+      "kind",
+      "range"
+    ],
+    "response": [
+      "ConsoleWorkspaceListResponse"
+    ]
+  },
+  {
     "id": "listDocumentAuthorityReclassifications",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/documents/:documentId/authority-reclassifications",
@@ -5808,6 +5931,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "workspace:read"
   },
   {
+    "id": "listModelPriceBasisModels",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/model-price-basis-models",
+    "request": [],
+    "response": [
+      "ModelPriceBasisModelsResponse"
+    ],
+    "permission": "connections:read"
+  },
+  {
     "id": "listNetworkRoutes",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/network-routes",
@@ -5882,6 +6015,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ListOrganizationAdministrationMembersResponse"
+    ]
+  },
+  {
+    "id": "listOrganizationAnthropicApiKeys",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/model-providers/anthropic/api-keys",
+    "request": [],
+    "response": [
+      "OrganizationAnthropicApiKeysResponse"
     ]
   },
   {
@@ -8407,6 +8549,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "removeOrganizationAnthropicApiKey",
+    "method": "DELETE",
+    "path": "/v1/organizations/:organizationId/model-providers/anthropic/api-keys/:keyId",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "removeSessionResources",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/resources/remove",
@@ -9102,6 +9251,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "serveOrganizationAnthropicApiKeyAgain",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/model-providers/anthropic/api-keys/:keyId/serve-again",
+    "request": [],
+    "response": [
+      "OrganizationAnthropicApiKey"
+    ]
+  },
+  {
     "id": "setAgentCallHostPhones",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/agent-call-phones",
@@ -9244,6 +9402,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "setOrganizationCompatibleEndpointModelListPrice",
+    "method": "PUT",
+    "path": "/v1/organizations/:organizationId/model-providers/openai_compatible/endpoints/:connectionId/models/:customModelId/list-price",
+    "request": [
+      "SetOrganizationCustomModelListPriceRequest"
+    ],
+    "response": [
+      "OrganizationCompatibleEndpointModel"
+    ]
+  },
+  {
     "id": "setOrganizationCompatibleEndpointModelReasoning",
     "method": "PUT",
     "path": "/v1/organizations/:organizationId/model-providers/openai_compatible/endpoints/:connectionId/models/:customModelId/reasoning",
@@ -9252,6 +9421,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "OrganizationCompatibleEndpointModel"
+    ]
+  },
+  {
+    "id": "setOrganizationProviderCustomModelListPrice",
+    "method": "PUT",
+    "path": "/v1/organizations/:organizationId/model-providers/:providerKind/custom-models/:customModelId/list-price",
+    "request": [
+      "SetOrganizationCustomModelListPriceRequest"
+    ],
+    "response": [
+      "OrganizationProviderCustomModel"
     ]
   },
   {
@@ -9384,6 +9564,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "WorkspaceInferenceControlResponse"
     ],
     "permission": "workspace:admin"
+  },
+  {
+    "id": "setWorkspaceModelKeyListPrice",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/connections/:connectionId/list-price",
+    "request": [
+      "SetWorkspaceModelKeyListPriceRequest"
+    ],
+    "response": [
+      "ConnectionMetadata",
+      "ConnectionResponse"
+    ]
   },
   {
     "id": "setWorkspacePauseTimer",
@@ -9973,6 +10165,28 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "capabilities:manage"
   },
   {
+    "id": "updateConsoleSettings",
+    "method": "PUT",
+    "path": "/v1/organizations/:organizationId/console/settings",
+    "request": [
+      "UpdateConsoleSettingsRequest"
+    ],
+    "response": [
+      "ConsoleSettings"
+    ]
+  },
+  {
+    "id": "updateConsoleWorkspace",
+    "method": "PUT",
+    "path": "/v1/organizations/:organizationId/console/workspaces/:workspaceId",
+    "request": [
+      "UpdateConsoleWorkspaceRequest"
+    ],
+    "response": [
+      "ConsoleWorkspaceKind"
+    ]
+  },
+  {
     "id": "updateEditableArtifactVisibility",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/editable-artifacts/:artifactId/visibility",
@@ -10218,6 +10432,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "OrganizationAgentAdminAccess"
+    ]
+  },
+  {
+    "id": "updateOrganizationAnthropicApiKey",
+    "method": "PATCH",
+    "path": "/v1/organizations/:organizationId/model-providers/anthropic/api-keys/:keyId",
+    "request": [
+      "UpdateOrganizationAnthropicApiKeyRequest"
+    ],
+    "response": [
+      "OrganizationAnthropicApiKey"
     ]
   },
   {

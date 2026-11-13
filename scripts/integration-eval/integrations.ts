@@ -167,12 +167,13 @@ export const INTEGRATIONS: readonly IntegrationSpec[] = [
     toolNamePatterns: [/sharepoint/],
   },
   {
-    // Per-customer hosts (`<org>.crm4.dynamics.com`, `<env>.operations.dynamics.com`)
+    // Per-customer hosts (`<org>.crm4.dynamics.com`, `<env>.operations.dynamics.com`,
+    // `api.businesscentral.dynamics.com` for every Business Central environment)
     // resolve through the shared `dynamics.com` parent.
     id: "microsoft_dynamics",
     label: "Microsoft Dynamics",
     families: ["integration:dynamics.com"],
-    labelWords: ["microsoft dynamics", "dynamics 365", "dynamics", "dataverse"],
+    labelWords: ["microsoft dynamics", "dynamics 365", "dynamics", "dataverse", "business central"],
   },
   {
     // Never connected in either test workspace: only the strong-match card row uses it.

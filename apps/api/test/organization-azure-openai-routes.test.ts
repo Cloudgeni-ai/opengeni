@@ -51,6 +51,8 @@ describe("organization Azure OpenAI provider routes", () => {
   >;
   let upstream: Array<{ url: string; headers: Headers; body: Record<string, unknown> }>;
   let upstreamStatus: number;
+  /** The model id Azure answers with; Azure reports a deployment's base model. */
+  let reportedModel: string | undefined;
   let tokenRequests: Array<{ url: string; body: URLSearchParams }>;
   let tokenStatus: number;
   let app: Hono;
@@ -90,7 +92,10 @@ describe("organization Azure OpenAI provider routes", () => {
           body: JSON.parse(init.body as string),
         });
         return upstreamStatus === 200
-          ? Response.json({ status: "completed" })
+          ? Response.json({
+              status: "completed",
+              ...(reportedModel ? { model: reportedModel } : {}),
+            })
           : Response.json(
               { error: { message: `upstream detail ${KEY}` } },
               { status: upstreamStatus },
@@ -102,6 +107,7 @@ describe("organization Azure OpenAI provider routes", () => {
   beforeEach(() => {
     upstream = [];
     upstreamStatus = 200;
+    reportedModel = undefined;
     tokenRequests = [];
     tokenStatus = 200;
     upsert = spyOn(opengeniDb, "upsertOrganizationModelProviderConnection").mockImplementation(
@@ -119,6 +125,8 @@ describe("organization Azure OpenAI provider routes", () => {
         providerKind: input.providerKind,
         upstreamModelId: input.upstreamModelId,
         label: input.label ?? null,
+        listPricingModelId: input.listPrice?.basis === "model" ? input.listPrice.modelId : null,
+        listPricing: input.listPrice?.basis === "custom" ? input.listPrice.pricing : null,
         version: 1,
         retiredAt: null,
         createdAt: new Date("2026-10-17T00:00:00.000Z"),
@@ -321,6 +329,124 @@ describe("organization Azure OpenAI provider routes", () => {
     expect(response.status).toBe(201);
     expect(upstream).toHaveLength(0);
     expect(credential).not.toHaveBeenCalled();
+  });
+
+  test("a new deployment is priced from the base model Azure reports serving", async () => {
+    reportedModel = "gpt-6-astra-2026-03-05";
+    const response = await addDeployment("prod-reasoning");
+    expect(response.status).toBe(201);
+    expect(create.mock.calls.at(-1)![1]).toMatchObject({
+      upstreamModelId: "prod-reasoning",
+      listPrice: { basis: "model", modelId: "gpt-6-astra" },
+    });
+    expect(await response.json()).toMatchObject({
+      listPrice: { basis: "model", modelId: "gpt-6-astra" },
+      listPriceKnown: true,
+    });
+  });
+
+  test("a deployment whose base model has no known price stays unpriced, never free", async () => {
+    reportedModel = "house-finetune-7";
+    const response = await addDeployment("prod-finetune");
+    expect(response.status).toBe(201);
+    expect(create.mock.calls.at(-1)![1]).not.toHaveProperty("listPrice");
+    expect(await response.json()).toMatchObject({ listPrice: null, listPriceKnown: false });
+  });
+
+  test("deployments saved with the key keep the base model Azure reports for each", async () => {
+    reportedModel = "gpt-6-astra";
+    const saved = await put("azure_openai", {
+      apiKey: KEY,
+      endpoint: "https://contoso.openai.azure.com",
+      models: ["prod-reasoning"],
+    });
+    expect(saved.status).toBe(200);
+    expect(upsert.mock.calls.at(-1)![1]).toMatchObject({
+      models: ["prod-reasoning"],
+      modelListPrices: { "prod-reasoning": { basis: "model", modelId: "gpt-6-astra" } },
+    });
+  });
+
+  describe("setting a deployment's price", () => {
+    const MODEL = "00000000-0000-4000-8000-0000000000b1";
+    let setPrice: ReturnType<
+      typeof spyOn<typeof opengeniDb, "setOrganizationModelProviderCustomModelListPrice">
+    >;
+    beforeEach(() => {
+      setPrice = spyOn(
+        opengeniDb,
+        "setOrganizationModelProviderCustomModelListPrice",
+      ).mockImplementation(async (_db, input) => ({
+        id: MODEL,
+        accountId: ORGANIZATION,
+        providerKind: input.providerKind,
+        upstreamModelId: "prod-reasoning",
+        label: null,
+        listPricingModelId: input.price?.basis === "model" ? input.price.modelId : null,
+        listPricing: input.price?.basis === "custom" ? input.price.pricing : null,
+        version: input.expectedVersion + 1,
+        retiredAt: null,
+        createdAt: new Date("2026-10-17T00:00:00.000Z"),
+        updatedAt: new Date("2026-10-17T00:00:00.000Z"),
+      }));
+      spies.push(setPrice);
+    });
+    const setListPrice = async (kind: string, listPrice: unknown, headers = browser) =>
+      await app.request(`${BASE}/${kind}/custom-models/${MODEL}/list-price`, {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({ expectedVersion: 1, listPrice }),
+      });
+
+    test("an administrator's own rate overrides the base model", async () => {
+      const pricing = {
+        inputMicrosPerMillionTokens: 2_000_000,
+        outputMicrosPerMillionTokens: 8_000_000,
+      };
+      const response = await setListPrice("azure_openai", { basis: "custom", pricing });
+      expect(response.status).toBe(200);
+      expect(setPrice.mock.calls.at(-1)![1]).toMatchObject({
+        organizationId: ORGANIZATION,
+        actorSubjectId: ADMIN,
+        providerKind: "azure_openai",
+        customModelId: MODEL,
+        expectedVersion: 1,
+        price: { basis: "custom", pricing },
+      });
+      expect(await response.json()).toMatchObject({
+        listPrice: { basis: "custom", pricing },
+        listPriceKnown: true,
+        version: 2,
+      });
+    });
+
+    test("a base model must have a known price, so nothing silently stays unpriced", async () => {
+      const response = await setListPrice("azure_openai", {
+        basis: "model",
+        modelId: "not-a-catalogue-model",
+      });
+      expect(response.status).toBe(422);
+      expect(setPrice).not.toHaveBeenCalled();
+      const listed = await setListPrice("azure_openai", { basis: "model", modelId: "gpt-6-astra" });
+      expect(listed.status).toBe(200);
+      expect(await listed.json()).toMatchObject({ listPriceKnown: true });
+    });
+
+    test("clearing the price leaves the deployment's usage unpriced", async () => {
+      const response = await setListPrice("azure_openai", null);
+      expect(response.status).toBe(200);
+      expect(setPrice.mock.calls.at(-1)![1]).toMatchObject({ price: null });
+      expect(await response.json()).toMatchObject({ listPrice: null, listPriceKnown: false });
+    });
+
+    test("providers that report their own cost have no price to set", async () => {
+      expect((await setListPrice("openrouter", null)).status).toBe(404);
+      expect(
+        (await setListPrice("azure_openai", null, { "content-type": "application/json" } as never))
+          .status,
+      ).toBe(403);
+      expect(setPrice).not.toHaveBeenCalled();
+    });
   });
 
   test("mutations keep the same-origin browser guard", async () => {

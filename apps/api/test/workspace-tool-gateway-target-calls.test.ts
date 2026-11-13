@@ -840,6 +840,41 @@ describe("portable known-tool calls", () => {
       f.close();
     }
   });
+  test("a caller that disconnects mid-call gets the client-gone 499, never a 500", async () => {
+    const f = createFixture();
+    const { createApp } = await import("../src/app");
+    const app = createApp({
+      settings: f.settings,
+      db: f.deps.db,
+      bus: {} as never,
+      workflowClient: {} as never,
+    });
+    const controller = new AbortController();
+    f.state.onCredential = async () => {
+      controller.abort();
+      await Promise.resolve();
+    };
+    try {
+      const response = await app.request(
+        `http://localhost/v1/workspaces/${workspaceId}/tools/invoke`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            target: { identity: f.identity(f.shared) },
+            operationId: crypto.randomUUID(),
+            arguments: {},
+          }),
+          signal: controller.signal,
+        },
+      );
+      expect(response.status).toBe(499);
+      expect(await response.text()).toBe("");
+      expect(f.grafana.calls).toHaveLength(0);
+    } finally {
+      f.close();
+    }
+  });
   test("cancellation during connect, list, native preflight and call closes preparation without replay", async () => {
     for (const phase of ["initialize", "tools/list", "preflight", "tools/call"] as const) {
       const controller = new AbortController();

@@ -211,6 +211,39 @@ describe("empty final reply production runtime with PostgreSQL", () => {
     ).toBe(false);
     expect(actual.turn?.status).toBe("completed");
   }, 60_000);
+  test("a response with no text and no tool call gets one reminder, then the notice, never a loop", async () => {
+    // No tool ran and no goal completed: only the contentless response asks
+    // for a reply. The SDK alone would sample the same request again.
+    const actual = await run(
+      [{ output: [] }, { output: [] }, { outputText: "never sampled" }],
+      false,
+    );
+    expect(actual.model.calls).toBe(2);
+    expect(actual.turn?.status).toBe("completed");
+    expect(
+      hasFinalReplyNudge(
+        actual.history.map((row) => row.item),
+        actual.result.turnId,
+      ),
+    ).toBe(true);
+    expect(JSON.stringify(actual.model.requests[1]?.input)).toContain(
+      "Runtime final-reply handoff",
+    );
+    expect(actual.events.filter((e) => e.type === "turn.completed").at(-1)?.payload).toEqual({
+      output: "",
+      emptyFinalReply: true,
+    });
+    expect(actual.events.filter((e) => e.type === "turn.started")).toHaveLength(1);
+    expect(actual.events.filter((e) => e.type === "turn.failed")).toHaveLength(0);
+  }, 60_000);
+  test("a contentless response followed by an answer after the reminder delivers it", async () => {
+    const actual = await run([{ output: [] }, { outputText: "Here is the answer." }], false);
+    expect(actual.model.calls).toBe(2);
+    expect(actual.turn?.status).toBe("completed");
+    expect(actual.events.filter((e) => e.type === "turn.completed").map((e) => e.payload)).toEqual([
+      { output: "Here is the answer." },
+    ]);
+  }, 60_000);
   test("review: empty final after completed hosted search receives the handoff", async () => {
     const actual = await run(
       [

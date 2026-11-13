@@ -3,6 +3,7 @@ import "./lib/content-security-boot";
 import "./lib/crypto-random-uuid";
 // Must evaluate before ./App creates the router from the current URL.
 import "./lib/signup-attribution-boot";
+import "./lib/console-host-boot";
 // Backs the shared session UI with this app's router and API helpers.
 import "./app-host";
 import { AppearanceProvider } from "@opengeni/react/app/lib/appearance";

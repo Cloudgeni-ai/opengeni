@@ -2005,6 +2005,13 @@ export const connections = pgTable(
     verifiedInstallAt: timestamp("verified_install_at", { withTimezone: true }),
     verifiedInstallVersion: integer("verified_install_version"),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    // A workspace's own OpenAI, Azure OpenAI or OpenAI-compatible model key
+    // only: what its model's usage costs, for usage estimates and spend limits
+    // (see organizationModelProviderCustomModels). The catalogue model whose
+    // list rate it shares, or the administrator's own rate; both null when
+    // unknown. Never part of `version`, so the model's id is unaffected.
+    priceBasisModelId: text("price_basis_model_id"),
+    listPricing: jsonb("list_pricing").$type<ConnectedModelListPricing>(),
     createdBySubjectId: text("created_by_subject_id"),
     updatedBySubjectId: text("updated_by_subject_id"),
     // Explicit execution authority. Workspace rows have no member authority;
@@ -2091,6 +2098,10 @@ export const connections = pgTable(
     authorityGenerationValid: check(
       "connections_authority_generation_check",
       sql`${table.authorityGeneration} > 0`,
+    ),
+    listPriceValid: check(
+      "connections_list_price_chk",
+      sql`(${table.priceBasisModelId} is null or ${table.listPricing} is null) and ((${table.priceBasisModelId} is null and ${table.listPricing} is null) or (${table.subjectId} is null and ${table.kind} = 'api_key' and ${table.metadata} ? 'directModelProvider')) and (${table.priceBasisModelId} is null or (octet_length(${table.priceBasisModelId}) between 1 and 256 and ${table.priceBasisModelId} ~ '^[!-~]+$')) and (${table.listPricing} is null or jsonb_typeof(${table.listPricing}) = 'object')`,
     ),
     authority: foreignKey({
       name: "connections_authority_fk",
@@ -15600,6 +15611,17 @@ export const organizationModelProviderConnections = pgTable(
     compatibleApi: text("compatible_api").$type<"chat" | "responses">(),
     /** OpenAI-compatible endpoints only: an optional display name. */
     label: text("label"),
+    /**
+     * Anthropic API connections only: the organization's further API keys.
+     * The connection's own key is the first member.
+     */
+    apiKeyMembers: jsonb("api_key_members").$type<StoredAnthropicApiKeyMember[]>(),
+    /**
+     * Anthropic API connections only: member id to the time Anthropic refused
+     * that key for lack of credits (the connection's own key is
+     * `primary-v<version>`).
+     */
+    apiKeyCreditRefusals: jsonb("api_key_credit_refusals").$type<Record<string, string>>(),
     /** How the connection signs in; Microsoft Entra ID methods are Azure OpenAI only. */
     authMethod: text("auth_method")
       .$type<OrganizationModelProviderAuthMethod>()
@@ -15662,8 +15684,27 @@ export const organizationModelProviderConnections = pgTable(
       "organization_model_provider_connections_auth_method_chk",
       sql`${table.authMethod} in ('api_key', 'entra_client_secret', 'entra_deployment_identity') and (${table.authMethod} = 'api_key' or ${table.providerKind} = 'azure_openai')`,
     ),
+    apiKeyMembersCheck: check(
+      "organization_model_provider_connections_api_key_members_chk",
+      sql`${table.apiKeyMembers} is null or (${table.providerKind} = 'anthropic' and jsonb_typeof(${table.apiKeyMembers}) = 'array' and jsonb_array_length(${table.apiKeyMembers}) <= 63)`,
+    ),
+    apiKeyRefusalsCheck: check(
+      "organization_model_provider_connections_api_key_refusals_chk",
+      sql`${table.apiKeyCreditRefusals} is null or (${table.providerKind} = 'anthropic' and jsonb_typeof(${table.apiKeyCreditRefusals}) = 'object')`,
+    ),
   }),
 );
+
+/** One further API key of an organization's Anthropic API connection. */
+export type StoredAnthropicApiKeyMember = {
+  id: string;
+  label: string;
+  credentialEncrypted: string;
+  credentialDigest: string;
+  anthropicOrganizationId: string | null;
+  createdAt: string;
+  createdBySubjectId: string;
+};
 
 export const organizationModelProviderConnectionOperations = pgTable(
   "organization_model_provider_connection_operations",
@@ -15771,6 +15812,14 @@ export const organizationModelProviderCustomModels = pgTable(
     defaultReasoningEffort: text("default_reasoning_effort").$type<
       "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
     >(),
+    /**
+     * OpenAI, Azure OpenAI and OpenAI-compatible models only: the catalogue
+     * model whose list rate prices this model's usage estimates (an Azure
+     * deployment's base model). Null when unknown or `list_pricing` is set.
+     */
+    priceBasisModelId: text("price_basis_model_id"),
+    /** The administrator's own list rate for the model, in USD micros per 1M tokens. */
+    listPricing: jsonb("list_pricing").$type<ConnectedModelListPricing>(),
     version: integer("version").notNull().default(1),
     createOperationId: uuid("create_operation_id").notNull(),
     createRequestHash: text("create_request_hash").notNull(),
@@ -15843,8 +15892,20 @@ export const organizationModelProviderCustomModels = pgTable(
       "organization_model_provider_custom_models_delete_receipt_chk",
       sql`(${table.deleteOperationId} is null and ${table.deleteRequestHash} is null) or (${table.deleteOperationId} is not null and ${table.deleteRequestHash} ~ '^[a-f0-9]{64}$' and ${table.retiredAt} is not null)`,
     ),
+    listPriceCheck: check(
+      "organization_model_provider_custom_models_list_price_chk",
+      sql`(${table.priceBasisModelId} is null or ${table.listPricing} is null) and ((${table.priceBasisModelId} is null and ${table.listPricing} is null) or ${table.providerKind} in ('openai', 'azure_openai', 'openai_compatible')) and (${table.priceBasisModelId} is null or (octet_length(${table.priceBasisModelId}) between 1 and 256 and ${table.priceBasisModelId} ~ '^[!-~]+$')) and (${table.listPricing} is null or jsonb_typeof(${table.listPricing}) = 'object')`,
+    ),
   }),
 );
+
+/** An administrator's own list rate for a connected model, in USD micros per 1M tokens. */
+export type ConnectedModelListPricing = {
+  inputMicrosPerMillionTokens: number;
+  cachedInputMicrosPerMillionTokens?: number | undefined;
+  cacheWriteMicrosPerMillionTokens?: number | undefined;
+  outputMicrosPerMillionTokens: number;
+};
 
 export * from "./workspace-instruction-policies-schema";
 export * from "./company-profile-schema";

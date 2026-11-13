@@ -1,8 +1,11 @@
 import {
+  CreditCardIcon,
   EraserIcon,
   GitPullRequestIcon,
+  KeyRoundIcon,
   MailIcon,
   MessageSquareTextIcon,
+  MessagesSquareIcon,
   MonitorIcon,
   PaletteIcon,
   Table2Icon,
@@ -24,10 +27,13 @@ type Pitch = {
   emphasis: string;
   lead: string;
   highlights: { icon: LucideIcon; text: string }[];
+  /** The product name beside the wordmark, when it isn't the app. */
+  product?: string;
+  tagline: string;
 };
 
 /** Which audience the panel beside the sign-in form speaks to. */
-export type SignedOutPitch = "general" | "excel";
+export type SignedOutPitch = "general" | "excel" | "console";
 
 const pitches: Record<SignedOutPitch, Pitch> = {
   // Everyone who signs in on the web sees this: agents that do real work in
@@ -42,6 +48,7 @@ const pitches: Record<SignedOutPitch, Pitch> = {
       { icon: MailIcon, text: "Answers your inbox and preps tomorrow's meetings" },
       { icon: MonitorIcon, text: "Uses its own computer and browser, day and night" },
     ],
+    tagline: "Your conversations. Your projects. One workspace.",
   },
   // The sign-in window the Excel add-in opens: the person is working in a
   // workbook, so the panel says what the add-in does there, in plain words.
@@ -54,6 +61,21 @@ const pitches: Record<SignedOutPitch, Pitch> = {
       { icon: EraserIcon, text: "Cleans up messy data and formats sheets" },
       { icon: MessageSquareTextIcon, text: "Explains what is in a workbook" },
     ],
+    tagline: "Your conversations. Your projects. One workspace.",
+  },
+  // Opengeni Console's own host: owners and admins of a product that embeds
+  // Opengeni, there to review their users' sessions, cost and keys.
+  console: {
+    headline: "Your product's agents,",
+    emphasis: "in one place.",
+    lead: "Review the sessions your users have with your agents, see what they cost, and manage API keys and members.",
+    highlights: [
+      { icon: MessagesSquareIcon, text: "Your users' questions and answers" },
+      { icon: CreditCardIcon, text: "Billed cost by session and workspace" },
+      { icon: KeyRoundIcon, text: "API keys, members and billing" },
+    ],
+    product: "Console",
+    tagline: "For teams that build with Opengeni.",
   },
 };
 
@@ -72,12 +94,15 @@ export function SignedOutPage({
 }: {
   children: ReactNode;
   legalLinks?: SignedOutLegalLinks | undefined;
-  /** Defaults to the general pitch; "excel" when the Excel add-in opened sign-in. */
+  /**
+   * Defaults to the general pitch; "excel" when the Excel add-in opened
+   * sign-in; "console" on Opengeni Console's own host.
+   */
   pitch?: SignedOutPitch | undefined;
   /** Operator support address, offered as a mailto link when configured. */
   supportEmail?: string | undefined;
 }) {
-  const { headline, emphasis, lead, highlights } = pitches[pitch];
+  const { headline, emphasis, lead, highlights, product, tagline } = pitches[pitch];
   const legal = [
     { href: legalLinks?.privacyPolicyUrl, label: "Privacy", external: true },
     { href: legalLinks?.termsOfServiceUrl, label: "Terms", external: true },
@@ -96,6 +121,9 @@ export function SignedOutPage({
           <div className="flex items-center gap-2.5 text-fg">
             <BrandMark className="w-[31px]" />
             <Wordmark className="text-[23px]" />
+            {product ? (
+              <span className="text-[23px] leading-none font-medium text-fg-muted">{product}</span>
+            ) : null}
           </div>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -161,7 +189,7 @@ export function SignedOutPage({
                 </nav>
               ) : null}
             </div>
-            <span>Your conversations. Your projects. One workspace.</span>
+            <span>{tagline}</span>
           </div>
         </footer>
       </div>

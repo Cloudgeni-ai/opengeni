@@ -605,6 +605,8 @@ function fakeSlack(
     postReadPageSize?: number;
     postVisibilityDelayReads?: number;
     rejectFirstPostCode?: string;
+    /** Refuse posts that carry a custom name or picture, as Slack does with a bad one. */
+    rejectIdentityPosts?: boolean;
     loseFirstDeleteResponse?: boolean;
     loseFirstDeleteBeforeCommit?: boolean;
     deleteErrorCode?: string;
@@ -1054,6 +1056,14 @@ function fakeSlack(
       postAttempts += 1;
       if (options.rejectFirstPostCode && postAttempts === 1) {
         return Response.json({ ok: false, error: options.rejectFirstPostCode });
+      }
+      // Slack refuses an icon_url of 256 characters or more.
+      const iconUrl = params.get("icon_url");
+      if (
+        (iconUrl !== null && iconUrl.length >= 256) ||
+        (options.rejectIdentityPosts && (iconUrl !== null || params.get("username") !== null))
+      ) {
+        return Response.json({ ok: false, error: "invalid_arguments" });
       }
       if (pausedPost) {
         const gate = pausedPost;
@@ -3832,6 +3842,61 @@ describe("Opengeni Slack bot connection", () => {
     expect(withoutGrant.identity).toBeUndefined();
     expect(withoutGrant.call).toMatchObject({ username: null, iconUrl: null });
     expect(withoutGrant.forced).toMatchObject({ username: null, iconUrl: null });
+  });
+
+  test("a post Slack refuses for its name or picture is delivered as the app, once", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack({
+      scopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES, OPENGENI_SLACK_BOT_IDENTITY_SCOPE],
+      teamId: `T_REFUSED_${crypto.randomUUID().slice(0, 8)}`,
+      rejectIdentityPosts: true,
+    });
+    const { bot } = await connectedTestBot(workspace, slack.fetch);
+    const posts = () => slack.calls.filter((call) => call.method === "chat.postMessage");
+    // A picture link Slack would refuse is never sent; the name still is.
+    const tooLong = `https://app.example.test/${"x".repeat(240)}.png`;
+    const operationId = crypto.randomUUID();
+    const first = await bot.postMessage({
+      operationId,
+      channelId: "C_MEMBER",
+      text: "on it",
+      identity: { username: "Release owner", iconUrl: tooLong },
+    });
+    expect(posts()[0]).toMatchObject({ username: "Release owner", iconUrl: null });
+    // Refused with the name, it is posted again without it, under the same operation.
+    expect(posts()).toHaveLength(2);
+    expect(posts()[1]).toMatchObject({
+      clientMessageId: operationId,
+      username: null,
+      iconUrl: null,
+    });
+    expect(first.timestamp).toBeString();
+    // The ledger completed: a retry of the operation posts nothing more.
+    const again = await bot.postMessage({
+      operationId,
+      channelId: "C_MEMBER",
+      text: "on it",
+      identity: { username: "Release owner", iconUrl: tooLong },
+    });
+    expect(again.timestamp).toBe(first.timestamp);
+    expect(posts()).toHaveLength(2);
+    // Other refusals are not retried.
+    const other = fakeSlack({
+      scopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES, OPENGENI_SLACK_BOT_IDENTITY_SCOPE],
+      teamId: `T_OTHER_${crypto.randomUUID().slice(0, 8)}`,
+      rejectFirstPostCode: "msg_too_long",
+    });
+    const { bot: otherBot } = await connectedTestBot(await freshWorkspace(), other.fetch);
+    await expect(
+      otherBot.postMessage({
+        operationId: crypto.randomUUID(),
+        channelId: "C_MEMBER",
+        text: "on it",
+        identity: { username: "Release owner" },
+      }),
+    ).rejects.toThrow(/msg_too_long/);
+    expect(other.calls.filter((call) => call.method === "chat.postMessage")).toHaveLength(1);
   });
 
   test("reconciles an accepted post after response loss without a second mutation", async () => {

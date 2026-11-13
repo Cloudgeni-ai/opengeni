@@ -11,6 +11,7 @@ import type {
   OrganizationModelProviderConnection as Connection,
   OrganizationModelCatalogProviderKind as ProviderKind,
   OrganizationProviderCustomModel as CustomModel,
+  ConnectedModelListPrice,
 } from "@opengeni/sdk";
 import {
   DirectModelName,
@@ -23,6 +24,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import type { ProviderConnectionView } from "@/components/ai-gateway-connection";
+import { listPriceSummary, ModelListPriceDialog } from "@/components/models/model-list-price";
 import { useClaudeUsage } from "@/components/models/claude-usage";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 import {
@@ -485,6 +487,40 @@ export function useOrganizationProviderConnection({
     }
   }
 
+  /** Saves what an OpenAI model's or Azure deployment's usage costs (null: unknown). */
+  async function savePrice(
+    model: CustomModel,
+    listPrice: ConnectedModelListPrice | null,
+  ): Promise<boolean> {
+    if (!epoch.active || !enabled || (providerKind !== "openai" && providerKind !== "azure_openai"))
+      return false;
+    const write = sharedQueryWriter(client);
+    try {
+      const saved = await client.setOrganizationProviderCustomModelListPrice(
+        organizationId,
+        providerKind,
+        model.id,
+        { expectedVersion: model.version, listPrice },
+      );
+      const current = peekSharedQuery<CustomModel[]>(client, modelsKey)?.data ?? [];
+      write(
+        modelsKey,
+        current.map((candidate) => (candidate.id === saved.id ? saved : candidate)),
+      );
+      void invalidateSharedQueries(client, ["model-settings"]);
+      toast.success(
+        listPrice
+          ? `Price saved for ${model.upstreamModelId}`
+          : `Price removed from ${model.upstreamModelId}`,
+      );
+      return true;
+    } catch (error) {
+      void refreshModels();
+      throw new Error(providerRefusalText(error), { cause: error });
+    }
+  }
+  const modelById = (id: string) => models.find((candidate) => candidate.id === id);
+
   return {
     config: meta,
     scopeLabel: "Organization",
@@ -532,5 +568,33 @@ export function useOrganizationProviderConnection({
     disconnect,
     addCustomModel: addModel,
     removeCustomModel: (model) => removeModel(model as CustomModel),
+    ...(direct
+      ? {
+          customModelDetail: (row: { id: string }) => {
+            const model = modelById(row.id);
+            return model ? listPriceSummary(model) : null;
+          },
+          customModelAction: (row: { id: string }) => {
+            const model = modelById(row.id);
+            return model ? (
+              <ModelListPriceDialog
+                key={`${model.id}:${model.version}`}
+                model={model}
+                providerName={meta.title}
+                basisHint={
+                  azure ? "Choose the deployment’s base model." : "Choose the model it serves."
+                }
+                scope={client}
+                cacheKey={["model-settings", "organization-provider", organizationId, providerKind]}
+                loadPriceBasisModelIds={async () =>
+                  (await client.listOrganizationProviderCustomModels(organizationId, providerKind))
+                    .priceBasisModelIds ?? []
+                }
+                onSave={(listPrice) => savePrice(model, listPrice)}
+              />
+            ) : null;
+          },
+        }
+      : {}),
   };
 }

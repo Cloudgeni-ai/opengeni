@@ -64,7 +64,9 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * ids-only inventory of installations that send updates (1153) and the
  * recording compaction sweep's inventory of meeting tracks not yet kept
  * compact (1240), and the session storage pass's inventory of sessions with
- * content to collect and its collector of unreferenced content blobs (1359).
+ * content to collect and its collector of unreferenced content blobs (1359),
+ * and the sandbox reaper's inventory of cold sandboxes whose chats are all
+ * archived (1404).
  * Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
@@ -100,6 +102,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "end_agent_call_rings_v1(uuid)",
   "session_content_garbage_candidates_v1(integer)",
   "collect_session_content_garbage_v1(uuid, uuid, integer)",
+  "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
 ] as const;
 
 /**
@@ -136,6 +139,9 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * granted, settling a call sends no ended push and those phones ring out.
  * 1359 withholds the session content collector and its inventory; until they
  * are granted, unreferenced content blobs stay until the session is archived.
+ * 1404 withholds the inventory of cold sandboxes whose chats are all
+ * archived; until it is granted, such a non-compute sandbox keeps its saved
+ * workspace until its chats are deleted (as before).
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -146,6 +152,7 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "end_agent_call_rings_v1(uuid)",
   "session_content_garbage_candidates_v1(integer)",
   "collect_session_content_garbage_v1(uuid, uuid, integer)",
+  "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -261,6 +268,10 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "session_attempt_tool_catalogs",
     "session_content_blobs",
     "opengeni_private.session_content_collections",
+  ],
+  "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)": [
+    "sandbox_leases",
+    "sessions",
   ],
 };
 
@@ -2207,13 +2218,16 @@ export const FORCE_RLS_TABLES = [
   "organization_company_profile_agent_policies",
   "organization_company_profile_agent_policy_events",
   "organization_connectors",
+  "organization_console_audit_events",
   "organization_credential_providers",
+  "organization_end_user_labels",
   "organization_identity_issuers",
   "organization_inference_residency",
   "organization_inference_residency_events",
   "organization_integration_policies",
   "organization_integration_policy_operations",
   "organization_invitation_binding_events",
+  "organization_managed_workspaces",
   "organization_mcp_assertion_replays",
   "organization_mcp_trusted_issuer_events",
   "organization_mcp_trusted_issuer_subjects",
@@ -2242,6 +2256,7 @@ export const FORCE_RLS_TABLES = [
   "organization_recovery_policies",
   "organization_recovery_policy_heads",
   "organization_service_accounts",
+  "organization_session_review_settings",
   "organization_shared_workspace_administration_capabilities",
   "organization_skill_reach",
   "organization_user_resource_authorities",
@@ -2684,6 +2699,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "organization_connectors",
   "organization_credential_providers",
   "organization_identity_issuers",
+  "organization_managed_workspaces",
   "organization_mcp_assertion_replays",
   "organization_mcp_trusted_issuer_events",
   "organization_mcp_trusted_issuer_subjects",
@@ -2694,6 +2710,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "organization_model_provider_custom_models",
   "organization_privacy_preferences",
   "organization_service_accounts",
+  "organization_session_review_settings",
   "organization_skill_reach",
   "organization_webhook_deliveries",
   "organization_webhooks",
@@ -3000,6 +3017,9 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "knowledge_source_objects",
   "knowledge_sources",
   "knowledge_sync_runs",
+  // 1377_opengeni_console: append-only Console audit log and end-user labels.
+  "organization_console_audit_events",
+  "organization_end_user_labels",
   "pr_review_managed_github_authority_nonces",
   "preference_registry_preferences",
   "preference_registry_revisions",

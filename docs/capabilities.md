@@ -994,6 +994,10 @@ Ordinary new sessions include two first-party Opengeni tools:
   the current session for an exact catalog result. Calling it does not install,
   enable, connect, or grant anything. The exact turn attempt fences the event,
   and the signed-in human must confirm the provider domain and complete setup.
+  Every result says whether a card is in the chat (`cardShown`, with its
+  `eventId`). `tool_search` posts the same card itself, through this tool,
+  when a search clearly names one integration the person can connect (see
+  `docs/mcp-surfaces.md`, "Human integration setup in chat").
 - `custom_mcp_setup_request` posts a human review card for a remote HTTPS MCP
   endpoint not yet in the workspace catalog. The agent may propose a name and
   exact URL, but cannot register or contact the server. The signed-in human

@@ -1,5 +1,30 @@
 # @opengeni/ogtool
 
+## 6.20.1
+
+### Patch Changes
+
+- @opengeni/codemode@6.20.1
+- @opengeni/contracts@6.20.1
+
+## 6.20.0
+
+### Patch Changes
+
+- Updated dependencies [ae3972e]
+- Updated dependencies [e37485b]
+- Updated dependencies [9c17a87]
+  - @opengeni/contracts@6.20.0
+  - @opengeni/codemode@6.20.0
+
+## 6.19.0
+
+### Patch Changes
+
+- Updated dependencies [a85adef]
+  - @opengeni/contracts@6.19.0
+  - @opengeni/codemode@6.19.0
+
 ## 6.18.0
 
 ### Patch Changes

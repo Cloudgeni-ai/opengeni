@@ -83,7 +83,11 @@ export function agentViewerCanMakePrivate(
   agent: Pick<AgentRecord, "visibility" | "ownerSubjectId" | "createdBySubjectId">,
 ): boolean {
   if (agent.visibility === "private") return agentEditableBy(viewer, agent);
-  if (agent.createdBySubjectId === null || agent.createdBySubjectId.startsWith("slack-agent:")) {
+  if (
+    agent.createdBySubjectId === null ||
+    agent.createdBySubjectId.startsWith("slack-agent:") ||
+    agent.createdBySubjectId.startsWith("teams-agent:")
+  ) {
     return false;
   }
   if (!agentEditableBy(viewer, agent)) return false;

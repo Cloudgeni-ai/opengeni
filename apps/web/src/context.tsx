@@ -12,6 +12,7 @@ import { userErrorText } from "@opengeni/react/ui/api-error";
 // setup. Everything below the workspace shell consumes the state through
 // `useAppContext`.
 import { DESKTOP_APP_RETURN_PATH } from "@opengeni/contracts";
+import { onConsoleHost, socialProvidersForHost } from "@/lib/console-route";
 import { EXCEL_ADDIN_PATH } from "@/lib/excel-addin";
 import { Outlet, useRouterState } from "@tanstack/react-router";
 import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
@@ -47,6 +48,7 @@ import { Button } from "@opengeni/react/ui/button";
 import { SignInCallbackNotice } from "@/components/sign-in-callback-notice";
 import { NativeSignInProvider } from "@/lib/native-sign-in-context";
 import { PersonalSecurityProvider } from "@/lib/personal-security-context";
+import { renderedRoutePathname } from "@/lib/rendered-route-pathname";
 import { Input } from "@opengeni/react/ui/input";
 import { Label } from "@opengeni/react/ui/label";
 import { Toaster } from "@opengeni/react/app/components/toaster";
@@ -191,9 +193,10 @@ const webAppStateHost: AppStateHost = {
 };
 
 export function RootRouteComponent() {
-  const pathname = useRouterState({
-    select: (state) => state.location.pathname,
-  });
+  // Providers wrap the rendered page, so they follow the rendered route.
+  const pathname = useRouterState({ select: renderedRoutePathname });
+  // Analytics reports the address the person is on, not the route still shown.
+  const locationPathname = useRouterState({ select: (state) => state.location.pathname });
   const hasSearchParameters = useRouterState({
     select: (state) => Object.keys(state.location.search).length > 0,
   });
@@ -205,7 +208,9 @@ export function RootRouteComponent() {
       /^\/native-sign-in\/?$/.test(state.location.pathname) &&
       new URLSearchParams(state.location.searchStr).get("platform") === "office"
         ? "excel"
-        : "general",
+        : onConsoleHost()
+          ? "console"
+          : "general",
   });
   // Public surfaces render ahead of auth/config gates. `/reset-password` and
   // shared chats (`/share/<id>`) are always public; DEV visual harnesses are public and need no session.
@@ -363,7 +368,10 @@ export function RootRouteComponent() {
                   ? clientConfig.auth.signupChallengeSiteKey
                   : undefined
               }
-              socialProviders={managedSocialProviders}
+              socialProviders={socialProvidersForHost(
+                window.location.hostname,
+                managedSocialProviders,
+              )}
               onSocialSubmit={handleManagedSocialAuth}
               // Passkey prompts can't open inside the desktop app.
               passkeySignIn={managedPasskeySignIn && !passkeysNeedBrowser()}
@@ -617,7 +625,7 @@ export function RootRouteComponent() {
             config={clientConfig.analytics}
             hasSearchParameters={hasSearchParameters}
             isPublicAuthRoute={isPublicAuthRoute}
-            pathname={pathname}
+            pathname={locationPathname}
             search={analyticsSearch}
           />
         </Suspense>

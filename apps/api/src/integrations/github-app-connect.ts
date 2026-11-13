@@ -2,15 +2,14 @@ import { createHash } from "node:crypto";
 import { htmlPageResponse } from "../http/html-page-security";
 import { z } from "zod";
 import { HTTPException } from "hono/http-exception";
+import { ApiHttpError } from "../http/api-error";
 import type { ConnectAdvance, ConnectAttempt } from "@opengeni/contracts/connect";
 import {
   bindAuthorizedGitHubInstallationRepositories,
   deleteGitHubInstallationBinding,
   finishConnectOperation,
   getConnectAttempt,
-  listConnectorActionPolicies,
   listGitHubInstallationAccessForWorkspace,
-  upsertConnectorActionPolicies,
   type ConnectActorScope,
   type ConnectOperationAuthorization,
 } from "@opengeni/db";
@@ -100,7 +99,11 @@ const repairAccountIdPattern = /^github-installation:([1-9][0-9]{0,15})$/u;
  * Repair of one linked installation starts at its own fix instead of the
  * account chooser: one uninstalled on GitHub goes straight to installing the
  * app again; any other goes straight to its owner's sign-in for that
- * installation.
+ * installation. When GitHub was asked and didn't answer, no attempt starts: a
+ * retryable 503 `upstream_unavailable` with `details.code:
+ * "provider_unreachable"`. When the installation can't be checked for another
+ * reason (a host without `getInstallation`, an App configuration or auth
+ * error), the account chooser opens as before.
  */
 export async function githubAppRepairNavigation(
   deps: ApiRouteDeps,
@@ -117,9 +120,20 @@ export async function githubAppRepairNavigation(
     throw new HTTPException(409, {
       message: "This GitHub installation is no longer linked to the workspace",
     });
-  // Gone on GitHub: install the app again. Unknown (GitHub didn't answer):
-  // the account chooser covers both a reinstall and an owner sign-in.
-  // Otherwise: that installation's owner sign-in.
+  // GitHub didn't answer: the fix is unknown, so nothing starts. The person
+  // checks again rather than landing in a generic account chooser.
+  if (repair.live === undefined && repair.unreachable)
+    throw new ApiHttpError(503, {
+      code: "upstream_unavailable",
+      message: "GitHub couldn't be reached. Check again.",
+      retryable: true,
+      outcomeUnknown: false,
+      details: { code: "provider_unreachable", provider: "github" },
+    });
+  // Gone on GitHub: install the app again. Unknown without an outage (the
+  // host can't ask, or the App's own configuration failed): the account
+  // chooser covers both a reinstall and an owner sign-in. Otherwise: that
+  // installation's owner sign-in.
   const navigation =
     repair.live === null
       ? githubAppConnectNavigation(deps, scope, attemptId, requestUrl, "install")
@@ -395,41 +409,13 @@ export async function completeGitHubAppConnect(
                 await listGitHubInstallationAccessForWorkspace(tx, state.workspaceId)
               ).find((binding) => binding.installationId === repaired);
               if (previous && previous.githubAccountId === proof.installation.accountId) {
-                // The approvals chosen for it carry over to the new
-                // installation, never over a choice already made there.
-                const from = `github-app:${repaired}`;
-                const to = `github-app:${installationId}`;
-                const existing = await listConnectorActionPolicies(tx, {
-                  accountId: state.accountId,
-                  workspaceId: state.workspaceId,
-                  connectionIds: [from, to],
-                });
-                const scope = (policy: (typeof existing)[number]) =>
-                  JSON.stringify([policy.serverId, policy.toolName, policy.actionName]);
-                const chosen = new Set(
-                  existing.filter((policy) => policy.connectionId === to).map(scope),
-                );
-                const policies = existing.filter(
-                  (policy) => policy.connectionId === from && !chosen.has(scope(policy)),
-                );
-                for (let offset = 0; offset < policies.length; offset += 128)
-                  await upsertConnectorActionPolicies(
-                    tx,
-                    policies.slice(offset, offset + 128).map((policy) => ({
-                      accountId: state.accountId,
-                      workspaceId: state.workspaceId,
-                      subjectId: state.subjectId,
-                      connectionId: to,
-                      serverId: policy.serverId,
-                      toolName: policy.toolName,
-                      actionName: policy.actionName,
-                      policy: policy.policy,
-                    })),
-                  );
+                // The approvals chosen for it move to the new installation,
+                // never over a choice already made there, keeping who set them.
                 await deleteGitHubInstallationBinding(tx, {
                   accountId: state.accountId,
                   workspaceId: state.workspaceId,
                   installationId: repaired,
+                  replacedByInstallationId: installationId,
                   eventRouteSecret: eventRouteSecret(deps.settings),
                   audit: { subjectId: state.subjectId, source: "app", principalKind: null },
                 });

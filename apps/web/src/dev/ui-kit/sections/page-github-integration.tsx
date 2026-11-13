@@ -147,6 +147,8 @@ type State = {
   selectionLoaded?: boolean;
   /** All my repositories, at this access. */
   allRepositoriesAccess?: "read" | "write";
+  /** GitHub can't be reached when a repair starts. */
+  githubUnreachable?: boolean;
 };
 
 function personalRepository(
@@ -200,6 +202,15 @@ const STATES: State[] = [
     repositories: 3,
     manyRepositories: true,
     approvals: true,
+  },
+  {
+    key: "repair-unreachable",
+    label: "GitHub can't be reached when Reinstall starts: Check again retries the repair",
+    permissions: MANAGER,
+    installations: [ACME, { ...OCTOCAT, issue: "uninstalled" }],
+    connected: true,
+    repositories: 3,
+    githubUnreachable: true,
   },
   {
     key: "needs-authorization",
@@ -339,8 +350,11 @@ function approvalActors(state: State): Actor[] {
   ];
 }
 
-/** The GitHub App connect flow, up to the sign-in step. */
-function repairTransport() {
+/**
+ * The GitHub App connect flow, up to the sign-in step. With GitHub
+ * unreachable, starting a repair fails as the API does.
+ */
+function repairTransport(githubUnreachable: boolean) {
   let current: Record<string, unknown> | null = null;
   const attempt = () => {
     current = {
@@ -362,7 +376,15 @@ function repairTransport() {
     catalog: async () => [],
     accounts: async () => [],
     pending: async () => [],
-    begin: async () => attempt(),
+    begin: async () => {
+      if (githubUnreachable)
+        throw Object.assign(new Error("GitHub couldn't be reached. Check again."), {
+          status: 503,
+          code: "upstream_unavailable",
+          details: { code: "provider_unreachable", provider: "github" },
+        });
+      return attempt();
+    },
     recover: async () => structuredClone(current),
     get: async () => structuredClone(current),
     advance: async () => structuredClone(current),
@@ -373,7 +395,7 @@ function repairTransport() {
 
 function fakeContext(state: State) {
   const actors = approvalActors(state);
-  const transport = repairTransport();
+  const transport = repairTransport(state.githubUnreachable === true);
   const client = new Proxy(
     {
       connectTransport: () => transport,

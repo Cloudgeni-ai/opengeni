@@ -42,6 +42,7 @@ import {
   type XaiSubscriptionRequestContext,
 } from "@opengeni/xai-subscription";
 import { testSettings } from "@opengeni/testing/settings";
+import { ARTIFACT_ORIGIN_KEY, projectHistoryForProvider } from "../src/provider-history-adapter";
 import OpenAI from "openai";
 import {
   buildModelInstance,
@@ -792,6 +793,96 @@ describe("pinned Responses large-output boundary", () => {
       ]);
       expect(source.status).toBe(status);
       expect(persisted.status).toBe(status);
+    }
+  });
+
+  test("native apply_patch history replays with its required status after a switch to Codex", async () => {
+    const { getInputItems } = await pinnedResponsesModule();
+    const operation = { type: "update_file", path: "src/a.ts", diff: "@@\n-a\n+b\n" };
+    // Rows persisted before the fix, exactly as stored in production: the
+    // canonical history had already dropped `status`.
+    const legacyRows = [
+      {
+        providerData: {},
+        id: "apc_legacy",
+        type: "apply_patch_call",
+        callId: "call_legacy",
+        operation,
+      },
+      { type: "apply_patch_call_output", callId: "call_legacy" },
+    ];
+    // Rows produced by a turn on another billing route after the fix.
+    const liveRows = [
+      { type: "apply_patch_call", callId: "call_live", status: "completed", operation },
+      {
+        type: "apply_patch_call_output",
+        callId: "call_live",
+        status: "failed",
+        output: "patch did not apply",
+      },
+    ].map((item) => JSON.parse(JSON.stringify(canonicalizePersistedHistoryItem(item))));
+
+    const wire = normalizedCodexRequestBody(
+      { input: getInputItems([...legacyRows, ...liveRows] as never) },
+      (s) => s,
+    );
+    expect(wire.input).toEqual([
+      { type: "apply_patch_call", call_id: "call_legacy", status: "in_progress", operation },
+      { type: "apply_patch_call_output", call_id: "call_legacy", status: "completed" },
+      { type: "apply_patch_call", call_id: "call_live", status: "completed", operation },
+      {
+        type: "apply_patch_call_output",
+        call_id: "call_live",
+        status: "failed",
+        output: "patch did not apply",
+      },
+    ]);
+  });
+
+  test("a credits-to-Codex switch replays required status and never prior reasoning as text", async () => {
+    // The production shape: GPT-6 Astra on Opengeni credits reasoned (summary
+    // plus ciphertext bound to the credits route) and used native apply_patch;
+    // the next turn ran on a Codex subscription.
+    const { getInputItems } = await pinnedResponsesModule();
+    const reasoningSummary = "Plan: patch the Ask Pronta panel before merging.";
+    const operation = { type: "update_file", path: "src/panel.tsx", diff: "@@\n-a\n+b\n" };
+    const stored = [
+      { type: "message", role: "user", content: "Fix the panel" },
+      {
+        type: "reasoning",
+        id: "rs_credits",
+        content: [{ type: "input_text", text: reasoningSummary }],
+        providerData: {
+          id: "rs_credits",
+          type: "reasoning",
+          encrypted_content: "credits-ciphertext",
+          [ARTIFACT_ORIGIN_KEY]: "credits-route",
+        },
+      },
+      { type: "apply_patch_call", id: "apc_1", callId: "call_patch", operation },
+      { type: "apply_patch_call_output", callId: "call_patch" },
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "Patched." }] },
+      { type: "message", role: "user", content: "Is this where the chat will appear?" },
+    ].map((item) => JSON.parse(JSON.stringify(canonicalizePersistedHistoryItem(item))));
+
+    const codexInput = getInputItems(
+      projectHistoryForProvider(stored, "responses", { artifactScope: "codex-route" }) as never,
+    );
+    const wire = normalizedCodexRequestBody({ input: codexInput }, (s) => s);
+    const input = wire.input as Array<Record<string, unknown>>;
+    expect(input.filter((item) => String(item.type).startsWith("apply_patch"))).toEqual([
+      { type: "apply_patch_call", call_id: "call_patch", status: "in_progress", operation },
+      { type: "apply_patch_call_output", call_id: "call_patch", status: "completed" },
+    ]);
+    expect(input.some((item) => item.type === "reasoning")).toBe(false);
+    for (const api of ["responses", "chat", "anthropic-messages"] as const) {
+      const sent = JSON.stringify(
+        api === "responses" ? wire : projectHistoryForProvider(stored, api),
+      );
+      expect(sent).not.toContain(reasoningSummary);
+      expect(sent).not.toContain("credits-ciphertext");
+      expect(sent).not.toContain("Historical reasoning");
+      expect(sent).toContain("Patched.");
     }
   });
 

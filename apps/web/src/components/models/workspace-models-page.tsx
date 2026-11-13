@@ -119,6 +119,7 @@ import {
   organizationEndpointConnect,
   useOrganizationCompatibleEndpoints,
 } from "@/components/models/organization-compatible-endpoints";
+import { OrganizationAnthropicApiKeys } from "@/components/models/organization-anthropic-api-keys";
 import {
   WorkspaceModelKeyRows,
   useWorkspaceModelKeyConnect,
@@ -1450,6 +1451,18 @@ export function WorkspaceModelsPageBody({
       <OrganizationGatewayPage
         state={orgGateways[key.id]}
         labels={labels}
+        keys={
+          key.id === "anthropic" &&
+          organizationId &&
+          organizationAdmin &&
+          orgGateways.anthropic.connected ? (
+            <OrganizationAnthropicApiKeys
+              client={client}
+              organizationId={organizationId}
+              canManage={orgGateways.anthropic.canManageConnection}
+            />
+          ) : null
+        }
         footnote={
           organizationAdmin &&
           canManageConnections &&
@@ -1835,6 +1848,7 @@ function OrganizationGatewayRow({
 function OrganizationGatewayPage({
   state,
   labels,
+  keys,
   footnote,
   onBack,
   onConnect,
@@ -1842,6 +1856,8 @@ function OrganizationGatewayPage({
 }: {
   state: ProviderConnection;
   labels: ModelsScopeLabels;
+  /** The organization Anthropic API connection's several API keys. */
+  keys?: ReactNode;
   footnote?: ReactNode;
   onBack: () => void;
   onConnect: () => void;
@@ -1858,6 +1874,7 @@ function OrganizationGatewayPage({
       onBack={onBack}
       onConnect={onConnect}
       onEditAccess={onEditAccess}
+      keys={state.connected ? keys : null}
       footnote={state.connected ? footnote : null}
     />
   );

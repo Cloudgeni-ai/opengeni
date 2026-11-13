@@ -10,6 +10,7 @@
  * message, at session admission and on delivery.
  */
 import { sql } from "drizzle-orm";
+import { AGENT_ORGANIZATION_ACCESS_SQL } from "./agents";
 import { rawRows, withRlsContext, type Database } from "./database";
 import { PERSONAL_WORKSPACE_EXTERNAL_SOURCE } from "./personal-workspace-membership";
 import { teamsScoped, type TeamsInstallation } from "./teams-conversations";
@@ -67,6 +68,7 @@ export async function setTeamsChatChoice(
         and actor_id=${input.actorId}::uuid and subject_id=${input.subjectId} for share`,
     );
     if (!linked.length) throw new Error("teams_link_missing");
+    await requireTeamsAgentTargets(tx, i, [input]);
     await tx.execute(sql`insert into teams_bot_chat_choices
       (account_id,workspace_id,tenant_id,actor_id,subject_id,target_account_id,target_workspace_id,agent_id)
       values(${i.account_id}::uuid,${i.workspace_id}::uuid,${i.tenant_id}::uuid,${input.actorId}::uuid,
@@ -77,21 +79,65 @@ export async function setTeamsChatChoice(
   });
 }
 
-/** Forget the person's choice, for example when they lost access to it. */
+/** Forget the person's choice, for example when they lost access to it. Only their own. */
 export async function clearTeamsChatChoice(
   db: Database,
   i: TeamsInstallation,
-  input: { actorId: string },
+  input: { actorId: string; subjectId: string },
 ): Promise<void> {
   await teamsScoped(db, i, async (tx) => {
     await tx.execute(
-      sql`delete from teams_bot_chat_choices where tenant_id=${i.tenant_id}::uuid and actor_id=${input.actorId}::uuid`,
+      sql`delete from teams_bot_chat_choices where tenant_id=${i.tenant_id}::uuid
+        and actor_id=${input.actorId}::uuid and subject_id=${input.subjectId}`,
     );
   });
 }
 
+/**
+ * Every agent a stored target names must be a shared agent of the
+ * organization that lives in the target workspace (never an Only me agent,
+ * one of a Personal workspace, or one of another workspace), checked in the
+ * writing transaction. Agents never change workspace, and the foreign key
+ * on `agent_id` cascades a concurrent delete onto the new row.
+ */
+async function requireTeamsAgentTargets(
+  tx: Database,
+  i: TeamsInstallation,
+  targets: readonly TeamsChatTarget[],
+): Promise<void> {
+  const wanted = targets.filter(
+    (target): target is { workspaceId: string; agentId: string } => target.agentId !== null,
+  );
+  if (!wanted.length) return;
+  if (wanted.some((target) => !UUID.test(target.agentId) || !UUID.test(target.workspaceId)))
+    throw new Error("teams_route_target_invalid");
+  const ids = [...new Set(wanted.map((target) => target.agentId.toLowerCase()))];
+  // The organization's directory (agents_organization_read), read in an
+  // account-only scope; the parent scope is restored afterwards.
+  const rows = await withRlsContext(tx, { accountId: i.account_id }, (scoped) =>
+    rawRows<{ id: string; workspace_id: string }>(
+      scoped,
+      sql`select a.id::text as id,a.workspace_id::text as workspace_id from agents a
+        join workspaces w on w.id=a.workspace_id and w.account_id=a.account_id
+        where a.id = any(${uuidArray(ids)}) and a.account_id=${i.account_id}::uuid
+          and a.visibility='workspace'
+          and w.external_source is distinct from ${PERSONAL_WORKSPACE_EXTERNAL_SOURCE}`,
+    ),
+  );
+  const home = new Map(rows.map((row) => [row.id.toLowerCase(), row.workspace_id.toLowerCase()]));
+  if (
+    wanted.some(
+      (target) => home.get(target.agentId.toLowerCase()) !== target.workspaceId.toLowerCase(),
+    )
+  )
+    throw new Error("teams_route_target_invalid");
+}
+
 /** How long a switch card's numbers stay valid. */
 export const TEAMS_ROUTE_PROMPT_TTL_MS = 24 * 60 * 60_000;
+
+/** The most numbered options one switch card holds (the table's CHECK). */
+export const TEAMS_ROUTE_PROMPT_MAX_OPTIONS = 100;
 
 export type TeamsRoutePrompt = {
   id: string;
@@ -114,9 +160,18 @@ export async function putTeamsRoutePrompt(
     options: readonly TeamsChatTarget[];
   },
 ): Promise<string> {
-  if (input.options.length < 1 || input.options.length > 100)
+  if (input.options.length < 1 || input.options.length > TEAMS_ROUTE_PROMPT_MAX_OPTIONS)
     throw new Error("teams_route_prompt_options_invalid");
   return teamsScoped(db, i, async (tx) => {
+    // The card is the person's own: their link must still name them, as for
+    // a remembered choice.
+    const linked = await rawRows(
+      tx,
+      sql`select 1 from teams_bot_links where tenant_id=${i.tenant_id}::uuid
+        and actor_id=${input.actorId}::uuid and subject_id=${input.subjectId} for share`,
+    );
+    if (!linked.length) throw new Error("teams_link_missing");
+    await requireTeamsAgentTargets(tx, i, input.options);
     await tx.execute(
       sql`delete from teams_bot_route_prompts where tenant_id=${i.tenant_id}::uuid and actor_id=${input.actorId}::uuid`,
     );
@@ -184,7 +239,12 @@ export async function takeTeamsRoutePromptOption(
   i: TeamsInstallation,
   input: { actorId: string; subjectId: string; position: number; now?: Date },
 ): Promise<{ target: TeamsChatTarget; payload: Record<string, unknown> | null } | null> {
-  if (!Number.isInteger(input.position) || input.position < 1 || input.position > 100) return null;
+  if (
+    !Number.isInteger(input.position) ||
+    input.position < 1 ||
+    input.position > TEAMS_ROUTE_PROMPT_MAX_OPTIONS
+  )
+    return null;
   return teamsScoped(db, i, async (tx) => {
     const cutoff = new Date((input.now?.getTime() ?? Date.now()) - TEAMS_ROUTE_PROMPT_TTL_MS);
     const [row] = await rawRows<{
@@ -396,24 +456,36 @@ export type TeamsAgentDirectoryEntry = {
   name: string;
   nameKey: string;
   avatar: unknown;
+  /** Anyone in the organization may use it ("Who can use it: Anyone in <organization>"). */
+  organizationAccess: boolean;
 };
+
+/** The most agents one directory read returns. */
+export const TEAMS_AGENT_DIRECTORY_LIMIT = 1000;
 
 /**
  * The shared (workspace-visible) agents of an organization whose home is one
  * of `workspaceIds` (null: any shared workspace), by name. Only me agents and
- * agents of Personal workspaces are never listed. Whether the person may use
- * one is decided by the caller from their live access to its workspace; this
- * only lists.
+ * agents of Personal workspaces are never listed. Agents in
+ * `preferWorkspaceIds`, and agents anyone in the organization may use, come
+ * first, so a large organization's limit only ever drops agents the person
+ * can't use. Whether the person may use one is decided by the caller from
+ * their live access to its workspace; this only lists.
  */
 export async function listTeamsAgentDirectory(
   db: Database,
-  input: { accountId: string; workspaceIds: readonly string[] | null },
+  input: {
+    accountId: string;
+    workspaceIds: readonly string[] | null;
+    preferWorkspaceIds?: readonly string[];
+  },
 ): Promise<TeamsAgentDirectoryEntry[]> {
   if (input.workspaceIds?.length === 0) return [];
   const within =
     input.workspaceIds === null
       ? sql`true`
       : sql`a.workspace_id = any(${uuidArray(input.workspaceIds.filter((id) => UUID.test(id)))})`;
+  const prefer = uuidArray((input.preferWorkspaceIds ?? []).filter((id) => UUID.test(id)));
   const rows = await withRlsContext(db, { accountId: input.accountId }, (tx) =>
     rawRows<{
       id: string;
@@ -423,15 +495,21 @@ export async function listTeamsAgentDirectory(
       name: string;
       name_key: string;
       avatar: unknown;
+      organization_access: boolean;
     }>(
       tx,
-      sql`select a.id,a.account_id,a.workspace_id,w.name as workspace_name,a.name,a.name_key,a.avatar from agents a
-        join workspaces w on w.id=a.workspace_id and w.account_id=a.account_id
-        where a.account_id=${input.accountId}::uuid and a.visibility='workspace'
-          and w.external_source is distinct from ${PERSONAL_WORKSPACE_EXTERNAL_SOURCE}
-          and ${within}
-        order by a.name_key, a.created_at, a.id
-        limit 500`,
+      sql`select * from (
+          select a.id,a.account_id,a.workspace_id,w.name as workspace_name,a.name,a.name_key,a.avatar,
+            a.created_at,${sql.raw(AGENT_ORGANIZATION_ACCESS_SQL)} as organization_access
+          from agents a
+          join workspaces w on w.id=a.workspace_id and w.account_id=a.account_id
+          where a.account_id=${input.accountId}::uuid and a.visibility='workspace'
+            and w.external_source is distinct from ${PERSONAL_WORKSPACE_EXTERNAL_SOURCE}
+            and ${within}
+        ) directory
+        order by (directory.workspace_id = any(${prefer}) or directory.organization_access) desc,
+          directory.name_key, directory.created_at, directory.id
+        limit ${TEAMS_AGENT_DIRECTORY_LIMIT}`,
     ),
   );
   return rows.map((row) => ({
@@ -442,5 +520,77 @@ export async function listTeamsAgentDirectory(
     name: row.name,
     nameKey: row.name_key,
     avatar: row.avatar,
+    organizationAccess: row.organization_access === true,
   }));
 }
+
+/**
+ * One shared agent of the organization that lives in `workspaceId` (never
+ * an Only me agent or one of a Personal workspace), read live; or null. `db`
+ * may be a transaction: the read runs in an account-only scope and the
+ * parent scope is restored afterwards.
+ */
+export async function getTeamsAgentInWorkspace(
+  db: Database,
+  input: { accountId: string; workspaceId: string; agentId: string },
+): Promise<TeamsAgentDirectoryEntry | null> {
+  if (!UUID.test(input.agentId) || !UUID.test(input.workspaceId)) return null;
+  const [row] = await withRlsContext(db, { accountId: input.accountId }, (tx) =>
+    rawRows<{
+      id: string;
+      account_id: string;
+      workspace_id: string;
+      workspace_name: string;
+      name: string;
+      name_key: string;
+      avatar: unknown;
+      organization_access: boolean;
+    }>(
+      tx,
+      sql`select a.id,a.account_id,a.workspace_id,w.name as workspace_name,a.name,a.name_key,a.avatar,
+          ${sql.raw(AGENT_ORGANIZATION_ACCESS_SQL)} as organization_access
+        from agents a
+        join workspaces w on w.id=a.workspace_id and w.account_id=a.account_id
+        where a.id=${input.agentId}::uuid and a.account_id=${input.accountId}::uuid
+          and a.workspace_id=${input.workspaceId}::uuid and a.visibility='workspace'
+          and w.external_source is distinct from ${PERSONAL_WORKSPACE_EXTERNAL_SOURCE}`,
+    ),
+  );
+  return row
+    ? {
+        id: row.id,
+        accountId: row.account_id,
+        workspaceId: row.workspace_id,
+        workspaceName: row.workspace_name,
+        name: row.name,
+        nameKey: row.name_key,
+        avatar: row.avatar,
+        organizationAccess: row.organization_access === true,
+      }
+    : null;
+}
+
+const TEAMS_ORGANIZATION_AGENT_SUBJECT_PREFIX = "teams-agent:";
+
+/**
+ * The service principal a Teams chat with an agent anyone in the
+ * organization may use runs as, when the person asking isn't a member of the
+ * agent's workspace (the Teams counterpart of Slack's `slack-agent:<id>`).
+ * Never a person.
+ */
+export function teamsOrganizationAgentSubjectId(agentId: string): string {
+  return `${TEAMS_ORGANIZATION_AGENT_SUBJECT_PREFIX}${agentId}`;
+}
+
+/** The agent such a principal names, or null for anyone else. */
+export function teamsOrganizationAgentIdFromSubject(
+  subjectId: string | null | undefined,
+): string | null {
+  return typeof subjectId === "string" &&
+    subjectId.startsWith(TEAMS_ORGANIZATION_AGENT_SUBJECT_PREFIX)
+    ? subjectId.slice(TEAMS_ORGANIZATION_AGENT_SUBJECT_PREFIX.length)
+    : null;
+}
+
+/** A Teams route whose chat runs as such an agent: its id starts with this. */
+export const TEAMS_ORGANIZATION_AGENT_ROUTE_PREFIX = "teams-agent:";

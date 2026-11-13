@@ -11,6 +11,7 @@ import { useRef, useState } from "react";
 import { toast } from "sonner";
 
 import type { ProviderConnectState } from "@/components/ai-gateway-connection";
+import { listPriceSummary, ModelListPriceDialog } from "@/components/models/model-list-price";
 import { ORGANIZATION_PROVIDER_META } from "@/components/models/provider-metadata";
 import { providerRefusalText } from "@/components/organization-model-provider-connection";
 import { ProviderTile } from "@opengeni/react/app/components/models/provider-mark";
@@ -189,8 +190,9 @@ export function workspaceEndpointConnect(
 
 /**
  * One row per workspace key, with the workspace's other accounts: its
- * provider, who uses it and the model it serves. Disconnecting asks first;
- * changing a key or model is connecting again, since each key serves one model.
+ * provider, who uses it, the model it serves and what that model costs.
+ * Disconnecting asks first; changing a key or model is connecting again,
+ * since each key serves one model. Its price can change in place.
  */
 export function WorkspaceModelKeyRows({
   client,
@@ -213,12 +215,68 @@ export function WorkspaceModelKeyRows({
     <>
       {keys.map((connection) => {
         const spec = directModelConnectionSpec(connection)!;
+        const priced = { ...connection, upstreamModelId: spec.model };
+        const price = listPriceSummary(priced);
         return (
           <ListRow
             key={connection.id}
             leading={<ProviderTile provider={spec.provider} size="lg" />}
             title={modelKeyTitle(connection)}
             meta={[scope, "API key", spec.model]}
+            {...(price ? { description: price } : {})}
+            {...(canManage
+              ? {
+                  control: (
+                    <ModelListPriceDialog
+                      key={`price:${connection.id}:${JSON.stringify(connection.listPrice ?? null)}`}
+                      model={priced}
+                      providerName={
+                        spec.provider === "openai_compatible"
+                          ? "Your endpoint"
+                          : ORGANIZATION_PROVIDER_META[spec.provider].title
+                      }
+                      basisHint={
+                        spec.provider === "azure_openai"
+                          ? "Choose the deployment’s base model."
+                          : spec.provider === "openai"
+                            ? "Choose the model it serves."
+                            : "Choose the model it serves, if it’s one of these."
+                      }
+                      scope={client}
+                      cacheKey={["model-settings", "workspace-model-keys", workspaceId]}
+                      loadPriceBasisModelIds={async () =>
+                        (await client.listModelPriceBasisModels(workspaceId)).priceBasisModelIds
+                      }
+                      onSave={async (listPrice) => {
+                        const save = () =>
+                          client.setWorkspaceModelKeyListPrice(workspaceId, connection.id, {
+                            listPrice,
+                          });
+                        try {
+                          try {
+                            await save();
+                          } catch (error) {
+                            // Setting the same price again is safe when the answer was lost.
+                            if (!(error instanceof OpenGeniApiError) || !error.outcomeUnknown)
+                              throw error;
+                            await save();
+                          }
+                        } catch (error) {
+                          throw new Error(providerRefusalText(error), { cause: error });
+                        }
+                        await invalidateModelSettingsQueries(client);
+                        toast.success(
+                          listPrice
+                            ? `Price saved for ${spec.model}`
+                            : `Price removed from ${spec.model}`,
+                        );
+                        onChange();
+                        return true;
+                      }}
+                    />
+                  ),
+                }
+              : {})}
             menu={
               canManage ? (
                 <DropdownMenuItem

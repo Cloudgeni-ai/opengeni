@@ -4988,6 +4988,13 @@ export const englishMessages = {
     "Add a passkey to your account to turn on {name}, then connect again.",
   "sessionMcpCapabilityCard.confirmWithPasskeyToTurnOn":
     "Confirm it's you with your passkey to turn on {name}, then connect again.",
+  "sessionMcpCapabilityCard.addAPasskeyToTurnOnHere":
+    "Add a passkey to your account to turn on {name}.",
+  "sessionMcpCapabilityCard.confirmWithPasskeyToTurnOnHere":
+    "Confirm it's you with your passkey to turn on {name}.",
+  "sessionMcpCapabilityCard.addAPasskey": "Add a passkey",
+  "sessionMcpCapabilityCard.confirmItSYou": "Confirm it's you",
+  "sessionMcpCapabilityCard.tryAgain": "Try again",
   "sessionMcpCapabilityCard.onlyAnAdminCanTurnOn":
     "Only an admin can turn on {name}. Ask an admin to turn it on, then connect your account.",
   "sessionMcpCapabilityCard.onlyMe": "Only me",
@@ -5769,6 +5776,8 @@ export const englishMessages = {
   "timeline.projection.restoredFromOlderSave":
     "This chat's workspace machine was lost, so its files were restored from a save made at {time}. Changes made after that may be missing.",
   "timeline.projection.returnedToYourPreferredModel": "Returned to your preferred model.",
+  "timeline.projection.sandboxDeletedWhileArchived":
+    "This chat's workspace machine was deleted while the chat was archived. The chat continues on a new one, without the old one's files.",
   "timeline.projection.savedWithoutRebuildableFolders":
     "This chat's files were saved without folders that can be rebuilt: {folders}.",
   "timeline.projection.switchedToAFallbackModel": "Switched to a fallback model.",

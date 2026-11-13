@@ -44,7 +44,8 @@ import {
   teamsGroupRouteActive,
   type TeamsGroupAudience,
   getWorkspaceTeamsInstallation,
-  listTeamsAgentDirectory,
+  getTeamsAgentInWorkspace,
+  getTeamsTurnRouting,
   listTeamsInstallations,
   installTeamsBot,
   linkTeamsActor,
@@ -166,16 +167,32 @@ import {
 import {
   loadTeamsRouteDirectory,
   resolveTeamsRoute,
-  teamsAgentReplyHeader,
   teamsChoiceUnavailableText,
+  teamsReplyHeader,
   teamsRouteOptionNamed,
   teamsRouteOptions,
+  teamsRouteTargetOffered,
   teamsSwitchCardText,
   teamsSwitchCommand,
   teamsSwitchedText,
   teamsWorkspaceInReach,
   TEAMS_NO_WORKSPACE_TEXT,
+  type TeamsRouteDirectory,
 } from "./teams-routing";
+import { organizationAgentAskerPerson } from "./organization-agents";
+import {
+  isTeamsOrganizationAgentRoute,
+  teamsFullTenantMember,
+  teamsOrganizationAgentGrant,
+  teamsOrganizationAgentInstructions,
+  teamsOrganizationAgentMembersOnlyText,
+  teamsOrganizationAgentNotEligibleText,
+  teamsOrganizationAgentNoticeText,
+  teamsOrganizationAgentUnavailableText,
+  teamsOrganizationAgentRouteId,
+  teamsOrganizationAgentSessionOptions,
+  type TeamsMemberFacts,
+} from "./teams-organization-agents";
 
 const ENDPOINT = "/v1/integrations/teams/messages";
 const ROOT = "/v1/workspaces/:workspaceId/integrations/teams";
@@ -748,6 +765,60 @@ async function routeActorGrant(
   }
   const identity = await actorGrant(deps, i, actorId);
   return identity && (await routeSessionGrant(deps, i, r, identity));
+}
+/**
+ * Who a route's work runs as for `actorId`, read live, and the linked person
+ * behind it. Usually that person's own grant (`routeActorGrant`). A route
+ * made for an organization agent's open use runs as the agent's service
+ * principal instead, only while the person is still linked and an active
+ * full member of the organization, the agent is still open to the
+ * organization in the route's workspace, and the reach still includes it.
+ */
+async function routeActor(
+  deps: ApiRouteDeps,
+  i: TeamsInstallation,
+  r: TeamsRoute,
+  actorId: string,
+): Promise<{ grant: AccessGrant; subjectId: string } | null> {
+  if (isTeamsOrganizationAgentRoute(r)) {
+    if (!deps.settings.teamsWorkspaceRoutingEnabled || !r.personal || !r.agent_id) return null;
+    const identity = await teamsIdentity(deps, i, actorId);
+    if (!identity || identity.subjectId !== r.subject_id) return null;
+    const workspaceId = routeSessionWorkspace(r);
+    const agent = await getTeamsAgentInWorkspace(deps.db, {
+      accountId: i.account_id,
+      workspaceId,
+      agentId: r.agent_id,
+    });
+    if (
+      !agent?.organizationAccess ||
+      agent.accountId !== i.account_id ||
+      !(await teamsWorkspaceInReach(deps.db, i, identity.subjectId, workspaceId))
+    )
+      return null;
+    return {
+      grant: teamsOrganizationAgentGrant(agent, {
+        tenantId: i.tenant_id,
+        actorId,
+        opengeniSubjectId: identity.subjectId,
+      }),
+      subjectId: identity.subjectId,
+    };
+  }
+  const grant = await routeActorGrant(deps, i, r, actorId);
+  return grant ? { grant, subjectId: grant.subjectId } : null;
+}
+/** Whether a route's session still has the audience the route was made for. */
+function routeAudienceHolds(
+  r: TeamsRoute,
+  audience: { visibility: string; ownerSubjectId: string | null } | null,
+): boolean {
+  if (!audience) return false;
+  // An organization agent's chat is visible to its workspace's members.
+  if (isTeamsOrganizationAgentRoute(r))
+    return r.personal && audience.visibility === "workspace_shared";
+  if (!r.personal) return audience.visibility !== "user_private";
+  return audience.visibility === "user_private" && audience.ownerSubjectId === r.subject_id;
 }
 export type TeamsRosterReader = (m: {
   serviceUrl: string;
@@ -1569,7 +1640,13 @@ function startTeamsTyping(
 
 /** What a routed 1:1 message's inbox payload adds: what the first reply names. */
 type TeamsRoutedPayload = TeamsMessage & {
-  teamsRouting?: { workspaceLabel: string; agentName: string | null; announce: boolean };
+  teamsRouting?: {
+    workspaceLabel: string;
+    agentName: string | null;
+    announce: boolean;
+    /** A one-off `in <Workspace>: …` message; its replies name the workspace. */
+    oneOff?: boolean;
+  };
 };
 
 /**
@@ -1613,18 +1690,24 @@ async function routeTeamsPersonalMessage(
   const directory = await loadTeamsRouteDirectory(deps.db, i, identity.subjectId);
   const remember = (target: TeamsChatTarget) =>
     setTeamsChatChoice(deps.db, i, { ...who, ...target });
-  const optionLabels = (target: TeamsChatTarget) => ({
-    workspaceLabel:
-      directory.candidates.find((c) => c.workspaceId === target.workspaceId)?.label ?? "",
-    agentName: target.agentId
-      ? (directory.agents.find((a) => a.id === target.agentId)?.name ?? null)
-      : null,
-  });
+  const optionLabels = (target: TeamsChatTarget) => {
+    const agent = target.agentId
+      ? directory.agents.find(
+          (a) => a.id === target.agentId && a.targetWorkspaceId === target.workspaceId,
+        )
+      : undefined;
+    return {
+      // An agent anyone in the organization may use can live in a workspace
+      // that isn't one of the person's.
+      workspaceLabel:
+        directory.candidates.find((c) => c.workspaceId === target.workspaceId)?.label ??
+        agent?.targetWorkspaceLabel ??
+        "",
+      agentName: agent?.name ?? null,
+    };
+  };
   // A card option counts only while it is still one of the person's options.
-  const stillOffered = (target: TeamsChatTarget) =>
-    teamsRouteOptions(directory).some(
-      (o) => o.workspaceId === target.workspaceId && o.agentId === target.agentId,
-    );
+  const stillOffered = (target: TeamsChatTarget) => teamsRouteTargetOffered(directory, target);
   const showCard = async (waiting: TeamsMessage | null) => {
     const options = teamsRouteOptions(directory);
     if (options.length === 0) return await reply("route_no_workspace", TEAMS_NO_WORKSPACE_TEXT);
@@ -1675,6 +1758,7 @@ async function routeTeamsPersonalMessage(
       text: waiting.text,
       ...labels,
       announce: true,
+      directory,
       replies,
       observed,
     });
@@ -1708,7 +1792,7 @@ async function routeTeamsPersonalMessage(
   switch (resolution.kind) {
     case "denied": {
       if (resolution.forgetChoice) {
-        await clearTeamsChatChoice(deps.db, i, { actorId: m.actorId });
+        await clearTeamsChatChoice(deps.db, i, who);
         // A workspace the person can no longer see is still named to them.
         if (choice && !directory.candidates.some((c) => c.workspaceId === choice.workspaceId))
           return await reply(
@@ -1732,13 +1816,33 @@ async function routeTeamsPersonalMessage(
       if (resolution.remember) await remember(resolution.target);
       return await enqueueRoutedMessage(deps, app, i, m, identity.subjectId, {
         ...resolution,
+        oneOff: resolution.source === "prefix",
+        directory,
         replies,
         observed,
       });
   }
 }
 
-/** Queues a routed 1:1 message once the person's live access to its workspace holds. */
+/** What Teams says about the sender of a 1:1 message, or null when it can't say. */
+async function readTeamsSender(app: App, m: TeamsMessage): Promise<TeamsMemberFacts | null> {
+  try {
+    const member = await app.api
+      .fromServiceUrl({ serviceUrl: teamsServiceUrl(m.serviceUrl) })
+      .conversations.getMemberById(m.conversationId, m.actorId);
+    return member && typeof member === "object" ? (member as TeamsMemberFacts) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Queues a routed 1:1 message once the person's live access to its
+ * workspace holds. Someone that workspace doesn't let start chats can still
+ * ask an agent anyone in the organization may use, as the agent (see
+ * teams-organization-agents.ts), when Teams says they are a full member of
+ * the tenant; members keep their own chat, unchanged.
+ */
 async function enqueueRoutedMessage(
   deps: ApiRouteDeps,
   app: App,
@@ -1751,79 +1855,154 @@ async function enqueueRoutedMessage(
     workspaceLabel: string;
     agentName: string | null;
     announce: boolean;
+    /** A one-off `in <Workspace>: …` message: its replies name the workspace. */
+    oneOff?: boolean;
+    directory: TeamsRouteDirectory;
     replies: TeamsReplies;
     observed: (reason: string) => void;
   },
 ): Promise<{ status: number }> {
   const { target, replies, observed } = route;
+  const reply = async (outcome: string, text: string) => {
+    const sent = await replies.once(() => send(replies.app, m, text));
+    observed(sent === DUPLICATE_REPLY ? "reply_duplicate" : outcome);
+    return { status: 200 };
+  };
   const canStart = async (db: ApiRouteDeps["db"]) => {
     const grant = await teamsTargetGrant(db, i, subjectId, target.workspaceId);
     return Boolean(grant && hasPermission(grant.permissions, "sessions:create"));
   };
-  const refuse = async () => {
-    const sent = await replies.once(() =>
-      send(
-        replies.app,
-        m,
-        `Your Opengeni account can't start chats in **${route.workspaceLabel || "that workspace"}**. Send **switch** to choose another workspace. No chat was started.`,
-      ),
+  const refuse = async () =>
+    await reply(
+      "sessions_create_denied",
+      `Your Opengeni account can't start chats in **${route.workspaceLabel || "that workspace"}**. Send **switch** to choose another workspace. No chat was started.`,
     );
-    observed(sent === DUPLICATE_REPLY ? "reply_duplicate" : "sessions_create_denied");
-    return { status: 200 };
+  // The agent in that workspace, read live in `db` (the enqueue transaction).
+  const liveAgent = async (db: ApiRouteDeps["db"], agentId: string) => {
+    const agent = await getTeamsAgentInWorkspace(db, {
+      accountId: i.account_id,
+      workspaceId: target.workspaceId,
+      agentId,
+    });
+    return agent && agent.accountId === i.account_id ? agent : null;
   };
-  if (!(await canStart(deps.db))) return await refuse();
+  const directoryAgent = target.agentId
+    ? (route.directory.agents.find(
+        (agent) => agent.id === target.agentId && agent.targetWorkspaceId === target.workspaceId,
+      ) ?? null)
+    : null;
   // The installation's own workspace keeps a route with no session workspace,
   // as before; any other workspace is named on the route and checked again in
   // the enqueue transaction.
   const sessionWorkspaceId = target.workspaceId === i.workspace_id ? null : target.workspaceId;
-  const routeId = teamsRouteId(m, i.generation, subjectId, sessionWorkspaceId, target.agentId);
   const eventId = `${m.identity}:${i.generation}`;
-  const payload: TeamsRoutedPayload = {
-    ...m,
-    text: route.text,
-    teamsRouting: {
-      workspaceLabel: route.workspaceLabel,
-      agentName: route.agentName,
-      announce: route.announce,
-    },
-  };
-  let queued: Awaited<ReturnType<typeof enqueueTeamsMessage>>;
-  try {
-    queued = await enqueueTeamsMessage(deps.db, i, {
-      routeId,
-      actorId: m.actorId,
-      subjectId,
-      personal: true,
-      sessionWorkspaceId,
-      authorizeSessionWorkspace: async (tx, checked) =>
-        checked.workspaceId === target.workspaceId &&
-        checked.agentId === target.agentId &&
-        (await canStart(tx)) &&
-        (!checked.agentId ||
-          (
-            await listTeamsAgentDirectory(deps.db, {
-              accountId: i.account_id,
-              workspaceIds: [checked.workspaceId],
-            })
-          ).some((agent) => agent.id === checked.agentId)),
-      agentId: target.agentId,
-      channelId: null,
-      conversationId: m.conversationId,
-      threadId: m.threadId,
-      serviceUrl: m.serviceUrl,
-      botId: m.botId,
-      eventId,
-      payload,
-    });
-  } catch (error) {
-    // Access changed between the check above and the queue's own check.
-    if (error instanceof Error && error.message === "teams_route_unavailable")
-      return await refuse();
-    throw error;
+  let senderChecked = false;
+  for (let attempt = 0; ; attempt += 1) {
+    const member = await canStart(deps.db);
+    const organizationAgent = !member && directoryAgent?.open ? directoryAgent : null;
+    if (!member && !organizationAgent) return await refuse();
+    if (organizationAgent && !senderChecked) {
+      senderChecked = true;
+      // Teams must say this is a full member of the connected tenant, and
+      // Opengeni that the linked person is an active member of the
+      // organization (as Slack asks of its open agents).
+      if (
+        !teamsFullTenantMember(await readTeamsSender(app, m), {
+          tenantId: i.tenant_id,
+          actorId: m.actorId,
+        })
+      )
+        return await reply(
+          "organization_agent_not_eligible",
+          teamsOrganizationAgentNotEligibleText(organizationAgent.name),
+        );
+      const person = await organizationAgentAskerPerson(deps.db, {
+        connectionAccountId: i.account_id,
+        agentAccountId: organizationAgent.targetAccountId,
+        linkedSubjectId: subjectId,
+      });
+      if ("refusal" in person)
+        return await reply(
+          "organization_agent_person_refused",
+          teamsOrganizationAgentMembersOnlyText(organizationAgent.name),
+        );
+    }
+    const routeId = organizationAgent
+      ? teamsOrganizationAgentRouteId(
+          m,
+          i.generation,
+          subjectId,
+          sessionWorkspaceId,
+          organizationAgent.id,
+        )
+      : teamsRouteId(m, i.generation, subjectId, sessionWorkspaceId, target.agentId);
+    const payload: TeamsRoutedPayload = {
+      ...m,
+      text: route.text,
+      teamsRouting: {
+        workspaceLabel: route.workspaceLabel,
+        agentName: route.agentName,
+        // An organization agent's first reply always says where it went and
+        // who can see it.
+        announce: route.announce || Boolean(organizationAgent),
+        ...(route.oneOff ? { oneOff: true } : {}),
+      },
+    };
+    let queued: Awaited<ReturnType<typeof enqueueTeamsMessage>>;
+    try {
+      queued = await enqueueTeamsMessage(deps.db, i, {
+        routeId,
+        actorId: m.actorId,
+        subjectId,
+        personal: true,
+        sessionWorkspaceId,
+        authorizeSessionWorkspace: async (tx, checked) => {
+          if (checked.workspaceId !== target.workspaceId || checked.agentId !== target.agentId)
+            return false;
+          if (organizationAgent)
+            return Boolean(
+              (await namedSubjectIsActiveOrganizationMember(tx, {
+                accountId: i.account_id,
+                subjectId,
+              })) &&
+              (await liveAgent(tx, organizationAgent.id))?.organizationAccess &&
+              (await teamsWorkspaceInReach(tx, i, subjectId, target.workspaceId)),
+            );
+          return (
+            (await canStart(tx)) &&
+            (!checked.agentId || Boolean(await liveAgent(tx, checked.agentId)))
+          );
+        },
+        agentId: target.agentId,
+        channelId: null,
+        conversationId: m.conversationId,
+        threadId: m.threadId,
+        serviceUrl: m.serviceUrl,
+        botId: m.botId,
+        eventId,
+        payload,
+      });
+    } catch (error) {
+      // The organization's reach changed while access was checked: check again, once.
+      if (error instanceof Error && error.message === "teams_reach_changed" && attempt === 0)
+        continue;
+      // Access changed between the check above and the queue's own check.
+      if (
+        error instanceof Error &&
+        (error.message === "teams_route_unavailable" || error.message === "teams_reach_changed")
+      )
+        return organizationAgent
+          ? await reply(
+              "organization_agent_unavailable",
+              teamsOrganizationAgentUnavailableText(organizationAgent.name),
+            )
+          : await refuse();
+      throw error;
+    }
+    if (!queued.queued) return { status: 200 };
+    startTeamsTyping(deps, app, m, i, queued, eventId, observed);
+    return { status: 200 };
   }
-  if (!queued.queued) return { status: 200 };
-  startTeamsTyping(deps, app, m, i, queued, eventId, observed);
-  return { status: 200 };
 }
 async function runtime(deps: ApiRouteDeps): Promise<App> {
   let pending = runtimes.get(deps);
@@ -2500,6 +2679,9 @@ function admissionNotice(
         link: { title: "Open Opengeni", url },
       };
 }
+/** What every Teams chat's agent is told about Teams. */
+const TEAMS_SESSION_INSTRUCTIONS =
+  "This conversation is delivered through Microsoft Teams. Replies are short by default: lead with the answer or outcome and any essential next step in a few sentences. Avoid headers, long lists, repeated conclusions, and detailed investigation logs unless the person asks for detail or the task requires it. Summarize completed work rather than narrating every step; preserve information needed to act or understand a material limitation. Human approvals and private information requests must be completed in the authenticated Opengeni chat.";
 async function drainRoute(
   deps: ApiRouteDeps,
   i: TeamsInstallation,
@@ -2541,18 +2723,26 @@ async function drainRoute(
     }
   };
   if (!(await verifyGroup())) return;
+  const organizationAgent = isTeamsOrganizationAgentRoute(r);
+  // The route's agent and its workspace's name, read once per drain.
+  let agentLabel: Promise<{ name: string; workspaceName: string } | null> | undefined;
+  const routeAgentLabel = () =>
+    (agentLabel ??= r.agent_id
+      ? teamsAgentLabel(deps.db, { accountId: i.account_id, agentId: r.agent_id })
+      : Promise.resolve(null));
   const inbound = await getTeamsPendingMessage(deps.db, i, r);
   if (inbound) {
-    const grant = await routeActorGrant(deps, i, r, inbound.actor_id);
+    const actor = await routeActor(deps, i, r, inbound.actor_id);
     if (
-      !grant ||
-      grant.subjectId !== inbound.subject_id ||
-      !hasPermission(grant.permissions, "sessions:create") ||
-      (r.personal && grant.subjectId !== r.subject_id)
+      !actor ||
+      actor.subjectId !== inbound.subject_id ||
+      !hasPermission(actor.grant.permissions, "sessions:create") ||
+      (r.personal && actor.subjectId !== r.subject_id)
     ) {
       await settleTeamsMessage(deps.db, i, r, inbound.event_id, "teams_actor_access_revoked");
       return;
     }
+    const { grant } = actor;
     const text = inbound.payload.text;
     if (typeof text !== "string") throw new Error("teams_inbox_payload_invalid");
     // Recorded channel or group chat messages before this mention: since the
@@ -2564,7 +2754,7 @@ async function drainRoute(
       r.session_bound,
     );
     const scoped = await catalogDeps(deps, grant);
-    const admissionActor = await routeActorGrant(deps, i, r, inbound.actor_id);
+    const admissionActor = await routeActor(deps, i, r, inbound.actor_id);
     if (
       !(await currentInstallation(deps, i)) ||
       admissionActor?.subjectId !== inbound.subject_id ||
@@ -2587,7 +2777,7 @@ async function drainRoute(
           }))
         )
           throw new HTTPException(403, { message: "personal_workspace_closed" });
-        const createRouteSession = (agentId: string | null) =>
+        const createRouteSession = async (agentId: string | null) =>
           createSessionForRequest(
             scoped,
             grant,
@@ -2597,11 +2787,17 @@ async function drainRoute(
               ...(agentId ? { agentId } : {}),
               initialMessage: text,
               ...(modelContext ? { modelContext } : {}),
-              visibility: r.personal ? "private" : "workspace",
+              // An organization agent's chat belongs to its workspace, whose
+              // members can see it; every other 1:1 chat is Only me.
+              visibility: r.personal && !organizationAgent ? "private" : "workspace",
               idempotencyKey: `teams:${r.route_id}`,
               clientEventId: inbound.event_id,
-              instructions:
-                "This conversation is delivered through Microsoft Teams. Replies are short by default: lead with the answer or outcome and any essential next step in a few sentences. Avoid headers, long lists, repeated conclusions, and detailed investigation logs unless the person asks for detail or the task requires it. Summarize completed work rather than narrating every step; preserve information needed to act or understand a material limitation. Human approvals and private information requests must be completed in the authenticated Opengeni chat.",
+              instructions: organizationAgent
+                ? `${TEAMS_SESSION_INSTRUCTIONS}\n\n${teamsOrganizationAgentInstructions(
+                    (await routeAgentLabel())?.workspaceName ?? null,
+                  )}`
+                : TEAMS_SESSION_INSTRUCTIONS,
+              ...(organizationAgent ? teamsOrganizationAgentSessionOptions(deps.settings) : {}),
             },
             undefined,
             {
@@ -2614,9 +2810,12 @@ async function drainRoute(
             },
           );
         // An agent that went away between routing and create answers as a
-        // plain chat in the same workspace, as in Slack.
+        // plain chat in the same workspace, as in Slack. An organization
+        // agent's chat is the agent's or nothing.
         const created = await createRouteSession(r.agent_id ?? null).catch((error: unknown) => {
           if (r.agent_id && error instanceof SessionAgentNotFoundError) {
+            if (organizationAgent)
+              throw new HTTPException(403, { message: "teams_organization_agent_unavailable" });
             agentDropped = true;
             return createRouteSession(null);
           }
@@ -2650,15 +2849,26 @@ async function drainRoute(
         routing?.announce && routing.workspaceLabel
           ? ` in **${routing.workspaceLabel}**${routing.agentName && !agentDropped ? ` with **${routing.agentName}**` : ""}`
           : "";
-      if (!r.session_bound)
+      const disclaimer = `${deps.settings.teamsAppName} is an AI agent and can make mistakes. Send **help** for tips and commands.`;
+      if (!r.session_bound && organizationAgent) {
+        // Only the workspace's members can open this chat, so no link. The
+        // person is told once, on their chat's first reply, who can see it.
+        const agent = await routeAgentLabel();
+        await enqueueTeamsOutput(deps.db, i, r, 0, [
+          [
+            `Started${where}.`,
+            teamsOrganizationAgentNoticeText(
+              agent?.name ?? routing?.agentName ?? "This agent",
+              agent?.workspaceName ?? routing?.workspaceLabel ?? null,
+            ),
+            disclaimer,
+          ].join("\n\n"),
+        ]);
+      } else if (!r.session_bound)
         await enqueueSessionNotice(deps, i, r, 0, {
           card: `Started${where}. Follow progress or approve requests in Opengeni.`,
           lead: `Started${where}. Follow progress or approve requests`,
-          ...(r.personal
-            ? {
-                after: `${deps.settings.teamsAppName} is an AI agent and can make mistakes. Send **help** for tips and commands.`,
-              }
-            : {}),
+          ...(r.personal ? { after: disclaimer } : {}),
         });
       await settleTeamsMessage(deps.db, i, r, inbound.event_id, null, turnId);
       r.session_bound = true;
@@ -2676,7 +2886,16 @@ async function drainRoute(
       if (error instanceof HTTPException && error.status >= 400 && error.status < 500) {
         const noticeKind =
           error.message === "teams_session_audience_changed" ? "audience_changed" : "admission";
-        await enqueueTeamsOutput(deps.db, i, r, -1, [admissionNotice(deps, r, noticeKind).text], {
+        // An organization agent's asker can't act on Opengeni's workspace
+        // pages: they are told the agent isn't available, without a link.
+        const noticeText = organizationAgent
+          ? teamsOrganizationAgentUnavailableText(
+              (await routeAgentLabel())?.name ??
+                (inbound.payload as TeamsRoutedPayload).teamsRouting?.agentName ??
+                "This agent",
+            )
+          : admissionNotice(deps, r, noticeKind).text;
+        await enqueueTeamsOutput(deps.db, i, r, -1, [noticeText], {
           eventId: inbound.event_id,
           kind: noticeKind,
         });
@@ -2690,15 +2909,16 @@ async function drainRoute(
       } else throw error;
     }
   }
-  const owner = await routeActorGrant(deps, i, r, r.actor_id);
+  const ownerActor = await routeActor(deps, i, r, r.actor_id);
   if (
-    !owner ||
-    owner.subjectId !== r.subject_id ||
-    !hasPermission(owner.permissions, "sessions:read")
+    !ownerActor ||
+    ownerActor.subjectId !== r.subject_id ||
+    !hasPermission(ownerActor.grant.permissions, "sessions:read")
   ) {
     await refuseTeamsRouteOutputs(deps.db, i, r, "teams_owner_access_revoked");
     return;
   }
+  const owner = ownerActor.grant;
   let output = await claimTeamsOutput(deps.db, i, r, true);
   if (!output) {
     if (r.session_bound) {
@@ -2714,24 +2934,42 @@ async function drainRoute(
       const audience = await scope(() =>
         getSessionAuthorityProjection(deps.db, routeSessionWorkspace(r), r.session_id),
       );
-      if (
-        !audience ||
-        (!r.personal && audience.visibility === "user_private") ||
-        (r.personal &&
-          (audience.visibility !== "user_private" || audience.ownerSubjectId !== r.subject_id))
-      ) {
+      if (!routeAudienceHolds(r, audience)) {
         await refuseTeamsRouteOutputs(deps.db, i, r, "teams_destination_audience_changed");
         return;
       }
-      let header: string | null | undefined;
-      const agentHeader = async () => {
-        if (header === undefined) {
-          const agent = r.agent_id
-            ? await teamsAgentLabel(deps.db, { accountId: i.account_id, agentId: r.agent_id })
-            : null;
-          header = agent ? teamsAgentReplyHeader(agent.name, agent.workspaceName) : null;
+      // Replies say who answered and where: an agent's always (Teams shows
+      // one bot name), and a one-off `in <Workspace>: …` message's, which
+      // otherwise says nothing about the workspace it went to.
+      // What this chat's own messages said about routing, per turn, once per pass.
+      const turnRouting = new Map<string, Promise<Record<string, unknown>[]>>();
+      const routingOf = (turnId: string) => {
+        let pending = turnRouting.get(turnId);
+        if (!pending) {
+          pending = getTeamsTurnRouting(deps.db, i, r, turnId);
+          turnRouting.set(turnId, pending);
         }
-        return header;
+        return pending;
+      };
+      // An organization agent's chat is visible to its workspace, whose
+      // members can start turns in it with their own access. Only turns the
+      // asker's own Teams messages started are sent to them. This relies on
+      // an inbox row being linked to its turn (settleTeamsMessage) before
+      // that turn's events are drained: admission and appends settle it
+      // earlier in the same pass, so an own turn is never skipped.
+      const forThisChat = async (turnId: string | null | undefined) =>
+        !organizationAgent || (Boolean(turnId) && (await routingOf(turnId!)).length > 0);
+      const replyHeader = async (turnId: string | null) => {
+        const agent = await routeAgentLabel();
+        if (agent)
+          return teamsReplyHeader({ agentName: agent.name, workspaceName: agent.workspaceName });
+        if (!turnId) return null;
+        const oneOff = (await routingOf(turnId)).find(
+          (routing) => routing.oneOff === true && typeof routing.workspaceLabel === "string",
+        );
+        return oneOff
+          ? teamsReplyHeader({ agentName: null, workspaceName: oneOff.workspaceLabel as string })
+          : null;
       };
       const page = await scope(() =>
         listSessionEventPage(deps.db, routeSessionWorkspace(r), r.session_id, {
@@ -2742,14 +2980,18 @@ async function drainRoute(
       );
       for (const event of page.events) {
         const payload = event.payload as Record<string, unknown>;
+        if (!(await forThisChat(event.turnId))) {
+          // Moves the route past another person's turn without sending it.
+          await enqueueTeamsOutput(deps.db, i, r, event.sequence, []);
+          continue;
+        }
         if (event.type === "turn.completed") {
           const reply =
             typeof payload.output === "string" && payload.output.trim()
               ? payload.output
               : turnCompletedReply(payload);
-          // An agent's replies say who answered: Teams shows one bot name.
-          const replyHeader = reply ? await agentHeader() : null;
-          const text = replyHeader && reply ? `${replyHeader}\n\n${reply}` : reply;
+          const header = reply ? await replyHeader(event.turnId ?? null) : null;
+          const text = header && reply ? `${header}\n\n${reply}` : reply;
           await enqueueTeamsOutput(
             deps.db,
             i,
@@ -2767,15 +3009,22 @@ async function drainRoute(
             ? {
                 card: "Your task needs your input or approval in the secure Opengeni chat.",
                 lead: "Your task needs your input or approval. Open the secure Opengeni chat",
+                // Nobody approves an organization agent's chat (it runs
+                // unattended), and its asker can't open it.
+                plain:
+                  "This request needs an approval or input that only a member of the agent's workspace can give.",
               }
             : event.type === "turn.failed"
               ? {
                   card: "The task could not finish. The details are in Opengeni.",
                   lead: "The task could not finish. Open Opengeni for details",
+                  plain: "The task could not finish.",
                 }
               : null;
         // Without a notice this still moves the route past the event.
-        if (notice) await enqueueSessionNotice(deps, i, r, event.sequence, notice);
+        if (notice && organizationAgent)
+          await enqueueTeamsOutput(deps.db, i, r, event.sequence, [notice.plain]);
+        else if (notice) await enqueueSessionNotice(deps, i, r, event.sequence, notice);
         else await enqueueTeamsOutput(deps.db, i, r, event.sequence, []);
         if (notice && event.turnId) await markTeamsTurnAnswered(deps.db, i, r, event.turnId);
       }
@@ -2784,8 +3033,13 @@ async function drainRoute(
   }
   if (!output) return;
   // Recheck both sides immediately before the external side effect.
-  const liveOwner = await routeActorGrant(deps, i, r, r.actor_id);
-  if (!(await currentInstallation(deps, i)) || !liveOwner || liveOwner.subjectId !== r.subject_id) {
+  const liveActor = await routeActor(deps, i, r, r.actor_id);
+  const liveOwner = liveActor?.grant;
+  if (
+    !(await currentInstallation(deps, i)) ||
+    !liveOwner ||
+    liveActor?.subjectId !== r.subject_id
+  ) {
     await settleTeamsOutput(deps.db, i, output.operation_id, {
       state: "failed",
       error: "teams_authority_revoked",
@@ -2805,14 +3059,7 @@ async function drainRoute(
       : withSessionRlsActorContext({ subjectId: liveOwner.subjectId }, () =>
           getSessionAuthorityProjection(deps.db, routeSessionWorkspace(r), r.session_id),
         ));
-    if (
-      !deliveryAudience ||
-      (!r.personal && deliveryAudience.visibility === "user_private") ||
-      (r.personal &&
-        (deliveryAudience.visibility !== "user_private" ||
-          deliveryAudience.ownerSubjectId !== r.subject_id)) ||
-      !(await renewTeamsRoute(deps.db, i, r))
-    ) {
+    if (!routeAudienceHolds(r, deliveryAudience) || !(await renewTeamsRoute(deps.db, i, r))) {
       await settleTeamsOutput(deps.db, i, output.operation_id, {
         state: "failed",
         error: "teams_delivery_authority_changed",
@@ -2835,7 +3082,7 @@ async function drainRoute(
   }
   try {
     const notice =
-      Number(output.source_sequence) === -1
+      Number(output.source_sequence) === -1 && !isTeamsOrganizationAgentRoute(r)
         ? admissionNotice(
             deps,
             r,
