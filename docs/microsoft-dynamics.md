@@ -6,11 +6,13 @@ delegated Microsoft Entra ID. Customer-facing setup lives in
 
 ## Products
 
-| Product | Connection URL | Scope | Tools | Flag |
-|---|---|---|---|---|
-| Dataverse (Dynamics 365 Sales, Customer Service, …) | `https://<org>.crm[N].dynamics.com/api/mcp` (also `/api/mcp_preview`) | `https://<org host>/user_impersonation` | Dataverse Web API bridge (below) | on when the client is configured |
-| Finance and Operations | `https://<env>.operations.dynamics.com/mcp` (also `*.cloudax.dynamics.com`) | `https://<env host>/.default` | Microsoft's ERP MCP server | `OPENGENI_MICROSOFT_DYNAMICS_FINANCE_OPERATIONS_ENABLED` (default off) |
-| Business Central | `https://api.businesscentral.dynamics.com/v2.0/[<tenant>/]<environment>/api/v2.0` | `https://api.businesscentral.dynamics.com/Financials.ReadWrite.All` | Business Central API bridge (below) | on when the client is configured |
+All three products are on whenever the client is configured.
+
+| Product | Connection URL | Scope | Tools |
+|---|---|---|---|
+| Dataverse (Dynamics 365 Sales, Customer Service, …) | `https://<org>.crm[N].dynamics.com/api/mcp` (also `/api/mcp_preview`) | `https://<org host>/user_impersonation` | Dataverse Web API bridge (below) |
+| Finance and Operations | `https://<env>.operations[.<region>].dynamics.com/mcp` (also `*.cloudax.dynamics.com`) | `https://<env host>/.default` | Finance and Operations OData bridge (below) |
+| Business Central | `https://api.businesscentral.dynamics.com/v2.0/[<tenant>/]<environment>/api/v2.0` | `https://api.businesscentral.dynamics.com/Financials.ReadWrite.All` | Business Central API bridge (below) |
 
 `packages/contracts/src/microsoft-dynamics.ts` classifies URLs
 (`microsoftDynamicsProductForMcpUrl`), normalises a pasted environment address
@@ -27,19 +29,13 @@ one connection covers every company, and tools take the company name or id.
 |---|---|
 | `OPENGENI_MICROSOFT_DYNAMICS_CLIENT_ID` | Multi-tenant Entra app (pre-registered; Microsoft has no dynamic client registration here). |
 | `OPENGENI_MICROSOFT_DYNAMICS_CLIENT_SECRET` | Its client secret. Set both or neither. |
-| `OPENGENI_MICROSOFT_DYNAMICS_FINANCE_OPERATIONS_ENABLED` | Accept Finance and Operations URLs. |
-
-Finance and Operations was verified on 12 Nov 2026 against a real environment
-(`opengeni-fno-test.operations.ch.dynamics.com`) through the staging connector:
-card, Entra sign-in and an ERP MCP read with an explicit company. The flag is on
-in Opengeni's staging and production environments.
 
 The Entra app needs:
 
 - redirect URI `<public API origin>/v1/integrations/oauth/callback` (Web platform);
 - delegated API permissions **Dynamics CRM → user_impersonation**, **Dynamics
   365 Business Central → Financials.ReadWrite.All** and, for Finance and
-  Operations, **Dynamics ERP** permissions (`mcp.tools`), plus
+  Operations, **Dynamics ERP** → `Odata.FullAccess`, plus
   Microsoft Graph `openid`, `profile`, `offline_access`;
 - "Accounts in any organizational directory" (multi-tenant).
 
@@ -110,6 +106,45 @@ The token resolver lets a Dataverse connection's grant reach only the Web API
 root on the same host (`isDataverseWebApiDestination`). Microsoft's error
 message reaches the agent; a write whose outcome is unknown (network failure,
 5xx) is reported as uncertain and never retried.
+
+## Finance and Operations OData bridge
+
+`packages/runtime/src/finance-operations-odata-mcp.ts` replaces Microsoft's
+ERP MCP server for Finance and Operations connections, the same way the
+Dataverse bridge does. It serves `fno_list_entities`, `fno_describe_entity`,
+`fno_query` (OData GET under `/data/`, paging with
+`odata.maxpagesize`, `cross-company=true`, `/$count`) and
+`fno_create_record` / `fno_update_record` / `fno_delete_record` (Ask first).
+Writes add `cross-company=true` so `dataAreaId` chooses the company; an
+update sends `If-Match: *` and never creates a record. Entity metadata comes
+from the JSON metadata service (`/Metadata/PublicEntities`,
+`/Metadata/PublicEnumerations`); `/data/$metadata` is about 55 MB and is
+never read. The token resolver lets the grant reach only `/data/` and
+`/Metadata/` on the bound host (`isFinanceOperationsDataDestination`).
+
+Why OData rather than the ERP MCP server, checked on 13 Nov 2026 against
+`opengeni-fno-test.operations.ch.dynamics.com` as a System administrator
+user, with one delegated `.default` token (`scp`: `CustomService.FullAccess
+mcp.tools Odata.FullAccess`):
+
+- **Allow-list:** with the app's row in **Allowed MCP clients**
+  (`McpAllowedClients`) set to not allowed, `POST /mcp` returned 403 ("Appid
+  … is not allowed to access the MCP endpoint") while `/data` returned 200
+  with the same token. Every customer would have to add the app first.
+- **Billing:** Microsoft bills ERP MCP tool calls from non-Copilot-Studio
+  clients at 0.1 Copilot Credits each unless the user has Finance Premium or
+  Supply Chain Management Premium. OData is not billed in Copilot Credits.
+- **Reliability:** 10 of 10 reads succeeded on each path (median 0.14 s MCP,
+  0.25 s OData); the first MCP `initialize` took 6.4 s. MCP form tools are
+  stateful and must run one at a time, and its SQL read only the user's
+  default company (32 of 417 customers) unless the tool's `companyId` is set.
+- **Quirks:** F&O ignores `$apply` and returns every row, so `fno_query`
+  refuses it and points to `$count`; text filters use `eq 'abc*'` wildcards
+  (`startswith` is not supported); error text is in
+  `error.innererror.message`, next to a stack trace the bridge drops.
+
+What the bridge doesn't cover: the ERP MCP form tools and X++ actions
+(`api_*`), for operations that exist only behind a form button.
 
 ## Business Central API bridge
 
