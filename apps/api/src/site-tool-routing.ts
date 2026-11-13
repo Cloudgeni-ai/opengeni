@@ -1,4 +1,8 @@
-import type { AccessGrant, ToolGatewayIdentity } from "@opengeni/contracts";
+import {
+  WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX,
+  type AccessGrant,
+  type ToolGatewayIdentity,
+} from "@opengeni/contracts";
 import {
   availableMcpAccountBindings,
   expandMcpAccountRoutes,
@@ -7,6 +11,7 @@ import {
 } from "@opengeni/core";
 import type { EnabledMcpCapabilityServer } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
+import { ApiHttpError } from "./http/api-error";
 import { allGatewayToolRefs } from "./workspace-tool-gateway";
 
 /**
@@ -53,6 +58,14 @@ export type SiteToolRouting =
         connectionId: string | null;
       };
       account?: SiteToolAccount;
+      /**
+       * Set when nothing in the viewer's inventory explains the declared
+       * identity (another member's account route the version pairs with no
+       * connector, or a connector no longer here). It still runs as itself,
+       * so whatever the gateway can resolve keeps working; a miss is answered
+       * as `site_tool_not_available_for_viewer` instead of a bare 404.
+       */
+      unresolved?: true;
     }
   /** The viewer chooses one of their own accounts. */
   | {
@@ -72,6 +85,22 @@ const same = (left: ToolGatewayIdentity, right: ToolGatewayIdentity) =>
 
 export const siteToolNotAuthorized = () =>
   new HTTPException(403, { message: "site_tool_not_authorized" });
+
+/**
+ * A tool the pinned Site version declares that the viewer cannot use, and
+ * cannot connect from here. Keeps the status of the unavailable-tool answer
+ * (404) so existing callers see no change; the typed code and message let the
+ * Site say why. Discloses nothing beyond the version's own declarations.
+ */
+export const siteToolNotAvailableForViewer = () =>
+  new ApiHttpError(404, {
+    code: "not_found",
+    message:
+      "This Site uses an account that isn't yours, so it can't run this for you. Ask the Site's owner to publish it again so it can use your own account.",
+    retryable: false,
+    outcomeUnknown: false,
+    details: { code: "site_tool_not_available_for_viewer" },
+  });
 
 export type SiteToolAccountInventory = {
   /** Connectors whose tools run on a person's account, by canonical id. */
@@ -204,7 +233,7 @@ export function routeSiteTool(
   if (!declared.some((item) => same(item, identity))) throw siteToolNotAuthorized();
   // A declared canonical connector: the viewer's own accounts.
   if (inventory.canonical.has(identity.serverId)) return choose(identity);
-  const asItself = (): SiteToolRouting => ({
+  const asItself = (unresolved?: true): SiteToolRouting => ({
     kind: "direct",
     identity,
     declaredIdentity: identity,
@@ -213,6 +242,7 @@ export function routeSiteTool(
       toolName: identity.toolName,
       connectionId: null,
     },
+    ...(unresolved ? { unresolved } : {}),
   });
   // A declared identity that is not an account route at all (first-party or a
   // connector without accounts) runs as itself.
@@ -223,9 +253,48 @@ export function routeSiteTool(
     (item) => item.toolName === identity.toolName && inventory.canonical.has(item.serverId),
   );
   if (candidates.length === 1) return choose(candidates[0]!);
-  // Otherwise it stays that route, which the gateway never resolves for this
-  // viewer: the same non-enumerating `tool_unavailable` as before routing.
-  return asItself();
+  // Otherwise it stays that route, which the gateway does not resolve for this
+  // viewer; the miss is answered as `site_tool_not_available_for_viewer`.
+  return asItself(true);
+}
+
+/**
+ * The tools a new Site version declares, as every viewer can use them. An
+ * agent sees its own account routes (`account-<hash>`), so a Site it builds
+ * declares the publisher's routes. Each one the publisher owns is paired with
+ * its connector's canonical identity, which `routeSiteTool` resolves per
+ * viewer to their own account, or to the connect card when they have none.
+ * Uses only the publisher's own bindings; nothing else is added, and the list
+ * never grows past the declaration limit.
+ */
+export function siteToolDeclarationsForEveryViewer(
+  inventory: Pick<SiteToolAccountInventory, "accounts">,
+  declared: readonly ToolGatewayIdentity[],
+): ToolGatewayIdentity[] {
+  const result = [...declared];
+  const seen = new Set(declared.map((item) => JSON.stringify([item.serverId, item.toolName])));
+  for (const item of declared) {
+    const own = inventory.accounts.find((account) => account.serverId === item.serverId);
+    if (!own) continue;
+    const canonical = { serverId: own.canonicalServerId, toolName: item.toolName };
+    const key = JSON.stringify([canonical.serverId, canonical.toolName]);
+    if (seen.has(key)) continue;
+    if (result.length >= WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX) break;
+    seen.add(key);
+    result.push(canonical);
+  }
+  return result;
+}
+
+/** `siteToolDeclarationsForEveryViewer` over the publisher's own inventory. */
+export async function declareSiteToolsForEveryViewer(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  declared: readonly ToolGatewayIdentity[],
+  readAccounts: typeof readSiteToolAccountInventory = readSiteToolAccountInventory,
+): Promise<ToolGatewayIdentity[]> {
+  if (declared.length === 0) return [...declared];
+  return siteToolDeclarationsForEveryViewer(await readAccounts(deps, grant), declared);
 }
 
 /**

@@ -12,6 +12,7 @@ import {
   type PreparedWorkspaceArtifactContent,
 } from "./workspace-artifact-content";
 import { userContentSignedGetUrlOptions } from "./http/user-content";
+import { declareSiteToolsForEveryViewer } from "./site-tool-routing";
 type Storage = NonNullable<ObjectStorageDependency>;
 export const MAX_SITE_SOURCE_BYTES = 64 * 1024 * 1024;
 
@@ -163,6 +164,13 @@ export async function prepareWorkspaceArtifactPublication(
   if (!storage) throw new Error("Object storage is not configured");
   if (Boolean(input.uploadId) === (input.html !== undefined))
     throw new Error("Provide either uploadId or inline html, not both");
+  // The publisher's own account routes also declare their connector, so
+  // other viewers run the Site on their own account or are asked to connect.
+  if (input.requestedTools !== undefined)
+    input = {
+      ...input,
+      requestedTools: await declareSiteToolsForEveryViewer(deps, grant, input.requestedTools),
+    };
   if (!input.uploadId) {
     return prepareWorkspaceArtifactContent(storage, grant.workspaceId, {
       ...input,

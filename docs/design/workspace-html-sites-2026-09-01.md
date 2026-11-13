@@ -445,7 +445,15 @@ renders, answers or skips that confirmation.
   maps only through a canonical identity the same version declares for that
   tool. Another member's personal connection is never used. A viewer with
   several accounts picks one in the confirmation; a viewer with none gets the
-  existing connect card.
+  existing connect card. Agents see only their own account routes, so
+  publishing pairs every declared route the publisher owns with its
+  connector's canonical identity (`declareSiteToolsForEveryViewer`, from the
+  publisher's own bindings, within the declaration limit). A declared tool
+  that nothing in the viewer's inventory explains (an older version that pairs
+  another member's route with no connector, or a connector no longer here)
+  keeps the unavailable-tool status, 404, with `details.code`
+  `site_tool_not_available_for_viewer` and a message the Site can show; the
+  parent bridge passes that code to the Site.
 - **Confirmation.** `tools/invoke` answers 409 with `details.code`
   `tool_gateway_approval_required`, `site_tool_account_required` or
   `site_tool_connection_required`. The parent bridge (`createSiteToolBridge`

@@ -395,7 +395,10 @@ Site calls that need approval are confirmed by the viewer in the Opengeni frame:
 `POST tools/site-consent` for the viewer's own accounts and the provider's own
 review of the exact arguments (for Gmail, the message as it would be sent), then mints
 `tools/target-approvals` (optionally `rememberForSite`) and retries the same
-operation. See "Host-native consent" in
+operation. A declared Site tool the viewer can neither use nor connect answers
+404 with `details.code` `site_tool_not_available_for_viewer`; publishing pairs
+the publisher's own account routes with their connector so other viewers get
+their own account or the connect card instead. See "Host-native consent" in
 `docs/design/workspace-html-sites-2026-09-01.md`.
 
 `POST tools/target-approvals` issues a version-2 binding over the existing

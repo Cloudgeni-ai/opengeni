@@ -82,6 +82,34 @@ export class SiteToolConnectionRequiredError extends Error {
   }
 }
 
+/**
+ * A tool the pinned Site declares that this viewer can neither use nor connect
+ * from here (for example another member's account the Site was published
+ * with). The Site receives this code and the server's explanation instead of a
+ * bare unavailable tool.
+ */
+function siteToolNotAvailableForViewer(error: unknown): unknown {
+  if (
+    !(error instanceof OpenGeniApiError) ||
+    error.details?.code !== "site_tool_not_available_for_viewer"
+  )
+    return error;
+  const decoded = (() => {
+    try {
+      const body = JSON.parse(error.body) as { error?: { message?: unknown } };
+      return typeof body.error?.message === "string" ? body.error.message : null;
+    } catch {
+      return null;
+    }
+  })();
+  return Object.assign(new Error(decoded ?? "This tool isn't available to you on this Site."), {
+    name: "SiteToolNotAvailableForViewerError",
+    code: "site_tool_not_available_for_viewer",
+    retryable: false,
+    outcomeUnknown: false,
+  });
+}
+
 /** Server refusals that the Opengeni frame answers by asking the viewer. */
 const SITE_CONSENT_CODES = new Set([
   "tool_gateway_approval_required",
@@ -179,7 +207,12 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
       !allowed.has(identityKey(request.target.identity))
     )
       throw new Error("This tool is not available to the Site");
-    const tool = await input.workspaceTools.$resolve!(request.target, { signal, ...context });
+    let tool: ToolGatewayResolvedTool;
+    try {
+      tool = await input.workspaceTools.$resolve!(request.target, { signal, ...context });
+    } catch (error) {
+      throw siteToolNotAvailableForViewer(error);
+    }
     // A declared connector tool resolves to the viewer's own account route,
     // which the server derived from this pinned version: the same tool name.
     if (
@@ -338,7 +371,8 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
       return await invokeOnce(request, signal);
     } catch (error) {
       const code = siteConsentCode(error);
-      if (!code || !input.confirmToolCall || !input.fetchResponse || !input.artifactId) throw error;
+      if (!code || !input.confirmToolCall || !input.fetchResponse || !input.artifactId)
+        throw siteToolNotAvailableForViewer(error);
       return await invokeWithConsent(request, signal, code);
     }
   };
