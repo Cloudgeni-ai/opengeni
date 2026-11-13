@@ -2540,6 +2540,19 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "GET /v1/billing/integration-usage",
+    "method": "GET",
+    "path": "/v1/billing/integration-usage",
+    "request": [],
+    "query": [
+      "accountId",
+      "since",
+      "until"
+    ],
+    "response": [],
+    "permission": "billing:read"
+  },
+  {
     "id": "GET /v1/config/content-security",
     "method": "GET",
     "path": "/v1/config/content-security",

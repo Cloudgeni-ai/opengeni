@@ -265,6 +265,8 @@ import {
   connectionReconnectDay,
   connectionsNeedingReconnectFor,
   listConnectionsNeedingReconnect,
+  nangoBackendsFor,
+  nangoReplacedSocialProviders,
   type ConnectionNeedingReconnect,
   type ResolvedSessionAuthorization,
 } from "@opengeni/core";
@@ -654,6 +656,12 @@ export type McpServerOptions = {
    * `slack_bot_*` tool unlisted; omitted keeps them listed.
    */
   slackBotAvailable?: boolean | undefined;
+  /**
+   * Native social providers a Nango-backed integration currently serves
+   * (docs/nango.md). Their provider tools are not listed; calls are refused
+   * either way.
+   */
+  nangoReplacedSocialProviders?: ReadonlySet<string> | undefined;
 };
 
 /**
@@ -1434,8 +1442,18 @@ export function buildOpenGeniMcpServer(
     );
     if (!authority)
       throw new ToolArgumentError(`Unknown or unavailable social connection: ${connectionId}`);
+    // While Nango serves a provider, its native accounts are not used here.
+    if (
+      nangoReplacedSocialProviders(await nangoBackendsFor(deps.db, deps.settings)).has(
+        authority.connection.provider,
+      )
+    )
+      throw new ToolArgumentError(`Unknown or unavailable social connection: ${connectionId}`);
     return authority;
   };
+  const nativeSocialProviders = (["x", "reddit"] as const).filter(
+    (provider) => !options.nangoReplacedSocialProviders?.has(provider),
+  );
   const requireAuthorizedSocialConnectionForProvider = async (
     provider: "x" | "reddit",
     connectionId: string,
@@ -2059,7 +2077,7 @@ export function buildOpenGeniMcpServer(
     // Reddit Integration cards. The legacy social_* names remain available to
 
     // identity and reject a near-identical Connection from the other adapter.
-    for (const provider of ["x", "reddit"] as const) {
+    for (const provider of nativeSocialProviders) {
       const providerName = provider === "x" ? "X" : "Reddit";
       server.registerTool(
         `${provider}_accounts_list`,
@@ -2275,7 +2293,7 @@ export function buildOpenGeniMcpServer(
       },
     );
 
-    for (const provider of ["x", "reddit"] as const) {
+    for (const provider of nativeSocialProviders) {
       const providerName = provider === "x" ? "X" : "Reddit";
       server.registerTool(
         `${provider}_posts_sync`,
@@ -7812,6 +7830,7 @@ function registerCapabilityDiscoveryTools(
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         subjectId: subjectId ?? null,
+        integrationBackends: await nangoBackendsFor(deps.db, deps.settings),
       });
     } catch {
       return [];

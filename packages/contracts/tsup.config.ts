@@ -39,6 +39,7 @@ export default defineConfig({
     "src/connection-authority.ts",
     "src/connector-attachments.ts",
     "src/connector-destinations.ts",
+    "src/nango.ts",
     "src/google-drive.ts",
     "src/knowledge-source-sync-retirement.ts",
     "src/github-repository.ts",
