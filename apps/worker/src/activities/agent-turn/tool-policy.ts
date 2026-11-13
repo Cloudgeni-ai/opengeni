@@ -4,12 +4,18 @@ import {
   type LazyToolTransport,
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
-import { openingToolsFromTurnMetadata, type TurnExecutionPolicyV1 } from "@opengeni/contracts";
+import {
+  openingToolsFromTurnMetadata,
+  type LatencyMode,
+  type TurnExecutionPolicyV1,
+} from "@opengeni/contracts";
 import {
   configuredModelForAcceptedTurnExecutionPolicy,
   isDirectOpenAiApiBaseUrl,
   paidHostedToolsChargeCredits,
   type ModelProviderApi,
+  type ReasoningSummaries,
+  type ReasoningSummaryRequest,
   type ResolvedModelProvider,
   type Settings,
 } from "@opengeni/config";
@@ -130,14 +136,18 @@ function modelAcceptsTextVerbosity(upstreamModelId: string): boolean {
 }
 
 /**
- * Ask supported reasoning Responses routes for their provider-selected summary
- * format. This is public summary text, never private or encrypted reasoning.
- * Codex and unverified compatible wires retain the existing detailed setting.
+ * The reasoning summary a turn requests, from the deployment's per-route and
+ * per-latency-mode setting (`settings.reasoningSummaries`). This is public
+ * summary text, never private or encrypted reasoning. Codex uses its setting
+ * for every model; direct OpenAI and the Azure OpenAI wire use theirs only for
+ * GPT-5 and later reasoning models. Other routes and models return undefined
+ * and keep the runtime default (`detailed`).
  */
 export function reasoningSummaryForTurn(
   resolvedModel: {
     provider: {
       id: string;
+      kind: ResolvedModelProvider["kind"];
       api: ModelProviderApi;
       wireProfile: "openai" | "azure-openai";
       builtin: boolean;
@@ -148,7 +158,12 @@ export function reasoningSummaryForTurn(
       capabilities: { reasoning: { runnable: boolean } };
     };
   } | null,
-): "auto" | undefined {
+  latencyMode: LatencyMode,
+  summaries: ReasoningSummaries,
+): ReasoningSummaryRequest | undefined {
+  if (resolvedModel?.provider.kind === "codex-subscription") {
+    return summaries.codex[latencyMode];
+  }
   if (
     resolvedModel?.provider.api !== "responses" ||
     !resolvedModel.configured.capabilities.reasoning.runnable ||
@@ -157,10 +172,11 @@ export function reasoningSummaryForTurn(
     return undefined;
   }
   const provider = resolvedModel.provider;
-  return provider.wireProfile === "azure-openai" ||
-    (provider.builtin && provider.id === "openai" && isDirectOpenAiApiBaseUrl(provider.baseUrl))
-    ? "auto"
-    : undefined;
+  if (provider.wireProfile === "azure-openai") return summaries.azure[latencyMode];
+  if (provider.builtin && provider.id === "openai" && isDirectOpenAiApiBaseUrl(provider.baseUrl)) {
+    return summaries.openai[latencyMode];
+  }
+  return undefined;
 }
 
 /**

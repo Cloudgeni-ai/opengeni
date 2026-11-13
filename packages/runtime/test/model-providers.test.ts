@@ -1985,6 +1985,79 @@ describe("buildModelInstance — chat vs responses Model selection per provider 
     expect(opaqueObservations).toEqual([{ requestId: "request-1", fingerprints: [] }]);
   });
 
+  test("a `none` reasoning summary leaves only the summary field off the Codex wire", async () => {
+    const provider: ResolvedModelProvider = {
+      id: CODEX_PROVIDER_ID,
+      label: "Subscription",
+      kind: "codex-subscription",
+      api: "responses",
+      builtin: false,
+    };
+    const bodies = new Map<string, Record<string, any>>();
+    for (const reasoningSummary of [undefined, "detailed", "auto", "none"] as const) {
+      const codexClient = new ReplayableJsonOpenAI(
+        {
+          apiKey: "placeholder",
+          baseURL: CODEX_PROVIDER_BASE_URL,
+          maxRetries: 0,
+          fetch: codexSubscriptionFetch(async (_input, init) => {
+            bodies.set(
+              String(reasoningSummary),
+              JSON.parse(await requestBodyText(init?.body)) as Record<string, any>,
+            );
+            const message = responseMessage("msg_summary", "Done");
+            return new Response(
+              [
+                { type: "response.output_item.done", output_index: 0, item: message },
+                {
+                  type: "response.completed",
+                  response: { id: "r1", status: "completed", output: [message], usage: null },
+                },
+              ]
+                .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+                .join(""),
+              { status: 200, headers: { "content-type": "text/event-stream" } },
+            );
+          }),
+        },
+        { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
+      );
+      const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+        model: buildModelInstance(provider, codexClient, "gpt-6.1-sol"),
+        reasoningEffort: "medium",
+        serviceTier: "ultrafast",
+        encryptedReasoning: true,
+        ...(reasoningSummary ? { reasoningSummary } : {}),
+      });
+      await codexRequestStorage.run(codexTestContext(), async () => {
+        const result = await new Runner({ tracingDisabled: true }).run(agent, "hello", {
+          maxTurns: 1,
+          stream: true,
+        });
+        for await (const _event of result) {
+          // consume
+        }
+        await result.completed;
+      });
+    }
+    expect([...bodies.keys()]).toEqual(["undefined", "detailed", "auto", "none"]);
+    const detailed = bodies.get("detailed")!;
+    // Omitting the option is the earlier wire, byte for byte.
+    expect(JSON.stringify(bodies.get("undefined"))).toBe(JSON.stringify(detailed));
+    expect(detailed.reasoning).toEqual({ effort: "medium", summary: "detailed" });
+    expect(detailed.service_tier).toBe("ultrafast");
+    expect(bodies.get("auto")!.reasoning).toEqual({ effort: "medium", summary: "auto" });
+    const none = bodies.get("none")!;
+    expect(none.reasoning).toStrictEqual({ effort: "medium" });
+    expect("summary" in none.reasoning).toBe(false);
+    // Nothing else in the request changes: instructions, tools, input,
+    // include, prompt-cache fields and service tier are identical.
+    const { reasoning: _detailedReasoning, ...detailedRest } = detailed;
+    const { reasoning: _noneReasoning, ...noneRest } = none;
+    expect(JSON.stringify(noneRest)).toBe(JSON.stringify(detailedRest));
+    expect(none.include).toContain("reasoning.encrypted_content");
+  });
+
   test("normalizes a SuperGrok request at the owned object stage with native hosted search", async () => {
     let capturedBody: Record<string, unknown> | null = null;
     let capturedHeaders = new Headers();
