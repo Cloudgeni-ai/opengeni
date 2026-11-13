@@ -95,6 +95,16 @@ test("a shared agent is in each linked Slack workspace, with how people ask it a
   expect(container.textContent).toContain("Introduce in channels");
 });
 
+test("people ask it by the Opengeni app's name in that Slack workspace", async () => {
+  const agent = makeAgent({ name: "Release Scribe", slack: [availability()] });
+  const container = await render(agent, {
+    listAgentSlackInstalls: installs([row({ botDisplayName: "Opengeni Staging" })]),
+  });
+  expect(container.querySelector("[data-agent-slack-handle]")?.textContent).toBe(
+    "@Opengeni Staging Release Scribe",
+  );
+});
+
 test("introducing it in channels goes to that Slack workspace", async () => {
   const agent = makeAgent({
     slack: [availability()],

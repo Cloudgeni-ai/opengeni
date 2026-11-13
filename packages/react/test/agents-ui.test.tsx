@@ -562,6 +562,28 @@ test("an agent in Slack can be made Only me, and the form says it leaves Slack",
   );
 });
 
+test("an agent's image icon shows in the form and is kept when saving other changes", async () => {
+  const avatar = { kind: "image" as const, artifactId: "bbbbbbbb-bbbb-4bbb-8bbb-000000000001" };
+  const agent = makeAgent({ avatar });
+  const client = fakeAgentsClient([agent]);
+  const container = await render(
+    <AgentsTestHost context={appContext(client)}>
+      <EditAgentPage workspaceId={WORKSPACE_ID} agentId={agent.id} />
+    </AgentsTestHost>,
+  );
+  const tile = container.querySelector<HTMLElement>("[aria-label='Change icon']")!;
+  expect(tile.querySelector(".border-dashed")).toBeNull();
+  const name = container.querySelector<HTMLInputElement>("input[placeholder='Release manager']")!;
+  await act(async () => setValue(name, "Release desk"));
+  await act(async () => button(container, "Save").click());
+  await flush();
+  const update = client.calls.find((call) => call[0] === "updateAgent")?.[3] as
+    | Record<string, unknown>
+    | undefined;
+  expect(update).toMatchObject({ name: "Release desk" });
+  expect(update && "avatar" in update).toBe(false);
+});
+
 // --- Composer chip -------------------------------------------------------------
 
 test("the composer chip lists agents to chat with and Browse agents", async () => {

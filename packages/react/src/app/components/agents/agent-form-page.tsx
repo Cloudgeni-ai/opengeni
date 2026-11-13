@@ -187,10 +187,13 @@ function AgentForm({
   const [instructions, setInstructions] = useState(initial.instructions);
   const [memoryEnabled, setMemoryEnabled] = useState(initial.memoryEnabled);
   const [visibility, setVisibility] = useState<AgentVisibility>(initial.visibility);
+  // An agent's own image (one made for it, in its workspace) stays its icon
+  // until another is picked. A new agent starts from a chat's emoji, icon or
+  // letters only: a chat's image is that chat's file.
+  const image = agent && initial.avatar?.kind === "image" ? initial.avatar : null;
   const [draft, setDraft] = useState(() =>
     sessionAvatarDraft(
-      // Image avatars are a chat's own files, which an agent doesn't have.
-      initial.avatar?.kind === "image" ? null : initial.avatar,
+      initial.avatar?.kind === "image" && !image ? null : initial.avatar,
       sessionAvatarSeedHue(sessionAvatarFallbackHue(seedKey)),
     ),
   );
@@ -216,7 +219,7 @@ function AgentForm({
   const values = (): AgentFormValues => ({
     name,
     description,
-    avatar: sessionAvatarFromDraft(draft, name, null),
+    avatar: sessionAvatarFromDraft(draft, name, image),
     instructions,
     memoryEnabled,
     visibility,
@@ -230,7 +233,7 @@ function AgentForm({
       ...(instructionsChanged
         ? optionalError("instructions", lengthError(instructions, AGENT_INSTRUCTIONS_MAX_LENGTH))
         : {}),
-      ...sessionAvatarDraftErrors(draft, name, null),
+      ...sessionAvatarDraftErrors(draft, name, image),
     };
     setErrors(next);
     if (!next.name && (next.emoji || next.letters)) setPickerOpen(true);
@@ -306,7 +309,7 @@ function AgentForm({
               setErrors(({ emoji: _emoji, letters: _letters, ...rest }) => rest);
             }}
             name={name}
-            image={null}
+            image={image}
             errors={errors}
             workspaceId={workspaceId}
             seed={seedKey}

@@ -414,6 +414,12 @@ export const AgentSlackInstall = /* @__PURE__ */ defineSchema(() =>
     connectionId: Uuid,
     slackTeamId: z.string(),
     slackTeamName: z.string().nullable(),
+    /**
+     * The Opengeni app's name in this Slack workspace, which people mention
+     * (`Opengeni Staging`). Absent from older servers and for an installation
+     * no longer linked here; read it as `Opengeni`.
+     */
+    botDisplayName: z.string().optional(),
     /** Null when the agent is not available in this Slack workspace. */
     availability: AgentSlackAvailability.nullable(),
     /**
