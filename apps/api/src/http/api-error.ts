@@ -19,6 +19,7 @@ import {
   SessionUsageLimitUnavailableError,
   nestedPostgresSqlState,
   SessionApprovalForbiddenError,
+  SessionMissingFromWorkspaceError,
   WorkspaceControlBusyError,
   WorkspaceContentFlowRefusedError,
 } from "@opengeni/db";
@@ -57,6 +58,26 @@ export class ApiHttpError extends HTTPException {
     this.outcomeUnknown = options.outcomeUnknown;
     this.details = options.details;
   }
+}
+
+/**
+ * A session deleted while the request read it. A request that names that
+ * session finds it gone (404); any other request, such as a list whose page
+ * included it, read a changing workspace and can simply retry (409).
+ */
+export function sessionMissingHttpError(error: unknown, requestUrl: string): ApiHttpError | null {
+  if (!(error instanceof SessionMissingFromWorkspaceError)) return null;
+  const url = new URL(requestUrl);
+  const named =
+    url.pathname.split("/").includes(error.sessionId) ||
+    [...url.searchParams.values()].includes(error.sessionId);
+  return named
+    ? new ApiHttpError(404, { code: "not_found", message: "session not found", retryable: false })
+    : new ApiHttpError(409, {
+        code: "conflict",
+        message: "A session was deleted while the request read it. Retry the request.",
+        retryable: true,
+      });
 }
 
 /** A missing permission keeps its plain sentence and names the permission in `details`. */

@@ -1,6 +1,17 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { bootstrapWorkspace, createDb, createSession, peekSessionWork } from "../src/index";
+import {
+  bootstrapWorkspace,
+  createDb,
+  createSession,
+  evaluateSessionControl,
+  evaluateSessionControls,
+  evaluateSessionDiscoveryControls,
+  peekSessionWork,
+  SessionControlInvariantError,
+  SessionMissingFromWorkspaceError,
+  withWorkspaceRls,
+} from "../src/index";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -78,3 +89,24 @@ for (const observer of [true, false]) {
     expect(outcome.value).toEqual({ kind: observer ? "unavailable" : "idle" });
   }, 60_000);
 }
+
+test("every control read classifies a session missing from its workspace", async () => {
+  const { grant, session } = await seedSession();
+  const missing = crypto.randomUUID();
+  const reads: Array<(db: Parameters<typeof evaluateSessionControl>[0]) => Promise<unknown>> = [
+    (db) => evaluateSessionControl(db, grant.workspaceId, missing),
+    (db) => evaluateSessionControls(db, grant.workspaceId, [session.id, missing]),
+    (db) => evaluateSessionDiscoveryControls(db, grant.workspaceId, [missing]),
+  ];
+  for (const read of reads) {
+    const error = await withWorkspaceRls(client.db, grant.workspaceId, read).then(
+      () => null,
+      (thrown: unknown) => thrown,
+    );
+    expect(error).toBeInstanceOf(SessionMissingFromWorkspaceError);
+    // Callers and logs that know only the invariant error still see one.
+    expect(error).toBeInstanceOf(SessionControlInvariantError);
+    expect((error as Error).name).toBe("SessionControlInvariantError");
+    expect((error as SessionMissingFromWorkspaceError).sessionId).toBe(missing);
+  }
+}, 60_000);
