@@ -112,7 +112,7 @@ function ConsoleAccountMenu({ label, role }: { label: string; role: string | nul
       <DropdownMenuTrigger asChild>
         <button
           type="button"
-          className="flex w-full min-w-0 items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-xs text-fg-muted hover:bg-bg-muted focus-visible:outline-2 focus-visible:outline-ring"
+          className="flex w-full min-w-0 items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-xs text-fg-muted hover:bg-hover focus-visible:outline-2 focus-visible:outline-ring"
           aria-label={`${label || "Account"}. Account menu`}
         >
           <span className="min-w-0 flex-1 truncate" title={label}>
