@@ -186,6 +186,10 @@
       "types": "./src/insights-usage.ts",
       "default": "./src/insights-usage.ts"
     },
+    "./console": {
+      "types": "./src/console.ts",
+      "default": "./src/console.ts"
+    },
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
