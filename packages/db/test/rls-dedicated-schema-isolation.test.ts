@@ -85,7 +85,8 @@ appUrl.username = "opengeni_app";
 appUrl.password = APP_PASSWORD;
 const APP_URL = appUrl.toString();
 const SEARCH_PATH = `${SCHEMA},opengeni_private,public`;
-const IMAGE = "pgvector/pgvector:pg17";
+const IMAGE =
+  "pgvector/pgvector:0.8.6-pg17@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f";
 
 function quoteIdentifier(value: string): string {
   return `"${value.replaceAll('"', '""')}"`;
