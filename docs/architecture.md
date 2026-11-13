@@ -473,9 +473,11 @@ inventory classifier. Results are discarded after resolution, arrivals during a
 read start a fresh batch, and claims still revalidate the command. Missing rows
 remain unacknowledged so exits racing adoption retain their heartbeat retry.
 Pushes cannot steal an active reaper claim; a racing push preserves an immediate retry. The runner
-retries unacknowledged terminal records on reconnect and its existing heartbeat
-cadence over the bulk connection. Completion collectors use independent ingestion
-capacity and yield before their claim expires, preserving heartbeat/control liveness.
+sends `OperationCompleted` and its operation inventory on the control connection,
+never queued behind output frames on the bulk connection, and retries
+unacknowledged terminal records on reconnect and with every heartbeat. Completion
+collectors use independent ingestion capacity, follow one output attachment to
+the exit frame and yield before their claim expires, preserving heartbeat/control liveness.
 An exact-operation delivery receipt stops notification retries after durable server
 ownership; it never grants output custody. A dedicated first-notification timestamp
 bypasses polling backoff once, while failed collection keeps reconciliation backoff.
