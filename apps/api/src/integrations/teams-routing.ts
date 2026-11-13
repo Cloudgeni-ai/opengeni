@@ -29,6 +29,7 @@ import {
   namedSubjectPersonalWorkspaceId,
   personalWorkspaceClosedToNewWork,
   teamsReachIncludes,
+  TEAMS_ROUTE_PROMPT_MAX_OPTIONS,
   type Database,
   type TeamsChatTarget,
   type TeamsInstallation,
@@ -43,8 +44,16 @@ import {
 /** A workspace the person can start work in from Teams. */
 export type TeamsRouteWorkspace = { workspaceId: string; label: string; personal: boolean };
 
-/** A shared agent of the organization, and whether this person can use it. */
-export type TeamsRouteAgent = SlackRoutingAgent & { usable: boolean };
+/**
+ * A shared agent of the organization, and whether this person can use it:
+ * as themselves, as a member of its workspace (`member`), or, when anyone in
+ * the organization may use it (`open`), as the agent itself.
+ */
+export type TeamsRouteAgent = SlackRoutingAgent & {
+  usable: boolean;
+  member: boolean;
+  open: boolean;
+};
 
 /** Everything routing reads for one person, loaded live per message. */
 export type TeamsRouteDirectory = {
@@ -123,7 +132,13 @@ function workspaceLabel(directory: TeamsRouteDirectory, workspaceId: string): st
   return directory.candidates.find((c) => c.workspaceId === workspaceId)?.label ?? null;
 }
 
-/** The agents a name can mean: one per name, preferring ones the person can use. */
+/**
+ * The agents a name can mean: one per name, preferring agents of the
+ * person's own workspaces, then agents anyone in the organization may use,
+ * then ones they can't use. A name is ambiguous only between agents of the
+ * best group, so an agent another workspace opens to the organization never
+ * takes a name away from the person's own agent.
+ */
 function nameableAgents(directory: TeamsRouteDirectory): {
   agents: TeamsRouteAgent[];
   ambiguous: Map<string, TeamsRouteAgent[]>;
@@ -137,9 +152,10 @@ function nameableAgents(directory: TeamsRouteDirectory): {
   const agents: TeamsRouteAgent[] = [];
   const ambiguous = new Map<string, TeamsRouteAgent[]>();
   for (const [key, list] of byKey) {
-    const usable = list.filter((agent) => agent.usable);
-    if (usable.length > 1) ambiguous.set(key, usable);
-    agents.push(usable[0] ?? list[0]!);
+    const own = list.filter((agent) => agent.member);
+    const best = own.length ? own : list.filter((agent) => agent.usable);
+    if (best.length > 1) ambiguous.set(key, best);
+    agents.push(best[0] ?? list[0]!);
   }
   return { agents, ambiguous };
 }
@@ -186,8 +202,13 @@ export function teamsChoiceUnavailableText(label: string | null): string {
   return `You can no longer start chats in **${label ?? "the workspace this chat used"}** from Teams. Send **switch** to choose another. No chat was started.`;
 }
 
-/** The numbered options a switch card offers: usable agents first, then workspaces, Personal first. */
-export function teamsRouteOptions(directory: TeamsRouteDirectory): TeamsRouteOption[] {
+/** The most numbered rows one switch card shows. */
+export const TEAMS_ROUTE_OPTION_LIMIT = TEAMS_ROUTE_PROMPT_MAX_OPTIONS;
+/** Rows a card keeps for workspaces however many agents there are. */
+const TEAMS_ROUTE_WORKSPACE_ROWS = 50;
+
+/** Everything the person can switch to: usable agents, then workspaces, Personal first. Uncapped. */
+export function teamsRouteTargets(directory: TeamsRouteDirectory): TeamsRouteOption[] {
   const agents = directory.agents
     .filter((agent) => agent.usable)
     .map((agent) => ({
@@ -204,7 +225,32 @@ export function teamsRouteOptions(directory: TeamsRouteDirectory): TeamsRouteOpt
       title: workspace.label,
       detail: workspace.personal ? "Your Personal workspace" : "Workspace",
     }));
-  return [...agents, ...workspaces].slice(0, 100);
+  return [...agents, ...workspaces];
+}
+
+/**
+ * The numbered options a switch card offers: usable agents first, then
+ * workspaces, Personal first. Agents and workspaces are capped separately,
+ * so many agents never push every workspace off the card. `switch <name>`
+ * still finds anything beyond the card (see `teamsRouteOptionNamed`).
+ */
+export function teamsRouteOptions(directory: TeamsRouteDirectory): TeamsRouteOption[] {
+  const all = teamsRouteTargets(directory);
+  const agents = all.filter((option) => option.agentId !== null);
+  const workspaces = all.filter((option) => option.agentId === null);
+  const workspaceRows = Math.min(workspaces.length, TEAMS_ROUTE_WORKSPACE_ROWS);
+  const shownAgents = agents.slice(0, TEAMS_ROUTE_OPTION_LIMIT - workspaceRows);
+  return [...shownAgents, ...workspaces.slice(0, TEAMS_ROUTE_OPTION_LIMIT - shownAgents.length)];
+}
+
+/** Whether a target is still one the person can switch to, card or not. */
+export function teamsRouteTargetOffered(
+  directory: TeamsRouteDirectory,
+  target: TeamsChatTarget,
+): boolean {
+  return teamsRouteTargets(directory).some(
+    (option) => option.workspaceId === target.workspaceId && option.agentId === target.agentId,
+  );
 }
 
 /** Find a workspace or agent by what the person typed after "switch". */
@@ -212,9 +258,17 @@ export function teamsRouteOptionNamed(
   directory: TeamsRouteDirectory,
   name: string,
 ): TeamsRouteOption | "ambiguous" | null {
-  const options = teamsRouteOptions(directory);
+  const options = teamsRouteTargets(directory);
   const wanted = slackAgentNameKey(name.replace(/^\+/u, ""));
-  const matches = options.filter((option) => slackAgentNameKey(option.title) === wanted);
+  const named = options.filter((option) => slackAgentNameKey(option.title) === wanted);
+  // The person's own workspaces and agents come before agents other
+  // workspaces open to the organization, as when an agent is addressed.
+  const own = named.filter(
+    (option) =>
+      option.agentId === null ||
+      directory.agents.some((agent) => agent.id === option.agentId && agent.member),
+  );
+  const matches = own.length ? own : named;
   if (matches.length > 1) return "ambiguous";
   return matches[0] ?? null;
 }
@@ -228,18 +282,26 @@ export function resolveTeamsRoute(input: {
 }): TeamsRouteResolution {
   const { directory } = input;
   const { candidates } = directory;
-  const many = candidates.length + directory.agents.filter((a) => a.usable).length > 1;
+  // Whether the person has a real choice among their own workspaces and
+  // agents. Agents other workspaces open to the organization don't count
+  // (their chats always say where they went).
+  const many = candidates.length + directory.agents.filter((a) => a.member).length > 1;
   const label = (workspaceId: string) => workspaceLabel(directory, workspaceId);
-  const choiceLive =
-    input.choice &&
-    label(input.choice.workspaceId) !== null &&
-    (!input.choice.agentId ||
-      directory.agents.some(
+  // A remembered agent is live while the person can use it there, even in a
+  // workspace they aren't a member of (an agent anyone in the organization
+  // may use); a remembered workspace while it is one of theirs.
+  const choiceAgent = input.choice?.agentId
+    ? directory.agents.find(
         (agent) =>
           agent.id === input.choice!.agentId &&
-          agent.usable &&
           agent.targetWorkspaceId === input.choice!.workspaceId,
-      ))
+      )
+    : undefined;
+  const choiceLabel = input.choice
+    ? (label(input.choice.workspaceId) ?? choiceAgent?.targetWorkspaceLabel ?? null)
+    : null;
+  const choiceLive =
+    input.choice && (input.choice.agentId ? choiceAgent?.usable === true : choiceLabel !== null)
       ? input.choice
       : null;
 
@@ -268,13 +330,23 @@ export function resolveTeamsRoute(input: {
   //    as in step 4; nothing starts somewhere else.
   const main = mainAddress(input.text, input.appName);
   if (main) {
-    if (input.choice && label(input.choice.workspaceId) === null)
+    // Leaving an agent anyone in the organization may use, in a workspace
+    // that isn't the person's, goes to their default workspace instead.
+    const leavingOrganizationAgent = Boolean(
+      choiceLive && choiceAgent && label(choiceLive.workspaceId) === null,
+    );
+    if (input.choice && !leavingOrganizationAgent && label(input.choice.workspaceId) === null)
       return {
         kind: "denied",
         text: teamsChoiceUnavailableText(null),
         forgetChoice: true,
       };
-    const base = input.choice ? input.choice.workspaceId : defaultWorkspace(directory);
+    const base =
+      input.choice && !leavingOrganizationAgent
+        ? input.choice.workspaceId
+        : defaultWorkspace(directory);
+    if (!base && leavingOrganizationAgent && candidates.length > 0)
+      return { kind: "ask", options: teamsRouteOptions(directory) };
     if (!base) return { kind: "denied", text: TEAMS_NO_WORKSPACE_TEXT };
     const target = { workspaceId: base, agentId: null };
     if (main.remainder === null)
@@ -323,18 +395,15 @@ export function resolveTeamsRoute(input: {
   if (input.choice && !choiceLive)
     return {
       kind: "denied",
-      text: teamsChoiceUnavailableText(label(input.choice.workspaceId)),
+      text: teamsChoiceUnavailableText(choiceLabel),
       forgetChoice: true,
     };
   if (choiceLive) {
-    const agent = choiceLive.agentId
-      ? directory.agents.find((a) => a.id === choiceLive.agentId)
-      : undefined;
     return {
       kind: "resolved",
       target: choiceLive,
-      workspaceLabel: label(choiceLive.workspaceId)!,
-      agentName: agent?.name ?? null,
+      workspaceLabel: choiceLabel ?? "",
+      agentName: choiceAgent?.name ?? null,
       text: input.text,
       source: "choice",
       remember: false,
@@ -398,6 +467,19 @@ export function teamsAgentReplyHeader(agentName: string, workspaceName: string |
 }
 
 /**
+ * The header on a reply: the agent and its workspace for an agent's reply,
+ * or the workspace alone for a one-off `in <Workspace>: …` message, so the
+ * person sees where an answer came from. Null when there is nothing to name.
+ */
+export function teamsReplyHeader(input: {
+  agentName: string | null;
+  workspaceName: string | null;
+}): string | null {
+  if (input.agentName) return teamsAgentReplyHeader(input.agentName, input.workspaceName);
+  return input.workspaceName ? `**${input.workspaceName}**` : null;
+}
+
+/**
  * Whether the organization's Teams reach still includes a workspace for this
  * person, read live. Checked when a routed message is queued and before every
  * delivery, so an admin's narrower reach stops chats it no longer includes.
@@ -422,7 +504,8 @@ export async function teamsWorkspaceInReach(
  * The person's live routing directory: the workspaces they can start work in
  * within the organization's reach (Personal ones only while the organization
  * allows them and they are open to new work), and the organization's shared
- * agents in reach, each marked usable when its workspace is a candidate.
+ * agents in reach, each marked usable when its workspace is a candidate or
+ * anyone in the organization may use it.
  */
 export async function loadTeamsRouteDirectory(
   db: Database,
@@ -453,22 +536,33 @@ export async function loadTeamsRouteDirectory(
       personal: workspace.personal,
     });
   }
-  const usable = new Set(candidates.map((c) => c.workspaceId));
+  const memberOf = new Set(candidates.map((c) => c.workspaceId));
+  // Only the reach's workspaces, and the ones the person can use first, so
+  // the directory's limit never drops an agent they can use.
   const agents = (
-    await listTeamsAgentDirectory(db, { accountId: i.account_id, workspaceIds: null })
+    await listTeamsAgentDirectory(db, {
+      accountId: i.account_id,
+      workspaceIds: reach.workspaceIds === null ? null : [...reach.workspaceIds, i.workspace_id],
+      preferWorkspaceIds: candidates.filter((c) => !c.personal).map((c) => c.workspaceId),
+    })
   )
     .filter((agent) =>
       teamsReachIncludes(reach, i, { workspaceId: agent.workspaceId, personal: false }),
     )
-    .map((agent) => ({
-      id: agent.id,
-      name: agent.name,
-      nameKey: agent.nameKey,
-      targetAccountId: agent.accountId,
-      targetWorkspaceId: agent.workspaceId,
-      targetWorkspaceLabel: agent.workspaceName,
-      usable: usable.has(agent.workspaceId),
-    }));
+    .map((agent) => {
+      const member = memberOf.has(agent.workspaceId);
+      return {
+        id: agent.id,
+        name: agent.name,
+        nameKey: agent.nameKey,
+        targetAccountId: agent.accountId,
+        targetWorkspaceId: agent.workspaceId,
+        targetWorkspaceLabel: agent.workspaceName,
+        member,
+        open: agent.organizationAccess,
+        usable: member || agent.organizationAccess,
+      };
+    });
   return {
     candidates,
     agents,

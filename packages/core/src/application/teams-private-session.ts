@@ -2,7 +2,10 @@ import { HTTPException } from "hono/http-exception";
 import {
   getPrivateSessionCreatePolicy,
   getSessionAuthorityProjection,
+  getTeamsAgentInWorkspace,
   getWorkspaceGrant,
+  TEAMS_ORGANIZATION_AGENT_ROUTE_PREFIX,
+  teamsOrganizationAgentIdFromSubject,
   requireTeamsConversationProof,
   namedSubjectHasLiveWorkspaceAuthority,
   namedSubjectIsActiveOrganizationMember,
@@ -23,6 +26,15 @@ import { requireDeploymentAllowsOnlyMe } from "./organization-privacy";
  * own Personal workspace or, with Teams workspace routing, in another
  * workspace of the organization where the sender may start work; every other
  * route stays in the installation's.
+ *
+ * With workspace routing, a 1:1 route can also run as an agent anyone in the
+ * organization may use, for a sender who isn't a member of the agent's
+ * workspace (see `teamsOrganizationAgentGrant` in the API). That grant is the
+ * agent's own service principal; the sender it acts for is the route's linked
+ * person (`serviceInitiatorContext.opengeniSubjectId`), who must still be an
+ * active full member of the organization, and the agent must still be open
+ * to the organization and live in the session's workspace. Its chat is
+ * visible to that workspace's members, never Only me.
  */
 export async function authorizeTeamsConversationAdmission(
   deps: Pick<AppDependencies, "db" | "settings">,
@@ -45,10 +57,26 @@ export async function authorizeTeamsConversationAdmission(
     throw new HTTPException(403, { message: "teams_private_session_proof_invalid" });
   }
   requirePermission(grant, "sessions:create");
+  const organizationAgentId = teamsOrganizationAgentIdFromSubject(grant.subjectId);
+  const asker = grant.serviceInitiatorContext?.["opengeniSubjectId"];
+  if (
+    organizationAgentId &&
+    (grant.principalKind !== "service" ||
+      typeof asker !== "string" ||
+      !asker ||
+      teamsOrganizationAgentIdFromSubject(asker) !== null ||
+      grant.serviceInitiatorContext?.["teamsAgentId"] !== organizationAgentId ||
+      !deps.settings.teamsWorkspaceRoutingEnabled ||
+      input.privateCreate)
+  ) {
+    throw new HTTPException(403, { message: "teams_private_session_proof_invalid" });
+  }
   const accepted = {
     accountId: grant.accountId,
     workspaceId: input.workspaceId,
-    subjectId: grant.subjectId,
+    // The route, its inbox and its link name the person; an organization
+    // agent's grant carries them as its initiator context.
+    subjectId: organizationAgentId ? (asker as string) : grant.subjectId,
     sessionId: input.sessionId,
     initialMessage: input.initialMessage,
     proof: { ...input.proof },
@@ -73,6 +101,42 @@ export async function authorizeTeamsConversationAdmission(
     ) {
       throw new HTTPException(403, { message: "teams_bot_disabled" });
     }
+    if (organizationAgentId) {
+      // Only a 1:1 route made for this agent's open use, in the agent's own
+      // workspace, while the agent is still open to the organization and the
+      // person an active full member of it.
+      const agent = source.personal
+        ? await getTeamsAgentInWorkspace(db, {
+            accountId: accepted.accountId,
+            workspaceId: accepted.workspaceId,
+            agentId: organizationAgentId,
+          })
+        : null;
+      if (
+        !source.personal ||
+        source.groupAudience ||
+        source.agentId?.toLowerCase() !== organizationAgentId.toLowerCase() ||
+        !source.routeId.startsWith(TEAMS_ORGANIZATION_AGENT_ROUTE_PREFIX) ||
+        !agent?.organizationAccess ||
+        !(await namedSubjectIsActiveOrganizationMember(db, accepted))
+      )
+        throw new HTTPException(403, { message: "teams_actor_access_revoked" });
+      const audience = await getSessionAuthorityProjection(
+        db,
+        accepted.workspaceId,
+        accepted.sessionId,
+      );
+      if (
+        (!audience && (requireExistingSession || !input.creating)) ||
+        (audience && audience.visibility !== "workspace_shared")
+      )
+        throw new HTTPException(403, { message: "teams_session_audience_changed" });
+      return;
+    }
+    // Every other route is the person's own, never one made for an agent's
+    // open use.
+    if (source.routeId.startsWith(TEAMS_ORGANIZATION_AGENT_ROUTE_PREFIX))
+      throw new HTTPException(403, { message: "teams_actor_access_revoked" });
     if (
       !source.personal &&
       !source.groupAudience &&

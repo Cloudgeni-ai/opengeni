@@ -666,9 +666,11 @@ export async function enqueueTeamsMessage(
     /**
      * The caller's live authority check for a 1:1 route that names another
      * workspace of the organization or an agent, run in the enqueue
-     * transaction. It replaces the Personal-workspace-only rule and must also
-     * confirm the agent may run in that workspace. A route that names an agent
-     * is refused without it.
+     * transaction with `tx` (read everything through it). It replaces the
+     * Personal-workspace-only rule and must also confirm the agent may run in
+     * that workspace. A route that names an agent is refused without it.
+     * Throws `teams_reach_changed` when the organization's Teams reach
+     * changed while it ran; the caller may check again.
      */
     authorizeSessionWorkspace?: (
       tx: Database,
@@ -696,7 +698,18 @@ export async function enqueueTeamsMessage(
     // Only the linked person's own Personal workspace, named by their active
     // organization membership, can hold their 1:1 chat, unless workspace
     // routing checks their live access to the workspace (and the agent) here.
+    // The check reads the organization's Teams reach; the reach version it
+    // saw must still be current once the installation row is locked below,
+    // so a reach change committed meanwhile refuses the message instead of
+    // racing it (a later one waits for this transaction).
+    let checkedReachVersion: string | null = null;
     if (input.authorizeSessionWorkspace && (sessionWorkspaceId || agentId)) {
+      const [before] = await rawRows<{ reach_version: string | number }>(
+        tx,
+        sql`select reach_version from teams_bot_installations where tenant_id=${i.tenant_id}::uuid`,
+      );
+      if (!before) throw new Error("teams_installation_changed");
+      checkedReachVersion = String(before.reach_version);
       if (
         !(await input.authorizeSessionWorkspace(tx, {
           workspaceId: sessionWorkspaceId ?? i.workspace_id,
@@ -713,11 +726,13 @@ export async function enqueueTeamsMessage(
       })) !== sessionWorkspaceId
     )
       throw new Error("teams_route_unavailable");
-    const active = await rawRows(
+    const active = await rawRows<{ reach_version: string | number }>(
       tx,
-      sql`select 1 from teams_bot_installations where tenant_id=${i.tenant_id}::uuid and active and generation=${i.generation}::uuid and (${input.groupRevision ?? null}::bigint is null or group_revision=${input.groupRevision ?? null}::bigint) for update`,
+      sql`select reach_version from teams_bot_installations where tenant_id=${i.tenant_id}::uuid and active and generation=${i.generation}::uuid and (${input.groupRevision ?? null}::bigint is null or group_revision=${input.groupRevision ?? null}::bigint) for update`,
     );
     if (!active.length) throw new Error("teams_installation_changed");
+    if (checkedReachVersion !== null && String(active[0]!.reach_version) !== checkedReachVersion)
+      throw new Error("teams_reach_changed");
     if (input.groupAudience) {
       const [current] = await rawRows<{ route_id: string; group_audience: TeamsGroupAudience }>(
         tx,
@@ -857,6 +872,31 @@ export async function markTeamsTurnAnswered(
       sql`update teams_bot_inbox set replied_at=now() where route_id=${r.route_id} and turn_id=${turnId}::uuid and replied_at is null`,
     );
   });
+}
+/**
+ * The routing notes (`payload.teamsRouting`) of the messages a turn answers,
+ * oldest first: what the ingress recorded about where each one was sent.
+ */
+export async function getTeamsTurnRouting(
+  db: Database,
+  i: TeamsInstallation,
+  r: TeamsRoute,
+  turnId: string,
+): Promise<Record<string, unknown>[]> {
+  return teamsScoped(db, i, async (tx) =>
+    (
+      await rawRows<{ routing: unknown }>(
+        tx,
+        sql`select payload->'teamsRouting' as routing from teams_bot_inbox
+          where route_id=${r.route_id} and turn_id=${turnId}::uuid order by created_at,event_id limit 20`,
+      )
+    )
+      .map((row) => row.routing)
+      .filter(
+        (routing): routing is Record<string, unknown> =>
+          typeof routing === "object" && routing !== null && !Array.isArray(routing),
+      ),
+  );
 }
 export async function enqueueTeamsOutput(
   db: Database,
