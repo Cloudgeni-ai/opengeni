@@ -370,8 +370,19 @@ export function TurnSummary({
         failureText,
         settling || settlePhase ? undefined : durationMs,
         contextCompactionCount ?? 0,
+        unloadedSteps ?? false,
       ),
-    [items, outcome, failureText, durationMs, settling, settlePhase, contextCompactionCount, t],
+    [
+      items,
+      outcome,
+      failureText,
+      durationMs,
+      settling,
+      settlePhase,
+      contextCompactionCount,
+      unloadedSteps,
+      t,
+    ],
   );
   const facetDefinitions = useMemo(
     () => resolveTurnSummaryFacets(facetConfiguration),

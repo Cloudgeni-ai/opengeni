@@ -185,8 +185,9 @@ export function TurnSummary({
         failureText,
         durationMs,
         contextCompactionCount ?? 0,
+        unloadedSteps ?? false,
       ),
-    [t, items, outcome, failureText, durationMs, contextCompactionCount],
+    [t, items, outcome, failureText, durationMs, contextCompactionCount, unloadedSteps],
   );
   const definitions = useMemo(
     () => resolveTurnSummaryFacets(facetConfiguration),
