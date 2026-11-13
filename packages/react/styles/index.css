@@ -254,6 +254,7 @@
 
   --color-og-status-queued: var(--og-color-status-queued);
   --color-og-status-running: var(--og-color-status-running);
+  --color-og-charge: var(--og-color-charge);
   --color-og-status-idle: var(--og-color-status-idle);
   --color-og-status-waiting: var(--og-color-status-waiting);
   --color-og-status-failed: var(--og-color-status-failed);
@@ -801,6 +802,7 @@
     --og-color-accent-soft: Canvas;
     --og-color-status-queued: CanvasText;
     --og-color-status-running: CanvasText;
+    --og-color-charge: Highlight;
     --og-color-status-idle: CanvasText;
     --og-color-status-waiting: CanvasText;
     --og-color-status-failed: CanvasText;

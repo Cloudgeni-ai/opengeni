@@ -119,3 +119,5 @@ export type {
 } from "./voice-recording-store";
 
 export { ModelPolicyPickerMenu } from "./components/model-policy-picker-menu";
+export { ComposerModelPicker, ModelLevelPicker } from "./components/model-level-picker";
+export type { ModelLevel, ModelLevelPickerProps } from "./components/model-level-picker";
