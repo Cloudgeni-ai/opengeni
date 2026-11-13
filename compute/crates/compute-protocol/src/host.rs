@@ -773,6 +773,13 @@ pub enum Request {
         /// The OCI image, pinned by digest: `registry/repository@sha256:…`,
         /// optionally with its tag before the digest.
         image: String,
+        /// The image creates of this name start from now, usually built
+        /// from the OCI image's version before. A host that keeps it builds
+        /// by changing a copy of it, so the two images share all but what
+        /// changed and hosts and the store holding it need only that (ADR
+        /// 40); one that does not builds a new file system.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<ImageId>,
     },
     /// Store a copy of a sandbox's disk as a sandbox image, from which
     /// creates may start

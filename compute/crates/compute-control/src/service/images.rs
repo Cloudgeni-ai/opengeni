@@ -68,6 +68,9 @@ impl<S: Store> Service<S> {
         let target = &live[turn % live.len()].target;
         let request = Request::Prepare {
             image: source.to_owned(),
+            // What the name starts from now: the host builds over it if it
+            // keeps it (ADR 40).
+            before: self.settings().images.get(name).flatten(),
         };
         let answered = self
             .hosts
