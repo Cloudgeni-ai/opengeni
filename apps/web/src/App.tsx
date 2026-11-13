@@ -111,8 +111,10 @@ import {
 import { parseApiKeyParam } from "@/lib/api-keys-route";
 import {
   consoleHostRedirectPath,
+  parseConsoleMembersSearch,
   parseConsoleSearch,
   parseConsoleSessionsSearch,
+  parseConsoleUsageSearch,
 } from "@/lib/console-route";
 import { isNativeAppPlatform, type NativeSignInSearch } from "@/lib/native-sign-in-context";
 import { siteAuthSearch } from "@/lib/site-auth";
@@ -666,11 +668,13 @@ const consoleAgentsRoute = createRoute({
 const consoleMembersRoute = createRoute({
   getParentRoute: () => consoleRoute,
   path: "members",
+  validateSearch: parseConsoleMembersSearch,
   component: LazyConsoleMembersRoute,
 });
 const consoleUsageRoute = createRoute({
   getParentRoute: () => consoleRoute,
   path: "usage",
+  validateSearch: parseConsoleUsageSearch,
   component: LazyConsoleUsageRoute,
 });
 const consoleSettingsRoute = createRoute({

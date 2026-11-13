@@ -7,9 +7,11 @@ import {
   BookOpenIcon,
   BotIcon,
   Building2Icon,
+  ChevronsUpDownIcon,
   CreditCardIcon,
   KeyRoundIcon,
   LayoutDashboardIcon,
+  LogOutIcon,
   MenuIcon,
   MessagesSquareIcon,
   SettingsIcon,
@@ -43,8 +45,13 @@ import { ScopeSwitcherTrigger } from "@opengeni/react/ui/scope-switcher-trigger"
 import { NavGroup, NavItem } from "@opengeni/react/ui/settings-nav";
 import { Sheet, SheetContent, SheetTitle } from "@opengeni/react/ui/sheet";
 
-import { CONSOLE_PATH, type ConsoleSearch } from "@/lib/console-route";
-import { ConsoleContext, ConsoleForbidden, type ConsoleContextValue } from "./console-shared";
+import { CONSOLE_PATH, onConsoleHost, type ConsoleSearch } from "@/lib/console-route";
+import {
+  ConsoleContext,
+  ConsoleForbidden,
+  useConsoleSignOut,
+  type ConsoleContextValue,
+} from "./console-shared";
 
 type ConsoleDestination =
   | "/console"
@@ -95,12 +102,48 @@ function initial(label: string): string {
   return (label.replace(/^Org\s+/u, "").trim()[0] ?? "O").toUpperCase();
 }
 
+/** Who is signed in, and Sign out. On a Console host nothing here leads into the app. */
+function ConsoleAccountMenu({ label, role }: { label: string; role: string | null }) {
+  const context = useAppContext();
+  const signOut = useConsoleSignOut();
+  if (!label && !signOut) return null;
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          className="flex w-full min-w-0 items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-xs text-fg-muted hover:bg-bg-muted focus-visible:outline-2 focus-visible:outline-ring"
+          aria-label={`${label || "Account"}. Account menu`}
+        >
+          <span className="min-w-0 flex-1 truncate" title={label}>
+            {label}
+            {role ? ` · ${role}` : ""}
+          </span>
+          <ChevronsUpDownIcon aria-hidden="true" className="size-3.5 shrink-0" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" side="top" className="w-56">
+        {context.authSession?.user.email ? (
+          <DropdownMenuLabel className="truncate">{context.authSession.user.email}</DropdownMenuLabel>
+        ) : null}
+        {signOut ? (
+          <DropdownMenuItem variant="destructive" onSelect={signOut}>
+            <LogOutIcon />
+            Sign out
+          </DropdownMenuItem>
+        ) : null}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 export function ConsoleShellRoute() {
   const context = useAppContext();
   const navigate = useNavigate();
   const { org: requestedOrg } = useSearch({ strict: false }) as ConsoleSearch;
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const [menuOpen, setMenuOpen] = useState(false);
+  const consoleHost = onConsoleHost();
 
   const orgs = useMemo(() => {
     const all = organizationsForSubject(t, context.accessContext, context.workspaces);
@@ -196,15 +239,11 @@ export function ConsoleShellRoute() {
                 <DropdownMenuCheck checked={org.accountId === organization.accountId} />
               </DropdownMenuItem>
             ))}
-            {value?.appWorkspaceId ? (
+            {value ? (
               <>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem asChild>
-                  <Link
-                    to="/workspaces/$workspaceId/organization"
-                    params={{ workspaceId: value.appWorkspaceId }}
-                    search={{ section: "general" }}
-                  >
+                  <Link to="/console/settings" search={value.search}>
                     Rename organization
                   </Link>
                 </DropdownMenuItem>
@@ -234,14 +273,12 @@ export function ConsoleShellRoute() {
           </NavGroup>
         ))}
       </nav>
-      {displayName ? (
-        <div className="mt-auto w-full border-t border-border py-3">
-          <p className="truncate px-2.5 text-xs text-fg-muted" title={displayName}>
-            {displayName}
-            {role === "owner" ? " · Owner" : role === "admin" ? " · Admin" : ""}
-          </p>
-        </div>
-      ) : null}
+      <div className="mt-auto w-full border-t border-border py-2">
+        <ConsoleAccountMenu
+          label={displayName}
+          role={role === "owner" ? "Owner" : role === "admin" ? "Admin" : null}
+        />
+      </div>
     </div>
   );
 
@@ -277,6 +314,7 @@ export function ConsoleShellRoute() {
                 </a>
               </Button>
             ) : null}
+            {consoleHost ? null : (
             <Button variant="ghost" size="sm" asChild>
               {value?.appWorkspaceId ? (
                 <Link
@@ -293,6 +331,7 @@ export function ConsoleShellRoute() {
                 </Link>
               )}
             </Button>
+            )}
           </div>
         </header>
         <div className="min-h-0 flex-1 overflow-y-auto">

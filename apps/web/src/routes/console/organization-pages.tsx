@@ -1,28 +1,40 @@
-// Agents, Members and Usage: short Console pages that lean on the app's own
-// organization settings for anything beyond reading.
+// Agents, Members and Usage and billing. Members and billing are the app's
+// own organization settings pages, kept inside Console.
 import type { ConsoleRange } from "@opengeni/sdk";
-import { Link } from "@tanstack/react-router";
-import { ArrowUpRightIcon, BotIcon, CreditCardIcon, UsersIcon } from "lucide-react";
-import { useState } from "react";
+import { useNavigate, useSearch } from "@tanstack/react-router";
+import { BotIcon, CreditCardIcon, UsersIcon } from "lucide-react";
+import { lazy, Suspense, useEffect, useState } from "react";
+import { toast } from "sonner";
 
-import { Button } from "@opengeni/react/ui/button";
 import { EmptyState } from "@opengeni/react/ui/empty-state";
 import { ListRow, ListRowSkeleton, RowList } from "@opengeni/react/ui/list-row";
 import { PageHeader } from "@opengeni/react/ui/page-header";
 import { Section } from "@opengeni/react/ui/section";
 import { StatGroup, StatTile } from "@opengeni/react/ui/stat-tile";
-import { StatusBadge } from "@opengeni/react/ui/status-badge";
 
 import {
   ConsoleLoadError,
   ConsolePage,
-  formatCount,
   formatMicros,
   rangeLabel,
   useConsole,
-  useConsoleQuery,
 } from "./console-shared";
+import { OrganizationBillingPage } from "@/components/organization/billing-page";
+import { OrganizationPeoplePage } from "@/components/organization/people-page";
+import type { ConsoleMembersSearch, ConsoleUsageSearch } from "@/lib/console-route";
+
+import {
+  ConsoleOrganizationProvider,
+  useConsoleOrganizationAccess,
+  useConsoleOrganizationIdentity,
+} from "./console-organization";
 import { RangeControl, useConsoleSummary } from "./overview";
+
+const CheckoutCreditsCelebration = lazy(async () => {
+  const module =
+    await import("@opengeni/react/app/components/credits/checkout-credits-celebration");
+  return { default: module.CheckoutCreditsCelebration };
+});
 
 export function ConsoleAgentsRoute() {
   return (
@@ -38,101 +50,79 @@ export function ConsoleAgentsRoute() {
   );
 }
 
-/** A link into the app's organization settings, anchored on a workspace there. */
-function OrganizationSettingsLink({
-  section,
-  children,
-}: {
-  section: "people" | "billing";
-  children: string;
-}) {
-  const { appWorkspaceId } = useConsole();
-  if (!appWorkspaceId) return null;
-  return (
-    <Button variant="outline" asChild>
-      <Link
-        to="/workspaces/$workspaceId/organization"
-        params={{ workspaceId: appWorkspaceId }}
-        search={{ section }}
-      >
-        {children}
-        <ArrowUpRightIcon aria-hidden="true" />
-      </Link>
-    </Button>
-  );
-}
-
-function roleLabel(role: string): string {
-  return role === "owner" ? "Owner" : role === "admin" ? "Admin" : "Member";
-}
-
-/** Your product's end users can hold an organization membership; they aren't people on your team. */
-export function isEndUserSubject(subjectId: string): boolean {
-  return subjectId.startsWith("external_user:");
-}
-
 export function ConsoleMembersRoute() {
-  const { client, organizationId } = useConsole();
-  const members = useConsoleQuery(
-    () => client.listOrganizationAdministrationMembers(organizationId),
-    [client, organizationId],
-  );
-  const current = (members.data?.members ?? []).filter((member) => member.status !== "revoked");
-  const rows = current.filter((member) => !isEndUserSubject(member.subjectId));
-  const endUsers = current.length - rows.length;
+  const { appWorkspaceId } = useConsole();
+  const { person, invitation, view } = useSearch({ strict: false }) as ConsoleMembersSearch;
+  const access = useConsoleOrganizationAccess();
+  const subPage = Boolean(person || invitation || view);
   return (
     <ConsolePage>
-      <PageHeader
-        title="Members"
-        icon={<UsersIcon />}
-        description="The same people and roles as in Opengeni"
-        actions={
-          <OrganizationSettingsLink section="people">Manage members</OrganizationSettingsLink>
-        }
-      />
-      {members.error ? (
-        <ConsoleLoadError error={members.error} onRetry={members.reload} />
-      ) : !members.data ? (
-        <ListRowSkeleton count={4} />
-      ) : (
-        <>
-          <RowList
-            variant="table"
-            label="Members"
-            nameLabel="Member"
-            columns={[{ id: "role", label: "Role", width: 112 }]}
-          >
-            {rows.map((member) => (
-              <ListRow
-                key={member.id}
-                title={member.name ?? member.email ?? "Unnamed member"}
-                description={member.name && member.email ? member.email : undefined}
-                status={
-                  member.status === "active" ? undefined : (
-                    <StatusBadge
-                      variant="dot"
-                      status={member.status === "suspended" ? "suspended" : "invited"}
-                    />
-                  )
-                }
-                cells={{ role: roleLabel(member.role) }}
-              />
-            ))}
-          </RowList>
-          {endUsers > 0 ? (
-            <p className="mt-4 text-xs text-fg-muted">
-              End users of your product aren't listed ({formatCount(endUsers)}).
-            </p>
-          ) : null}
-        </>
-      )}
+      {subPage ? null : <PageHeader title="Members" icon={<UsersIcon />} />}
+      <ConsoleOrganizationProvider>
+        <OrganizationPeoplePage
+          workspaceId={appWorkspaceId ?? ""}
+          person={person}
+          invitation={invitation}
+          view={view}
+          canManageBilling={access.canManageBilling}
+          hideEndUsers
+        />
+      </ConsoleOrganizationProvider>
     </ConsolePage>
   );
 }
 
+// A Stripe return is a full page load: one report per outcome per document.
+const reportedCheckoutReturns = new Set<string>();
+
 export function ConsoleUsageRoute() {
+  const navigate = useNavigate();
+  const { client, organizationId, search } = useConsole();
+  const { workspace, checkout, checkoutSession } = useSearch({
+    strict: false,
+  }) as ConsoleUsageSearch;
+  const access = useConsoleOrganizationAccess();
+  const identity = useConsoleOrganizationIdentity();
   const [range, setRange] = useState<ConsoleRange>("30d");
   const summary = useConsoleSummary(range);
+  // Kept past the URL cleanup below, which drops the session id right away.
+  const [celebrated] = useState(() => checkoutSession ?? null);
+  useEffect(() => {
+    if (!checkout) return;
+    if (!reportedCheckoutReturns.has(checkout)) {
+      reportedCheckoutReturns.add(checkout);
+      if (checkout === "cancelled") toast("Checkout cancelled", { description: "No charge was made." });
+      else if (!checkoutSession) {
+        toast.success("Payment received", { description: "Your credits will appear shortly." });
+      }
+    }
+    void navigate({ to: "/console/usage", search, replace: true });
+  }, [checkout, checkoutSession, navigate, search]);
+
+  const billing = (
+    <ConsoleOrganizationProvider>
+      {celebrated && access.canReadBilling ? (
+        <Suspense fallback={null}>
+          <CheckoutCreditsCelebration
+            client={client}
+            accountId={organizationId}
+            checkoutSessionId={celebrated}
+          />
+        </Suspense>
+      ) : null}
+      <OrganizationBillingPage
+        key={organizationId}
+        identity={identity}
+        canReadBilling={access.canReadBilling}
+        canManageBilling={access.canManageBilling}
+        canManageAutomaticTopUp={access.canManageAutomaticTopUp}
+        budgetWorkspaceId={workspace}
+      />
+    </ConsoleOrganizationProvider>
+  );
+  // A workspace's budget page brings its own back link and title.
+  if (workspace) return <ConsolePage>{billing}</ConsolePage>;
+
   const data = summary.data;
   const total = data?.spend.totalMicros ?? 0;
   const share = (micros: number) => (total > 0 ? `${Math.round((micros / total) * 100)}%` : "—");
@@ -142,12 +132,7 @@ export function ConsoleUsageRoute() {
         title="Usage and billing"
         icon={<CreditCardIcon />}
         description={rangeLabel(range)}
-        actions={
-          <>
-            <RangeControl value={range} onChange={setRange} />
-            <OrganizationSettingsLink section="billing">Billing</OrganizationSettingsLink>
-          </>
-        }
+        actions={<RangeControl value={range} onChange={setRange} />}
       />
       {summary.error ? (
         <ConsoleLoadError error={summary.error} onRetry={summary.reload} />
@@ -215,6 +200,7 @@ export function ConsoleUsageRoute() {
           </p>
         </>
       )}
+      <Section title="Billing">{billing}</Section>
     </ConsolePage>
   );
 }

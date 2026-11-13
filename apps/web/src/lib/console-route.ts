@@ -21,6 +21,39 @@ export function parseConsoleSessionsSearch(search: Record<string, unknown>): Con
     : {};
 }
 
+/** Members: the person or invitation whose page is open, or Invite people. */
+export type ConsoleMembersSearch = { person?: string; invitation?: string; view?: "invite" };
+
+export function parseConsoleMembersSearch(search: Record<string, unknown>): ConsoleMembersSearch {
+  const result: ConsoleMembersSearch = {};
+  if (typeof search.person === "string" && search.person) result.person = search.person;
+  else if (typeof search.invitation === "string" && search.invitation) {
+    result.invitation = search.invitation;
+  } else if (search.view === "invite") result.view = "invite";
+  return result;
+}
+
+/** Usage and billing: a workspace's budget page, or a Stripe checkout's return. */
+export type ConsoleUsageSearch = {
+  workspace?: string;
+  checkout?: "success" | "cancelled";
+  checkoutSession?: string;
+};
+
+export function parseConsoleUsageSearch(search: Record<string, unknown>): ConsoleUsageSearch {
+  const result: ConsoleUsageSearch = {};
+  if (typeof search.workspace === "string" && UUID.test(search.workspace)) {
+    result.workspace = search.workspace;
+  }
+  if (search.checkout === "success" || search.checkout === "cancelled") {
+    result.checkout = search.checkout;
+  }
+  if (typeof search.checkoutSession === "string" && search.checkoutSession) {
+    result.checkoutSession = search.checkoutSession;
+  }
+  return result;
+}
+
 /**
  * Console's own hosts: a host whose first or second label is `console`
  * (console.opengeni.ai, staging.console.opengeni.ai), never consolex.* or app.*.
@@ -31,6 +64,11 @@ export function isConsoleHostname(hostname: string): boolean {
     (labels.length >= 2 && labels[0] === "console") ||
     (labels.length >= 3 && labels[1] === "console")
   );
+}
+
+/** Whether this page is served on a Console host, where nothing leads into the app. */
+export function onConsoleHost(): boolean {
+  return typeof window !== "undefined" && isConsoleHostname(window.location.hostname);
 }
 
 // Pages that keep their own path on the Console host: sign-in returns, invite
@@ -77,11 +115,16 @@ export function consoleHostRedirectPath(
   const organization = /^\/workspaces\/[^/]+\/organization\/?$/u.test(pathname);
   if (organization) {
     const target = ORGANIZATION_SECTION_PAGES[query.get("section") ?? ""] ?? CONSOLE_PATH;
-    // A Stripe checkout return keeps its outcome for the Usage and billing page.
+    // What the page had open stays open: a person or invitation, Invite
+    // people, a workspace's budget, a Stripe checkout's outcome.
+    const keep: Record<string, readonly string[]> = {
+      "/console/members": ["person", "invitation", "view"],
+      "/console/usage": ["workspace", "checkout", "checkoutSession"],
+    };
     const kept = new URLSearchParams();
-    for (const name of ["checkout", "checkoutSession"]) {
+    for (const name of keep[target] ?? []) {
       const value = query.get(name);
-      if (value && target === "/console/usage") kept.set(name, value);
+      if (value) kept.set(name, value);
     }
     const rest = kept.toString();
     return rest ? `${target}?${rest}` : target;

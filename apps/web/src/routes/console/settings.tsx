@@ -19,6 +19,9 @@ import {
   useConsole,
   useConsoleQuery,
 } from "./console-shared";
+import { OrganizationGeneralPage } from "@/components/organization/general-page";
+
+import { ConsoleOrganizationProvider } from "./console-organization";
 
 const REVIEW_LEVELS: { value: ConsoleReviewLevel; title: string; description: string }[] = [
   {
@@ -69,6 +72,9 @@ export function ConsoleSettingsRoute() {
   return (
     <ConsolePage>
       <PageHeader title="Settings" icon={<SettingsIcon />} />
+      <ConsoleOrganizationProvider>
+        <OrganizationGeneralPage />
+      </ConsoleOrganizationProvider>
       {settings.error ? (
         <ConsoleLoadError error={settings.error} onRetry={settings.reload} />
       ) : (

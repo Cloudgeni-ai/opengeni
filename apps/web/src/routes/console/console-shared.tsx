@@ -14,15 +14,21 @@ import {
   type ReactNode,
 } from "react";
 
+import { toast } from "sonner";
+
+import { useOptionalBrowserAccounts } from "@opengeni/react/accounts";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import { formatMoneyMicros } from "@opengeni/react/app/lib/format";
 import {
   apiErrorDetails,
   apiErrorFacts,
+  userErrorText,
   userErrorTextWithoutReference,
 } from "@opengeni/react/ui/api-error";
 import { Button } from "@opengeni/react/ui/button";
 import { EmptyState } from "@opengeni/react/ui/empty-state";
 import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { onConsoleHost } from "@/lib/console-route";
 
 export type ConsoleClient = ChatClient<OpenGeniBrowserClient>;
 
@@ -99,8 +105,28 @@ export function isReviewOff(error: unknown): boolean {
   return status === 403 && REVIEW_OFF.test(serverMessage ?? "");
 }
 
-/** Console is for owners and admins: say so, with the way back to the app. */
+/** Signs out of every account in this browser that Console is using. */
+export function useConsoleSignOut(): (() => void) | null {
+  const context = useAppContext();
+  const accounts = useOptionalBrowserAccounts();
+  if (context.clientConfig.auth.mode !== "managedSession") return null;
+  const browserAccounts = context.clientConfig.managedAuthSessionSetMode !== "legacy";
+  return () => {
+    const done =
+      browserAccounts && accounts ? accounts.logoutAll() : context.handleManagedSignOut();
+    void Promise.resolve(done).catch((error: unknown) =>
+      toast.error("Couldn't sign out", { description: userErrorText(error) }),
+    );
+  };
+}
+
+/**
+ * Console is for owners and admins: say so, with the way back to the app, or
+ * on a Console host (where nothing leads into the app) Sign out.
+ */
 export function ConsoleForbidden() {
+  const signOut = useConsoleSignOut();
+  const consoleHost = onConsoleHost();
   return (
     <EmptyState
       variant="page"
@@ -108,9 +134,17 @@ export function ConsoleForbidden() {
       title="Opengeni Console is for organization owners and admins"
       description="Ask an owner of this organization for access."
       action={
-        <Button variant="outline" asChild>
-          <Link to="/">Back to Opengeni</Link>
-        </Button>
+        consoleHost ? (
+          signOut ? (
+            <Button variant="outline" onClick={signOut}>
+              Sign out
+            </Button>
+          ) : undefined
+        ) : (
+          <Button variant="outline" asChild>
+            <Link to="/">Back to Opengeni</Link>
+          </Button>
+        )
       }
     />
   );

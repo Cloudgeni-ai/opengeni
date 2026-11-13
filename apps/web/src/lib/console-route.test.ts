@@ -3,8 +3,10 @@ import { describe, expect, test } from "bun:test";
 import {
   consoleHostRedirectPath,
   isConsoleHostname,
+  parseConsoleMembersSearch,
   parseConsoleSearch,
   parseConsoleSessionsSearch,
+  parseConsoleUsageSearch,
 } from "./console-route";
 
 const org = "11111111-1111-4111-8111-111111111111";
@@ -68,6 +70,12 @@ describe("consoleHostRedirectPath", () => {
         "?section=billing&checkout=success&checkoutSession=cs_1",
       ),
     ).toBe("/console/usage?checkout=success&checkoutSession=cs_1");
+    expect(
+      consoleHostRedirectPath("console.opengeni.ai", page, "?section=people&person=m1&tab=x"),
+    ).toBe("/console/members?person=m1");
+    expect(
+      consoleHostRedirectPath("console.opengeni.ai", page, `?section=billing&workspace=${org}`),
+    ).toBe(`/console/usage?workspace=${org}`);
     expect(consoleHostRedirectPath("console.opengeni.ai", page, "?section=models")).toBe(
       "/console",
     );
@@ -87,5 +95,10 @@ describe("Console search", () => {
     expect(parseConsoleSearch({ org: "acme" })).toEqual({});
     expect(parseConsoleSessionsSearch({ workspace: org })).toEqual({ workspace: org });
     expect(parseConsoleSessionsSearch({ workspace: 3 })).toEqual({});
+    expect(parseConsoleMembersSearch({ person: "m1", view: "invite" })).toEqual({ person: "m1" });
+    expect(parseConsoleMembersSearch({ view: "invite" })).toEqual({ view: "invite" });
+    expect(parseConsoleUsageSearch({ workspace: "x", checkout: "success" })).toEqual({
+      checkout: "success",
+    });
   });
 });
