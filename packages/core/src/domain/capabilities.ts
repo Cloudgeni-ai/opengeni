@@ -2389,7 +2389,7 @@ async function requireCatalogItem(
   return item;
 }
 
-function configuredMcpCatalogItems(
+export function configuredMcpCatalogItems(
   settings: Settings,
   nangoBackends: NangoBackends = new Map(),
 ): CapabilityCatalogItem[] {
@@ -2481,7 +2481,7 @@ function nangoConfiguredCatalogItem(
   });
 }
 
-function withoutNangoReplacedSocialItems(
+export function withoutNangoReplacedSocialItems(
   items: CapabilityCatalogItem[],
   nangoBackends: NangoBackends,
 ): CapabilityCatalogItem[] {

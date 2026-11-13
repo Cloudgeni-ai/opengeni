@@ -132,7 +132,9 @@ export function projectConnectionsForBackends<T extends ConnectionMetadata>(
   }
   return connections.map((connection) => {
     if (connection.status !== "active" && connection.status !== "needs_reauth") return connection;
-    const native = nativeNangoIntegrationForProviderDomain(connection.providerDomain);
+    const native = isNangoProviderDomain(connection.providerDomain)
+      ? null
+      : nativeNangoIntegrationForProviderDomain(connection.providerDomain);
     if (native && backends.has(native.integrationKey)) {
       const superseded = nangoOwners.has(
         `${native.integrationKey}\u0000${connection.subjectId ?? ""}`,

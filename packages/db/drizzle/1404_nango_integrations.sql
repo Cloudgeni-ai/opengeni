@@ -16,9 +16,10 @@
 --      native and Nango connections of one integration across organizations,
 --      used before and at a backend swap.
 --
--- Rolling: two new FORCE-RLS tables and two owner-only SECURITY INVOKER
--- functions the previous release never reads, writes or calls. No existing
--- object changes.
+-- Rolling: two new FORCE-RLS tables, one invoker view of the effective
+-- switch, two owner-only SECURITY INVOKER functions and one owner-only read
+-- policy on social_connections, none of which the previous release reads,
+-- writes or calls. No existing object is altered or dropped.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
 
@@ -53,6 +54,15 @@ CREATE TABLE integration_backend_revisions (
 CREATE INDEX integration_backend_revisions_key_idx
   ON integration_backend_revisions (integration_key, revision DESC);
 COMMENT ON TABLE integration_backend_revisions IS 'Append-only operator switch: which backend (native or nango) serves each catalog integration. The newest revision per key is effective.';
+
+-- The switch in effect right now, one row per integration key (read-only).
+CREATE VIEW integration_backends_effective WITH (security_invoker = true) AS
+  SELECT DISTINCT ON (integration_key)
+    integration_key, backend, nango_provider_config_key, enabled, definition,
+    revision, changed_by, reason, changed_at
+  FROM integration_backend_revisions
+  ORDER BY integration_key, revision DESC;
+COMMENT ON VIEW integration_backends_effective IS 'Newest integration_backend_revisions row per integration key. Nango serves a key only when backend = nango, enabled, and the deployment has a Nango secret key.';
 
 CREATE TABLE nango_usage_events (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -98,6 +108,7 @@ ALTER TABLE integration_backend_revisions FORCE ROW LEVEL SECURITY;
 ALTER TABLE nango_usage_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE nango_usage_events FORCE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE integration_backend_revisions FROM PUBLIC;
+REVOKE ALL ON TABLE integration_backends_effective FROM PUBLIC;
 REVOKE ALL ON TABLE nango_usage_events FROM PUBLIC;
 
 -- The setting is deployment-wide: every role that holds SELECT reads it.
@@ -244,6 +255,8 @@ BEGIN
     -- Exact grants, whatever the owner's default privileges gave the runtime.
     REVOKE ALL ON integration_backend_revisions, nango_usage_events FROM opengeni_app;
     GRANT SELECT ON integration_backend_revisions TO opengeni_app;
+    REVOKE ALL ON integration_backends_effective FROM opengeni_app;
+    GRANT SELECT ON integration_backends_effective TO opengeni_app;
     GRANT SELECT, INSERT ON nango_usage_events TO opengeni_app;
     REVOKE ALL ON FUNCTION set_integration_backend(text, text, text, boolean, jsonb, text, text) FROM opengeni_app;
     REVOKE ALL ON FUNCTION nango_affected_connections(text) FROM opengeni_app;

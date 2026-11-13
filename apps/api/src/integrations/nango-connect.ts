@@ -79,7 +79,17 @@ import { safeReturnPath } from "./oauth-return-path";
  * failures and deletions.
  */
 
-type NangoDeps = { db: Database; settings: Settings; fetchImpl?: typeof fetch };
+type NangoDeps = {
+  db: Database;
+  settings: Settings;
+  fetchImpl?: typeof fetch;
+  /** The effective backend switch; defaults to the cached deployment setting. */
+  nangoBackends?: () => Promise<ReadonlyMap<string, EffectiveNangoIntegration>>;
+};
+
+async function backendsFor(deps: NangoDeps) {
+  return deps.nangoBackends ? await deps.nangoBackends() : await nangoBackendsFor(deps.db, deps.settings);
+}
 
 export const NANGO_CONNECT_PATH = "/v1/integrations/nango/connect";
 export const NANGO_CONNECT_COMPLETE_PATH = "/v1/integrations/nango/connect/complete";
@@ -111,7 +121,7 @@ export async function nangoIntegrationForConnectTarget(
     nativeNangoIntegrationForMcpUrl(mcpUrl)?.integrationKey ??
     nangoToolsIntegrationKeyFromMcpUrl(mcpUrl);
   if (!key) return null;
-  return (await nangoBackendsFor(deps.db, deps.settings)).get(key) ?? null;
+  return (await backendsFor(deps)).get(key) ?? null;
 }
 
 function integrationOwnership(integration: EffectiveNangoIntegration): ConnectionOwnership {
@@ -317,7 +327,7 @@ export async function nangoConnectPage(
   // Tags are minted only for an owner the start verified; the webhook relies on it.
   if (!personalOwnerStateAccepted(state))
     throw new HTTPException(422, { message: "This account cannot own a personal connection" });
-  const integration = (await nangoBackendsFor(deps.db, deps.settings)).get(state.integrationKey);
+  const integration = (await backendsFor(deps)).get(state.integrationKey);
   if (!integration || integration.providerConfigKey !== state.providerConfigKey)
     throw new HTTPException(409, { message: "This integration is no longer connected through Nango" });
   const session = await nangoClient(deps).createConnectSession({
@@ -534,7 +544,7 @@ export async function completeNangoConnect(
     throw new HTTPException(403, { message: OAUTH_BROWSER_MISMATCH_MESSAGE });
   if (!personalOwnerStateAccepted(state))
     throw new HTTPException(422, { message: "This account cannot own a personal connection" });
-  const integration = (await nangoBackendsFor(deps.db, deps.settings)).get(state.integrationKey);
+  const integration = (await backendsFor(deps)).get(state.integrationKey);
   if (!integration || integration.providerConfigKey !== state.providerConfigKey)
     throw new HTTPException(409, { message: "This integration is no longer connected through Nango" });
   const client = nangoClient(deps);
@@ -785,7 +795,7 @@ export async function handleNangoWebhook(
   const integrationKey = event.tags.opengeni_integration;
   const attemptId = event.tags.opengeni_attempt_id;
   if (!accountId || !workspaceId || !subjectId || !integrationKey || !attemptId) return "ignored";
-  const backends = await nangoBackendsFor(deps.db, deps.settings);
+  const backends = await backendsFor(deps);
   const integration = backends.get(integrationKey);
   // Attempt tags are minted only after the page verified a signed start for
   // this owner (nangoConnectPage), so they carry that verification.
