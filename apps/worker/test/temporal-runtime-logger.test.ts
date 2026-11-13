@@ -49,10 +49,13 @@ test("the runtime forwards core logs and routes SDK records to the structured lo
         errorClass: "TemporalSdkOperationError",
         errorCode: "temporal_sdk_failure_logged",
         failureName: "Error",
+        // An arbitrary error's message is only ever logged as a hash.
+        failureMessageHash: expect.stringMatching(/^m_[0-9a-f]{12}$/),
         origin: "worker",
       },
     },
   ]);
+  expect(JSON.stringify(logged)).not.toContain("private cause");
 });
 
 test("installs the process runtime once and leaves an embedding host's runtime alone", () => {

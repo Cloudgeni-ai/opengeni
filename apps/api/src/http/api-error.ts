@@ -19,6 +19,7 @@ import {
   SessionUsageLimitUnavailableError,
   nestedPostgresSqlState,
   SessionApprovalForbiddenError,
+  SessionMissingFromWorkspaceError,
   WorkspaceControlBusyError,
   WorkspaceContentFlowRefusedError,
 } from "@opengeni/db";
@@ -56,6 +57,50 @@ export class ApiHttpError extends HTTPException {
     this.retryable = options.retryable;
     this.outcomeUnknown = options.outcomeUnknown;
     this.details = options.details;
+  }
+}
+
+/**
+ * A session deleted while the request read it. A request that names that
+ * session finds it gone (404); any other request, such as a list whose page
+ * included it, read a changing workspace (409). Only a read retries blindly:
+ * a write may have committed before its later read found the session gone.
+ */
+export function sessionMissingHttpError(
+  error: unknown,
+  requestUrl: string,
+  method: string,
+): ApiHttpError | null {
+  if (!(error instanceof SessionMissingFromWorkspaceError)) return null;
+  const url = new URL(requestUrl);
+  const sessionId = error.sessionId.toLowerCase();
+  const named = [
+    ...url.pathname.split("/").map(decodeURIComponentSafe),
+    ...url.searchParams.values(),
+  ].some((value) => value.toLowerCase() === sessionId);
+  if (named) {
+    return new ApiHttpError(404, {
+      code: "not_found",
+      message: "session not found",
+      retryable: false,
+    });
+  }
+  const read = method === "GET" || method === "HEAD";
+  return new ApiHttpError(409, {
+    code: "conflict",
+    message: read
+      ? "A session was deleted while the request read it. Retry the request."
+      : "A session was deleted while the request ran. Check whether the change applied before retrying.",
+    retryable: read,
+    outcomeUnknown: !read,
+  });
+}
+
+function decodeURIComponentSafe(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
   }
 }
 

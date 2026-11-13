@@ -47,6 +47,7 @@ import { Button } from "@opengeni/react/ui/button";
 import { SignInCallbackNotice } from "@/components/sign-in-callback-notice";
 import { NativeSignInProvider } from "@/lib/native-sign-in-context";
 import { PersonalSecurityProvider } from "@/lib/personal-security-context";
+import { renderedRoutePathname } from "@/lib/rendered-route-pathname";
 import { Input } from "@opengeni/react/ui/input";
 import { Label } from "@opengeni/react/ui/label";
 import { Toaster } from "@opengeni/react/app/components/toaster";
@@ -191,9 +192,10 @@ const webAppStateHost: AppStateHost = {
 };
 
 export function RootRouteComponent() {
-  const pathname = useRouterState({
-    select: (state) => state.location.pathname,
-  });
+  // Providers wrap the rendered page, so they follow the rendered route.
+  const pathname = useRouterState({ select: renderedRoutePathname });
+  // Analytics reports the address the person is on, not the route still shown.
+  const locationPathname = useRouterState({ select: (state) => state.location.pathname });
   const hasSearchParameters = useRouterState({
     select: (state) => Object.keys(state.location.search).length > 0,
   });
@@ -617,7 +619,7 @@ export function RootRouteComponent() {
             config={clientConfig.analytics}
             hasSearchParameters={hasSearchParameters}
             isPublicAuthRoute={isPublicAuthRoute}
-            pathname={pathname}
+            pathname={locationPathname}
             search={analyticsSearch}
           />
         </Suspense>

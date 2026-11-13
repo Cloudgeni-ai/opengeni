@@ -78,7 +78,74 @@ test("an activity failure becomes one JSON line without task token, identifiers 
     workflowType: "sandboxDrainWorkflow",
     attempt: 4890,
     durationMs: 12,
+    failureMessageHash: expect.stringMatching(/^m_[0-9a-f]{12}$/),
   });
+});
+
+test("a code-authored invariant failure logs its message template without identifiers", () => {
+  class SessionControlInvariantError extends Error {
+    override name = "SessionControlInvariantError";
+  }
+  const id = "3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
+  sdkLogger().warn("Activity failed", {
+    sdkComponent: "activity",
+    activityType: "peekSessionWork",
+    error: new SessionControlInvariantError(`Session ${id} does not exist in its workspace`),
+  });
+  // A workflow failure wraps the activity failure; the innermost cause explains it.
+  const wrapped = new Error("Activity task failed", {
+    cause: new SessionControlInvariantError(`Session ${id} does not exist in its workspace`),
+  });
+  sdkLogger().warn("Workflow failed", { sdkComponent: "workflow", error: wrapped });
+
+  expect(lines).toHaveLength(2);
+  for (const line of lines) expect(line.text).not.toContain(id);
+  const [activity, workflow] = lines.map((line) => JSON.parse(line.text));
+  expect(activity).toMatchObject({
+    failureName: "SessionControlInvariantError",
+    failureMessage: "Session <id> does not exist in its workspace",
+  });
+  expect(workflow.failureMessage).toBe("Session <id> does not exist in its workspace");
+  expect(workflow.failureMessageHash).toBe(activity.failureMessageHash);
+});
+
+test("a code-authored wrapper explains a failure instead of the driver error it wraps", () => {
+  class DatabaseTransactionError extends Error {
+    override name = "DatabaseTransactionError";
+  }
+  const postgres = Object.assign(new Error(`duplicate key value ${SENTINEL}`), {
+    name: "PostgresError",
+    severity: "ERROR",
+    code: "23505",
+  });
+  sdkLogger().warn("Activity failed", {
+    sdkComponent: "activity",
+    error: new DatabaseTransactionError("Database transaction settlement failed", {
+      cause: postgres,
+    }),
+  });
+  expect(lines[0]!.text).not.toContain(SENTINEL);
+  expect(JSON.parse(lines[0]!.text)).toMatchObject({
+    failureName: "DatabaseTransactionError",
+    failureMessage: "Database transaction settlement failed",
+    sqlState: "23505",
+  });
+});
+
+test("other failure messages are reduced to a stable hash of their template", () => {
+  sdkLogger().warn("Activity failed", {
+    sdkComponent: "activity",
+    error: new Error(`provider said ${SENTINEL} for 7 "quoted ${SENTINEL}"`),
+  });
+  sdkLogger().warn("Activity failed", {
+    sdkComponent: "activity",
+    error: new Error(`provider said ${SENTINEL} for 9 "other"`),
+  });
+  for (const line of lines) expect(line.text).not.toContain(SENTINEL);
+  const [first, second] = lines.map((line) => JSON.parse(line.text));
+  expect(first).not.toHaveProperty("failureMessage");
+  expect(first.failureMessageHash).toMatch(/^m_[0-9a-f]{12}$/);
+  expect(second.failureMessageHash).toBe(first.failureMessageHash);
 });
 
 /** The shape a refused database write reaches the SDK in: the persistence

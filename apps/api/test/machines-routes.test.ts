@@ -36,7 +36,9 @@ import {
   transitionSessionVisibility,
   type Database,
   type DbClient,
+  SessionMissingFromWorkspaceError,
 } from "@opengeni/db";
+import * as opengeniDb from "@opengeni/db";
 import { subjectFor } from "@opengeni/runtime";
 import { createApp } from "../src/app";
 import type { AppDependencies, SessionWorkflowClient } from "@opengeni/core";
@@ -736,6 +738,32 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
     expect(body.machines).toEqual([
       expect.objectContaining({ sandboxId: sandbox.id, active: false, isSessionGroup: false }),
     ]);
+  }, 60_000);
+
+  test("a session deleted while the list reads it is not found, not a server error", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, session, bus } = await seed({ sandboxBackend: "none" });
+    const app = appFor(bus);
+    const auth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read", "sessions:read"])}`;
+    // The session read loads the row, then evaluates its control in a later
+    // statement. A deletion that commits in between leaves the control read
+    // without the session, which is what this read then throws.
+    const read = spyOn(opengeniDb, "getSessionForSubject").mockImplementationOnce(async () => {
+      throw new SessionMissingFromWorkspaceError(session.id);
+    });
+    try {
+      const response = await app.request(
+        `/v1/workspaces/${workspaceId}/machines?sessionId=${session.id}`,
+        { headers: { authorization: auth } },
+      );
+      expect(read).toHaveBeenCalledTimes(1);
+      expect(response.status).toBe(404);
+      expect(await response.json()).toMatchObject({
+        error: { status: 404, code: "not_found", message: "session not found" },
+      });
+    } finally {
+      read.mockRestore();
+    }
   }, 60_000);
 
   test("a machine-home session exposes the deployment-managed fallback group", async () => {

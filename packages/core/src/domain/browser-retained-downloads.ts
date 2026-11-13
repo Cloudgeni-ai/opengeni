@@ -44,7 +44,9 @@ export function sanitizeWorkspaceFilename(filename: string): string {
     .replace(/[^A-Za-z0-9._ -]+/g, "_")
     .replace(/\s+/g, " ")
     .trim();
-  return safe || "file";
+  // `.` and `..` are directory segments, not names a sandbox can write a file
+  // under; any other name (including one containing `..`) stays as typed.
+  return safe && safe !== "." && safe !== ".." ? safe : "file";
 }
 
 /**

@@ -84368,6 +84368,19 @@ export function repairMissingQuiescenceReceiptWakes(
   return repairMissingQuiescenceReceiptWakesWith(peekSessionWork, db, limit, after);
 }
 
+async function sessionRowExists(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<boolean> {
+  const [row] = await db
+    .select({ id: schema.sessions.id })
+    .from(schema.sessions)
+    .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+    .limit(1);
+  return row !== undefined;
+}
+
 export async function peekSessionWork(
   db: Database,
   workspaceId: string,
@@ -84386,9 +84399,25 @@ export async function peekSessionWork(
         .limit(1);
       if (!visible) return { kind: "unavailable" };
     }
-    const effectiveControl = await evaluateSessionControl(scopedDb, workspaceId, sessionId, {
-      lock: "share",
-    });
+    let effectiveControl: Awaited<ReturnType<typeof evaluateSessionControl>>;
+    try {
+      effectiveControl = await evaluateSessionControl(scopedDb, workspaceId, sessionId, {
+        lock: "share",
+      });
+    } catch (error) {
+      // The shared workspace-control lock waits for a concurrent deletion to
+      // commit, so the session can vanish between the read above and this one.
+      // That is an absent session, observed exactly like the read below
+      // observes it, not a broken invariant (which would fail the activity and
+      // retry until the next attempt saw the deletion).
+      if (
+        error instanceof SessionControlInvariantError &&
+        !(await sessionRowExists(scopedDb, workspaceId, sessionId))
+      ) {
+        return { kind: observerAccountId ? "unavailable" : "idle" };
+      }
+      throw error;
+    }
     // This is an advisory control observation, not a session/configuration
     // read. Do not transfer frozen prompts, tool catalogs or other payloads
     // that none of the decisions below consumes.
