@@ -32686,8 +32686,11 @@
       "shape": {
         "$": "object",
         "$.account": "string!",
+        "$.capabilityId": "string? null",
+        "$.connectionId": "string?",
         "$.connector": "string!",
-        "$.identity": "ref(AttemptToolIdentity)!"
+        "$.identity": "ref(AttemptToolIdentity)!",
+        "$.shared": "boolean?"
       }
     },
     "ToolGatewaySiteConsentResponse": {
@@ -38259,12 +38262,17 @@
       "SiteTakedownRequest": "type",
       "SiteToolBridge": "type",
       "SiteToolCaller": "type",
+      "SiteToolCallFailedError": "value",
       "SiteToolCallRequest": "type",
       "SiteToolConnectionRequiredError": "value",
       "SiteToolConnectPrompt": "type",
       "SiteToolConsentDecision": "type",
       "SiteToolConsentDeclinedError": "value",
       "SiteToolConsentPrompt": "type",
+      "SiteToolFailure": "type",
+      "SiteToolFailureCode": "type",
+      "siteToolFailureMessage": "value",
+      "SiteToolFailurePrompt": "type",
       "SiteViewAs": "type",
       "SiteViewer": "type",
       "SiteViewerCapabilities": "type",
@@ -39872,12 +39880,17 @@
       "siteSessionPath": "value",
       "SiteToolBridge": "type",
       "SiteToolCaller": "type",
+      "SiteToolCallFailedError": "value",
       "SiteToolCallRequest": "type",
       "SiteToolConnectionRequiredError": "value",
       "SiteToolConnectPrompt": "type",
       "SiteToolConsentDecision": "type",
       "SiteToolConsentDeclinedError": "value",
-      "SiteToolConsentPrompt": "type"
+      "SiteToolConsentPrompt": "type",
+      "SiteToolFailure": "type",
+      "SiteToolFailureCode": "type",
+      "siteToolFailureMessage": "value",
+      "SiteToolFailurePrompt": "type"
     },
     "@opengeni/sdk/site-bridge-host": {
       "handleSiteBridgeRequest": "value",
@@ -46496,6 +46509,14 @@
       "ports",
       "start"
     ],
+    "SiteToolCallFailedError": [
+      "code",
+      "detail",
+      "details",
+      "outcomeUnknown",
+      "retryable",
+      "system"
+    ],
     "SiteToolConnectionRequiredError": [
       "code",
       "outcomeUnknown",
@@ -49695,6 +49716,26 @@
       ],
       "update": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateSiteAuthConnectionRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SiteAuthConnectionMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ]
+    },
+    "@opengeni/sdk:SiteToolCallFailedError": {
+      "code": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SiteToolFailureCode\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "detail": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSStringKeyword\"}}"
+      ],
+      "details": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"code\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"}}"
+      ],
+      "outcomeUnknown": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSBooleanKeyword\"}}"
+      ],
+      "retryable": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSBooleanKeyword\"}}"
+      ],
+      "system": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSStringKeyword\"}]}}"
       ]
     },
     "@opengeni/sdk:SiteToolConnectionRequiredError": {
@@ -60933,6 +60974,26 @@
     "@opengeni/sdk/site:OpenGeniSiteBridgeError": {},
     "@opengeni/sdk/site:OpenGeniSiteDataError": {},
     "@opengeni/sdk/site:OpenGeniSiteSqlError": {},
+    "@opengeni/sdk/site:SiteToolCallFailedError": {
+      "code": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SiteToolFailureCode\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "detail": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSStringKeyword\"}}"
+      ],
+      "details": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"code\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"}}"
+      ],
+      "outcomeUnknown": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSBooleanKeyword\"}}"
+      ],
+      "retryable": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSBooleanKeyword\"}}"
+      ],
+      "system": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSStringKeyword\"}]}}"
+      ]
+    },
     "@opengeni/sdk/site:SiteToolConnectionRequiredError": {
       "code": [
         "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":null}"

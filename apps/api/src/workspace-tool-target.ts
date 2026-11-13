@@ -61,6 +61,7 @@ import {
   readSiteToolAccountInventory,
   routeSiteTool,
   siteToolConsentChoices,
+  siteToolNotAvailableForViewer,
   type SiteToolAccount,
   type SiteToolRouting,
 } from "./site-tool-routing";
@@ -85,6 +86,11 @@ export type TargetGatewayOptions = {
   onFence?: (fence: TargetAuthorityFence) => void;
 };
 const unavailable = () => new HTTPException(404, { message: "tool_unavailable" });
+const isToolUnavailable = (error: unknown) =>
+  error instanceof HTTPException &&
+  !(error instanceof ApiHttpError) &&
+  error.status === 404 &&
+  error.message === "tool_unavailable";
 const key = (identity: ToolGatewayIdentity) =>
   JSON.stringify([identity.serverId, identity.toolName]);
 const sameIdentity = (a: ToolGatewayIdentity, b: ToolGatewayIdentity) => key(a) === key(b);
@@ -431,7 +437,13 @@ async function withTarget<T>(
       // A physical boundary that denied (or could not read) authority drops an
       // optional connector silently or fails a required one; report that
       // outcome instead of an opaque missing tool.
-      return await fence.settle(error);
+      return await fence.settle(
+        // A declared Site tool nothing in the viewer's inventory explains says
+        // so, instead of the bare unavailable-tool answer.
+        site?.routing.unresolved && isToolUnavailable(error)
+          ? siteToolNotAvailableForViewer()
+          : error,
+      );
     }
     return await use(prepared, tool, fence, site?.routing);
   } finally {
@@ -848,11 +860,11 @@ export async function describeWorkspaceSiteToolConsent(
     },
     options,
   );
-  const choices = siteToolConsentChoices(
-    await (options.readAccounts ?? readSiteToolAccountInventory)(deps, authorization.grant),
-    declared,
-    requested,
+  const inventory = await (options.readAccounts ?? readSiteToolAccountInventory)(
+    deps,
+    authorization.grant,
   );
+  const choices = siteToolConsentChoices(inventory, declared, requested);
   // What the call would do, read by the provider on the account the frame
   // preselects; the Site's own description of its arguments is not enough.
   const route = choices.connect
@@ -874,11 +886,18 @@ export async function describeWorkspaceSiteToolConsent(
       : null;
   return ToolGatewaySiteConsentResponse.parse({
     version: 1,
-    accounts: choices.accounts.map(({ identity, connector, account }) => ({
-      identity,
-      connector,
-      account,
-    })),
+    // The viewer's own connection and its capability, so the frame can offer
+    // Reconnect for that same account when it stops working.
+    accounts: choices.accounts.map(
+      ({ identity, connector, account, connectionId, canonicalServerId, shared }) => ({
+        identity,
+        connector,
+        account,
+        connectionId,
+        capabilityId: inventory.canonical.get(canonicalServerId)?.capabilityId ?? null,
+        shared: shared === true,
+      }),
+    ),
     selected: choices.selected,
     review,
     connect: choices.connect,

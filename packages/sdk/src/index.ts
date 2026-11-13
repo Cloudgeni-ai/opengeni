@@ -342,11 +342,16 @@ export {
   isSiteCatalogStaleError,
   SiteToolConsentDeclinedError,
   SiteToolConnectionRequiredError,
+  SiteToolCallFailedError,
+  siteToolFailureMessage,
 } from "./site-tool-bridge";
 export type {
   SiteToolConsentPrompt,
   SiteToolConsentDecision,
   SiteToolConnectPrompt,
+  SiteToolFailure,
+  SiteToolFailureCode,
+  SiteToolFailurePrompt,
   SiteToolBridge,
   SiteToolCaller,
   SiteToolCallRequest,

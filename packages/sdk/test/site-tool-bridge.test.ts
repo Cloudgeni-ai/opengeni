@@ -162,9 +162,15 @@ test("public Site bridge pins host authority, strips extra input and does not re
     siteVersionId: "foreign",
     approvalToken: "must-not-forward",
   };
-  await expect(bridge.call(hostile, { signal: new AbortController().signal })).rejects.toThrow(
-    "connection lost",
-  );
+  // A dropped connection may have run the call: a typed, plain unknown
+  // outcome, never run again; the original stays in `detail`.
+  await expect(
+    bridge.call(hostile, { signal: new AbortController().signal }),
+  ).rejects.toMatchObject({
+    code: "site_tool_outcome_unknown",
+    message: "Couldn't confirm this finished. Check before trying again.",
+    detail: expect.stringContaining("connection lost"),
+  });
   expect(requests).toEqual([
     {
       catalogDigest: catalog.digest,
@@ -237,7 +243,10 @@ test("inline HTML reuses the bridge without inventing a saved Site identity", as
   const signal = new AbortController().signal;
   expect((await bridge.catalog({ signal })).entries).toHaveLength(1);
   await bridge.call({ catalogDigest: catalog.digest, identity, arguments: {} }, { signal });
-  expect(calls).toEqual([{ catalogDigest: catalog.digest, identity, arguments: {} }]);
+  // The bridge pins one operation id, so a rerun is never a second call.
+  expect(calls).toEqual([
+    { catalogDigest: catalog.digest, identity, arguments: {}, operationId: expect.any(String) },
+  ]);
   await expect(
     bridge.call(
       {
@@ -247,7 +256,10 @@ test("inline HTML reuses the bridge without inventing a saved Site identity", as
       },
       { signal },
     ),
-  ).rejects.toThrow("not enabled");
+  ).rejects.toMatchObject({
+    code: "site_tool_unavailable",
+    detail: expect.stringContaining("not enabled"),
+  });
   expect(calls).toHaveLength(1);
 });
 

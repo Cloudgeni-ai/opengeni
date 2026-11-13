@@ -334,16 +334,44 @@ import {
 } from "./slack-rest-mcp";
 import {
   DATAVERSE_WEB_API_MCP_BRIDGE_ADAPTER,
+  DATAVERSE_WEB_API_TOOLS,
+  isDataverseMcpConfig,
   type DataverseWebApiMcpBridgeContext,
 } from "./dataverse-web-api-mcp";
 import {
   BUSINESS_CENTRAL_API_MCP_BRIDGE_ADAPTER,
+  BUSINESS_CENTRAL_API_TOOLS,
+  isBusinessCentralApiConfig,
   type BusinessCentralApiMcpBridgeContext,
 } from "./business-central-api-mcp";
 import {
   FINANCE_OPERATIONS_ODATA_MCP_BRIDGE_ADAPTER,
+  FINANCE_OPERATIONS_ODATA_TOOLS,
+  isFinanceOperationsMcpConfig,
   type FinanceOperationsODataMcpBridgeContext,
 } from "./finance-operations-odata-mcp";
+
+/**
+ * The fixed tool set of a built-in bridge that runs instead of a connector's
+ * hosted MCP server, or null when the connector's own server serves its tools.
+ * Anything that lists a connector's tools outside a run (such as its tool
+ * permissions) uses this, so it shows the tools agents actually call without
+ * asking a hosted server the bridge never uses.
+ */
+export function fixedBridgeConnectorTools(
+  url: string,
+  connectionRef: McpServerConnectionRef | undefined,
+): ReadonlyArray<{
+  name: string;
+  description?: string | undefined;
+  annotations?: Readonly<Record<string, boolean>>;
+  _meta?: Readonly<Record<string, unknown>>;
+}> | null {
+  if (isDataverseMcpConfig(url, connectionRef)) return DATAVERSE_WEB_API_TOOLS;
+  if (isBusinessCentralApiConfig(url, connectionRef)) return BUSINESS_CENTRAL_API_TOOLS;
+  if (isFinanceOperationsMcpConfig(url, connectionRef)) return FINANCE_OPERATIONS_ODATA_TOOLS;
+  return null;
+}
 
 import { McpResultCustomDataBridge, unwrapSdkMcpResultProjection } from "./mcp-result-custom-data";
 import {
@@ -8829,6 +8857,22 @@ function mcpOutcomeUncertainResponse(
   );
 }
 
+/**
+ * The typed error of a tool call that needs its connection signed in again:
+ * nothing reached the provider, so hosts such as a Site frame can offer
+ * Reconnect and run it again.
+ */
+function connectionAuthNeededError(message: string) {
+  return {
+    error: {
+      code: "connection_auth_needed",
+      message,
+      retryable: false,
+      outcomeUnknown: false,
+    },
+  };
+}
+
 function isAuthNeededMcpError(error: unknown): boolean {
   try {
     if (!(error instanceof Error)) {
@@ -11083,6 +11127,7 @@ export class PrefixedMcpServer implements MCPServer {
         return boundedMcpToolResult({
           isError: true,
           content: [{ type: "text", text: error.message }],
+          structuredContent: connectionAuthNeededError(error.message),
         });
       }
       // A brokered tools/call that receives 401 may already have changed provider
@@ -11125,6 +11170,7 @@ export class PrefixedMcpServer implements MCPServer {
         return boundedMcpToolResult({
           isError: true,
           content: [{ type: "text", text: MCP_AUTH_NEEDED_ERROR.message }],
+          structuredContent: connectionAuthNeededError(MCP_AUTH_NEEDED_ERROR.message),
         });
       }
       // A routed workspace mutation crossed provider admission but lost exact

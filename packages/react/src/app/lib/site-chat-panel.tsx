@@ -29,6 +29,29 @@ export function siteChatPanelStorageId(subjectId: string): string {
   return ["og.site-view.chat", `v${VERSION}`, encodeURIComponent(subjectId)].join(":");
 }
 
+type WaitingCandidate = Readonly<{
+  id: string;
+  status: string;
+  requiresActionSince?: string | null | undefined;
+}>;
+
+/**
+ * The Site conversation that has just started waiting for the person (an
+ * approval or question, such as one from the Site's own `ai.run`), newest
+ * first, so the panel can show it. `seen` holds the waits already known;
+ * a wait counts once, and the one already open never needs switching to.
+ */
+export function newlyWaitingConversation(
+  sessions: readonly WaitingCandidate[],
+  seen: ReadonlySet<string>,
+  openId: string | null,
+): { next: string | null; seen: Set<string> } {
+  const waiting = sessions.filter((session) => session.status === "requires_action");
+  const key = (session: WaitingCandidate) => `${session.id}:${session.requiresActionSince ?? ""}`;
+  const next = waiting.find((session) => session.id !== openId && !seen.has(key(session)));
+  return { next: next?.id ?? null, seen: new Set(waiting.map(key)) };
+}
+
 export function clampSiteChatWidth(width: number): number {
   if (!Number.isFinite(width)) return SITE_CHAT_DEFAULT_WIDTH;
   return Math.round(Math.min(SITE_CHAT_MAX_WIDTH, Math.max(SITE_CHAT_MIN_WIDTH, width)));
