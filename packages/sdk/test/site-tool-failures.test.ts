@@ -157,7 +157,9 @@ describe("Site tool failures reach the viewer as clear states", () => {
     expect(result).toMatchObject({
       isError: true,
       content: [{ type: "text", text: "Microsoft Dynamics didn't allow this for your account." }],
-      structuredContent: { error: { code: "site_tool_permission_denied", system: "Microsoft Dynamics" } },
+      structuredContent: {
+        error: { code: "site_tool_permission_denied", system: "Microsoft Dynamics" },
+      },
     });
   });
 

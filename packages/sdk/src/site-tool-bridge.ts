@@ -187,7 +187,10 @@ export function siteToolFailureKind(error: unknown): SiteToolFailureKind | null 
   if (error instanceof SiteToolCallFailedError) return null;
   if (error instanceof Error && error.name === "AbortError") return null;
   const { code, nested } = errorCodes(error);
-  if (SITE_TOOL_PASSTHROUGH_CODES.has(String(code)) || SITE_TOOL_PASSTHROUGH_CODES.has(String(nested)))
+  if (
+    SITE_TOOL_PASSTHROUGH_CODES.has(String(code)) ||
+    SITE_TOOL_PASSTHROUGH_CODES.has(String(nested))
+  )
     return null;
   const detail = error instanceof Error ? error.message : String(error);
   const outcomeUnknown =
@@ -741,7 +744,8 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
           consent.accounts.find(
             (candidate) => selected && identityKey(candidate.identity) === identityKey(selected),
           ) ?? (consent.accounts.length === 1 ? consent.accounts[0] : undefined);
-        system = account?.connector ?? consent.accounts[0]?.connector ?? consent.connect?.name ?? null;
+        system =
+          account?.connector ?? consent.accounts[0]?.connector ?? consent.connect?.name ?? null;
         if (
           kind.code === "site_tool_reconnect_required" &&
           account?.connectionId &&
@@ -763,7 +767,7 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
       message: kind.message ?? siteToolFailureMessage(kind.code, system),
     };
   };
-  const recovering = async <T,>(
+  const recovering = async <T>(
     identity: ToolGatewayIdentity | null,
     signal: AbortSignal,
     run: () => Promise<T>,
