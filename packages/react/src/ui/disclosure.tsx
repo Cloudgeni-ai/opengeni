@@ -51,6 +51,13 @@ export interface DisclosureProps {
   sheetDescription?: ReactNode | undefined;
   /** Sheet variant: footer actions. Defaults to one "Done" button. */
   sheetFooter?: ReactNode | undefined;
+  /** Sheet variant: the footer's quiet destructive action on the object ("Remove"). */
+  sheetFooterStart?: ReactNode | undefined;
+  /**
+   * Sheet variant: shown in place of the footer while set, such as a
+   * `DetailFooterConfirm` asking whether to remove the object.
+   */
+  sheetFooterConfirm?: ReactNode | undefined;
   className?: string | undefined;
   /** Classes on the row that opens it. */
   triggerClassName?: string | undefined;
@@ -167,6 +174,8 @@ export function Disclosure({
   sheetTitle,
   sheetDescription,
   sheetFooter,
+  sheetFooterStart,
+  sheetFooterConfirm,
   className,
   triggerClassName,
   contentClassName,
@@ -225,15 +234,17 @@ export function Disclosure({
           <DetailBody>
             <DetailSection className={contentClassName}>{children}</DetailSection>
           </DetailBody>
-          <DetailFooter>
-            {sheetFooter ?? (
-              <SheetClose asChild>
-                <Button type="button" className="pointer-coarse:h-11">
-                  Done
-                </Button>
-              </SheetClose>
-            )}
-          </DetailFooter>
+          {sheetFooterConfirm ?? (
+            <DetailFooter start={sheetFooterStart}>
+              {sheetFooter ?? (
+                <SheetClose asChild>
+                  <Button type="button" className="pointer-coarse:h-11">
+                    Done
+                  </Button>
+                </SheetClose>
+              )}
+            </DetailFooter>
+          )}
         </DetailSheetContent>
       </DetailSheet>
     );

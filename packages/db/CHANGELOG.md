@@ -1,5 +1,73 @@
 # @opengeni/db
 
+## 6.20.1
+
+### Patch Changes
+
+- @opengeni/codemode@6.20.1
+- @opengeni/codex@6.20.1
+- @opengeni/config@6.20.1
+- @opengeni/contracts@6.20.1
+- @opengeni/network@6.20.1
+- @opengeni/observability@6.20.1
+- @opengeni/subscriptions@6.20.1
+- @opengeni/xai-subscription@6.20.1
+
+## 6.20.0
+
+### Minor Changes
+
+- e37485b: An organization's Anthropic API connection can hold several API keys, for example one per Anthropic organization whose credits it uses. The connection's own key stays the first, so an organization with one key works exactly as before, and model ids stay `organization-anthropic/…`. Admins add, rename and remove keys under Models on the Anthropic API page; each new key is checked with Anthropic's free model listing first, stored encrypted and never shown again.
+
+  Each chat keeps one key, so its prompt cache stays warm, and moves to another key only when Anthropic refuses its key for lack of credits. A refused key is marked **Out of credits** and left out until an admin chooses **Serve again**; when every key is out of credits, the request fails without being sent. Rate limits keep their usual handling. Claude subscription models never use these keys, and nothing buys credits or enables top-ups.
+
+  New routes under `/v1/organizations/:organizationId/model-providers/anthropic/api-keys`; the SDK calls them with `listOrganizationAnthropicApiKeys`, `addOrganizationAnthropicApiKey`, `updateOrganizationAnthropicApiKey`, `removeOrganizationAnthropicApiKey` and `serveOrganizationAnthropicApiKeyAgain`.
+
+- 2a207b4: Microsoft Teams (with workspace routing) now serves agents whose Who can use it is `Anyone in <organization>` to full members of the connected Teams tenant who aren't in the agent's workspace, with Slack's open-agent rules: 1:1 chats only, never guests (Teams' `getMemberById` must say `userRole` "user" in the connected tenant), live organization membership at enqueue, admission and delivery, and a one-time notice that the workspace's members can see the chat, which runs as the agent's read-only service principal `teams-agent:<agentId>`. A one-off `in <Workspace>: …` message continues the person's chat there and its replies start with a `**Workspace**` header.
+
+  - Stored Teams chat choices and switch-card options must name a shared agent of the named workspace (`teams_route_target_invalid`); a card needs the person's live link (`teams_link_missing`) and holds at most 100 options (`TEAMS_ROUTE_PROMPT_MAX_OPTIONS`); a reach change committed during an enqueue's access check refuses it (`teams_reach_changed`).
+  - Breaking for direct `@opengeni/db` users: `clearTeamsChatChoice` takes `{ actorId, subjectId }` and clears only that person's choice. `listTeamsAgentDirectory` accepts `preferWorkspaceIds`, returns `organizationAccess` and reads up to 1,000 agents. New: `getTeamsAgentInWorkspace`, `getTeamsTurnRouting`, `teamsOrganizationAgentSubjectId`, `teamsOrganizationAgentIdFromSubject`, `TEAMS_ORGANIZATION_AGENT_ROUTE_PREFIX`, `AGENT_ORGANIZATION_ACCESS_SQL`.
+
+- 9c17a87: `tool_search` now shows an integration's Connect card itself when a search clearly names one integration the person can connect (exactly one named, by a distinctive mention such as "on Slack", "ClickUp" or "Airtabel"), instead of relying on the agent to call `capability_authorization_request` next. It posts the card through that same tool when the search call is accepted, with the same authorization, tool selection and policy, and does not post it again until the person writes (a first-connection card never stands in for a reconnect card); the search result then says the card is shown. Model calls of the tool are unchanged. Searches naming several integrations, an installed one, or a name used as an ordinary word keep today's notice, as does any search where the card tool answers without a card; when the card call fails or times out, the notice no longer says whether a card was shown.
+
+  Whether a card is in the chat is now stated in every result: `tool_search` results that name a connectable integration carry `connectCard` (`shown`, and when shown its `capabilityId`, `eventId` and `alreadyShown`), and every `capability_authorization_request` result carries `cardShown` (and `alreadyShown` for a repeat from search). `@opengeni/contracts` exports `TOOL_DISCOVERY_CARD_META_KEY`, the request `_meta` key that marks a card request from tool discovery, and `@opengeni/db`'s `appendTurnCapabilityCardOnce` takes an optional `{ sinceLatestMessage }` to reuse a card any turn shows since the person's latest message (only this turn's when no person has written), and now reuses only a card of the same kind (a first connection, or a reconnect of the same connection).
+
+### Patch Changes
+
+- ae3972e: The Microsoft Dynamics connection now supports Dynamics 365 Business Central. Paste the Business Central web client address (`https://businesscentral.dynamics.com/<tenant>/<environment>?company=…`) and sign in; one connection covers every company in the environment. Agents list companies and entities, query with OData, create, update and delete records and run actions such as posting, through the Business Central API (v2.0) as the signed-in user. Changes ask first by default.
+- 0e273b0: Opengeni Console can run as its own platform on a `console.*` or `*.console.*` host (console.opengeni.ai, staging.console.opengeni.ai). There, every page stays in Console: Console's own sign-in, Members, Usage and billing and the organization name inside Console, an account menu with Sign out, and no links into the app. Verification emails, invitation links, Google sign-in returns and Stripe returns open on the allowed host the request came from (`OPENGENI_BETTER_AUTH_ALLOWED_HOSTS`).
+
+  New optional `OPENGENI_BETTER_AUTH_COOKIE_PREFIX` renames the auth cookies (for example to keep staging apart from production on a shared parent domain). Unset keeps the current cookie names, so existing sessions stay signed in.
+
+  Console usage by model now reports calls and input, output and cached tokens from the credit ledger instead of zeros. GitHub sign-in is hidden on the Console host.
+
+- cf65a72: Fix several failures seen in production:
+
+  - An attached file whose name merely contains two dots (such as `notes..txt`) no longer fails the turn. Sandbox file names still refuse empty, `.`, `..`, path separators and NUL, and uploads name a bare `.` or `..` `file`.
+  - A completed video from an Only-me chat is delivered to the chat. The reconciliation service read the result as a service actor that could not see the private chat, so the operation retried forever with "Completed video generation lost its retained artifact".
+  - Checking a session's work while the session is being deleted reports it idle instead of failing the activity with `SessionControlInvariantError`.
+  - A chat deleted while its title is generated ends the title operation quietly instead of warning "Independent session title failed".
+  - A caller that disconnects from `POST /v1/workspaces/:workspaceId/tools/{resolve,invoke,target-approvals,manifest}` gets the client-gone 499 (empty body) instead of a 500, counted as `aborted` in `opengeni_tool_target_operations_total`.
+  - A request that reads a session deleted while it runs no longer fails with a 500 "Session … does not exist in its workspace". A request that names that session (for example `GET /v1/workspaces/:workspaceId/machines?sessionId=…`) answers 404 "session not found"; any other request, such as a list whose page included it, answers 409 (retryable only for reads). The missing-session case of `SessionControlInvariantError` is now the `SessionMissingFromWorkspaceError` subclass.
+  - The web app picks its root providers from the rendered route rather than the pending location, so navigating to Security settings or phone sign-in no longer shows "Opengeni app context is not ready".
+  - Temporal "Activity failed" / "Workflow failed" logs add `failureMessageHash` (a hash of the explaining cause's message with identifiers, numbers and quoted values removed) and, for code-authored invariant errors, that template as `failureMessage`.
+
+- Updated dependencies [ae3972e]
+- Updated dependencies [0e273b0]
+- Updated dependencies [52ef65b]
+- Updated dependencies [e37485b]
+- Updated dependencies [cf65a72]
+- Updated dependencies [6c10a4d]
+- Updated dependencies [9c17a87]
+  - @opengeni/contracts@6.20.0
+  - @opengeni/config@6.20.0
+  - @opengeni/observability@6.20.0
+  - @opengeni/codex@6.20.0
+  - @opengeni/codemode@6.20.0
+  - @opengeni/network@6.20.0
+  - @opengeni/subscriptions@6.20.0
+  - @opengeni/xai-subscription@6.20.0
+
 ## 6.19.0
 
 ### Patch Changes

@@ -344,6 +344,10 @@ import {
   isBusinessCentralApiConfig,
   type BusinessCentralApiMcpBridgeContext,
 } from "./business-central-api-mcp";
+import {
+  FINANCE_OPERATIONS_ODATA_MCP_BRIDGE_ADAPTER,
+  type FinanceOperationsODataMcpBridgeContext,
+} from "./finance-operations-odata-mcp";
 
 /**
  * The fixed tool set of a built-in bridge that runs instead of a connector's
@@ -1192,6 +1196,7 @@ type BuiltInMcpBridgeContext = GmailRestMcpBridgeContext &
   SlackRestMcpBridgeContext &
   DataverseWebApiMcpBridgeContext &
   BusinessCentralApiMcpBridgeContext &
+  FinanceOperationsODataMcpBridgeContext &
   DriveMcpBridgeContext;
 const BUILT_IN_MCP_BRIDGE_ADAPTERS: readonly LocalMcpBridgeAdapter<
   GmailRestMcpBridgeConfig,
@@ -1202,6 +1207,7 @@ const BUILT_IN_MCP_BRIDGE_ADAPTERS: readonly LocalMcpBridgeAdapter<
   SLACK_REST_MCP_BRIDGE_ADAPTER,
   DATAVERSE_WEB_API_MCP_BRIDGE_ADAPTER,
   BUSINESS_CENTRAL_API_MCP_BRIDGE_ADAPTER,
+  FINANCE_OPERATIONS_ODATA_MCP_BRIDGE_ADAPTER,
   DRIVE_MCP_BRIDGE_ADAPTER,
 ]);
 const SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS = 120_000;

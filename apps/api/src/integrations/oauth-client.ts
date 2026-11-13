@@ -851,10 +851,6 @@ function assertOAuthStartProfile(
   ) {
     throw new HTTPException(503, { message: profile.requireDeploymentClient.message });
   }
-  const unavailable = profile.unavailableMessage?.(settings, mcpUrl);
-  if (unavailable) {
-    throw new HTTPException(503, { message: unavailable });
-  }
 }
 
 /**

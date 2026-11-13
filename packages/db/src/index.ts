@@ -57719,42 +57719,13 @@ export async function endComputeGroupOfArchivedChats(
   input: { workspaceId: string; sandboxGroupId: string },
   bound?: DatabaseWorkBound,
 ): Promise<boolean> {
-  const chat = sql`chat`;
-  const root = sql`root`;
-  // Archived for a day: a chat restored sooner, by Undo or later, returns
-  // with the sandbox it had. One stored by the idle archiver (no archived_at)
-  // was unused for weeks already.
-  const archived = (alias: SQL) =>
-    sql`(${sessionArchivedSql(alias)} and (${alias}.archived_at is null
-      or ${alias}.archived_at <= now() - make_interval(secs => ${ARCHIVED_CHAT_SANDBOX_KEPT_SECONDS})))`;
   const scoped = withinWorkBound(db, bound, (boundedDb, limit) =>
     withWorkspaceRls(boundedDb, input.workspaceId, async (scopedDb) => {
       // The tenancy lock is held: the statements below get only the time left.
       await limit(scopedDb);
       const rows = await rawRows<{ unused: boolean }>(
         scopedDb,
-        sql`
-        select exists (
-          select 1 from sessions chat
-          where chat.workspace_id = ${input.workspaceId}
-            and chat.sandbox_group_id = ${input.sandboxGroupId}
-        ) and not exists (
-          select 1 from sessions chat
-          left join sessions root
-            on root.workspace_id = chat.workspace_id
-           and root.id = chat.root_session_id
-          where chat.workspace_id = ${input.workspaceId}
-            and chat.sandbox_group_id = ${input.sandboxGroupId}
-            and (
-              chat.status in ('queued', 'running', 'requires_action', 'recovering',
-                'waiting_capacity')
-              or not (
-                ${archived(chat)}
-                or (root.id is not null and ${archived(root)})
-              )
-            )
-        ) as unused
-      `,
+        sql`select ${sandboxGroupOnlyOfArchivedChatsSql(input)} as unused`,
       );
       if (rows[0]?.unused !== true) return false;
       const ended = await requestComputeGroupEndTx(scopedDb, {
@@ -57768,6 +57739,182 @@ export async function endComputeGroupOfArchivedChats(
     return await scoped;
   } catch (error) {
     // A deleted workspace took its chats and leases with it.
+    if (error instanceof Error && error.message === `Workspace not found: ${input.workspaceId}`) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Whether a sandbox group is named by chats that are all archived (the rule
+ * of {@link endComputeGroupOfArchivedChats}): each archived by the Archive
+ * action at least {@link ARCHIVED_CHAT_SANDBOX_KEPT_SECONDS} ago or stored by
+ * the idle archiver, a sub-chat with its root, and none with work under way.
+ * False for a group no chat names. Migration 1404's inventory repeats it.
+ */
+function sandboxGroupOnlyOfArchivedChatsSql(input: {
+  workspaceId: string;
+  sandboxGroupId: string;
+}): SQL {
+  const chat = sql`chat`;
+  const root = sql`root`;
+  // Archived for a day: a chat restored sooner, by Undo or later, returns
+  // with the sandbox it had. One stored by the idle archiver (no archived_at)
+  // was unused for weeks already.
+  const archived = (alias: SQL) =>
+    sql`(${sessionArchivedSql(alias)} and (${alias}.archived_at is null
+      or ${alias}.archived_at <= now() - make_interval(secs => ${ARCHIVED_CHAT_SANDBOX_KEPT_SECONDS})))`;
+  return sql`(exists (
+      select 1 from sessions chat
+      where chat.workspace_id = ${input.workspaceId}
+        and chat.sandbox_group_id = ${input.sandboxGroupId}
+    ) and not exists (
+      select 1 from sessions chat
+      left join sessions root
+        on root.workspace_id = chat.workspace_id
+       and root.id = chat.root_session_id
+      where chat.workspace_id = ${input.workspaceId}
+        and chat.sandbox_group_id = ${input.sandboxGroupId}
+        and (
+          chat.status in ('queued', 'running', 'requires_action', 'recovering',
+            'waiting_capacity')
+          or not (
+            ${archived(chat)}
+            or (root.id is not null and ${archived(root)})
+          )
+        )
+    ))`;
+}
+
+/** Migration 1404's inventory, withheld from the runtime for one release. */
+export const COLD_SANDBOXES_OF_ARCHIVED_CHATS_ROUTINE =
+  "opengeni_private.cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)";
+
+export type ColdSandboxOfArchivedChats = {
+  accountId: string;
+  workspaceId: string;
+  sandboxGroupId: string;
+};
+
+/** False while the deployment's database withholds the inventory (1404). */
+export async function coldSandboxesOfArchivedChatsAvailable(db: Database): Promise<boolean> {
+  const [row] = await rawRows<{ granted: boolean | null }>(
+    db,
+    sql`select has_function_privilege(
+      to_regprocedure(${COLD_SANDBOXES_OF_ARCHIVED_CHATS_ROUTINE})::oid, 'EXECUTE') as granted`,
+  );
+  return row?.granted === true;
+}
+
+/**
+ * Cold sandboxes of a backend other than compute (a stopped Modal or Docker
+ * box with its saved workspace) whose chats are all archived, by
+ * {@link sandboxGroupOnlyOfArchivedChatsSql}'s rule, in key order after
+ * `after`. Routing ids only; {@link forgetColdSandboxOfArchivedChats} checks
+ * again before it forgets one.
+ */
+export async function listColdSandboxesOfArchivedChats(
+  db: Database,
+  input: { after?: { workspaceId: string; sandboxGroupId: string } | null; limit: number },
+): Promise<ColdSandboxOfArchivedChats[]> {
+  const rows = await rawRows<{
+    account_id: string;
+    workspace_id: string;
+    sandbox_group_id: string;
+  }>(
+    db,
+    sql`select account_id, workspace_id, sandbox_group_id
+      from opengeni_private.cold_sandboxes_of_archived_chats_v1(
+        ${ARCHIVED_CHAT_SANDBOX_KEPT_SECONDS}::integer,
+        ${input.after?.workspaceId ?? null}::uuid,
+        ${input.after?.sandboxGroupId ?? null}::uuid,
+        ${input.limit}::integer
+      )`,
+  );
+  return rows.map((row) => ({
+    accountId: row.account_id,
+    workspaceId: row.workspace_id,
+    sandboxGroupId: row.sandbox_group_id,
+  }));
+}
+
+/**
+ * Forget the cold sandbox of chats that are all archived, as deleting those
+ * chats does: its lease rows go, with the saved workspace they name. The
+ * checkpoint ledger then deletes the provider snapshots nothing names any
+ * more (`gcSandboxCheckpointArtifacts`), and a chat restored later starts on
+ * a new sandbox, as one does whose sandbox was never created.
+ *
+ * Only a group whose every lease is cold and unheld, with no unsettled
+ * workspace write, running command or open terminal, is forgotten; anything
+ * else (a turn that arrived, a lock another writer holds) leaves it for a
+ * later pass. True when it was forgotten now.
+ */
+export async function forgetColdSandboxOfArchivedChats(
+  db: Database,
+  input: ColdSandboxOfArchivedChats,
+): Promise<boolean> {
+  try {
+    return await withRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (scopedDb) =>
+        await scopedDb.transaction(async (txRaw) => {
+          const tx = txRaw as unknown as Database;
+          const leases = await rawRows<{ id: string; forgettable: boolean }>(
+            tx,
+            sql`
+            select lease.id,
+              (lease.liveness = 'cold' and lease.backend not in ('compute', 'selfhosted')
+                and lease.refcount = 0 and lease.turn_holders = 0 and lease.viewer_holders = 0
+                and lease.instance_id is null and lease.archive_capture_id is null
+                and lease.reaper_hold_id is null and lease.rotation_requested_at is null
+                and lease.provider_deadline_at is null) as forgettable
+            from sandbox_leases lease
+            where lease.workspace_id = ${input.workspaceId}
+              and lease.sandbox_group_id = ${input.sandboxGroupId}
+            for update nowait
+          `,
+          );
+          if (leases.length === 0 || leases.some((lease) => !lease.forgettable)) return false;
+          const leaseIds = sql`(${sql.join(
+            leases.map((lease) => sql`${lease.id}::uuid`),
+            sql`, `,
+          )})`;
+          const [state] = await rawRows<{ unused: boolean; busy: boolean }>(
+            tx,
+            sql`select ${sandboxGroupOnlyOfArchivedChatsSql(input)} as unused,
+              (exists (select 1 from sandbox_lease_holders h where h.lease_id in ${leaseIds})
+                or exists (select 1 from sandbox_workspace_mutation_admissions admission
+                  where admission.lease_id in ${leaseIds} and admission.settled_at is null)
+                or exists (select 1 from sandbox_retained_processes process
+                  where process.lease_id in ${leaseIds} and process.state = 'active')
+                or exists (select 1 from sandbox_pty_sessions pty
+                  where pty.workspace_id = ${input.workspaceId}
+                    and pty.sandbox_group_id = ${input.sandboxGroupId}
+                    and pty.status = 'open')) as busy`,
+          );
+          if (state?.unused !== true || state.busy) return false;
+          await tx.execute(sql`delete from sandbox_leases where id in ${leaseIds}`);
+          return true;
+        }),
+    );
+  } catch (error) {
+    // Another writer holds the lease (55P03), or a row still names it: leave it
+    // for a later pass, as deleting the chats would.
+    let current: unknown = error;
+    for (let depth = 0; depth < 8 && current; depth += 1) {
+      const code =
+        typeof current === "object" && "code" in current
+          ? (current as { code?: unknown }).code
+          : undefined;
+      if (code === "55P03" || code === "23503") return false;
+      current =
+        typeof current === "object" && "cause" in current
+          ? (current as { cause?: unknown }).cause
+          : undefined;
+    }
     if (error instanceof Error && error.message === `Workspace not found: ${input.workspaceId}`) {
       return false;
     }

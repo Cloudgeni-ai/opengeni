@@ -671,7 +671,7 @@ export const CASES: readonly EvalCase[] = [
     servedBy: ["onedrive"],
   },
 
-  // ── Microsoft Dynamics (Dataverse / Dynamics 365 Sales) ───────────────────
+  // ── Microsoft Dynamics (Dataverse / Dynamics 365 Sales, Finance and Operations) ──
   ...notConnected("microsoft_dynamics", [
     {
       slug: "opportunities",
@@ -729,6 +729,22 @@ export const CASES: readonly EvalCase[] = [
     integration: "microsoft_dynamics",
     kind: "write",
     prompt: 'Create a customer in Business Central named "Halcyon eval {RUN}".',
+    verify: "receipts_only",
+  },
+  {
+    id: "microsoft_dynamics.read.fno-customer",
+    integration: "microsoft_dynamics",
+    kind: "read",
+    prompt:
+      "In Dynamics 365 Finance and Operations, what is the credit limit of customer US-001 in company USMF, and what is the customer's name?",
+    expectAnswer: [i("500,?000|500k"), i("contoso retail san diego")],
+  },
+  {
+    id: "microsoft_dynamics.write.fno-customer-group",
+    integration: "microsoft_dynamics",
+    kind: "write",
+    prompt:
+      'In Dynamics 365 Finance and Operations, create a customer group "HE{RUN}" in company USMF with the description "Halcyon eval {RUN}".',
     verify: "receipts_only",
   },
   {

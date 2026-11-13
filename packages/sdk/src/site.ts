@@ -33,6 +33,7 @@ export type {
   OpenGeniSiteAiRequest,
   OpenGeniSiteAiResult,
   OpenGeniSiteAiOptions,
+  OpenGeniSiteAiWait,
 } from "./site-ai";
 export {
   OpenGeniSiteSqlError,

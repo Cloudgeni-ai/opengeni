@@ -2992,6 +2992,12 @@ export function workspaceActorContextExempt(method: string, pathname: string): b
   )
     return true;
   if (/^\/v1\/workspaces\/[^/]+\/mcp(?:\/(?:docs|files))?$/.test(pathname)) return true;
+  // Linking a Slack account from a Slack link is for people who may have no
+  // access to the workspace yet: an organization member links without it, and
+  // anyone else asks for it. These routes require a managed sign-in and the
+  // signed link (or the request it prepared for that person) and scope their
+  // own reads and writes to the workspace.
+  if (isSlackUserLinkIntentRequest(method, pathname)) return true;
   if (
     method === "GET" &&
     publicWorkspaceBrowserRoutePatterns.some((route) => route.test(pathname))
@@ -2999,6 +3005,20 @@ export function workspaceActorContextExempt(method: string, pathname: string): b
     return true;
   }
   return method === "POST" && /^\/v1\/workspaces\/[^/]+\/github\/installations$/.test(pathname);
+}
+
+const SLACK_USER_LINK_INTENTS = String.raw`^/v1/workspaces/[^/]+/integrations/slack/user-link-intents`;
+const slackUserLinkIntentRoutes = {
+  POST: [
+    new RegExp(`${SLACK_USER_LINK_INTENTS}$`),
+    new RegExp(`${SLACK_USER_LINK_INTENTS}/[^/]+/(?:link|request-access|cancel)$`),
+  ],
+  GET: [new RegExp(`${SLACK_USER_LINK_INTENTS}/[^/]+$`)],
+} as const;
+
+function isSlackUserLinkIntentRequest(method: string, pathname: string): boolean {
+  const routes = slackUserLinkIntentRoutes[method as keyof typeof slackUserLinkIntentRoutes];
+  return routes?.some((route) => route.test(pathname)) ?? false;
 }
 
 function workspaceRequestRequiresCodexAccountPrevalidation(request: Request): boolean {

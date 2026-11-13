@@ -7,6 +7,7 @@ import "@/navigation-host";
 import type { AppApiHost } from "@opengeni/react/app/lib/app-api";
 import { configurePageAppHost } from "@opengeni/react/app/lib/app-host";
 import { lazySurface } from "@opengeni/react/app/lib/app-surfaces";
+import { requestAdminStepUp } from "@/lib/admin-step-up";
 
 export const webAppApiHost: AppApiHost = {
   apiBaseUrl,
@@ -17,6 +18,8 @@ export const webAppApiHost: AppApiHost = {
 
 configurePageAppHost({
   api: webAppApiHost,
+  // The console's own passkey prompt (AdminStepUpDialog), also for connect cards.
+  adminStepUp: requestAdminStepUp,
   surfaces: {
     pdfPreview: lazySurface(() => import("@/components/artifacts/pdf-file-preview")),
     codexSubscriptions: lazySurface(async () => ({

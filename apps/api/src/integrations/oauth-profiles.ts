@@ -19,7 +19,6 @@ import {
   googleCalendarToolSupportsScopes,
 } from "@opengeni/runtime/google-calendar-rest-mcp";
 import {
-  MICROSOFT_DYNAMICS_PRODUCT_LABELS,
   microsoftDynamicsDefaultScope,
   microsoftDynamicsProductForMcpUrl,
 } from "@opengeni/contracts/microsoft-dynamics";
@@ -152,8 +151,6 @@ export type OAuthProviderProfile = {
    * resources.
    */
   requireDeploymentClient?: { key: DeploymentManagedClientKey; message: string };
-  /** Deployment switch for the matched endpoint: a 503 message when it is off. */
-  unavailableMessage?: (settings: Settings, mcpUrl: string) => string | null;
   /** Suggested ownership; explicit choices remain subject to requiredOwnership. */
   defaultOwnership?: ConnectionOwnership;
   /** Built-in-only ownership restriction, including old reconnect/callback state. */
@@ -519,11 +516,6 @@ const MICROSOFT_DYNAMICS_PROFILE: OAuthProviderProfile = {
     message:
       "Microsoft Dynamics requires OPENGENI_MICROSOFT_DYNAMICS_CLIENT_ID and OPENGENI_MICROSOFT_DYNAMICS_CLIENT_SECRET",
   },
-  unavailableMessage: (settings, mcpUrl) =>
-    microsoftDynamicsProductForMcpUrl(mcpUrl) === "finance_operations" &&
-    !settings.microsoftDynamicsFinanceOperationsEnabled
-      ? `${MICROSOFT_DYNAMICS_PRODUCT_LABELS.finance_operations} isn't available on this deployment yet.`
-      : null,
   authorizationServer: {
     issuerOrigins: [MICROSOFT_LOGIN_ORIGIN],
     authorizationEndpointOrigins: [MICROSOFT_LOGIN_ORIGIN],

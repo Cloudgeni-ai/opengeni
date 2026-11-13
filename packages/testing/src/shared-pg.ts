@@ -1371,6 +1371,9 @@ export async function grantDeferredRuntimeAccess(
       opengeni_private.session_content_garbage_candidates_v1(integer),
       opengeni_private.collect_session_content_garbage_v1(uuid, uuid, integer)
       TO ${grantee};
+    GRANT EXECUTE ON FUNCTION
+      opengeni_private.cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)
+      TO ${grantee};
   `);
 }
 

@@ -39821,6 +39821,7 @@
       "OpenGeniSiteAiOptions": "type",
       "OpenGeniSiteAiRequest": "type",
       "OpenGeniSiteAiResult": "type",
+      "OpenGeniSiteAiWait": "type",
       "OpenGeniSiteBridgeCancelMessage": "type",
       "OpenGeniSiteBridgeConnectMessage": "type",
       "OpenGeniSiteBridgeError": "value",
@@ -42288,6 +42289,8 @@
       "sessionGoalStateLabel": "value"
     },
     "@opengeni/react/session-app": {
+      "AdminStepUpHandler": "type",
+      "AdminStepUpRequest": "type",
       "EditableArtifactSurfaceProps": "type",
       "MessageContextInput": "type",
       "MessageContextItem": "type",
