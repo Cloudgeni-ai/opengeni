@@ -1981,7 +1981,7 @@ const INVENTORY = {
     "## Autonomy and persistence": 3047,
     "# Destructive Actions": 547,
     "# Runtime mechanics": 20,
-    "## New messages while you work": 805,
+    "## New messages while you work": 589,
     "## Compaction": 698,
   },
   tools: { request_human_input: 2048 },
