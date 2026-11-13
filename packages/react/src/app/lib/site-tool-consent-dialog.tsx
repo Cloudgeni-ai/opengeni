@@ -257,33 +257,20 @@ export function SiteToolRecover({
   onDone: (again: boolean) => void;
 }) {
   const { failure } = request;
-  const { client } = useAppContext();
-  const connected = useRef(false);
   const answered = useRef(false);
   const answer = (again: boolean) => {
     if (answered.current) return;
     answered.current = true;
     onDone(again);
   };
-  if (failure.reconnect) {
+  if (failure.reconnect)
     return (
-      <McpConnectionCard
-        client={client}
+      <SiteToolReconnect
         workspaceId={request.workspaceId}
-        capabilityId={failure.reconnect.capabilityId}
-        name={failure.reconnect.name}
-        returnUrl={window.location.href}
-        reconnectConnectionId={failure.reconnect.connectionId}
-        personalOnly
-        dialogOnly
-        onConfigured={() => {
-          connected.current = true;
-          answer(true);
-        }}
-        onClose={() => answer(connected.current)}
+        reconnect={failure.reconnect}
+        onDone={answer}
       />
     );
-  }
   const retry = failure.retryable;
   return (
     <Dialog open onOpenChange={(open) => (open ? undefined : answer(false))}>
@@ -313,5 +300,36 @@ export function SiteToolRecover({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** The existing connect card, signing in to the viewer's same connection again. */
+function SiteToolReconnect({
+  workspaceId,
+  reconnect,
+  onDone,
+}: {
+  workspaceId: string;
+  reconnect: NonNullable<RecoverRequest["failure"]["reconnect"]>;
+  onDone: (connected: boolean) => void;
+}) {
+  const { client } = useAppContext();
+  const connected = useRef(false);
+  return (
+    <McpConnectionCard
+      client={client}
+      workspaceId={workspaceId}
+      capabilityId={reconnect.capabilityId}
+      name={reconnect.name}
+      returnUrl={window.location.href}
+      reconnectConnectionId={reconnect.connectionId}
+      personalOnly
+      dialogOnly
+      onConfigured={() => {
+        connected.current = true;
+        onDone(true);
+      }}
+      onClose={() => onDone(connected.current)}
+    />
   );
 }
