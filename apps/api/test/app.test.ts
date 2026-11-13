@@ -136,6 +136,30 @@ describe("API helpers", () => {
       false,
     );
     expect(workspaceActorContextExempt("GET", `/v1/workspaces/${workspace}/not-mcp`)).toBe(false);
+
+    // Slack account linking from a Slack link, for people who may have no
+    // workspace access yet: exactly these methods and paths.
+    const links = `/v1/workspaces/${workspace}/integrations/slack/user-link-intents`;
+    for (const [method, path] of [
+      ["POST", links],
+      ["GET", `${links}/request-1`],
+      ["POST", `${links}/request-1/link`],
+      ["POST", `${links}/request-1/request-access`],
+      ["POST", `${links}/request-1/cancel`],
+    ] as const) {
+      expect(workspaceActorContextExempt(method, path)).toBe(true);
+    }
+    for (const [method, path] of [
+      ["GET", links],
+      ["DELETE", `${links}/request-1`],
+      ["GET", `${links}/request-1/link`],
+      ["POST", `${links}/request-1/approve`],
+      ["POST", `${links}/request-1/link/extra`],
+      ["GET", `/v1/workspaces/${workspace}/members/access-requests/slack`],
+      ["POST", `/v1/workspaces/${workspace}/integrations/slack/user-links`],
+    ] as const) {
+      expect(workspaceActorContextExempt(method, path)).toBe(false);
+    }
   });
 
   test("keeps signed-state GitHub connect public until its route-specific browser grant", async () => {
