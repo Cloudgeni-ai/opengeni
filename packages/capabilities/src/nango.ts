@@ -251,6 +251,11 @@ export class NangoClient {
    * when Nango does not know it. Only its summary and granted scopes leave this
    * method; credentials in the response are never returned. `tags` is null
    * when the response carries no tags object.
+   *
+   * This read makes Nango refresh an expired token, and Nango answers 424
+   * when that refresh fails: that is returned as `refreshFailed: true` (with
+   * one auth error), not thrown. Use `listConnections` to read errors
+   * without a refresh.
    */
   async getConnection(
     connectionId: string,
@@ -259,6 +264,7 @@ export class NangoClient {
     | (Omit<NangoConnectionSummary, "tags"> & {
         tags: Record<string, string> | null;
         scopes: string[] | null;
+        refreshFailed: boolean;
       })
     | null
   > {
@@ -269,6 +275,17 @@ export class NangoClient {
     const path = `/connections/${encodeURIComponent(connectionId)}?${query.toString()}`;
     const result = await this.json("GET", path);
     if (result.status === 404) return null;
+    if (result.status === 424)
+      return {
+        connectionId,
+        providerConfigKey,
+        provider: null,
+        createdAt: null,
+        tags: null,
+        authErrors: 1,
+        scopes: null,
+        refreshFailed: true,
+      };
     if (result.status < 200 || result.status >= 300)
       throw new NangoApiError(
         `Nango GET /connections/{id} failed with ${result.status}`,
@@ -297,6 +314,7 @@ export class NangoClient {
         ? raw.errors.filter((error) => (error as { type?: unknown })?.type === "auth").length
         : 0,
       scopes: nangoReportedScopes(raw),
+      refreshFailed: false,
     };
   }
 

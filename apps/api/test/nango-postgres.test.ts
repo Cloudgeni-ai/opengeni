@@ -105,6 +105,8 @@ function fakeNango() {
     email: string;
     scope: string;
     authErrors: number;
+    /** GET /connections/{id} refreshes the token; Nango answers 424 when that fails. */
+    refreshFails?: boolean;
   };
   const remote: Remote[] = [];
   const requests: Array<{ method: string; url: URL }> = [];
@@ -138,6 +140,11 @@ function fakeNango() {
     const single = /^\/connections\/([^/]+)$/u.exec(url.pathname);
     if (single && method === "GET") {
       const entry = remote.find((candidate) => candidate.connectionId === single[1]);
+      if (entry?.refreshFails)
+        return Response.json(
+          { error: { code: "refresh_exhausted", message: "Connection refresh exhausted" } },
+          { status: 424 },
+        );
       return entry
         ? Response.json({
             connection_id: entry.connectionId,
@@ -292,6 +299,10 @@ describe("Nango connections in PostgreSQL", () => {
     ).toBe("ignored");
     expect((await nangoRows(target))[0]!.status).toBe("active");
     nango.remote[0]!.authErrors = 1;
+    nango.remote[0]!.refreshFails = true;
+    const singleReadsBefore = nango.requests.filter(
+      (request) => request.method === "GET" && request.url.pathname === "/connections/nw-1",
+    ).length;
     expect(
       await handleNangoWebhook(
         deps,
@@ -299,7 +310,14 @@ describe("Nango connections in PostgreSQL", () => {
       ),
     ).toBe("needs_reauth");
     expect((await nangoRows(target))[0]!.status).toBe("needs_reauth");
+    // The re-check reads the list (errors, no refresh), never the refreshing single read.
+    expect(
+      nango.requests.filter(
+        (request) => request.method === "GET" && request.url.pathname === "/connections/nw-1",
+      ).length,
+    ).toBe(singleReadsBefore);
     nango.remote[0]!.authErrors = 0;
+    nango.remote[0]!.refreshFails = false;
     expect(
       await handleNangoWebhook(
         deps,
@@ -366,6 +384,49 @@ describe("Nango connections in PostgreSQL", () => {
           request.url.pathname === "/connections" && request.url.searchParams.has("connectionId"),
       ),
     ).toBe(false);
+  });
+
+  test("a connection Nango cannot refresh (424) is never stored", async () => {
+    if (!shared) return;
+    const target = await owner("nango refresh exhausted");
+    const nango = fakeNango();
+    const token = await signedState(target);
+    const state = readNangoConnectState(settings, token);
+    const tags = nangoAttemptTags({ ...target, attemptId: state.nonce, integrationKey: "gmail" });
+    nango.remote.push({
+      connectionId: "nx-1",
+      tags,
+      email: "stale@example.com",
+      scope: "https://mail.google.com/",
+      authErrors: 1,
+      refreshFails: true,
+    });
+    const deps = {
+      db: client.db,
+      settings,
+      fetchImpl: nango.fetchImpl,
+      nangoBackends: async () => backends,
+    };
+    // The backup finalizer ignores it.
+    expect(
+      await handleNangoWebhook(
+        deps,
+        webhook(target, "nx-1", { operation: "creation", success: true, tags }),
+      ),
+    ).toBe("unknown_connection");
+    // The page's completion refuses it and stops its Nango billing.
+    await expect(
+      completeNangoConnect(deps, {
+        state: token,
+        browser: { bindingDigests: [], signedInSubjectId: null },
+      }),
+    ).rejects.toMatchObject({ status: 422 });
+    expect(await nangoRows(target)).toHaveLength(0);
+    expect(
+      nango.requests.some(
+        (request) => request.method === "DELETE" && request.url.pathname === "/connections/nx-1",
+      ),
+    ).toBe(true);
   });
 
   test("disconnecting deletes the connection in Nango", async () => {

@@ -94,9 +94,12 @@ signature).
 - `auth` creation/override: backup finalizer for a connect attempt whose page
   was closed early. It reads the connection with `GET /connections/{id}` and
   requires the signed webhook's attempt tags (and the tags Nango reports for
-  the connection, when present) to match.
-- `auth` refresh failure: re-reads the connection with
-  `GET /connections/{id}?provider_config_key=…` and marks it
+  the connection, when present) to match. `GET /connections/{id}` refreshes the
+  token; Nango's 424 (refresh exhausted) means the connection is not stored,
+  here or on the page's completion (which also deletes it in Nango).
+- `auth` refresh failure: re-reads the connection from the list
+  (`GET /connections?connectionId=…`, matched on id and provider config key),
+  which reports errors without refreshing, and marks it
   `needs_reauth` only if Nango still reports an auth error; a later successful
   refresh (or a re-check without errors) marks it active again. Replays of an
   old event are therefore harmless.

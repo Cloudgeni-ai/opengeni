@@ -431,6 +431,8 @@ describe("NangoClient.getConnection", () => {
         const url = new URL(String(input));
         requests.push(url.pathname + url.search);
         if (url.pathname === "/connections/missing") return new Response("", { status: 404 });
+        if (url.pathname === "/connections/stale")
+          return Response.json({ error: { code: "refresh_exhausted" } }, { status: 424 });
         return Response.json({
           connection_id: "c-1",
           provider_config_key: "google-mail",
@@ -451,11 +453,19 @@ describe("NangoClient.getConnection", () => {
       tags: { opengeni_attempt_id: "a1" },
       authErrors: 1,
       scopes: ["a", "b"],
+      refreshFailed: false,
     });
     expect(JSON.stringify(connection)).not.toContain("provider-token");
     expect(requests[0]).toBe(
       "/connections/c-1?provider_config_key=google-mail&refresh_token=false",
     );
     expect(await client.getConnection("missing", "google-mail")).toBeNull();
+    // Nango refreshes on this read and answers 424 when that fails.
+    expect(await client.getConnection("stale", "google-mail")).toMatchObject({
+      refreshFailed: true,
+      authErrors: 1,
+      scopes: null,
+    });
+    expect(await client.connectionGrantedScopes("stale", "google-mail")).toBeNull();
   });
 });

@@ -462,15 +462,22 @@ async function readConnectionIdentity(
   return { label, metadata: key ? { [key]: label, accountEmail: label } : { accountLabel: label } };
 }
 
-/** Best effort: the provider's actual grants, or null to use the app's fixed scopes. */
+/**
+ * Best effort: the provider's actual grants, or null to use the app's fixed
+ * scopes. `refreshFailed` when Nango could not refresh the connection (424).
+ */
 async function readGrantedScopes(
   client: NangoClient,
   integration: EffectiveNangoIntegration,
   nangoConnectionId: string,
-): Promise<string[] | null> {
-  return await client
-    .connectionGrantedScopes(nangoConnectionId, integration.providerConfigKey)
+): Promise<{ scopes: string[] | null; refreshFailed: boolean }> {
+  const connection = await client
+    .getConnection(nangoConnectionId, integration.providerConfigKey)
     .catch(() => null);
+  return {
+    scopes: connection?.scopes ?? null,
+    refreshFailed: connection?.refreshFailed === true,
+  };
 }
 
 function nangoMetadata(
@@ -677,7 +684,15 @@ export async function completeNangoConnect(
       .catch(() => undefined);
     throw error;
   }
-  const grantedScopes = await readGrantedScopes(client, integration, match.connectionId);
+  const granted = await readGrantedScopes(client, integration, match.connectionId);
+  if (granted.refreshFailed) {
+    // Nango cannot refresh this connection: never store it as active.
+    await client
+      .deleteConnection(match.connectionId, state.providerConfigKey)
+      .catch(() => undefined);
+    throw new HTTPException(422, { message: "The account could not be verified. Connect again." });
+  }
+  const grantedScopes = granted.scopes;
   const success = (connection: ConnectionMetadata): NangoConnectCompletion => {
     if (state.returnUrl && (state.connectAttemptId || state.encryptedExternalContinuation))
       return { status: "complete", redirectTo: state.returnUrl, exactReturn: true };
@@ -956,8 +971,11 @@ export async function handleNangoWebhook(
       const current = await client.getConnection(event.connectionId, integration.providerConfigKey);
       // The webhook's tags are signed by Nango; tags the connection reports
       // now must match too when Nango returns them.
+      // A connection whose token Nango cannot refresh (424) is not stored;
+      // the user connects again.
       const verified =
         current &&
+        !current.refreshFailed &&
         nangoTagsMatchAttempt(event.tags, { ...owner, attemptId, integrationKey }) &&
         (current.tags === null ||
           nangoTagsMatchAttempt(current.tags, { ...owner, attemptId, integrationKey }));
@@ -995,10 +1013,14 @@ export async function handleNangoWebhook(
     case "refresh": {
       if (!stored) return "unknown_connection";
       // A signed webhook can still be replayed or arrive late: act only on
-      // what Nango reports for the connection now.
-      const current = await nangoClient(deps).getConnection(
-        event.connectionId,
-        event.providerConfigKey,
+      // what Nango reports now. The list read returns errors without
+      // refreshing (GET /connections/{id} would refresh and answer 424).
+      const current = (
+        await nangoClient(deps).listConnections({ connectionId: event.connectionId })
+      ).find(
+        (connection) =>
+          connection.connectionId === event.connectionId &&
+          connection.providerConfigKey === event.providerConfigKey,
       );
       if (!current) return "ignored";
       const failing = current.authErrors > 0;
