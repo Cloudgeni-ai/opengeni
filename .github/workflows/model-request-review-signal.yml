@@ -17,4 +17,4 @@ jobs:
       - name: Signal
         env:
           PULL: ${{ github.event.pull_request.number }}
-        run: echo "Review on #$PULL; the Model request review workflow evaluates it from main."
+        run: 'echo "Review on #$PULL; the Model request review workflow evaluates it from main."'
