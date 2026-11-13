@@ -466,8 +466,10 @@ renders, answers or skips that confirmation.
     (`tool_connection_needs_attention`, or a result with `connection_auth_needed`).
     Reconnect signs in to that same connection, the viewer's own or the
     workspace's shared one (`site-consent` accounts carry `connectionId`,
-    `capabilityId` and `shared`). The provider never received the call, so it
-    then runs as a new operation.
+    `capabilityId` and `shared`). A call Opengeni refused before dispatch
+    then runs again as a new operation (the provider never received it). A
+    provider's result asking to sign in again may come after it acted, so it
+    is returned as is and never run again; the Site calls again itself.
   - `site_tool_permission_denied`: the provider refused it for the viewer's
     account (a result with `provider_permission_denied`, e.g. missing Dynamics
     security roles). "Microsoft Dynamics didn't allow this for your account."

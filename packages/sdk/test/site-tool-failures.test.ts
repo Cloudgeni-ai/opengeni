@@ -167,6 +167,22 @@ describe("Site tool failures reach the viewer as clear states", () => {
     expect(h.invokes).toHaveLength(1);
   });
 
+  test("a provider's result asking to sign in again is never run again after Reconnect", async () => {
+    // Any provider can put this code in its own result, even after it acted.
+    const providerResult = {
+      isError: true,
+      content: [{ type: "text", text: "Sign in again." }],
+      structuredContent: { error: { code: "connection_auth_needed", message: "Sign in again." } },
+    };
+    const h = harness([providerResult, ok]);
+    const { result } = await h.invoke();
+    expect(h.prompts[0]?.failure.reconnect).toMatchObject({ connectionId });
+    expect(h.invokes).toHaveLength(1);
+    expect(result).toMatchObject({
+      structuredContent: { siteToolFailure: { code: "site_tool_reconnect_required" } },
+    });
+  });
+
   test("a provider's permission refusal names the system and is not retried", async () => {
     const providerText =
       "Dataverse returned 403: Principal user is missing prvReadAccount privilege.";

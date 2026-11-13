@@ -829,9 +829,13 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
   };
   /**
    * Runs `run` and, when it stops, asks the host what to do. `run(true)` after
-   * a reconnect: the connection had to sign in again, so the provider never
-   * received the call, and it runs as a new operation (the first one's
-   * approval is spent). Try again reuses the same operation.
+   * a reconnect: Opengeni refused the call before dispatch because the
+   * connection had to sign in again, so the provider never received it, and
+   * it runs as a new operation (the first one's approval is spent). A tool
+   * result asking to sign in again is the provider's own output and may come
+   * after it acted, so Reconnect is offered but the call is not run again:
+   * the Site gets the result and calls again itself. Try again reuses the
+   * same operation.
    */
   const recovering = async <T>(
     identity: ToolGatewayIdentity | null,
@@ -860,11 +864,11 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
           ? await input.recoverToolCall({ failure, signal }).catch(() => false)
           : false;
       signal.throwIfAborted();
-      if (again && failure.reconnect) {
+      if (again && failure.reconnect && value === undefined) {
         reconnected = true;
         continue;
       }
-      if (again && failure.retryable) continue;
+      if (again && failure.retryable && value === undefined) continue;
       if (value === undefined)
         throw Object.assign(new SiteToolCallFailedError(failure), { cause: thrown });
       return { ...value, result: siteToolFailureResult(resultOf(value)!, failure) } as T;
