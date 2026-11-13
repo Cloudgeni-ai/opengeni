@@ -454,6 +454,26 @@ renders, answers or skips that confirmation.
   keeps the unavailable-tool status, 404, with `details.code`
   `site_tool_not_available_for_viewer` and a message the Site can show; the
   parent bridge passes that code to the Site.
+- **Failures.** Every other way a call stops reaches the viewer as a plain
+  state in the Opengeni frame and the Site as a typed `code`, never an HTTP
+  status or internal error string (the original stays in `detail`). The
+  parent bridge classifies it (`recoverToolCall` is the host UI; the Site
+  receives `SiteToolCallFailedError`, or for a provider's refusal the result's
+  `structuredContent.error`), names the system from `tools/site-consent`, and
+  runs the call again when the viewer chooses to (at most three runs, never
+  after a refusal or an unknown outcome):
+  - `site_tool_reconnect_required`: the account's sign-in stopped working
+    (`tool_connection_needs_attention`, or a result with `connection_auth_needed`).
+    Reconnect signs in to that same connection (`site-consent` accounts carry
+    `connectionId` and `capabilityId`), then the call runs again.
+  - `site_tool_permission_denied`: the provider refused it for the viewer's
+    account (a result with `provider_permission_denied`, e.g. missing Dynamics
+    security roles). "Microsoft Dynamics didn't allow this for your account."
+    with Close.
+  - `site_tool_outcome_unknown`: it may have run; Close, never run again.
+  - `site_tool_not_available_for_viewer` and `site_tool_unavailable`: a
+    readable message with Try again.
+  Calls that stop the same way at once share one message and one answer.
 - **Confirmation.** `tools/invoke` answers 409 with `details.code`
   `tool_gateway_approval_required`, `site_tool_account_required` or
   `site_tool_connection_required`. The parent bridge (`createSiteToolBridge`

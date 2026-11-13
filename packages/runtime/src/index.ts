@@ -8848,6 +8848,22 @@ function mcpOutcomeUncertainResponse(
   );
 }
 
+/**
+ * The typed error of a tool call that needs its connection signed in again:
+ * nothing reached the provider, so hosts such as a Site frame can offer
+ * Reconnect and run it again.
+ */
+function connectionAuthNeededError(message: string) {
+  return {
+    error: {
+      code: "connection_auth_needed",
+      message,
+      retryable: false,
+      outcomeUnknown: false,
+    },
+  };
+}
+
 function isAuthNeededMcpError(error: unknown): boolean {
   try {
     if (!(error instanceof Error)) {
@@ -11102,6 +11118,7 @@ export class PrefixedMcpServer implements MCPServer {
         return boundedMcpToolResult({
           isError: true,
           content: [{ type: "text", text: error.message }],
+          structuredContent: connectionAuthNeededError(error.message),
         });
       }
       // A brokered tools/call that receives 401 may already have changed provider
@@ -11144,6 +11161,7 @@ export class PrefixedMcpServer implements MCPServer {
         return boundedMcpToolResult({
           isError: true,
           content: [{ type: "text", text: MCP_AUTH_NEEDED_ERROR.message }],
+          structuredContent: connectionAuthNeededError(MCP_AUTH_NEEDED_ERROR.message),
         });
       }
       // A routed workspace mutation crossed provider admission but lost exact

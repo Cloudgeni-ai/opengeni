@@ -323,6 +323,10 @@ export type ToolGatewaySiteConsentAccount = {
   identity: ToolGatewayIdentity;
   connector: string;
   account: string;
+  /** The viewer's own connection behind the route, for reconnecting it. */
+  connectionId?: string;
+  /** The catalog capability that reconnects it, when there is one. */
+  capabilityId?: string | null;
 };
 /** The provider's own reading of the call (for Gmail, the message as it would be sent). */
 export type ToolGatewaySiteConsentReview = {

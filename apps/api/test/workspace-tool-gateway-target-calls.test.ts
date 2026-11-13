@@ -2210,6 +2210,10 @@ describe("Site tool consent", () => {
       expect(choices.accounts.map((account) => account.identity).sort(byServer)).toEqual(
         [f.identity(f.shared), f.identity(f.personal)].sort(byServer),
       );
+      // Each names the viewer's own connection, so the frame can reconnect it.
+      expect(choices.accounts.every((account) => typeof account.connectionId === "string")).toBe(
+        true,
+      );
       const none = await describeWorkspaceSiteToolConsent(
         f.deps,
         targetAuthorization("human:target-call-none"),

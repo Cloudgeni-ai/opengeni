@@ -283,13 +283,15 @@ describe("Site tool consent in the host bridge", () => {
     expect(error).toMatchObject({
       code: "site_tool_not_available_for_viewer",
       message,
-      retryable: false,
       outcomeUnknown: false,
     });
-    // Nothing to confirm or connect, and nothing retried.
+    // Nothing to confirm or connect, and nothing retried without the viewer;
+    // the frame only looked up which system it was.
     expect(h.prompts).toHaveLength(0);
     expect(h.connectPrompts()).toBe(0);
-    expect(h.host).toHaveLength(0);
+    expect(h.host.map((request) => request.path)).toEqual([
+      "/v1/workspaces/workspace/tools/site-consent",
+    ]);
     expect(h.invokes).toHaveLength(1);
   });
 

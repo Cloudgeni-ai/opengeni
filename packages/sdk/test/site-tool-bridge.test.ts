@@ -162,9 +162,14 @@ test("public Site bridge pins host authority, strips extra input and does not re
     siteVersionId: "foreign",
     approvalToken: "must-not-forward",
   };
-  await expect(bridge.call(hostile, { signal: new AbortController().signal })).rejects.toThrow(
-    "connection lost",
-  );
+  // The Site gets a typed, plain failure; the original stays in `detail`.
+  await expect(
+    bridge.call(hostile, { signal: new AbortController().signal }),
+  ).rejects.toMatchObject({
+    code: "site_tool_unavailable",
+    message: "This didn't work.",
+    detail: expect.stringContaining("connection lost"),
+  });
   expect(requests).toEqual([
     {
       catalogDigest: catalog.digest,
@@ -247,7 +252,10 @@ test("inline HTML reuses the bridge without inventing a saved Site identity", as
       },
       { signal },
     ),
-  ).rejects.toThrow("not enabled");
+  ).rejects.toMatchObject({
+    code: "site_tool_unavailable",
+    detail: expect.stringContaining("not enabled"),
+  });
   expect(calls).toHaveLength(1);
 });
 

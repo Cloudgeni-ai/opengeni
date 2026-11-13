@@ -110,6 +110,158 @@ function siteToolNotAvailableForViewer(error: unknown): unknown {
   });
 }
 
+/**
+ * Why a Site's tool call didn't complete, as the viewer and Site code see it.
+ * Site code reads the same `code` on the error (or on the result's
+ * `structuredContent.error` for a provider's refusal).
+ * - `site_tool_reconnect_required`: the viewer's connection must sign in again.
+ * - `site_tool_permission_denied`: the provider refused it for the viewer's account.
+ * - `site_tool_not_available_for_viewer`: the Site's tool can't run for this viewer.
+ * - `site_tool_outcome_unknown`: it may have run; check before trying again.
+ * - `site_tool_unavailable`: anything else that stopped it.
+ */
+export type SiteToolFailureCode =
+  | "site_tool_reconnect_required"
+  | "site_tool_permission_denied"
+  | "site_tool_not_available_for_viewer"
+  | "site_tool_outcome_unknown"
+  | "site_tool_unavailable";
+export type SiteToolFailure = {
+  code: SiteToolFailureCode;
+  /** The system the tool belongs to ("Microsoft Dynamics"), when known. */
+  system: string | null;
+  /** One plain sentence for the viewer; never an HTTP status or internal code. */
+  message: string;
+  /** The viewer's own connection to sign in again, for `site_tool_reconnect_required`. */
+  reconnect: { connectionId: string; capabilityId: string; name: string } | null;
+  /** Running it again may help: false after a refusal or an unknown outcome. */
+  retryable: boolean;
+  /** The original error, for logs or a details toggle; not for the viewer's main text. */
+  detail: string;
+};
+export type SiteToolFailurePrompt = { failure: SiteToolFailure; signal: AbortSignal };
+
+/** A Site tool call that stopped; `code` says why (see `SiteToolFailureCode`). */
+export class SiteToolCallFailedError extends Error {
+  readonly code: SiteToolFailureCode;
+  readonly retryable: boolean;
+  readonly outcomeUnknown: boolean;
+  readonly system: string | null;
+  readonly detail: string;
+  constructor(failure: SiteToolFailure) {
+    super(failure.message);
+    this.name = "SiteToolCallFailedError";
+    this.code = failure.code;
+    this.retryable = failure.retryable;
+    this.outcomeUnknown = failure.code === "site_tool_outcome_unknown";
+    this.system = failure.system;
+    this.detail = failure.detail;
+  }
+}
+
+/** Codes the bridge passes through unchanged: SDK control flow or an answer already typed. */
+const SITE_TOOL_PASSTHROUGH_CODES = new Set([
+  "catalog_stale",
+  "tool_definition_stale",
+  "tool_reapproval_required",
+  "site_tool_consent_declined",
+  "site_tool_connection_required",
+  // Without the host's confirmation, the Site still learns what the call needs.
+  "tool_gateway_approval_required",
+  "site_tool_account_required",
+]);
+
+type SiteToolFailureKind = Pick<SiteToolFailure, "code" | "retryable" | "detail"> & {
+  /** Opengeni's own explanation for the viewer, when the server gave one. */
+  message?: string;
+};
+
+function errorCodes(error: unknown): { code: unknown; nested: unknown } {
+  if (typeof error !== "object" || error === null) return { code: undefined, nested: undefined };
+  const candidate = error as { code?: unknown; details?: { code?: unknown } | undefined };
+  return { code: candidate.code, nested: candidate.details?.code };
+}
+
+/** How a thrown Site tool error reaches the viewer, or null to pass it through. */
+export function siteToolFailureKind(error: unknown): SiteToolFailureKind | null {
+  if (error instanceof SiteToolCallFailedError) return null;
+  if (error instanceof Error && error.name === "AbortError") return null;
+  const { code, nested } = errorCodes(error);
+  if (SITE_TOOL_PASSTHROUGH_CODES.has(String(code)) || SITE_TOOL_PASSTHROUGH_CODES.has(String(nested)))
+    return null;
+  const detail = error instanceof Error ? error.message : String(error);
+  const outcomeUnknown =
+    typeof error === "object" &&
+    error !== null &&
+    (error as { outcomeUnknown?: unknown }).outcomeUnknown === true;
+  if (outcomeUnknown) return { code: "site_tool_outcome_unknown", retryable: false, detail };
+  if (nested === "tool_connection_needs_attention" || code === "connection_auth_needed")
+    return { code: "site_tool_reconnect_required", retryable: false, detail };
+  if (code === "site_tool_not_available_for_viewer")
+    // Already the server's own explanation (see siteToolNotAvailableForViewer).
+    return { code: "site_tool_not_available_for_viewer", retryable: true, detail, message: detail };
+  if (nested === "site_tool_not_available_for_viewer")
+    return { code: "site_tool_not_available_for_viewer", retryable: true, detail };
+  return { code: "site_tool_unavailable", retryable: true, detail };
+}
+
+/** A tool result the provider refused in a way the viewer can act on, or null. */
+function siteToolResultFailureKind(
+  result: ToolGatewayCallResponse["result"] | undefined,
+): SiteToolFailureKind | null {
+  if (!result?.isError) return null;
+  const error = (result.structuredContent as { error?: { code?: unknown; message?: unknown } })
+    ?.error;
+  const detail = typeof error?.message === "string" ? error.message : "";
+  if (error?.code === "connection_auth_needed")
+    return { code: "site_tool_reconnect_required", retryable: false, detail };
+  if (error?.code === "provider_permission_denied")
+    return { code: "site_tool_permission_denied", retryable: false, detail };
+  return null;
+}
+
+/** The viewer's sentence for a failure; it names the system when known. */
+export function siteToolFailureMessage(code: SiteToolFailureCode, system: string | null): string {
+  switch (code) {
+    case "site_tool_reconnect_required":
+      return system ? `Sign in to ${system} again to continue.` : "Sign in again to continue.";
+    case "site_tool_permission_denied":
+      return system
+        ? `${system} didn't allow this for your account.`
+        : "This wasn't allowed for your account.";
+    case "site_tool_not_available_for_viewer":
+      return "This isn't available to you on this Site.";
+    case "site_tool_outcome_unknown":
+      return system
+        ? `Couldn't confirm this finished. Check ${system} before trying again.`
+        : "Couldn't confirm this finished. Check before trying again.";
+    case "site_tool_unavailable":
+      return system ? `Couldn't get this from ${system}.` : "This didn't work.";
+  }
+}
+
+/** The same error result, with the viewer's typed code and sentence; the provider's text stays in `detail`. */
+function siteToolFailureResult(
+  result: NonNullable<ToolGatewayCallResponse["result"]>,
+  failure: SiteToolFailure,
+): ToolGatewayCallResponse["result"] {
+  return {
+    ...result,
+    content: [{ type: "text", text: failure.message }],
+    structuredContent: {
+      ...(result.structuredContent ?? {}),
+      error: {
+        code: failure.code,
+        message: failure.message,
+        system: failure.system,
+        retryable: false,
+        outcomeUnknown: false,
+        detail: failure.detail,
+      },
+    },
+  };
+}
+
 /** Server refusals that the Opengeni frame answers by asking the viewer. */
 const SITE_CONSENT_CODES = new Set([
   "tool_gateway_approval_required",
@@ -171,6 +323,12 @@ export type CreateSiteToolBridgeOptions = {
   confirmToolCall?: (prompt: SiteToolConsentPrompt) => Promise<SiteToolConsentDecision>;
   /** Host UI that lets the viewer connect an account; resolves true once connected. */
   connectForToolCall?: (prompt: SiteToolConnectPrompt) => Promise<boolean>;
+  /**
+   * Host UI for a call that didn't complete: Reconnect, a plain refusal, or
+   * Retry. Resolve true to run the call again (after Retry or a reconnect).
+   * Without it the Site still receives the typed `SiteToolCallFailedError`.
+   */
+  recoverToolCall?: (prompt: SiteToolFailurePrompt) => Promise<boolean>;
 } & (
   | { artifactId: string; siteVersionId: string; requestedTools: readonly ToolGatewayIdentity[] }
   | { artifactId?: never; siteVersionId?: never; requestedTools?: never }
@@ -429,7 +587,7 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
     signal.throwIfAborted();
     return catalog;
   };
-  return {
+  const bridge: SiteToolBridge = {
     ...(targeted ? { resolve, invoke } : {}),
     ...(input.fetchResponse && input.artifactId ? { siteData: true } : {}),
     ...(input.fetchResponse
@@ -562,7 +720,108 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
       }
     },
   };
+  // Every call that stops reaches the viewer as a clear state and the Site as
+  // a typed code, never a raw status or internal error string.
+  const describeFailure = async (
+    identity: ToolGatewayIdentity | null,
+    kind: SiteToolFailureKind,
+    signal: AbortSignal,
+  ): Promise<SiteToolFailure> => {
+    let system: string | null = null;
+    let reconnect: SiteToolFailure["reconnect"] = null;
+    if (identity && input.fetchResponse && input.artifactId) {
+      try {
+        const consent = await hostJson<ToolGatewaySiteConsentResponse>(
+          "site-consent",
+          { identity, siteArtifactId: input.artifactId, siteVersionId: input.siteVersionId },
+          signal,
+        );
+        const selected = consent.selected;
+        const account =
+          consent.accounts.find(
+            (candidate) => selected && identityKey(candidate.identity) === identityKey(selected),
+          ) ?? (consent.accounts.length === 1 ? consent.accounts[0] : undefined);
+        system = account?.connector ?? consent.accounts[0]?.connector ?? consent.connect?.name ?? null;
+        if (
+          kind.code === "site_tool_reconnect_required" &&
+          account?.connectionId &&
+          account.capabilityId
+        )
+          reconnect = {
+            connectionId: account.connectionId,
+            capabilityId: account.capabilityId,
+            name: account.connector,
+          };
+      } catch {
+        // Naming the system is best effort; the failure itself still reaches the viewer.
+      }
+    }
+    return {
+      ...kind,
+      system,
+      reconnect,
+      message: kind.message ?? siteToolFailureMessage(kind.code, system),
+    };
+  };
+  const recovering = async <T extends { result?: ToolGatewayCallResponse["result"] }>(
+    identity: ToolGatewayIdentity | null,
+    signal: AbortSignal,
+    run: () => Promise<T>,
+  ): Promise<T> => {
+    for (let attempt = 1; ; attempt += 1) {
+      let kind: SiteToolFailureKind | null;
+      let value: T | undefined;
+      let thrown: unknown;
+      try {
+        value = await run();
+        kind = siteToolResultFailureKind(value.result);
+        if (!kind) return value;
+      } catch (error) {
+        kind = siteToolFailureKind(error);
+        if (!kind || signal.aborted) throw error;
+        thrown = error;
+      }
+      const failure = await describeFailure(identity, kind, signal);
+      signal.throwIfAborted();
+      const again =
+        attempt < SITE_TOOL_RECOVERY_ATTEMPTS && input.recoverToolCall
+          ? await input.recoverToolCall({ failure, signal }).catch(() => false)
+          : false;
+      signal.throwIfAborted();
+      if (again && (failure.retryable || failure.reconnect)) continue;
+      if (value === undefined)
+        throw Object.assign(new SiteToolCallFailedError(failure), { cause: thrown });
+      return { ...value, result: siteToolFailureResult(value.result!, failure) };
+    }
+  };
+  const declaredIdentity = (target: ToolGatewayInvokeRequest["target"]) =>
+    "identity" in target ? target.identity : null;
+  const { resolve: bridgeResolve, invoke: bridgeInvoke, call: bridgeCall } = bridge;
+  return {
+    ...bridge,
+    ...(bridgeResolve
+      ? {
+          resolve: async (request: ToolGatewayResolveRequest, options: { signal: AbortSignal }) =>
+            await recovering(declaredIdentity(request.target), options.signal, () =>
+              bridgeResolve(request, options),
+            ),
+        }
+      : {}),
+    ...(bridgeInvoke
+      ? {
+          invoke: async (request: ToolGatewayInvokeRequest, options: { signal: AbortSignal }) =>
+            await recovering(declaredIdentity(request.target), options.signal, () =>
+              bridgeInvoke(request, options),
+            ),
+        }
+      : {}),
+    call: async (request, options) =>
+      await recovering(request.identity, options.signal, () => bridgeCall(request, options)),
+  };
 }
+
+/** Times a call runs in all: the first, then at most two after Retry or a reconnect. */
+const SITE_TOOL_RECOVERY_ATTEMPTS = 3;
 
 /** Saved Site bundles may treat a provider's error.code as retry authorization.
  * An executed result is data, never a pre-execution control signal. Only wrap

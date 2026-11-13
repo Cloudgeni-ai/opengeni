@@ -24,3 +24,11 @@ from the catalog:
 When exactly one environment still needs the caller's sign-in, the request
 shows that environment's own card instead of `input_required`. Without
 environments, the text is unchanged.
+
+An MCP tool result that needs its connection signed in again keeps its text
+and now also carries `structuredContent.error` with `code`
+`connection_auth_needed` (about +120 bytes). The Dynamics Web API bridge's
+error results for Microsoft's permission refusals carry `code`
+`provider_permission_denied`, and its sign-in refusals `connection_auth_needed`,
+beside the same message. Hosts such as the Site frame read the code; the text
+the model reads is unchanged.

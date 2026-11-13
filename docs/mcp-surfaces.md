@@ -398,8 +398,12 @@ review of the exact arguments (for Gmail, the message as it would be sent), then
 operation. A declared Site tool the viewer can neither use nor connect answers
 404 with `details.code` `site_tool_not_available_for_viewer`; publishing pairs
 the publisher's own account routes with their connector so other viewers get
-their own account or the connect card instead. See "Host-native consent" in
-`docs/design/workspace-html-sites-2026-09-01.md`.
+their own account or the connect card instead. Every other way a Site call
+stops reaches the viewer as a plain state and the Site as a typed `code`
+(`site_tool_reconnect_required`, `site_tool_permission_denied`,
+`site_tool_not_available_for_viewer`, `site_tool_outcome_unknown`,
+`site_tool_unavailable`); see "Failures" in the same design. See
+"Host-native consent" in `docs/design/workspace-html-sites-2026-09-01.md`.
 
 `POST tools/target-approvals` issues a version-2 binding over the existing
 executable effect digest and Site tuple. Exact caller, identity, arguments and

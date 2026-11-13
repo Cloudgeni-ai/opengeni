@@ -3,11 +3,21 @@ import type {
   SiteToolConnectPrompt,
   SiteToolConsentDecision,
   SiteToolConsentPrompt,
+  SiteToolFailurePrompt,
 } from "@opengeni/sdk/site";
 import { useEffect, useRef, useState } from "react";
 import { toolReviewAction } from "@opengeni/contracts";
 import { McpConnectionCard } from "../../components/session-mcp-capability-card";
+import { Button } from "../../ui/button";
 import { ConfirmDialog } from "../../ui/confirm-dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "../../ui/dialog";
 import { CheckboxField } from "../../ui/field";
 import { SelectMenu } from "../../ui/select-menu";
 import { useAppContext } from "../app-context";
@@ -229,5 +239,79 @@ export function SiteToolConnect({
       }}
       onClose={() => onDone(connected.current)}
     />
+  );
+}
+
+export type RecoverRequest = SiteToolFailurePrompt & { workspaceId: string };
+
+/**
+ * A Site tool call that didn't complete, in plain words with one action:
+ * Reconnect that same account, Try again, or Close. The original error is
+ * behind Details only.
+ */
+export function SiteToolRecover({
+  request,
+  onDone,
+}: {
+  request: RecoverRequest;
+  onDone: (again: boolean) => void;
+}) {
+  const { failure } = request;
+  const { client } = useAppContext();
+  const connected = useRef(false);
+  const answered = useRef(false);
+  const answer = (again: boolean) => {
+    if (answered.current) return;
+    answered.current = true;
+    onDone(again);
+  };
+  if (failure.reconnect) {
+    return (
+      <McpConnectionCard
+        client={client}
+        workspaceId={request.workspaceId}
+        capabilityId={failure.reconnect.capabilityId}
+        name={failure.reconnect.name}
+        returnUrl={window.location.href}
+        reconnectConnectionId={failure.reconnect.connectionId}
+        personalOnly
+        dialogOnly
+        onConfigured={() => {
+          connected.current = true;
+          answer(true);
+        }}
+        onClose={() => answer(connected.current)}
+      />
+    );
+  }
+  const retry = failure.retryable;
+  return (
+    <Dialog open onOpenChange={(open) => (open ? undefined : answer(false))}>
+      <DialogContent showCloseButton={false} className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle className="text-base">{failure.message}</DialogTitle>
+          {failure.code === "site_tool_permission_denied" && failure.system ? (
+            <DialogDescription>Ask whoever manages your {failure.system} access.</DialogDescription>
+          ) : null}
+        </DialogHeader>
+        {failure.detail ? (
+          <details className="text-sm text-fg-muted">
+            <summary className="cursor-pointer select-none">Details</summary>
+            <p className="mt-2 break-words">{failure.detail}</p>
+          </details>
+        ) : null}
+        <DialogFooter>
+          <Button
+            type="button"
+            variant={retry ? "default" : "ghost"}
+            className="min-h-11"
+            autoFocus
+            onClick={() => answer(retry)}
+          >
+            {retry ? "Try again" : "Close"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

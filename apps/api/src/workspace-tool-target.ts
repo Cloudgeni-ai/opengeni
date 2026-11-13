@@ -860,11 +860,11 @@ export async function describeWorkspaceSiteToolConsent(
     },
     options,
   );
-  const choices = siteToolConsentChoices(
-    await (options.readAccounts ?? readSiteToolAccountInventory)(deps, authorization.grant),
-    declared,
-    requested,
+  const inventory = await (options.readAccounts ?? readSiteToolAccountInventory)(
+    deps,
+    authorization.grant,
   );
+  const choices = siteToolConsentChoices(inventory, declared, requested);
   // What the call would do, read by the provider on the account the frame
   // preselects; the Site's own description of its arguments is not enough.
   const route = choices.connect
@@ -886,11 +886,17 @@ export async function describeWorkspaceSiteToolConsent(
       : null;
   return ToolGatewaySiteConsentResponse.parse({
     version: 1,
-    accounts: choices.accounts.map(({ identity, connector, account }) => ({
-      identity,
-      connector,
-      account,
-    })),
+    // The viewer's own connection and its capability, so the frame can offer
+    // Reconnect for that same account when it stops working.
+    accounts: choices.accounts.map(
+      ({ identity, connector, account, connectionId, canonicalServerId }) => ({
+        identity,
+        connector,
+        account,
+        connectionId,
+        capabilityId: inventory.canonical.get(canonicalServerId)?.capabilityId ?? null,
+      }),
+    ),
     selected: choices.selected,
     review,
     connect: choices.connect,
