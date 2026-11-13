@@ -1,5 +1,41 @@
 # @opengeni/db
 
+## 6.21.0
+
+### Minor Changes
+
+- 92396d0: A stopped Modal or Docker sandbox is forgotten a day after every chat that works in it is archived, as a compute sandbox is.
+
+  - Its saved workspace goes with it, and the checkpoint GC deletes the Modal snapshot it named, which had no expiry. Before, it was kept until the chats were deleted.
+  - The same rule as for compute: a chat restored within a day keeps its sandbox, one stored automatically after weeks unused loses it at once, and a sandbox shared by several chats stays while any of them is live. A chat restored later continues on a new sandbox and is told the old files are gone.
+  - New definer `opengeni_private.cold_sandboxes_of_archived_chats_v1` (migration 1404), withheld from the runtime for one release; until a later migration grants it nothing changes.
+
+### Patch Changes
+
+- 7d0d52b: Dynamics 365 Finance and Operations now works in every Microsoft Dynamics connection without a flag. Its tools run on the environment's OData data entities with the person's own sign-in, so customers no longer add Opengeni to **Allowed MCP clients** and calls don't use Copilot Credits. Agents list and describe data entities, query one company or all of them (with counts), and create, update and delete records; changes ask first. `OPENGENI_MICROSOFT_DYNAMICS_FINANCE_OPERATIONS_ENABLED` is removed and ignored if still set.
+
+  Existing Finance and Operations connections switch from the ERP MCP server's tools to the `fno_*` tools, so tool permissions saved under the old tool names no longer apply; set them again on the new tools. Tenants that consented before the app requested **Access Dynamics AX data** (`Odata.FullAccess`) need an administrator to consent again.
+
+- 3a1bc06: The retained-process reconciler no longer fails a whole pass when a process in another workspace becomes due while it takes its workspace fences.
+
+  - Migration 1405 makes `opengeni_private.claim_terminal_retained_processes` take the fences itself and claim only rows in the workspaces it fenced. A row that became due in between is left for the next pass.
+  - Before, on databases whose migration role bypasses row security (for example a superuser), such a row reached the claim's update and the session-tenancy fence trigger rejected it with SQLSTATE 55000, failing the reconcile pass.
+  - Same signatures, owner and grants; no runtime change is needed.
+
+- Updated dependencies [7d0d52b]
+- Updated dependencies [ef4c334]
+- Updated dependencies [ce864c0]
+- Updated dependencies [6ac2cd4]
+- Updated dependencies [6acbb24]
+  - @opengeni/config@6.21.0
+  - @opengeni/contracts@6.21.0
+  - @opengeni/codemode@6.21.0
+  - @opengeni/codex@6.21.0
+  - @opengeni/observability@6.21.0
+  - @opengeni/network@6.21.0
+  - @opengeni/subscriptions@6.21.0
+  - @opengeni/xai-subscription@6.21.0
+
 ## 6.20.1
 
 ### Patch Changes

@@ -1,5 +1,46 @@
 # @opengeni/react
 
+## 6.21.0
+
+### Minor Changes
+
+- 177e342: Hosts can replace the composer's full model picker with two or three named levels. Pass `modelPickerProps.levels` to `SessionConversation`, `NewConversation` or `OpenGeniChat.conversationProps`: each `ModelLevel` is a label, one catalog model, one reasoning effort and whether it offers Ultrafast. The composer then shows a small inline level control that people tap or swipe; Ultrafast can be offered on any level and takes a deliberate press and hold (or a push past the end of the last level), and shows its usage cost when it turns on. Omitting `levels` keeps the full picker, levels the workspace cannot run are left out, a new chat starts on the first level, and an existing chat on another model keeps it and shows its name until a level is picked. `ModelLevelPicker` and `ComposerModelPicker` are exported from `@opengeni/react` and `@opengeni/react/composer`, the renderer-neutral `modelLevelsView` and `modelLevelChoice` from `@opengeni/react/model-levels`, and React Native hosts get the same control as `ModelLevelControl` from `@opengeni/react-native/timeline`, with `onSelectionFeedback` for haptics and `startOnFirstLevel` for new-chat screens.
+- ef4c334: - My things: each of your own logins has Remove, which removes it from every workspace after you confirm.
+  - Connect cards: when turning an integration on waits for an admin to confirm with a passkey, the card offers that as its action. Hosts set it with `onAdminStepUp` on `SessionApp` (or `adminStepUp` on the app host); by default the Opengeni app's page for it opens, then Try again.
+  - `site.ai.run` and `site.ai.result` take `waitForApproval: true` to wait through approvals and input requests and resolve with the final result once the person answers in Opengeni; `onWait` reports the wait. Without it a wait still resolves as `pending`.
+  - Approval cards show each value of a small argument object (up to four plain values, such as an update's changed fields) on the card instead of a collapsed "1 field"; larger objects still open in Details.
+- a19c047: Turn summary facets now learn when they see only part of a turn. `TurnSummaryContext.unloadedSteps` is true when some of the turn's steps are not loaded: before the turn is opened, until its earlier pages are read, and on a long live turn whose collapsed row keeps only its newest steps. A count over `items` or `toolCalls` is then too low and can go down while the turn runs, so a facet can omit it or show it as a lower bound. The signal reaches every turn row, in both the readable and the classic presentation, on web and React Native. `@opengeni/react/timeline-model` adds the helpers that renderers use for it: `timelineTurnsWithUnloadedSteps`, `activityHasUnloadedSteps` and `turnGroupHasUnloadedSteps`.
+
+### Patch Changes
+
+- 6ac2cd4: A Site that uses a connected account now works for everyone who opens it. Publishing a Site that calls the publisher's own account (as an agent sees it) also declares that connector, so another viewer runs the call on their own account, or gets the Connect card when they have none, instead of `API 404: tool_unavailable`. A Site published before this that still points only at another person's account answers with `details.code` `site_tool_not_available_for_viewer` and a message saying to publish it again; the Site receives that code instead of a bare unavailable tool.
+
+  For an agent, the publisher's accounts are its turn's own account routes, and the publication accepts the connector declared alongside each of them. A retry with the tools as originally declared replays the same publication. A list that pairing would push past the 128-tool limit is refused with a message, instead of being left working only for the publisher.
+
+  When a Site's tool call can't complete, the viewer now sees a clear state in the Opengeni frame instead of a raw error such as `API 404: tool_unavailable`, and the Site receives a typed `code` it can read: Reconnect for an account whose sign-in stopped working (`site_tool_reconnect_required`, signing in to that same account, personal or shared; a call Opengeni refused before sending it then runs again, while a provider's result asking to sign in again is returned for the Site to call again), a plain refusal that names the system for a provider's permission error (`site_tool_permission_denied`, e.g. "Microsoft Dynamics didn't allow this for your account."), a message asking the Site owner to publish again (`site_tool_not_available_for_viewer`), and a readable message for anything else (`site_tool_unavailable`). Try again is offered only when Opengeni confirms the call ran nothing and the refusal isn't definitive, and it reuses the same operation id. A dropped connection, a 5xx or an untyped error on a call may have run, so it says to check before trying again (`site_tool_outcome_unknown`) and is never run again. The original error stays behind Details. Calls that fail the same way at once share one message. `createSiteToolBridge` takes `recoverToolCall` for this host UI and exports `SiteToolCallFailedError`; Site consent accounts carry the viewer's `connectionId`, `capabilityId` and whether it is `shared`; a tool call that needs its connection signed in again carries `structuredContent.error.code` `connection_auth_needed`, and the Dynamics bridge marks Microsoft's permission refusals `provider_permission_denied`.
+
+  For Site authors: a failed `site.tools` call now rejects with one of the `site_tool_*` codes above. The original code (`not_found`, `upstream_unavailable`, `tool_connection_needs_attention`, ...) stays readable on `error.details.code`. A provider's error result is unchanged (its `content` and `structuredContent.error`) and gains `structuredContent.siteToolFailure` with the typed code and the viewer's sentence. `OpenGeniSiteBridgeError` has an optional `details`.
+
+  Microsoft Dynamics connections are personal by default but can now be shared with the workspace: the connect card offers "This workspace" and the API no longer refuses workspace ownership. Everyone then acts with the sharing person's Dynamics security roles.
+
+  The generic Microsoft Dynamics catalog entry now reflects environments already added to the workspace. When one is usable in the chat, `capability_catalog_search` and `capability_authorization_request` report it as ready and name it, instead of asking for an environment address. When the only one still needs the person's sign-in, the request shows that environment's own Connect card.
+
+  A Dynamics 365 (Dataverse), Business Central or Finance and Operations connector's tool permissions now list the tools agents actually run through Opengeni's Web API bridge, instead of asking the environment's hosted MCP server, which failed with "Could not load the connector's tools" when the environment doesn't allow that MCP client.
+
+  The Connect card keeps showing a connection as done after a reload or account switch when the chat already uses it, and setup card results tell the agent the chat continues on its own once the person finishes.
+
+  - A prepared key setup (an agent's proposed MCP server) now lets the agent continue the request once it is connected, as other setup cards do.
+  - A confirmation dialog opened from a form field (such as "Make this person a workspace admin?" in Add people) no longer also submits the form behind it, which added the person with the role chosen before the confirmation.
+  - When a Site conversation starts waiting for the person, such as an approval from the Site's own `ai.run`, the Site's chat panel opens it.
+
+- Updated dependencies [7d0d52b]
+- Updated dependencies [ef4c334]
+- Updated dependencies [ce864c0]
+- Updated dependencies [6ac2cd4]
+  - @opengeni/contracts@6.21.0
+  - @opengeni/sdk@6.21.0
+  - @opengeni/connect@6.21.0
+
 ## 6.20.1
 
 ### Patch Changes
