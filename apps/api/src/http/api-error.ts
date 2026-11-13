@@ -88,7 +88,9 @@ export function sessionMissingHttpError(
   const read = method === "GET" || method === "HEAD";
   return new ApiHttpError(409, {
     code: "conflict",
-    message: "A session was deleted while the request read it. Retry the request.",
+    message: read
+      ? "A session was deleted while the request read it. Retry the request."
+      : "A session was deleted while the request ran. Check whether the change applied before retrying.",
     retryable: read,
     outcomeUnknown: !read,
   });
