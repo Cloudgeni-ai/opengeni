@@ -314,6 +314,13 @@ import {
 const MICROSOFT_DYNAMICS_SETUP_DETAIL = `Each connection is one Dynamics environment. Ask the person for the web address they open Dynamics at (for example https://contoso.crm4.dynamics.com, or https://businesscentral.dynamics.com/<tenant>/<environment> for Business Central; any page of it works). If they don't know it, they can open Dynamics and copy the address bar, or find Environment URL in the Power Platform admin center. Then call custom_mcp_setup_request with name "${MICROSOFT_DYNAMICS_CONNECTION_NAME}" and that address as endpointUrl. Its card signs them in with their Microsoft work account.`;
 
 /**
+ * What a posted setup card means for the turn: the chat continues the request
+ * once the person finishes it, so the agent doesn't ask them to report back.
+ */
+const SETUP_CARD_CONTINUES =
+  "When the person finishes it, you get an update and continue then, so don't ask them to tell you when they're done.";
+
+/**
  * Why a Microsoft Dynamics address can't be connected here, in words the
  * agent can pass on, or null when it can. `product` is null when the address
  * is not a recognized Dynamics environment.
@@ -8156,7 +8163,7 @@ function registerCapabilityDiscoveryTools(
                 ? integrationDefinitionCardPostedMessage(item)
                 : item.kind === "plugin"
                   ? `The ${item.name} plugin card was posted. The person reviews what it adds and installs it for the workspace; nothing is installed yet. Once they do, its Skills are yours from your next turn, and its MCP servers may still need connecting: search the catalog for them then.`
-                  : "The recommendation was posted for human confirmation. No access has been granted yet.",
+                  : `The recommendation was posted for human confirmation. No access has been granted yet. ${SETUP_CARD_CONTINUES}`,
       });
     },
   );
@@ -8303,8 +8310,8 @@ function registerCapabilityDiscoveryTools(
         status: "setup_requested",
         eventId: appended.events[0]?.id ?? null,
         message: mcpSetup
-          ? "The prepared connection card was posted. The person enters only the missing key in its protected fields. No server was added or contacted."
-          : "The human review card was posted. No server was added or contacted.",
+          ? `The prepared connection card was posted. The person enters only the missing key in its protected fields. No server was added or contacted. ${SETUP_CARD_CONTINUES}`
+          : `The human review card was posted. No server was added or contacted. ${SETUP_CARD_CONTINUES}`,
       });
     },
   );

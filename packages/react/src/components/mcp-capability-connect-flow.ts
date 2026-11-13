@@ -30,7 +30,7 @@ import { useOpenGeniText } from "../messages/runtime";
 import {
   attachSessionCapability,
   continueAfterCapabilitySetup,
-  sessionCapabilityTools,
+  sessionUsesCapability,
 } from "../session-capability-policy";
 import { workspaceHasNobodyToShareWith } from "../workspace-sharing";
 import { ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE } from "@opengeni/contracts/managed-sign-in-methods";
@@ -313,17 +313,11 @@ export function useMcpCapabilityConnect({
       ownLoginElsewhere = ownLoginToUseHere(accounts, resolved.mcpUrl ?? resolved.endpointUrl);
     }
     if (invocation.signal.aborted || lifetime.current !== invocation || !active()) return null;
-    const selected =
-      session?.toolPolicy.mode === "workspace_default"
-        ? session.effectiveToolPolicy?.selectedIds
-        : session?.tools.filter((tool) => tool.kind === "mcp").map((tool) => tool.id);
     setConnected(accountReady);
     setOffHere(ownLoginElsewhere);
-    setComplete(
-      accountReady &&
-        !!selected &&
-        sessionCapabilityTools(resolved).every((tool) => selected.includes(tool.id)),
-    );
+    // Already used in this chat: read from the session the way adding it
+    // does, so a reload shows the same finished card.
+    setComplete(accountReady && !!session && sessionUsesCapability(session, resolved));
     return resolved;
   }
 
