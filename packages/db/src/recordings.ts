@@ -850,6 +850,11 @@ export type RecordingSearchMatch = {
   startMilliseconds: number;
   /** The speaker's resolved name, or null when the model gave no label. */
   speaker: string | null;
+  /**
+   * The speaker's label (one of the recording's `speakers`), or null when
+   * the model gave none, for callers that word unnamed voices themselves.
+   */
+  speakerLabel: string | null;
   text: string;
 };
 
@@ -946,6 +951,7 @@ export async function getRecordingSearchDetails(
             ? null
             : (entry.speakers.find((speaker) => speaker.label === row.speaker_label)?.name ??
               row.speaker_label),
+        speakerLabel: row.speaker_label,
         text: row.text,
       });
     }

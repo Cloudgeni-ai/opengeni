@@ -9,12 +9,13 @@
 // writes only the first notes or its own. An Only me summary reads that
 // meeting as its owner.
 import {
-  defaultRecordingSpeakerName,
   RECORDING_NOTE_MAX_BYTES,
+  recordingSpeakerDefault,
   type AccessGrant,
   type Recording,
   type RecordingNote,
   type RecordingSpeaker,
+  type RecordingTrack,
   type RecordingTranscriptVersion,
 } from "@opengeni/contracts";
 import {
@@ -106,8 +107,46 @@ function meetingStatus(recording: Recording): string {
   }
 }
 
-function speakerName(speaker: RecordingSpeaker): string {
-  return speaker.source === "suggested" ? `${speaker.name} (suggested)` : speaker.name;
+/**
+ * What the model is told about voices nobody has named yet. The page words
+ * them in its reader's language ("Speaker 2" in English, through the host's
+ * text), which the server never knows, so tool output names them by number
+ * or source in parentheses instead of an English name the model would repeat.
+ */
+export const UNNAMED_SPEAKERS_NOTE =
+  "Speakers in parentheses, such as (speaker 2) or (microphone), are voices nobody has named yet, not names. The meeting page shows them in its reader's language, as Speaker 2 or Microphone in English; call them the same way in the language you write in.";
+
+/**
+ * How a speaker reads in tool output: the name someone gave the voice (a
+ * suggestion marked so), else its number or source in parentheses, such as
+ * "(speaker 2)" for the diarizer's `speaker_1`. A label of no known form is
+ * shown as it is, as the page shows it.
+ */
+export function meetingSpeakerName(
+  label: string,
+  speakers: readonly RecordingSpeaker[],
+  tracks: readonly Pick<RecordingTrack, "trackNumber" | "source">[],
+): { text: string; unnamed: boolean } {
+  const speaker = speakers.find((candidate) => candidate.label === label);
+  if (speaker && (speaker.personId || speaker.source) && speaker.name.trim()) {
+    return {
+      text: speaker.source === "suggested" ? `${speaker.name} (suggested)` : speaker.name,
+      unnamed: false,
+    };
+  }
+  const named = recordingSpeakerDefault(label, tracks);
+  switch (named.kind) {
+    case "speaker":
+      return { text: `(speaker ${named.number})`, unnamed: true };
+    case "microphone":
+      return { text: "(microphone)", unnamed: true };
+    case "system":
+      return { text: "(shared audio)", unnamed: true };
+    case "track":
+      return { text: `(track ${named.number})`, unnamed: true };
+    case "label":
+      return { text: named.label, unnamed: false };
+  }
 }
 
 function versionSummary(version: RecordingTranscriptVersion) {
@@ -347,34 +386,43 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
           )
         ).flat(),
       );
+      let unnamed = false;
+      const meetings = page.recordings.map((recording) => {
+        const found = searchDetails.get(recording.id);
+        const speakers = found?.speakers ?? [];
+        const nameOf = (label: string) => {
+          const name = meetingSpeakerName(label, speakers, recording.tracks);
+          unnamed ||= name.unnamed;
+          return name.text;
+        };
+        return {
+          id: recording.id,
+          title: recording.title,
+          startedAt: recording.startedAt,
+          duration: formatMeetingTimestamp(recording.durationMilliseconds),
+          status: meetingStatus(recording),
+          visibility: recording.visibility === "private" ? "only_me" : "workspace",
+          ...(page.sourceWorkspaces.has(recording.workspaceId)
+            ? { recordedIn: page.sourceWorkspaces.get(recording.workspaceId) }
+            : {}),
+          speakers: speakers.map((speaker) => nameOf(speaker.label)),
+          ...(recording.externalRef ? { externalRef: recording.externalRef } : {}),
+          ...(found && found.matches.length > 0
+            ? {
+                matches: found.matches.map((match) =>
+                  renderLine({
+                    startMilliseconds: match.startMilliseconds,
+                    speaker: match.speakerLabel === null ? null : nameOf(match.speakerLabel),
+                    text: match.text,
+                  }),
+                ),
+              }
+            : {}),
+        };
+      });
       return json({
-        meetings: page.recordings.map((recording) => {
-          const found = searchDetails.get(recording.id);
-          return {
-            id: recording.id,
-            title: recording.title,
-            startedAt: recording.startedAt,
-            duration: formatMeetingTimestamp(recording.durationMilliseconds),
-            status: meetingStatus(recording),
-            visibility: recording.visibility === "private" ? "only_me" : "workspace",
-            ...(page.sourceWorkspaces.has(recording.workspaceId)
-              ? { recordedIn: page.sourceWorkspaces.get(recording.workspaceId) }
-              : {}),
-            speakers: (found?.speakers ?? []).map(speakerName),
-            ...(recording.externalRef ? { externalRef: recording.externalRef } : {}),
-            ...(found && found.matches.length > 0
-              ? {
-                  matches: found.matches.map((match) =>
-                    renderLine({
-                      startMilliseconds: match.startMilliseconds,
-                      speaker: match.speaker,
-                      text: match.text,
-                    }),
-                  ),
-                }
-              : {}),
-          };
-        }),
+        meetings,
+        ...(unnamed ? { unnamedSpeakers: UNNAMED_SPEAKERS_NOTE } : {}),
         nextCursor: page.nextBefore ? encodeSearchCursor(page.nextBefore) : null,
       });
     },
@@ -454,7 +502,7 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
           segments.map((segment) => ({
             key: segment.sequence,
             startMilliseconds: segment.startMilliseconds,
-            speaker: defaultRecordingSpeakerName(`track-${segment.trackNumber}`, recording.tracks),
+            speaker: meetingSpeakerName(`track-${segment.trackNumber}`, [], recording.tracks).text,
             text: segment.text,
           })),
           request.maxChars,
@@ -468,6 +516,8 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
             : null;
         return json({
           ...(first ? { meeting: await details(recording, who, [], recordedIn) } : {}),
+          // Every live lane is a track's unnamed voice.
+          ...(first && segments.length > 0 ? { unnamedSpeakers: UNNAMED_SPEAKERS_NOTE } : {}),
           transcript:
             live && live.segments.length > 0
               ? "live preview: rough text while recording; speakers are not told apart"
@@ -496,21 +546,31 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
         }
         throw error;
       }
-      const names = new Map(page.speakers.map((speaker) => [speaker.label, speakerName(speaker)]));
+      const names = new Map<string, ReturnType<typeof meetingSpeakerName>>();
+      const nameOf = (label: string) => {
+        let name = names.get(label);
+        if (!name) {
+          name = meetingSpeakerName(label, page.speakers, recording.tracks);
+          names.set(label, name);
+        }
+        return name;
+      };
       const rendered = renderWithin(
         page.segments.map((segment) => ({
           key: segment.index,
           startMilliseconds: segment.startMilliseconds,
-          speaker: segment.speakerLabel
-            ? (names.get(segment.speakerLabel) ?? segment.speakerLabel)
-            : null,
+          speaker: segment.speakerLabel ? nameOf(segment.speakerLabel).text : null,
           text: segment.text,
         })),
         request.maxChars,
       );
       const more = rendered.lastKey !== null && (rendered.truncated || page.nextAfter !== null);
+      for (const speaker of page.speakers) nameOf(speaker.label);
       return json({
         ...(first ? { meeting: await details(recording, who, page.speakers, recordedIn) } : {}),
+        ...(first && [...names.values()].some((name) => name.unnamed)
+          ? { unnamedSpeakers: UNNAMED_SPEAKERS_NOTE }
+          : {}),
         transcript: versionSummary(page.version),
         lines: rendered.text,
         nextCursor: more
@@ -647,12 +707,15 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
       visibility: recording.visibility === "private" ? "only_me" : "workspace",
       ...(recordedIn ? { recordedIn } : {}),
       ...(owner ? { recordedBy: owner.name ?? owner.email } : {}),
-      speakers: speakers.map((speaker) => ({
-        label: speaker.label,
-        name: speaker.name,
-        ...(speaker.personId ? { personId: speaker.personId } : {}),
-        ...(speaker.source === "suggested" ? { suggested: true } : {}),
-      })),
+      speakers: speakers.map((speaker) => {
+        const shown = meetingSpeakerName(speaker.label, speakers, recording.tracks);
+        return {
+          label: speaker.label,
+          name: shown.unnamed ? shown.text : speaker.name,
+          ...(speaker.personId ? { personId: speaker.personId } : {}),
+          ...(speaker.source === "suggested" ? { suggested: true } : {}),
+        };
+      }),
       ...(versions.length > 1
         ? {
             versions: versions.map((version) => ({

@@ -29,6 +29,7 @@ import {
   formatMeetingTimestamp,
   parseMeetingTimestamp,
   registerMeetingTools,
+  UNNAMED_SPEAKERS_NOTE,
 } from "../src/mcp/meeting-tools";
 
 let shared: SharedTestDatabase | null = null;
@@ -239,12 +240,16 @@ describe("meeting tools", () => {
       status: "ready",
       visibility: "workspace",
       duration: "5:00",
-      speakers: ["Speaker 1", "Tomas"],
+      speakers: ["(speaker 1)", "Tomas"],
       matches: ["[1:05] Tomas: The roof budget is tight."],
     });
+    expect(found.unnamedSpeakers).toBe(UNNAMED_SPEAKERS_NOTE);
     expect(found.meetings.find((meeting: { id: string }) => meeting.id === standup)).toMatchObject({
       visibility: "only_me",
     });
+    // A match by a voice nobody named reads as its number.
+    const welcome = await call("meetings_search", { query: "welcome" });
+    expect(welcome.meetings[0].matches).toEqual(["[0:00] (speaker 1): Welcome."]);
 
     expect((await call("meetings_search", { person: "tomas" })).meetings).toHaveLength(1);
     const first = await call("meetings_search", { limit: 1 });
@@ -286,18 +291,21 @@ describe("meeting tools", () => {
       recordedBy: "Ingrid Solberg",
       speakers: [
         { label: "speaker_0", name: "Ingrid" },
-        { label: "speaker_1", name: "Speaker 2" },
+        { label: "speaker_1", name: "(speaker 2)" },
       ],
     });
+    expect(part.unnamedSpeakers).toBe(UNNAMED_SPEAKERS_NOTE);
     expect(part.transcript).toMatchObject({ version: 1, model: "scribe_v2", current: true });
     const lines = part.lines.split("\n");
     // One speaker's consecutive segments read as one line.
     expect(lines[0]).toStartWith("[0:00] Ingrid: Point number 0 about");
     expect(lines[0]).toContain("Point number 1 about");
+    expect(lines[1]).toStartWith("[0:25] (speaker 2): Point number 5 about");
     expect(part.nextCursor).toStartWith("t:");
 
     const next = await call("meeting_read", { meetingId: recordingId, cursor: part.nextCursor });
     expect(next.meeting).toBeUndefined();
+    expect(next.unnamedSpeakers).toBeUndefined();
     expect(next.lines.length).toBeGreaterThan(0);
     expect(next.lines).not.toContain("Point number 0 about");
     expect(next.nextCursor).toBeNull();
@@ -317,6 +325,20 @@ describe("meeting tools", () => {
       isError: true,
       error: { code: "invalid_time" },
     });
+
+    // Once everyone is named, names read as given and nothing is explained.
+    await updateRecordingSpeakers(client.db, {
+      ...scope.actor,
+      recordingId,
+      assignments: [{ label: "speaker_1", name: "Kari" }],
+    });
+    const named = await call("meeting_read", { meetingId: recordingId, maxChars: 1_500 });
+    expect(named.meeting.speakers).toEqual([
+      { label: "speaker_0", name: "Ingrid" },
+      { label: "speaker_1", name: "Kari" },
+    ]);
+    expect(named.unnamedSpeakers).toBeUndefined();
+    expect(named.lines.split("\n")[1]).toStartWith("[0:25] Kari: Point number 5 about");
   });
 
   test("someone else's Only me meeting is not visible, and a live one reads its preview", async () => {
@@ -358,7 +380,8 @@ describe("meeting tools", () => {
     const read = await toolsFor(scope.grantFor(scope.owner))("meeting_read", { meetingId: live });
     expect(read.meeting).toMatchObject({ title: "Live now", status: "recording" });
     expect(read.transcript).toStartWith("live preview");
-    expect(read.lines).toBe("[0:01] Microphone: Hello all. Let's start.");
+    expect(read.lines).toBe("[0:01] (microphone): Hello all. Let's start.");
+    expect(read.unnamedSpeakers).toBe(UNNAMED_SPEAKERS_NOTE);
 
     // A stretch past a whole page of live lines still continues to it.
     const later = Array.from({ length: 1_100 }, (_, index) => ({
@@ -385,7 +408,7 @@ describe("meeting tools", () => {
       to: "18:23",
       cursor: stretch.nextCursor,
     });
-    expect(rest.lines).toBe("[18:20] Microphone: Line 1094. Line 1095. Line 1096.");
+    expect(rest.lines).toBe("[18:20] (microphone): Line 1094. Line 1095. Line 1096.");
     expect(rest.nextCursor).toBeNull();
   });
 

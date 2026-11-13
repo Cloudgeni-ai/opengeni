@@ -1008,6 +1008,14 @@ saves as people type, is not.
 Agents read a meeting with the `meeting_read` tool. Its details give each
 speaker's `label` (and `personId` for a person from the workspace's
 directory), the `notepad` and the `notes` with their `revision`. The
+transcript lines name each speaker as people named them. A voice nobody
+has named yet reads as its number or source in parentheses, `(speaker 2)`,
+`(microphone)`, `(shared audio)` or `(track 3)`, never as the server's
+English default name: the page words those in its reader's language from the
+host's text (`meetings.recordings.speakerNumber` and its siblings), which the
+server doesn't know, so a response that has any adds an `unnamedSpeakers` note
+asking the agent to word them in the language it writes in. `meetings_search`
+names speakers and matching lines the same way. The
 `meeting_notes_save` tool saves the `notes` through the same path as the
 `PUT` above, for the person the agent acts for, with `expectedRevision`; a
 newer save answers `notes_changed`. The meeting page shows notes an agent's

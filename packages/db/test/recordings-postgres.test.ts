@@ -2050,7 +2050,12 @@ describe("recordings", () => {
       "Tomas",
     ]);
     expect(details.get(budget.recordingId)?.matches).toEqual([
-      { startMilliseconds: 5_000, speaker: "Tomas", text: "The budget for the roof is tight." },
+      {
+        startMilliseconds: 5_000,
+        speaker: "Tomas",
+        speakerLabel: "speaker_1",
+        text: "The budget for the roof is tight.",
+      },
     ]);
     const corrected = await getRecordingSearchDetails(db, {
       ...memberActor,
@@ -2058,7 +2063,12 @@ describe("recordings", () => {
       query: "scaffolding",
     });
     expect(corrected.get(budget.recordingId)?.matches).toEqual([
-      { startMilliseconds: 120_000, speaker: "Tomas", text: "Agreed, the scaffolding can wait." },
+      {
+        startMilliseconds: 120_000,
+        speaker: "Tomas",
+        speakerLabel: "speaker_1",
+        text: "Agreed, the scaffolding can wait.",
+      },
     ]);
 
     const stretch = await getRecordingTranscriptPage(db, {
