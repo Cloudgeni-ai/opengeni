@@ -29,6 +29,7 @@ import { isModelPreempted, preemptedResponseDone } from "./model-preemption";
 import {
   ARTIFACT_ORIGIN_KEY,
   artifactOrigin,
+  MACHINE_CONTINUATION_TEXT,
   projectHistoryForProvider,
 } from "./provider-history-adapter";
 import {
@@ -930,12 +931,7 @@ function placeConversationSystems(messages: Message[]): Message[] {
     if (result.at(-1)?.role !== "user")
       result.push({
         role: "user",
-        content: [
-          {
-            type: "text",
-            text: "Opengeni continuation (machine-origin input; no new human message).",
-          },
-        ],
+        content: [{ type: "text", text: MACHINE_CONTINUATION_TEXT }],
       });
     result.push({ role: "system", content: systems });
     systems = [];
