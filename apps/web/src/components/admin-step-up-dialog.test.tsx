@@ -78,6 +78,8 @@ mock.module("@opengeni/react/ui/form-dialog", () => ({
 const { AdminStepUpDialog } = await import("./admin-step-up-dialog");
 type StepUpHandoffApi = import("./admin-step-up-dialog").StepUpHandoffApi;
 const { withAdminStepUp } = await import("@/lib/admin-step-up");
+const { OpenGeniApiError } = await import("@opengeni/sdk");
+const { userErrorText } = await import("@opengeni/react/ui/api-error");
 const { ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE } =
   await import("@opengeni/contracts/managed-sign-in-methods");
 
@@ -189,6 +191,22 @@ describe("AdminStepUpDialog", () => {
     await view.click("Add passkey");
     expect((await change).status).toBe(403);
     expect(navigations).toEqual([{ to: "/settings/security" }]);
+    await view.unmount();
+  });
+
+  test("cancelling the add-a-passkey prompt shows a passkey hint, not a missing permission", async () => {
+    const view = await mount(async () => {});
+    const change = withAdminStepUp(async () => refusal(false), {
+      input: "/v1/x",
+      init: { method: "POST", body: "{}" },
+    });
+    await flush();
+    await view.click("Cancel");
+    const response = await change;
+    expect(response.status).toBe(403);
+    // The page that sent the change shows the refusal the SDK raises for it.
+    const raised = new OpenGeniApiError(response.status, await response.text(), { mutation: true });
+    expect(userErrorText(raised)).toBe("Add a passkey to your account, then try again.");
     await view.unmount();
   });
 });
