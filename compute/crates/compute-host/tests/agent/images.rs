@@ -2,7 +2,8 @@
 //! store once, however many creates wait for it, keeps it, and copies it
 //! for each new disk, an agent after a restart included; an image nowhere
 //! is refused and frees the id. A create waiting for its image keeps its
-//! room.
+//! room. An image the host is asked to keep is fetched ahead of its
+//! creates (ADR 41).
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -101,6 +102,47 @@ async fn creates_fetch_their_image_once_keep_it_and_copy_it() {
     assert_eq!(std::fs::read(disk(&state, id(6))).unwrap(), b"an image");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_image_the_host_is_asked_to_keep_is_here_before_its_first_create() {
+    let root = Lab::root();
+    let store = Directory::new(root.join("store"));
+    let file = root.join("image.ext4");
+    std::fs::write(&file, b"a new image").unwrap();
+    let image = store.put_rootfs(&file).await.unwrap();
+    let config = Lab::config(&root, HostPolicy::default());
+    let state = config.root.clone();
+    let engine = Fake {
+        world: Arc::default(),
+        delays: Delays::default(),
+    };
+    let (handle, _agent) = HostAgent::start(config, engine, store).await.unwrap();
+
+    // The request is answered before the fetch; the image arrives after.
+    handle.keep(image, None).await.unwrap();
+    let kept = state.join("rootfs").join(format!("{image}.ext4"));
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while std::fs::read(&kept).ok().as_deref() != Some(b"a new image".as_slice()) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the kept image is fetched");
+
+    // Its first create needs nothing from the store.
+    std::fs::remove_file(root.join("store/rootfs").join(format!("{image}.ext4"))).unwrap();
+    handle
+        .create(id(1), SandboxConfig::new(1, 128, NEVER).with_image(image))
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(disk(&state, id(1))).unwrap(), b"a new image");
+
+    // Asked again, a host that has the image fetches nothing and says so
+    // at once; one asked to keep an image nowhere still answers.
+    handle.keep(image, None).await.unwrap();
+    let nowhere: ImageId = "cd".repeat(32).parse().unwrap();
+    handle.keep(nowhere, Some(image)).await.unwrap();
+}
+
 /// A store whose image lengths each wait for a permit, so a create naming
 /// an image waits for its fetch until the test adds one.
 struct Gated {
@@ -174,8 +216,9 @@ impl Store for Gated {
         &self,
         image: ImageId,
         path: &Path,
+        seed: Option<&Path>,
     ) -> impl Future<Output = Result<bool, EngineError>> + Send {
-        self.inner.fetch_image(image, path)
+        self.inner.fetch_image(image, path, seed)
     }
 }
 

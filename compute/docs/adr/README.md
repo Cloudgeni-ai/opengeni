@@ -43,6 +43,7 @@ old one; old records stay as history.
 | 35 | [Built images nothing uses are forgotten](0035-built-images-nothing-uses-are-forgotten.md) | Accepted |
 | 36 | [Idle memory stays in RAM](0036-idle-memory-stays-in-ram.md) | Accepted |
 | 37 | [Compressing idle memory is asked for](0037-compressing-idle-memory-is-asked-for.md) | Accepted |
+| 41 | [Every host keeps each new image ahead of its creates](0041-every-host-keeps-each-new-image-ahead.md) | Accepted |
 
 ## Format
 

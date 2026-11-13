@@ -1187,6 +1187,44 @@ async fn stored_image(dir: &Path) -> (PathBuf, ImageId, Arc<Counted>, Chunked) {
     (path, image, backend, store)
 }
 
+/// An image built over the one before shares its unchanged chunks at the
+/// same offsets (ADR 40): fetched with the one before as its seed, only
+/// the chunks that changed are downloaded (ADR 41).
+#[tokio::test]
+async fn an_image_fetched_over_the_one_before_downloads_only_what_changed() {
+    use crate::store::Store as _;
+    let dir = tempfile::tempdir().unwrap();
+    let (before, _, backend, store) = stored_image(dir.path()).await;
+    let next = dir.path().join("next");
+    sparse(
+        &next,
+        at_chunk(4, 0),
+        &[
+            (at_chunk(0, 1), b"boot"),
+            (at_chunk(1, 2), b"LIBS"),
+            (at_chunk(2, 3), b"etc"),
+            (at_chunk(3, 4), b"usr"),
+        ],
+    );
+    let image = store.put_rootfs(&next).await.unwrap();
+    backend.take();
+
+    let fetched = dir.path().join("fetched");
+    assert!(
+        store
+            .fetch_image(image, &fetched, Some(&before))
+            .await
+            .unwrap()
+    );
+    assert_eq!(fs::read(&fetched).unwrap(), fs::read(&next).unwrap());
+    assert_eq!(backend.take().0, 1, "only the changed chunk is downloaded");
+
+    let whole = dir.path().join("whole");
+    assert!(store.fetch_image(image, &whole, None).await.unwrap());
+    assert_eq!(fs::read(&whole).unwrap(), fs::read(&next).unwrap());
+    assert_eq!(backend.take().0, 4, "without a seed, every chunk with data");
+}
+
 /// The files of a sandbox whose disk was made from `image` at `path`, as
 /// `name`, then had `writes` made to it.
 fn made_from(

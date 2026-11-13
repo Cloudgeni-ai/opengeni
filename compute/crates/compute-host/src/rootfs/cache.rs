@@ -278,6 +278,18 @@ impl Cache {
     /// The image `image`, fetched from `store` first if the host does not
     /// have it, and marked used now.
     pub async fn get<S: Store>(&self, image: ImageId, store: &S) -> Result<Held, Missing> {
+        self.get_over(image, store, None).await
+    }
+
+    /// [`Cache::get`], a fetch starting from the image `seed` if the host
+    /// has it, so only the chunks that differ from it are downloaded
+    /// (ADR 41).
+    pub async fn get_over<S: Store>(
+        &self,
+        image: ImageId,
+        store: &S,
+        seed: Option<ImageId>,
+    ) -> Result<Held, Missing> {
         let shared = self.shared(image).await;
         let path = self.path(image);
         let failed = |error: String| Missing::Failed { image, error };
@@ -295,7 +307,12 @@ impl Cache {
             // Kept until the fetch's last write: the store writes into the
             // staging file.
             let owner = self.owner.clone();
-            let fetched = store.fetch_image(image, &staging).await;
+            // Not held: if it is removed meanwhile, the fetch finds it
+            // changed and downloads everything.
+            let seed = seed
+                .filter(|seed| *seed != image && self.has(*seed))
+                .map(|seed| self.path(seed));
+            let fetched = store.fetch_image(image, &staging, seed.as_deref()).await;
             let found = matches!(fetched, Ok(true));
             let placed = self
                 .blocking({

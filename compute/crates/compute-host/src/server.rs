@@ -237,6 +237,7 @@ async fn respond(
                 },
             },
         },
+        Request::Keep { image, before } => done(handle.keep(image, before).await),
         Request::Capture {
             id,
             generation,

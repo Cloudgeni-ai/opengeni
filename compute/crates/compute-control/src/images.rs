@@ -35,6 +35,13 @@ const ASK_EVERY: Duration = Duration::from_secs(5);
 /// How long a replica waits after a failed ask before the next, which goes
 /// to the next host.
 const RETRY_AFTER: Duration = Duration::from_secs(60);
+/// How long a captured image is spread to hosts that join after it: long
+/// enough for the creates right after a capture, which a host joining
+/// later fetches for on its first.
+const SPREAD_FOR: Duration = Duration::from_secs(60 * 60);
+/// How often a replica looks for live hosts that lack an image they are to
+/// keep.
+const KEEP_EVERY: Duration = Duration::from_secs(10);
 
 /// What the store records an image built from the OCI image `source`
 /// with the guest programs of digest `guest` under, as a host's base
@@ -61,7 +68,18 @@ pub struct Images {
     /// name starts from each time the service starts, until it has read
     /// what was built for the name since.
     pinned: Arc<BTreeSet<ImageId>>,
+    /// For each image a name started from after another, that other one:
+    /// what hosts fetch it over (ADR 41).
+    befores: Arc<RwLock<BTreeMap<ImageId, ImageId>>>,
+    /// Images every live host is to have besides the named ones, such as
+    /// a template just captured, with the image each was made from and
+    /// until when.
+    spread: Arc<RwLock<Spread>>,
 }
+
+/// Images spread to every live host: each with the image it was made from,
+/// and until when.
+type Spread = BTreeMap<ImageId, (Option<ImageId>, Instant)>;
 
 impl Images {
     /// These images.
@@ -70,6 +88,8 @@ impl Images {
         Self {
             pinned: Arc::new(images.values().copied().flatten().collect()),
             named: Arc::new(RwLock::new(images)),
+            befores: Arc::default(),
+            spread: Arc::default(),
         }
     }
 
@@ -85,10 +105,50 @@ impl Images {
 
     /// Makes `image` the stored image named `name`.
     pub fn set(&self, name: &str, image: ImageId) {
-        self.named
+        let before = self
+            .named
             .write()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(name.to_owned(), Some(image));
+            .insert(name.to_owned(), Some(image))
+            .flatten();
+        if let Some(before) = before.filter(|before| *before != image) {
+            self.befores
+                .write()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(image, before);
+        }
+    }
+
+    /// Has every live host keep `image`, made from `before`, for the next
+    /// [`SPREAD_FOR`] (ADR 41).
+    pub fn spread(&self, image: ImageId, before: Option<ImageId>) {
+        self.spread
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(image, (before, Instant::now() + SPREAD_FOR));
+    }
+
+    /// The images every live host is to have now, each with the image it
+    /// is fetched over, if one is known: every name's, and those spread
+    /// lately.
+    #[must_use]
+    pub fn to_keep(&self) -> BTreeMap<ImageId, Option<ImageId>> {
+        let befores = self.befores.read().unwrap_or_else(PoisonError::into_inner);
+        let mut keep: BTreeMap<ImageId, Option<ImageId>> = self
+            .named
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .flatten()
+            .map(|image| (*image, befores.get(image).copied()))
+            .collect();
+        let mut spread = self.spread.write().unwrap_or_else(PoisonError::into_inner);
+        let now = Instant::now();
+        spread.retain(|_, (_, until)| *until > now);
+        for (image, (before, _)) in spread.iter() {
+            keep.entry(*image).or_insert(*before);
+        }
+        keep
     }
 
     /// Whether some name names `image`, or did when the service started:
@@ -129,6 +189,15 @@ fn first_turn(source: &str) -> usize {
     let hash = blake3::hash(source.as_bytes());
     let [a, b, c, d, ..] = *hash.as_bytes();
     usize::try_from(u32::from_le_bytes([a, b, c, d])).unwrap_or_default()
+}
+
+/// Follows `sources` ([`follow`]) and has every live host keep the images
+/// that follow ([`keep_on_hosts`]), for as long as it runs.
+pub async fn run<S: Store>(service: Arc<Service<S>>, sources: BTreeMap<String, String>) {
+    tokio::join!(
+        follow(Arc::clone(&service), sources),
+        keep_on_hosts(service)
+    );
 }
 
 /// Keeps each name in `sources` starting from the stored image built from
@@ -236,6 +305,38 @@ async fn start<S: Store>(
         images.set(name, image);
     }
     None
+}
+
+/// Has every live host keep the images [`Images::to_keep`] names, each
+/// fetched over the image before it, so no create waits for a fetch (ADR
+/// 41): asks each host once per image, for as long as it runs. A host that
+/// cannot be reached is asked again; one from before the request is not.
+pub async fn keep_on_hosts<S: Store>(service: Arc<Service<S>>) {
+    let images = service.settings().images.clone();
+    let mut asked: std::collections::HashMap<String, BTreeSet<ImageId>> =
+        std::collections::HashMap::new();
+    loop {
+        let keep = images.to_keep();
+        for target in service.live_hosts() {
+            let done = asked.entry(target.name.clone()).or_default();
+            for (image, before) in &keep {
+                if done.contains(image) {
+                    continue;
+                }
+                match service.keep_on(&target, *image, *before).await {
+                    Ok(()) => {
+                        tracing::info!(host = %target.name, %image, "asked a host to keep an image ahead of its creates");
+                        done.insert(*image);
+                    }
+                    Err(error) => {
+                        tracing::debug!(host = %target.name, %image, %error, "asking a host to keep an image failed; asking again later");
+                    }
+                }
+            }
+            done.retain(|image| keep.contains_key(image));
+        }
+        tokio::time::sleep(KEEP_EVERY).await;
+    }
 }
 
 #[cfg(test)]

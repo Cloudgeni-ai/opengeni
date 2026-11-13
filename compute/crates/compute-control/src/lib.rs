@@ -215,7 +215,7 @@ pub async fn start<S: Store>(store: Arc<S>, config: Config) -> anyhow::Result<Ru
         )),
         tokio::spawn(prune(Arc::clone(&service))),
         tokio::spawn(collect_images(Arc::clone(&service))),
-        tokio::spawn(images::follow(Arc::clone(&service), config.image_sources)),
+        tokio::spawn(images::run(Arc::clone(&service), config.image_sources)),
     ];
     if let (Some(pointers), Some((from, url))) = (pointers, import) {
         tasks.push(tokio::spawn(pointers::import(

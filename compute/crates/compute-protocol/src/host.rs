@@ -774,6 +774,22 @@ pub enum Request {
         /// optionally with its tag before the digest.
         image: String,
     },
+    /// Have the stored image `image` on this host ahead of the creates
+    /// that will start from it, so none waits for its fetch (ADR 41):
+    /// fetched in the background unless the host has it, with the image
+    /// `before` it as the seed when the host has that (only the chunks that
+    /// differ are downloaded), and then the templates of every shape the
+    /// host keeps a template of on `before` built on `image` too. Answered
+    /// at once with [`Reply::Done`], before any of it; a host with no
+    /// store has nothing to fetch and does nothing. Refused by a host from
+    /// before this request with [`ErrorCode::Invalid`].
+    Keep {
+        /// The image.
+        image: ImageId,
+        /// The image creates of its name started from until now.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<ImageId>,
+    },
     /// Store a copy of a sandbox's disk as a sandbox image, from which
     /// creates may start
     /// ([ADR 22](../../docs/adr/0022-templates-saved-from-sandboxes.md)).
