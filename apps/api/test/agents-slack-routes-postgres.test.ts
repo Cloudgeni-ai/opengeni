@@ -306,7 +306,7 @@ describe("an agent's Slack availability (real PostgreSQL)", () => {
     expect(reshared.json.agent.slack).toHaveLength(1);
   }, 120_000);
 
-  test("Anyone in the organization: an organization admin chooses it, Slack follows it, older open use counts", async () => {
+  test("Anyone in the organization: an organization admin chooses it, Slack follows it", async () => {
     if (!available) return;
     const install = await installation(`org-${Date.now()}`);
     const openRows = async (agentId: string) => ({
@@ -381,24 +381,20 @@ describe("an agent's Slack availability (real PostgreSQL)", () => {
     const afterRename = await call(install.admin, "GET", `${install.base}/${agent.id}`);
     expect(afterRename.json.agent.visibility).toBe("organization");
 
-    // The previous release closes it through its own switch, which only
-    // writes the installation: that holds, and the next edit here agrees.
+    // Only the agent's own setting decides (1418 copied what the previous
+    // release read from the installations); each installation's open is
+    // kept equal to it for that release, and the next edit writes it again.
     await shared!.admin`update agent_slack_installs set open = false where agent_id = ${agent.id}`;
-    const closedByOld = await call(install.admin, "GET", `${install.base}/${agent.id}`);
-    expect(closedByOld.json.agent.visibility).toBe("workspace");
-    expect(closedByOld.json.agent.slack).toEqual([expect.objectContaining({ open: false })]);
+    const stillOpen = await call(install.admin, "GET", `${install.base}/${agent.id}`);
+    expect(stillOpen.json.agent.visibility).toBe("organization");
+    expect(stillOpen.json.agent.slack).toEqual([expect.objectContaining({ open: true })]);
     const edited = await call(install.admin, "PATCH", `${install.base}/${agent.id}`, {
-      expectedVersion: closedByOld.json.agent.version,
-      description: "Edited after the old close",
+      expectedVersion: stillOpen.json.agent.version,
+      description: "Edited after an installation was closed",
     });
     expect(edited.status).toBe(200);
-    expect(edited.json.agent.visibility).toBe("workspace");
-    expect((await openRows(agent.id)).flag).toBe(false);
-    const reopened = await call(install.orgAdmin, "PATCH", `${install.base}/${agent.id}`, {
-      expectedVersion: edited.json.agent.version,
-      visibility: "organization",
-    });
-    expect(reopened.status).toBe(200);
+    expect(edited.json.agent.visibility).toBe("organization");
+    expect(await openRows(agent.id)).toEqual({ installs: [true], flag: true });
 
     // Only me clears it everywhere, and shared again it is closed.
     const madePrivate = await call(install.orgAdmin, "PATCH", `${install.base}/${agent.id}`, {
@@ -416,15 +412,13 @@ describe("an agent's Slack availability (real PostgreSQL)", () => {
     expect(sharedAgain.json.agent.visibility).toBe("workspace");
     expect(await openRows(agent.id)).toEqual({ installs: [false], flag: false });
 
-    // An agent an older release opened through Slack's switch is open to the
-    // organization, and the older Slack field still changes it.
+    // Slack's older open field still changes the agent's own setting.
     const older = await call(install.admin, "POST", install.base, { name: "Older desk" });
     expect(older.status).toBe(201);
-    await shared!.admin`
-      update agent_slack_installs set open = true where agent_id = ${older.json.agent.id}`;
-    const read = await call(install.admin, "GET", `${install.base}/${older.json.agent.id}`);
-    expect(read.json.agent.visibility).toBe("organization");
     const slackPath = `${install.base}/${older.json.agent.id}/slack/${install.connectionId}`;
+    const openedOld = await call(install.orgAdmin, "PUT", slackPath, { open: true });
+    expect(openedOld.status).toBe(200);
+    expect(openedOld.json.agent.visibility).toBe("organization");
     const closed = await call(install.admin, "PUT", slackPath, { open: false });
     expect(closed.status).toBe(200);
     expect(closed.json.availability.open).toBe(false);

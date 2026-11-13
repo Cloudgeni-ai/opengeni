@@ -412,35 +412,22 @@ describe("agents data layer (restricted runtime role)", () => {
       version: current!.version,
     });
 
-    // A previous-release server closes it in one installation only: the
-    // agent is closed everywhere, and this release's next edit keeps it so.
+    // Only the agent's own setting decides (since 1418); an installation's
+    // `open` is kept equal to it for the previous release, which reads it.
     await shared.admin`update agent_slack_installs set open = false
       where agent_id = ${agent.id} and connection_id = ${org.connectionId}`;
-    expect((await getAgent(app.db, org.homeScope, agent.id))?.organizationAccess).toBe(false);
+    expect((await getAgent(app.db, org.homeScope, agent.id))?.organizationAccess).toBe(true);
     for (const connectionId of [org.connectionId, org.otherConnectionId]) {
       expect(
         await getSlackAgent(app.db, { accountId: org.accountId, agentId: agent.id, connectionId }),
-      ).toMatchObject({ open: false });
+      ).toMatchObject({ open: true });
     }
-    const edited = await updateAgent(app.db, org.homeScope, {
-      agentId: agent.id,
-      expectedVersion: null,
-      actorSubjectId: org.owner,
-      patch: { description: "Still closed." },
-    });
-    expect(edited).toMatchObject({ kind: "updated", agent: { organizationAccess: false } });
-    expect(
-      (await listAgentSlackInstalls(app.db, org.homeScope, [agent.id])).map(
-        (install) => install.open,
-      ),
-    ).toEqual([false, false]);
-    // Opening it again opens every installation.
     expect(
       await updateAgent(app.db, org.homeScope, {
         agentId: agent.id,
         expectedVersion: null,
         actorSubjectId: org.owner,
-        patch: { organizationAccess: true },
+        patch: { description: "Still open." },
       }),
     ).toMatchObject({ kind: "updated", agent: { organizationAccess: true } });
     expect(
