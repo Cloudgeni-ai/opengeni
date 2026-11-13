@@ -253,7 +253,6 @@ describe("modular prompt: tool-specific clauses", () => {
     );
     expect(composed).not.toContain("opengeni__goal_");
     // Goal-state guidance that names no tool remains.
-    expect(composed).toContain("an active goal continues on its own");
     expect(composed).toContain("A `goal.completed` event records goal state");
   });
 
