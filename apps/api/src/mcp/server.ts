@@ -318,7 +318,7 @@ const MICROSOFT_DYNAMICS_SETUP_DETAIL = `Each connection is one Dynamics environ
  * once the person finishes it, so the agent doesn't ask them to report back.
  */
 const SETUP_CARD_CONTINUES =
-  "When the person finishes it, you get an update and continue then, so don't ask them to tell you when they're done.";
+  "When the person who asked finishes it, you get an update and continue then, so don't ask them to tell you when they're done.";
 
 /**
  * Why a Microsoft Dynamics address can't be connected here, in words the

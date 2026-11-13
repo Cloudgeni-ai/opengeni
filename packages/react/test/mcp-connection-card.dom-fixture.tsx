@@ -1311,7 +1311,11 @@ test("an admin asked to confirm with a passkey is told so, not that only an admi
 });
 
 function conversationClient(
-  options: { failAttach?: boolean; session?: Record<string, unknown> } = {},
+  options: {
+    failAttach?: boolean;
+    session?: Record<string, unknown>;
+    connections?: readonly ConnectionMetadata[];
+  } = {},
 ) {
   const calls: string[] = [];
   const continuations: unknown[][] = [];
@@ -1322,7 +1326,7 @@ function conversationClient(
   } as unknown as CapabilityCatalogItem;
   const client = {
     listCapabilities: async () => ({ items: [attached] }),
-    listConnections: async () => [connection],
+    listConnections: async () => options.connections ?? [connection],
     getSession: async () =>
       options.session ?? {
         tools: [],
@@ -1985,3 +1989,41 @@ test("after a reload a chat that already uses the connection shows it as done", 
     await view.unmount();
   }
 });
+
+function defaultPolicySession(effectiveIds: string[]) {
+  return {
+    tools: effectiveIds.map((id) => ({ kind: "mcp", id })),
+    firstPartyMcpTools: [],
+    toolPolicy: { mode: "workspace_default", inheritedFromSessionId: null },
+    toolPolicyVersion: 3,
+    effectiveToolPolicy: { selectedIds: [], effectiveIds, mandatoryIds: [], idsTruncated: false },
+  };
+}
+
+for (const [name, options] of [
+  ["a server removed from the chat", { session: defaultPolicySession([]) }],
+  [
+    "a server the chat includes without a usable account",
+    { session: defaultPolicySession(["service"]), connections: [] },
+  ],
+] as const)
+  test(`after a reload ${name} is not shown as done`, async () => {
+    const h = conversationClient(options);
+    const view = await renderComponent(
+      <McpConnectionCard
+        client={h.client}
+        workspaceId="workspace"
+        sessionId="session"
+        capabilityId="service"
+        name="Example service"
+        returnUrl="https://host.example/"
+      />,
+    );
+    try {
+      await flush();
+      expect(document.querySelector('[data-state="complete"]')).toBeNull();
+      expect(h.calls).toEqual([]);
+    } finally {
+      await view.unmount();
+    }
+  });
