@@ -38,11 +38,22 @@ afterAll(() => GlobalRegistrator.unregister());
 
 const flush = () => act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
 
-async function mount(api: ConfirmPasskeyApi) {
+async function mount(
+  api: Omit<ConfirmPasskeyApi, "confirmSession"> & Partial<ConfirmPasskeyApi>,
+  handoff?: string,
+) {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
-  await act(async () => root.render(<ConfirmPasskeyRoute api={api} />));
+  const full: ConfirmPasskeyApi = {
+    confirmSession: async () => {
+      throw new Error("not in this test");
+    },
+    ...api,
+  };
+  await act(async () =>
+    root.render(<ConfirmPasskeyRoute api={full} {...(handoff === undefined ? {} : { handoff })} />),
+  );
   await flush();
   return {
     container,
@@ -110,6 +121,47 @@ describe("confirming the desktop app's step-up in the browser", () => {
         (button) => button.textContent === "Use passkey",
       ),
     ).toBe(true);
+    await view.unmount();
+  });
+});
+
+describe("confirming this browser's own session (no handoff)", () => {
+  test("an embedded app's step-up page confirms this session with the passkey", async () => {
+    let sessions = 0;
+    const view = await mount(
+      {
+        confirm: async () => {
+          throw new Error("no handoff here");
+        },
+        confirmSession: async () => {
+          sessions += 1;
+        },
+      },
+      "",
+    );
+    expect(view.container.textContent).toContain("Use your passkey to change who has access.");
+    expect(view.container.textContent).not.toContain("For the Opengeni app");
+    await view.click("Use passkey");
+    expect(sessions).toBe(1);
+    expect(view.container.querySelector("h1")?.textContent).toBe("You're confirmed");
+    expect(view.container.textContent).toContain("Go back to where you were and try again.");
+    await view.unmount();
+  });
+
+  test("without a passkey yet it says to add one first", async () => {
+    const view = await mount(
+      {
+        confirm: async () => "000000",
+        confirmSession: async () => {
+          throw new AuthApiError(409, "PASSKEY_NONE_REGISTERED");
+        },
+      },
+      "",
+    );
+    await view.click("Use passkey");
+    expect(view.container.querySelector("[role=alert]")?.textContent).toBe(
+      "Add a passkey to your account first.",
+    );
     await view.unmount();
   });
 });

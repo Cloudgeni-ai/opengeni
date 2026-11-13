@@ -12,7 +12,7 @@ import type { Database } from "./database";
 import { rawRows, withRlsContext } from "./database";
 
 /**
- * Nango-backed integrations (migration 1404, docs/nango.md).
+ * Nango-backed integrations (migration 1405, docs/nango.md).
  *
  * The operator switch is the append-only `integration_backend_revisions`
  * table; the newest revision per integration key is effective. Runtime roles
@@ -31,7 +31,7 @@ function pgCode(error: unknown): string | undefined {
   return undefined;
 }
 
-/** Newest revision per integration key; empty before migration 1404 is applied. */
+/** Newest revision per integration key; empty before migration 1405 is applied. */
 export async function readIntegrationBackendSettings(
   db: Database,
 ): Promise<IntegrationBackendSetting[]> {

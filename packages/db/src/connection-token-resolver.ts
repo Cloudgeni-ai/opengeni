@@ -33,6 +33,9 @@ import {
   BUSINESS_CENTRAL_API_ROOT,
   businessCentralApiBase,
   dataverseWebApiBase,
+  FINANCE_OPERATIONS_DATA_PATH,
+  FINANCE_OPERATIONS_METADATA_PATH,
+  financeOperationsOrigin,
 } from "@opengeni/contracts/microsoft-dynamics";
 import {
   PERSONAL_GITHUB_REQUESTED_SCOPES,
@@ -1050,7 +1053,8 @@ function connectionBindingMatches(
           isOfficialSlackRestDestination(destination, ref)
         ) &&
         !isDataverseWebApiDestination(destination, binding, ref) &&
-        !isBusinessCentralApiDestination(destination, binding, ref))
+        !isBusinessCentralApiDestination(destination, binding, ref) &&
+        !isFinanceOperationsDataDestination(destination, binding, ref))
     ) {
       return false;
     }
@@ -1130,7 +1134,40 @@ function isDataverseWebApiDestination(
     !url.username &&
     !url.password &&
     !url.hash &&
-    url.pathname.startsWith(root.pathname)
+    url.pathname.startsWith(root.pathname) &&
+    // The URL parser resolves literal dot segments; refuse encoded separators and
+    // dots that a server could decode into a path outside the Web API root.
+    !/%(?:2f|5c|2e)/iu.test(url.pathname)
+  );
+}
+
+/**
+ * The Finance and Operations bridge runs a Finance and Operations MCP
+ * connection's tools against the same environment's OData data entities and
+ * metadata service: same origin as the bound MCP endpoint, under those roots
+ * only.
+ */
+function isFinanceOperationsDataDestination(
+  destinationUrl: string,
+  binding: string,
+  ref: McpServerConnectionRef,
+): boolean {
+  const origin = financeOperationsOrigin(binding);
+  if (!origin || ref.kind !== "oauth2") return false;
+  const url = new URL(destinationUrl);
+  // Destinations arrive canonicalized without a trailing slash, so a root
+  // itself (`/data/`) reads as `/data`.
+  const under = (root: string) =>
+    url.pathname === root.replace(/\/$/u, "") || url.pathname.startsWith(root);
+  return (
+    url.origin === origin &&
+    ref.providerDomain.toLowerCase() === url.hostname &&
+    !url.username &&
+    !url.password &&
+    !url.hash &&
+    // Encoded separators or dots could climb out of the root on the server.
+    !/%(?:2f|5c|2e)/iu.test(url.pathname) &&
+    (under(FINANCE_OPERATIONS_DATA_PATH) || under(FINANCE_OPERATIONS_METADATA_PATH))
   );
 }
 

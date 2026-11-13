@@ -1,5 +1,21 @@
 # @opengeni/desktop
 
+## 6.20.1
+
+### Patch Changes
+
+- @opengeni/agent-host@6.20.1
+- @opengeni/sdk@6.20.1
+
+## 6.20.0
+
+### Patch Changes
+
+- Updated dependencies [c624443]
+- Updated dependencies [e37485b]
+  - @opengeni/sdk@6.20.0
+  - @opengeni/agent-host@6.20.0
+
 ## 6.19.0
 
 ### Patch Changes

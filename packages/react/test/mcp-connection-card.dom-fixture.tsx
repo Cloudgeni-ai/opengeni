@@ -2,10 +2,12 @@ import { expect, test } from "bun:test";
 import { StrictMode } from "react";
 import type { OpenGeniClient, CapabilityCatalogItem, ConnectionMetadata } from "@opengeni/sdk";
 import { OpenGeniApiError } from "@opengeni/sdk";
+import type { AppHost } from "../src/app/lib/app-host";
 import { matchingActiveMcpConnections } from "../src/mcp-connection-status";
 import { actRun, flush, registerDom, renderComponent } from "./render-hook";
 registerDom();
 const { McpConnectionCard } = await import("../src/components/session-mcp-capability-card");
+const { AppHostProvider } = await import("../src/app/lib/app-host");
 
 const item = {
   id: "service",
@@ -1711,6 +1713,8 @@ function ownLoginElsewhereClient(options: {
   turnedOnBySignIn: boolean;
   /** Turning the capability on here is an admin's step. */
   enableRefused?: boolean;
+  /** Turning it on waits for an admin passkey step-up while `required` is set. */
+  stepUp?: { required: boolean };
 }) {
   let committed = false;
   let enabled = false;
@@ -1771,6 +1775,17 @@ function ownLoginElsewhereClient(options: {
         throw new OpenGeniApiError(
           403,
           JSON.stringify({ error: { message: "Only an admin can turn on this integration" } }),
+          { mutation: true },
+        );
+      if (options.stepUp?.required)
+        throw new OpenGeniApiError(
+          403,
+          JSON.stringify({
+            error: {
+              message: "Confirm it's you to change who has access.",
+              details: { code: "ADMIN_PASSKEY_STEP_UP_REQUIRED", passkeyRegistered: true },
+            },
+          }),
           { mutation: true },
         );
       enabled = true;
@@ -1937,6 +1952,58 @@ test("using your own login here when only an admin can turn the capability on le
     expect(h.grants).toEqual([]);
     expect(document.body.textContent).toContain("Only an admin can turn on Example service.");
     expect(configured).toBe(0);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("using your own login here that waits for a passkey step-up offers it, then uses the login", async () => {
+  sessionStorage.clear();
+  const stepUp = { required: true };
+  const h = ownLoginElsewhereClient({ listedBeforeSignIn: true, turnedOnBySignIn: false, stepUp });
+  let asked = 0;
+  let configured = 0;
+  const view = await renderComponent(
+    <AppHostProvider
+      host={
+        {
+          adminStepUp: async () => {
+            asked += 1;
+            stepUp.required = false;
+            return true;
+          },
+        } as unknown as AppHost
+      }
+    >
+      <McpConnectionCard
+        client={h.client}
+        workspaceId="workspace"
+        capabilityId="reused-service"
+        name="Example service"
+        returnUrl="https://host.example/"
+        onConfigured={() => {
+          configured += 1;
+        }}
+        dialogOnly
+        personalOnly
+      />
+    </AppHostProvider>,
+  );
+  try {
+    await flush();
+    const button = (label: string) =>
+      [...document.querySelectorAll("button")].find((node) => node.textContent === label);
+    await actRun(() => button("Use it here")!.click());
+    await flush();
+    expect(document.body.textContent).toContain(
+      "Confirm it's you with your passkey to turn on Example service.",
+    );
+    expect(h.grants).toEqual([]);
+    await actRun(() => button("Confirm it's you")!.click());
+    await flush();
+    expect(asked).toBe(1);
+    expect(h.calls).toEqual(["enableCapability", "enableCapability", "issueUserResourceGrant"]);
+    expect(configured).toBe(1);
   } finally {
     await view.unmount();
   }

@@ -1,5 +1,5 @@
 /**
- * Nango integrations (migration 1404) against real PostgreSQL with FORCE RLS:
+ * Nango integrations (migration 1405) against real PostgreSQL with FORCE RLS:
  *
  * - the backend switch is append-only, written only through the owner-only
  *   setter and read (newest revision per key) by the runtime role;

@@ -14,9 +14,6 @@ every call runs with that person's Dynamics security roles.
 | Dynamics 365 Business Central                                 | `https://businesscentral.dynamics.com/<tenant>/<environment>`                                             | Available |
 | Dynamics 365 Finance and Operations                           | `https://<env>.operations.dynamics.com` (or regional, such as `https://<env>.operations.ch.dynamics.com`) | Available |
 
-Self-hosted Opengeni turns on Finance and Operations with
-`OPENGENI_MICROSOFT_DYNAMICS_FINANCE_OPERATIONS_ENABLED=true`.
-
 ## Connect
 
 1. Ask an agent in chat to connect Microsoft Dynamics, and give it the address
@@ -48,6 +45,12 @@ agents list and describe tables, query records with OData or FetchXML
 records. They use the environment's Web API, so you don't need to turn on
 Dataverse's MCP server or allow Opengeni as an MCP client, and these calls
 don't use Copilot Credits.
+
+For Finance and Operations, agents list and describe data entities, query
+records in one company or across companies (including counts), and create,
+update and delete records. They use the environment's OData data entities,
+so you don't need to add Opengeni to **Allowed MCP clients**, and these
+calls don't use Copilot Credits.
 
 For Business Central, one connection covers every company in the environment.
 Agents list companies and entities (customers, vendors, items, sales and
@@ -104,46 +107,46 @@ tenant. Guest or partner accounts from another tenant aren't supported yet.
 
 ### Finance and Operations
 
-1. In Feature management, turn on **Dynamics 365 ERP Model Context Protocol
-   server** (newer environments have it on already).
-2. Open **System administration** > **Setup** > **Allowed MCP clients**, add
-   Opengeni's application ID and set **Allowed** to **Yes**.
-   A newly allowed client can take up to a minute to work.
+No environment setting is needed beyond consent. Opengeni reads and changes
+Finance and Operations data through its data entities, which needs the
+**Access Dynamics AX data** permission. If your tenant consented to Opengeni
+before that permission was part of it, Finance and Operations requests fail
+until an administrator grants consent again with the link above.
+
+Each person needs a user in the environment (**System administration** >
+**Users**) with security roles that give access to the data, as for any other
+client.
 
 Environments created in the Power Platform admin center use a regional
 address such as `https://contoso.operations.ch.dynamics.com`; it works the
 same way.
 
 Calls run under each user's own Finance and Operations security roles. See
-[MCP server security](https://learn.microsoft.com/en-us/dynamics365/fin-ops-core/dev-itpro/copilot/mcp/mcp-security).
+[data entities and OData](https://learn.microsoft.com/en-us/dynamics365/fin-ops-core/dev-itpro/data-entities/odata).
 
 ## Licensing and billing
 
 - Users need a licence that gives them access to the data, as for any other
   client. Dataverse Web API calls count toward your tenant's normal
-  [Power Platform request limits](https://learn.microsoft.com/en-us/power-platform/admin/api-request-limits-allocations);
-  they are not billed in Copilot Credits. Business Central API calls count
-  toward the environment's
-  [API limits](https://learn.microsoft.com/en-us/dynamics365/business-central/dev-itpro/administration/operational-limits-online)
-  and are not billed in Copilot Credits either.
+  [Power Platform request limits](https://learn.microsoft.com/en-us/power-platform/admin/api-request-limits-allocations),
+  Finance and Operations OData calls toward its
+  [service protection limits](https://learn.microsoft.com/en-us/dynamics365/fin-ops-core/dev-itpro/data-entities/priority-based-throttling),
+  and Business Central API calls toward the environment's
+  [API limits](https://learn.microsoft.com/en-us/dynamics365/business-central/dev-itpro/administration/operational-limits-online).
+  None of them is billed in Copilot Credits.
 - Microsoft bills calls to its hosted MCP servers from non-Microsoft clients
   in Copilot Credits (see
-  [Dataverse MCP billing](https://learn.microsoft.com/en-us/power-apps/maker/data-platform/data-platform-mcp#billing)).
-  Opengeni uses the Web API for Dataverse. The Finance and Operations
-  connection uses its MCP server, which Microsoft bills at 0.1 Copilot Credits
-  per tool call unless the user has Finance Premium or Supply Chain Management
-  Premium (see
-  [ERP MCP server](https://learn.microsoft.com/en-us/dynamics365/fin-ops-core/dev-itpro/copilot/copilot-mcp)).
+  [Dataverse MCP billing](https://learn.microsoft.com/en-us/power-apps/maker/data-platform/data-platform-mcp#billing)
+  and the [ERP MCP server](https://learn.microsoft.com/en-us/dynamics365/fin-ops-core/dev-itpro/copilot/copilot-mcp)).
+  Opengeni doesn't use them.
 - Opengeni's own usage is billed as usual.
 
 ## Troubleshooting
 
-| Message                                           | What to do                                                                                    |
-| ------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| Your IT needs to approve Opengeni first           | Copy the message for IT from the card. After they approve, choose **Try signing in again**.   |
-| Didn't get to finish signing in?                  | If you sent an approval request from Microsoft's page, wait for IT to approve it, then retry. |
-| Access denied, or missing a privilege             | The signed-in user's Dynamics security roles don't allow it.                                  |
-| The client isn't allowed (Finance and Operations) | Add Opengeni's application ID to **Allowed MCP clients**.                                     |
-| Finance and Operations isn't available here yet   | Ask us to turn on Finance and Operations.                                                     |
-| No access to this Dynamics environment            | Ask the environment's Dynamics admin to add your account with a security role.                |
-| No Business Central licence                       | Ask your Microsoft 365 admin for a Business Central licence, then try again.                  |
+| Message                                 | What to do                                                                                    |
+| --------------------------------------- | --------------------------------------------------------------------------------------------- |
+| Your IT needs to approve Opengeni first | Copy the message for IT from the card. After they approve, choose **Try signing in again**.   |
+| Didn't get to finish signing in?        | If you sent an approval request from Microsoft's page, wait for IT to approve it, then retry. |
+| Access denied, or missing a privilege   | The signed-in user's Dynamics security roles don't allow it.                                  |
+| No access to this Dynamics environment  | Ask the environment's Dynamics admin to add your account with a security role.                |
+| No Business Central licence             | Ask your Microsoft 365 admin for a Business Central licence, then try again.                  |

@@ -1,6 +1,8 @@
 import { useState, type ReactNode } from "react";
 import { CapabilityCatalogItem } from "@opengeni/contracts";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import { AppContext } from "@opengeni/react/app/app-context";
+import { AppHostProvider, type AppHost } from "@opengeni/react/app/lib/app-host";
 import { SessionCapabilityCard } from "@opengeni/react/app/components/capabilities/session-capability-card";
 import { ThisComputerCard } from "@opengeni/react/this-computer";
 import {
@@ -619,6 +621,137 @@ const DYNAMICS_STATES: { label: string; state: DynamicsState }[] = [
   { label: "Live: press Connect; Microsoft refuses in the window", state: "live" },
 ];
 
+/* ----------------------------------------------------------------------------
+   Admin step-up: the account is connected, but turning the integration on
+   here needs the admin to confirm it's them with a passkey. "app" uses this
+   app's own step-up dialog; "embedded" is a host without one, so the card
+   opens Opengeni's page for it. Press Connect, then the card's next action.
+   -------------------------------------------------------------------------- */
+
+function stepUpClient(passkeyRegistered: boolean) {
+  let committed = false;
+  const off = {
+    id: "mcp:kit-team-tools",
+    kind: "mcp",
+    authKind: "oauth2",
+    name: "Team tools",
+    enabled: false,
+    mcpUrl: "https://tools.example.com/mcp",
+    providerDomain: "tools.example.com",
+    connectionRef: null,
+  };
+  const account = {
+    id: "kit-own-account",
+    providerDomain: "tools.example.com",
+    kind: "oauth2",
+    status: "active",
+    subjectId: "user:kit",
+    metadata: { mcpUrl: off.mcpUrl, accountLabel: "maya@example.com" },
+    version: 1,
+  };
+  const attempt = {
+    id: "kit-step-up-attempt",
+    workspaceId: "ws-kit",
+    providerId: "mcp-oauth",
+    ownership: "personal",
+    revision: 1,
+    state: "credential_input",
+    credentialsCommitted: false,
+    integrationInstalled: false,
+    completionRequirement: "connection",
+    nextAction: { type: "credentials", fields: [] },
+    expiresAt: new Date(Date.now() + 600_000).toISOString(),
+  };
+  const transport = new Proxy(
+    {
+      begin: async () => structuredClone(attempt),
+      advance: async () => {
+        committed = true;
+        return {
+          ...attempt,
+          revision: 2,
+          state: "complete",
+          credentialsCommitted: true,
+          nextAction: { type: "none" },
+          account: {
+            id: account.id,
+            providerId: "mcp-oauth",
+            ownership: "personal",
+            status: "connected",
+            label: "Team tools",
+            version: 1,
+          },
+        };
+      },
+    },
+    {
+      get(target, key) {
+        if (typeof key !== "string") return undefined;
+        if (key in target) return (target as Record<string, unknown>)[key];
+        return async () => [];
+      },
+    },
+  );
+  return new Proxy(
+    {
+      connectTransport: () => transport,
+      listCapabilities: async () => ({ items: [off] }),
+      listConnections: async () => (committed ? [account] : []),
+      listOwnConnectionAccounts: async () => (committed ? [account] : []),
+      getSession: async () => ({ id: "session-kit", tools: [], toolPolicy: { mode: "explicit" } }),
+      enableCapability: async () => {
+        throw new OpenGeniApiError(
+          403,
+          JSON.stringify({
+            error: {
+              message: "Confirm it's you with your passkey to change who has access.",
+              details: { code: "ADMIN_PASSKEY_STEP_UP_REQUIRED", passkeyRegistered },
+            },
+          }),
+          { mutation: true },
+        );
+      },
+    } as Record<string, unknown>,
+    {
+      get(target, key) {
+        if (typeof key !== "string") return undefined;
+        if (key in target) return target[key];
+        if (key === "then") return undefined;
+        return async () => emptyList();
+      },
+    },
+  );
+}
+
+const EMBEDDED_HOST = {
+  navigation: {
+    page: { open: (path: string) => window.open(path, "_blank", "noopener") },
+  },
+} as unknown as AppHost;
+
+function StepUpCard({ embedded, passkey }: { embedded: boolean; passkey: boolean }) {
+  const [fake] = useState(() => stepUpClient(passkey));
+  const card = (
+    <McpConnectionCard
+      client={fake as never}
+      workspaceId="ws-kit"
+      sessionId="session-kit"
+      capabilityId="mcp:kit-team-tools"
+      name="Team tools"
+      rationale="Looking up the release needs Team tools turned on here."
+      returnUrl="https://app.example.com/chat"
+      personalOnly
+    />
+  );
+  return embedded ? <AppHostProvider host={EMBEDDED_HOST}>{card}</AppHostProvider> : card;
+}
+
+const STEP_UP_STATES: { label: string; embedded: boolean; passkey: boolean }[] = [
+  { label: "In this app, has a passkey (press Connect)", embedded: false, passkey: true },
+  { label: "In this app, no passkey yet (press Connect)", embedded: false, passkey: false },
+  { label: "Embedded, has a passkey (press Connect)", embedded: true, passkey: true },
+];
+
 export default function ChatConnectSection() {
   const oauth = CARDS.oauth!;
   const dynamics = CARDS.dynamics!;
@@ -673,6 +806,15 @@ export default function ChatConnectSection() {
             {SIGN_IN.map((entry) => (
               <StateCell key={entry.definitionId} label={entry.label} align="stretch">
                 <SignInCard entry={entry} />
+              </StateCell>
+            ))}
+          </StatesGrid>
+        ) : null}
+        {showPart("stepup") ? (
+          <StatesGrid title="Admin step-up" columns={1}>
+            {STEP_UP_STATES.map((entry) => (
+              <StateCell key={entry.label} label={entry.label} align="stretch">
+                <StepUpCard embedded={entry.embedded} passkey={entry.passkey} />
               </StateCell>
             ))}
           </StatesGrid>

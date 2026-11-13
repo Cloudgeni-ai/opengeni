@@ -194,7 +194,7 @@ describe("agent capability catalog search", () => {
       const withDynamics = [
         ...catalog,
         ...nativeConnectionCapabilityRecommendations({
-          microsoftDynamics: { financeOperations: false },
+          microsoftDynamics: true,
         }).filter((entry) => entry.id === "api:microsoft-dynamics"),
       ];
       for (const query of [
@@ -559,7 +559,7 @@ describe("agent capability catalog search", () => {
 
     test("a CRM question that names no system does not name Dynamics", () => {
       const dynamics = nativeConnectionCapabilityRecommendations({
-        microsoftDynamics: { financeOperations: true },
+        microsoftDynamics: true,
       }).filter((entry) => entry.id === "api:microsoft-dynamics");
       const withDynamics = [...catalog, ...dynamics];
       const namedWith = (query: string, distinctive = false) =>

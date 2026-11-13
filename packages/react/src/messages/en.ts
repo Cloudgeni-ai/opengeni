@@ -4988,6 +4988,13 @@ export const englishMessages = {
     "Add a passkey to your account to turn on {name}, then connect again.",
   "sessionMcpCapabilityCard.confirmWithPasskeyToTurnOn":
     "Confirm it's you with your passkey to turn on {name}, then connect again.",
+  "sessionMcpCapabilityCard.addAPasskeyToTurnOnHere":
+    "Add a passkey to your account to turn on {name}.",
+  "sessionMcpCapabilityCard.confirmWithPasskeyToTurnOnHere":
+    "Confirm it's you with your passkey to turn on {name}.",
+  "sessionMcpCapabilityCard.addAPasskey": "Add a passkey",
+  "sessionMcpCapabilityCard.confirmItSYou": "Confirm it's you",
+  "sessionMcpCapabilityCard.tryAgain": "Try again",
   "sessionMcpCapabilityCard.onlyAnAdminCanTurnOn":
     "Only an admin can turn on {name}. Ask an admin to turn it on, then connect your account.",
   "sessionMcpCapabilityCard.onlyMe": "Only me",

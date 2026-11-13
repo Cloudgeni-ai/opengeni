@@ -195,15 +195,15 @@ function registerOwnResourceReachRoutes(app: Hono, deps: ApiRouteDeps): void {
     } catch (error) {
       return lifecycleError(error);
     }
-    const listed: OwnResource[] = [...resources.entries()].map(
-      ([key, { originWorkspaceId: _origin, ...resource }]) => ({
+    const listed: OwnResource[] = [...resources.entries()]
+      .filter(([key]) => !names.get(key)?.removed)
+      .map(([key, { originWorkspaceId: _origin, ...resource }]) => ({
         ...resource,
         name: names.get(key)?.name ?? FALLBACK_NAME[resource.resourceKind],
         provider: names.get(key)?.provider ?? null,
         plan: names.get(key)?.plan ?? null,
         workspaces: resource.workspaces.sort(byPersonalThenName),
-      }),
-    );
+      }));
     listed.sort(
       (left, right) =>
         KIND_ORDER[left.resourceKind] - KIND_ORDER[right.resourceKind] ||

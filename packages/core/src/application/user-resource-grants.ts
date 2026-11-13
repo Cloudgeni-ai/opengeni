@@ -415,6 +415,8 @@ export type OwnResourceName = {
   provider: string | null;
   /** A plan's reported plan, when known. */
   plan: string | null;
+  /** A login that was removed: it no longer works anywhere and isn't listed. */
+  removed?: boolean;
 };
 
 export function ownResourceKey(resource: OwnResourceInput): string {
@@ -460,6 +462,7 @@ export async function nameOwnResources(
         name: connectionAccountIdentityLabel(connection.metadata, connection.providerDomain),
         provider: connection.providerDomain,
         plan: null,
+        ...(connection.status === "revoked" ? { removed: true } : {}),
       });
     }
   }

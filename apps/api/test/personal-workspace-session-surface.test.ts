@@ -2278,6 +2278,24 @@ describe("managed personal-resource grant HTTP lifecycle", () => {
       { workspaceId: human.legacyWorkspaceId, current: true, on: true },
     ]);
 
+    // A removed login isn't listed anymore.
+    await shared!.admin.begin(async (tx) => {
+      await tx`select set_config('opengeni.account_id', ${human.accountId}, true),
+        set_config('opengeni.workspace_id', ${human.legacyWorkspaceId}, true),
+        set_config('opengeni.subject_id', ${human.subjectId}, true)`;
+      await tx`update connections set status = 'revoked' where id = ${notion}`;
+    });
+    const afterRemove = await app.request(
+      `http://x/v1/workspaces/${human.legacyWorkspaceId}/own-resources`,
+      { headers: { cookie: human.cookie } },
+    );
+    expect(afterRemove.status).toBe(200);
+    expect(
+      ((await afterRemove.json()) as { resources: Array<{ resourceId: string }> }).resources.map(
+        (resource) => resource.resourceId,
+      ),
+    ).toEqual([linear]);
+
     // Someone else's list never shows yours.
     const theirs = await app.request(
       `http://x/v1/workspaces/${other.personalWorkspaceId}/own-resources`,

@@ -64,7 +64,9 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * ids-only inventory of installations that send updates (1153) and the
  * recording compaction sweep's inventory of meeting tracks not yet kept
  * compact (1240), and the session storage pass's inventory of sessions with
- * content to collect and its collector of unreferenced content blobs (1359).
+ * content to collect and its collector of unreferenced content blobs (1359),
+ * and the sandbox reaper's inventory of cold sandboxes whose chats are all
+ * archived (1404).
  * Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
@@ -100,6 +102,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "end_agent_call_rings_v1(uuid)",
   "session_content_garbage_candidates_v1(integer)",
   "collect_session_content_garbage_v1(uuid, uuid, integer)",
+  "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
 ] as const;
 
 /**
@@ -136,6 +139,9 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * granted, settling a call sends no ended push and those phones ring out.
  * 1359 withholds the session content collector and its inventory; until they
  * are granted, unreferenced content blobs stay until the session is archived.
+ * 1404 withholds the inventory of cold sandboxes whose chats are all
+ * archived; until it is granted, such a non-compute sandbox keeps its saved
+ * workspace until its chats are deleted (as before).
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -146,6 +152,7 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "end_agent_call_rings_v1(uuid)",
   "session_content_garbage_candidates_v1(integer)",
   "collect_session_content_garbage_v1(uuid, uuid, integer)",
+  "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -261,6 +268,10 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "session_attempt_tool_catalogs",
     "session_content_blobs",
     "opengeni_private.session_content_collections",
+  ],
+  "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)": [
+    "sandbox_leases",
+    "sessions",
   ],
 };
 
@@ -1941,7 +1952,7 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   TENANCY_BACKFILL_ACTIVATION_EVIDENCE_ROUTINE,
   VERIFIED_SIGNUP_TRIAL_SWITCH_SETTER_ROUTINE,
   "set_credit_promotion_policy(jsonb, text, text)",
-  // 1404_nango_integrations: owner-only operator setter and export.
+  // 1405_nango_integrations: owner-only operator setter and export.
   "set_integration_backend(text, text, text, boolean, jsonb, text, text)",
   "nango_affected_connections(text)",
   "set_subscription_plan_catalog(jsonb, text, text)",
@@ -2933,7 +2944,7 @@ export const RUNTIME_READ_ONLY_TABLES = [
   "company_profile_snapshots",
   "deployment_model_catalog",
   "document_authority_reclassifications",
-  // 1404_nango_integrations: the operator integration backend switch.
+  // 1405_nango_integrations: the operator integration backend switch.
   "integration_backend_revisions",
   "knowledge_lifecycle_events",
   "knowledge_memories",
@@ -3015,7 +3026,7 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "knowledge_source_objects",
   "knowledge_sources",
   "knowledge_sync_runs",
-  // 1404_nango_integrations: append-only Nango usage events.
+  // 1405_nango_integrations: append-only Nango usage events.
   "nango_usage_events",
   // 1377_opengeni_console: append-only Console audit log and end-user labels.
   "organization_console_audit_events",

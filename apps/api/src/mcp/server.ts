@@ -331,11 +331,6 @@ function microsoftDynamicsSetupProblem(
     return "Microsoft Dynamics isn't available on this Opengeni deployment yet. Nothing was posted; tell the person.";
   if (!product)
     return "That isn't a Dynamics environment address. Ask the person to open Dynamics and copy the address bar (it looks like https://contoso.crm4.dynamics.com), or find Environment URL in the Power Platform admin center, then call custom_mcp_setup_request again.";
-  if (
-    product === "finance_operations" &&
-    settings.microsoftDynamicsFinanceOperationsEnabled !== true
-  )
-    return "Dynamics 365 Finance and Operations isn't available here yet; only Dynamics 365 Sales and other Dataverse environments can be connected. Nothing was posted; tell the person.";
   return null;
 }
 
@@ -7749,11 +7744,7 @@ function registerCapabilityDiscoveryTools(
       integrationDefinitions: connectableIntegrationDefinitions(deps.settings, grant.workspaceId),
       ...(deps.settings.microsoftDynamicsClientId?.trim() &&
       deps.settings.microsoftDynamicsClientSecret?.trim()
-        ? {
-            microsoftDynamics: {
-              financeOperations: deps.settings.microsoftDynamicsFinanceOperationsEnabled === true,
-            },
-          }
+        ? { microsoftDynamics: true }
         : {}),
     });
   // Indexed marketplace plugins: a person installs one from its card.
