@@ -1560,6 +1560,19 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       const replayed = WorkspaceArtifactMutationResponse.parse(JSON.parse(retry.text));
       expect(replayed.replayed).toBe(true);
       expect(replayed.version.id).toBe(created.version.id);
+      // Declaring the connector itself next to the publisher's own route is
+      // the same declaration, stored once.
+      const explicit = await create([
+        { serverId: route, toolName: "query" },
+        { serverId: "crm", toolName: "query" },
+      ]);
+      if (explicit.isError) throw new Error(explicit.text);
+      expect(
+        WorkspaceArtifactMutationResponse.parse(JSON.parse(explicit.text)).version.requestedTools,
+      ).toEqual([
+        { serverId: route, toolName: "query" },
+        { serverId: "crm", toolName: "query" },
+      ]);
       // A connector none of the attempt's routes belongs to is still refused.
       const foreign = await create([{ serverId: "billing", toolName: "query" }]);
       expect(foreign.isError).toBe(true);
