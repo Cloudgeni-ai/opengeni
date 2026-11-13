@@ -25,6 +25,21 @@ export function setAdminStepUpHandler(next: Handler): () => void {
   };
 }
 
+/**
+ * Open the prompt for a refusal a caller already holds (a connect card whose
+ * change was refused after the person closed the prompt). Resolves true once
+ * they confirmed, so the caller sends its change again; false without a
+ * prompt mounted or when they cancel.
+ */
+export async function requestAdminStepUp(request: AdminStepUpRequest): Promise<boolean> {
+  const current = handler;
+  if (!current) return false;
+  pending ??= current(request).finally(() => {
+    pending = null;
+  });
+  return await pending;
+}
+
 /** The step-up a refused response asks for, or null for any other response. */
 export async function adminStepUpRequested(response: Response): Promise<AdminStepUpRequest | null> {
   if (response.status !== 403) return null;

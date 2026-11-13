@@ -168,6 +168,23 @@ const DELETE_BRANCH = scene(
   { display: { toolName: "delete_branch", connector: "GitHub", providerDomain: "github.com" } },
 );
 
+const UPDATE_RECORD = scene(
+  "update",
+  "mcp_records__update_record",
+  {
+    table: "accounts",
+    id: "7f3c1a",
+    record: { creditlimit: 25000, telephone1: "+47 22 33 44 55" },
+  },
+  {
+    display: {
+      toolName: "update_record",
+      connector: "Records",
+      providerDomain: "records.example.com",
+    },
+  },
+);
+
 const APP_ACTION = scene(
   "app",
   "admin_action_call",
@@ -235,6 +252,7 @@ const SCENES = [
   TRASH,
   PULL_REQUEST,
   DELETE_BRANCH,
+  UPDATE_RECORD,
   APP_ACTION,
   LEGACY,
   ...DELETE_CONNECTIONS,
@@ -483,6 +501,9 @@ export default function ChatApprovalsSection() {
             </StateCell>
             <StateCell label="Destructive connector tool" align="stretch">
               <Surface scenes={[DELETE_BRANCH]} />
+            </StateCell>
+            <StateCell label="Update a record (small object shown inline)" align="stretch">
+              <Surface scenes={[UPDATE_RECORD]} />
             </StateCell>
             <StateCell label="Opengeni app action" align="stretch">
               <Surface scenes={[APP_ACTION]} />

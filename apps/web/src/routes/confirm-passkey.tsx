@@ -5,26 +5,36 @@
 // one-time code to type into the app. The code is what confirms the app, so
 // a link forwarded by someone else gains them nothing unless the code is
 // shared too, which the page warns against.
+//
+// Opened without a handoff (an embedded Opengeni app sends people here when
+// an admin change asks for a passkey), it confirms this browser's own
+// session, as the console's step-up prompt does.
 import { CheckIcon, KeyRoundIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { Button } from "@opengeni/react/ui/button";
 import { Notice } from "@opengeni/react/ui/notice";
 
-import { AuthApiError, confirmPasskeyHandoff } from "@/api";
+import { AuthApiError, confirmAdminWithPasskey, confirmPasskeyHandoff } from "@/api";
 import { adminStepUpErrorMessage, formatHandoffCode } from "@/components/admin-step-up-dialog";
 
 export type ConfirmPasskeyApi = {
   /** Runs the passkey ceremony for the handoff; resolves to the code for the app. */
   confirm: (handoffId: string) => Promise<string>;
+  /** Confirms this browser's own session (no handoff). */
+  confirmSession: () => Promise<void>;
 };
 
-const defaultApi: ConfirmPasskeyApi = { confirm: confirmPasskeyHandoff };
+const defaultApi: ConfirmPasskeyApi = {
+  confirm: confirmPasskeyHandoff,
+  confirmSession: confirmAdminWithPasskey,
+};
 
 type State =
   | { kind: "ready" }
   | { kind: "confirming" }
   | { kind: "done"; code: string }
+  | { kind: "confirmed" }
   | { kind: "unavailable"; message: string };
 
 /** Why this page can't confirm, in a sentence the person can act on. */
@@ -50,17 +60,18 @@ export function ConfirmPasskeyRoute({
     () => handoff ?? new URLSearchParams(window.location.search).get("handoff") ?? "",
     [handoff],
   );
-  const [state, setState] = useState<State>(() =>
-    handoffId
-      ? { kind: "ready" }
-      : { kind: "unavailable", message: "This link is incomplete. Start again in the app." },
-  );
+  const [state, setState] = useState<State>({ kind: "ready" });
   const [error, setError] = useState<string | null>(null);
 
   async function confirm() {
     setError(null);
     setState({ kind: "confirming" });
     try {
+      if (!handoffId) {
+        await api.confirmSession();
+        setState({ kind: "confirmed" });
+        return;
+      }
       setState({ kind: "done", code: await api.confirm(handoffId) });
     } catch (caught) {
       if (
@@ -81,7 +92,7 @@ export function ConfirmPasskeyRoute({
       <div className="w-full max-w-sm rounded-xl border border-border bg-surface p-6">
         <div className="mb-4 flex items-center gap-3">
           <span className="flex size-9 shrink-0 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
-            {state.kind === "done" ? (
+            {state.kind === "done" || state.kind === "confirmed" ? (
               <CheckIcon aria-hidden className="size-4" />
             ) : (
               <KeyRoundIcon aria-hidden className="size-4" />
@@ -89,15 +100,23 @@ export function ConfirmPasskeyRoute({
           </span>
           <div>
             <h1 className="text-base font-semibold">
-              {state.kind === "done" ? "Enter this code in the app" : "Confirm it's you"}
+              {state.kind === "done"
+                ? "Enter this code in the app"
+                : state.kind === "confirmed"
+                  ? "You're confirmed"
+                  : "Confirm it's you"}
             </h1>
-            <p className="text-sm text-fg-subtle">For the Opengeni app</p>
+            {handoffId ? <p className="text-sm text-fg-subtle">For the Opengeni app</p> : null}
           </div>
         </div>
         {state.kind === "unavailable" ? (
           <div role="alert">
             <Notice tone="failed">{state.message}</Notice>
           </div>
+        ) : state.kind === "confirmed" ? (
+          <p className="text-sm text-fg-muted">
+            Go back to where you were and try again. You won't be asked again until you sign out.
+          </p>
         ) : state.kind === "done" ? (
           <>
             <p
@@ -114,8 +133,9 @@ export function ConfirmPasskeyRoute({
         ) : (
           <>
             <p className="text-sm text-fg-muted">
-              Continue only if you just selected Continue in browser in the Opengeni app. If you
-              didn't, close this page.
+              {handoffId
+                ? "Continue only if you just selected Continue in browser in the Opengeni app. If you didn't, close this page."
+                : "Use your passkey to change who has access."}
             </p>
             {error ? (
               <div role="alert" className="mt-4">

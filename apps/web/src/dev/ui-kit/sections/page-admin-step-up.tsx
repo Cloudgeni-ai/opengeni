@@ -116,6 +116,7 @@ export default function AdminStepUpSection() {
             handoff="8f0c3c4e-2f6d-4a8a-9d43-1d8f0e3c6b21"
             api={{
               confirm: () => new Promise((resolve) => setTimeout(() => resolve(SAMPLE_CODE), 900)),
+              confirmSession: () => new Promise((resolve) => setTimeout(resolve, 900)),
             }}
           />
         </div>
