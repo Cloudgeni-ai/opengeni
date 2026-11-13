@@ -1240,6 +1240,7 @@ import {
   type SessionCommandActor,
   SessionControlConflictError,
   SessionControlInvariantError,
+  SessionMissingFromWorkspaceError,
   updateSessionCommandReceiptResult,
   type SessionTurnAttemptOutcome,
   type WorkspaceControlRow,

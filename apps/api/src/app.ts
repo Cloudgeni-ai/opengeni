@@ -138,6 +138,7 @@ import {
   sessionStartedByPerson,
   rlsContextForWorkspace,
   SessionRepositoryRemovedError,
+  SessionMissingFromWorkspaceError,
   withSubscriptionAccountAdministrators,
   ambientBillingOrigin,
   withBillingOriginOverride,
@@ -2835,6 +2836,10 @@ export function createAppComposition(
               details: { code: rawError.code },
             })
           : (missingPermissionHttpError(rawError) ??
+            // A session deleted while the request ran is gone, not a server fault.
+            (rawError instanceof SessionMissingFromWorkspaceError
+              ? new HTTPException(404, { message: "session not found" })
+              : null) ??
             authenticationRequiredHttpError(rawError) ??
             sessionUsageLimitHttpError(rawError) ??
             allowanceExhaustedHttpError(rawError) ??

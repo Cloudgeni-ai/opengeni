@@ -14,5 +14,6 @@ Fix several failures seen in production:
 - Checking a session's work while the session is being deleted reports it idle instead of failing the activity with `SessionControlInvariantError`.
 - A chat deleted while its title is generated ends the title operation quietly instead of warning "Independent session title failed".
 - A caller that disconnects from `POST /v1/workspaces/:workspaceId/tools/{resolve,invoke,target-approvals,manifest}` gets the client-gone 499 (empty body) instead of a 500, counted as `aborted` in `opengeni_tool_target_operations_total`.
+- A request that reads a session deleted while it runs (for example `GET /v1/workspaces/:workspaceId/machines?sessionId=…`) answers 404 "session not found" instead of a 500 "Session … does not exist in its workspace". The missing-session case of `SessionControlInvariantError` is now the `SessionMissingFromWorkspaceError` subclass.
 - The web app picks its root providers from the rendered route rather than the pending location, so navigating to Security settings or phone sign-in no longer shows "Opengeni app context is not ready".
 - Temporal "Activity failed" / "Workflow failed" logs add `failureMessageHash` (a hash of the explaining cause's message with identifiers, numbers and quoted values removed) and, for code-authored invariant errors, that template as `failureMessage`.
