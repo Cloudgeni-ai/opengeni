@@ -323,17 +323,43 @@ impl Machine<'_> {
     }
 }
 
-/// Puts a copy of the host's current guest kernel in the jail: a clone
-/// sharing its extents where the filesystem can (XFS, btrfs), otherwise a
-/// plain copy. Never a hard link: the jail is the VMM's, and a name for the
-/// host's own kernel in it would let a compromised VMM have the host change
-/// that file's owner or read it in place of one of its own. Replacing it on
-/// every boot picks up a kernel upgrade; restores do not read the kernel.
-pub(crate) fn link_kernel(host_kernel: &Path, paths: &Paths) -> io::Result<()> {
+/// Puts a copy of `kernel`, the agent's [`stage_kernel`] copy of the host's
+/// guest kernel, in the jail: a clone sharing its extents where the
+/// filesystem can (XFS, btrfs), otherwise a plain copy. Never a hard link:
+/// the jail is the VMM's, and a name for the host's own kernel in it would
+/// let a compromised VMM have the host change that file's owner or read it
+/// in place of one of its own. Replacing it on every boot picks up a kernel
+/// upgrade; restores do not read the kernel. Nothing syncs it: every boot
+/// makes it again before its VMM reads it.
+pub(crate) fn link_kernel(kernel: &Path, paths: &Paths) -> io::Result<()> {
     let staging = paths.kernel.with_extension("staging");
     remove_if_present(&staging)?;
-    copy_sparse(host_kernel, &staging)?;
+    copy_contents(&File::open(kernel)?, &File::create(&staging)?)?;
     fs::rename(&staging, &paths.kernel)
+}
+
+/// Where the agent keeps its copy of the host's guest kernel: under the
+/// state root, on the sandboxes' own filesystem.
+pub(crate) fn staged_kernel(root: &Path) -> PathBuf {
+    root.join("kernel").join("vmlinux")
+}
+
+/// Copies the host's guest kernel to [`staged_kernel`] and returns that
+/// path, which every boot's [`link_kernel`] then copies. The host's kernel
+/// lives elsewhere (`/opt`), on another filesystem than the sandboxes, so
+/// each boot's copy of it was a whole one, some 30 MB written and synced;
+/// from this copy it is a clone, which writes nothing, where the
+/// filesystem shares extents. Made by every agent start, so nothing syncs
+/// it either: only this process uses it, and an install that changes the
+/// kernel restarts the agent.
+pub(crate) fn stage_kernel(host_kernel: &Path, root: &Path) -> io::Result<PathBuf> {
+    let staged = staged_kernel(root);
+    fs::create_dir_all(staged.parent().expect("a staged kernel has a directory"))?;
+    let staging = staged.with_extension("staging");
+    remove_if_present(&staging)?;
+    copy_contents(&File::open(host_kernel)?, &File::create(&staging)?)?;
+    fs::rename(&staging, &staged)?;
+    Ok(staged)
 }
 
 /// Writes `contents` to `path` so that after a crash the file either holds
