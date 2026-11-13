@@ -1,5 +1,17 @@
 # @opengeni/codemode
 
+## 6.20.0
+
+### Patch Changes
+
+- Updated dependencies [c624443]
+- Updated dependencies [ae3972e]
+- Updated dependencies [e37485b]
+- Updated dependencies [9c17a87]
+  - @opengeni/sdk@6.20.0
+  - @opengeni/contracts@6.20.0
+  - @opengeni/tool-gateway@6.20.0
+
 ## 6.19.0
 
 ### Patch Changes
