@@ -211,6 +211,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     slackBotDisplayName: "Opengeni",
     slackCommand: "/opengeni",
     socialOauthClientsJson: "{}",
+    nangoApiBaseUrl: "https://api.nango.dev",
     goalMaxAutoContinuations: 20,
     goalIdleBackoffMs: DEFAULT_GOAL_IDLE_BACKOFF_MS,
     goalIdleBackoffMaxMs: DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS,

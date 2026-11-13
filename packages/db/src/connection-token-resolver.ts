@@ -20,6 +20,16 @@ import type {
 
 import { type ConnectionUseAttribution } from "@opengeni/contracts/connection-authority";
 import {
+  isNangoConnectionCredential,
+  isNangoProviderDomain,
+  nangoAuthHeaders,
+  nangoDestinationAllowed,
+  nangoIntegrationKeyFromProviderDomain,
+  nangoToolsMcpUrl,
+  nativeNangoIntegrationByKey,
+  type NangoProxyTransport,
+} from "@opengeni/contracts/nango";
+import {
   BUSINESS_CENTRAL_API_ROOT,
   businessCentralApiBase,
   dataverseWebApiBase,
@@ -145,6 +155,12 @@ export type ResolveConnectionCredentialResult =
        */
       authorizeProviderRequest?: () => Promise<boolean>;
       expiresAt?: Date | null;
+      /**
+       * Present for a Nango-backed connection: `headers` authenticate to the
+       * Nango API, and the caller must send its already-validated provider
+       * request through this proxy (see credentialRequestTarget).
+       */
+      proxy?: NangoProxyTransport;
     }
   | {
       status: "auth_needed";
@@ -191,6 +207,12 @@ export type ResolveConnectionCredentialInput = {
   hostConnectionUseAttribution?: ConnectionUseAttribution;
   /** Exact accepted attempt plus one stable physical-provider request id. */
   connectionUseContext?: AcceptedConnectionUseContext;
+  /**
+   * Transports the caller can apply besides sending `headers` to
+   * `destinationUrl` directly. A Nango-backed connection resolves only for a
+   * caller that declares `nango_proxy`; any other caller gets auth_needed.
+   */
+  acceptedTransports?: readonly "nango_proxy"[];
 };
 
 const OFFICIAL_GMAIL_MCP_RESOURCE = "https://gmailmcp.googleapis.com/mcp/v1";
@@ -621,6 +643,7 @@ export function buildConnectionTokenResolver(
     inputCredentialTarget: "mcp" | "http_api",
     connectionUseAttribution?: ConnectionUseAttribution,
     recordUsage = true,
+    acceptedTransports: readonly string[] = [],
   ): Promise<ResolveConnectionCredentialResult> => {
     if (cred.status !== "active") {
       return authNeededForStatus(cred, ref);
@@ -647,7 +670,9 @@ export function buildConnectionTokenResolver(
           : {}),
       };
     }
-    const material = credentialMaterialForConnection(cred, inputCredentialTarget);
+    const material = isNangoProviderDomain(cred.providerDomain)
+      ? nangoCredentialMaterial(cred, settings, acceptedTransports)
+      : credentialMaterialForConnection(cred, inputCredentialTarget);
     if (material.status !== "ok") {
       return {
         status: "auth_needed",
@@ -679,6 +704,7 @@ export function buildConnectionTokenResolver(
           : {}),
       ...(connectionUseAttribution ? { connectionUseAttribution } : {}),
       expiresAt: cred.expiresAt,
+      ...(material.proxy ? { proxy: material.proxy } : {}),
     };
   };
 
@@ -975,6 +1001,7 @@ export function buildConnectionTokenResolver(
       input.credentialTarget ?? "mcp",
       connectionUseAttribution,
       credentialResolutionMode === "execution",
+      input.acceptedTransports ?? [],
     );
   };
 }
@@ -990,6 +1017,8 @@ function connectionBindingMatches(
 ): boolean {
   if (cred.providerDomain.toLowerCase() !== ref.providerDomain.toLowerCase()) return false;
   if (ref.kind && cred.kind !== ref.kind) return false;
+  if (isNangoProviderDomain(cred.providerDomain))
+    return nangoConnectionBindingMatches(cred, ref, destinationUrl);
 
   const credential = cred.credential as Record<string, unknown>;
   const metadata = cred.metadata as Record<string, unknown>;
@@ -1241,7 +1270,8 @@ async function refreshAutoConnectedCredential(
 }
 
 function shouldRefresh(cred: ConnectionCredentialForBroker, force: boolean, now: Date): boolean {
-  if (cred.kind !== "oauth2") {
+  // Nango refreshes provider tokens itself; there is nothing to refresh here.
+  if (cred.kind !== "oauth2" || isNangoProviderDomain(cred.providerDomain)) {
     return false;
   }
   if (force) {
@@ -1315,8 +1345,85 @@ type ConnectionCredentialMaterial =
       status: "ok";
       headers: Record<string, string>;
       placements?: ConnectionCredentialPlacement[];
+      proxy?: NangoProxyTransport;
     }
   | { status: "invalid" | "unsupported" };
+
+/**
+ * A Nango connection binds to its integration's exact provider destinations
+ * (Google bridges) or to its own synthetic tool-bridge identity (config-only
+ * integrations). A native and a Nango connection never satisfy each other's
+ * reference because their provider domains differ.
+ */
+function nangoConnectionBindingMatches(
+  cred: Pick<ConnectionCredentialForBroker, "providerDomain" | "kind" | "metadata">,
+  ref: McpServerConnectionRef,
+  destinationUrl: string,
+): boolean {
+  const key = nangoIntegrationKeyFromProviderDomain(cred.providerDomain);
+  if (!key || cred.kind !== "oauth2" || ref.subjectScope !== "subject") return false;
+  const destination = canonicalHttpUrl(destinationUrl);
+  if (!destination) return false;
+  const native = nativeNangoIntegrationByKey(key);
+  if (native) {
+    if (destination === canonicalHttpUrl(native.mcpUrl)) return true;
+    if (!nangoDestinationAllowed(native.destinations, destination)) return false;
+    // The same exact routes the native grant may reach, nothing broader.
+    const nativeRef = { ...ref, providerDomain: native.nativeProviderDomain };
+    if (native.integrationKey === "gmail") return isOfficialGmailRestDestination(destination, nativeRef);
+    if (native.integrationKey === "google-calendar")
+      return isOfficialGoogleCalendarRestDestination(destination, nativeRef);
+    return isOfficialDriveRestDestination(destination, nativeRef) || isNangoDriveReadDestination(destination);
+  }
+  return destination === canonicalHttpUrl(nangoToolsMcpUrl(key));
+}
+
+/**
+ * Under Nango, Drive reads cannot use Google's hosted Drive MCP server, so the
+ * bridge serves them from these Drive REST routes (docs/nango.md).
+ */
+function isNangoDriveReadDestination(destinationUrl: string): boolean {
+  const url = new URL(destinationUrl);
+  return (
+    url.origin === "https://www.googleapis.com" &&
+    !url.username &&
+    !url.password &&
+    !url.hash &&
+    /^\/drive\/v3\/(?:files(?:\/[a-zA-Z0-9_-]+(?:\/export|\/permissions)?)?|about)$/u.test(url.pathname)
+  );
+}
+
+function nangoCredentialMaterial(
+  cred: ConnectionCredentialForBroker,
+  settings: Settings,
+  acceptedTransports: readonly string[],
+): ConnectionCredentialMaterial {
+  // Fail closed: a caller that cannot route through the proxy, or a
+  // deployment without the Nango key, gets no headers at all.
+  if (!acceptedTransports.includes("nango_proxy") || !settings.nangoSecretKey)
+    return { status: "unsupported" };
+  const credential = cred.credential;
+  if (
+    !isNangoConnectionCredential(credential) ||
+    nangoIntegrationKeyFromProviderDomain(cred.providerDomain) !== credential.integrationKey
+  )
+    return { status: "invalid" };
+  return {
+    status: "ok",
+    headers: nangoAuthHeaders({
+      secretKey: settings.nangoSecretKey,
+      nangoConnectionId: credential.nangoConnectionId,
+      providerConfigKey: credential.providerConfigKey,
+    }),
+    proxy: {
+      kind: "nango_proxy",
+      baseUrl: settings.nangoApiBaseUrl,
+      integrationKey: credential.integrationKey,
+      providerConfigKey: credential.providerConfigKey,
+      nangoConnectionId: credential.nangoConnectionId,
+    },
+  };
+}
 
 function credentialMaterialForConnection(
   cred: ConnectionCredentialForBroker,
