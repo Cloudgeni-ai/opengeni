@@ -2695,8 +2695,11 @@ export type BuildAgentOptions = {
     response: HumanInputResponse;
   };
   reasoningEffort?: ReasoningEffort;
-  /** Provider-generated Responses summaries. Omitted preserves the existing wire. */
-  reasoningSummary?: "auto" | "detailed";
+  /**
+   * Provider-generated Responses summaries. Omitted preserves the existing wire
+   * (`detailed`); `none` sends no `reasoning.summary`, so none is written.
+   */
+  reasoningSummary?: "auto" | "detailed" | "none";
   /** Product latency selection frozen onto this turn. */
   latencyMode?: LatencyMode;
   /** Provider-specific wire value resolved by the worker (`fast` or `priority`). */
@@ -4187,6 +4190,7 @@ export function buildOpenGeniAgent(
       : null;
   if (embeddedSkillReadTool) agentTools.push(embeddedSkillReadTool);
   const instructionInspection = inspectPersistentAgentInstructions(settings, instructionOptions);
+  const reasoningSummary = options.reasoningSummary ?? "detailed";
   const baseConfig = {
     name: "Opengeni Agent",
     model: options.model ?? settings.openaiModel,
@@ -4217,7 +4221,7 @@ export function buildOpenGeniAgent(
     modelSettings: {
       reasoning: {
         effort: options.reasoningEffort ?? settings.openaiReasoningEffort,
-        summary: options.reasoningSummary ?? "detailed",
+        ...(reasoningSummary === "none" ? {} : { summary: reasoningSummary }),
       },
       ...(options.textVerbosity ? { text: { verbosity: options.textVerbosity } } : {}),
       // Round-trip the encrypted reasoning payload with every call so chains

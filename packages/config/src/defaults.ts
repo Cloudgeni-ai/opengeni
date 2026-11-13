@@ -12,6 +12,22 @@ export const DEFAULT_GOAL_IDLE_BACKOFF_MS: readonly number[] = [3_000, 30_000, 1
 export const DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS = 600_000;
 
 /**
+ * Responses `reasoning.summary` per route and latency mode
+ * (OPENGENI_REASONING_SUMMARY_JSON overrides single cells; `none` sends no
+ * summary field). Ultrafast on Codex asks for none: the answer waits until the
+ * summary is written, which measured about 1.3–2.4 s per call. Every other
+ * cell is the earlier wire.
+ */
+export const DEFAULT_REASONING_SUMMARIES = {
+  codex: { standard: "detailed", priority: "detailed", fast: "detailed", ultrafast: "none" },
+  openai: { standard: "auto", priority: "auto", fast: "auto", ultrafast: "auto" },
+  azure: { standard: "auto", priority: "auto", fast: "auto", ultrafast: "auto" },
+} as const satisfies Record<
+  "codex" | "openai" | "azure",
+  Record<"standard" | "priority" | "fast" | "ultrafast", "auto" | "detailed" | "none">
+>;
+
+/**
  * Turn-worker graceful shutdown. A draining turn worker lets in-flight turns
  * finish naturally for the grace, then cancels the rest with WORKER_SHUTDOWN
  * (recoverable checkpoint), and the Temporal SDK force-stops at the force time.

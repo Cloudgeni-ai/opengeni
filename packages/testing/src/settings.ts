@@ -4,6 +4,7 @@ import {
   DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS,
   DEFAULT_GOAL_IDLE_BACKOFF_MS,
   DEFAULT_MODEL_COST_POLICY_JSON,
+  DEFAULT_REASONING_SUMMARIES,
 } from "@opengeni/config/defaults";
 import type { Settings } from "@opengeni/config";
 
@@ -346,6 +347,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     codexRotationNearExhaustionPct: 90,
     reasoningConfigurationUpdatesEnabled: false,
     openaiReasoningEffort: "high",
+    reasoningSummaries: structuredClone(DEFAULT_REASONING_SUMMARIES),
     openaiAllowedReasoningEfforts: "low,medium,high,xhigh,max",
     creditsDefaultModel: "gpt-6-luna",
     creditsDefaultReasoningEffort: "xhigh",

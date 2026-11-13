@@ -7,6 +7,7 @@ import {
   DEFAULT_TURN_WORKER_SHUTDOWN_GRACE_MS,
   DEFAULT_TURN_WORKER_SHUTDOWN_FORCE_MS,
   DEFAULT_BILLING_LEGACY_ACCOUNT_IDS,
+  DEFAULT_REASONING_SUMMARIES,
 } from "./defaults";
 export {
   DEFAULT_OPENROUTER_MODEL_ID,
@@ -18,6 +19,7 @@ export {
   DEFAULT_TURN_WORKER_SHUTDOWN_GRACE_MS,
   DEFAULT_TURN_WORKER_SHUTDOWN_FORCE_MS,
   DEFAULT_BILLING_LEGACY_ACCOUNT_IDS,
+  DEFAULT_REASONING_SUMMARIES,
 } from "./defaults";
 export { managedUserEmailAllowed } from "./managed-user-admission";
 export * from "./realtime-voice-pricing";
@@ -263,6 +265,62 @@ export function retainedImageWorkspaceQuotaBytes(
     settings.retainedImageWorkspaceQuotaBytes
   );
 }
+
+/**
+ * The Responses `reasoning.summary` Opengeni requests on a route it has
+ * verified. `none` omits the field, so the provider writes no summary.
+ */
+export const ReasoningSummaryRequest = z.enum(["auto", "detailed", "none"]);
+export type ReasoningSummaryRequest = z.infer<typeof ReasoningSummaryRequest>;
+
+/**
+ * Routes whose summary Opengeni chooses: the Codex subscription for every model,
+ * and direct OpenAI and the Azure OpenAI wire for GPT-5 and later reasoning models.
+ * Every other route and model keeps the runtime default (`detailed`).
+ */
+export type ReasoningSummaryRoute = "codex" | "openai" | "azure";
+export type ReasoningSummaries = Record<
+  ReasoningSummaryRoute,
+  Record<LatencyMode, ReasoningSummaryRequest>
+>;
+
+function reasoningSummaryTiers(defaults: Record<LatencyMode, ReasoningSummaryRequest>) {
+  return z
+    .object({
+      standard: ReasoningSummaryRequest.default(defaults.standard),
+      priority: ReasoningSummaryRequest.default(defaults.priority),
+      fast: ReasoningSummaryRequest.default(defaults.fast),
+      ultrafast: ReasoningSummaryRequest.default(defaults.ultrafast),
+    })
+    .strict()
+    .prefault({});
+}
+
+/**
+ * OPENGENI_REASONING_SUMMARY_JSON: `{"<route>": {"<latency mode>": "auto" |
+ * "detailed" | "none"}}`. Each given cell replaces its default; unknown routes
+ * or modes are rejected.
+ */
+const EnvReasoningSummaries = z.preprocess(
+  (value) => {
+    if (typeof value !== "string") return value;
+    const source = value.trim();
+    if (!source) return undefined;
+    try {
+      return JSON.parse(source);
+    } catch {
+      return value;
+    }
+  },
+  z
+    .object({
+      codex: reasoningSummaryTiers(DEFAULT_REASONING_SUMMARIES.codex),
+      openai: reasoningSummaryTiers(DEFAULT_REASONING_SUMMARIES.openai),
+      azure: reasoningSummaryTiers(DEFAULT_REASONING_SUMMARIES.azure),
+    })
+    .strict()
+    .prefault({}),
+);
 
 const EnvFirstPartyMcpTools = z.preprocess(
   (value) => {
@@ -1444,6 +1502,10 @@ const SettingsSchema = z.object({
   codexRotationNearExhaustionPct: z.coerce.number().int().min(1).max(100).default(90),
   reasoningConfigurationUpdatesEnabled: EnvBoolean.default(false),
   openaiReasoningEffort: ReasoningEffort.default("low"),
+  // Responses reasoning summary per route and latency mode
+  // (OPENGENI_REASONING_SUMMARY_JSON, see EnvReasoningSummaries). Like
+  // reasoning effort it is fixed for a turn.
+  reasoningSummaries: EnvReasoningSummaries,
   openaiAllowedReasoningEfforts: z.string().default("low,medium,high,xhigh,max"),
   // Default for new chats and scheduled tasks when the workspace has an
   // Opengeni credit balance, no saved workspace default, and no usable
@@ -6310,6 +6372,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
       "OPENGENI_REASONING_CONFIGURATION_UPDATES_ENABLED",
     ),
     openaiReasoningEffort: optional("OPENGENI_OPENAI_REASONING_EFFORT"),
+    reasoningSummaries: optional("OPENGENI_REASONING_SUMMARY_JSON"),
     openaiAllowedReasoningEfforts: optional("OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS"),
     creditsDefaultModel: optional("OPENGENI_CREDITS_DEFAULT_MODEL"),
     creditsDefaultReasoningEffort: optional("OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT"),
