@@ -114,9 +114,11 @@ both ways for 10 minutes stops counting until its next byte, which wakes the
 sandbox), or one of its ports saw recent traffic. Idle means none of them. Holds should carry a lease the caller renews.
 
 Recommended rules (per sandbox, all optional): pause after 10 s idle and stay
-paused in RAM; archive the files after 2 minutes; compress, then end the VM
-process, **only under memory pressure**, least recently used first
-([ADR 4](docs/adr/0004-memory-pressure-evicts.md)); delete the local copy
+paused in RAM; archive the files after 2 minutes; end the VM process **only
+under memory pressure**, at once, least recently used first
+([ADR 4](docs/adr/0004-memory-pressure-evicts.md),
+[ADR 37](docs/adr/0037-compressing-idle-memory-is-asked-for.md); with
+`compress_paused` it is compressed in RAM first); delete the local copy
 after 3 idle days. Memory is not saved: a sandbox whose VM process ended
 boots fresh from its files. With `keep_memory` it is saved to local disk
 after 30 s and archived with the files, and the memory image is deleted

@@ -65,9 +65,10 @@ fn policies() -> [SleepPolicy; 9] {
             checkpoint_every: Some(s(600)),
             ..SleepRules::NEVER
         }),
-        // A nested host: huge pages cannot be compressed.
+        // Its memory kept, and compression asked for (ADR 37): pressure
+        // compresses it before ending its process.
         policy(SleepRules {
-            compress_under_pressure: false,
+            compress_under_pressure: true,
             ..SleepRules::RECOMMENDED.keeping_memory()
         }),
         // Ends processes on a timer, without object storage.

@@ -168,14 +168,37 @@ pub struct SleepConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forget_after_ms: Option<u64>,
     /// Let memory pressure compress the paused VM's memory, on hosts that
-    /// can.
-    #[serde(default)]
+    /// can, before it ends the VM process. Off unless asked for (ADR 37).
+    /// A host that does not know this field refuses it, as with
+    /// `keep_memory`.
+    #[serde(
+        default,
+        rename = "compress_paused",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
     pub compress: bool,
+    /// The `compress` of earlier releases, read and dropped. Their
+    /// recommended settings had it on for every sandbox, so a stored `true`
+    /// says nothing anyone chose; reading it as off turns compression off
+    /// for the sandboxes created before (ADR 37).
+    #[serde(default, rename = "compress", skip_serializing)]
+    pub earlier_compress: Dropped,
     /// Copy the sandbox to object storage after it ran this many
     /// milliseconds since its last copy there, while it runs; counts running
     /// time, not idle time (see [`SleepRules::checkpoint_every`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint_every_ms: Option<u64>,
+}
+
+/// A setting of earlier releases that is read, whatever it held, and never
+/// written again.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Dropped;
+
+impl<'de> Deserialize<'de> for Dropped {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        serde::de::IgnoredAny::deserialize(deserializer).map(|_| Self)
+    }
 }
 
 impl SleepConfig {
@@ -202,6 +225,7 @@ impl SleepConfig {
             evict_after_ms: ms(rules.evict_after),
             forget_after_ms: ms(rules.forget_after),
             compress: rules.compress_under_pressure,
+            earlier_compress: Dropped,
             checkpoint_every_ms: ms(rules.checkpoint_every),
         }
     }
@@ -1397,10 +1421,34 @@ mod tests {
             ..SleepConfig::default()
         })
         .unwrap();
-        assert_eq!(json, r#"{"pause_after_ms":10000,"compress":false}"#);
+        assert_eq!(json, r#"{"pause_after_ms":10000}"#);
         let parsed: SleepConfig = serde_json::from_str(r#"{"pause_after_ms":5}"#).unwrap();
         assert_eq!(parsed.rules().pause_after, Some(Duration::from_millis(5)));
         assert!(serde_json::from_str::<SleepConfig>(r#"{"pause":5}"#).is_err());
+    }
+
+    /// Compression is asked for by its own name, and the `compress` that
+    /// earlier recommended settings wrote for every sandbox is read as off
+    /// and never written again (ADR 37).
+    #[test]
+    fn compression_is_only_what_was_asked_for() {
+        const { assert!(!SleepConfig::RECOMMENDED.compress) };
+        let earlier: SleepConfig =
+            serde_json::from_str(r#"{"pause_after_ms":10000,"compress":true}"#).unwrap();
+        assert!(!earlier.rules().compress_under_pressure);
+        let written = serde_json::to_string(&earlier).unwrap();
+        assert_eq!(written, r#"{"pause_after_ms":10000}"#);
+
+        let asked = SleepConfig {
+            compress: true,
+            ..SleepConfig::RECOMMENDED
+        };
+        let json = serde_json::to_string(&asked).unwrap();
+        assert!(json.contains(r#""compress_paused":true"#), "{json}");
+        assert!(!json.contains(r#""compress":"#), "{json}");
+        let parsed: SleepConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, asked);
+        assert!(parsed.rules().compress_under_pressure);
     }
 
     /// Memory is kept only where the settings say so, and settings that do
