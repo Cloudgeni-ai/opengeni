@@ -919,9 +919,7 @@ async function assertArtifactRequestedToolsInAttemptCatalog(
     bindings.some(
       (binding) =>
         binding.canonicalServerId === identity.serverId &&
-        allowed.has(
-          toolIdentityKey({ serverId: binding.serverId, toolName: identity.toolName }),
-        ),
+        allowed.has(toolIdentityKey({ serverId: binding.serverId, toolName: identity.toolName })),
     );
   if (!missing.every(paired)) {
     throw new WorkspaceArtifactOperationError(
