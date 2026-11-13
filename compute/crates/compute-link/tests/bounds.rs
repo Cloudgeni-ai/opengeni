@@ -1,6 +1,7 @@
 //! What a guest can make the host keep is bounded, each subscription a
 //! connection leaves has its whole grace period, and only requests wake,
-//! never a no-wake one: the core driven directly, one rule at a time.
+//! never a no-wake one, and a gone agent keeps no session: the core driven
+//! directly, one rule at a time.
 
 use bytes::Bytes;
 use compute_link::core::{CONNECTION_NAME, ConnId, Core, Effect, Input, LinkId, Settings};
@@ -1251,4 +1252,89 @@ fn the_host_answers_only_where_its_agent_could() {
     assert_eq!(unanswered(&effects), Vec::<(String, String)>::new());
     assert_eq!(wakes(&effects), 0);
     assert_eq!(delivered(&effects, 1), Vec::<Bytes>::new());
+}
+
+/// A sandbox whose agent process is gone for good (its VM ended with no
+/// memory kept) loses its session at once: the gateway is told, the kept
+/// copy goes, what waited for that agent is never handed to the next one,
+/// and the next agent's connection opens a session of its own.
+#[test]
+fn a_gone_agent_ends_its_session_and_the_next_agent_opens_another() {
+    let (mut core, s) = asleep(Settings::default());
+    told(&mut core, 0, Running::Asleep);
+    msg(&mut core, 0, s, 1, Bytes::from_static(b"for the old agent"));
+    core.take();
+    core.on(
+        1,
+        Input::Gone {
+            sandbox: SANDBOX.into(),
+        },
+    );
+    let effects = core.take();
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Frame { frame: HostFrame::Close { s: closed }, .. } if *closed == s
+        )),
+        "the gateway hears the session ended: {effects:?}"
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Save { saved: None, .. })),
+        "the kept copy goes, so a restarted host does not open it again: {effects:?}"
+    );
+    // Told again, as each change of the sandbox tells it: nothing more.
+    core.on(
+        2,
+        Input::Gone {
+            sandbox: SANDBOX.into(),
+        },
+    );
+    assert_eq!(core.take(), Vec::<Effect>::new());
+    // The next agent boots and connects as another process.
+    connect_as(&mut core, 3, 2, "i2");
+    let effects = core.take();
+    let new = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Frame {
+                frame: HostFrame::Open { s, connection, .. },
+                ..
+            } if connection == "i2" => Some(*s),
+            _ => None,
+        })
+        .expect("the new agent opens its own session");
+    assert_ne!(new, s);
+    core.on(
+        3,
+        Input::Gateway {
+            link: LINK,
+            frame: GatewayFrame::Opened {
+                s: new,
+                scope: "agent.w.a.connection.i2".into(),
+                relay: Relay {
+                    url: "wss://relay.example/v1".into(),
+                    token: "relay".into(),
+                    expires_at_ms: u64::MAX,
+                },
+            },
+            payload: Bytes::new(),
+        },
+    );
+    guest(
+        &mut core,
+        3,
+        2,
+        ClientOp::Sub {
+            subject: "agent.w.a.connection.i2.rpc".into(),
+            queue: None,
+            sid: "1".into(),
+        },
+    );
+    assert_eq!(
+        delivered(&core.take(), 2),
+        Vec::<Bytes>::new(),
+        "what waited for the old agent never reaches the new one"
+    );
 }

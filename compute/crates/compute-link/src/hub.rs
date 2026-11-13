@@ -218,6 +218,14 @@ impl Hub {
         });
     }
 
+    /// The sandbox's agent process is gone for good (its VM ended with no
+    /// memory kept): its session ends, and its next agent opens a new one.
+    pub fn gone(&self, sandbox: &str) {
+        let _ = self.commands.send(Command::Input(Input::Gone {
+            sandbox: sandbox.to_owned(),
+        }));
+    }
+
     /// Tells the sandbox's gateway whether it runs, when that changed, and
     /// every session that opens for it later. An attached sandbox's state
     /// is unknown until the first call.
