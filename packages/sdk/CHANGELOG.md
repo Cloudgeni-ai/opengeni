@@ -1,5 +1,24 @@
 # @opengeni/sdk
 
+## 6.20.0
+
+### Minor Changes
+
+- c624443: Azure OpenAI deployments, OpenAI models and OpenAI-compatible endpoint models connected by an organization or by one workspace can now be priced, so their usage shows a cost estimate and counts toward spend limits instead of being recorded without a cost. A new Azure deployment takes the price of the base model Azure reports serving; administrators can choose a base model or enter their own rate per 1M tokens with the price button on each model's row, or with `setOrganizationProviderCustomModelListPrice`, `setOrganizationCompatibleEndpointModelListPrice` and `setWorkspaceModelKeyListPrice` (`listModelPriceBasisModels` lists the base models for a workspace). Each model reports its `listPrice` and whether its usage is priced (`listPriceKnown`); a model without a price is shown as unpriced, never as free.
+- e37485b: An organization's Anthropic API connection can hold several API keys, for example one per Anthropic organization whose credits it uses. The connection's own key stays the first, so an organization with one key works exactly as before, and model ids stay `organization-anthropic/…`. Admins add, rename and remove keys under Models on the Anthropic API page; each new key is checked with Anthropic's free model listing first, stored encrypted and never shown again.
+
+  Each chat keeps one key, so its prompt cache stays warm, and moves to another key only when Anthropic refuses its key for lack of credits. A refused key is marked **Out of credits** and left out until an admin chooses **Serve again**; when every key is out of credits, the request fails without being sent. Rate limits keep their usual handling. Claude subscription models never use these keys, and nothing buys credits or enables top-ups.
+
+  New routes under `/v1/organizations/:organizationId/model-providers/anthropic/api-keys`; the SDK calls them with `listOrganizationAnthropicApiKeys`, `addOrganizationAnthropicApiKey`, `updateOrganizationAnthropicApiKey`, `removeOrganizationAnthropicApiKey` and `serveOrganizationAnthropicApiKeyAgain`.
+
+### Patch Changes
+
+- Updated dependencies [ae3972e]
+- Updated dependencies [e37485b]
+- Updated dependencies [9c17a87]
+  - @opengeni/contracts@6.20.0
+  - @opengeni/connect@6.20.0
+
 ## 6.19.0
 
 ### Minor Changes

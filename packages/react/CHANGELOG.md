@@ -1,5 +1,27 @@
 # @opengeni/react
 
+## 6.20.0
+
+### Minor Changes
+
+- 60a33cb: A compute sandbox is deleted a day after every chat that works in it is archived.
+
+  - Archived chats no longer keep their sandbox in storage forever. A chat restored within a day of archiving keeps its sandbox. A chat stored automatically after weeks unused loses its sandbox at once. A sandbox shared by several chats stays while any of them is live, and a chat with work under way keeps its sandbox.
+  - A chat restored later continues on a new sandbox. Its timeline says the old one was deleted, and the agent is told on its next turn that the old files are gone.
+  - New message key: `timeline.projection.sandboxDeletedWhileArchived`.
+
+### Patch Changes
+
+- ed6b66c: Connecting an integration in a shared workspace with your own login already added in another workspace now turns the integration on here, instead of saying the authorized account doesn't match. When the integration isn't set up here yet and you already have that login, the card offers to use it here instead of signing in again.
+- ae3972e: The Microsoft Dynamics connection now supports Dynamics 365 Business Central. Paste the Business Central web client address (`https://businesscentral.dynamics.com/<tenant>/<environment>?company=…`) and sign in; one connection covers every company in the environment. Agents list companies and entities, query with OData, create, update and delete records and run actions such as posting, through the Business Central API (v2.0) as the signed-in user. Changes ask first by default.
+- Updated dependencies [c624443]
+- Updated dependencies [ae3972e]
+- Updated dependencies [e37485b]
+- Updated dependencies [9c17a87]
+  - @opengeni/sdk@6.20.0
+  - @opengeni/contracts@6.20.0
+  - @opengeni/connect@6.20.0
+
 ## 6.19.0
 
 ### Patch Changes
