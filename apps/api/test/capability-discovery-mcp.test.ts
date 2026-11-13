@@ -967,7 +967,10 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
     });
     // `bindingsKnown`: this turn's account selection is recorded (and has none for the environment).
     const open = async (available: boolean, bindingsKnown = !available) => {
-      const attempt = await seedAttempt(bindingsKnown);
+      const attempt = await seedAttempt(bindingsKnown, undefined, undefined, {
+        mode: "workspace_default",
+        inheritedFromSessionId: null,
+      });
       await persistAttemptToolCatalog(
         client.db,
         createAttemptToolEnvironment({
