@@ -1,5 +1,36 @@
 # @opengeni/api-router
 
+## 6.20.1
+
+### Patch Changes
+
+- 66b7a83: People without access to a workspace can open its Slack link again. The Slack user-link routes (`POST …/integrations/slack/user-link-intents`, `GET …/:requestId`, and `POST …/:requestId/link`, `/request-access` and `/cancel`) were behind the workspace access check, so an organization member outside the workspace got "workspace access denied" instead of linking their Slack account, and anyone else couldn't ask for access. The routes keep their own checks (a managed sign-in, the signed Slack link or the request it prepared for that person, and workspace-scoped reads and writes).
+  - @opengeni/agent-proto@6.20.1
+  - @opengeni/artifact-tool@6.20.1
+  - @opengeni/capabilities@6.20.1
+  - @opengeni/codemode@6.20.1
+  - @opengeni/codex@6.20.1
+  - @opengeni/config@6.20.1
+  - @opengeni/contracts@6.20.1
+  - @opengeni/core@6.20.1
+  - @opengeni/db@6.20.1
+  - @opengeni/decisions@6.20.1
+  - @opengeni/documents@6.20.1
+  - @opengeni/events@6.20.1
+  - @opengeni/github@6.20.1
+  - @opengeni/interaction@6.20.1
+  - @opengeni/network@6.20.1
+  - @opengeni/observability@6.20.1
+  - @opengeni/runtime@6.20.1
+  - @opengeni/storage@6.20.1
+  - @opengeni/tool-gateway@6.20.1
+  - @opengeni/vaults@6.20.1
+  - @opengeni/vaults-bitwarden@6.20.1
+  - @opengeni/vaults-keeper@6.20.1
+  - @opengeni/vaults-onepassword@6.20.1
+  - @opengeni/vaults-protonpass@6.20.1
+  - @opengeni/xai-subscription@6.20.1
+
 ## 6.20.0
 
 ### Minor Changes
