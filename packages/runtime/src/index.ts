@@ -645,6 +645,11 @@ export {
 } from "./input-wait-yield";
 import { withModelStepHandover } from "./model-step-handover";
 export { ModelStepHandover } from "./model-step-handover";
+import { contentlessModelResponseGuard } from "./contentless-model-response";
+export {
+  ContentlessModelResponseHandover,
+  isContentlessModelResponse,
+} from "./contentless-model-response";
 export {
   ModelPreemption,
   isModelPreempted,
@@ -11495,6 +11500,12 @@ export type RunAgentStreamOptions = {
   beforeModelRequest?: ModelCallLifecycle["beforeModelRequest"];
   /** Register terminal response settlement before the next producer model request. */
   onModelResponse?: ModelCallLifecycle["onModelResponse"];
+  /**
+   * Called when the run ends at a model-step boundary because the previous
+   * response had no text and no tool call (see contentlessModelResponseGuard).
+   * The run then finishes with an empty final output.
+   */
+  onContentlessModelResponse?: () => void;
   /** Lets a Steer cut the in-flight model request short (see streamWithPreemption). */
   modelPreemption?: ModelCallLifecycle["modelPreemption"];
   /** Abort the provider/tool loop when the owning activity is cancelled. */
@@ -11766,14 +11777,21 @@ export async function runAgentStream(
 ) {
   const gate = agentInputWaitYields.get(agent);
   const scope = gate?.beginStream(overrides.signal);
+  const contentless = contentlessModelResponseGuard(overrides.onContentlessModelResponse);
   try {
     if (scope) agent.toolUseBehavior = scope.toolUseBehavior;
     const stream = await withModelCallLifecycle(
       {
-        ...(overrides.beforeModelRequest
-          ? { beforeModelRequest: overrides.beforeModelRequest }
-          : {}),
-        ...(overrides.onModelResponse ? { onModelResponse: overrides.onModelResponse } : {}),
+        // The host's admission (a waiting Steer, cancellation) decides first;
+        // only then does a contentless previous response end the run.
+        beforeModelRequest: async (point) => {
+          await overrides.beforeModelRequest?.(point);
+          if (point === "model_entry") contentless.check();
+        },
+        onModelResponse: (event) => {
+          contentless.observe(event);
+          return overrides.onModelResponse?.(event) ?? Promise.resolve();
+        },
         ...(overrides.modelPreemption ? { modelPreemption: overrides.modelPreemption } : {}),
       },
       () =>

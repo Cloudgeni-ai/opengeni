@@ -4,6 +4,7 @@ import { hostedSearchFixture } from "./fixtures/hosted-search";
 import { anthropicMessages } from "../src/anthropic-messages";
 import {
   chatRouteHoistsSystemMessages,
+  MACHINE_CONTINUATION_TEXT,
   projectHistoryForProvider,
   ProviderHistoryIncompatibleError,
   responsesRouteDeclaresAdditionalTools,
@@ -826,5 +827,61 @@ describe("historical facts never separate a tool call from its result", () => {
       "tool_result",
     ]);
     expect(claude[4]!.content[0]).toMatchObject({ type: "thinking" });
+  });
+});
+
+describe("machine-started continuation after an answered turn", () => {
+  const ask: Item = { type: "message", role: "user", content: "Connect the CRM" };
+  const reply: Item = {
+    type: "message",
+    role: "assistant",
+    content: [{ type: "output_text", text: "Connect it with the card above." }],
+  };
+  const update: Item = { type: "message", role: "system", content: "Setup completed." };
+  const anchor = { type: "message", role: "user", content: MACHINE_CONTINUATION_TEXT };
+  const roles = (items: Item[]) =>
+    items.map((item) =>
+      item.type === "unknown"
+        ? `unknown:${(item.providerData as Item).role}`
+        : String(item.role ?? item.type),
+    );
+
+  for (const api of ["responses", "chat"] as const) {
+    test(`${api}: a system update after the reply never leaves the request ending on that reply`, () => {
+      const items = [ask, reply, update];
+      const original = JSON.stringify(items);
+      const projected = projectHistoryForProvider(items, api);
+      expect(projected).toEqual([ask, reply, anchor, update]);
+      expect(JSON.stringify(items)).toBe(original);
+    });
+
+    test(`${api}: the next request of the turn keeps the same prefix`, () => {
+      const answer: Item = {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Connected." }],
+      };
+      const first = projectHistoryForProvider([ask, reply, update], api);
+      const next = projectHistoryForProvider([ask, reply, update, answer], api);
+      expect(next.slice(0, first.length)).toEqual(first);
+      expect(next.at(-1)).toEqual(answer);
+    });
+
+    test(`${api}: a person's message after the system message needs no anchor`, () => {
+      const items = [ask, reply, update, { type: "message", role: "user", content: "Go on" }];
+      expect(projectHistoryForProvider(items, api)).toEqual(items);
+    });
+
+    test(`${api}: a system message after a tool result needs no anchor`, () => {
+      const items = [ask, C("a"), R("a"), update];
+      expect(projectHistoryForProvider(items, api)).toEqual(items);
+    });
+  }
+
+  test("responses: a developer reminder after the reply gets one anchor before the run", () => {
+    const reminder: Item = { type: "message", role: "developer", content: "Reply now." };
+    const projected = projectHistoryForProvider([ask, reply, update, reminder], "responses");
+    expect(roles(projected)).toEqual(["user", "assistant", "user", "system", "unknown:developer"]);
+    expect(projected[2]).toEqual(anchor);
   });
 });

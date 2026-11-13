@@ -69,6 +69,12 @@ export const ARTIFACT_ORIGIN_KEY = "opengeni.artifact_origin.v1";
 const TOOL_DISCLOSURE_TEXT_WITH_INVOKE =
   "These tools are now available. Call one by its name, or through tool_invoke with its name and a nested arguments object. Definitions:";
 const MACHINE_ORIGIN_PREFIX = "Opengeni tool update (machine-origin input; no new human message).";
+/**
+ * The request-local user turn placed before a system message that follows
+ * the model's own reply with nothing to answer (see withContinuationAnchors).
+ */
+export const MACHINE_CONTINUATION_TEXT =
+  "Opengeni continuation (machine-origin input; no new human message).";
 
 /**
  * Responses routes verified live to accept `additional_tools`, call a declared
@@ -558,7 +564,7 @@ function projectWireHistory(
       changed ||= next !== item;
       return next;
     });
-    return changed ? withoutOmittedReasoning(projected) : items;
+    return withContinuationAnchors(changed ? withoutOmittedReasoning(projected) : items);
   }
 
   if (providerApi === "anthropic-messages") {
@@ -650,14 +656,66 @@ function projectWireHistory(
   // Historical facts, any other assistant message and runtime notices inside
   // an unfinished step wait for its last result. Only a person's message ends
   // a step early.
-  return withItemsAfterOpenCalls(
-    changed ? withoutOmittedReasoning(projected) : items,
-    (item) => isAssistantMessage(item) || isRuntimeNotice(item),
-    {
-      resultTypeByCallType: FUNCTION_RESULT_TYPE_BY_CALL_TYPE,
-      endsStep: (item) => isPersonMessage(item) && !machineOrigin.has(item),
-    },
+  return withContinuationAnchors(
+    withItemsAfterOpenCalls(
+      changed ? withoutOmittedReasoning(projected) : items,
+      (item) => isAssistantMessage(item) || isRuntimeNotice(item),
+      {
+        resultTypeByCallType: FUNCTION_RESULT_TYPE_BY_CALL_TYPE,
+        endsStep: (item) => isPersonMessage(item) && !machineOrigin.has(item),
+      },
+    ),
   );
+}
+
+/**
+ * A system or developer message that follows the model's own reply, with no
+ * user message after it before the model speaks again, answers nothing. A
+ * route that moves system messages out of the conversation (Claude behind a
+ * Responses or Chat gateway, Gemini on Chat) then ends the request on that
+ * reply, which the model reads as its own unfinished message: it continues
+ * the old reply or returns nothing at all. This is the shape of every
+ * machine-started turn (a delivered update, a reply reminder) after an
+ * answered turn. A request-local machine-origin user message goes before each
+ * such run of system messages, as the Claude adapter does
+ * (placeConversationSystems). The decision depends only on the items, so the
+ * next request of the turn reproduces the same prefix.
+ */
+function withContinuationAnchors(
+  items: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+  let result: Array<Record<string, unknown>> | undefined;
+  for (let index = 0; index < items.length; index++) {
+    const item = items[index]!;
+    const previous = index > 0 ? items[index - 1]! : undefined;
+    if (previous && isSystemLikeItem(item) && endsModelReply(previous)) {
+      let next = index + 1;
+      while (next < items.length && isSystemLikeItem(items[next]!)) next++;
+      const following = items[next];
+      if (!following || !isUserRoleMessage(following)) {
+        result ??= items.slice(0, index);
+        result.push({ type: "message", role: "user", content: MACHINE_CONTINUATION_TEXT });
+      }
+    }
+    result?.push(item);
+  }
+  return result ?? items;
+}
+
+/** A system/developer message, including the Responses pass-through forms. */
+function isSystemLikeItem(item: Record<string, unknown>): boolean {
+  if (isSystemMessage(item)) return true;
+  if (item.type !== "unknown") return false;
+  const role = (item.providerData as Record<string, unknown> | undefined)?.role;
+  return role === "developer" || role === "system";
+}
+
+function endsModelReply(item: Record<string, unknown>): boolean {
+  return isAssistantMessage(item) || item.type === "reasoning";
+}
+
+function isUserRoleMessage(item: Record<string, unknown>): boolean {
+  return isMessage(item) && item.role === "user";
 }
 
 /** After wire projection, only function calls are executable on Chat and Claude. */
