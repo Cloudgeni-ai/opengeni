@@ -65,8 +65,14 @@ jobs:
           bun scripts/ci/pr-fast-plan.ts --plan "$RUNNER_TEMP/pr-impact.json" --output "$RUNNER_TEMP/pr-plan.json"
           echo "unit_count=$(jq '.unitTests | length' "$RUNNER_TEMP/pr-plan.json")" >> "$GITHUB_OUTPUT"
           echo "web_bundle=$(jq '.prWebBundle == true' "$RUNNER_TEMP/pr-plan.json")" >> "$GITHUB_OUTPUT"
-          echo "e2e_count=$(jq '.e2eTests | length' "$RUNNER_TEMP/pr-plan.json")" >> "$GITHUB_OUTPUT"
-          echo "browser_lane_count=$(jq '.browserAcceptanceLanes | length' "$RUNNER_TEMP/pr-plan.json")" >> "$GITHUB_OUTPUT"
+          # The plan runs the PR head's pr-fast-plan.ts. A head older than the PR
+          # browser selection passes Batch's whole impacted set through with no
+          # PR matrix, which cannot fit one shard; Batch runs those lanes instead.
+          if [ "$(jq 'has("prBrowserE2e")' "$RUNNER_TEMP/pr-plan.json")" != true ]; then
+            echo "::notice title=PR browser and E2E lanes skipped::This branch's pr-fast-plan.ts predates the PR browser selection. Merge main to run them on the PR; Batch runs them either way."
+          fi
+          echo "e2e_count=$(jq 'if has("prBrowserE2e") then .e2eTests | length else 0 end' "$RUNNER_TEMP/pr-plan.json")" >> "$GITHUB_OUTPUT"
+          echo "browser_lane_count=$(jq 'if has("prBrowserE2e") then .browserAcceptanceLanes | length else 0 end' "$RUNNER_TEMP/pr-plan.json")" >> "$GITHUB_OUTPUT"
           # A skipped reusable call still needs a syntactically valid matrix.
           echo "e2e_matrix=$(jq -c 'if (.prE2eMatrix | length) == 0 then [{index:0,number:1,total:1}] else .prE2eMatrix end' "$RUNNER_TEMP/pr-plan.json")" >> "$GITHUB_OUTPUT"
           echo "browser_lane_matrix=$(jq -c 'if (.prBrowserLaneMatrix | length) == 0 then [{lane:"none",engine:"chromium"}] else .prBrowserLaneMatrix end' "$RUNNER_TEMP/pr-plan.json")" >> "$GITHUB_OUTPUT"

@@ -923,6 +923,9 @@ export const RETIRING_FEATURE_TABLES = {
     "knowledge_source_sync_states",
     "knowledge_source_sync_wakes",
   ],
+  // The agents contract (1380 to 1399): nothing reads or writes the legacy bot
+  // templates and Slack agents tables any more; the legacy drop removes them.
+  agentsLegacy: ["bot_templates", "slack_agents"],
 } as const;
 const RETIRING_FEATURE_TABLE_NAMES: ReadonlySet<string> = new Set(
   Object.values(RETIRING_FEATURE_TABLES).flat(),
@@ -1882,15 +1885,25 @@ const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET = new Set<string
 );
 
 /**
- * 1243/1244 agents: SECURITY INVOKER trigger functions. The legacy sync
- * triggers mirror bot_templates and slack_agents writes into the agents
- * tables; the guard keeps sessions.agent_id immutable once set.
+ * 1243/1244 agents: SECURITY INVOKER trigger functions. The guard keeps
+ * sessions.agent_id immutable once set.
  */
-const AGENTS_TRIGGER_ROUTINES = [
+const AGENTS_TRIGGER_ROUTINES = ["guard_session_agent_id_immutable()"] as const;
+
+/**
+ * Agents trigger functions bound to the legacy tables: 1243's sync functions
+ * (their triggers were dropped by 1397) and 1380's installation workspace
+ * fill. Checked like any owner-internal helper while present; the legacy drop
+ * removes them with the tables, so readiness also accepts them absent.
+ */
+export const AGENTS_LEGACY_TRIGGER_ROUTINES = [
   "sync_agent_from_bot_template()",
   "sync_agent_from_slack_agent()",
-  "guard_session_agent_id_immutable()",
+  "fill_agent_slack_install_workspace()",
 ] as const;
+const AGENTS_LEGACY_TRIGGER_ROUTINE_SET: ReadonlySet<string> = new Set(
+  AGENTS_LEGACY_TRIGGER_ROUTINES,
+);
 
 /** Owner-internal helpers that must exist but must never be callable by the runtime role. */
 export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
@@ -1916,6 +1929,7 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   "validate_usage_allowance_rule(jsonb)",
   "guard_slack_file_upload_operation()",
   ...AGENTS_TRIGGER_ROUTINES,
+  ...AGENTS_LEGACY_TRIGGER_ROUTINES,
   // 1276: refuses agent-chat claims from workers without the agent layer.
   "guard_agent_instructions_claim_protocol()",
   ...SESSION_USAGE_LIMIT_INTERNAL_ROUTINES,
@@ -1943,6 +1957,7 @@ export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
   "validate_usage_allowance_rule(jsonb)",
   "guard_slack_file_upload_operation()",
   ...AGENTS_TRIGGER_ROUTINES,
+  ...AGENTS_LEGACY_TRIGGER_ROUTINES,
   // 1276: refuses agent-chat claims from workers without the agent layer.
   "guard_agent_instructions_claim_protocol()",
   SESSION_USAGE_LIMIT_STATE_ROUTINE,
@@ -2192,13 +2207,16 @@ export const FORCE_RLS_TABLES = [
   "organization_company_profile_agent_policies",
   "organization_company_profile_agent_policy_events",
   "organization_connectors",
+  "organization_console_audit_events",
   "organization_credential_providers",
+  "organization_end_user_labels",
   "organization_identity_issuers",
   "organization_inference_residency",
   "organization_inference_residency_events",
   "organization_integration_policies",
   "organization_integration_policy_operations",
   "organization_invitation_binding_events",
+  "organization_managed_workspaces",
   "organization_mcp_assertion_replays",
   "organization_mcp_trusted_issuer_events",
   "organization_mcp_trusted_issuer_subjects",
@@ -2227,6 +2245,7 @@ export const FORCE_RLS_TABLES = [
   "organization_recovery_policies",
   "organization_recovery_policy_heads",
   "organization_service_accounts",
+  "organization_session_review_settings",
   "organization_shared_workspace_administration_capabilities",
   "organization_skill_reach",
   "organization_user_resource_authorities",
@@ -2669,6 +2688,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "organization_connectors",
   "organization_credential_providers",
   "organization_identity_issuers",
+  "organization_managed_workspaces",
   "organization_mcp_assertion_replays",
   "organization_mcp_trusted_issuer_events",
   "organization_mcp_trusted_issuer_subjects",
@@ -2679,6 +2699,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "organization_model_provider_custom_models",
   "organization_privacy_preferences",
   "organization_service_accounts",
+  "organization_session_review_settings",
   "organization_skill_reach",
   "organization_webhook_deliveries",
   "organization_webhooks",
@@ -2985,6 +3006,9 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "knowledge_source_objects",
   "knowledge_sources",
   "knowledge_sync_runs",
+  // 1377_opengeni_console: append-only Console audit log and end-user labels.
+  "organization_console_audit_events",
+  "organization_end_user_labels",
   "pr_review_managed_github_authority_nonces",
   "preference_registry_preferences",
   "preference_registry_revisions",
@@ -4690,6 +4714,7 @@ export function evaluateRuntimeDatabasePosture(
   }
   for (const forbiddenRoutine of targetSchemaForbiddenRoutines) {
     const matches = posture.targetRoutines.filter((routine) => routine.name === forbiddenRoutine);
+    if (matches.length === 0 && AGENTS_LEGACY_TRIGGER_ROUTINE_SET.has(forbiddenRoutine)) continue;
     if (matches.length !== 1) {
       violations.push(
         `owner-internal target-schema helper ${forbiddenRoutine} is missing or ambiguous`,

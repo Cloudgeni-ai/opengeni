@@ -42,7 +42,7 @@
     },
     {
       "path": ".github/workflows/compute-ci.yml",
-      "sha256": "e9cc26d5ba66ab3ee407e594f698b235ca59c040fdae53d153101f9cae76e55a"
+      "sha256": "40772b57688c638e28e001ab3a565509f19e27b23c32875a3245e14128a20c4d"
     },
     {
       "path": ".github/workflows/compute-release.yml",
@@ -90,7 +90,7 @@
     },
     {
       "path": ".github/workflows/pr-ci.yml",
-      "sha256": "ec8d9fe110d782b775c9b84f352dd4fa44d13ca94da142eae80eab17ad2ed335"
+      "sha256": "61b9402aa9c4083e3e5631eff1a3756494815542f20a20074ddfd58139f1b371"
     },
     {
       "path": ".github/workflows/production-pr-heads.yml",
@@ -166,7 +166,7 @@
     },
     {
       "path": ".github/workflows/runtime-posture-compatibility.yml",
-      "sha256": "ff0cffea40db249376a7e2a16bc9797c75eac485463e5c0a489245562bbd0f54"
+      "sha256": "328813c110e33dc6bc21d1ec72cd38a219945eccf8dc4cf1e50e178cb93c265f"
     },
     {
       "path": ".github/workflows/seal-release-head.yml",
@@ -1579,7 +1579,7 @@
       "workflow": ".github/workflows/pr-ci.yml",
       "job": "plan",
       "step": "Plan all affected files",
-      "sha256": "0fd49dab7cbd58118f80d64677306b7b6fde2414c1c0e8e66c5ad9430a036245"
+      "sha256": "a6364e92b52f4316ff7c9ba4c11266f433b5c3c0e4544ba88a6eff1fe97bdcc5"
     },
     {
       "workflow": ".github/workflows/pr-ci.yml",

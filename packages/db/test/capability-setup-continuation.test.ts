@@ -112,7 +112,10 @@ async function settleIdle(
 }
 
 /** "check my email": the agent posts a connect card for Mail and ends its turn. */
-async function sessionWithCard(grant: Grant, options: { settle?: boolean } = {}) {
+async function sessionWithCard(
+  grant: Grant,
+  options: { settle?: boolean; payload?: Record<string, unknown> } = {},
+) {
   const session = await createSession(client.db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
@@ -146,7 +149,7 @@ async function sessionWithCard(grant: Grant, options: { settle?: boolean } = {})
     [
       {
         type: "tool.auth_needed",
-        payload: {
+        payload: options.payload ?? {
           serverId: "opengeni",
           toolName: "capability_authorization_request",
           providerDomain: "mail.example.com",
@@ -317,5 +320,53 @@ describe("capability setup continuation", () => {
       outcome: "not_needed",
       reason: "not_requester",
     });
+  });
+
+  test("a server the agent asked to add is found by its endpoint", async () => {
+    // custom_mcp_setup_request posts its card before the capability exists,
+    // so the card names the endpoint, not a capability id.
+    const endpointUrl = "https://mail.example.com/mcp";
+    const grant = await workspace();
+    const { session, card } = await sessionWithCard(grant, {
+      payload: {
+        serverId: "opengeni",
+        toolName: "custom_mcp_setup_request",
+        providerDomain: "mail.example.com",
+        reason: "missing_connection",
+        setupRequest: {
+          kind: "mcp",
+          name: CAPABILITY.name,
+          endpointUrl,
+          rationale: "Reading your inbox needs Mail.",
+        },
+      },
+    });
+    const input = {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      capabilityId: CAPABILITY.id,
+      capabilityName: CAPABILITY.name,
+      toolsVerified: true,
+      requesterSubjectId: grant.subjectId,
+    };
+    expect(await enqueueCapabilitySetupContinuation(client.db, input)).toEqual({
+      outcome: "not_needed",
+      reason: "no_card",
+    });
+    expect(
+      await enqueueCapabilitySetupContinuation(client.db, {
+        ...input,
+        endpointUrl: "https://other.example.com/mcp",
+      }),
+    ).toEqual({ outcome: "not_needed", reason: "no_card" });
+    // The saved server may differ from the card's address by case or a trailing slash.
+    const queued = await enqueueCapabilitySetupContinuation(client.db, {
+      ...input,
+      endpointUrl: "https://Mail.example.com/mcp/",
+    });
+    if (queued.outcome !== "queued") throw new Error(`not queued: ${JSON.stringify(queued)}`);
+    expect(queued.update.sourceId).toBe(card.id);
+    expect(queued.shouldWake).toBe(true);
   });
 });

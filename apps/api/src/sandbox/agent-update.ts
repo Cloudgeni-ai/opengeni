@@ -31,6 +31,7 @@ export type AgentUpdateDeps = {
   /** Which release an update targets; defaults to the deployment's
    * published releases (see createPublishedAgentReleases). */
   releases?: PublishedAgentReleases;
+  now?: () => number;
 };
 
 function releasesFor(deps: AgentUpdateDeps): PublishedAgentReleases {
@@ -88,6 +89,12 @@ export async function requestAgentUpdate(
   if (!reusableRequest && live.agentVersion === targetVersion) {
     return refused(409, "machine already runs the promoted version");
   }
+  // An unfinished operation the runner has gone quiet on was lost: it is
+  // replaced by a request for the current release.
+  const lostSince =
+    !reusableRequest && live.agentUpdate
+      ? lostAgentUpdateCutoff(live.agentUpdate, (deps.now ?? Date.now)())
+      : null;
   const operationId = reusableRequest?.operationId ?? crypto.randomUUID();
   const fence = {
     accountId: live.accountId,
@@ -102,9 +109,14 @@ export async function requestAgentUpdate(
       ...fence,
       targetVersion,
       newerTarget: isNewerTarget(live, targetVersion),
-      ...(input.expectedOperationId === undefined
-        ? {}
-        : { expectedOperationId: input.expectedOperationId }),
+      ...(lostSince && live.agentUpdate
+        ? {
+            expectedOperationId: live.agentUpdate.operationId,
+            replaceUnfinishedBefore: lostSince,
+          }
+        : input.expectedOperationId === undefined
+          ? {}
+          : { expectedOperationId: input.expectedOperationId }),
     });
     if (!reserved) return refused(409, "machine update state changed; refresh and retry");
   }
@@ -378,6 +390,7 @@ async function postponeAgentUpdate(
   targetVersion: string,
   errorCode: string,
   browsers: { wait: "start" | "restart"; closeAt?: Date | null },
+  now: number,
 ): Promise<EnrollmentRecord | null> {
   if (!live.connectionInstanceId) return null;
   const fence = {
@@ -388,10 +401,12 @@ async function postponeAgentUpdate(
     connectionGeneration: live.connectionGeneration,
     operationId: crypto.randomUUID(),
   };
+  const lostSince = live.agentUpdate ? lostAgentUpdateCutoff(live.agentUpdate, now) : null;
   const reserved = await beginEnrollmentAgentUpdate(db, {
     ...fence,
     targetVersion,
     expectedOperationId: live.agentUpdate?.operationId ?? null,
+    ...(lostSince ? { replaceUnfinishedBefore: lostSince } : {}),
     newerTarget: isNewerTarget(live, targetVersion),
     browsersWait: browsers.wait,
     ...(browsers.closeAt === undefined ? {} : { browsersCloseAt: browsers.closeAt }),
@@ -423,12 +438,47 @@ export const AUTOMATIC_AGENT_UPDATE_RETRY_MS = {
   busy: 10 * 60_000,
   /** A request the runner never answered is re-sent under the same operation. */
   unanswered: 10 * 60_000,
+  /** An operation the runner accepted stays its own while it is heard from:
+   * a runner waiting for idle repeats its wait every minute, and only the
+   * download of the release is quieter. One not heard from for this long was
+   * lost (its progress went out on a connection that has since closed, or the
+   * runner gave up without being heard) and is asked for again, for the
+   * current release. A runner still carrying it refuses as busy updating. */
+  lost: 30 * 60_000,
   /** Other retryable failures (download, verification, a replaced process)
    * back off: `retryableFirst` after the first, doubling after each further
    * failure of the same run, at most `retryableMax`. */
   retryableFirst: 10 * 60_000,
   retryableMax: 6 * 60 * 60_000,
 } as const;
+
+/** When the machine's unfinished update counts as lost: it has gone without
+ * progress since the returned time, `unanswered` ago for a request and `lost`
+ * ago for an accepted operation. Null while it is still heard from, and for a
+ * finished one. Replacing it is fenced on this time, so progress that arrives
+ * meanwhile keeps the operation. */
+export function lostAgentUpdateCutoff(
+  update: NonNullable<EnrollmentRecord["agentUpdate"]>,
+  now: number,
+): Date | null {
+  if (!ACTIVE_UPDATE_STATUSES.has(update.status)) return null;
+  const updatedAt = Date.parse(update.updatedAt);
+  if (!Number.isFinite(updatedAt)) return null;
+  const cutoff =
+    now -
+    (update.status === "requested"
+      ? AUTOMATIC_AGENT_UPDATE_RETRY_MS.unanswered
+      : AUTOMATIC_AGENT_UPDATE_RETRY_MS.lost);
+  return updatedAt <= cutoff ? new Date(cutoff) : null;
+}
+
+/** Whether the machine's unfinished update was lost (see lostAgentUpdateCutoff). */
+export function agentUpdateLost(
+  update: NonNullable<EnrollmentRecord["agentUpdate"]>,
+  now: number,
+): boolean {
+  return lostAgentUpdateCutoff(update, now) !== null;
+}
 
 /** How long after a retryable failure the next automatic attempt waits. */
 export function retryableAgentUpdateBackoffMs(enrollment: EnrollmentRecord): number {
@@ -458,14 +508,12 @@ export function automaticAgentUpdateDue(
   const updatedAt = Date.parse(update.updatedAt);
   const age = Number.isFinite(updatedAt) ? now - updatedAt : Number.POSITIVE_INFINITY;
   if (ACTIVE_UPDATE_STATUSES.has(update.status)) {
-    // Past "requested", the runner owns the operation (including waiting for
-    // idle). A replaced runner turns it into a retryable failure on its Hello.
-    return (
-      update.status === "requested" &&
-      update.targetVersion === targetVersion &&
-      update.connectionInstanceId === enrollment.connectionInstanceId &&
-      age >= AUTOMATIC_AGENT_UPDATE_RETRY_MS.unanswered
-    );
+    // The runner owns an unfinished operation while it is heard from
+    // (including a long wait for idle), and a replaced runner turns it into a
+    // retryable failure on its Hello. An unanswered request is re-sent; any
+    // other operation gone quiet was lost and is replaced by a request for
+    // the current release.
+    return agentUpdateLost(update, now);
   }
   // An announced closing time holds, even for a newer target, so the agents
   // told about it are not surprised earlier.
@@ -549,6 +597,7 @@ export function createAutomaticAgentUpdater(
               decision === "postpone_again"
                 ? { wait: "restart", closeAt: null }
                 : { wait: "start", ...(closingAt ? { closeAt: closingAt } : {}) },
+              decided,
             );
             if (postponed) {
               observability?.info?.(

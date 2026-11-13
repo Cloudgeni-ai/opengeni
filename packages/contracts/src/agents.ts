@@ -98,7 +98,10 @@ export const AGENT_ERROR_CODES = [
   "agent_slack_name_invalid",
   /** Only shared (`workspace`) agents can be available in Slack. */
   "agent_slack_requires_workspace_visibility",
-  /** For now an agent is available in at most one Slack workspace. */
+  /**
+   * @deprecated Never returned: an agent is available in every linked Slack
+   * workspace at once. Kept so the exported type does not narrow within a major.
+   */
   "agent_slack_single_install",
   /**
    * Agents are available in every Slack workspace linked to their workspace;
@@ -158,12 +161,20 @@ const AgentFirstMessage = /* @__PURE__ */ defineSchema(() =>
 
 /**
  * Who can use an agent: `private` (Only me) is its owner; `workspace` is
- * everyone in its home workspace. The same two words, and the same schema
- * shape, a chat uses; kept unexported so the public surface keeps naming it
- * `SessionVisibility`.
+ * everyone in its home workspace; `organization` is also anyone in its
+ * organization, from chat integrations such as Slack (their chats run in
+ * the agent's workspace, which its members can see). Clients must tolerate
+ * values added later.
  */
-const AgentVisibility = /* @__PURE__ */ defineSchema(() => z.enum(["private", "workspace"]));
+export const AgentVisibility = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["private", "workspace", "organization"]),
+);
 export type AgentVisibility = z.infer<typeof AgentVisibility>;
+
+/** Shared with its workspace, and maybe beyond: anything but Only me. */
+export function agentVisibilityIsShared(visibility: AgentVisibility): boolean {
+  return visibility !== "private";
+}
 
 /** What an agent was made from. Display and support only; grants nothing. */
 export const AgentOrigin = /* @__PURE__ */ defineSchema(() =>
@@ -199,7 +210,11 @@ export const AgentSlackAvailability = /* @__PURE__ */ defineSchema(() =>
     slackTeamName: z.string().nullable(),
     /** What people may type after `+`, for example `data-team`. */
     handle: z.string(),
-    /** Open use: people outside the agent's workspace can use it there too. */
+    /**
+     * Open use: people outside the agent's workspace can use it there too.
+     * This is the agent's own "Anyone in <organization>" (`visibility:
+     * "organization"`), the same in every Slack workspace.
+     */
     open: z.boolean(),
     enabledBySubjectId: z.string().nullable(),
     version: z.number().int().positive(),
@@ -219,7 +234,10 @@ export const AgentViewerAccess = /* @__PURE__ */ defineSchema(() =>
     canEdit: z.boolean(),
     /** Make it available in Slack, or not: an admin of its workspace. */
     canManageSlack: z.boolean(),
-    /** Turn open use in Slack on: an organization admin. Turning it off needs `canManageSlack`. */
+    /**
+     * Choose "Anyone in <organization>" under who can use it: an organization
+     * admin. Narrowing it back needs `canEdit`.
+     */
     canOpenInSlack: z.boolean(),
   }),
 );

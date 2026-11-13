@@ -247,8 +247,8 @@ export function registerBotTemplateTools(input: {
       }
       try {
         const { agent: created } = await createAgent(deps.db, home, {
-          visibility: request.visibility,
-          ownerSubjectId: request.visibility === "private" ? viewer.subjectId : null,
+          visibility,
+          ownerSubjectId: visibility === "private" ? viewer.subjectId : null,
           name: request.name,
           description: request.description,
           avatar: request.avatar,

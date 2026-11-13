@@ -33,6 +33,7 @@ import {
   sessionCapabilityTools,
 } from "../session-capability-policy";
 import { workspaceHasNobodyToShareWith } from "../workspace-sharing";
+import { ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE } from "@opengeni/contracts/managed-sign-in-methods";
 import { microsoftDynamicsProductForMcpUrl } from "@opengeni/contracts/microsoft-dynamics";
 import { organizationAppApproval, type OrganizationAppApproval } from "@opengeni/contracts/connect";
 import { organizationApprovalFor, type OrganizationApproval } from "../connect-setup-model";
@@ -408,6 +409,21 @@ export function useMcpCapabilityConnect({
                 },
         });
       } catch (failure) {
+        // An admin who hasn't confirmed it's them with a passkey is asked to;
+        // the account is connected and turning it on works once they do.
+        if (
+          failure instanceof OpenGeniApiError &&
+          failure.status === 403 &&
+          failure.details?.code === ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE
+        )
+          throw new ConnectCardMessage(
+            t(
+              failure.details.passkeyRegistered === false
+                ? "sessionMcpCapabilityCard.addAPasskeyToTurnOn"
+                : "sessionMcpCapabilityCard.confirmWithPasskeyToTurnOn",
+              { name: resolved.name },
+            ),
+          );
         // The account is connected, but turning the integration on here is an
         // admin's step. Say so: the account is used once an admin turns it on.
         if (failure instanceof OpenGeniApiError && failure.status === 403)

@@ -51,6 +51,8 @@ function draftServer() {
   let failSaves = false;
   let failNextSubmit = false;
   let refuseNextSubmit = false;
+  let loseNextSubmitReply: { landed: boolean } | null = null;
+  let dropNextSave = false;
   let holdNextSave: Promise<void> | null = null;
   let holdNextRead: Promise<void> | null = null;
   let holdNextSubmit: Promise<void> | null = null;
@@ -75,6 +77,16 @@ function draftServer() {
       const held = holdNextSave;
       holdNextSave = null;
       if (held) await held;
+      if (dropNextSave) {
+        dropNextSave = false;
+        // Offline: the save never reached the server.
+        throw new OpenGeniApiError(0, "", {
+          code: "network_error",
+          retryable: true,
+          outcomeUnknown: true,
+          mutation: true,
+        });
+      }
       if (failSaves) {
         saves.push(`${request.expectedRevision} ${request.text}: refused`);
         throw draftChanged();
@@ -124,12 +136,25 @@ function draftServer() {
           { mutation: true },
         );
       }
+      const lose = loseNextSubmitReply;
+      loseNextSubmitReply = null;
+      const lostReply = () =>
+        new OpenGeniApiError(0, "", {
+          code: "network_error",
+          retryable: true,
+          outcomeUnknown: true,
+          mutation: true,
+        });
+      // The connection dropped before the request reached the server.
+      if (lose && !lose.landed) throw lostReply();
       // Clear the draft only while it still holds what was sent.
       if (request.expectedDraftRevision === slot.revision || request.text === slot.text) {
         slot.revision += 1;
         slot.text = "";
       }
       delivered.push(request.text);
+      // Accepted, but the reply never reached the page.
+      if (lose) throw lostReply();
       const accepted = {
         id: crypto.randomUUID(),
         workspaceId: WORKSPACE_ID,
@@ -211,6 +236,14 @@ function draftServer() {
     },
     refuseNextSubmit() {
       refuseNextSubmit = true;
+    },
+    /** The next Send gets no reply; `landed` says whether the server took it. */
+    loseNextSubmitReply(landed: boolean) {
+      loseNextSubmitReply = { landed };
+    },
+    /** The next draft save never reaches the server. */
+    dropNextSave() {
+      dropNextSave = true;
     },
   };
 }
@@ -294,8 +327,9 @@ describe("composer draft changed", () => {
       await until(() => server.delivered.length > 0);
 
       expect(server.delivered).toEqual(["what I send"]);
-      // Send never saved over the other tab's newer draft: it stays, and shows.
-      expect(server.saves).toEqual(["1 draft", "2 what I send: draft changed"]);
+      // Send saved nothing first, so never over the other tab's newer draft:
+      // it stays, and shows.
+      expect(server.saves).toEqual(["1 draft"]);
       expect(server.slot.text).toBe("from the other tab");
       await until(() => hook.result.current.value === "from the other tab");
       expect(hook.result.current.value).toBe("from the other tab");
@@ -325,8 +359,9 @@ describe("composer draft changed", () => {
       await until(() => server.delivered.length > 0);
 
       expect(server.delivered).toEqual(["same text"]);
-      // One refused save, then no second write: the content was already there.
-      expect(server.saves).toEqual(["1 same text: draft changed"]);
+      // Nothing is saved first; the server clears the draft holding the sent text.
+      expect(server.saves).toEqual([]);
+      expect(server.slot.text).toBe("");
       expect(hook.result.current.draftConflict).toBeNull();
       expect(hook.result.current.error).toBeNull();
       expect(
@@ -679,12 +714,212 @@ describe("composer draft changed", () => {
 
       expect(server.delivered).toEqual(["what I send"]);
       // The page's own save was the basis, so the draft holding a piece of
-      // the sent message was saved over and cleared, not kept.
-      expect(server.saves).toEqual(["1 draft", "3 what I sen", "4 what I send"]);
-      expect(server.submits.map((submit) => submit.expectedDraftRevision)).toEqual([5]);
+      // the sent message was cleared, not kept; nothing was saved first.
+      expect(server.saves).toEqual(["1 draft", "3 what I sen"]);
+      expect(server.submits.map((submit) => submit.expectedDraftRevision)).toEqual([4]);
       expect(server.slot.text).toBe("");
     } finally {
       await mounted.unmount();
     }
   });
 });
+
+/* A Send carries its own content and saves nothing first, so a message typed
+   and sent within the autosave pause is in no draft. When that Send gets no
+   answer it may never have reached the server: the message is kept as the
+   draft so it outlives the page and shows on the person's other devices, as
+   it did when every Send saved first. Never once the server took it, and
+   never over another device's newer draft. */
+for (const path of ["an idle Send", "a busy Send"] as const) {
+  const mountOn = (server: ReturnType<typeof draftServer>) =>
+    renderHook(
+      () =>
+        useComposer(sessionId, {
+          client: server.client,
+          workspaceId: WORKSPACE_ID,
+          ...(path === "a busy Send"
+            ? { busySend: "steer" as const, sendDestination: () => "queue" as const }
+            : {}),
+        }),
+      undefined,
+    );
+  const MESSAGE = "sent before autosave";
+
+  describe(`${path} that gets no answer`, () => {
+    test("is kept as the draft until it is delivered", async () => {
+      const server = draftServer();
+      const hook = await mountOn(server);
+      try {
+        await flush(20);
+        server.loseNextSubmitReply(false);
+        await actRun(() => hook.result.current.setValue(MESSAGE));
+        await actRun(() => {
+          void hook.result.current.send();
+        });
+        await until(() => server.slot.text === MESSAGE);
+
+        expect(server.delivered).toEqual([]);
+        expect(server.slot.text).toBe(MESSAGE);
+        // The box stays empty: the message waits in the timeline.
+        expect(hook.result.current.value).toBe("");
+
+        if (path === "a busy Send") {
+          const unconfirmed = (hook.result.current.optimisticMessages ?? []).find(
+            (message) => message.text === MESSAGE,
+          );
+          expect(unconfirmed).toMatchObject({ state: "failed", outcomeUnknown: true });
+          await actRun(() =>
+            hook.result.current.retryOptimisticMessage!(unconfirmed!.clientEventId),
+          );
+        }
+        // Delivered (the idle Send retries by itself): the kept draft clears.
+        await until(() => server.delivered.length > 0);
+        expect(server.delivered).toEqual([MESSAGE]);
+        expect(new Set(server.submits.map((submit) => submit.clientEventId)).size).toBe(1);
+        await until(() => server.slot.text === "");
+        expect(server.slot.text).toBe("");
+        expect(hook.result.current.value).toBe("");
+      } finally {
+        await hook.unmount();
+      }
+    });
+
+    test("refused with a 503 while Opengeni is updating, is kept as the draft until delivered", async () => {
+      const server = draftServer();
+      const hook = await mountOn(server);
+      try {
+        await flush(20);
+        server.failNextSubmit();
+        await actRun(() => hook.result.current.setValue(MESSAGE));
+        await actRun(() => {
+          void hook.result.current.send();
+        });
+        await until(() => server.slot.text === MESSAGE);
+        expect(server.slot.text).toBe(MESSAGE);
+        expect(server.delivered).toEqual([]);
+        if (path === "a busy Send") {
+          // Refused before anything was accepted: back in the untouched box.
+          expect(hook.result.current.value).toBe(MESSAGE);
+          await actRun(() => {
+            void hook.result.current.send();
+          });
+        } else {
+          // Held and retried by itself; the box stays empty.
+          expect(hook.result.current.value).toBe("");
+        }
+        await until(() => server.delivered.length > 0);
+        expect(server.delivered).toEqual([MESSAGE]);
+        await until(() => server.slot.text === "");
+        expect(server.slot.text).toBe("");
+        expect(hook.result.current.value).toBe("");
+      } finally {
+        await hook.unmount();
+      }
+    });
+
+    test("kept while offline, its draft write goes out once the browser is back online", async () => {
+      const server = draftServer();
+      const hook = await mountOn(server);
+      try {
+        await flush(20);
+        server.loseNextSubmitReply(false);
+        server.dropNextSave();
+        await actRun(() => hook.result.current.setValue(MESSAGE));
+        await actRun(() => {
+          void hook.result.current.send();
+        });
+        await until(() => server.submits.length > 0);
+        await flush(100);
+        expect(server.slot.text).toBe("");
+
+        await actRun(() => {
+          window.dispatchEvent(new Event("online"));
+        });
+        await until(() => server.slot.text === MESSAGE);
+        expect(server.slot.text).toBe(MESSAGE);
+        expect(hook.result.current.value).toBe("");
+      } finally {
+        await hook.unmount();
+      }
+    });
+
+    test("is never kept as the draft once the server took it", async () => {
+      const server = draftServer();
+      const hook = await mountOn(server);
+      try {
+        await flush(20);
+        server.loseNextSubmitReply(true);
+        await actRun(() => hook.result.current.setValue(MESSAGE));
+        await actRun(() => {
+          void hook.result.current.send();
+        });
+        await until(() => server.delivered.length > 0);
+        await flush(200);
+
+        expect(server.delivered).toEqual([MESSAGE]);
+        // Its write names the revision the send went ahead from, which the
+        // accepted send moved past: refused, the sent text stays out.
+        expect(server.slot.text).toBe("");
+        expect(hook.result.current.value).toBe("");
+      } finally {
+        await hook.unmount();
+      }
+    });
+
+    test("never writes over another device's newer draft", async () => {
+      const server = draftServer();
+      const hook = await mountOn(server);
+      try {
+        await flush(20);
+        server.loseNextSubmitReply(false);
+        server.beforeSubmit(() => server.otherTabWrites("from the other device"));
+        await actRun(() => hook.result.current.setValue(MESSAGE));
+        await actRun(() => {
+          void hook.result.current.send();
+        });
+        await until(() => server.submits.length > 0);
+        await flush(200);
+
+        expect(server.slot.text).toBe("from the other device");
+        expect(server.saves.filter((save) => save.endsWith(` ${MESSAGE}`))).toEqual([]);
+      } finally {
+        await hook.unmount();
+      }
+    });
+
+    test("is kept as the draft while newer typing waits, then the typing saves", async () => {
+      const server = draftServer();
+      const hook = await mountOn(server);
+      try {
+        await flush(20);
+        server.loseNextSubmitReply(false);
+        const release = server.holdNextSubmit();
+        await actRun(() => hook.result.current.setValue(MESSAGE));
+        await actRun(() => {
+          void hook.result.current.send();
+        });
+        await actRun(() => hook.result.current.setValue("and one more thing"));
+        release();
+        await until(() => server.slot.text === MESSAGE);
+        expect(server.slot.text).toBe(MESSAGE);
+        expect(hook.result.current.value).toBe("and one more thing");
+
+        if (path === "a busy Send") {
+          const unconfirmed = (hook.result.current.optimisticMessages ?? []).find(
+            (message) => message.text === MESSAGE,
+          );
+          await actRun(() =>
+            hook.result.current.retryOptimisticMessage!(unconfirmed!.clientEventId),
+          );
+        }
+        await until(() => server.delivered.length > 0);
+        expect(server.delivered).toEqual([MESSAGE]);
+        await until(() => server.slot.text === "and one more thing");
+        expect(server.slot.text).toBe("and one more thing");
+        expect(hook.result.current.value).toBe("and one more thing");
+      } finally {
+        await hook.unmount();
+      }
+    });
+  });
+}

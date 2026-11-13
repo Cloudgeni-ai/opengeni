@@ -699,6 +699,15 @@ or iterate `iterateOrganizationSessions`; the route is
 `GET /v1/organizations/:organizationId/sessions`, every row carries its
 `workspaceId`, and events are then read through the ordinary workspace routes.
 Personal workspaces and managed-human **Only me** sessions are never included.
+
+Workspaces your organization key creates are **managed by the product**. Your
+organization's owners and admins can review them in
+[Opengeni Console](opengeni-console.md) (`/console` in the web app): sessions
+of your end users, including their private ones, with transcripts, ratings and
+metered cost, under a review level the organization sets (full transcripts,
+metadata only, or off). Every transcript open is audit-logged. Only me chats of
+Opengeni accounts are never shown, and API keys cannot use Console. You do not
+need to store transcripts yourself for review.
 For the legacy sessions-and-files-only tier, use
 `createOrganizationApiKey(organizationId, { name, access: "read" })`.
 An explicit `read_only` preset is broader: it includes every canonical

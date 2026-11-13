@@ -1,5 +1,12 @@
 # @opengeni/xai-subscription
 
+## 6.18.0
+
+### Patch Changes
+
+- Updated dependencies [917393e]
+  - @opengeni/network@6.18.0
+
 ## 6.17.0
 
 ### Patch Changes

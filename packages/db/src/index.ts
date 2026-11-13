@@ -316,6 +316,7 @@ export {
 } from "./subscription-core-codex-bindings";
 import type { GoalAdmissionPausedReason } from "@opengeni/contracts";
 import { accountContactEmail } from "@opengeni/contracts/passkey-only-account";
+import { microsoftDynamicsProductForMcpUrl } from "@opengeni/contracts/microsoft-dynamics";
 import { SessionAvatar as SessionAvatarSchema, type SessionAvatar } from "@opengeni/contracts";
 import { SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
 import { subscriptionExecutionAuthorityFromTurn } from "./accepted-subscription-authority";
@@ -6223,6 +6224,12 @@ export async function deleteGitHubInstallationBinding(
     eventRouteSecret: Uint8Array | null;
     /** Who removed the installation from the workspace: audited in the same transaction. */
     audit?: DisconnectAuditActor | null;
+    /**
+     * The installation that replaces this one (a reinstall on the same GitHub
+     * account). Its approval choices move to the replacement in the same
+     * transaction; a choice already made there wins.
+     */
+    replacedByInstallationId?: number | undefined;
   },
 ): Promise<boolean> {
   return await withRlsContext(
@@ -6239,6 +6246,17 @@ export async function deleteGitHubInstallationBinding(
         )
         .returning({ id: schema.githubInstallations.id });
       await syncGitHubEventRoutes(scopedDb, input.workspaceId, input.eventRouteSecret);
+      const replacedBy = input.replacedByInstallationId;
+      const moved =
+        rows.length > 0 && replacedBy !== undefined && replacedBy !== input.installationId
+          ? await moveConnectorActionPoliciesInScope(scopedDb, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              fromConnectionId: `github-app:${input.installationId}`,
+              toConnectionId: `github-app:${replacedBy}`,
+              auditSubjectId: input.audit?.subjectId ?? null,
+            })
+          : null;
       if (input.audit && rows.length > 0) {
         await insertDisconnectAuditEventInScope(scopedDb, {
           accountId: input.accountId,
@@ -6251,11 +6269,123 @@ export async function deleteGitHubInstallationBinding(
             provider: "github",
             providerDomain: "github.com",
           },
+          ...(moved
+            ? {
+                details: {
+                  replacedByInstallationId: String(replacedBy),
+                  approvalPoliciesMoved: moved.movedPolicyIds.length,
+                  approvalPoliciesRemoved: moved.removedPolicyIds,
+                },
+              }
+            : {}),
         });
       }
       return rows.length > 0;
     },
   );
+}
+
+/**
+ * Moves one connection's approval choices to the connection that replaced it,
+ * in the caller's scoped transaction, and removes them from the old one. A
+ * choice already made on the new connection wins. Moved rows keep who created
+ * and last changed them, and when; the actor doing the move is audited.
+ */
+async function moveConnectorActionPoliciesInScope(
+  scopedDb: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    fromConnectionId: string;
+    toConnectionId: string;
+    auditSubjectId: string | null;
+  },
+): Promise<{ movedPolicyIds: string[]; removedPolicyIds: string[] }> {
+  const fromConnection = and(
+    eq(schema.connectorActionPolicies.workspaceId, input.workspaceId),
+    eq(schema.connectorActionPolicies.connectionId, input.fromConnectionId),
+  );
+  const previous = await scopedDb
+    .select()
+    .from(schema.connectorActionPolicies)
+    .where(fromConnection)
+    .orderBy(asc(schema.connectorActionPolicies.id))
+    .for("update");
+  if (previous.length === 0) return { movedPolicyIds: [], removedPolicyIds: [] };
+  const moved: Array<typeof schema.connectorActionPolicies.$inferSelect & { from: string }> = [];
+  for (let offset = 0; offset < previous.length; offset += 128) {
+    const batch = previous.slice(offset, offset + 128);
+    const inserted = await scopedDb
+      .insert(schema.connectorActionPolicies)
+      .values(
+        batch.map((policy) => ({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          connectionId: input.toConnectionId,
+          serverId: policy.serverId,
+          toolName: policy.toolName,
+          actionName: policy.actionName,
+          policy: policy.policy,
+          createdBySubjectId: policy.createdBySubjectId,
+          updatedBySubjectId: policy.updatedBySubjectId,
+          createdAt: policy.createdAt,
+          updatedAt: policy.updatedAt,
+        })),
+      )
+      .onConflictDoNothing({
+        target: [
+          schema.connectorActionPolicies.workspaceId,
+          schema.connectorActionPolicies.connectionId,
+          schema.connectorActionPolicies.serverId,
+          schema.connectorActionPolicies.toolName,
+          schema.connectorActionPolicies.actionName,
+        ],
+      })
+      .returning();
+    const scope = (policy: { serverId: string; toolName: string; actionName: string }) =>
+      JSON.stringify([policy.serverId, policy.toolName, policy.actionName]);
+    const sources = new Map(batch.map((policy) => [scope(policy), policy.id]));
+    for (const row of inserted) moved.push({ ...row, from: sources.get(scope(row))! });
+  }
+  const removed = await scopedDb
+    .delete(schema.connectorActionPolicies)
+    .where(fromConnection)
+    .returning({ id: schema.connectorActionPolicies.id });
+  if (input.auditSubjectId && moved.length > 0) {
+    for (let offset = 0; offset < moved.length; offset += 128)
+      await scopedDb.insert(schema.auditEvents).values(
+        moved.slice(offset, offset + 128).map((row) =>
+          withLosslessContentWriteVersion(
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              subjectId: input.auditSubjectId!,
+              action: "connector.action.policy_changed",
+              targetType: "connector_action_policy",
+              targetId: row.id,
+              metadata: {
+                connectionId: row.connectionId,
+                serverId: row.serverId,
+                toolName: row.toolName,
+                actionName: row.actionName,
+                policy: row.policy,
+                version: row.version,
+                previousPolicy: null,
+                previousVersion: null,
+                movedFromConnectionId: input.fromConnectionId,
+                movedFromPolicyId: row.from,
+              },
+            },
+            "metadata",
+            "metadataCodecVersion",
+          ),
+        ),
+      );
+  }
+  return {
+    movedPolicyIds: moved.map((row) => row.id),
+    removedPolicyIds: removed.map((row) => row.id),
+  };
 }
 
 /**
@@ -41395,6 +41525,10 @@ export async function listSessionEventPage(
           // Indexing the ordered ID array avoids rescanning an ordered CTE at
           // every recursion step. Keep the subsequent payload SELECT separate:
           // this is still metadata planning, not a new page-wide snapshot.
+          // The recursive step reads its next ID through a scalar subquery so
+          // the lookup is always an index parameter. Joining `ordered` there
+          // lets the planner (PostgreSQL 16.16, 17.12, 18.7) put the payload
+          // scan below it and turn the ID match into a per-step session scan.
           const metadataRows = await rawRows<
             SessionEventProjectionMetadataRow & { sourceRowCount: number }
           >(
@@ -41426,12 +41560,13 @@ export async function listSessionEventPage(
                 select sized.id, sized.sequence,
                   bounded.row_number + 1, sized.bytes,
                   bounded.cumulative_bytes + 1 + sized.bytes
-                from bounded cross join ordered
-                cross join lateral (
+                from bounded cross join lateral (
                   select ${schema.sessionEvents.id}, ${schema.sessionEvents.sequence},
                     (${transferBytesSql})::int as bytes
                   from ${schema.sessionEvents}
-                  where ${schema.sessionEvents.id} = ordered.ids[bounded.row_number + 1]
+                  where ${schema.sessionEvents.id} = (
+                      select ordered.ids[bounded.row_number + 1] from ordered
+                    )
                     and ${schema.sessionEvents.workspaceId} = ${workspaceId}
                     and ${schema.sessionEvents.sessionId} = ${sessionId}
                   offset 0
@@ -70005,6 +70140,11 @@ export async function beginEnrollmentAgentUpdate(
      * (null: none), so a decision made from an older read of the machine
      * never replaces a newer record. */
     expectedOperationId?: string | null;
+    /** Also replace an unfinished operation whose last progress is at or
+     * before this time: its runner was asked and has not been heard from
+     * since, so it is treated as lost. A fresh progress event moves the
+     * operation past this time and keeps it. */
+    replaceUnfinishedBefore?: Date;
   },
 ): Promise<EnrollmentRecord | null> {
   return await withRlsContext(
@@ -70079,6 +70219,9 @@ export async function beginEnrollmentAgentUpdate(
               sql`${schema.enrollments.agentUpdateStatus} is null`,
               eq(schema.enrollments.agentUpdateStatus, "succeeded"),
               eq(schema.enrollments.agentUpdateStatus, "failed"),
+              input.replaceUnfinishedBefore === undefined
+                ? undefined
+                : sql`${schema.enrollments.agentUpdateUpdatedAt} <= ${input.replaceUnfinishedBefore.toISOString()}::timestamptz`,
             ),
             input.expectedOperationId === undefined
               ? undefined
@@ -92740,6 +92883,12 @@ export type EnqueueCapabilitySetupContinuationInput = {
   sessionId: string;
   capabilityId: string;
   /**
+   * The capability's MCP endpoint. An agent's request to add a server
+   * (custom_mcp_setup_request) posts its card before the capability exists, so
+   * that card names the endpoint rather than a capability id.
+   */
+  endpointUrl?: string;
+  /**
    * The card is a connected account's own notice (expired access, more access
    * a tool needs) rather than a capability card: find it by this connection.
    */
@@ -92965,9 +93114,15 @@ async function latestAuthCardTx(
   tx: Database,
   input: Pick<
     EnqueueCapabilitySetupContinuationInput,
-    "workspaceId" | "sessionId" | "capabilityId" | "connectionId"
+    "workspaceId" | "sessionId" | "capabilityId" | "connectionId" | "endpointUrl"
   >,
 ): Promise<Array<{ id: string; sequence: number; payload: unknown }>> {
+  const capabilityCard = sql`${schema.sessionEvents.payload} -> 'capability' ->> 'id' = ${input.capabilityId}`;
+  // The card keeps the address as the agent gave it; ignore case and a
+  // trailing slash so the saved server's address still finds it.
+  const setupRequestCard = input.endpointUrl
+    ? sql`rtrim(lower(${schema.sessionEvents.payload} -> 'setupRequest' ->> 'endpointUrl'), '/') = rtrim(lower(${input.endpointUrl}), '/')`
+    : null;
   return await tx
     .select({
       id: schema.sessionEvents.id,
@@ -92982,7 +93137,9 @@ async function latestAuthCardTx(
         eq(schema.sessionEvents.type, "tool.auth_needed"),
         input.connectionId
           ? sql`${schema.sessionEvents.payload} ->> 'connectionId' = ${input.connectionId}`
-          : sql`${schema.sessionEvents.payload} -> 'capability' ->> 'id' = ${input.capabilityId}`,
+          : setupRequestCard
+            ? sql`(${capabilityCard} or ${setupRequestCard})`
+            : capabilityCard,
       ),
     )
     .orderBy(desc(schema.sessionEvents.sequence))
@@ -97507,6 +97664,20 @@ function catalogExposureState(
   return "legacy_active";
 }
 
+/**
+ * A workspace's Microsoft Dynamics entry keeps its MCP address only in
+ * `endpoint_url`: `mcp_url` takes part in the registry's cross-workspace
+ * uniqueness, which two workspaces using one environment would break.
+ */
+function workspaceDynamicsMcpUrl(row: typeof schema.capabilityCatalogItems.$inferSelect) {
+  return row.workspaceId &&
+    row.kind === "mcp" &&
+    row.endpointUrl &&
+    microsoftDynamicsProductForMcpUrl(row.endpointUrl)
+    ? row.endpointUrl
+    : null;
+}
+
 function mapCapabilityCatalogItem(
   row: typeof schema.capabilityCatalogItems.$inferSelect,
   exposure: "trusted" | "legacy_active" | "unverified" = capabilityCatalogItemIsTrustedForExposure({
@@ -97572,7 +97743,7 @@ function mapCapabilityCatalogItem(
     providerDomain: row.providerDomain,
     surfaceType: row.surfaceType,
     transport: row.transport,
-    mcpUrl: row.mcpUrl,
+    mcpUrl: row.mcpUrl ?? workspaceDynamicsMcpUrl(row),
     authKind: row.authKind as CapabilityCatalogItem["authKind"],
     credentialFacts: row.credentialFacts,
     tier: row.tier as CapabilityCatalogItem["tier"],
@@ -98289,7 +98460,6 @@ export * from "./event-triggers";
 export * from "./mcp-event-subscriptions";
 export * from "./event-source-feeds";
 export * from "./automation-templates";
-export * from "./bot-templates";
 export * from "./organization-model-providers";
 export * from "./organization-compatible-model-endpoints";
 export * from "./organization-anthropic-api-keys";
@@ -98310,6 +98480,7 @@ export async function listDueWorkspacePauseTimers(db: Database, limit = 100) {
 }
 
 export * from "./feedback";
+export * from "./console";
 export * from "./session-final-reply";
 export * from "./knowledge-entries";
 

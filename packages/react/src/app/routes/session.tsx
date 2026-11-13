@@ -3043,9 +3043,10 @@ function SessionChatPane(props: {
     ...(props.initialDraft ? { initialDraft: props.initialDraft } : {}),
     // The console always offers the other choice beside Send.
     offerQueue: true,
-    // Ordinary Send is acknowledged locally. Clear only resources captured in
-    // that immutable optimistic operation; later additions belong to the next
-    // draft, while retry keeps the original resource refs in the failed bubble.
+    // Send and Steer are acknowledged locally: the message leaves the box
+    // when it is shown. Clear only resources captured in that immutable
+    // operation; later additions belong to the next draft, while retry keeps
+    // the original resource refs in the failed bubble.
     onSubmitted: (_text, input) => {
       noteTurnFailureAction("send_message");
       attachments.removeReadyFiles(
@@ -3055,9 +3056,9 @@ function SessionChatPane(props: {
       );
       repositories.commitSent(input.resources ?? []);
     },
-    // Steer and recovered sends do not pass through onSubmitted. Keep the
-    // host-owned upload/repository queue in sync once those inputs are
-    // accepted too; the immutable input snapshot preserves later additions.
+    // Recovered sends do not pass through onSubmitted. Keep the host-owned
+    // upload/repository queue in sync once those inputs are accepted too;
+    // the immutable input snapshot preserves later additions.
     onSent: (_text, input) => {
       setCreditRefusal(null);
       attachments.removeReadyFiles(

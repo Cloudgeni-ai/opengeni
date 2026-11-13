@@ -2947,9 +2947,18 @@ to the person at the limit; grants are scarce and expire, and whether one is wor
 spending depends on how soon the limit resets anyway, which is a person's call.
 
 The rest of the usage body is decoded too: the `limits` list with each scoped
-limit's share of the weekly limit (`weekly_scoped_shares`), `extra_usage`, and the
-weekly limits of other Claude surfaces (shown for information; they never decide
-placement). `seven_day_overage_included`, as model responses name it, is the
+limit's share of the weekly limit (`weekly_scoped_shares`), paid usage credits, and
+the weekly limits of other Claude surfaces (shown for information; they never decide
+placement). Usage credits ("extra usage") come from two parts of the body: the
+setting, `extra_usage_state` (`enabled`, `disabled`, `not_configured`) in the reset
+programs' `event_props`, and the `extra_usage` object (whether the credits can pay
+right now, and the month's cap and spend in cents). Opengeni's reads skip spend
+reporting as Claude Code's reset check does, and such reads answer
+`extra_usage: null` whatever the setting, so a null object is never read as "off":
+without the setting the state is unknown. The account rows, the account page, the
+pooled-limits card and the organization's Claude heading show when usage credits
+are on. Opengeni only reads this state; it never turns usage credits on, buys
+credits or changes auto-reload. `seven_day_overage_included`, as model responses name it, is the
 weekly Fable limit (the usage endpoint reports the same limit as a scoped `limits`
 entry): it limits only Fable models, and a reading of either name ends a block
 claimed under the other. From model response headers Opengeni keeps the service

@@ -4918,7 +4918,7 @@ export type ClaudeSubscriptionUsage = {
   wallReset?: ClaudeWallReset | null | undefined;
   /** Claude's limit list, with each scoped limit's share of the weekly limit. */
   limits?: ClaudeUsageLimit[] | undefined;
-  /** Paid extra usage; null when Claude reports none. */
+  /** Paid usage credits. Absent or null: not reported, so unknown (never off). */
   extraUsage?: ClaudeExtraUsage | null | undefined;
   /** Weekly limits of other Claude surfaces, for information only. */
   surfaceWindows?: ClaudeSurfaceUsageWindow[] | undefined;

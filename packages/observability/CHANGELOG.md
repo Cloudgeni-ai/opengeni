@@ -1,5 +1,18 @@
 # @opengeni/observability
 
+## 6.18.0
+
+### Patch Changes
+
+- ea2f259: `opengeni_http_request_duration_seconds` has a 2-second bucket, so the core read latency alert's "p95 above 2 seconds" is exact. Before, the nearest bounds were 1 and 2.5 seconds, and the alert's p95 was interpolated inside that bucket: it paged when about a third of workspace and session reads took 1 to 2 seconds even when none took 2, and stayed quiet when a tenth took 2.2 seconds. Each HTTP route series gains one bucket series.
+- Updated dependencies [f313a0e]
+- Updated dependencies [6813960]
+- Updated dependencies [9188c1d]
+- Updated dependencies [3105a8b]
+- Updated dependencies [a16189c]
+- Updated dependencies [89cf4ba]
+  - @opengeni/contracts@6.18.0
+
 ## 6.17.0
 
 ### Patch Changes

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { EnrollmentRecord } from "@opengeni/db";
 import {
   agentUpdateBrowserClosingNotice,
+  agentUpdateLost,
   automaticAgentUpdateDue,
   browserClosingUpdateAt,
   browserUpdateDecision,
@@ -122,11 +123,11 @@ describe("automatic agent updates", () => {
     ).toBe(true);
   });
 
-  test("an in-flight update is the runner's; only an unanswered request is re-sent", () => {
+  test("an in-flight update is the runner's while it is heard from; an unanswered request is re-sent", () => {
     for (const status of ["accepted", "waiting_for_idle", "downloading", "restarting"] as const) {
       expect(
         automaticAgentUpdateDue(
-          machine("0.1.55", { status, updatedAt: minutesAgo(600) }),
+          machine("0.1.55", { status, updatedAt: minutesAgo(29) }),
           "0.1.60",
           NOW,
         ),
@@ -147,14 +148,77 @@ describe("automatic agent updates", () => {
         NOW,
       ),
     ).toBe(true);
-    // A request owned by a replaced process is settled by the successor's Hello.
+    // A request owned by a replaced process is settled by the successor's
+    // Hello. One the Hello did not settle is replaced like an unanswered one.
+    expect(
+      automaticAgentUpdateDue(
+        machine("0.1.55", { ...requested, connectionInstanceId: "old", updatedAt: minutesAgo(5) }),
+        "0.1.60",
+        NOW,
+      ),
+    ).toBe(false);
     expect(
       automaticAgentUpdateDue(
         machine("0.1.55", { ...requested, connectionInstanceId: "old", updatedAt: minutesAgo(60) }),
         "0.1.60",
         NOW,
       ),
+    ).toBe(true);
+  });
+
+  test("an update the runner has gone quiet on was lost and is asked for again", () => {
+    // A live machine that reported waiting for idle, with nothing holding it,
+    // and was not heard from again: its later progress went out on a
+    // connection that has since closed.
+    const quiet = {
+      status: "waiting_for_idle" as const,
+      targetVersion: "0.1.56",
+      blockers: [],
+      updatedAt: minutesAgo(30),
+    };
+    expect(agentUpdateLost(machine("0.1.55", quiet).agentUpdate!, NOW)).toBe(true);
+    expect(automaticAgentUpdateDue(machine("0.1.55", quiet), "0.1.60", NOW)).toBe(true);
+    // For the release promoted now, even when the lost one targeted it.
+    expect(
+      automaticAgentUpdateDue(
+        machine("0.1.55", { ...quiet, targetVersion: "0.1.60" }),
+        "0.1.60",
+        NOW,
+      ),
+    ).toBe(true);
+    for (const status of [
+      "accepted",
+      "downloading",
+      "verifying",
+      "applying",
+      "restarting",
+    ] as const) {
+      expect(
+        automaticAgentUpdateDue(
+          machine("0.1.55", { ...quiet, status, updatedAt: minutesAgo(12 * 24 * 60) }),
+          "0.1.60",
+          NOW,
+        ),
+      ).toBe(true);
+    }
+    // Waiting runners repeat their wait every minute, so one heard from
+    // recently keeps its operation.
+    expect(
+      automaticAgentUpdateDue(
+        machine("0.1.55", { ...quiet, errorCode: "update_busy_work", updatedAt: minutesAgo(1) }),
+        "0.1.60",
+        NOW,
+      ),
     ).toBe(false);
+    // Finished operations are never lost.
+    expect(
+      agentUpdateLost(
+        machine("0.1.55", { status: "failed", updatedAt: minutesAgo(600) }).agentUpdate!,
+        NOW,
+      ),
+    ).toBe(false);
+    // A machine already on the promoted release has nothing to ask for.
+    expect(automaticAgentUpdateDue(machine("0.1.60", quiet), "0.1.60", NOW)).toBe(false);
   });
 
   test("a completed update to an older target does not block the next one", () => {

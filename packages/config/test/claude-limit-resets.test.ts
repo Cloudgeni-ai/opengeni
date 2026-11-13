@@ -204,8 +204,9 @@ describe("the rest of the usage body", () => {
         usedPercentOfWeekly: expect.any(Number),
       },
     ]);
-    // Reported as null by every account: no extra usage, no other surface's limit.
-    expect(details?.extraUsage).toBeNull();
+    // Usage credits come from the reset program's setting (the spend-skipping
+    // read answers `extra_usage: null`); other surfaces' limits are null.
+    expect(details?.extraUsage?.state).toBe("enabled");
     expect(details?.surfaceWindows).toEqual([]);
     // The Fable limit stays readable as its plan window.
     expect(
@@ -230,6 +231,7 @@ describe("the rest of the usage body", () => {
     };
     const details = parseClaudeUsageResponse(body, now)?.details;
     expect(details?.extraUsage).toEqual({
+      state: "not_configured",
       isEnabled: true,
       monthlyLimit: 5000,
       usedCredits: 1250,

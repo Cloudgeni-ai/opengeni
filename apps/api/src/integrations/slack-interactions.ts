@@ -131,7 +131,6 @@ import {
   getWorkspace,
   getWorkspaceGrant,
   getOrganizationPrivacyPreferences,
-  namedSubjectIsActiveOrganizationMember,
   namedSubjectPersonalWorkspaceId,
   resolveSlackTargetAuthority,
   listSlackInteractionProgressDeliveryEvidence,
@@ -241,7 +240,6 @@ import {
   openSlackAgentGrant,
   openSlackAgentIdFromSubject,
   openSlackAgentInstructions,
-  openSlackAgentPersonRefusal,
   openSlackAgentRefusal,
   openSlackAgentSessionOptions,
   type OpenSlackAgentPersonRefusal,
@@ -254,6 +252,7 @@ import {
   slackOpenAgentOrganizationMembersOnlyText,
   slackOpenAgentSharedConversationText,
 } from "./slack-open-agents";
+import { organizationAgentAskerPerson } from "./organization-agents";
 import {
   buildSlackAppHomeAccessBlocks,
   buildSlackAppHomeBlocks,
@@ -2067,19 +2066,11 @@ async function openSlackAgentAskerPerson(
   agent: Pick<SlackAgentRecord, "targetAccountId">,
   link: { subjectId: string } | null,
 ): Promise<{ subjectId: string } | { refusal: OpenSlackAgentPersonRefusal }> {
-  const organizationMember =
-    link !== null &&
-    agent.targetAccountId === home.accountId &&
-    (await namedSubjectIsActiveOrganizationMember(deps.db, {
-      accountId: home.accountId,
-      subjectId: link.subjectId,
-    }));
-  const refusal = openSlackAgentPersonRefusal({
+  return await organizationAgentAskerPerson(deps.db, {
+    connectionAccountId: home.accountId,
+    agentAccountId: agent.targetAccountId,
     linkedSubjectId: link?.subjectId ?? null,
-    organizationMember,
   });
-  if (refusal || !link) return { refusal: refusal ?? "not_linked" };
-  return { subjectId: link.subjectId };
 }
 
 /** The one private reply for a person an open agent can't take: link, or why not. */
@@ -2892,6 +2883,7 @@ async function handleSlackRouteChoice(
     ? await getSlackAgent(deps.db, {
         accountId: home.accountId,
         agentId: chosen.candidateSlackAgentId,
+        connectionId: entry.connectionId,
       })
     : null;
   if (

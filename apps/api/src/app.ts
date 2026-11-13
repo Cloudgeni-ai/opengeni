@@ -457,6 +457,7 @@ import { registerCanonicalHumanIdentityRoutes } from "./routes/canonical-human-i
 import { registerOrganizationMembershipRoutes } from "./routes/organization-memberships";
 import { adminStepUpGuard } from "./auth/admin-step-up";
 import { registerOrganizationSessionRoutes } from "./routes/organization-sessions";
+import { registerConsoleRoutes } from "./routes/console";
 import { registerOrganizationRecoveryRoutes } from "./routes/organization-recovery";
 import { registerManagedOnboardingRoutes } from "./routes/managed-onboarding";
 import {
@@ -2779,6 +2780,7 @@ export function createAppComposition(
   registerCanonicalHumanIdentityRoutes(app, routeDeps);
   registerOrganizationMembershipRoutes(app, routeDeps);
   registerOrganizationSessionRoutes(app, routeDeps);
+  registerConsoleRoutes(app, routeDeps);
   registerOrganizationRecoveryRoutes(app, routeDeps);
   registerUserResourceAuthorityRoutes(app, routeDeps);
   registerSlackInteractionRoutes(app, routeDeps);

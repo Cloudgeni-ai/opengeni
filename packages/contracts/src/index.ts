@@ -24098,6 +24098,7 @@ export * from "./remember";
 export * from "./agent-authored-durable-text";
 
 export * from "./feedback";
+export * from "./console";
 
 export type { PluginDiscoveryItem, PluginDiscoveryPage } from "./plugin-discovery";
 export { mcpEndpointIdentity } from "./mcp-endpoint";

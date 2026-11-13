@@ -392,6 +392,7 @@ export type {
   OpenGeniRequestOptions,
   SendMessageInput,
   SessionListPageOptions,
+  SlackAgentInstallationOptions,
   SteerMessageResult,
   TranscribeAudioInput,
   WorkspaceControlEventPage,
@@ -556,6 +557,7 @@ export { parseSseStream } from "./sse";
 export { asVaultClient, vaultsApi, vaultErrorCode, vaultErrorDetail } from "./vaults-api";
 export type { VaultClientLike, VaultsApi } from "./vaults-api";
 export type * from "./vault-types";
+export type * from "@opengeni/contracts/console";
 export type { SseMessage } from "./sse";
 export { normalizeMcpOutput } from "./mcp-output";
 export type { NormalizedMcpOutput } from "./mcp-output";
