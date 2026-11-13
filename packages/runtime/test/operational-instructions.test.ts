@@ -275,7 +275,7 @@ describe("provider-neutral operational instructions", () => {
     );
   });
 
-  test("answers a question asked mid-run, then continues unfinished work", () => {
+  test("leaves a mid-run message to the model's judgment and keeps the earlier work going", () => {
     const start = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf(
       "The user may send a new message while you are still working.",
     );
@@ -288,12 +288,11 @@ describe("provider-neutral operational instructions", () => {
     expect(end).toBeGreaterThan(start);
     expect(guidance).not.toContain("provide the update and then progress with the task");
     expect(guidance).toContain(
-      "If it only asks a question or for status, answer it, then continue any unfinished work you can still advance in this turn, unless the message changes or cancels it.",
+      "Use your judgment about how it relates to the earlier request: it may replace it, change it, add to it, or be a side question. Act on that, and carry on with whatever earlier work still stands.",
     );
     expect(guidance).not.toContain("without starting or resuming other work");
-    expect(guidance).toContain(
-      "If nothing is in flight and nothing more can be advanced in this turn, the answer is your final response: an active goal continues on its own, and without one, offer to continue when work remains.",
-    );
+    expect(guidance).not.toContain("If it only asks a question");
+    expect(guidance).not.toContain("the answer is your final response");
     expect(guidance).toContain("acknowledgement, not approval");
   });
 

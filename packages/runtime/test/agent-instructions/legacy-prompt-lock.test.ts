@@ -22,45 +22,45 @@ import { LEGACY_PROMPT_CASES } from "./legacy-cases";
  */
 const LOCKED: Record<string, { chars: number; sha256: string; layers: string }> = {
   default: {
-    chars: 33709,
-    sha256: "c24f37a71073d86a13fc3f2b9a764bcd280b1ded92436c8a95738bdc9391988f",
+    chars: 33355,
+    sha256: "6660c2083e9eb03c385225194ae54cc2fe348e5e0f86b306c9233d007193f9dd",
     layers: "operational_contract,persona_and_core",
   },
   environment_and_rig: {
-    chars: 34583,
-    sha256: "1ac830744ece9a0bb948f801668e325303ae93a49473afb1466f60ddfd5b8bfb",
+    chars: 34229,
+    sha256: "b47a497a418a473d68620e96cc46dd5aa9e7ec1e7eecc08fba7fcd6f9d303f2e",
     layers: "operational_contract,persona_and_core",
   },
   custom_template_with_marker: {
-    chars: 32299,
-    sha256: "54849dd67824590c42b6dde79127b50265c1ffb97a4b589865f2097794aac106",
+    chars: 31945,
+    sha256: "747ef96def6bb16d2c85aac182194d60bb3da829f150b05219b45f5c3a28ef76",
     layers: "operational_contract,persona_and_core",
   },
   custom_template_without_marker: {
-    chars: 32299,
-    sha256: "54849dd67824590c42b6dde79127b50265c1ffb97a4b589865f2097794aac106",
+    chars: 31945,
+    sha256: "747ef96def6bb16d2c85aac182194d60bb3da829f150b05219b45f5c3a28ef76",
     layers: "operational_contract,persona_and_core",
   },
   extras_without_governance: {
-    chars: 38149,
-    sha256: "79a4093e49834a9b1dad4ac06ef974bd836bdc33cbc437f5e617f6269187ff19",
+    chars: 37795,
+    sha256: "9c9ee8f050b9bcf06c068bd4008991431779f78823c44cc601a6958b99d69245",
     layers:
       "operational_contract,persona_and_core,codemode,code_search,git_bindings,workspace_memory,skill_catalog,session_instructions",
   },
   extras_with_governance: {
-    chars: 37163,
-    sha256: "c90d5c591a30e9c664cedf6d4c12463064d6d398fa174e3806a7352bfbc7285b",
+    chars: 36809,
+    sha256: "c40a66a661927e191498b62a2a8c0f5b22c2b3ad2f66445816824ef5668bd240",
     layers:
       "operational_contract,persona_and_core,workspace_governance,session_instructions,codemode,code_search,workspace_memory",
   },
   selfhosted_with_bindings: {
-    chars: 33709,
-    sha256: "c24f37a71073d86a13fc3f2b9a764bcd280b1ded92436c8a95738bdc9391988f",
+    chars: 33355,
+    sha256: "6660c2083e9eb03c385225194ae54cc2fe348e5e0f86b306c9233d007193f9dd",
     layers: "operational_contract,persona_and_core",
   },
   unattended: {
-    chars: 34247,
-    sha256: "7c04cef230123d1796d495dd126cc3e8e630a8b9c1e1def4c960837944683469",
+    chars: 33893,
+    sha256: "78245df1e4fa77c5fece460f36d63fd2e33699364febf99a5ffb45efd886ba7c",
     layers: "operational_contract,persona_and_core",
   },
 };
