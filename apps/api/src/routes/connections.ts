@@ -138,6 +138,7 @@ import {
   type SlackBotInstallCallbackFailureStage,
 } from "@opengeni/db";
 import type { ApiRouteDeps } from "@opengeni/core";
+import type { ConnectionMetadata as ConnectionMetadataRecord } from "@opengeni/contracts";
 import { KNOWLEDGE_SOURCE_SYNC_RETIRED_MESSAGE } from "@opengeni/contracts/knowledge-source-sync-retirement";
 import { pinnedFetch } from "@opengeni/network";
 import type { Hono } from "hono";
@@ -903,17 +904,21 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!connection) {
       throw new HTTPException(404, { message: "connection not found" });
     }
-    // Read as the list reads it while a backend is switched. Only a native
+    // Read as the lists read it while a backend is switched. Only a native
     // connection of a Nango-backed service needs its owner's other accounts
-    // (to tell whether a Nango connection has superseded it).
+    // (to tell whether a Nango connection has superseded it); a personal one
+    // also counts the owner's personal accounts in other workspaces.
     const backends = await nangoBackendsFor(db, settings);
-    const siblings =
-      backends.size > 0 && !connection.providerDomain.startsWith("nango:")
-        ? (await listConnectionsMetadata(db, workspaceId, grant.subjectId)).filter(
-            (other) => other.id !== connection.id && other.subjectId === connection.subjectId,
-          )
-        : [];
-    const [projected] = projectConnectionsForBackends([connection, ...siblings], backends);
+    const siblings = new Map<string, ConnectionMetadataRecord>();
+    if (backends.size > 0 && !connection.providerDomain.startsWith("nango:")) {
+      for (const other of await listConnectionsMetadata(db, workspaceId, grant.subjectId))
+        if (other.subjectId === connection.subjectId) siblings.set(other.id, other);
+      if (connection.subjectId !== null && connection.subjectId === grant.subjectId)
+        for (const other of await listOwnConnectionAccountsForGrant(db, grant))
+          if (other.subjectId === connection.subjectId) siblings.set(other.id, other);
+      siblings.delete(connection.id);
+    }
+    const [projected] = projectConnectionsForBackends([connection, ...siblings.values()], backends);
     return c.json(ConnectionResponse.parse({ connection: projected ?? connection }));
   });
 

@@ -92,8 +92,11 @@ deletes them (below).
 signature).
 
 - `auth` creation/override: backup finalizer for a connect attempt whose page
-  was closed early (tags are re-verified).
-- `auth` refresh failure: re-checks the connection in Nango and marks it
+  was closed early. It reads the connection with `GET /connections/{id}` and
+  requires the signed webhook's attempt tags (and the tags Nango reports for
+  the connection, when present) to match.
+- `auth` refresh failure: re-reads the connection with
+  `GET /connections/{id}?provider_config_key=…` and marks it
   `needs_reauth` only if Nango still reports an auth error; a later successful
   refresh (or a re-check without errors) marks it active again. Replays of an
   old event are therefore harmless.
@@ -203,14 +206,19 @@ disconnect them while the integration is on Nango.
 
 ```sh
 bun run integrations:nango orphans [--key gmail] [--out orphans.csv]
-bun run integrations:nango orphans --key gmail --delete --operator <you> --reason "<why>"
+bun run integrations:nango orphans --key gmail --delete [--include-untagged] --operator <you> --reason "<why>"
 ```
 
 It lists every Nango connection (paged `GET /connections`) whose id has no live
-Opengeni row (from `nango_affected_connections`), optionally per integration,
-and with `--delete` deletes each in Nango. Run it after a flip back, and
-periodically to catch rows removed by workspace/organization deletion or member
-removal.
+Opengeni row (from `nango_affected_connections`), optionally per integration
+(by its tag, or by provider config key when untagged), with an `action`
+column. `--delete` deletes only connections Opengeni made (they carry the
+`opengeni_attempt_id` tag) that are at least two hours old, longer than a
+connect attempt lives, so an in-progress connect is never deleted. Untagged
+connections (made outside Opengeni) are listed but deleted only with
+`--include-untagged`, and never one whose age Nango does not report. Run it
+after a flip back, and periodically to catch rows removed by
+workspace/organization deletion or member removal.
 
 ### Export affected users
 

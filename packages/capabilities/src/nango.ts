@@ -3,6 +3,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 
 import {
   NANGO_DEFAULT_API_BASE_URL,
+  NANGO_TAG,
   nangoApiUrl,
   nangoAuthHeaders,
   type NangoToolDescriptor,
@@ -246,23 +247,68 @@ export class NangoClient {
   }
 
   /**
+   * One connection read with the documented `GET /connections/{id}`, or null
+   * when Nango does not know it. Only its summary and granted scopes leave this
+   * method; credentials in the response are never returned. `tags` is null
+   * when the response carries no tags object.
+   */
+  async getConnection(
+    connectionId: string,
+    providerConfigKey: string,
+  ): Promise<
+    | (Omit<NangoConnectionSummary, "tags"> & {
+        tags: Record<string, string> | null;
+        scopes: string[] | null;
+      })
+    | null
+  > {
+    const query = new URLSearchParams({
+      provider_config_key: providerConfigKey,
+      refresh_token: "false",
+    });
+    const path = `/connections/${encodeURIComponent(connectionId)}?${query.toString()}`;
+    const result = await this.json("GET", path);
+    if (result.status === 404) return null;
+    if (result.status < 200 || result.status >= 300)
+      throw new NangoApiError(
+        `Nango GET /connections/{id} failed with ${result.status}`,
+        result.status,
+        errorCode(result.body),
+      );
+    const raw = (result.body ?? {}) as Record<string, unknown>;
+    const reportedId = typeof raw.connection_id === "string" ? raw.connection_id : connectionId;
+    const reportedKey =
+      typeof raw.provider_config_key === "string" ? raw.provider_config_key : providerConfigKey;
+    if (reportedId !== connectionId || reportedKey !== providerConfigKey) return null;
+    let tags: Record<string, string> | null = null;
+    if (raw.tags && typeof raw.tags === "object" && !Array.isArray(raw.tags)) {
+      tags = {};
+      for (const [key, value] of Object.entries(raw.tags as Record<string, unknown>))
+        if (typeof value === "string") tags[key.toLowerCase()] = value;
+    }
+    const created = raw.created_at ?? raw.created;
+    return {
+      connectionId,
+      providerConfigKey,
+      provider: typeof raw.provider === "string" ? raw.provider : null,
+      createdAt: typeof created === "string" ? created : null,
+      tags,
+      authErrors: Array.isArray(raw.errors)
+        ? raw.errors.filter((error) => (error as { type?: unknown })?.type === "auth").length
+        : 0,
+      scopes: nangoReportedScopes(raw),
+    };
+  }
+
+  /**
    * The OAuth scopes the provider actually granted to one connection, as Nango
-   * reports them, or null when Nango does not report any. Only the scope list
-   * leaves this method; credentials in the response are never returned.
+   * reports them, or null when Nango does not report any.
    */
   async connectionGrantedScopes(
     connectionId: string,
     providerConfigKey: string,
   ): Promise<string[] | null> {
-    const query = new URLSearchParams({
-      provider_config_key: providerConfigKey,
-      refresh_token: "false",
-    });
-    const { body } = await this.ok(
-      "GET",
-      `/connections/${encodeURIComponent(connectionId)}?${query.toString()}`,
-    );
-    return nangoReportedScopes(body);
+    return (await this.getConnection(connectionId, providerConfigKey))?.scopes ?? null;
   }
 
   /**
@@ -410,4 +456,59 @@ export function nangoReportedScopes(body: unknown): string[] | null {
     (scope) => scope.length <= 512,
   );
   return scopes.length > 0 ? scopes.slice(0, 200) : null;
+}
+
+// ---------------------------------------------------------------------------
+// Orphan reconciliation (operator)
+// ---------------------------------------------------------------------------
+
+/**
+ * Minimum age before an orphan may be deleted. A connect attempt's signed
+ * state lives one hour; two hours keeps every in-progress connect (whose row
+ * is stored only when it completes) out of reach.
+ */
+export const NANGO_ORPHAN_MIN_AGE_MS = 2 * 60 * 60 * 1000;
+
+export type NangoOrphanAction = "delete" | "keep_recent" | "keep_unknown_age" | "keep_untagged";
+
+export type NangoOrphan = NangoConnectionSummary & { action: NangoOrphanAction };
+
+/**
+ * Nango connections that no live Opengeni connection stands for, and what a
+ * `--delete` run does with each. Only connections Opengeni made (they carry
+ * its attempt tag) and older than `minAgeMs` are deleted; untagged ones (made
+ * outside Opengeni) only when `includeUntagged` is set, and never one whose
+ * age Nango does not report.
+ */
+export function planNangoOrphans(input: {
+  remote: readonly NangoConnectionSummary[];
+  liveNangoConnectionIds: ReadonlySet<string>;
+  /** Restrict to one integration: its tag, or (untagged) its provider config keys. */
+  integration?: { key: string; providerConfigKeys: ReadonlySet<string> } | undefined;
+  now: number;
+  minAgeMs?: number;
+  includeUntagged?: boolean;
+}): NangoOrphan[] {
+  const minAgeMs = Math.max(input.minAgeMs ?? NANGO_ORPHAN_MIN_AGE_MS, NANGO_ORPHAN_MIN_AGE_MS);
+  return input.remote.flatMap((connection) => {
+    if (input.liveNangoConnectionIds.has(connection.connectionId)) return [];
+    const tagged = Boolean(connection.tags[NANGO_TAG.attemptId]);
+    if (input.integration) {
+      const taggedKey = connection.tags[NANGO_TAG.integrationKey];
+      const matches = taggedKey
+        ? taggedKey === input.integration.key
+        : input.integration.providerConfigKeys.has(connection.providerConfigKey);
+      if (!matches) return [];
+    }
+    const created = connection.createdAt ? Date.parse(connection.createdAt) : Number.NaN;
+    const action: NangoOrphanAction =
+      !tagged && !input.includeUntagged
+        ? "keep_untagged"
+        : !Number.isFinite(created)
+          ? "keep_unknown_age"
+          : input.now - created < minAgeMs
+            ? "keep_recent"
+            : "delete";
+    return [{ ...connection, action }];
+  });
 }

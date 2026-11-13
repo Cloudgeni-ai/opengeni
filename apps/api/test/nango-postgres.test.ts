@@ -139,7 +139,15 @@ function fakeNango() {
     if (single && method === "GET") {
       const entry = remote.find((candidate) => candidate.connectionId === single[1]);
       return entry
-        ? Response.json({ credentials: { type: "OAUTH2", raw: { scope: entry.scope } } })
+        ? Response.json({
+            connection_id: entry.connectionId,
+            provider_config_key: url.searchParams.get("provider_config_key"),
+            provider: "google-mail",
+            created_at: "2026-11-13T00:00:00.000Z",
+            tags: entry.tags,
+            errors: Array.from({ length: entry.authErrors }, () => ({ type: "auth" })),
+            credentials: { type: "OAUTH2", raw: { scope: entry.scope } },
+          })
         : new Response("", { status: 404 });
     }
     if (single && method === "DELETE") return new Response(null, { status: 204 });
@@ -305,6 +313,59 @@ describe("Nango connections in PostgreSQL", () => {
       ),
     ).toBe("deleted");
     expect((await nangoRows(target))[0]!.status).toBe("revoked");
+  });
+
+  test("the creation webhook finalizes an attempt the page did not finish", async () => {
+    if (!shared) return;
+    const target = await owner("nango finalizer");
+    const nango = fakeNango();
+    const tags = nangoAttemptTags({ ...target, attemptId: "closed-page", integrationKey: "gmail" });
+    nango.remote.push({
+      connectionId: "nf-1",
+      tags,
+      email: "late@example.com",
+      scope: "https://mail.google.com/",
+      authErrors: 0,
+    });
+    const deps = {
+      db: client.db,
+      settings,
+      fetchImpl: nango.fetchImpl,
+      nangoBackends: async () => backends,
+    };
+    // Tags Nango reports for the connection must match the signed webhook's.
+    const forged = nangoAttemptTags({ ...target, attemptId: "other", integrationKey: "gmail" });
+    expect(
+      await handleNangoWebhook(
+        deps,
+        webhook(target, "nf-1", { operation: "creation", success: true, tags: forged }),
+      ),
+    ).toBe("unknown_connection");
+    expect(await nangoRows(target)).toHaveLength(0);
+    expect(
+      await handleNangoWebhook(
+        deps,
+        webhook(target, "nf-1", { operation: "creation", success: true, tags }),
+      ),
+    ).toBe("finalized");
+    expect(await nangoRows(target)).toMatchObject([
+      { status: "active", nango_connection_id: "nf-1", email: "late@example.com" },
+    ]);
+    // It reads the one connection with the documented endpoint, never list filters.
+    expect(
+      nango.requests.some(
+        (request) =>
+          request.method === "GET" &&
+          request.url.pathname === "/connections/nf-1" &&
+          request.url.searchParams.get("provider_config_key") === "google-mail",
+      ),
+    ).toBe(true);
+    expect(
+      nango.requests.some(
+        (request) =>
+          request.url.pathname === "/connections" && request.url.searchParams.has("connectionId"),
+      ),
+    ).toBe(false);
   });
 
   test("disconnecting deletes the connection in Nango", async () => {

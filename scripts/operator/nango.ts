@@ -5,10 +5,10 @@
 //     [--definition definition.json] [--disabled] --operator <name> --reason <reason>
 //   bun scripts/operator/nango.ts affected --key gmail [--out affected.csv]
 //   bun scripts/operator/nango.ts usage [--since 2026-11-01] [--until 2026-12-01] [--account <uuid>] [--out usage.csv]
-//   bun scripts/operator/nango.ts orphans [--key gmail] [--out orphans.csv] [--delete --operator <name> --reason <reason>]
+//   bun scripts/operator/nango.ts orphans [--key gmail] [--out orphans.csv] [--delete [--include-untagged] --operator <name> --reason <reason>]
 import { parseArgs } from "node:util";
 import { dbSearchPath, getSettings } from "@opengeni/config";
-import { NangoClient } from "@opengeni/capabilities";
+import { NangoClient, planNangoOrphans } from "@opengeni/capabilities";
 import { NANGO_TAG } from "@opengeni/contracts";
 import { createDb, listNangoAffectedConnections, summarizeNangoUsage } from "@opengeni/db";
 import { sql } from "drizzle-orm";
@@ -30,6 +30,7 @@ const { values } = parseArgs({
     until: { type: "string" },
     account: { type: "string" },
     delete: { type: "boolean" },
+    "include-untagged": { type: "boolean" },
   },
 });
 
@@ -135,13 +136,10 @@ try {
       ...(settings.nangoApiBaseUrl ? { baseUrl: settings.nangoApiBaseUrl } : {}),
     });
     const remote = await nango.listAllConnections();
-    const keys = new Set<string>(
-      (
-        (await client.db.execute(
-          sql`select distinct integration_key from integration_backend_revisions`,
-        )) as unknown as Array<{ integration_key: string }>
-      ).map((row) => row.integration_key),
-    );
+    const revisions = (await client.db.execute(
+      sql`select integration_key, nango_provider_config_key from integration_backend_revisions`,
+    )) as unknown as Array<{ integration_key: string; nango_provider_config_key: string | null }>;
+    const keys = new Set<string>(revisions.map((row) => row.integration_key));
     for (const connection of remote) {
       const tagged = connection.tags[NANGO_TAG.integrationKey];
       if (tagged) keys.add(tagged);
@@ -155,14 +153,28 @@ try {
       for (const row of await listNangoAffectedConnections(client.db, key))
         if (row.backend === "nango" && row.status !== "revoked" && row.nangoConnectionId)
           live.add(row.nangoConnectionId);
-    const orphans = remote.filter(
-      (connection) =>
-        !live.has(connection.connectionId) &&
-        (!values.key || connection.tags[NANGO_TAG.integrationKey] === values.key),
-    );
+    const orphans = planNangoOrphans({
+      remote,
+      liveNangoConnectionIds: live,
+      integration: values.key
+        ? {
+            key: values.key,
+            providerConfigKeys: new Set(
+              revisions
+                .filter((row) => row.integration_key === values.key)
+                .flatMap((row) =>
+                  row.nango_provider_config_key ? [row.nango_provider_config_key] : [],
+                ),
+            ),
+          }
+        : undefined,
+      now: Date.now(),
+      includeUntagged: values["include-untagged"] === true,
+    });
     const deleted = new Set<string>();
     if (values.delete)
       for (const orphan of orphans) {
+        if (orphan.action !== "delete") continue;
         await nango.deleteConnection(orphan.connectionId, orphan.providerConfigKey);
         deleted.add(orphan.connectionId);
       }
@@ -175,6 +187,8 @@ try {
         workspace_id: orphan.tags[NANGO_TAG.workspaceId] ?? null,
         user_id: orphan.tags[NANGO_TAG.endUserId] ?? null,
         created_at: orphan.createdAt,
+        opengeni_tagged: Boolean(orphan.tags[NANGO_TAG.attemptId]),
+        action: values.delete ? orphan.action : `would_${orphan.action}`,
         deleted: deleted.has(orphan.connectionId),
       })),
       [
@@ -185,6 +199,8 @@ try {
         "workspace_id",
         "user_id",
         "created_at",
+        "opengeni_tagged",
+        "action",
         "deleted",
       ],
     );

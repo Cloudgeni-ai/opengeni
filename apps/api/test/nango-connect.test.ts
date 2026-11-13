@@ -175,6 +175,9 @@ describe("Nango Connect", () => {
     expect(html).not.toContain("session_token=s");
     expect(html).toContain('"sessionToken":"session-token"');
     expect(html).toContain('type: "session_token"');
+    // After connect, 409 (connection changed) is retried within the short backoff only.
+    expect(html).toContain("retryConflict && response.status === 409");
+    expect(html).toContain("await complete(true)");
   });
 
   test("completion stores nothing until Nango has a connection with this attempt's tags", async () => {

@@ -20,10 +20,12 @@ import {
   nativeNangoIntegrationForProviderDomain,
   parseNangoAuthWebhook,
   parseNangoIntegrationDefinition,
+  planNangoOrphans,
   readIdentityField,
   selectNangoTools,
   verifyNangoWebhookSignature,
   type IntegrationBackendSetting,
+  type NangoConnectionSummary,
 } from "../src/nango";
 
 function setting(overrides: Partial<IntegrationBackendSetting>): IntegrationBackendSetting {
@@ -338,5 +340,122 @@ describe("NangoClient", () => {
     expect(calls[3]!.url).toBe("https://nango.test/connections/c1/tools/create-post/calls");
     expect(calls[3]!.body).toBe(JSON.stringify({ input: { text: "hi" } }));
     expect(calls[4]!.method).toBe("DELETE");
+  });
+});
+
+describe("orphan reconciliation", () => {
+  const now = Date.parse("2026-11-13T12:00:00.000Z");
+  const tagged = (attemptId: string) => ({
+    ...nangoAttemptTags({
+      accountId: "org",
+      workspaceId: "ws",
+      subjectId: "user",
+      attemptId,
+      integrationKey: "gmail",
+    }),
+  });
+  const remote = (
+    connectionId: string,
+    tags: Record<string, string>,
+    createdAt: string | null,
+    providerConfigKey = "google-mail",
+  ): NangoConnectionSummary => ({
+    connectionId,
+    providerConfigKey,
+    provider: "google-mail",
+    createdAt,
+    tags,
+    authErrors: 0,
+  });
+  const connections = [
+    remote("live", tagged("a1"), "2026-11-01T00:00:00.000Z"),
+    remote("old-tagged", tagged("a2"), "2026-11-13T09:00:00.000Z"),
+    remote("in-progress", tagged("a3"), "2026-11-13T11:30:00.000Z"),
+    remote("no-age", tagged("a4"), null),
+    remote("outside", {}, "2026-10-01T00:00:00.000Z"),
+    remote("other-integration", {}, "2026-10-01T00:00:00.000Z", "linkedin"),
+  ];
+
+  test("deletes only old Opengeni-tagged orphans; untagged only when asked", () => {
+    const plan = planNangoOrphans({
+      remote: connections,
+      liveNangoConnectionIds: new Set(["live"]),
+      now,
+    });
+    expect(Object.fromEntries(plan.map((orphan) => [orphan.connectionId, orphan.action]))).toEqual({
+      "old-tagged": "delete",
+      "in-progress": "keep_recent",
+      "no-age": "keep_unknown_age",
+      outside: "keep_untagged",
+      "other-integration": "keep_untagged",
+    });
+    const withUntagged = planNangoOrphans({
+      remote: connections,
+      liveNangoConnectionIds: new Set(["live"]),
+      now,
+      includeUntagged: true,
+      // A shorter age than the connect-state lifetime is never used.
+      minAgeMs: 1,
+    });
+    expect(withUntagged.find((orphan) => orphan.connectionId === "outside")?.action).toBe("delete");
+    expect(withUntagged.find((orphan) => orphan.connectionId === "in-progress")?.action).toBe(
+      "keep_recent",
+    );
+  });
+
+  test("one integration: by tag, or by provider config key when untagged", () => {
+    const plan = planNangoOrphans({
+      remote: connections,
+      liveNangoConnectionIds: new Set(),
+      integration: { key: "gmail", providerConfigKeys: new Set(["google-mail"]) },
+      now,
+      includeUntagged: true,
+    });
+    expect(plan.map((orphan) => orphan.connectionId).sort()).toEqual([
+      "in-progress",
+      "live",
+      "no-age",
+      "old-tagged",
+      "outside",
+    ]);
+  });
+});
+
+describe("NangoClient.getConnection", () => {
+  test("reads one connection with the documented endpoint, without credentials", async () => {
+    const requests: string[] = [];
+    const client = new NangoClient({
+      secretKey: "nango-secret-test",
+      baseUrl: "https://nango.test",
+      fetchImpl: (async (input: string | URL | Request) => {
+        const url = new URL(String(input));
+        requests.push(url.pathname + url.search);
+        if (url.pathname === "/connections/missing") return new Response("", { status: 404 });
+        return Response.json({
+          connection_id: "c-1",
+          provider_config_key: "google-mail",
+          provider: "google-mail",
+          created_at: "2026-11-13T00:00:00.000Z",
+          tags: { Opengeni_Attempt_Id: "a1" },
+          errors: [{ type: "auth" }, { type: "sync" }],
+          credentials: { access_token: "provider-token", raw: { scope: "a b" } },
+        });
+      }) as typeof fetch,
+    });
+    const connection = await client.getConnection("c-1", "google-mail");
+    expect(connection).toEqual({
+      connectionId: "c-1",
+      providerConfigKey: "google-mail",
+      provider: "google-mail",
+      createdAt: "2026-11-13T00:00:00.000Z",
+      tags: { opengeni_attempt_id: "a1" },
+      authErrors: 1,
+      scopes: ["a", "b"],
+    });
+    expect(JSON.stringify(connection)).not.toContain("provider-token");
+    expect(requests[0]).toBe(
+      "/connections/c-1?provider_config_key=google-mail&refresh_token=false",
+    );
+    expect(await client.getConnection("missing", "google-mail")).toBeNull();
   });
 });

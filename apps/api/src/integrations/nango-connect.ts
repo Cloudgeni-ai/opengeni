@@ -295,7 +295,7 @@ const PAGE_SCRIPT = `(() => {
   let done = false;
   let closed = false;
   let pollTimer = null;
-  async function complete() {
+  async function complete(retryConflict) {
     if (done) return true;
     try {
       const response = await fetch(data.completeUrl, {
@@ -311,7 +311,14 @@ const PAGE_SCRIPT = `(() => {
         window.location.replace(body.redirectTo);
         return true;
       }
-      if (!response.ok && response.status !== 429 && response.status < 500) {
+      // 429 and 5xx are retried; so is 409 (the connection changed
+      // meanwhile) within the short backoff after connect.
+      if (
+        !response.ok &&
+        !(retryConflict && response.status === 409) &&
+        response.status !== 429 &&
+        response.status < 500
+      ) {
         done = true;
         status.textContent = data.text.failed;
         return true;
@@ -327,14 +334,14 @@ const PAGE_SCRIPT = `(() => {
     stopPolling();
     for (const delay of [0, 500, 1000, 2000, 4000, 8000]) {
       if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
-      if (await complete()) return;
+      if (await complete(true)) return;
     }
     if (!done) status.textContent = data.text.failed;
   }
   function poll(delay) {
     if (done || closed || Date.now() + delay > data.expiresAtMs) return;
     pollTimer = setTimeout(async () => {
-      if (await complete()) return;
+      if (await complete(false)) return;
       poll(Math.min(delay * 2, 30000));
     }, delay);
   }
@@ -354,7 +361,7 @@ const PAGE_SCRIPT = `(() => {
       closed = true;
       stopPolling();
       // A connection made just before closing still finishes once.
-      void complete().then((finished) => {
+      void complete(false).then((finished) => {
         if (!finished) status.textContent = data.text.closed;
       });
     }
@@ -946,15 +953,17 @@ export async function handleNangoWebhook(
       // Backup finalizer: the page did not finish (closed early). The tags
       // were set by this server for one signed, verified attempt.
       const client = nangoClient(deps);
-      const verified = (await client.listConnections({ connectionId: event.connectionId })).find(
-        (connection) =>
-          connection.connectionId === event.connectionId &&
-          connection.providerConfigKey === integration.providerConfigKey &&
-          nangoTagsMatchAttempt(connection.tags, { ...owner, attemptId, integrationKey }),
-      );
+      const current = await client.getConnection(event.connectionId, integration.providerConfigKey);
+      // The webhook's tags are signed by Nango; tags the connection reports
+      // now must match too when Nango returns them.
+      const verified =
+        current &&
+        nangoTagsMatchAttempt(event.tags, { ...owner, attemptId, integrationKey }) &&
+        (current.tags === null ||
+          nangoTagsMatchAttempt(current.tags, { ...owner, attemptId, integrationKey }));
       if (!verified) return "unknown_connection";
       const identity = await readConnectionIdentity(client, integration, event.connectionId);
-      const grantedScopes = await readGrantedScopes(client, integration, event.connectionId);
+      const grantedScopes = current.scopes;
       let outcome: Awaited<ReturnType<typeof persistNangoConnection>> | null = null;
       await withOrganizationIntegrationAcquisition(deps.db, owner, [integrationKey], async (tx) => {
         await requireConnectOwnerAuthority(
@@ -987,15 +996,9 @@ export async function handleNangoWebhook(
       if (!stored) return "unknown_connection";
       // A signed webhook can still be replayed or arrive late: act only on
       // what Nango reports for the connection now.
-      const current = (
-        await nangoClient(deps).listConnections({
-          connectionId: event.connectionId,
-          integrationId: event.providerConfigKey,
-        })
-      ).find(
-        (connection) =>
-          connection.connectionId === event.connectionId &&
-          connection.providerConfigKey === event.providerConfigKey,
+      const current = await nangoClient(deps).getConnection(
+        event.connectionId,
+        event.providerConfigKey,
       );
       if (!current) return "ignored";
       const failing = current.authErrors > 0;
