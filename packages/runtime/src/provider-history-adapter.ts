@@ -680,6 +680,12 @@ function projectWireHistory(
  * such run of system messages, as the Claude adapter does
  * (placeConversationSystems). The decision depends only on the items, so the
  * next request of the turn reproduces the same prefix.
+ *
+ * It applies to every Responses and Chat route, including native OpenAI and
+ * Codex Responses, which keep system messages in place and do not need it:
+ * the route cannot tell which model sits behind a gateway. A session whose
+ * history already has such a run gets the anchor in its earlier prefix once,
+ * so its first request after the change misses the prompt cache once.
  */
 function withContinuationAnchors(
   items: Array<Record<string, unknown>>,

@@ -649,6 +649,7 @@ import { contentlessModelResponseGuard } from "./contentless-model-response";
 export {
   ContentlessModelResponseHandover,
   isContentlessModelResponse,
+  stoppedAtOutputLimit,
 } from "./contentless-model-response";
 export {
   ModelPreemption,

@@ -3,7 +3,12 @@ import type { AgentOutputItem, StreamEvent } from "@openai/agents";
 import { SandboxAgent } from "@openai/agents/sandbox";
 import { assistantMessage, functionCall, ScriptedModel } from "@opengeni/testing/scripted-model";
 import { testSettings } from "@opengeni/testing/settings";
-import { buildOpenGeniAgent, isContentlessModelResponse, runAgentStream } from "../src/index";
+import {
+  buildOpenGeniAgent,
+  isContentlessModelResponse,
+  runAgentStream,
+  stoppedAtOutputLimit,
+} from "../src/index";
 import { preemptedResponseDone } from "../src/model-preemption";
 
 const done = (output: unknown[], providerData?: Record<string, unknown>): StreamEvent =>
@@ -53,6 +58,24 @@ describe("contentless model response", () => {
     const preempted = preemptedResponseDone({ output: [] }) as unknown as StreamEvent;
     expect(isContentlessModelResponse(preempted)).toBe(false);
   });
+
+  test("an output-limit stop is read from the Responses shape and Claude's stop reason", () => {
+    const limit = { status: "incomplete", incomplete_details: { reason: "max_output_tokens" } };
+    expect(stoppedAtOutputLimit(done([reasoning], limit))).toBe(true);
+    expect(
+      stoppedAtOutputLimit(done([reasoning], { anthropic: { stopReason: "max_tokens" } })),
+    ).toBe(true);
+    expect(
+      stoppedAtOutputLimit(
+        done([reasoning], {
+          status: "incomplete",
+          incomplete_details: { reason: "content_filter" },
+        }),
+      ),
+    ).toBe(false);
+    expect(stoppedAtOutputLimit(done([reasoning], { status: "completed" }))).toBe(false);
+    expect(stoppedAtOutputLimit(done([reasoning]))).toBe(false);
+  });
 });
 
 function sandbox(agent: ReturnType<typeof buildOpenGeniAgent>) {
@@ -72,6 +95,59 @@ function sandbox(agent: ReturnType<typeof buildOpenGeniAgent>) {
 }
 
 describe("a run never re-samples after a contentless response", () => {
+  const OUTPUT_LIMIT = {
+    status: "incomplete",
+    incomplete_details: { reason: "max_output_tokens" },
+  };
+
+  async function runScripted(steps: ConstructorParameters<typeof ScriptedModel>[0]) {
+    const settings = testSettings({ sandboxBackend: "local", webSearchEnabled: false });
+    const model = new ScriptedModel(steps);
+    const agent = buildOpenGeniAgent(settings, [], { model, hostedWebSearch: false });
+    let handovers = 0;
+    const stream = await runAgentStream(agent, "Continue", settings, {
+      ownedSandbox: sandbox(agent) as never,
+      onContentlessModelResponse: () => {
+        handovers++;
+      },
+    });
+    for await (const event of stream) void event;
+    await stream.completed;
+    return { model, handovers, finalOutput: stream.finalOutput ?? "" };
+  }
+
+  test("reasoning stopped at the output limit is continued", async () => {
+    const actual = await runScripted([
+      { output: [reasoning], providerData: OUTPUT_LIMIT },
+      { outputText: "Answer." },
+    ]);
+    expect(actual.model.calls).toBe(2);
+    expect(actual.handovers).toBe(0);
+    expect(actual.finalOutput).toBe("Answer.");
+  });
+
+  test("output-limited reasoning is continued at most three times in a row", async () => {
+    const actual = await runScripted([
+      { output: [reasoning], providerData: OUTPUT_LIMIT },
+      { output: [reasoning], providerData: OUTPUT_LIMIT },
+      { output: [reasoning], providerData: OUTPUT_LIMIT },
+      { output: [reasoning], providerData: OUTPUT_LIMIT },
+      { outputText: "never sampled" },
+    ]);
+    expect(actual.model.calls).toBe(4);
+    expect(actual.handovers).toBe(1);
+    expect(actual.finalOutput).toBe("");
+  });
+
+  test("an empty response at the output limit is still contentless", async () => {
+    const actual = await runScripted([
+      { output: [], providerData: OUTPUT_LIMIT },
+      { outputText: "never sampled" },
+    ]);
+    expect(actual.model.calls).toBe(1);
+    expect(actual.handovers).toBe(1);
+  });
+
   for (const [name, output] of [
     ["no output", []],
     ["reasoning only", [reasoning]],
