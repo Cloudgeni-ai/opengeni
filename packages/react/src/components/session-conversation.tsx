@@ -23,18 +23,6 @@ import type { ClientOverride } from "../session-context";
 import { type ModelPolicyPickerProps } from "./model-policy-picker";
 import { ComposerModelPicker, type ModelLevel } from "./model-level-picker";
 
-/** What a host may set on the composer's model control. */
-export type SessionModelPickerProps = Pick<
-  ModelPolicyPickerProps,
-  "groupPresentation" | "messages"
-> & {
-  /**
-   * Show these levels (for example Standard and Thorough, each one model and
-   * effort) instead of the full picker. Omit or pass an empty list to keep the
-   * full picker; that is the switch for people who should see every option.
-   */
-  levels?: readonly ModelLevel[] | undefined;
-};
 import { ConversationRenderBoundary } from "./conversation-render-boundary";
 import { LazyPart } from "./lazy-part";
 import {
@@ -109,6 +97,19 @@ import {
 import { SingleSendWording, useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 import { ClientPaymentPageActivity } from "../timeline/payment-page-activity";
 import { ThisComputerCard, type ThisComputerCardProps } from "./this-computer/this-computer-card";
+
+/** What a host may set on the composer's model control. */
+export type SessionModelPickerProps = Pick<
+  ModelPolicyPickerProps,
+  "groupPresentation" | "messages"
+> & {
+  /**
+   * Show these levels (for example Standard and Thorough, each one model and
+   * effort) instead of the full picker. Omit or pass an empty list to keep the
+   * full picker; that is the switch for people who should see every option.
+   */
+  levels?: readonly ModelLevel[] | undefined;
+};
 
 export type SessionConversationLabels = {
   /** Banner action after a refresh failure; the conversation stays mounted. */
