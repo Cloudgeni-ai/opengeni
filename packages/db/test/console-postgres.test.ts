@@ -13,6 +13,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import {
   bootstrapWorkspace,
   consoleSessionCounts,
+  consoleSpendBreakdown,
   consoleSpendByWorkspace,
   createDb,
   createSession,
@@ -317,4 +318,42 @@ test("review level, workspace kind and the audit log", async () => {
       })
     ).size,
   ).toBe(0);
+});
+
+test("top models count billed calls and their tokens once per call", async () => {
+  const { accountId, managedId } = await organization();
+  const call = (
+    sourceId: string,
+    amount: number,
+    tokens: { inputTokens: number; outputTokens: number; cachedTokens: number } | null,
+    key: string,
+    type = "model_usage_debit",
+  ) => shared.admin`insert into credit_ledger_entries
+      (account_id, workspace_id, type, amount_micros, source_type, source_id, idempotency_key, metadata)
+    values (${accountId}, ${managedId}, ${type}, ${amount}, 'model_response', ${sourceId}, ${key},
+      ${shared.admin.json({ model: "gpt-6-luna", ...(tokens ?? {}) })})`;
+  const tokens = { inputTokens: 1200, outputTokens: 300, cachedTokens: 800 };
+  // One call debited from promotional and paid credit: one call, its tokens once.
+  await call("resp_1", -1_500, tokens, `${accountId}:1a`);
+  await call("resp_1", -971, tokens, `${accountId}:1b`);
+  await call(
+    "resp_2",
+    -2_000,
+    { inputTokens: 100, outputTokens: 50, cachedTokens: 0 },
+    `${accountId}:2`,
+  );
+  const breakdown = await consoleSpendBreakdown(client.db, accountId, {
+    since: new Date(Date.now() - 86_400_000).toISOString(),
+    until: new Date(Date.now() + 60_000).toISOString(),
+  });
+  expect(breakdown.byModel).toEqual([
+    {
+      model: "gpt-6-luna",
+      spendMicros: 4_471,
+      calls: 2,
+      inputTokens: 1_300,
+      outputTokens: 350,
+      cachedTokens: 800,
+    },
+  ]);
 });

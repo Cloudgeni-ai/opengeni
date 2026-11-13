@@ -16,7 +16,39 @@ mock.module("@tanstack/react-router", () => ({
   Link: ({ children }: { children?: ReactNode }) => createElement("a", { href: "#" }, children),
 }));
 
-const { ConsoleContext } = await import("./console-shared");
+// Console runs inside the app's own context: the signed-in owner of the organization.
+const appContext = {
+  accessKeyVersion: 1,
+  accessContext: {
+    subjectId: "user:mira",
+    subjectLabel: "Mira Holt",
+    accountGrants: [
+      {
+        accountId: organizationId,
+        subjectId: "user:mira",
+        role: "owner",
+        permissions: ["billing:read", "billing:manage", "api_keys:manage", "account:admin"],
+      },
+    ],
+    workspaceGrants: [],
+  },
+  clientConfig: {
+    auth: { mode: "managedSession" },
+    productAccessMode: "managed",
+    managedAuthSessionSetMode: "legacy",
+  },
+  workspaces: [{ id: workspaceId, accountId: organizationId, name: "Analysts" }],
+  authSession: { user: { name: "Mira Holt", email: "mira@kontali.test" } },
+  revalidatePrincipalAccess: mock(async () => undefined),
+  handleManagedSignOut: mock(async () => undefined),
+};
+const AppContextModule = await import("@opengeni/react/app/app-context");
+mock.module("@opengeni/react/app/app-context", () => ({
+  ...AppContextModule,
+  useAppContext: () => ({ ...appContext, client }),
+}));
+
+const { ConsoleContext, formatMicros } = await import("./console-shared");
 const { ConsoleSessionsRoute } = await import("./sessions");
 const { ConsoleSettingsRoute } = await import("./settings");
 const { ConsoleNewApiKeyRoute } = await import("./api-keys");
@@ -68,6 +100,21 @@ const client = {
       member("m3", "external_user:kontali:lars", "lars", "member"),
     ],
   })),
+  getOrganizationAdministrationOverview: mock(async () => ({
+    organization: {
+      id: organizationId,
+      name: "Tech",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    },
+    roles: [],
+    workspaces: [],
+  })),
+  listOrganizationInvitationsForOrganization: mock(async () => ({
+    invitations: [],
+    nextCursor: null,
+  })),
+  listOrganizationMemberNames: mock(async () => ({ available: false, members: [] })),
   getConsoleSettings: mock(async () => ({
     organizationId,
     reviewLevel: "full",
@@ -112,7 +159,20 @@ function apiKey(
 }
 
 function member(id: string, subjectId: string, name: string, role: string) {
-  return { id, subjectId, name, email: null, role, status: "active" };
+  return {
+    id,
+    organizationId,
+    subjectId,
+    name,
+    email: null,
+    role,
+    status: "active",
+    authorizationRevision: 1,
+    sharedWorkspaceAccess: [],
+    revokedAt: null,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  };
 }
 
 let container: HTMLDivElement;
@@ -198,7 +258,9 @@ describe("Console members", () => {
     await render(createElement(ConsoleMembersRoute));
     expect(container.textContent).toContain("Mira Holt");
     expect(container.textContent).not.toContain("anna");
-    expect(container.textContent).toContain("End users of your product aren't listed (2)");
+    expect(container.textContent).not.toContain("lars");
+    // Invite people is right here, not in the app.
+    expect(container.textContent).toContain("Invite people");
   });
 });
 
@@ -258,5 +320,14 @@ describe("Console API keys", () => {
     const html = container.innerHTML;
     expect(html.split("og_live_ab12_secret_token_value").length - 1).toBeGreaterThanOrEqual(1);
     expect(container.textContent).toContain("You won't be able to see it again");
+  });
+});
+
+describe("Console money", () => {
+  test("a cost under a cent never reads $0.00", () => {
+    expect(formatMicros(2_471)).toBe("<$0.01");
+    expect(formatMicros(2_471, { precise: true })).toBe("$0.0025");
+    expect(formatMicros(0)).toBe("$0.00");
+    expect(formatMicros(90_000)).toBe("$0.09");
   });
 });

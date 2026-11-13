@@ -499,7 +499,14 @@ export async function consoleSpendBreakdown(
   window: ConsoleWindow,
 ): Promise<{
   byDay: { date: string; managed: boolean; spendMicros: number }[];
-  byModel: { model: string; spendMicros: number }[];
+  byModel: {
+    model: string;
+    spendMicros: number;
+    calls: number;
+    inputTokens: number;
+    outputTokens: number;
+    cachedTokens: number;
+  }[];
 }> {
   return await consoleScope(db, accountId, async (tx) => {
     await scopeWorkspace(tx, null);
@@ -518,15 +525,41 @@ export async function consoleSpendBreakdown(
           and (ledger.type like '%\\_debit' or ledger.type = 'byok_platform_fee')
         group by 1, 2 order by 1`,
     );
-    const byModel = await rawRows<{ model: string; spend: string }>(
+    // Billed model calls only: a model debit's metadata carries its token
+    // counts. One call may be debited in several entries (promotional and
+    // paid credit) under one source, so tokens are counted once per call.
+    const byModel = await rawRows<{
+      model: string;
+      spend: string;
+      calls: string;
+      input_tokens: string;
+      output_tokens: string;
+      cached_tokens: string;
+    }>(
       tx,
-      sql`select coalesce(nullif(metadata ->> 'model', ''), 'other') as model,
-          sum(-amount_micros)::bigint::text as spend
-        from credit_ledger_entries
-        where account_id = ${accountId}::uuid
-          and occurred_at >= ${window.since}::timestamptz and occurred_at < ${window.until}::timestamptz
-          and ${LEDGER_SPEND_FILTER}
-        group by 1 order by sum(-amount_micros) desc limit 20`,
+      sql`select model,
+          sum(spend)::bigint::text as spend,
+          count(*) filter (where call)::text as calls,
+          coalesce(sum(input_tokens) filter (where call), 0)::bigint::text as input_tokens,
+          coalesce(sum(output_tokens) filter (where call), 0)::bigint::text as output_tokens,
+          coalesce(sum(cached_tokens) filter (where call), 0)::bigint::text as cached_tokens
+        from (
+          select coalesce(nullif(metadata ->> 'model', ''), 'other') as model,
+            (type = 'model_usage_debit' and source_id is not null) as call,
+            sum(-amount_micros) as spend,
+            max(case when jsonb_typeof(metadata -> 'inputTokens') = 'number'
+              then (metadata ->> 'inputTokens')::numeric end) as input_tokens,
+            max(case when jsonb_typeof(metadata -> 'outputTokens') = 'number'
+              then (metadata ->> 'outputTokens')::numeric end) as output_tokens,
+            max(case when jsonb_typeof(metadata -> 'cachedTokens') = 'number'
+              then (metadata ->> 'cachedTokens')::numeric end) as cached_tokens
+          from credit_ledger_entries
+          where account_id = ${accountId}::uuid
+            and occurred_at >= ${window.since}::timestamptz and occurred_at < ${window.until}::timestamptz
+            and ${LEDGER_SPEND_FILTER}
+          group by 1, 2, source_id
+        ) calls
+        group by model order by sum(spend) desc limit 20`,
     );
     return {
       byDay: byDay.map((row) => ({
@@ -534,7 +567,14 @@ export async function consoleSpendBreakdown(
         managed: row.managed,
         spendMicros: num(row.spend),
       })),
-      byModel: byModel.map((row) => ({ model: row.model, spendMicros: num(row.spend) })),
+      byModel: byModel.map((row) => ({
+        model: row.model,
+        spendMicros: num(row.spend),
+        calls: num(row.calls),
+        inputTokens: num(row.input_tokens),
+        outputTokens: num(row.output_tokens),
+        cachedTokens: num(row.cached_tokens),
+      })),
     };
   });
 }

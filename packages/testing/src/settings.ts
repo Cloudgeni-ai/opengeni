@@ -227,6 +227,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     betterAuthSecret: undefined,
     betterAuthAllowedHosts: "",
     betterAuthCookieDomain: undefined,
+    betterAuthCookiePrefix: undefined,
     betterAuthTrustedOrigins: "",
     managedEmailDelivery: "resend",
     resendApiKey: undefined,

@@ -204,7 +204,9 @@ export function ConsoleSessionRoute() {
             <DetailAsideItem label="Calls">
               {formatCount(current.modelCalls)} model · {formatCount(current.toolCalls)} tool
             </DetailAsideItem>
-            <DetailAsideItem label="Cost">{formatMicros(session.costMicros)}</DetailAsideItem>
+            <DetailAsideItem label="Cost">
+              {formatMicros(session.costMicros, { precise: true })}
+            </DetailAsideItem>
             {current.feedback.length > 0 ? (
               <DetailAsideItem label="Feedback">
                 <ul className="m-0 flex list-none flex-col gap-2 p-0">

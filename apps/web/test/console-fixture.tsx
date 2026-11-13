@@ -15,7 +15,15 @@ import { AppContext, type AppContextValue } from "@opengeni/react/app/app-contex
 import { Toaster } from "@opengeni/react/app/components/toaster";
 import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 
-import { parseConsoleSearch, parseConsoleSessionsSearch } from "../src/lib/console-route";
+import { ManagedAuthPanel } from "../src/components/managed-auth-panel";
+import { SignedOutPage } from "../src/components/signed-out-page";
+import {
+  parseConsoleMembersSearch,
+  parseConsoleSearch,
+  parseConsoleSessionsSearch,
+  parseConsoleUsageSearch,
+  socialProvidersForHost,
+} from "../src/lib/console-route";
 import { ConsoleApiKeysRoute, ConsoleNewApiKeyRoute } from "../src/routes/console/api-keys";
 import {
   ConsoleAgentsRoute,
@@ -404,6 +412,97 @@ const client = {
       })),
     };
   },
+  // The app's organization settings pages, which Console embeds.
+  async getOrganizationAdministrationOverview() {
+    return {
+      organization: {
+        id: ORG,
+        name: "Kontali",
+        createdAt: "2026-08-01T08:00:00.000Z",
+        updatedAt: "2026-08-01T08:00:00.000Z",
+      },
+      roles: [],
+      workspaces: [],
+    };
+  },
+  async listOrganizationInvitationsForOrganization() {
+    return {
+      invitations: [
+        {
+          id: "1a1a0000-0000-4000-8000-000000000001",
+          organizationId: ORG,
+          organizationName: "Kontali",
+          targetEmail: "erik@kontali.com",
+          targetName: null,
+          initialWorkspaceIds: [],
+          role: "admin",
+          status: "pending",
+          revision: 1,
+          expiresAt: ago(-1440),
+          acceptedMembershipId: null,
+          createdAt: ago(120),
+          updatedAt: ago(120),
+          delivery: null,
+        },
+      ],
+      nextCursor: null,
+    };
+  },
+  async listOrganizationMemberNames() {
+    return { available: false, members: [] };
+  },
+  async getBilling() {
+    return {
+      mode: "stripe",
+      balance: {
+        accountId: ORG,
+        balanceMicros: dollars(412.6),
+        creditsMicros: dollars(412.6),
+        currency: "usd",
+        updatedAt: ago(5),
+      },
+    };
+  },
+  async getBillingEntitlements() {
+    return { accountId: ORG, entitlements: {} };
+  },
+  async listBillingReceipts() {
+    return {
+      receipts: [
+        {
+          id: "in_1",
+          kind: "top_up",
+          amountMicros: dollars(500),
+          currency: "usd",
+          createdAt: "2026-11-01T09:12:00.000Z",
+          status: "paid",
+          receiptUrl: null,
+          description: "Credit top-up",
+        },
+      ],
+      nextCursor: null,
+    };
+  },
+  async getBillingAlertSettings() {
+    return {
+      accountId: ORG,
+      lowBalanceThresholdMicros: dollars(50),
+      monthlySpendAlertMicros: null,
+      updatedAt: ago(9000),
+    };
+  },
+  async getBillingAutoTopUp() {
+    return { accountId: ORG, enabled: false, status: "off", paymentMethod: null };
+  },
+  async getBillingSubscriptionPlans() {
+    return null;
+  },
+  async getOrganizationPrivacySettings() {
+    return { organizationId: ORG, personalWorkspaceMonthlyCredits: null };
+  },
+  async getWorkspaceBudgets() {
+    return { budgets: [] };
+  },
 };
 
 const context = {
@@ -420,11 +519,26 @@ const context = {
     defaultAccountId: ORG,
     workspaceGrants: [],
     accountGrants: [
-      { accountId: ORG, subjectId: ME, role: "owner", metadata: { accountName: "Kontali" } },
+      {
+        accountId: ORG,
+        subjectId: ME,
+        role: "owner",
+        permissions: ["account:admin", "billing:read", "billing:manage", "api_keys:manage"],
+        metadata: { accountName: "Kontali" },
+      },
     ],
   },
   authSession: { user: { name: "Mira Holt", email: "mira@kontali.com" } },
-  clientConfig: { auth: { mode: "managedSession" }, documentationUrl: "https://docs.opengeni.ai" },
+  clientConfig: {
+    auth: { mode: "managedSession" },
+    productAccessMode: "managed",
+    managedAuthSessionSetMode: "legacy",
+    billingMode: "stripe",
+    documentationUrl: "https://docs.opengeni.ai",
+  },
+  accessKeyVersion: 1,
+  revalidatePrincipalAccess: async () => undefined,
+  handleManagedSignOut: async () => undefined,
   managedSelfContext: null,
 } as unknown as AppContextValue;
 
@@ -451,8 +565,18 @@ const routeTree = rootRoute.addChildren([
     child("api-keys", ConsoleApiKeysRoute),
     child("api-keys/new", ConsoleNewApiKeyRoute),
     child("agents", ConsoleAgentsRoute),
-    child("members", ConsoleMembersRoute),
-    child("usage", ConsoleUsageRoute),
+    createRoute({
+      getParentRoute: () => consoleRoute,
+      path: "members",
+      validateSearch: parseConsoleMembersSearch,
+      component: ConsoleMembersRoute,
+    }),
+    createRoute({
+      getParentRoute: () => consoleRoute,
+      path: "usage",
+      validateSearch: parseConsoleUsageSearch,
+      component: ConsoleUsageRoute,
+    }),
     child("settings", ConsoleSettingsRoute),
   ]),
 ]);
@@ -462,11 +586,26 @@ const router = createRouter({
   history: createMemoryHistory({ initialEntries: [initialPath] }),
 });
 
+// `?path=sign-in`: the signed-out page as a Console host shows it.
+const signIn = initialPath === "sign-in";
 createRoot(document.getElementById("root")!).render(
   <TooltipProvider>
-    <AppContext.Provider value={context}>
-      <RouterProvider router={router} />
-      <Toaster />
-    </AppContext.Provider>
+    {signIn ? (
+      <div className="flex h-dvh flex-col">
+        <SignedOutPage pitch="console">
+          <ManagedAuthPanel
+            presentation="embedded"
+            socialProviders={socialProvidersForHost(location.hostname, ["google", "github"])}
+            onSocialSubmit={async () => undefined}
+            onSubmit={async () => undefined}
+          />
+        </SignedOutPage>
+      </div>
+    ) : (
+      <AppContext.Provider value={context}>
+        <RouterProvider router={router} />
+        <Toaster />
+      </AppContext.Provider>
+    )}
   </TooltipProvider>,
 );
