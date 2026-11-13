@@ -4,6 +4,8 @@ import type { Settings } from "@opengeni/config";
 import {
   effectiveNangoIntegrations,
   nangoAttemptTags,
+  OPENGENI_API_CONTRACT_HEADER,
+  OPENGENI_API_CONTRACT_REVISION,
   type IntegrationBackendSetting,
 } from "@opengeni/contracts";
 import type { Database } from "@opengeni/db";
@@ -178,6 +180,10 @@ describe("Nango Connect", () => {
     // After connect, 409 (connection changed) is retried within the short backoff only.
     expect(html).toContain("retryConflict && response.status === 409");
     expect(html).toContain("await complete(true)");
+    // The completion POST passes the browser API-contract fence.
+    expect(html).toContain("[data.contractHeader]: data.contractRevision");
+    expect(html).toContain(`"contractHeader":"${OPENGENI_API_CONTRACT_HEADER}"`);
+    expect(html).toContain(`"contractRevision":"${OPENGENI_API_CONTRACT_REVISION}"`);
   });
 
   test("completion stores nothing until Nango has a connection with this attempt's tags", async () => {
