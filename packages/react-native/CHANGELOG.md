@@ -1,5 +1,19 @@
 # @opengeni/react-native
 
+## 6.21.0
+
+### Patch Changes
+
+- a19c047: Turn summary facets now learn when they see only part of a turn. `TurnSummaryContext.unloadedSteps` is true when some of the turn's steps are not loaded: before the turn is opened, until its earlier pages are read, and on a long live turn whose collapsed row keeps only its newest steps. A count over `items` or `toolCalls` is then too low and can go down while the turn runs, so a facet can omit it or show it as a lower bound. The signal reaches every turn row, in both the readable and the classic presentation, on web and React Native. `@opengeni/react/timeline-model` adds the helpers that renderers use for it: `timelineTurnsWithUnloadedSteps`, `activityHasUnloadedSteps` and `turnGroupHasUnloadedSteps`.
+- Updated dependencies [7d0d52b]
+- Updated dependencies [ef4c334]
+- Updated dependencies [ce864c0]
+- Updated dependencies [6ac2cd4]
+- Updated dependencies [a19c047]
+  - @opengeni/contracts@6.21.0
+  - @opengeni/react@6.21.0
+  - @opengeni/sdk@6.21.0
+
 ## 6.20.1
 
 ### Patch Changes
