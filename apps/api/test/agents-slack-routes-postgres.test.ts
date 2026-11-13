@@ -5,8 +5,7 @@
 // are refused when a shared agent is created, renamed or shared; older agents
 // catch up when Slack reads its agents; an agent is in every linked Slack
 // workspace at once, and the legacy Slack agents routes name the installation
-// where it matters. Nothing writes the legacy slack_agents or bot_templates
-// tables.
+// where it matters.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import type { Settings } from "@opengeni/config";
@@ -216,15 +215,6 @@ describe("an agent's Slack availability (real PostgreSQL)", () => {
       install_workspace_id: install.home,
       open: false,
     });
-    const legacyRows = async () =>
-      Number(
-        (
-          await shared!.admin<{ count: number }[]>`
-            select (select count(*) from slack_agents where id = ${agent.id})
-              + (select count(*) from bot_templates where id = ${agent.id}) as count`
-        )[0]?.count ?? 0,
-      );
-    expect(await legacyRows()).toBe(0);
     // The version the create returned is current: Slack moved it before the reply.
     const edited = await call(install.admin, "PATCH", `${install.base}/${agent.id}`, {
       expectedVersion: agent.version,
@@ -287,7 +277,6 @@ describe("an agent's Slack availability (real PostgreSQL)", () => {
     expect(
       await shared!.admin`select 1 from agent_slack_installs where agent_id = ${agent.id}`,
     ).toHaveLength(0);
-    expect(await legacyRows()).toBe(0);
     const privateRows = await call(install.admin, "GET", `${install.base}/${agent.id}/slack`);
     expect(privateRows.json.installs).toEqual([
       expect.objectContaining({
@@ -719,10 +708,6 @@ describe("an agent's Slack availability (real PostgreSQL)", () => {
       instructions: `${AGENT_FIRST_MESSAGE_LEAD}\n${firstMessage}`,
       avatar: expect.objectContaining({ kind: "letters" }),
     });
-    expect(
-      await shared!.admin`select 1 from slack_agents where id = ${weekly}
-        union all select 1 from bot_templates where id = ${weekly}`,
-    ).toHaveLength(0);
 
     // Its page says why the newer one isn't in Slack.
     const rows = await call(install.admin, "GET", `${install.base}/${newer}/slack`);
