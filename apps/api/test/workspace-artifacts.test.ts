@@ -1468,16 +1468,15 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     // An agent sees only its own account routes; the turn's frozen binding
     // names the connector behind the route (a workspace account here; a
     // personal one pairs the same way once its sender delegation is frozen).
-    const connectionId = (
-      await createConnection(client.db, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        providerDomain: "crm.example",
-        kind: "oauth2",
-        credentialEncrypted: "unused-test-credential",
-        metadata: {},
-      })
-    ).id;
+    const connection = await createConnection(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      providerDomain: "crm.example",
+      kind: "oauth2",
+      credentialEncrypted: "unused-test-credential",
+      metadata: {},
+    });
+    const connectionId = connection.id;
     const route = `account-${crypto.randomUUID().replaceAll("-", "")}`;
     const connectionRef = {
       providerDomain: "crm.example",
@@ -1496,6 +1495,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
           originWorkspaceId: grant.workspaceId,
           subjectScope: "workspace",
           ownerSubjectId: null,
+          connectionAuthorityGeneration: 1, // a new connection's first generation
           accountLabel: "ada@example.com",
           providerDomain: "crm.example",
           kind: "oauth2",
