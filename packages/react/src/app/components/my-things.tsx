@@ -98,7 +98,9 @@ async function loginDetails(client: MyThingsClient, workspaceId: string) {
   }
   // Only your own logins; a shared account in this workspace isn't yours to remove here.
   const logins = new Map(
-    accounts.filter((account) => account.subjectId !== null).map((account) => [account.id, account]),
+    accounts
+      .filter((account) => account.subjectId !== null)
+      .map((account) => [account.id, account]),
   );
   return { names, logins };
 }
