@@ -231,32 +231,45 @@ export async function requestSlackUserLinkWorkspaceAccess(
   input: SlackUserLinkAccessMutationInput,
   now = new Date(),
 ): Promise<SlackUserLinkAccessRequest> {
-  return await mutateRequest(db, input, "request", {}, now, async (database, row) => {
-    if (row.subjectId !== input.actorSubjectId) {
-      throw new SlackUserLinkAccessPersistenceError("subject_mismatch");
-    }
-    if (row.status !== "prepared") {
-      throw new SlackUserLinkAccessPersistenceError("state_conflict");
-    }
-    const [updated] = await database
-      .update(schema.slackUserLinkAccessRequests)
-      .set({
-        status: "pending",
-        version: row.version + 1,
-        requestedAt: now,
-        updatedAt: now,
-      })
-      .where(
-        and(
-          eq(schema.slackUserLinkAccessRequests.id, row.id),
-          eq(schema.slackUserLinkAccessRequests.version, row.version),
-        ),
-      )
-      .returning();
-    if (!updated) throw new SlackUserLinkAccessPersistenceError("version_conflict");
-    await insertAudit(database, updated, input.actorSubjectId, "workspace.access_request.created");
-    return updated;
-  });
+  return await mutateRequest(
+    db,
+    input,
+    "request",
+    {},
+    now,
+    async (database, row) => {
+      if (row.subjectId !== input.actorSubjectId) {
+        throw new SlackUserLinkAccessPersistenceError("subject_mismatch");
+      }
+      if (row.status !== "prepared") {
+        throw new SlackUserLinkAccessPersistenceError("state_conflict");
+      }
+      const [updated] = await database
+        .update(schema.slackUserLinkAccessRequests)
+        .set({
+          status: "pending",
+          version: row.version + 1,
+          requestedAt: now,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.slackUserLinkAccessRequests.id, row.id),
+            eq(schema.slackUserLinkAccessRequests.version, row.version),
+          ),
+        )
+        .returning();
+      if (!updated) throw new SlackUserLinkAccessPersistenceError("version_conflict");
+      await insertAudit(
+        database,
+        updated,
+        input.actorSubjectId,
+        "workspace.access_request.created",
+      );
+      return updated;
+    },
+    { requesterOnly: true },
+  );
 }
 
 export async function cancelSlackUserLinkAccessRequest(
@@ -264,38 +277,46 @@ export async function cancelSlackUserLinkAccessRequest(
   input: SlackUserLinkAccessMutationInput,
   now = new Date(),
 ): Promise<SlackUserLinkAccessRequest> {
-  return await mutateRequest(db, input, "cancel", {}, now, async (database, row) => {
-    if (row.subjectId !== input.actorSubjectId) {
-      throw new SlackUserLinkAccessPersistenceError("subject_mismatch");
-    }
-    if (row.status !== "prepared" && row.status !== "pending") {
-      throw new SlackUserLinkAccessPersistenceError("state_conflict");
-    }
-    const [updated] = await database
-      .update(schema.slackUserLinkAccessRequests)
-      .set({
-        status: "cancelled",
-        version: row.version + 1,
-        decidedAt: now,
-        decisionBySubjectId: input.actorSubjectId,
-        updatedAt: now,
-      })
-      .where(
-        and(
-          eq(schema.slackUserLinkAccessRequests.id, row.id),
-          eq(schema.slackUserLinkAccessRequests.version, row.version),
-        ),
-      )
-      .returning();
-    if (!updated) throw new SlackUserLinkAccessPersistenceError("version_conflict");
-    await insertAudit(
-      database,
-      updated,
-      input.actorSubjectId,
-      "workspace.access_request.cancelled",
-    );
-    return updated;
-  });
+  return await mutateRequest(
+    db,
+    input,
+    "cancel",
+    {},
+    now,
+    async (database, row) => {
+      if (row.subjectId !== input.actorSubjectId) {
+        throw new SlackUserLinkAccessPersistenceError("subject_mismatch");
+      }
+      if (row.status !== "prepared" && row.status !== "pending") {
+        throw new SlackUserLinkAccessPersistenceError("state_conflict");
+      }
+      const [updated] = await database
+        .update(schema.slackUserLinkAccessRequests)
+        .set({
+          status: "cancelled",
+          version: row.version + 1,
+          decidedAt: now,
+          decisionBySubjectId: input.actorSubjectId,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.slackUserLinkAccessRequests.id, row.id),
+            eq(schema.slackUserLinkAccessRequests.version, row.version),
+          ),
+        )
+        .returning();
+      if (!updated) throw new SlackUserLinkAccessPersistenceError("version_conflict");
+      await insertAudit(
+        database,
+        updated,
+        input.actorSubjectId,
+        "workspace.access_request.cancelled",
+      );
+      return updated;
+    },
+    { requesterOnly: true },
+  );
 }
 
 export async function denySlackUserLinkAccessRequest(
@@ -611,6 +632,10 @@ async function mutateRequest(
   protectedInput: Record<string, unknown>,
   now: Date,
   transition: (database: Database, row: RequestRow) => Promise<RequestRow>,
+  options: {
+    /** Only the person the request is for may act on it (request access, cancel). */
+    requesterOnly?: boolean;
+  } = {},
 ): Promise<SlackUserLinkAccessRequest> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
     return await scopedDb.transaction(async (tx) => {
@@ -634,6 +659,11 @@ async function mutateRequest(
         .for("update")
         .limit(1);
       if (!found) throw new SlackUserLinkAccessPersistenceError("not_found");
+      // Before any version or replay check, so someone else's request always
+      // answers the same, whatever its state.
+      if (options.requesterOnly && found.subjectId !== input.actorSubjectId) {
+        throw new SlackUserLinkAccessPersistenceError("subject_mismatch");
+      }
       const [replay] = await tx
         .select()
         .from(schema.slackUserLinkAccessRequestOperations)

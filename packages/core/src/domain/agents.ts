@@ -139,9 +139,8 @@ function slackAvailability(
       slackAgentNameKey(agent.name) === install.nameKey
         ? slackAgentHandle(agent.name)
         : install.nameKey,
-    // Anyone in the organization is the agent's own setting now
-    // (`organizationAccess`, which its Slack installations decide while the
-    // previous release may still write them).
+    // Anyone in the organization is the agent's own setting
+    // (`agents.organization_access`); installations no longer decide it.
     open: agent.organizationAccess,
     enabledBySubjectId: install.enabledBySubjectId,
     version: install.version,
