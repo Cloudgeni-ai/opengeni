@@ -380,7 +380,7 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
   function reconnect(
     repair?: Pick<
       NativeConnectRequest,
-      "title" | "description" | "authorizeLabel" | "reconnectAccountId"
+      "title" | "unreachableTitle" | "description" | "authorizeLabel" | "reconnectAccountId"
     >,
   ) {
     if (status?.configured && canManage) {
@@ -1019,12 +1019,18 @@ function githubListText(items: string[]): string {
 function githubRepairDialog(
   installation: GitHubInstallationBinding,
   fix: "reinstall" | "authorize",
-): Pick<NativeConnectRequest, "title" | "description" | "authorizeLabel" | "reconnectAccountId"> {
+): Pick<
+  NativeConnectRequest,
+  "title" | "unreachableTitle" | "description" | "authorizeLabel" | "reconnectAccountId"
+> {
   const account = installation.accountLogin ?? "this account";
   const reconnectAccountId = `github-installation:${installation.installationId}`;
+  // GitHub can't say which fix applies when it can't be reached.
+  const unreachableTitle = "GitHub couldn't be reached";
   if (fix === "reinstall") {
     return {
       title: `Reinstall on ${account}`,
+      unreachableTitle,
       description: "The Opengeni app was removed on GitHub. Install it again.",
       authorizeLabel: "Reinstall on GitHub",
       reconnectAccountId,
@@ -1032,6 +1038,7 @@ function githubRepairDialog(
   }
   return {
     title: `Authorize ${account}`,
+    unreachableTitle,
     description:
       installation.accountType === "Organization"
         ? `Sign in to GitHub as an owner of ${account} to confirm this link.`

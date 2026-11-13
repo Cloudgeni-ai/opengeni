@@ -34,6 +34,7 @@ import {
   REMOTE_COMPACTION_V2_BETA_FEATURE,
   REMOTE_COMPACTION_V2_IMPLEMENTATION,
   awaitModelCallAdmission,
+  bindAgentGitCredentialSession,
   materializeSandboxFileDownloads,
   sandboxFileDownloadFailureNote,
   type SandboxFileDownload,
@@ -1923,6 +1924,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             codexContext,
           });
           const { agent, modelVisibleSkillCatalogText, postAgentPreparationStartedAt } = builtAgent;
+          // Each chat sharing a managed box uses its own Git credential files.
+          if (activeSandboxBackend !== "selfhosted") {
+            bindAgentGitCredentialSession(agent, input.sessionId);
+          }
 
           await bindLazySandboxProvisioner({
             ...sandboxRoute,

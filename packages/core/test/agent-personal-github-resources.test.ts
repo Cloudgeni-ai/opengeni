@@ -555,6 +555,68 @@ describe("agent-named personal GitHub repositories", () => {
     ).toContain("repositoryId given does not match Acme/Listed");
   });
 
+  test("every field plus stray App fields resolves leniently and never widens", async () => {
+    const deps = services({ turn: [listedTurn], current: currentState() });
+    const full = {
+      provider: "github",
+      credentialBindingId: bindingId,
+      repositoryId: "42",
+      access: "read",
+    } as const;
+    const stray = simple("https://github.com/Acme/Listed", {
+      ...full,
+      connectionId: "app-connection",
+      installationId: 7,
+      githubInstallationId: 7,
+      githubRepositoryId: 42,
+    });
+    expect(isUnresolvedPersonalGitHubRepositoryResource(stray)).toBe(true);
+    const [resolved] = await resolve([stray], deps);
+    expect(resolved).toEqual(
+      expect.objectContaining({
+        credentialBindingId: bindingId,
+        repositoryId: "42",
+        access: "read",
+      }),
+    );
+    for (const field of [
+      "connectionId",
+      "installationId",
+      "githubInstallationId",
+      "githubRepositoryId",
+    ]) {
+      expect(resolved).not.toHaveProperty(field);
+    }
+    // The given fields are still checked against the turn's own delegation.
+    expect(
+      await rejection(
+        resolve(
+          [
+            simple("https://github.com/Acme/Listed", {
+              ...full,
+              credentialBindingId: otherBindingId,
+              connectionId: "app-connection",
+            }),
+          ],
+          deps,
+        ),
+      ),
+    ).toContain("is not this turn's Your GitHub account");
+    expect(
+      await rejection(
+        resolve(
+          [
+            simple("https://github.com/acme/elsewhere", {
+              ...full,
+              connectionId: "app-connection",
+            }),
+          ],
+          deps,
+        ),
+      ),
+    ).toContain("is not part of this turn's Your GitHub access");
+  });
+
   test("without a requested level, write only when the person can push now", async () => {
     const archived = services({
       turn: [listedTurn],

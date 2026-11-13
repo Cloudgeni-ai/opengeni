@@ -39,6 +39,12 @@ const GITHUB_REQUEST_TIMEOUT_MS = 10_000;
  * Agents cannot know the binding, provider repository id or the access their
  * turn holds, so the server fills in whatever is missing from the turn's own
  * accepted Your GitHub delegation, and checks whatever was given.
+ *
+ * A fully specified resource that also carries GitHub app or other provider
+ * fields (`connectionId`, `installationId`, ...) goes the same way: those
+ * fields mean nothing for a repository used as the person, so they are
+ * dropped, and everything else is still checked against the turn's own
+ * delegation. Nothing is widened by accepting it.
  */
 export function isUnresolvedPersonalGitHubRepositoryResource(
   resource: ResourceRef,
@@ -49,7 +55,18 @@ export function isUnresolvedPersonalGitHubRepositoryResource(
     (resource.provider === undefined || resource.provider === "github") &&
     (resource.credentialBindingId === undefined ||
       resource.repositoryId === undefined ||
-      resource.access === undefined)
+      resource.access === undefined ||
+      hasNonPersonalRepositoryFields(resource))
+  );
+}
+
+function hasNonPersonalRepositoryFields(resource: RepositoryResourceRef): boolean {
+  return (
+    resource.connectionId !== undefined ||
+    resource.installationId !== undefined ||
+    resource.githubInstallationId !== undefined ||
+    resource.githubRepositoryId !== undefined ||
+    resource.projectId !== undefined
   );
 }
 
@@ -153,6 +170,10 @@ const NEW_MESSAGE =
 
 function noDelegationMessage(fullName: string): string {
   return `This turn has no Your GitHub access to pass on, so a new session can't use ${fullName} as the person. Your GitHub access comes from the person who sent the current message: they connect Your GitHub and attach the repository to this chat as themselves or turn on All my repositories, then send a new message. Omit connectionType to use the workspace's GitHub app instead.`;
+}
+
+function noAttemptMessage(fullName: string): string {
+  return `This request has no running agent attempt, so GitHub can't be asked as the person about ${fullName}. The person can attach it to this chat as themselves, or send a new message.`;
 }
 
 function deniedMessage(
@@ -353,7 +374,7 @@ export function agentPersonalGitHubRepositoryServices(input: {
       });
       // Why a GitHub lookup failed, so the agent hears "reconnect" or "the
       // connection changed" instead of "try again" when that is the cause.
-      let lookupFailure: "reconnect" | "denied" | "transient" | null = null;
+      let lookupFailure: "reconnect" | "denied" | "transient" | "no_attempt" | null = null;
       const check = async () =>
         await checkPersonalGitHubRepositoryAccess({
           db: input.db,
@@ -369,7 +390,7 @@ export function agentPersonalGitHubRepositoryServices(input: {
           // this turn's own accepted use of the person's connection.
           githubGet: async (url) => {
             if (!attempt) {
-              lookupFailure = "denied";
+              lookupFailure = "no_attempt";
               throw new Error("no agent attempt to attribute the GitHub lookup to");
             }
             const authorization = await turnGitHubAuthorization({
@@ -404,7 +425,11 @@ export function agentPersonalGitHubRepositoryServices(input: {
         });
       const result = await check();
       if (result.allowed || result.reason !== "provider_unavailable") return result;
-      const failure = lookupFailure as "reconnect" | "denied" | "transient" | null;
+      const failure = lookupFailure as "reconnect" | "denied" | "transient" | "no_attempt" | null;
+      // Not a connection problem: the caller has no attempt to make the
+      // lookup as, so say what helps instead of "reconnect" or "try again".
+      if (failure === "no_attempt")
+        throw rejected(noAttemptMessage(repository.fullName ?? "this repository"));
       if (failure === "reconnect") return denial("reconnect_required");
       if (failure === "denied") {
         // A refused credential may have just marked the connection for
@@ -482,9 +507,11 @@ async function turnGitHubAuthorization(input: {
   }
   if (
     credential.connectionId !== delegation.connectionId ||
+    credential.connectionUseAttribution?.workspaceId !== input.workspaceId ||
     credential.connectionUseAttribution?.connectionGeneration !==
       accepted.connectionAuthorityGeneration ||
-    credential.connectionUseAttribution.ownerSubjectId !== delegation.ownerSubjectId
+    credential.connectionUseAttribution.ownerSubjectId !== delegation.ownerSubjectId ||
+    credential.connectionUseAttribution.sessionId !== attempt.sessionId
   ) {
     return { status: "denied" };
   }
@@ -502,6 +529,7 @@ async function turnGitHubAuthorization(input: {
   if (
     providerRequest.status !== "authorized" ||
     providerRequest.originWorkspaceId !== input.originWorkspaceId ||
+    providerRequest.attribution.workspaceId !== input.workspaceId ||
     providerRequest.attribution.connectionId !== delegation.connectionId ||
     providerRequest.attribution.connectionGeneration !== accepted.connectionAuthorityGeneration ||
     providerRequest.attribution.ownerSubjectId !== delegation.ownerSubjectId
