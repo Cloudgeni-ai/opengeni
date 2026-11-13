@@ -1281,39 +1281,32 @@ export async function recordTeamsFeedback(deps: ApiRouteDeps, f: TeamsFeedback):
   if (!teamsConversationAllowed(deps, f)) return "channel_disabled";
   const i = await getTeamsInstallation(deps.db, f.tenantId);
   if (!i?.active) return "feedback_installation_inactive";
-  // With workspace routing a linked person's 1:1 chats may run outside the
-  // installation's workspace, so who they are is an organization fact.
-  const routing = deps.settings.teamsWorkspaceRoutingEnabled;
-  const identity = routing
-    ? await teamsIdentity(deps, i, f.actorId)
-    : await actorGrant(deps, i, f.actorId);
-  if (!identity) return "feedback_actor_unlinked";
   const reply = await getTeamsDeliveredReply(deps.db, i, {
     conversationId: f.conversationId,
     providerMessageId: f.replyToId,
   });
-  if (!reply || (reply.personal && reply.subject_id !== identity.subjectId))
-    return "feedback_target_missing";
   let grant: AccessGrant | null;
-  if (routing && reply.personal) {
-    // A routed 1:1 reply is rated with the authority its chat runs with,
-    // read live as before every delivery: the linked owner's own access to
-    // the chat's workspace, or an organization agent's grant while its asker
-    // is an active member. Never the installation workspace's.
+  if (deps.settings.teamsWorkspaceRoutingEnabled && reply?.personal) {
+    // With workspace routing a 1:1 chat may run outside the installation's
+    // workspace, so its reply is rated with the authority the chat runs with,
+    // read live as before every delivery: its linked owner (an active
+    // organization member) with their own access to the chat's workspace, or
+    // an organization agent's grant while the owner may still use it. Never
+    // the installation workspace's.
+    const identity = await teamsIdentity(deps, i, f.actorId);
+    if (!identity) return "feedback_actor_unlinked";
+    if (reply.subject_id !== identity.subjectId) return "feedback_target_missing";
     const actor = await routeActor(deps, i, reply, f.actorId);
     grant = actor && actor.subjectId === reply.subject_id ? actor.grant : null;
   } else {
-    const installationGrant = routing ? await actorGrant(deps, i, f.actorId) : identity;
-    grant =
-      installationGrant &&
-      (reply.session_workspace_id
-        ? await ownPersonalWorkspaceGrant(
-            deps,
-            i,
-            installationGrant.subjectId,
-            reply.session_workspace_id,
-          )
-        : (installationGrant as AccessGrant));
+    // Channels, group chats and installations without routing: as before.
+    const identity = await actorGrant(deps, i, f.actorId);
+    if (!identity) return "feedback_actor_unlinked";
+    if (!reply || (reply.personal && reply.subject_id !== identity.subjectId))
+      return "feedback_target_missing";
+    grant = reply.session_workspace_id
+      ? await ownPersonalWorkspaceGrant(deps, i, identity.subjectId, reply.session_workspace_id)
+      : identity;
   }
   // The same permissions the HTTP feedback route requires for feedback on a chat.
   if (
@@ -2091,10 +2084,9 @@ async function teamsLinker(c: Context, deps: ApiRouteDeps): Promise<TeamsLinker>
     });
   // Unauthenticated requests still get a 401 here.
   const context = await requireAccessContext(c, deps);
-  // Only a person signed in to Opengeni themselves (browser session or
-  // approved Opengeni app) links their Teams account: never a delegated
-  // person (an agent's app actions, a published Site's viewer), a key or a
-  // service.
+  // Only a person signed in to Opengeni themselves in their browser links
+  // their Teams account: never a delegated person (an agent's app actions, a
+  // published Site's viewer), a key or a service.
   const subjectId = await managedHumanSubjectForRequest(c, deps);
   if (context.mode !== "managed" || !subjectId || subjectId !== context.subjectId)
     throw new HTTPException(403, { message: "A signed-in human account is required." });
