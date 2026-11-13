@@ -14,6 +14,7 @@ import {
   type NangoConnectionCredential,
 } from "@opengeni/capabilities";
 import {
+  NANGO_DEFAULT_API_BASE_URL,
   OAuthStartResponse,
   type ConnectionMetadata,
   type ConnectionOwnership,
@@ -126,10 +127,9 @@ export async function nangoIntegrationForConnectTarget(
   return (await backendsFor(deps)).get(key) ?? null;
 }
 
-function integrationOwnership(integration: EffectiveNangoIntegration): ConnectionOwnership {
-  // Google's managed apps act as the person; never a shared account.
-  if (integration.native) return "personal";
-  return integration.definition.ownership === "workspace" ? "workspace" : "personal";
+function integrationOwnership(_integration: EffectiveNangoIntegration): ConnectionOwnership {
+  // A Nango connection acts as the person who connected it; never a shared account.
+  return "personal";
 }
 
 function connectMcpUrl(integration: EffectiveNangoIntegration): string {
@@ -224,13 +224,10 @@ export async function startNangoConnect(
   context: OAuthStartContext,
   integration: EffectiveNangoIntegration,
 ): Promise<OAuthStartResponse> {
-  const forced = integrationOwnership(integration);
-  const ownership: ConnectionOwnership = integration.native
-    ? "personal"
-    : (context.payload.ownership ?? forced);
-  if (integration.native && context.payload.ownership && context.payload.ownership !== "personal")
+  const ownership: ConnectionOwnership = integrationOwnership(integration);
+  if (context.payload.ownership && context.payload.ownership !== "personal")
     throw new HTTPException(422, {
-      message: `${integration.native.displayName} connects only your own account`,
+      message: `${integration.native?.displayName ?? integration.definition.displayName ?? "This integration"} connects only your own account`,
     });
   assertConnectionOwnershipAllowedForPrincipal(ownership, context.personalOwnershipAllowed);
   await withOrganizationIntegrationAcquisition(
@@ -282,13 +279,24 @@ function escapeJsonForHtml(value: unknown): string {
   return JSON.stringify(value).replace(/</gu, "\\u003c").replace(/>/gu, "\\u003e");
 }
 
+/**
+ * The Nango Connect embedding handshake (as @nangohq/frontend's ConnectUI):
+ * the iframe posts `{type:"ready"}`, the page answers with
+ * `{type:"session_token", sessionToken}`, and the iframe reports `connect`
+ * and `close` events (bare or wrapped as `{type:"event", ev}`). On connect the
+ * page finishes with a short backoff; meanwhile a slow, bounded backoff poll
+ * covers a missed event until the session expires or the window closes. The
+ * webhook remains the backup finalizer.
+ */
 const PAGE_SCRIPT = `(() => {
   const data = JSON.parse(document.getElementById("nango-connect").textContent);
   const status = document.getElementById("status");
+  const frame = document.getElementById("nango-frame");
   let done = false;
-  let started = Date.now();
+  let closed = false;
+  let pollTimer = null;
   async function complete() {
-    if (done) return;
+    if (done) return true;
     try {
       const response = await fetch(data.completeUrl, {
         method: "POST",
@@ -301,23 +309,57 @@ const PAGE_SCRIPT = `(() => {
         done = true;
         status.textContent = data.text.done;
         window.location.replace(body.redirectTo);
-        return;
+        return true;
       }
-      if (!response.ok) {
+      if (!response.ok && response.status !== 429 && response.status < 500) {
         done = true;
         status.textContent = data.text.failed;
+        return true;
       }
     } catch {}
+    return false;
+  }
+  function stopPolling() {
+    if (pollTimer !== null) clearTimeout(pollTimer);
+    pollTimer = null;
+  }
+  async function finishAfterConnect() {
+    stopPolling();
+    for (const delay of [0, 500, 1000, 2000, 4000, 8000]) {
+      if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+      if (await complete()) return;
+    }
+    if (!done) status.textContent = data.text.failed;
+  }
+  function poll(delay) {
+    if (done || closed || Date.now() + delay > data.expiresAtMs) return;
+    pollTimer = setTimeout(async () => {
+      if (await complete()) return;
+      poll(Math.min(delay * 2, 30000));
+    }, delay);
   }
   window.addEventListener("message", (event) => {
-    if (event.origin !== data.connectOrigin) return;
-    const type = event.data && typeof event.data === "object" ? event.data.type : null;
-    if (type === "connect" || type === "close") void complete();
+    if (event.origin !== data.connectOrigin || event.source !== frame.contentWindow) return;
+    const message = event.data && typeof event.data === "object" ? event.data : null;
+    if (!message) return;
+    const type = message.type === "event" && message.ev ? message.ev.type : message.type;
+    if (type === "ready") {
+      frame.contentWindow.postMessage(
+        { type: "session_token", sessionToken: data.sessionToken },
+        data.connectOrigin,
+      );
+    } else if (type === "connect") {
+      void finishAfterConnect();
+    } else if (type === "close") {
+      closed = true;
+      stopPolling();
+      // A connection made just before closing still finishes once.
+      void complete().then((finished) => {
+        if (!finished) status.textContent = data.text.closed;
+      });
+    }
   });
-  const timer = setInterval(() => {
-    if (done || Date.now() - started > 30 * 60 * 1000) return clearInterval(timer);
-    void complete();
-  }, 3000);
+  poll(5000);
 })();`;
 
 const PAGE_STYLE =
@@ -346,17 +388,29 @@ export async function nangoConnectPage(
   if (!session.connectLink)
     throw new HTTPException(502, { message: "Nango did not return a connect link" });
   const connectOrigin = new URL(session.connectLink).origin;
+  // The session token travels by postMessage, never in the frame URL. A
+  // non-default Nango API is named the way ConnectUI names it.
+  const frameUrl = new URL(`${connectOrigin}/`);
+  const apiBase = (deps.settings.nangoApiBaseUrl ?? NANGO_DEFAULT_API_BASE_URL).replace(
+    /\/+$/u,
+    "",
+  );
+  if (apiBase !== NANGO_DEFAULT_API_BASE_URL) frameUrl.searchParams.set("apiURL", apiBase);
+  const expiresAtMs = session.expiresAt ? Date.parse(session.expiresAt) : Number.NaN;
   const baseUrl = integrationBaseUrl(deps.settings.publicBaseUrl, input.requestUrl);
   const data = {
     state: input.state,
     completeUrl: `${baseUrl}${NANGO_CONNECT_COMPLETE_PATH}`,
     connectOrigin,
+    sessionToken: session.token,
+    expiresAtMs: Number.isFinite(expiresAtMs) ? expiresAtMs : Date.now() + 30 * 60 * 1000,
     text: {
       done: "Connected. You can close this window.",
       failed: "The connection could not be completed. Close this window and try again.",
+      closed: "Closed without connecting. Close this window and try again.",
     },
   };
-  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Connect</title><style>${PAGE_STYLE}</style></head><body><p id="status">Sign in to continue.</p><iframe title="Connect" src="${session.connectLink.replace(/"/gu, "&quot;")}" allow="clipboard-write"></iframe><script type="application/json" id="nango-connect">${escapeJsonForHtml(data)}</script><script>${PAGE_SCRIPT}</script></body></html>`;
+  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Connect</title><style>${PAGE_STYLE}</style></head><body><p id="status">Sign in to continue.</p><iframe id="nango-frame" title="Connect" src="${frameUrl.toString().replace(/"/gu, "&quot;")}" allow="clipboard-write"></iframe><script type="application/json" id="nango-connect">${escapeJsonForHtml(data)}</script><script>${PAGE_SCRIPT}</script></body></html>`;
   const policy = `${htmlPageContentSecurityPolicy(html)}; frame-src ${connectOrigin}; connect-src 'self'`;
   return new Response(html, {
     status: 200,
@@ -399,6 +453,17 @@ async function readConnectionIdentity(
     throw new HTTPException(502, { message: "The connected account could not be verified" });
   const key = ACCOUNT_IDENTITY_KEYS[integration.integrationKey];
   return { label, metadata: key ? { [key]: label, accountEmail: label } : { accountLabel: label } };
+}
+
+/** Best effort: the provider's actual grants, or null to use the app's fixed scopes. */
+async function readGrantedScopes(
+  client: NangoClient,
+  integration: EffectiveNangoIntegration,
+  nangoConnectionId: string,
+): Promise<string[] | null> {
+  return await client
+    .connectionGrantedScopes(nangoConnectionId, integration.providerConfigKey)
+    .catch(() => null);
 }
 
 function nangoMetadata(
@@ -473,6 +538,8 @@ async function persistNangoConnection(
     mcpUrl: string;
     nangoConnectionId: string;
     identity: ConnectionIdentity;
+    /** Scopes Nango reports for the connection; null when it reports none. */
+    grantedScopes: string[] | null;
   },
 ): Promise<{
   connection: ConnectionMetadata;
@@ -500,12 +567,18 @@ async function persistNangoConnection(
     input.integration,
     input.nangoConnectionId,
   );
-  // A managed app grants fixed scopes; recording them lets the reviewed
-  // bridges admit exactly the tools those scopes cover.
+  // The scopes the provider granted, as Nango reports them; otherwise the
+  // fixed scopes of the integration's app. The reviewed bridges then admit
+  // exactly the tools those scopes cover.
   const grantedScopes = [
-    ...(input.integration.definition.scopes ?? input.integration.native?.managedScopes ?? []),
+    ...(input.grantedScopes ??
+      input.integration.definition.scopes ??
+      input.integration.native?.managedScopes ??
+      []),
   ];
-  // The same account connected again: keep its connection, settings and grants.
+  // The same account connected again keeps its connection, settings and
+  // grants. Without a verified account identity every connection is a new
+  // account: nothing is ever merged on a guess.
   const sameAccount = input.identity.label
     ? existing.find((connection) =>
         Object.values(input.identity.metadata).some(
@@ -514,9 +587,7 @@ async function persistNangoConnection(
             value === connection.metadata.accountLabel,
         ),
       )
-    : existing.length === 1
-      ? existing[0]
-      : undefined;
+    : undefined;
   if (sameAccount) {
     const updated = await updateConnection(db, {
       workspaceId: sameAccount.workspaceId,
@@ -599,6 +670,7 @@ export async function completeNangoConnect(
       .catch(() => undefined);
     throw error;
   }
+  const grantedScopes = await readGrantedScopes(client, integration, match.connectionId);
   const success = (connection: ConnectionMetadata): NangoConnectCompletion => {
     if (state.returnUrl && (state.connectAttemptId || state.encryptedExternalContinuation))
       return { status: "complete", redirectTo: state.returnUrl, exactReturn: true };
@@ -627,6 +699,7 @@ export async function completeNangoConnect(
       mcpUrl: state.mcpUrl,
       nangoConnectionId: match.connectionId,
       identity,
+      grantedScopes,
     });
     return outcome.connection;
   };
@@ -881,6 +954,7 @@ export async function handleNangoWebhook(
       );
       if (!verified) return "unknown_connection";
       const identity = await readConnectionIdentity(client, integration, event.connectionId);
+      const grantedScopes = await readGrantedScopes(client, integration, event.connectionId);
       let outcome: Awaited<ReturnType<typeof persistNangoConnection>> | null = null;
       await withOrganizationIntegrationAcquisition(deps.db, owner, [integrationKey], async (tx) => {
         await requireConnectOwnerAuthority(
@@ -895,6 +969,7 @@ export async function handleNangoWebhook(
           mcpUrl: connectMcpUrl(integration),
           nangoConnectionId: event.connectionId,
           identity,
+          grantedScopes,
         });
       });
       const result = outcome as Awaited<ReturnType<typeof persistNangoConnection>> | null;
@@ -910,7 +985,21 @@ export async function handleNangoWebhook(
     }
     case "refresh": {
       if (!stored) return "unknown_connection";
-      if (!event.success && stored.status === "active") {
+      // A signed webhook can still be replayed or arrive late: act only on
+      // what Nango reports for the connection now.
+      const current = (
+        await nangoClient(deps).listConnections({
+          connectionId: event.connectionId,
+          integrationId: event.providerConfigKey,
+        })
+      ).find(
+        (connection) =>
+          connection.connectionId === event.connectionId &&
+          connection.providerConfigKey === event.providerConfigKey,
+      );
+      if (!current) return "ignored";
+      const failing = current.authErrors > 0;
+      if (!event.success && failing && stored.status === "active") {
         await setConnectionStatus(
           deps.db,
           stored.workspaceId,
@@ -925,7 +1014,7 @@ export async function handleNangoWebhook(
         usage("connection_needs_reauth");
         return "needs_reauth";
       }
-      if (event.success && stored.status === "needs_reauth") {
+      if (event.success && !failing && stored.status === "needs_reauth") {
         await setConnectionStatus(deps.db, stored.workspaceId, "active", null, {
           id: stored.id,
           version: stored.version,

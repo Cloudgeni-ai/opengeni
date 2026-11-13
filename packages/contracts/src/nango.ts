@@ -191,7 +191,8 @@ export type NangoIntegrationDefinition = {
   displayName?: string;
   description?: string;
   logoUrl?: string;
-  ownership?: "personal" | "workspace";
+  /** Nango connections are always the connecting person's own account. */
+  ownership?: "personal";
   /** Read-only provider request through the Nango proxy that names the account. */
   accountIdentity?: { url: string; field: string };
   tools?: NangoToolSourceDefinition;
@@ -250,8 +251,7 @@ export function parseNangoIntegrationDefinition(value: unknown): NangoIntegratio
   if (description) definition.description = description;
   const logoUrl = boundedText(raw.logoUrl, 2048);
   if (logoUrl && /^https:\/\//u.test(logoUrl)) definition.logoUrl = logoUrl;
-  if (raw.ownership === "personal" || raw.ownership === "workspace")
-    definition.ownership = raw.ownership;
+  if (raw.ownership === "personal") definition.ownership = "personal";
   const identity = raw.accountIdentity as Record<string, unknown> | undefined;
   const identityUrl = boundedText(identity?.url, 2048);
   const identityField = boundedText(identity?.field, 200);

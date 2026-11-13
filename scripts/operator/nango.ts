@@ -5,9 +5,12 @@
 //     [--definition definition.json] [--disabled] --operator <name> --reason <reason>
 //   bun scripts/operator/nango.ts affected --key gmail [--out affected.csv]
 //   bun scripts/operator/nango.ts usage [--since 2026-11-01] [--until 2026-12-01] [--account <uuid>] [--out usage.csv]
+//   bun scripts/operator/nango.ts orphans [--key gmail] [--out orphans.csv] [--delete --operator <name> --reason <reason>]
 import { parseArgs } from "node:util";
 import { dbSearchPath, getSettings } from "@opengeni/config";
-import { createDb, summarizeNangoUsage } from "@opengeni/db";
+import { NangoClient } from "@opengeni/capabilities";
+import { NANGO_TAG } from "@opengeni/contracts";
+import { createDb, listNangoAffectedConnections, summarizeNangoUsage } from "@opengeni/db";
 import { sql } from "drizzle-orm";
 
 const [command, ...rest] = process.argv.slice(2);
@@ -26,11 +29,13 @@ const { values } = parseArgs({
     since: { type: "string" },
     until: { type: "string" },
     account: { type: "string" },
+    delete: { type: "boolean" },
   },
 });
 
-const usage = "Usage: nango.ts show | set | affected | usage (see docs/nango.md)";
-if (!command || !["show", "set", "affected", "usage"].includes(command)) throw new Error(usage);
+const usage = "Usage: nango.ts show | set | affected | usage | orphans (see docs/nango.md)";
+if (!command || !["show", "set", "affected", "usage", "orphans"].includes(command))
+  throw new Error(usage);
 
 function csvCell(value: unknown): string {
   if (value === null || value === undefined) return "";
@@ -113,7 +118,84 @@ try {
       "account_label",
       "created_at",
       "last_used_at",
+      "nango_connection_id",
     ]);
+  } else if (command === "orphans") {
+    // Nango connections no live Opengeni connection stands for (left behind by
+    // a workspace, organization or member removal, a flip back, or made
+    // outside Opengeni). Nango bills them until they are deleted.
+    if (!settings.nangoSecretKey) throw new Error("Set OPENGENI_NANGO_SECRET_KEY");
+    if (
+      values.delete &&
+      (!values.operator?.trim() || !values.reason || values.reason.trim().length < 6)
+    )
+      throw new Error("--delete needs --operator and --reason (at least six characters)");
+    const nango = new NangoClient({
+      secretKey: settings.nangoSecretKey,
+      ...(settings.nangoApiBaseUrl ? { baseUrl: settings.nangoApiBaseUrl } : {}),
+    });
+    const remote = await nango.listAllConnections();
+    const keys = new Set<string>(
+      (
+        (await client.db.execute(
+          sql`select distinct integration_key from integration_backend_revisions`,
+        )) as unknown as Array<{ integration_key: string }>
+      ).map((row) => row.integration_key),
+    );
+    for (const connection of remote) {
+      const tagged = connection.tags[NANGO_TAG.integrationKey];
+      if (tagged) keys.add(tagged);
+    }
+    if (values.key) {
+      keys.clear();
+      keys.add(values.key);
+    }
+    const live = new Set<string>();
+    for (const key of keys)
+      for (const row of await listNangoAffectedConnections(client.db, key))
+        if (row.backend === "nango" && row.status !== "revoked" && row.nangoConnectionId)
+          live.add(row.nangoConnectionId);
+    const orphans = remote.filter(
+      (connection) =>
+        !live.has(connection.connectionId) &&
+        (!values.key || connection.tags[NANGO_TAG.integrationKey] === values.key),
+    );
+    const deleted = new Set<string>();
+    if (values.delete)
+      for (const orphan of orphans) {
+        await nango.deleteConnection(orphan.connectionId, orphan.providerConfigKey);
+        deleted.add(orphan.connectionId);
+      }
+    await emit(
+      orphans.map((orphan) => ({
+        nango_connection_id: orphan.connectionId,
+        provider_config_key: orphan.providerConfigKey,
+        integration_key: orphan.tags[NANGO_TAG.integrationKey] ?? null,
+        organization_id: orphan.tags[NANGO_TAG.organizationId] ?? null,
+        workspace_id: orphan.tags[NANGO_TAG.workspaceId] ?? null,
+        user_id: orphan.tags[NANGO_TAG.endUserId] ?? null,
+        created_at: orphan.createdAt,
+        deleted: deleted.has(orphan.connectionId),
+      })),
+      [
+        "nango_connection_id",
+        "provider_config_key",
+        "integration_key",
+        "organization_id",
+        "workspace_id",
+        "user_id",
+        "created_at",
+        "deleted",
+      ],
+    );
+    if (values.delete)
+      console.error(
+        JSON.stringify({
+          deleted: deleted.size,
+          operator: values.operator!.trim(),
+          reason: values.reason!.trim(),
+        }),
+      );
   } else {
     const until = values.until ? new Date(values.until) : new Date();
     const since = values.since ? new Date(values.since) : monthStart(until);

@@ -56,7 +56,7 @@ export const NANGO_DRIVE_READ_DEFINITIONS = {
   },
   download_file_content: {
     description:
-      "Download a Google Drive file's bytes as base64 (up to 10 MiB). Google Docs, Sheets and Slides are exported as PDF unless exportMimeType is given.",
+      "Download a Google Drive file (up to 10 MiB). It is saved to the agent's files when this chat has them; otherwise its bytes are returned as base64 (up to 1 MiB). Google Docs, Sheets and Slides are exported as PDF unless exportMimeType is given.",
     schema: z
       .object({
         fileId: id,
@@ -99,6 +99,8 @@ const FILE_FIELDS =
 const LIST_FIELDS = `nextPageToken,files(${FILE_FIELDS})`;
 export const NANGO_DRIVE_MAX_TEXT_CHARS = 200_000;
 export const NANGO_DRIVE_MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024;
+/** Inline base64 is only for chats without agent files; keep tool results small. */
+export const NANGO_DRIVE_MAX_INLINE_BYTES = 1024 * 1024;
 
 const TEXT_EXPORTS: Record<string, string> = {
   "application/vnd.google-apps.document": "text/plain",

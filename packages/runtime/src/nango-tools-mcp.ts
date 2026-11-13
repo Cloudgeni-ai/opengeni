@@ -7,6 +7,7 @@ import {
 import type { McpServerConnectionRef, ToolAuthNeededPayload } from "@opengeni/contracts";
 import {
   classifyNangoTool,
+  NANGO_DEFAULT_API_BASE_URL,
   nangoApiUrl,
   nangoIntegrationKeyFromProviderDomain,
   nangoToolsIntegrationKeyFromMcpUrl,
@@ -53,6 +54,8 @@ export type NangoToolsMcpBridgeContext = {
   recordNangoUsage?: NangoUsageRecorder;
   /** Operator definitions of the Nango-backed integrations for this turn. */
   nangoIntegrationDefinitions?: ReadonlyMap<string, NangoIntegrationDefinition>;
+  /** The deployment's Nango API base; the bridge's only destination. */
+  nangoApiBaseUrl?: string;
 };
 
 type ToolResult = Awaited<ReturnType<NonNullable<MCPServer["callToolResult"]>>>;
@@ -117,7 +120,12 @@ export class NangoToolsMcpServer implements LocalMcpBridgeServer {
       authority: "connection",
       toolSurface: "static_reviewed",
       mutationReplay: "safe_reads_only",
-      destinations: [{ origin: "https://api.nango.dev", pathPrefix: "/" }],
+      destinations: [
+        {
+          origin: new URL(context.nangoApiBaseUrl ?? NANGO_DEFAULT_API_BASE_URL).origin,
+          pathPrefix: "/",
+        },
+      ],
     });
   }
 
@@ -313,21 +321,29 @@ export class NangoToolsMcpServer implements LocalMcpBridgeServer {
       if (write) throw new NangoToolOutcomeUnknownError(name);
       return errorResult(`${name} could not be reached. Try again.`, "tool_failed");
     }
-    let text: string;
+    let read: { text: string; bytes: number; tooLarge: boolean };
     try {
-      text = await response.text();
+      read = await readBoundedResponseText(response, MAX_TOOL_RESPONSE_BYTES);
     } catch {
       report(response.status, 0);
-      if (write && (response.ok || response.status >= 500))
-        throw new NangoToolOutcomeUnknownError(name);
+      if (write) throw new NangoToolOutcomeUnknownError(name);
       return errorResult(
         `${name} returned an unreadable response (${response.status}).`,
         "tool_failed",
       );
     }
-    report(response.status, new TextEncoder().encode(text).byteLength);
-    if (text.length > MAX_TOOL_RESPONSE_BYTES)
+    report(response.status, read.bytes);
+    if (read.tooLarge) {
+      // A write that answered 2xx already ran; never invite a retry.
+      if (write && response.ok)
+        return {
+          content: [{ type: "text", text: `${name} completed; its output was too large to show.` }],
+          structuredContent: { completed: true, outputOmitted: true },
+        };
+      if (write) throw new NangoToolOutcomeUnknownError(name);
       return errorResult(`${name} returned too much data.`, "tool_failed");
+    }
+    const text = read.text;
     let output: unknown = text;
     try {
       output = text ? JSON.parse(text) : {};
@@ -335,7 +351,10 @@ export class NangoToolsMcpServer implements LocalMcpBridgeServer {
       // Plain-text output stays text.
     }
     if (!response.ok) {
-      if (write && response.status >= 500) throw new NangoToolOutcomeUnknownError(name);
+      // Only a clear refusal before the function ran means nothing happened;
+      // anything else (a runtime error, a timeout, 5xx) may have had effects.
+      if (write && !nangoRefusedBeforeExecution(response.status, output))
+        throw new NangoToolOutcomeUnknownError(name);
       const message =
         (output as { error?: { message?: unknown } } | null)?.error?.message ??
         `${name} failed (${response.status}).`;
@@ -357,6 +376,45 @@ export class NangoToolsMcpServer implements LocalMcpBridgeServer {
       structuredContent: structured,
     };
   }
+}
+
+/**
+ * Whether a failed Nango call was refused before its function ran: the call
+ * was not authorized, the tool or connection is unknown, the input failed
+ * validation, or it was rate limited. A function runtime error, a timeout or
+ * any other failure may have had effects.
+ */
+export function nangoRefusedBeforeExecution(status: number, body: unknown): boolean {
+  const rawCode = (body as { error?: { code?: unknown } } | null)?.error?.code;
+  const code = typeof rawCode === "string" ? rawCode.toLowerCase() : "";
+  if (/runtime|script|function_|timeout|timed_out|failure|internal/u.test(code)) return false;
+  if (status === 401 || status === 403 || status === 404 || status === 429) return true;
+  if (status === 400 || status === 422)
+    return /^(invalid_|missing_|unknown_|bad_request|validation|not_found)|_not_found$|_invalid$/u.test(
+      code,
+    );
+  return false;
+}
+
+async function readBoundedResponseText(
+  response: Response,
+  maxBytes: number,
+): Promise<{ text: string; bytes: number; tooLarge: boolean }> {
+  const reader = response.body?.getReader();
+  if (!reader) return { text: "", bytes: 0, tooLarge: false };
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    bytes += value.byteLength;
+    if (bytes > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      return { text: "", bytes, tooLarge: true };
+    }
+    chunks.push(value);
+  }
+  return { text: Buffer.concat(chunks).toString("utf8"), bytes, tooLarge: false };
 }
 
 export const NANGO_TOOLS_MCP_BRIDGE_ADAPTER_ID = "nango-tools";

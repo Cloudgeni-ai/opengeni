@@ -16,7 +16,13 @@ import {
   type NangoUsageRecorder,
 } from "./nango-transport";
 import {
+  connectorAttachmentFileName,
+  type ConnectorFileMaterializationRequest,
+} from "./connector-attachments";
+import { isRoutingMutationOutcomeUnknownError } from "./sandbox/routing/routing-session";
+import {
   NANGO_DRIVE_MAX_DOWNLOAD_BYTES,
+  NANGO_DRIVE_MAX_INLINE_BYTES,
   NANGO_DRIVE_READ_TOOLS,
   isNangoDriveReadTool,
   nangoDriveContentUrl,
@@ -166,6 +172,8 @@ export type DriveMcpBridgeContext = {
   createRemoteServer: () => MCPServer;
   /** Best-effort accounting for requests sent through the Nango proxy. */
   recordNangoUsage?: NangoUsageRecorder;
+  /** Saves a downloaded file to the agent's files (Nango-served downloads). */
+  materializeConnectorFile?: (request: ConnectorFileMaterializationRequest) => Promise<unknown>;
 };
 type DriveToolResult = Awaited<ReturnType<NonNullable<MCPServer["callToolResult"]>>>;
 type ParsedCall = {
@@ -219,7 +227,7 @@ export class DriveMcpServer implements LocalMcpBridgeServer {
   ): Promise<DriveToolResult> {
     options?.signal?.throwIfAborted();
     if (!this.remote && isNangoDriveReadTool(name))
-      return await this.callRestRead(name, args, options);
+      return await this.callRestRead(name, args, meta, options);
     if (!Object.hasOwn(definitions, name)) {
       const remote = this.remote;
       if (!remote) return inputError(`Unknown Google Drive tool: ${name}`);
@@ -417,6 +425,7 @@ export class DriveMcpServer implements LocalMcpBridgeServer {
   private async callRestRead(
     name: NangoDriveReadName,
     args: Record<string, unknown> | null,
+    meta: Record<string, unknown> | null | undefined,
     options?: { signal?: AbortSignal },
   ) {
     const parsed = parseNangoDriveRead(name, args);
@@ -482,14 +491,72 @@ export class DriveMcpServer implements LocalMcpBridgeServer {
       const { text, truncated } = projectNangoDriveText(bytes);
       return jsonResult({ file: fileSummary, content: text, truncated });
     }
+    const contentMimeType = (response.headers.get("content-type") ?? mimeType)
+      .split(";", 1)[0]!
+      .trim()
+      .toLowerCase();
+    const operationId = meta?.opengeniOperationId;
+    if (
+      this.context.materializeConnectorFile &&
+      typeof operationId === "string" &&
+      UUID_PATTERN.test(operationId)
+    ) {
+      let materialized: unknown;
+      try {
+        materialized = await this.context.materializeConnectorFile({
+          serverId: this.context.serverId,
+          toolName: name,
+          connectionId: credential.connectionId ?? "",
+          operationId,
+          providerAttachmentId: { provider: "google-drive", kind: "attachment", value: fileId },
+          fileName: connectorAttachmentFileName(
+            typeof metadata.payload.name === "string" ? metadata.payload.name : "",
+            `${fileId}.bin`,
+          ),
+          mediaType: /^[\w.+-]+\/[\w.+-]+$/u.test(contentMimeType)
+            ? contentMimeType
+            : "application/octet-stream",
+          bytes,
+          authorizeProviderRequest: async () => {
+            if (options?.signal?.aborted) return false;
+            const current = await this.resolve(name, target);
+            return (
+              current.status === "ok" &&
+              current.connectionId === credential.connectionId &&
+              (!current.authorizeProviderRequest || (await current.authorizeProviderRequest()))
+            );
+          },
+        });
+      } catch (error) {
+        if (isRoutingMutationOutcomeUnknownError(error)) throw error;
+        return inputError("The Google Drive file could not be saved to the agent's files.");
+      }
+      const attachments =
+        materialized && typeof materialized === "object" && "attachments" in materialized
+          ? (materialized as { attachments: unknown }).attachments
+          : undefined;
+      if (Array.isArray(attachments))
+        return jsonResult({
+          file: fileSummary,
+          contentMimeType,
+          sizeBytes: bytes.byteLength,
+          attachments,
+        });
+      return inputError("The Google Drive file could not be saved to the agent's files.");
+    }
+    if (bytes.byteLength > NANGO_DRIVE_MAX_INLINE_BYTES)
+      return inputError(
+        "The file is larger than 1 MiB and this chat has no agent files to save it to.",
+      );
     return jsonResult({
       file: fileSummary,
-      contentMimeType: response.headers.get("content-type") ?? mimeType,
+      contentMimeType,
       sizeBytes: bytes.byteLength,
       base64Content: Buffer.from(bytes).toString("base64"),
     });
   }
 }
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 type OkCredential = Extract<ResolveConnectionCredentialResult, { status: "ok" }>;
 function reconnectResult(): DriveToolResult {
   return {

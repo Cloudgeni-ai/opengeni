@@ -260,6 +260,61 @@ describe("Google bridges under Nango", () => {
     const bad = await drive.callToolResult("get_file_metadata", { fileId: "../x" });
     expect(bad.isError).toBe(true);
   });
+
+  test("Drive downloads go to the agent's files, and inline base64 stays small", async () => {
+    const size = 2 * 1024 * 1024;
+    const { fetchImpl } = recordingFetch((call) =>
+      call.url.includes("alt=media")
+        ? new Response(new Uint8Array(size), { headers: { "content-type": "application/pdf" } })
+        : Response.json({ id: "pdf1", name: "Report.pdf", mimeType: "application/pdf" }),
+    );
+    const saved: Array<{ fileName: string; bytes: number; operationId: string }> = [];
+    const make = (withFiles: boolean) =>
+      new DriveMcpServer(
+        { url: OFFICIAL_DRIVE_MCP_URL, connectionRef: subjectRef("nango:google-drive") },
+        {
+          workspaceId: "ws_1",
+          subjectId: "user:a",
+          serverId: "drive",
+          resolveCredential: async () => ({
+            status: "ok",
+            headers: nangoHeaders("google-drive"),
+            connectionId: "c1",
+            proxy: proxy("google-drive", "google-drive"),
+          }),
+          fetchImpl,
+          createRemoteServer: () => {
+            throw new Error("hosted Drive MCP must not be used under Nango");
+          },
+          ...(withFiles
+            ? {
+                materializeConnectorFile: async (request) => {
+                  saved.push({
+                    fileName: request.fileName,
+                    bytes: request.bytes.byteLength,
+                    operationId: request.operationId,
+                  });
+                  return { attachments: [{ path: "/files/Report.pdf" }] };
+                },
+              }
+            : {}),
+        },
+      );
+    const operationId = "33333333-3333-4333-8333-333333333333";
+    const stored = await make(true).callToolResult(
+      "download_file_content",
+      { fileId: "pdf1" },
+      { opengeniOperationId: operationId },
+    );
+    expect(stored.structuredContent).toMatchObject({
+      sizeBytes: size,
+      attachments: [{ path: "/files/Report.pdf" }],
+    });
+    expect(stored.structuredContent).not.toHaveProperty("base64Content");
+    expect(saved).toEqual([{ fileName: "Report.pdf", bytes: size, operationId }]);
+    const inline = await make(false).callToolResult("download_file_content", { fileId: "pdf1" });
+    expect(inline.isError).toBe(true);
+  });
 });
 
 describe("generic Nango tools bridge", () => {
@@ -388,6 +443,53 @@ describe("generic Nango tools bridge", () => {
     });
     const read = await server.callToolResult("unknown-tool", {});
     expect(read.isError).toBe(true);
+  });
+
+  test("a write answered 5xx or with a runtime error is sent once and reported uncertain", async () => {
+    for (const failure of [
+      () => Response.json({ error: { code: "server_error" } }, { status: 502 }),
+      () => Response.json({ error: { code: "function_runtime_error" } }, { status: 400 }),
+      () => Response.json({ error: { code: "conflict" } }, { status: 409 }),
+    ]) {
+      const { server, calls } = bridge((call) =>
+        call.url.includes("/functions") ? Response.json(functions) : failure(),
+      );
+      await expect(server.callToolResult("create-post", { text: "Hi" })).rejects.toMatchObject({
+        connectorActionOutcome: "uncertain",
+      });
+      expect(calls.filter((call) => call.url.endsWith("/tools/create-post/calls"))).toHaveLength(1);
+    }
+  });
+
+  test("a clear refusal before the function ran is reported as an ordinary failure", async () => {
+    for (const refusal of [
+      () =>
+        Response.json(
+          { error: { code: "invalid_input", message: "text is required" } },
+          {
+            status: 400,
+          },
+        ),
+      () => Response.json({ error: { code: "unknown_connection" } }, { status: 404 }),
+      () => new Response("", { status: 401 }),
+    ]) {
+      const { server } = bridge((call) =>
+        call.url.includes("/functions") ? Response.json(functions) : refusal(),
+      );
+      const result = await server.callToolResult("create-post", { text: "" });
+      expect(result.isError).toBe(true);
+    }
+  });
+
+  test("a successful write with an oversized output still reads as completed", async () => {
+    const { server } = bridge((call) =>
+      call.url.includes("/functions")
+        ? Response.json(functions)
+        : new Response("x".repeat(4 * 1024 * 1024 + 10), { status: 200 }),
+    );
+    const result = await server.callToolResult("create-post", { text: "Hi" });
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent).toEqual({ completed: true, outputOmitted: true });
   });
 });
 

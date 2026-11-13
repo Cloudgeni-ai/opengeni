@@ -13,7 +13,10 @@ export {
 import type { SearchRecordForm } from "./hosted-search-evidence";
 import type { NangoIntegrationDefinition, NangoProxyTransport } from "@opengeni/contracts/nango";
 import { NANGO_TOOLS_MCP_BRIDGE_ADAPTER, type NangoToolsMcpBridgeContext } from "./nango-tools-mcp";
-import type { NangoUsageRecorder } from "./nango-transport";
+import {
+  NANGO_PROXY_TRANSPORTS as NANGO_PREFLIGHT_TRANSPORTS,
+  type NangoUsageRecorder,
+} from "./nango-transport";
 export {
   COMMAND_COMPLETION_NOTICE_MAX_BYTES,
   CommandCompletionDelivery,
@@ -6943,6 +6946,7 @@ export async function prepareAgentTools(
             ...(options.nangoIntegrationDefinitions
               ? { nangoIntegrationDefinitions: options.nangoIntegrationDefinitions }
               : {}),
+            ...(settings.nangoApiBaseUrl ? { nangoApiBaseUrl: settings.nangoApiBaseUrl } : {}),
             onAuthNeeded: async (payload) => {
               await publishAuthNeeded(options, payload);
             },
@@ -8480,6 +8484,9 @@ function connectionApprovalPreflight(
       forceRefresh: false,
       credentialResolutionMode: "preflight",
       preflightAcceptsRefreshableExpiry: true,
+      // The preflight never sends a provider request, so a proxy-only
+      // (Nango) credential is checked like any other connection.
+      acceptedTransports: NANGO_PREFLIGHT_TRANSPORTS,
       ...(options.credentialSubjectId ? { subjectId: options.credentialSubjectId } : {}),
     });
     if (result.status !== "ok") throw new ConnectionApprovalPreflightError(result.reason);

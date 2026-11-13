@@ -170,6 +170,11 @@ describe("Nango Connect", () => {
     });
     const html = await response.text();
     expect(html).not.toContain("nango-secret-test");
+    // ConnectUI handshake: the token goes by postMessage, never in the frame URL.
+    expect(html).toContain('src="https://connect.nango.test/?apiURL=https%3A%2F%2Fnango.test"');
+    expect(html).not.toContain("session_token=s");
+    expect(html).toContain('"sessionToken":"session-token"');
+    expect(html).toContain('type: "session_token"');
   });
 
   test("completion stores nothing until Nango has a connection with this attempt's tags", async () => {

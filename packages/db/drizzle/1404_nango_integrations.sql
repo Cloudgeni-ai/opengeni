@@ -158,7 +158,9 @@ BEGIN
           'accountIdentity', 'tools', 'scopes'] <> '{}'::jsonb
         OR (p_definition ? 'tools' AND (jsonb_typeof(p_definition->'tools') <> 'object'
           OR p_definition->'tools'->>'source' IS DISTINCT FROM 'nango'))
-        OR (p_definition ? 'ownership' AND p_definition->>'ownership' NOT IN ('personal', 'workspace'))
+        -- Nango connections act as the person who connected them; shared
+        -- (workspace-owned) Nango accounts are not supported.
+        OR (p_definition ? 'ownership' AND p_definition->>'ownership' IS DISTINCT FROM 'personal')
       ) THEN
         RAISE EXCEPTION 'invalid integration definition' USING ERRCODE = '22023';
       END IF;
@@ -190,7 +192,8 @@ BEGIN
       status text,
       account_label text,
       created_at timestamptz,
-      last_used_at timestamptz
+      last_used_at timestamptz,
+      nango_connection_id text
     )
     LANGUAGE plpgsql VOLATILE SECURITY INVOKER
     SET search_path = pg_catalog, %I, pg_temp
@@ -217,7 +220,7 @@ BEGIN
           CASE WHEN c.provider_domain LIKE 'nango:%%' THEN 'nango' ELSE 'native' END,
           c.provider_domain, c.status,
           coalesce(c.metadata->>'accountEmail', c.metadata->>'accountLabel', c.metadata->>'email'),
-          c.created_at, c.last_used_at
+          c.created_at, c.last_used_at, c.metadata->>'nangoConnectionId'
         FROM connections c
         JOIN workspaces w ON w.id = c.workspace_id AND w.account_id = c.account_id
         JOIN managed_accounts a ON a.id = c.account_id
@@ -229,7 +232,7 @@ BEGIN
         SELECT s.account_id, a.name, s.workspace_id, w.name,
           CASE WHEN s.subject_id LIKE 'user:%%' THEN substr(s.subject_id, 6) ELSE s.subject_id END,
           u.email, s.id, 'native', 'x.com', s.status, s.account_handle,
-          s.created_at, NULL::timestamptz
+          s.created_at, NULL::timestamptz, NULL::text
         FROM social_connections s
         JOIN workspaces w ON w.id = s.workspace_id AND w.account_id = s.account_id
         JOIN managed_accounts a ON a.id = s.account_id

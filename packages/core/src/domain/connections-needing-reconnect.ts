@@ -16,6 +16,7 @@ import type { Observability } from "@opengeni/observability";
 import { listOwnConnectionMetadata } from "./personal-connection-delegations";
 import {
   catalogProviderDomain,
+  INTEGRATION_BACKEND_PROJECTION_KEY,
   projectConnectionsForBackends,
   type NangoBackends,
 } from "./nango-integrations";
@@ -99,14 +100,20 @@ export async function listConnectionsNeedingReconnect(
         backends,
       ).filter((connection) => connection.status === "needs_reauth")
     : [];
-  return [...shared, ...own]
-    .map((connection) => needingReconnect(connection, input.workspaceId))
-    .sort(
-      (left, right) =>
-        left.providerDomain.localeCompare(right.providerDomain) ||
-        left.account.localeCompare(right.account) ||
-        left.connectionId.localeCompare(right.connectionId),
-    );
+  return (
+    [...shared, ...own]
+      // Already replaced by a Nango connection of the same owner.
+      .filter(
+        (connection) => connection.metadata[INTEGRATION_BACKEND_PROJECTION_KEY] !== "superseded",
+      )
+      .map((connection) => needingReconnect(connection, input.workspaceId))
+      .sort(
+        (left, right) =>
+          left.providerDomain.localeCompare(right.providerDomain) ||
+          left.account.localeCompare(right.account) ||
+          left.connectionId.localeCompare(right.connectionId),
+      )
+  );
 }
 
 function sameEndpoint(left: string, right: string): boolean {

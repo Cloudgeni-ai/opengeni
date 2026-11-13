@@ -903,7 +903,18 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!connection) {
       throw new HTTPException(404, { message: "connection not found" });
     }
-    return c.json(ConnectionResponse.parse({ connection }));
+    // Read as the list reads it while a backend is switched. Only a native
+    // connection of a Nango-backed service needs its owner's other accounts
+    // (to tell whether a Nango connection has superseded it).
+    const backends = await nangoBackendsFor(db, settings);
+    const siblings =
+      backends.size > 0 && !connection.providerDomain.startsWith("nango:")
+        ? (await listConnectionsMetadata(db, workspaceId, grant.subjectId)).filter(
+            (other) => other.id !== connection.id && other.subjectId === connection.subjectId,
+          )
+        : [];
+    const [projected] = projectConnectionsForBackends([connection, ...siblings], backends);
+    return c.json(ConnectionResponse.parse({ connection: projected ?? connection }));
   });
 
   app.patch("/v1/workspaces/:workspaceId/connections/:connectionId", async (c) => {

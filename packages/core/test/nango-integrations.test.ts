@@ -191,7 +191,8 @@ describe("integration backend switch", () => {
     // Once the owner connected through Nango, the native account is superseded.
     const nango = connection({ providerDomain: "nango:gmail" });
     const both = projectConnectionsForBackends([native, nango], NANGO_ON);
-    expect(both.map((entry) => entry.status)).toEqual(["error", "active"]);
+    expect(both.map((entry) => entry.status)).toEqual(["needs_reauth", "active"]);
+    expect(both[0]!.metadata.integrationBackendProjection).toBe("superseded");
 
     // Flipping back restores the native account exactly; Nango reads inactive.
     const back = projectConnectionsForBackends([native, nango], NANGO_OFF);

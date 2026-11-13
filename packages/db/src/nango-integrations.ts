@@ -36,22 +36,27 @@ export async function readIntegrationBackendSettings(
   db: Database,
 ): Promise<IntegrationBackendSetting[]> {
   try {
-    const rows = await rawRows<{
-      revision: number | string;
-      integration_key: string;
-      backend: string;
-      nango_provider_config_key: string | null;
-      enabled: boolean;
-      definition: unknown;
-      changed_at: Date | string;
-    }>(
-      db,
-      sql`
+    const rows = await db.transaction(
+      async (tx) =>
+        await rawRows<{
+          revision: number | string;
+          integration_key: string;
+          backend: string;
+          nango_provider_config_key: string | null;
+          enabled: boolean;
+          definition: unknown;
+          changed_at: Date | string;
+        }>(
+          // Its own transaction, or a savepoint inside a caller's, so a failed
+          // read never aborts the caller's work.
+          tx,
+          sql`
         select distinct on (integration_key)
           revision, integration_key, backend, nango_provider_config_key, enabled, definition, changed_at
         from integration_backend_revisions
         order by integration_key, revision desc
       `,
+        ),
     );
     return rows.map((row) => ({
       integrationKey: row.integration_key,
@@ -296,11 +301,24 @@ export async function summarizeNangoUsage(
   try {
     lifecycle = await rawRows<LifecycleRow>(
       db,
+      // Each connection's state when the period starts (its last lifecycle
+      // event before it), then the events inside the period.
       sql`
+        select * from (
+          select distinct on (account_id, nango_connection_id)
+            account_id::text, workspace_id::text, integration_key, subject_id, nango_connection_id,
+            kind, occurred_at
+          from nango_usage_events
+          where kind in ('connection_created', 'connection_reconnected', 'connection_deleted')
+            and occurred_at < ${since.toISOString()}::timestamptz ${accountFilter}
+          order by account_id, nango_connection_id, occurred_at desc
+        ) opening
+        union all
         select account_id::text, workspace_id::text, integration_key, subject_id, nango_connection_id,
           kind, occurred_at
         from nango_usage_events
         where kind in ('connection_created', 'connection_reconnected', 'connection_deleted')
+          and occurred_at >= ${since.toISOString()}::timestamptz
           and occurred_at < ${until.toISOString()}::timestamptz ${accountFilter}
         order by occurred_at
       `,
@@ -463,6 +481,8 @@ export type NangoAffectedConnection = {
   accountLabel: string | null;
   createdAt: string;
   lastUsedAt: string | null;
+  /** The Nango connection a Nango-backed row stands for. */
+  nangoConnectionId: string | null;
 };
 
 /** Owner-only: every native and Nango connection of one integration. */
@@ -492,5 +512,6 @@ export async function listNangoAffectedConnections(
     accountLabel: row.account_label == null ? null : String(row.account_label),
     createdAt: iso(row.created_at) ?? "",
     lastUsedAt: iso(row.last_used_at),
+    nangoConnectionId: row.nango_connection_id == null ? null : String(row.nango_connection_id),
   }));
 }

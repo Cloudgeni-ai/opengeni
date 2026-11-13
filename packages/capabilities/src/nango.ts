@@ -210,6 +210,7 @@ export class NangoClient {
       connectionId?: string;
       tags?: Record<string, string>;
       integrationId?: string;
+      page?: number;
     } = {},
   ): Promise<NangoConnectionSummary[]> {
     const query = new URLSearchParams();
@@ -217,6 +218,7 @@ export class NangoClient {
     if (input.integrationId) query.set("integrationId", input.integrationId);
     for (const [key, value] of Object.entries(input.tags ?? {})) query.set(`tags[${key}]`, value);
     query.set("limit", "100");
+    if (input.page !== undefined) query.set("page", String(input.page));
     const { body } = await this.ok("GET", `/connections?${query.toString()}`);
     const connections = (body as { connections?: unknown[] } | null)?.connections;
     if (!Array.isArray(connections)) return [];
@@ -241,6 +243,48 @@ export class NangoClient {
         },
       ];
     });
+  }
+
+  /**
+   * The OAuth scopes the provider actually granted to one connection, as Nango
+   * reports them, or null when Nango does not report any. Only the scope list
+   * leaves this method; credentials in the response are never returned.
+   */
+  async connectionGrantedScopes(
+    connectionId: string,
+    providerConfigKey: string,
+  ): Promise<string[] | null> {
+    const query = new URLSearchParams({
+      provider_config_key: providerConfigKey,
+      refresh_token: "false",
+    });
+    const { body } = await this.ok(
+      "GET",
+      `/connections/${encodeURIComponent(connectionId)}?${query.toString()}`,
+    );
+    return nangoReportedScopes(body);
+  }
+
+  /**
+   * Every connection of the environment (optionally of one integration), page
+   * by page until a page adds nothing new. For operator reconciliation.
+   */
+  async listAllConnections(
+    input: { integrationId?: string } = {},
+  ): Promise<NangoConnectionSummary[]> {
+    const seen = new Map<string, NangoConnectionSummary>();
+    for (let page = 0; page < 1000; page += 1) {
+      const batch = await this.listConnections({ ...input, page });
+      let added = 0;
+      for (const connection of batch) {
+        const key = `${connection.providerConfigKey}\u0000${connection.connectionId}`;
+        if (seen.has(key)) continue;
+        seen.set(key, connection);
+        added += 1;
+      }
+      if (batch.length < 100 || added === 0) break;
+    }
+    return [...seen.values()];
   }
 
   /** Deleting a connection stops Nango's connection billing for it. 404 is success. */
@@ -349,4 +393,21 @@ export class NangoClient {
       responseBytes: result.bytes,
     };
   }
+}
+
+/** Reads granted scopes from a Nango connection body (`credentials.raw.scope`). */
+export function nangoReportedScopes(body: unknown): string[] | null {
+  const raw = (body as { credentials?: { raw?: Record<string, unknown> } } | null)?.credentials
+    ?.raw;
+  const value = raw?.scope ?? raw?.scopes;
+  const list =
+    typeof value === "string"
+      ? value.split(/[\s,]+/u)
+      : Array.isArray(value)
+        ? value.filter((scope): scope is string => typeof scope === "string")
+        : [];
+  const scopes = [...new Set(list.map((scope) => scope.trim()).filter(Boolean))].filter(
+    (scope) => scope.length <= 512,
+  );
+  return scopes.length > 0 ? scopes.slice(0, 200) : null;
 }

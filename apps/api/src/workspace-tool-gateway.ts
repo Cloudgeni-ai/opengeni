@@ -55,6 +55,7 @@ import {
 import {
   buildConnectionTokenResolver,
   buildSlackApiRateLimiter,
+  recordNangoUsageEvent,
   lockActiveExternalOrganizationKeyAuthority,
   withAccountRls,
   requireWorkspace,
@@ -941,14 +942,13 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
       ...input,
       ...(input.connectionRef.subjectScope === "subject" ? { subjectId: grant.subjectId } : {}),
     });
+  // Read once per gateway request: a backend flip reaches the next request.
+  const nangoBackends = await nangoBackendsFor(routeDeps.db, routeDeps.settings);
   const firstPartyServers = await Promise.all([
     ...(gatewayServerIds.has("opengeni")
       ? [
           // Read alongside the other first-party servers, not before them.
-          Promise.all([
-            resolveSlackBotToolAvailability(routeDeps.db, grant),
-            nangoBackendsFor(routeDeps.db, routeDeps.settings),
-          ]).then(([slackBotAvailable, nangoBackends]) =>
+          resolveSlackBotToolAvailability(routeDeps.db, grant).then((slackBotAvailable) =>
             inMemoryMcpRegistration(
               "opengeni",
               buildOpenGeniMcpServer(deps, grant, {
@@ -1056,6 +1056,16 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
       // every connection-backed server gets the non-refreshing preflight.
       connectionApprovalPreflight: true,
       credentialSubjectId: grant.subjectId,
+      nangoIntegrationDefinitions: new Map(
+        [...nangoBackends].map(([key, integration]) => [key, integration.definition] as const),
+      ),
+      recordNangoUsage: (report) =>
+        recordNangoUsageEvent(routeDeps.db, {
+          ...report,
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          subjectId: grant.subjectId,
+        }),
       mcpAccountLabels: accountRoutes.accountLabels,
       resolveCredential,
       slackRateLimit: buildSlackApiRateLimiter(routeDeps.db, gatewaySettings),

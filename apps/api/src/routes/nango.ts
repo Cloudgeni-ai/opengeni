@@ -1,4 +1,5 @@
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
+import type { Permission } from "@opengeni/contracts";
 import { HTTPException } from "hono/http-exception";
 import { requireAccessContext, type ApiRouteDeps } from "@opengeni/core";
 import { summarizeNangoUsage, withAccountRls } from "@opengeni/db";
@@ -33,6 +34,20 @@ function usagePeriod(query: { since?: string | undefined; until?: string | undef
   if (until.getTime() - since.getTime() > MAX_USAGE_PERIOD_MS)
     throw new HTTPException(400, { message: "usage periods are at most one year" });
   return { since, until };
+}
+
+/**
+ * The organization a request names (or the caller's default one), when the
+ * caller holds `permission` there or is its admin.
+ */
+export async function requireAccountPermission(
+  c: Context,
+  deps: ApiRouteDeps,
+  requestedAccountId: string | undefined,
+  permission: Permission,
+): Promise<string> {
+  const context = await requireAccessContext(c, deps);
+  return requireSelectedAccount(context, requestedAccountId, permission);
 }
 
 /** Nango Connect, its webhook, and the organization's Nango usage (docs/nango.md). */
@@ -74,8 +89,12 @@ export function registerNangoRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   // Organization admins: estimated Nango usage and cost of their organization.
   app.get(NANGO_USAGE_PATH, async (c) => {
-    const context = await requireAccessContext(c, deps);
-    const accountId = requireSelectedAccount(context, c.req.query("accountId"), "billing:read");
+    const accountId = await requireAccountPermission(
+      c,
+      deps,
+      c.req.query("accountId"),
+      "billing:read",
+    );
     const period = usagePeriod({ since: c.req.query("since"), until: c.req.query("until") });
     return c.json(
       await withAccountRls(deps.db, accountId, (scoped) =>

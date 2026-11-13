@@ -53,7 +53,8 @@ export function nangoMcpServerConfig(integration: EffectiveNangoIntegration): Mc
     ...(definition.tools?.allow?.length ? { allowedTools: [...definition.tools.allow] } : {}),
     connectionRef: {
       providerDomain: integration.providerDomain,
-      subjectScope: definition.ownership === "workspace" ? "workspace" : "subject",
+      // Nango connections are always the connecting person's own account.
+      subjectScope: "subject",
       kind: "oauth2",
     },
   };
@@ -117,7 +118,7 @@ export const INTEGRATION_BACKEND_PROJECTION_KEY = "integrationBackendProjection"
 /**
  * How connections read while a backend is switched. Nothing stored changes:
  * - native connections of a Nango-backed integration read as needing
- *   reconnection (reconnecting leads to the Nango Connect card), or as
+ *   reconnection (reconnecting leads to the Nango Connect card), marked
  *   superseded once their owner has an active Nango connection for it;
  * - Nango connections of an integration that is native again read as inactive.
  * Flipping back restores the stored status exactly.
@@ -143,7 +144,10 @@ export function projectConnectionsForBackends<T extends ConnectionMetadata>(
       );
       return {
         ...connection,
-        status: superseded ? "error" : "needs_reauth",
+        // Either way the account cannot be used until it is connected
+        // through Nango; a superseded one is already replaced, so it is not
+        // listed among accounts needing a reconnect.
+        status: "needs_reauth",
         metadata: {
           ...connection.metadata,
           [INTEGRATION_BACKEND_PROJECTION_KEY]: superseded ? "superseded" : "reconnect",

@@ -2475,7 +2475,7 @@ function nangoConfiguredCatalogItem(
       ...item.metadata,
       integrationBackend: "nango",
       nangoIntegrationKey: integration.integrationKey,
-      personalOnly: definition.ownership !== "workspace",
+      personalOnly: true,
       ...(definition.logoUrl ? { logoUrl: definition.logoUrl } : {}),
     },
   });
