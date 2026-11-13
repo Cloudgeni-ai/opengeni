@@ -42,7 +42,7 @@
     },
     {
       "path": ".github/workflows/compute-ci.yml",
-      "sha256": "e9cc26d5ba66ab3ee407e594f698b235ca59c040fdae53d153101f9cae76e55a"
+      "sha256": "40772b57688c638e28e001ab3a565509f19e27b23c32875a3245e14128a20c4d"
     },
     {
       "path": ".github/workflows/compute-release.yml",
@@ -166,7 +166,7 @@
     },
     {
       "path": ".github/workflows/runtime-posture-compatibility.yml",
-      "sha256": "ff0cffea40db249376a7e2a16bc9797c75eac485463e5c0a489245562bbd0f54"
+      "sha256": "328813c110e33dc6bc21d1ec72cd38a219945eccf8dc4cf1e50e178cb93c265f"
     },
     {
       "path": ".github/workflows/seal-release-head.yml",

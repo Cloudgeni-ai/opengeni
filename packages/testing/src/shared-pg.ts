@@ -97,7 +97,11 @@ const PORT = 61440;
 const CONTAINER = `opengeni-shared-test-pg-${PORT}`;
 const PASSWORD = "x";
 const APP_PASSWORD = "apppw";
-const IMAGE = "pgvector/pgvector:pg16";
+// Pinned by digest: the floating tag moves on every PostgreSQL minor and
+// pgvector release, and planner-sensitive tests must not change under CI.
+// Move it on purpose, together with any test that the new version affects.
+const IMAGE =
+  "pgvector/pgvector:0.8.6-pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b";
 const NATIVE_PG_URL = process.env.OPENGENI_TEST_PG_URL?.trim() || undefined;
 const ADMIN_URL = NATIVE_PG_URL ?? `postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}/postgres`;
 const adminConnection = new URL(ADMIN_URL);
