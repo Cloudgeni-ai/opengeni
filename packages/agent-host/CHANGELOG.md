@@ -1,5 +1,14 @@
 # @opengeni/agent-host
 
+## 6.19.0
+
+### Patch Changes
+
+- 65cb26f: Agent 0.1.161 ships the embedded browser controller that relaunches a managed browser whose process was killed while the controller was stopping, instead of refusing it permanently.
+- 227650c: A Connected Machine update the server stops hearing about no longer stays stuck. An update outlives the connection its request arrived on, since each connection lasts only as long as its five-minute broker credential, but the agent sent its progress through that connection, so progress after it closed could be lost: a failed or still-waiting update could read as `waiting_for_idle` with no blockers for good, on the release promoted back then, and the server never asked again because an accepted update was the agent's to finish. The agent now reports update progress through its current connection. The server treats an unfinished update it has not heard about for 30 minutes (an unanswered request after 10) as lost, and the next heartbeat, or Update now, replaces it with a request for the release promoted now. An agent still carrying the old update refuses it as busy updating and is asked again later. `beginEnrollmentAgentUpdate` takes an optional `replaceUnfinishedBefore` for this.
+- Updated dependencies [a85adef]
+  - @opengeni/sdk@6.19.0
+
 ## 6.18.0
 
 ### Patch Changes
