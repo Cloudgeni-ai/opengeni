@@ -48,7 +48,7 @@ mock.module("@opengeni/react/app/app-context", () => ({
   useAppContext: () => ({ ...appContext, client }),
 }));
 
-const { ConsoleContext } = await import("./console-shared");
+const { ConsoleContext, formatMicros } = await import("./console-shared");
 const { ConsoleSessionsRoute } = await import("./sessions");
 const { ConsoleSettingsRoute } = await import("./settings");
 const { ConsoleNewApiKeyRoute } = await import("./api-keys");
@@ -320,5 +320,14 @@ describe("Console API keys", () => {
     const html = container.innerHTML;
     expect(html.split("og_live_ab12_secret_token_value").length - 1).toBeGreaterThanOrEqual(1);
     expect(container.textContent).toContain("You won't be able to see it again");
+  });
+});
+
+describe("Console money", () => {
+  test("a cost under a cent never reads $0.00", () => {
+    expect(formatMicros(2_471)).toBe("<$0.01");
+    expect(formatMicros(2_471, { precise: true })).toBe("$0.0025");
+    expect(formatMicros(0)).toBe("$0.00");
+    expect(formatMicros(90_000)).toBe("$0.09");
   });
 });

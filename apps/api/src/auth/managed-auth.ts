@@ -1215,8 +1215,17 @@ export function managedAuthPublicBaseUrls(
 }
 
 /** Every browser origin the deployment's sign-in pages are served from. */
+/**
+ * Origins a sign-in may return to: the trusted origins and every allowed
+ * public host (such as Opengeni Console's), so a Google or GitHub sign-in
+ * started on the Console host comes back there.
+ */
 export function managedAuthPublicOrigins(settings: Settings): string[] {
-  return betterAuthTrustedOrigins(settings);
+  const origins = new Set(betterAuthTrustedOrigins(settings));
+  for (const base of managedAuthPublicBaseUrls(settings, undefined)) {
+    origins.add(new URL(base).origin);
+  }
+  return [...origins];
 }
 
 function betterAuthTrustedOrigins(settings: Settings): string[] {

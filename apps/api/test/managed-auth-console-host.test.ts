@@ -6,6 +6,7 @@ import { testSettings } from "@opengeni/testing/settings";
 import {
   createManagedAuth,
   managedAuthPublicBaseUrls,
+  managedAuthPublicOrigins,
   managedAuthRequestBaseUrl,
 } from "../src/auth/managed-auth";
 import { resolveOrganizationUserSetupDeliveryEmail } from "../src/auth/organization-user-setup";
@@ -137,5 +138,14 @@ describe("managed auth on Opengeni Console's host", () => {
         origins,
       ),
     ).toThrow();
+  });
+
+  test("a sign-in may return to every allowed host, the Console host included", () => {
+    const origins = managedAuthPublicOrigins(
+      testSettings({ ...hosts, betterAuthTrustedOrigins: "https://app.opengeni.test" }),
+    );
+    expect(origins).toContain("https://app.opengeni.test");
+    expect(origins).toContain("https://console.opengeni.test");
+    expect(origins).not.toContain("https://attacker.test");
   });
 });

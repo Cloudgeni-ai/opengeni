@@ -269,12 +269,12 @@ export function ConsoleSessionsRoute() {
             label="Sessions"
             nameLabel="Session"
             columns={[
-              { id: "workspace", label: "Workspace", width: 124 },
-              { id: "user", label: "End user", width: 120 },
-              { id: "feedback", label: "Feedback", width: 64 },
-              { id: "turns", label: "Turns", width: 48, align: "end" },
-              { id: "cost", label: "Cost", width: 72, align: "end", leadsWhenFolded: true },
-              { id: "updated", label: "Updated", width: 104, align: "end" },
+              { id: "workspace", label: "Workspace", width: 112 },
+              { id: "user", label: "End user", width: 104 },
+              { id: "feedback", label: "Feedback", width: 60 },
+              { id: "turns", label: "Turns", width: 44, align: "end" },
+              { id: "cost", label: "Cost", width: 64, align: "end", leadsWhenFolded: true },
+              { id: "updated", label: "Updated", width: 88, align: "end" },
             ]}
           >
             {state.sessions.map((session) => (
@@ -295,13 +295,17 @@ export function ConsoleSessionsRoute() {
                   cost: formatMicros(session.costMicros),
                   updated: <RelativeTime date={session.updatedAt} />,
                 }}
-                onOpen={() =>
+                // A real link: the title is its target, and it opens in a new tab too.
+                href={`/console/sessions/${encodeURIComponent(session.workspaceId)}/${encodeURIComponent(session.id)}?org=${encodeURIComponent(search.org)}`}
+                onOpen={(event) => {
+                  if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                  event.preventDefault();
                   void navigate({
                     to: "/console/sessions/$workspaceId/$sessionId",
                     params: { workspaceId: session.workspaceId, sessionId: session.id },
                     search,
-                  })
-                }
+                  });
+                }}
               />
             ))}
           </RowList>

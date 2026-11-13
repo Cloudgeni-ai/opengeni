@@ -190,7 +190,21 @@ export function rangeLabel(range: ConsoleRange): string {
 }
 
 /** Micro-USD as the billing pages show money: "$12.40". */
-export function formatMicros(micros: number): string {
+/**
+ * USD micros as money. A cost under a cent reads "<$0.01" in lists and
+ * tiles; `precise` (a session's own cost) shows its first significant
+ * digits instead, such as "$0.0025".
+ */
+export function formatMicros(micros: number, options: { precise?: boolean } = {}): string {
+  if (micros > 0 && micros < 10_000) {
+    if (!options.precise) return `<${formatMoneyMicros(10_000, "usd")}`;
+    return new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency: "USD",
+      currencyDisplay: "narrowSymbol",
+      maximumSignificantDigits: 2,
+    }).format(micros / 1_000_000);
+  }
   return formatMoneyMicros(micros, "usd");
 }
 

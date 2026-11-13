@@ -22,7 +22,7 @@ Console host:
   workspaces or chats open Overview. Sign-in returns, password reset, account
   setup, shared chats and other fixed public pages keep their path.
 - sign-in, sign-up, password reset and email verification use Console's own
-  sign-in page, and post-sign-in, Google or GitHub sign-in and invitation
+  sign-in page, and post-sign-in, Google sign-in and invitation
   links return to the Console host.
 - Members (invite, roles, remove), Usage and billing (top-ups, plans, budgets,
   Stripe returns), API keys and the organization name work inside Console with
@@ -34,7 +34,7 @@ The API takes the host a link should open on from the request: an allowed
 `x-forwarded-host` (`OPENGENI_BETTER_AUTH_ALLOWED_HOSTS`), else
 `OPENGENI_PUBLIC_BASE_URL`. That chooses the host of verification emails,
 invitation account-setup links (a resent invitation keeps the host it was
-first sent from), Google and GitHub sign-in returns and the Stripe return
+first sent from), Google sign-in returns and the Stripe return
 pages Console asks for.
 
 A deployment serving Console on its own host sets:
@@ -43,14 +43,17 @@ A deployment serving Console on its own host sets:
 | --- | --- |
 | `OPENGENI_BETTER_AUTH_ALLOWED_HOSTS` | the app and Console hosts, e.g. `app.opengeni.ai,console.opengeni.ai` |
 | `OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS` | both origins, e.g. `https://app.opengeni.ai,https://console.opengeni.ai` (browser mutations, passkeys) |
-| `OPENGENI_BETTER_AUTH_COOKIE_DOMAIN` | the shared parent, e.g. `.opengeni.ai`, so one sign-in covers both hosts |
+| `OPENGENI_BETTER_AUTH_COOKIE_DOMAIN` | optional: the shared parent, e.g. `.opengeni.ai`, so one sign-in covers both hosts. Unset, each host keeps its own host-only sign-in (same accounts and organizations); everything above works on the Console host either way |
 | `OPENGENI_BETTER_AUTH_COOKIE_PREFIX` | optional; a distinct prefix (e.g. `opengeni-staging`) keeps staging's cookies apart from production's on a shared parent domain. Unset keeps Better Auth's default name, so existing sessions stay signed in |
-| Google and GitHub OAuth apps | add `https://<console host>/v1/auth/callback/google` and `/github` as redirect URIs |
+| Google OAuth client | add `https://<console host>/v1/auth/callback/google` as a redirect URI |
 
 The web server proxies `/v1` with the incoming host as `x-forwarded-host`, and
 its Content-Security-Policy uses `'self'`, so no other change is needed there.
 Passkeys are bound to the hostname they were made on: a passkey made on the
-app host does not sign in on the Console host.
+app host does not sign in on the Console host (one made there does, with the
+Console origin in `OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS`). A GitHub OAuth app
+has a single callback host, so the Console host offers Google and email
+sign-in, not GitHub.
 
 ## Managed workspaces
 
@@ -158,7 +161,7 @@ workspaces and sets `truncated: true` when there are more.
 
 ## Not yet
 
-Passkeys shared between the app and Console hosts, a Console-specific
+GitHub sign-in and passkeys shared between the app and Console hosts, a Console-specific
 onboarding for someone who has no organization yet (they get the app's
 organization setup, then land in Console), and Insights inside Console.
 Organization-level agents shared across managed workspaces, end-user opt-out,

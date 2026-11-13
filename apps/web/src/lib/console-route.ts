@@ -66,6 +66,19 @@ export function isConsoleHostname(hostname: string): boolean {
   );
 }
 
+/**
+ * The social sign-in buttons a host offers. A GitHub OAuth app has one
+ * callback host, the app's, so the Console host offers Google only.
+ */
+export function socialProvidersForHost<T extends string>(
+  hostname: string,
+  providers: readonly T[],
+): T[] {
+  return isConsoleHostname(hostname)
+    ? providers.filter((provider) => provider !== "github")
+    : [...providers];
+}
+
 /** Whether this page is served on a Console host, where nothing leads into the app. */
 export function onConsoleHost(): boolean {
   return typeof window !== "undefined" && isConsoleHostname(window.location.hostname);

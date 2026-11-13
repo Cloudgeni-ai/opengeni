@@ -22,6 +22,7 @@ import {
   parseConsoleSearch,
   parseConsoleSessionsSearch,
   parseConsoleUsageSearch,
+  socialProvidersForHost,
 } from "../src/lib/console-route";
 import { ConsoleApiKeysRoute, ConsoleNewApiKeyRoute } from "../src/routes/console/api-keys";
 import {
@@ -594,7 +595,7 @@ createRoot(document.getElementById("root")!).render(
         <SignedOutPage pitch="console">
           <ManagedAuthPanel
             presentation="embedded"
-            socialProviders={["google", "github"]}
+            socialProviders={socialProvidersForHost(location.hostname, ["google", "github"])}
             onSocialSubmit={async () => undefined}
             onSubmit={async () => undefined}
           />

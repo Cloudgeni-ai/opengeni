@@ -1478,9 +1478,10 @@ deployment's configured browser session-set mode.
 Opengeni Console can be served on its own host (`console.opengeni.ai`,
 `staging.console.opengeni.ai`) by the same web and API deployment. Add the
 host to `OPENGENI_BETTER_AUTH_ALLOWED_HOSTS` and its origin to
-`OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS`, share the session with
-`OPENGENI_BETTER_AUTH_COOKIE_DOMAIN`, and register its Google and GitHub
-sign-in callbacks. `OPENGENI_BETTER_AUTH_COOKIE_PREFIX` optionally renames the
+`OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS`, optionally share the session with
+`OPENGENI_BETTER_AUTH_COOKIE_DOMAIN` (unset, the Console host has its own
+sign-in), and register its Google sign-in callback (the Console host offers
+no GitHub sign-in). `OPENGENI_BETTER_AUTH_COOKIE_PREFIX` optionally renames the
 auth cookies (for example to keep staging and production apart on one parent
 domain); changing it signs everyone out, and leaving it unset keeps Better
 Auth's default names. See [`opengeni-console.md`](opengeni-console.md#its-own-host).

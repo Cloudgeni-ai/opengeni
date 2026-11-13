@@ -7,6 +7,7 @@ import {
   parseConsoleSearch,
   parseConsoleSessionsSearch,
   parseConsoleUsageSearch,
+  socialProvidersForHost,
 } from "./console-route";
 
 const org = "11111111-1111-4111-8111-111111111111";
@@ -100,5 +101,15 @@ describe("Console search", () => {
     expect(parseConsoleUsageSearch({ workspace: "x", checkout: "success" })).toEqual({
       checkout: "success",
     });
+  });
+});
+
+describe("socialProvidersForHost", () => {
+  test("the Console host offers Google only", () => {
+    expect(socialProvidersForHost("console.opengeni.ai", ["google", "github"])).toEqual(["google"]);
+    expect(socialProvidersForHost("app.opengeni.ai", ["google", "github"])).toEqual([
+      "google",
+      "github",
+    ]);
   });
 });
