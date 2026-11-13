@@ -773,12 +773,22 @@ impl RecordKind {
 /// ~2k entries — trivial).
 struct Spool {
     dir: PathBuf,
-    /// Open handle for the segment currently being appended.
-    active: Option<(u64, fs::File, u64 /* bytes written */)>,
+    /// The segment currently being appended.
+    active: Option<ActiveSegment>,
     index: VecDeque<FrameLoc>,
     /// Physical bytes present per segment, including records whose logical
     /// frames were acknowledged before the whole segment became deletable.
     segment_sizes: HashMap<u64, u64>,
+}
+
+/// The segment a spool appends to. Its append handle is held only while the
+/// op can still produce frames: the exit record closes it, so a completed op
+/// awaiting its final ack holds no descriptor however long it is retained.
+/// Replay reads open their own handle.
+struct ActiveSegment {
+    id: u64,
+    file: Option<fs::File>,
+    written: u64,
 }
 
 #[derive(Debug, Default)]
@@ -813,11 +823,11 @@ impl Spool {
     /// reservation after I/O failure; stale pre-existing files are excluded.
     fn charged_bytes_after_failure(&self) -> Option<u64> {
         let committed = self.segment_sizes.values().copied().sum::<u64>();
-        let partial = if let Some((segment, _, written)) = &self.active {
-            fs::metadata(self.segment_path(*segment))
+        let partial = if let Some(active) = &self.active {
+            fs::metadata(self.segment_path(active.id))
                 .ok()?
                 .len()
-                .saturating_sub(*written)
+                .saturating_sub(active.written)
         } else {
             0
         };
@@ -830,10 +840,10 @@ impl Spool {
         // a hard size guarantee).
         let needs_new = match &self.active {
             None => true,
-            Some((_, _, written)) => *written >= segment_bytes,
+            Some(active) => active.written >= segment_bytes,
         };
         if needs_new {
-            let next_id = self.active.as_ref().map_or(0, |(id, _, _)| id + 1);
+            let next_id = self.active.as_ref().map_or(0, |active| active.id + 1);
             let file = fs::OpenOptions::new()
                 .create_new(true)
                 .append(true)
@@ -842,9 +852,29 @@ impl Spool {
                     during: "open segment",
                     source,
                 })?;
-            self.active = Some((next_id, file, 0));
+            self.active = Some(ActiveSegment {
+                id: next_id,
+                file: Some(file),
+                written: 0,
+            });
         }
-        let (segment, file, written) = self.active.as_mut().expect("active segment ensured above");
+        let active_id = self.active.as_ref().map_or(0, |active| active.id);
+        let path = self.segment_path(active_id);
+        let active = self.active.as_mut().expect("active segment ensured above");
+        if active.file.is_none() {
+            // Only a frame after the exit record lands here; reopen the
+            // closed segment rather than starting a colliding one.
+            let file = fs::OpenOptions::new()
+                .append(true)
+                .open(path)
+                .map_err(|source| RetentionError::SpoolIo {
+                    during: "reopen segment",
+                    source,
+                })?;
+            active.file = Some(file);
+        }
+        let segment = active.id;
+        let file = active.file.as_mut().expect("append handle ensured above");
 
         let payload: &[u8] = match &frame.body {
             FrameBody::Data { bytes, .. } => bytes,
@@ -871,14 +901,18 @@ impl Spool {
         let record_len = RECORD_HEADER_LEN as u64 + u64::from(payload_len);
         self.index.push_back(FrameLoc {
             seq: frame.seq,
-            segment: *segment,
-            offset: *written,
+            segment,
+            offset: active.written,
             record_len,
             payload_len: u64::from(payload_len),
             kind: RecordKind::of(&frame.body),
         });
-        *written += record_len;
-        *self.segment_sizes.entry(*segment).or_default() += record_len;
+        active.written += record_len;
+        if matches!(frame.body, FrameBody::Exit { .. }) {
+            // The op produces nothing after its exit record.
+            active.file = None;
+        }
+        *self.segment_sizes.entry(segment).or_default() += record_len;
         Ok(())
     }
 
@@ -897,10 +931,7 @@ impl Spool {
             self.index.pop_front();
             let segment_still_referenced =
                 self.index.front().is_some_and(|next| next.segment == seg);
-            let segment_is_active = self
-                .active
-                .as_ref()
-                .is_some_and(|(active, _, _)| *active == seg);
+            let segment_is_active = self.active.as_ref().is_some_and(|active| active.id == seg);
             if !segment_still_referenced && !segment_is_active {
                 // Best-effort delete: a failed unlink only leaks disk, never
                 // correctness; the next free attempt will not retry (the index
@@ -914,16 +945,17 @@ impl Spool {
         // remove it immediately. Otherwise an attached high-volume command
         // could keep gigabytes of already-acked disk charged until teardown.
         if self.index.is_empty() {
-            if let Some((active_segment, file, written)) = self.active.take() {
-                drop(file);
-                let path = self.segment_path(active_segment);
+            if let Some(mut active) = self.active.take() {
+                active.file = None;
+                let path = self.segment_path(active.id);
                 if fs::remove_file(&path).is_ok() {
-                    freed.disk_bytes += self.segment_sizes.remove(&active_segment).unwrap_or(0);
-                } else if let Ok(file) = fs::OpenOptions::new().append(true).open(path) {
+                    freed.disk_bytes += self.segment_sizes.remove(&active.id).unwrap_or(0);
+                } else {
                     // Windows requires closing before unlink. If deletion
-                    // still fails, restore the append handle and retain the
-                    // disk charge rather than corrupting or undercounting it.
-                    self.active = Some((active_segment, file, written));
+                    // still fails, keep the segment (a later append reopens
+                    // it) and retain the disk charge rather than corrupting
+                    // or undercounting it.
+                    self.active = Some(active);
                 }
             }
         }
@@ -944,8 +976,13 @@ impl Spool {
         for loc in self.index.iter().filter(|l| l.seq > from_exclusive) {
             // Make sure appended bytes are on disk before reading them back
             // through a second handle.
-            if let Some((active_seg, file, _)) = &mut self.active {
-                if *active_seg == loc.segment {
+            if let Some(ActiveSegment {
+                id,
+                file: Some(file),
+                ..
+            }) = &mut self.active
+            {
+                if *id == loc.segment {
                     file.flush().map_err(|source| RetentionError::SpoolIo {
                         during: "flush before replay read",
                         source,
@@ -1646,5 +1683,66 @@ mod tests {
             walked.extend(chunk);
         }
         assert_eq!(walked, log.replay(0).unwrap());
+    }
+
+    /// Descriptors this process holds on files under `dir`.
+    #[cfg(target_os = "linux")]
+    fn open_descriptors_under(dir: &std::path::Path) -> usize {
+        fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(|entry| fs::read_link(entry.ok()?.path()).ok())
+            .filter(|target| target.starts_with(dir))
+            .count()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_completed_spooled_op_holds_no_descriptor_while_it_awaits_its_ack() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut logs = (0..32)
+            .map(|i| RetentionLog::new(small_config(), dir.path().join(i.to_string())))
+            .collect::<Vec<_>>();
+        for log in &mut logs {
+            for chunk in 0..6u8 {
+                log.append(data(&[chunk; 24])).unwrap();
+            }
+            assert!(log.is_spooled());
+        }
+        // Running ops keep their append handle.
+        assert_eq!(open_descriptors_under(dir.path()), logs.len());
+        for log in &mut logs {
+            log.append(FrameBody::Exit {
+                payload: b"done".to_vec(),
+            })
+            .unwrap();
+        }
+        // Retained, unacknowledged and complete: nothing stays open.
+        assert_eq!(open_descriptors_under(dir.path()), 0);
+        for log in &mut logs {
+            let replay = log.replay(0).unwrap();
+            assert_eq!(replay.len(), 7);
+            assert_eq!(
+                replay.last().unwrap().body,
+                FrameBody::Exit {
+                    payload: b"done".to_vec()
+                }
+            );
+        }
+        assert_eq!(open_descriptors_under(dir.path()), 0);
+
+        // A frame after the exit record still lands in the same spool.
+        logs[0].append(FrameBody::Progress).unwrap();
+        assert_eq!(
+            logs[0].replay(0).unwrap().iter().map(|f| f.seq).max(),
+            Some(8)
+        );
+
+        // The final ack still removes every segment from disk.
+        for (i, log) in logs.iter_mut().enumerate() {
+            log.ack(if i == 0 { 8 } else { 7 });
+            let spool = dir.path().join(i.to_string());
+            let left = fs::read_dir(&spool).map_or(0, Iterator::count);
+            assert_eq!(left, 0, "spool {i} keeps no segment after its final ack");
+        }
     }
 }

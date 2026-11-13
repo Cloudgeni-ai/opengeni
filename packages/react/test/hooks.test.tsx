@@ -4910,7 +4910,7 @@ describe("useComposer durable draft and control binding", () => {
     await hook.unmount();
   });
 
-  test("a whitespace-only file message saves and submits the same placeholder", async () => {
+  test("a whitespace-only file message submits the placeholder without saving it first", async () => {
     const savedTexts: string[] = [];
     const submittedTexts: string[] = [];
     const resource = {
@@ -4959,7 +4959,8 @@ describe("useComposer durable draft and control binding", () => {
     await flush();
     await flushing(async () => hook.result.current.setValue(" \n"));
     await flushing(async () => expect(await hook.result.current.send()).toBe(true));
-    expect(savedTexts.at(-1)).toBe(FILE_ONLY_MESSAGE_TEXT(englishText));
+    // The send carries its own content; nothing is saved before it.
+    expect(savedTexts).not.toContain(FILE_ONLY_MESSAGE_TEXT(englishText));
     expect(submittedTexts).toEqual([FILE_ONLY_MESSAGE_TEXT(englishText)]);
     await hook.unmount();
   });
@@ -5290,8 +5291,13 @@ describe("useComposer durable draft and control binding", () => {
         await flush(10_000);
         expect(hook.result.current.reconnecting).toBe(false);
       } else {
-        expect(hook.result.current.value).toBe(initial.text);
-        expect(hook.result.current.restoredResources).toEqual([resource]);
+        // The message left the box when it was sent; it waits, unconfirmed,
+        // as a message to retry, and the retry repeats it exactly.
+        expect(hook.result.current.value).toBe("");
+        expect(hook.result.current.restoredResources).toEqual([]);
+        expect(hook.result.current.optimisticMessages).toMatchObject([
+          { text: initial.text, delivery: "steer", state: "failed", outcomeUnknown: true },
+        ]);
         expect(hook.result.current.error).toMatchObject({
           outcomeUnknown: true,
         });
@@ -5611,12 +5617,9 @@ describe("useComposer durable draft and control binding", () => {
         undefined,
       );
       await flush();
-      expect(second.result.current.value).toBe(
-        delivery === "send" ? "" : "original uncertain prompt",
-      );
-      expect(second.result.current.restoredResources).toEqual(
-        delivery === "send" ? [] : [originalResource],
-      );
+      // Both left the box when sent; the uncertain message is kept as such.
+      expect(second.result.current.value).toBe("");
+      expect(second.result.current.restoredResources).toEqual([]);
       if (delivery === "steer") {
         expect(second.result.current.steering).toMatchObject({
           phase: "failed",
@@ -6253,7 +6256,7 @@ describe("useComposer file-only send", () => {
     await hook.unmount();
   });
 
-  test("persists the same file-only text that it submits", async () => {
+  test("submits a file-only message with its placeholder text and no save first", async () => {
     const initial: ComposerDraft = {
       revision: 3,
       text: "",
@@ -6298,9 +6301,8 @@ describe("useComposer file-only send", () => {
 
     await flushing(async () => expect(await hook.result.current.send()).toBe(true));
 
-    expect(saved).toHaveLength(1);
+    expect(saved).toHaveLength(0);
     expect(sent).toHaveLength(1);
-    expect((saved[0] as { text: string }).text).toBe(FILE_ONLY_MESSAGE_TEXT(englishText));
     expect((sent[0] as { text: string }).text).toBe(FILE_ONLY_MESSAGE_TEXT(englishText));
     await hook.unmount();
   });

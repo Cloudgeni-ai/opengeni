@@ -315,6 +315,12 @@ type ActiveRemoteExec = {
   failOwnershipTransfer(opId: string): void;
   releaseCancellationAuthority(opId: string): void;
   settleNotDispatched(opId: string): void;
+  /** The provider minted this exact operation id. */
+  noteMinted(opId: string): void;
+  /** The invocation ended without minting this entry's operation id, so no
+   * operation of that identity exists to cancel, observe or hand off (for
+   * example, a secret file write before the command failed). Releases it. */
+  settleIfNeverMinted(): void;
   bindTransport(transport: RemoteOperationControl): void;
   /** End the operation's foreground wait now (a Steer is waiting); see yieldExecCommand. */
   requestYield(): void;
@@ -1427,6 +1433,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               invokeExecNative(commandInput),
             ),
           {
+            onDurableOpIdMinted: (opId) => remoteExec?.noteMinted(opId),
             onDurableOpOwnershipTransferStarted: (opId) => remoteExec?.startOwnershipTransfer(opId),
             onDurableOpOwnershipTransferFailed: (opId) => remoteExec?.failOwnershipTransfer(opId),
             onDurableOpOwnershipTransferred: (opId) =>
@@ -1436,6 +1443,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
           },
         );
       } catch (error) {
+        remoteExec?.settleIfNeverMinted();
         const retainedProcess =
           !useRemoteOpCancellation && error instanceof RoutingMutationOutcomeUnknownError
             ? error.retainedProcess
@@ -1481,6 +1489,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
           throw error;
         }
       }
+      remoteExec?.settleIfNeverMinted();
       const initial = nativeCommandBanner(initialNative);
       const initialResult = nativeCommandResult(initialNative);
       const initialPage = lossless
@@ -1917,6 +1926,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               tool.invoke(runContext, cancellableInput, details),
             ),
           {
+            onDurableOpIdMinted: (opId) => remoteExec?.noteMinted(opId),
             onDurableOpOwnershipTransferStarted: (opId) => remoteExec?.startOwnershipTransfer(opId),
             onDurableOpOwnershipTransferFailed: (opId) => remoteExec?.failOwnershipTransfer(opId),
             onDurableOpOwnershipTransferred: (opId) =>
@@ -1927,6 +1937,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         ),
       );
     } catch (error) {
+      remoteExec?.settleIfNeverMinted();
       if (isSecretReferenceError(error)) {
         // Delivery-time refusal (e.g. cmd.exe on a machine), before dispatch.
         pendingStart?.settle();
@@ -1987,6 +1998,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         throw error;
       }
     }
+    remoteExec?.settleIfNeverMinted();
     if (typeof output !== "string") {
       if (remoteExec && !remoteExec.ownershipTransferred) {
         const terminal = nativeCommandResult(output).exitCode !== null;
@@ -2869,6 +2881,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     let abandonmentRequest: Promise<void> | null = null;
     let observation: Promise<RemoteOperationObservation | null> | null = null;
     let ownershipTransferPending = false;
+    let minted = false;
     let transport: RemoteOperationControl | null =
       session.requiresPinnedRemoteOperationControl?.() === true ? null : session;
     const requestYield = () => {
@@ -2926,6 +2939,12 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       },
       settleNotDispatched: (unstartedOpId) => {
         if (unstartedOpId === opId) entry.settle();
+      },
+      noteMinted: (mintedOpId) => {
+        if (mintedOpId === opId) minted = true;
+      },
+      settleIfNeverMinted: () => {
+        if (!minted) entry.settle();
       },
       cancel: () => {
         cancellation ??= (async () => {

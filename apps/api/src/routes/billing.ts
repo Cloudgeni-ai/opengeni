@@ -13,6 +13,7 @@ import {
   CreateBillingPortalResponse,
   CreateCheckoutRequest,
   CreateCheckoutResponse,
+  ListBillingReceiptsQuery,
   OrganizationUsageQuery,
   OrganizationUsageWorkspacePageQuery,
   type AccessContext,
@@ -57,6 +58,7 @@ import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
 import { subscriptionStore } from "../billing-subscription-store";
 import { StripeSubscriptions, subscriptionWebhookEvent } from "../billing-subscriptions";
 import { serializedStripeCustomer } from "../billing-stripe-customer";
+import { listStripeReceipts } from "../billing-receipts";
 import { parseRequestBody, parseRequestQuery } from "../http/request-body";
 import { errorMessage } from "@opengeni/contracts/values";
 import {
@@ -341,6 +343,39 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
         balance: entry ? await getBillingBalance(deps.db, accountId) : null,
       }),
     );
+  });
+
+  // Every payment the organization made, with its receipt. Reading never
+  // creates a Stripe customer: an organization that never paid has none.
+  app.get("/v1/billing/receipts", async (c) => {
+    if (deps.settings.billingMode !== "stripe") {
+      throw new HTTPException(404, { message: "stripe billing is not enabled" });
+    }
+    const context = await requireAccessContext(c, deps);
+    const accountId = requireSelectedAccount(context, c.req.query("accountId"), "billing:read");
+    const query = parseRequestQuery(ListBillingReceiptsQuery, c.req.query(), {
+      status: 400,
+      message: "invalid receipts query",
+    });
+    const provider = stripeCustomerProvider(deps);
+    const customer = await withRlsContext(deps.db, { accountId, workspaceId: null }, (tx) =>
+      getBillingCustomer(tx, accountId, provider),
+    );
+    if (!customer) return c.json({ receipts: [], nextCursor: null });
+    try {
+      return c.json(
+        await listStripeReceipts(stripeClient(deps), customer.providerCustomerId, {
+          cursor: query.cursor,
+          limit: query.limit,
+        }),
+      );
+    } catch (error) {
+      // A cursor from another customer, or one Stripe no longer knows.
+      if (query.cursor && error instanceof Stripe.errors.StripeInvalidRequestError) {
+        throw new HTTPException(400, { message: "invalid receipts cursor" });
+      }
+      throw error;
+    }
   });
 
   app.post("/v1/billing/portal", async (c) => {

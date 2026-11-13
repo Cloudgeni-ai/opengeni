@@ -917,6 +917,7 @@ async fn a_vm_whose_disk_check_was_cut_short_still_wakes_and_runs() {
     const SAVE_LATER: SleepConfig = SleepConfig {
         pause_after_ms: Some(30),
         save_after_ms: Some(1_500),
+        keep_memory: true,
         ..NEVER
     };
     let lab = Lab::new(Delays::default(), HostPolicy::default()).await;

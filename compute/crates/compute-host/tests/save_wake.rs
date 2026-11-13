@@ -327,6 +327,7 @@ fn ladder(deepest: LevelName) -> SleepConfig {
     let mut config = SleepConfig {
         pause_after_ms: Some(500),
         save_after_ms: Some(1_000),
+        keep_memory: true,
         drop_after_ms: Some(1_000),
         ..SleepConfig::default()
     };
@@ -478,6 +479,98 @@ async fn guest_processes_survive_waking_from_object_storage() {
         )
         .await;
     }
+}
+
+/// A guest whose memory is not kept is ended with nothing of it saved once
+/// its rules call for it, and its next wake boots it: its files are as it
+/// left them, and its programs and what it held in memory are gone. No
+/// memory image is ever made for it.
+///
+/// The lab's hosts send guests no notice, so nothing asks this guest to
+/// write its disk out as it pauses: it syncs its own write, as a guest on
+/// a host with a notice port is asked to.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_guest_whose_memory_is_not_kept_boots_afresh_with_its_files() {
+    const UID: u32 = (1 << 30) + 6000;
+    let Some(lab) = lab() else { return };
+    let agent = start(&lab, &format!("e{}", short()), UID, NoStore).await;
+    let id: Id = "00000000-0000-4000-8000-0000000000b9".parse().unwrap();
+    let config = SandboxConfig {
+        disk_mib: None,
+        reach: Vec::new(),
+        image: None,
+        vcpus: 2,
+        memory_mib: 512,
+        memory_request_mib: None,
+        cpu_request_millis: None,
+        sleep: SleepConfig {
+            keep_memory: false,
+            ..ladder(LevelName::Saved)
+        },
+        link: None,
+    };
+    let created = agent
+        .client
+        .call(&Request::Create { id, config })
+        .await
+        .unwrap();
+    assert!(matches!(created, Reply::Done), "{created:?}");
+    exec(&agent.client, id, SETUP).await;
+    exec(&agent.client, id, "echo kept > /kept; sync").await;
+
+    let started = Instant::now();
+    let launches = loop {
+        let status = status(&agent.client).await;
+        let sandbox = status.sandboxes.iter().find(|s| s.id == id).unwrap();
+        if sandbox.level == LevelName::Saved && sandbox.step.is_none() {
+            assert!(!sandbox.memory_saved, "{sandbox:?}");
+            break sandbox.launches;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(120),
+            "its VM never ended: {sandbox:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let images = agent
+        .root
+        .join("s/vm/firecracker")
+        .join(id.to_string())
+        .join("images");
+    let generations = std::fs::read_dir(&images).map_or(0, |entries| {
+        entries
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().len() == 16)
+            .count()
+    });
+    assert_eq!(generations, 0, "a memory image in {}", images.display());
+
+    let woke = Instant::now();
+    let output = exec(
+        &agent.client,
+        id,
+        "echo kept=$(cat /kept)\n\
+         test -e /dev/shm/count && echo counting=yes || echo counting=no\n\
+         test -e /dev/shm/blob && echo blob=yes || echo blob=no",
+    )
+    .await;
+    eprintln!("booted afresh and checked in {:?}", woke.elapsed());
+    assert_eq!(field(&output, "kept"), "kept", "{output}");
+    assert_eq!(field(&output, "counting"), "no", "{output}");
+    assert_eq!(field(&output, "blob"), "no", "{output}");
+    let status = status(&agent.client).await;
+    let sandbox = status.sandboxes.iter().find(|s| s.id == id).unwrap();
+    assert_eq!(sandbox.launches, launches + 1, "{sandbox:?}");
+
+    let removed = agent
+        .client
+        .call(&Request::Remove {
+            id,
+            generation: None,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(removed, Reply::Done), "{removed:?}");
 }
 
 /// Wakes the sandbox through a pager, then kills the agent process while

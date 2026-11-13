@@ -177,6 +177,8 @@ pub struct ReadyClones {
 
 /// What a host can take on now. Fields it does not know are ignored, so
 /// hosts can report more than an older service reads.
+// Each bool is a separate thing the host tells, read on its own.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capacity {
     /// Memory free for sandboxes above the host's buffer, in MiB.
@@ -254,6 +256,14 @@ pub struct Capacity {
     /// earlier release.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<u64>,
+    /// Whether the run of the agent before this one stopped because it was
+    /// asked to (a signal, as an upgrade, a restart or a planned reboot
+    /// sends) and finished stopping. The service counts this run's start
+    /// as a restart only when it was not: its watchdog stopped it, it
+    /// crashed, hung in its stop or lost its machine. `false` from a host
+    /// of an earlier release, whose every restart counts.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub after_asked_stop: bool,
     /// What the host is now, as it would register: told here for the same
     /// reason as [`Capacity::guest`], so that a host whose configuration
     /// changed under a kept registration is placed on what it is. The

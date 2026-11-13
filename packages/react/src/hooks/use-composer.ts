@@ -160,7 +160,18 @@ type PendingComposerOperation = {
   annotationsAtSend: DraftTimelineAnnotation[];
   /** Latest local text/resources that must survive an uncertain delivery. */
   newerShadow: ComposerDraftShadow;
+  /** The send takes the box's text (not an explicit `text` argument). */
   clearDraftOnAccept: boolean;
+  /**
+   * The send took what it carries out of the box when it was sent (the
+   * text when `clearDraftOnAccept`, its files and annotations), so the box
+   * already shows what comes next. An answer later never clears the box;
+   * a definitive refusal gives the content back. Absent on operations kept
+   * from before this, which still hold their text in the box until accepted.
+   */
+  emptiedAtSend?: boolean | undefined;
+  /** The draft as sent, for a server that needs it saved first. */
+  draftPayload?: SaveComposerDraftRequest | null | undefined;
   /** False after remount when the original input carried secret credentials. */
   canRetry: boolean;
 };
@@ -1018,6 +1029,15 @@ export function useComposer(
   // This composer's latest accepted save per chat, so a save on leaving can
   // follow one still under way.
   const settledWritesRef = useRef(new Map<string, SettledDraftWrite>());
+  // Set once the server refuses a Send because it is not the saved draft.
+  // Only a server older than "Send wins" does that; for it a durable Send
+  // saves the draft before it submits.
+  const draftFencedSendRef = useRef(false);
+  // A draft save of this page's went out and no answer came back: the server
+  // may hold it as a revision this page never saw. Until a save is answered,
+  // Send saves first, so that write is taken as this page's own and not kept
+  // as another device's newer draft.
+  const draftWriteUnconfirmedRef = useRef(false);
   const onSent = useCallback(
     (text: string, input: SendMessageInput) => {
       notifyComposerObserver(options.onSent, text, input);
@@ -1100,6 +1120,7 @@ export function useComposer(
     setPolicyPicked(policyPickedRef.current);
     draftRef.current = null;
     sendBasisRef.current = null;
+    draftWriteUnconfirmedRef.current = false;
     restoredResourcesRef.current = shadow?.resources ?? [];
     lastSavedSignature.current = null;
     savePickPromptlyRef.current = false;
@@ -1748,12 +1769,12 @@ export function useComposer(
   );
 
   /**
-   * Take the session's one draft slot. The server accepts a durable send only
-   * with exactly the content saved at the revision it names, so a send holds
-   * the slot from its save through its submit: no autosave and no other send
-   * can write the draft in between. Everything that writes the draft waits
-   * its turn here, in order. Call the returned function to let the next one
-   * in; it is safe to call more than once.
+   * Take the session's one draft slot. Everything that writes the draft
+   * waits its turn here, in order. A durable send holds it through its
+   * submit: a save of this page's already under way lands first, so the
+   * send names the revision that save made, and no autosave or other send
+   * writes the draft before the server has cleared it. Call the returned
+   * function to let the next one in; it is safe to call more than once.
    */
   const acquireDraftSlot = useCallback(async (): Promise<() => void> => {
     let release!: () => void;
@@ -1829,6 +1850,7 @@ export function useComposer(
           try {
             rememberPageDraftWrite(writesKey, draftContentKey(request));
             const saved = await client.saveComposerDraft(workspaceId, sessionId, request);
+            draftWriteUnconfirmedRef.current = false;
             settledWritesRef.current.set(writesKey, {
               revision: saved.revision,
               content: draftContentKey(request),
@@ -1838,6 +1860,10 @@ export function useComposer(
             return true;
           } catch (cause) {
             problem = asError(cause);
+            // No answer: the server may hold this write all the same.
+            if (isOutcomeUnknownError(cause) || isTransientServiceFailure(cause)) {
+              draftWriteUnconfirmedRef.current = true;
+            }
           }
           if (!owned()) return false;
           if (!isDraftConflictError(problem) || reread >= DRAFT_CONFLICT_REREADS) {
@@ -1852,6 +1878,7 @@ export function useComposer(
           if (!owned()) return false;
           const remoteContent = draftContentKey(draftPayload(remote));
           if (remoteContent === draftContentKey(request)) {
+            draftWriteUnconfirmedRef.current = false;
             adoptDraftBase(remote);
             return true;
           }
@@ -1869,6 +1896,126 @@ export function useComposer(
       }
     },
     [adoptDraftBase, client, durableDrafts, sessionId, workspaceId],
+  );
+
+  /**
+   * The draft revision a durable send names. The caller holds the draft
+   * slot. The server never refuses a send over the draft: it carries its own
+   * content, and afterwards the server clears the draft only while it is
+   * still at this revision or holds exactly what was sent, and keeps a newer
+   * one from another device. So a send saves nothing first, except when this
+   * page may have written a revision it never saw (a save that got no
+   * answer), when it carries a model, effort or speed pick the draft does
+   * not hold yet (the server makes a pick the chat's setting only from the
+   * saved draft), or when the server is older and still needs the saved
+   * content.
+   * `blocked` is an outage that stopped that save: nothing was sent.
+   */
+  const resolveSendDraftRevision = useCallback(
+    async (
+      payload: SaveComposerDraftRequest | null,
+      owner: { targetKey: string; generation: number },
+    ): Promise<{ revision: number | undefined; saved: boolean; blocked: Error | null }> => {
+      let saved = false;
+      if (
+        payload &&
+        (draftFencedSendRef.current ||
+          draftWriteUnconfirmedRef.current ||
+          pickNotSaved(payload, draftRef.current)) &&
+        // A save base that is another device's draft this page never showed
+        // is not saved over: the send goes ahead from the send basis.
+        !sendDraftBasis(draftRef.current, sendBasisRef.current).behind
+      ) {
+        let failure = null as Error | null;
+        saved = await saveDraftInSlot(
+          payload,
+          owner,
+          (problem) => {
+            failure = problem;
+          },
+          false,
+        );
+        if (!saved && failure) {
+          // Only an outage holds the message; otherwise it is sent from the
+          // draft as last seen, carrying what is in the box.
+          if (isTransientServiceFailure(failure)) {
+            return { revision: undefined, saved, blocked: failure };
+          }
+          setError(null);
+          setDraftConflict(null);
+        }
+      }
+      const basis = sendDraftBasis(draftRef.current, sendBasisRef.current);
+      if (basis.behind) keepNewerDraftAfterSend();
+      return { revision: basis.revision, saved, blocked: null };
+    },
+    [keepNewerDraftAfterSend, saveDraftInSlot],
+  );
+
+  /**
+   * A durable send that did not go through left the box it emptied, while
+   * the draft may still hold an earlier save of the message (the send saved
+   * nothing first). The emptied box is not an edit: it clears this page's
+   * own earlier save, but never saves over another device's newer draft.
+   * The caller holds the draft slot; typing since the send is left to
+   * autosave.
+   */
+  const settleEmptiedDraft = useCallback(
+    async (owner: { targetKey: string; generation: number }): Promise<void> => {
+      const base = draftRef.current;
+      if (
+        !base ||
+        !policyRef.current ||
+        valueRef.current !== "" ||
+        restoredResourcesRef.current.length > 0 ||
+        annotationsRef.current.length > 0
+      ) {
+        return;
+      }
+      const payload = composerDraftPayload(
+        base,
+        valueRef.current,
+        restoredResourcesRef.current,
+        annotationsRef.current,
+        pickedPolicy(policyPickedRef, policyRef),
+        resolveSendExtras(sendExtrasRef.current).resources ?? [],
+      );
+      // A failure here shows and recovers like an autosave failure.
+      await saveDraftInSlot(payload, owner, undefined, false);
+      if (sendDraftBasis(draftRef.current, sendBasisRef.current).behind) {
+        keepNewerDraftAfterSend();
+      }
+    },
+    [keepNewerDraftAfterSend, saveDraftInSlot],
+  );
+
+  /**
+   * Submit a durable send at `first.revision`. A server older than "Send
+   * wins" refuses a send that is not the saved draft. Then this saves the
+   * draft once, remembers that the server needs it, and submits again under
+   * the same client event ID, which the refusal did not use up.
+   */
+  const submitDurableSend = useCallback(
+    async <T>(
+      payload: SaveComposerDraftRequest | null,
+      owner: { targetKey: string; generation: number },
+      first: { revision: number; saved: boolean },
+      submit: (revision: number) => Promise<T>,
+      onRevision: (revision: number) => void,
+    ): Promise<T> => {
+      try {
+        return await submit(first.revision);
+      } catch (cause) {
+        if (first.saved || !payload || !isDraftConflictError(asError(cause))) throw cause;
+        draftFencedSendRef.current = true;
+        const next = await resolveSendDraftRevision(payload, owner);
+        if (next.blocked) throw next.blocked;
+        if (!next.saved || next.revision === undefined) throw cause;
+        onRevision(next.revision);
+        return await submit(next.revision);
+      }
+    },
+    [resolveSendDraftRevision],
   );
 
   const persistPayload = useCallback(
@@ -2130,39 +2277,29 @@ export function useComposer(
           }
         }
         let expectedDraftRevision: number | undefined;
+        // True when this send saved the draft first (see `resolveSendDraftRevision`).
+        let savedFirst = false;
         if (durableDrafts && operation.draftPayload) {
           releaseDraftSlot = await acquireDraftSlot();
-          let persistFailure = null as Error | null;
-          if (
-            // A retry repeats its first attempt, which already saved (or went
-            // ahead without saving): saving again could write over a newer
-            // draft from another device.
-            operation.expectedDraftRevision === undefined &&
-            // The save base is another device's draft this page never showed.
-            !sendDraftBasis(draftRef.current, sendBasisRef.current).behind &&
-            !(await saveDraftInSlot(
-              operation.draftPayload,
-              { targetKey: ownedTargetKey, generation: ownedGeneration },
-              (problem) => {
-                persistFailure = problem;
-              },
-              false,
-            ))
-          ) {
+          // A retry repeats its first attempt's revision, so the server
+          // replays that send instead of seeing a different request.
+          expectedDraftRevision = operation.expectedDraftRevision;
+          if (expectedDraftRevision === undefined) {
+            const resolved = await resolveSendDraftRevision(operation.draftPayload, {
+              targetKey: ownedTargetKey,
+              generation: ownedGeneration,
+            });
             // An update that blocks the draft save holds the send like any
             // other transient failure; nothing was submitted yet.
-            if (persistFailure && isTransientServiceFailure(persistFailure)) {
+            if (resolved.blocked) {
               notSubmitted = true;
-              throw persistFailure;
+              throw resolved.blocked;
             }
-            // Otherwise the save only keeps the draft in step. Send carries
-            // what is in the box and goes ahead from the draft as last seen.
-            setError(null);
-            setDraftConflict(null);
+            expectedDraftRevision = resolved.revision;
+            savedFirst = resolved.saved;
+          } else if (sendDraftBasis(draftRef.current, sendBasisRef.current).behind) {
+            keepNewerDraftAfterSend();
           }
-          const basis = sendDraftBasis(draftRef.current, sendBasisRef.current);
-          if (basis.behind) keepNewerDraftAfterSend();
-          expectedDraftRevision = operation.expectedDraftRevision ?? basis.revision;
           if (
             expectedDraftRevision !== undefined &&
             operation.expectedDraftRevision !== expectedDraftRevision
@@ -2183,7 +2320,7 @@ export function useComposer(
         ) {
           return;
         }
-        const wireInput = {
+        let wireInput = {
           ...operation.input,
           ...(expectedDraftRevision !== undefined ? { expectedDraftRevision } : {}),
         };
@@ -2198,44 +2335,62 @@ export function useComposer(
         let steerOrSend = operation.steerOrSend === true;
         const submit = async (): Promise<void> => {
           if (durableDrafts) {
-            if (!operation.draftPayload || expectedDraftRevision === undefined) {
+            const sendPayload = operation.draftPayload;
+            if (!sendPayload || expectedDraftRevision === undefined) {
               throw new ComposerStateError(t("hooks.useComposer.theDurableComposerDraftIs"));
             }
-            const result = await client
-              .submitComposerDraft(workspaceId, sessionId, {
-                text: operation.draftPayload.text,
-                annotations: operation.draftPayload.annotations,
-                resources: operation.draftPayload.resources,
-                // Absent while the draft follows the chat's settings.
-                ...(operation.draftPayload.model !== undefined
-                  ? { model: operation.draftPayload.model }
-                  : {}),
-                ...(operation.draftPayload.reasoningEffort !== undefined
-                  ? { reasoningEffort: operation.draftPayload.reasoningEffort }
-                  : {}),
-                ...(operation.draftPayload.latencyMode !== undefined
-                  ? { latencyMode: operation.draftPayload.latencyMode }
-                  : {}),
-                expectedDraftRevision,
-                clientEventId: operation.clientEventId,
-                delivery: steerOrSend ? "steer_or_send" : "send",
-                ...(wireInput.controlEtag ? { controlEtag: wireInput.controlEtag } : {}),
-                ...(wireInput.modelContext ? { modelContext: wireInput.modelContext } : {}),
-                ...(wireInput.mcpCredentialUpdates
-                  ? { mcpCredentialUpdates: wireInput.mcpCredentialUpdates }
-                  : {}),
-                ...(wireInput.connectionAccounts
-                  ? { connectionAccounts: wireInput.connectionAccounts }
-                  : {}),
-
-                ...(wireInput.personalResourceAttachment
-                  ? { personalResourceAttachment: wireInput.personalResourceAttachment }
-                  : {}),
-              })
-              .catch((cause: unknown) => {
-                mutationFailureObserved = true;
-                throw cause;
-              });
+            const result = await submitDurableSend(
+              sendPayload,
+              { targetKey: ownedTargetKey, generation: ownedGeneration },
+              { revision: expectedDraftRevision, saved: savedFirst },
+              (revision) =>
+                client
+                  .submitComposerDraft(workspaceId, sessionId, {
+                    text: sendPayload.text,
+                    annotations: sendPayload.annotations,
+                    resources: sendPayload.resources,
+                    // Absent while the draft follows the chat's settings.
+                    ...(sendPayload.model !== undefined ? { model: sendPayload.model } : {}),
+                    ...(sendPayload.reasoningEffort !== undefined
+                      ? { reasoningEffort: sendPayload.reasoningEffort }
+                      : {}),
+                    ...(sendPayload.latencyMode !== undefined
+                      ? { latencyMode: sendPayload.latencyMode }
+                      : {}),
+                    expectedDraftRevision: revision,
+                    clientEventId: operation.clientEventId,
+                    delivery: steerOrSend ? "steer_or_send" : "send",
+                    ...(wireInput.controlEtag ? { controlEtag: wireInput.controlEtag } : {}),
+                    ...(wireInput.modelContext ? { modelContext: wireInput.modelContext } : {}),
+                    ...(wireInput.mcpCredentialUpdates
+                      ? { mcpCredentialUpdates: wireInput.mcpCredentialUpdates }
+                      : {}),
+                    ...(wireInput.connectionAccounts
+                      ? { connectionAccounts: wireInput.connectionAccounts }
+                      : {}),
+                    ...(wireInput.personalResourceAttachment
+                      ? { personalResourceAttachment: wireInput.personalResourceAttachment }
+                      : {}),
+                  })
+                  .catch((cause: unknown) => {
+                    mutationFailureObserved = true;
+                    throw cause;
+                  }),
+              (revision) => {
+                // The send now goes ahead from the draft it saved; a retry
+                // repeats this revision.
+                expectedDraftRevision = revision;
+                savedFirst = true;
+                wireInput = { ...wireInput, expectedDraftRevision: revision };
+                replaceOptimisticSends((current) =>
+                  current.map((candidate) =>
+                    candidate.clientEventId === operation.clientEventId
+                      ? { ...candidate, expectedDraftRevision: revision }
+                      : candidate,
+                  ),
+                );
+              },
+            );
             acceptedResult = result;
             followAcceptedDraft(result.draft);
             releaseDraftSlot?.();
@@ -2332,6 +2487,9 @@ export function useComposer(
         // A send held for an update is not a delivery failure (yet).
         if (!markFailed(cause, outcomeUnknown)) {
           notifyComposerObserver(onDeliveryErrorRef.current, problem, operation.input, "send");
+          if (releaseDraftSlot) {
+            await settleEmptiedDraft({ targetKey: ownedTargetKey, generation: ownedGeneration });
+          }
         }
       } finally {
         releaseDraftSlot?.();
@@ -2369,8 +2527,10 @@ export function useComposer(
     onSent,
     options.events,
     replaceOptimisticSends,
-    saveDraftInSlot,
+    resolveSendDraftRevision,
     sessionId,
+    settleEmptiedDraft,
+    submitDurableSend,
     targetKey,
     workspaceId,
     t,
@@ -2544,14 +2704,17 @@ export function useComposer(
     ): Promise<boolean> => {
       const ownedTargetKey = targetKey;
       const ownedGeneration = targetGeneration.current;
+      const owner = { targetKey: ownedTargetKey, generation: ownedGeneration };
       const operationKey = pendingComposerOperationKey(workspaceId, sessionId);
       const pending = pendingOperationRef.current ?? restorePendingComposerOperation(operationKey);
       if (pending && !pendingOperationRef.current) {
         pendingOperationRef.current = pending;
         pendingClientEventId.current = pending.input.clientEventId ?? null;
       }
-      const draftAtSend = value;
-      const annotationsAtSend = annotations;
+      // From the refs: the box as it is now, whichever render this runs from.
+      const draftAtSend = valueRef.current;
+      const annotationsAtSend = cloneAnnotations(annotationsRef.current);
+      const resourcesAtSend = [...restoredResourcesRef.current];
       const rawText = explicit ?? draftAtSend;
       const hasText = rawText.trim().length > 0;
       const hasAnnotations = annotationsAtSend.length > 0;
@@ -2562,7 +2725,7 @@ export function useComposer(
       // Resolve the extras once: a file-only message (empty text + ≥1 ready
       // resource) is legitimate, so we must not bail on empty text alone.
       const extras = pending ? {} : resolveSendExtras(sendExtrasRef.current);
-      const hasResources = restoredResources.length > 0 || (extras.resources?.length ?? 0) > 0;
+      const hasResources = resourcesAtSend.length > 0 || (extras.resources?.length ?? 0) > 0;
       if (
         (!pending && (!annotationsComplete || (!hasText && !hasResources && !hasAnnotations))) ||
         !sessionId ||
@@ -2579,63 +2742,190 @@ export function useComposer(
         pendingClientEventId.current = null;
         forgetPendingComposerOperation(operationKey);
       };
+      const owned = (): boolean =>
+        targetKeyRef.current === ownedTargetKey && targetGeneration.current === ownedGeneration;
+      /** Record a change to this send's own operation, wherever it is kept. */
+      const updatePending = (
+        operation: PendingComposerOperation,
+        update: (current: PendingComposerOperation) => PendingComposerOperation,
+      ): PendingComposerOperation => {
+        const current = pendingOperationRef.current;
+        const kept =
+          current !== null &&
+          owned() &&
+          current.input.clientEventId === operation.input.clientEventId;
+        const next = update(kept ? current : operation);
+        if (kept) pendingOperationRef.current = next;
+        rememberPendingComposerOperation(operationKey, next);
+        return next;
+      };
 
       let keepSteering = pending?.delivery === "steer";
-      // Held from this send's draft save (or its retry) through its submit.
-      let releaseDraftSlot: (() => void) | null = null;
+      // Held from deciding this send's draft revision through its submit.
+      // Assigned inside `resolveRevision`, so the declared type must not narrow.
+      let releaseDraftSlot = null as (() => void) | null;
 
       const settleAccepted = (operation: PendingComposerOperation): void => {
         clearPending();
-        const draftWasUnchanged = valueRef.current === operation.draftAtSend;
-        const resourcesWereUnchanged =
-          JSON.stringify(restoredResourcesRef.current) ===
-          JSON.stringify(operation.resourcesAtSend);
-        const annotationsWereUnchanged =
-          JSON.stringify(annotationsRef.current) === JSON.stringify(operation.annotationsAtSend);
-        if (resourcesWereUnchanged) {
-          restoredResourcesRef.current = [];
-          setRestoredResources([]);
-        }
-        if (annotationsWereUnchanged) {
-          annotationsRef.current = [];
-          setAnnotations([]);
-          setAnnotationReviewTargetId(null);
-        }
-        if (operation.clearDraftOnAccept && draftWasUnchanged) {
-          valueRef.current = "";
-          setValue("");
+        // A send that emptied the box when it was sent leaves the box alone:
+        // whatever is there now came after it.
+        if (!operation.emptiedAtSend) {
+          const draftWasUnchanged = valueRef.current === operation.draftAtSend;
+          const resourcesWereUnchanged =
+            JSON.stringify(restoredResourcesRef.current) ===
+            JSON.stringify(operation.resourcesAtSend);
+          const annotationsWereUnchanged =
+            JSON.stringify(annotationsRef.current) === JSON.stringify(operation.annotationsAtSend);
+          if (resourcesWereUnchanged) {
+            restoredResourcesRef.current = [];
+            setRestoredResources([]);
+          }
+          if (annotationsWereUnchanged) {
+            annotationsRef.current = [];
+            setAnnotations([]);
+            setAnnotationReviewTargetId(null);
+          }
+          if (operation.clearDraftOnAccept && draftWasUnchanged) {
+            valueRef.current = "";
+            setValue("");
+          }
         }
         onSent?.(operation.input.text, operation.input);
       };
+      /**
+       * A send refused for good gives back what it took out of the box: into
+       * the box when nothing new was put there meanwhile, otherwise as a
+       * failed message beside the others (Retry, Restore, Remove), so nothing
+       * typed is lost. Returns true when it went back into the box. Only for
+       * an operation that `emptiedAtSend`.
+       */
+      const giveBack = (operation: PendingComposerOperation, cause: unknown): boolean => {
+        const textTaken = operation.clearDraftOnAccept;
+        const boxUntouched =
+          (!textTaken || valueRef.current === "") &&
+          annotationsRef.current.length === 0 &&
+          restoredResourcesRef.current.length === 0 &&
+          (resolveSendExtras(sendExtrasRef.current).resources?.length ?? 0) === 0;
+        if (owned() && boxUntouched) {
+          localEditRevision.current += 1;
+          if (textTaken) {
+            valueRef.current = operation.draftAtSend;
+            setValue(operation.draftAtSend);
+          }
+          // Files the host held for the send come back as the files they are.
+          restoredResourcesRef.current = [...(operation.input.resources ?? [])];
+          annotationsRef.current = cloneAnnotations(operation.annotationsAtSend);
+          setRestoredResources(restoredResourcesRef.current);
+          setAnnotations(annotationsRef.current);
+          return true;
+        }
+        const problem = asError(cause);
+        const failed: OptimisticSendOperation = {
+          clientEventId: operation.input.clientEventId ?? generateClientEventId(),
+          delivery: operation.delivery,
+          // Retried, it still goes to the running turn when there is one.
+          ...(operation.steerOrSend ||
+          (operation.delivery === "steer" && !steerOrSendUnsupportedRef.current)
+            ? { steerOrSend: true }
+            : {}),
+          destination: "chat",
+          text: operation.input.text,
+          annotations: cloneAnnotations(operation.annotationsAtSend),
+          resources: [...(operation.input.resources ?? [])],
+          occurredAt: steeringOccurredAtRef.current,
+          state: "failed",
+          error: formatError(
+            cause,
+            composerSubmissionErrorMessage(t, problem, canBuyCreditsRef.current),
+          ),
+          retryable: composerSubmissionCanRetry(problem),
+          outcomeUnknown: false,
+          ...(problem instanceof OpenGeniApiError && problem.correlationId
+            ? { correlationId: problem.correlationId }
+            : {}),
+          input: operation.input,
+          draftPayload: operation.draftPayload ?? null,
+          newerShadow: operation.newerShadow,
+          canRetry: operation.canRetry,
+        };
+        if (owned()) {
+          replaceOptimisticSends((current) => [...current, failed]);
+        } else {
+          rememberOptimisticSendOperations(operationKey, [
+            ...restoreOptimisticSendOperations(t, operationKey, canBuyCreditsRef.current),
+            failed,
+          ]);
+        }
+        return false;
+      };
+      /** The draft revision a send that never reached the server goes ahead from. */
+      const resolveRevision = async (
+        operation: PendingComposerOperation,
+      ): Promise<{
+        operation: PendingComposerOperation;
+        saved: boolean;
+        blocked: Error | null;
+      }> => {
+        releaseDraftSlot = await acquireDraftSlot();
+        const resolved = await resolveSendDraftRevision(operation.draftPayload ?? null, owner);
+        if (resolved.blocked || resolved.revision === undefined) {
+          return { operation, saved: resolved.saved, blocked: resolved.blocked };
+        }
+        const revision = resolved.revision;
+        return {
+          operation: updatePending(operation, (current) => ({
+            ...current,
+            input: { ...current.input, expectedDraftRevision: revision },
+          })),
+          saved: resolved.saved,
+          blocked: null,
+        };
+      };
 
-      const deliver = async (operation: PendingComposerOperation) => {
+      const deliver = async (operation: PendingComposerOperation, savedFirst: boolean) => {
         const wireDelivery = operation.steerOrSend ? "steer_or_send" : operation.delivery;
         if (durableDrafts) {
           const input = operation.input;
-          if (input.expectedDraftRevision === undefined || input.clientEventId === undefined) {
+          const clientEventId = input.clientEventId;
+          if (input.expectedDraftRevision === undefined || clientEventId === undefined) {
             throw new ComposerStateError(t("hooks.useComposer.theDurableComposerDraftIs"));
           }
-          const result = await client.submitComposerDraft(workspaceId, sessionId, {
-            text: input.text,
-            annotations: input.annotations ?? [],
-            resources: input.resources ?? [],
-            // Absent while the draft follows the chat's settings.
-            ...(input.model ? { model: input.model } : {}),
-            ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
-            ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
-            expectedDraftRevision: input.expectedDraftRevision,
-            clientEventId: input.clientEventId,
-            delivery: wireDelivery,
-            ...(input.controlEtag ? { controlEtag: input.controlEtag } : {}),
-            ...(input.modelContext ? { modelContext: input.modelContext } : {}),
-            ...(input.mcpCredentialUpdates
-              ? { mcpCredentialUpdates: input.mcpCredentialUpdates }
-              : {}),
-            ...(input.connectionAccounts ? { connectionAccounts: input.connectionAccounts } : {}),
-            ...(input.personalResourceAttachment
-              ? { personalResourceAttachment: input.personalResourceAttachment }
-              : {}),
-          });
+          const result = await submitDurableSend(
+            operation.draftPayload ?? null,
+            owner,
+            { revision: input.expectedDraftRevision, saved: savedFirst },
+            async (revision) =>
+              await client.submitComposerDraft(workspaceId, sessionId, {
+                text: input.text,
+                annotations: input.annotations ?? [],
+                resources: input.resources ?? [],
+                // Absent while the draft follows the chat's settings.
+                ...(input.model ? { model: input.model } : {}),
+                ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
+                ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
+                expectedDraftRevision: revision,
+                clientEventId,
+                delivery: wireDelivery,
+                ...(input.controlEtag ? { controlEtag: input.controlEtag } : {}),
+                ...(input.modelContext ? { modelContext: input.modelContext } : {}),
+                ...(input.mcpCredentialUpdates
+                  ? { mcpCredentialUpdates: input.mcpCredentialUpdates }
+                  : {}),
+                ...(input.connectionAccounts
+                  ? { connectionAccounts: input.connectionAccounts }
+                  : {}),
+                ...(input.personalResourceAttachment
+                  ? { personalResourceAttachment: input.personalResourceAttachment }
+                  : {}),
+              }),
+            (revision) => {
+              // A retry repeats the revision this send went ahead from.
+              updatePending(operation, (current) => ({
+                ...current,
+                input: { ...current.input, expectedDraftRevision: revision },
+              }));
+            },
+          );
           followAcceptedDraft(result.draft);
           return result;
         }
@@ -2652,18 +2942,17 @@ export function useComposer(
       };
       // Before anything is accepted, a server without `steer_or_send` names it
       // in its refusal; this composer then chooses from its own view instead.
-      const deliverOrFallBack = async (operation: PendingComposerOperation) => {
+      const deliverOrFallBack = async (operation: PendingComposerOperation, savedFirst = false) => {
         try {
-          return await deliver(operation);
+          return await deliver(operation, savedFirst);
         } catch (cause) {
           if (!operation.steerOrSend || !rejectsSteerOrSend(cause)) throw cause;
           steerOrSendUnsupportedRef.current = true;
-          const chosen = { ...operation, steerOrSend: false };
-          if (pendingOperationRef.current === operation) {
-            pendingOperationRef.current = chosen;
-            rememberPendingComposerOperation(operationKey, chosen);
-          }
-          return await deliver(chosen);
+          const chosen = updatePending(operation, (current) => ({
+            ...current,
+            steerOrSend: false,
+          }));
+          return await deliver(chosen, true);
         }
       };
       // A `steer_or_send` the server resolved to a Send is an ordinary message:
@@ -2674,20 +2963,90 @@ export function useComposer(
       ): result is NonNullable<typeof result> =>
         result !== null && (!operation.steerOrSend || result.routing === "accepted_for_steering");
 
+      // A new message: it leaves the box now, in the same render that shows
+      // it as sending. The operation holds its exact content from here on, so
+      // a refusal can give it back and a retry repeats it byte for byte.
+      let fresh: PendingComposerOperation | null = null;
+      if (!pending) {
+        // Trimming is only an emptiness check. A non-blank prompt is
+        // submitted byte-for-byte; the wire contract requires non-empty text
+        // (z.string().min(1)) and the worker rejects whitespace-only text, so
+        // a file-only message carries a minimal default and its attachments
+        // still get delivered.
+        const sendText = hasText ? rawText : hasAnnotations ? "" : FILE_ONLY_MESSAGE_TEXT(t);
+        pendingClientEventId.current ??= generateClientEventId();
+        const effectiveControl = effectiveControlRef.current;
+        const policyPick = pickedPolicy(policyPickedRef, policyRef);
+        const input = composeSendInput(sendText, pendingClientEventId.current, extras, {
+          ...policyPick,
+          ...(effectiveControl?.controlEtag ? { controlEtag: effectiveControl.controlEtag } : {}),
+          resources: mergeResources(resourcesAtSend, extras.resources ?? []),
+          annotations: cloneAnnotations(annotationsAtSend),
+        });
+        const takesText = explicit === undefined;
+        const draftBase = draftRef.current;
+        fresh = {
+          delivery,
+          ...(delivery === "steer" && steerOrSend && !steerOrSendUnsupportedRef.current
+            ? { steerOrSend: true }
+            : {}),
+          input,
+          draftAtSend,
+          resourcesAtSend,
+          annotationsAtSend: cloneAnnotations(annotationsAtSend),
+          // What stays in the box while this send runs.
+          newerShadow: {
+            text: takesText ? "" : draftAtSend,
+            resources: [],
+            annotations: [],
+            ...(policyPick ? { policy: policyPick } : {}),
+          },
+          clearDraftOnAccept: takesText,
+          emptiedAtSend: true,
+          draftPayload:
+            durableDrafts && draftBase && currentPolicy
+              ? composerDraftPayload(
+                  draftBase,
+                  sendText,
+                  resourcesAtSend,
+                  annotationsAtSend,
+                  policyPick,
+                  extras.resources ?? [],
+                )
+              : null,
+          canRetry: true,
+        };
+        pendingOperationRef.current = fresh;
+        rememberPendingComposerOperation(operationKey, fresh);
+        localEditRevision.current += 1;
+        if (takesText) {
+          valueRef.current = "";
+          setValue("");
+        }
+        annotationsRef.current = [];
+        restoredResourcesRef.current = [];
+        setAnnotations([]);
+        setAnnotationReviewTargetId(null);
+        setRestoredResources([]);
+      }
+      const shown = pending ?? fresh;
       if (delivery === "steer") {
         if (steeringRef.current?.clientEventId !== pending?.input.clientEventId) {
           steeringOccurredAtRef.current = new Date().toISOString();
         }
         setSteering({
           phase: "submitting",
-          text: rawText,
-          clientEventId: pending?.input.clientEventId ?? pendingClientEventId.current,
+          text: shown?.input.text ?? rawText,
+          clientEventId: shown?.input.clientEventId ?? pendingClientEventId.current,
           triggerEventId: null,
           turnId: null,
         });
       }
       setSending(true);
       setError(null);
+      // As for a queued Send: the host lets go of what this message carries
+      // (its ready files) as the box empties.
+      if (fresh) onSubmitted?.(fresh.input.text, fresh.input);
       try {
         if (pending) {
           let acceptedEvent: SessionEvent | null = null;
@@ -2750,9 +3109,20 @@ export function useComposer(
             setError(new ComposerReconciliationRequiredError());
             return false;
           }
+          let retried = pending;
           try {
-            if (durableDrafts) releaseDraftSlot = await acquireDraftSlot();
-            const result = await deliverOrFallBack(pending);
+            let savedFirst = false;
+            if (durableDrafts && pending.input.expectedDraftRevision === undefined) {
+              // It never reached the server (the page went away before it
+              // was submitted), so it goes ahead from the draft as it is now.
+              const resolved = await resolveRevision(pending);
+              if (resolved.blocked) throw resolved.blocked;
+              retried = resolved.operation;
+              savedFirst = resolved.saved;
+            } else if (durableDrafts) {
+              releaseDraftSlot = await acquireDraftSlot();
+            }
+            const result = await deliverOrFallBack(retried, savedFirst);
             if (pending.delivery === "steer" && steered(pending, result)) {
               keepSteering = true;
               setSteering({
@@ -2779,6 +3149,10 @@ export function useComposer(
             if (!outcomeUnknown) {
               clearPending();
               keepSteering = false;
+              if (retried.emptiedAtSend && !giveBack(retried, cause)) {
+                // It is shown as a failed message instead; no second notice.
+                return false;
+              }
             } else if (pending.delivery === "steer") {
               keepSteering = true;
               setSteering({
@@ -2809,94 +3183,33 @@ export function useComposer(
           return true;
         }
 
-        // Trimming is only an emptiness check. A non-blank prompt is persisted
-        // and submitted byte-for-byte, while file-only sends use the same
-        // placeholder for both operations so the server content fence cannot
-        // reject its own client.
-        const sendText = hasText ? rawText : hasAnnotations ? "" : FILE_ONLY_MESSAGE_TEXT(t);
-        const currentPayload = currentDraftPayload();
-        const payload = currentPayload ? { ...currentPayload, text: sendText } : null;
-        // The slot first: a save of this page's that is still running decides
-        // the basis. A save base that is another device's draft this page
-        // never showed is not saved over: Send goes ahead from the send basis.
-        if (payload) releaseDraftSlot = await acquireDraftSlot();
-        if (payload && !sendDraftBasis(draftRef.current, sendBasisRef.current).behind) {
-          let saveFailure = null as Error | null;
-          if (
-            !(await saveDraftInSlot(
-              payload,
-              { targetKey: ownedTargetKey, generation: ownedGeneration },
-              (problem) => {
-                saveFailure = problem;
-              },
-              false,
-            ))
-          ) {
-            // Only an outage holds the message; otherwise it is sent from the
-            // draft as last seen, carrying what is in the box.
-            if (!saveFailure || isTransientServiceFailure(saveFailure)) return false;
-            setError(null);
-            setDraftConflict(null);
+        if (!fresh) return false;
+        let operation: PendingComposerOperation = fresh;
+        let savedFirst = false;
+        if (durableDrafts) {
+          // The slot first: a save of this page's that is still under way
+          // lands before the send names its revision. No save is made here
+          // in the usual case (see `resolveSendDraftRevision`).
+          const resolved = await resolveRevision(operation);
+          if (resolved.blocked) {
+            // An outage stopped the save this send needed: nothing was sent.
+            // The save already reported it.
+            clearPending();
+            giveBack(operation, resolved.blocked);
+            return false;
           }
+          operation = resolved.operation;
+          savedFirst = resolved.saved;
         }
-        if (
-          targetKeyRef.current !== ownedTargetKey ||
-          targetGeneration.current !== ownedGeneration
-        ) {
-          return false;
-        }
-        // The wire contract requires non-empty text (z.string().min(1)) and the
-        // worker rejects whitespace-only text; a file-only message therefore
-        // carries a minimal default so the attachments still get delivered.
-        pendingClientEventId.current ??= generateClientEventId();
-        const effectiveControl = effectiveControlRef.current;
-        const draftBasis = sendDraftBasis(draftRef.current, sendBasisRef.current);
-        const input = composeSendInput(sendText, pendingClientEventId.current, extras, {
-          ...pickedPolicy(policyPickedRef, policyRef),
-          ...(effectiveControl?.controlEtag ? { controlEtag: effectiveControl.controlEtag } : {}),
-          ...(durableDrafts && draftBasis.revision !== undefined
-            ? { expectedDraftRevision: draftBasis.revision }
-            : {}),
-          resources: mergeResources(restoredResources, extras.resources ?? []),
-          annotations: cloneAnnotations(annotationsAtSend),
-        });
-        const operation: PendingComposerOperation = {
-          delivery,
-          ...(delivery === "steer" && steerOrSend && !steerOrSendUnsupportedRef.current
-            ? { steerOrSend: true }
-            : {}),
-          input,
-          draftAtSend,
-          resourcesAtSend: [...restoredResources],
-          annotationsAtSend: cloneAnnotations(annotationsAtSend),
-          newerShadow: {
-            text: draftAtSend,
-            resources: mergeResources(restoredResources, extras.resources ?? []),
-            annotations: cloneAnnotations(annotationsAtSend),
-            policy: pickedPolicy(policyPickedRef, policyRef),
-          },
-          clearDraftOnAccept: explicit === undefined,
-          canRetry: true,
-        };
-        pendingOperationRef.current = operation;
-        rememberPendingComposerOperation(operationKey, operation);
-        if (delivery === "steer") {
-          setSteering({
-            phase: "submitting",
-            text: sendText,
-            clientEventId: input.clientEventId ?? null,
-            triggerEventId: null,
-            turnId: null,
-          });
-        }
+        if (!owned()) return false;
         try {
-          const result = await deliverOrFallBack(operation);
+          const result = await deliverOrFallBack(operation, savedFirst);
           if (delivery === "steer" && steered(operation, result)) {
             keepSteering = true;
             setSteering({
               phase: "accepted",
-              text: sendText,
-              clientEventId: input.clientEventId ?? null,
+              text: operation.input.text,
+              clientEventId: operation.input.clientEventId ?? null,
               triggerEventId: result.accepted.id,
               turnId: result.turn.id,
               stoppingPreviousAttempt:
@@ -2912,6 +3225,10 @@ export function useComposer(
           );
           if (!isOutcomeUnknownError(cause)) {
             clearPending();
+            if (!giveBack(operation, cause)) {
+              // It is shown as a failed message instead; no second notice.
+              return false;
+            }
           } else if (delivery === "steer") {
             keepSteering = true;
             setSteering({
@@ -2954,17 +3271,17 @@ export function useComposer(
     [
       acquireDraftSlot,
       client,
-      currentDraftPayload,
       durableDrafts,
+      formatError,
       onSent,
-      restoredResources,
-      annotations,
+      onSubmitted,
       followAcceptedDraft,
-      saveDraftInSlot,
+      replaceOptimisticSends,
+      resolveSendDraftRevision,
       sending,
       sessionId,
+      submitDurableSend,
       targetKey,
-      value,
       workspaceId,
       loadDraft,
       t,
@@ -3955,6 +4272,18 @@ function composerDraftPayload(
 function draftSignature(payload: SaveComposerDraftRequest): string {
   const { expectedRevision: _revision, ...content } = payload;
   return JSON.stringify(content);
+}
+
+/** Whether `payload` carries a model, effort or speed pick `saved` does not hold. */
+function pickNotSaved(payload: SaveComposerDraftRequest, saved: ComposerDraft | null): boolean {
+  if (payload.model === undefined) return false;
+  return (
+    !saved ||
+    saved.policyFollowsSession ||
+    saved.model !== payload.model ||
+    saved.reasoningEffort !== payload.reasoningEffort ||
+    saved.latencyMode !== payload.latencyMode
+  );
 }
 
 /** Whether a draft holds anything to show in the composer. */

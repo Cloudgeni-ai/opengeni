@@ -140,10 +140,19 @@ export const ClaudeUsageLimit = /* @__PURE__ */ defineSchema(() =>
 );
 export type ClaudeUsageLimit = z.infer<typeof ClaudeUsageLimit>;
 
-/** The account's paid extra usage, when the provider reports it. */
+/**
+ * The account's paid usage credits ("extra usage"), when the provider
+ * reports them. `state` is the account's usage-credits setting (the usage
+ * body's `event_props.extra_usage_state`); null when the provider could not
+ * say. `isEnabled` is whether usage credits can pay for requests right now
+ * (the `extra_usage` object): it is false while they are on with no balance
+ * left, so it never says the setting is off. Amounts are in minor units of
+ * `currency` (cents for USD). Every field Claude did not report is null.
+ */
 export const ClaudeExtraUsage = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
+      state: z.enum(["enabled", "disabled", "not_configured"]).nullable(),
       isEnabled: primitives.boolean.nullable(),
       monthlyLimit: z.number().finite().nullable(),
       usedCredits: z.number().finite().nullable(),
@@ -154,6 +163,23 @@ export const ClaudeExtraUsage = /* @__PURE__ */ defineSchema(() =>
     .strict(),
 );
 export type ClaudeExtraUsage = z.infer<typeof ClaudeExtraUsage>;
+
+/** Whether an account's paid usage credits are on: `unknown` until Claude says. */
+export type ClaudeUsageCreditsState = "on" | "off" | "unknown";
+
+/**
+ * The usage-credits state an operator sees. On when the setting is enabled
+ * or the credits can pay right now; off only when Claude reports the
+ * setting disabled or never configured. Anything else, including no
+ * reading, is unknown, never off.
+ */
+export function claudeUsageCreditsState(
+  extraUsage: ClaudeExtraUsage | null | undefined,
+): ClaudeUsageCreditsState {
+  if (extraUsage?.state === "enabled" || extraUsage?.isEnabled === true) return "on";
+  if (extraUsage?.state === "disabled" || extraUsage?.state === "not_configured") return "off";
+  return "unknown";
+}
 
 /**
  * Weekly limits of other Claude surfaces (cowork, apps). Shown for
@@ -249,7 +275,7 @@ export const ClaudeSubscriptionUsage = /* @__PURE__ */ defineSchema(() =>
       wallReset: ClaudeWallReset.nullable().optional(),
       /** The usage endpoint's limit list, with each scoped limit's share of the weekly limit. */
       limits: z.array(ClaudeUsageLimit).max(16).optional(),
-      /** Paid extra usage; null when the provider reports none. */
+      /** Paid usage credits. Absent or null: not reported, so unknown (never off). */
       extraUsage: ClaudeExtraUsage.nullable().optional(),
       surfaceWindows: z.array(ClaudeSurfaceUsageWindow).max(3).optional(),
       serviceState: ClaudeServiceState.nullable().optional(),

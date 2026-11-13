@@ -298,7 +298,6 @@ import {
 } from "../browser-recording-save";
 import {
   recordSourcePlacementMove,
-  reconcileListedSourcePlacementMoves,
   retireFormerPlacementControllers,
   retireSourceFormerPlacements,
 } from "../former-placement-retirement";
@@ -432,28 +431,20 @@ export function registerBrowserSessionRoutes(
   app.get("/v1/workspaces/:workspaceId/browser-sessions", async (context) => {
     const workspaceId = context.req.param("workspaceId") ?? "";
     const grant = await requireAccessGrant(context, deps, workspaceId, "sessions:read");
-    const list = async () => {
-      const listed = await listBrowserSessions(deps.db, {
-        accountId: grant.accountId,
-        workspaceId,
-        ...parseInteractionSessionListQuery(context.req.query()),
-      });
-      return {
+    // Reading a list changes nothing. A browser on a machine its chat has
+    // moved away from keeps running there with its profile, so the chat can
+    // move back and continue in it; only its End retires it.
+    const listed = await listBrowserSessions(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      ...parseInteractionSessionListQuery(context.req.query()),
+    });
+    return context.json(
+      BrowserSessionListResponse.parse({
         ...listed,
         sessions: await filterInteractionSessionsForGrant(deps, grant, listed.sessions),
-      };
-    };
-    let listed = await list();
-    // A browser left behind by its task's move is retired, not reusable.
-    if (
-      await reconcileListedSourcePlacementMoves(channelServices, {
-        grant,
-        sessions: listed.sessions,
-      })
-    ) {
-      listed = await list();
-    }
-    return context.json(BrowserSessionListResponse.parse(listed));
+      }),
+    );
   });
 
   app.get("/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId", async (context) => {

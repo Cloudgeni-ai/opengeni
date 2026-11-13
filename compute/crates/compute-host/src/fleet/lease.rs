@@ -698,6 +698,9 @@ fn capacity(status: &HostStatus, info: &HostInfo, image: &str, guest: Option<&st
         // Which run of the agent this is: the service counts a later one
         // as the agent starting again.
         run: Some(run()),
+        // Whether the run before it was asked to stop: the service counts
+        // only the restarts that were not asked for.
+        after_asked_stop: super::stopped::after_asked_stop(),
         // What it is configured with now, which a restart in place may
         // have changed under the registration it kept.
         info: Some(info.clone()),

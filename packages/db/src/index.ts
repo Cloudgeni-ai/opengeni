@@ -316,6 +316,7 @@ export {
 } from "./subscription-core-codex-bindings";
 import type { GoalAdmissionPausedReason } from "@opengeni/contracts";
 import { accountContactEmail } from "@opengeni/contracts/passkey-only-account";
+import { microsoftDynamicsProductForMcpUrl } from "@opengeni/contracts/microsoft-dynamics";
 import { SessionAvatar as SessionAvatarSchema, type SessionAvatar } from "@opengeni/contracts";
 import { SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
 import { subscriptionExecutionAuthorityFromTurn } from "./accepted-subscription-authority";
@@ -630,7 +631,6 @@ export { buildSlackApiRateLimiter } from "./slack-api-rate-limits";
 export * from "./scheduled-human-wait";
 import {
   CODEX_CAPACITY_RECOVERY_KEY,
-  CODEX_CAPACITY_FALSE_RESUMPTION_LIMIT,
   readCodexCapacityRecovery,
   codexFalseResumptionBackoffMs,
   clearCodexCapacityRecovery,
@@ -26946,9 +26946,7 @@ export type SubscriptionCoreWaiterProvider = keyof typeof SUBSCRIPTION_CORE_WAIT
  * names of their legacy waiters, so a wait reads the same before and after
  * the provider's cutover.
  */
-type SubscriptionCoreWaitVocabulary<
-  P extends SubscriptionCoreWaiterProvider = SubscriptionCoreWaiterProvider,
-> = {
+type SubscriptionCoreWaitVocabulary = {
   /** Product name in internal error texts. */
   label: string;
   waitingEventType: "codex.capacity.waiting" | "turn.capacity_waiting";
@@ -26958,8 +26956,6 @@ type SubscriptionCoreWaitVocabulary<
   statusReason: string;
   /** Why pending tool calls close when the turn parks. */
   closeToolsReason: string;
-  /** The false-resumption limit's terminal code (also the status reason). */
-  exhaustedCode: (typeof SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES)[P];
   resumedEvent: (waiter: SubscriptionCoreCodexCapacityWait) => {
     type: "codex.capacity.resumed" | "turn.recovery.requested";
     payload: Record<string, unknown>;
@@ -26980,7 +26976,7 @@ type SubscriptionCoreWaitVocabulary<
 };
 
 const SUBSCRIPTION_CORE_WAIT_VOCABULARY: {
-  [P in SubscriptionCoreWaiterProvider]: SubscriptionCoreWaitVocabulary<P>;
+  [P in SubscriptionCoreWaiterProvider]: SubscriptionCoreWaitVocabulary;
 } = {
   codex: {
     label: "Codex",
@@ -26988,7 +26984,6 @@ const SUBSCRIPTION_CORE_WAIT_VOCABULARY: {
     waitingPayload: { recovery: "codex_capacity", retryable: true, rotated: true },
     statusReason: "codex_capacity",
     closeToolsReason: "codex_capacity_wait",
-    exhaustedCode: SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES.codex,
     resumedEvent: (waiter) => ({
       type: "codex.capacity.resumed",
       payload: {
@@ -27019,7 +27014,6 @@ const SUBSCRIPTION_CORE_WAIT_VOCABULARY: {
     },
     statusReason: "xai_capacity",
     closeToolsReason: "xai_capacity_wait",
-    exhaustedCode: SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES.xai,
     resumedEvent: (waiter) => ({
       type: "turn.recovery.requested",
       payload: {
@@ -27053,7 +27047,6 @@ const SUBSCRIPTION_CORE_WAIT_VOCABULARY: {
     },
     statusReason: "claude_capacity",
     closeToolsReason: "claude_capacity_wait",
-    exhaustedCode: SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES.claude,
     resumedEvent: (waiter) => ({
       type: "turn.recovery.requested",
       payload: {
@@ -27361,7 +27354,6 @@ export function subscriptionCoreCodexNextCheckAt(input: {
 
 export type ArmSubscriptionCoreCodexCapacityWaitResult =
   | { action: "waiting"; waiter: SubscriptionCoreCodexCapacityWait; events: SessionEvent[] }
-  | { action: "stopped"; sessionStatus: "queued" | "failed"; events: SessionEvent[] }
   | { action: "stale"; events: SessionEvent[] };
 
 /**
@@ -27531,20 +27523,20 @@ export async function armSubscriptionCoreCapacityWait(
         }
 
         // A resumed attempt that lands straight back on unavailable capacity
-        // without completing a model call is a false resumption; the same
-        // bounded budget and persisted backoff as the legacy Codex wait apply.
+        // without completing a model call is a false resumption. It delays
+        // the next resume by the persisted backoff; it never ends the turn.
+        // The reconcile resumes only when the turn's own placement would run
+        // (`refreshBeforeReconcile`), so a false resumption is a race with
+        // another turn taking the capacity, and the message is still owed
+        // an answer once capacity returns.
         const recovery = readCodexCapacityRecovery(turn.metadata);
         const falseResumption =
           recovery.resumeGeneration !== null &&
           recovery.resumeGeneration <= turn.executionGeneration;
         const falseResumptions = recovery.falseResumptions + (falseResumption ? 1 : 0);
-        const stopped = falseResumptions >= CODEX_CAPACITY_FALSE_RESUMPTION_LIMIT;
-        const retryNotBefore =
-          falseResumption && !stopped
-            ? new Date(
-                now.getTime() + codexFalseResumptionBackoffMs(falseResumptions),
-              ).toISOString()
-            : recovery.retryNotBefore;
+        const retryNotBefore = falseResumption
+          ? new Date(now.getTime() + codexFalseResumptionBackoffMs(falseResumptions)).toISOString()
+          : recovery.retryNotBefore;
         const recoveryMetadata = {
           ...metadataWithoutTurnDispatchAttempt(turn.metadata),
           [CODEX_CAPACITY_RECOVERY_KEY]: {
@@ -27555,14 +27547,12 @@ export async function armSubscriptionCoreCapacityWait(
         };
         // A long wait is announced once, as it starts: a worker's parent gets
         // child_waiting_capacity, a top-level chat's person an inbox notice.
-        const attention = stopped
-          ? null
-          : capacityWaitAttention({
-              waitReason: input.waitReason,
-              earliestResetAt: input.earliestResetAt,
-              healthRetryAt: input.healthRetryAt ?? null,
-              now,
-            });
+        const attention = capacityWaitAttention({
+          waitReason: input.waitReason,
+          earliestResetAt: input.earliestResetAt,
+          healthRetryAt: input.healthRetryAt ?? null,
+          now,
+        });
         const personNotice =
           attention && !session.parentSessionId
             ? SessionNotificationPostedPayload.parse(
@@ -27570,6 +27560,7 @@ export async function armSubscriptionCoreCapacityWait(
                   turnId: input.turnId,
                   provider,
                   resetsAt: attention.resetsAt,
+                  waitReason: input.waitReason,
                 }),
               )
             : null;
@@ -27589,15 +27580,6 @@ export async function armSubscriptionCoreCapacityWait(
               }
             : {}),
         };
-        const waitingPrompt = stopped
-          ? await runnableQueuedTurnExists(tx, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              sources: ["user", "api"],
-            })
-          : false;
-        const sessionStatus = stopped ? (waitingPrompt ? "queued" : "failed") : "waiting_capacity";
         await closeSessionTurnAttemptInTransaction(tx, {
           id: input.attemptId,
           accountId: input.accountId,
@@ -27605,7 +27587,7 @@ export async function armSubscriptionCoreCapacityWait(
           sessionId: input.sessionId,
           turnId: input.turnId,
           executionGeneration: turn.executionGeneration,
-          outcome: stopped ? "failed" : "waiting_capacity",
+          outcome: "waiting_capacity",
           closedAt: now,
         });
 
@@ -27623,24 +27605,14 @@ export async function armSubscriptionCoreCapacityWait(
             retryNotBefore ? Date.parse(retryNotBefore) : 0,
           ),
         );
-        let waiter: SubscriptionCoreCodexCapacityWait | null = null;
-        if (stopped) {
-          // The session's waiter row, whatever provider armed it (`existing`
-          // is read without a provider).
-          if (existing)
-            await tx.execute(sql`delete from subscription_capacity_waiters
-              where workspace_id = ${input.workspaceId}::uuid
-                and session_id = ${input.sessionId}::uuid
-                and waiter_id = ${existing.waiterId}::uuid`);
-        } else {
-          // Arming follows a placement evaluation, so this generation has
-          // already observed its own initial revision; only a later capacity
-          // change creates pending wake work.
-          const generation = (existing?.generation ?? 0) + 1;
-          const wakeRevision = (existing?.wakeRevision ?? 0) + 1;
-          const [row] = await rawRows<SubscriptionCoreCodexWaiterRow>(
-            tx,
-            sql`insert into subscription_capacity_waiters (
+        // Arming follows a placement evaluation, so this generation has
+        // already observed its own initial revision; only a later capacity
+        // change creates pending wake work.
+        const generation = (existing?.generation ?? 0) + 1;
+        const wakeRevision = (existing?.wakeRevision ?? 0) + 1;
+        const [row] = await rawRows<SubscriptionCoreCodexWaiterRow>(
+          tx,
+          sql`insert into subscription_capacity_waiters (
                 account_id, workspace_id, session_id, turn_id, provider, candidate_providers, wait_reason,
                 policy_hash, reset_kind, refresh_attempt, resumed_update_id, earliest_reset_at,
                 generation, wake_revision, observed_wake_revision, next_check_at,
@@ -27679,10 +27651,9 @@ export async function armSubscriptionCoreCapacityWait(
                     updated_at = excluded.updated_at
                 where subscription_capacity_waiters.account_id = excluded.account_id
               returning ${SUBSCRIPTION_CORE_CODEX_WAITER_COLUMNS}`,
-          );
-          if (!row) throw new Error(`Core ${label} capacity wait arm returned no waiter row`);
-          waiter = mapSubscriptionCoreCodexWaiter(row);
-        }
+        );
+        if (!row) throw new Error(`Core ${label} capacity wait arm returned no waiter row`);
+        const waiter = mapSubscriptionCoreCodexWaiter(row);
 
         let sequence = session.lastSequence;
         const closedTools = await closePendingSessionToolCallsInTransaction(tx, {
@@ -27693,7 +27664,7 @@ export async function armSubscriptionCoreCapacityWait(
           reason: vocabulary.closeToolsReason,
           sequence,
           now,
-          preserveInterruptionRows: !stopped,
+          preserveInterruptionRows: true,
         });
         sequence = closedTools.sequence;
         const inserted = await tx
@@ -27706,12 +27677,12 @@ export async function armSubscriptionCoreCapacityWait(
                   workspaceId: input.workspaceId,
                   sessionId: input.sessionId,
                   sequence: ++sequence,
-                  type: stopped ? "turn.failed" : vocabulary.waitingEventType,
+                  type: vocabulary.waitingEventType,
                   payload: {
                     ...input.failurePayload,
                     ...vocabulary.waitingPayload,
-                    waiterId: waiter?.waiterId ?? existing?.waiterId ?? null,
-                    generation: waiter?.generation ?? existing?.generation ?? null,
+                    waiterId: waiter.waiterId,
+                    generation: waiter.generation,
                     goalId,
                     goalVersion,
                     blockedTurnGeneration: turn.executionGeneration,
@@ -27720,17 +27691,6 @@ export async function armSubscriptionCoreCapacityWait(
                     earliestResetAt: input.earliestResetAt?.toISOString() ?? null,
                     nextCheckAt: nextCheckAt.toISOString(),
                     falseResumptions,
-                    ...(stopped
-                      ? {
-                          error:
-                            "Automatic capacity recovery stopped after 10 resumptions returned immediately to unavailable capacity. Use Retry or send Continue after checking subscription capacity.",
-                          code: vocabulary.exhaustedCode,
-                          recovery: "user_message",
-                          recoveryExhausted: true,
-                          retryable: false,
-                          ...("rotated" in vocabulary.waitingPayload ? { rotated: false } : {}),
-                        }
-                      : {}),
                   },
                   turnId: input.turnId,
                   turnGeneration: turn.executionGeneration,
@@ -27745,8 +27705,8 @@ export async function armSubscriptionCoreCapacityWait(
                   sequence: ++sequence,
                   type: "session.status.changed",
                   payload: {
-                    status: sessionStatus,
-                    reason: stopped ? vocabulary.exhaustedCode : vocabulary.statusReason,
+                    status: "waiting_capacity",
+                    reason: vocabulary.statusReason,
                   },
                   turnId: input.turnId,
                   turnGeneration: turn.executionGeneration,
@@ -27780,10 +27740,10 @@ export async function armSubscriptionCoreCapacityWait(
         const [waitingTurn] = await tx
           .update(schema.sessionTurns)
           .set({
-            status: stopped ? "failed" : "waiting_capacity",
+            status: "waiting_capacity",
             activeAttemptId: null,
             metadata:
-              attention && session.parentSessionId && waiter
+              attention && session.parentSessionId
                 ? {
                     ...waitingMetadata,
                     [CAPACITY_WAIT_PARENT_NOTICE_KEY]: capacityWaitNoticeMarker(
@@ -27796,7 +27756,7 @@ export async function armSubscriptionCoreCapacityWait(
                   }
                 : waitingMetadata,
             version: turn.version + 1,
-            finishedAt: stopped ? now : null,
+            finishedAt: null,
             updatedAt: now,
           })
           .where(
@@ -27812,10 +27772,9 @@ export async function armSubscriptionCoreCapacityWait(
         const [waitingSession] = await tx
           .update(schema.sessions)
           .set({
-            status: sessionStatus,
-            activeTurnId: stopped ? null : input.turnId,
+            status: "waiting_capacity",
+            activeTurnId: input.turnId,
             lastSequence: sequence,
-            ...(stopped ? { queueVersion: session.queueVersion + 1 } : {}),
             updatedAt: now,
           })
           .where(
@@ -27828,38 +27787,10 @@ export async function armSubscriptionCoreCapacityWait(
           )
           .returning({ id: schema.sessions.id });
         if (!waitingSession) throw new Error(`Core ${label} capacity session changed during arm`);
-        if (stopped) {
-          await cancelTurnInteractionInterventionsInTransaction(tx, input);
-          await settleSessionMaintenanceInTransaction(tx, input);
-          const terminalEvent = inserted[0]!;
-          await projectSessionRealtimeDelegationTerminalInTransaction(tx, {
-            ...input,
-            turnStatus: "failed",
-            terminalEvent: {
-              id: terminalEvent.id,
-              type: "turn.failed",
-              payload: sessionEventPayloadRecord(
-                terminalEvent.payload,
-                terminalEvent.payloadCodecVersion,
-              ),
-            },
-            now,
-          });
-          await enqueueFailedChildOutboxForTurnTx(tx, input.workspaceId, session, turn);
-          await tx
-            .update(schema.sessionGoals)
-            .set({ continuationSuppressedTurnId: turn.id, updatedAt: now })
-            .where(
-              and(
-                eq(schema.sessionGoals.workspaceId, input.workspaceId),
-                eq(schema.sessionGoals.sessionId, input.sessionId),
-                eq(schema.sessionGoals.status, "active"),
-              ),
-            );
-        } else if (attention) {
+        if (attention) {
           await enqueueChildWaitingCapacityOutboxTx(tx, input.workspaceId, session, {
             turnId: input.turnId,
-            waiterId: waiter!.waiterId,
+            waiterId: waiter.waiterId,
             provider,
             nextCheckAt,
             resetsAt: attention.resetsAt,
@@ -27876,14 +27807,7 @@ export async function armSubscriptionCoreCapacityWait(
               and generation = ${input.leaseFence.generation}`);
         }
         const events = [...closedTools.events, ...inserted.map(mapEvent)];
-        if (stopped) {
-          return {
-            action: "stopped",
-            sessionStatus: waitingPrompt ? "queued" : "failed",
-            events,
-          } as const;
-        }
-        return { action: "waiting", waiter: waiter!, events } as const;
+        return { action: "waiting", waiter, events } as const;
       }),
   );
 }
@@ -28200,6 +28124,7 @@ export async function reconcileSubscriptionCoreCapacityWait(
                     turnId: blockedTurn.id,
                     provider: waiter.provider,
                     resetsAt: attention!.resetsAt,
+                    waitReason: waitEvaluation.waitReason,
                   }),
                   // Same key: the open notification is updated in place, silently.
                   replaced: openNotice !== null,
@@ -41471,6 +41396,10 @@ export async function listSessionEventPage(
           // Indexing the ordered ID array avoids rescanning an ordered CTE at
           // every recursion step. Keep the subsequent payload SELECT separate:
           // this is still metadata planning, not a new page-wide snapshot.
+          // The recursive step reads its next ID through a scalar subquery so
+          // the lookup is always an index parameter. Joining `ordered` there
+          // lets the planner (PostgreSQL 16.16, 17.12, 18.7) put the payload
+          // scan below it and turn the ID match into a per-step session scan.
           const metadataRows = await rawRows<
             SessionEventProjectionMetadataRow & { sourceRowCount: number }
           >(
@@ -41502,12 +41431,13 @@ export async function listSessionEventPage(
                 select sized.id, sized.sequence,
                   bounded.row_number + 1, sized.bytes,
                   bounded.cumulative_bytes + 1 + sized.bytes
-                from bounded cross join ordered
-                cross join lateral (
+                from bounded cross join lateral (
                   select ${schema.sessionEvents.id}, ${schema.sessionEvents.sequence},
                     (${transferBytesSql})::int as bytes
                   from ${schema.sessionEvents}
-                  where ${schema.sessionEvents.id} = ordered.ids[bounded.row_number + 1]
+                  where ${schema.sessionEvents.id} = (
+                      select ordered.ids[bounded.row_number + 1] from ordered
+                    )
                     and ${schema.sessionEvents.workspaceId} = ${workspaceId}
                     and ${schema.sessionEvents.sessionId} = ${sessionId}
                   offset 0
@@ -70081,6 +70011,11 @@ export async function beginEnrollmentAgentUpdate(
      * (null: none), so a decision made from an older read of the machine
      * never replaces a newer record. */
     expectedOperationId?: string | null;
+    /** Also replace an unfinished operation whose last progress is at or
+     * before this time: its runner was asked and has not been heard from
+     * since, so it is treated as lost. A fresh progress event moves the
+     * operation past this time and keeps it. */
+    replaceUnfinishedBefore?: Date;
   },
 ): Promise<EnrollmentRecord | null> {
   return await withRlsContext(
@@ -70155,6 +70090,9 @@ export async function beginEnrollmentAgentUpdate(
               sql`${schema.enrollments.agentUpdateStatus} is null`,
               eq(schema.enrollments.agentUpdateStatus, "succeeded"),
               eq(schema.enrollments.agentUpdateStatus, "failed"),
+              input.replaceUnfinishedBefore === undefined
+                ? undefined
+                : sql`${schema.enrollments.agentUpdateUpdatedAt} <= ${input.replaceUnfinishedBefore.toISOString()}::timestamptz`,
             ),
             input.expectedOperationId === undefined
               ? undefined
@@ -92816,6 +92754,12 @@ export type EnqueueCapabilitySetupContinuationInput = {
   sessionId: string;
   capabilityId: string;
   /**
+   * The capability's MCP endpoint. An agent's request to add a server
+   * (custom_mcp_setup_request) posts its card before the capability exists, so
+   * that card names the endpoint rather than a capability id.
+   */
+  endpointUrl?: string;
+  /**
    * The card is a connected account's own notice (expired access, more access
    * a tool needs) rather than a capability card: find it by this connection.
    */
@@ -93041,9 +92985,15 @@ async function latestAuthCardTx(
   tx: Database,
   input: Pick<
     EnqueueCapabilitySetupContinuationInput,
-    "workspaceId" | "sessionId" | "capabilityId" | "connectionId"
+    "workspaceId" | "sessionId" | "capabilityId" | "connectionId" | "endpointUrl"
   >,
 ): Promise<Array<{ id: string; sequence: number; payload: unknown }>> {
+  const capabilityCard = sql`${schema.sessionEvents.payload} -> 'capability' ->> 'id' = ${input.capabilityId}`;
+  // The card keeps the address as the agent gave it; ignore case and a
+  // trailing slash so the saved server's address still finds it.
+  const setupRequestCard = input.endpointUrl
+    ? sql`rtrim(lower(${schema.sessionEvents.payload} -> 'setupRequest' ->> 'endpointUrl'), '/') = rtrim(lower(${input.endpointUrl}), '/')`
+    : null;
   return await tx
     .select({
       id: schema.sessionEvents.id,
@@ -93058,7 +93008,9 @@ async function latestAuthCardTx(
         eq(schema.sessionEvents.type, "tool.auth_needed"),
         input.connectionId
           ? sql`${schema.sessionEvents.payload} ->> 'connectionId' = ${input.connectionId}`
-          : sql`${schema.sessionEvents.payload} -> 'capability' ->> 'id' = ${input.capabilityId}`,
+          : setupRequestCard
+            ? sql`(${capabilityCard} or ${setupRequestCard})`
+            : capabilityCard,
       ),
     )
     .orderBy(desc(schema.sessionEvents.sequence))
@@ -97583,6 +97535,20 @@ function catalogExposureState(
   return "legacy_active";
 }
 
+/**
+ * A workspace's Microsoft Dynamics entry keeps its MCP address only in
+ * `endpoint_url`: `mcp_url` takes part in the registry's cross-workspace
+ * uniqueness, which two workspaces using one environment would break.
+ */
+function workspaceDynamicsMcpUrl(row: typeof schema.capabilityCatalogItems.$inferSelect) {
+  return row.workspaceId &&
+    row.kind === "mcp" &&
+    row.endpointUrl &&
+    microsoftDynamicsProductForMcpUrl(row.endpointUrl)
+    ? row.endpointUrl
+    : null;
+}
+
 function mapCapabilityCatalogItem(
   row: typeof schema.capabilityCatalogItems.$inferSelect,
   exposure: "trusted" | "legacy_active" | "unverified" = capabilityCatalogItemIsTrustedForExposure({
@@ -97648,7 +97614,7 @@ function mapCapabilityCatalogItem(
     providerDomain: row.providerDomain,
     surfaceType: row.surfaceType,
     transport: row.transport,
-    mcpUrl: row.mcpUrl,
+    mcpUrl: row.mcpUrl ?? workspaceDynamicsMcpUrl(row),
     authKind: row.authKind as CapabilityCatalogItem["authKind"],
     credentialFacts: row.credentialFacts,
     tier: row.tier as CapabilityCatalogItem["tier"],
@@ -98365,7 +98331,6 @@ export * from "./event-triggers";
 export * from "./mcp-event-subscriptions";
 export * from "./event-source-feeds";
 export * from "./automation-templates";
-export * from "./bot-templates";
 export * from "./organization-model-providers";
 export * from "./organization-compatible-model-endpoints";
 export * from "./organization-model-defaults";

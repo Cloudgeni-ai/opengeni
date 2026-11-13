@@ -1,8 +1,9 @@
 import {
-  BoxesIcon,
-  CloudIcon,
   EraserIcon,
+  GitPullRequestIcon,
+  MailIcon,
   MessageSquareTextIcon,
+  MonitorIcon,
   PaletteIcon,
   Table2Icon,
   type LucideIcon,
@@ -29,22 +30,17 @@ type Pitch = {
 export type SignedOutPitch = "general" | "excel";
 
 const pitches: Record<SignedOutPitch, Pitch> = {
-  // Everyone who signs in on the web sees this: one plain promise first, and
-  // developers in the supporting lines.
+  // Everyone who signs in on the web sees this: agents that do real work in
+  // the person's own apps, matching the public landing page, with concrete
+  // jobs instead of generic examples.
   general: {
-    headline: "Get things done,",
-    emphasis: "just by asking.",
-    lead: "Plan a trip, write a letter, make sense of a bill, or hand off a long task. Developers can build the same agents into their own apps.",
+    headline: "Hand off real work.",
+    emphasis: "Get it back done.",
+    lead: "Agents that work in the background in GitHub, Gmail, Calendar, Slack and more, and check with you before anything goes out.",
     highlights: [
-      { icon: MessageSquareTextIcon, text: "Ask anything, on your computer or your phone" },
-      {
-        icon: CloudIcon,
-        text: "Keeps working on long tasks, even when you close your laptop",
-      },
-      {
-        icon: BoxesIcon,
-        text: "For developers: tools, sandboxes, approvals and observability, ready to use",
-      },
+      { icon: GitPullRequestIcon, text: "Reviews pull requests and fixes failing builds" },
+      { icon: MailIcon, text: "Answers your inbox and preps tomorrow's meetings" },
+      { icon: MonitorIcon, text: "Uses its own computer and browser, day and night" },
     ],
   },
   // The sign-in window the Excel add-in opens: the person is working in a
@@ -126,7 +122,7 @@ export function SignedOutPage({
                 {headline}{" "}
                 <em className="font-serif text-[1.18em] leading-none font-normal">{emphasis}</em>
               </h1>
-              <p className="mt-5 max-w-[330px] text-[15px] leading-[1.6] text-fg-muted">{lead}</p>
+              <p className="mt-5 max-w-[400px] text-[15px] leading-[1.6] text-fg-muted">{lead}</p>
               <ul className="mt-8 space-y-4">
                 {highlights.map(({ icon: Icon, text }) => (
                   <li key={text} className="flex items-start gap-3 text-sm text-fg">

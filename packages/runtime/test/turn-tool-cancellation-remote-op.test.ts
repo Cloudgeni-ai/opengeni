@@ -1,7 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import type { Tool } from "@openai/agents";
 import { shell } from "@openai/agents/sandbox";
-import { ErrorCode, OpFrame, type ControlRequest, type ExecRequest } from "@opengeni/agent-proto";
+import {
+  ErrorCode,
+  OpFrame,
+  type ControlRequest,
+  type ControlResponse,
+  type ExecRequest,
+} from "@opengeni/agent-proto";
+import { createStaticSecretResolver } from "@opengeni/vaults/testing";
 import { SelfhostedControlError, type ControlRpc } from "../src/sandbox/selfhosted/control-rpc";
 import {
   FakeOpRunner,
@@ -16,6 +23,7 @@ import {
   type SelfhostedSessionDeps,
 } from "../src/sandbox/selfhosted/session";
 import { SandboxChannelAService } from "../src/sandbox/channel-a";
+import { RoutingSandboxSession } from "../src/sandbox/routing/routing-session";
 import {
   COMMAND_FINISH_FLOOR_MS,
   createTurnToolCancellationController,
@@ -54,6 +62,8 @@ async function remainsPending(promise: Promise<unknown>): Promise<boolean> {
 
 function makeRig(input: {
   beforeRequest?: (request: ControlRequest) => void | Promise<void>;
+  /** Answer a request the fake runner does not serve (a file write). */
+  answerRequest?: (request: ControlRequest) => ControlResponse | undefined;
   defaultScript?: (exec: ExecRequest, opId: string) => FakeOpScript | Promise<FakeOpScript>;
   withOpStream?: boolean;
   sessionDeps?: Pick<
@@ -74,7 +84,7 @@ function makeRig(input: {
     request: async (subject, request, options) => {
       requests.push(request);
       await input.beforeRequest?.(request);
-      return await runner.request(subject, request, options);
+      return input.answerRequest?.(request) ?? (await runner.request(subject, request, options));
     },
   };
   const session = new SelfhostedSession({
@@ -846,6 +856,90 @@ describe("remote synchronous command custody", () => {
       expect(rig.runner.runs.get(originalOpId)?.finalAcked).toBe(false);
     },
   );
+});
+
+describe("a command that fails before its operation exists", () => {
+  // Built from parts so this file holds no literal reference.
+  const SECRET_REFERENCE = ["{", "{secret:Token}}"].join("");
+
+  /** A workspace machine behind the routing session, as a turn sees it. A
+   *  command with a secret reference first writes its private env file there,
+   *  before the command itself is started. */
+  async function routedWorkspaceMachine(failEnvFileWrite: boolean) {
+    const rig = makeRig({
+      beforeRequest: (request) => {
+        if (request.op?.$case === "fsWrite" && failEnvFileWrite) throw machineOfflineError();
+      },
+      answerRequest: (request) =>
+        request.op?.$case === "fsWrite"
+          ? {
+              requestId: request.requestId,
+              result: {
+                $case: "fsWrite",
+                fsWrite: { bytesWritten: String(request.op.fsWrite.content.byteLength) },
+              },
+            }
+          : undefined,
+      defaultScript: () => ({ frames: [], live: true, holdUntilCancel: true }),
+      sessionDeps: { execTimeoutMs: 0 },
+    });
+    const routing = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({
+        session: rig.session as never,
+        sandboxId: null,
+        kind: "compute",
+        leaseEpoch: 1,
+        providerInstanceId: "instance",
+        activeEpoch: 0,
+      }),
+      beforeMutation: async () => ({}),
+      afterMutation: async () => undefined,
+    });
+    await routing.prime();
+    const controller = createTurnToolCancellationController(undefined, {
+      secretResolver: createStaticSecretResolver({ Token: "token-value" }),
+    });
+    const exec = shell({ configureTools: (tools) => controller.wrapTools(tools, routing as never) })
+      .clone()
+      .bind(routing as never)
+      .tools()
+      .find(
+        (tool): tool is Extract<Tool<unknown>, { type: "function" }> =>
+          tool.type === "function" && tool.name === "exec_command",
+      );
+    if (!exec) throw new Error("SDK shell did not expose exec_command");
+    const invoke = (callId: string) =>
+      exec.invoke({} as never, JSON.stringify({ cmd: `use ${SECRET_REFERENCE}` }), {
+        toolCall: { type: "function_call", callId, name: "exec_command", arguments: "{}" },
+      });
+    return { rig, controller, invoke };
+  }
+
+  test("a failed secret delivery does not hold the turn open", async () => {
+    const { rig, controller, invoke } = await routedWorkspaceMachine(true);
+    const result = await invoke("secret_delivery_failed");
+
+    expect(result).toContain("[workspace machine]");
+    // The command itself was never started anywhere.
+    expect(rig.runner.starts).toEqual([]);
+    const drain = controller.waitForQuiescence();
+    expect(await remainsPending(drain)).toBe(false);
+    await drain;
+  });
+
+  test("a started command still holds the turn until it is stopped", async () => {
+    const { rig, controller, invoke } = await routedWorkspaceMachine(false);
+    const result = invoke("secret_delivered");
+    await waitFor(() => rig.runner.starts.length === 1, "command start");
+    expect(rig.runner.starts.map((start) => start.opId)).toEqual(["secret_delivered:0"]);
+
+    const drain = controller.waitForQuiescence();
+    await drain;
+    // Finalization stopped the exact running operation before it settled.
+    expect(rig.runner.runs.get("secret_delivered:0")?.exit.cancelled).toBe(true);
+    await result.catch(() => undefined);
+  });
 });
 
 describe("a Steer during a Connected Machine command's foreground wait", () => {

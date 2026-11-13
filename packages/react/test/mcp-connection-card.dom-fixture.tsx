@@ -1211,6 +1211,105 @@ test("an integration only an admin can turn on says so after sign-in, not a gene
   }
 });
 
+test("an admin asked to confirm with a passkey is told so, not that only an admin can turn it on", async () => {
+  sessionStorage.clear();
+  let committed = false;
+  const off = {
+    ...item,
+    id: "custom-service",
+    name: "Team tools",
+    enabled: false,
+    connectionRef: null,
+  } as unknown as CapabilityCatalogItem;
+  const account = { ...connection, id: "own-account", subjectId: "user:own" };
+  const attempt = {
+    id: "own-attempt",
+    workspaceId: "workspace",
+    providerId: "mcp-oauth",
+    ownership: "personal",
+    revision: 1,
+    state: "credential_input",
+    credentialsCommitted: false,
+    integrationInstalled: false,
+    completionRequirement: "connection",
+    nextAction: { type: "credentials", fields: [] },
+    expiresAt: "2030-01-01T00:00:00Z",
+  };
+  const client = {
+    listCapabilities: async () => ({ items: [off] }),
+    listConnections: async () => (committed ? [account] : []),
+    listOwnConnectionAccounts: async () => (committed ? [account] : []),
+    enableCapability: async () => {
+      throw new OpenGeniApiError(
+        403,
+        JSON.stringify({
+          error: {
+            message: "Add a passkey to your account to change admin settings.",
+            details: { code: "ADMIN_PASSKEY_STEP_UP_REQUIRED", passkeyRegistered: false },
+          },
+        }),
+        { mutation: true },
+      );
+    },
+    connectTransport: () => ({
+      begin: async () => attempt,
+      advance: async () => {
+        committed = true;
+        return {
+          ...attempt,
+          revision: 2,
+          state: "complete",
+          credentialsCommitted: true,
+          nextAction: { type: "none" },
+          account: {
+            id: account.id,
+            providerId: "mcp-oauth",
+            ownership: "personal",
+            status: "connected",
+            label: "Team tools",
+            version: 1,
+          },
+        };
+      },
+    }),
+  } as unknown as OpenGeniClient;
+  const previousOpen = window.open;
+  window.open = (() => ({
+    opener: null,
+    closed: false,
+    location: { replace() {} },
+    close() {},
+  })) as unknown as typeof window.open;
+  const view = await renderComponent(
+    <McpConnectionCard
+      client={client}
+      workspaceId="workspace"
+      capabilityId={off.id}
+      name="Team tools"
+      returnUrl="https://host.example/"
+      dialogOnly
+      personalOnly
+    />,
+  );
+  try {
+    await flush();
+    const button = [...document.querySelectorAll("button")].find(
+      (candidate) => candidate.textContent === "Continue to Team tools",
+    );
+    expect(button).toBeDefined();
+    await actRun(() => button!.click());
+    await flush();
+    expect(document.body.textContent).toContain(
+      "Add a passkey to your account to turn on Team tools, then connect again.",
+    );
+    expect(document.body.textContent).not.toContain("Only an admin can turn on");
+    expect(document.body.textContent).not.toContain("Connection setup could not finish");
+  } finally {
+    await view.unmount();
+    window.open = previousOpen;
+  }
+});
+
 function conversationClient(options: { failAttach?: boolean } = {}) {
   const calls: string[] = [];
   const continuations: unknown[][] = [];

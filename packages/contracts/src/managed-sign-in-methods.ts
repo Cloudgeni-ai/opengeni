@@ -96,7 +96,47 @@ export const ManagedPasskeyStepUpResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     /** This browser session is confirmed until it ends. */
     confirmed: primitives.boolean,
+    /**
+     * For a step-up handed over by an app: the one-time code the person types
+     * into the app to confirm the app's session too.
+     */
+    code: z
+      .string()
+      .regex(/^\d{6}$/u)
+      .optional(),
   }),
+);
+
+/**
+ * The console page where a person confirms, in their own browser, a step-up
+ * started in an app that can't show passkey prompts itself (the desktop app).
+ * It carries the handoff id as `?handoff=`.
+ */
+export const PASSKEY_STEP_UP_HANDOFF_PATH = "/confirm-passkey";
+
+/** Starting a step-up; `handoffId` confirms the app session that handed it over too. */
+export const ManagedPasskeyStepUpOptionsRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({ handoffId: primitives.uuid.optional() }).strict(),
+);
+
+/**
+ * A step-up handed to the person's browser. Once they use their passkey there,
+ * the browser shows a one-time code; the app's session claims the handoff
+ * with it.
+ */
+export const ManagedPasskeyStepUpHandoff = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    handoffId: primitives.uuid,
+    expiresAt: z.string(),
+    /** How long it lasts, so a client with a wrong clock still knows. */
+    expiresInSeconds: z.number().int().positive(),
+  }),
+);
+export type ManagedPasskeyStepUpHandoff = z.infer<typeof ManagedPasskeyStepUpHandoff>;
+
+/** The app's session claiming its handoff with the code the browser showed. */
+export const ManagedPasskeyStepUpHandoffClaim = /* @__PURE__ */ defineSchema(() =>
+  z.object({ code: z.string().regex(/^\d{6}$/u) }).strict(),
 );
 export const ManagedSignInMethods = /* @__PURE__ */ defineSchema(() =>
   z.object({

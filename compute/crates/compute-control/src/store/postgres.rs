@@ -120,6 +120,13 @@ fn run_of(capacity: Option<&Capacity>) -> Result<Option<i64>> {
         .transpose()
 }
 
+/// Whether the run a host told of in `capacity` followed a stop it was
+/// asked for ([`Capacity::after_asked_stop`]), as a parameter: such a
+/// start is not counted as a restart.
+fn asked_of(capacity: Option<&Capacity>) -> bool {
+    capacity.is_some_and(|capacity| capacity.after_asked_stop)
+}
+
 /// A `bigint` back as a `u64`.
 fn small(value: i64) -> Result<u64> {
     u64::try_from(value).map_err(corrupt)
@@ -535,7 +542,7 @@ impl PostgresStore {
              state = case when compute_hosts.drained then 'draining' else 'live' end, \
              renewals = compute_hosts.renewals + 1, seq = 0, \
              restarts = compute_hosts.restarts \
-             + case when compute_hosts.run < excluded.run then 1 else 0 end, \
+             + case when compute_hosts.run < excluded.run and not $9 then 1 else 0 end, \
              run = greatest(compute_hosts.run, excluded.run), \
              attempt = excluded.attempt, answer = excluded.answer, \
              capacity = excluded.capacity, changed = excluded.changed, gone_ms = null",
@@ -550,6 +557,7 @@ impl PostgresStore {
                 // A host registering afresh after a reboot runs its agent
                 // again.
                 &run_of(Some(&register.capacity))?,
+                &asked_of(Some(&register.capacity)),
             ],
         )
         .await

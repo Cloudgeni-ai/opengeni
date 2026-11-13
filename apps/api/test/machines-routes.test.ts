@@ -2156,11 +2156,204 @@ describe("Connected Machine signed self-update orchestration", () => {
     );
     expect(updateRequests()).toHaveLength(2);
     expect(updateRequests()[1]!.requestId).toBe(second!.operationId);
-    // An accepted update is the runner's to finish; heartbeats do not re-send it.
-    now += 60 * 60_000;
+    // An accepted update is the runner's to finish while it may still be
+    // heard from; heartbeats do not re-send it.
+    now += 15 * 60_000;
     await heartbeat();
     await Bun.sleep(50);
     expect(updateRequests()).toHaveLength(2);
+  }, 90_000);
+
+  // A machine reported waiting for idle, with nothing holding it, and was
+  // never heard from about that update again: everything it published later
+  // went out on a connection that had already closed. The record must not
+  // keep it waiting for good, on the release that was promoted back then.
+  async function machineWithLostUpdate() {
+    const { accountId, workspaceId, enrollment } = await seed();
+    const subject = `agent.${workspaceId}.${enrollment.id}.connection.${CONNECTION_INSTANCE_ID}`;
+    await handleHelloPayload(
+      db,
+      undefined,
+      Hello.encode(
+        Hello.fromPartial({
+          agentId: enrollment.id,
+          workspaceId,
+          agentVersion: "0.1.15",
+          binarySha256: "ab".repeat(32),
+          updateChannel: "stable",
+        }),
+      ).finish(),
+      `${subject}.hello`,
+    );
+    const live = (await getEnrollment(db, workspaceId, enrollment.id))!;
+    const lostOperationId = crypto.randomUUID();
+    await beginEnrollmentAgentUpdate(db, {
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
+      connectionInstanceId: CONNECTION_INSTANCE_ID,
+      connectionGeneration: live.connectionGeneration,
+      operationId: lostOperationId,
+      targetVersion: "0.1.16",
+    });
+    const progress = (operationId: string, stage: AgentUpdateStage, errorCode = "") =>
+      handleAgentEventPayload(
+        db,
+        undefined,
+        AgentEvent.encode(
+          AgentEvent.fromPartial({
+            agentId: enrollment.id,
+            event: {
+              $case: "agentUpdateProgress",
+              agentUpdateProgress: {
+                blockers: [],
+                operationId,
+                targetVersion: "0.1.16",
+                stage,
+                errorCode,
+                retryable: errorCode !== "",
+                rolledBack: false,
+              },
+            },
+          }),
+        ).finish(),
+        `${subject}.events`,
+        new MemoryEventBus(),
+      );
+    await progress(lostOperationId, AgentUpdateStage.AGENT_UPDATE_STAGE_ACCEPTED);
+    await progress(lostOperationId, AgentUpdateStage.AGENT_UPDATE_STAGE_WAITING_FOR_IDLE);
+    const status = async () => (await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate;
+    expect(await status()).toMatchObject({
+      operationId: lostOperationId,
+      status: "waiting_for_idle",
+      targetVersion: "0.1.16",
+      errorCode: null,
+      blockers: [],
+    });
+    const goQuiet = () =>
+      admin`update enrollments set agent_update_updated_at = now() - interval '12 days'
+        where id = ${enrollment.id}`;
+    return {
+      accountId,
+      workspaceId,
+      enrollment,
+      subject,
+      lostOperationId,
+      progress,
+      status,
+      goQuiet,
+    };
+  }
+
+  test("a machine's heartbeat replaces an update it went quiet on with one for the current release", async () => {
+    if (!available) return;
+    const { workspaceId, enrollment, subject, lostOperationId, progress, status, goQuiet } =
+      await machineWithLostUpdate();
+    const requests: ControlRequest[] = [];
+    const bus = busWithAgent({
+      workspaceId,
+      agentId: enrollment.id,
+      online: true,
+      onRequest: (request) => requests.push(request),
+    });
+    // 0.1.17 was promoted since the machine was asked for 0.1.16.
+    const updates = createAutomaticAgentUpdater({
+      db,
+      bus,
+      settings: {
+        ...settings,
+        agentAutoUpdate: true,
+        agentStableVersion: "0.1.17",
+        publicBaseUrl: "https://dev.opengeni.example",
+      },
+    })!;
+    const heartbeat = () =>
+      handleAgentEventPayload(
+        db,
+        undefined,
+        AgentEvent.encode(
+          AgentEvent.fromPartial({
+            agentId: enrollment.id,
+            event: { $case: "heartbeat", heartbeat: {} },
+          }),
+        ).finish(),
+        `${subject}.events`,
+        bus,
+        updates,
+      );
+    const updateRequests = () =>
+      requests.filter((request) => request.op?.$case === "agentUpdateApply");
+
+    // Heard from moments ago: the wait is the runner's.
+    await heartbeat();
+    await Bun.sleep(50);
+    expect(updateRequests()).toHaveLength(0);
+
+    await goQuiet();
+    await heartbeat();
+    const replaced = await waitForValue(
+      status,
+      (update) => update?.status === "accepted" && update.operationId !== lostOperationId,
+      "the replacement of the lost update",
+    );
+    expect(replaced).toMatchObject({ targetVersion: "0.1.17", errorCode: null, blockers: [] });
+    expect(updateRequests()).toHaveLength(1);
+    expect(updateRequests()[0]!.op).toMatchObject({
+      agentUpdateApply: {
+        operationId: replaced!.operationId,
+        targetVersion: "0.1.17",
+        expectedCurrentVersion: "0.1.15",
+      },
+    });
+    // Late news of the lost operation no longer moves the machine.
+    await progress(lostOperationId, AgentUpdateStage.AGENT_UPDATE_STAGE_FAILED, "download_timeout");
+    expect(await status()).toMatchObject({
+      operationId: replaced!.operationId,
+      status: "accepted",
+    });
+  }, 90_000);
+
+  test("Update now replaces an update the machine went quiet on", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, enrollment, lostOperationId, status, goQuiet } =
+      await machineWithLostUpdate();
+    const requests: ControlRequest[] = [];
+    const app = appFor(
+      busWithAgent({
+        workspaceId,
+        agentId: enrollment.id,
+        online: true,
+        onRequest: (request) => requests.push(request),
+      }),
+      {
+        settings: {
+          ...settings,
+          agentStableVersion: "0.1.17",
+          publicBaseUrl: "https://dev.opengeni.example",
+        },
+      },
+    );
+    const bearerToken = await bearer(accountId, workspaceId, ["enrollments:manage"]);
+    const updateNow = () =>
+      app.request(`/v1/workspaces/${workspaceId}/machines/${enrollment.id}/update`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${bearerToken}` },
+      });
+    // Still heard from: the machine is busy with that update.
+    expect((await updateNow()).status).toBe(409);
+    expect(requests).toHaveLength(0);
+
+    await goQuiet();
+    const response = await updateNow();
+    expect(response.status).toBe(202);
+    const body = (await response.json()) as { operationId: string; targetVersion: string };
+    expect(body.operationId).not.toBe(lostOperationId);
+    expect(body.targetVersion).toBe("0.1.17");
+    expect(await status()).toMatchObject({
+      operationId: body.operationId,
+      status: "accepted",
+      targetVersion: "0.1.17",
+    });
   }, 90_000);
 
   test("a compute sandbox's agent follows promotions from its heartbeat, and an agent that cannot update is asked once per promotion", async () => {

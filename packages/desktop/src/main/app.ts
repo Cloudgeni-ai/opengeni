@@ -63,6 +63,7 @@ import {
   accountToReturnTo,
   cameFromAfterShowing,
   readInstalledFrom,
+  welcomeServer,
   type StoredAccount,
 } from "./accounts";
 import { AppShots, AppShotSettingsStore, MacAppShots } from "./app-shots";
@@ -1324,7 +1325,13 @@ export class DesktopShell {
   private welcomeState(): WelcomeState {
     return {
       productName: this.config.productName,
-      defaultServerUrl: this.defaultServerUrl(),
+      // Signing a signed-out account in again goes to that account's own
+      // server, not the app's default one.
+      defaultServerUrl: welcomeServer(
+        this.store.active(),
+        this.addingAccount,
+        this.defaultServerUrl(),
+      ),
       otherServers: this.config.allowOtherServers !== false,
       pendingServer: this.pending ? serverLabel(this.pending.baseUrl) : null,
       error: this.welcomeError,

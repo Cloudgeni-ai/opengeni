@@ -178,9 +178,6 @@ describe("agents through the API (real PostgreSQL)", () => {
       viewer: { canEdit: true, canManageSlack: false, canOpenInSlack: false },
       version: 1,
     });
-    // An agent made in the app keeps no legacy template row.
-    expect(await shared.admin`select id from bot_templates where id = ${agent.id}`).toHaveLength(0);
-
     expect((await call(reader, "GET", `${base}/${agent.id}`)).json.agent).toMatchObject({
       instructions:
         "Answer in short sentences.\n\nWhen a chat starts:\nHelp me plan the next release.",
@@ -311,18 +308,15 @@ describe("agents through the API (real PostgreSQL)", () => {
       instructions: "Ask how they deploy today.",
       firstMessage: "",
     });
-    const [legacy] = await shared.admin<{ setup_instructions: string }[]>`
-      select setup_instructions from bot_templates where id = ${id}`;
-    expect(legacy?.setup_instructions).toBe("Ask how they deploy today.");
 
-    // A change through /agents keeps the legacy row in step.
+    // A change through /agents shows through /bot-templates.
     await call(alice, "PATCH", `${agents}/${id}`, {
       expectedVersion: 1,
       instructions: "Ask how they deploy.",
     });
-    const [synced] = await shared.admin<{ setup_instructions: string }[]>`
-      select setup_instructions from bot_templates where id = ${id}`;
-    expect(synced?.setup_instructions).toBe("Ask how they deploy.");
+    expect((await call(alice, "GET", `${templates}/${id}`)).json.template).toMatchObject({
+      setupInstructions: "Ask how they deploy.",
+    });
     // Only agents made as templates are listed: the old gallery opens them
     // unbound, as composer text.
     const plain = await call(alice, "POST", agents, {
@@ -342,7 +336,6 @@ describe("agents through the API (real PostgreSQL)", () => {
     ).toMatchObject({ name: "Plain agent", setupInstructions: "Be brief." });
     expect((await call(alice, "DELETE", `${templates}/${id}`)).status).toBe(200);
     expect(await shared.admin`select id from agents where id = ${id}`).toHaveLength(0);
-    expect(await shared.admin`select id from bot_templates where id = ${id}`).toHaveLength(0);
   }, 180_000);
 
   test("a chat started with an agent runs on its current revision; chats list by privacy", async () => {

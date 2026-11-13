@@ -229,7 +229,7 @@ export function commentBody(
   if (!verdict.approved) {
     lines.push(
       "",
-      'Keep it a draft until its description says in plain words what changes on the wire and the possible quality, prompt-caching, behaviour or bug risks. Only the maintainer approves it, never an agent with his credentials (AGENTS.md, "Model request changes").',
+      'Keep it a draft until its description says in plain words what changes on the wire and the possible quality, prompt-caching, behaviour or bug risks. Only the maintainer approves it. He approves in chat with his agent, which records that approval here on the head he approved (AGENTS.md, "Model request changes").',
     );
     if (isMaintainer(author))
       lines.push(

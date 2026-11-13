@@ -56,7 +56,14 @@ impl Rig {
     /// A running sandbox as [`Self::running`], not held, that memory
     /// pressure may put to sleep: idle.
     fn sleepable(&mut self, id: u128, request: u64, limit: u64, resident: u64) {
-        self.add(id, request, limit, resident, false, SleepRules::RECOMMENDED);
+        self.add(
+            id,
+            request,
+            limit,
+            resident,
+            false,
+            SleepRules::RECOMMENDED.keeping_memory(),
+        );
     }
 
     fn add(
@@ -668,6 +675,7 @@ fn a_step_that_pauses_or_resumes_a_vm_has_its_bounds_asked_again() {
     let actions = rig.send(Input::Sleep {
         sandbox: SandboxId(1),
         level: Level::Paused,
+        keep: true,
     });
     let op = actions
         .iter()

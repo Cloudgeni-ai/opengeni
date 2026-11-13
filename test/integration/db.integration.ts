@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { createCatalogItem } from "@opengeni/core";
 
 import {
   addSessionSystemUpdate,
@@ -1391,6 +1392,37 @@ describe("DB integration", () => {
       ).rejects.toThrow();
     } finally {
       await appDbClient.close();
+    }
+  });
+
+  test("two workspaces can add the same Microsoft Dynamics environment", async () => {
+    const endpointUrl = `https://contoso-${crypto.randomUUID().slice(0, 8)}.crm4.dynamics.com/api/mcp`;
+    for (const grant of [await testGrant(dbClient.db), await testGrant(dbClient.db)]) {
+      const item = await createCatalogItem({
+        db: dbClient.db,
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        payload: {
+          kind: "mcp",
+          source: "manual",
+          name: "Microsoft Dynamics",
+          description: null,
+          category: "custom",
+          tags: [],
+          homepageUrl: null,
+          endpointUrl,
+          installUrl: null,
+          authModel: null,
+          metadata: {},
+        },
+      });
+      expect(item).toMatchObject({
+        workspaceId: grant.workspaceId,
+        endpointUrl,
+        mcpUrl: endpointUrl,
+        authKind: "oauth2",
+        providerDomain: new URL(endpointUrl).hostname,
+      });
     }
   });
 

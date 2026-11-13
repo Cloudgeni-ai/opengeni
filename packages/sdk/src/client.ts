@@ -578,6 +578,8 @@ import type {
   CancelBillingSubscriptionRequest,
   BillingSubscriptionChange,
   CreateBillingPortalResponse,
+  ListBillingReceiptsQuery,
+  ListBillingReceiptsResponse,
   CreateCheckoutRequest,
   BillingCheckoutStatus,
   CreateCheckoutResponse,
@@ -974,6 +976,28 @@ function sessionListQuery(options: {
   if (parentSessionId !== undefined) query.parentSessionId = parentSessionId ?? "null";
   if (scopeSubjectId !== undefined) query.scopeSubjectId = scopeSubjectId;
   return query;
+}
+
+/**
+ * Which Slack installation a legacy Slack agent call is for. The Slack agent
+ * list shows an agent once per installation; pass that record's
+ * `connectionId`. Channels and intros of an agent in several installations
+ * need it (`slack_agent_installation_required`) unless exactly one of them
+ * belongs to the path workspace; other calls act on the
+ * agent itself and only use it to pick which record they return.
+ */
+export type SlackAgentInstallationOptions = {
+  connectionId?: string;
+};
+
+function slackAgentInstallationQuery(
+  options: SlackAgentInstallationOptions,
+  extra: Record<string, string> = {},
+): string {
+  const query = new URLSearchParams(extra);
+  if (options.connectionId) query.set("connectionId", options.connectionId);
+  const text = query.toString();
+  return text ? `?${text}` : "";
 }
 
 export type SessionListPageOptions = {
@@ -11518,10 +11542,11 @@ export class OpenGeniClient {
     workspaceId: string,
     agentId: string,
     request: UpdateSlackAgentRequest,
+    options: SlackAgentInstallationOptions = {},
   ): Promise<SlackAgentResponse> {
     return await this.requestJson<SlackAgentResponse>(
       "PATCH",
-      `/v1/workspaces/${workspaceId}/integrations/slack/agents/${encodeURIComponent(agentId)}`,
+      `/v1/workspaces/${workspaceId}/integrations/slack/agents/${encodeURIComponent(agentId)}${slackAgentInstallationQuery(options)}`,
       request,
     );
   }
@@ -11530,10 +11555,11 @@ export class OpenGeniClient {
   async deleteOpenGeniSlackAgent(
     workspaceId: string,
     agentId: string,
+    options: SlackAgentInstallationOptions = {},
   ): Promise<{ deleted: boolean }> {
     return await this.requestJson<{ deleted: boolean }>(
       "DELETE",
-      `/v1/workspaces/${workspaceId}/integrations/slack/agents/${encodeURIComponent(agentId)}`,
+      `/v1/workspaces/${workspaceId}/integrations/slack/agents/${encodeURIComponent(agentId)}${slackAgentInstallationQuery(options)}`,
     );
   }
 
@@ -11542,8 +11568,9 @@ export class OpenGeniClient {
     workspaceId: string,
     agentId: string,
     cursor?: string,
+    options: SlackAgentInstallationOptions = {},
   ): Promise<SlackAgentChannelListResponse> {
-    const query = cursor ? `?${new URLSearchParams({ cursor })}` : "";
+    const query = slackAgentInstallationQuery(options, cursor ? { cursor } : {});
     return await this.requestJson<SlackAgentChannelListResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/integrations/slack/agents/${encodeURIComponent(agentId)}/channels${query}`,
@@ -11555,10 +11582,11 @@ export class OpenGeniClient {
     workspaceId: string,
     agentId: string,
     request: SlackAgentIntroRequest,
+    options: SlackAgentInstallationOptions = {},
   ): Promise<SlackAgentIntroResponse> {
     return await this.requestJson<SlackAgentIntroResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/integrations/slack/agents/${encodeURIComponent(agentId)}/intro`,
+      `/v1/workspaces/${workspaceId}/integrations/slack/agents/${encodeURIComponent(agentId)}/intro${slackAgentInstallationQuery(options)}`,
       request,
     );
   }
@@ -12570,6 +12598,28 @@ export class OpenGeniClient {
       "POST",
       "/v1/billing/portal",
       request,
+    );
+  }
+
+  /**
+   * The organization's payments, newest first, each with its Stripe receipt or
+   * invoice: plan invoices, credit purchases and automatic top-ups. Pass the
+   * returned nextCursor to read older payments.
+   */
+  async listBillingReceipts(
+    query: ListBillingReceiptsQuery = {},
+    options: { signal?: AbortSignal } = {},
+  ): Promise<ListBillingReceiptsResponse> {
+    return await this.requestJson<ListBillingReceiptsResponse>(
+      "GET",
+      "/v1/billing/receipts",
+      undefined,
+      {
+        ...(query.accountId !== undefined ? { accountId: query.accountId } : {}),
+        ...(query.cursor !== undefined ? { cursor: query.cursor } : {}),
+        ...(query.limit !== undefined ? { limit: String(query.limit) } : {}),
+      },
+      options.signal ? { signal: options.signal } : {},
     );
   }
 

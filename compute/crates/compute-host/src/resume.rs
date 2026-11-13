@@ -30,10 +30,13 @@
 //! connection ending. A window lapses when the guest is launched again
 //! (a restore or a boot, [`RunClock::launched`]) before it runs out: the
 //! new guest has yet to prove it runs, and its first take-up's window
-//! covers every stream not carried by then. [`TAKE_UP`] counts only time in
-//! which the guest could run ([`RunClock`]): a guest paused just after
-//! taking one stream up has all of it, once it runs again, for the
-//! others.
+//! covers every stream not carried by then. A guest booted afresh
+//! ([`RunClock::booted`]) has none of the streams, whatever it takes up
+//! later: they end as it is launched, so the hub never hands a request to
+//! an agent that is no longer there while the new one starts. [`TAKE_UP`]
+//! counts only time in which the guest could run ([`RunClock`]): a guest
+//! paused just after taking one stream up has all of it, once it runs
+//! again, for the others.
 //!
 //! Only a connection from the VM process launched last proves anything,
 //! or carries a stream: one from an earlier process says nothing of the
@@ -90,6 +93,22 @@ struct ClockInner {
     /// The socket the guest's link connections come in on, whose waiting
     /// ones a launch closes (see [`Door`]).
     door: Mutex<Weak<UnixListener>>,
+    /// Ends the sandbox's streams, as a boot does (see [`RunClock::booted`]).
+    end_streams: Mutex<EndStreams>,
+}
+
+/// What ends a sandbox's streams, set by its [`Streams`].
+#[derive(Default)]
+struct EndStreams(Option<Box<dyn Fn() + Send + Sync>>);
+
+impl std::fmt::Debug for EndStreams {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(if self.0.is_some() {
+            "EndStreams(set)"
+        } else {
+            "EndStreams(unset)"
+        })
+    }
 }
 
 /// What the clock counted before the guest last began to run, and since
@@ -184,6 +203,35 @@ impl RunClock {
         }
         ran.launch += 1;
         Ok(())
+    }
+
+    /// A VM process for the sandbox is about to start booted afresh, with
+    /// none of its memory: as [`Self::launched`], and the guest has none of
+    /// the streams an earlier one had, so they end now rather than once it
+    /// has taken another up. While they lasted the hub would still hand
+    /// the agent's requests to a connection no agent holds.
+    pub(crate) fn booted(&self) -> io::Result<()> {
+        self.launched()?;
+        // Not under the clock's lock: a stream's sweep reads the clock
+        // while it holds the streams'.
+        let end = self
+            .inner
+            .end_streams
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(end) = &end.0 {
+            end();
+        }
+        Ok(())
+    }
+
+    /// Has `end` end the sandbox's streams on a boot.
+    fn ends_streams_with(&self, end: Box<dyn Fn() + Send + Sync>) {
+        self.inner
+            .end_streams
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .0 = Some(end);
     }
 
     /// A clock whose door no connection can be taken from, as tests use:
@@ -499,16 +547,21 @@ where
         take_up: Duration,
         clock: RunClock,
     ) -> Self {
-        Self {
-            inner: Arc::new(Inner {
-                sandbox,
-                serve,
-                limit,
-                take_up,
-                clock,
-                map: Mutex::new(Map::default()),
-            }),
-        }
+        let inner = Arc::new(Inner {
+            sandbox,
+            serve,
+            limit,
+            take_up,
+            clock,
+            map: Mutex::new(Map::default()),
+        });
+        let weak = Arc::downgrade(&inner);
+        inner.clock.ends_streams_with(Box::new(move || {
+            if let Some(inner) = weak.upgrade() {
+                end_all(&inner);
+            }
+        }));
+        Self { inner }
     }
 
     /// Takes a new connection from the guest, which came in under
@@ -645,6 +698,25 @@ where
             _hub: Tasks(vec![reader.abort_handle(), writer.abort_handle()]),
             carrier: Tasks::default(),
         }
+    }
+}
+
+/// Ends every stream of the sandbox, which a guest booted afresh has none
+/// of (see [`RunClock::booted`]). No VM process of the sandbox runs then,
+/// so no connection can carry one meanwhile.
+fn end_all<F>(inner: &Inner<F>) {
+    let mut map = inner.lock();
+    let streams = std::mem::take(&mut map.streams);
+    map.proven = None;
+    drop(map);
+    let ended = streams.len();
+    drop(streams);
+    if ended > 0 {
+        tracing::info!(
+            sandbox = %inner.sandbox,
+            ended,
+            "agent-link streams ended: the guest boots afresh and has none of them",
+        );
     }
 }
 

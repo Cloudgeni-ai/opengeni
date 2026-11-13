@@ -69,6 +69,7 @@ export {
   type SlackLinkPreparePhase,
 } from "@opengeni/react/app/app-state";
 import { desktopCapability } from "@opengeni/react/app/lib/desktop";
+import { passkeysNeedBrowser } from "@/lib/passkeys";
 
 const AnalyticsManager = lazy(() =>
   import("@/components/analytics-consent").then((module) => ({
@@ -364,8 +365,9 @@ export function RootRouteComponent() {
               }
               socialProviders={managedSocialProviders}
               onSocialSubmit={handleManagedSocialAuth}
-              passkeySignIn={managedPasskeySignIn}
-              passkeySignUp={managedPasskeySignUp}
+              // Passkey prompts can't open inside the desktop app.
+              passkeySignIn={managedPasskeySignIn && !passkeysNeedBrowser()}
+              passkeySignUp={managedPasskeySignUp && !passkeysNeedBrowser()}
               onPasskeySubmit={handleManagedPasskeyAuth}
             />
           )}

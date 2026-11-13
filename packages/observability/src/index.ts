@@ -183,7 +183,12 @@ export const OPENGENI_OBSERVABILITY_DISTRIBUTION = {
   grafanaDashboardLabelValue: "1",
 } as const;
 
-const httpHistogramBuckets = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10];
+// Every latency threshold an alert compares a quantile of this histogram
+// against must be a bucket bound: histogram_quantile interpolates linearly
+// inside a bucket, so a threshold between bounds measures where in the bucket
+// the quantile lands, not how many requests exceed it. 2s is the core read
+// alert's threshold (OpenGeniCoreReadLatencyHigh).
+const httpHistogramBuckets = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 2.5, 5, 10];
 const durationHistogramBuckets = [
   0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 900, 1800, 3600,
 ];

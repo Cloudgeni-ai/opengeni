@@ -4918,7 +4918,7 @@ export type ClaudeSubscriptionUsage = {
   wallReset?: ClaudeWallReset | null | undefined;
   /** Claude's limit list, with each scoped limit's share of the weekly limit. */
   limits?: ClaudeUsageLimit[] | undefined;
-  /** Paid extra usage; null when Claude reports none. */
+  /** Paid usage credits. Absent or null: not reported, so unknown (never off). */
   extraUsage?: ClaudeExtraUsage | null | undefined;
   /** Weekly limits of other Claude surfaces, for information only. */
   surfaceWindows?: ClaudeSurfaceUsageWindow[] | undefined;
@@ -11141,6 +11141,41 @@ export type CreateBillingPortalRequest = {
 export type CreateBillingPortalResponse = {
   portalSessionId: string;
   url: string;
+};
+
+export type ListBillingReceiptsQuery = {
+  accountId?: string | undefined;
+  /** The nextCursor of the previous page. */
+  cursor?: string | undefined;
+  /** Receipts per page, 1 to 50. Defaults to 10. */
+  limit?: number | undefined;
+};
+
+/**
+ * One successful payment and where to download its receipt: plan invoices,
+ * credit purchases and automatic top-ups alike. Amounts are in the currency's
+ * smallest unit (cents for USD).
+ */
+export type BillingReceipt = {
+  id: string;
+  createdAt: string;
+  kind: "plan" | "credits" | "auto_top_up" | "other";
+  /** What the payment was for, in a few words. */
+  description: string;
+  amount: number;
+  currency: string;
+  amountRefunded: number;
+  refunded: boolean;
+  /** Stripe's receipt for the payment. */
+  receiptUrl: string | null;
+  /** The invoice page and PDF when the payment paid an invoice. */
+  invoiceUrl: string | null;
+  invoicePdfUrl: string | null;
+};
+
+export type ListBillingReceiptsResponse = {
+  receipts: BillingReceipt[];
+  nextCursor: string | null;
 };
 
 export type UserMessageEventInput = {

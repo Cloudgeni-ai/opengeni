@@ -135,9 +135,14 @@ const client = fakeAgentsClient(agents, {
         connectionId: SECOND_CONNECTION,
         slackTeamId: "T02",
         slackTeamName: "Acme Support",
-        availability: null,
-        // One Slack workspace per agent for now.
-        unavailable: "agent_slack_single_install",
+        // A shared agent is in every linked Slack workspace.
+        availability: {
+          ...releases.slack[0]!,
+          connectionId: SECOND_CONNECTION,
+          slackTeamId: "T02",
+          slackTeamName: "Acme Support",
+        },
+        unavailable: null,
       },
     ],
   },

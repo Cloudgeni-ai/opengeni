@@ -1,7 +1,7 @@
 import type { ComponentType } from "react";
 import type { SubscriptionUsagePool } from "@opengeni/sdk";
 import { SubscriptionUsagePoolView } from "@/components/models/subscription-usage-pool";
-import { ClaudeUsageReadout } from "@/components/models/claude-usage";
+import { ClaudeUsageReadout, claudeUsageCreditsChip } from "@/components/models/claude-usage";
 import { SubscriptionAccountRow } from "@/components/models/subscription-account-ui";
 import { RowList } from "@opengeni/react/ui/list-row";
 import { ACCOUNT_COLUMNS } from "@/components/models/codex-models";
@@ -39,6 +39,17 @@ export function exhaustedClaudeFixture(now: number, mixed = false): Subscription
   return {
     provider: "claude",
     observedAt: at(0),
+    // Mixed: one account has usage credits on and one hasn't reported yet.
+    ...(mixed
+      ? {
+          usageCredits: weekly.map((account, index) => ({
+            id: account.id,
+            label: account.label,
+            state:
+              index === 1 ? ("on" as const) : index === 0 ? ("unknown" as const) : ("off" as const),
+          })),
+        }
+      : {}),
     windows: [
       {
         id: "weekly",
@@ -92,6 +103,19 @@ export function ExhaustedClaudePreview({
           key={account.id}
           provider="claude_subscription"
           title={account.label}
+          addon={claudeUsageCreditsChip(
+            pool.usageCredits?.[index]?.state === "on"
+              ? {
+                  state: "enabled",
+                  isEnabled: null,
+                  monthlyLimit: null,
+                  usedCredits: null,
+                  utilization: null,
+                  currency: null,
+                  disabledReason: null,
+                }
+              : null,
+          )}
           meta={[
             index === 2 || index === 3 ? "Everyone in Cloudgeni" : "cloudgeni only",
             index === 0 ? "Claude plan" : "Claude Max",
