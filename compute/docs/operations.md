@@ -206,8 +206,11 @@ enabling it changes no session's backend.
    (Opengeni's never does) is checkpointed to the store after every ten
    minutes it runs: losing its host costs it what it did since its newest
    copy (ADR 18). A checkpoint copies the disk alone and never pauses the
-   VM; memory is saved only when the sandbox goes idle or is handed off
-   (ADR 34). `--checkpoint-every-s` (through
+   VM (ADR 34). Memory is saved nowhere by default: an idle sandbox stays
+   paused in host RAM, its VM process ends when the host needs the memory,
+   and its next wake boots from its files. Memory is saved for a sandbox
+   in use that is handed off, for an explicit sleep, and for one created
+   with `keep_memory` (ADR 36). `--checkpoint-every-s` (through
    `computeControl.extraArgs`) sets that target for the fleet; 0 takes
    none.
 10. **Metrics.** Set `computeControl.metrics.port` (for example 9464) to
@@ -548,7 +551,9 @@ to hosts that offer them; other pools' teams reach none.
 
 - **Draining a host.** `POST /v1/hosts/<name>/drain` stops new sandboxes
   going there and hands off every sandbox on it that nothing holds awake;
-  each is adopted elsewhere on its next wake (ADR 18). The answer counts
+  each is adopted elsewhere on its next wake (ADR 18). An idle sandbox
+  goes with its files alone and boots there, unless it keeps its memory
+  (ADR 36). The answer counts
   those `moved` and those `left` (held awake, or the host did not answer):
   drain again until none are left. Some never let go: a desktop someone
   keeps open, a program that never stops working. Once the sandboxes
@@ -1056,9 +1061,13 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   - `OpenGeniComputeHostAgentRestarting`: a host's agent restarts changed
     at least `computeControl.alerts.agentRestarts` (2) times in six hours,
     for a minute. The count is kept in the store, so it survives
-    compute-control rollouts and changes of leader. One in-place upgrade
-    or reboot restarts each agent once and does not fire it; raise the
-    threshold where agents are upgraded in place more often.
+    compute-control rollouts and changes of leader. Only restarts nobody
+    asked for count: the watchdog stopping the agent, a crash, a stop that
+    hung, or the machine going down. An agent asked to stop (an upgrade, a
+    `systemctl restart`, a planned reboot) leaves a mark in the host's root
+    once its stop is done, and the next run tells the service it found it,
+    so any number of releases a day fires nothing. A host of an earlier
+    release leaves no mark, so the upgrade onto this one still counts once.
   - `OpenGeniComputeHostRefusingWakes`: a host refused
     `computeControl.alerts.refusedWakes` (3) wakes or more as full in half
     an hour, and refused one in the last ten minutes, for a quarter of an

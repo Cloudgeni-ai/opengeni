@@ -1,5 +1,102 @@
 # @opengeni/react
 
+## 6.20.1
+
+### Patch Changes
+
+- @opengeni/connect@6.20.1
+- @opengeni/contracts@6.20.1
+- @opengeni/sdk@6.20.1
+
+## 6.20.0
+
+### Minor Changes
+
+- 60a33cb: A compute sandbox is deleted a day after every chat that works in it is archived.
+
+  - Archived chats no longer keep their sandbox in storage forever. A chat restored within a day of archiving keeps its sandbox. A chat stored automatically after weeks unused loses its sandbox at once. A sandbox shared by several chats stays while any of them is live, and a chat with work under way keeps its sandbox.
+  - A chat restored later continues on a new sandbox. Its timeline says the old one was deleted, and the agent is told on its next turn that the old files are gone.
+  - New message key: `timeline.projection.sandboxDeletedWhileArchived`.
+
+### Patch Changes
+
+- ed6b66c: Connecting an integration in a shared workspace with your own login already added in another workspace now turns the integration on here, instead of saying the authorized account doesn't match. When the integration isn't set up here yet and you already have that login, the card offers to use it here instead of signing in again.
+- ae3972e: The Microsoft Dynamics connection now supports Dynamics 365 Business Central. Paste the Business Central web client address (`https://businesscentral.dynamics.com/<tenant>/<environment>?company=…`) and sign in; one connection covers every company in the environment. Agents list companies and entities, query with OData, create, update and delete records and run actions such as posting, through the Business Central API (v2.0) as the signed-in user. Changes ask first by default.
+- Updated dependencies [c624443]
+- Updated dependencies [ae3972e]
+- Updated dependencies [e37485b]
+- Updated dependencies [9c17a87]
+  - @opengeni/sdk@6.20.0
+  - @opengeni/contracts@6.20.0
+  - @opengeni/connect@6.20.0
+
+## 6.19.0
+
+### Patch Changes
+
+- 1e29039: An admin change refused because a passkey confirmation is still needed now says to confirm with a passkey (or add one) instead of "You don't have permission to do this". This is what shows when the person closes the passkey prompt. The admin passkey step-up now covers only changes to who can access an organization and its data: members, roles and invitations, creating API keys, and shared connections.
+- 973329a: Chats that share one sandbox (a parent and its workers) now each keep their own personal GitHub pass, broker routes and `gh` setup, so Git and `gh` in one chat no longer fail with "authorization is no longer current" after another chat on the box ran. The repository remote stays `https://github.com/<owner>/<repo>`, no token enters the sandbox, renewal updates only its own chat, and chat directories unused for a day are removed.
+
+  A personal repository resource that also carries stray GitHub App fields is accepted with those fields ignored (access is still checked as the person), and a request without a running agent attempt now says so instead of asking to reconnect GitHub.
+
+  Repairing an uninstalled GitHub App installation while GitHub can't be reached now says "GitHub couldn't be reached" with **Check again** (the API answers 503 `provider_unreachable`) instead of opening the account chooser. When a reinstall replaces the old installation, its approval choices move to the new one with their original setter, and the old installation's rows are removed.
+
+- b349ca0: A durable Send refused for good is now kept as the composer draft until it is removed, restored or delivered, so closing the page no longer loses it. It never overwrites a newer draft from another device. A kept send also survives the composer remounting in the same page. The composer no longer re-reads its draft on every host render while a delivered message waits for its turn: it now reads the latest `onSent`/`onSubmitted` through refs, and re-reads only when a new admission arrives.
+- 226fe73: A durable Send that gets no definitive answer (the connection drops, or Opengeni is updating) now keeps its message as the draft, so it survives closing the page and shows on the person's other devices, as it did when every Send saved the draft first. Before, a message typed and sent within the autosave pause was in no draft, and closing the tab before the send went through lost it. The draft is written only while it is still at the revision the Send went ahead from, so it never brings back a message the server already accepted and never writes over another device's newer draft. When the Send lands later, the server clears a draft holding exactly what it sent.
+
+  An accepted Send now always moves the draft past the revision it went ahead from, also when nothing was ever saved: it creates an empty draft at revision 1 instead of leaving none.
+
+- Updated dependencies [a85adef]
+  - @opengeni/sdk@6.19.0
+  - @opengeni/contracts@6.19.0
+  - @opengeni/connect@6.19.0
+
+## 6.18.0
+
+### Minor Changes
+
+- f313a0e: An agent's Who can use it has a third choice, `Anyone in <organization>`: a shared agent that full members of its organization may also use from chat integrations, not only its workspace's members. It replaces Slack's per-Slack-workspace option that let linked organization members use an agent, so the agent decides it once and every chat integration follows it. Slack does today, and Teams will read the same setting through the integration-neutral check in `apps/api/src/integrations/organization-agents.ts`.
+
+  - `visibility` on agents (requests and responses) accepts and returns `"organization"` alongside `"private"` and `"workspace"`. Choosing it needs an organization admin (403 otherwise); narrowing it back doesn't. Only me clears it.
+  - Slack's safety checks for these agents are unchanged: the person must be a full member of the connected Slack team, in a conversation only that team can see, with a linked Slack account, and an active, full member of the organization, read live on every message. They are told once that the agent's workspace can see the chat, and the chat runs as the agent's read-only service principal.
+  - The agent page's Slack section no longer has its own open switch. `AgentSlackAvailability.open` still says whether linked organization members can use the agent there, and `PUT …/slack/:connectionId` with `open` still works: it changes the agent's Who can use it, in every Slack workspace.
+  - Migration 1379 adds `agents.organization_access` (default false; rolling). Every write keeps `agent_slack_installs.open` equal to it, and while an agent is in Slack it is open only if every installation is (the column decides only for an agent in no Slack installation), so the previous release behaves the same during the rollout and a change it makes holds, also after a rollback: closing the agent in one Slack workspace closes it everywhere. The one visible effect: if a server on the previous release adds an organization agent to another Slack workspace during the rollout, the agent closes to the organization until an organization admin chooses Anyone in again (the safe direction). A later contract step backfills the column from `open` and stops reading `open`.
+
+  Agents contract (migrations 1380 to 1399): a shared agent is available in every linked Slack workspace at once. The temporary one-Slack-workspace-per-agent limit is gone, with the agent page's Move here; the `agent_slack_single_install` error code is deprecated and never returned, and `putAgentSlackInstall` no longer takes `moveFromOther`. `listAgentsMissingFromSlack` now takes the installation's `connectionId` and lists the shared agents not yet in that installation.
+
+  - The Slack records that pointed at `slack_agents` (channel routes, interactions, user states, proposals, intro posts, suggestions) now reference the agent's installation in `agent_slack_installs`, with the same delete behaviour, and `agent_slack_installs.install_workspace_id` records the installation's own workspace. Before the new keys are validated, migration 1389 cleans up rows that would fail them the way each key's delete rule would (chats and proposals are unlinked and kept; the rest are deleted) and logs the count per table.
+  - Nothing writes `bot_templates` or `slack_agents` any more (an agent's leftover `slack_agents` row is deleted when the agent is renamed, made Only me or removed) and the legacy sync triggers are dropped.
+  - The legacy Slack agents API shows an agent once per installation with the agent's own `version`. Its item routes take an optional `connectionId` query parameter (SDK: the `SlackAgentInstallationOptions` argument); channels and intros of an agent in several installations need it (`slack_agent_installation_required`) unless exactly one of them belongs to the path workspace. Open use and deleting act on the agent itself, as before.
+  - Breaking for direct `@opengeni/db` users: removed the legacy bot template functions (`listBotTemplates`, `getBotTemplate`, `createBotTemplate`, `updateBotTemplate`, `deleteBotTemplate`, `BotTemplateRecord`, `BotTemplateLimitError`) and `lockAgentLegacySlackVersion`; `legacySlackAgentAvatar` is now `agentSlackAvatar`. Use the agents data layer.
+  - Upgrade requirement for self-hosted and embedded deployments: upgrade from a release that contains the agents API switch (#7274) and apply this release only when no running binary is older. Rolling back past that release afterwards is not safe.
+  - Accepted rollout effects while the previous release still serves (or after a rollback to it), for an agent in a second Slack workspace: a route card's agent pick there answers "That agent no longer exists", the legacy Slack agents item routes answer 404 for it, and the previous release's Move here (if it has one) deletes the other Slack workspace's channel settings, which this release then adds back empty. All fail closed and end when this release serves again.
+
+### Patch Changes
+
+- 3bc721a: A chat waiting for Codex subscription capacity now waits honestly and wakes on real capacity. Before a waiting turn is judged, the waiter re-reads both usage and every account's live model list, so it judges the same pool the resumed turn will be placed on: it no longer resumes a turn only to have it park again a second later, and the expected time it names is the reset of an account that actually offers the turn's model (and latency tier), or no time at all when none is known. A waiting turn no longer fails after ten resumptions with text only an operator could act on; it keeps waiting, with the existing backoff between resumptions. The chat and the inbox notification now say the message will be answered as soon as there is room, and that switching to another model continues sooner.
+- 3b8f7da: A message sent while the agent is working (Send under `busySend: "steer"`, or Steer) now leaves the composer in the same frame it appears in the timeline. Before, the text stayed in the box until the server answered, about one to two request times later. The send also makes one request instead of two: with durable drafts it no longer saves the draft before submitting, because the submit carries the full message and the draft revision it went ahead from, and the server keeps a newer draft from another device on its own. A save still goes first only when this page has a draft write that got no answer, when the message carries a model, effort or speed pick the saved draft does not hold yet (the chat adopts a pick only from the saved draft), or when an older server refuses the send with "draft changed" (then it saves and resubmits once under the same client event ID, and remembers to save first).
+
+  A send refused for good puts its text, files and notes back in the box when nothing new was typed meanwhile; otherwise the new typing stays and the message waits in the timeline with Retry and Restore. An unconfirmed send stays in the timeline and its retry repeats it with the same key. A queued Send that fails no longer lets autosave write its emptied box over another device's newer draft.
+
+- d83e5f2: When an admin must confirm with a passkey before turning on an integration, the connect card now asks them to add or confirm a passkey. It used to say only an admin can turn it on, which was wrong for someone who is already an admin.
+- a16189c: Slack replies no longer show Opengeni links as raw Markdown. An image or link to an artifact (`![Preview](artifact:<id>)`, `[deck](artifact:<id>)`), a chat (`session:<id>`) or a console path now becomes a Slack link to that page in Opengeni, and a `sandbox:` path becomes its label. A clickable thumbnail links with its alt text. Markdown tables become an aligned code block, with each link in a cell numbered and listed under it. Operations an earlier release bound to other bytes keep them on retry. The console's file page opens a Site when an `artifact:<uuid>` link names one, since Sites share the UUID format.
+
+  Native app push registration now says why a deployment can't deliver to the app. `PUT /v1/native-app/push-device` answers 409 with `details.code` `native_push_unavailable` (`NATIVE_PUSH_UNAVAILABLE_DETAIL_CODE`, `isNativePushUnavailableError` in the SDK) when the app ID isn't in `OPENGENI_NATIVE_APP_IDS` or the platform has no push credentials, instead of a bare 400, or of accepting a registration that would never get a push. The iPhone app shows "This server isn't set up to send notifications to this app." instead of "Try again", shows a failed calls change under Calls from agents, and reports its APNs environment from its signing profile, also when it re-registers rotated tokens in the background (it re-registers a stored registration for the wrong environment too).
+
+  The iPhone message field grows with its text again, up to six lines (four with large text on a small screen, and never more than half the room above the keyboard) before it scrolls. On the new architecture iOS reports a field's content size only when its layout changes, so the fixed height the composer set from it never grew past one line and earlier lines scrolled out of view.
+
+- 73c3e82: A message sent as a Steer while no turn was running now stays above the turn it starts. When a later Steer handed that turn over at its next model step, the timeline moved the turn's work and messages above the first message, so the person's question read as if it came after its own answer, both live and after a refresh. Only Steers drawn while a turn is actually running now wait for that turn's handover.
+- 89cf4ba: `FormDialog` takes `aboveOtherDialogs`, which shows the dialog and its overlay above every other open dialog, including the chat's connect dialog.
+- Updated dependencies [f313a0e]
+- Updated dependencies [6813960]
+- Updated dependencies [9188c1d]
+- Updated dependencies [3105a8b]
+- Updated dependencies [a16189c]
+- Updated dependencies [89cf4ba]
+  - @opengeni/contracts@6.18.0
+  - @opengeni/sdk@6.18.0
+  - @opengeni/connect@6.18.0
+
 ## 6.17.0
 
 ### Minor Changes

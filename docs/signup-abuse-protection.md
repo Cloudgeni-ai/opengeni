@@ -244,7 +244,15 @@ prefixes never take part:
   creation (sign-in) time; refreshes do not extend it, since the stored address
   is the sign-in address.
 
-The new owner's session networks are recorded at organization setup. When an
+The new owner's session networks are recorded at organization setup, and again
+at each evaluation while the setup can still be evaluated (seven days) when the
+owner has signed in since (`1375_signup_denied_network_later_sign_ins.sql`).
+Farms set up from a fresh address and sign in from their usual network a minute
+later, so a sign-in after setup must count. The refresh is one indexed look-up
+of the owner's newest sessions and writes only when a newer sign-in has a
+network; if it fails, the evaluation still uses what is already recorded. The
+signup network (the API's key) and the sign-in networks (the database's key)
+use different keys, so they are never compared with each other. When an
 account becomes `denied` or `held`, the decision setter captures its owner's
 session networks (newest 200 sessions in the last 90 days) and remembers the
 owner (`opengeni_private.signup_network_flagged_owners`), so the networks

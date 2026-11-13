@@ -21,6 +21,19 @@ import type {
   BrowserDownloadSaveProgress,
 } from "@opengeni/contracts";
 import { SESSION_EVENT_CONVERSATION_FILTER_HEADER } from "@opengeni/contracts/session-history";
+import type {
+  ConsoleApiKeyUsageResponse,
+  ConsoleAuditEventListResponse,
+  ConsoleRange,
+  ConsoleSessionDetail,
+  ConsoleSessionListResponse,
+  ConsoleSettings,
+  ConsoleSummary,
+  ConsoleWorkspaceKind,
+  ConsoleWorkspaceListResponse,
+  UpdateConsoleSettingsRequest,
+  UpdateConsoleWorkspaceRequest,
+} from "@opengeni/contracts/console";
 import {
   currentMessageTimeZone,
   normalizeMessageTimeZone,
@@ -507,8 +520,15 @@ import type {
   OrganizationProviderCustomModelsResponse,
   CreateOrganizationProviderCustomModelRequest,
   DeleteOrganizationProviderCustomModelRequest,
+  SetOrganizationCustomModelListPriceRequest,
+  SetWorkspaceModelKeyListPriceRequest,
+  ModelPriceBasisModelsResponse,
   OrganizationCompatibleEndpoint,
   OrganizationCompatibleEndpointsResponse,
+  OrganizationAnthropicApiKey,
+  OrganizationAnthropicApiKeysResponse,
+  AddOrganizationAnthropicApiKeyRequest,
+  UpdateOrganizationAnthropicApiKeyRequest,
   CreateOrganizationCompatibleEndpointRequest,
   ReplaceOrganizationCompatibleEndpointKeyRequest,
   CreateOrganizationCompatibleEndpointModelRequest,
@@ -578,6 +598,8 @@ import type {
   CancelBillingSubscriptionRequest,
   BillingSubscriptionChange,
   CreateBillingPortalResponse,
+  ListBillingReceiptsQuery,
+  ListBillingReceiptsResponse,
   CreateCheckoutRequest,
   BillingCheckoutStatus,
   CreateCheckoutResponse,
@@ -974,6 +996,28 @@ function sessionListQuery(options: {
   if (parentSessionId !== undefined) query.parentSessionId = parentSessionId ?? "null";
   if (scopeSubjectId !== undefined) query.scopeSubjectId = scopeSubjectId;
   return query;
+}
+
+/**
+ * Which Slack installation a legacy Slack agent call is for. The Slack agent
+ * list shows an agent once per installation; pass that record's
+ * `connectionId`. Channels and intros of an agent in several installations
+ * need it (`slack_agent_installation_required`) unless exactly one of them
+ * belongs to the path workspace; other calls act on the
+ * agent itself and only use it to pick which record they return.
+ */
+export type SlackAgentInstallationOptions = {
+  connectionId?: string;
+};
+
+function slackAgentInstallationQuery(
+  options: SlackAgentInstallationOptions,
+  extra: Record<string, string> = {},
+): string {
+  const query = new URLSearchParams(extra);
+  if (options.connectionId) query.set("connectionId", options.connectionId);
+  const text = query.toString();
+  return text ? `?${text}` : "";
 }
 
 export type SessionListPageOptions = {
@@ -6647,11 +6691,83 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Set what an organization OpenAI model's or Azure OpenAI deployment's
+   * usage costs: the catalogue model it is priced like (an Azure
+   * deployment's base model), an explicit rate, or null for unknown.
+   */
+  async setOrganizationProviderCustomModelListPrice(
+    organizationId: string,
+    providerKind: "openai" | "azure_openai",
+    customModelId: string,
+    request: SetOrganizationCustomModelListPriceRequest,
+  ): Promise<OrganizationProviderCustomModel> {
+    return await this.requestJson<OrganizationProviderCustomModel>(
+      "PUT",
+      `/v1/organizations/${organizationId}/model-providers/${providerKind}/custom-models/${encodeURIComponent(customModelId)}/list-price`,
+      request,
+    );
+  }
+
   /** Read the workspace's hard provider/model allowlist. */
   async getWorkspaceModelAccessPolicy(workspaceId: string): Promise<WorkspaceModelAccessPolicy> {
     return await this.requestJson<WorkspaceModelAccessPolicy>(
       "GET",
       `/v1/workspaces/${workspaceId}/model-policy`,
+    );
+  }
+
+  /** List the API keys of the organization's Anthropic API connection (never their values). */
+  async listOrganizationAnthropicApiKeys(
+    organizationId: string,
+  ): Promise<OrganizationAnthropicApiKeysResponse> {
+    return await this.requestJson<OrganizationAnthropicApiKeysResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/model-providers/anthropic/api-keys`,
+    );
+  }
+
+  /** Add a further API key to the organization's Anthropic API connection. */
+  async addOrganizationAnthropicApiKey(
+    organizationId: string,
+    request: AddOrganizationAnthropicApiKeyRequest,
+  ): Promise<OrganizationAnthropicApiKey> {
+    return await this.requestJson<OrganizationAnthropicApiKey>(
+      "POST",
+      `/v1/organizations/${organizationId}/model-providers/anthropic/api-keys`,
+      request,
+    );
+  }
+
+  /** Rename one further API key of the organization's Anthropic API connection. */
+  async updateOrganizationAnthropicApiKey(
+    organizationId: string,
+    keyId: string,
+    request: UpdateOrganizationAnthropicApiKeyRequest,
+  ): Promise<OrganizationAnthropicApiKey> {
+    return await this.requestJson<OrganizationAnthropicApiKey>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/model-providers/anthropic/api-keys/${encodeURIComponent(keyId)}`,
+      request,
+    );
+  }
+
+  /** Remove one further API key of the organization's Anthropic API connection. */
+  async removeOrganizationAnthropicApiKey(organizationId: string, keyId: string): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/organizations/${organizationId}/model-providers/anthropic/api-keys/${encodeURIComponent(keyId)}`,
+    );
+  }
+
+  /** Let an API key Anthropic refused for lack of credits serve again. */
+  async serveOrganizationAnthropicApiKeyAgain(
+    organizationId: string,
+    keyId: string,
+  ): Promise<OrganizationAnthropicApiKey> {
+    return await this.requestJson<OrganizationAnthropicApiKey>(
+      "POST",
+      `/v1/organizations/${organizationId}/model-providers/anthropic/api-keys/${encodeURIComponent(keyId)}/serve-again`,
     );
   }
 
@@ -6729,6 +6845,20 @@ export class OpenGeniClient {
     return await this.requestJson<OrganizationCompatibleEndpointModel>(
       "PUT",
       `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints/${encodeURIComponent(connectionId)}/models/${encodeURIComponent(customModelId)}/reasoning`,
+      request,
+    );
+  }
+
+  /** Set what an OpenAI-compatible endpoint model's usage costs, or null for unknown. */
+  async setOrganizationCompatibleEndpointModelListPrice(
+    organizationId: string,
+    connectionId: string,
+    customModelId: string,
+    request: SetOrganizationCustomModelListPriceRequest,
+  ): Promise<OrganizationCompatibleEndpointModel> {
+    return await this.requestJson<OrganizationCompatibleEndpointModel>(
+      "PUT",
+      `/v1/organizations/${organizationId}/model-providers/openai_compatible/endpoints/${encodeURIComponent(connectionId)}/models/${encodeURIComponent(customModelId)}/list-price`,
       request,
     );
   }
@@ -11518,10 +11648,11 @@ export class OpenGeniClient {
     workspaceId: string,
     agentId: string,
     request: UpdateSlackAgentRequest,
+    options: SlackAgentInstallationOptions = {},
   ): Promise<SlackAgentResponse> {
     return await this.requestJson<SlackAgentResponse>(
       "PATCH",
-      `/v1/workspaces/${workspaceId}/integrations/slack/agents/${encodeURIComponent(agentId)}`,
+      `/v1/workspaces/${workspaceId}/integrations/slack/agents/${encodeURIComponent(agentId)}${slackAgentInstallationQuery(options)}`,
       request,
     );
   }
@@ -11530,10 +11661,11 @@ export class OpenGeniClient {
   async deleteOpenGeniSlackAgent(
     workspaceId: string,
     agentId: string,
+    options: SlackAgentInstallationOptions = {},
   ): Promise<{ deleted: boolean }> {
     return await this.requestJson<{ deleted: boolean }>(
       "DELETE",
-      `/v1/workspaces/${workspaceId}/integrations/slack/agents/${encodeURIComponent(agentId)}`,
+      `/v1/workspaces/${workspaceId}/integrations/slack/agents/${encodeURIComponent(agentId)}${slackAgentInstallationQuery(options)}`,
     );
   }
 
@@ -11542,8 +11674,9 @@ export class OpenGeniClient {
     workspaceId: string,
     agentId: string,
     cursor?: string,
+    options: SlackAgentInstallationOptions = {},
   ): Promise<SlackAgentChannelListResponse> {
-    const query = cursor ? `?${new URLSearchParams({ cursor })}` : "";
+    const query = slackAgentInstallationQuery(options, cursor ? { cursor } : {});
     return await this.requestJson<SlackAgentChannelListResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/integrations/slack/agents/${encodeURIComponent(agentId)}/channels${query}`,
@@ -11555,10 +11688,11 @@ export class OpenGeniClient {
     workspaceId: string,
     agentId: string,
     request: SlackAgentIntroRequest,
+    options: SlackAgentInstallationOptions = {},
   ): Promise<SlackAgentIntroResponse> {
     return await this.requestJson<SlackAgentIntroResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/integrations/slack/agents/${encodeURIComponent(agentId)}/intro`,
+      `/v1/workspaces/${workspaceId}/integrations/slack/agents/${encodeURIComponent(agentId)}/intro${slackAgentInstallationQuery(options)}`,
       request,
     );
   }
@@ -11617,6 +11751,32 @@ export class OpenGeniClient {
       `/v1/workspaces/${workspaceId}/connections/${connectionId}`,
     );
     return response.connection;
+  }
+
+  /**
+   * Set what a workspace's own OpenAI, Azure OpenAI or OpenAI-compatible
+   * model key's model costs: the catalogue model it is priced like (an Azure
+   * deployment's base model), an explicit rate, or null for unknown.
+   */
+  async setWorkspaceModelKeyListPrice(
+    workspaceId: string,
+    connectionId: string,
+    request: SetWorkspaceModelKeyListPriceRequest,
+  ): Promise<ConnectionMetadata> {
+    const response = await this.requestJson<ConnectionResponse>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/connections/${connectionId}/list-price`,
+      request,
+    );
+    return response.connection;
+  }
+
+  /** Catalogue models with a known list rate that a workspace model key can be priced like. */
+  async listModelPriceBasisModels(workspaceId: string): Promise<ModelPriceBasisModelsResponse> {
+    return await this.requestJson<ModelPriceBasisModelsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/model-price-basis-models`,
+    );
   }
 
   /**
@@ -12315,6 +12475,177 @@ export class OpenGeniClient {
     } while (cursor !== undefined);
   }
 
+  // --- Opengeni Console (organization owners and admins) ---------------------------------------
+
+  /** Console Overview: organization spend, managed and team workspaces, sessions and end users. */
+  async getConsoleSummary(
+    organizationId: string,
+    options: { range?: ConsoleRange; signal?: AbortSignal } = {},
+  ): Promise<ConsoleSummary> {
+    return await this.requestJson<ConsoleSummary>(
+      "GET",
+      `/v1/organizations/${organizationId}/console/summary`,
+      undefined,
+      options.range ? { range: options.range } : {},
+      { signal: options.signal },
+    );
+  }
+
+  /** Every shared workspace of the organization, managed by the product or the team's own. */
+  async listConsoleWorkspaces(
+    organizationId: string,
+    options: {
+      range?: ConsoleRange;
+      kind?: "all" | ConsoleWorkspaceKind;
+      signal?: AbortSignal;
+    } = {},
+  ): Promise<ConsoleWorkspaceListResponse> {
+    return await this.requestJson<ConsoleWorkspaceListResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/console/workspaces`,
+      undefined,
+      {
+        ...(options.range ? { range: options.range } : {}),
+        ...(options.kind ? { kind: options.kind } : {}),
+      },
+      { signal: options.signal },
+    );
+  }
+
+  /** Mark a workspace as managed by the product, or as the team's own. Audited. */
+  async updateConsoleWorkspace(
+    organizationId: string,
+    workspaceId: string,
+    request: UpdateConsoleWorkspaceRequest,
+  ): Promise<{ workspaceId: string; kind: ConsoleWorkspaceKind }> {
+    return await this.requestJson(
+      "PUT",
+      `/v1/organizations/${organizationId}/console/workspaces/${workspaceId}`,
+      request,
+    );
+  }
+
+  /**
+   * Reviewable sessions across the organization's managed workspaces, newest
+   * first: shared sessions and those private to the product's end users.
+   * Opengeni accounts' private chats are never listed.
+   */
+  async listConsoleSessions(
+    organizationId: string,
+    options: {
+      limit?: number;
+      cursor?: string;
+      workspaceId?: string;
+      q?: string;
+      signal?: AbortSignal;
+    } = {},
+  ): Promise<ConsoleSessionListResponse> {
+    return await this.requestJson<ConsoleSessionListResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/console/sessions`,
+      undefined,
+      {
+        ...(options.limit === undefined ? {} : { limit: String(options.limit) }),
+        ...(options.cursor ? { cursor: options.cursor } : {}),
+        ...(options.workspaceId ? { workspaceId: options.workspaceId } : {}),
+        ...(options.q ? { q: options.q } : {}),
+      },
+      { signal: options.signal },
+    );
+  }
+
+  /** One reviewable session with cost, tokens and ratings. Each open is written to the audit log. */
+  async getConsoleSession(
+    organizationId: string,
+    workspaceId: string,
+    sessionId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<ConsoleSessionDetail> {
+    return await this.requestJson<ConsoleSessionDetail>(
+      "GET",
+      `/v1/organizations/${organizationId}/console/workspaces/${workspaceId}/sessions/${sessionId}`,
+      undefined,
+      {},
+      { signal: options.signal },
+    );
+  }
+
+  /** The transcript of a reviewable session, oldest first (full review level only). */
+  async listConsoleSessionEvents(
+    organizationId: string,
+    workspaceId: string,
+    sessionId: string,
+    options: { after?: number; limit?: number; signal?: AbortSignal } = {},
+  ): Promise<{ events: SessionEvent[]; hasMore: boolean; nextAfter: number | null }> {
+    return await this.requestJson(
+      "GET",
+      `/v1/organizations/${organizationId}/console/workspaces/${workspaceId}/sessions/${sessionId}/events`,
+      undefined,
+      {
+        ...(options.after === undefined ? {} : { after: String(options.after) }),
+        ...(options.limit === undefined ? {} : { limit: String(options.limit) }),
+      },
+      { signal: options.signal },
+    );
+  }
+
+  async getConsoleSettings(
+    organizationId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<ConsoleSettings> {
+    return await this.requestJson<ConsoleSettings>(
+      "GET",
+      `/v1/organizations/${organizationId}/console/settings`,
+      undefined,
+      {},
+      { signal: options.signal },
+    );
+  }
+
+  /** Set what owners and admins may see of end-user sessions: full, metadata or off. Audited. */
+  async updateConsoleSettings(
+    organizationId: string,
+    request: UpdateConsoleSettingsRequest,
+  ): Promise<ConsoleSettings> {
+    return await this.requestJson<ConsoleSettings>(
+      "PUT",
+      `/v1/organizations/${organizationId}/console/settings`,
+      request,
+    );
+  }
+
+  /** Console audit log, newest first: transcript opens and setting changes. */
+  async listConsoleAuditLog(
+    organizationId: string,
+    options: { limit?: number; cursor?: string; sessionId?: string; signal?: AbortSignal } = {},
+  ): Promise<ConsoleAuditEventListResponse> {
+    return await this.requestJson<ConsoleAuditEventListResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/console/audit-log`,
+      undefined,
+      {
+        ...(options.limit === undefined ? {} : { limit: String(options.limit) }),
+        ...(options.cursor ? { cursor: options.cursor } : {}),
+        ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+      },
+      { signal: options.signal },
+    );
+  }
+
+  /** Who created each organization key and the spend in the workspaces it created. */
+  async getConsoleApiKeyUsage(
+    organizationId: string,
+    options: { range?: ConsoleRange; signal?: AbortSignal } = {},
+  ): Promise<ConsoleApiKeyUsageResponse> {
+    return await this.requestJson<ConsoleApiKeyUsageResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/console/api-keys`,
+      undefined,
+      options.range ? { range: options.range } : {},
+      { signal: options.signal },
+    );
+  }
+
   // --- Billing (account-scoped) --------------------------------------------------------------------
 
   async getBillingAlertSettings(
@@ -12570,6 +12901,28 @@ export class OpenGeniClient {
       "POST",
       "/v1/billing/portal",
       request,
+    );
+  }
+
+  /**
+   * The organization's payments, newest first, each with its Stripe receipt or
+   * invoice: plan invoices, credit purchases and automatic top-ups. Pass the
+   * returned nextCursor to read older payments.
+   */
+  async listBillingReceipts(
+    query: ListBillingReceiptsQuery = {},
+    options: { signal?: AbortSignal } = {},
+  ): Promise<ListBillingReceiptsResponse> {
+    return await this.requestJson<ListBillingReceiptsResponse>(
+      "GET",
+      "/v1/billing/receipts",
+      undefined,
+      {
+        ...(query.accountId !== undefined ? { accountId: query.accountId } : {}),
+        ...(query.cursor !== undefined ? { cursor: query.cursor } : {}),
+        ...(query.limit !== undefined ? { limit: String(query.limit) } : {}),
+      },
+      options.signal ? { signal: options.signal } : {},
     );
   }
 

@@ -5,6 +5,7 @@ import {
   registerDom,
   renderComponent,
   flush,
+  actRun,
 } from "../../../../../packages/react/test/render-hook";
 
 registerDom();
@@ -296,6 +297,97 @@ test("a new connection never resumes the repair of a linked account, and a repai
     // Starting again repeats this repair; it is not another account.
     expect(document.body.textContent).toContain("Start over");
     expect(document.body.textContent).not.toContain("Connect a different account");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a repair GitHub can't be asked to start says so and checks the same repair again", async () => {
+  const api = transport([]);
+  const unreachable = Object.assign(new Error("GitHub couldn't be reached. Check again."), {
+    status: 503,
+    code: "upstream_unavailable",
+    details: { code: "provider_unreachable", provider: "github" },
+  });
+  api.begin.mockImplementationOnce(async () => {
+    throw unreachable;
+  });
+  const view = await renderComponent(
+    <NativeConnectSetup
+      transport={api}
+      workspaceId="workspace"
+      request={{
+        scope: { workspaceId: "workspace", transport: api },
+        providerId: "github-app",
+        ownership: "workspace",
+        returnUrl: "http://localhost/integrations/github",
+        idempotencyKey: "repair-octocat",
+        reconnectAccountId: "github-installation:81",
+        title: "Reinstall on octocat",
+        unreachableTitle: "GitHub couldn't be reached",
+        description: "The Opengeni app was removed on GitHub. Install it again.",
+        authorizeLabel: "Reinstall on GitHub",
+      }}
+      onClose={() => {}}
+      onComplete={() => {}}
+    />,
+  );
+  try {
+    await flush(20);
+    const title = document.querySelector("[role=dialog] h2")!;
+    expect(title.textContent).toBe("GitHub couldn't be reached");
+    // One line and one action: no Reinstall, no generic chooser or failure.
+    const buttons = [...document.querySelectorAll("[role=dialog] button")]
+      .map((button) => button.textContent?.trim())
+      .filter((label) => label && label !== "Close");
+    expect(buttons).toEqual(["Check again"]);
+    expect(document.body.textContent).not.toContain("Could not start setup");
+    const check = [...document.querySelectorAll("button")].find(
+      (button) => button.textContent === "Check again",
+    )!;
+    await actRun(() => check.click());
+    await flush(20);
+    // The same repair, retried: same account and idempotency key.
+    expect(api.begin).toHaveBeenCalledTimes(2);
+    expect(api.begin.mock.calls[1]![1]).toMatchObject({
+      reconnectAccountId: "github-installation:81",
+      idempotencyKey: "repair-octocat",
+    });
+    expect(document.querySelector("[role=dialog] h2")!.textContent).toBe("Reinstall on octocat");
+    expect(document.body.textContent).not.toContain("Check again");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a setup that fails for another reason keeps the generic retry", async () => {
+  const api = transport([]);
+  api.begin.mockImplementationOnce(async () => {
+    throw Object.assign(new Error("Request failed."), { status: 500, code: "internal_error" });
+  });
+  const view = await renderComponent(
+    <NativeConnectSetup
+      transport={api}
+      workspaceId="workspace"
+      request={{
+        scope: { workspaceId: "workspace", transport: api },
+        providerId: "github-app",
+        ownership: "workspace",
+        returnUrl: "http://localhost/integrations/github",
+        idempotencyKey: "repair-octocat",
+        reconnectAccountId: "github-installation:81",
+        title: "Reinstall on octocat",
+        unreachableTitle: "GitHub couldn't be reached",
+      }}
+      onClose={() => {}}
+      onComplete={() => {}}
+    />,
+  );
+  try {
+    await flush(20);
+    expect(document.querySelector("[role=dialog] h2")!.textContent).toBe("Reinstall on octocat");
+    expect(document.body.textContent).toContain("Could not start setup.");
+    expect(document.body.textContent).not.toContain("Check again");
   } finally {
     await view.unmount();
   }

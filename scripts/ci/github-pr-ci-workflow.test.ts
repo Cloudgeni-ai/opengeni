@@ -163,6 +163,14 @@ test("PR runs Batch's own E2E and browser jobs for its impacted subset", () => {
     expect(pr.jobs.plan.outputs[output]).toBe(`\${{ steps.plan.outputs.${output} }}`);
     expect(plan.indexOf("pr-fast-plan.ts")).toBeLessThan(plan.indexOf(`${output}=`));
   }
+  // A head whose pr-fast-plan.ts predates the PR selection passes Batch's whole
+  // impacted set through; the PR must not run it all in one fallback shard.
+  expect(plan).toContain(
+    `e2e_count=$(jq 'if has("prBrowserE2e") then .e2eTests | length else 0 end'`,
+  );
+  expect(plan).toContain(
+    `browser_lane_count=$(jq 'if has("prBrowserE2e") then .browserAcceptanceLanes | length else 0 end'`,
+  );
   expect(plan).toContain(
     'cp "$RUNNER_TEMP/pr-plan.json" "$RUNNER_TEMP/pr-lane-plan/impact-plan.json"',
   );

@@ -112,6 +112,12 @@ Server configuration:
 | `OPENGENI_APNS_KEY_ID`, `OPENGENI_APNS_TEAM_ID`, `OPENGENI_APNS_PRIVATE_KEY` | APNs token auth (.p8). The bundle ID must be an App ID with Push Notifications in that team. Development builds use the APNs sandbox. |
 | `OPENGENI_FCM_SERVICE_ACCOUNT_JSON` | Firebase service account with the Cloud Messaging role. Android builds also need that project's `google-services.json`: set `OPENGENI_GOOGLE_SERVICES_FILE` to its path when building. |
 
+A deployment refuses a push registration it could never deliver: an app ID not in
+`OPENGENI_NATIVE_APP_IDS`, or a platform without credentials. Settings then says
+the server isn't set up to send notifications to this app; the API's error
+message names the refused app ID. The app reports its APNs environment from the build's signing
+profile, so a release build installed from Xcode registers for the sandbox.
+
 ## Message rendering limits
 
 The shared native timeline renders Markdown only up to 8,192 UTF-16 code units

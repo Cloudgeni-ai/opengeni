@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE } from "@opengeni/contracts/managed-sign-in-methods";
 
-import { adminStepUpRequested, setAdminStepUpHandler, withAdminStepUp } from "./admin-step-up";
+import {
+  adminStepUpRequested,
+  requestAdminStepUp,
+  setAdminStepUpHandler,
+  withAdminStepUp,
+} from "./admin-step-up";
 
 const refused = (details: Record<string, unknown>) =>
   Response.json(
@@ -92,6 +97,22 @@ describe("admin step-up in the console", () => {
     );
     expect(response.status).toBe(403);
     expect(sends).toBe(1);
+    unmount();
+  });
+
+  test("a refusal a caller already holds opens the same prompt", async () => {
+    expect(await requestAdminStepUp({ passkeyRegistered: true })).toBe(false);
+    const asked: unknown[] = [];
+    const unmount = setAdminStepUpHandler(async (info) => {
+      asked.push(info);
+      return true;
+    });
+    const [first, second] = await Promise.all([
+      requestAdminStepUp({ passkeyRegistered: false }),
+      requestAdminStepUp({ passkeyRegistered: false }),
+    ]);
+    expect([first, second]).toEqual([true, true]);
+    expect(asked).toEqual([{ passkeyRegistered: false }]);
     unmount();
   });
 });

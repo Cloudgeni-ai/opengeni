@@ -1,5 +1,165 @@
 # @opengeni/core
 
+## 6.20.1
+
+### Patch Changes
+
+- @opengeni/capabilities@6.20.1
+- @opengeni/codex@6.20.1
+- @opengeni/config@6.20.1
+- @opengeni/contracts@6.20.1
+- @opengeni/db@6.20.1
+- @opengeni/documents@6.20.1
+- @opengeni/events@6.20.1
+- @opengeni/network@6.20.1
+- @opengeni/observability@6.20.1
+- @opengeni/runtime@6.20.1
+- @opengeni/storage@6.20.1
+- @opengeni/tool-gateway@6.20.1
+- @opengeni/vaults@6.20.1
+- @opengeni/xai-subscription@6.20.1
+
+## 6.20.0
+
+### Minor Changes
+
+- e37485b: An organization's Anthropic API connection can hold several API keys, for example one per Anthropic organization whose credits it uses. The connection's own key stays the first, so an organization with one key works exactly as before, and model ids stay `organization-anthropic/…`. Admins add, rename and remove keys under Models on the Anthropic API page; each new key is checked with Anthropic's free model listing first, stored encrypted and never shown again.
+
+  Each chat keeps one key, so its prompt cache stays warm, and moves to another key only when Anthropic refuses its key for lack of credits. A refused key is marked **Out of credits** and left out until an admin chooses **Serve again**; when every key is out of credits, the request fails without being sent. Rate limits keep their usual handling. Claude subscription models never use these keys, and nothing buys credits or enables top-ups.
+
+  New routes under `/v1/organizations/:organizationId/model-providers/anthropic/api-keys`; the SDK calls them with `listOrganizationAnthropicApiKeys`, `addOrganizationAnthropicApiKey`, `updateOrganizationAnthropicApiKey`, `removeOrganizationAnthropicApiKey` and `serveOrganizationAnthropicApiKeyAgain`.
+
+- 2a207b4: Microsoft Teams (with workspace routing) now serves agents whose Who can use it is `Anyone in <organization>` to full members of the connected Teams tenant who aren't in the agent's workspace, with Slack's open-agent rules: 1:1 chats only, never guests (Teams' `getMemberById` must say `userRole` "user" in the connected tenant), live organization membership at enqueue, admission and delivery, and a one-time notice that the workspace's members can see the chat, which runs as the agent's read-only service principal `teams-agent:<agentId>`. A one-off `in <Workspace>: …` message continues the person's chat there and its replies start with a `**Workspace**` header.
+
+  - Stored Teams chat choices and switch-card options must name a shared agent of the named workspace (`teams_route_target_invalid`); a card needs the person's live link (`teams_link_missing`) and holds at most 100 options (`TEAMS_ROUTE_PROMPT_MAX_OPTIONS`); a reach change committed during an enqueue's access check refuses it (`teams_reach_changed`).
+  - Breaking for direct `@opengeni/db` users: `clearTeamsChatChoice` takes `{ actorId, subjectId }` and clears only that person's choice. `listTeamsAgentDirectory` accepts `preferWorkspaceIds`, returns `organizationAccess` and reads up to 1,000 agents. New: `getTeamsAgentInWorkspace`, `getTeamsTurnRouting`, `teamsOrganizationAgentSubjectId`, `teamsOrganizationAgentIdFromSubject`, `TEAMS_ORGANIZATION_AGENT_ROUTE_PREFIX`, `AGENT_ORGANIZATION_ACCESS_SQL`.
+
+### Patch Changes
+
+- ae3972e: The Microsoft Dynamics connection now supports Dynamics 365 Business Central. Paste the Business Central web client address (`https://businesscentral.dynamics.com/<tenant>/<environment>?company=…`) and sign in; one connection covers every company in the environment. Agents list companies and entities, query with OData, create, update and delete records and run actions such as posting, through the Business Central API (v2.0) as the signed-in user. Changes ask first by default.
+- cf65a72: Fix several failures seen in production:
+
+  - An attached file whose name merely contains two dots (such as `notes..txt`) no longer fails the turn. Sandbox file names still refuse empty, `.`, `..`, path separators and NUL, and uploads name a bare `.` or `..` `file`.
+  - A completed video from an Only-me chat is delivered to the chat. The reconciliation service read the result as a service actor that could not see the private chat, so the operation retried forever with "Completed video generation lost its retained artifact".
+  - Checking a session's work while the session is being deleted reports it idle instead of failing the activity with `SessionControlInvariantError`.
+  - A chat deleted while its title is generated ends the title operation quietly instead of warning "Independent session title failed".
+  - A caller that disconnects from `POST /v1/workspaces/:workspaceId/tools/{resolve,invoke,target-approvals,manifest}` gets the client-gone 499 (empty body) instead of a 500, counted as `aborted` in `opengeni_tool_target_operations_total`.
+  - A request that reads a session deleted while it runs no longer fails with a 500 "Session … does not exist in its workspace". A request that names that session (for example `GET /v1/workspaces/:workspaceId/machines?sessionId=…`) answers 404 "session not found"; any other request, such as a list whose page included it, answers 409 (retryable only for reads). The missing-session case of `SessionControlInvariantError` is now the `SessionMissingFromWorkspaceError` subclass.
+  - The web app picks its root providers from the rendered route rather than the pending location, so navigating to Security settings or phone sign-in no longer shows "Opengeni app context is not ready".
+  - Temporal "Activity failed" / "Workflow failed" logs add `failureMessageHash` (a hash of the explaining cause's message with identifiers, numbers and quoted values removed) and, for code-authored invariant errors, that template as `failureMessage`.
+
+- Updated dependencies [08953be]
+- Updated dependencies [ae3972e]
+- Updated dependencies [0e273b0]
+- Updated dependencies [52ef65b]
+- Updated dependencies [e37485b]
+- Updated dependencies [cf65a72]
+- Updated dependencies [6c10a4d]
+- Updated dependencies [2a207b4]
+- Updated dependencies [9c17a87]
+  - @opengeni/runtime@6.20.0
+  - @opengeni/contracts@6.20.0
+  - @opengeni/db@6.20.0
+  - @opengeni/config@6.20.0
+  - @opengeni/observability@6.20.0
+  - @opengeni/codex@6.20.0
+  - @opengeni/capabilities@6.20.0
+  - @opengeni/documents@6.20.0
+  - @opengeni/events@6.20.0
+  - @opengeni/storage@6.20.0
+  - @opengeni/tool-gateway@6.20.0
+  - @opengeni/vaults@6.20.0
+  - @opengeni/network@6.20.0
+  - @opengeni/xai-subscription@6.20.0
+
+## 6.19.0
+
+### Patch Changes
+
+- 973329a: Chats that share one sandbox (a parent and its workers) now each keep their own personal GitHub pass, broker routes and `gh` setup, so Git and `gh` in one chat no longer fail with "authorization is no longer current" after another chat on the box ran. The repository remote stays `https://github.com/<owner>/<repo>`, no token enters the sandbox, renewal updates only its own chat, and chat directories unused for a day are removed.
+
+  A personal repository resource that also carries stray GitHub App fields is accepted with those fields ignored (access is still checked as the person), and a request without a running agent attempt now says so instead of asking to reconnect GitHub.
+
+  Repairing an uninstalled GitHub App installation while GitHub can't be reached now says "GitHub couldn't be reached" with **Check again** (the API answers 503 `provider_unreachable`) instead of opening the account chooser. When a reinstall replaces the old installation, its approval choices move to the new one with their original setter, and the old installation's rows are removed.
+
+- Updated dependencies [227650c]
+- Updated dependencies [a85adef]
+- Updated dependencies [973329a]
+- Updated dependencies [7c378ac]
+- Updated dependencies [1b6b22f]
+- Updated dependencies [226fe73]
+  - @opengeni/db@6.19.0
+  - @opengeni/contracts@6.19.0
+  - @opengeni/runtime@6.19.0
+  - @opengeni/documents@6.19.0
+  - @opengeni/events@6.19.0
+  - @opengeni/capabilities@6.19.0
+  - @opengeni/codex@6.19.0
+  - @opengeni/config@6.19.0
+  - @opengeni/observability@6.19.0
+  - @opengeni/storage@6.19.0
+  - @opengeni/tool-gateway@6.19.0
+  - @opengeni/vaults@6.19.0
+  - @opengeni/network@6.19.0
+  - @opengeni/xai-subscription@6.19.0
+
+## 6.18.0
+
+### Minor Changes
+
+- f313a0e: An agent's Who can use it has a third choice, `Anyone in <organization>`: a shared agent that full members of its organization may also use from chat integrations, not only its workspace's members. It replaces Slack's per-Slack-workspace option that let linked organization members use an agent, so the agent decides it once and every chat integration follows it. Slack does today, and Teams will read the same setting through the integration-neutral check in `apps/api/src/integrations/organization-agents.ts`.
+
+  - `visibility` on agents (requests and responses) accepts and returns `"organization"` alongside `"private"` and `"workspace"`. Choosing it needs an organization admin (403 otherwise); narrowing it back doesn't. Only me clears it.
+  - Slack's safety checks for these agents are unchanged: the person must be a full member of the connected Slack team, in a conversation only that team can see, with a linked Slack account, and an active, full member of the organization, read live on every message. They are told once that the agent's workspace can see the chat, and the chat runs as the agent's read-only service principal.
+  - The agent page's Slack section no longer has its own open switch. `AgentSlackAvailability.open` still says whether linked organization members can use the agent there, and `PUT …/slack/:connectionId` with `open` still works: it changes the agent's Who can use it, in every Slack workspace.
+  - Migration 1379 adds `agents.organization_access` (default false; rolling). Every write keeps `agent_slack_installs.open` equal to it, and while an agent is in Slack it is open only if every installation is (the column decides only for an agent in no Slack installation), so the previous release behaves the same during the rollout and a change it makes holds, also after a rollback: closing the agent in one Slack workspace closes it everywhere. The one visible effect: if a server on the previous release adds an organization agent to another Slack workspace during the rollout, the agent closes to the organization until an organization admin chooses Anyone in again (the safe direction). A later contract step backfills the column from `open` and stops reading `open`.
+
+  Agents contract (migrations 1380 to 1399): a shared agent is available in every linked Slack workspace at once. The temporary one-Slack-workspace-per-agent limit is gone, with the agent page's Move here; the `agent_slack_single_install` error code is deprecated and never returned, and `putAgentSlackInstall` no longer takes `moveFromOther`. `listAgentsMissingFromSlack` now takes the installation's `connectionId` and lists the shared agents not yet in that installation.
+
+  - The Slack records that pointed at `slack_agents` (channel routes, interactions, user states, proposals, intro posts, suggestions) now reference the agent's installation in `agent_slack_installs`, with the same delete behaviour, and `agent_slack_installs.install_workspace_id` records the installation's own workspace. Before the new keys are validated, migration 1389 cleans up rows that would fail them the way each key's delete rule would (chats and proposals are unlinked and kept; the rest are deleted) and logs the count per table.
+  - Nothing writes `bot_templates` or `slack_agents` any more (an agent's leftover `slack_agents` row is deleted when the agent is renamed, made Only me or removed) and the legacy sync triggers are dropped.
+  - The legacy Slack agents API shows an agent once per installation with the agent's own `version`. Its item routes take an optional `connectionId` query parameter (SDK: the `SlackAgentInstallationOptions` argument); channels and intros of an agent in several installations need it (`slack_agent_installation_required`) unless exactly one of them belongs to the path workspace. Open use and deleting act on the agent itself, as before.
+  - Breaking for direct `@opengeni/db` users: removed the legacy bot template functions (`listBotTemplates`, `getBotTemplate`, `createBotTemplate`, `updateBotTemplate`, `deleteBotTemplate`, `BotTemplateRecord`, `BotTemplateLimitError`) and `lockAgentLegacySlackVersion`; `legacySlackAgentAvatar` is now `agentSlackAvatar`. Use the agents data layer.
+  - Upgrade requirement for self-hosted and embedded deployments: upgrade from a release that contains the agents API switch (#7274) and apply this release only when no running binary is older. Rolling back past that release afterwards is not safe.
+  - Accepted rollout effects while the previous release still serves (or after a rollback to it), for an agent in a second Slack workspace: a route card's agent pick there answers "That agent no longer exists", the legacy Slack agents item routes answer 404 for it, and the previous release's Move here (if it has one) deletes the other Slack workspace's channel settings, which this release then adds back empty. All fail closed and end when this release serves again.
+
+### Patch Changes
+
+- d83e5f2: Two workspaces can now add the same Microsoft Dynamics environment. A workspace's Dynamics entry no longer stores its address in the catalog's `mcp_url` column, which is unique across workspaces, so adding an environment another workspace already uses no longer fails with an internal error. Reads still return the address as `mcpUrl`.
+- Updated dependencies [f313a0e]
+- Updated dependencies [6813960]
+- Updated dependencies [9188c1d]
+- Updated dependencies [3bc721a]
+- Updated dependencies [d83e5f2]
+- Updated dependencies [3105a8b]
+- Updated dependencies [d83e5f2]
+- Updated dependencies [ea2f259]
+- Updated dependencies [07a9375]
+- Updated dependencies [3d2f6ed]
+- Updated dependencies [35a2a06]
+- Updated dependencies [d83e5f2]
+- Updated dependencies [3c366a7]
+- Updated dependencies [f318955]
+- Updated dependencies [a16189c]
+- Updated dependencies [89cf4ba]
+- Updated dependencies [4c6c0a4]
+- Updated dependencies [c1b19a8]
+- Updated dependencies [917393e]
+  - @opengeni/contracts@6.18.0
+  - @opengeni/db@6.18.0
+  - @opengeni/config@6.18.0
+  - @opengeni/observability@6.18.0
+  - @opengeni/runtime@6.18.0
+  - @opengeni/network@6.18.0
+  - @opengeni/capabilities@6.18.0
+  - @opengeni/codex@6.18.0
+  - @opengeni/documents@6.18.0
+  - @opengeni/events@6.18.0
+  - @opengeni/storage@6.18.0
+  - @opengeni/tool-gateway@6.18.0
+  - @opengeni/vaults@6.18.0
+  - @opengeni/xai-subscription@6.18.0
+
 ## 6.17.0
 
 ### Patch Changes

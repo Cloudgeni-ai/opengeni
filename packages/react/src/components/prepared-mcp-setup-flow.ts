@@ -8,7 +8,10 @@ import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/brow
 import { useEffect, useRef, useState } from "react";
 import { useConnect } from "../hooks/use-connect";
 import type { OpenGeniText } from "../messages/runtime";
-import { attachSessionCapability } from "../session-capability-policy";
+import {
+  attachSessionCapability,
+  continueAfterCapabilitySetup,
+} from "../session-capability-policy";
 import type { AuthNeededItem } from "../timeline/types";
 
 /** Whether an auth notice is an agent's prepared key setup for a custom MCP server. */
@@ -116,6 +119,9 @@ export function usePreparedMcpSetupAccess({
       await attachSessionCapability(t, client, workspaceId, sessionId, item, () => active);
       if (!active) return;
       setAccess("ready");
+      // Let the agent carry on with the request that posted this card, so the
+      // person never has to say they are done. The server sends at most one.
+      continueAfterCapabilitySetup(client, workspaceId, sessionId, item.id);
       // A host refresh failure cannot undo a verified connection or turn it
       // into a reason to resubmit credentials.
       void Promise.resolve(notify.current?.()).catch(() => {});

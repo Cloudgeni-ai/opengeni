@@ -13,6 +13,7 @@ import {
   CreateBillingPortalResponse,
   CreateCheckoutRequest,
   CreateCheckoutResponse,
+  ListBillingReceiptsQuery,
   OrganizationUsageQuery,
   OrganizationUsageWorkspacePageQuery,
   type AccessContext,
@@ -53,10 +54,13 @@ import Stripe from "stripe";
 import { sql } from "drizzle-orm";
 import { requireAccessContext, MissingPermissionRefusal } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
+import type { Settings } from "@opengeni/config";
 import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
+import { managedAuthPublicBaseUrls } from "../auth/managed-auth";
 import { subscriptionStore } from "../billing-subscription-store";
 import { StripeSubscriptions, subscriptionWebhookEvent } from "../billing-subscriptions";
 import { serializedStripeCustomer } from "../billing-stripe-customer";
+import { listStripeReceipts } from "../billing-receipts";
 import { parseRequestBody, parseRequestQuery } from "../http/request-body";
 import { errorMessage } from "@opengeni/contracts/values";
 import {
@@ -253,6 +257,7 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
           creditsProductId: deps.settings.stripeCreditsProductId,
           publicBaseUrl: deps.settings.publicBaseUrl,
           webBaseUrl: deps.settings.webBaseUrl,
+          returnOrigins: billingReturnOrigins(deps.settings),
           successUrl: body.successUrl,
           cancelUrl: body.cancelUrl,
           idempotencyKey,
@@ -343,6 +348,39 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
   });
 
+  // Every payment the organization made, with its receipt. Reading never
+  // creates a Stripe customer: an organization that never paid has none.
+  app.get("/v1/billing/receipts", async (c) => {
+    if (deps.settings.billingMode !== "stripe") {
+      throw new HTTPException(404, { message: "stripe billing is not enabled" });
+    }
+    const context = await requireAccessContext(c, deps);
+    const accountId = requireSelectedAccount(context, c.req.query("accountId"), "billing:read");
+    const query = parseRequestQuery(ListBillingReceiptsQuery, c.req.query(), {
+      status: 400,
+      message: "invalid receipts query",
+    });
+    const provider = stripeCustomerProvider(deps);
+    const customer = await withRlsContext(deps.db, { accountId, workspaceId: null }, (tx) =>
+      getBillingCustomer(tx, accountId, provider),
+    );
+    if (!customer) return c.json({ receipts: [], nextCursor: null });
+    try {
+      return c.json(
+        await listStripeReceipts(stripeClient(deps), customer.providerCustomerId, {
+          cursor: query.cursor,
+          limit: query.limit,
+        }),
+      );
+    } catch (error) {
+      // A cursor from another customer, or one Stripe no longer knows.
+      if (query.cursor && error instanceof Stripe.errors.StripeInvalidRequestError) {
+        throw new HTTPException(400, { message: "invalid receipts cursor" });
+      }
+      throw error;
+    }
+  });
+
   app.post("/v1/billing/portal", async (c) => {
     if (deps.settings.billingMode !== "stripe") {
       throw new HTTPException(404, { message: "stripe billing is not enabled" });
@@ -360,6 +398,7 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
         customerId,
         publicBaseUrl: deps.settings.publicBaseUrl,
         webBaseUrl: deps.settings.webBaseUrl,
+        returnOrigins: billingReturnOrigins(deps.settings),
         returnUrl: parsed.returnUrl,
       }),
     );
@@ -467,6 +506,7 @@ function registerSubscriptionRoutes(app: Hono, deps: ApiRouteDeps): void {
             parsed.successUrl,
             "/billing?subscription=success",
             "successUrl",
+            billingReturnOrigins(deps.settings),
           ),
           cancelUrl: checkoutReturnUrl(
             deps.settings.publicBaseUrl,
@@ -474,6 +514,7 @@ function registerSubscriptionRoutes(app: Hono, deps: ApiRouteDeps): void {
             parsed.cancelUrl,
             "/billing?subscription=cancelled",
             "cancelUrl",
+            billingReturnOrigins(deps.settings),
           ),
         }),
       ),
@@ -520,6 +561,7 @@ function registerSubscriptionRoutes(app: Hono, deps: ApiRouteDeps): void {
         customerId,
         publicBaseUrl: deps.settings.publicBaseUrl,
         webBaseUrl: deps.settings.webBaseUrl,
+        returnOrigins: billingReturnOrigins(deps.settings),
         returnUrl: parsed.returnUrl,
       }),
     );
@@ -537,6 +579,8 @@ export function stripeCheckoutSessionCreateParams(input: {
   creditsProductId?: string | undefined;
   publicBaseUrl?: string | undefined;
   webBaseUrl?: string | undefined;
+  /** Other public origins a return URL may use (billingReturnOrigins). */
+  returnOrigins?: readonly string[] | undefined;
   successUrl?: string | undefined;
   cancelUrl?: string | undefined;
   idempotencyKey: string;
@@ -561,6 +605,7 @@ export function stripeCheckoutSessionCreateParams(input: {
     input.successUrl,
     "/checkout-complete.html?checkout=success",
     "successUrl",
+    input.returnOrigins,
   );
   const cancelUrl = checkoutReturnUrl(
     input.publicBaseUrl,
@@ -568,6 +613,7 @@ export function stripeCheckoutSessionCreateParams(input: {
     input.cancelUrl,
     "/checkout-complete.html?checkout=cancelled",
     "cancelUrl",
+    input.returnOrigins,
   );
   return {
     mode: "payment",
@@ -641,6 +687,8 @@ export function stripeBillingPortalSessionCreateParams(input: {
   customerId: string;
   publicBaseUrl?: string | undefined;
   webBaseUrl?: string | undefined;
+  /** Other public origins the return URL may use (billingReturnOrigins). */
+  returnOrigins?: readonly string[] | undefined;
   returnUrl?: string | undefined;
 }): Stripe.BillingPortal.SessionCreateParams {
   return {
@@ -651,8 +699,19 @@ export function stripeBillingPortalSessionCreateParams(input: {
       input.returnUrl,
       "/billing",
       "returnUrl",
+      input.returnOrigins,
     ),
   };
+}
+
+/**
+ * Opengeni's other public hosts a Stripe page may return to: the allowed
+ * hosts (OPENGENI_BETTER_AUTH_ALLOWED_HOSTS), such as the Console host.
+ */
+export function billingReturnOrigins(
+  settings: Pick<Settings, "publicBaseUrl" | "betterAuthAllowedHosts">,
+): string[] {
+  return managedAuthPublicBaseUrls(settings, undefined).map((base) => new URL(base).origin);
 }
 
 export function checkoutReturnUrl(
@@ -661,6 +720,7 @@ export function checkoutReturnUrl(
   candidate: string | undefined,
   fallbackPath: string,
   field: string,
+  returnOrigins: readonly string[] = [],
 ): string {
   if (!publicBaseUrl) {
     throw new HTTPException(500, {
@@ -673,7 +733,7 @@ export function checkoutReturnUrl(
     return fallback;
   }
   const parsed = new URL(candidate);
-  const allowedOrigins = new Set([new URL(publicBaseUrl).origin, base.origin]);
+  const allowedOrigins = new Set([new URL(publicBaseUrl).origin, base.origin, ...returnOrigins]);
   if (!allowedOrigins.has(parsed.origin)) {
     throw new HTTPException(400, {
       message: `${field} must use the Opengeni public${allowedOrigins.size > 1 ? " or web" : ""} origin`,

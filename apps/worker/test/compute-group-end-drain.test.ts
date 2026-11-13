@@ -13,6 +13,7 @@ import {
   createDb,
   createSession,
   readLease,
+  readUnseenSandboxStop,
   reapStaleLeaseHolders,
   type Database,
   type DbClient,
@@ -230,6 +231,20 @@ describe("compute group end", () => {
     expect(await readLease(db, fixture.workspaceId, fixture.sandboxGroupId)).toMatchObject({
       liveness: "cold",
       groupEndRequestedAt: null,
+      // Nothing to resume or restore: a chat that goes on (one restored from
+      // the archive) starts on a new sandbox.
+      instanceId: null,
+      resumeState: null,
+    });
+    // The chat's record says why, so its next turn is told the files are gone.
+    const [terminated] = await admin<{ payload: Record<string, unknown> }[]>`
+      select payload from session_events
+      where workspace_id = ${fixture.workspaceId} and session_id = ${fixture.sessionId}
+        and type = 'sandbox.box.terminated'`;
+    expect(terminated!.payload).toMatchObject({ persisted: false, drainReason: "group_end" });
+    expect(await readUnseenSandboxStop(db, fixture.workspaceId, fixture.sessionId)).toMatchObject({
+      kind: "stopped",
+      reason: "group_end",
     });
   }, 60_000);
 

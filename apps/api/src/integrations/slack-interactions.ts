@@ -131,7 +131,6 @@ import {
   getWorkspace,
   getWorkspaceGrant,
   getOrganizationPrivacyPreferences,
-  namedSubjectIsActiveOrganizationMember,
   namedSubjectPersonalWorkspaceId,
   resolveSlackTargetAuthority,
   listSlackInteractionProgressDeliveryEvidence,
@@ -201,7 +200,10 @@ import {
 import {
   slackMrkdwnFromMarkdown,
   slackMrkdwnKeepingClaudeCiteTags,
+  slackMrkdwnKeepingObjectLinks,
   slackMrkdwnKeepingProviderTracking,
+  slackObjectLinkUrl,
+  type SlackObjectLinkUrl,
 } from "./slack-mrkdwn";
 import { sessionAvatarImageUrl } from "./session-avatar-image";
 import { slackMentionedUserIds, slackReadableRequestText } from "./slack-request-text";
@@ -238,7 +240,6 @@ import {
   openSlackAgentGrant,
   openSlackAgentIdFromSubject,
   openSlackAgentInstructions,
-  openSlackAgentPersonRefusal,
   openSlackAgentRefusal,
   openSlackAgentSessionOptions,
   type OpenSlackAgentPersonRefusal,
@@ -251,6 +252,7 @@ import {
   slackOpenAgentOrganizationMembersOnlyText,
   slackOpenAgentSharedConversationText,
 } from "./slack-open-agents";
+import { organizationAgentAskerPerson } from "./organization-agents";
 import {
   buildSlackAppHomeAccessBlocks,
   buildSlackAppHomeBlocks,
@@ -2064,19 +2066,11 @@ async function openSlackAgentAskerPerson(
   agent: Pick<SlackAgentRecord, "targetAccountId">,
   link: { subjectId: string } | null,
 ): Promise<{ subjectId: string } | { refusal: OpenSlackAgentPersonRefusal }> {
-  const organizationMember =
-    link !== null &&
-    agent.targetAccountId === home.accountId &&
-    (await namedSubjectIsActiveOrganizationMember(deps.db, {
-      accountId: home.accountId,
-      subjectId: link.subjectId,
-    }));
-  const refusal = openSlackAgentPersonRefusal({
+  return await organizationAgentAskerPerson(deps.db, {
+    connectionAccountId: home.accountId,
+    agentAccountId: agent.targetAccountId,
     linkedSubjectId: link?.subjectId ?? null,
-    organizationMember,
   });
-  if (refusal || !link) return { refusal: refusal ?? "not_linked" };
-  return { subjectId: link.subjectId };
 }
 
 /** The one private reply for a person an open agent can't take: link, or why not. */
@@ -2889,6 +2883,7 @@ async function handleSlackRouteChoice(
     ? await getSlackAgent(deps.db, {
         accountId: home.accountId,
         agentId: chosen.candidateSlackAgentId,
+        connectionId: entry.connectionId,
       })
     : null;
   if (
@@ -6768,7 +6763,7 @@ async function publishSlackSharedResult(
     `slack-shared-result:${origin.interactionId}:${event.id}:${origin.policyActivationVersion}`,
   );
   const identity = await client.sessionIdentity(interaction.workspaceId, interaction.sessionId);
-  await deliverSlackModelText(async (format) => {
+  await deliverSlackModelText(slackModelTextLinks(deps, interaction), async (format) => {
     await client.postMessage({
       operationId: publicationOperationId,
       channelId: origin.sourceChannelId,
@@ -7706,7 +7701,7 @@ async function deliverSlackSessionEvents(
           throw new Error("Slack progress delivery lost its durable interaction claim");
         }
         if (progress.kind === "claimed") {
-          await deliverSlackModelText((format) =>
+          await deliverSlackModelText(slackModelTextLinks(deps, interaction), (format) =>
             postDelivery(
               client,
               interaction,
@@ -7861,7 +7856,7 @@ async function deliverSlackSessionEvents(
           ? null
           : turnCompletedReply(event.payload);
         if (reply && !isSlackNoReplyText(reply)) {
-          await deliverSlackModelText((format) =>
+          await deliverSlackModelText(slackModelTextLinks(deps, interaction), (format) =>
             postDelivery(
               client,
               interaction,
@@ -7904,7 +7899,7 @@ async function deliverSlackSessionEvents(
         // a second final post.
         // Render exactly as the progress post did: the same bounded text
         // through the same formatter, under the same operation.
-        await deliverSlackModelText((format) =>
+        await deliverSlackModelText(slackModelTextLinks(deps, interaction), (format) =>
           postDelivery(
             client,
             interaction,
@@ -7925,7 +7920,7 @@ async function deliverSlackSessionEvents(
           const updateOperationId = deterministicUuid(
             slackPostSeed(interaction, `slack-terminal-update:${interaction.id}:${event.sequence}`),
           );
-          await deliverSlackModelText(async (format) => {
+          await deliverSlackModelText(slackModelTextLinks(deps, interaction), async (format) => {
             // The result is the result. Continuation prose lives in the
             // one-time hint and `<command> info`.
             const text = boundedOutput(
@@ -7970,7 +7965,7 @@ async function deliverSlackSessionEvents(
               operationId,
             )
           : [];
-        await deliverSlackModelText((format) => {
+        await deliverSlackModelText(slackModelTextLinks(deps, interaction), (format) => {
           const text = boundedOutput(`${requester.mention}${format(output)}`);
           return postDelivery(
             client,
@@ -8199,20 +8194,26 @@ async function postDelivery(
  * the deploy) must keep them, or every retry would conflict and wedge the
  * interaction. Earlier releases sent the unformatted bytes, then the
  * formatting from before Claude citation tags were rewritten, then the
- * formatting from before source links lost hosted-search tracking. The ledger
+ * formatting from before source links lost hosted-search tracking, then the
+ * formatting from before Opengeni object links and tables were rewritten. The ledger
  * reports a conflict from its durable claim, before any Slack write, so
  * retrying with each earlier rendering that differs under the same operation
  * id is safe. The id itself never changes: action handles and the post lookups
  * keyed on it stay exact, and a new operation always carries the current
  * formatting.
+ *
+ * `objectLinkUrl` opens the session's `artifact:` and `session:` links in the
+ * console (`slackModelTextLinks`).
  */
 async function deliverSlackModelText(
+  objectLinkUrl: SlackObjectLinkUrl,
   deliver: (format: (text: string) => string) => Promise<unknown>,
 ): Promise<void> {
+  const renderings = slackModelTextRenderings(objectLinkUrl);
   const texts: string[] = [];
   let attempt = 0;
   for (;;) {
-    const render = SLACK_MODEL_TEXT_RENDERINGS[attempt]!;
+    const render = renderings[attempt]!;
     try {
       await deliver((text) => {
         if (attempt === 0) texts.push(text);
@@ -8223,13 +8224,11 @@ async function deliverSlackModelText(
       if (!(error instanceof SlackBotOperationConflictError)) throw error;
       // The next rendering that gives any of these texts bytes no earlier
       // attempt sent; one that sends the same bytes would conflict the same way.
-      const next = SLACK_MODEL_TEXT_RENDERINGS.findIndex(
+      const next = renderings.findIndex(
         (candidate, index) =>
           index > attempt &&
           texts.some((text) =>
-            SLACK_MODEL_TEXT_RENDERINGS.slice(0, index).every(
-              (earlier) => earlier(text) !== candidate(text),
-            ),
+            renderings.slice(0, index).every((earlier) => earlier(text) !== candidate(text)),
           ),
       );
       if (next < 0) throw error;
@@ -8239,12 +8238,30 @@ async function deliverSlackModelText(
 }
 
 /** Current Slack formatting first, then each rendering an earlier release used. */
-const SLACK_MODEL_TEXT_RENDERINGS: readonly ((text: string) => string)[] = [
-  slackMrkdwnFromMarkdown,
-  slackMrkdwnKeepingProviderTracking,
-  slackMrkdwnKeepingClaudeCiteTags,
-  (text) => text,
-];
+function slackModelTextRenderings(
+  objectLinkUrl: SlackObjectLinkUrl,
+): readonly ((text: string) => string)[] {
+  return [
+    (text) => slackMrkdwnFromMarkdown(text, objectLinkUrl),
+    slackMrkdwnKeepingObjectLinks,
+    slackMrkdwnKeepingProviderTracking,
+    slackMrkdwnKeepingClaudeCiteTags,
+    (text) => text,
+  ];
+}
+
+/** Console addresses for the Opengeni object links in this interaction's session. */
+function slackModelTextLinks(
+  deps: ApiRouteDeps,
+  interaction: Pick<SlackInteraction, "workspaceId" | "sessionId">,
+): SlackObjectLinkUrl {
+  if (!interaction.sessionId) return () => null;
+  return slackObjectLinkUrl({
+    baseUrl: deps.settings.webBaseUrl ?? deps.settings.publicBaseUrl,
+    workspaceId: interaction.workspaceId,
+    sessionId: interaction.sessionId,
+  });
+}
 
 async function enqueueNormalizedSlackInteraction(
   deps: ApiRouteDeps,

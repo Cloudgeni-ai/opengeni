@@ -1,5 +1,71 @@
 # @opengeni/documents
 
+## 6.20.1
+
+### Patch Changes
+
+- @opengeni/config@6.20.1
+- @opengeni/contracts@6.20.1
+- @opengeni/db@6.20.1
+- @opengeni/network@6.20.1
+- @opengeni/storage@6.20.1
+
+## 6.20.0
+
+### Patch Changes
+
+- Updated dependencies [ae3972e]
+- Updated dependencies [0e273b0]
+- Updated dependencies [52ef65b]
+- Updated dependencies [e37485b]
+- Updated dependencies [cf65a72]
+- Updated dependencies [2a207b4]
+- Updated dependencies [9c17a87]
+  - @opengeni/contracts@6.20.0
+  - @opengeni/db@6.20.0
+  - @opengeni/config@6.20.0
+  - @opengeni/storage@6.20.0
+  - @opengeni/network@6.20.0
+
+## 6.19.0
+
+### Patch Changes
+
+- Updated dependencies [227650c]
+- Updated dependencies [a85adef]
+- Updated dependencies [973329a]
+- Updated dependencies [7c378ac]
+- Updated dependencies [1b6b22f]
+- Updated dependencies [226fe73]
+  - @opengeni/db@6.19.0
+  - @opengeni/contracts@6.19.0
+  - @opengeni/config@6.19.0
+  - @opengeni/storage@6.19.0
+  - @opengeni/network@6.19.0
+
+## 6.18.0
+
+### Patch Changes
+
+- Updated dependencies [f313a0e]
+- Updated dependencies [6813960]
+- Updated dependencies [9188c1d]
+- Updated dependencies [3bc721a]
+- Updated dependencies [d83e5f2]
+- Updated dependencies [3105a8b]
+- Updated dependencies [d83e5f2]
+- Updated dependencies [3d2f6ed]
+- Updated dependencies [35a2a06]
+- Updated dependencies [f318955]
+- Updated dependencies [a16189c]
+- Updated dependencies [89cf4ba]
+- Updated dependencies [917393e]
+  - @opengeni/contracts@6.18.0
+  - @opengeni/db@6.18.0
+  - @opengeni/config@6.18.0
+  - @opengeni/network@6.18.0
+  - @opengeni/storage@6.18.0
+
 ## 6.17.0
 
 ### Patch Changes

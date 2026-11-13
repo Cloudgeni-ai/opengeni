@@ -222,6 +222,10 @@ export function FormFrame({
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    // A dialog portalled out of another form (a confirmation opened from a
+    // field) is still its child in React, so its submit would otherwise also
+    // submit that outer form, with the field's value from before the confirm.
+    event.stopPropagation();
     if (pending || submitDisabled) return;
     setThrown(null);
     if (!onSubmit) {
@@ -676,6 +680,9 @@ export function useFormOverlay({
   };
 }
 
+/** Above the chat's connect dialog (1000/1001 in session-capability.css). */
+const ABOVE_OTHER_DIALOGS_Z_INDEX = 1100;
+
 export function FormDialog({
   open,
   onOpenChange,
@@ -687,8 +694,20 @@ export function FormDialog({
   onCancel,
   onPendingChange,
   className,
+  aboveOtherDialogs,
   ...frame
-}: FormOverlayProps & { size?: FormDialogSize }) {
+}: FormOverlayProps & {
+  size?: FormDialogSize;
+  /**
+   * Show above every other open dialog, including the chat's connect dialog
+   * (which sits above host page chrome). For a prompt any open surface can
+   * raise and that must be answered first, such as the admin passkey step-up.
+   * Only the overlay and the dialog are raised: menus, selects and tooltips
+   * opened from inside it still render at their own layer, so keep it to plain fields.
+   */
+  aboveOtherDialogs?: boolean | undefined;
+}) {
+  const layer = aboveOtherDialogs ? { zIndex: ABOVE_OTHER_DIALOGS_Z_INDEX } : undefined;
   const overlay = useFormOverlay({
     open,
     onOpenChange,
@@ -704,9 +723,13 @@ export function FormDialog({
     <DialogPrimitive.Root {...overlay.rootProps}>
       {trigger ? <DialogPrimitive.Trigger asChild>{trigger}</DialogPrimitive.Trigger> : null}
       <DialogContainedPortal>
-        <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/50 transition-opacity duration-[120ms] starting:opacity-0" />
+        <DialogPrimitive.Overlay
+          className="fixed inset-0 z-50 bg-black/50 transition-opacity duration-[120ms] starting:opacity-0"
+          style={layer}
+        />
         <DialogPrimitive.Content
           {...overlay.contentProps}
+          style={layer}
           {...(frame.description ? {} : { "aria-describedby": undefined })}
           className={cn(
             "fixed z-50 flex flex-col outline-hidden transition-opacity duration-[120ms] starting:opacity-0",

@@ -101,6 +101,9 @@ function sessionCookie(response: Response): string {
 }
 
 async function passkeyPerson(rt: Runtime, name: string) {
+  // Every fixture signs up from the same test address; keep the per-address
+  // sign-up limit from deciding which later test fails.
+  await admin`delete from auth_rate_limits where key like 'passkey-sign-up:%'`;
   const passkey = createSoftwarePasskey();
   const options = await call(rt, "POST", "/v1/auth/passkey/sign-up/options", "", { name });
   expect(options.status).toBe(200);
@@ -165,6 +168,15 @@ async function rename(rt: Runtime, cookie: string, organization: Organization) {
     organization.updatedAt = ((await response.clone().json()) as Organization).updatedAt;
   }
   return response;
+}
+
+/** Invite someone new to the organization: a change to who has access. */
+async function invite(rt: Runtime, cookie: string, organization: Organization) {
+  return await call(rt, "POST", `/v1/organizations/${organization.id}/invitations`, cookie, {
+    email: `${crypto.randomUUID()}@example.test`,
+    expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+    operationId: crypto.randomUUID(),
+  });
 }
 
 /** Every session of the person as if signed in with a password. */
@@ -257,18 +269,20 @@ describe("admin passkey step-up", () => {
     const owner = await passkeyPerson(rt, "Owner");
     const organization = await createOrganization(rt, owner.cookie);
     // Signed in with a passkey: confirmed, with no time limit.
-    expect((await rename(rt, owner.cookie, organization)).status).toBe(200);
+    expect((await invite(rt, owner.cookie, organization)).status).toBeLessThan(300);
     await admin`update auth_sessions set mfa_verified_at = now() - interval '30 days'
       where token = ${sessionToken(owner.cookie)}`;
-    expect((await rename(rt, owner.cookie, organization)).status).toBe(200);
+    expect((await invite(rt, owner.cookie, organization)).status).toBeLessThan(300);
 
     // A session signed in with a password is asked once.
     await unconfirm(owner.userId);
-    const refused = await refusal(await rename(rt, owner.cookie, organization));
+    const refused = await refusal(await invite(rt, owner.cookie, organization));
     expect(refused.details).toEqual({
       code: ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE,
       passkeyRegistered: true,
     });
+    // Settings aren't access: renaming the organization is never asked.
+    expect((await rename(rt, owner.cookie, organization)).status).toBe(200);
     // Reads never need it.
     expect(
       (await call(rt, "GET", `/v1/organizations/${organization.id}/members`, owner.cookie)).status,
@@ -277,15 +291,15 @@ describe("admin passkey step-up", () => {
     const confirmed = await stepUp(rt, owner.cookie, owner.passkey);
     expect(confirmed.status).toBe(200);
     expect(await confirmed.json()).toEqual({ confirmed: true });
-    expect((await rename(rt, owner.cookie, organization)).status).toBe(200);
-    expect((await rename(rt, owner.cookie, organization)).status).toBe(200);
+    expect((await invite(rt, owner.cookie, organization)).status).toBeLessThan(300);
+    expect((await invite(rt, owner.cookie, organization)).status).toBeLessThan(300);
     // A confirmed owner creates a personal key.
     const key = await createPersonalKey(rt, owner.cookie, organization.id);
     expect(key.status, await key.clone().text()).toBe(201);
 
     // The mark belongs to that session: the same person's other session is asked.
     const other = await passwordSession(rt, owner.userId);
-    expect(await stepUpCode(await rename(rt, other, organization))).toBe(
+    expect(await stepUpCode(await invite(rt, other, organization))).toBe(
       ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE,
     );
     // A ceremony started in one session can't confirm another.
@@ -296,7 +310,7 @@ describe("admin passkey step-up", () => {
       response: softwarePasskeyAssertion(owner.passkey, ceremony.options, { origin: ORIGIN }),
     });
     expect(elsewhere.status).toBe(422);
-    expect(await stepUpCode(await rename(rt, other, organization))).toBe(
+    expect(await stepUpCode(await invite(rt, other, organization))).toBe(
       ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE,
     );
     // An expired session is never marked.
@@ -343,16 +357,155 @@ describe("admin passkey step-up", () => {
       response: softwarePasskeyAssertion(other.passkey, ceremony.options, { origin: ORIGIN }),
     });
     expect(response.status).toBe(422);
-    await refusal(await rename(rt, owner.cookie, organization));
+    await refusal(await invite(rt, owner.cookie, organization));
     // Signed out, nothing can be confirmed.
     expect((await call(rt, "POST", "/v1/auth/passkey/step-up/options", "")).status).toBe(403);
+  }, 120_000);
+
+  test("an app that can't show passkey prompts hands its step-up to the person's browser", async () => {
+    const rt = runtime();
+    const owner = await passkeyPerson(rt, "Desktop Owner");
+    const organization = await createOrganization(rt, owner.cookie);
+    await unconfirm(owner.userId);
+    // The desktop app's window: the same person's own session, not confirmed.
+    const appSession = await passwordSession(rt, owner.userId);
+    expect(await stepUpCode(await invite(rt, appSession, organization))).toBe(
+      ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE,
+    );
+    const start = async (cookie: string) => {
+      const started = await call(rt, "POST", "/v1/auth/passkey/step-up/handoff", cookie);
+      expect(started.status, await started.clone().text()).toBe(200);
+      const handoff = (await started.json()) as {
+        handoffId: string;
+        expiresAt: string;
+        expiresInSeconds: number;
+      };
+      expect(handoff.expiresInSeconds).toBeGreaterThan(0);
+      return handoff;
+    };
+    const confirmInBrowser = async (handoffId: string) => {
+      const options = await call(rt, "POST", "/v1/auth/passkey/step-up/options", owner.cookie, {
+        handoffId,
+      });
+      expect(options.status, await options.clone().text()).toBe(200);
+      const ceremony = (await options.json()) as { challengeId: string; options: never };
+      const confirmed = await call(rt, "POST", "/v1/auth/passkey/step-up", owner.cookie, {
+        challengeId: ceremony.challengeId,
+        response: softwarePasskeyAssertion(owner.passkey, ceremony.options, { origin: ORIGIN }),
+      });
+      expect(confirmed.status, await confirmed.clone().text()).toBe(200);
+      const { code } = (await confirmed.json()) as { code: string };
+      expect(code).toMatch(/^\d{6}$/u);
+      return code;
+    };
+    const claim = (cookie: string, handoffId: string, code: string) =>
+      call(rt, "POST", `/v1/auth/passkey/step-up/handoff/${handoffId}/claim`, cookie, { code });
+    const codeOf = async (response: Response) =>
+      ((await response.json()) as { code?: unknown }).code;
+    const wrong = (code: string) => String((Number(code) + 1) % 1_000_000).padStart(6, "0");
+
+    const { handoffId } = await start(appSession);
+    // Someone else can't use it, and nothing is claimable before the passkey.
+    const stranger = await passwordPerson(rt);
+    const strangerOptions = await call(
+      rt,
+      "POST",
+      "/v1/auth/passkey/step-up/options",
+      stranger.cookie,
+      { handoffId },
+    );
+    expect(strangerOptions.status).toBe(403);
+    expect(await strangerOptions.json()).toMatchObject({ code: "PASSKEY_HANDOFF_OTHER_ACCOUNT" });
+    expect(await codeOf(await claim(appSession, handoffId, "000000"))).toBe(
+      "PASSKEY_HANDOFF_NOT_CONFIRMED",
+    );
+
+    // The passkey in the browser alone confirms only the browser: whoever
+    // holds the app's session also needs the code the browser shows, so a
+    // forwarded link can't lend the person's passkey to a stolen session.
+    const code = await confirmInBrowser(handoffId);
+    expect(await stepUpCode(await invite(rt, appSession, organization))).toBe(
+      ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE,
+    );
+    // Only the session that started it can claim it.
+    const otherSession = await passwordSession(rt, owner.userId);
+    expect(await codeOf(await claim(otherSession, handoffId, code))).toBe(
+      "PASSKEY_HANDOFF_OTHER_SESSION",
+    );
+    expect(await codeOf(await claim(appSession, handoffId, wrong(code)))).toBe(
+      "PASSKEY_HANDOFF_WRONG_CODE",
+    );
+    const claimed = await claim(appSession, handoffId, code);
+    expect(claimed.status, await claimed.clone().text()).toBe(200);
+    expect((await invite(rt, appSession, organization)).status).toBeLessThan(300);
+    expect(await stepUpCode(await invite(rt, otherSession, organization))).toBe(
+      ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE,
+    );
+
+    // A handoff is used once.
+    expect(await codeOf(await claim(appSession, handoffId, code))).toBe("PASSKEY_HANDOFF_EXPIRED");
+    const again = await call(rt, "POST", "/v1/auth/passkey/step-up/options", owner.cookie, {
+      handoffId,
+    });
+    expect(again.status).toBe(409);
+    expect(await again.json()).toMatchObject({ code: "PASSKEY_HANDOFF_EXPIRED" });
+
+    // Guessing the code voids the handoff after a few tries.
+    await unconfirm(owner.userId);
+    const { handoffId: guessed } = await start(appSession);
+    const guessedCode = await confirmInBrowser(guessed);
+    for (let attempt = 1; attempt < 5; attempt += 1) {
+      expect(await codeOf(await claim(appSession, guessed, wrong(guessedCode)))).toBe(
+        "PASSKEY_HANDOFF_WRONG_CODE",
+      );
+    }
+    expect(await codeOf(await claim(appSession, guessed, wrong(guessedCode)))).toBe(
+      "PASSKEY_HANDOFF_EXPIRED",
+    );
+    expect(await codeOf(await claim(appSession, guessed, guessedCode))).toBe(
+      "PASSKEY_HANDOFF_EXPIRED",
+    );
+    expect(await stepUpCode(await invite(rt, appSession, organization))).toBe(
+      ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE,
+    );
+
+    // An expired handoff can't be confirmed.
+    const expiring = await start(appSession);
+    // Identifiers are stored hashed; the handoff's own expiry finds its row.
+    const expired = await admin`update auth_verifications
+      set expires_at = now() - interval '1 second'
+      where value like ${`%"expiresAt":"${expiring.expiresAt}"%`}`;
+    expect(expired.count).toBe(1);
+    const late = await call(rt, "POST", "/v1/auth/passkey/step-up/options", owner.cookie, {
+      handoffId: expiring.handoffId,
+    });
+    expect(await codeOf(late)).toBe("PASSKEY_HANDOFF_EXPIRED");
+
+    // Only from this site; without a passkey there is nothing to hand over;
+    // signed out, nothing to start.
+    const crossSite = await rt.app.request("/v1/auth/passkey/step-up/handoff", {
+      method: "POST",
+      headers: {
+        origin: "https://evil.example",
+        "sec-fetch-site": "cross-site",
+        "content-type": "application/json",
+        cookie: appSession,
+      },
+      body: "{}",
+    });
+    expect(crossSite.status).toBeGreaterThanOrEqual(400);
+    const passwordOnly = await passwordPerson(rt);
+    const none = await call(rt, "POST", "/v1/auth/passkey/step-up/handoff", passwordOnly.cookie);
+    expect(none.status).toBe(409);
+    expect(await none.json()).toMatchObject({ code: "PASSKEY_NONE_REGISTERED" });
+    expect((await call(rt, "POST", "/v1/auth/passkey/step-up/handoff", "")).status).toBe(403);
   }, 120_000);
 
   test("an admin without a passkey is told to add one", async () => {
     const rt = runtime();
     const owner = await passwordPerson(rt);
     const organization = await createOrganization(rt, owner.cookie);
-    const refused = await refusal(await rename(rt, owner.cookie, organization));
+    const refused = await refusal(await invite(rt, owner.cookie, organization));
     expect(refused.details).toMatchObject({
       code: ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE,
       passkeyRegistered: false,
@@ -419,7 +572,7 @@ describe("admin passkey step-up", () => {
       { expectedRevision: invitation.revision, operationId: crypto.randomUUID() },
     );
     expect(accepted.status).toBe(200);
-    const memberResponse = await rename(rt, member.cookie, organization);
+    const memberResponse = await invite(rt, member.cookie, organization);
     expect(memberResponse.status).toBe(403);
     expect(
       ((await memberResponse.json()) as { error: { details?: { code?: unknown } } }).error.details
@@ -431,7 +584,7 @@ describe("admin passkey step-up", () => {
     expect(memberKey.status, await memberKey.clone().text()).toBe(201);
 
     await unconfirm(owner.userId);
-    expect((await rename(runtime("off"), owner.cookie, organization)).status).toBe(200);
+    expect((await invite(runtime("off"), owner.cookie, organization)).status).toBeLessThan(300);
   }, 120_000);
 
   test("the request's own form can't skip it; personal keys need a confirmed session to create, not to use", async () => {
@@ -448,24 +601,25 @@ describe("admin passkey step-up", () => {
     expect(key.status).toBe(201);
     const { token } = (await key.json()) as { token: string };
 
-    const renameWith = (path: string, headers: Record<string, string>) =>
+    const inviteWith = (path: string, headers: Record<string, string>) =>
       rt.app.request(path, {
-        method: "PATCH",
+        method: "POST",
         headers: { origin: ORIGIN, "content-type": "application/json", ...headers },
         body: JSON.stringify({
-          name: "Never renamed",
-          expectedUpdatedAt: organization.updatedAt,
+          email: `${crypto.randomUUID()}@example.test`,
+          expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
           operationId: crypto.randomUUID(),
         }),
       });
+    const invitations = `/v1/organizations/${organization.id}/invitations`;
     // The router decodes the path; the guard matches the same decoded path.
-    const escaped = await renameWith(`/v1/%6Frganizations/${organization.id}`, {
+    const escaped = await inviteWith(`/v1/%6Frganizations/${organization.id}/invitations`, {
       cookie: owner.cookie,
       "sec-fetch-site": "same-origin",
     });
     expect(await stepUpCode(escaped)).toBe(ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE);
     // An Authorization header nothing recognises leaves the cookie in charge.
-    const strayBearer = await renameWith(`/v1/organizations/${organization.id}`, {
+    const strayBearer = await inviteWith(invitations, {
       cookie: owner.cookie,
       "sec-fetch-site": "same-origin",
       authorization: "Bearer not-a-credential",
@@ -473,13 +627,10 @@ describe("admin passkey step-up", () => {
     expect(await stepUpCode(strayBearer)).toBe(ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE);
     // Once created, a personal API key acts under its owner's authority and
     // isn't asked.
-    const personalKey = await renameWith(`/v1/organizations/${organization.id}`, {
-      authorization: `Bearer ${token}`,
-    });
-    expect(personalKey.status, await personalKey.clone().text()).toBe(200);
-    // Billing reads the organization from the query or the body: any one the
-    // person administers counts.
-    const checkout = await rt.app.request(`/v1/billing/checkout?accountId=${crypto.randomUUID()}`, {
+    const personalKey = await inviteWith(invitations, { authorization: `Bearer ${token}` });
+    expect(personalKey.status, await personalKey.clone().text()).toBeLessThan(300);
+    // Billing and settings aren't access management: never asked.
+    const checkout = await rt.app.request(`/v1/billing/checkout?accountId=${organization.id}`, {
       method: "POST",
       headers: {
         origin: ORIGIN,
@@ -489,7 +640,8 @@ describe("admin passkey step-up", () => {
       },
       body: JSON.stringify({ accountId: organization.id }),
     });
-    expect(await stepUpCode(checkout)).toBe(ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE);
+    expect(await stepUpCode(checkout)).not.toBe(ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE);
+    expect((await rename(rt, owner.cookie, organization)).status).toBe(200);
   }, 120_000);
 
   test("shared connections are admin settings; the admin's own are not", async () => {
@@ -517,6 +669,37 @@ describe("admin passkey step-up", () => {
     ).toBe(ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE);
     const personal = await create(rt, "personal");
     expect(await stepUpCode(personal)).not.toBe(ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE);
+  }, 120_000);
+
+  test("adding, enabling, disabling and removing a capability and its tool permissions are never asked", async () => {
+    const rt = runtime();
+    const setup = runtime("off");
+    const owner = await passwordPerson(rt);
+    const organization = await createOrganization(setup, owner.cookie);
+    const workspaceId = await sharedWorkspace(setup, owner.cookie, organization.id);
+    const capabilities = `/v1/workspaces/${workspaceId}/capabilities`;
+    const added = await call(rt, "POST", capabilities, owner.cookie, {
+      kind: "mcp",
+      name: "Step-up MCP",
+      endpointUrl: "https://step-up.example.test/mcp",
+    });
+    expect(added.status, await added.clone().text()).toBeLessThan(300);
+    const { id } = (await added.json()) as { id: string };
+    const item = `${capabilities}/${encodeURIComponent(id)}`;
+    // Enabling reaches the server itself (none here); only the guard is under test.
+    for (const [method, path, body] of [
+      ["POST", `${item}/enable`, {}],
+      ["PUT", `${item}/tool-permissions`, { tools: {} }],
+      ["PATCH", `/v1/workspaces/${workspaceId}/session-mcp-tool-permissions`, {}],
+      ["POST", `${item}/disable`, {}],
+      ["DELETE", `${item}/installation`, undefined],
+    ] as const) {
+      const response = await call(rt, method, path, owner.cookie, body);
+      expect(await stepUpCode(response), `${method} ${path}`).not.toBe(
+        ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE,
+      );
+      expect(response.status, `${method} ${path}`).not.toBe(403);
+    }
   }, 120_000);
 
   test("a workspace admin is asked in the browser and to create a key, not when using it", async () => {

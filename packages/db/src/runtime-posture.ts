@@ -64,7 +64,9 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * ids-only inventory of installations that send updates (1153) and the
  * recording compaction sweep's inventory of meeting tracks not yet kept
  * compact (1240), and the session storage pass's inventory of sessions with
- * content to collect and its collector of unreferenced content blobs (1359).
+ * content to collect and its collector of unreferenced content blobs (1359),
+ * and the sandbox reaper's inventory of cold sandboxes whose chats are all
+ * archived (1404).
  * Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
@@ -100,6 +102,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "end_agent_call_rings_v1(uuid)",
   "session_content_garbage_candidates_v1(integer)",
   "collect_session_content_garbage_v1(uuid, uuid, integer)",
+  "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
 ] as const;
 
 /**
@@ -136,6 +139,9 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * granted, settling a call sends no ended push and those phones ring out.
  * 1359 withholds the session content collector and its inventory; until they
  * are granted, unreferenced content blobs stay until the session is archived.
+ * 1404 withholds the inventory of cold sandboxes whose chats are all
+ * archived; until it is granted, such a non-compute sandbox keeps its saved
+ * workspace until its chats are deleted (as before).
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -146,6 +152,7 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "end_agent_call_rings_v1(uuid)",
   "session_content_garbage_candidates_v1(integer)",
   "collect_session_content_garbage_v1(uuid, uuid, integer)",
+  "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -261,6 +268,10 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "session_attempt_tool_catalogs",
     "session_content_blobs",
     "opengeni_private.session_content_collections",
+  ],
+  "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)": [
+    "sandbox_leases",
+    "sessions",
   ],
 };
 
@@ -923,6 +934,9 @@ export const RETIRING_FEATURE_TABLES = {
     "knowledge_source_sync_states",
     "knowledge_source_sync_wakes",
   ],
+  // The agents contract (1380 to 1399): nothing reads or writes the legacy bot
+  // templates and Slack agents tables any more; the legacy drop removes them.
+  agentsLegacy: ["bot_templates", "slack_agents"],
 } as const;
 const RETIRING_FEATURE_TABLE_NAMES: ReadonlySet<string> = new Set(
   Object.values(RETIRING_FEATURE_TABLES).flat(),
@@ -1882,15 +1896,25 @@ const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET = new Set<string
 );
 
 /**
- * 1243/1244 agents: SECURITY INVOKER trigger functions. The legacy sync
- * triggers mirror bot_templates and slack_agents writes into the agents
- * tables; the guard keeps sessions.agent_id immutable once set.
+ * 1243/1244 agents: SECURITY INVOKER trigger functions. The guard keeps
+ * sessions.agent_id immutable once set.
  */
-const AGENTS_TRIGGER_ROUTINES = [
+const AGENTS_TRIGGER_ROUTINES = ["guard_session_agent_id_immutable()"] as const;
+
+/**
+ * Agents trigger functions bound to the legacy tables: 1243's sync functions
+ * (their triggers were dropped by 1397) and 1380's installation workspace
+ * fill. Checked like any owner-internal helper while present; the legacy drop
+ * removes them with the tables, so readiness also accepts them absent.
+ */
+export const AGENTS_LEGACY_TRIGGER_ROUTINES = [
   "sync_agent_from_bot_template()",
   "sync_agent_from_slack_agent()",
-  "guard_session_agent_id_immutable()",
+  "fill_agent_slack_install_workspace()",
 ] as const;
+const AGENTS_LEGACY_TRIGGER_ROUTINE_SET: ReadonlySet<string> = new Set(
+  AGENTS_LEGACY_TRIGGER_ROUTINES,
+);
 
 /** Owner-internal helpers that must exist but must never be callable by the runtime role. */
 export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
@@ -1916,6 +1940,7 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   "validate_usage_allowance_rule(jsonb)",
   "guard_slack_file_upload_operation()",
   ...AGENTS_TRIGGER_ROUTINES,
+  ...AGENTS_LEGACY_TRIGGER_ROUTINES,
   // 1276: refuses agent-chat claims from workers without the agent layer.
   "guard_agent_instructions_claim_protocol()",
   ...SESSION_USAGE_LIMIT_INTERNAL_ROUTINES,
@@ -1927,6 +1952,9 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   TENANCY_BACKFILL_ACTIVATION_EVIDENCE_ROUTINE,
   VERIFIED_SIGNUP_TRIAL_SWITCH_SETTER_ROUTINE,
   "set_credit_promotion_policy(jsonb, text, text)",
+  // 1406_nango_integrations: owner-only operator setter and export.
+  "set_integration_backend(text, text, text, boolean, jsonb, text, text)",
+  "nango_affected_connections(text)",
   "set_subscription_plan_catalog(jsonb, text, text)",
   MANAGED_AUTH_NEW_SIGNUPS_SWITCH_SETTER_ROUTINE,
   ...DOCUMENT_MIGRATION_AUDIT_INTERNAL_ROUTINES,
@@ -1937,12 +1965,15 @@ export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
   "set_subscription_plan_catalog(jsonb, text, text)",
   "scheduled_task_is_exhausted(uuid)",
   "set_credit_promotion_policy(jsonb, text, text)",
+  "set_integration_backend(text, text, text, boolean, jsonb, text, text)",
+  "nango_affected_connections(text)",
   CLAUDE_SNAPSHOT_VALIDATOR_ROUTINE,
   "usage_allowance_period(jsonb, timestamp with time zone)",
   "validate_usage_allowance_config(jsonb)",
   "validate_usage_allowance_rule(jsonb)",
   "guard_slack_file_upload_operation()",
   ...AGENTS_TRIGGER_ROUTINES,
+  ...AGENTS_LEGACY_TRIGGER_ROUTINES,
   // 1276: refuses agent-chat claims from workers without the agent layer.
   "guard_agent_instructions_claim_protocol()",
   SESSION_USAGE_LIMIT_STATE_ROUTINE,
@@ -2118,6 +2149,7 @@ export const FORCE_RLS_TABLES = [
   "image_generation_operations",
   "import_batches",
   "inbound_events",
+  "integration_backend_revisions",
   "integration_facet_binding_owners",
   "integration_facet_bindings",
   "integration_facet_definitions",
@@ -2184,6 +2216,7 @@ export const FORCE_RLS_TABLES = [
   "model_call_fact_reconciliation_candidates",
   "model_call_fact_reconciliation_progress",
   "model_call_facts",
+  "nango_usage_events",
   "network_routes",
   "new_session_drafts",
   "organization_agent_admin_access",
@@ -2192,13 +2225,16 @@ export const FORCE_RLS_TABLES = [
   "organization_company_profile_agent_policies",
   "organization_company_profile_agent_policy_events",
   "organization_connectors",
+  "organization_console_audit_events",
   "organization_credential_providers",
+  "organization_end_user_labels",
   "organization_identity_issuers",
   "organization_inference_residency",
   "organization_inference_residency_events",
   "organization_integration_policies",
   "organization_integration_policy_operations",
   "organization_invitation_binding_events",
+  "organization_managed_workspaces",
   "organization_mcp_assertion_replays",
   "organization_mcp_trusted_issuer_events",
   "organization_mcp_trusted_issuer_subjects",
@@ -2227,6 +2263,7 @@ export const FORCE_RLS_TABLES = [
   "organization_recovery_policies",
   "organization_recovery_policy_heads",
   "organization_service_accounts",
+  "organization_session_review_settings",
   "organization_shared_workspace_administration_capabilities",
   "organization_skill_reach",
   "organization_user_resource_authorities",
@@ -2669,6 +2706,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "organization_connectors",
   "organization_credential_providers",
   "organization_identity_issuers",
+  "organization_managed_workspaces",
   "organization_mcp_assertion_replays",
   "organization_mcp_trusted_issuer_events",
   "organization_mcp_trusted_issuer_subjects",
@@ -2679,6 +2717,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "organization_model_provider_custom_models",
   "organization_privacy_preferences",
   "organization_service_accounts",
+  "organization_session_review_settings",
   "organization_skill_reach",
   "organization_webhook_deliveries",
   "organization_webhooks",
@@ -2905,6 +2944,8 @@ export const RUNTIME_READ_ONLY_TABLES = [
   "company_profile_snapshots",
   "deployment_model_catalog",
   "document_authority_reclassifications",
+  // 1406_nango_integrations: the operator integration backend switch.
+  "integration_backend_revisions",
   "knowledge_lifecycle_events",
   "knowledge_memories",
   "knowledge_memory_lifecycle_events",
@@ -2985,6 +3026,11 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "knowledge_source_objects",
   "knowledge_sources",
   "knowledge_sync_runs",
+  // 1406_nango_integrations: append-only Nango usage events.
+  "nango_usage_events",
+  // 1377_opengeni_console: append-only Console audit log and end-user labels.
+  "organization_console_audit_events",
+  "organization_end_user_labels",
   "pr_review_managed_github_authority_nonces",
   "preference_registry_preferences",
   "preference_registry_revisions",
@@ -3366,6 +3412,12 @@ export type RuntimeDatabasePostureOptions = {
    * one is present it is checked like every other definer.
    */
   routinesCreatedByLaterMigrations?: readonly string[];
+  /**
+   * The same, for owner-internal target-schema helpers (named without their argument list):
+   * a helper a later migration creates may be absent. When one is present it is checked like
+   * every other helper.
+   */
+  targetRoutinesCreatedByLaterMigrations?: readonly string[];
 };
 
 export type RuntimeDatabaseIdentity = {
@@ -4683,6 +4735,7 @@ export function evaluateRuntimeDatabasePosture(
   }
 
   const targetSchemaOwner = posture.schemas.find((schema) => schema.name === targetSchema)?.owner;
+  const notYetCreatedTargetRoutines = new Set(options.targetRoutinesCreatedByLaterMigrations ?? []);
   for (const routine of posture.targetRoutines) {
     if (!knownTargetRoutines.has(routine.name)) {
       violations.push(...unknownRoutineViolations(routine, targetSchema, expectedRole));
@@ -4690,6 +4743,12 @@ export function evaluateRuntimeDatabasePosture(
   }
   for (const forbiddenRoutine of targetSchemaForbiddenRoutines) {
     const matches = posture.targetRoutines.filter((routine) => routine.name === forbiddenRoutine);
+    if (matches.length === 0 && AGENTS_LEGACY_TRIGGER_ROUTINE_SET.has(forbiddenRoutine)) continue;
+    if (
+      matches.length === 0 &&
+      notYetCreatedTargetRoutines.has(forbiddenRoutine.slice(0, forbiddenRoutine.indexOf("(")))
+    )
+      continue;
     if (matches.length !== 1) {
       violations.push(
         `owner-internal target-schema helper ${forbiddenRoutine} is missing or ambiguous`,

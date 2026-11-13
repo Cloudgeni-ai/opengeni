@@ -221,6 +221,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             event = event.with(format!("compute.phase.{phase}_us"), *took);
         }
         for (what, bytes) in &report.notes.bytes {
+            observer
+                .metrics()
+                .step_bytes(running.step, running.why.cause, what, *bytes);
             event = event.with(format!("compute.bytes.{what}"), *bytes);
         }
         for (key, value) in &report.notes.details {

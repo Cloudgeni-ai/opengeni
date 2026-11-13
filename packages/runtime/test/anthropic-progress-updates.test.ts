@@ -14,6 +14,7 @@ import {
   modelResponseHasVisibleText,
 } from "../src/input-wait-yield";
 import { ARTIFACT_ORIGIN_KEY, projectHistoryForProvider } from "../src/provider-history-adapter";
+import { renderCompactionPromptInputForChat } from "../src/context-compaction";
 import { AssistantMessagePhaseTracker, normalizeSdkEvent } from "../src/run-events";
 
 // Claude Opus 5.5 and Sonnet 5.5 can write a progress update before a tool
@@ -463,16 +464,54 @@ describe("Claude progress updates before a tool call", () => {
     expect(JSON.stringify(assistant.content)).toBe(JSON.stringify(updatesContent));
   });
 
-  test("other providers see the update only as labelled historical reasoning, never the signed block", () => {
-    const projected = projectHistoryForProvider(expectedOutput as never[], "responses");
-    expect(projected[1]).toEqual({
+  test("history stored while updates were assistant messages never reaches another API as text", () => {
+    const legacyUpdate = {
       type: "message",
       role: "assistant",
+      id: "msg_progress:1",
       status: "completed",
       content: [
-        { type: "output_text", text: `[Historical reasoning from another model]\n${UPDATE}` },
+        { type: "output_text", text: UPDATE, providerData: { anthropic: { block: progress } } },
       ],
-    });
+    };
+    const mixed = {
+      type: "message",
+      role: "assistant",
+      id: "msg_mixed",
+      status: "completed",
+      content: [
+        { type: "output_text", text: UPDATE, providerData: { anthropic: { block: progress } } },
+        { type: "output_text", text: "Visible answer." },
+      ],
+    };
+    const stored = [
+      { role: "user", content: "Plan the migration" },
+      legacyUpdate,
+      mixed,
+    ] as never[];
+    for (const api of ["responses", "chat"] as const) {
+      const projected = projectHistoryForProvider(stored, api);
+      const wire = JSON.stringify(projected);
+      expect(wire).not.toContain(UPDATE);
+      expect(wire).not.toContain(progress.signature);
+      expect(wire).toContain("Visible answer.");
+      expect(projected.some((item: any) => item.id === "msg_progress:1")).toBe(false);
+    }
+    const transcript = renderCompactionPromptInputForChat(stored as never);
+    expect(transcript).not.toContain(UPDATE);
+    expect(transcript).toContain("Visible answer.");
+    // Canonical history is untouched for a later switch back to Claude.
+    expect(legacyUpdate.content[0]!.text).toBe(UPDATE);
+  });
+
+  test("other providers never see the update: no signed block and no text in its place", () => {
+    const projected = projectHistoryForProvider(expectedOutput as never[], "responses");
+    expect(projected).toEqual(
+      (expectedOutput as Array<Record<string, unknown>>).filter(
+        (item) => item.type !== "reasoning",
+      ) as never,
+    );
+    expect(JSON.stringify(projected)).not.toContain(UPDATE);
     expect(JSON.stringify(projected)).not.toContain(progress.signature);
   });
 

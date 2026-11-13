@@ -151,6 +151,10 @@ pub enum Input {
     },
     /// The sandbox left the host: its session ends.
     Detach { sandbox: String },
+    /// The sandbox's agent process is gone for good: its VM ended and no
+    /// copy of its memory is kept to resume it. Its session ends, with what
+    /// waits for it, and the sandbox's next agent starts a new one.
+    Gone { sandbox: String },
     /// A guest connection for `sandbox` was accepted.
     Accepted { conn: ConnId, sandbox: String },
     /// A guest connection sent an operation.
@@ -498,6 +502,7 @@ impl Core {
                 saved,
             } => self.attach(now, &sandbox, link, saved),
             Input::Detach { sandbox } => self.detach(now, &sandbox),
+            Input::Gone { sandbox } => self.gone(now, &sandbox),
             Input::Accepted { conn, sandbox } => self.accepted(conn, sandbox),
             Input::Guest { conn, op } => self.guest(now, conn, op),
             Input::GuestClosed { conn } => self.drop_conn(now, conn),
@@ -615,6 +620,35 @@ impl Core {
             saved: None,
         });
         self.release_gateway(&sandbox.gateway);
+    }
+
+    /// The sandbox's agent process is gone for good, so its session can
+    /// never be held again: it ends, and its gateway no longer routes to
+    /// an agent that is not there. Nothing waits for that agent either:
+    /// what waited was never delivered, and its senders hear that the
+    /// session ended. The sandbox stays attached, so its next agent's
+    /// connection opens a session of its own. Nothing for a sandbox whose
+    /// agent is already gone.
+    fn gone(&mut self, now: u64, id: &str) {
+        let Some(sandbox) = self.sandboxes.get(id) else {
+            return;
+        };
+        if sandbox.instance.is_none() {
+            return;
+        }
+        self.end_session(id);
+        self.close_sandbox_conns(now, id, None);
+        let sandbox = self.sandboxes.get_mut(id).expect("checked above");
+        sandbox.instance = None;
+        sandbox.subs.clear();
+        sandbox.next_sid = 1;
+        sandbox.waiting.clear();
+        sandbox.owes_nothing();
+        sandbox.relay = None;
+        sandbox.retry_at = None;
+        sandbox.retry_delay = self.settings.retry_min_ms;
+        sandbox.grace_until = None;
+        self.save(id);
     }
 
     fn use_gateway(&mut self, gateway: &str) {

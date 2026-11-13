@@ -131,6 +131,15 @@ function useFixtureClient(fixture: Fixture): MyThingsClient {
         const row = RESOURCES[0]!.workspaces.find((each) => each.workspaceId === workspaceId);
         return { workspace: { ...row!, on: request.on } };
       },
+      deleteConnection: async () => {
+        await wait(600);
+        if (fixture === "fails") throw new Error("That login couldn't be removed. Try again.");
+        return { ok: true } as never;
+      },
+      disconnectPersonalGitHub: async () => {
+        await wait(600);
+        return { ok: true } as never;
+      },
     };
     return client;
   }, [fixture]);

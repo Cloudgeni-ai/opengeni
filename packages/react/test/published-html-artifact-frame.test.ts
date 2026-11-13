@@ -180,7 +180,14 @@ describe("Site bridge request ownership", () => {
       try {
         await expect(
           connected.site.tools.docs!.search!({}, { expectedDefinitionDigest: pin as string }),
-        ).rejects.toMatchObject({ code: "invalid_request" });
+        ).rejects.toMatchObject({
+          // A refusal that ran nothing reaches the Site typed and plain, with
+          // the validation's own code kept on `details`, and is not retried.
+          code: "site_tool_unavailable",
+          retryable: false,
+          outcomeUnknown: false,
+          details: { code: "invalid_request" },
+        });
         expect(bodies).toHaveLength(1);
         expect(bodies[0]).toHaveProperty("expectedDefinitionDigest", pin);
         expect(effects).toBe(0);

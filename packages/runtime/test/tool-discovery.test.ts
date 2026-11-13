@@ -243,8 +243,8 @@ describe("tool discovery ranking", () => {
       expect(names(new ToolSearchIndex(lined).rank(query, 8))).toEqual(
         names(new ToolSearchIndex(plain).rank(query, 8)),
       );
-      expect(names(new ToolSearchIndex(lined).bestMatches(query))).toEqual(
-        names(new ToolSearchIndex(plain).bestMatches(query)),
+      expect(names(new ToolSearchIndex(lined).strongestMatches(query, 3))).toEqual(
+        names(new ToolSearchIndex(plain).strongestMatches(query, 3)),
       );
     }
   });
@@ -505,21 +505,126 @@ describe("decision selection", () => {
     // A clear choice shows no alternatives.
     expect(JSON.parse(result.output).suggestions).toBeUndefined();
   });
-  test("the no-model default loads the strongest match, or the top-ranked one on a tie", async () => {
+  test("the no-model default loads the strongest matches: a clear winner alone, close ones together", async () => {
     const runtime = new LazyToolRuntime("generic_dispatch", new Set());
-    runtime.refresh([candidate("tasks__get", "Get task"), candidate("tasks__read", "Read task")]);
+    runtime.refresh([
+      candidate("tasks__get", "Get task"),
+      candidate("tasks__read", "Read task"),
+      candidate("tasks__archive", "Archive task"),
+      candidate("tasks__list", "List tasks"),
+      candidate("projects__get", "Get project"),
+    ]);
     expect((await runtime.prepareSearch({ query: "get task" })).tools?.map((t) => t.name)).toEqual([
       "tasks__get",
     ]);
-    // A tie or a clause without resource words never comes back empty: the
-    // top-ranked candidate loads and the others stay visible.
+    // Keyword rank cannot tell close matches apart, so the strongest three
+    // load together and the rest stay visible as suggestions.
     const tie = await runtime.prepareSearch({ query: "task" });
-    expect(tie.tools).toHaveLength(1);
-    expect(JSON.parse(tie.output)).toMatchObject({
-      schemasLoaded: true,
-      tools: [{ name: "tasks__get" }],
-      suggestions: [{ name: "tasks__read" }],
-    });
+    expect(tie.tools).toHaveLength(3);
+    const output = JSON.parse(tie.output);
+    expect(output.schemasLoaded).toBe(true);
+    expect(output.tools[0].name).toBe("tasks__get");
+    expect(output.suggestions.map((t: { name: string }) => t.name)).toContain("tasks__list");
+    expect(output.tools.map((t: { name: string }) => t.name)).not.toContain("projects__get");
+    // Every request of a multi-request search gets its own strongest matches.
+    expect(
+      (await runtime.prepareSearch({ query: "archive a task; get a project" })).tools?.map(
+        (t) => t.name,
+      ),
+    ).toEqual(["tasks__archive", "projects__get"]);
+  });
+  test("one search loads a workflow's sibling tools, but not another account's copy of a tool", () => {
+    const sessions = [
+      candidate(
+        "workspace__session_create",
+        "Spawn a new agent session (a worker) for a concrete, bounded subtask that can run independently.",
+      ),
+      candidate(
+        "workspace__session_send_message",
+        "Send a message to a session. To continue related work, message a worker you already spawned instead of spawning a new one.",
+      ),
+      candidate(
+        "workspace__session_message_status",
+        "Follow the exact update ID returned by session_send_message. Returns delivery state and the consuming turn.",
+      ),
+      candidate("workspace__sessions_list", "Discover sessions in this workspace."),
+      candidate("calendar__create_event", "Create a calendar event."),
+    ];
+    const index = new ToolSearchIndex(sessions);
+    const loaded = names(
+      index.strongestMatches(
+        "Create a separate worker session, then send a follow-up message to that same session",
+        3,
+      ),
+    );
+    expect(loaded).toContain("workspace__session_create");
+    expect(loaded).toContain("workspace__session_send_message");
+    expect(loaded).not.toContain("calendar__create_event");
+    const accounts = new ToolSearchIndex([
+      candidate("mail_home__search_messages", "Search email messages in the mailbox."),
+      candidate("mail_work__search_messages", "Search email messages in the mailbox."),
+      candidate("mail_home__read_message", "Read one email message from the mailbox."),
+    ]);
+    expect(
+      names(accounts.strongestMatches("search and read email messages in the mailbox", 3)),
+    ).toEqual(["mail_home__read_message", "mail_home__search_messages"]);
+  });
+  test("a close match from another integration is a rival reading, not a sibling", () => {
+    const index = new ToolSearchIndex([
+      candidate("workspace__sessions_list", "List sessions (chats) in this workspace."),
+      candidate("workspace__session_get", "Get one session (chat) in this workspace."),
+      candidate("messenger__list_chats", "List my chats and their sessions in the messenger."),
+    ]);
+    // The messenger tool scores almost as high and covers the request, but it
+    // is another reading of "my chats": it stays a named candidate.
+    expect(names(index.strongestMatches("list my chats and sessions", 3))).toEqual([
+      "workspace__sessions_list",
+    ]);
+  });
+  test("a request its best match does not fully cover loads only that match", () => {
+    const index = new ToolSearchIndex([
+      candidate("vault__secret_search", "Search saved secrets and logins by name."),
+      candidate("vault__secret_save", "Save a secret login."),
+      candidate("reports__run_report", "Run a basic report."),
+      candidate("lists__update_entry", "Update an entry in a list."),
+      candidate("issues__user_reports", "Get the user reports of an issue."),
+    ]);
+    // The agent set off a remark with a semicolon; it is its own request, but
+    // a vague one, so it does not bring a batch of tools.
+    const loaded = names(
+      index.strongestMatches(
+        "search saved logins for the console; report whether an entry exists",
+        3,
+      ),
+    );
+    expect(loaded[0]).toBe("vault__secret_search");
+    expect(loaded).toHaveLength(2);
+  });
+  test("a notification ranks a tool that notifies", () => {
+    const index = new ToolSearchIndex([
+      candidate("workspace__notify_user", "Notify the person in their inbox and on their phone."),
+      candidate("mail__send_email", "Send an email message."),
+    ]);
+    expect(names(index.rank("phone notification for the person", 1))).toEqual([
+      "workspace__notify_user",
+    ]);
+    expect(names(index.rank("the person was notified", 1))).toEqual(["workspace__notify_user"]);
+    // Sending a notification is the tool's own operation, so a messaging
+    // tool's "send" does not outrank it.
+    const messaging = new ToolSearchIndex([
+      candidate("workspace__notify_user", "Notify the person in their inbox and on their phone."),
+      candidate(
+        "messenger__send_message",
+        "Send a message as the person to one of their chats, on the chat's network.",
+      ),
+      candidate("mail__send_email", "Send an email message."),
+      candidate("chat__post_message", "Post a message in a channel."),
+      candidate("sms__send_text", "Send a text message to a phone number."),
+      candidate("mail__read_message", "Read one email message."),
+    ]);
+    expect(names(messaging.rank("send the user a notification message", 1))).toEqual([
+      "workspace__notify_user",
+    ]);
   });
   test("selects only authorized candidates, returns a compact receipt and freezes selected schemas", async () => {
     let calls = 0;
@@ -561,7 +666,7 @@ describe("decision selection", () => {
       schemasLoaded: true,
       fallback: "decision_model_unavailable",
     });
-    expect(fallback.tools).toHaveLength(1);
+    expect(fallback.tools).toHaveLength(2);
     expect(fallback.output).not.toContain("secret");
     // Unknown names, missing candidates, out-of-range or duplicate judgments
     // are all invalid: nothing the selector named is trusted.
@@ -597,7 +702,7 @@ describe("decision selection", () => {
     ]);
     const result = await runtime.prepareSearch({ query: "get task" });
     expect(calls).toBe(1);
-    expect(result.tools?.map((t) => t.name)).toEqual(["tasks__get"]);
+    expect(result.tools?.map((t) => t.name)).toEqual(["tasks__get", "tasks__get_details"]);
     expect(JSON.parse(result.output)).toMatchObject({
       fallback: "decision_model_unavailable",
       schemasLoaded: true,
@@ -620,7 +725,7 @@ describe("decision selection", () => {
         candidate("tasks__get_details", "Get task"),
       ]);
       const result = await hanging.prepareSearch({ query: "get task" });
-      expect(result.tools?.map((t) => t.name)).toEqual(["tasks__get"]);
+      expect(result.tools?.map((t) => t.name)).toEqual(["tasks__get", "tasks__get_details"]);
       expect(JSON.parse(result.output).fallback).toBe("decision_model_unavailable");
       const turn = new AbortController();
       const cancelled = hanging.prepareSearch({ query: "get task" }, turn.signal);
@@ -1164,12 +1269,17 @@ test.each(["codex_native", "openai_native", "generic_dispatch"] as const)(
         return "read";
       },
     }) as Tool;
-    // The tie loads the top-ranked guess (tasks__get); the exact load then
-    // brings the tool the model actually wants.
+    // The tie loads the three top-ranked guesses; the exact load then brings
+    // the fourth, the tool the model actually wants.
     const agent = new Agent({
       name: "discovery",
       model: "scripted",
-      tools: [candidate("tasks__get", "Read a task"), target],
+      tools: [
+        candidate("tasks__get", "Read a task"),
+        candidate("tasks__fetch", "Read a task"),
+        candidate("tasks__show", "Read a task"),
+        target,
+      ],
     });
     const runtime = installLazyToolRuntime(agent, transport, new Set());
     const model = new ScriptedModel([
@@ -1195,7 +1305,7 @@ test.each(["codex_native", "openai_native", "generic_dispatch"] as const)(
     expect(approvals).toBe(1);
     expect(executions).toBe(1);
     expect(JSON.stringify(model.requests[1]!.input)).not.toContain('"required"');
-    // The tie loads one guess; on native routes the other tool follows the
+    // The tie loads three guesses; on native routes the other tool follows the
     // result as a candidate, so the exact load is one call away.
     if (transport !== "generic_dispatch")
       expect(model.requests[1]!.input).toContainEqual({
@@ -1441,7 +1551,7 @@ describe("searches that name an integration the person can connect", () => {
   const loaded = (result: { tools?: { name?: unknown }[] }) =>
     result.tools?.map((t) => t.name) ?? [];
   const GMAIL_NOTICE =
-    'Not connected yet: Gmail (capabilityId "api:gmail"). If the task needs it, call capability_authorization_request with that capabilityId and a short rationale to show the person its Connect card.';
+    'Not connected yet: Gmail (capabilityId "api:gmail"). If the task needs it, call capability_authorization_request with that capabilityId and a short rationale to show the person its Connect card. No card is shown until you do.';
 
   test("names only whole integration names the query contains", () => {
     const matches = CATALOG_ENTRIES.map(({ capabilityId, name }) => ({ capabilityId, name }));
@@ -1692,7 +1802,7 @@ describe("searches that name an integration the person can connect", () => {
       const result = await runtime.prepareSearch({ query: "check the box" });
       expect(loaded(result)).toContain(CARD);
       expect(JSON.parse(result.output).notConnected).toBe(
-        'Not connected yet: Box (capabilityId "registry:box"). If the task needs it, call capability_authorization_request with that capabilityId and a short rationale to show the person its Connect card.',
+        'Not connected yet: Box (capabilityId "registry:box"). If the task needs it, call capability_authorization_request with that capabilityId and a short rationale to show the person its Connect card. No card is shown until you do.',
       );
     }
   });
@@ -1725,7 +1835,7 @@ describe("searches that name an integration the person can connect", () => {
       { capabilityId: "registry:weather", name: "Weather" },
     ]);
     expect(connectableIntegrationNotice([GMAIL, CALENDAR])).toBe(
-      'Not connected yet: Gmail (capabilityId "api:gmail"), Google Calendar (capabilityId "api:google-calendar"). If the task needs one, call capability_authorization_request with its capabilityId and a short rationale to show the person its Connect card.',
+      'Not connected yet: Gmail (capabilityId "api:gmail"), Google Calendar (capabilityId "api:google-calendar"). If the task needs one, call capability_authorization_request with its capabilityId and a short rationale to show the person its Connect card. No card is shown until you do.',
     );
   });
 
@@ -1948,7 +2058,7 @@ describe("searches that name an integration their strong matches do not belong t
   // Not in the production catalog; a workspace adds it as a custom MCP.
   const WISPR_FLOW = { capabilityId: "mcp:wispr-flow", name: "Wispr Flow" };
   const notice = (integration: { capabilityId: string; name: string }) =>
-    `Not connected yet: ${integration.name} (capabilityId ${JSON.stringify(integration.capabilityId)}). If the task needs it, call capability_authorization_request with that capabilityId and a short rationale to show the person its Connect card.`;
+    `Not connected yet: ${integration.name} (capabilityId ${JSON.stringify(integration.capabilityId)}). If the task needs it, call capability_authorization_request with that capabilityId and a short rationale to show the person its Connect card. No card is shown until you do.`;
   const pool = (withLinear: boolean, extra: readonly ReturnType<typeof candidate>[] = []) => [
     candidate(
       SLACK_BOT,
@@ -2893,7 +3003,7 @@ describe("plain tool names and unloaded candidates on every route", () => {
     for (const transport of ["openai_native", "codex_native"] as const) {
       const native = await runtimeWith(transport).prepareSearch({ query });
       const shown = loaded(native);
-      expect(shown.length).toBeLessThanOrEqual(1);
+      expect(shown.length).toBeLessThanOrEqual(3);
       expect(native.notice).toStartWith(
         shown.length
           ? "Close candidates this search did not load:\n- "

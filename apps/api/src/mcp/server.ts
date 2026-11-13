@@ -107,6 +107,7 @@ import {
   type SessionStatus,
   SubmitHumanInputResponseRequest,
   FIRST_PARTY_MCP_CALLER_META_KEY,
+  TOOL_DISCOVERY_CARD_META_KEY,
 } from "@opengeni/contracts";
 import {
   SessionCreateConnectionSelectionUnavailableError,
@@ -264,6 +265,8 @@ import {
   connectionReconnectDay,
   connectionsNeedingReconnectFor,
   listConnectionsNeedingReconnect,
+  nangoBackendsFor,
+  nangoReplacedSocialProviders,
   type ConnectionNeedingReconnect,
   type ResolvedSessionAuthorization,
 } from "@opengeni/core";
@@ -305,12 +308,75 @@ import {
   canonicalMcpEndpointUrl,
   MICROSOFT_DYNAMICS_CAPABILITY_ID,
   MICROSOFT_DYNAMICS_CONNECTION_NAME,
+  microsoftDynamicsEnvironmentAddress,
   microsoftDynamicsMcpEndpoint,
+  microsoftDynamicsProductForMcpUrl,
   type MicrosoftDynamicsProduct,
 } from "@opengeni/contracts/microsoft-dynamics";
 
 /** What the agent needs before it can show a Microsoft Dynamics Connect card. */
-const MICROSOFT_DYNAMICS_SETUP_DETAIL = `Each connection is one Dynamics environment. Ask the person for the web address they open Dynamics at (for example https://contoso.crm4.dynamics.com; any page of it works). If they don't know it, they can open Dynamics and copy the address bar, or find Environment URL in the Power Platform admin center. Then call custom_mcp_setup_request with name "${MICROSOFT_DYNAMICS_CONNECTION_NAME}" and that address as endpointUrl. Its card signs them in with their Microsoft work account.`;
+const MICROSOFT_DYNAMICS_SETUP_DETAIL = `Each connection is one Dynamics environment. Ask the person for the web address they open Dynamics at (for example https://contoso.crm4.dynamics.com, or https://businesscentral.dynamics.com/<tenant>/<environment> for Business Central; any page of it works). If they don't know it, they can open Dynamics and copy the address bar, or find Environment URL in the Power Platform admin center. Then call custom_mcp_setup_request with name "${MICROSOFT_DYNAMICS_CONNECTION_NAME}" and that address as endpointUrl. Its card signs them in with their Microsoft work account.`;
+
+/** The workspace's own Dynamics environments: catalog entries for an exact environment endpoint. */
+function microsoftDynamicsEnvironments(
+  items: readonly CapabilityCatalogItem[],
+): CapabilityCatalogItem[] {
+  return items.filter((item) => {
+    const url = item.mcpUrl ?? item.endpointUrl;
+    return (
+      item.kind === "mcp" &&
+      !!url &&
+      microsoftDynamicsProductForMcpUrl(url) !== null &&
+      capabilityCatalogItemIsTrustedForExposure(item)
+    );
+  });
+}
+
+/**
+ * The generic Microsoft Dynamics entry's setup once the workspace already has
+ * environments: one this caller can use is ready, and one they can still
+ * connect is offered by its own card, which needs no address. Null when there
+ * are none, so the entry asks for the environment's address as before.
+ */
+function microsoftDynamicsSetupFromEnvironments(
+  environments: readonly { item: CapabilityCatalogItem; setup: CapabilitySetupProjection }[],
+): CapabilitySetupProjection | null {
+  const describe = (list: typeof environments) =>
+    list
+      .map(({ item }) => {
+        const address = microsoftDynamicsEnvironmentAddress(item.mcpUrl ?? item.endpointUrl ?? "");
+        return `${item.name}${address ? ` (${address})` : ""}, capabilityId ${item.id}`;
+      })
+      .join("; ");
+  const ready = environments.filter(({ setup }) => setup.status === "ready");
+  if (ready.length > 0)
+    return {
+      status: "ready",
+      action: null,
+      detail: `Already connected and usable in this chat: ${describe(ready)}. Use its tools. Only for a different environment: ${MICROSOFT_DYNAMICS_SETUP_DETAIL}`,
+    };
+  const connectable = environments.filter(({ setup }) => setup.status === "authorization_required");
+  if (connectable.length > 0)
+    return {
+      status: "authorization_required",
+      action: "connect",
+      detail: `This workspace already has ${describe(connectable)}. Call capability_authorization_request with ${connectable.length === 1 ? "this capabilityId" : "the capabilityId of the one the person means"}; its card signs them in without asking for the address. Only for a different environment: ${MICROSOFT_DYNAMICS_SETUP_DETAIL}`,
+    };
+  if (environments.length > 0)
+    return {
+      status: "authorization_required",
+      action: "connect",
+      detail: `This workspace already has ${describe(environments)}, but it is not usable in this chat: ${environments[0]!.setup.detail} Only for a different environment: ${MICROSOFT_DYNAMICS_SETUP_DETAIL}`,
+    };
+  return null;
+}
+
+/**
+ * What a posted setup card means for the turn: the chat continues the request
+ * once the person finishes it, so the agent doesn't ask them to report back.
+ */
+const SETUP_CARD_CONTINUES =
+  "When the person who asked finishes it, you get an update and continue then, so don't ask them to tell you when they're done.";
 
 /**
  * Why a Microsoft Dynamics address can't be connected here, in words the
@@ -327,12 +393,7 @@ function microsoftDynamicsSetupProblem(
   )
     return "Microsoft Dynamics isn't available on this Opengeni deployment yet. Nothing was posted; tell the person.";
   if (!product)
-    return "That isn't a Dynamics environment address. Ask the person to open Dynamics and copy the address bar (it looks like https://contoso.crm4.dynamics.com), or find Environment URL in the Power Platform admin center, then call custom_mcp_setup_request again. Business Central isn't supported yet.";
-  if (
-    product === "finance_operations" &&
-    settings.microsoftDynamicsFinanceOperationsEnabled !== true
-  )
-    return "Dynamics 365 Finance and Operations isn't available here yet; only Dynamics 365 Sales and other Dataverse environments can be connected. Nothing was posted; tell the person.";
+    return "That isn't a Dynamics environment address. Ask the person to open Dynamics and copy the address bar (it looks like https://contoso.crm4.dynamics.com), or find Environment URL in the Power Platform admin center, then call custom_mcp_setup_request again.";
   return null;
 }
 
@@ -595,6 +656,12 @@ export type McpServerOptions = {
    * `slack_bot_*` tool unlisted; omitted keeps them listed.
    */
   slackBotAvailable?: boolean | undefined;
+  /**
+   * Native social providers a Nango-backed integration currently serves
+   * (docs/nango.md). Their provider tools are not listed; calls are refused
+   * either way.
+   */
+  nangoReplacedSocialProviders?: ReadonlySet<string> | undefined;
 };
 
 /**
@@ -1375,8 +1442,18 @@ export function buildOpenGeniMcpServer(
     );
     if (!authority)
       throw new ToolArgumentError(`Unknown or unavailable social connection: ${connectionId}`);
+    // While Nango serves a provider, its native accounts are not used here.
+    if (
+      nangoReplacedSocialProviders(await nangoBackendsFor(deps.db, deps.settings)).has(
+        authority.connection.provider,
+      )
+    )
+      throw new ToolArgumentError(`Unknown or unavailable social connection: ${connectionId}`);
     return authority;
   };
+  const nativeSocialProviders = (["x", "reddit"] as const).filter(
+    (provider) => !options.nangoReplacedSocialProviders?.has(provider),
+  );
   const requireAuthorizedSocialConnectionForProvider = async (
     provider: "x" | "reddit",
     connectionId: string,
@@ -2000,7 +2077,7 @@ export function buildOpenGeniMcpServer(
     // Reddit Integration cards. The legacy social_* names remain available to
 
     // identity and reject a near-identical Connection from the other adapter.
-    for (const provider of ["x", "reddit"] as const) {
+    for (const provider of nativeSocialProviders) {
       const providerName = provider === "x" ? "X" : "Reddit";
       server.registerTool(
         `${provider}_accounts_list`,
@@ -2216,7 +2293,7 @@ export function buildOpenGeniMcpServer(
       },
     );
 
-    for (const provider of ["x", "reddit"] as const) {
+    for (const provider of nativeSocialProviders) {
       const providerName = provider === "x" ? "X" : "Reddit";
       server.registerTool(
         `${provider}_posts_sync`,
@@ -5125,7 +5202,7 @@ function registerFleetTools(
         if (setup.status === "unavailable") {
           return json({ kind: "selfhosted", status: "unavailable", message: setup.detail });
         }
-        const eventId = await appendCapabilityCardEvent(deps, grant, sessionId, {
+        const { eventId } = await appendCapabilityCardEvent(deps, grant, sessionId, {
           item,
           action: "connect",
           rationale: "Connect your computer so this chat can run on it.",
@@ -7730,11 +7807,7 @@ function registerCapabilityDiscoveryTools(
       integrationDefinitions: connectableIntegrationDefinitions(deps.settings, grant.workspaceId),
       ...(deps.settings.microsoftDynamicsClientId?.trim() &&
       deps.settings.microsoftDynamicsClientSecret?.trim()
-        ? {
-            microsoftDynamics: {
-              financeOperations: deps.settings.microsoftDynamicsFinanceOperationsEnabled === true,
-            },
-          }
+        ? { microsoftDynamics: true }
         : {}),
     });
   // Indexed marketplace plugins: a person installs one from its card.
@@ -7757,6 +7830,7 @@ function registerCapabilityDiscoveryTools(
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         subjectId: subjectId ?? null,
+        integrationBackends: await nangoBackendsFor(deps.db, deps.settings),
       });
     } catch {
       return [];
@@ -7766,7 +7840,9 @@ function registerCapabilityDiscoveryTools(
   // Installation is workspace metadata; an enabled personal MCP is usable only
   // when its tools actually made it into this caller's immutable attempt catalog.
   // This is a readiness projection, never credential resolution or a new grant.
-  const setupProjections = async (items: CapabilityCatalogItem[]) => {
+  const projectSetups = async (
+    items: CapabilityCatalogItem[],
+  ): Promise<CapabilitySetupProjection[]> => {
     const availableServerIds = new Set<string>();
     const availableFirstPartyTools = new Set<string>();
     const acceptedServerIds = new Set<string>();
@@ -7839,6 +7915,29 @@ function registerCapabilityDiscoveryTools(
       ),
     );
   };
+  // The workspace's Dynamics environments with this caller's setup for each.
+  const dynamicsEnvironmentSetups = async (items?: readonly CapabilityCatalogItem[]) => {
+    const environments = microsoftDynamicsEnvironments(items ?? (await catalog()).items);
+    if (environments.length === 0) return [];
+    const setups = await projectSetups(environments);
+    return environments.map((item, index) => ({ item, setup: setups[index]! }));
+  };
+  // The generic Dynamics entry reflects environments already here, so an agent
+  // is not told to ask for an address of an environment that is connected.
+  // `catalogItems`: the workspace catalog when the caller already read it.
+  const setupProjections = async (
+    items: CapabilityCatalogItem[],
+    catalogItems?: readonly CapabilityCatalogItem[],
+  ) => {
+    const setups = await projectSetups(items);
+    const index = items.findIndex((item) => item.id === MICROSOFT_DYNAMICS_CAPABILITY_ID);
+    if (index === -1 || setups[index]!.status === "unavailable") return setups;
+    const fromEnvironments = microsoftDynamicsSetupFromEnvironments(
+      await dynamicsEnvironmentSetups(catalogItems),
+    );
+    if (fromEnvironments) setups[index] = fromEnvironments;
+    return setups;
+  };
 
   server.registerTool(
     "capability_catalog_search",
@@ -7880,7 +7979,7 @@ function registerCapabilityDiscoveryTools(
               ).values(),
             ];
       const [projected, inventory] = await Promise.all([
-        setupProjections([...ranked.map(({ item }) => item), ...connections]),
+        setupProjections([...ranked.map(({ item }) => item), ...connections], current.items),
         reconnectInventory(ranked.map(({ item }) => item)),
       ]);
       const setups = projected.slice(0, ranked.length);
@@ -7982,30 +8081,54 @@ function registerCapabilityDiscoveryTools(
           ),
       },
     },
-    async ({ capabilityId, rationale, connectionId }) => {
+    async ({ capabilityId, rationale, connectionId }, extra) => {
       await authorize();
+      // Tool discovery shows a card for a search that clearly names one
+      // integration; it shows that card at most once per chat.
+      const fromDiscovery = extra?._meta?.[TOOL_DISCOVERY_CARD_META_KEY] === true;
       const current = await catalog();
-      const item =
+      let item =
         [...current.items, ...recommendations()].find(
           (candidate) => candidate.id === capabilityId,
         ) ?? (await marketplacePluginCapabilityItem(deps.db, grant.workspaceId, capabilityId));
       if (!item || !capabilityCatalogItemIsTrustedForExposure(item)) {
         throw new ToolArgumentError("Unknown or untrusted capability; search the catalog again.");
       }
+      // Each Dynamics connection is one customer environment. An environment
+      // already here answers for the generic entry: ready when this caller can
+      // use it, else its own card (which needs no address) when it is the only
+      // one. Otherwise the card needs the environment's address, which only
+      // the person knows.
+      if (item.id === MICROSOFT_DYNAMICS_CAPABILITY_ID) {
+        const [own] = await projectSetups([item]);
+        if (own?.status === "unavailable")
+          return json({
+            capabilityId: item.id,
+            status: "unavailable",
+            cardShown: false,
+            message: own.detail,
+          });
+        const environments = await dynamicsEnvironmentSetups(current.items);
+        const connectable = environments.filter(
+          ({ setup }) => setup.status === "authorization_required",
+        );
+        const fromEnvironments = microsoftDynamicsSetupFromEnvironments(environments);
+        if (fromEnvironments?.status !== "ready" && connectable.length === 1) {
+          item = connectable[0]!.item;
+        } else {
+          return json({
+            capabilityId: item.id,
+            status: fromEnvironments?.status === "ready" ? "ready" : "input_required",
+            cardShown: false,
+            message: fromEnvironments?.detail ?? MICROSOFT_DYNAMICS_SETUP_DETAIL,
+          });
+        }
+      }
       const [[setup], inventory] = await Promise.all([
         setupProjections([item]),
         reconnectInventory([item]),
       ]);
       if (!setup) throw new Error("Capability setup projection is unavailable.");
-      // Each Dynamics connection is one customer environment: its card needs
-      // the environment's address, which only the person knows.
-      if (item.id === MICROSOFT_DYNAMICS_CAPABILITY_ID) {
-        return json({
-          capabilityId: item.id,
-          status: "input_required",
-          message: MICROSOFT_DYNAMICS_SETUP_DETAIL,
-        });
-      }
       // An account of this entry that stopped working is reconnected in place:
       // a first-time Connect cannot replace it. The agent names the one the
       // task needs; without a name, the only one here is used while no
@@ -8044,6 +8167,7 @@ function registerCapabilityDiscoveryTools(
         return json({
           capabilityId: item.id,
           status: "ready",
+          cardShown: false,
           message: setup.detail,
         });
       }
@@ -8051,6 +8175,7 @@ function registerCapabilityDiscoveryTools(
         return json({
           capabilityId: item.id,
           status: "unavailable",
+          cardShown: false,
           message: setup.detail,
         });
       }
@@ -8074,48 +8199,69 @@ function registerCapabilityDiscoveryTools(
       const personCannotConnect =
         person !== null &&
         inChatCapabilitySetup(person, item.id, item, memberIntegrationSetup).kind === "unavailable";
-      const eventId = await appendCapabilityCardEvent(deps, grant, sessionId, {
+      const { eventId, alreadyShown } = await appendCapabilityCardEvent(deps, grant, sessionId, {
         item,
         action: reconnect ? "connect" : (setup.action ?? "connect"),
         rationale,
         ...(reconnect ? { reconnect } : {}),
+        // Tool discovery's card is not posted again until the person writes.
+        // A model call always posts: a card whose state changed (a machine
+        // just connected) is worth showing again.
+        ...(fromDiscovery ? { once: "since_latest_message" as const } : {}),
       });
+      // Every result says whether a card is in the chat, so a caller can
+      // never report one that was not shown. A card already there keeps the
+      // status and guidance it would have had, and says it was not reposted.
+      const shown = { cardShown: eventId !== null, ...(alreadyShown ? { alreadyShown } : {}) };
+      const posted = (body: { message: string } & Record<string, unknown>) =>
+        json(
+          alreadyShown
+            ? {
+                ...body,
+                message: `${body.message.replace(" was posted", " is already in this chat")} It was not posted again.`,
+              }
+            : body,
+        );
       if (reconnect) {
-        return json({
+        return posted({
           capabilityId: item.id,
           status: "authorization_requested",
           action: "connect",
           connectionId: reconnect.connectionId,
           eventId,
+          ...shown,
           message: personCannotConnect
             ? `The card was posted, but this person can't reconnect ${item.name} from here: their access doesn't allow it, and the card tells them so. Tell them ${reconnect.account} stopped working on ${connectionReconnectDay(reconnect.since)} and that whoever manages this app has to reconnect it. Nothing is reconnected.`
             : `The card to reconnect ${capabilityReconnectAccountLabel(item, reconnect)} was posted. It signs in again to that same account, which stopped working on ${connectionReconnectDay(reconnect.since)}; nothing is reconnected yet. Tell the person plainly that it stopped working and that the card reconnects it. It works from their next message after reconnecting.`,
         });
       }
       if (machineCardWhenReady) {
-        return json({
+        return posted({
           capabilityId: item.id,
           status: "ready",
           eventId,
+          ...shown,
           message: `${setup.detail} The Connected Machine card is in this chat: the person can choose a machine for this chat or connect another. Chrome needs the browser extension (${browserExtension(deps.settings).installUrl}) on a connected machine.`,
         });
       }
       if (githubCardWhenReady) {
-        return json({
+        return posted({
           capabilityId: item.id,
           status: "ready",
           eventId,
+          ...shown,
           message:
             item.id === PERSONAL_GITHUB_CAPABILITY_ID
               ? `${setup.detail} The Your GitHub card is in this chat: the person can choose which repositories the agent may use as them.`
               : `${setup.detail} The GitHub card is in this chat: the person picks a repository with its "Use" button, which attaches it to this chat.`,
         });
       }
-      return json({
+      return posted({
         capabilityId: item.id,
         status: "authorization_requested",
         action: setup.action,
         eventId,
+        ...shown,
         message: personCannotConnect
           ? item.kind === "plugin"
             ? `The card was posted, but this person can't install the ${item.name} plugin: installing plugins needs permission to manage this workspace's plugins, and the card tells them so. Don't ask them to use the card. Tell them a workspace admin has to install it. Nothing is installed.`
@@ -8128,7 +8274,7 @@ function registerCapabilityDiscoveryTools(
                 ? integrationDefinitionCardPostedMessage(item)
                 : item.kind === "plugin"
                   ? `The ${item.name} plugin card was posted. The person reviews what it adds and installs it for the workspace; nothing is installed yet. Once they do, its Skills are yours from your next turn, and its MCP servers may still need connecting: search the catalog for them then.`
-                  : "The recommendation was posted for human confirmation. No access has been granted yet.",
+                  : `The recommendation was posted for human confirmation. No access has been granted yet. ${SETUP_CARD_CONTINUES}`,
       });
     },
   );
@@ -8275,8 +8421,8 @@ function registerCapabilityDiscoveryTools(
         status: "setup_requested",
         eventId: appended.events[0]?.id ?? null,
         message: mcpSetup
-          ? "The prepared connection card was posted. The person enters only the missing key in its protected fields. No server was added or contacted."
-          : "The human review card was posted. No server was added or contacted.",
+          ? `The prepared connection card was posted. The person enters only the missing key in its protected fields. No server was added or contacted. ${SETUP_CARD_CONTINUES}`
+          : `The human review card was posted. No server was added or contacted. ${SETUP_CARD_CONTINUES}`,
       });
     },
   );
@@ -8525,11 +8671,39 @@ async function appendCapabilityCardEvent(
     toolName?: string;
     /** The account that stopped working which this card reconnects. */
     reconnect?: ConnectionNeedingReconnect;
+    /**
+     * Post the card only when no current card of the same kind for the
+     * capability is already shown in this turn, or (`since_latest_message`)
+     * since the person's latest message; `alreadyShown` then names that card.
+     */
+    once?: "turn" | "since_latest_message";
   },
-): Promise<string | null> {
+): Promise<{ eventId: string | null; alreadyShown: boolean }> {
   const { item } = input;
   const claims = exactAgentCommandContext(grant, sessionId);
   const payload = capabilityCardPayload(item, input);
+  if (input.once) {
+    const once = await appendTurnCapabilityCardOnce(
+      deps.db,
+      grant.workspaceId,
+      sessionId,
+      claims.callerTurnId,
+      claims.callerExecutionGeneration,
+      claims.callerAttemptId,
+      item.id,
+      { type: "tool.auth_needed", payload },
+      null,
+      { sinceLatestMessage: input.once === "since_latest_message" },
+    );
+    await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, once.events);
+    if (!once.accepted) {
+      throw new Error("The calling turn was replaced before the authorization request committed.");
+    }
+    return {
+      eventId: once.existingEventId ?? once.events[0]?.id ?? null,
+      alreadyShown: once.existingEventId !== null,
+    };
+  }
   const appended = await appendAndPublishTurnEventsFenced(
     deps.db,
     deps.bus,
@@ -8543,7 +8717,7 @@ async function appendCapabilityCardEvent(
   if (!appended.accepted) {
     throw new Error("The calling turn was replaced before the authorization request committed.");
   }
-  return appended.events[0]?.id ?? null;
+  return { eventId: appended.events[0]?.id ?? null, alreadyShown: false };
 }
 
 /** The `tool.auth_needed` payload that renders a capability card in the chat. */

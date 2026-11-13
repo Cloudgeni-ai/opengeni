@@ -127,6 +127,66 @@ describe.skipIf(!enabled)("independent title native request custody", () => {
       }
     });
   }
+  test("a title whose chat was deleted mid-generation ends quietly", async () => {
+    const org = await fixture.organization();
+    const connectionId = await fixture.connection(org, providers[0]!);
+    const work = await fixture.turn(org, { model: models[0]! });
+    expect(
+      await subscriptionCoreTurns(providers[0]!).placeSubscriptionCoreTurn(fixture.client.db, work),
+    ).toMatchObject({ kind: "run", connectionId });
+    const [turn] = await shared.admin<{ metadata: Record<string, unknown> }[]>`
+      select metadata from session_turns where id = ${work.identity.turnId}::uuid`;
+    const policy = TurnExecutionPolicyV1.parse(turn!.metadata.turnExecutionPolicyV1);
+    const request = SessionTitleRequest.parse({
+      version: 1,
+      prompt: "Name this conversation",
+      policy,
+      providerId: policy.providerId,
+      modelId: policy.productModelId,
+      upstreamModelId: policy.upstreamModelId,
+      definitionVersion: "fixture-definition",
+      apiConnectionId: null,
+      expectedTitle: { title: null, source: null },
+      externallyBilled: true,
+      chargesOpenGeniCredits: false,
+      countsTowardTokenCap: false,
+      pricingJson: "{}",
+    });
+    const job = await admitSessionTitleOperation(fixture.client.db, {
+      ...work,
+      provider: "codex",
+      connectionId,
+      requestEncrypted: encryptEnvironmentValue(key, JSON.stringify(request)),
+    });
+    await fixture.finish(work);
+    // The chat is deleted while its title is being generated; its operation
+    // row goes with it and the in-flight step fails.
+    const readOrigin = spyOn(titleDb, "readTurnBillingOrigin").mockImplementation(async () => {
+      await shared.admin`delete from session_title_operations where id = ${job!.id}::uuid`;
+      throw new Error("source rows are gone");
+    });
+    const observability = createObservability(settings, { component: "worker" });
+    const warn = spyOn(observability, "warn");
+    const service = {
+      db: fixture.client.db,
+      settings,
+      observability,
+      runtime: {
+        generateSessionTitle: () => {
+          throw new Error("must not dispatch");
+        },
+      },
+    } as unknown as TurnActivityServices;
+    const input = { accountId: org.accountId, workspaceId: org.workspaceId, operationId: job!.id };
+    try {
+      expect(await reconcileSessionTitleOperation(service, input)).toEqual({ action: "terminal" });
+      expect(await getSessionTitleOperation(fixture.client.db, input)).toBeNull();
+      expect(readOrigin).toHaveBeenCalledTimes(1);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      readOrigin.mockRestore();
+    }
+  });
   for (const scenario of [
     "permanent",
     "busy",

@@ -764,8 +764,12 @@ test("a member sees what is wrong without the fix they cannot make", async () =>
   }
 });
 
-/** A Connect transport that records each begin, for the repair dialog. */
-function connectRecorder() {
+/**
+ * A Connect transport that records each begin, for the repair dialog. With
+ * `unreachable`, the first begin fails as the API does when GitHub can't be
+ * reached.
+ */
+function connectRecorder({ unreachable = false }: { unreachable?: boolean } = {}) {
   const begun: unknown[][] = [];
   const attempt = {
     id: "attempt-repair",
@@ -786,6 +790,12 @@ function connectRecorder() {
     pending: async () => [],
     begin: async (...args: unknown[]) => {
       begun.push(args);
+      if (unreachable && begun.length === 1)
+        throw Object.assign(new Error("GitHub couldn't be reached. Check again."), {
+          status: 503,
+          code: "upstream_unavailable",
+          details: { code: "provider_unreachable", provider: "github" },
+        });
       return structuredClone(attempt);
     },
     recover: async () => structuredClone(attempt),
@@ -850,6 +860,57 @@ test("an app uninstalled on one account is named at the top, and Reinstall repai
     );
     expect(document.body.textContent).not.toContain("Choose an account");
     expect(JSON.stringify(begun)).toContain('"reconnectAccountId":"github-installation:81"');
+  } finally {
+    await rendered.unmount();
+  }
+});
+
+test("when GitHub can't be reached, Reinstall says so and Check again retries the same repair", async () => {
+  const context = appContext(
+    ["github:manage"],
+    mock(async () => ({})),
+  );
+  const healthy = context.githubStatus.installations[0]!;
+  context.githubStatus.installations = [
+    {
+      ...healthy,
+      installationId: 81,
+      githubAccountId: 82,
+      accountLogin: "benyhh",
+      accountType: "User",
+      lifecycle: "deleted",
+      issue: "uninstalled",
+      repositoryCount: 0,
+    },
+    healthy,
+  ];
+  const { begun, transport } = connectRecorder({ unreachable: true });
+  const rendered = await renderAdapter({
+    ...context,
+    client: { ...context.client, connectTransport: () => transport },
+  });
+  try {
+    await act(async () => {
+      installationRow(rendered.model(), 81).action!.onClick();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    const title = () => document.querySelector("[role=dialog] h2")?.textContent;
+    expect(title()).toBe("GitHub couldn't be reached");
+    expect(document.body.textContent).not.toContain("Choose an account");
+    expect(document.body.textContent).not.toContain("Reinstall on GitHub");
+    const check = [...document.querySelectorAll<HTMLButtonElement>("[role=dialog] button")].find(
+      (button) => button.textContent === "Check again",
+    )!;
+    await act(async () => {
+      check.click();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(begun).toHaveLength(2);
+    expect(JSON.stringify(begun[1])).toContain('"reconnectAccountId":"github-installation:81"');
+    expect(title()).toBe("Reinstall on benyhh");
   } finally {
     await rendered.unmount();
   }

@@ -1,12 +1,15 @@
-/** Durable logical-turn state; checks and quota/account signals never spend this budget. */
+/**
+ * Durable logical-turn state: how many resumes of this turn landed straight
+ * back on unavailable capacity, and the persisted backoff before the next.
+ * The count only grows the backoff; it never ends the turn.
+ */
 export const CODEX_CAPACITY_RECOVERY_KEY = "codexCapacityRecoveryV1";
-export const CODEX_CAPACITY_FALSE_RESUMPTION_LIMIT = 10;
 
 /**
- * The terminal code of each core waiter's false-resumption breaker (one per
- * provider wait vocabulary). The breaker state is shared
- * (`CODEX_CAPACITY_RECOVERY_KEY`), so a human Retry of a turn that failed
- * with any of these codes replenishes it.
+ * The terminal code each core waiter's former false-resumption breaker gave
+ * a turn (one per provider wait vocabulary). Waits no longer stop, but turns
+ * that failed with these codes remain: a human Retry of one clears the shared
+ * recovery state (`CODEX_CAPACITY_RECOVERY_KEY`).
  */
 export const SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES = {
   codex: "codex_capacity_recovery_exhausted",
@@ -36,7 +39,6 @@ export function readCodexCapacityRecovery(
     !state ||
     !Number.isSafeInteger(state.falseResumptions) ||
     state.falseResumptions < 0 ||
-    state.falseResumptions > CODEX_CAPACITY_FALSE_RESUMPTION_LIMIT ||
     (state.resumeGeneration !== null &&
       (!Number.isSafeInteger(state.resumeGeneration) || state.resumeGeneration < 1)) ||
     (state.retryNotBefore !== null &&

@@ -40,6 +40,7 @@ import * as runtimePosture from "../src/runtime-posture";
 import {
   postureBeforeMigration,
   privateRoutinesCreatedAfter,
+  targetRoutinesCreatedAfter,
   publicTablesCreatedAfter,
 } from "./predecessor-runtime-posture";
 import {
@@ -976,8 +977,33 @@ describe("runtime database posture evaluator", () => {
       rlsStrategy: "force",
       tablesCreatedByLaterMigrations: publicTablesCreatedAfter(automation, true),
       routinesCreatedByLaterMigrations: privateRoutinesCreatedAfter(automation, true),
+      targetRoutinesCreatedByLaterMigrations: targetRoutinesCreatedAfter(automation, true),
     });
+    // Owner-internal target-schema helpers a later file creates are excused too.
+    const nango = "1406_nango_integrations.sql";
+    expect(targetRoutinesCreatedAfter(nango, true)).toContain("set_integration_backend");
+    expect(targetRoutinesCreatedAfter(nango, false)).not.toContain("set_integration_backend");
+    expect(targetRoutinesCreatedAfter(automation, true)).not.toContain(
+      "set_credit_promotion_policy",
+    );
+    expect(targetRoutinesCreatedAfter(automation, true)).not.toContain("opengeni_private");
     expect(() => postureBeforeMigration("9999_missing.sql")).toThrow("unknown migration");
+  });
+
+  test("a predecessor database may lack an owner-internal helper a later file creates", () => {
+    const posture = safePosture();
+    posture.targetRoutines = posture.targetRoutines.filter(
+      (routine) => !routine.name.startsWith("set_integration_backend("),
+    );
+    const missing =
+      "owner-internal target-schema helper set_integration_backend(text, text, text, boolean, jsonb, text, text) is missing or ambiguous";
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(missing);
+    expect(
+      evaluateRuntimeDatabasePosture(posture, {
+        ...options,
+        targetRoutinesCreatedByLaterMigrations: ["set_integration_backend"],
+      }),
+    ).not.toContain(missing);
   });
 
   test("predecessor definer lists come from the private functions later migration files create", () => {
@@ -4172,6 +4198,7 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
     "vaults",
     "vault_items",
     "slack_agent_update_settings",
+    "sandbox_leases",
   ];
   // Private tables runtime definers own (RUNTIME_DEFINER_ROUTINE_TABLES names them with their schema).
   const definerPrivateTables = [
@@ -4251,6 +4278,7 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "end_agent_call_rings_v1(uuid)",
       "session_content_garbage_candidates_v1(integer)",
       "collect_session_content_garbage_v1(uuid, uuid, integer)",
+      "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -4261,6 +4289,7 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "end_agent_call_rings_v1(uuid)",
       "session_content_garbage_candidates_v1(integer)",
       "collect_session_content_garbage_v1(uuid, uuid, integer)",
+      "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
@@ -4344,6 +4373,7 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "end_agent_call_rings_v1(uuid)",
       "session_content_garbage_candidates_v1(integer)",
       "collect_session_content_garbage_v1(uuid, uuid, integer)",
+      "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
     ]) {
       const posture = eventPosture(false);
       posture.privateRoutines = posture.privateRoutines.filter((entry) => entry.name !== name);

@@ -7,6 +7,7 @@ import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import { SectionVariantProvider } from "@opengeni/react/ui/section";
 import { OrganizationBillingPage } from "../src/components/organization/billing-page";
 import { OrganizationDirectoryProvider } from "../src/components/organization/organization-directory";
+import { previewReceipts } from "../src/dev/subscription-plans-preview";
 import "../src/styles.css";
 
 const params = new URLSearchParams(location.search);
@@ -58,6 +59,19 @@ const client = new OpenGeniBrowserClient({
       });
     if (url.pathname === "/v1/billing/entitlements")
       return Response.json({ accountId, mode: "managed", entitlements: {} });
+    if (url.pathname === "/v1/billing/receipts") {
+      if (scenario === "no-receipts") return Response.json({ receipts: [], nextCursor: null });
+      const start = Math.max(
+        0,
+        previewReceipts.findIndex((receipt) => receipt.id === url.searchParams.get("cursor")) + 1,
+      );
+      const page = previewReceipts.slice(start, start + 4);
+      const last = page.at(-1);
+      return Response.json({
+        receipts: page,
+        nextCursor: last && start + 4 < previewReceipts.length ? last.id : null,
+      });
+    }
     if (url.pathname === "/v1/billing/alerts") {
       if (method === "PUT") threshold = JSON.parse(String(init?.body)).lowBalanceThresholdMicros;
       return Response.json({ accountId, lowBalanceThresholdMicros: threshold });

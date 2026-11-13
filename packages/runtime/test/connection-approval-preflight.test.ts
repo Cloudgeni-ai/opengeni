@@ -85,6 +85,8 @@ describe("connection approval preflight", () => {
         forceRefresh: false,
         preflightAcceptsRefreshableExpiry: true,
         subjectId: "human:viewer",
+        // A proxy-only (Nango) credential must preflight like any other.
+        acceptedTransports: ["nango_proxy"],
       });
       expect(provider.calls).toHaveLength(0);
       await call.execute();

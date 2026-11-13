@@ -19,7 +19,24 @@ import type {
 } from "@opengeni/contracts";
 
 import { type ConnectionUseAttribution } from "@opengeni/contracts/connection-authority";
-import { dataverseWebApiBase } from "@opengeni/contracts/microsoft-dynamics";
+import {
+  isNangoConnectionCredential,
+  isNangoProviderDomain,
+  nangoAuthHeaders,
+  nangoDestinationAllowed,
+  nangoIntegrationKeyFromProviderDomain,
+  nangoToolsMcpUrl,
+  nativeNangoIntegrationByKey,
+  type NangoProxyTransport,
+} from "@opengeni/contracts/nango";
+import {
+  BUSINESS_CENTRAL_API_ROOT,
+  businessCentralApiBase,
+  dataverseWebApiBase,
+  FINANCE_OPERATIONS_DATA_PATH,
+  FINANCE_OPERATIONS_METADATA_PATH,
+  financeOperationsOrigin,
+} from "@opengeni/contracts/microsoft-dynamics";
 import {
   PERSONAL_GITHUB_REQUESTED_SCOPES,
   PERSONAL_GITHUB_PROVIDER_DOMAIN,
@@ -141,6 +158,12 @@ export type ResolveConnectionCredentialResult =
        */
       authorizeProviderRequest?: () => Promise<boolean>;
       expiresAt?: Date | null;
+      /**
+       * Present for a Nango-backed connection: `headers` authenticate to the
+       * Nango API, and the caller must send its already-validated provider
+       * request through this proxy (see credentialRequestTarget).
+       */
+      proxy?: NangoProxyTransport;
     }
   | {
       status: "auth_needed";
@@ -187,6 +210,12 @@ export type ResolveConnectionCredentialInput = {
   hostConnectionUseAttribution?: ConnectionUseAttribution;
   /** Exact accepted attempt plus one stable physical-provider request id. */
   connectionUseContext?: AcceptedConnectionUseContext;
+  /**
+   * Transports the caller can apply besides sending `headers` to
+   * `destinationUrl` directly. A Nango-backed connection resolves only for a
+   * caller that declares `nango_proxy`; any other caller gets auth_needed.
+   */
+  acceptedTransports?: readonly "nango_proxy"[];
 };
 
 const OFFICIAL_GMAIL_MCP_RESOURCE = "https://gmailmcp.googleapis.com/mcp/v1";
@@ -617,6 +646,7 @@ export function buildConnectionTokenResolver(
     inputCredentialTarget: "mcp" | "http_api",
     connectionUseAttribution?: ConnectionUseAttribution,
     recordUsage = true,
+    acceptedTransports: readonly string[] = [],
   ): Promise<ResolveConnectionCredentialResult> => {
     if (cred.status !== "active") {
       return authNeededForStatus(cred, ref);
@@ -643,7 +673,9 @@ export function buildConnectionTokenResolver(
           : {}),
       };
     }
-    const material = credentialMaterialForConnection(cred, inputCredentialTarget);
+    const material = isNangoProviderDomain(cred.providerDomain)
+      ? nangoCredentialMaterial(cred, settings, acceptedTransports)
+      : credentialMaterialForConnection(cred, inputCredentialTarget);
     if (material.status !== "ok") {
       return {
         status: "auth_needed",
@@ -670,11 +702,15 @@ export function buildConnectionTokenResolver(
       // Reviewed bridges gate each tool on the provider's actual OAuth grants.
       ...(cred.providerDomain.toLowerCase() === "slack.com"
         ? { grantedScopes: normalizeSlackScopes(cred.grantedScopes) }
-        : cred.kind === "oauth2"
+        : cred.kind === "oauth2" &&
+            // A Nango-managed app's fixed scopes are known only when the
+            // integration definition lists them; otherwise the provider decides.
+            !(isNangoProviderDomain(cred.providerDomain) && cred.grantedScopes.length === 0)
           ? { grantedScopes: [...cred.grantedScopes] }
           : {}),
       ...(connectionUseAttribution ? { connectionUseAttribution } : {}),
       expiresAt: cred.expiresAt,
+      ...(material.proxy ? { proxy: material.proxy } : {}),
     };
   };
 
@@ -971,6 +1007,7 @@ export function buildConnectionTokenResolver(
       input.credentialTarget ?? "mcp",
       connectionUseAttribution,
       credentialResolutionMode === "execution",
+      input.acceptedTransports ?? [],
     );
   };
 }
@@ -986,6 +1023,8 @@ function connectionBindingMatches(
 ): boolean {
   if (cred.providerDomain.toLowerCase() !== ref.providerDomain.toLowerCase()) return false;
   if (ref.kind && cred.kind !== ref.kind) return false;
+  if (isNangoProviderDomain(cred.providerDomain))
+    return nangoConnectionBindingMatches(cred, ref, destinationUrl);
 
   const credential = cred.credential as Record<string, unknown>;
   const metadata = cred.metadata as Record<string, unknown>;
@@ -1013,7 +1052,9 @@ function connectionBindingMatches(
           binding === canonicalHttpUrl(OFFICIAL_SLACK_MCP_URL) &&
           isOfficialSlackRestDestination(destination, ref)
         ) &&
-        !isDataverseWebApiDestination(destination, binding, ref))
+        !isDataverseWebApiDestination(destination, binding, ref) &&
+        !isBusinessCentralApiDestination(destination, binding, ref) &&
+        !isFinanceOperationsDataDestination(destination, binding, ref))
     ) {
       return false;
     }
@@ -1047,6 +1088,33 @@ export function connectionMetadataMatchesBinding(
 }
 
 /**
+ * The Business Central bridge runs a Business Central connection's tools
+ * against the Business Central API. Every environment is the same Entra
+ * resource on one host, so a person's grant reaches each environment they
+ * connect, whichever of their Business Central connections is current.
+ */
+function isBusinessCentralApiDestination(
+  destinationUrl: string,
+  binding: string,
+  ref: McpServerConnectionRef,
+): boolean {
+  if (!businessCentralApiBase(binding) || ref.kind !== "oauth2") return false;
+  const url = new URL(destinationUrl);
+  const root = new URL(BUSINESS_CENTRAL_API_ROOT);
+  return (
+    url.origin === root.origin &&
+    ref.providerDomain.toLowerCase() === root.hostname &&
+    !url.username &&
+    !url.password &&
+    !url.hash &&
+    url.pathname.startsWith(root.pathname) &&
+    // The URL parser resolves literal dot segments; refuse encoded separators and
+    // dots that a server could decode into a path outside the API root.
+    !/%(?:2f|5c|2e)/iu.test(url.pathname)
+  );
+}
+
+/**
  * The Dataverse bridge runs a Dataverse MCP connection's tools against the same
  * environment's Web API: same origin as the bound MCP endpoint, under the Web
  * API root only.
@@ -1066,7 +1134,40 @@ function isDataverseWebApiDestination(
     !url.username &&
     !url.password &&
     !url.hash &&
-    url.pathname.startsWith(root.pathname)
+    url.pathname.startsWith(root.pathname) &&
+    // The URL parser resolves literal dot segments; refuse encoded separators and
+    // dots that a server could decode into a path outside the Web API root.
+    !/%(?:2f|5c|2e)/iu.test(url.pathname)
+  );
+}
+
+/**
+ * The Finance and Operations bridge runs a Finance and Operations MCP
+ * connection's tools against the same environment's OData data entities and
+ * metadata service: same origin as the bound MCP endpoint, under those roots
+ * only.
+ */
+function isFinanceOperationsDataDestination(
+  destinationUrl: string,
+  binding: string,
+  ref: McpServerConnectionRef,
+): boolean {
+  const origin = financeOperationsOrigin(binding);
+  if (!origin || ref.kind !== "oauth2") return false;
+  const url = new URL(destinationUrl);
+  // Destinations arrive canonicalized without a trailing slash, so a root
+  // itself (`/data/`) reads as `/data`.
+  const under = (root: string) =>
+    url.pathname === root.replace(/\/$/u, "") || url.pathname.startsWith(root);
+  return (
+    url.origin === origin &&
+    ref.providerDomain.toLowerCase() === url.hostname &&
+    !url.username &&
+    !url.password &&
+    !url.hash &&
+    // Encoded separators or dots could climb out of the root on the server.
+    !/%(?:2f|5c|2e)/iu.test(url.pathname) &&
+    (under(FINANCE_OPERATIONS_DATA_PATH) || under(FINANCE_OPERATIONS_METADATA_PATH))
   );
 }
 
@@ -1209,7 +1310,8 @@ async function refreshAutoConnectedCredential(
 }
 
 function shouldRefresh(cred: ConnectionCredentialForBroker, force: boolean, now: Date): boolean {
-  if (cred.kind !== "oauth2") {
+  // Nango refreshes provider tokens itself; there is nothing to refresh here.
+  if (cred.kind !== "oauth2" || isNangoProviderDomain(cred.providerDomain)) {
     return false;
   }
   if (force) {
@@ -1283,8 +1385,91 @@ type ConnectionCredentialMaterial =
       status: "ok";
       headers: Record<string, string>;
       placements?: ConnectionCredentialPlacement[];
+      proxy?: NangoProxyTransport;
     }
   | { status: "invalid" | "unsupported" };
+
+/**
+ * A Nango connection binds to its integration's exact provider destinations
+ * (Google bridges) or to its own synthetic tool-bridge identity (config-only
+ * integrations). A native and a Nango connection never satisfy each other's
+ * reference because their provider domains differ.
+ */
+function nangoConnectionBindingMatches(
+  cred: Pick<ConnectionCredentialForBroker, "providerDomain" | "kind" | "metadata">,
+  ref: McpServerConnectionRef,
+  destinationUrl: string,
+): boolean {
+  const key = nangoIntegrationKeyFromProviderDomain(cred.providerDomain);
+  if (!key || cred.kind !== "oauth2" || ref.subjectScope !== "subject") return false;
+  const destination = canonicalHttpUrl(destinationUrl);
+  if (!destination) return false;
+  const native = nativeNangoIntegrationByKey(key);
+  if (native) {
+    if (destination === canonicalHttpUrl(native.mcpUrl)) return true;
+    if (!nangoDestinationAllowed(native.destinations, destination)) return false;
+    // The same exact routes the native grant may reach, nothing broader.
+    const nativeRef = { ...ref, providerDomain: native.nativeProviderDomain };
+    if (native.integrationKey === "gmail")
+      return isOfficialGmailRestDestination(destination, nativeRef);
+    if (native.integrationKey === "google-calendar")
+      return isOfficialGoogleCalendarRestDestination(destination, nativeRef);
+    return (
+      isOfficialDriveRestDestination(destination, nativeRef) ||
+      isNangoDriveReadDestination(destination)
+    );
+  }
+  return destination === canonicalHttpUrl(nangoToolsMcpUrl(key));
+}
+
+/**
+ * Under Nango, Drive reads cannot use Google's hosted Drive MCP server, so the
+ * bridge serves them from these Drive REST routes (docs/nango.md).
+ */
+function isNangoDriveReadDestination(destinationUrl: string): boolean {
+  const url = new URL(destinationUrl);
+  return (
+    url.origin === "https://www.googleapis.com" &&
+    !url.username &&
+    !url.password &&
+    !url.hash &&
+    /^\/drive\/v3\/(?:files(?:\/[a-zA-Z0-9_-]+(?:\/export|\/permissions)?)?|about)$/u.test(
+      url.pathname,
+    )
+  );
+}
+
+function nangoCredentialMaterial(
+  cred: ConnectionCredentialForBroker,
+  settings: Settings,
+  acceptedTransports: readonly string[],
+): ConnectionCredentialMaterial {
+  // Fail closed: a caller that cannot route through the proxy, or a
+  // deployment without the Nango key, gets no headers at all.
+  if (!acceptedTransports.includes("nango_proxy") || !settings.nangoSecretKey)
+    return { status: "unsupported" };
+  const credential = cred.credential;
+  if (
+    !isNangoConnectionCredential(credential) ||
+    nangoIntegrationKeyFromProviderDomain(cred.providerDomain) !== credential.integrationKey
+  )
+    return { status: "invalid" };
+  return {
+    status: "ok",
+    headers: nangoAuthHeaders({
+      secretKey: settings.nangoSecretKey,
+      nangoConnectionId: credential.nangoConnectionId,
+      providerConfigKey: credential.providerConfigKey,
+    }),
+    proxy: {
+      kind: "nango_proxy",
+      baseUrl: settings.nangoApiBaseUrl,
+      integrationKey: credential.integrationKey,
+      providerConfigKey: credential.providerConfigKey,
+      nangoConnectionId: credential.nangoConnectionId,
+    },
+  };
+}
 
 function credentialMaterialForConnection(
   cred: ConnectionCredentialForBroker,

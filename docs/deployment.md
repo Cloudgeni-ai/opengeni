@@ -1473,6 +1473,19 @@ start the matching release. Do not restart an older API that exposes the raw
 provider-management routes. This feature does not authorize changing the
 deployment's configured browser session-set mode.
 
+### Opengeni Console host
+
+Opengeni Console can be served on its own host (`console.opengeni.ai`,
+`staging.console.opengeni.ai`) by the same web and API deployment. Add the
+host to `OPENGENI_BETTER_AUTH_ALLOWED_HOSTS` and its origin to
+`OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS`, optionally share the session with
+`OPENGENI_BETTER_AUTH_COOKIE_DOMAIN` (unset, the Console host has its own
+sign-in), and register its Google sign-in callback (the Console host offers
+no GitHub sign-in). `OPENGENI_BETTER_AUTH_COOKIE_PREFIX` optionally renames the
+auth cookies (for example to keep staging and production apart on one parent
+domain); changing it signs everyone out, and leaving it unset keeps Better
+Auth's default names. See [`opengeni-console.md`](opengeni-console.md#its-own-host).
+
 ### Managed passkey sign-in
 
 Managed deployments in the legacy browser session-set mode offer passkey
@@ -1509,10 +1522,12 @@ them, and readiness requires them from then on. A release that still has the
   does: sessions don't record which passkey opened them, so ending all of them
   is the only way to shut out a removed passkey.
 - `OPENGENI_ADMIN_PASSKEY_STEP_UP=required` (default `off`) makes owners and
-  admins make admin changes from a browser session confirmed with a passkey:
-  members, roles and invitations, billing and plans, API keys, shared
-  integrations and connections, and organization and workspace settings, and
-  creating a personal API key. A session signed in with a passkey is confirmed;
+  admins change who can access the organization and its data from a browser
+  session confirmed with a passkey: members, roles, invitations, service
+  accounts and ownership recovery; creating organization and workspace API keys
+  (or changing what one may do), and creating a personal API key; and creating,
+  changing or removing shared connections, including Gmail. Settings, billing,
+  policies, integration installs and revoking keys are not asked. A session signed in with a passkey is confirmed;
   otherwise the API refuses with `ADMIN_PASSKEY_STEP_UP_REQUIRED` in the error
   details, the console asks for the passkey once and sends the change again,
   and the session stays confirmed until it ends (`auth_sessions.mfa_verified_at`,
@@ -4261,6 +4276,7 @@ Service endpoints:
 - API: `GET /healthz` on `OPENGENI_API_PORT` (default `8000`); `GET /traffic-readyz` checks Postgres for traffic routing, while `GET /readyz` reports Postgres, NATS, and Temporal with bounded timeouts. `GET /metrics` is served on `OPENGENI_API_METRICS_PORT` when it is set, and then never on `OPENGENI_API_PORT`, so an ingress that forwards every path to the API cannot publish it. Without it, `/metrics` stays on `OPENGENI_API_PORT` (the local and Docker Compose default). The Helm chart sets it from `api.metricsPort` (default `9464`) behind a separate always-ClusterIP `<release>-api-metrics` Service that the ServiceMonitor, scrape annotations, and bundled collector use; do not route it through an Ingress. The ServiceMonitor relabels those series back to the public API Service's `service`/`job` identity, so alerts keyed on `service="<release>-api"` keep matching; annotation-based scrapers see the new Service name. `api.metricsPort: null` restores the legacy single-port layout.
 - Worker: `GET /metrics`, `GET /healthz`, and `GET /readyz` on `OPENGENI_WORKER_HTTP_PORT` (default `8001`); readiness requires lifecycle state `ready` plus healthy Postgres, NATS, and Temporal checks. The standalone worker reserves a one-connection Postgres probe pool so ordinary activity-pool saturation cannot create false readiness failures. A draining worker stays live but becomes unready before polling stops.
 - Relay: `GET /healthz` on `OPENGENI_RELAY_BIND` (the wss port, default `8443`) when the relay is enabled. `GET /metrics` is served on `OPENGENI_RELAY_METRICS_BIND` (a `host:port`) when it is set, and then never on the wss port, so an ingress that forwards every path of the relay host cannot publish it. Without it, `/metrics` stays on the wss port (the local development default, where the relay binds loopback). The relay refuses to start when both binds share a port. The Helm chart sets it from `relay.metricsPort` (default `9464`) behind a separate always-ClusterIP `<release>-relay-metrics` Service that the relay ServiceMonitor and scrape annotations use; do not route it through an Ingress. The ServiceMonitor relabels those series back to the public relay Service's `service`/`job` identity; annotation-based scrapers see the new `<release>-relay-metrics` Service name. The default needs a relay image from the same release or later; `relay.metricsPort: null` restores the legacy single-port layout, including for an older pinned relay image.
+- Bundled Temporal (`temporal.enabled`): Temporal's own Prometheus metrics (`service_latency`, `service_errors`, `persistence_latency` and the rest for frontend, history and matching) on `temporal.metrics.port` (default `9090`) of the `<release>-temporal` Service, port name `metrics`. The chart renders a ServiceMonitor for it with `observability.serviceMonitor.enabled`, and `networkPolicy.monitoring` admits the scraper. These tell a slow Temporal server apart from a slow client: a workflow start or signal that is slow at the client but fast in `service_latency` points at the network or client, and a slow `persistence_latency` at the database. `temporal.metrics.port: null` turns the endpoint off.
 
 API and worker health responses include the non-fatal warning
 `github_app_bot_identity_unavailable` when that process has partial workspace

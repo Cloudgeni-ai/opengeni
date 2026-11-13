@@ -484,6 +484,62 @@ signs in once first and returns a safe 422 if Entra refuses it; the identity
 needs the `Cognitive Services OpenAI User` role on the resource. Ownership,
 reach and administration are the same as for a key connection.
 
+#### What OpenAI, Azure OpenAI and endpoint models you connect cost
+
+These providers never report what a call cost, so a call is priced from the
+model's **list price**. That price feeds usage estimates, Insights, per-task
+usage limits and workspace allowances that count usage paid outside Opengeni
+credits (`unbilledUsage: "list_price"`). Nothing is charged, and the price is
+never debit authority or part of a model's definition version, so changing it
+never strands an accepted turn. This applies the same way to an
+organization's models and to a workspace's own OpenAI, Azure OpenAI and
+OpenAI-compatible model keys. A model has one of:
+
+- **A base model** (`{ "basis": "model", "modelId": "gpt-6-astra" }`): the
+  catalogue model whose list rate it shares, such as an Azure deployment's base
+  model. It must have a known rate (a reviewed or built-in rate, or an
+  operator `OPENGENI_MODEL_PRICING_JSON` entry); the list responses name these
+  as `priceBasisModelIds`.
+- **Its own rate** (`{ "basis": "custom", "pricing": { … } }`): input, optional
+  cached-input and output USD micros per 1M tokens. It overrides a base model.
+  An operator `OPENGENI_MODEL_PRICING_JSON` entry for the model's exact
+  product id still comes first.
+- **No price** (`null`). An organization OpenAI model named by its OpenAI
+  model id keeps OpenAI's list rate when Opengeni has one. Anything else stays
+  **unpriced**: its calls
+  are recorded with an unknown cost (never $0), task limits show them as
+  unpriced and allowances can't count them, and the model's row says so.
+
+When a deployment is added, or saved with the key, Azure's answer to the setup
+check names the base model it serves (for example `gpt-6-astra-2026-03-05`);
+when that is a priceable catalogue model, exactly or without its `-YYYY-MM-DD`
+snapshot suffix, it becomes the deployment's price. A deployment added before
+this, or whose base model has no known rate, stays unpriced until an
+administrator sets its price with the price button on its row or
+`PUT /v1/organizations/:id/model-providers/:kind/custom-models/:customModelId/list-price`
+(`openai` and `azure_openai`) or
+`PUT …/openai_compatible/endpoints/:connectionId/models/:customModelId/list-price`,
+with `{ expectedVersion, listPrice }`. Each model reports its `listPrice` and
+`listPriceKnown`.
+
+A base model's rate is the model's catalogue list rate. Azure's regional and
+data-zone deployments can cost more than that, so their estimate can be low;
+enter the deployment's own rate when that matters.
+
+A workspace's own model key works the same way: a new OpenAI or Azure OpenAI
+key takes the base model the provider reports when it is connected (an
+OpenAI-compatible endpoint's own answer is not trusted for this), and a
+workspace admin sets or clears its price with the price button on the key's
+row or `PUT /v1/workspaces/:workspaceId/connections/:connectionId/list-price`
+with `{ listPrice }`; `GET /v1/workspaces/:workspaceId/model-price-basis-models`
+lists the base models. The price is not part of the key's version, so the
+key's model keeps its id. Workspace connection lists report each key's
+`listPrice` and `listPriceKnown`.
+
+A new price applies to calls after it; earlier unpriced calls keep their
+unknown cost. Insights shows them as unpriced, never as $0: a spend total
+that leaves them out says how many calls in the period are not priced.
+
 #### Organization OpenAI-compatible endpoints
 
 Organization owners/admins connect their own OpenAI-compatible endpoints from
@@ -1181,8 +1237,8 @@ use `openrouter/<upstream>`. This deployment rail is independent of any
 workspace-owned OpenRouter connection.
 
 For explicit `anthropic/…` Chat targets on any OpenRouter rail, the request
-adapter moves unsigned historical reasoning into labeled assistant text instead
-of sending it as native thinking. It preserves signed text and encrypted
+adapter leaves unsigned historical reasoning out of the request instead of
+sending it as native thinking or as text. It preserves signed text and encrypted
 reasoning details and leaves stored history unchanged. This also handles older
 non-streamed replies whose reasoning was nested inside text metadata. Other
 Chat targets retain their native reasoning fields.
@@ -1430,8 +1486,8 @@ models and workspaces exactly as for OpenRouter.
 
 - **Claude targets.** Opper exposes Claude through Anthropic, Bedrock, Vertex,
   and Azure. For any Opper Chat target whose id names Claude (pool, pinned route,
-  or `eu.anthropic.claude-…` alias), the request adapter moves unsigned
-  historical reasoning into labeled assistant text, exactly like OpenRouter
+  or `eu.anthropic.claude-…` alias), the request adapter leaves unsigned
+  historical reasoning out of the request, exactly like OpenRouter
   `anthropic/…` targets. Signed text and encrypted details are preserved and
   stored history is unchanged.
 - **Gemini targets.** The request-local `$ref` → `_$ref` tool-output projection
@@ -1559,20 +1615,20 @@ while opaque blocks remain separate. Explicit empty detail arrays are preserved.
 Parallel plaintext aliases do not emit a duplicate delta. This behavior is
 shared by configured providers and Chat BYOK routes. See the
 [structured reasoning contract](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens).
-When switching to Responses or native Claude, plaintext Chat reasoning becomes
-labelled historical assistant text; it is not sent as an empty foreign reasoning
+When switching to Responses or native Claude, plaintext Chat reasoning is left
+out of the request; it is never sent as text or as an empty foreign reasoning
 artifact. Responses also omits Chat reply-message metadata from text/refusal
 blocks and nested Chat function envelopes from tool calls. Both adapters apply
 this projection at their request boundary, including SDK-driven continuations.
 Canonical history stays unchanged, so switching back
 to Chat restores its original reasoning field. Native encrypted Responses and
 signed Claude reasoning retain their exact artifacts on their own API. When
-switching API families, their readable summaries become labelled historical
-assistant text; an opaque-only item becomes an unavailable marker. Signatures
+switching API families, these reasoning items, their readable summaries and
+opaque-only items are left out of the request, never sent as text. Signatures
 and ciphertext never enter another API's request. Chat also applies the shared
 projection at its adapter boundary, covering SDK-driven continuations.
-Older replies with reasoning only in nested Chat metadata retain that text too;
-newer replies with a separate reasoning item do not duplicate it.
+Reasoning that older replies kept only in nested Chat metadata is left out
+too.
 
 Chat Completions receives one request-local transcript view for
 canonical record types that its SDK converter cannot represent; that view is
@@ -2242,7 +2298,35 @@ The value depends only on the route and model, never on the message: like
 reasoning effort, a provider may treat it as part of the cached prompt prefix.
 A compaction request built from the turn's prepared request carries the same
 model settings, so the portable checkpoint summary is also requested at low
-verbosity. `reasoning.summary` stays `detailed`.
+verbosity, with the turn's own `reasoning.summary`.
+
+The `reasoning.summary` a turn requests is one deployment setting,
+`OPENGENI_REASONING_SUMMARY_JSON`, keyed by route and latency mode
+(`reasoningSummaryForTurn` in the same file; defaults in
+`packages/config/src/defaults.ts`). The routes are `codex` (the Codex
+subscription, every model), `openai` (direct OpenAI Responses) and `azure`
+(the Azure OpenAI Responses wire); `openai` and `azure` apply only to the
+GPT-5-family and later reasoning models that receive `text.verbosity`. Every
+other route and model sends `detailed`. Values are `auto`, `detailed` or
+`none`, which sends no summary field, so the provider writes none. The
+defaults are `detailed` on Codex except `none` for Ultrafast, and `auto` on
+direct OpenAI and Azure at every speed. On Codex the answer waits until the
+summary is written: measured on GPT-6.1 Sol at Ultrafast and medium effort,
+the first answer token came a median 1.3 s (WebSocket) to 2.4 s (HTTP) sooner
+with no summary. A value changes only the cells it names and an unknown route,
+mode or value fails startup, for example
+`OPENGENI_REASONING_SUMMARY_JSON='{"codex":{"fast":"none"}}'` also turns the
+summary off for Fast on Codex.
+
+A turn with no summary shows no thinking row: the timeline creates one only
+from streamed summary text, and private or encrypted reasoning is never shown.
+The provider's `any` first-token measurement then marks the first answer
+text, as `text` does. The summary is not part of Opengeni's prompt-cache key
+(the session id) and earlier requests are never rewritten; reasoning items
+stored with an empty summary replay unchanged. Like `service_tier`, it is
+part of the request shape a pooled Responses WebSocket compares before it
+continues the previous response, so the first request after a change of
+speed sends its full input, exactly as changing speed did before.
 
 Streaming Codex subscription requests travel over a pooled Responses
 WebSocket (`packages/network/src/responses-websocket.ts`), with the Codex
@@ -2637,9 +2721,11 @@ so no display mode returns them verbatim, and because a summary is only ever a
 thought it cannot replace a reply. Replay sends
 each signed block back unchanged in its original position, so history bytes
 match what Claude returned; history stored while updates were briefly recorded
-as assistant messages replays the same signed block. Other APIs see a newly
-stored summary only as labelled historical reasoning; summaries stored as
-assistant messages during that window are not rewritten. Other Claude models keep
+as assistant messages replays the same signed block. Other APIs never see a
+summary: newly stored ones are reasoning items left out of their requests, and
+the text parts of summaries stored as assistant messages during that window are
+left out of other APIs' requests and the Chat compaction transcript. Stored
+history is not rewritten. Other Claude models keep
 `display: "summarized"` and their existing reasoning items.
 
 Native Claude HTTP and SSE errors retain status and bounded retry/request
@@ -2747,7 +2833,9 @@ unsupported effort on a known adaptive model is rejected before network I/O.
 Historical models requiring fixed thinking budgets are not enabled through
 adaptive-thinking controls. Invalid streams fail closed, incomplete tools
 are never executed, and truncated compaction summaries are rejected. The adapter
-does not silently retry failed requests or rotate credentials.
+does not silently retry failed requests or rotate credentials, except that an
+organization Anthropic API connection with several keys sends a request refused
+for lack of credits again on the session's next key (below).
 HTTP error details are read for at most 5 seconds (or the shorter configured
 stream idle timeout) and 64 KiB. A stalled or broken diagnostic body does not
 hide the HTTP status, request ID or Retry-After header; caller cancellation
@@ -2761,6 +2849,47 @@ policy rejection even when HTTP is 200 and content is empty. It uses the existin
 policy-refusal presentation, never completes an empty successful response, and
 never executes tools from refused output. These failures retain the request ID
 without persisting arbitrary provider explanation text.
+
+### Several Anthropic API keys for an organization
+
+An organization's Anthropic API connection can hold several API keys, for
+example one per Anthropic organization whose credits it uses. The connection's
+own key is the first member, unchanged: an organization with one key works
+exactly as before, and model ids stay `organization-anthropic/…`. Organization
+admins add further keys under Models on the Anthropic API page, or through
+`/v1/organizations/:organizationId/model-providers/anthropic/api-keys` (list,
+add, rename, remove, and `serve-again`). Adding a key checks it with
+Anthropic's free `GET /v1/models` and records the Anthropic organization from
+its `anthropic-organization-id` header; no model request is sent. Keys are
+stored encrypted on the connection row (`api_key_members`) and never returned.
+The connection's own key is replaced or disconnected through the connection;
+replacing it gives it a new member id (`primary-v<version>`).
+
+These keys serve only `organization-anthropic/` models. Claude subscription
+models (`claude/…`, `organization-claude-subscription/…`) never use them, and
+no route ever falls back from one to the other.
+
+Each session keeps one key: the runtime orders the keys by rendezvous hashing
+of the session's prompt cache key over the member ids
+(`anthropicApiKeyOrder`), and sends with the first key that still serves.
+Anthropic's prompt cache, signed thinking and server search results belong to
+the key's Anthropic organization, so a session moves only when its key can't
+serve it; adding or removing a key moves only the sessions that ranked it
+first. Only the `x-api-key` header differs between keys; the request body is
+the one the session would send with any key.
+
+When Anthropic refuses a key because its organization can't pay (HTTP 402, a
+`billing_error`, a spend-limit error, or HTTP 400 "credit balance is too low"),
+the same request goes to the session's next key, and the worker records the
+refusal (`api_key_credit_refusals`), so later turns leave that key out. A
+refused key stays out until an admin chooses **Serve again** (after adding
+credits) or adds it again; there is no timed recheck, because promotional and
+prepaid credits don't come back by themselves. Rate limits and overload are
+not refusals and keep their ordinary handling on the same key. When every key
+is refused the request fails without being sent, with
+`anthropic_api_keys_out_of_credits`. Nothing buys credits, enables top-ups or
+extra usage: each key's spending is governed by its own Anthropic
+organization's billing settings.
 
 
 ### Claude subscription request identity
@@ -2918,9 +3047,18 @@ to the person at the limit; grants are scarce and expire, and whether one is wor
 spending depends on how soon the limit resets anyway, which is a person's call.
 
 The rest of the usage body is decoded too: the `limits` list with each scoped
-limit's share of the weekly limit (`weekly_scoped_shares`), `extra_usage`, and the
-weekly limits of other Claude surfaces (shown for information; they never decide
-placement). `seven_day_overage_included`, as model responses name it, is the
+limit's share of the weekly limit (`weekly_scoped_shares`), paid usage credits, and
+the weekly limits of other Claude surfaces (shown for information; they never decide
+placement). Usage credits ("extra usage") come from two parts of the body: the
+setting, `extra_usage_state` (`enabled`, `disabled`, `not_configured`) in the reset
+programs' `event_props`, and the `extra_usage` object (whether the credits can pay
+right now, and the month's cap and spend in cents). Opengeni's reads skip spend
+reporting as Claude Code's reset check does, and such reads answer
+`extra_usage: null` whatever the setting, so a null object is never read as "off":
+without the setting the state is unknown. The account rows, the account page, the
+pooled-limits card and the organization's Claude heading show when usage credits
+are on. Opengeni only reads this state; it never turns usage credits on, buys
+credits or changes auto-reload. `seven_day_overage_included`, as model responses name it, is the
 weekly Fable limit (the usage endpoint reports the same limit as a scoped `limits`
 entry): it limits only Fable models, and a reading of either name ends a block
 claimed under the other. From model response headers Opengeni keeps the service

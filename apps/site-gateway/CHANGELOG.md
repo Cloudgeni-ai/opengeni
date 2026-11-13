@@ -1,5 +1,44 @@
 # @opengeni/site-gateway
 
+## 0.1.45
+
+### Patch Changes
+
+- @opengeni/contracts@6.20.1
+- @opengeni/sdk@6.20.1
+
+## 0.1.44
+
+### Patch Changes
+
+- Updated dependencies [c624443]
+- Updated dependencies [ae3972e]
+- Updated dependencies [e37485b]
+- Updated dependencies [9c17a87]
+  - @opengeni/sdk@6.20.0
+  - @opengeni/contracts@6.20.0
+
+## 0.1.43
+
+### Patch Changes
+
+- Updated dependencies [a85adef]
+  - @opengeni/sdk@6.19.0
+  - @opengeni/contracts@6.19.0
+
+## 0.1.42
+
+### Patch Changes
+
+- Updated dependencies [f313a0e]
+- Updated dependencies [6813960]
+- Updated dependencies [9188c1d]
+- Updated dependencies [3105a8b]
+- Updated dependencies [a16189c]
+- Updated dependencies [89cf4ba]
+  - @opengeni/contracts@6.18.0
+  - @opengeni/sdk@6.18.0
+
 ## 0.1.41
 
 ### Patch Changes

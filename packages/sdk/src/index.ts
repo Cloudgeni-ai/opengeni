@@ -342,11 +342,16 @@ export {
   isSiteCatalogStaleError,
   SiteToolConsentDeclinedError,
   SiteToolConnectionRequiredError,
+  SiteToolCallFailedError,
+  siteToolFailureMessage,
 } from "./site-tool-bridge";
 export type {
   SiteToolConsentPrompt,
   SiteToolConsentDecision,
   SiteToolConnectPrompt,
+  SiteToolFailure,
+  SiteToolFailureCode,
+  SiteToolFailurePrompt,
   SiteToolBridge,
   SiteToolCaller,
   SiteToolCallRequest,
@@ -392,6 +397,7 @@ export type {
   OpenGeniRequestOptions,
   SendMessageInput,
   SessionListPageOptions,
+  SlackAgentInstallationOptions,
   SteerMessageResult,
   TranscribeAudioInput,
   WorkspaceControlEventPage,
@@ -482,6 +488,8 @@ export {
   APPROVAL_REQUIRES_ACCOUNT_OWNER_CODE,
   isRetryableStreamError,
   OPENGENI_MAINTENANCE_ERROR_CODE,
+  NATIVE_PUSH_UNAVAILABLE_DETAIL_CODE,
+  isNativePushUnavailableError,
 } from "./errors";
 export type { OpenGeniSecureContextRequiredReason } from "./errors";
 export { isTransientRequestError } from "./read-retry";
@@ -554,6 +562,7 @@ export { parseSseStream } from "./sse";
 export { asVaultClient, vaultsApi, vaultErrorCode, vaultErrorDetail } from "./vaults-api";
 export type { VaultClientLike, VaultsApi } from "./vaults-api";
 export type * from "./vault-types";
+export type * from "@opengeni/contracts/console";
 export type { SseMessage } from "./sse";
 export { normalizeMcpOutput } from "./mcp-output";
 export type { NormalizedMcpOutput } from "./mcp-output";
@@ -1095,12 +1104,21 @@ export type {
   DeleteOrganizationProviderCustomModelRequest,
   OrganizationCompatibleEndpoint,
   OrganizationCompatibleEndpointsResponse,
+  OrganizationAnthropicApiKey,
+  OrganizationAnthropicApiKeysResponse,
+  AddOrganizationAnthropicApiKeyRequest,
+  UpdateOrganizationAnthropicApiKeyRequest,
   CreateOrganizationCompatibleEndpointRequest,
   ReplaceOrganizationCompatibleEndpointKeyRequest,
   CreateOrganizationCompatibleEndpointModelRequest,
   CompatibleModelReasoning,
   OrganizationCompatibleEndpointModel,
   SetOrganizationCompatibleEndpointModelReasoningRequest,
+  ConnectedModelListPricing,
+  ConnectedModelListPrice,
+  SetOrganizationCustomModelListPriceRequest,
+  SetWorkspaceModelKeyListPriceRequest,
+  ModelPriceBasisModelsResponse,
   WorkspaceModelAccessPolicy,
   OrganizationModelDefaults,
   UpdateOrganizationModelDefaultsRequest,
@@ -1273,6 +1291,9 @@ export type {
   McpElicitationValue,
   CreateBillingPortalRequest,
   CreateBillingPortalResponse,
+  BillingReceipt,
+  ListBillingReceiptsQuery,
+  ListBillingReceiptsResponse,
   CreateCheckoutRequest,
   CreateCheckoutResponse,
   CreateDocumentBaseRequest,

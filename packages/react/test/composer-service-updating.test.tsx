@@ -371,7 +371,7 @@ describe("composer while Opengeni is updating", () => {
     }
   });
 
-  test("a send blocked by a draft save during an update is held as not yet submitted", async () => {
+  test("a send blocked by its draft save during an update is held as not yet submitted", async () => {
     // Its own session: pending messages are remembered per session.
     const sessionId = crypto.randomUUID();
     let parked = true;
@@ -395,6 +395,9 @@ describe("composer while Opengeni is updating", () => {
     try {
       await flush(10);
       await actRun(() => hook.result.current.setValue("Ship it"));
+      // Autosave gets no answer, so the server may hold a revision this page
+      // never saw, and the send saves the draft first.
+      await flush(600);
       await actRun(() => hook.result.current.send());
       await flush(10);
       expect(submits).toEqual([]);

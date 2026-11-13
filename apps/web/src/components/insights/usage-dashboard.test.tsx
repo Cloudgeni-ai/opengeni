@@ -200,6 +200,34 @@ describe("Insights usage dashboard", () => {
     }
   });
 
+  test("spend says how many calls in the period have no price, past ones included", async () => {
+    const totals = nextUsage.totals;
+    nextUsage = {
+      ...nextUsage,
+      totals: {
+        ...totals,
+        calls: totals.calls + 360,
+        byPayer: {
+          ...totals.byPayer,
+          own_key: {
+            calls: (totals.byPayer?.own_key?.calls ?? 0) + 360,
+            chargedMicros: totals.byPayer?.own_key?.chargedMicros ?? 0,
+            listMicros: totals.byPayer?.own_key?.listMicros ?? 0,
+          },
+        },
+      },
+    };
+    const unpriced = nextUsage.totals.calls - nextUsage.totals.pricedCalls;
+    const view = await render();
+    try {
+      expect(view.container.textContent).toContain(
+        `estimated · ${unpriced.toLocaleString("en-US")} calls not priced`,
+      );
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("selecting a row filters to it and drills one level down", async () => {
     const view = await render();
     try {

@@ -223,6 +223,16 @@ export type ToolGatewayCaller = z.infer<typeof ToolGatewayCaller>;
 export const FIRST_PARTY_MCP_CALLER_META_KEY = "opengeniCaller";
 
 /**
+ * MCP request `_meta` key the worker's tool discovery sets (to `true`) when a
+ * search that clearly names one integration the person can connect shows its
+ * Connect card through `capability_authorization_request`. Such a call reuses
+ * the same kind of card (a first connection, or a reconnect of the same
+ * connection) already shown since the person's latest message instead of
+ * posting another. It only narrows what the call does.
+ */
+export const TOOL_DISCOVERY_CARD_META_KEY = "opengeni/toolDiscoveryCard";
+
+/**
  * Result `_meta` key a first-party tool sets on an error result when it
  * refused the caller's arguments before doing any work (a schema mismatch, a
  * bad combination of fields, an unknown ID). The caller made the mistake, not
@@ -612,6 +622,12 @@ export const ToolGatewaySiteConsentAccount = /* @__PURE__ */ defineSchema(() =>
       identity: ToolGatewayIdentity,
       connector: primitives.string.max(200),
       account: primitives.string.max(320),
+      /** The viewer's own connection behind the route, for reconnecting it. */
+      connectionId: primitives.uuid.optional(),
+      /** The catalog capability that reconnects it, when there is one. */
+      capabilityId: primitives.string.max(200).nullable().optional(),
+      /** The connection is shared with the workspace rather than the viewer's own. */
+      shared: z.boolean().optional(),
     })
     .strict(),
 );

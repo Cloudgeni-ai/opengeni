@@ -188,6 +188,7 @@ import {
   regionRestrictedHttpError,
   authenticationRequiredHttpError,
   missingPermissionHttpError,
+  sessionMissingHttpError,
   scheduledTaskTargetAccessHttpError,
   sessionUsageLimitHttpError,
   workspaceControlBusyHttpError,
@@ -259,6 +260,7 @@ import {
   managedAuthNewSignupsPausedResponse,
   managedAuthOAuthReturnMatches,
   resolveManagedAuthOAuthAttempt,
+  managedAuthPublicOrigins,
   findManagedAuthOAuthState,
 } from "./auth/managed-auth";
 import {
@@ -356,6 +358,7 @@ import { registerSessionAvatarImageRoutes } from "./routes/session-avatar-image"
 import { registerCodexRoutes } from "./routes/codex";
 import { registerOrganizationModelProviderRoutes } from "./routes/organization-model-providers";
 import { registerOrganizationCompatibleModelEndpointRoutes } from "./routes/organization-compatible-model-endpoints";
+import { registerOrganizationAnthropicApiKeyRoutes } from "./routes/organization-anthropic-api-keys";
 import { registerOrganizationModelDefaultsRoutes } from "./routes/organization-model-defaults";
 import {
   registerModelAccountSettingsRoutes,
@@ -368,6 +371,8 @@ import { registerOrganizationIntegrationPolicyRoutes } from "./routes/organizati
 import { registerOrganizationConnectorRoutes } from "./routes/organization-connectors";
 import { registerSuperGrokRoutes } from "./routes/supergrok";
 import { registerConnectionRoutes } from "./routes/connections";
+import { registerNangoRoutes } from "./routes/nango";
+import { registerWorkspaceModelKeyPriceRoutes } from "./routes/workspace-model-key-prices";
 import { registerVaultProviderRoutes, vaultProviderRegistryFor } from "./routes/vault-providers";
 import { registerConnectRoutes } from "./routes/connect";
 
@@ -456,6 +461,7 @@ import { registerCanonicalHumanIdentityRoutes } from "./routes/canonical-human-i
 import { registerOrganizationMembershipRoutes } from "./routes/organization-memberships";
 import { adminStepUpGuard } from "./auth/admin-step-up";
 import { registerOrganizationSessionRoutes } from "./routes/organization-sessions";
+import { registerConsoleRoutes } from "./routes/console";
 import { registerOrganizationRecoveryRoutes } from "./routes/organization-recovery";
 import { registerManagedOnboardingRoutes } from "./routes/managed-onboarding";
 import {
@@ -507,6 +513,7 @@ export {
   withDefaultEnabledCapabilityMcpTools,
 } from "@opengeni/core";
 export { workflowIdForSession } from "@opengeni/core";
+import { nangoBackendsFor, nangoReplacedSocialProviders } from "@opengeni/core";
 export { replaySessionEvents, sseSessionStream, sseWorkspaceControlStream } from "./http/sse";
 
 export const API_MAX_REQUEST_BODY_BYTES = 32 * 1024 * 1024;
@@ -1493,7 +1500,7 @@ export function createAppComposition(
           managedAuth,
           c.req.raw,
           oauthCallbackProvider,
-          deps.settings.publicBaseUrl!,
+          managedAuthPublicOrigins(deps.settings),
         );
         if (!attempt || !authority || attempt.authorityHash !== managedAuthSha256(authority)) {
           throw new HTTPException(409, { message: "provider_route_blocked" });
@@ -1518,12 +1525,12 @@ export function createAppComposition(
           !handled.authSessionId &&
           managedAuthOAuthReturnMatches(
             providerResponse.headers.get("location") ?? "",
-            new URL(deps.settings.publicBaseUrl!).origin,
+            attempt.returnOrigin,
             attempt.transactionId,
             "complete",
           )
         ) {
-          const location = new URL("/account-auth", deps.settings.publicBaseUrl!);
+          const location = new URL("/account-auth", attempt.returnOrigin);
           location.searchParams.set("transaction", attempt.transactionId);
           location.searchParams.set("social", "error");
           providerResponse = Response.redirect(location, 302);
@@ -1558,7 +1565,7 @@ export function createAppComposition(
             // proves that completion did not commit. An uncertain outcome may
             // already point the selected slot at this session, so the callback
             // must not independently revoke it.
-            const location = new URL("/account-auth", deps.settings.publicBaseUrl!);
+            const location = new URL("/account-auth", attempt.returnOrigin);
             location.searchParams.set("transaction", attempt.transactionId);
             location.searchParams.set("social", "error");
             providerResponse = Response.redirect(location, 302);
@@ -2310,6 +2317,9 @@ export function createAppComposition(
         const mcp = buildOpenGeniMcpServer(mcpDeps, grant, {
           requestOrigin: new URL(c.req.url).origin,
           slackBotAvailable,
+          nangoReplacedSocialProviders: nangoReplacedSocialProviders(
+            await nangoBackendsFor(routeDeps.db, routeDeps.settings),
+          ),
           appActions: sessionScope
             ? {
                 access: {
@@ -2383,7 +2393,7 @@ export function createAppComposition(
       parseRequestBody(schema, body, { status: 400, message: "Invalid targeted tool request" });
       c.header("cache-control", "no-store");
       const started = performance.now();
-      let outcome: "ok" | "failed" = "failed";
+      let outcome: "ok" | "failed" | "aborted" = "failed";
       try {
         const response =
           operation === "resolve"
@@ -2422,6 +2432,15 @@ export function createAppComposition(
         );
         outcome = "ok";
         return c.json(response, operation === "target-approvals" ? 201 : 200);
+      } catch (error) {
+        // A caller that disconnects aborts the target work through `signal`.
+        // That is a client disconnect, not a server failure: answer with the
+        // client-gone convention (mcp/request-abort.ts), 499 and no body.
+        if (c.req.raw.signal.aborted) {
+          outcome = "aborted";
+          return new Response(null, { status: 499 });
+        }
+        throw error;
       } finally {
         recordWorkspaceToolTargetOperation(routeDeps.observability, {
           operation,
@@ -2716,6 +2735,8 @@ export function createAppComposition(
   registerPersonalGitHubGitBrokerRoutes(app, routeDeps);
   registerPersonalGitHubGatewayRoutes(app, routeDeps);
   registerConnectionRoutes(app, routeDeps);
+  registerNangoRoutes(app, routeDeps);
+  registerWorkspaceModelKeyPriceRoutes(app, routeDeps);
   registerVaultProviderRoutes(app, routeDeps);
   registerConnectRoutes(app, routeDeps);
 
@@ -2756,6 +2777,7 @@ export function createAppComposition(
   registerCodexRoutes(app, routeDeps);
   registerOrganizationModelProviderRoutes(app, routeDeps);
   registerOrganizationCompatibleModelEndpointRoutes(app, routeDeps);
+  registerOrganizationAnthropicApiKeyRoutes(app, routeDeps);
   registerOrganizationModelDefaultsRoutes(app, routeDeps);
   registerModelAccountSettingsRoutes(app, routeDeps);
   registerModelAccountChoiceRoutes(app, routeDeps);
@@ -2777,6 +2799,7 @@ export function createAppComposition(
   registerCanonicalHumanIdentityRoutes(app, routeDeps);
   registerOrganizationMembershipRoutes(app, routeDeps);
   registerOrganizationSessionRoutes(app, routeDeps);
+  registerConsoleRoutes(app, routeDeps);
   registerOrganizationRecoveryRoutes(app, routeDeps);
   registerUserResourceAuthorityRoutes(app, routeDeps);
   registerSlackInteractionRoutes(app, routeDeps);
@@ -2824,6 +2847,7 @@ export function createAppComposition(
               details: { code: rawError.code },
             })
           : (missingPermissionHttpError(rawError) ??
+            sessionMissingHttpError(rawError, c.req.url, c.req.method) ??
             authenticationRequiredHttpError(rawError) ??
             sessionUsageLimitHttpError(rawError) ??
             allowanceExhaustedHttpError(rawError) ??
@@ -2974,6 +2998,12 @@ export function workspaceActorContextExempt(method: string, pathname: string): b
   )
     return true;
   if (/^\/v1\/workspaces\/[^/]+\/mcp(?:\/(?:docs|files))?$/.test(pathname)) return true;
+  // Linking a Slack account from a Slack link is for people who may have no
+  // access to the workspace yet: an organization member links without it, and
+  // anyone else asks for it. These routes require a managed sign-in and the
+  // signed link (or the request it prepared for that person) and scope their
+  // own reads and writes to the workspace.
+  if (isSlackUserLinkIntentRequest(method, pathname)) return true;
   if (
     method === "GET" &&
     publicWorkspaceBrowserRoutePatterns.some((route) => route.test(pathname))
@@ -2981,6 +3011,20 @@ export function workspaceActorContextExempt(method: string, pathname: string): b
     return true;
   }
   return method === "POST" && /^\/v1\/workspaces\/[^/]+\/github\/installations$/.test(pathname);
+}
+
+const SLACK_USER_LINK_INTENTS = String.raw`^/v1/workspaces/[^/]+/integrations/slack/user-link-intents`;
+const slackUserLinkIntentRoutes = {
+  POST: [
+    new RegExp(`${SLACK_USER_LINK_INTENTS}$`),
+    new RegExp(`${SLACK_USER_LINK_INTENTS}/[^/]+/(?:link|request-access|cancel)$`),
+  ],
+  GET: [new RegExp(`${SLACK_USER_LINK_INTENTS}/[^/]+$`)],
+} as const;
+
+function isSlackUserLinkIntentRequest(method: string, pathname: string): boolean {
+  const routes = slackUserLinkIntentRoutes[method as keyof typeof slackUserLinkIntentRoutes];
+  return routes?.some((route) => route.test(pathname)) ?? false;
 }
 
 function workspaceRequestRequiresCodexAccountPrevalidation(request: Request): boolean {
@@ -4318,6 +4362,13 @@ const routeLabelPatterns: Array<{
     pattern: /^\/v1\/integrations\/oauth\/callback$/,
     label: "/v1/integrations/oauth/callback",
   },
+  { pattern: /^\/v1\/integrations\/nango\/connect$/, label: "/v1/integrations/nango/connect" },
+  {
+    pattern: /^\/v1\/integrations\/nango\/connect\/complete$/,
+    label: "/v1/integrations/nango/connect/complete",
+  },
+  { pattern: /^\/v1\/integrations\/nango\/webhook$/, label: "/v1/integrations/nango/webhook" },
+  { pattern: /^\/v1\/billing\/integration-usage$/, label: "/v1/billing/integration-usage" },
   {
     pattern: /^\/v1\/integrations\/provider-oauth\/callback$/,
     label: "/v1/integrations/provider-oauth/callback",

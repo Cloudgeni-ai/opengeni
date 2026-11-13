@@ -35,6 +35,13 @@ workspaces, external users) in [`product-integration.md`](product-integration.md
   creation, plus explicit invitation revoke
 - `GET /v1/organizations/:id/members` and revision-fenced member lifecycle `PATCH`
 - `GET|PATCH /v1/organizations/:id/retention-policy`
+- `/v1/organizations/:id/console/*` for organization owners and admins:
+  summary, workspaces (managed by product or team), reviewable sessions with
+  audited transcript reads, review level settings, audit log and API key
+  usage; never available to API keys (see [`opengeni-console.md`](opengeni-console.md)).
+  On a Console host, auth emails, invitation links, Google and GitHub sign-in
+  returns and Stripe returns use the request's allowed host
+  (`OPENGENI_BETTER_AUTH_ALLOWED_HOSTS`)
 - `GET|POST /v1/organizations/:id/personal-api-keys` and
   `DELETE /v1/organizations/:id/personal-api-keys/:apiKeyId` (keys that act as
   the person who created them; see [`credentials.md`](credentials.md))

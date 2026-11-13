@@ -126,6 +126,11 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
     path === "/v1/integrations/provider-oauth/callback" ||
     path === "/v1/integrations/github-personal/oauth/callback" ||
     path === "/v1/integrations/oauth/client-metadata.json" ||
+    // Nango Connect: signed state plus browser binding (integrations/nango-connect.ts).
+    (c.req.method === "GET" && path === "/v1/integrations/nango/connect") ||
+    (c.req.method === "POST" && path === "/v1/integrations/nango/connect/complete") ||
+    // Nango's webhooks: HMAC over the raw body with the webhook signing key.
+    (c.req.method === "POST" && path === "/v1/integrations/nango/webhook") ||
     // The sign-in popup's static last page; it reads nothing.
     (c.req.method === "GET" && path === "/v1/integrations/connect/finished") ||
     path === "/v1/integrations/slack/callback" ||

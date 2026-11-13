@@ -30,7 +30,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use compute_core::{Durability, Host, Input, Level, SandboxId};
+use compute_core::{Host, Input, Level, SandboxId};
 use compute_engine::Engine;
 use compute_protocol::fleet::{Ruling, Verdict};
 use tokio::sync::oneshot;
@@ -576,7 +576,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// Handed off awake, every hold on it ends at once: from then on the
     /// hand-off refuses new ones, as it refuses wakes, so the streams that
     /// held it end at their next write, and nothing keeps it from being
-    /// paused, saved and archived with its memory. Holds named in its
+    /// paused, saved and archived with its memory. An idle one goes as its
+    /// rules say: with a memory image if a copy holds one or its memory
+    /// is kept, and otherwise with its files alone. Holds named in its
     /// record stay recorded: one renewed after a hand-off that did not
     /// finish holds it again.
     pub(super) fn hand_off(&mut self, id: Id, owner: OwnerEpoch, awake: bool, reply: Reply<()>) {
@@ -658,7 +660,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             let _ = reply.send(Err(HostError::Awake(id)));
             return;
         }
-        match self.request_sleep(id, Level::Archived) {
+        // One in use goes with its programs, which wake on the host it
+        // goes to. An idle one goes as its rules say: one whose memory is
+        // not kept has its VM ended, and its files alone go.
+        match self.request_sleep(id, Level::Archived, wanted || view.runs()) {
             Ok(Room::Now) => {}
             Ok(Room::AfterReading) => {
                 // Only the next disk reading can tell whether its save
@@ -736,8 +741,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             self.fail_hand_off(id, &HostError::Broken(id));
             return;
         }
-        if view.is_some_and(|view| view.unsavable && view.state.durability == Durability::Volatile)
-        {
+        if view.is_some_and(|view| view.unsavable && !view.state.memory_saved) {
             self.fail_hand_off(id, &super::requests::cannot_save(id));
             return;
         }

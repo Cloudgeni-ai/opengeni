@@ -30,6 +30,9 @@ import {
   isAutomationRunBatch,
   isPreparingWork,
   timelineTurnsWithOutput,
+  timelineTurnsWithUnloadedSteps,
+  activityHasUnloadedSteps,
+  turnGroupHasUnloadedSteps,
   noticeDisplayText,
   noticeIsResolvedApproval,
   noticeTone,
@@ -250,6 +253,7 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
     [t, items, pauses],
   );
   const turnsWithOutput = useMemo(() => timelineTurnsWithOutput(items), [items]);
+  const unloadedStepTurns = useMemo(() => timelineTurnsWithUnloadedSteps(items), [items]);
   const sources = useMemo(() => annotationSources(items), [items]);
   useNativeTextAnnotation(sources, props.onAnnotate);
   const foldMemory = useRef(new Map<string, "open" | "closed">()).current;
@@ -653,6 +657,7 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
   );
   const context: GroupContext = {
     turnsWithOutput,
+    unloadedStepTurns,
     // Without turn detail a turn row is only its status ("Working · 8s").
     facets: turnDetail ? props.facets : STATUS_ONLY_FACETS,
     agentSignals: turnDetail,
@@ -873,6 +878,8 @@ const STATUS_ONLY_FACETS: TurnSummaryFacetConfiguration = { replace: [] };
 
 type GroupContext = {
   turnsWithOutput: ReadonlySet<string>;
+  /** Turns whose steps are not all loaded, for `TurnSummaryContext.unloadedSteps`. */
+  unloadedStepTurns: ReadonlySet<string>;
   facets?: TurnSummaryFacetConfiguration | undefined;
   agentSignals: boolean;
   renderLiveMark?: ((state: TurnSummaryLiveMarkState) => ReactNode) | undefined;
@@ -1036,6 +1043,7 @@ function TimelineGroupView({
           }
           foldKey={group.id}
           facets={context.facets}
+          unloadedSteps={activityHasUnloadedSteps(group.items, context.unloadedStepTurns)}
         >
           <TurnRailFrame>
             <ActivityRail items={group.items} startupActive={false} />
@@ -1056,6 +1064,7 @@ function TimelineGroupView({
           bare={insideTurn}
           foldKey={group.id}
           facets={context.facets}
+          unloadedSteps={turnGroupHasUnloadedSteps(group, context.unloadedStepTurns)}
           contextCompactionCount={group.contextCompactionCount}
         >
           {insideTurn ? (

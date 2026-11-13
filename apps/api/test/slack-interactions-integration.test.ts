@@ -74,6 +74,7 @@ import {
   createSessionForRequest,
   updateSessionTitle,
   type ApiRouteDeps,
+  type AppDependencies,
   type SessionWorkflowClient,
 } from "@opengeni/core";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -96,10 +97,13 @@ import {
 import { SLACK_AGENT_SUGGESTION_ASK_ACTION_ID } from "../src/integrations/slack-agents";
 import { proposeSlackAgentFromChat } from "../src/integrations/slack-agent-proposals";
 import { assertSlackTaskUploadTarget } from "../src/integrations/slack-task-file-upload";
+import { createApp } from "../src/app";
 import {
   slackMrkdwnFromMarkdown,
   slackMrkdwnKeepingClaudeCiteTags,
+  slackMrkdwnKeepingObjectLinks,
   slackMrkdwnKeepingProviderTracking,
+  slackObjectLinkUrl,
 } from "../src/integrations/slack-mrkdwn";
 import {
   OPEN_SLACK_AGENT_FIRST_PARTY_MCP_TOOLS,
@@ -1359,6 +1363,11 @@ async function activeOrganizationMember(accountId: string, subjectId: string) {
   await shared!.admin`
     insert into organization_memberships (account_id, subject_id, status, personal_workspace_id)
     values (${accountId}, ${subjectId}, 'active', ${personal!.id})`;
+}
+
+/** The whole API app over these deps, with its middleware, as a browser reaches it. */
+function fullApp(deps: ApiRouteDeps): Hono {
+  return createApp(deps as unknown as AppDependencies);
 }
 
 /** A workspace GitHub App repository resource, as the website picker attaches it. */
@@ -3245,13 +3254,16 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
         },
       },
     });
+    // Through the real app, so its workspace middleware applies: these people
+    // have no access to the workspace.
+    const api = fullApp(value.deps);
     const basePath = `/v1/workspaces/${value.owner.workspaceId}/integrations/slack/user-link-intents`;
     const as = (userId: string) => ({
       "content-type": "application/json",
       "x-test-managed-user": userId,
     });
     const prepare = async (userId: string, slackUserId: string) => {
-      const response = await value.app.request(basePath, {
+      const response = await api.request(basePath, {
         method: "POST",
         headers: as(userId),
         body: JSON.stringify({
@@ -3272,7 +3284,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
       };
     };
     const link = (userId: string, requestId: string, expectedVersion: number) =>
-      value.app.request(`${basePath}/${requestId}/link`, {
+      api.request(`${basePath}/${requestId}/link`, {
         method: "POST",
         headers: as(userId),
         body: JSON.stringify({ expectedVersion, idempotencyKey: crypto.randomUUID() }),
@@ -3292,7 +3304,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     expect(
       await getSlackBotUserLink(client.db, value.owner.workspaceId, value.connectionId, "U0SAM"),
     ).toBeNull();
-    const polled = await value.app.request(`${basePath}/${prepared.id}`, {
+    const polled = await api.request(`${basePath}/${prepared.id}`, {
       headers: as(memberId),
     });
     expect(await polled.json()).toMatchObject({
@@ -3323,7 +3335,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     // A cancelled request asks for a fresh link rather than refusing the member.
     const cancelledSlackUserId = `U_CANCELLED_${crypto.randomUUID()}`;
     const toCancel = await prepare(memberId, cancelledSlackUserId);
-    const cancelled = await value.app.request(`${basePath}/${toCancel.id}/cancel`, {
+    const cancelled = await api.request(`${basePath}/${toCancel.id}/cancel`, {
       method: "POST",
       headers: as(memberId),
       body: JSON.stringify({ expectedVersion: 1, idempotencyKey: crypto.randomUUID() }),
@@ -3360,6 +3372,27 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     ).toBeNull();
     // Nor can anyone confirm another person's request.
     expect((await link(memberId, outsider.id, 1)).status).toBe(400);
+    // They can ask the workspace for access instead.
+    const asked = await api.request(`${basePath}/${outsider.id}/request-access`, {
+      method: "POST",
+      headers: as(outsiderId),
+      body: JSON.stringify({ expectedVersion: 1, idempotencyKey: crypto.randomUUID() }),
+    });
+    expect(asked.status).toBe(200);
+    expect(await asked.json()).toMatchObject({ status: "pending", version: 2 });
+    expect(
+      await getWorkspaceGrant(client.db, `user:${outsiderId}`, value.owner.workspaceId),
+    ).toBeNull();
+    // The routes stay closed to anyone not signed in.
+    expect(
+      (
+        await api.request(basePath, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ linkToken: "x" }),
+        })
+      ).status,
+    ).toBe(401);
   });
 
   test("a workspace member's opened link links nothing until they confirm which Slack account it is", async () => {
@@ -3400,6 +3433,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
         },
       },
     });
+    const api = fullApp(value.deps);
     const headers = { "content-type": "application/json", "x-test-managed-user": memberId };
     const linkToken = createSlackUserLinkToken(signingMaterial, {
       workspaceId: value.owner.workspaceId,
@@ -3415,7 +3449,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
 
     // Opening the link (which may have come from someone else) only prepares
     // it, naming the Slack account, even though the member could link it.
-    const prepareResponse = await value.app.request(basePath, {
+    const prepareResponse = await api.request(basePath, {
       method: "POST",
       headers,
       body: JSON.stringify({ linkToken }),
@@ -3433,7 +3467,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     // Preparing again, or reading it, links nothing either.
     expect(
       await (
-        await value.app.request(basePath, {
+        await api.request(basePath, {
           method: "POST",
           headers,
           body: JSON.stringify({ linkToken }),
@@ -3441,13 +3475,13 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
       ).json(),
     ).toMatchObject({ id: prepared.id, status: "prepared", version: 1 });
     expect(
-      await (await value.app.request(`${basePath}/${prepared.id}`, { headers })).json(),
+      await (await api.request(`${basePath}/${prepared.id}`, { headers })).json(),
     ).toMatchObject({ status: "prepared", version: 1, canLink: true });
     expect([...(await storedLinks())]).toEqual([]);
 
     // Only the explicit confirmation, at the version shown, links it.
     const link = (expectedVersion: number) =>
-      value.app.request(`${basePath}/${prepared.id}/link`, {
+      api.request(`${basePath}/${prepared.id}/link`, {
         method: "POST",
         headers,
         body: JSON.stringify({ expectedVersion, idempotencyKey: crypto.randomUUID() }),
@@ -3460,7 +3494,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     expect([...(await storedLinks())]).toEqual([{ subjectId: value.owner.subjectId }]);
 
     // The route that linked on first use is gone.
-    const legacy = await value.app.request(
+    const legacy = await api.request(
       `/v1/workspaces/${value.owner.workspaceId}/integrations/slack/user-links`,
       { method: "POST", headers, body: JSON.stringify({ linkToken }) },
     );
@@ -11199,6 +11233,113 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     expect(completed).toEqual({ request_digest: digestOf(earlier), status: "completed" });
   });
 
+  test("keeps the formatting an earlier release bound before tables and Opengeni links were rewritten", async () => {
+    if (!available) return;
+    const value = await fixture();
+    await postEvent(value.app, {
+      teamId: value.teamId,
+      eventId: `E_MRKDWN_OBJECTS_${crypto.randomUUID()}`,
+      event: {
+        type: "message",
+        channel_type: "im",
+        user: value.ownerSlackUserId,
+        channel: "D_MRKDWN_OBJECTS",
+        ts: "1762000000.000004",
+        text: "Which rule applies?",
+      },
+    });
+    await drainAll(value.deps);
+    const [route] = await interactions(value.owner.workspaceId);
+    const output = [
+      "**Rule 4-1** applies ([example.com](https://example.com/rules/4-1?utm_source=openai)):",
+      "",
+      "| Rule | Fee |",
+      "| --- | --- |",
+      "| 4-1 | 10 |",
+      "",
+      "![Fee chart](artifact:5b2905c5-68c6-4d43-9c30-fdcefbd3a74e)",
+    ].join("\n");
+    // Delivery links Opengeni objects to the console, in this chat's workspace.
+    const baseUrl = value.deps.settings.webBaseUrl ?? value.deps.settings.publicBaseUrl;
+    expect(baseUrl).toBeTruthy();
+    const formatted = slackMrkdwnFromMarkdown(
+      output,
+      slackObjectLinkUrl({
+        baseUrl,
+        workspaceId: value.owner.workspaceId,
+        sessionId: route!.session_id,
+      }),
+    );
+    const earlier = slackMrkdwnKeepingObjectLinks(output);
+    expect(formatted).toBe(
+      [
+        "*Rule 4-1* applies (<https://example.com/rules/4-1|example.com>):",
+        "",
+        "```",
+        "Rule | Fee",
+        "-----|----",
+        "4-1  | 10",
+        "```",
+        "",
+        `<${new URL(`/workspaces/${value.owner.workspaceId}/artifacts/files/5b2905c5-68c6-4d43-9c30-fdcefbd3a74e?fromSession=${route!.session_id}`, baseUrl!).toString()}|Fee chart>`,
+      ].join("\n"),
+    );
+    // Every earlier rendering differs, so only this one can match the claim.
+    expect(
+      new Set([
+        output,
+        formatted,
+        earlier,
+        slackMrkdwnKeepingProviderTracking(output),
+        slackMrkdwnKeepingClaudeCiteTags(output),
+      ]).size,
+    ).toBe(4);
+    value.slack.failuresByText.set("applies", { status: 429, retryAfterSeconds: 30 });
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      { type: "turn.completed", payload: { output } },
+    ]);
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    const attempted = value.slack.postAttempts.at(-1)!;
+    expect(attempted.text).toBe(formatted);
+    const operationId = attempted.clientMessageId!;
+    const digestOf = (text: string) =>
+      createHmac("sha256", environmentsEncryptionKeyBytes(value.deps.settings)!)
+        .update(
+          JSON.stringify({
+            operationId,
+            connectionId: value.connectionId,
+            targetKind: "channel",
+            targetId: attempted.channel,
+            threadTimestamp: attempted.threadTimestamp || null,
+            text,
+            blocks: null,
+          }),
+        )
+        .digest("hex");
+
+    // The claim the previous release would have left: its formatting, which
+    // kept tables and Opengeni links as written, with the provider call rejected.
+    await shared!.admin`
+      update slack_bot_post_operations set request_digest = ${digestOf(earlier)}
+      where connection_id = ${value.connectionId} and operation_id = ${operationId}`;
+    value.slack.failuresByText.clear();
+    await expireSlackProviderCooldown(value);
+    await shared!.admin`
+      update slack_interactions set delivery_retry_at = now() where id = ${route!.id}`;
+    const postsBefore = value.slack.posts.length;
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(false);
+
+    // The retry keeps the bound bytes under the same operation, and posts once.
+    expect(value.slack.posts.slice(postsBefore)).toEqual([
+      expect.objectContaining({ text: earlier, clientMessageId: operationId }),
+    ]);
+    const [completed] = await shared!.admin<{ request_digest: string; status: string }[]>`
+      select request_digest, status from slack_bot_post_operations
+      where connection_id = ${value.connectionId} and operation_id = ${operationId}`;
+    expect(completed).toEqual({ request_digest: digestOf(earlier), status: "completed" });
+  });
+
   test("posts one bounded pointer card when a worker the human started needs input", async () => {
     if (!available) return;
     const value = await fixture({ slackOrchestrationNotices: { childRequiresAction: true } });
@@ -13447,8 +13588,9 @@ describe("Slack agents", () => {
 
     const agents = async () =>
       await shared!.admin<{ id: string; name: string; knowledge_collection_id: string | null }[]>`
-        select id, name, knowledge_collection_id from slack_agents
-        where connection_id = ${value.connectionId} and name = 'Finance'`;
+        select a.id, a.name, a.memory_collection_id as knowledge_collection_id
+        from agents a join agent_slack_installs i on i.agent_id = a.id
+        where i.connection_id = ${value.connectionId} and a.name = 'Finance'`;
     const press = async (actionId: string, userId: string) =>
       await pressSlackButton(value, {
         post: card,

@@ -148,6 +148,9 @@
   /* Status - muted so they inform without alarming --------------------------- */
   --og-color-status-queued: #a3a3a3;
   --og-color-status-running: #d5bd72;
+  /* Charge - the one warm colour for a costly speed (Ultrafast) while it is on
+     or being engaged. Hosts may retint it. */
+  --og-color-charge: #ffb547;
   --og-color-status-idle: #83cbb0;
   --og-color-status-waiting: #e9ab77;
   --og-color-status-failed: oklch(0.77 0.12 22);
@@ -295,6 +298,7 @@
      on the selected-row fill. */
   --og-color-status-queued: #696969;
   --og-color-status-running: #716122;
+  --og-color-charge: #b45f00;
   --og-color-status-idle: #237058;
   --og-color-status-waiting: #8c5524;
   --og-color-status-failed: oklch(0.5 0.19 22);

@@ -367,3 +367,41 @@ test("the shared listing preserves tie-breaks and the broker still checks revoca
     ),
   );
 });
+
+test("MP-KEYS-12: an organization's several Anthropic API keys reach only its Anthropic API provider", async () => {
+  const scope = await world();
+  await connect(scope, "anthropic", true);
+  await models(scope, "anthropic", true);
+  await models(scope, "claude_subscription", true);
+  const members = ["second", "third"].map((name) => ({
+    id: crypto.randomUUID(),
+    label: name,
+    credentialEncrypted: encryptEnvironmentValue(key, `test-org-anthropic-${name}`),
+    credentialDigest: name.padEnd(64, "0"),
+    anthropicOrganizationId: null,
+    createdAt: new Date().toISOString(),
+    createdBySubjectId: actor,
+  }));
+  await shared!.admin`
+    update organization_model_provider_connections
+    set api_key_members = ${shared!.admin.json(members)},
+      api_key_credit_refusals = ${shared!.admin.json({ [members[1]!.id]: new Date().toISOString() })}
+    where account_id = ${scope.accountId} and provider_kind = 'anthropic'`;
+  const actual = await batched(scope);
+  expect(actual).toEqual(await serial(scope));
+  const providers = JSON.parse(actual.modelProvidersJson!) as {
+    id: string;
+    apiKey?: string;
+    anthropic?: { apiKeys?: { id: string; apiKey: string }[] };
+  }[];
+  const anthropic = providers.find((provider) => provider.id === "organization-anthropic");
+  // Its own key first; the key out of credits is left out.
+  expect(anthropic?.anthropic?.apiKeys).toEqual([
+    { id: "primary-v1", apiKey: "test-org-anthropic" },
+    { id: members[0]!.id, apiKey: "test-org-anthropic-second" },
+  ]);
+  expect(anthropic?.apiKey).toBe("test-org-anthropic");
+  for (const provider of providers)
+    if (provider.id !== "organization-anthropic")
+      expect(provider.anthropic?.apiKeys).toBeUndefined();
+});

@@ -27,6 +27,15 @@ describe("same-turn final reply handoff", () => {
     expect(needsFinalReply({ ...quiet, suppressedEcho: true, inputWaitYielded: true })).toBe(false);
     expect(needsFinalReply({ ...quiet, suppressedEcho: true, maintenance: true })).toBe(false);
   });
+  test("asks for a reply when a model response had no text and no tool call", () => {
+    // A machine-started turn (a delivered update) has run no tools yet.
+    const quiet = { ...empty, toolsExecuted: false, completedGoal: false };
+    expect(needsFinalReply({ ...quiet, contentlessResponse: true })).toBe(true);
+    expect(needsFinalReply({ ...quiet, contentlessResponse: true, maintenance: true })).toBe(false);
+    expect(needsFinalReply({ ...quiet, contentlessResponse: true, inputWaitYielded: true })).toBe(
+      false,
+    );
+  });
   test("preserves deliberate waits, approvals, maintenance, and ordinary answers", () => {
     for (const patch of [
       { inputWaitYielded: true },

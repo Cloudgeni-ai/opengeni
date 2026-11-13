@@ -6,15 +6,22 @@ delegated Microsoft Entra ID. Customer-facing setup lives in
 
 ## Products
 
-| Product | Connection URL | Scope | Tools | Flag |
-|---|---|---|---|---|
-| Dataverse (Dynamics 365 Sales, Customer Service, …) | `https://<org>.crm[N].dynamics.com/api/mcp` (also `/api/mcp_preview`) | `https://<org host>/user_impersonation` | Dataverse Web API bridge (below) | on when the client is configured |
-| Finance and Operations | `https://<env>.operations.dynamics.com/mcp` (also `*.cloudax.dynamics.com`) | `https://<env host>/.default` | Microsoft's ERP MCP server | `OPENGENI_MICROSOFT_DYNAMICS_FINANCE_OPERATIONS_ENABLED` (default off) |
-| Business Central | — | — | not supported yet (see below) | — |
+All three products are on whenever the client is configured.
+
+| Product | Connection URL | Scope | Tools |
+|---|---|---|---|
+| Dataverse (Dynamics 365 Sales, Customer Service, …) | `https://<org>.crm[N].dynamics.com/api/mcp` (also `/api/mcp_preview`) | `https://<org host>/user_impersonation` | Dataverse Web API bridge (below) |
+| Finance and Operations | `https://<env>.operations[.<region>].dynamics.com/mcp` (also `*.cloudax.dynamics.com`) | `https://<env host>/.default` | Finance and Operations OData bridge (below) |
+| Business Central | `https://api.businesscentral.dynamics.com/v2.0/[<tenant>/]<environment>/api/v2.0` | `https://api.businesscentral.dynamics.com/Financials.ReadWrite.All` | Business Central API bridge (below) |
 
 `packages/contracts/src/microsoft-dynamics.ts` classifies URLs
 (`microsoftDynamicsProductForMcpUrl`), normalises a pasted environment address
 to its connection URL (`microsoftDynamicsMcpEndpoint`) and names the scopes.
+A Business Central address is the web client
+(`https://businesscentral.dynamics.com/<tenant>/<environment>?company=…`; no
+environment means `Production`, a `?tenant=` query also names the tenant) or
+any API URL of the environment. The company is not part of the connection:
+one connection covers every company, and tools take the company name or id.
 
 ## Configuration
 
@@ -22,13 +29,13 @@ to its connection URL (`microsoftDynamicsMcpEndpoint`) and names the scopes.
 |---|---|
 | `OPENGENI_MICROSOFT_DYNAMICS_CLIENT_ID` | Multi-tenant Entra app (pre-registered; Microsoft has no dynamic client registration here). |
 | `OPENGENI_MICROSOFT_DYNAMICS_CLIENT_SECRET` | Its client secret. Set both or neither. |
-| `OPENGENI_MICROSOFT_DYNAMICS_FINANCE_OPERATIONS_ENABLED` | Accept Finance and Operations URLs. |
 
 The Entra app needs:
 
 - redirect URI `<public API origin>/v1/integrations/oauth/callback` (Web platform);
-- delegated API permissions **Dynamics CRM → user_impersonation** and, for
-  Finance and Operations, **Dynamics ERP** permissions (`mcp.tools`), plus
+- delegated API permissions **Dynamics CRM → user_impersonation**, **Dynamics
+  365 Business Central → Financials.ReadWrite.All** and, for Finance and
+  Operations, **Dynamics ERP** → `Odata.FullAccess`, plus
   Microsoft Graph `openid`, `profile`, `offline_access`;
 - "Accounts in any organizational directory" (multi-tenant).
 
@@ -100,12 +107,91 @@ root on the same host (`isDataverseWebApiDestination`). Microsoft's error
 message reaches the agent; a write whose outcome is unknown (network failure,
 5xx) is reported as uncertain and never retried.
 
-## Business Central (follow-up)
+## Finance and Operations OData bridge
 
-Business Central's MCP server (`https://mcp.businesscentral.dynamics.com`) and
-API (`https://api.businesscentral.dynamics.com/v2.0/<tenant>/<environment>/`)
-both need the tenant and environment name per connection (MCP through
-`TenantId` / `EnvironmentName` headers). The scope is
-`https://<mcp|api>.businesscentral.dynamics.com/Financials.ReadWrite.All`. Add
-it with a bridge or headers that take the tenant from the token's `tid` and the
-environment from the connection URL.
+`packages/runtime/src/finance-operations-odata-mcp.ts` replaces Microsoft's
+ERP MCP server for Finance and Operations connections, the same way the
+Dataverse bridge does. It serves `fno_list_entities`, `fno_describe_entity`,
+`fno_query` (OData GET under `/data/`, paging with
+`odata.maxpagesize`, `cross-company=true`, `/$count`) and
+`fno_create_record` / `fno_update_record` / `fno_delete_record` (Ask first).
+Writes add `cross-company=true` so `dataAreaId` chooses the company; an
+update sends `If-Match: *` and never creates a record. Entity metadata comes
+from the JSON metadata service (`/Metadata/PublicEntities`,
+`/Metadata/PublicEnumerations`); `/data/$metadata` is about 55 MB and is
+never read. The token resolver lets the grant reach only `/data/` and
+`/Metadata/` on the bound host (`isFinanceOperationsDataDestination`).
+
+Why OData rather than the ERP MCP server, checked on 13 Nov 2026 against
+`opengeni-fno-test.operations.ch.dynamics.com` as a System administrator
+user, with one delegated `.default` token (`scp`: `CustomService.FullAccess
+mcp.tools Odata.FullAccess`):
+
+- **Allow-list:** with the app's row in **Allowed MCP clients**
+  (`McpAllowedClients`) set to not allowed, `POST /mcp` returned 403 ("Appid
+  … is not allowed to access the MCP endpoint") while `/data` returned 200
+  with the same token. Every customer would have to add the app first.
+- **Billing:** Microsoft bills ERP MCP tool calls from non-Copilot-Studio
+  clients at 0.1 Copilot Credits each unless the user has Finance Premium or
+  Supply Chain Management Premium. OData is not billed in Copilot Credits.
+- **Reliability:** 10 of 10 reads succeeded on each path (median 0.14 s MCP,
+  0.25 s OData); the first MCP `initialize` took 6.4 s. MCP form tools are
+  stateful and must run one at a time, and its SQL read only the user's
+  default company (32 of 417 customers) unless the tool's `companyId` is set.
+- **Quirks:** F&O ignores `$apply` and returns every row, so `fno_query`
+  refuses it and points to `$count`; text filters use `eq 'abc*'` wildcards
+  (`startswith` is not supported); error text is in
+  `error.innererror.message`, next to a stack trace the bridge drops.
+
+What the bridge doesn't cover: the ERP MCP form tools and X++ actions
+(`api_*`), for operations that exist only behind a form button.
+
+## Business Central API bridge
+
+`packages/runtime/src/business-central-api-mcp.ts` serves generic tools over
+the environment's API v2.0 root with the connection's grant:
+`business_central_list_companies`, `business_central_list_entities` and
+`business_central_describe_entity` (from `$metadata`: properties, enum values,
+navigation properties and bound actions), `business_central_query` (OData GET
+relative to a company, paging with `odata.maxpagesize`), and
+`business_central_create_record` / `business_central_update_record`
+(`If-Match: *`) / `business_central_delete_record` /
+`business_central_run_action` (bound `Microsoft.NAV.<action>`, for example
+`post`). The four change tools recommend Ask first. A tool's `company` is a
+name or id; it may be omitted when the environment has one company.
+
+All Business Central environments are one Entra resource on one host, so the
+token resolver lets a Business Central connection's grant reach any URL below
+`https://api.businesscentral.dynamics.com/v2.0/`. A person with two connected
+environments then works whichever of their connections the resolver picks
+(it selects personal connections by provider domain).
+
+Why the API rather than Microsoft's Business Central MCP server (verified on
+11 November 2026 against a real tenant with the staging Entra app):
+
+- **One URL for every environment.** `POST https://mcp.businesscentral.dynamics.com`
+  picks the environment from request headers (`TenantId`, `EnvironmentName`,
+  optional `Company`, `ConfigurationName`). Opengeni connections are keyed and
+  bound by their MCP URL, so environments would be indistinguishable without
+  per-connection headers.
+- **Read-only until an admin configures it.** Without a named configuration
+  the server offers only discovery tools (`bc_actions_search`,
+  `bc_actions_describe`, `bc_actions_invoke`, `list_companies`) in read-only
+  mode. Writes need an admin with the MCP - ADMIN permission set to publish an
+  MCP configuration (page 8350) enabling create/modify per API page, and the
+  client must send its `ConfigurationName`. The API needs only consent and the
+  user's own licence and permission sets.
+- **Awkward invocation.** `bc_actions_invoke` takes `RequestParameters` as a
+  JSON-encoded string; an object fails with only "An error occurred invoking
+  'bc_actions_invoke'".
+- **Same consent either way.** The Entra permission (Dynamics 365 Business
+  Central, delegated `Financials.ReadWrite.All`) covers both; the MCP token's
+  audience is `https://mcp.businesscentral.dynamics.com`, the API's
+  `https://api.businesscentral.dynamics.com`.
+
+Server details for reference: Streamable HTTP, protocol 2025-06-18, server
+"Microsoft Dynamics 365 Business Central" 29.0.57751.0; a 401 advertises
+`/.well-known/oauth-protected-resource` with authority
+`https://login.microsoftonline.com/common/v2.0` and no dynamic client
+registration. With `Company` set, `list_companies` disappears and tool schemas
+drop `company`.

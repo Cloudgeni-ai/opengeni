@@ -696,7 +696,11 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     turnExecutionPolicy.latencyMode,
   );
   const textVerbosity = textVerbosityForTurn(resolvedModel, turnExecutionPolicy.upstreamModelId);
-  const reasoningSummary = reasoningSummaryForTurn(resolvedModel);
+  const reasoningSummary = reasoningSummaryForTurn(
+    resolvedModel,
+    turnExecutionPolicy.latencyMode,
+    runSettings.reasoningSummaries,
+  );
   // The calls this resume runs as approved: its trigger's and every sibling
   // approval of the same pause decided before it began.
   const approvedToolCallIds = await openSuffixApprovedCallIds({
@@ -1074,6 +1078,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         openingToolNames: openingToolNamesForTurn(resolvedModel, turn.metadata),
         toolSearchDecisionModel: configuredToolDecisionModel({
           settings: runSettings,
+          observability,
           onUnavailable: () =>
             observability.warn(
               "Configured decision model is unavailable; using lexical tool discovery",

@@ -226,6 +226,9 @@ fn every_series() -> Metrics {
             for outcome in outcomes {
                 metrics.step(step, cause, outcome, Duration::from_millis(3));
             }
+            for kind in compute_protocol::host_metrics::BYTE_KINDS {
+                metrics.step_bytes(step, cause, kind, 1);
+            }
         }
     }
     let codes = [

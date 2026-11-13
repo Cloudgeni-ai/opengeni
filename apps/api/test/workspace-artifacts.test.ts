@@ -23,6 +23,7 @@ import {
 import {
   bootstrapWorkspace,
   createChannel,
+  createConnection,
   createDb,
   createSession,
   createWorkspaceArtifact,
@@ -1463,6 +1464,123 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     }
   }, 60_000);
 
+  test("an agent's Site on its own account route also declares that connector, and a retry replays", async () => {
+    // An agent sees only its own account routes; the turn's frozen binding
+    // names the connector behind the route (a workspace account here; a
+    // personal one pairs the same way once its sender delegation is frozen).
+    const connection = await createConnection(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      providerDomain: "crm.example",
+      kind: "oauth2",
+      credentialEncrypted: "unused-test-credential",
+      metadata: {},
+    });
+    const connectionId = connection.id;
+    const route = `account-${crypto.randomUUID().replaceAll("-", "")}`;
+    const connectionRef = {
+      providerDomain: "crm.example",
+      kind: "oauth2" as const,
+      subjectScope: "workspace" as const,
+      connectionId,
+    };
+    const attempt = await seedAttempt(grant, {
+      permissions: ["artifacts:publish"],
+      tools: ["artifacts_create"],
+      mcpAccountBindings: [
+        {
+          serverId: route,
+          canonicalServerId: "crm",
+          connectionId,
+          originWorkspaceId: grant.workspaceId,
+          subjectScope: "workspace",
+          ownerSubjectId: null,
+          connectionAuthorityGeneration: 1, // a new connection's first generation
+          accountLabel: "ada@example.com",
+          providerDomain: "crm.example",
+          kind: "oauth2",
+          connectionRef,
+        },
+      ],
+    });
+    await persistArtifactAttemptCatalog(grant, attempt, [{ serverId: route, toolName: "query" }]);
+    const server = buildOpenGeniMcpServer(
+      {
+        settings: testSettings(),
+        db: client.db,
+        objectStorage,
+        bus: new MemoryEventBus(),
+      } as ApiRouteDeps,
+      {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        subjectId: "worker:first-party-mcp",
+        permissions: ["artifacts:publish"],
+        principalKind: "agent_attempt",
+        metadata: {
+          sessionId: attempt.sessionId,
+          turnId: attempt.turnId,
+          attemptId: attempt.attemptId,
+          executionGeneration: attempt.executionGeneration,
+          firstPartyMcpTools: ["artifacts_create"],
+        },
+      },
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const mcp = new Client({ name: "workspace-artifact-paired-tools-test", version: "1" });
+    await server.connect(serverTransport);
+    await mcp.connect(clientTransport);
+    const suffix = crypto.randomUUID();
+    const create = async (requestedTools: Array<{ serverId: string; toolName: string }>) => {
+      const result = await mcp.callTool({
+        name: "artifacts_create",
+        arguments: {
+          title: "Paired Site tools",
+          html: "<!doctype html><main>CRM</main>",
+          requestedTools,
+          idempotencyKey: `paired-${suffix}-${requestedTools.map((tool) => tool.serverId).join("-")}`,
+        },
+      });
+      const text = result.content.find((item) => item.type === "text");
+      if (!text || text.type !== "text") throw new Error("missing create result");
+      return { isError: result.isError === true, text: text.text };
+    };
+    try {
+      const declared = [{ serverId: route, toolName: "query" }];
+      const first = await create(declared);
+      if (first.isError) throw new Error(first.text);
+      const created = WorkspaceArtifactMutationResponse.parse(JSON.parse(first.text));
+      expect(created.version.requestedTools).toEqual([
+        { serverId: route, toolName: "query" },
+        { serverId: "crm", toolName: "query" },
+      ]);
+      // A retry with the list as declared is the same publication.
+      const retry = await create(declared);
+      if (retry.isError) throw new Error(retry.text);
+      const replayed = WorkspaceArtifactMutationResponse.parse(JSON.parse(retry.text));
+      expect(replayed.replayed).toBe(true);
+      expect(replayed.version.id).toBe(created.version.id);
+      // Declaring the connector itself next to the publisher's own route is
+      // the same declaration, stored once.
+      const explicit = await create([
+        { serverId: route, toolName: "query" },
+        { serverId: "crm", toolName: "query" },
+      ]);
+      if (explicit.isError) throw new Error(explicit.text);
+      expect(
+        WorkspaceArtifactMutationResponse.parse(JSON.parse(explicit.text)).version.requestedTools,
+      ).toEqual([
+        { serverId: route, toolName: "query" },
+        { serverId: "crm", toolName: "query" },
+      ]);
+      // A connector none of the attempt's routes belongs to is still refused.
+      const foreign = await create([{ serverId: "billing", toolName: "query" }]);
+      expect(foreign.isError).toBe(true);
+    } finally {
+      await Promise.all([mcp.close(), server.close()]);
+    }
+  }, 60_000);
+
   test("prevents attempts from retaining Site tools outside their immutable catalog", async () => {
     const attempt = await seedAttempt(grant, {
       permissions: ["artifacts:publish"],
@@ -1788,6 +1906,8 @@ async function seedAttempt(
   options: {
     permissions?: Permission[] | null;
     tools?: FirstPartyMcpToolName[];
+    /** The turn's accepted MCP account bindings, frozen when it is accepted. */
+    mcpAccountBindings?: unknown[];
   } = {},
 ): Promise<Attempt> {
   const session = await createSession(client.db, {
@@ -1805,17 +1925,24 @@ async function seedAttempt(
     ...(options.tools === undefined ? {} : { firstPartyMcpTools: options.tools }),
   });
   const executionGeneration = 3;
-  const [turn] = await shared.admin<{ id: string }[]>`
+  // The binding fence reads each bound connection in the turn's own scope.
+  const [turn] = await shared.admin.begin(async (tx) => {
+    await tx`select set_config('opengeni.account_id', ${targetGrant.accountId}, true),
+      set_config('opengeni.workspace_id', ${targetGrant.workspaceId}, true)`;
+    return await tx<{ id: string }[]>`
     INSERT INTO session_turns (
       account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
       status, position, prompt, model, reasoning_effort, sandbox_backend,
-      execution_generation, initiator_kind, initiator_subject_id, initiator_context
+      execution_generation, initiator_kind, initiator_subject_id, initiator_context,
+      mcp_account_bindings
     ) VALUES (
       ${targetGrant.accountId}, ${targetGrant.workspaceId}, ${session.id}, gen_random_uuid(),
       ${`artifact-wf-${crypto.randomUUID()}`}, 'running', 0, 'Publish artifact',
       'gpt-5.6-sol', 'medium', 'none', ${executionGeneration}, 'subject',
-      ${targetGrant.subjectId}, '{"accepted":true}'::jsonb
+      ${targetGrant.subjectId}, '{"accepted":true}'::jsonb,
+      ${options.mcpAccountBindings ? tx.json(options.mcpAccountBindings as never) : null}::jsonb
     ) RETURNING id`;
+  });
   const attemptId = crypto.randomUUID();
   await shared.admin.begin(async (tx) => {
     await tx`
@@ -1858,7 +1985,7 @@ async function persistArtifactAttemptCatalog(
     entries: identities.map(({ approval = "none", ...identity }) => ({
       identity,
       modelName: `${identity.serverId}__${identity.toolName}`,
-      codemodePath: [identity.serverId, identity.toolName],
+      codemodePath: [identity.serverId.replace(/[^A-Za-z0-9_$]/gu, "_"), identity.toolName],
       inputSchema: { type: "object" },
       source: identity.serverId === "docs" ? "docs" : "mcp",
       approval,

@@ -1,4 +1,8 @@
-import { WorkspaceArtifactSourceBundle, type AccessGrant } from "@opengeni/contracts";
+import {
+  WorkspaceArtifactSourceBundle,
+  type AccessGrant,
+  type ToolGatewayIdentity,
+} from "@opengeni/contracts";
 import type { ApiRouteDeps, ObjectStorageDependency } from "@opengeni/core";
 import { retryWhileMissing } from "@opengeni/storage";
 import {
@@ -12,6 +16,7 @@ import {
   type PreparedWorkspaceArtifactContent,
 } from "./workspace-artifact-content";
 import { userContentSignedGetUrlOptions } from "./http/user-content";
+import { declareSiteToolsForEveryViewer } from "./site-tool-routing";
 type Storage = NonNullable<ObjectStorageDependency>;
 export const MAX_SITE_SOURCE_BYTES = 64 * 1024 * 1024;
 
@@ -158,16 +163,34 @@ export async function prepareWorkspaceArtifactPublication(
   deps: ApiRouteDeps,
   grant: AccessGrant,
   input: Input,
-): Promise<PreparedWorkspaceArtifactContent & { uploadId?: string }> {
+): Promise<
+  PreparedWorkspaceArtifactContent & {
+    uploadId?: string;
+    declaredRequestedTools?: ToolGatewayIdentity[];
+  }
+> {
   const storage = deps.objectStorage;
   if (!storage) throw new Error("Object storage is not configured");
   if (Boolean(input.uploadId) === (input.html !== undefined))
     throw new Error("Provide either uploadId or inline html, not both");
-  if (!input.uploadId) {
-    return prepareWorkspaceArtifactContent(storage, grant.workspaceId, {
+  // The publisher's own account routes also declare their connector, so
+  // other viewers run the Site on their own account or are asked to connect.
+  // The tools as declared stay the publication's idempotency identity.
+  const declared =
+    input.requestedTools === undefined ? {} : { declaredRequestedTools: input.requestedTools };
+  if (input.requestedTools !== undefined)
+    input = {
       ...input,
-      html: input.html!,
-    });
+      requestedTools: await declareSiteToolsForEveryViewer(deps, grant, input.requestedTools),
+    };
+  if (!input.uploadId) {
+    return {
+      ...prepareWorkspaceArtifactContent(storage, grant.workspaceId, {
+        ...input,
+        html: input.html!,
+      }),
+      ...declared,
+    };
   }
   if (input.source) throw new Error("Upload source JSON using the source upload URL");
   const row = await getWorkspaceArtifactUpload(deps.db, grant.workspaceId, input.uploadId);
@@ -196,6 +219,7 @@ export async function prepareWorkspaceArtifactPublication(
     sourceSha256: null,
     sourceSizeBytes,
     ...(input.requestedTools === undefined ? {} : { requestedTools: input.requestedTools }),
+    ...declared,
     persistContent: async () => {},
     discardContent: async () => {},
   };

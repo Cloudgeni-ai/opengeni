@@ -1,5 +1,5 @@
 import { OrganizationApprovalHelp } from "../organization-approval-help";
-import { microsoftDynamicsProductForMcpUrl } from "@opengeni/contracts/microsoft-dynamics";
+import { microsoftDynamicsEnvironmentAddress } from "@opengeni/contracts/microsoft-dynamics";
 import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/browser";
 import type { ChatClient } from "@opengeni/sdk";
 import { useEffect, useState } from "react";
@@ -8,6 +8,7 @@ import { browserConnectWindowHost } from "../connect-window-host";
 import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";
 import { capabilityPresentation } from "../integration-presentation";
 import { useOpenGeniText } from "../messages/runtime";
+import { useAdminStepUp } from "../app/lib/app-host";
 import { useMcpCapabilityConnect } from "./mcp-capability-connect-flow";
 import { connectionCardSubtitle, showsMcpServerLabel } from "./mcp-server-label";
 import { SessionCapabilityFrame } from "./session-capability-frame";
@@ -100,6 +101,7 @@ function ScopedCard({
 }: McpConnectionCardProps) {
   const t = useOpenGeniText();
   const [windows] = useState(() => browserConnectWindowHost(window));
+  const adminStepUp = useAdminStepUp();
   const flow = useMcpCapabilityConnect({
     client,
     workspaceId,
@@ -112,6 +114,7 @@ function ScopedCard({
     onClose,
     personalOnly: configuredPersonalOnly,
     reconnectConnectionId,
+    adminStepUp,
   });
   const reconnecting = Boolean(reconnectConnectionId);
   const { item, personalOnly, busy, waiting, reconciling, connected, ownership, offHere } = flow;
@@ -173,11 +176,10 @@ function ScopedCard({
   const introduction = hostDescription || presentation?.introduction || "";
   const abilities = hostDescription ? [] : (presentation?.capabilities ?? []);
   const lead = introduction || item?.description || rationale;
-  // A Dynamics environment is known by its host, not its MCP endpoint.
-  const dynamics = !!item?.mcpUrl && !!microsoftDynamicsProductForMcpUrl(item.mcpUrl);
-  const address = dynamics
-    ? (item?.providerDomain ?? item?.mcpUrl ?? "")
-    : (item?.mcpUrl ?? item?.providerDomain ?? "");
+  // A Dynamics environment is known by its address, not its connection URL.
+  const environment = item?.mcpUrl ? microsoftDynamicsEnvironmentAddress(item.mcpUrl) : null;
+  const dynamics = environment !== null;
+  const address = environment ?? item?.mcpUrl ?? item?.providerDomain ?? "";
   const approval = flow.approval;
   const adminApproval = approval && approval.reason !== "unfinished" ? approval : null;
   const approvalNote = approval?.reason === "unfinished" ? approval : null;
@@ -297,6 +299,19 @@ function ScopedCard({
                   </button>
                 ) : null}
               </div>
+            ) : flow.stepUp ? (
+              // Connected, but turning it on waits for a passkey: that is the step.
+              <button
+                className="og-session-capability-primary"
+                disabled={busy}
+                onClick={flow.confirmStepUp}
+              >
+                {flow.stepUp.opened || !flow.stepUp.hostAction || !adminStepUp
+                  ? t("sessionMcpCapabilityCard.tryAgain")
+                  : flow.stepUp.passkeyRegistered
+                    ? t("sessionMcpCapabilityCard.confirmItSYou")
+                    : t("sessionMcpCapabilityCard.addAPasskey")}
+              </button>
             ) : ownLoginQuestion ? (
               <>
                 <p className="og-session-capability-scope">{ownLoginQuestion}</p>

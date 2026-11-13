@@ -105,7 +105,6 @@ async function idToken(nonce: string | null, tenant = TENANT_ID) {
 async function fixture(
   options: {
     prm?: Record<string, unknown> | "absent";
-    financeOperationsEnabled?: boolean;
     idTokenTenant?: string;
   } = {},
 ) {
@@ -140,7 +139,6 @@ async function fixture(
     integrationsStateSecret: "dynamics-oauth-fixture-state",
     microsoftDynamicsClientId: CLIENT_ID,
     microsoftDynamicsClientSecret: CLIENT_SECRET,
-    microsoftDynamicsFinanceOperationsEnabled: options.financeOperationsEnabled ?? false,
   });
   const app = createApp({
     db: client.db,
@@ -198,13 +196,16 @@ async function fixture(
       );
     throw new Error(`Unexpected synthetic Microsoft destination: ${url}`);
   });
-  async function begin(mcpUrl = DATAVERSE_MCP_URL) {
+  async function begin(
+    mcpUrl = DATAVERSE_MCP_URL,
+    ownership: "personal" | "workspace" = "personal",
+  ) {
     const response = await app.request(base, {
       method: "POST",
       headers,
       body: JSON.stringify({
         providerId: "mcp-oauth",
-        ownership: "personal",
+        ownership,
         returnUrl,
         idempotencyKey: randomUUID(),
       }),
@@ -221,8 +222,11 @@ async function fixture(
       }),
     });
   }
-  async function authorize(mcpUrl = DATAVERSE_MCP_URL) {
-    const advanced = await begin(mcpUrl);
+  async function authorize(
+    mcpUrl = DATAVERSE_MCP_URL,
+    ownership: "personal" | "workspace" = "personal",
+  ) {
+    const advanced = await begin(mcpUrl, ownership);
     expect(advanced.status).toBe(200);
     const ready = await advanced.json();
     expect(ready.state).toBe("requires_user_action");
@@ -258,6 +262,9 @@ describe("Microsoft Dynamics MCP OAuth", () => {
       tokenEndpoint: `${ENTRA}/${TENANT_ID}/oauth2/v2.0/token`,
     };
     expect(() => assertAuthorizationServerNotReserved(entra, DEFAULT_OAUTH_PROFILE)).not.toThrow();
+    // Personal by default, but an admin may share one account with the workspace.
+    expect(dataverse?.defaultOwnership).toBe("personal");
+    expect(dataverse?.requiredOwnership).toBeUndefined();
   });
 
   test("signs in with the deployment's Entra app, environment scope and verified identity", async () => {
@@ -320,6 +327,22 @@ describe("Microsoft Dynamics MCP OAuth", () => {
     }
   }, 30_000);
 
+  test("an account can be shared with the workspace", async () => {
+    const provider = await fixture();
+    try {
+      const begun = await provider.authorize(DATAVERSE_MCP_URL, "workspace");
+      const response = await provider.callback({ state: begun.state, code: "fixture-code" });
+      expect(response.status).toBe(302);
+      expect(await provider.read(begun.attempt.id)).toMatchObject({ state: "complete" });
+      const [account] = (
+        await listConnectionsMetadata(client.db, provider.identity.personalWorkspaceId)
+      ).filter((connection) => connection.providerDomain === "contoso.crm.dynamics.com");
+      expect(account?.subjectId ?? null).toBeNull();
+    } finally {
+      provider.restore();
+    }
+  }, 30_000);
+
   test("an id_token from another tenant than its issuer claims stays unverified", async () => {
     const provider = await fixture({ idTokenTenant: "not-a-tenant" });
     try {
@@ -365,23 +388,15 @@ describe("Microsoft Dynamics MCP OAuth", () => {
     ).toEqual([DATAVERSE_SCOPE, "offline_access"]);
   });
 
-  test("Finance and Operations stays off until its flag is on", async () => {
-    const off = await fixture();
+  test("Finance and Operations signs in for its environment's resource", async () => {
+    const provider = await fixture();
     try {
-      const response = await off.begin(FINANCE_MCP_URL);
-      expect(response.status).toBe(503);
-      expect(await response.text()).toContain("Finance and Operations");
-    } finally {
-      off.restore();
-    }
-    const on = await fixture({ financeOperationsEnabled: true });
-    try {
-      const begun = await on.authorize(FINANCE_MCP_URL);
+      const begun = await provider.authorize(FINANCE_MCP_URL);
       expect(begun.authorizationUrl.searchParams.get("scope")?.split(" ")[0]).toBe(
         "https://usmf.operations.dynamics.com/.default",
       );
     } finally {
-      on.restore();
+      provider.restore();
     }
   }, 30_000);
 
@@ -484,6 +499,73 @@ describe("Microsoft Dynamics MCP OAuth", () => {
         "https://contoso.crm.dynamics.com/api/data/v9.1/accounts",
         "https://contoso.crm.dynamics.com/XRMServices/2011/Organization.svc",
         "https://other.crm.dynamics.com/api/data/v9.2/accounts",
+      ])
+        expect((await at(outside)).status).not.toBe("ok");
+    } finally {
+      provider.restore();
+    }
+  }, 30_000);
+
+  test("a Finance and Operations grant reaches only its environment's data and metadata", async () => {
+    const provider = await fixture();
+    try {
+      const host = "usmf.operations.dynamics.com";
+      const saved = await createConnection(client.db, {
+        accountId: provider.identity.accountId,
+        workspaceId: provider.identity.personalWorkspaceId,
+        subjectId: provider.identity.subjectId,
+        providerDomain: host,
+        kind: "oauth2",
+        grantedScopes: [`https://${host}/.default`],
+        credentialEncrypted: encryptEnvironmentValue(
+          Buffer.from(provider.settings.environmentsEncryptionKey!, "base64"),
+          JSON.stringify({
+            access_token: "fresh",
+            refresh_token: REFRESH_TOKEN,
+            token_type: "Bearer",
+            expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+            mcp_url: FINANCE_MCP_URL,
+            resource: FINANCE_MCP_URL,
+            resource_parameter_supported: false,
+            token_endpoint: ENTRA_TOKEN_URL,
+            refresh_scope: `https://${host}/.default offline_access`,
+            client_id: CLIENT_ID,
+            client_secret: CLIENT_SECRET,
+            token_endpoint_auth_method: "client_secret_post",
+          }),
+        ),
+        expiresAt: new Date(Date.now() + 3_600_000),
+        metadata: { mcpUrl: FINANCE_MCP_URL, resource: FINANCE_MCP_URL },
+        createdBySubjectId: provider.identity.subjectId,
+      });
+      const resolve = buildConnectionTokenResolver(client.db, provider.settings);
+      const at = (destinationUrl: string) =>
+        resolve({
+          workspaceId: provider.identity.personalWorkspaceId,
+          subjectId: provider.identity.subjectId,
+          serverId: "dynamics",
+          destinationUrl,
+          connectionRef: {
+            connectionId: saved.id,
+            providerDomain: host,
+            kind: "oauth2",
+            subjectScope: "subject",
+            resource: FINANCE_MCP_URL,
+          },
+        });
+      for (const inside of [
+        `https://${host}/data/`,
+        `https://${host}/data/CustomersV3?$top=1`,
+        `https://${host}/Metadata/PublicEntities('CustomerV3')`,
+      ])
+        expect(await at(inside)).toMatchObject({ status: "ok" });
+      for (const outside of [
+        `https://${host}/api/services/SomeService`,
+        `https://${host}/database`,
+        `https://${host}/data-x/CustomersV3`,
+        `https://${host}/data/..%2Fapi/services/SomeService`,
+        `https://${host}/data/../api/services/SomeService`,
+        `https://other.operations.dynamics.com/data/CustomersV3`,
       ])
         expect((await at(outside)).status).not.toBe("ok");
     } finally {

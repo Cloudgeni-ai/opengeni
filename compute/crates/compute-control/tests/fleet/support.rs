@@ -604,6 +604,7 @@ pub fn roomy() -> Capacity {
         reads_packs: true,
         sets_aside: true,
         run: None,
+        after_asked_stop: false,
         info: None,
     }
 }

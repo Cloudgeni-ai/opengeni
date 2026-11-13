@@ -38,6 +38,7 @@ use compute_engine::{
 };
 use serde::{Deserialize, Serialize};
 
+use self::guest::Synced;
 use crate::image::{Images, Made, Parts, Suspect, Verified};
 use crate::layout::{Paths, link_kernel, remove_if_present};
 #[cfg(target_os = "linux")]
@@ -259,12 +260,18 @@ async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) 
 
 impl<E: Engine, S: Store> Job<E, S> {
     /// Tells the sandbox's agent-link streams that a VM process for it is
-    /// about to start. None of its VM processes runs then. On an error the
-    /// process must not start (see [`crate::resume::RunClock::launched`]).
-    fn launching(&self) -> io::Result<()> {
-        self.link_clock
-            .as_ref()
-            .map_or(Ok(()), crate::resume::RunClock::launched)
+    /// about to start, `booted` afresh or restored with its memory. None of
+    /// its VM processes runs then. On an error the process must not start
+    /// (see [`crate::resume::RunClock::launched`] and
+    /// [`crate::resume::RunClock::booted`]).
+    fn launching(&self, booted: bool) -> io::Result<()> {
+        self.link_clock.as_ref().map_or(Ok(()), |clock| {
+            if booted {
+                clock.booted()
+            } else {
+                clock.launched()
+            }
+        })
     }
 
     /// Runs `step` and reports how it went and what VM remains. A step that
@@ -364,6 +371,7 @@ impl<E: Engine, S: Store> Job<E, S> {
             | Step::Compress
             | Step::Save
             | Step::Drop
+            | Step::End
             | Step::Checkpoint => {
                 let Some(live) = self.live.take() else {
                     // The VM vanished between the decision and the step; the
@@ -376,6 +384,7 @@ impl<E: Engine, S: Store> Job<E, S> {
                     Step::Compress => self.compress(live).await,
                     Step::Save => self.save(live).await,
                     Step::Checkpoint => self.checkpoint(live).await,
+                    Step::End => self.end_unsaved(live).await,
                     _ => self.end_process(live).await,
                 }
             }
@@ -493,14 +502,20 @@ impl<E: Engine, S: Store> Job<E, S> {
     /// time from the record. Recorded first, so a pause that fails to be
     /// recorded leaves the VM as it was.
     async fn pause(&mut self, live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
-        if !self.sync_guest().await {
-            return (Outcome::Cancelled, After::Kept(live));
-        }
-        if self
-            .record
-            .last_used_ms
-            .is_none_or(|was| was < self.last_used_ms)
-            && let Err(error) = self.commit(Change::new()).await
+        // A guest that did not say it wrote its files out is paused all the
+        // same, and recorded so: until it runs again, its VM is not ended
+        // without its memory saved (see `Record::unsynced`).
+        let unsynced = match self.sync_guest().await {
+            Synced::Cancelled => return (Outcome::Cancelled, After::Kept(live)),
+            Synced::Written => false,
+            Synced::Unanswered => true,
+        };
+        if (self.record.unsynced != unsynced
+            || self
+                .record
+                .last_used_ms
+                .is_none_or(|was| was < self.last_used_ms))
+            && let Err(error) = self.commit(Change::new().unsynced(unsynced)).await
         {
             return (state_failure(&error), After::Kept(live));
         }
@@ -674,6 +689,43 @@ impl<E: Engine, S: Store> Job<E, S> {
         let outcome = self
             .end_with_memory(live.vm, live.memory, Outcome::Done)
             .await;
+        (outcome, After::NoVm)
+    }
+
+    /// Ends the VM process of a paused VM with no memory of it saved, which
+    /// frees all of its memory at once and writes nothing: its sandbox's
+    /// memory is not kept, so its programs end here and its next wake boots
+    /// from its disk, which its guest wrote out as it paused. A copy of
+    /// that disk in the store stays the sandbox's copy, since the disk has
+    /// not changed since. Memory images an earlier save left on the host
+    /// go, as nothing wakes from them again.
+    async fn end_unsaved(&mut self, live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
+        // The core ends a VM so only when no copy holds its memory; this
+        // is a guard, and keeps the record from vouching for an image
+        // about to go.
+        if self.record.image
+            && let Err(error) = self.commit(Change::new().image(false)).await
+        {
+            return (state_failure(&error), After::Kept(live));
+        }
+        live.stopping.store(true, Ordering::Release);
+        let outcome = self
+            .end_with_memory(live.vm, live.memory, Outcome::Done)
+            .await;
+        if outcome == Outcome::Done {
+            let paths = self.paths.clone();
+            let cleared = blocking(move || {
+                withdraw_base(&paths)?;
+                remove_if_present(&paths.snapshot.state)?;
+                remove_if_present(&paths.snapshot.memory)?;
+                images_of(&paths).clear()
+            })
+            .await
+            .and_then(|cleared| cleared);
+            if let Err(error) = cleared {
+                tracing::warn!(id = %self.id, %error, "memory images of an ended VM not removed; its next boot removes them");
+            }
+        }
         (outcome, After::NoVm)
     }
 
@@ -1004,7 +1056,7 @@ impl<E: Engine, S: Store> Job<E, S> {
             Err(error) => return (io_failure("boot", error), After::NoVm),
         };
         notes::phase("prepare");
-        if let Err(error) = self.launching() {
+        if let Err(error) = self.launching(true) {
             return (io_failure("boot", error), After::NoVm);
         }
         match self.engine.boot(&self.spec).await {

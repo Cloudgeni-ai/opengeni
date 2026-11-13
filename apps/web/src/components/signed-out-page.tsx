@@ -1,8 +1,12 @@
 import {
-  BoxesIcon,
-  CloudIcon,
+  CreditCardIcon,
   EraserIcon,
+  GitPullRequestIcon,
+  KeyRoundIcon,
+  MailIcon,
   MessageSquareTextIcon,
+  MessagesSquareIcon,
+  MonitorIcon,
   PaletteIcon,
   Table2Icon,
   type LucideIcon,
@@ -23,29 +27,28 @@ type Pitch = {
   emphasis: string;
   lead: string;
   highlights: { icon: LucideIcon; text: string }[];
+  /** The product name beside the wordmark, when it isn't the app. */
+  product?: string;
+  tagline: string;
 };
 
 /** Which audience the panel beside the sign-in form speaks to. */
-export type SignedOutPitch = "general" | "excel";
+export type SignedOutPitch = "general" | "excel" | "console";
 
 const pitches: Record<SignedOutPitch, Pitch> = {
-  // Everyone who signs in on the web sees this: one plain promise first, and
-  // developers in the supporting lines.
+  // Everyone who signs in on the web sees this: agents that do real work in
+  // the person's own apps, matching the public landing page, with concrete
+  // jobs instead of generic examples.
   general: {
-    headline: "Get things done,",
-    emphasis: "just by asking.",
-    lead: "Plan a trip, write a letter, make sense of a bill, or hand off a long task. Developers can build the same agents into their own apps.",
+    headline: "Hand off real work.",
+    emphasis: "Get it back done.",
+    lead: "Agents that work in the background in GitHub, Gmail, Calendar, Slack and more, and check with you before anything goes out.",
     highlights: [
-      { icon: MessageSquareTextIcon, text: "Ask anything, on your computer or your phone" },
-      {
-        icon: CloudIcon,
-        text: "Keeps working on long tasks, even when you close your laptop",
-      },
-      {
-        icon: BoxesIcon,
-        text: "For developers: tools, sandboxes, approvals and observability, ready to use",
-      },
+      { icon: GitPullRequestIcon, text: "Reviews pull requests and fixes failing builds" },
+      { icon: MailIcon, text: "Answers your inbox and preps tomorrow's meetings" },
+      { icon: MonitorIcon, text: "Uses its own computer and browser, day and night" },
     ],
+    tagline: "Your conversations. Your projects. One workspace.",
   },
   // The sign-in window the Excel add-in opens: the person is working in a
   // workbook, so the panel says what the add-in does there, in plain words.
@@ -58,6 +61,21 @@ const pitches: Record<SignedOutPitch, Pitch> = {
       { icon: EraserIcon, text: "Cleans up messy data and formats sheets" },
       { icon: MessageSquareTextIcon, text: "Explains what is in a workbook" },
     ],
+    tagline: "Your conversations. Your projects. One workspace.",
+  },
+  // Opengeni Console's own host: owners and admins of a product that embeds
+  // Opengeni, there to review their users' sessions, cost and keys.
+  console: {
+    headline: "Your product's agents,",
+    emphasis: "in one place.",
+    lead: "Review the sessions your users have with your agents, see what they cost, and manage API keys and members.",
+    highlights: [
+      { icon: MessagesSquareIcon, text: "Your users' questions and answers" },
+      { icon: CreditCardIcon, text: "Billed cost by session and workspace" },
+      { icon: KeyRoundIcon, text: "API keys, members and billing" },
+    ],
+    product: "Console",
+    tagline: "For teams that build with Opengeni.",
   },
 };
 
@@ -76,12 +94,15 @@ export function SignedOutPage({
 }: {
   children: ReactNode;
   legalLinks?: SignedOutLegalLinks | undefined;
-  /** Defaults to the general pitch; "excel" when the Excel add-in opened sign-in. */
+  /**
+   * Defaults to the general pitch; "excel" when the Excel add-in opened
+   * sign-in; "console" on Opengeni Console's own host.
+   */
   pitch?: SignedOutPitch | undefined;
   /** Operator support address, offered as a mailto link when configured. */
   supportEmail?: string | undefined;
 }) {
-  const { headline, emphasis, lead, highlights } = pitches[pitch];
+  const { headline, emphasis, lead, highlights, product, tagline } = pitches[pitch];
   const legal = [
     { href: legalLinks?.privacyPolicyUrl, label: "Privacy", external: true },
     { href: legalLinks?.termsOfServiceUrl, label: "Terms", external: true },
@@ -100,6 +121,9 @@ export function SignedOutPage({
           <div className="flex items-center gap-2.5 text-fg">
             <BrandMark className="w-[31px]" />
             <Wordmark className="text-[23px]" />
+            {product ? (
+              <span className="text-[23px] leading-none font-medium text-fg-muted">{product}</span>
+            ) : null}
           </div>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -126,7 +150,7 @@ export function SignedOutPage({
                 {headline}{" "}
                 <em className="font-serif text-[1.18em] leading-none font-normal">{emphasis}</em>
               </h1>
-              <p className="mt-5 max-w-[330px] text-[15px] leading-[1.6] text-fg-muted">{lead}</p>
+              <p className="mt-5 max-w-[400px] text-[15px] leading-[1.6] text-fg-muted">{lead}</p>
               <ul className="mt-8 space-y-4">
                 {highlights.map(({ icon: Icon, text }) => (
                   <li key={text} className="flex items-start gap-3 text-sm text-fg">
@@ -165,7 +189,7 @@ export function SignedOutPage({
                 </nav>
               ) : null}
             </div>
-            <span>Your conversations. Your projects. One workspace.</span>
+            <span>{tagline}</span>
           </div>
         </footer>
       </div>

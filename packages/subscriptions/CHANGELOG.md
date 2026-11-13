@@ -1,5 +1,13 @@
 # @opengeni/subscriptions
 
+## 6.20.1
+
+## 6.20.0
+
+## 6.19.0
+
+## 6.18.0
+
 ## 6.17.0
 
 ### Patch Changes

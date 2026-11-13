@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import type { Settings } from "@opengeni/config";
+import { metadataWithTurnExecutionPolicyV1 } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import {
   applySessionTurnSettlement,
@@ -682,12 +683,17 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
       replaced: true,
       body: expect.stringContaining(weeklyText),
     });
-    // An unknown reset is said as unknown.
+    // An unknown reset names no time: the message is answered when there is room.
     const unknown = await reconcile(null);
     expect(unknown.events[0]!.payload).toMatchObject({ earliestResetAt: null });
     expect(unknown.events[1]!.payload).toMatchObject({
-      body: expect.stringContaining("no reset time is known"),
+      body: expect.stringContaining(
+        "All Codex subscriptions are busy. Your message will be answered as soon as one has room.",
+      ),
     });
+    expect(String((unknown.events[1]!.payload as { body?: unknown }).body)).not.toMatch(
+      /\d{4}-\d{2}-\d{2}|expected/,
+    );
     expect(await marker()).toMatchObject({ resetsAt: null });
     expect(await rowState(turn)).toMatchObject({
       session_status: "waiting_capacity",
@@ -1550,6 +1556,84 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
       reason: "no_eligible_capacity",
       earliestResetAt: until,
     });
+  });
+
+  test("SUB-WAIT-02: a wait names only the reset of an account whose live list offers the turn's model, and an expired list re-admits accounts, so a waiter re-reads lists before it judges", async () => {
+    const org = await organization();
+    const offers = await sharedConnection(org, "lists-model");
+    const lacks = await sharedConnection(org, "lacks-model");
+    const catalog = async (connectionId: string, slugs: string[], fresh: boolean) =>
+      await shared!.admin`
+        update subscription_connection_quota
+        set model_catalog_slugs = ${slugs}::text[], model_catalog_refresh_generation = 1,
+          model_catalog_observed_at = now() - interval '2 minutes',
+          model_catalog_expires_at = now() + ${fresh ? "1 hour" : "-1 minute"}::interval
+        where connection_id = ${connectionId}::uuid`;
+    // The account that can serve the model resets in a day; one whose plan
+    // lacks it resets in ten minutes (a Free account's included usage).
+    const servesAt = Date.now() + 86_400_000;
+    const lacksAt = Date.now() + 600_000;
+    await exhaust(org, offers, servesAt);
+    await exhaust(org, lacks, lacksAt);
+    const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    const accepted = async (latencyMode: "standard" | "ultrafast") =>
+      await shared!.admin`
+        update session_turns set metadata = ${shared!.admin.json(
+          metadataWithTurnExecutionPolicyV1({}, {
+            schemaVersion: 1,
+            definitionVersion: `sha256:${"a".repeat(64)}`,
+            requestedModelId: MODEL,
+            productModelId: MODEL,
+            modelSource: "explicit",
+            providerId: "codex-subscription",
+            upstreamModelId: "gpt-5.5",
+            wireApi: "responses",
+            reasoningEffort: "medium",
+            reasoningSource: "explicit",
+            latencyMode,
+            latencyModeSource: "explicit",
+            credentialSource: { kind: "connected_subscription", provider: "codex" },
+            billing: { metering: "external", upstreamPayer: "connected_subscription" },
+          } as never) as never,
+        )}::jsonb
+        where id = ${turn.identity.turnId}::uuid`;
+    await accepted("standard");
+    await catalog(offers, ["gpt-5.5"], true);
+    await catalog(lacks, ["gpt-5.5-mini"], true);
+    // Fresh lists: the wait ends when the account that serves the model resets.
+    expect(await evaluate(turn)).toMatchObject({
+      kind: "wait",
+      reason: "no_eligible_capacity",
+      earliestResetAt: new Date(servesAt),
+    });
+    // An expired list counts its account as possibly serving the model: the
+    // evaluation then quotes the reset of an account that cannot serve it.
+    // This is why a waiter's reconcile re-reads the lists, as the resumed
+    // turn does, before it judges.
+    await catalog(lacks, ["gpt-5.5-mini"], false);
+    expect(await evaluate(turn)).toMatchObject({ earliestResetAt: new Date(lacksAt) });
+
+    // An Ultrafast turn that no account offers at that tier: the account
+    // with capacity is not eligible and no reset can end that, so the wait
+    // names no time.
+    await accepted("ultrafast");
+    await exhaust(org, offers, null);
+    await catalog(offers, ["gpt-5.5"], true);
+    await catalog(lacks, ["gpt-5.5-mini"], true);
+    expect(await evaluate(turn)).toMatchObject({
+      kind: "wait",
+      reason: "no_eligible_capacity",
+      earliestResetAt: null,
+    });
+    // With every list expired, the same pool looks runnable: a reconcile
+    // judging these stored lists resumed the turn, and the turn, after
+    // reading the lists, parked again at once.
+    await catalog(offers, ["gpt-5.5"], false);
+    await catalog(lacks, ["gpt-5.5-mini"], false);
+    expect(await evaluate(turn)).toMatchObject({ kind: "run", connectionId: offers });
+    await catalog(offers, ["gpt-5.5", "gpt-5.5@ultrafast"], true);
+    await catalog(lacks, ["gpt-5.5-mini"], true);
+    expect(await evaluate(turn)).toMatchObject({ kind: "run", connectionId: offers });
   });
 
   test("an explicit pin refused mid-turn waits on the pinned account instead of failing over", async () => {

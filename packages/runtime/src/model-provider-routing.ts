@@ -311,6 +311,9 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
         }
         if (isUnknownFinishReason(finishReason)) throw new UnknownModelFinishReasonError();
       }
+      // An output-limit stop carries the Responses `incomplete` shape, as the
+      // Claude adapter's does, so the run can tell it from a finished response.
+      const outputLimited = finishReason === "length";
       yield event.type === "response_done"
         ? {
             ...event,
@@ -323,12 +326,24 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
                         ...event.response.usage,
                         inputTokensDetails: sdkChatInputTokenDetails(inputTokensDetails),
                       },
-                      // Match non-streaming Chat's providerData.usage evidence so
-                      // telemetry retains invalid-field diagnostics and unknowns
-                      // rather than mistaking SDK sanitization for provider zero.
+                    }
+                  : {}),
+                ...(inputTokensDetails || outputLimited
+                  ? {
                       providerData: {
                         ...event.response.providerData,
-                        usage: { prompt_tokens_details: inputTokensDetails },
+                        // Match non-streaming Chat's providerData.usage evidence so
+                        // telemetry retains invalid-field diagnostics and unknowns
+                        // rather than mistaking SDK sanitization for provider zero.
+                        ...(inputTokensDetails
+                          ? { usage: { prompt_tokens_details: inputTokensDetails } }
+                          : {}),
+                        ...(outputLimited
+                          ? {
+                              status: "incomplete",
+                              incomplete_details: { reason: "max_output_tokens" },
+                            }
+                          : {}),
                       },
                     }
                   : {}),

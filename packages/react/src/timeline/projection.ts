@@ -256,9 +256,16 @@ export function buildTimeline(
   // Messages drawn from streamed text that no completion has settled yet. A
   // Steer that cuts the answer short leaves its unfinished text here.
   const unsettledStreamedMessages = new Set<AgentMessageItem>();
-  // Steer bubbles drawn while the current turn still ran. The turn's answer
-  // was written before them, so a handover keeps that answer above them.
-  let steerBubblesAwaitingHandover: UserMessageItem[] = [];
+  // Steer bubbles drawn while a turn still ran, with that turn. The turn's
+  // answer was written before them, so its handover keeps that answer above
+  // them. A Steer accepted while no turn ran starts its own turn: everything
+  // after it was written after it, so it waits for no handover.
+  let steerBubblesAwaitingHandover: Array<{ bubble: UserMessageItem; turnId: string }> = [];
+  // The turn running at this point of the history. A bounded replay can begin
+  // inside a turn, so that turn's own activity also counts as running, unless
+  // its end is already in view (late receipts follow some ends).
+  let runningTurnId: string | null = null;
+  const endedTurnIds = new Set<string>();
   const humanInputRequests = humanInputRequestsById(events);
   const humanInputToolCallIds = new Set(
     [...humanInputRequests.values()]
@@ -543,6 +550,35 @@ export function buildTimeline(
       presentationTurnId = turnId;
     }
     if (
+      turnId &&
+      !event.duplicateOfEventId &&
+      (!event.turnAssociation || event.turnAssociation === "current")
+    ) {
+      if (event.type === "turn.started") {
+        runningTurnId = turnId;
+        endedTurnIds.delete(turnId);
+        // Only one turn runs at a time: a Steer drawn during another turn
+        // can no longer be handed over by it.
+        steerBubblesAwaitingHandover = steerBubblesAwaitingHandover.filter(
+          (awaiting) => awaiting.turnId === turnId,
+        );
+      } else if (
+        event.type === "turn.completed" ||
+        event.type === "turn.failed" ||
+        event.type === "turn.cancelled" ||
+        event.type === "turn.superseded"
+      ) {
+        endedTurnIds.add(turnId);
+        if (runningTurnId === turnId) runningTurnId = null;
+      } else if (
+        runningTurnId === null &&
+        isAgentActivityEvent(event.type) &&
+        !endedTurnIds.has(turnId)
+      ) {
+        runningTurnId = turnId;
+      }
+    }
+    if (
       openWaitNotice &&
       (event.type === "user.message" ||
         event.type === "system.update.delivered" ||
@@ -693,8 +729,11 @@ export function buildTimeline(
           occurredAt: event.occurredAt,
         };
         items.push(userMessage);
-        if (payload.delivery === "steer" || payload.routing === "accepted_for_steering") {
-          steerBubblesAwaitingHandover.push(userMessage);
+        if (
+          runningTurnId !== null &&
+          (payload.delivery === "steer" || payload.routing === "accepted_for_steering")
+        ) {
+          steerBubblesAwaitingHandover.push({ bubble: userMessage, turnId: runningTurnId });
         }
         break;
       }
@@ -1409,7 +1448,16 @@ export function buildTimeline(
         // Most shutdowns save the workspace and say nothing. Only a shutdown
         // that could not save it, or saved it without rebuildable folders,
         // is worth telling the person.
-        if (payload.captureAbandoned === true) {
+        if (payload.drainReason === "group_end") {
+          // Deleted with nothing saved, because every chat of it was archived.
+          items.push({
+            kind: "notice",
+            id: event.id,
+            tone: "input",
+            text: t("timeline.projection.sandboxDeletedWhileArchived"),
+            occurredAt: event.occurredAt,
+          });
+        } else if (payload.captureAbandoned === true) {
           const unsavedSince =
             typeof payload.unsavedSince === "string" ? new Date(payload.unsavedSince) : null;
           items.push({
@@ -2023,10 +2071,13 @@ export function buildTimeline(
           // while this request still streamed: a late completion must not
           // carry finished text below it either.
           const cutOffText = stringValue(payload.cutOffText);
+          // Only the Steers drawn while this turn ran; a history without a
+          // turn id cannot tell, so it keeps every waiting Steer.
+          const handoverBubbles = steerBubblesAwaitingHandover
+            .filter((awaiting) => turnId === null || awaiting.turnId === turnId)
+            .map((awaiting) => awaiting.bubble);
           const steerBoundary = Math.min(
-            ...steerBubblesAwaitingHandover
-              .map((bubble) => items.indexOf(bubble))
-              .filter((index) => index >= 0),
+            ...handoverBubbles.map((bubble) => items.indexOf(bubble)).filter((index) => index >= 0),
             items.length,
           );
           const isTurnMessage = (item: TimelineItem): item is AgentMessageItem =>
@@ -2066,8 +2117,8 @@ export function buildTimeline(
               items.splice(index, 1);
               unsettledStreamedMessages.delete(item);
             }
-            if (steerBubblesAwaitingHandover.length > 0) {
-              const bubbleIndexes = steerBubblesAwaitingHandover
+            if (handoverBubbles.length > 0) {
+              const bubbleIndexes = handoverBubbles
                 .map((bubble) => items.indexOf(bubble))
                 .filter((index) => index >= 0);
               if (bubbleIndexes.length > 0) insertAt = Math.min(...bubbleIndexes);
@@ -4747,11 +4798,12 @@ const ACTION_CAPACITY_WAIT_REASONS: ReadonlySet<string> = new Set([
 const ACTION_CAPACITY_WAIT_CODE = /_(?:allocator_disabled|relogin_required|account_forbidden)$/;
 
 /**
- * A quota or capacity wait reads as "Usage limit reached" with one plain line
- * of guidance. It never promises that the work continues by itself: the
- * reader decides whether to wait for the quota to reset or to switch. Only a
- * wait that a person must resolve (reconnect, re-enable, choose another
- * account) keeps its recorded, actionable reason and is not labelled a limit.
+ * A quota or capacity wait reads as "Waiting for capacity" with one plain
+ * line: the message is answered as soon as there is room (the waiting turn
+ * stays queued and resumes by itself when an account can serve it), or
+ * sooner on another model. It names no time: the timeline cannot keep a
+ * time current. Only a wait that a person must resolve (reconnect,
+ * re-enable, choose another account) keeps its recorded, actionable reason.
  */
 function capacityWaitPresentation(
   t: OpenGeniText,
@@ -4789,8 +4841,9 @@ function capacityWaitPresentation(
   };
 }
 
-const CAPACITY_LIMIT_LABEL = (t: OpenGeniText) => t("timeline.projection.usageLimitReached");
-const CAPACITY_LIMIT_DETAIL = (t: OpenGeniText) => t("timeline.projection.tryAgainAfterYourQuota");
+const CAPACITY_LIMIT_LABEL = (t: OpenGeniText) => t("timeline.projection.waitingForCapacity");
+const CAPACITY_LIMIT_DETAIL = (t: OpenGeniText) =>
+  t("timeline.projection.messageAnsweredWhenThereIsRoom");
 
 /** Lifecycle evidence that a capacity wait is over. */
 function endsCapacityWait(event: SessionEvent, payload: Record<string, unknown>): boolean {

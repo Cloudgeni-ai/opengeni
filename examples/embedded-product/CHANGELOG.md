@@ -1,5 +1,63 @@
 # @opengeni/example-embedded-product
 
+## 0.0.81
+
+### Patch Changes
+
+- @opengeni/connect@6.20.1
+- @opengeni/contracts@6.20.1
+- @opengeni/react@6.20.1
+- @opengeni/sdk@6.20.1
+
+## 0.0.80
+
+### Patch Changes
+
+- Updated dependencies [60a33cb]
+- Updated dependencies [c624443]
+- Updated dependencies [ed6b66c]
+- Updated dependencies [ae3972e]
+- Updated dependencies [e37485b]
+- Updated dependencies [9c17a87]
+  - @opengeni/react@6.20.0
+  - @opengeni/sdk@6.20.0
+  - @opengeni/contracts@6.20.0
+  - @opengeni/connect@6.20.0
+
+## 0.0.79
+
+### Patch Changes
+
+- Updated dependencies [1e29039]
+- Updated dependencies [a85adef]
+- Updated dependencies [973329a]
+- Updated dependencies [b349ca0]
+- Updated dependencies [226fe73]
+  - @opengeni/react@6.19.0
+  - @opengeni/sdk@6.19.0
+  - @opengeni/contracts@6.19.0
+  - @opengeni/connect@6.19.0
+
+## 0.0.78
+
+### Patch Changes
+
+- Updated dependencies [f313a0e]
+- Updated dependencies [6813960]
+- Updated dependencies [9188c1d]
+- Updated dependencies [3bc721a]
+- Updated dependencies [3b8f7da]
+- Updated dependencies [d83e5f2]
+- Updated dependencies [3105a8b]
+- Updated dependencies [a16189c]
+- Updated dependencies [73c3e82]
+- Updated dependencies [89cf4ba]
+- Updated dependencies [89cf4ba]
+  - @opengeni/contracts@6.18.0
+  - @opengeni/react@6.18.0
+  - @opengeni/sdk@6.18.0
+  - @opengeni/connect@6.18.0
+
 ## 0.0.77
 
 ### Patch Changes

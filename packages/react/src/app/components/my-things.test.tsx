@@ -7,6 +7,12 @@ import type {
   OwnResourceReachWorkspace,
 } from "@opengeni/sdk";
 
+import {
+  PERSONAL_GITHUB_CREDENTIAL_ROLE,
+  PERSONAL_GITHUB_PROVIDER_DOMAIN,
+  PERSONAL_GITHUB_PROVIDER_FAMILY,
+} from "@opengeni/contracts/personal-github";
+
 GlobalRegistrator.register();
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true;
@@ -14,7 +20,7 @@ afterAll(() => GlobalRegistrator.unregister());
 
 const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
-const { MyThings, planTitle, whereItWorksSummary } = await import("./my-things");
+const { MyThings, planTitle, removeOwnLogin, whereItWorksSummary } = await import("./my-things");
 
 function row(
   name: string,
@@ -124,6 +130,9 @@ function client(listed: OwnResource[] | Error) {
     listOwnConnectionAccounts: mock(async () => [
       {
         id: LOGIN,
+        workspaceId: "home",
+        version: 3,
+        status: "active",
         authorityId: "55555555-5555-4555-8555-555555555555",
         subjectId: "user:sam",
         kind: "oauth",
@@ -137,6 +146,8 @@ function client(listed: OwnResource[] | Error) {
     setOwnResourceReach: mock(async () => {
       throw new Error("not used");
     }),
+    deleteConnection: mock(async () => ({}) as ConnectionMetadata),
+    disconnectPersonalGitHub: mock(async () => ({}) as ConnectionMetadata),
   };
 }
 
@@ -194,3 +205,48 @@ test("My things says it couldn't load and can try again", async () => {
   expect(fake.listOwnResources).toHaveBeenCalledTimes(2);
   await view.unmount();
 });
+
+test("your own GitHub account is removed with its own disconnect", async () => {
+  const fake = client(resources);
+  await removeOwnLogin(fake, {
+    id: LOGIN,
+    workspaceId: "home",
+    version: 7,
+    providerDomain: PERSONAL_GITHUB_PROVIDER_DOMAIN,
+    kind: "oauth2",
+    metadata: {
+      credentialRole: PERSONAL_GITHUB_CREDENTIAL_ROLE,
+      providerFamily: PERSONAL_GITHUB_PROVIDER_FAMILY,
+      providerPrincipalId: "1",
+      githubUserId: "1",
+      githubLogin: "sam",
+      oauthEnvironment: "production",
+      oauthClientMarker: "0".repeat(32),
+      credentialBindingId: "66666666-6666-4666-8666-666666666666",
+      connectedAt: "2026-11-01T00:00:00Z",
+      lastVerifiedAt: "2026-11-01T00:00:00Z",
+    },
+  } as unknown as ConnectionMetadata);
+  expect(fake.deleteConnection).not.toHaveBeenCalled();
+  expect(fake.disconnectPersonalGitHub).toHaveBeenCalledWith(
+    "home",
+    LOGIN,
+    expect.objectContaining({ expectedVersion: 7 }),
+  );
+});
+
+// Radix caches DOM availability on import: the sheet tests run in their own process.
+test("a login of your own can be removed from My things", async () => {
+  const child = Bun.spawn({
+    cmd: [process.execPath, "test", "./my-things-remove.dom-fixture.tsx"],
+    cwd: import.meta.dir,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  expect(exitCode, `${stdout}\n${stderr}`).toBe(0);
+}, 15_000);

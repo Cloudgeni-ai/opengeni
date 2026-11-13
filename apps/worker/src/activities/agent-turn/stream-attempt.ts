@@ -936,6 +936,9 @@ export async function runTurnStreamAttempt(
   // Set when the stream ended for a Steer, at a step boundary or by cutting
   // the model request short; the stream is then settled as a handover.
   let steerHandover = false;
+  // Set when the stream ended because a model response had no text and no
+  // tool call; the turn then gets one reply reminder, never a re-sample loop.
+  let contentlessResponseHandover = false;
   // Streamed text of a cut-off request that never completed. Never model
   // input; the handover event carries it so the timeline keeps showing it.
   let preemptedCutOffText = "";
@@ -1015,6 +1018,7 @@ export async function runTurnStreamAttempt(
       throw new Error("Run input was not prepared");
     }
     steerHandover = false;
+    contentlessResponseHandover = false;
     let compactionHandover: Error | undefined;
     // Keep the fence in step with a Steer the watch already noticed.
     eventing.toolCancellationFenceRef.current?.setForegroundWaitYield(
@@ -1279,6 +1283,9 @@ export async function runTurnStreamAttempt(
           onModelResponse: (event) => {
             responseCreditPolicyRevisions.add(creditPolicyRevision);
             return modelCallAdmission.onModelResponse(event);
+          },
+          onContentlessModelResponse: () => {
+            contentlessResponseHandover = true;
           },
           ...(steerWatch ? { modelPreemption: () => steerWatch?.signal() } : {}),
           signal: runtimeCancellationSignal,
@@ -2687,6 +2694,7 @@ export async function runTurnStreamAttempt(
         toolsExecuted: toolsExecuted || finalReplyNudged || durableReplyFacts.toolsExecuted,
         completedGoal: durableReplyFacts.completedGoal,
         suppressedEcho,
+        contentlessResponse: contentlessResponseHandover,
       })
     ) {
       await historySink.reconcileConversationTruth({ requireDurable: true });

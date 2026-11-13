@@ -1,5 +1,64 @@
 # @opengeni/config
 
+## 6.20.1
+
+### Patch Changes
+
+- @opengeni/codex@6.20.1
+- @opengeni/contracts@6.20.1
+- @opengeni/xai-subscription@6.20.1
+
+## 6.20.0
+
+### Minor Changes
+
+- 0e273b0: Opengeni Console can run as its own platform on a `console.*` or `*.console.*` host (console.opengeni.ai, staging.console.opengeni.ai). There, every page stays in Console: Console's own sign-in, Members, Usage and billing and the organization name inside Console, an account menu with Sign out, and no links into the app. Verification emails, invitation links, Google sign-in returns and Stripe returns open on the allowed host the request came from (`OPENGENI_BETTER_AUTH_ALLOWED_HOSTS`).
+
+  New optional `OPENGENI_BETTER_AUTH_COOKIE_PREFIX` renames the auth cookies (for example to keep staging apart from production on a shared parent domain). Unset keeps the current cookie names, so existing sessions stay signed in.
+
+  Console usage by model now reports calls and input, output and cached tokens from the credit ledger instead of zeros. GitHub sign-in is hidden on the Console host.
+
+- e37485b: An organization's Anthropic API connection can hold several API keys, for example one per Anthropic organization whose credits it uses. The connection's own key stays the first, so an organization with one key works exactly as before, and model ids stay `organization-anthropic/…`. Admins add, rename and remove keys under Models on the Anthropic API page; each new key is checked with Anthropic's free model listing first, stored encrypted and never shown again.
+
+  Each chat keeps one key, so its prompt cache stays warm, and moves to another key only when Anthropic refuses its key for lack of credits. A refused key is marked **Out of credits** and left out until an admin chooses **Serve again**; when every key is out of credits, the request fails without being sent. Rate limits keep their usual handling. Claude subscription models never use these keys, and nothing buys credits or enables top-ups.
+
+  New routes under `/v1/organizations/:organizationId/model-providers/anthropic/api-keys`; the SDK calls them with `listOrganizationAnthropicApiKeys`, `addOrganizationAnthropicApiKey`, `updateOrganizationAnthropicApiKey`, `removeOrganizationAnthropicApiKey` and `serveOrganizationAnthropicApiKeyAgain`.
+
+### Patch Changes
+
+- 52ef65b: An organization's several Anthropic API keys are no longer part of a model's definition. Before this, the first turn of a new chat on an organization Anthropic API model with several keys failed after five recoveries, and adding a key or a key running out of credits failed the turns already running.
+- Updated dependencies [ae3972e]
+- Updated dependencies [e37485b]
+- Updated dependencies [6c10a4d]
+- Updated dependencies [9c17a87]
+  - @opengeni/contracts@6.20.0
+  - @opengeni/codex@6.20.0
+  - @opengeni/xai-subscription@6.20.0
+
+## 6.19.0
+
+### Patch Changes
+
+- Updated dependencies [a85adef]
+  - @opengeni/contracts@6.19.0
+  - @opengeni/codex@6.19.0
+  - @opengeni/xai-subscription@6.19.0
+
+## 6.18.0
+
+### Patch Changes
+
+- 9188c1d: Claude accounts now show whether paid usage credits ("extra usage") are on. The usage read takes the account's usage-credits setting from the reset programs' `event_props.extra_usage_state` (`enabled`, `disabled`, `not_configured`) and keeps the `extra_usage` object when Claude sends it (whether the credits can pay right now, and the month's cap and spend in cents). Before, the usage-credits state came only from `extra_usage`, which reads that skip spend reporting always answer with `null`, so an account with usage credits switched on showed as having none. `ClaudeExtraUsage` gains `state`, and `claudeUsageCreditsState()` gives `on`, `off` or `unknown`: a missing or unrecognized report is unknown, never off. The pooled usage response gains `usageCredits` (Claude only), each pooled account's state. Account rows carry a "Usage credits on" chip, the account page says whether usage credits are on, off or not reported, and the pooled-limits card and the organization's Claude heading name or count the accounts that have them on. This is read and display only: Opengeni never turns usage credits on, buys credits or changes auto-reload.
+- Updated dependencies [f313a0e]
+- Updated dependencies [6813960]
+- Updated dependencies [9188c1d]
+- Updated dependencies [3105a8b]
+- Updated dependencies [a16189c]
+- Updated dependencies [89cf4ba]
+  - @opengeni/contracts@6.18.0
+  - @opengeni/codex@6.18.0
+  - @opengeni/xai-subscription@6.18.0
+
 ## 6.17.0
 
 ### Minor Changes

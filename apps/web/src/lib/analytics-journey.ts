@@ -52,6 +52,7 @@ const TOP_LEVEL_PAGES: ReadonlyArray<readonly [RegExp, string]> = [
   [/^\/setup-account$/, "setup-account"],
   [/^\/account-auth$/, "account-auth"],
   [/^\/settings\/security$/, "personal-security"],
+  [/^\/console(\/.*)?$/, "console"],
 ];
 const SECTIONS = new Set([
   "general",

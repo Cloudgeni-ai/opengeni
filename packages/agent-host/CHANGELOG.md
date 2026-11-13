@@ -1,5 +1,40 @@
 # @opengeni/agent-host
 
+## 6.20.1
+
+### Patch Changes
+
+- @opengeni/sdk@6.20.1
+
+## 6.20.0
+
+### Patch Changes
+
+- Updated dependencies [c624443]
+- Updated dependencies [e37485b]
+  - @opengeni/sdk@6.20.0
+
+## 6.19.0
+
+### Patch Changes
+
+- 65cb26f: Agent 0.1.161 ships the embedded browser controller that relaunches a managed browser whose process was killed while the controller was stopping, instead of refusing it permanently.
+- 227650c: A Connected Machine update the server stops hearing about no longer stays stuck. An update outlives the connection its request arrived on, since each connection lasts only as long as its five-minute broker credential, but the agent sent its progress through that connection, so progress after it closed could be lost: a failed or still-waiting update could read as `waiting_for_idle` with no blockers for good, on the release promoted back then, and the server never asked again because an accepted update was the agent's to finish. The agent now reports update progress through its current connection. The server treats an unfinished update it has not heard about for 30 minutes (an unanswered request after 10) as lost, and the next heartbeat, or Update now, replaces it with a request for the release promoted now. An agent still carrying the old update refuses it as busy updating and is asked again later. `beginEnrollmentAgentUpdate` takes an optional `replaceUnfinishedBefore` for this.
+- Updated dependencies [a85adef]
+  - @opengeni/sdk@6.19.0
+
+## 6.18.0
+
+### Patch Changes
+
+- bd21ead: A finished command no longer keeps a file descriptor open while the agent holds its output. When a command's output spills to disk, the agent kept the spool segment's append handle open until the output was released or evicted, so every completed command waiting for its final acknowledgement held one descriptor. Retained results can number in the thousands, which a 1024 soft limit can't cover. A busy sandbox then hit `EMFILE` and couldn't start `/bin/sh` for new commands. Writing the command's exit record now closes the handle, and reads open their own as before. Running commands are unchanged.
+- Updated dependencies [f313a0e]
+- Updated dependencies [6813960]
+- Updated dependencies [9188c1d]
+- Updated dependencies [3105a8b]
+- Updated dependencies [a16189c]
+  - @opengeni/sdk@6.18.0
+
 ## 6.17.0
 
 ### Patch Changes

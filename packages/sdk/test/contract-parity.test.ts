@@ -13,6 +13,8 @@ import {
   BeginSessionRealtimeRequest as ContractBeginSessionRealtimeRequest,
   CreateBillingPortalRequest as ContractCreateBillingPortalRequest,
   CreateBillingPortalResponse as ContractCreateBillingPortalResponse,
+  ListBillingReceiptsQuery as ContractListBillingReceiptsQuery,
+  ListBillingReceiptsResponse as ContractListBillingReceiptsResponse,
   CAPABILITY_DESCRIPTORS,
   ClientConfig as ContractClientConfig,
   ClaudeSubscriptionUsage as ContractClaudeSubscriptionUsage,
@@ -164,6 +166,8 @@ import type {
   BeginSessionRealtimeRequest,
   CreateBillingPortalRequest,
   CreateBillingPortalResponse,
+  ListBillingReceiptsQuery,
+  ListBillingReceiptsResponse,
   CreateKnowledgeMemoryRequest,
   FirstPartyMcpToolName,
   KnowledgeMemory,
@@ -316,6 +320,21 @@ describe("SDK / contracts parity", () => {
         contractResponseAcceptsSdk,
       ].every((fn) => typeof fn === "function"),
     ).toBe(true);
+  });
+
+  test("billing receipt shapes stay in parity", () => {
+    const query = (
+      value: ListBillingReceiptsQuery,
+    ): z.input<typeof ContractListBillingReceiptsQuery> => value;
+    const pageFromSdk = (
+      value: ListBillingReceiptsResponse,
+    ): z.input<typeof ContractListBillingReceiptsResponse> => value;
+    const pageFromContract = (
+      value: z.infer<typeof ContractListBillingReceiptsResponse>,
+    ): ListBillingReceiptsResponse => value;
+    expect([query, pageFromSdk, pageFromContract].every((fn) => typeof fn === "function")).toBe(
+      true,
+    );
   });
 
   test("personal-resource management request and page shapes stay in parity", () => {

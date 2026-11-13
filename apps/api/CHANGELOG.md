@@ -1,5 +1,213 @@
 # @opengeni/api-router
 
+## 6.20.1
+
+### Patch Changes
+
+- 66b7a83: People without access to a workspace can open its Slack link again. The Slack user-link routes (`POST …/integrations/slack/user-link-intents`, `GET …/:requestId`, and `POST …/:requestId/link`, `/request-access` and `/cancel`) were behind the workspace access check, so an organization member outside the workspace got "workspace access denied" instead of linking their Slack account, and anyone else couldn't ask for access. The routes keep their own checks (a managed sign-in, the signed Slack link or the request it prepared for that person, and workspace-scoped reads and writes).
+  - @opengeni/agent-proto@6.20.1
+  - @opengeni/artifact-tool@6.20.1
+  - @opengeni/capabilities@6.20.1
+  - @opengeni/codemode@6.20.1
+  - @opengeni/codex@6.20.1
+  - @opengeni/config@6.20.1
+  - @opengeni/contracts@6.20.1
+  - @opengeni/core@6.20.1
+  - @opengeni/db@6.20.1
+  - @opengeni/decisions@6.20.1
+  - @opengeni/documents@6.20.1
+  - @opengeni/events@6.20.1
+  - @opengeni/github@6.20.1
+  - @opengeni/interaction@6.20.1
+  - @opengeni/network@6.20.1
+  - @opengeni/observability@6.20.1
+  - @opengeni/runtime@6.20.1
+  - @opengeni/storage@6.20.1
+  - @opengeni/tool-gateway@6.20.1
+  - @opengeni/vaults@6.20.1
+  - @opengeni/vaults-bitwarden@6.20.1
+  - @opengeni/vaults-keeper@6.20.1
+  - @opengeni/vaults-onepassword@6.20.1
+  - @opengeni/vaults-protonpass@6.20.1
+  - @opengeni/xai-subscription@6.20.1
+
+## 6.20.0
+
+### Minor Changes
+
+- 0e273b0: Opengeni Console can run as its own platform on a `console.*` or `*.console.*` host (console.opengeni.ai, staging.console.opengeni.ai). There, every page stays in Console: Console's own sign-in, Members, Usage and billing and the organization name inside Console, an account menu with Sign out, and no links into the app. Verification emails, invitation links, Google sign-in returns and Stripe returns open on the allowed host the request came from (`OPENGENI_BETTER_AUTH_ALLOWED_HOSTS`).
+
+  New optional `OPENGENI_BETTER_AUTH_COOKIE_PREFIX` renames the auth cookies (for example to keep staging apart from production on a shared parent domain). Unset keeps the current cookie names, so existing sessions stay signed in.
+
+  Console usage by model now reports calls and input, output and cached tokens from the credit ledger instead of zeros. GitHub sign-in is hidden on the Console host.
+
+### Patch Changes
+
+- ae3972e: The Microsoft Dynamics connection now supports Dynamics 365 Business Central. Paste the Business Central web client address (`https://businesscentral.dynamics.com/<tenant>/<environment>?company=…`) and sign in; one connection covers every company in the environment. Agents list companies and entities, query with OData, create, update and delete records and run actions such as posting, through the Business Central API (v2.0) as the signed-in user. Changes ask first by default.
+- cf65a72: Fix several failures seen in production:
+
+  - An attached file whose name merely contains two dots (such as `notes..txt`) no longer fails the turn. Sandbox file names still refuse empty, `.`, `..`, path separators and NUL, and uploads name a bare `.` or `..` `file`.
+  - A completed video from an Only-me chat is delivered to the chat. The reconciliation service read the result as a service actor that could not see the private chat, so the operation retried forever with "Completed video generation lost its retained artifact".
+  - Checking a session's work while the session is being deleted reports it idle instead of failing the activity with `SessionControlInvariantError`.
+  - A chat deleted while its title is generated ends the title operation quietly instead of warning "Independent session title failed".
+  - A caller that disconnects from `POST /v1/workspaces/:workspaceId/tools/{resolve,invoke,target-approvals,manifest}` gets the client-gone 499 (empty body) instead of a 500, counted as `aborted` in `opengeni_tool_target_operations_total`.
+  - A request that reads a session deleted while it runs no longer fails with a 500 "Session … does not exist in its workspace". A request that names that session (for example `GET /v1/workspaces/:workspaceId/machines?sessionId=…`) answers 404 "session not found"; any other request, such as a list whose page included it, answers 409 (retryable only for reads). The missing-session case of `SessionControlInvariantError` is now the `SessionMissingFromWorkspaceError` subclass.
+  - The web app picks its root providers from the rendered route rather than the pending location, so navigating to Security settings or phone sign-in no longer shows "Opengeni app context is not ready".
+  - Temporal "Activity failed" / "Workflow failed" logs add `failureMessageHash` (a hash of the explaining cause's message with identifiers, numbers and quoted values removed) and, for code-authored invariant errors, that template as `failureMessage`.
+
+- 9c17a87: `tool_search` now shows an integration's Connect card itself when a search clearly names one integration the person can connect (exactly one named, by a distinctive mention such as "on Slack", "ClickUp" or "Airtabel"), instead of relying on the agent to call `capability_authorization_request` next. It posts the card through that same tool when the search call is accepted, with the same authorization, tool selection and policy, and does not post it again until the person writes (a first-connection card never stands in for a reconnect card); the search result then says the card is shown. Model calls of the tool are unchanged. Searches naming several integrations, an installed one, or a name used as an ordinary word keep today's notice, as does any search where the card tool answers without a card; when the card call fails or times out, the notice no longer says whether a card was shown.
+
+  Whether a card is in the chat is now stated in every result: `tool_search` results that name a connectable integration carry `connectCard` (`shown`, and when shown its `capabilityId`, `eventId` and `alreadyShown`), and every `capability_authorization_request` result carries `cardShown` (and `alreadyShown` for a repeat from search). `@opengeni/contracts` exports `TOOL_DISCOVERY_CARD_META_KEY`, the request `_meta` key that marks a card request from tool discovery, and `@opengeni/db`'s `appendTurnCapabilityCardOnce` takes an optional `{ sinceLatestMessage }` to reuse a card any turn shows since the person's latest message (only this turn's when no person has written), and now reuses only a card of the same kind (a first connection, or a reconnect of the same connection).
+
+- Updated dependencies [08953be]
+- Updated dependencies [ae3972e]
+- Updated dependencies [0e273b0]
+- Updated dependencies [52ef65b]
+- Updated dependencies [e37485b]
+- Updated dependencies [cf65a72]
+- Updated dependencies [6c10a4d]
+- Updated dependencies [2a207b4]
+- Updated dependencies [9c17a87]
+  - @opengeni/runtime@6.20.0
+  - @opengeni/contracts@6.20.0
+  - @opengeni/db@6.20.0
+  - @opengeni/core@6.20.0
+  - @opengeni/config@6.20.0
+  - @opengeni/observability@6.20.0
+  - @opengeni/codex@6.20.0
+  - @opengeni/codemode@6.20.0
+  - @opengeni/artifact-tool@6.20.0
+  - @opengeni/capabilities@6.20.0
+  - @opengeni/decisions@6.20.0
+  - @opengeni/documents@6.20.0
+  - @opengeni/events@6.20.0
+  - @opengeni/github@6.20.0
+  - @opengeni/interaction@6.20.0
+  - @opengeni/storage@6.20.0
+  - @opengeni/tool-gateway@6.20.0
+  - @opengeni/vaults@6.20.0
+  - @opengeni/vaults-bitwarden@6.20.0
+  - @opengeni/vaults-keeper@6.20.0
+  - @opengeni/vaults-onepassword@6.20.0
+  - @opengeni/vaults-protonpass@6.20.0
+  - @opengeni/agent-proto@6.20.0
+  - @opengeni/network@6.20.0
+  - @opengeni/xai-subscription@6.20.0
+
+## 6.19.0
+
+### Patch Changes
+
+- d374c99: Agents with an image icon post in Slack again. Slack refuses a post whose picture URL is 256 characters or longer, which an image avatar's signed URL could reach on a longer host. New avatar URLs carry a 128-bit signature (older full-length URLs keep working), a picture URL that is still too long is left off, and a post Slack refuses with `invalid_arguments` while carrying a name or picture is sent once more as the app's.
+- Updated dependencies [227650c]
+- Updated dependencies [a85adef]
+- Updated dependencies [973329a]
+- Updated dependencies [7c378ac]
+- Updated dependencies [1b6b22f]
+- Updated dependencies [226fe73]
+  - @opengeni/db@6.19.0
+  - @opengeni/contracts@6.19.0
+  - @opengeni/runtime@6.19.0
+  - @opengeni/core@6.19.0
+  - @opengeni/documents@6.19.0
+  - @opengeni/events@6.19.0
+  - @opengeni/codemode@6.19.0
+  - @opengeni/artifact-tool@6.19.0
+  - @opengeni/capabilities@6.19.0
+  - @opengeni/codex@6.19.0
+  - @opengeni/config@6.19.0
+  - @opengeni/decisions@6.19.0
+  - @opengeni/github@6.19.0
+  - @opengeni/interaction@6.19.0
+  - @opengeni/observability@6.19.0
+  - @opengeni/storage@6.19.0
+  - @opengeni/tool-gateway@6.19.0
+  - @opengeni/vaults@6.19.0
+  - @opengeni/vaults-bitwarden@6.19.0
+  - @opengeni/vaults-keeper@6.19.0
+  - @opengeni/vaults-onepassword@6.19.0
+  - @opengeni/vaults-protonpass@6.19.0
+  - @opengeni/agent-proto@6.19.0
+  - @opengeni/network@6.19.0
+  - @opengeni/xai-subscription@6.19.0
+
+## 6.18.0
+
+### Minor Changes
+
+- f313a0e: An agent's Who can use it has a third choice, `Anyone in <organization>`: a shared agent that full members of its organization may also use from chat integrations, not only its workspace's members. It replaces Slack's per-Slack-workspace option that let linked organization members use an agent, so the agent decides it once and every chat integration follows it. Slack does today, and Teams will read the same setting through the integration-neutral check in `apps/api/src/integrations/organization-agents.ts`.
+
+  - `visibility` on agents (requests and responses) accepts and returns `"organization"` alongside `"private"` and `"workspace"`. Choosing it needs an organization admin (403 otherwise); narrowing it back doesn't. Only me clears it.
+  - Slack's safety checks for these agents are unchanged: the person must be a full member of the connected Slack team, in a conversation only that team can see, with a linked Slack account, and an active, full member of the organization, read live on every message. They are told once that the agent's workspace can see the chat, and the chat runs as the agent's read-only service principal.
+  - The agent page's Slack section no longer has its own open switch. `AgentSlackAvailability.open` still says whether linked organization members can use the agent there, and `PUT …/slack/:connectionId` with `open` still works: it changes the agent's Who can use it, in every Slack workspace.
+  - Migration 1379 adds `agents.organization_access` (default false; rolling). Every write keeps `agent_slack_installs.open` equal to it, and while an agent is in Slack it is open only if every installation is (the column decides only for an agent in no Slack installation), so the previous release behaves the same during the rollout and a change it makes holds, also after a rollback: closing the agent in one Slack workspace closes it everywhere. The one visible effect: if a server on the previous release adds an organization agent to another Slack workspace during the rollout, the agent closes to the organization until an organization admin chooses Anyone in again (the safe direction). A later contract step backfills the column from `open` and stops reading `open`.
+
+  Agents contract (migrations 1380 to 1399): a shared agent is available in every linked Slack workspace at once. The temporary one-Slack-workspace-per-agent limit is gone, with the agent page's Move here; the `agent_slack_single_install` error code is deprecated and never returned, and `putAgentSlackInstall` no longer takes `moveFromOther`. `listAgentsMissingFromSlack` now takes the installation's `connectionId` and lists the shared agents not yet in that installation.
+
+  - The Slack records that pointed at `slack_agents` (channel routes, interactions, user states, proposals, intro posts, suggestions) now reference the agent's installation in `agent_slack_installs`, with the same delete behaviour, and `agent_slack_installs.install_workspace_id` records the installation's own workspace. Before the new keys are validated, migration 1389 cleans up rows that would fail them the way each key's delete rule would (chats and proposals are unlinked and kept; the rest are deleted) and logs the count per table.
+  - Nothing writes `bot_templates` or `slack_agents` any more (an agent's leftover `slack_agents` row is deleted when the agent is renamed, made Only me or removed) and the legacy sync triggers are dropped.
+  - The legacy Slack agents API shows an agent once per installation with the agent's own `version`. Its item routes take an optional `connectionId` query parameter (SDK: the `SlackAgentInstallationOptions` argument); channels and intros of an agent in several installations need it (`slack_agent_installation_required`) unless exactly one of them belongs to the path workspace. Open use and deleting act on the agent itself, as before.
+  - Breaking for direct `@opengeni/db` users: removed the legacy bot template functions (`listBotTemplates`, `getBotTemplate`, `createBotTemplate`, `updateBotTemplate`, `deleteBotTemplate`, `BotTemplateRecord`, `BotTemplateLimitError`) and `lockAgentLegacySlackVersion`; `legacySlackAgentAvatar` is now `agentSlackAvatar`. Use the agents data layer.
+  - Upgrade requirement for self-hosted and embedded deployments: upgrade from a release that contains the agents API switch (#7274) and apply this release only when no running binary is older. Rolling back past that release afterwards is not safe.
+  - Accepted rollout effects while the previous release still serves (or after a rollback to it), for an agent in a second Slack workspace: a route card's agent pick there answers "That agent no longer exists", the legacy Slack agents item routes answer 404 for it, and the previous release's Move here (if it has one) deletes the other Slack workspace's channel settings, which this release then adds back empty. All fail closed and end when this release serves again.
+
+### Patch Changes
+
+- d83e5f2: The agent now continues on its own after a person connects a server the agent asked to add (`custom_mcp_setup_request`, including Microsoft Dynamics environments), as it already does for catalog connect cards. That card is posted before the capability exists, so the continuation now also finds it by the capability's MCP endpoint.
+- 3105a8b: Admin changes that need a passkey now work from the desktop app. The app can't show passkey prompts (Electron has no passkey UI on macOS or Linux, so the prompt never opened and the dialog spun forever), so confirming now opens the person's own browser on the same server. There they use their passkey, with their password manager or device, and the browser then shows a one-time code to type into the app. Only the app session that started the confirmation can use that code, a few wrong codes void it, and it expires after ten minutes, so a forwarded link can't confirm anyone else's session. In the app, Add passkey opens the browser's security page, and passkey sign-in is hidden there. Signing a signed-out account in again from the app's sign-in page now uses that account's own server instead of the app's default one. Passkey prompts and step-up requests that never answer now end with a clear message instead of waiting forever.
+- 07a9375: Listing browsers and Desktops no longer ends the ones on a Connected Machine their chat has moved away from. A browser left there keeps running with its profile, as the refusal to use it from the new machine already says, so moving the chat back continues in the same browser with its sign-ins. Before, any listing (the app polls them) retired it within seconds of a move, even a brief one, and its signed-in state could not be resumed. Ending it still retires it on that machine.
+- 3d2f6ed: Archiving a Knowledge collection now also archives what is only inside it: its sub-collections and the entries that no other live collection holds or live entry cites. Before, they stayed in use and moved to the top of Collections, so archived collections seemed to come back. Undo, or restoring the collection, brings back everything archived with it. Entries that are also in another live collection or cited from outside it, entries you can't change, and anything archived separately keep their state.
+- a16189c: Slack replies no longer show Opengeni links as raw Markdown. An image or link to an artifact (`![Preview](artifact:<id>)`, `[deck](artifact:<id>)`), a chat (`session:<id>`) or a console path now becomes a Slack link to that page in Opengeni, and a `sandbox:` path becomes its label. A clickable thumbnail links with its alt text. Markdown tables become an aligned code block, with each link in a cell numbered and listed under it. Operations an earlier release bound to other bytes keep them on retry. The console's file page opens a Site when an `artifact:<uuid>` link names one, since Sites share the UUID format.
+
+  Native app push registration now says why a deployment can't deliver to the app. `PUT /v1/native-app/push-device` answers 409 with `details.code` `native_push_unavailable` (`NATIVE_PUSH_UNAVAILABLE_DETAIL_CODE`, `isNativePushUnavailableError` in the SDK) when the app ID isn't in `OPENGENI_NATIVE_APP_IDS` or the platform has no push credentials, instead of a bare 400, or of accepting a registration that would never get a push. The iPhone app shows "This server isn't set up to send notifications to this app." instead of "Try again", shows a failed calls change under Calls from agents, and reports its APNs environment from its signing profile, also when it re-registers rotated tokens in the background (it re-registers a stored registration for the wrong environment too).
+
+  The iPhone message field grows with its text again, up to six lines (four with large text on a small screen, and never more than half the room above the keyboard) before it scrolls. On the new architecture iOS reports a field's content size only when its layout changes, so the fixed height the composer set from it never grew past one line and earlier lines scrolled out of view.
+
+- Updated dependencies [f313a0e]
+- Updated dependencies [6813960]
+- Updated dependencies [9188c1d]
+- Updated dependencies [3bc721a]
+- Updated dependencies [d83e5f2]
+- Updated dependencies [3105a8b]
+- Updated dependencies [d83e5f2]
+- Updated dependencies [ea2f259]
+- Updated dependencies [07a9375]
+- Updated dependencies [3d2f6ed]
+- Updated dependencies [35a2a06]
+- Updated dependencies [d83e5f2]
+- Updated dependencies [3c366a7]
+- Updated dependencies [f318955]
+- Updated dependencies [a16189c]
+- Updated dependencies [89cf4ba]
+- Updated dependencies [4c6c0a4]
+- Updated dependencies [c1b19a8]
+- Updated dependencies [917393e]
+  - @opengeni/contracts@6.18.0
+  - @opengeni/core@6.18.0
+  - @opengeni/db@6.18.0
+  - @opengeni/config@6.18.0
+  - @opengeni/observability@6.18.0
+  - @opengeni/runtime@6.18.0
+  - @opengeni/network@6.18.0
+  - @opengeni/artifact-tool@6.18.0
+  - @opengeni/capabilities@6.18.0
+  - @opengeni/codemode@6.18.0
+  - @opengeni/codex@6.18.0
+  - @opengeni/decisions@6.18.0
+  - @opengeni/documents@6.18.0
+  - @opengeni/events@6.18.0
+  - @opengeni/github@6.18.0
+  - @opengeni/interaction@6.18.0
+  - @opengeni/storage@6.18.0
+  - @opengeni/tool-gateway@6.18.0
+  - @opengeni/vaults@6.18.0
+  - @opengeni/vaults-bitwarden@6.18.0
+  - @opengeni/vaults-keeper@6.18.0
+  - @opengeni/vaults-onepassword@6.18.0
+  - @opengeni/vaults-protonpass@6.18.0
+  - @opengeni/xai-subscription@6.18.0
+  - @opengeni/agent-proto@6.18.0
+
 ## 6.17.0
 
 ### Minor Changes

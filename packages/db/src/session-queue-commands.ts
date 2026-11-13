@@ -3410,29 +3410,52 @@ export async function submitHumanPromptInTransaction(
       updatedAt: now,
     })
     .where(eq(schema.sessions.id, input.sessionId));
+  const clearedDraft = {
+    text: "",
+    annotations: [],
+    resources: [],
+    tools: [],
+    toolsProvided: false,
+    // The next message follows the chat's settings again. Store the
+    // ones this Send ran with, which are now the chat's current ones.
+    model: turn.model,
+    reasoningEffort: turn.reasoningEffort,
+    latencyMode: turn.latencyMode,
+    policyFollowsSession: true,
+    sourceTurnId: null,
+    sourceTurnVersion: null,
+    updatedAt: now,
+  };
+  // An accepted Send always moves the draft past the revision it went ahead
+  // from, also when nothing was ever saved (revision 0): a later write that
+  // names that revision (a client keeping a send that got no answer as the
+  // draft) is then refused, so the sent text never comes back as a draft.
   const [nextDraft] = draftHoldsSent
     ? await db
         .update(schema.composerDrafts)
-        .set({
-          revision: storedDraft.revision + 1,
-          text: "",
-          annotations: [],
-          resources: [],
-          tools: [],
-          toolsProvided: false,
-          // The next message follows the chat's settings again. Store the
-          // ones this Send ran with, which are now the chat's current ones.
-          model: turn.model,
-          reasoningEffort: turn.reasoningEffort,
-          latencyMode: turn.latencyMode,
-          policyFollowsSession: true,
-          sourceTurnId: null,
-          sourceTurnVersion: null,
-          updatedAt: now,
-        })
+        .set({ ...clearedDraft, revision: storedDraft.revision + 1 })
         .where(eq(schema.composerDrafts.id, storedDraft.id))
         .returning()
-    : [undefined];
+    : storedDraft === null && input.expectedDraftRevision === 0
+      ? await db
+          .insert(schema.composerDrafts)
+          .values({
+            ...clearedDraft,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            subjectId: input.subjectId,
+            revision: 1,
+          })
+          .onConflictDoNothing({
+            target: [
+              schema.composerDrafts.workspaceId,
+              schema.composerDrafts.sessionId,
+              schema.composerDrafts.subjectId,
+            ],
+          })
+          .returning()
+      : [undefined];
   if (draftHoldsSent && !nextDraft) {
     throw new SessionControlInvariantError("Accepted composer draft did not rotate");
   }

@@ -1,5 +1,145 @@
 # @opengeni/runtime
 
+## 6.20.1
+
+### Patch Changes
+
+- @opengeni/agent-proto@6.20.1
+- @opengeni/capabilities@6.20.1
+- @opengeni/codemode@6.20.1
+- @opengeni/codex@6.20.1
+- @opengeni/config@6.20.1
+- @opengeni/contracts@6.20.1
+- @opengeni/decisions@6.20.1
+- @opengeni/interaction@6.20.1
+- @opengeni/jev@6.20.1
+- @opengeni/network@6.20.1
+- @opengeni/observability@6.20.1
+- @opengeni/sdk@6.20.1
+- @opengeni/tool-gateway@6.20.1
+- @opengeni/vaults@6.20.1
+- @opengeni/xai-subscription@6.20.1
+
+## 6.20.0
+
+### Minor Changes
+
+- ae3972e: The Microsoft Dynamics connection now supports Dynamics 365 Business Central. Paste the Business Central web client address (`https://businesscentral.dynamics.com/<tenant>/<environment>?company=…`) and sign in; one connection covers every company in the environment. Agents list companies and entities, query with OData, create, update and delete records and run actions such as posting, through the Business Central API (v2.0) as the signed-in user. Changes ask first by default.
+- e37485b: An organization's Anthropic API connection can hold several API keys, for example one per Anthropic organization whose credits it uses. The connection's own key stays the first, so an organization with one key works exactly as before, and model ids stay `organization-anthropic/…`. Admins add, rename and remove keys under Models on the Anthropic API page; each new key is checked with Anthropic's free model listing first, stored encrypted and never shown again.
+
+  Each chat keeps one key, so its prompt cache stays warm, and moves to another key only when Anthropic refuses its key for lack of credits. A refused key is marked **Out of credits** and left out until an admin chooses **Serve again**; when every key is out of credits, the request fails without being sent. Rate limits keep their usual handling. Claude subscription models never use these keys, and nothing buys credits or enables top-ups.
+
+  New routes under `/v1/organizations/:organizationId/model-providers/anthropic/api-keys`; the SDK calls them with `listOrganizationAnthropicApiKeys`, `addOrganizationAnthropicApiKey`, `updateOrganizationAnthropicApiKey`, `removeOrganizationAnthropicApiKey` and `serveOrganizationAnthropicApiKeyAgain`.
+
+### Patch Changes
+
+- 08953be: A turn started by the platform after an answered turn (a delivered update such as a finished integration setup, or a reply reminder) no longer leaves Claude and similar models with nothing to answer on Responses and Chat routes, such as an organization AI gateway. Those routes moved the update out of the conversation, so the request ended on the model's own earlier reply: Claude read it as an unfinished message and returned an empty response, or continued the old reply. A request-local machine-origin user turn now goes before such a system message, as the native Claude route already did. It applies on every Responses and Chat route, including native OpenAI and Codex Responses; a session whose history already has such a message gets one prompt-cache miss after the update.
+
+  A model response with no text and no tool call also no longer makes the turn sample again without end: the run ends at that step, the turn gets one reply reminder, and a second empty response ends it with the visible empty-reply notice. A reasoning-only response that stopped at the output-token limit is still continued, up to three in a row. A streamed Chat response that stopped at the output limit now carries `status: "incomplete"` in its provider data, as Claude responses do, so it reports a `length` finish. `RunAgentStreamOptions` takes an optional `onContentlessModelResponse` callback, and `isContentlessModelResponse`, `stoppedAtOutputLimit` and `ContentlessModelResponseHandover` are exported.
+
+- cf65a72: Fix several failures seen in production:
+
+  - An attached file whose name merely contains two dots (such as `notes..txt`) no longer fails the turn. Sandbox file names still refuse empty, `.`, `..`, path separators and NUL, and uploads name a bare `.` or `..` `file`.
+  - A completed video from an Only-me chat is delivered to the chat. The reconciliation service read the result as a service actor that could not see the private chat, so the operation retried forever with "Completed video generation lost its retained artifact".
+  - Checking a session's work while the session is being deleted reports it idle instead of failing the activity with `SessionControlInvariantError`.
+  - A chat deleted while its title is generated ends the title operation quietly instead of warning "Independent session title failed".
+  - A caller that disconnects from `POST /v1/workspaces/:workspaceId/tools/{resolve,invoke,target-approvals,manifest}` gets the client-gone 499 (empty body) instead of a 500, counted as `aborted` in `opengeni_tool_target_operations_total`.
+  - A request that reads a session deleted while it runs no longer fails with a 500 "Session … does not exist in its workspace". A request that names that session (for example `GET /v1/workspaces/:workspaceId/machines?sessionId=…`) answers 404 "session not found"; any other request, such as a list whose page included it, answers 409 (retryable only for reads). The missing-session case of `SessionControlInvariantError` is now the `SessionMissingFromWorkspaceError` subclass.
+  - The web app picks its root providers from the rendered route rather than the pending location, so navigating to Security settings or phone sign-in no longer shows "Opengeni app context is not ready".
+  - Temporal "Activity failed" / "Workflow failed" logs add `failureMessageHash` (a hash of the explaining cause's message with identifiers, numbers and quoted values removed) and, for code-authored invariant errors, that template as `failureMessage`.
+
+- 6c10a4d: Switching a chat to a Codex subscription after the model edited files with native apply_patch no longer fails with `400 missing_required_parameter: input[N].status`. The Responses input schema requires `status` on apply_patch, computer, local shell and program-output items, as well as on hosted search, code interpreter and image-generation calls, but history and the Codex request normalizer kept it only for hosted calls. All of these item types now keep their status in stored history and in every request, and a type check against the OpenAI SDK fails when that list goes stale. Chats that already failed this way after apply_patch work again on Retry, without changes to stored history.
+
+  Reasoning is also never resent as text after a model, provider or billing switch. Reasoning that the new route can't accept natively (another provider's encrypted reasoning, Claude thinking on another API, including Claude progress updates stored as assistant messages, Chat reasoning, or unsigned reasoning on Claude Chat routes) is left out of the request. Before, it was sent as "[Historical reasoning from another model]" or "[Historical reasoning without a provider signature]" assistant text, which could trip a provider's safety systems. Stored history is unchanged, so switching back to the issuing provider still replays it natively.
+
+- 9c17a87: `tool_search` now shows an integration's Connect card itself when a search clearly names one integration the person can connect (exactly one named, by a distinctive mention such as "on Slack", "ClickUp" or "Airtabel"), instead of relying on the agent to call `capability_authorization_request` next. It posts the card through that same tool when the search call is accepted, with the same authorization, tool selection and policy, and does not post it again until the person writes (a first-connection card never stands in for a reconnect card); the search result then says the card is shown. Model calls of the tool are unchanged. Searches naming several integrations, an installed one, or a name used as an ordinary word keep today's notice, as does any search where the card tool answers without a card; when the card call fails or times out, the notice no longer says whether a card was shown.
+
+  Whether a card is in the chat is now stated in every result: `tool_search` results that name a connectable integration carry `connectCard` (`shown`, and when shown its `capabilityId`, `eventId` and `alreadyShown`), and every `capability_authorization_request` result carries `cardShown` (and `alreadyShown` for a repeat from search). `@opengeni/contracts` exports `TOOL_DISCOVERY_CARD_META_KEY`, the request `_meta` key that marks a card request from tool discovery, and `@opengeni/db`'s `appendTurnCapabilityCardOnce` takes an optional `{ sinceLatestMessage }` to reuse a card any turn shows since the person's latest message (only this turn's when no person has written), and now reuses only a card of the same kind (a first connection, or a reconnect of the same connection).
+
+- Updated dependencies [c624443]
+- Updated dependencies [ae3972e]
+- Updated dependencies [0e273b0]
+- Updated dependencies [52ef65b]
+- Updated dependencies [e37485b]
+- Updated dependencies [cf65a72]
+- Updated dependencies [6c10a4d]
+- Updated dependencies [9c17a87]
+  - @opengeni/sdk@6.20.0
+  - @opengeni/contracts@6.20.0
+  - @opengeni/config@6.20.0
+  - @opengeni/observability@6.20.0
+  - @opengeni/codex@6.20.0
+  - @opengeni/codemode@6.20.0
+  - @opengeni/capabilities@6.20.0
+  - @opengeni/decisions@6.20.0
+  - @opengeni/interaction@6.20.0
+  - @opengeni/tool-gateway@6.20.0
+  - @opengeni/vaults@6.20.0
+  - @opengeni/jev@6.20.0
+  - @opengeni/agent-proto@6.20.0
+  - @opengeni/network@6.20.0
+  - @opengeni/xai-subscription@6.20.0
+
+## 6.19.0
+
+### Patch Changes
+
+- 973329a: Chats that share one sandbox (a parent and its workers) now each keep their own personal GitHub pass, broker routes and `gh` setup, so Git and `gh` in one chat no longer fail with "authorization is no longer current" after another chat on the box ran. The repository remote stays `https://github.com/<owner>/<repo>`, no token enters the sandbox, renewal updates only its own chat, and chat directories unused for a day are removed.
+
+  A personal repository resource that also carries stray GitHub App fields is accepted with those fields ignored (access is still checked as the person), and a request without a running agent attempt now says so instead of asking to reconnect GitHub.
+
+  Repairing an uninstalled GitHub App installation while GitHub can't be reached now says "GitHub couldn't be reached" with **Check again** (the API answers 503 `provider_unreachable`) instead of opening the account chooser. When a reinstall replaces the old installation, its approval choices move to the new one with their original setter, and the old installation's rows are removed.
+
+- Updated dependencies [a85adef]
+  - @opengeni/sdk@6.19.0
+  - @opengeni/contracts@6.19.0
+  - @opengeni/codemode@6.19.0
+  - @opengeni/capabilities@6.19.0
+  - @opengeni/codex@6.19.0
+  - @opengeni/config@6.19.0
+  - @opengeni/decisions@6.19.0
+  - @opengeni/interaction@6.19.0
+  - @opengeni/observability@6.19.0
+  - @opengeni/tool-gateway@6.19.0
+  - @opengeni/vaults@6.19.0
+  - @opengeni/jev@6.19.0
+  - @opengeni/agent-proto@6.19.0
+  - @opengeni/network@6.19.0
+  - @opengeni/xai-subscription@6.19.0
+
+## 6.18.0
+
+### Patch Changes
+
+- 07a9375: Listing browsers and Desktops no longer ends the ones on a Connected Machine their chat has moved away from. A browser left there keeps running with its profile, as the refusal to use it from the new machine already says, so moving the chat back continues in the same browser with its sign-ins. Before, any listing (the app polls them) retired it within seconds of a move, even a brief one, and its signed-in state could not be resumed. Ending it still retires it on that machine.
+- d83e5f2: Each Microsoft Dynamics Dataverse tool's description now ends with the environment it is connected to (`Environment: <host>.`), so an agent can tell one connected environment from another and notice when a request names an environment that isn't connected yet.
+- 3c366a7: A sandbox command no tool call owns, such as a workspace capture's Git and file reads or platform setup, now releases its retained output on the machine as soon as its result returns. Before, that output stayed retained until a durability hook its caller often never reached, so the agent kept it, and an open spool file, for up to an hour. Busy compute sandboxes could then run out of file descriptors. Tool-owned output keeps its existing release points.
+- 4c6c0a4: Tool search without a decision model loads each request's strongest few matches instead of one: the best match and the next ones from the same integration scoring at least 0.7 of it, up to three per request, so a task's sibling tools (create a session, then message it) arrive in one search instead of one round trip each. A tie within one integration now loads the close matches together rather than one guess; close matches from other integrations or connections are listed, not loaded. "Notification" now matches tools that notify, and notifying counts as sending, so a messaging tool's "send" no longer outranks the tool that notifies.
+- c1b19a8: A command that fails before it is started no longer keeps its turn from finishing. When a command's preparation failed on its way to the sandbox (for example, writing the private file for a secret reference while the machine was restarting), the turn kept waiting to stop a command that never existed, until the worker gave up and restarted. The turn now releases a command whose operation was never created, and still waits for every command that was.
+- Updated dependencies [f313a0e]
+- Updated dependencies [6813960]
+- Updated dependencies [9188c1d]
+- Updated dependencies [3105a8b]
+- Updated dependencies [ea2f259]
+- Updated dependencies [a16189c]
+- Updated dependencies [89cf4ba]
+- Updated dependencies [917393e]
+  - @opengeni/contracts@6.18.0
+  - @opengeni/sdk@6.18.0
+  - @opengeni/config@6.18.0
+  - @opengeni/observability@6.18.0
+  - @opengeni/network@6.18.0
+  - @opengeni/capabilities@6.18.0
+  - @opengeni/codemode@6.18.0
+  - @opengeni/codex@6.18.0
+  - @opengeni/decisions@6.18.0
+  - @opengeni/interaction@6.18.0
+  - @opengeni/tool-gateway@6.18.0
+  - @opengeni/vaults@6.18.0
+  - @opengeni/xai-subscription@6.18.0
+  - @opengeni/jev@6.18.0
+  - @opengeni/agent-proto@6.18.0
+
 ## 6.17.0
 
 ### Minor Changes

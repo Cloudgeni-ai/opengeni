@@ -1,5 +1,6 @@
 import {
   WorkspaceArtifactRequestedTools,
+  type McpConnectionAccountBinding,
   type ToolGatewayIdentity,
   type WorkspaceArtifact,
   type WorkspaceArtifactDetailResponse,
@@ -14,6 +15,7 @@ import type { Database } from "./database";
 import { withRlsContext, withWorkspaceRls, withWorkspaceSubjectRls } from "./database";
 import * as schema from "./schema";
 import { hydrateStoredAttemptToolCatalog } from "./session-content-blobs";
+import { parseAcceptedMcpAccountBindings } from "./mcp-account-bindings";
 import { sameSitePublicationRequest, sitePublicationRequest } from "./site-publication-request";
 
 type ArtifactRow = typeof schema.workspaceArtifacts.$inferSelect;
@@ -672,6 +674,8 @@ type PublishMetadata = {
   sourceSha256: string | null;
   sourceSizeBytes: number | null;
   requestedTools?: ToolGatewayIdentity[];
+  /** `requestedTools` as the caller declared them, before the server paired connector identities. */
+  declaredRequestedTools?: ToolGatewayIdentity[];
   operationKey: string;
   actorSubjectId: string;
   sourceSessionId: string | null;
@@ -889,7 +893,35 @@ async function assertArtifactRequestedToolsInAttemptCatalog(
       "Artifact requested tool authority is unavailable for the exact attempt",
     );
   }
-  if (requestedTools.some((identity) => !allowed.has(toolIdentityKey(identity)))) {
+  const missing = requestedTools.filter((identity) => !allowed.has(toolIdentityKey(identity)));
+  if (missing.length === 0) return;
+  // A connector identity paired with one of the attempt's own account routes
+  // (`account-<hash>`, which is all an agent sees) is the same tool: the
+  // turn's frozen account bindings name the connector behind each route.
+  const [turn] = await scopedDb
+    .select({ bindings: schema.sessionTurns.mcpAccountBindings })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, input.workspaceId),
+        eq(schema.sessionTurns.sessionId, input.sourceSessionId),
+        eq(schema.sessionTurns.id, input.sourceTurnId),
+      ),
+    )
+    .limit(1);
+  let bindings: McpConnectionAccountBinding[];
+  try {
+    bindings = parseAcceptedMcpAccountBindings(turn?.bindings) ?? [];
+  } catch {
+    bindings = [];
+  }
+  const paired = (identity: ToolGatewayIdentity) =>
+    bindings.some(
+      (binding) =>
+        binding.canonicalServerId === identity.serverId &&
+        allowed.has(toolIdentityKey({ serverId: binding.serverId, toolName: identity.toolName })),
+    );
+  if (!missing.every(paired)) {
     throw new WorkspaceArtifactOperationError(
       "Artifact requested tools must be present in the exact attempt tool catalog",
     );

@@ -13,12 +13,15 @@ import {
 } from "@opengeni/core";
 import { storedConnectionIntegrationKey } from "../integrations/stored-connection-integration-key";
 import { withDesktopAppReturnPath } from "../desktop-app-return";
+import { nangoBackendsFor, projectConnectionsForBackends } from "@opengeni/core";
+import { deleteNangoConnectionFor } from "../integrations/nango-connect";
 import {
   assertClaudeWorkspaceCredential,
   prepareClaudeWorkspaceCredential,
 } from "../claude-workspace-connection";
 import {
   createConnectionIdempotently,
+  setWorkspaceModelKeyListPriceInScope,
   upsertWorkspaceProviderApiKeyConnection,
   rotateWorkspaceProviderApiKeyConnection,
   revokeWorkspaceProviderApiKeyConnections,
@@ -50,6 +53,8 @@ import {
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
   VERCEL_AI_GATEWAY_CONNECTION_ROLE,
   parseConnectResultPageTextJson,
+  connectedModelPriceBasisFromReportedModel,
+  workspaceModelKeyListPriceKnown,
 } from "@opengeni/config";
 import {
   ATLASSIAN_PROVIDER_DOMAIN,
@@ -133,6 +138,7 @@ import {
   type SlackBotInstallCallbackFailureStage,
 } from "@opengeni/db";
 import type { ApiRouteDeps } from "@opengeni/core";
+import type { ConnectionMetadata as ConnectionMetadataRecord } from "@opengeni/contracts";
 import { KNOWLEDGE_SOURCE_SYNC_RETIRED_MESSAGE } from "@opengeni/contracts/knowledge-source-sync-retirement";
 import { pinnedFetch } from "@opengeni/network";
 import type { Hono } from "hono";
@@ -212,13 +218,23 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId);
     const reach = connectionReadReach(grant);
-    const connections = await listConnectionsMetadata(db, workspaceId, grant.subjectId);
+    // While a backend is switched, accounts read as the switch projects them.
+    const connections = projectConnectionsForBackends(
+      await listConnectionsMetadata(db, workspaceId, grant.subjectId),
+      await nangoBackendsFor(db, settings),
+    );
     return c.json(
       ListConnectionsResponse.parse({
         // The personal setup permission sees only the caller's own accounts.
         connections: withAccountIdentityState(
           reach === "all"
-            ? connections
+            ? connections.map((connection) => {
+                // A workspace model key says whether its usage gets a cost estimate.
+                const listPriceKnown = workspaceModelKeyListPriceKnown(settings, connection);
+                return listPriceKnown === undefined
+                  ? connection
+                  : { ...connection, listPriceKnown };
+              })
             : connections.filter((connection) => connection.subjectId === grant.subjectId),
         ),
       }),
@@ -240,10 +256,11 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(
       ListConnectionsResponse.parse({
         connections: withAccountIdentityState(
-          (
+          projectConnectionsForBackends(
             await listOwnConnectionAccountsForGrant(db, grant, {
               includeInactive: includeInactive === "true",
-            })
+            }),
+            await nangoBackendsFor(db, settings),
           ).filter((connection) => reach === "all" || connection.subjectId === grant.subjectId),
         ),
       }),
@@ -287,6 +304,8 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = access.grant;
     const beforeCommit = externalContinuationCommitAuthorizer(access);
     const payload = await parseRequestJson(c, CreateConnectionRequest);
+    // The catalogue model a new OpenAI or Azure OpenAI key's model is priced like.
+    let detectedListPrice: { basis: "model"; modelId: string } | undefined;
     if (
       payload.metadata?.directModelProvider !== undefined ||
       String(payload.metadata?.credentialRole ?? "").startsWith("direct_")
@@ -322,7 +341,18 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
                   requireHttpsOutsideLocalTest: true,
                 })) as typeof fetch)
             : undefined);
-        await verifyDirectModelAccess(config.data, payload.credential.apiKey as string, modelFetch);
+        const { reportedModel } = await verifyDirectModelAccess(
+          config.data,
+          payload.credential.apiKey as string,
+          modelFetch,
+        );
+        // OpenAI and Azure OpenAI answer with the model they served (for
+        // Azure, the deployment's base model), which prices the key's usage.
+        // An OpenAI-compatible endpoint's own answer is not trusted for that.
+        if (config.data.provider !== "openai_compatible") {
+          const modelId = connectedModelPriceBasisFromReportedModel(settings, reportedModel);
+          if (modelId) detectedListPrice = { basis: "model", modelId };
+        }
         // An OpenAI-compatible model's reasoning levels, when the request
         // doesn't set them, come from the endpoint's own model listing.
         if (config.data.provider === "openai_compatible" && config.data.reasoning === undefined) {
@@ -386,6 +416,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       // integration credentials still require an explicit broker destination.
       if (!workspaceProviderKind && !directModelKey)
         assertBrokeredApiKeyCredential(payload.kind, payload.credential);
+      let priced: Awaited<ReturnType<typeof setWorkspaceModelKeyListPriceInScope>> = null;
       // Workspace model-provider keys decide what every session runs on: a
       // settings action, unlike a member's own or shared integration credential.
       if (subjectId === null && (workspaceProviderKind || directModelKey))
@@ -454,6 +485,19 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
             expiresAt: payload.expiresAt ? new Date(payload.expiresAt) : null,
             metadata: payload.metadata,
             createdBySubjectId: grant.subjectId,
+            ...(directModelKey && detectedListPrice
+              ? {
+                  onCreated: async (tx: Database, created: { id: string }) => {
+                    priced = await setWorkspaceModelKeyListPriceInScope(tx, {
+                      accountId: grant.accountId,
+                      workspaceId,
+                      connectionId: created.id,
+                      actorSubjectId: grant.subjectId,
+                      price: detectedListPrice!,
+                    });
+                  },
+                }
+              : {}),
             ...(payload.operationId
               ? {
                   operation: {
@@ -479,7 +523,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
             }
             throw error;
           });
-      return c.json(ConnectionResponse.parse({ connection }), 201);
+      return c.json(ConnectionResponse.parse({ connection: priced ?? connection }), 201);
     };
     const commit = (database: Database) =>
       beforeCommit
@@ -860,7 +904,22 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!connection) {
       throw new HTTPException(404, { message: "connection not found" });
     }
-    return c.json(ConnectionResponse.parse({ connection }));
+    // Read as the lists read it while a backend is switched. Only a native
+    // connection of a Nango-backed service needs its owner's other accounts
+    // (to tell whether a Nango connection has superseded it); a personal one
+    // also counts the owner's personal accounts in other workspaces.
+    const backends = await nangoBackendsFor(db, settings);
+    const siblings = new Map<string, ConnectionMetadataRecord>();
+    if (backends.size > 0 && !connection.providerDomain.startsWith("nango:")) {
+      for (const other of await listConnectionsMetadata(db, workspaceId, grant.subjectId))
+        if (other.subjectId === connection.subjectId) siblings.set(other.id, other);
+      if (connection.subjectId !== null && connection.subjectId === grant.subjectId)
+        for (const other of await listOwnConnectionAccountsForGrant(db, grant))
+          if (other.subjectId === connection.subjectId) siblings.set(other.id, other);
+      siblings.delete(connection.id);
+    }
+    const [projected] = projectConnectionsForBackends([connection, ...siblings.values()], backends);
+    return c.json(ConnectionResponse.parse({ connection: projected ?? connection }));
   });
 
   app.patch("/v1/workspaces/:workspaceId/connections/:connectionId", async (c) => {
@@ -1357,6 +1416,8 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!connection) {
       throw new HTTPException(409, { message: "connection changed during disconnect; try again" });
     }
+    // A Nango connection is deleted in Nango too, so its billing stops.
+    await deleteNangoConnectionFor({ db, settings }, existing);
     return c.json(ConnectionResponse.parse({ connection }));
   });
 

@@ -167,8 +167,9 @@ ordinary subject/host list scope, reads immutable command launch targets, and us
 the existing session command cancellation path; it does not create a separate
 process registry or agent tool surface.
 
-Hosted tool-call `status` survives replay; other annotations are stripped
-(`packages/codex/src/hosted-call-status.ts`).
+`status` survives replay on every item type whose Responses input schema requires
+it (hosted calls, apply_patch, computer, local shell, program output); other
+annotations are stripped (`packages/codex/src/replay-status.ts`).
 
 ### 3.1 Postgres is durable truth; NATS is transport
 
@@ -765,6 +766,18 @@ additional organizations per human; invitation memberships do not consume it.
 First-sign-in onboarding and invitation precedence remain a separate one-shot
 path.
 
+Opengeni Console (`/console`, `apps/api/src/routes/console.ts`) gives
+organization owners and admins, never API keys or external users, read-only
+review of sessions in workspaces the product manages
+(`organization_managed_workspaces`): shared sessions and private sessions of
+`external_user:` owners, never an Opengeni account's private chat. The review
+level (full, metadata, off) and the reviewable-session predicate are applied in
+SQL on every read (`packages/db/src/console.ts`), each open is audit-logged
+before it is returned, and team workspaces expose cost and counts only. On its
+own host (`console.*`, `*.console.*`) the web app keeps every page in Console,
+and the API builds auth, invitation and Stripe return links on the request's
+allowed host. See [`opengeni-console.md`](opengeni-console.md).
+
 Canonical: `packages/core/src/access/index.ts`,
 `packages/core/src/session-authorization.ts`, `packages/db/src/runtime-posture.ts`,
 [`organization-tenancy.md`](organization-tenancy.md),
@@ -1046,7 +1059,7 @@ Link renewal locks the enrollment before sampling the database clock, checking
 the owner/instance and extending its lease in one statement; a longer heartbeat
 lease is preserved. Refusal codes and renewal cadence are unchanged.
 Compute sleeps idle sandboxes, so compute leases never idle-drain; group end
-(chat/workspace deletion) drains them and the reaper deletes the sandbox and
+(chat/workspace deletion, or every chat of the group archived) drains them and the reaper deletes the sandbox and
 revokes its `sandbox` enrollment. See [compute backend](compute-backend.md).
 
 Home-compute selection proves establishment authority; invalid pointers reconcile
@@ -2149,7 +2162,7 @@ Manifests and `.changeset/config.json` own publication; this map describes respo
 | --- | --- | --- |
 | `apps/api` | `@opengeni/api-router` | Hono HTTP composition, middleware, routes, MCP transport, SSE, and API-side control adapters over core |
 | `apps/worker` | `@opengeni/worker-bundle` | Temporal workflows, control/turn activities, agent execution, maintenance pumps, and worker lifecycle |
-| `apps/web` | `opengeni-web` | Stock React/Vite operator console consuming the public SDK and React packages |
+| `apps/web` | `opengeni-web` | Stock React/Vite operator console consuming the public SDK and React packages, including Opengeni Console under `/console` ([`opengeni-console.md`](opengeni-console.md)) |
 | `apps/desktop` | `@opengeni/desktop-app` | Opengeni desktop app for macOS, Windows and Linux, built on `@opengeni/desktop` |
 | `apps/browser-extension` | `@opengeni/browser-extension` | Browser attachment extension; a leaf client, not session authority ([README](../apps/browser-extension/README.md), [privacy](../apps/browser-extension/PRIVACY.md)) |
 | `apps/site-gateway` | `@opengeni/site-gateway` | Cloudflare Worker serving published Sites on `<label>.<sites domain>`: host lookup, viewer sign-in cookies, signed forwarding to `/v1/site-runtime`, short generation-keyed HTML caching and edge headers; no authorization of its own ([README](../apps/site-gateway/README.md)) |
@@ -3365,8 +3378,8 @@ Topics: [`README.md`](README.md).
 | Schedules | `packages/core/src/domain/scheduled-tasks.ts`, `apps/api/src/temporal-schedule-sync.ts`, `apps/worker/src/activities/scheduled-tasks.ts` | [`reliability-fixes.md`](reliability-fixes.md), [`scheduled-task-access.md`](scheduled-task-access.md), [`slack-bot.md`](slack-bot.md) |
 | Event-triggered automations | `packages/core/src/domain/event-triggers/` | [`automations-and-events.md`](design/automations-and-events.md) |
 | Child sessions or depth policy | `packages/core/src/domain/sessions.ts`, `packages/core/src/session-authorization.ts` | [`nested-agent-depth.md`](nested-agent-depth.md) |
-| Bots: chat description, avatar and bot templates | `packages/contracts/src/bots.ts`, `apps/api/src/mcp/session-profile-tools.ts`, `apps/api/src/routes/bot-templates.ts`, `packages/core/src/domain/bot-templates.ts`, `packages/db/src/bot-templates.ts` | [`bots.md`](bots.md) |
-| Agents (Slack agents and bot templates merged; expand/contract) | `packages/db/src/agents-schema.ts`, `packages/db/drizzle/1243_agents.sql`, `packages/db/drizzle/1244_session_agents.sql` | [`agents.md`](agents.md) |
+| Bots: chat description, avatar and bot templates | `packages/contracts/src/bots.ts`, `apps/api/src/mcp/session-profile-tools.ts`, `apps/api/src/routes/bot-templates.ts`, `packages/core/src/domain/bot-templates.ts`, `packages/db/src/agents.ts` (bot templates are agents) | [`bots.md`](bots.md) |
+| Agents (Slack agents and bot templates merged; expand/contract) | `packages/db/src/agents-schema.ts`, `packages/db/src/agents.ts`, `packages/db/drizzle/1243_agents.sql`, `packages/db/drizzle/1244_session_agents.sql`, `packages/db/drizzle/1380_agent_slack_install_workspace.sql` (contract) | [`agents.md`](agents.md) |
 | Agents in the app: Agents page, agent page and form, composer agent chip, chat header chip, Slack availability | `packages/react/src/app/components/agents/`, `packages/react/src/app/lib/agents.tsx`, `packages/react/src/app/lib/composer-agent.tsx`, `packages/react/src/app/lib/session-agent.ts`, `apps/web/src/routes/agents.tsx`, `apps/web/src/components/agents/` | [`agents.md`](agents.md) |
 | Automatic or human session titles | `packages/contracts/src/session-titles.ts`, `apps/api/src/mcp/server.ts`, `packages/core/src/domain/sessions.ts`, `apps/worker/src/activities/agent-turn/session-title.ts`, `packages/db/src/` | [`run-lifecycle.md`](run-lifecycle.md) |
 | Realtime browser conversation | `packages/sdk/src/realtime.ts`, `packages/react/src/realtime/`, `apps/api/src/session-realtime-context.ts` | [`run-lifecycle.md`](run-lifecycle.md), package READMEs |
@@ -3388,6 +3401,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Advisory work discovery or durable work claims | `packages/contracts/src/work-claims.ts`, `packages/db/src/work-claims.ts`, `packages/db/src/index.ts`, `apps/api/src/` | [`work-discovery.md`](work-discovery.md), [`agent-session-authority.md`](agent-session-authority.md) |
 | Schema, repository, RLS, or migration | `packages/db/src/`, `packages/db/drizzle/` | [`force-rls-migration-backfills.md`](force-rls-migration-backfills.md) |
 | Organization, personal resources, or private sessions | `packages/db/src/`, `packages/core/src/access/` | [`organization-tenancy.md`](organization-tenancy.md) |
+| Opengeni Console review, managed workspaces, review level or audit log | `packages/contracts/src/console.ts`, `packages/db/src/console.ts`, `apps/api/src/routes/console.ts`, the web app's `/console` routes | [`opengeni-console.md`](opengeni-console.md) |
 | Organization API-key policies, presets, or shared-workspace scope | `packages/contracts/src/organization-access.ts`, `packages/core/src/access/`, `apps/api/src/routes/api-keys.ts` | [`product-integration.md`](product-integration.md#explicit-organization-key-policies) |
 | Organization recovery custody or workspace ownership | `packages/contracts/src/organization-recovery.ts`, `packages/db/src/organization-recovery.ts`, `apps/api/src/routes/organization-recovery.ts` | [`organization-recovery.md`](organization-recovery.md), [`organization-tenancy.md`](organization-tenancy.md) |
 | Vaults, `{{secret:…}}` references, secret delivery, or secret reads | `packages/contracts/src/vaults.ts`, `packages/core/src/domain/vaults/`, `packages/db/src/vaults.ts`, `packages/vaults/`, `apps/api/src/routes/vaults.ts` | [`secrets.md`](secrets.md) |
@@ -3429,6 +3443,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Composer draft submission or native embedding host seam | `packages/core/src/application/composer-submit.ts`, `apps/api/src/routes/sessions.ts`, `packages/react/src/embedded-session-client.ts` | [`embedding.md`](embedding.md), package READMEs, and §7.1 |
 | Providers and social connectors | `apps/api/src/integrations/`, `apps/api/src/mcp/server.ts`, `packages/core/src/application/new-session-drafts.ts`, `packages/network/src/mcp-oauth-discovery.ts`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
 | Microsoft Teams delegated tools and bot conversations | `packages/capabilities/src/integration-definitions.ts`, `apps/api/src/integrations/teams-bot.ts`, `apps/api/src/integrations/teams-protocol.ts`, `apps/api/src/integrations/teams-group.ts`, `apps/api/src/integrations/teams-admin-proof.ts`, `apps/api/src/integrations/teams-onboarding-limit.ts`, `packages/db/src/teams-conversations.ts` | [`microsoft-teams-release-readiness.md`](microsoft-teams-release-readiness.md) |
+| Nango-backed integrations (backend switch, Connect, proxy, tools bridge, usage) | `packages/contracts/src/nango.ts`, `packages/capabilities/src/nango.ts`, `packages/db/src/nango-integrations.ts`, `packages/core/src/domain/nango-integrations.ts`, `packages/runtime/src/nango-transport.ts`, `packages/runtime/src/nango-tools-mcp.ts`, `apps/api/src/integrations/nango-connect.ts`, `scripts/operator/nango.ts` | [`nango.md`](nango.md) |
 | Slack user-token MCP tools and shared provider quota | `packages/runtime/src/slack-rest-mcp.ts`, `packages/contracts/src/slack-rest-mcp.ts`, `packages/db/src/slack-api-rate-limits.ts` | [`design/first-party-mcp-bridges.md`](design/first-party-mcp-bridges.md), [`slack-bot.md`](slack-bot.md) |
 | Slack app identity and icons | `packages/contracts/src/slack-bot-scopes.ts`, `scripts/generate-slack-bot-icons.ts`, `deploy/slack/` | [`slack-bot.md`](slack-bot.md) |
 | Slack bot availability, scheduled posting and prepared delivery | `packages/db/src/organization-slack-bots.ts`, `apps/api/src/routes/slack-bot-access.ts`, `apps/api/src/integrations/slack-bot.ts` | [`slack-bot.md`](slack-bot.md) |

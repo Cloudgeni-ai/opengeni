@@ -35,6 +35,8 @@ import { recordingOwnerForSignOut } from "@/lib/sign-out-recordings";
 import { useRail } from "@opengeni/react/app/components/rail/rail-context";
 import { AccountUsageMenuItem } from "@opengeni/react/app/components/usage/usage-entry";
 import { MyThingsMenuItem } from "@/components/my-things-menu-item";
+import { BillingMenuItem } from "@/components/billing-menu-item";
+import { ConsoleMenuItem } from "@/components/console-menu-item";
 import { useNewOrganizationMenuItem } from "@/components/rail/switcher-block";
 import {
   accountMenuAriaLabel,
@@ -298,6 +300,14 @@ export function BrowserAccountMenu({
           />
           {newOrganization.item}
           <MyThingsMenuItem
+            workspaceId={rail.workspaceId}
+            className="forced-colors:text-[CanvasText]!"
+          />
+          <BillingMenuItem
+            workspaceId={rail.workspaceId}
+            className="forced-colors:text-[CanvasText]!"
+          />
+          <ConsoleMenuItem
             workspaceId={rail.workspaceId}
             className="forced-colors:text-[CanvasText]!"
           />

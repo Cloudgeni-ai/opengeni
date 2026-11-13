@@ -994,6 +994,10 @@ Ordinary new sessions include two first-party Opengeni tools:
   the current session for an exact catalog result. Calling it does not install,
   enable, connect, or grant anything. The exact turn attempt fences the event,
   and the signed-in human must confirm the provider domain and complete setup.
+  Every result says whether a card is in the chat (`cardShown`, with its
+  `eventId`). `tool_search` posts the same card itself, through this tool,
+  when a search clearly names one integration the person can connect (see
+  `docs/mcp-surfaces.md`, "Human integration setup in chat").
 - `custom_mcp_setup_request` posts a human review card for a remote HTTPS MCP
   endpoint not yet in the workspace catalog. The agent may propose a name and
   exact URL, but cannot register or contact the server. The signed-in human
@@ -1101,6 +1105,10 @@ host-owned GitHub authority.
 
 ## Google Drive MCP connection
 
+An operator can serve Drive through Nango instead; reads then come from Drive
+REST through the Nango proxy and `create_file`/`copy_file` are not offered (see
+[`nango.md`](nango.md)).
+
 Google Drive appears as one personal catalog MCP connection. Its reads, search,
 downloads, copies and uploads use Google's official
 `https://drivemcp.googleapis.com/mcp/v1` server. The same selected connection
@@ -1129,6 +1137,9 @@ are retained. See [Google Drive](google-drive.md) for operator setup, supported
 tools, limits and explicit replacement of old source schedules.
 
 ## Gmail MCP bridge
+
+An operator can serve Gmail through Nango's managed app; the tool surface stays
+the same and requests go through the Nango proxy (see [`nango.md`](nango.md)).
 
 The reviewed Gmail connector uses Opengeni's REST-backed MCP bridge. Its
 historical `https://gmailmcp.googleapis.com/mcp/v1` connection identity remains
@@ -1241,6 +1252,10 @@ See Google's [OAuth web-server guide](https://developers.google.com/identity/pro
 and [restricted-scope verification requirements](https://developers.google.com/identity/protocols/oauth2/production-readiness/restricted-scope-verification).
 
 ## Google Calendar bridge
+
+An operator can serve Calendar through Nango's managed app; the tool surface
+stays the same and requests go through the Nango proxy (see
+[`nango.md`](nango.md)).
 
 Google Calendar uses the same reviewed REST-bridge design as Gmail. The catalog
 row's `https://calendarmcp.googleapis.com/mcp/v1` resource (Google's hosted

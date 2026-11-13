@@ -2356,7 +2356,13 @@ export class BrowserSupervisor {
           // the same live process, or provably gone with no process using the
           // profile; an adopted copy whose browser is gone is resettled to its
           // copy below instead. A transport this controller could not detach
-          // keeps the browser refused: another reattach would share it.
+          // keeps the browser refused: another reattach would share it. A
+          // shutdown suspension cut short (the browser was killed while the
+          // controller stopped) is completed only once that browser is
+          // provably gone and no process uses the profile, so the profile is
+          // relaunched as after an idle release; a browser that may still be
+          // live stays refused, since the stopped controller's transport may
+          // still hold it.
           if (this.recoveryTransportsUncertain.has(options.browserSessionId))
             throw workingRuntimeUnavailable("process_state_unknown");
           const recorded =
@@ -2370,7 +2376,11 @@ export class BrowserSupervisor {
             await this.assertProfileUnused(profileDirectory).catch(() => {
               throw workingRuntimeUnavailable("process_state_unknown");
             });
-          if (state === "live" || !receipt.adoption) {
+          const admitted =
+            interruptedRecovery.kind === "suspending"
+              ? state === "exited"
+              : state === "live" || !receipt.adoption;
+          if (admitted) {
             const writer = await SqliteBrowserWorkingRuntimeJournal.open({
               ...options,
               sessionDirectory,

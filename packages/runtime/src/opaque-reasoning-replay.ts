@@ -9,14 +9,29 @@ import { opaqueProviderArtifactFingerprint } from "@opengeni/codex";
  * blocks. Each such item records the binding it was issued under (its origin,
  * see `withArtifactOrigin`): the provider for encrypted content; the platform,
  * account, model and (for prefix-bound models) the instruction prefix for
- * Claude. A request whose binding differs replays encrypted content as
- * readable historical text (`projectHistoryForProvider` with `artifactScope`)
- * and leaves Claude's own thinking out (its own reasoning shown back to Claude
- * as text can trip Claude's safety systems). Items stored before origins were recorded stay
- * native until the provider refuses them; the refusal is remembered here so
- * the one retry, and every later request in this process, leaves them out
- * (Claude) or sends them as text (encrypted content).
+ * Claude. A request whose binding differs leaves the item out
+ * (`projectHistoryForProvider` with `artifactScope`, and Claude's own
+ * binding check). Reasoning is never resent as readable text: shown back as
+ * text it can trip a provider's safety systems. Items stored before origins
+ * were recorded stay native until the provider refuses them; the refusal is
+ * remembered here so the one retry, and every later request in this process,
+ * leaves them out.
  */
+
+/**
+ * A message content part that holds Claude's thinking: history stored while
+ * Claude progress updates were briefly recorded as assistant messages keeps
+ * the signed block on the part (`providerData.anthropic.block`). Claude gets
+ * the block back natively; every other API and transcript leaves the part out,
+ * because its text is Claude's reasoning, never words written for the person.
+ */
+export function isClaudeThinkingContentPart(part: unknown): boolean {
+  if (!part || typeof part !== "object") return false;
+  const metadata = (part as { providerData?: { anthropic?: { block?: { type?: unknown } } } })
+    .providerData;
+  const type = metadata?.anthropic?.block?.type;
+  return type === "thinking" || type === "redacted_thinking";
+}
 
 /** Claude's signed thinking block on a reasoning item, when it has one. */
 export function claudeSignedThinkingBlock(

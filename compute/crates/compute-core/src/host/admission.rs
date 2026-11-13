@@ -844,8 +844,9 @@ impl Host {
     }
 
     /// Bytes of the budget that VM processes other than `waiter`'s already
-    /// ending will free, and that ending every other idle one already saved
-    /// would free besides, ready spare VMs included. Both take milliseconds
+    /// ending will free, and that ending every other idle one already
+    /// saved, or never to be saved, would free besides, ready spare VMs
+    /// included. Both take milliseconds
     /// and no I/O; a sandbox backing off after a failed step takes no step
     /// until its backoff ends, so it counts for neither.
     fn instant_room(&self, now: At, waiter: Option<SandboxId>) -> (u64, u64) {
@@ -858,7 +859,7 @@ impl Host {
             }
             let ending = slot
                 .in_flight
-                .is_some_and(|flight| flight.step == Step::Drop)
+                .is_some_and(|flight| matches!(flight.step, Step::Drop | Step::End))
                 || (slot.floor >= Level::Saved
                     && slot.in_flight.is_none()
                     && slot.reclaimable()
@@ -878,7 +879,9 @@ impl Host {
     /// spare VMs, oldest first. A held wake that waits for processor time
     /// counts no memory until that is free: freeing memory would not let
     /// it through. Counts what floors already set and spare VMs already
-    /// ending will free. Returns whether any floor changed.
+    /// ending will free, and an overdrawn budget as memory to free too, so
+    /// a host booked beyond its budget frees what it is over as well as
+    /// its buffer. Returns whether any floor changed.
     pub(super) fn keep_buffer(&mut self, now: At) -> bool {
         let (Some(admission), Some(capacity)) = (self.policy.admission, self.capacity()) else {
             return false;
@@ -901,8 +904,9 @@ impl Host {
             .filter(|slot| cpu.is_none_or(|headroom| i128::from(slot.cpu_need()) <= headroom))
             .map(|slot| slot.wake_need(percent))
             .sum();
-        let needed = (admission.buffer + held)
-            .saturating_sub(capacity.free() + planned + self.spares.ending());
+        let freeing = i128::from(planned) + i128::from(self.spares.ending());
+        let short = i128::from(admission.buffer) + i128::from(held) - capacity.headroom() - freeing;
+        let needed = u64::try_from(short.max(0)).unwrap_or(u64::MAX);
         let needed = self.end_spares(needed);
         needed > 0 && self.push_idle(now, needed, Measure::Occupancy).0
     }

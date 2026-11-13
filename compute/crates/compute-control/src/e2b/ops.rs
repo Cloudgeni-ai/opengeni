@@ -145,7 +145,8 @@ pub async fn create<S: Store>(
         agent: None,
     };
     // E2B's running sandbox that pauses at its timeout sleeps like any
-    // other fleet sandbox whose create says nothing, and every one reaches
+    // other fleet sandbox whose create says nothing, but that its memory
+    // is kept, as E2B keeps a paused sandbox's; and every one reaches
     // every offer its team is given: E2B's API cannot name one. One killed
     // at its timeout runs until then, as on E2B, and never sleeps: nothing
     // it does on its own (a timer, a connection it opened, such as a CI
@@ -155,7 +156,7 @@ pub async fn create<S: Store>(
     // lost, as on E2B, and a checkpoint would only stop its programs for
     // nothing.
     let sleep = if auto_pause {
-        front.service.settings().sleep
+        front.service.settings().sleep.keeping_memory()
     } else {
         SleepConfig::default()
     };

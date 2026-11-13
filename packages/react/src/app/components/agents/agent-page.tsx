@@ -24,6 +24,7 @@ import { useAppContext } from "../../app-context";
 import { agentAvatar } from "../../lib/agent-avatar";
 import { agentErrorCode, downloadAgentFile, useAgent, useAgentChats } from "../../lib/agents";
 import { useNavigate } from "../../lib/navigation";
+import { orgName } from "../../lib/org";
 import { forgetSessionAgent } from "../../lib/session-agent";
 import { toast } from "../../lib/toast";
 import { slackLogo } from "../new-session-starter-logos";
@@ -48,6 +49,22 @@ export const AGENT_VERSION_CONFLICT =
 export function workspacePeopleLabel(workspaceName: string | null | undefined): string {
   const name = workspaceName?.trim();
   return name ? `People in ${name}` : "People in this workspace";
+}
+
+/** "Who can use it: Anyone in <organization>". */
+export function organizationPeopleLabel(organizationName: string | null | undefined): string {
+  const name = organizationName?.trim();
+  return name ? `Anyone in ${name}` : "Anyone in the organization";
+}
+
+/** Who can use an agent, in words. */
+export function agentAudienceLabel(
+  visibility: Agent["visibility"],
+  names: { workspaceName: string | null | undefined; organizationName: string | null | undefined },
+): string {
+  if (visibility === "private") return "Only me";
+  if (visibility === "organization") return organizationPeopleLabel(names.organizationName);
+  return workspacePeopleLabel(names.workspaceName);
 }
 
 function SourceIcon({ chat }: { chat: Pick<AgentChat, "source"> }) {
@@ -83,7 +100,7 @@ function AgentChats({ agent, workspaceId }: { agent: Agent; workspaceId: string 
   const [filter, setFilter] = useState<AgentChatsFilter>("yours");
   const chats = useAgentChats(workspaceId, agent.id, filter);
   // An Only me agent's chats are all its owner's.
-  const shared = agent.visibility === "workspace";
+  const shared = agent.visibility !== "private";
   return (
     <DetailSection
       title="Chats"
@@ -236,7 +253,7 @@ export function AgentPage({
   /** Where it is available in Slack, rendered under the app row. */
   renderSlack?: AgentSlackSlot | undefined;
 }) {
-  const { client, workspaces } = useAppContext();
+  const { client, workspaces, accessContext } = useAppContext();
   const navigate = useNavigate();
   const state = useAgent(workspaceId, agentId);
   const [deleting, setDeleting] = useState(false);
@@ -276,7 +293,11 @@ export function AgentPage({
       </DetailPage>
     );
   }
-  const workspaceName = workspaces.find((row) => row.id === agent.workspaceId)?.name ?? null;
+  const workspace = workspaces.find((row) => row.id === agent.workspaceId);
+  const workspaceName = workspace?.name ?? null;
+  const organizationName = workspace
+    ? orgName(workspace.accountId, accessContext.accountGrants)
+    : null;
   const saved = (next: Agent) => {
     state.set(next);
     forgetSessionAgent(workspaceId, next.id);
@@ -351,7 +372,10 @@ export function AgentPage({
         </DetailSection>
         <DetailSection title="Who can use it">
           <p className="m-0 text-sm text-fg">
-            {agent.visibility === "private" ? "Only me" : workspacePeopleLabel(workspaceName)}
+            {agentAudienceLabel(agent.visibility, {
+              workspaceName,
+              organizationName,
+            })}
           </p>
         </DetailSection>
         <DetailSection title="Available in">

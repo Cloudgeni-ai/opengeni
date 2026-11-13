@@ -115,6 +115,7 @@ export function OrganizationPeoplePage({
   invitation,
   view,
   canManageBilling,
+  hideEndUsers = false,
 }: {
   workspaceId: string;
   person?: string;
@@ -122,6 +123,11 @@ export function OrganizationPeoplePage({
   view?: "invite";
   /** Whether the signed-in person can change the plan; defaults to owners. */
   canManageBilling?: boolean;
+  /**
+   * Leave out a product's end users (`external_user:` subjects): they can
+   * hold an organization membership but aren't people on the team.
+   */
+  hideEndUsers?: boolean;
 }) {
   const directory = useOrganizationDirectory();
   const nav = useOrganizationNavigation(workspaceId);
@@ -138,7 +144,7 @@ export function OrganizationPeoplePage({
   } else if (person) page = <PersonPage key={person} id={person} nav={nav} actions={actions} />;
   else if (invitation) {
     page = <InvitationPage key={invitation} id={invitation} nav={nav} actions={actions} />;
-  } else page = <PeopleList nav={nav} actions={actions} />;
+  } else page = <PeopleList nav={nav} actions={actions} hideEndUsers={hideEndUsers} />;
 
   return (
     <>
@@ -451,11 +457,23 @@ const COLUMNS: RowListColumn[] = [
   { id: "workspaces", label: "Workspaces", width: 256, hideLabel: true },
 ];
 
-function PeopleList({ nav, actions }: { nav: OrganizationNavigation; actions: PeopleActions }) {
+function PeopleList({
+  nav,
+  actions,
+  hideEndUsers,
+}: {
+  nav: OrganizationNavigation;
+  actions: PeopleActions;
+  hideEndUsers: boolean;
+}) {
   const directory = useOrganizationDirectory();
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<PeopleFilter>("all");
-  const members = directory.members.value.filter((member) => member.status !== "revoked");
+  const members = directory.members.value.filter(
+    (member) =>
+      member.status !== "revoked" &&
+      !(hideEndUsers && member.subjectId.startsWith("external_user:")),
+  );
   const invitations = directory.invitations.value.invitations.filter(
     (invitation) => invitation.status === "pending",
   );

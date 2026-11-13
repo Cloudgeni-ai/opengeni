@@ -6625,6 +6625,37 @@ describe("runtime event normalization", () => {
     expect((agent as any).defaultManifest.entries[`.opengeni/files/${fileId}`].type).toBe("dir");
   });
 
+  test("accepts file names that merely contain two dots and still refuses path segments", () => {
+    const settings = testSettings();
+    const download = (filename: string) => ({
+      fileId: "file-1",
+      mountPath: ".opengeni/files/file-1",
+      filename,
+      content: new TextEncoder().encode("hello"),
+      sizeBytes: 5,
+    });
+    const baseClient = { backendId: "docker", create: async () => ({}) } as any;
+    for (const filename of [
+      "notes..txt",
+      "Quarterly report..pdf",
+      "v1..2.csv",
+      "..hidden",
+      "end..",
+    ]) {
+      expect(() => withSandboxFileDownloads(baseClient, [download(filename)])).not.toThrow();
+      const manifest = buildManifest(settings, [{ kind: "file", fileId: "file-1" }], undefined, [
+        download(filename),
+      ]);
+      const entry = manifest.entries[".opengeni/files/file-1"] as any;
+      expect(entry.children[filename].type).toBe("file");
+    }
+    for (const filename of ["", ".", "..", "../escape.txt", "a/b.txt", "a\\b.txt", "nul\0.txt"]) {
+      expect(() => withSandboxFileDownloads(baseClient, [download(filename)])).toThrow(
+        "Invalid sandbox file name for file-1",
+      );
+    }
+  });
+
   test("downloads signed file resources before sandbox use without emitting URLs in events", async () => {
     const commands: string[] = [];
     const events: string[] = [];
@@ -9569,6 +9600,18 @@ describe("runtime event normalization", () => {
         structuralResults.push(await structural.executeCatalogTool("inspect", {}));
       }
 
+      // A call that needs its connection signed in again says so in a typed
+      // code, beside the same text.
+      expect(structuralResults[1]).toMatchObject({
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: "Authentication required - a connection link was posted to the session.",
+          },
+        ],
+        structuredContent: { error: { code: "connection_auth_needed", outcomeUnknown: false } },
+      });
       expect(structuralResults[2]).toMatchObject({
         isError: true,
         structuredContent: {

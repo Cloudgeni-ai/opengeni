@@ -1,6 +1,11 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
-import type { FirstPartyMcpToolName, Permission } from "@opengeni/contracts";
+import type {
+  AccessGrant,
+  FirstPartyMcpToolName,
+  Permission,
+  ResourceRef,
+} from "@opengeni/contracts";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import {
   claimSessionWorkForAttempt,
@@ -18,6 +23,10 @@ import {
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
+import {
+  agentPersonalGitHubRepositoryServices,
+  resolveAgentPersonalGitHubRepositoryResources,
+} from "../../../packages/core/src/domain/agent-personal-github-resources";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 
 /**
@@ -360,7 +369,40 @@ async function personWithYourGitHub(allRepositories: "read" | "write" | null) {
     subjectId,
     connectionId: connection.id,
   };
-  return { call, child, credentialBindingId, connection, githubCalls, root, db, selection };
+  /** Resolves as a caller whose grant names this turn but no attempt. */
+  async function resolveWithoutAttempt(resources: ResourceRef[]) {
+    return await resolveAgentPersonalGitHubRepositoryResources({
+      grant: {
+        accountId: originGrant.accountId,
+        workspaceId: target!.id,
+        subjectId: "worker:first-party-mcp",
+        permissions: AGENT_PERMISSIONS,
+        principalKind: "agent_attempt",
+        metadata: { sessionId: root.id, turnId: claimed.turn.id },
+      } as AccessGrant,
+      workspaceId: target!.id,
+      settings,
+      resources,
+      services: agentPersonalGitHubRepositoryServices({
+        db,
+        settings,
+        workspaceId: target!.id,
+        accountId: originGrant.accountId,
+        githubPersonalFetch,
+      }),
+    });
+  }
+  return {
+    call,
+    child,
+    resolveWithoutAttempt,
+    credentialBindingId,
+    connection,
+    githubCalls,
+    root,
+    db,
+    selection,
+  };
 }
 
 describe("agent-created workers act as the person (real PostgreSQL)", () => {
@@ -588,6 +630,27 @@ describe("agent-created workers act as the person (real PostgreSQL)", () => {
       repositoryCount: 1,
       allRepositories: { enabled: true, access: "write" },
     });
+  });
+
+  test("All my repositories without an agent attempt says so, not reconnect", async () => {
+    if (!shared) return;
+    const person = await personWithYourGitHub("write");
+    const refusal = await person
+      .resolveWithoutAttempt([
+        {
+          kind: "repository",
+          uri: "https://github.com/acme/elsewhere",
+          ref: "main",
+          connectionType: "github_personal",
+        },
+      ])
+      .then(
+        () => "",
+        (error: unknown) => (error instanceof Error ? error.message : String(error)),
+      );
+    expect(refusal).toContain("has no running agent attempt");
+    expect(refusal).not.toContain("reconnect");
+    expect(person.githubCalls).toEqual([]);
   });
 
   test("an enterprise managed user's own repositories (owner with an underscore) work", async () => {

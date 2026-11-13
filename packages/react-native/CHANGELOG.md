@@ -1,5 +1,65 @@
 # @opengeni/react-native
 
+## 6.20.1
+
+### Patch Changes
+
+- @opengeni/contracts@6.20.1
+- @opengeni/react@6.20.1
+- @opengeni/sdk@6.20.1
+
+## 6.20.0
+
+### Patch Changes
+
+- Updated dependencies [60a33cb]
+- Updated dependencies [c624443]
+- Updated dependencies [ed6b66c]
+- Updated dependencies [ae3972e]
+- Updated dependencies [e37485b]
+- Updated dependencies [9c17a87]
+  - @opengeni/react@6.20.0
+  - @opengeni/sdk@6.20.0
+  - @opengeni/contracts@6.20.0
+
+## 6.19.0
+
+### Patch Changes
+
+- Updated dependencies [1e29039]
+- Updated dependencies [a85adef]
+- Updated dependencies [973329a]
+- Updated dependencies [b349ca0]
+- Updated dependencies [226fe73]
+  - @opengeni/react@6.19.0
+  - @opengeni/sdk@6.19.0
+  - @opengeni/contracts@6.19.0
+
+## 6.18.0
+
+### Patch Changes
+
+- a16189c: Slack replies no longer show Opengeni links as raw Markdown. An image or link to an artifact (`![Preview](artifact:<id>)`, `[deck](artifact:<id>)`), a chat (`session:<id>`) or a console path now becomes a Slack link to that page in Opengeni, and a `sandbox:` path becomes its label. A clickable thumbnail links with its alt text. Markdown tables become an aligned code block, with each link in a cell numbered and listed under it. Operations an earlier release bound to other bytes keep them on retry. The console's file page opens a Site when an `artifact:<uuid>` link names one, since Sites share the UUID format.
+
+  Native app push registration now says why a deployment can't deliver to the app. `PUT /v1/native-app/push-device` answers 409 with `details.code` `native_push_unavailable` (`NATIVE_PUSH_UNAVAILABLE_DETAIL_CODE`, `isNativePushUnavailableError` in the SDK) when the app ID isn't in `OPENGENI_NATIVE_APP_IDS` or the platform has no push credentials, instead of a bare 400, or of accepting a registration that would never get a push. The iPhone app shows "This server isn't set up to send notifications to this app." instead of "Try again", shows a failed calls change under Calls from agents, and reports its APNs environment from its signing profile, also when it re-registers rotated tokens in the background (it re-registers a stored registration for the wrong environment too).
+
+  The iPhone message field grows with its text again, up to six lines (four with large text on a small screen, and never more than half the room above the keyboard) before it scrolls. On the new architecture iOS reports a field's content size only when its layout changes, so the fixed height the composer set from it never grew past one line and earlier lines scrolled out of view.
+
+- Updated dependencies [f313a0e]
+- Updated dependencies [6813960]
+- Updated dependencies [9188c1d]
+- Updated dependencies [3bc721a]
+- Updated dependencies [3b8f7da]
+- Updated dependencies [d83e5f2]
+- Updated dependencies [3105a8b]
+- Updated dependencies [a16189c]
+- Updated dependencies [73c3e82]
+- Updated dependencies [89cf4ba]
+- Updated dependencies [89cf4ba]
+  - @opengeni/contracts@6.18.0
+  - @opengeni/react@6.18.0
+  - @opengeni/sdk@6.18.0
+
 ## 6.17.0
 
 ### Patch Changes

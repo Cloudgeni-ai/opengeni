@@ -51,13 +51,14 @@ pub const BOUNDS: [f64; 16] = [
 
 /// Steps, as [`crate::host::step_name`] names them, in
 /// [`compute_core::Step::ALL`] order.
-pub const STEPS: [&str; 12] = [
+pub const STEPS: [&str; 13] = [
     "resume",
     "restore",
     "boot",
     "fetch",
     "pause",
     "drop",
+    "end",
     "compress",
     "save",
     "archive",
@@ -80,6 +81,10 @@ pub const STEP_OUTCOMES: [&str; 8] = [
 ];
 /// How a step ended, in classes: what step durations are kept by.
 pub const OUTCOME_CLASSES: [&str; 3] = ["done", "cancelled", "failed"];
+
+/// What a step's bytes went to: uploaded to object storage, copied within
+/// it, fetched from it, or freed for the host.
+pub const BYTE_KINDS: [&str; 4] = ["uploaded", "copied", "fetched", "freed"];
 /// The kinds of request the host answers.
 pub const REQUESTS: [&str; 15] = [
     "create", "remove", "touch", "wake", "connect", "sleep", "hold", "release", "status", "adopt",
@@ -202,7 +207,7 @@ const fn by(metric: Metric, labels: &'static [Label]) -> Metric {
 
 /// Every metric a host exports: its own, and its process's as
 /// OpenTelemetry's semantic conventions name them.
-pub const METRICS: [Metric; 43] = [
+pub const METRICS: [Metric; 44] = [
     by(
         sum(
             "compute.step.count",
@@ -228,6 +233,24 @@ pub const METRICS: [Metric; 43] = [
             Label {
                 name: "compute.outcome",
                 values: &OUTCOME_CLASSES,
+            },
+        ],
+    ),
+    by(
+        sum(
+            "compute.step.moved",
+            "By",
+            "Bytes finished steps uploaded, copied, fetched or freed, by kind and cause.",
+        ),
+        &[
+            STEP,
+            Label {
+                name: "compute.cause",
+                values: &CAUSES,
+            },
+            Label {
+                name: "compute.bytes.kind",
+                values: &BYTE_KINDS,
             },
         ],
     ),

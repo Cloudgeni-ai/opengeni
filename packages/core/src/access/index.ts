@@ -40,6 +40,7 @@ import {
   externalIdentityReadGranted,
   lockExternalWorkspaceMembershipLifecycleShared,
   readExternalIdentity,
+  rememberEndUserLabel,
   resolveExternalIdentityLink,
   managedPersonalWorkspacePermissions,
   nestedPostgresSqlState,
@@ -2554,6 +2555,14 @@ async function apiKeyAccessContext(
       }
       throw new HTTPException(503, { message: "external identity authority is unavailable" });
     }
+    // Console shows the product's own user id beside the end user's sessions.
+    // Display only and best effort: it never delays or fails authentication.
+    void rememberEndUserLabel(deps.db, {
+      accountId: identity.accountId,
+      subjectId: identity.subjectId,
+      source: identity.source,
+      externalId: identity.externalId,
+    });
     const linked =
       selection.mode === "linked_native"
         ? await resolveExternalIdentityLink(deps.db, {

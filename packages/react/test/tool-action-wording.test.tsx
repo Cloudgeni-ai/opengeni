@@ -185,7 +185,7 @@ test("the same host title names the step in the chat and the pending approval", 
   expect(pending.title).toBe("Opprett en kalenderavtale");
   // The approval list gives its own approve word; it is kept.
   expect(pending.approveLabel).toBe("Godkjenn");
-  expect(pending.fields.map((field) => field.label)).toEqual(["Body"]);
+  expect(pending.fields.map((field) => field.label)).toEqual(["Body · Subject"]);
 });
 
 test("the history line after a decision names the action in the host's words", () => {
