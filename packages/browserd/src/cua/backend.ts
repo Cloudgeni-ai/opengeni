@@ -211,6 +211,10 @@ export class CuaComputerBackend implements ComputerBackend {
   private nativeObservations = false;
   /** Windows CUA could not read because they are sheets of another window. */
   private readonly unreadableSheets = new Set<string>();
+  /** macOS windows on screen whose latest reading found no accessibility
+   * window for them (a system prompt or panel some helper processes show):
+   * they are read from their screenshot alone (see axlessObservation). */
+  private readonly axlessWindows = new Set<string>();
   /** macOS windows on the current Space that their app never shows. A window
    * stays this way until it comes on screen or goes away. */
   private readonly neverShown = new Set<string>();
@@ -1630,6 +1634,19 @@ export class CuaComputerBackend implements ComputerBackend {
         false,
         false,
       );
+    // CUA sends background input only to a window accessibility shows, so
+    // nothing that could reach another window of the app is sent.
+    if (
+      cuaCode === "off_space_or_ax_unresolved" &&
+      target.onScreen &&
+      this.axlessWindows.has(targetId)
+    )
+      return new ComputerBackendError(
+        code,
+        "This window is on screen but shows no accessibility elements, so input sent to it in the background could reach another window of its app, and none was sent: use the app or menu bar control that opened it, or ask the person to click it at the computer",
+        false,
+        false,
+      );
     if (cuaCode === "off_space_or_ax_unresolved" || cuaCode === "window_not_on_screen")
       return new ComputerBackendError(
         code,
@@ -1713,6 +1730,22 @@ export class CuaComputerBackend implements ComputerBackend {
         this.unreadableSheets.add(targetId);
         throw await this.sheetError(target);
       }
+      // A window macOS lists on screen for its app, which accessibility does
+      // not show (some system prompts and panels): its screenshot is still
+      // what the person sees, so it is the reading, with no elements. A
+      // locked screen hides every window from accessibility the same way, so
+      // that is ruled out first (see assertOnScreen).
+      if (
+        this.identity.platform === "macos" &&
+        state.pid === target.pid &&
+        state.window_id === target.windowId &&
+        !state.snapshot_id &&
+        target.onScreen &&
+        String(data.degraded_reason ?? "").startsWith("ax_window_unresolved")
+      ) {
+        await this.assertOnScreen(true);
+        return this.axlessObservation(targetId, target);
+      }
       throw new ComputerBackendError(
         "target_stale",
         `CUA observation did not bind the requested window (snapshot=${state.snapshot_id ?? "missing"}, reason=${data.degraded_reason ?? "none"})`,
@@ -1722,6 +1755,7 @@ export class CuaComputerBackend implements ComputerBackend {
     }
     // It read, so it is no longer a sheet that cannot be.
     this.unreadableSheets.delete(targetId);
+    this.axlessWindows.delete(targetId);
     const projected = projectElements(
       state.elements,
       this.identity.platform,
@@ -1887,6 +1921,31 @@ export class CuaComputerBackend implements ComputerBackend {
     const recent = (this.recentObservations.get(targetId) ?? []).slice(-(RECENT_OBSERVATIONS - 1));
     this.recentObservations.delete(targetId);
     this.recentObservations.set(targetId, [...recent, actedOn]);
+    return observation;
+  }
+
+  /** A reading of a window accessibility does not show (see axlessWindows):
+   * its screenshot and no elements, with nothing focused. Earlier readings'
+   * refs are not carried over: none of them can be resolved in it. */
+  private axlessObservation(targetId: string, target: Target): ComputerBackendObservation {
+    const observation: ComputerBackendObservation = {
+      observationId: `${this.session}:axless:${randomUUID()}`,
+      target: { ...target.native, focused: false },
+      frameId:
+        [...this.frames.entries()]
+          .reverse()
+          .find(([, frame]) => frame.targetId === targetId)?.[0] ?? null,
+      roots: [],
+      nodeCount: 0,
+      focusedRef: null,
+      changedRegions: [],
+    };
+    this.axlessWindows.add(targetId);
+    this.tokens.delete(targetId);
+    this.observations.delete(targetId);
+    this.observations.set(targetId, observation);
+    this.recentObservations.delete(targetId);
+    this.recentObservations.set(targetId, [observation]);
     return observation;
   }
 
