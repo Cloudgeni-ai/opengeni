@@ -334,12 +334,32 @@ import {
 } from "./slack-rest-mcp";
 import {
   DATAVERSE_WEB_API_MCP_BRIDGE_ADAPTER,
+  DATAVERSE_WEB_API_TOOLS,
+  isDataverseMcpConfig,
   type DataverseWebApiMcpBridgeContext,
 } from "./dataverse-web-api-mcp";
 import {
   BUSINESS_CENTRAL_API_MCP_BRIDGE_ADAPTER,
+  BUSINESS_CENTRAL_API_TOOLS,
+  isBusinessCentralApiConfig,
   type BusinessCentralApiMcpBridgeContext,
 } from "./business-central-api-mcp";
+
+/**
+ * The fixed tool set of a built-in bridge that runs instead of a connector's
+ * hosted MCP server, or null when the connector's own server serves its tools.
+ * Anything that lists a connector's tools outside a run (such as its tool
+ * permissions) uses this, so it shows the tools agents actually call without
+ * asking a hosted server the bridge never uses.
+ */
+export function fixedBridgeConnectorTools(
+  url: string,
+  connectionRef: McpServerConnectionRef | undefined,
+): readonly Awaited<ReturnType<MCPServer["listTools"]>>[number][] | null {
+  if (isDataverseMcpConfig(url, connectionRef)) return DATAVERSE_WEB_API_TOOLS;
+  if (isBusinessCentralApiConfig(url, connectionRef)) return BUSINESS_CENTRAL_API_TOOLS;
+  return null;
+}
 
 import { McpResultCustomDataBridge, unwrapSdkMcpResultProjection } from "./mcp-result-custom-data";
 import {
