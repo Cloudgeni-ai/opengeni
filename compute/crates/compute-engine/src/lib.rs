@@ -13,6 +13,7 @@ pub mod confined;
 mod error;
 pub mod firecracker;
 mod profile;
+pub mod repair;
 mod spec;
 pub mod vsock;
 pub mod watchdog;

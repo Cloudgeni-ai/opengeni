@@ -24,10 +24,15 @@ const TRACE: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
 
 /// A lab whose agent sends every event to the returned receiver.
 async fn watched() -> (Lab, Observer, mpsc::Receiver<Event>) {
+    watched_in(Lab::root()).await
+}
+
+/// Like [`watched`], on the lab at `root`.
+async fn watched_in(root: std::path::PathBuf) -> (Lab, Observer, mpsc::Receiver<Event>) {
     let (tap, events) = mpsc::channel(4096);
     let mut kept = None;
     let lab = Lab::start_configured(
-        Lab::root(),
+        root,
         Arc::default(),
         Delays::default(),
         HostPolicy::default(),
@@ -651,4 +656,51 @@ async fn a_traced_wake_from_the_store_carries_its_trace_to_the_end() {
         [("fetch", Some(trace)), ("restore", Some(trace))],
         "{steps:?}"
     );
+}
+
+/// A sandbox whose file system records errors is repaired as it boots
+/// fresh, and the repair is an event of its own beside the boot's, naming
+/// the sandbox and the step (ADR 43).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_disk_repaired_at_a_fresh_boot_has_its_own_event() {
+    let root = Lab::root();
+    let base = root.join("base.img");
+    std::fs::File::create(&base)
+        .unwrap()
+        .set_len(64 << 20)
+        .unwrap();
+    let made = std::process::Command::new("mkfs.ext4")
+        .args(["-q", "-F"])
+        .arg(&base)
+        .status();
+    if !made.is_ok_and(|made| made.success()) {
+        eprintln!("skipped: no mkfs.ext4");
+        return;
+    }
+    for request in ["ssv state 3", "ssv error_count 5"] {
+        let ran = std::process::Command::new("debugfs")
+            .args(["-w", "-R", request])
+            .arg(&base)
+            .output()
+            .unwrap();
+        assert!(ran.status.success(), "{ran:?}");
+    }
+    let (lab, _observer, mut events) = watched_in(root).await;
+    let sandbox = id(61);
+    lab.create(sandbox, NEVER).await;
+    assert!(matches!(lab.wake(sandbox).await, Reply::Woken { .. }));
+    let seen = until(&mut events, |event| event.name == "compute.disk.repair").await;
+    let repair = seen.last().unwrap();
+    assert_eq!(
+        text(repair, "compute.sandbox.id"),
+        Some(sandbox.to_string().as_str())
+    );
+    assert_eq!(text(repair, "compute.step"), Some("boot"));
+    // Only root can hand the disk to the VM's own user.
+    if rustix::process::geteuid().is_root() {
+        assert_eq!(text(repair, "compute.disk.repair"), Some("repaired"));
+        assert_eq!(int(repair, "compute.disk.errors"), Some(5), "{repair:#?}");
+    } else {
+        assert_eq!(text(repair, "compute.disk.repair"), Some("failed"));
+    }
 }
