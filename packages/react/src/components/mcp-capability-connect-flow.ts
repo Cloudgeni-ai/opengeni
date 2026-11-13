@@ -18,6 +18,7 @@ import {
 } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/browser";
 import { useEffect, useRef, useState } from "react";
+import type { AdminStepUpHandler, AdminStepUpRequest } from "../admin-step-up";
 import { ConnectCardMessage } from "../connect-card-message";
 import { attemptHint, type ConnectWindowHost } from "../connect-window-host";
 import { useConnect, type ConnectView } from "../hooks/use-connect";
@@ -131,6 +132,14 @@ export type McpCapabilityConnect = {
    * page comes back), or the person gave up on its sign-in page.
    */
   approval: OrganizationApproval | null;
+  /**
+   * Turning it on waits for the person to confirm it's them with a passkey.
+   * `opened`: the host's step-up went elsewhere (a page it opened) without
+   * confirming here, so the next action is Try again.
+   */
+  stepUp: (AdminStepUpRequest & { opened: boolean }) | null;
+  /** Confirm with the host's step-up, then turn it on again; or Try again. */
+  confirmStepUp: () => void;
   open: () => void;
   signIn: () => void;
   addHere: () => void;
@@ -165,6 +174,11 @@ export type McpCapabilityConnectInput = {
    * in again to that same connection instead of adding a new one.
    */
   reconnectConnectionId?: string | undefined;
+  /**
+   * How the host lets the person confirm it's them with a passkey when turning
+   * the capability on asks for it. Without one, the card says what to do.
+   */
+  adminStepUp?: AdminStepUpHandler | undefined;
 };
 
 /**
@@ -184,6 +198,7 @@ export function useMcpCapabilityConnect({
   onClose,
   personalOnly: configuredPersonalOnly = false,
   reconnectConnectionId,
+  adminStepUp,
 }: McpCapabilityConnectInput): McpCapabilityConnect {
   const t = useOpenGeniText();
   const [controller] = useState(
@@ -204,6 +219,7 @@ export function useMcpCapabilityConnect({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [stepUp, setStepUp] = useState<(AdminStepUpRequest & { opened: boolean }) | null>(null);
   const [retryFresh, setRetryFresh] = useState(false);
   // A sign-in the person left (closed its window or stopped waiting): its
   // page may have said an administrator has to approve the app.
@@ -215,6 +231,7 @@ export function useMcpCapabilityConnect({
   const authorization = useRef<AbortController | null>(null);
   const operation = useRef<AbortController | null>(null);
   const reservedPopup = useRef<(() => void) | null>(null);
+  const steppingUp = useRef(false);
   const startKey = useRef(crypto.randomUUID());
   const advanceKey = useRef(crypto.randomUUID());
   const startInput = useRef<string | null>(null);
@@ -367,6 +384,7 @@ export function useMcpCapabilityConnect({
     setBusy(true);
     setError(null);
     setNotice(null);
+    setStepUp(null);
     setRetryFresh(false);
     setLeftSignIn(null);
     try {
@@ -380,7 +398,7 @@ export function useMcpCapabilityConnect({
             setLeftSignIn(
               organizationAppApproval(left.nextAction.url, left.nextAction.organizationApprovalUrl),
             );
-        } else
+        } else {
           setError(
             // This flow's own steps explain themselves; a server or network
             // failure gets the card's plain line instead of its raw text.
@@ -388,6 +406,9 @@ export function useMcpCapabilityConnect({
               ? failure.message
               : t("sessionMcpCapabilityCard.connectionSetupCouldNotFinish"),
           );
+          if (failure instanceof ConnectCardMessage && failure.stepUp)
+            setStepUp({ ...failure.stepUp, opened: false });
+        }
       }
     } finally {
       if (operation.current === pending) {
@@ -488,15 +509,23 @@ export function useMcpCapabilityConnect({
         failure instanceof OpenGeniApiError &&
         failure.status === 403 &&
         failure.details?.code === ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE
-      )
+      ) {
+        const registered = failure.details.passkeyRegistered !== false;
+        // With a host step-up the card offers it as the next action.
         throw new ConnectCardMessage(
           t(
-            failure.details.passkeyRegistered === false
-              ? "sessionMcpCapabilityCard.addAPasskeyToTurnOn"
-              : "sessionMcpCapabilityCard.confirmWithPasskeyToTurnOn",
+            adminStepUp
+              ? registered
+                ? "sessionMcpCapabilityCard.confirmWithPasskeyToTurnOnHere"
+                : "sessionMcpCapabilityCard.addAPasskeyToTurnOnHere"
+              : registered
+                ? "sessionMcpCapabilityCard.confirmWithPasskeyToTurnOn"
+                : "sessionMcpCapabilityCard.addAPasskeyToTurnOn",
             { name: resolved.name },
           ),
+          { stepUp: { passkeyRegistered: registered } },
         );
+      }
       // The account is connected, but turning the integration on here is an
       // admin's step. Say so: the account is used once an admin turns it on.
       if (failure instanceof OpenGeniApiError && failure.status === 403)
@@ -505,6 +534,36 @@ export function useMcpCapabilityConnect({
         );
       throw failure;
     }
+  }
+
+  /** Turn it on again with the connected account: after a step-up, or Try again. */
+  function retryTurnOn() {
+    void run(async (active) => {
+      const attempt = controller.getSnapshot().attempt;
+      if (attempt?.state === "complete") await reconcile(attempt, active);
+      else await recoverSavedAttempt(active);
+    });
+  }
+
+  async function confirmStepUp() {
+    const asked = stepUp;
+    if (!asked || operation.current || steppingUp.current) return;
+    if (asked.opened || !adminStepUp) {
+      retryTurnOn();
+      return;
+    }
+    let confirmed = false;
+    steppingUp.current = true;
+    try {
+      confirmed = await adminStepUp({ passkeyRegistered: asked.passkeyRegistered });
+    } catch {
+      confirmed = false;
+    } finally {
+      steppingUp.current = false;
+    }
+    if (!current()) return;
+    if (confirmed) retryTurnOn();
+    else setStepUp({ ...asked, opened: true });
   }
 
   async function open() {
@@ -828,6 +887,8 @@ export function useMcpCapabilityConnect({
       (!!attemptState && RESTART_STATES.includes(attemptState)) ||
       (Boolean(error || notice) && view.attempt?.nextAction.type === "authorize"),
     approval,
+    stepUp,
+    confirmStepUp: () => void confirmStepUp(),
     open: () => void open(),
     signIn,
     addHere: () => void addHere(),

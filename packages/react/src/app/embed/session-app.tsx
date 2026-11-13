@@ -35,6 +35,7 @@ import { Toaster } from "../components/toaster";
 import { WorkspaceTenantBoundary } from "../components/workspace-tenant-boundary";
 import { apiErrorFromResponseBody, type AppApiHost } from "../lib/app-api";
 import { AppHostProvider, type AppHost, type SessionViewState } from "../lib/app-host";
+import type { AdminStepUpHandler } from "../../admin-step-up";
 import type { EditableArtifactSurfaceProps, PdfPreviewProps } from "../lib/app-surfaces";
 import { AppearanceProvider, useAppearance } from "../lib/appearance";
 import { parseComposerLaunchSearch } from "../lib/composer-launch";
@@ -120,6 +121,13 @@ export type SessionAppProps = Readonly<{
   className?: string | undefined;
   /** Called when the API rejects the credentials (any call answering 401). */
   onUnauthorized?: (() => void) | undefined;
+  /**
+   * Lets the person confirm it's them with a passkey when an admin change asks
+   * for it (turning on an integration, for one). Resolve true once they did,
+   * and the change is sent again. By default the Opengeni app's page for it
+   * opens through `openUrl`, and the person tries again here.
+   */
+  onAdminStepUp?: AdminStepUpHandler | undefined;
   /**
    * Model context added to each new chat and message, such as where the person
    * is writing from and what they have selected. Items with a `label` show as
@@ -526,6 +534,13 @@ function SessionAppForWorkspace(props: SessionAppProps) {
   const pdfPreview = props.surfaces?.pdfPreview;
   const editableArtifact = props.surfaces?.editableArtifact;
   const starters = props.starters;
+  // Read at call time, so a host passing a new function each render keeps the host stable.
+  const hasAdminStepUp = props.onAdminStepUp !== undefined;
+  const adminStepUp = useMemo<AdminStepUpHandler | undefined>(
+    () =>
+      hasAdminStepUp ? (request) => latest.current.onAdminStepUp?.(request) ?? false : undefined,
+    [hasAdminStepUp],
+  );
   const host = useMemo<AppHost>(
     () => ({
       navigation,
@@ -537,8 +552,9 @@ function SessionAppForWorkspace(props: SessionAppProps) {
       messageContext,
       ...(starters ? { starters } : {}),
       onSessionState: (state) => latest.current.onSessionState?.(state),
+      ...(adminStepUp ? { adminStepUp } : {}),
     }),
-    [api, editableArtifact, messageContext, navigation, pdfPreview, starters],
+    [adminStepUp, api, editableArtifact, messageContext, navigation, pdfPreview, starters],
   );
   return (
     <AppearanceProvider hostTheme={props.theme} scope="local">

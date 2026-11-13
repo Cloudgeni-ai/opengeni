@@ -1172,7 +1172,9 @@ The app defines the prompt, context and output presentation. This helper uses
 native sessions and events with the same permissions, approvals, model access
 and billing; it is not a second executor. New Site work is private per viewer
 and excluded from ordinary workspace discovery. `pending` and `cancelled` are
-not successful results; model failure rejects. Retain the `onSession` handle
+not successful results; model failure rejects. With `waitForApproval: true`, a
+turn waiting for an approval or an answer resolves once the person gives it in
+Opengeni and the turn finishes; `onWait` reports the wait. Retain the `onSession` handle
 to observe again using `site.ai.result(id, { turnId })`, without creating work.
 An `after` cursor returns only subsequent output; omit it for full replay.
 Aborting observation does not cancel native execution. See

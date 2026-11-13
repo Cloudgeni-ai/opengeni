@@ -226,6 +226,71 @@ for (const wait of waits) {
   });
 }
 
+for (const wait of waits) {
+  test(`run waits through ${wait.type} and resolves with the answer once the person gives it`, async () => {
+    const { ai, streamReads } = fixture(
+      [
+        { type: "agent.message.completed", payload: { text: "Checking", phase: "commentary" } },
+        { type: wait.type, payload: wait.payload },
+      ],
+      {
+        live: [
+          { sequence: 3, ...wait.decision },
+          { sequence: 4, type: "agent.message.completed", payload: { text: "Approved answer" } },
+          { sequence: 5, type: "turn.completed" },
+        ],
+      },
+    );
+    const waited: unknown[] = [];
+    const chunks: string[] = [];
+    const result = await ai.run(
+      { initialMessage: "App-designed task" },
+      {
+        waitForApproval: true,
+        onWait: (info) => waited.push(info),
+        onText: (text) => {
+          chunks.push(text);
+        },
+      },
+    );
+    expect(result).toMatchObject({
+      status: "completed",
+      turnId: "turn",
+      text: "Approved answer",
+      after: 5,
+    });
+    // The wait is reported once and its commentary is not the answer.
+    expect(waited).toEqual([
+      { kind: wait.type === "session.requiresAction" ? "approval" : "input" },
+    ]);
+    expect(chunks).toEqual(["Approved answer"]);
+    expect(streamReads[0]?.after).toBe(2);
+  });
+}
+
+test("a wait that outlasts one event stream reopens it and still resolves", async () => {
+  const { ai, client } = fixture([{ type: "session.requiresAction", payload: waits[0]!.payload }]);
+  const opened: Array<number | undefined> = [];
+  client.streamEvents = (_workspace, _session, options = {}) => {
+    opened.push(options.after);
+    const later = opened.length > 1;
+    return (async function* () {
+      if (!later) return; // The first stream ends while the person decides.
+      yield* events([
+        {},
+        { ...waits[0]!.decision },
+        { type: "agent.message.completed", payload: { text: "After approval" } },
+        { type: "turn.completed" },
+      ]).slice(1);
+    })();
+  };
+  expect(await ai.result("session", { turnId: "turn", waitForApproval: true })).toMatchObject({
+    status: "completed",
+    text: "After approval",
+  });
+  expect(opened).toEqual([1, 1]);
+});
+
 test("a wait resolving while replay is read does not settle early", async () => {
   const { ai, pageReads } = fixture(
     [
@@ -531,7 +596,10 @@ test("a cursor before a new turn does not bind to an omitted envelope's turn", a
 
 test("status-only pending projections retain the session's active turn identity", async () => {
   const { ai } = fixture([], { snapshot: { status: "requires_action", activeTurnId: "turn" } });
-  expect(await ai.result("session")).toMatchObject({ status: "pending", turnId: "turn" });
+  expect(await ai.result("session")).toMatchObject({
+    status: "pending",
+    turnId: "turn",
+  });
 });
 
 test("an exhausted stream and a non-advancing replay page fail instead of claiming completion", async () => {

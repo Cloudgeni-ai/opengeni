@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
-import type { ChatClient } from "@opengeni/sdk";
+import type { ChatClient, ConnectionMetadata } from "@opengeni/sdk";
 import type { OwnResource, OwnResourceReachWorkspace } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { isPersonalGitHubConnection } from "@opengeni/contracts/personal-github";
 import { Button } from "../../ui/button";
+import { DetailFooterConfirm } from "../../ui/detail-sheet";
 import { Disclosure } from "../../ui/disclosure";
 import { EmptyState } from "../../ui/empty-state";
 import { Notice } from "../../ui/notice";
@@ -26,7 +28,11 @@ import {
 export type MyThingsClient = OwnReachClient &
   Pick<
     ChatClient<OpenGeniBrowserClient>,
-    "listOwnResources" | "listCapabilities" | "listOwnConnectionAccounts"
+    | "listOwnResources"
+    | "listCapabilities"
+    | "listOwnConnectionAccounts"
+    | "deleteConnection"
+    | "disconnectPersonalGitHub"
   >;
 
 type ListState =
@@ -76,9 +82,9 @@ export function whereItWorksSummary(workspaces: readonly OwnResourceReachWorkspa
 /**
  * Which app each of your logins signs in to ("Gmail"), from this workspace's
  * connectors. A login for a connector this workspace doesn't list keeps its
- * service's address.
+ * service's address. Also each login itself, which says where to remove it.
  */
-async function loginAppNames(client: MyThingsClient, workspaceId: string) {
+async function loginDetails(client: MyThingsClient, workspaceId: string) {
   const [catalog, accounts] = await Promise.all([
     client.listCapabilities(workspaceId),
     client.listOwnConnectionAccounts(workspaceId, { includeInactive: true }),
@@ -90,17 +96,41 @@ async function loginAppNames(client: MyThingsClient, workspaceId: string) {
       if (!names.has(account.id)) names.set(account.id, item.name);
     }
   }
-  return names;
+  // Only your own logins; a shared account in this workspace isn't yours to remove here.
+  const logins = new Map(
+    accounts.filter((account) => account.subjectId !== null).map((account) => [account.id, account]),
+  );
+  return { names, logins };
+}
+
+/**
+ * Remove one of your own logins where it was added, for every workspace it
+ * works in. Your own GitHub account has its own disconnect.
+ */
+export async function removeOwnLogin(
+  client: Pick<MyThingsClient, "deleteConnection" | "disconnectPersonalGitHub">,
+  login: ConnectionMetadata,
+): Promise<void> {
+  if (isPersonalGitHubConnection(login)) {
+    await client.disconnectPersonalGitHub(login.workspaceId, login.id, {
+      expectedVersion: login.version,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    return;
+  }
+  await client.deleteConnection(login.workspaceId, login.id);
 }
 
 function useMyThings(client: MyThingsClient, workspaceId: string) {
   const [state, setState] = useState<ListState>({ status: "loading" });
   const [appNames, setAppNames] = useState<ReadonlyMap<string, string>>(new Map());
+  const [logins, setLogins] = useState<ReadonlyMap<string, ConnectionMetadata>>(new Map());
   const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     let current = true;
-    setState({ status: "loading" });
+    // A reload after a change keeps the list on screen.
+    setState((previous) => (previous.status === "ready" ? previous : { status: "loading" }));
     client
       .listOwnResources(workspaceId)
       .then((listed) => {
@@ -114,9 +144,12 @@ function useMyThings(client: MyThingsClient, workspaceId: string) {
           });
       });
     // Names are a nicety: without them a login shows its service's address.
-    loginAppNames(client, workspaceId)
-      .then((names) => {
-        if (current) setAppNames(names);
+    // Without its login, a row offers no Remove.
+    loginDetails(client, workspaceId)
+      .then((details) => {
+        if (!current) return;
+        setAppNames(details.names);
+        setLogins(details.logins);
       })
       .catch(() => undefined);
     return () => {
@@ -124,7 +157,12 @@ function useMyThings(client: MyThingsClient, workspaceId: string) {
     };
   }, [attempt, client, workspaceId]);
 
-  return { state, appNames, retry: useCallback(() => setAttempt((count) => count + 1), []) };
+  return {
+    state,
+    appNames,
+    logins,
+    retry: useCallback(() => setAttempt((count) => count + 1), []),
+  };
 }
 
 function titleAndAccount(
@@ -153,11 +191,16 @@ function MyThingRow({
   workspaceId,
   resource,
   appNames,
+  login,
+  onRemoved,
 }: {
   client: MyThingsClient;
   workspaceId: string;
   resource: OwnResource;
   appNames: ReadonlyMap<string, string>;
+  /** The login this row is, when it can be removed. */
+  login: ConnectionMetadata | null;
+  onRemoved: () => void;
 }) {
   const reach = useOwnResourceReach({
     client,
@@ -169,6 +212,24 @@ function MyThingRow({
   const { title, account } = titleAndAccount(resource, appNames);
   const where = reach.state.status === "ready" ? whereItWorksSummary(reach.state.workspaces) : null;
   const summary = [account, where].filter((part): part is string => Boolean(part)).join(" · ");
+  const [confirming, setConfirming] = useState(false);
+  const [removing, setRemoving] = useState(false);
+  const [removeError, setRemoveError] = useState<string | null>(null);
+  const removable = login !== null && login.status !== "revoked";
+  const remove = async () => {
+    if (!login) return;
+    setRemoving(true);
+    setRemoveError(null);
+    try {
+      await removeOwnLogin(client, login);
+      setConfirming(false);
+      onRemoved();
+    } catch (error) {
+      setRemoveError(userErrorText(error, "Couldn't remove this login."));
+    } finally {
+      setRemoving(false);
+    }
+  };
   return (
     <Disclosure
       variant="sheet"
@@ -176,9 +237,46 @@ function MyThingRow({
       summary={summary}
       loading={reach.state.status === "loading"}
       sheetDescription={account ?? undefined}
+      onOpenChange={(open) => {
+        if (open) return;
+        setConfirming(false);
+        setRemoveError(null);
+      }}
+      sheetFooterStart={
+        removable ? (
+          <Button
+            type="button"
+            variant="ghost"
+            className="-ml-3 text-danger hover:bg-danger/10 hover:text-danger pointer-coarse:h-11"
+            onClick={() => setConfirming(true)}
+          >
+            Remove
+          </Button>
+        ) : undefined
+      }
+      sheetFooterConfirm={
+        removable && confirming ? (
+          <DetailFooterConfirm
+            title={`Remove ${account ? `${title} (${account})` : title}?`}
+            description="It stops working in all your workspaces. You can sign in again anytime."
+            confirmLabel={removing ? "Removing…" : "Remove"}
+            pending={removing}
+            onCancel={() => {
+              setConfirming(false);
+              setRemoveError(null);
+            }}
+            onConfirm={() => void remove()}
+          />
+        ) : undefined
+      }
     >
       <p className="m-0 text-xs leading-4.5 text-fg-muted">{OWN_WHERE_IT_WORKS_DESCRIPTION}</p>
       <OwnWhereItWorks name={account ? `${title} (${account})` : title} reach={reach} />
+      {removeError ? (
+        <div role="alert">
+          <Notice tone="failed">{removeError}</Notice>
+        </div>
+      ) : null}
     </Disclosure>
   );
 }
@@ -203,7 +301,7 @@ const GROUPS = [
 ] as const;
 
 export function MyThings({ client, workspaceId }: { client: MyThingsClient; workspaceId: string }) {
-  const { state, appNames, retry } = useMyThings(client, workspaceId);
+  const { state, appNames, logins, retry } = useMyThings(client, workspaceId);
 
   if (state.status === "loading") {
     return (
@@ -257,6 +355,12 @@ export function MyThings({ client, workspaceId }: { client: MyThingsClient; work
                 workspaceId={workspaceId}
                 resource={resource}
                 appNames={appNames}
+                login={
+                  resource.resourceKind === "connection"
+                    ? (logins.get(resource.resourceId) ?? null)
+                    : null
+                }
+                onRemoved={retry}
               />
             ))}
           </Section>

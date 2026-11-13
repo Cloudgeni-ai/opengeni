@@ -8,6 +8,7 @@ import { browserConnectWindowHost } from "../connect-window-host";
 import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";
 import { capabilityPresentation } from "../integration-presentation";
 import { useOpenGeniText } from "../messages/runtime";
+import { useAdminStepUp } from "../app/lib/app-host";
 import { useMcpCapabilityConnect } from "./mcp-capability-connect-flow";
 import { connectionCardSubtitle, showsMcpServerLabel } from "./mcp-server-label";
 import { SessionCapabilityFrame } from "./session-capability-frame";
@@ -100,6 +101,7 @@ function ScopedCard({
 }: McpConnectionCardProps) {
   const t = useOpenGeniText();
   const [windows] = useState(() => browserConnectWindowHost(window));
+  const adminStepUp = useAdminStepUp();
   const flow = useMcpCapabilityConnect({
     client,
     workspaceId,
@@ -112,6 +114,7 @@ function ScopedCard({
     onClose,
     personalOnly: configuredPersonalOnly,
     reconnectConnectionId,
+    adminStepUp,
   });
   const reconnecting = Boolean(reconnectConnectionId);
   const { item, personalOnly, busy, waiting, reconciling, connected, ownership, offHere } = flow;
@@ -310,6 +313,19 @@ function ScopedCard({
                   {t("sessionMcpCapabilityCard.connectADifferentAccount")}
                 </button>
               </>
+            ) : flow.stepUp ? (
+              // Connected, but turning it on waits for a passkey: that is the step.
+              <button
+                className="og-session-capability-primary"
+                disabled={busy}
+                onClick={flow.confirmStepUp}
+              >
+                {flow.stepUp.opened || !adminStepUp
+                  ? t("sessionMcpCapabilityCard.tryAgain")
+                  : flow.stepUp.passkeyRegistered
+                    ? t("sessionMcpCapabilityCard.confirmItSYou")
+                    : t("sessionMcpCapabilityCard.addAPasskey")}
+              </button>
             ) : !connected && adminApproval ? (
               // The organization has to approve first: that help is the step,
               // with signing in again as its last action.
