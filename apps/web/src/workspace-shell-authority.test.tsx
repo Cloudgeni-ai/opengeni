@@ -50,10 +50,12 @@ function testContext(input: {
   workspaces: Workspace[];
   workspaceGrants?: AppContextValue["accessContext"]["workspaceGrants"];
   slackWorkspaceId?: string | null;
+  linkedWorkspaceId?: string | null;
   stateOwnerWorkspaceId?: string | null;
   prepareSlack?: (workspaceId: string) => Promise<SlackUserLinkAccessRequest | null>;
 }) {
   const calls = { github: 0, mcp: 0, reset: 0, prepareSlack: 0, transition: 0 };
+  const completedSlackLinks: string[] = [];
   const context = {
     accessKeyVersion: 1,
     accessContext: {
@@ -67,6 +69,10 @@ function testContext(input: {
     workspaces: input.workspaces,
     workspaceStateOwnerId: input.stateOwnerWorkspaceId ?? workspaceId,
     slackLinkContinuationWorkspaceId: input.slackWorkspaceId ?? null,
+    slackLinkLinkedWorkspaceId: input.linkedWorkspaceId ?? null,
+    completeSlackLinkContinuation: (linkedWorkspaceId: string) => {
+      completedSlackLinks.push(linkedWorkspaceId);
+    },
     client: {},
     captureWorkspaceInvocation: () => ({ workspaceId, revision: 1 }),
     ownsWorkspaceInvocation: () => true,
@@ -92,7 +98,7 @@ function testContext(input: {
       calls.transition += 1;
     },
   } as unknown as AppContextValue;
-  return { calls, context };
+  return { calls, context, completedSlackLinks };
 }
 
 async function renderShell(
@@ -244,8 +250,8 @@ describe("workspace shell authority", () => {
     });
 
     expect(calls.prepareSlack).toBe(1);
-    expect(rendered.container.textContent).toContain("Slack account linked");
-    expect(rendered.container.textContent).toContain("You can go back to Slack.");
+    expect(rendered.container.textContent).toContain("Linked.");
+    expect(rendered.container.textContent).toContain("Go back to Slack and ask again.");
     expect(rendered.container.textContent).not.toContain("invalid or expired");
     expect(rendered.container.textContent).not.toContain("Request access");
     // Linking grants nothing: no workspace shell mounts.
@@ -272,7 +278,7 @@ describe("workspace shell authority", () => {
       canLink: true,
       organizationMemberLink: { slackAccountLabel: "@ada in Acme Slack" },
     };
-    const { context } = testContext({
+    const { context, completedSlackLinks } = testContext({
       workspaces: [],
       slackWorkspaceId: workspaceId,
       prepareSlack: async () => request,
@@ -312,7 +318,35 @@ describe("workspace shell authority", () => {
     expect(linkCalls).toEqual([
       [workspaceId, request.id, { expectedVersion: 1, idempotencyKey: expect.any(String) }],
     ]);
-    expect(rendered.container.textContent).toContain("Slack account linked");
+    expect(rendered.container.textContent).toContain("Linked.");
+    expect(rendered.container.textContent).toContain("Go back to Slack and ask again.");
+    // The app keeps the outcome, so the access revalidation after linking
+    // (which resets this route's own state) doesn't hide it.
+    expect(completedSlackLinks).toEqual([workspaceId]);
+    await act(async () => rendered.root.unmount());
+  });
+
+  test("a completed link stays on screen after access revalidates, instead of leaving the workspace", async () => {
+    const { calls, context } = testContext({
+      workspaces: [],
+      linkedWorkspaceId: workspaceId,
+    });
+    let shellMounts = 0;
+    const rendered = await renderShell(
+      { ...context, accessKeyVersion: 2 },
+      () => {
+        shellMounts += 1;
+      },
+      { routed: true },
+    );
+    const text = rendered.container.textContent ?? "";
+    expect(text).toContain("Linked.");
+    expect(text).toContain("Go back to Slack and ask again.");
+    expect(text).not.toContain("Workspace unavailable");
+    expect(text).not.toContain("Checking Slack access");
+    expect(rendered.container.querySelectorAll("button, a")).toHaveLength(0);
+    expect(calls.prepareSlack).toBe(0);
+    expect(shellMounts).toBe(0);
     await act(async () => rendered.root.unmount());
   });
 });

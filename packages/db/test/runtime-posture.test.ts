@@ -2144,6 +2144,12 @@ describe("runtime database posture evaluator", () => {
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES ? 2 : 0) +
           // Migrations with an entry in runtime-posture-migrations/, one file each.
           migrationTableCount(tableClass(tables)) +
+          // 1415 and 1416 drop slack_agents and bot_templates: two full-DML FORCE-RLS tables.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? -2
+            : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
@@ -2234,8 +2240,11 @@ describe("runtime database posture evaluator", () => {
       expect(RUNTIME_FULL_DML_TABLES).toContain("secret_approval_rules");
       expect(FORCE_RLS_TABLES).toContain("automation_templates");
       expect(RUNTIME_FULL_DML_TABLES).toContain("automation_templates");
-      expect(FORCE_RLS_TABLES).toContain("bot_templates");
-      expect(RUNTIME_FULL_DML_TABLES).toContain("bot_templates");
+      // 1415 and 1416 dropped the legacy Slack agents and bot templates tables.
+      expect(FORCE_RLS_TABLES).not.toContain("bot_templates" as never);
+      expect(RUNTIME_FULL_DML_TABLES).not.toContain("bot_templates" as never);
+      expect(FORCE_RLS_TABLES).not.toContain("slack_agents" as never);
+      expect(RUNTIME_FULL_DML_TABLES).not.toContain("slack_agents" as never);
       expect(FORCE_RLS_TABLES).toContain("secret_use_approvals");
       expect(RUNTIME_FULL_DML_TABLES).toContain("secret_use_approvals");
       expect(FORCE_RLS_TABLES).toContain("session_title_operations");
@@ -2313,7 +2322,8 @@ describe("runtime database posture evaluator", () => {
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +
           organizationRecoveryProtectedTableCount -
-          8,
+          8 -
+          2, // 1415 and 1416 dropped slack_agents and bot_templates.
       );
       expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(
         tableCount +
@@ -2330,7 +2340,8 @@ describe("runtime database posture evaluator", () => {
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +
           organizationRecoveryProtectedTableCount -
-          8,
+          8 -
+          2, // 1415 and 1416 dropped slack_agents and bot_templates.
       );
       expect(RUNTIME_TABLE_PRIVILEGES.feedback_submissions).toEqual(["SELECT", "INSERT"]);
       expect(RUNTIME_TABLE_PRIVILEGES.memory_slack_publication_configurations).toEqual([

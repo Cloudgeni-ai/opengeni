@@ -12185,6 +12185,7 @@
       "shape": {
         "$": "object",
         "$.availability": "ref(AgentSlackAvailability)! null",
+        "$.botDisplayName": "string?",
         "$.connectionId": "string!",
         "$.slackTeamId": "string!",
         "$.slackTeamName": "string! null",

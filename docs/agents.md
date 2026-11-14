@@ -16,12 +16,13 @@ The change ships as expand, migrate and contract releases
 ([migrations-expand-contract.md](migrations-expand-contract.md)). The API now
 reads and writes only `agents`; since the contract
 ([Contract](#contract)) every legacy foreign key points at
-`agent_slack_installs` and nothing writes `bot_templates` or `slack_agents`.
-The legacy drop removes those tables.
+`agent_slack_installs`, and the legacy drop ([Legacy drop](#legacy-drop))
+removed the `bot_templates` and `slack_agents` tables.
 
 ## Data
 
-Every id is kept: `agents.id` = `slack_agents.id` = `bot_templates.id`, so
+Every id was kept: `agents.id` is the old `slack_agents.id` or
+`bot_templates.id`, so
 Slack routes, interactions, proposals, intro posts, suggestions, the
 `slack-agent:<id>` service principal and `?botTemplateId=` links all stay valid.
 
@@ -35,14 +36,17 @@ Slack routes, interactions, proposals, intro posts, suggestions, the
   for optimistic concurrency. `UNIQUE (id, account_id)` anchors the composite
   foreign keys below.
 - `agent_revisions`: immutable content per revision: Instructions (up to
-  20,000 characters), the older First message (up to 20,000; see
-  [One text](#one-text)) and the name and description as of that revision. The runtime role may only `SELECT` and
-  `INSERT`; deleting the agent cascades.
+  20,000 characters from a person, up to 40,022 with an older First message
+  joined; see [One text](#one-text)), the older `first_message` (empty since
+  migration 1422) and the name and description as of that revision. The
+  runtime role may only `SELECT` and `INSERT`; deleting the agent cascades.
 - `agent_slack_installs`: where an agent is available in Slack, one row per
   agent and Slack connection, owned by the agent's home workspace so a rename
   updates it in the same transaction. `name_key` is the Slack handle key (same
-  normalisation as `slack_agents.name_key`), unique per connection; `open` is
-  the open-use switch; `install_workspace_id` (migration 1380) is the Slack
+  normalisation as the old `slack_agents.name_key`), unique per connection;
+  `open` was the open-use switch (unread since migration 1418, kept equal to
+  `agents.organization_access` for the previous release); `install_workspace_id` (migration 1380,
+  required since 1409) is the Slack
   installation's own workspace, where its routes and Slack records live.
   Deleting that workspace deletes the row. The announcement channel stays per
   installation in `slack_agent_update_settings`.
@@ -229,20 +233,13 @@ and other integrations (Teams) read the same way.
   checks are in `apps/api/src/integrations/organization-agents.ts`
   (`agentOpenToOrganization`, `organizationAgentAskerPerson`); Slack's own
   team and conversation check stays in `slack-open-agents.ts`.
-- Storage: `agents.organization_access` (migration 1379, default false, a
-  rolling column the previous release ignores) on a `workspace` agent; the API
-  says `organization`. No backfill (FORCE RLS would hide the rows from the
-  migration principal). Every write keeps `open` on each of its installations
-  equal to the column, and until a later step stops reading `open`, while an
-  agent is in Slack it is open only if every installation's `open` is true;
-  the column decides only for an agent in no Slack installation. So a server
-  on the previous release behaves the same during the rollout, and a change
-  made through its old switch holds, also after a rollback: closing it in one
-  Slack workspace closes the agent, and the next write writes that to every
-  installation. A previous
-  release's server adding the agent to a new Slack workspace writes `open`
-  false there, which closes it to the organization until an organization
-  admin reopens it (it fails closed).
+- Storage: `agents.organization_access` (migration 1379, default false) on a
+  `workspace` agent, the only source since 1418
+  ([Legacy drop](#legacy-drop)); the API says `organization`. Every write
+  still keeps `open` on each of its installations equal to the column, for
+  the previous release, which decided by `open` while an agent was in Slack
+  (open only if every installation's was). Its changes during the rollout
+  write the column too, so they hold here.
 
 ### Contract
 
@@ -270,19 +267,18 @@ referencing table and then the referenced one, the order writers take them in.
 4. 1398 and 1399 add unique indexes per installation (`connection_id`,
    agent, Slack person or channel) concurrently; the API writes against them.
 
-The API no longer writes `bot_templates` or `slack_agents`. It only deletes an
-agent's leftover `slack_agents` row when it renames the agent or removes the
-agent or one of its installations: the previous release still inserts those
-rows, and a stale one (its id or old name) would refuse it turning the agent
-on again in an installation it left, or reusing a freed name, during the
-rollout or after a rollback to it. Once the legacy drop has removed the table
-this is skipped. The per-agent
+The contract release no longer wrote `bot_templates` or `slack_agents`. It
+only deleted an agent's leftover `slack_agents` row when it renamed the agent
+or removed the agent or one of its installations: the release before it still
+inserted those rows, and a stale one (its id or old name) would have refused
+it turning the agent on again in an installation it left, or reusing a freed
+name. It skips that once the legacy drop has removed the table. The per-agent
 unique keys `slack_agent_user_states_agent_user_uq` and
 `slack_agent_intro_posts_agent_channel_uq` stay until the legacy drop because
 the previous release names them in `ON CONFLICT`. Until then, the same Slack
 person (Enterprise Grid) or shared channel (Slack Connect) in two installations
 of one agent hits them, and that installation's hint, open notice or intro
-record counts as already made.
+record counts as already made. The legacy drop removes them.
 
 Upgrade requirement (self-hosted and embedded deployments included): apply
 the contract only when every running binary already contains the API switch
@@ -291,10 +287,11 @@ such a release first. Rolling back past the API switch is not safe once the
 contract is applied: older binaries rely on the dropped triggers and foreign
 keys, and their legacy writes would fail the new keys.
 
-The API switch release itself (the previous release, during the rollout or
-after a rollback to it) still finds an installation's workspace through
-`slack_agents`, which this release no longer writes. An agent this release
-turned on in Slack therefore falls back to its home workspace there, and an
+The API switch release itself (the previous release, during the contract's
+rollout or after a rollback to it) still finds an installation's workspace
+through `slack_agents`, which the contract release no longer writes. An agent
+the contract release turned on in Slack therefore falls back to its home
+workspace there, and an
 agent in several installations is seen only through the installation it
 joined first: in the others a pick from a route card answers that the agent
 is gone ("That agent no longer exists"), the legacy Slack agents item routes
@@ -305,6 +302,72 @@ such an agent; using it deletes the other installation's channel settings,
 which this release then adds back empty. These are accepted rollout and
 rollback effects: they fail closed (refuse or hide, never widen access) and
 end when this release serves again.
+
+### Legacy drop
+
+Migrations 1407 to 1417, after the contract is the previous release:
+
+1. 1407 adds `CHECK (install_workspace_id IS NOT NULL) NOT VALID`; 1408
+   validates it; 1409 sets the column `NOT NULL` (no scan, thanks to the
+   validated check) and drops the check. There is no second copy: 1380, its
+   fill trigger and the contract's own writes leave no row without the
+   workspace. Should a row still lack it, 1407 repairs it first, so 1408
+   can't fail: it sets the Slack connection's workspace (the installation's
+   own workspace, what the API writes) and removes a row whose connection has
+   none, as turning Slack off there would (the API places a shared agent again
+   in every linked Slack workspace). A `NOTICE` reports both counts. It lifts
+   FORCE row-level security on `agent_slack_installs` for this, and on
+   `connections` only when a row needs repair.
+2. 1410 and 1411 drop the per-agent unique keys, so the same Slack person or
+   channel in two installations of one agent gets a record in each.
+3. 1412 to 1414 drop `slack_agents`'s own foreign keys, one referenced table
+   per file, each locking the referenced table first and then `slack_agents`,
+   the order a cascading delete takes them in. 1415 drops `slack_agents`,
+   locking only it (and stops if a foreign key is left), and 1416
+   `bot_templates`, locking `workspaces` first (no `CASCADE`: nothing
+   references them); 1417 drops
+   the sync and fill trigger functions. During 1413, a workspace or account
+   delete that reaches `slack_agents` through its own cascade can still
+   deadlock with it; PostgreSQL aborts one side and the file is safe to
+   rerun. The contract release's delete of a leftover `slack_agents` row
+   touches none of the referenced tables, and once the table is gone it
+   skips the delete. The explicit locks put 1412 onwards in the release's
+   maintenance span, and each of 1412 to 1414 and 1416 can hold up readers
+   of the referenced table for up to two 5 second lock timeouts, one per
+   lock it takes (dropping such a key locks it anyway).
+
+Readiness no longer lists the two tables or the functions. The compatibility
+layers below, `?botTemplateId=` links and `slack-agent:<id>` principals keep
+working: they never needed the legacy rows.
+
+The same release takes two more contract steps:
+
+- **Anyone in the organization** (1418): `agents.organization_access` becomes
+  the only source. 1418 copies onto it the value the previous release read
+  while an agent was in Slack (open only if every installation's `open` is),
+  as the migration owner with FORCE row-level security lifted on `agents` and
+  `agent_slack_installs`; a `NOTICE` reports the count. Nothing reads `open`
+  any more. Every write still sets `open` on each of the agent's
+  installations to the column, because the previous release reads it: if it
+  stopped, closing an agent here would leave it open to that release's
+  servers. A later step stops writing and drops it. Every change the
+  previous release makes during the rollout writes the column too, so it
+  holds; a raw `open` change alone no longer counts.
+- **First message** (1419 to 1422; [One text](#one-text)): every revision's
+  older First message is joined to its Instructions and emptied. 1419 adds
+  the revision bounds again with Instructions up to 40,022 characters (the
+  most the join makes) `NOT VALID`, 1420 validates it, 1421 drops the old
+  20,000-character check, and 1422 joins, as the migration owner with FORCE
+  row-level security lifted on `agent_revisions`; a `NOTICE` reports the
+  count. The `first_message` column stays, empty, for the previous release
+  until a later step drops it.
+
+Rollback past this release: a binary older than the contract would find
+`slack_agents` and `bot_templates` gone and must not run (the contract's
+upgrade requirement already rules that out). The contract release (the
+previous one) keeps working: it never wrote or needed the legacy tables,
+reads `open`, which stays equal to the column, and shows the same
+Instructions, since it joined the First message the same way.
 
 ### Chats bound to an agent
 
@@ -381,26 +444,27 @@ the First message is read as part of them: `agentInstructionsWithFirstMessage`
 (`@opengeni/contracts`) joins it after the Instructions as its own paragraph
 led by "When a chat starts:" (it was what a new chat opened with, so it stays
 something for the start of a chat rather than a standing rule), unless they
-already contain it, and `agentInstructionsSql` reads stored
-revisions the same way for Slack routing and a chat's agent prompt. Nothing
-is migrated and the column stays:
+already contain it. Since migration 1422 every stored revision is joined
+that way ([Legacy drop](#legacy-drop)), so reads take the Instructions as
+stored; `first_message` stays, empty, until a later step drops it:
 
 - Every read (the API, the editor, Slack, a chat's agent layer) shows the
-  joined text; `firstMessage` is always empty and `hasFirstMessage` false.
-- The next change to an agent stores the joined text as a new revision with
-  an empty First message. Instructions sent with the change replace a stored
-  First message, because they were written over the joined text. Only when
-  the two together would pass the 20,000-character Instructions limit does
-  the revision keep both as sent (readers still see them joined).
+  Instructions; `firstMessage` is always empty and `hasFirstMessage` false
+  (both kept for older clients).
+- A First message sent with a change joins the Instructions in the new
+  revision, even when together they pass the 20,000 characters a person can
+  write (the database allows up to 40,022). Rollout: the previous release
+  still keeps the two apart in that one case, so such a revision written by
+  it during the rollout keeps its First message unread until that later
+  step joins and drops it.
 - A `firstMessage` from an older client, `bot_template_save`'s older
   `firstMessage`/`setupInstructions`, and `/bot-templates`
   `setupInstructions` all become Instructions. The legacy `bot_templates`
   and `slack_agents` rows are no longer written ([Contract](#contract)).
 - A chat with an agent whose current revision has a First message gets it as
   part of its Instructions from then on.
-- Rollback: an older release reads agents stored this way as Instructions
-  with no First message, and keeps working; agents never changed since still
-  have their First message for it.
+- Rollback: the previous release reads agents stored this way as
+  Instructions with no First message, and keeps working.
 
 ### Compatibility
 
@@ -433,14 +497,12 @@ is migrated and the column stays:
   endpoint deletes the agent: a shared agent can't leave only one linked
   Slack workspace.
 
-### Contract follow-ups
+### Follow-ups
 
-- The legacy drop: drop `bot_templates`, `slack_agents`, the sync and fill
-  functions and the per-agent unique keys, and make
-  `install_workspace_id` NOT NULL.
-- Backfill `agents.organization_access` from `agent_slack_installs.open`
-  (with the owner-only posture window), then stop reading and writing
-  `open` (keep the column until a later drop).
+Once the legacy drop is the previous release: stop writing
+`agent_slack_installs.open` and drop it, and join any First message the
+previous release kept apart during the rollout, then drop
+`agent_revisions.first_message`.
 
 ## App
 
@@ -497,8 +559,11 @@ templates** and the Slack agents list; `/bot-templates` redirects there.
    a chat starts. Old endpoints and frozen MCP tool names stay as
    compatibility layers.
 4. App: the Agents page replaces bot templates and the Slack agents list.
-5. Contract (this step), once step 3 is the previous release: point the
+5. Contract, once step 3 is the previous release: point the
    legacy foreign keys at `agent_slack_installs`, stop writing the legacy
    tables, drop the sync triggers and allow several Slack installations per
    agent.
-6. Drop the legacy tables once the contract is the previous release.
+6. Legacy drop (this step), once the contract is the previous release: drop
+   the legacy tables and functions and the per-agent keys, require the
+   installation workspace, read Anyone in the organization only from the
+   agent, and join every First message into the Instructions.

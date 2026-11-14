@@ -5,13 +5,13 @@
 // are refused when a shared agent is created, renamed or shared; older agents
 // catch up when Slack reads its agents; an agent is in every linked Slack
 // workspace at once, and the legacy Slack agents routes name the installation
-// where it matters. Nothing writes the legacy slack_agents or bot_templates
-// tables.
+// where it matters.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import type { Settings } from "@opengeni/config";
 import {
   AGENT_FIRST_MESSAGE_LEAD,
+  agentInstructionsWithFirstMessage,
   OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
   signDelegatedAccessToken,
@@ -113,7 +113,8 @@ async function slackConnection(accountId: string, workspaceId: string, label: st
 /**
  * A shared agent as an older release left it, with no Slack row yet: an
  * agent row and its first revision. A bot template became one with the
- * template text as its First message and empty Instructions.
+ * template text as its First message and empty Instructions; migration 1422
+ * joined that into the Instructions.
  */
 async function olderAgent(
   install: { accountId: string; owner: string },
@@ -128,9 +129,10 @@ async function olderAgent(
       values (${id}, ${install.accountId}, ${workspaceId}, 'workspace', ${name},
         lower(btrim(${name})), '', null, false, 1, 'bot_template', ${install.owner})`;
     await sql`insert into agent_revisions (agent_id, account_id, workspace_id, revision, name,
-        description, instructions, first_message, created_by_subject_id)
+        description, instructions, created_by_subject_id)
       values (${id}, ${install.accountId}, ${workspaceId}, 1, ${name}, '',
-        ${content.instructions ?? ""}, ${content.firstMessage ?? ""}, ${install.owner})`;
+        ${agentInstructionsWithFirstMessage(content.instructions ?? "", content.firstMessage ?? "")},
+        ${install.owner})`;
   });
   return id;
 }
@@ -216,15 +218,6 @@ describe("an agent's Slack availability (real PostgreSQL)", () => {
       install_workspace_id: install.home,
       open: false,
     });
-    const legacyRows = async () =>
-      Number(
-        (
-          await shared!.admin<{ count: number }[]>`
-            select (select count(*) from slack_agents where id = ${agent.id})
-              + (select count(*) from bot_templates where id = ${agent.id}) as count`
-        )[0]?.count ?? 0,
-      );
-    expect(await legacyRows()).toBe(0);
     // The version the create returned is current: Slack moved it before the reply.
     const edited = await call(install.admin, "PATCH", `${install.base}/${agent.id}`, {
       expectedVersion: agent.version,
@@ -287,7 +280,6 @@ describe("an agent's Slack availability (real PostgreSQL)", () => {
     expect(
       await shared!.admin`select 1 from agent_slack_installs where agent_id = ${agent.id}`,
     ).toHaveLength(0);
-    expect(await legacyRows()).toBe(0);
     const privateRows = await call(install.admin, "GET", `${install.base}/${agent.id}/slack`);
     expect(privateRows.json.installs).toEqual([
       expect.objectContaining({
@@ -306,7 +298,7 @@ describe("an agent's Slack availability (real PostgreSQL)", () => {
     expect(reshared.json.agent.slack).toHaveLength(1);
   }, 120_000);
 
-  test("Anyone in the organization: an organization admin chooses it, Slack follows it, older open use counts", async () => {
+  test("Anyone in the organization: an organization admin chooses it, Slack follows it", async () => {
     if (!available) return;
     const install = await installation(`org-${Date.now()}`);
     const openRows = async (agentId: string) => ({
@@ -381,24 +373,20 @@ describe("an agent's Slack availability (real PostgreSQL)", () => {
     const afterRename = await call(install.admin, "GET", `${install.base}/${agent.id}`);
     expect(afterRename.json.agent.visibility).toBe("organization");
 
-    // The previous release closes it through its own switch, which only
-    // writes the installation: that holds, and the next edit here agrees.
+    // Only the agent's own setting decides (1418 copied what the previous
+    // release read from the installations); each installation's open is
+    // kept equal to it for that release, and the next edit writes it again.
     await shared!.admin`update agent_slack_installs set open = false where agent_id = ${agent.id}`;
-    const closedByOld = await call(install.admin, "GET", `${install.base}/${agent.id}`);
-    expect(closedByOld.json.agent.visibility).toBe("workspace");
-    expect(closedByOld.json.agent.slack).toEqual([expect.objectContaining({ open: false })]);
+    const stillOpen = await call(install.admin, "GET", `${install.base}/${agent.id}`);
+    expect(stillOpen.json.agent.visibility).toBe("organization");
+    expect(stillOpen.json.agent.slack).toEqual([expect.objectContaining({ open: true })]);
     const edited = await call(install.admin, "PATCH", `${install.base}/${agent.id}`, {
-      expectedVersion: closedByOld.json.agent.version,
-      description: "Edited after the old close",
+      expectedVersion: stillOpen.json.agent.version,
+      description: "Edited after an installation was closed",
     });
     expect(edited.status).toBe(200);
-    expect(edited.json.agent.visibility).toBe("workspace");
-    expect((await openRows(agent.id)).flag).toBe(false);
-    const reopened = await call(install.orgAdmin, "PATCH", `${install.base}/${agent.id}`, {
-      expectedVersion: edited.json.agent.version,
-      visibility: "organization",
-    });
-    expect(reopened.status).toBe(200);
+    expect(edited.json.agent.visibility).toBe("organization");
+    expect(await openRows(agent.id)).toEqual({ installs: [true], flag: true });
 
     // Only me clears it everywhere, and shared again it is closed.
     const madePrivate = await call(install.orgAdmin, "PATCH", `${install.base}/${agent.id}`, {
@@ -416,15 +404,13 @@ describe("an agent's Slack availability (real PostgreSQL)", () => {
     expect(sharedAgain.json.agent.visibility).toBe("workspace");
     expect(await openRows(agent.id)).toEqual({ installs: [false], flag: false });
 
-    // An agent an older release opened through Slack's switch is open to the
-    // organization, and the older Slack field still changes it.
+    // Slack's older open field still changes the agent's own setting.
     const older = await call(install.admin, "POST", install.base, { name: "Older desk" });
     expect(older.status).toBe(201);
-    await shared!.admin`
-      update agent_slack_installs set open = true where agent_id = ${older.json.agent.id}`;
-    const read = await call(install.admin, "GET", `${install.base}/${older.json.agent.id}`);
-    expect(read.json.agent.visibility).toBe("organization");
     const slackPath = `${install.base}/${older.json.agent.id}/slack/${install.connectionId}`;
+    const openedOld = await call(install.orgAdmin, "PUT", slackPath, { open: true });
+    expect(openedOld.status).toBe(200);
+    expect(openedOld.json.agent.visibility).toBe("organization");
     const closed = await call(install.admin, "PUT", slackPath, { open: false });
     expect(closed.status).toBe(200);
     expect(closed.json.availability.open).toBe(false);
@@ -725,10 +711,6 @@ describe("an agent's Slack availability (real PostgreSQL)", () => {
       instructions: `${AGENT_FIRST_MESSAGE_LEAD}\n${firstMessage}`,
       avatar: expect.objectContaining({ kind: "letters" }),
     });
-    expect(
-      await shared!.admin`select 1 from slack_agents where id = ${weekly}
-        union all select 1 from bot_templates where id = ${weekly}`,
-    ).toHaveLength(0);
 
     // Its page says why the newer one isn't in Slack.
     const rows = await call(install.admin, "GET", `${install.base}/${newer}/slack`);

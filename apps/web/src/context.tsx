@@ -265,6 +265,7 @@ export function RootRouteComponent() {
     revalidatePrincipalAccess,
     defaultWorkspaceId,
     slackLinkContinuationWorkspaceId,
+    slackLinkLinkedWorkspaceId,
     routedWorkspace,
     creditRequired,
     setCreditRequired,
@@ -443,7 +444,8 @@ export function RootRouteComponent() {
     !accessLoading &&
     accessContext &&
     !defaultWorkspaceId &&
-    !slackLinkContinuationWorkspaceId ? (
+    !slackLinkContinuationWorkspaceId &&
+    !slackLinkLinkedWorkspaceId ? (
     browserAccountsEnabled ? (
       <BrowserAccountsOrganizationOnboardingPanel
         client={client}
@@ -483,7 +485,7 @@ export function RootRouteComponent() {
     )
   ) : accessLoading || !appContext ? (
     <LoadingPanel />
-  ) : !defaultWorkspaceId && !slackLinkContinuationWorkspaceId ? (
+  ) : !defaultWorkspaceId && !slackLinkContinuationWorkspaceId && !slackLinkLinkedWorkspaceId ? (
     <ProblemPanel
       title="No workspace access"
       description="You don't have access to any workspace yet."

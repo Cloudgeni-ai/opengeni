@@ -501,7 +501,6 @@ describe("bots through the API (real PostgreSQL)", () => {
       content: {
         instructions:
           "You own releases. Keep the checklist current.\n\nWhen a chat starts:\nInstall the release Skill and ask about their cadence.",
-        firstMessage: "",
       },
     });
     // It needs something to say.
@@ -614,7 +613,7 @@ describe("bots through the API (real PostgreSQL)", () => {
       visibility: "private",
       ownerSubjectId: subjectId,
       createdBySubjectId: subjectId,
-      content: { instructions: "When a chat starts:\nYou own my releases.", firstMessage: "" },
+      content: { instructions: "When a chat starts:\nYou own my releases." },
     });
   }, 180_000);
 

@@ -70,8 +70,9 @@ export const agents = pgTable(
 );
 
 /**
- * Immutable agent content: Instructions (up to 20,000 characters), First
- * message, and the name and description as of the revision. Home workspace
+ * Immutable agent content: Instructions (up to 20,000 characters from a person,
+ * longer with an older First message joined), and the name and description as of
+ * the revision. `first_message` is empty since 1422. Home workspace
  * only, never organization readable; the runtime may only read and insert.
  */
 export const agentRevisions = pgTable(
@@ -114,8 +115,8 @@ export const agentSlackInstalls = pgTable(
     accountId: uuid("account_id").notNull(),
     workspaceId: uuid("workspace_id").notNull(),
     connectionId: uuid("connection_id").notNull(),
-    /** The Slack installation's own workspace (migration 1380). */
-    installWorkspaceId: uuid("install_workspace_id"),
+    /** The Slack installation's own workspace (migrations 1380 and 1409). */
+    installWorkspaceId: uuid("install_workspace_id").notNull(),
     slackTeamId: text("slack_team_id").notNull(),
     nameKey: text("name_key").notNull(),
     open: boolean("open").notNull().default(false),

@@ -1,0 +1,7 @@
+---
+"@opengeni/db": minor
+---
+
+Agents legacy drop: the `bot_templates` and `slack_agents` tables and their trigger functions are dropped, `agent_slack_installs.install_workspace_id` is required (a row still missing it is repaired from its Slack connection's workspace first), and the per-agent unique keys on Slack user states and intro records are gone, so the same Slack person or channel in two installations of one agent gets a record in each. "Anyone in the organization" is read only from `agents.organization_access`, backfilled from the installations' `open` (still written, for the previous release). Every agent revision's older First message is joined into its Instructions ("When a chat starts:"), and the revision check allows Instructions up to 40,022 characters for that; `first_message` stays, empty. Apply it only after the release with the agents contract (#7555) runs everywhere.
+
+Breaking for direct `@opengeni/db` users: removed the Drizzle `botTemplates` and `slackAgents` tables, `AGENTS_LEGACY_TRIGGER_ROUTINES`, the `agentsLegacy` retiring-feature entry and `agentInstructionsSql`; `AgentRecord.hasFirstMessage`, `AgentContent.firstMessage`/`stored` and `AgentRevisionRecord.firstMessage` are gone, and `firstMessage` is optional on create and update inputs. The API's `firstMessage`/`hasFirstMessage` fields, the bot template and Slack agent endpoints, their MCP tools, `?botTemplateId=` links and `slack-agent:<id>` principals keep working on top of agents.

@@ -169,6 +169,11 @@ export function fakeAgentsClient(
       calls.push(["getSessionConfiguration", workspaceId, id]);
       return { id, workspaceId, title: null, description: null, avatar: null, ...options.session };
     },
+    /** An image avatar's file: not reachable here, so the avatar shows its fallback. */
+    async getRetainedArtifact(workspaceId: string, id: string): Promise<never> {
+      calls.push(["getRetainedArtifact", workspaceId, id]);
+      throw new Error("not found");
+    },
   };
 }
 
