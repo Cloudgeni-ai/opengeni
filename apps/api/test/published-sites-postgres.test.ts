@@ -1494,6 +1494,41 @@ test("published page tools: declarations, audiences, live membership and approva
     expect([f.prod, f.staging, f.personal].map((entry) => entry.identity.serverId)).toContain(
       foreign.json.entry.identity.serverId,
     );
+    // Invoking the owner's route as the member never sends the owner's
+    // credential. With several own accounts the member must choose, which a
+    // published page cannot ask; their own "Always allow for this Site" on one
+    // account chooses it, and the call runs on that account.
+    f.authorizations.length = 0;
+    f.callAuthorizations.length = 0;
+    const invokeOwnerRoute = () =>
+      f.post("invoke", {
+        target: { identity: f.foreign.identity },
+        operationId: crypto.randomUUID(),
+        arguments: { query: "owner route" },
+      });
+    const choose = await invokeOwnerRoute();
+    expect(choose.status, JSON.stringify(choose.json)).toBe(409);
+    expect(choose.json.error.details.code).toBe("site_tool_consent_requires_opengeni");
+    expect(f.provider.calls).toHaveLength(0);
+    await recordSiteToolAllowance(db.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspace.id,
+      siteId: f.site.id,
+      serverId: "grafana",
+      toolName: f.foreign.identity.toolName,
+      subjectId: f.member.subjectId,
+      connectionId: f.personal.connection.id,
+    });
+    const ownerRoute = await invokeOwnerRoute();
+    expect(ownerRoute.status, JSON.stringify(ownerRoute.json)).toBe(200);
+    expect(ownerRoute.json.result.content[0].text).toBe("found document for owner route");
+    expect(f.callAuthorizations).toEqual(["Bearer page-personal"]);
+    expect(f.authorizations.length).toBeGreaterThan(0);
+    expect(f.authorizations.every((value) => value === "Bearer page-personal")).toBe(true);
+    expect(f.authorizations).not.toContain("Bearer page-foreign");
+    expect(f.callAuthorizations).not.toContain("Bearer page-foreign");
+    const providerCalls = f.provider.calls.length;
+    expect(providerCalls).toBe(1);
     const forgedApproval = `ogta_${"a".repeat(43)}`;
     await updateConnectorToolPermissionPolicies(db.db, {
       accountId: f.accountId,
@@ -1526,7 +1561,7 @@ test("published page tools: declarations, audiences, live membership and approva
         approvalToken ? "tool_gateway_approval_required" : "site_tool_consent_requires_opengeni",
       );
     }
-    expect(f.provider.calls).toHaveLength(0);
+    expect(f.provider.calls).toHaveLength(providerCalls);
     const visitor = visitorId();
     await f.publication(f.owner, f.site.id, "PUT", { access: "public", agent: { enabled: false } });
     const outside = await fixture();
@@ -1559,7 +1594,9 @@ test("published page tools: declarations, audiences, live membership and approva
     const member = await f.signIn(f.member, f.host);
     await shared.admin`delete from workspace_memberships where workspace_id = ${f.workspace.id} and subject_id = ${f.member.subjectId}`;
     expect((await f.post("catalog", {}, member)).status).toBe(403);
-    expect(f.provider.calls).toHaveLength(0);
+    expect(f.provider.calls).toHaveLength(providerCalls);
+    expect(f.authorizations).not.toContain("Bearer page-foreign");
+    expect(f.callAuthorizations).not.toContain("Bearer page-foreign");
   } finally {
     f.close();
   }

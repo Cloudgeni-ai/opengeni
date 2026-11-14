@@ -182,8 +182,14 @@ pub(crate) enum Stored {
 /// What builds images and stores them.
 pub(crate) trait Builds: Send + Sync + 'static {
     /// Builds the image of `reference` and keeps it on this host: its id
-    /// and the manifest digest built, or what failed.
-    fn build(&self, reference: Reference) -> BoxFuture<'_, Result<(ImageId, String), String>>;
+    /// and the manifest digest built, or what failed. With `before`, an
+    /// image built earlier that this host keeps, the build changes a copy
+    /// of it (ADR 40).
+    fn build(
+        &self,
+        reference: Reference,
+        before: Option<ImageId>,
+    ) -> BoxFuture<'_, Result<(ImageId, String), String>>;
 
     /// Stores the image `image` this host keeps, or tells what failed.
     fn store(&self, image: ImageId) -> BoxFuture<'_, Result<Stored, String>>;
@@ -276,8 +282,14 @@ impl Preparer {
     }
 
     /// How the sandbox image of the OCI image `image` stands, starting its
-    /// build if nothing has, or if the last one failed and was told.
-    pub(crate) fn prepare(self: &Arc<Self>, image: &str) -> Result<Progress, PrepareError> {
+    /// build if nothing has, or if the last one failed and was told. A
+    /// build starts from `before`, the image creates of its name start from
+    /// now, when this host keeps it (ADR 40).
+    pub(crate) fn prepare(
+        self: &Arc<Self>,
+        image: &str,
+        before: Option<ImageId>,
+    ) -> Result<Progress, PrepareError> {
         let reference = Reference::parse(image).map_err(PrepareError::Invalid)?;
         if reference.digest.is_none() {
             return Err(PrepareError::Invalid(format!(
@@ -317,7 +329,7 @@ impl Preparer {
         let this = Arc::clone(self);
         let image = image.to_owned();
         tokio::spawn(async move {
-            let standing = this.build(reference, &image).await;
+            let standing = this.build(reference, before, &image).await;
             let unstored = match &standing {
                 Standing::Storing { prepared, .. } => Some(prepared.clone()),
                 _ => None,
@@ -334,11 +346,11 @@ impl Preparer {
     }
 
     /// Builds `reference` in its turn and stores it.
-    async fn build(&self, reference: Reference, image: &str) -> Standing {
+    async fn build(&self, reference: Reference, before: Option<ImageId>, image: &str) -> Standing {
         let _turn = self.turn.lock().await;
-        tracing::info!(%image, "building a sandbox image");
+        tracing::info!(%image, before = ?before.map(|id| id.to_string()), "building a sandbox image");
         let started = std::time::Instant::now();
-        let (id, digest) = match self.builder.build(reference).await {
+        let (id, digest) = match self.builder.build(reference, before).await {
             Ok(built) => built,
             Err(message) => {
                 tracing::warn!(%image, %message, "building a sandbox image failed");
@@ -475,10 +487,14 @@ struct Builder<K: ?Sized> {
 }
 
 impl<K: Keeps> Builds for Builder<K> {
-    fn build(&self, reference: Reference) -> BoxFuture<'_, Result<(ImageId, String), String>> {
+    fn build(
+        &self,
+        reference: Reference,
+        before: Option<ImageId>,
+    ) -> BoxFuture<'_, Result<(ImageId, String), String>> {
         Box::pin(async move {
             let work = &self.config.work;
-            let made = self.make(reference).await;
+            let made = self.make(reference, before).await;
             if let Err(error) = empty(work).await {
                 tracing::warn!(%error, "emptying the image build's scratch space failed");
             }
@@ -506,10 +522,22 @@ impl<K: Keeps> Builds for Builder<K> {
 
 impl<K: Keeps> Builder<K> {
     /// Builds the image of `reference` in emptied scratch space and keeps
-    /// it in the host's cache of images.
-    async fn make(&self, reference: Reference) -> Result<(ImageId, String), String> {
+    /// it in the host's cache of images: over a copy of `before` if this
+    /// host keeps it, which it holds meanwhile so disk relief leaves it.
+    async fn make(
+        &self,
+        reference: Reference,
+        before: Option<ImageId>,
+    ) -> Result<(ImageId, String), String> {
         empty(&self.config.work).await?;
         let output = self.config.work.join("image.ext4");
+        let held = match before {
+            Some(before) => self.rootfs.hold(before).await,
+            None => None,
+        };
+        if let (Some(before), None) = (before, &held) {
+            tracing::info!(%before, "the image before is not on this host; building a new file system");
+        }
         let build = Build {
             reference,
             credentials: self.config.credentials.clone(),
@@ -517,10 +545,20 @@ impl<K: Keeps> Builder<K> {
             work: self.config.work.join("work"),
             output: output.clone(),
             free_bytes: self.config.free_bytes,
+            before: held.as_ref().map(|held| held.path.clone()),
         };
         let made = compute_image::build(&build)
             .await
             .map_err(|error| format!("{error:#}"))?;
+        drop(held);
+        tracing::info!(
+            over_before = made.over_before,
+            size = made.size_bytes,
+            pull_s = made.pull_seconds,
+            unpack_s = made.unpack_seconds,
+            ext4_s = made.ext4_seconds,
+            "made a sandbox image"
+        );
         let id = file_id(&output).await.map_err(|error| error.to_string())?;
         self.rootfs
             .adopt(id, &output)
@@ -609,7 +647,11 @@ mod tests {
     }
 
     impl Builds for Fake {
-        fn build(&self, reference: Reference) -> BoxFuture<'_, Result<(ImageId, String), String>> {
+        fn build(
+            &self,
+            reference: Reference,
+            _before: Option<ImageId>,
+        ) -> BoxFuture<'_, Result<(ImageId, String), String>> {
             Box::pin(async move {
                 let n = self.started.fetch_add(1, Ordering::SeqCst);
                 let running = self.running.fetch_add(1, Ordering::SeqCst) + 1;
@@ -652,7 +694,7 @@ mod tests {
     /// Asks until the answer is no longer that the build is under way.
     async fn settled(preparer: &Arc<Preparer>, image: &str) -> Result<Progress, PrepareError> {
         loop {
-            match preparer.prepare(image) {
+            match preparer.prepare(image, None) {
                 Ok(Progress::Preparing) => tokio::task::yield_now().await,
                 other => return other,
             }
@@ -666,7 +708,7 @@ mod tests {
         image: &str,
     ) -> Result<Progress, PrepareError> {
         loop {
-            match preparer.prepare(image) {
+            match preparer.prepare(image, None) {
                 Ok(Progress::Preparing) => tokio::time::sleep(Duration::from_secs(5)).await,
                 other => return other,
             }
@@ -692,7 +734,7 @@ mod tests {
         assert_eq!(fake.stores(), 5, "stored at the fifth try");
         assert_eq!(fake.pauses(), [30, 60, 120, 240]);
         assert_eq!(
-            preparer.prepare(PINNED).unwrap(),
+            preparer.prepare(PINNED, None).unwrap(),
             Progress::Prepared(stored)
         );
     }
@@ -702,15 +744,15 @@ mod tests {
         let (fake, preparer) = preparer();
         *fake.refuse.lock().unwrap() = usize::MAX;
         fake.go.add_permits(1);
-        assert_eq!(preparer.prepare(PINNED).unwrap(), Progress::Preparing);
+        assert_eq!(preparer.prepare(PINNED, None).unwrap(), Progress::Preparing);
         for _ in 0..(20 * 60 / 5) {
             tokio::time::sleep(Duration::from_secs(5)).await;
-            assert_eq!(preparer.prepare(PINNED).unwrap(), Progress::Preparing);
+            assert_eq!(preparer.prepare(PINNED, None).unwrap(), Progress::Preparing);
         }
         assert_eq!(fake.pauses(), [30, 60, 120, 240, 480]);
         for _ in 0..(30 * 60 / 5) {
             tokio::time::sleep(Duration::from_secs(5)).await;
-            assert_eq!(preparer.prepare(PINNED).unwrap(), Progress::Preparing);
+            assert_eq!(preparer.prepare(PINNED, None).unwrap(), Progress::Preparing);
         }
         assert_eq!(fake.pauses()[5..], [600, 600, 600]);
         assert_eq!(fake.started.load(Ordering::SeqCst), 1, "never built again");
@@ -724,13 +766,13 @@ mod tests {
         let (fake, preparer) = preparer();
         *fake.refuse.lock().unwrap() = usize::MAX;
         fake.go.add_permits(1);
-        assert_eq!(preparer.prepare(PINNED).unwrap(), Progress::Preparing);
+        assert_eq!(preparer.prepare(PINNED, None).unwrap(), Progress::Preparing);
         tokio::time::sleep(UNASKED_AFTER + STORE_AGAIN_MOST * 2).await;
         let tried = fake.stores();
         tokio::time::sleep(Duration::from_secs(4 * 3600)).await;
         assert_eq!(fake.stores(), tried, "no tries once unasked");
 
-        assert_eq!(preparer.prepare(PINNED).unwrap(), Progress::Preparing);
+        assert_eq!(preparer.prepare(PINNED, None).unwrap(), Progress::Preparing);
         for _ in 0..10 {
             tokio::task::yield_now().await;
         }
@@ -745,7 +787,7 @@ mod tests {
         *fake.refuse.lock().unwrap() = 1;
         fake.kept.store(true, Ordering::SeqCst);
         fake.go.add_permits(1);
-        assert_eq!(preparer.prepare(PINNED).unwrap(), Progress::Preparing);
+        assert_eq!(preparer.prepare(PINNED, None).unwrap(), Progress::Preparing);
         while fake.stores() < 1 {
             tokio::task::yield_now().await;
         }
@@ -825,7 +867,7 @@ mod tests {
     #[tokio::test]
     async fn an_image_not_pinned_by_digest_is_refused() {
         let (fake, preparer) = preparer();
-        let refused = preparer.prepare("registry.example/sandbox:latest");
+        let refused = preparer.prepare("registry.example/sandbox:latest", None);
         assert!(
             matches!(refused, Err(PrepareError::Invalid(_))),
             "{refused:?}"
@@ -836,10 +878,10 @@ mod tests {
     #[tokio::test]
     async fn asks_during_a_build_hear_it_is_under_way_and_later_ones_get_its_image() {
         let (fake, preparer) = preparer();
-        assert_eq!(preparer.prepare(PINNED).unwrap(), Progress::Preparing);
+        assert_eq!(preparer.prepare(PINNED, None).unwrap(), Progress::Preparing);
         for _ in 0..5 {
             tokio::task::yield_now().await;
-            assert_eq!(preparer.prepare(PINNED).unwrap(), Progress::Preparing);
+            assert_eq!(preparer.prepare(PINNED, None).unwrap(), Progress::Preparing);
         }
         fake.go.add_permits(1);
         let Progress::Prepared(stored) = settled(&preparer, PINNED).await.unwrap() else {
@@ -849,7 +891,7 @@ mod tests {
         assert_eq!(stored.guest, GUEST, "told with the guest programs it got");
         for _ in 0..3 {
             assert_eq!(
-                preparer.prepare(PINNED).unwrap(),
+                preparer.prepare(PINNED, None).unwrap(),
                 Progress::Prepared(stored.clone())
             );
         }
@@ -865,11 +907,11 @@ mod tests {
         fake.go.add_permits(1);
         let first = settled(&preparer, PINNED).await.unwrap();
         tokio::time::sleep(TOLD_FOR / 2).await;
-        assert_eq!(preparer.prepare(PINNED).unwrap(), first, "still told");
+        assert_eq!(preparer.prepare(PINNED, None).unwrap(), first, "still told");
         assert_eq!(fake.started.load(Ordering::SeqCst), 1);
 
         tokio::time::sleep(TOLD_FOR / 2).await;
-        assert_eq!(preparer.prepare(PINNED).unwrap(), Progress::Preparing);
+        assert_eq!(preparer.prepare(PINNED, None).unwrap(), Progress::Preparing);
         fake.go.add_permits(1);
         let again = settled(&preparer, PINNED).await.unwrap();
         assert_ne!(again, first, "a new image");
@@ -881,7 +923,7 @@ mod tests {
     async fn a_failed_build_is_told_once_and_the_next_ask_builds_again() {
         let (fake, preparer) = preparer();
         fake.fail.store(true, Ordering::SeqCst);
-        assert_eq!(preparer.prepare(PINNED).unwrap(), Progress::Preparing);
+        assert_eq!(preparer.prepare(PINNED, None).unwrap(), Progress::Preparing);
         fake.go.add_permits(1);
         let failed = settled(&preparer, PINNED).await;
         let Err(PrepareError::Failed { image, message }) = failed else {
@@ -893,7 +935,7 @@ mod tests {
         );
 
         fake.fail.store(false, Ordering::SeqCst);
-        assert_eq!(preparer.prepare(PINNED).unwrap(), Progress::Preparing);
+        assert_eq!(preparer.prepare(PINNED, None).unwrap(), Progress::Preparing);
         fake.go.add_permits(1);
         assert!(matches!(
             settled(&preparer, PINNED).await,
@@ -905,8 +947,8 @@ mod tests {
     #[tokio::test]
     async fn images_are_built_one_at_a_time() {
         let (fake, preparer) = preparer();
-        assert_eq!(preparer.prepare(PINNED).unwrap(), Progress::Preparing);
-        assert_eq!(preparer.prepare(OTHER).unwrap(), Progress::Preparing);
+        assert_eq!(preparer.prepare(PINNED, None).unwrap(), Progress::Preparing);
+        assert_eq!(preparer.prepare(OTHER, None).unwrap(), Progress::Preparing);
         for _ in 0..10 {
             tokio::task::yield_now().await;
         }

@@ -1,5 +1,13 @@
 # @opengeni/ogtool
 
+## 6.22.0
+
+### Patch Changes
+
+- Updated dependencies [d50092b]
+  - @opengeni/contracts@6.22.0
+  - @opengeni/codemode@6.22.0
+
 ## 6.21.0
 
 ### Patch Changes

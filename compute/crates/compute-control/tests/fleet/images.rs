@@ -46,10 +46,16 @@ async fn a_release_s_image_is_built_by_a_host_and_new_creates_start_from_it() {
         .seen()
         .iter()
         .filter(
-            |seen| matches!(&seen.envelope.request, Request::Prepare { image } if image == SOURCE),
+            |seen| matches!(&seen.envelope.request, Request::Prepare { image, .. } if image == SOURCE),
         )
         .count();
     assert_eq!(asks, 2, "asked once to build and once more to learn it was");
+    // Each ask names the image the name started from, for the host to
+    // build over (ADR 40).
+    assert!(host.seen().iter().all(|seen| match &seen.envelope.request {
+        Request::Prepare { before: asked, .. } => *asked == Some(before),
+        _ => true,
+    }));
 
     let (status, body) = fleet
         .post(
@@ -66,6 +72,22 @@ async fn a_release_s_image_is_built_by_a_host_and_new_creates_start_from_it() {
             _ => None,
         });
     assert_eq!(created, Some(Some(built)), "the create starts from it");
+
+    // Every live host is asked to keep it ahead of its creates, fetched
+    // over the image before it (ADR 41).
+    until(
+        Duration::from_secs(30),
+        "the host is asked to keep it",
+        async || {
+            host.seen().iter().any(|seen| {
+                matches!(
+                    seen.envelope.request,
+                    Request::Keep { image, before: Some(was) } if image == built && was == before
+                )
+            })
+        },
+    )
+    .await;
 }
 
 /// Two names a release builds from one source both start from its image,

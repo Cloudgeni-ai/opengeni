@@ -2,7 +2,13 @@
 
 Status: Accepted, 2026-10-29. Replaces step 3 of the relief in
 [14](0014-requests-limits-and-admission.md), its rule that a running VM is
-never compressed, and its fixed out-of-memory score for VMMs.
+never compressed, and its fixed out-of-memory score for VMMs. Amended
+2026-11-14 by
+[44](0044-a-request-the-kernel-may-compress-is-kept-by-memory-min.md):
+the guarantee is kept by `memory.min`, not `memory.low`. Amended
+2026-11-14 by
+[44](0044-a-request-the-kernel-may-compress-is-kept-by-memory-min.md):
+the guarantee is kept by `memory.min`, not `memory.low`.
 
 ## Context
 

@@ -43,10 +43,11 @@
 //! capacity (the service keeps the one it last heard), and a registration,
 //! which must list everything the host holds, waits.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use anyhow::Context as _;
 use compute_core::At;
 use compute_fleet::{Guard, HostEpoch, HostLease, LeaseTerms, Renewal};
 use compute_protocol::fleet::{
@@ -162,6 +163,7 @@ impl Renewer {
     /// written, since then the guard would act on a stale lease, and if the
     /// agent serves but is gone.
     pub(crate) async fn run(self) -> anyhow::Result<()> {
+        let _writing = hold_lease_file(&self.file, self.lease.terms().term).await?;
         let (answers, mut answered) = mpsc::unbounded_channel();
         let (readings, mut read) = mpsc::unbounded_channel();
         let mut running = Running {
@@ -612,6 +614,45 @@ impl Running {
     }
 }
 
+/// Takes the lock beside the lease file `file`, which lets one renewer at a
+/// time write it, waiting up to `wait` for one still letting go: a renewer
+/// whose future was dropped ends on its own thread at that thread's next
+/// turn, and may write the file once more meanwhile. Both writing through
+/// the one staging name, the later rename would fail; the earlier
+/// renewer's last record could also land after the next one's. Held for
+/// as long as the file is open.
+async fn hold_lease_file(file: &Path, wait: Duration) -> anyhow::Result<std::fs::File> {
+    use rustix::fs::{FlockOperation, flock};
+
+    let path = file.with_extension("lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        match flock(&lock, FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => return Ok(lock),
+            Err(rustix::io::Errno::WOULDBLOCK) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Err(rustix::io::Errno::WOULDBLOCK) => {
+                anyhow::bail!(
+                    "another renewer still writes the lease file, {}",
+                    path.display()
+                )
+            }
+            Err(error) => {
+                return Err(std::io::Error::from(error))
+                    .with_context(|| format!("locking {}", path.display()));
+            }
+        }
+    }
+}
+
 /// Runs `work` to its end on a thread named `name` with a runtime of its
 /// own, so that nothing the caller's runtime runs holds it up, until it
 /// ends or the future returned is dropped, which drops `work` too.
@@ -822,6 +863,30 @@ mod tests {
         let stopped = ticks.load(Ordering::SeqCst);
         std::thread::sleep(Duration::from_millis(100));
         assert!(ticks.load(Ordering::SeqCst) <= stopped + 1, "it ended");
+    }
+
+    /// One renewer at a time writes the lease file: the next waits for the
+    /// one before to let go, and says so when it never does.
+    #[tokio::test]
+    async fn one_renewer_at_a_time_holds_the_lease_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("lease");
+        let first = hold_lease_file(&file, Duration::ZERO).await.unwrap();
+        let refused = hold_lease_file(&file, Duration::from_millis(50)).await;
+        assert!(
+            refused
+                .unwrap_err()
+                .to_string()
+                .contains("another renewer still writes"),
+        );
+        let waiting = tokio::spawn({
+            let file = file.clone();
+            async move { hold_lease_file(&file, Duration::from_secs(10)).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiting.is_finished(), "it waits while the first holds it");
+        drop(first);
+        waiting.await.unwrap().unwrap();
     }
 
     /// Work run apart that fails fails the caller.

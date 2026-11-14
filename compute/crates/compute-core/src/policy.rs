@@ -526,7 +526,7 @@ pub struct MemoryPolicy {
 }
 
 /// How running sandboxes that borrow memory are held back, shrunk and, as a
-/// last resort, ended (ADR 24). Each running VM's `memory.low` is its
+/// last resort, ended (ADR 24). Each running VM's `memory.min` (ADR 44) is its
 /// request plus what the kernel compressed of it, and while the host is
 /// short its `memory.high` lets it keep its request and a level of
 /// borrowed memory, the same for every sandbox at that level, idle ones
@@ -554,7 +554,7 @@ pub struct Outgrowth {
     /// Fewest bytes a shrink asks for, and the least a sandbox must be
     /// above its request for its VM to be ended.
     pub least: u64,
-    /// Smallest change of a VM's `memory.low` or `memory.high` worth
+    /// Smallest change of a VM's `memory.min` or `memory.high` worth
     /// writing.
     pub step: u64,
 }

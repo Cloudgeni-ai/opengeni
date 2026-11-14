@@ -286,7 +286,10 @@ error while a step such as a save keeps failing.
 The request also sets the VM's guarantees in its cgroup: `memory.low` while
 it runs (zero while paused, so the kernel takes from idle VMs first; not
 `memory.min`, which would have the kernel kill processes rather than slow a
-VM down if the host ever runs short beyond everything unprotected), and
+VM down if the host ever runs short beyond everything unprotected), or
+`memory.min` on a host that compresses running VMs, where the kernel
+would otherwise compress memory a sandbox was promised
+([ADR 44](docs/adr/0044-a-request-the-kernel-may-compress-is-kept-by-memory-min.md)), and
 `cpu.weight` from `cpu_request_millis` (a tenth of each of its processors
 unless set, rounded up to 10 millicores), so contended processors are shared by
 request and never below it while what is booked fits the host's capacity,
@@ -332,7 +335,7 @@ disk and shares its memory image, so creating one is a restore, not a boot. A
 ready pool keeps clones already restored and paused, so a create is a resume
 ([ADR 12](docs/adr/0012-templates-and-ready-pool.md)). Any create of a clone's
 processors and memory takes it, whatever it requests: the clone's VM is given
-the request's `memory.low` and `cpu.weight` before the claim is recorded. A
+the request's memory guarantee and `cpu.weight` before the claim is recorded. A
 clone is used only once its guest has taken its own id, random seed, machine
 id and hostname. A fill books its template's memory footprint and its disk
 copy until it is ready and measured. A shape unused for a week gives up its
@@ -520,8 +523,8 @@ all VMs together then compete with `system.slice` as one group however
 busy they are (the agent weighs that group, at start, against the groups
 beside it, so the VMs together get the processor capacity they were
 promised), and a VM's memory protection reaches only as far as its
-ancestors' (the agent keeps the parent's `memory.low` at the sum of its
-VMs'). The agent lowers its `oom_score_adj` to -999 at start, below its
+ancestors' (the agent keeps the parent's `memory.low` and `memory.min` at
+the sums of its VMs'). The agent lowers its `oom_score_adj` to -999 at start, below its
 VMs' -900, so the host's out-of-memory killer takes VMs before the agent
 that would bring them back, yet the agent stays killable inside its own
 unit. A host that compresses paused VMs needs zswap on; the agent refuses

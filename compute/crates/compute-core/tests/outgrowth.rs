@@ -176,7 +176,7 @@ impl Rig {
     }
 }
 
-/// The bounds `actions` set: sandbox, `memory.low`, `memory.high`.
+/// The bounds `actions` set: sandbox, `memory.min`, `memory.high`.
 fn bounds(actions: &[Action]) -> Vec<(u128, u64, Option<u64>)> {
     let mut set: Vec<_> = actions
         .iter()

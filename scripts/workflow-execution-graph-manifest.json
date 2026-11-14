@@ -6,7 +6,7 @@
   "workflows": [
     {
       "path": ".github/workflows/agent-ci.yml",
-      "sha256": "d2eb5f7b26be055fdfc2d9507a30c05adfd9ed4ad31a72c2b5fedf4b67856a34"
+      "sha256": "636f24b57f904fa23d87a81b6c3b1ea8f3f421fc9fa026c6c7508f2592f6aac8"
     },
     {
       "path": ".github/workflows/agent-release.yml",
@@ -42,7 +42,7 @@
     },
     {
       "path": ".github/workflows/compute-ci.yml",
-      "sha256": "40772b57688c638e28e001ab3a565509f19e27b23c32875a3245e14128a20c4d"
+      "sha256": "fca68a908ed15847b2ac24d3d36d57f1feaee0f7cea9827c7e74a4030f456f39"
     },
     {
       "path": ".github/workflows/compute-release.yml",
@@ -74,7 +74,7 @@
     },
     {
       "path": ".github/workflows/model-request-review-signal.yml",
-      "sha256": "f2f4493da9d5547de5188cdaac997c35660c23d56ad9af5b97d92ee250d7ae5b"
+      "sha256": "5f2fa7b87f9177c7e37e0069c9d40663b2aa4839af4298d33a014fbcaa4dcc52"
     },
     {
       "path": ".github/workflows/model-request-review.yml",
@@ -355,7 +355,7 @@
       "workflow": ".github/workflows/agent-ci.yml",
       "job": "test",
       "step": "Prove embedded helper selection with synthetic payloads",
-      "sha256": "723959b19c219405fefd8d526bdd7ffb45dd2f2670745ba25c5135549bbe078f"
+      "sha256": "470312782991fc58c5e30bc82e6adb6c4a143d9867f39ecb34d9e511588c97a7"
     },
     {
       "workflow": ".github/workflows/agent-ci.yml",
@@ -1195,7 +1195,7 @@
       "workflow": ".github/workflows/compute-ci.yml",
       "job": "kvm",
       "step": "Huge pages for the nested profile",
-      "sha256": "95ace5da0c3accf0b6d576b14a4506fa109de0c2eb8739bb1139bbd08be122e3"
+      "sha256": "fa09370bdc763c645f1b575f098108f3429f13df58bc124122c5ca36cb64eb75"
     },
     {
       "workflow": ".github/workflows/compute-ci.yml",
@@ -1483,7 +1483,7 @@
       "workflow": ".github/workflows/model-request-review-signal.yml",
       "job": "signal",
       "step": "Signal",
-      "sha256": "04db7e53af37976bc554eb647fd5eca55d0d67f2a547b9afa23bd38775048a97"
+      "sha256": "e27d316b41b4aa16da78e4c1fa112cdca9fc2ccd6366055ca121f1db0f261d18"
     },
     {
       "workflow": ".github/workflows/model-request-review.yml",

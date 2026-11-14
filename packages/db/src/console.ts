@@ -589,16 +589,19 @@ export async function consoleSpendByApiKey(
     await scopeWorkspace(tx, null);
     return await rawRows<{ api_key_id: string; workspaces: string; spend: string | null }>(
       tx,
+      // One pass over the organization's ledger for the window, grouped by
+      // workspace, rather than one ledger read per managed workspace.
       sql`select managed.created_by_api_key_id as api_key_id,
           count(distinct managed.workspace_id)::text as workspaces,
           coalesce(sum(spend.amount), 0)::bigint::text as spend
         from organization_managed_workspaces managed
-        left join lateral (
-          select sum(-amount_micros) as amount from credit_ledger_entries
-          where account_id = managed.account_id and workspace_id = managed.workspace_id
+        left join (
+          select workspace_id, sum(-amount_micros) as amount from credit_ledger_entries
+          where account_id = ${accountId}::uuid and workspace_id is not null
             and occurred_at >= ${window.since}::timestamptz and occurred_at < ${window.until}::timestamptz
             and ${LEDGER_SPEND_FILTER}
-        ) spend on true
+          group by workspace_id
+        ) spend on spend.workspace_id = managed.workspace_id
         where managed.account_id = ${accountId}::uuid and managed.created_by_api_key_id is not null
         group by managed.created_by_api_key_id`,
     );
@@ -833,7 +836,6 @@ async function summarizeSessions(
       turns: string;
       positive: string;
       negative: string;
-      spend: string;
       first_message: string | null;
     }>(
       tx,
@@ -846,7 +848,6 @@ async function summarizeSessions(
           (select count(*) from feedback_submissions f
             where f.workspace_id = s.workspace_id and f.session_id = s.id
               and f.sentiment = 'negative')::text as negative,
-          (${sessionSpendSql(sql`s.workspace_id`, sql`s.id`)})::text as spend,
           ${
             options.includeContent
               ? sql`(select left(e.payload ->> 'text', 500) from session_events e
@@ -858,12 +859,20 @@ async function summarizeSessions(
         where s.account_id = ${accountId}::uuid and s.workspace_id = ${workspaceId}::uuid
           and s.id = any(${pgTextArray(ids)}::uuid[])`,
     );
+    const spend = new Map(
+      (
+        await rawRows<{ id: string; spend: string }>(
+          tx,
+          consoleSessionSpendSql(accountId, workspaceId, ids),
+        )
+      ).map((row) => [row.id, num(row.spend)]),
+    );
     for (const stat of stats) {
       facts.set(stat.id, {
         turns: num(stat.turns),
         positive: num(stat.positive),
         negative: num(stat.negative),
-        spend: num(stat.spend),
+        spend: spend.get(stat.id) ?? 0,
         first: stat.first_message,
       });
     }
@@ -907,19 +916,43 @@ async function summarizeSessions(
   });
 }
 
-/** Metered spend of a session tree (the session and its sub-agents). */
-function sessionSpendSql(workspaceId: SQL, sessionId: SQL): SQL {
-  return sql`coalesce((select sum(-ledger.amount_micros)
-    from model_call_facts fact
-    join credit_ledger_entries ledger
-      on ledger.idempotency_key in (
-        'credit:model_usage_debit:' || fact.turn_id::text || ':' || fact.source_key,
-        'credit:byok_platform_fee:' || fact.turn_id::text || ':' || fact.source_key)
-    where fact.workspace_id = ${workspaceId}
-      and fact.session_id in (select tree.id from sessions tree
-        where tree.workspace_id = ${workspaceId}
-          and (tree.id = ${sessionId} or tree.root_session_id = ${sessionId}))
-      and ledger.amount_micros < 0), 0)`;
+/**
+ * Metered spend of each given root session's tree (the session and its
+ * sub-agents) in one workspace: rows of `{ id, spend }`, omitting sessions
+ * without debits.
+ *
+ * A model call is debited under `credit:model_usage_debit:<turn>:<source>`
+ * and, for BYOK, `credit:byok_platform_fee:<turn>:<source>`. The keys are
+ * built in a materialized CTE so the ledger join is a plain column equality:
+ * under row-level security PostgreSQL will not use an index for a join clause
+ * that applies a non-leakproof function such as `||`, and probing the unique
+ * idempotency index once per key replaces a full ledger scan per session.
+ */
+export function consoleSessionSpendSql(
+  accountId: string,
+  workspaceId: string,
+  sessionIds: readonly string[],
+): SQL {
+  return sql`with keys as materialized (
+      select root.id as root_id, key.value as idempotency_key
+      from sessions root
+      join sessions tree
+        on tree.workspace_id = root.workspace_id
+          and (tree.id = root.id or tree.root_session_id = root.id)
+      join model_call_facts fact
+        on fact.workspace_id = root.workspace_id and fact.session_id = tree.id
+      cross join lateral (values
+        ('credit:model_usage_debit:' || fact.turn_id::text || ':' || fact.source_key),
+        ('credit:byok_platform_fee:' || fact.turn_id::text || ':' || fact.source_key)
+      ) key(value)
+      where root.account_id = ${accountId}::uuid and root.workspace_id = ${workspaceId}::uuid
+        and root.id = any(${pgTextArray(sessionIds)}::uuid[])
+    )
+    select keys.root_id::text as id, sum(-ledger.amount_micros)::bigint::text as spend
+    from keys
+    join credit_ledger_entries ledger on ledger.idempotency_key = keys.idempotency_key
+    where ledger.account_id = ${accountId}::uuid and ledger.amount_micros < 0
+    group by keys.root_id`;
 }
 
 export type ConsoleSessionDetailRow = {

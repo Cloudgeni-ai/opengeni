@@ -338,13 +338,16 @@ pub trait Store: Send + Sync + 'static {
 
     /// Copies the stored sandbox image `image` (ADR 19) to `path`, a new
     /// file, checked against its id. False if the store does not hold it,
-    /// which a store that keeps no images never does.
+    /// which a store that keeps no images never does. A store may copy the
+    /// chunks that match `seed`, a local image, at the same offset rather
+    /// than download them (ADR 41).
     fn fetch_image(
         &self,
         image: ImageId,
         path: &Path,
+        seed: Option<&Path>,
     ) -> impl Future<Output = Result<bool, EngineError>> + Send {
-        let _ = (image, path);
+        let _ = (image, path, seed);
         ready(Ok(false))
     }
 
@@ -783,7 +786,12 @@ impl Store for Directory {
         .await
     }
 
-    async fn fetch_image(&self, image: ImageId, path: &Path) -> Result<bool, EngineError> {
+    async fn fetch_image(
+        &self,
+        image: ImageId,
+        path: &Path,
+        _seed: Option<&Path>,
+    ) -> Result<bool, EngineError> {
         let (from, to) = (self.rootfs(image), path.to_owned());
         blocking("fetch image", move || {
             match File::open(&from) {

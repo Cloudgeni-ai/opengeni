@@ -5,6 +5,7 @@ import {
   canonicalMcpEndpointUrl,
   dataverseWebApiBase,
   microsoftDynamicsDefaultScope,
+  microsoftDynamicsAddressProblem,
   microsoftDynamicsEnvironmentAddress,
   microsoftDynamicsMcpEndpoint,
   microsoftDynamicsProductForMcpUrl,
@@ -176,5 +177,98 @@ describe("Microsoft Dynamics MCP endpoints", () => {
       "contoso.crm17.dynamics.com",
     );
     expect(microsoftDynamicsEnvironmentAddress("https://example.com/mcp")).toBeNull();
+  });
+
+  test("a Business Central address is never read by dropping part of its path", () => {
+    // Production 6.21.0: the tenant segment was taken as the environment and
+    // "/Production" was dropped, so every query found no such environment.
+    for (const value of [
+      "https://businesscentral.dynamics.com/opengenitest2026/Production",
+      "https://businesscentral.dynamics.com/opengenitest2026/Production?company=CRONUS",
+      "businesscentral.dynamics.com/contoso/Sandbox/",
+    ]) {
+      expect(microsoftDynamicsMcpEndpoint(value)).toBeNull();
+      expect(canonicalMcpEndpointUrl(value)).toBe(value);
+      const problem = microsoftDynamicsAddressProblem(value);
+      expect(problem).toContain("isn't a tenant ID or domain");
+      expect(problem).toContain("address bar");
+      expect(problem).toContain(
+        "businesscentral.dynamics.com/<tenant>.onmicrosoft.com/<environment>",
+      );
+    }
+    // Anything after the environment other than a web client page is refused too.
+    for (const value of [
+      `https://businesscentral.dynamics.com/${BC_TENANT}/Production/extra`,
+      "https://businesscentral.dynamics.com/contoso.onmicrosoft.com/Production/a/b",
+      "https://businesscentral.dynamics.com/Production/extra/deeplink",
+    ]) {
+      expect(microsoftDynamicsMcpEndpoint(value)).toBeNull();
+      expect(microsoftDynamicsAddressProblem(value)).toEqual(expect.any(String));
+    }
+    expect(
+      microsoftDynamicsAddressProblem(
+        `https://businesscentral.dynamics.com/${BC_TENANT}/Production/extra`,
+      ),
+    ).toContain('more after the environment "Production"');
+    for (const value of [
+      "https://businesscentral.dynamics.com/SignIn?ReturnUrl=%2F",
+      `https://businesscentral.dynamics.com/${BC_TENANT}/deeplink?company=X`,
+      // A device client page is a page, never a tenant (it looks like a domain).
+      "https://businesscentral.dynamics.com/tablet.aspx?company=CRONUS",
+      "https://businesscentral.dynamics.com/phone.aspx",
+      "https://businesscentral.dynamics.com/not an environment",
+    ])
+      expect(microsoftDynamicsAddressProblem(value)).toContain("doesn't name an environment");
+    expect(
+      microsoftDynamicsAddressProblem(
+        "https://api.businesscentral.dynamics.com/v2.0/opengenitest2026/Production/api/v2.0",
+      ),
+    ).toContain("only the standard API");
+    expect(
+      microsoftDynamicsAddressProblem(
+        "https://api.businesscentral.dynamics.com/v2.0/Production/api/microsoft/automation/v2.0",
+      ),
+    ).toContain("only the standard API");
+  });
+
+  test("valid Business Central addresses keep working and have no problem", () => {
+    const cases: Array<[string, string]> = [
+      [`https://businesscentral.dynamics.com/${BC_TENANT}/Production`, BC_ROOT],
+      [
+        `https://businesscentral.dynamics.com/${BC_TENANT}/Production/?company=CRONUS&page=22`,
+        BC_ROOT,
+      ],
+      [`https://businesscentral.dynamics.com/${BC_TENANT}/Production/deeplink?company=X`, BC_ROOT],
+      [`https://businesscentral.dynamics.com/${BC_TENANT}?company=X`, BC_ROOT],
+      [
+        "https://businesscentral.dynamics.com/opengenitest2026.onmicrosoft.com/Production",
+        "https://api.businesscentral.dynamics.com/v2.0/opengenitest2026.onmicrosoft.com/Production/api/v2.0",
+      ],
+      [
+        "https://businesscentral.dynamics.com/Sandbox?company=CRONUS",
+        "https://api.businesscentral.dynamics.com/v2.0/Sandbox/api/v2.0",
+      ],
+      [
+        "https://businesscentral.dynamics.com/Sandbox/deeplink?company=CRONUS",
+        "https://api.businesscentral.dynamics.com/v2.0/Sandbox/api/v2.0",
+      ],
+      [
+        "https://businesscentral.dynamics.com/?company=CRONUS",
+        "https://api.businesscentral.dynamics.com/v2.0/Production/api/v2.0",
+      ],
+      [BC_ROOT, BC_ROOT],
+      [`https://businesscentral.dynamics.com/${BC_TENANT}/Production/phone.aspx`, BC_ROOT],
+    ];
+    for (const [value, mcpUrl] of cases) {
+      expect(microsoftDynamicsMcpEndpoint(value)).toEqual({ product: "business_central", mcpUrl });
+      expect(microsoftDynamicsAddressProblem(value)).toBeNull();
+    }
+    // Other products and other servers never report a Business Central problem.
+    for (const value of [
+      "https://contoso.crm4.dynamics.com/main.aspx",
+      "https://mcp.example.com/a/b",
+      "nope",
+    ])
+      expect(microsoftDynamicsAddressProblem(value)).toBeNull();
   });
 });

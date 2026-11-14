@@ -11875,6 +11875,16 @@ export async function runAgentStream(
 ) {
   const gate = agentInputWaitYields.get(agent);
   const scope = gate?.beginStream(overrides.signal);
+  // Discovery cards a search or listing skipped, or failed to show, become
+  // session events of this run.
+  const onRuntimeEvent = overrides.onRuntimeEvent;
+  const discoveryCards = lazyToolRuntimeForAgent(agent);
+  const discoveryCardSink = onRuntimeEvent
+    ? (event: unknown) => onRuntimeEvent({ type: "tool.discovery_card", payload: event })
+    : undefined;
+  discoveryCards?.setDiscoveryCardSink(discoveryCardSink);
+  // A later event never reaches a finished run's publisher.
+  const releaseDiscoveryCards = () => discoveryCards?.releaseDiscoveryCardSink(discoveryCardSink);
   const contentless = contentlessModelResponseGuard(overrides.onContentlessModelResponse);
   try {
     if (scope) agent.toolUseBehavior = scope.toolUseBehavior;
@@ -11907,9 +11917,11 @@ export async function runAgentStream(
       const finish = () => scope.endStream(stream.cancelled);
       void stream.completed.then(finish, finish);
     }
+    void stream.completed.then(releaseDiscoveryCards, releaseDiscoveryCards);
     return stream;
   } catch (error) {
     scope?.endStream();
+    releaseDiscoveryCards();
     throw error;
   }
 }

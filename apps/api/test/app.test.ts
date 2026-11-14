@@ -1773,6 +1773,29 @@ describe("API helpers", () => {
     ).rejects.toThrow("reserved for the canonical Codex Apps service");
   });
 
+  test("refuses a Business Central address that would drop its environment", async () => {
+    const created = createCatalogItem({
+      db: {} as Database,
+      accountId: crypto.randomUUID(),
+      workspaceId: crypto.randomUUID(),
+      payload: {
+        kind: "mcp",
+        source: "manual",
+        name: "Microsoft Dynamics",
+        description: null,
+        category: "custom",
+        tags: [],
+        homepageUrl: null,
+        endpointUrl: "https://businesscentral.dynamics.com/opengenitest2026/Production",
+        installUrl: null,
+        authModel: null,
+        metadata: {},
+      },
+    });
+    await expect(created).rejects.toMatchObject({ status: 422 });
+    await expect(created).rejects.toThrow('"opengenitest2026" isn\'t a tenant ID or domain');
+  });
+
   test("omits credential-header capability MCPs when their headers cannot be decrypted", () => {
     const key = randomBytes(32);
     const otherKey = randomBytes(32);

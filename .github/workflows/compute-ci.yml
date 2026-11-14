@@ -267,9 +267,27 @@ jobs:
         run: |
           # Half the runner's memory, in 2 MiB pages: the lab step runs its
           # tests at once, and a quarter (4 GB) left later ones a full host.
+          # The kernel grants only the pages it finds contiguous memory for,
+          # and a runner whose memory is fragmented (page cache from the
+          # steps before) once got 147 of about 4000: every later test then
+          # failed as a full host. So drop clean cache and compact first, try
+          # again while the pool still grows, and stop here if it falls short.
           pages=$(( $(awk '/MemTotal/ {print $2}' /proc/meminfo) / 2 / 2048 ))
-          echo "$pages" | sudo tee /proc/sys/vm/nr_hugepages
+          got=0
+          for try in 1 2 3; do
+            sync
+            echo 1 | sudo tee /proc/sys/vm/drop_caches > /dev/null
+            echo 1 | sudo tee /proc/sys/vm/compact_memory > /dev/null
+            echo "$pages" | sudo tee /proc/sys/vm/nr_hugepages > /dev/null
+            got=$(cat /proc/sys/vm/nr_hugepages)
+            echo "try $try: $got of $pages huge pages"
+            [ "$got" -ge "$pages" ] && break
+          done
           grep -i hugepages_total /proc/meminfo
+          if [ "$got" -lt "$pages" ]; then
+            echo "::error::the kernel granted $got of $pages huge pages; the nested profile's tests would find a full host"
+            exit 1
+          fi
       - name: Let sandbox traffic through Docker's firewall
         run: |
           # The runner runs Docker, whose FORWARD chain drops forwarded

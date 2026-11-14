@@ -43,6 +43,13 @@ old one; old records stay as history.
 | 35 | [Built images nothing uses are forgotten](0035-built-images-nothing-uses-are-forgotten.md) | Accepted |
 | 36 | [Idle memory stays in RAM](0036-idle-memory-stays-in-ram.md) | Accepted |
 | 37 | [Compressing idle memory is asked for](0037-compressing-idle-memory-is-asked-for.md) | Accepted |
+| 38 | [A full owner hands a wake on](0038-a-full-owner-hands-a-wake-on.md) | Accepted |
+| 39 | [A fresh boot waits for nothing it does not use](0039-a-fresh-boot-waits-for-nothing-it-does-not-use.md) | Accepted |
+| 40 | [An image is built over the one before](0040-an-image-is-built-over-the-one-before.md) | Accepted |
+| 41 | [Every host keeps each new image ahead of its creates](0041-every-host-keeps-each-new-image-ahead.md) | Accepted |
+| 43 | [A fresh boot repairs a damaged file system](0043-a-fresh-boot-repairs-a-damaged-file-system.md) | Accepted |
+| 44 | [A request the kernel may compress is kept by `memory.min`](0044-a-request-the-kernel-may-compress-is-kept-by-memory-min.md) | Accepted |
+| 44 | [A request the kernel may compress is kept by `memory.min`](0044-a-request-the-kernel-may-compress-is-kept-by-memory-min.md) | Accepted |
 
 ## Format
 

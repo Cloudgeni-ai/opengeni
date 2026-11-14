@@ -89,6 +89,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 step,
                 stays,
             } => self.asked(id, op, step, stays),
+            Event::ImageKept { image, before } => self.image_kept(image, before),
             Event::TemplateChecked { shape, result } => {
                 self.template_checked(shape, *result);
                 self.refill();

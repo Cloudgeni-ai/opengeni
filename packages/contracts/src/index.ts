@@ -17660,6 +17660,11 @@ export const SessionEventType = /* @__PURE__ */ defineSchema(() =>
     "agent.model.request",
     "agent.model.usage",
     "tool.auth_needed",
+    // Tool discovery (tool_search, tool_list) showed no new Connect card for
+    // an integration a request may name: skipped (and why), already in the
+    // chat, not shown by the card tool, or a failed card call. Payload:
+    // source, outcome, reason, the bounded query, and capability ids and names.
+    "tool.discovery_card",
     "credential.auth_needed",
     "agent.updated",
     "rig.setup.started",

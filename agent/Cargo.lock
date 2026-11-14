@@ -1971,7 +1971,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "opengeni-agent"
-version = "0.1.161"
+version = "0.1.163"
 dependencies = [
  "async-nats",
  "async-trait",
@@ -2019,7 +2019,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-files-ffi"
-version = "0.1.161"
+version = "0.1.163"
 
 [[package]]
 name = "opengeni-agent-harness"
@@ -2044,7 +2044,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-linux-ffi"
-version = "0.1.161"
+version = "0.1.163"
 dependencies = [
  "libc",
  "signal-hook-registry",
@@ -2053,7 +2053,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-macos-ffi"
-version = "0.1.161"
+version = "0.1.163"
 dependencies = [
  "accessibility-sys",
  "block2",
@@ -2072,7 +2072,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-pipewire-ffi"
-version = "0.1.161"
+version = "0.1.163"
 dependencies = [
  "libc",
  "thiserror 2.0.20",
@@ -2080,7 +2080,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-platform"
-version = "0.1.161"
+version = "0.1.163"
 dependencies = [
  "async-trait",
  "blake3",
@@ -2108,7 +2108,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-proto"
-version = "0.1.161"
+version = "0.1.163"
 dependencies = [
  "prost",
  "prost-build",
@@ -2117,7 +2117,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-stream"
-version = "0.1.161"
+version = "0.1.163"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2134,7 +2134,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-update"
-version = "0.1.161"
+version = "0.1.163"
 dependencies = [
  "blake3",
  "hex",
@@ -2154,7 +2154,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-windows-ffi"
-version = "0.1.161"
+version = "0.1.163"
 dependencies = [
  "thiserror 2.0.20",
  "windows-sys 0.61.2",
@@ -2162,7 +2162,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-computer-native"
-version = "0.1.161"
+version = "0.1.163"
 dependencies = [
  "arboard",
  "async-lock",
@@ -2195,7 +2195,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-relay"
-version = "0.1.161"
+version = "0.1.163"
 dependencies = [
  "async-trait",
  "axum",

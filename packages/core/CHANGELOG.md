@@ -1,5 +1,33 @@
 # @opengeni/core
 
+## 6.22.0
+
+### Patch Changes
+
+- Updated dependencies [1f25da5]
+- Updated dependencies [3bf1c71]
+- Updated dependencies [6597d38]
+- Updated dependencies [d50092b]
+- Updated dependencies [3604f11]
+- Updated dependencies [c36183c]
+- Updated dependencies [0d72a8b]
+- Updated dependencies [07ecbcc]
+- Updated dependencies [c105ed2]
+  - @opengeni/db@6.22.0
+  - @opengeni/runtime@6.22.0
+  - @opengeni/contracts@6.22.0
+  - @opengeni/observability@6.22.0
+  - @opengeni/documents@6.22.0
+  - @opengeni/events@6.22.0
+  - @opengeni/capabilities@6.22.0
+  - @opengeni/codex@6.22.0
+  - @opengeni/config@6.22.0
+  - @opengeni/storage@6.22.0
+  - @opengeni/tool-gateway@6.22.0
+  - @opengeni/vaults@6.22.0
+  - @opengeni/network@6.22.0
+  - @opengeni/xai-subscription@6.22.0
+
 ## 6.21.0
 
 ### Patch Changes

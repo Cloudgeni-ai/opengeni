@@ -1,5 +1,49 @@
 # @opengeni/worker-bundle
 
+## 6.22.0
+
+### Patch Changes
+
+- 3bf1c71: A Connected Machine command's completion no longer reaches its session minutes late on a slow uplink. The agent sent the few-byte completion notice, its retries and its operation inventory through the same first-in-first-out connection as command output, so the notice waited behind every output frame already queued (or was dropped from a full queue) until the next reconnect. The agent now sends them on its control connection, repeating an unacknowledged completion with every heartbeat. Opengeni's collector also used to give up on a completed command's output after five seconds without it, attach again (queuing the same frames once more) and back off for up to five minutes; it now follows one attachment until the exit arrives or its claim budget ends. `replayConnectedCommandOutput` requires a deadline for terminal replays. Failed completion, inventory collection, probe, settlement and output release warnings now carry a closed `reason` code (`claim_deadline`, `exit_frontier_not_reached`, `exit_frontier_mismatch`, `output_transport_unavailable`, `control_<code>`, `database_<sqlstate>` or `unclassified`), exported by the new `connectedCommandFailureReason`, since telemetry does not export error text.
+- 3604f11: Gemini 3 and later on Google's own OpenAI-compatible endpoints (AI Studio and Vertex) no longer fail on the first request after a tool call. Streamed Chat Completions tool calls now keep the fields the provider returned beyond the call itself, such as Gemini's `extra_content` thought signature, as non-streamed calls already did, so the follow-up request sends the signature back. Parallel tool calls streamed without an `index`, as Gemini on AI Studio sends them, now stay separate calls instead of being merged into one. The call records the provider that returned these fields: only that provider receives them again, and any other provider on Chat Completions or Responses gets the plain call. Provider error bodies wrapped in a JSON array, as Google sends them, are now read for the provider's bounded message and status code, so a failed turn shows the provider's reason instead of "400 status code (no body)". An exhausted-quota 429 sent this way now also stops the SDK's retries and fails the turn as provider quota, as object-shaped quota errors already did.
+- 07ecbcc: Skills whose SKILL.md description is a multi-line YAML block install again: the installed Skill's summary folds line breaks into spaces, and any remaining invalid Skill metadata returns a 422 instead of a server error. Chat titles now work on chat-API routes that report unset usage counters as null, and a failed title logs a content-free reason (the failing stage, error name and provider status or code).
+- Updated dependencies [1f25da5]
+- Updated dependencies [3bf1c71]
+- Updated dependencies [6597d38]
+- Updated dependencies [d50092b]
+- Updated dependencies [3604f11]
+- Updated dependencies [c36183c]
+- Updated dependencies [0d72a8b]
+- Updated dependencies [07ecbcc]
+- Updated dependencies [c105ed2]
+  - @opengeni/db@6.22.0
+  - @opengeni/runtime@6.22.0
+  - @opengeni/contracts@6.22.0
+  - @opengeni/sdk@6.22.0
+  - @opengeni/observability@6.22.0
+  - @opengeni/core@6.22.0
+  - @opengeni/documents@6.22.0
+  - @opengeni/events@6.22.0
+  - @opengeni/capabilities@6.22.0
+  - @opengeni/codemode@6.22.0
+  - @opengeni/codex@6.22.0
+  - @opengeni/config@6.22.0
+  - @opengeni/decisions@6.22.0
+  - @opengeni/github@6.22.0
+  - @opengeni/interaction@6.22.0
+  - @opengeni/storage@6.22.0
+  - @opengeni/tool-gateway@6.22.0
+  - @opengeni/vaults@6.22.0
+  - @opengeni/vaults-bitwarden@6.22.0
+  - @opengeni/vaults-keeper@6.22.0
+  - @opengeni/vaults-onepassword@6.22.0
+  - @opengeni/vaults-protonpass@6.22.0
+  - @opengeni/jev@6.22.0
+  - @opengeni/agent-proto@6.22.0
+  - @opengeni/network@6.22.0
+  - @opengeni/subscriptions@6.22.0
+  - @opengeni/xai-subscription@6.22.0
+
 ## 6.21.0
 
 ### Patch Changes

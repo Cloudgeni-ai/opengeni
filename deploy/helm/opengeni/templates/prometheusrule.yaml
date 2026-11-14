@@ -1884,9 +1884,12 @@ spec:
             description: For 15m, at least 3 Codex-subscription calls and over 5% of those reporting usage in 30m have omitted cached-token fields, or active HTTP-success traffic has produced no call that reported usage. Calls without any usage count as status="no_usage", not missing. Cache-hit ratio remains unknown rather than being fabricated as zero; inspect provider usage payload compatibility, stream failures and worker usage persistence.
         # ── Connected Machines (op-outcome plane) ────────────────────────────
         - alert: OpenGeniMachineOpInfraFailuresHigh
+          # Only infrastructure faults count (infrastructure="true": offline,
+          # draining, stream, protocol, …). A missing path, a consent gate or a
+          # fence is the machine answering what the agent asked, not a fault.
           expr: |
             (
-              sum(increase(opengeni_machine_op_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="failed"}[10m]))
+              sum(increase(opengeni_machine_op_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="failed",infrastructure="true"}[10m]))
               /
               clamp_min(sum(increase(opengeni_machine_op_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])), 1)
             ) > 0.1
@@ -1896,9 +1899,9 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: 'More than 10% of operations on Connected Machines failed over 10 minutes.'
+            summary: 'More than 10% of operations on Connected Machines failed for an infrastructure reason over 10 minutes. Missing files, consent refusals and similar answers to what the agent asked are not counted.'
             headline: 'Connected Machines: operations failing'
-            value: '{{ "{{ $value | humanizePercentage }}" }} of operations failed (10 min)'
+            value: '{{ "{{ $value | humanizePercentage }}" }} infra failures (10 min)'
             user_impact: 'Agents running on users'' own machines hit errors running commands or file operations.'
             next_step: 'Check NATS and relay health and the typed fault codes in Grafana.'
         - alert: OpenGeniMachineOpHealedFaultsSpiking

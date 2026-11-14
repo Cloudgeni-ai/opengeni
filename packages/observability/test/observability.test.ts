@@ -894,6 +894,7 @@ describe("observability", () => {
         ["ParallelSessionTitlePersistenceError", "parallel_session_title_persistence_failed"],
         ["KnowledgeIndexOperationError", "knowledge_index_embedding_failed"],
         ["WorkerOperationError", "worker_operation_failed"],
+        ["IndependentSessionTitleError", "independent_session_title_provider_request_failed"],
       ]) {
         obs.warn("fixed operational failure", {
           errorClass,
@@ -903,6 +904,8 @@ describe("observability", () => {
           error: sentinel,
           cause: sentinel,
           status: 503,
+          sessionTitleErrorName: "RateLimitError",
+          providerErrorCode: "rate_limit_exceeded",
         });
       }
       obs.warn("unknown operational failure", {
@@ -915,7 +918,7 @@ describe("observability", () => {
       console.warn = originalWarn;
     }
 
-    expect(observed).toHaveLength(5);
+    expect(observed).toHaveLength(6);
     expect(observed.join("\n")).not.toContain(sentinel);
     const records = observed.map((record) => JSON.parse(record));
     expect(records[0]).toMatchObject({
@@ -937,9 +940,17 @@ describe("observability", () => {
       errorCode: "worker_operation_failed",
       errorMessage: "worker operation failed",
     });
-    expect(records[4]).toMatchObject({ errorClass: "OperationError" });
-    expect(records[4]).not.toHaveProperty("errorCode");
-    expect(records[4]).not.toHaveProperty("errorMessage");
+    expect(records[4]).toMatchObject({
+      errorClass: "IndependentSessionTitleError",
+      errorCode: "independent_session_title_provider_request_failed",
+      errorMessage: "independent session title provider request failed",
+      sessionTitleErrorName: "RateLimitError",
+      providerErrorCode: "rate_limit_exceeded",
+      status: 503,
+    });
+    expect(records[5]).toMatchObject({ errorClass: "OperationError" });
+    expect(records[5]).not.toHaveProperty("errorCode");
+    expect(records[5]).not.toHaveProperty("errorMessage");
   });
 
   test("public structured logs admit only validated opaque sandbox correlation keys", () => {

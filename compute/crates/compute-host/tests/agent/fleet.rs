@@ -1800,3 +1800,45 @@ async fn a_hand_off_during_an_adopts_removal_is_told_to_try_again() {
     one.assert_clean();
     two.assert_clean();
 }
+
+/// A wake its owner refused for want of room leaves nothing wanting the
+/// sandbox awake there, so the owner hands it off when asked, and another
+/// host with room adopts and wakes it: what the service does instead of
+/// waiting for room on the full host (ADR 38).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sandbox_whose_wake_was_refused_as_full_is_handed_off_and_wakes_elsewhere() {
+    let a = Lab::root();
+    let shelf = a.join("shelf");
+    // Room for two of the labs' 256 MiB sandboxes.
+    let full = Lab::start_stored_configured(a, Arc::default(), Directory::new(&shelf), |config| {
+        config.policy.admission = Some(compute_core::Admission {
+            budget: 512 << 20,
+            buffer: 0,
+            busy_grace: Duration::from_millis(100),
+        });
+    })
+    .await;
+    let two = Lab::start_stored(Lab::root(), Arc::default(), Directory::new(&shelf)).await;
+    let sandbox = id(3);
+    full.create(sandbox, NEVER).await;
+    full.run(sandbox, &["write on-disk"]).await;
+    assert_eq!(full.sleep_to(sandbox, LevelName::Saved).await, Reply::Done);
+    full.wait_level(sandbox, LevelName::Saved).await;
+    for n in 1..=2 {
+        full.create(id(n), NEVER).await;
+        assert!(matches!(full.wake(id(n)).await, Reply::Woken { .. }));
+    }
+    assert_eq!(code(&full.wake(sandbox).await), Some(ErrorCode::HostFull));
+
+    assert_eq!(hand_off(&full, sandbox, 1).await, Reply::Done);
+    assert!(
+        full.status()
+            .await
+            .sandboxes
+            .iter()
+            .all(|held| held.id != sandbox)
+    );
+    assert_eq!(adopt(&two, sandbox, 2).await, Reply::Done);
+    assert!(matches!(two.wake(sandbox).await, Reply::Woken { .. }));
+    two.wait_level(sandbox, LevelName::Running).await;
+}

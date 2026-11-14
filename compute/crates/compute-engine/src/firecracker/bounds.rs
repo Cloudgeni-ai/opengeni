@@ -1,5 +1,6 @@
 //! The memory bounds the host asks of a running VM (ADR 24): its
-//! `memory.low`, its request plus what the kernel compressed of it, and its
+//! `memory.min` (ADR 44), its request plus what the kernel compressed of
+//! it, and its
 //! `memory.high`, past which the VM waits on its own allocations while the
 //! kernel compresses its coldest pages.
 //!
@@ -79,7 +80,7 @@
 use std::io;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use crate::cgroup::{Cgroup, Swap};
+use crate::cgroup::{Cgroup, Protection, Swap};
 
 /// Bytes reclaimed per step, and the swap a step may take: small enough
 /// that a newer bound, a pause or a resume waits at most one step's work,
@@ -107,8 +108,9 @@ pub(super) trait Group {
     fn current(&self) -> io::Result<u64>;
     /// Bytes of that its compressed pages take (`memory.zswap.current`).
     fn compressed(&self) -> io::Result<u64>;
-    /// Sets its `memory.low`.
-    fn set_low(&self, bytes: u64) -> io::Result<()>;
+    /// Sets its `memory.min`. Bounds are asked only on a host that
+    /// compresses running VMs, which keeps their requests by `memory.min`.
+    fn set_min(&self, bytes: u64) -> io::Result<()>;
     /// Sets its `memory.high`; `None` for none.
     fn set_high(&self, bytes: Option<u64>) -> io::Result<()>;
     /// Its swap slots; `None` on a kernel without swap.
@@ -130,8 +132,8 @@ impl Group for Cgroup {
         self.memory_compressed()
     }
 
-    fn set_low(&self, bytes: u64) -> io::Result<()> {
-        self.set_memory_low(bytes)
+    fn set_min(&self, bytes: u64) -> io::Result<()> {
+        self.protect_memory(bytes, Protection::Min)
     }
 
     fn set_high(&self, bytes: Option<u64>) -> io::Result<()> {
@@ -165,7 +167,7 @@ pub(super) struct Bounds {
 struct State {
     /// Raised by every reset: a bound asked under an earlier one is stale.
     epoch: u64,
-    /// The latest bound asked and not yet applied: `memory.low`, and
+    /// The latest bound asked and not yet applied: `memory.min`, and
     /// `memory.high` or `None` for none.
     wanted: Option<(u64, Option<u64>)>,
     /// Whether a writer thread is at work.
@@ -489,7 +491,7 @@ fn first(
     high: Option<u64>,
     settled: Option<u64>,
 ) -> io::Result<Option<u64>> {
-    group.set_low(low)?;
+    group.set_min(low)?;
     let Some(high) = high else {
         group.set_high(None)?;
         return Ok(None);
@@ -519,12 +521,12 @@ mod tests {
         fs::create_dir(&path).unwrap();
         for (file, text) in [
             ("memory.current", current.to_string()),
-            ("memory.low", "0".into()),
+            ("memory.min", "0".into()),
             ("memory.high", "max".into()),
         ] {
             fs::write(path.join(file), text).unwrap();
         }
-        fs::write(parent.path().join("memory.low"), "0").unwrap();
+        fs::write(parent.path().join("memory.min"), "0").unwrap();
         (parent, Cgroup::at(path))
     }
 
@@ -546,10 +548,12 @@ mod tests {
         let bounds = Arc::new(Bounds::default());
         bounds.ask(&cgroup, 512 << 20, None);
         settled(&bounds);
-        assert_eq!(read(&cgroup, "memory.low"), (512_u64 << 20).to_string());
+        assert_eq!(read(&cgroup, "memory.min"), (512_u64 << 20).to_string());
+        assert_eq!(read(&cgroup, "memory.low"), "0");
         assert_eq!(read(&cgroup, "memory.high"), "max");
         let parent = Cgroup::at(cgroup.path().parent().unwrap());
-        assert_eq!(read(&parent, "memory.low"), (512_u64 << 20).to_string());
+        assert_eq!(read(&parent, "memory.min"), (512_u64 << 20).to_string());
+        assert_eq!(read(&parent, "memory.low"), "0");
     }
 
     #[test]
@@ -562,12 +566,12 @@ mod tests {
         }
         bounds.ask(&cgroup, 3 << 30, Some(4 << 30));
         bounds
-            .reset(|| fs::write(cgroup.path().join("memory.low"), "1024"))
+            .reset(|| fs::write(cgroup.path().join("memory.min"), "1024"))
             .unwrap();
         assert_eq!(bounds.lock().wanted, None);
         // The writer finds nothing left to apply.
         bounds.work(&cgroup);
-        assert_eq!(read(&cgroup, "memory.low"), "1024");
+        assert_eq!(read(&cgroup, "memory.min"), "1024");
         assert!(!bounds.lock().working);
     }
 
@@ -648,7 +652,7 @@ mod tests {
             Ok(self.kernel().compressed)
         }
 
-        fn set_low(&self, bytes: u64) -> io::Result<()> {
+        fn set_min(&self, bytes: u64) -> io::Result<()> {
             self.kernel().low = bytes;
             Ok(())
         }
@@ -1049,8 +1053,8 @@ mod tests {
             self.vm.compressed()
         }
 
-        fn set_low(&self, bytes: u64) -> io::Result<()> {
-            self.vm.set_low(bytes)
+        fn set_min(&self, bytes: u64) -> io::Result<()> {
+            self.vm.set_min(bytes)
         }
 
         fn set_high(&self, bytes: Option<u64>) -> io::Result<()> {

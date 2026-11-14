@@ -382,6 +382,20 @@ endpoint returns (`reasoning_content` or `reasoning`) and cached input tokens
 (`usage.prompt_tokens_details.cached_tokens`) are read back like on every Chat
 Completions route.
 
+##### Provider fields on tool calls
+
+On every Chat Completions route, fields a provider returns on a tool call
+beyond its id, name and arguments are kept with the call, streamed or not.
+Gemini on Google's own OpenAI-compatible endpoints (AI Studio and Vertex)
+returns its thought signature this way (`extra_content.google.thought_signature`)
+and refuses the next request when a replayed call lacks it. Streamed calls
+that arrive without an `index` (Gemini on AI Studio) each stay their own call.
+The call records the provider that returned these fields, and only that
+provider receives them again; any other provider, on Chat Completions or
+Responses, gets the plain call. Error bodies these endpoints send as a JSON array
+(`[{"error": {...}}]`) are read for the provider's message and status, so a
+failed turn names the provider's reason.
+
 #### Organization OpenAI and Azure OpenAI
 
 Organization owners/admins can connect **OpenAI** and **Azure OpenAI once for

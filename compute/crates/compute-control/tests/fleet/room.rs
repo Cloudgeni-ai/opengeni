@@ -188,3 +188,89 @@ async fn a_create_a_full_host_refused_is_not_sent_there_again_until_it_reports_a
     assert_eq!(status, 503, "{body}");
     assert_eq!(full.ops(), ["create", "create", "create"]);
 }
+
+fn refuse_wakes(envelope: &Envelope) -> Act {
+    match envelope.request {
+        Request::Wake { .. } => Act::Reply(Reply::Error {
+            message: "full".into(),
+            code: ErrorCode::HostFull,
+        }),
+        _ => Act::Ordinary,
+    }
+}
+
+/// An owner with no room for a wake hands the sandbox off, and the wake
+/// places it on a host that has room, at once, instead of waiting for
+/// room where it last ran (ADR 38). Before, the wake waited for the full
+/// owner until its deadline although another host had room.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_full_owner_hands_a_wake_on_to_a_host_with_room() {
+    let fleet = Fleet::start_with(None, |settings| {
+        settings.wake_within = Duration::from_secs(20);
+    })
+    .await;
+    let a = fleet.host("host-a.example").await;
+    let sandbox = fleet.create(json!({})).await;
+    assert_eq!(a.holds(id(&sandbox)), Some(1));
+    let b = fleet.host("host-b.example").await;
+    a.behave(refuse_wakes);
+
+    let started = Instant::now();
+    let (status, body) = fleet
+        .post(&format!("/v1/sandboxes/{sandbox}/wake"), json!({}))
+        .await;
+    let took = started.elapsed();
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["host"], "host-b.example", "{body}");
+    assert!(took < Duration::from_secs(5), "{took:?}");
+    assert_eq!(a.ops(), ["create", "wake", "hand_off"]);
+    assert_eq!(a.holds(id(&sandbox)), None);
+    let (_, row) = fleet.get(&format!("/v1/sandboxes/{sandbox}")).await;
+    let epoch = row["owner_epoch"].as_u64().unwrap();
+    assert_eq!(b.holds(id(&sandbox)), Some(epoch));
+    assert_eq!(adopts(&b.ops()), 1, "{:?}", b.ops());
+}
+
+/// With no other host that has room, moving would not wake it sooner: the
+/// full owner keeps it, the wake waits for room there, and lands there as
+/// soon as the owner has room again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_full_owner_keeps_a_sandbox_no_other_host_has_room_for() {
+    let fleet = Fleet::start_with(None, |settings| {
+        settings.wake_within = Duration::from_secs(20);
+    })
+    .await;
+    let a = fleet.host("host-a.example").await;
+    let sandbox = fleet.create(json!({})).await;
+    let b = fleet.host("host-b.example").await;
+    b.set_capacity(Capacity {
+        memory_free_mib: 0,
+        ..roomy()
+    });
+    let view = std::sync::Arc::clone(fleet.running.service.view());
+    super::support::until(
+        Duration::from_secs(3),
+        "the view has the full host's report",
+        async || {
+            view.named("host-b.example")
+                .is_some_and(|known| known.capacity.memory_free_mib == 0)
+        },
+    )
+    .await;
+    a.behave(refuse_wakes);
+    let path = format!("/v1/sandboxes/{sandbox}/wake");
+    let woken = fleet.post(&path, json!({}));
+    let room = async {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        a.behave(|_| Act::Ordinary);
+        a.set_capacity(Capacity {
+            sandboxes: 1,
+            ..roomy()
+        });
+    };
+    let ((status, body), ()) = tokio::join!(woken, room);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["host"], "host-a.example", "{body}");
+    assert!(!a.ops().contains(&"hand_off"), "{:?}", a.ops());
+    assert_eq!(adopts(&b.ops()), 0, "{:?}", b.ops());
+}
