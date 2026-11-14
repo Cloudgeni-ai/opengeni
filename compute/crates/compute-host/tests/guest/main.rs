@@ -37,6 +37,8 @@ mod memory;
 mod required;
 #[path = "../support/state.rs"]
 mod state;
+#[path = "../support/vms.rs"]
+mod vms;
 
 use envd::{Envd, init};
 use required::skip;
@@ -396,26 +398,7 @@ impl Drop for Host {
 /// its VMs take the same names and taps, which are busy until these
 /// processes are gone, and it counts the VMs that run.
 fn end_vms() {
-    let Ok(vms) = std::fs::read_dir(CGROUP) else {
-        return;
-    };
-    let vms: Vec<PathBuf> = vms
-        .flatten()
-        .map(|vm| vm.path())
-        .filter(|vm| vm.is_dir())
-        .collect();
-    for vm in &vms {
-        let _ = std::fs::write(vm.join("cgroup.kill"), "1");
-    }
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while std::time::Instant::now() < deadline
-        && vms.iter().any(|vm| {
-            std::fs::read_to_string(vm.join("cgroup.events"))
-                .is_ok_and(|events| events.contains("populated 1"))
-        })
-    {
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    vms::end_vms(Path::new(CGROUP));
 }
 
 /// The checks every image passes once its sandbox has its token: its own
