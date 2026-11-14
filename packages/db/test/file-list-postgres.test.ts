@@ -181,7 +181,7 @@ test("file pages list exactly the visible files, newest first, across every kind
   const org = await organization();
   const { person, colleague } = org;
   const minute = (n: number) => new Date(Date.UTC(2026, 9, 1, 12, n)).toISOString();
-  const rows: FileRow[] = [
+  const fixtures: FileRow[] = [
     { workspace: org.shared, at: minute(1) },
     // Same instant as the shared file above: ties break by id across indexes.
     { workspace: org.shared, owner: person, at: minute(1) },
@@ -202,7 +202,7 @@ test("file pages list exactly the visible files, newest first, across every kind
     { workspace: org.shared, owner: person, at: minute(16) },
   ];
   const ids: string[] = [];
-  for (const row of rows) ids.push(await insertFile(org, row));
+  for (const row of fixtures) ids.push(await insertFile(org, row));
   // Newest in its workspace, and refused by the provider ACL: pages skip it.
   await protectAsGoogleDriveImport(org, ids[15]!);
   await protectAsGoogleDriveImport(org, ids[16]!);
@@ -223,7 +223,7 @@ test("file pages list exactly the visible files, newest first, across every kind
     for (const limit of [1, 2, 50]) expect(await listAll(reader, limit)).toEqual(expected);
   }
   // The rule above is not vacuous: spot-check what it lets people see.
-  const pick = (...rows: number[]) => rows.map((row) => ids[row]!);
+  const pick = (...positions: number[]) => positions.map((row) => ids[row]!);
   const tied = pick(0, 1).sort().reverse();
   expect(await visibleFiles(readers[0]!)).toEqual([...pick(9, 6, 5), ...tied]);
   expect(await visibleFiles(readers[3]!)).toEqual(pick(10, 9, 8, 7, 6, 5, 4, 1));
