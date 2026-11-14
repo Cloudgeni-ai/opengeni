@@ -354,24 +354,82 @@ fn reads_processor_time_from_cpu_stat() {
 }
 
 /// Groups VMs left behind claim no protection once an engine starts:
-/// empty ones go, and the parent claims what those with a process do.
+/// empty ones go, and the parent claims what those with a process do, of
+/// either kind.
 #[test]
 fn empty_groups_left_behind_are_removed_with_their_claims() {
     let parent = tempfile::tempdir().unwrap();
     let running = parent.path().join("running");
     fs::create_dir(&running).unwrap();
     fs::write(running.join("cgroup.events"), "populated 1\nfrozen 0\n").unwrap();
-    fs::write(running.join("memory.low"), "536870912\n").unwrap();
+    fs::write(running.join("memory.min"), "536870912\n").unwrap();
+    fs::write(running.join("memory.low"), "0\n").unwrap();
     // A real group's control files go with it; here an empty directory
     // stands for one left behind.
     fs::create_dir(parent.path().join("left-behind")).unwrap();
+    fs::write(parent.path().join("memory.min"), "9663676416\n").unwrap();
     fs::write(parent.path().join("memory.low"), "9663676416\n").unwrap();
     Cgroup::at(parent.path()).remove_empty_children().unwrap();
     assert!(running.exists());
     assert!(!parent.path().join("left-behind").exists());
+    let read = |file| fs::read_to_string(parent.path().join(file)).unwrap();
+    assert_eq!(read("memory.min"), "536870912");
+    assert_eq!(read("memory.low"), "0");
+}
+
+/// A guarantee is written as the kind asked for, the other kind cleared
+/// (an earlier release kept running VMs' requests by `memory.low`), and
+/// the parent claims the sum of each.
+#[test]
+fn a_guarantee_clears_the_other_kind_and_the_parent_claims_both() {
+    let parent = tempfile::tempdir().unwrap();
+    let (a, b) = (parent.path().join("a"), parent.path().join("b"));
+    for group in [&a, &b] {
+        fs::create_dir(group).unwrap();
+        fs::write(group.join("memory.low"), "1024").unwrap();
+        fs::write(group.join("memory.min"), "0").unwrap();
+    }
+    Cgroup::at(&a)
+        .protect_memory(4096, Protection::Min)
+        .unwrap();
+    let read = |path: &Path, file| fs::read_to_string(path.join(file)).unwrap();
+    assert_eq!(read(&a, "memory.min"), "4096");
+    assert_eq!(read(&a, "memory.low"), "0");
+    assert_eq!(read(parent.path(), "memory.min"), "4096");
+    assert_eq!(read(parent.path(), "memory.low"), "1024");
+    Cgroup::at(&b).protect_memory(0, Protection::Min).unwrap();
+    assert_eq!(read(&b, "memory.low"), "0");
+    assert_eq!(read(parent.path(), "memory.low"), "0");
+}
+
+/// Page cache a VM holds within its `memory.min` stays: what each child
+/// holds up to its `memory.min` beyond what it holds anyway counts, and a
+/// child without one keeps nothing.
+#[test]
+fn cache_children_keep_under_their_min_is_counted() {
+    let parent = tempfile::tempdir().unwrap();
+    let child = |name: &str, min: Option<u64>, current: u64, stat: &str| {
+        let path = parent.path().join(name);
+        fs::create_dir(&path).unwrap();
+        if let Some(min) = min {
+            fs::write(path.join("memory.min"), min.to_string()).unwrap();
+        }
+        fs::write(path.join("memory.current"), current.to_string()).unwrap();
+        fs::write(path.join("memory.stat"), stat).unwrap();
+    };
+    // 300 of anonymous memory and 700 of cache under a min of 800: 500 of
+    // the cache is kept.
+    child("within", Some(800), 1000, "anon 300\nfile 700\n");
+    // Holding more than its min in anonymous memory, it keeps no cache.
+    child("past", Some(800), 1500, "anon 1000\nfile 500\n");
+    // Paused: no min.
+    child("paused", Some(0), 1000, "anon 0\nfile 1000\n");
+    // Older: memory.low alone.
+    child("older", None, 1000, "anon 0\nfile 1000\n");
+    fs::write(parent.path().join("memory.current"), "4500").unwrap();
     assert_eq!(
-        fs::read_to_string(parent.path().join("memory.low")).unwrap(),
-        "536870912"
+        Cgroup::at(parent.path()).kept_cache_of_children().unwrap(),
+        500
     );
 }
 
