@@ -53,7 +53,7 @@ async function storeScreenshots(
   if (!storage?.putObjectIfAbsent)
     throw new HTTPException(503, { message: "Feedback screenshots need object storage" });
   const decoded = uploads.map((upload, index) => {
-    const bytes = Uint8Array.from(Buffer.from(upload.base64, "base64"));
+    const bytes = new Uint8Array(Buffer.from(upload.base64, "base64"));
     if (bytes.byteLength > FEEDBACK_SCREENSHOT_MAX_BYTES)
       throw new HTTPException(413, { message: `Screenshot ${index + 1} is too large` });
     if (!matchesSignature(bytes, upload.contentType))
@@ -180,7 +180,7 @@ export function registerFeedbackRoutes(app: Hono, deps: ApiRouteDeps): void {
       ? await deps.objectStorage?.getObjectBytes(screenshot.objectKey)
       : null;
     if (!screenshot || !object) throw new HTTPException(404, { message: "Screenshot not found" });
-    return c.body(Uint8Array.from(object.bytes).buffer, 200, {
+    return c.body(new Uint8Array(object.bytes).buffer, 200, {
       ...userContentResponseHeaders(screenshot.contentType),
       "content-type": screenshot.contentType,
       "cache-control": "private, no-store",

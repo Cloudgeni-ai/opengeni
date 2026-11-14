@@ -6623,7 +6623,7 @@ export function browserScreenshotResponse(
 ): Response {
   // Node Buffers can be views into a larger backing allocation. Copy exactly
   // the image bytes before constructing the Response.
-  return new Response(Uint8Array.from(frame.data).buffer, {
+  return new Response(new Uint8Array(frame.data).buffer, {
     status: 200,
     headers: {
       "cache-control": "no-store",

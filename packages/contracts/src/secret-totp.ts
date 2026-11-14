@@ -57,7 +57,7 @@ export function decodeBase32(input: string): Uint8Array {
     }
   }
   if (out.length === 0) throw new TotpInputError("TOTP secret is empty");
-  return Uint8Array.from(out);
+  return new Uint8Array(out);
 }
 
 function parseAlgorithm(value: string | null): TotpParams["algorithm"] {

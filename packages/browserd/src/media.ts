@@ -87,7 +87,7 @@ export function decodeBoundedBase64Image(value: unknown): Uint8Array {
   if (!/^[A-Za-z0-9+/]*={0,2}$/u.test(value) || value.length % 4 !== 0) {
     throw new Error("browser media response contains invalid base64");
   }
-  const data = Uint8Array.from(Buffer.from(value, "base64"));
+  const data = new Uint8Array(Buffer.from(value, "base64"));
   if (data.byteLength === 0 || data.byteLength > BROWSER_MEDIA_MAX_BYTES) {
     throw new Error("browser media response exceeds its byte bound");
   }

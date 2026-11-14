@@ -79,7 +79,7 @@ export function createAzureOpenAiTranscriptionProvider(input: {
       const requestId = requestIdOf(request);
       const signal = request.signal;
       const form = new FormData();
-      form.append("file", new Blob([Uint8Array.from(audio).buffer], { type: mimeType }), filename);
+      form.append("file", new Blob([new Uint8Array(audio).buffer], { type: mimeType }), filename);
       const language = openAiLanguage(request.language);
       if (language) form.append("language", language);
       const prompt = keytermsPrompt(request);

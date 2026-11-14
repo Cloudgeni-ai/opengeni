@@ -559,6 +559,25 @@ describe("verified workspace archives", () => {
     expect(error).toMatchObject({ code: "archive_hash_mismatch", retryable: false });
   });
 
+  test("archive base64 must be canonical, including the final quantum's pad bits", async () => {
+    const fake = sessionWithFingerprints([stableTree, stableTree]);
+    const verified = await captureVerifiedWorkspaceArchive(fake.session, 1_900_000_000_001);
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const padded = verified.base64.replace(/=+$/, "");
+    expect(padded.length).toBeLessThan(verified.base64.length);
+    const last = padded.at(-1)!;
+    // Same decoded bytes, but non-zero bits where the padding should be zero.
+    const nonCanonical = `${padded.slice(0, -1)}${alphabet[alphabet.indexOf(last) + 1]}${verified.base64.slice(padded.length)}`;
+    expect(new Uint8Array(Buffer.from(nonCanonical, "base64"))).toEqual(verified.bytes);
+
+    for (const invalid of [nonCanonical, `${verified.base64.slice(0, -4)}====`, "A==="]) {
+      expect(() => readVerifiedWorkspaceArchive(invalid, verified.descriptor)).toThrow(
+        expect.objectContaining({ code: "archive_base64_invalid" }),
+      );
+    }
+    expect(readVerifiedWorkspaceArchive(verified.base64, verified.descriptor)).toEqual(verified);
+  });
+
   test("restored-tree verification rejects a plausible partial workspace", async () => {
     const partialTree: WorkspaceTreeFingerprint = {
       ...stableTree,

@@ -23,7 +23,7 @@ export function base32Decode(input: string): Uint8Array {
       bytes.push((buffer >> bits) & 0xff);
     }
   }
-  return Uint8Array.from(bytes);
+  return new Uint8Array(bytes);
 }
 
 export function base32Encode(bytes: Uint8Array): string {

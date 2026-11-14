@@ -139,7 +139,7 @@ async function sendTranscription(
   const form = new FormData();
   form.append(
     "file",
-    new Blob([Uint8Array.from(input.audio).buffer], { type: input.mimeType }),
+    new Blob([new Uint8Array(input.audio).buffer], { type: input.mimeType }),
     input.filename,
   );
   return await fetchImpl(TRANSCRIBE_URL, {

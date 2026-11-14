@@ -836,7 +836,7 @@ function assertStoredGeneratedImageHead(
 
 function uuidFromDigest(digest: string, startByte: number): string {
   const source = Buffer.from(digest, "hex");
-  const bytes = Uint8Array.from(source.subarray(startByte, startByte + 16));
+  const bytes = new Uint8Array(source.subarray(startByte, startByte + 16));
   bytes[6] = (bytes[6]! & 0x0f) | 0x80;
   bytes[8] = (bytes[8]! & 0x3f) | 0x80;
   const hex = Buffer.from(bytes).toString("hex");

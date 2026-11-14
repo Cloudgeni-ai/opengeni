@@ -2008,7 +2008,7 @@ export class SelfhostedSession {
     }
     return {
       type: "image",
-      image: { data: Uint8Array.from(bytes), mediaType },
+      image: { data: new Uint8Array(bytes), mediaType },
     };
   }
 
