@@ -1286,6 +1286,8 @@ export async function recordTeamsFeedback(deps: ApiRouteDeps, f: TeamsFeedback):
     providerMessageId: f.replyToId,
   });
   let grant: AccessGrant | null;
+  /** The linked person who rated, when the chat runs as someone else (an organization agent). */
+  let asker: string | null = null;
   if (deps.settings.teamsWorkspaceRoutingEnabled && reply?.personal) {
     // With workspace routing a 1:1 chat may run outside the installation's
     // workspace, so its reply is rated with the authority the chat runs with,
@@ -1296,8 +1298,10 @@ export async function recordTeamsFeedback(deps: ApiRouteDeps, f: TeamsFeedback):
     const identity = await teamsIdentity(deps, i, f.actorId);
     if (!identity) return "feedback_actor_unlinked";
     if (reply.subject_id !== identity.subjectId) return "feedback_target_missing";
+    // routeActor checks the route's owner again, read live.
     const actor = await routeActor(deps, i, reply, f.actorId);
-    grant = actor && actor.subjectId === reply.subject_id ? actor.grant : null;
+    grant = actor?.grant ?? null;
+    if (actor && actor.subjectId !== actor.grant.subjectId) asker = actor.subjectId;
   } else {
     // Channels, group chats and installations without routing: as before.
     const identity = await actorGrant(deps, i, f.actorId);
@@ -1329,6 +1333,7 @@ export async function recordTeamsFeedback(deps: ApiRouteDeps, f: TeamsFeedback):
         sentiment: f.sentiment,
         ...(f.comment ? { comment: f.comment } : {}),
       },
+      ...(asker ? { onBehalfOf: { subjectId: asker } } : {}),
       server: { version: deps.settings.serverVersion, revision: deps.settings.deploymentRevision },
     });
   try {
@@ -1668,7 +1673,7 @@ type TeamsRoutedPayload = TeamsMessage & {
     workspaceLabel: string;
     agentName: string | null;
     announce: boolean;
-    /** A one-off `in <Workspace>: …` message; its replies name the workspace. */
+    /** A one-off `in <Workspace>: …` (or app-name) message; its replies name the workspace. */
     oneOff?: boolean;
   };
 };
@@ -1831,16 +1836,16 @@ async function routeTeamsPersonalMessage(
       }
       return await reply("route_denied", resolution.text);
     }
-    case "switched":
-      await remember(resolution.target);
-      return await reply("route_switched", teamsSwitchedText(resolution));
+    case "hint":
+      return await reply("route_address_hint", resolution.text);
     case "ask":
       return await showCard(m);
     case "resolved":
-      if (resolution.remember) await remember(resolution.target);
+      // Addressing a workspace, an agent or the main assistant is for this
+      // one message; only a switch changes the chat's choice.
       return await enqueueRoutedMessage(deps, app, i, m, identity.subjectId, {
         ...resolution,
-        oneOff: resolution.source === "prefix",
+        oneOff: resolution.source === "prefix" || resolution.source === "main",
         directory,
         replies,
         observed,
@@ -1879,7 +1884,7 @@ async function enqueueRoutedMessage(
     workspaceLabel: string;
     agentName: string | null;
     announce: boolean;
-    /** A one-off `in <Workspace>: …` message: its replies name the workspace. */
+    /** A one-off `in <Workspace>: …` (or app-name) message: its replies name the workspace. */
     oneOff?: boolean;
     directory: TeamsRouteDirectory;
     replies: TeamsReplies;
@@ -2083,12 +2088,12 @@ async function teamsLinker(c: Context, deps: ApiRouteDeps): Promise<TeamsLinker>
       message: "Sign in with your Opengeni account to link Teams.",
     });
   // Unauthenticated requests still get a 401 here.
-  const context = await requireAccessContext(c, deps);
+  await requireAccessContext(c, deps);
   // Only a person signed in to Opengeni themselves in their browser links
   // their Teams account: never a delegated person (an agent's app actions, a
   // published Site's viewer), a key or a service.
   const subjectId = await managedHumanSubjectForRequest(c, deps);
-  if (context.mode !== "managed" || !subjectId || subjectId !== context.subjectId)
+  if (!subjectId)
     throw new HTTPException(403, { message: "A signed-in human account is required." });
   return { subjectId, workspaceId: c.req.param("workspaceId")! };
 }
@@ -2968,8 +2973,8 @@ async function drainRoute(
         return;
       }
       // Replies say who answered and where: an agent's always (Teams shows
-      // one bot name), and a one-off `in <Workspace>: …` message's, which
-      // otherwise says nothing about the workspace it went to.
+      // one bot name), and a one-off `in <Workspace>: …` or app-name
+      // message's, which otherwise says nothing about the workspace it went to.
       // What this chat's own messages said about routing, per turn, once per pass.
       const turnRouting = new Map<string, Promise<Record<string, unknown>[]>>();
       const routingOf = (turnId: string) => {

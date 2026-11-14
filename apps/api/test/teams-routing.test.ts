@@ -87,7 +87,7 @@ describe("where a Teams 1:1 message goes", () => {
     });
   });
 
-  test("an agent addressed by name answers and becomes the chat's choice", () => {
+  test("an agent addressed by name answers this one message and leaves the chat's choice", () => {
     for (const text of ["Planner: draft it", "+planner draft it", "planner, draft it"])
       expect(route(text)).toEqual(
         expect.objectContaining({
@@ -96,15 +96,16 @@ describe("where a Teams 1:1 message goes", () => {
           agentName: "Planner",
           workspaceLabel: "Research",
           text: "draft it",
-          remember: true,
+          source: "agent",
+          remember: false,
         }),
       );
-    expect(route("+planner")).toEqual({
-      kind: "switched",
-      target: { workspaceId: "research", agentId: "planner" },
-      workspaceLabel: "Research",
-      agentName: "Planner",
-    });
+    // A name on its own changes nothing: only switch does.
+    for (const text of ["+planner", "Planner:"])
+      expect(route(text, { workspaceId: "home", agentId: null })).toEqual({
+        kind: "hint",
+        text: "To ask **Planner**, start your message with **Planner:**. To use it for every new message, send **switch Planner**.",
+      });
     // An agent whose workspace the person can't use is named, never served elsewhere.
     expect(route("+auditor check")).toEqual({
       kind: "denied",
@@ -123,8 +124,13 @@ describe("where a Teams 1:1 message goes", () => {
         target: { workspaceId: "research", agentId: null },
         text: "summarize",
         source: "main",
+        remember: false,
       }),
     );
+    expect(route("Opengeni Assistant", { workspaceId: "research", agentId: "planner" })).toEqual({
+      kind: "hint",
+      text: "To ask the main assistant, start your message with **Opengeni Assistant:**. Send **switch** to choose what this chat uses.",
+    });
     // A remembered workspace that no longer works is refused, never swapped
     // for the Personal or only workspace.
     expect(

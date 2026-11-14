@@ -755,7 +755,9 @@ conversation, organization connected or not, account linked or not).
   be the chat's linked owner, with live organization membership and current
   access to the chat's workspace (their own Personal workspace included). On a
   chat with an agent anyone in the organization may use, it is recorded as that
-  agent (`teams-agent:<agentId>`) while the agent is still open to them.
+  agent (`teams-agent:<agentId>`) while the agent is still open to them, with
+  the person who rated in the report's server-only diagnostics
+  (`onBehalfOf.subjectId`).
 
 ## Publisher verification and Store submission
 
@@ -811,9 +813,10 @@ With it on:
   `/teams/connect`, not one workspace's page. A person who isn't a member gets
   `link_not_organization_member`.
 - **Where a message goes**, first match wins: `in <Workspace>: …` for one
-  message; `<App name>: …` for the main assistant; an agent addressed by name
-  (`Name: …`, `Name, …` or `+name`), which also becomes the chat's choice; the
-  person's remembered choice; their Personal workspace; their only workspace;
+  message; `<App name>: …` for the main assistant, for one message; an agent
+  addressed by name (`Name: …`, `Name, …` or `+name`), for one message; the
+  person's remembered choice, which only **switch** changes; their Personal
+  workspace; their only workspace;
   otherwise a **switch** card with the message parked until they pick (one
   card per person, 24 hours, single use). Agents are the organization's shared
   agents in workspaces the person can use; Only me agents and agents in
@@ -821,11 +824,13 @@ With it on:
   "**Agent** · Workspace" header, a one-off `in <Workspace>: …` message's
   replies a "**Workspace**" header, and the first reply after a real choice
   names the workspace the chat is saved in. A one-off continues the person's
-  chat in that workspace (same route as a switch there); it doesn't change the
-  remembered choice.
+  chat in that workspace, or with that agent (same route as a switch there);
+  it doesn't change the remembered choice. An agent's name or the app name on
+  its own changes nothing and says how to ask once or switch. An app-name
+  one-off's replies carry the "**Workspace**" header too.
 - **Agents anyone in the organization may use** (Who can use it: Anyone in
   <organization>, see [agents.md](agents.md#anyone-in-the-organization)) are
-  also listed, addressed and remembered for people who aren't in their
+  also listed, addressed and chosen with **switch** for people who aren't in their
   workspace, with Slack's open-agent rules: only in 1:1 chats; Teams'
   `getMemberById` must say the sender is a full member (`userRole` "user") of
   the connected tenant, never a guest, read on every queued message; the

@@ -7,10 +7,11 @@
  * setting. The first match wins:
  *
  *   1. `in <Workspace>: …` for this one message;
- *   2. `<App name>: …` (or `Opengeni: …`): the main assistant again;
+ *   2. `<App name>: …` (or `Opengeni: …`): the main assistant, for this one
+ *      message;
  *   3. an agent addressed at the start (`+name`, or `Name: …` / `Name, …`),
- *      which also becomes the chat's choice, since a Teams 1:1 has no threads;
- *   4. the person's remembered choice (switch, or the last agent addressed);
+ *      for this one message;
+ *   4. the person's remembered choice, which only **switch** changes;
  *   5. their Personal workspace;
  *   6. their only workspace;
  *   7. otherwise a switch card, with the message waiting for the answer.
@@ -72,13 +73,13 @@ export type TeamsRouteResolution =
       agentName: string | null;
       text: string;
       source: "prefix" | "main" | "agent" | "choice" | "personal" | "sole";
-      /** Remember this target as the chat's choice. */
-      remember: boolean;
+      /** Remember this target as the chat's choice. Only a switch does. */
+      remember: false;
       /** Name the workspace on the first reply: routing made a real choice. */
       announce: boolean;
     }
-  /** Only switched the chat (an agent's name or the app name on its own). */
-  | { kind: "switched"; target: TeamsChatTarget; workspaceLabel: string; agentName: string | null }
+  /** An agent's name or the app name on its own: how to ask, or to switch. */
+  | { kind: "hint"; text: string }
   | { kind: "ask"; options: TeamsRouteOption[] }
   | { kind: "denied"; text: string; forgetChoice?: boolean };
 
@@ -325,9 +326,9 @@ export function resolveTeamsRoute(input: {
     };
   }
 
-  // 2. Back to the main assistant, in the workspace the chat already uses.
-  //    A remembered workspace that no longer works is refused and forgotten,
-  //    as in step 4; nothing starts somewhere else.
+  // 2. The main assistant, in the workspace the chat already uses, for this
+  //    one message. A remembered workspace that no longer works is refused
+  //    and forgotten, as in step 4; nothing starts somewhere else.
   const main = mainAddress(input.text, input.appName);
   if (main) {
     // Leaving an agent anyone in the organization may use, in a workspace
@@ -348,22 +349,23 @@ export function resolveTeamsRoute(input: {
     if (!base && leavingOrganizationAgent && candidates.length > 0)
       return { kind: "ask", options: teamsRouteOptions(directory) };
     if (!base) return { kind: "denied", text: TEAMS_NO_WORKSPACE_TEXT };
-    const target = { workspaceId: base, agentId: null };
     if (main.remainder === null)
-      return { kind: "switched", target, workspaceLabel: label(base)!, agentName: null };
+      return { kind: "hint", text: teamsMainAddressHintText(input.appName) };
     return {
       kind: "resolved",
-      target,
+      target: { workspaceId: base, agentId: null },
       workspaceLabel: label(base)!,
       agentName: null,
       text: main.remainder,
       source: "main",
-      remember: true,
+      remember: false,
       announce: many,
     };
   }
 
-  // 3. An agent addressed at the start. A bare name that merely starts a
+  // 3. An agent addressed at the start, for this one message: it continues
+  //    the person's chat with that agent, like `in <Workspace>: …`, and
+  //    leaves the chat's choice alone. A bare name that merely starts a
   //    sentence ("Data looks fine") is ordinary text, as in Slack.
   const { agents, ambiguous } = nameableAgents(directory);
   const address = matchSlackAgentAddress(input.text, agents, { allowBare: true, allowPlus: true });
@@ -374,18 +376,16 @@ export function resolveTeamsRoute(input: {
     const several = ambiguous.get(agent.nameKey);
     if (several) return { kind: "denied", text: ambiguousAgentText(several) };
     if (!agent.usable) return { kind: "denied", text: teamsNoAccessToAgentText(agent) };
-    const target = { workspaceId: agent.targetWorkspaceId, agentId: agent.id };
-    const workspace = agent.targetWorkspaceLabel ?? label(agent.targetWorkspaceId) ?? "";
     if (address.remainder === null)
-      return { kind: "switched", target, workspaceLabel: workspace, agentName: agent.name };
+      return { kind: "hint", text: teamsAgentAddressHintText(agent.name) };
     return {
       kind: "resolved",
-      target,
-      workspaceLabel: workspace,
+      target: { workspaceId: agent.targetWorkspaceId, agentId: agent.id },
+      workspaceLabel: agent.targetWorkspaceLabel ?? label(agent.targetWorkspaceId) ?? "",
       agentName: agent.name,
       text: address.remainder,
       source: "agent",
-      remember: true,
+      remember: false,
       announce: true,
     };
   }
@@ -452,6 +452,16 @@ export function teamsSwitchCardText(
     (option, index) => `${index + 1}. **${option.title}** · ${option.detail}`,
   );
   return [lead, rows.join("\n"), "Select one, or send **switch** and its number."].join("\n\n");
+}
+
+/** The reply to an agent's name on its own: addressing asks once; switch changes the chat. */
+export function teamsAgentAddressHintText(agentName: string): string {
+  return `To ask **${agentName}**, start your message with **${agentName}:**. To use it for every new message, send **switch ${agentName}**.`;
+}
+
+/** The reply to the app's name on its own. */
+export function teamsMainAddressHintText(appName: string): string {
+  return `To ask the main assistant, start your message with **${appName}:**. Send **switch** to choose what this chat uses.`;
 }
 
 /** The confirmation after choosing. */
