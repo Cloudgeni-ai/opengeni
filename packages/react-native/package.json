@@ -79,7 +79,7 @@
     "@opengeni/contracts": "workspace:*",
     "@opengeni/react": "workspace:*",
     "@opengeni/sdk": "workspace:*",
-    "thinking-orbs": "^0.3.1"
+    "thinking-orbs": "^0.3.2"
   },
   "devDependencies": {
     "@types/react": "^19.2.14",
