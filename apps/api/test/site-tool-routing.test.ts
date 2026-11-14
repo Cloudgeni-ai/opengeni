@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX } from "@opengeni/contracts";
-import { routeSiteTool, siteToolDeclarationsForEveryViewer } from "../src/site-tool-routing";
+import { WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX, type AccessGrant } from "@opengeni/contracts";
+import type { ApiRouteDeps } from "@opengeni/core";
+import { WorkspaceArtifactOperationError } from "@opengeni/db";
+import {
+  declareSiteToolsForEveryViewer,
+  routeSiteTool,
+  siteToolDeclarationsForEveryViewer,
+} from "../src/site-tool-routing";
 
 const account = (serverId: string, canonicalServerId: string) => ({
   serverId,
@@ -73,5 +79,32 @@ describe("Site tool declarations for every viewer", () => {
     // Tools that run as themselves are not marked.
     const firstParty = { serverId: "opengeni", toolName: "sessions_list" };
     expect(routeSiteTool(viewer, [firstParty], firstParty)).not.toHaveProperty("unresolved");
+  });
+
+  test("an agent's publication fails visibly when its turn's account bindings can't be read", async () => {
+    const grant = {
+      accountId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      subjectId: "agent:attempt",
+      principalKind: "agent_attempt",
+      permissions: [],
+      metadata: { sessionId: "s", turnId: "t", attemptId: "a", executionGeneration: 1 },
+    } as unknown as AccessGrant;
+    const deps = { db: {} } as unknown as ApiRouteDeps;
+    const declared = [{ serverId: "account-a", toolName: "query" }];
+    const unusedInventory = async () => {
+      throw new Error("an agent publishes with its turn's bindings");
+    };
+    const failed = declareSiteToolsForEveryViewer(deps, grant, declared, unusedInventory, () =>
+      Promise.reject(new Error("connection reset")),
+    );
+    await expect(failed).rejects.toBeInstanceOf(WorkspaceArtifactOperationError);
+    await expect(failed).rejects.toThrow("Nothing was published");
+    // Readable bindings still pair the publisher's route with its connector.
+    expect(
+      await declareSiteToolsForEveryViewer(deps, grant, declared, unusedInventory, async () =>
+        [account("account-a", "dynamics")] as never,
+      ),
+    ).toEqual([...declared, { serverId: "dynamics", toolName: "query" }]);
   });
 });

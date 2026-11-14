@@ -1494,6 +1494,30 @@ test("published page tools: declarations, audiences, live membership and approva
     expect([f.prod, f.staging, f.personal].map((entry) => entry.identity.serverId)).toContain(
       foreign.json.entry.identity.serverId,
     );
+    // Invoking the owner's route as the member runs on the member's account,
+    // and the owner's credential is never sent to the provider.
+    const resolvedAccount = [f.prod, f.staging, f.personal].find(
+      (entry) => entry.identity.serverId === foreign.json.entry.identity.serverId,
+    )!;
+    f.authorizations.length = 0;
+    f.callAuthorizations.length = 0;
+    const foreignInvoked = await f.post("invoke", {
+      target: { identity: f.foreign.identity },
+      operationId: crypto.randomUUID(),
+      expectedDefinitionDigest: foreign.json.definitionDigest,
+      arguments: { query: "owner route" },
+    });
+    expect(foreignInvoked.status, JSON.stringify(foreignInvoked.json)).toBe(200);
+    expect(foreignInvoked.json.result.content[0].text).toBe("found document for owner route");
+    expect(f.callAuthorizations).toEqual([`Bearer page-${resolvedAccount.label}`]);
+    expect(f.authorizations.length).toBeGreaterThan(0);
+    expect(
+      f.authorizations.every((value) => value === `Bearer page-${resolvedAccount.label}`),
+    ).toBe(true);
+    expect(f.authorizations).not.toContain("Bearer page-foreign");
+    expect(f.callAuthorizations).not.toContain("Bearer page-foreign");
+    const providerCalls = f.provider.calls.length;
+    expect(providerCalls).toBe(1);
     const forgedApproval = `ogta_${"a".repeat(43)}`;
     await updateConnectorToolPermissionPolicies(db.db, {
       accountId: f.accountId,
@@ -1526,7 +1550,7 @@ test("published page tools: declarations, audiences, live membership and approva
         approvalToken ? "tool_gateway_approval_required" : "site_tool_consent_requires_opengeni",
       );
     }
-    expect(f.provider.calls).toHaveLength(0);
+    expect(f.provider.calls).toHaveLength(providerCalls);
     const visitor = visitorId();
     await f.publication(f.owner, f.site.id, "PUT", { access: "public", agent: { enabled: false } });
     const outside = await fixture();
@@ -1559,7 +1583,9 @@ test("published page tools: declarations, audiences, live membership and approva
     const member = await f.signIn(f.member, f.host);
     await shared.admin`delete from workspace_memberships where workspace_id = ${f.workspace.id} and subject_id = ${f.member.subjectId}`;
     expect((await f.post("catalog", {}, member)).status).toBe(403);
-    expect(f.provider.calls).toHaveLength(0);
+    expect(f.provider.calls).toHaveLength(providerCalls);
+    expect(f.authorizations).not.toContain("Bearer page-foreign");
+    expect(f.callAuthorizations).not.toContain("Bearer page-foreign");
   } finally {
     f.close();
   }
