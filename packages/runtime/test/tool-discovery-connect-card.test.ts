@@ -11,7 +11,9 @@ import {
   type ConnectCardReceipt,
   type ConnectCardRequest,
   type ConnectedToolAccount,
+  type DiscoveryCardEvent,
 } from "../src/lazy-tool-transport";
+import { prefixedMcpToolName } from "../src/mcp-model-tool-name";
 
 // A search that clearly names one integration the person can connect shows its
 // Connect card itself, through the card tool, so the card never depends on the
@@ -106,6 +108,7 @@ function runtimeWith(
     withSetup?: boolean;
     withLinear?: boolean;
     accounts?: ReadonlyMap<string, ConnectedToolAccount>;
+    lookup?: ConnectableIntegrationLookup;
   },
 ): LazyToolRuntime {
   const runtime = new LazyToolRuntime(
@@ -122,7 +125,7 @@ function runtimeWith(
     undefined,
     undefined,
     undefined,
-    lookupOf(options.matches),
+    options.lookup ?? lookupOf(options.matches),
     options.accounts ? () => options.accounts! : undefined,
     undefined,
     undefined,
@@ -408,5 +411,390 @@ describe("the card request goes through the card tool", () => {
       connectCardReceiptFromResult({ ...text({ cardShown: true, eventId: "e" }), isError: true }),
     ).toBeNull();
     expect(connectCardReceiptFromResult([{ type: "text", text: "not json" }])).toBeNull();
+  });
+});
+
+describe("a request that opens with an integration's name as its label", () => {
+  for (const transport of TRANSPORTS) {
+    test(`${transport}: "Airtable list records…" names Airtable clearly and shows its card`, async () => {
+      for (const query of [
+        "Airtable list records/tables in connected base, find vendors, read-only query records",
+        "Airtable: find the vendors table",
+        "Show the vendors. Airtable search records",
+      ]) {
+        const { requested, request } = cardTool();
+        const result = await runtimeWith(transport, {
+          matches: [AIRTABLE],
+          request,
+        }).prepareSearch({ query, limit: 5 });
+        expect(requested).toEqual([AIRTABLE]);
+        expect(outputOf(result).connectCard).toMatchObject({
+          shown: true,
+          capabilityId: AIRTABLE.capabilityId,
+        });
+      }
+    });
+  }
+
+  test("a sentence-opening capital before an ordinary word is still no evidence", async () => {
+    for (const query of [
+      "Linear regression model on these numbers",
+      "Linear fit of the data",
+      "Linear: regression model on these numbers",
+    ]) {
+      const { requested, request } = cardTool();
+      const result = await runtimeWith("generic_dispatch", {
+        matches: [LINEAR],
+        request,
+      }).prepareSearch({ query });
+      expect(requested).toEqual([]);
+      expect(outputOf(result).connectCard).toEqual({ shown: false });
+    }
+  });
+
+  test("a colon label before an operation word names it", async () => {
+    const { requested, request } = cardTool();
+    await runtimeWith("generic_dispatch", { matches: [LINEAR], request }).prepareSearch({
+      query: "Linear: create an issue for the outage",
+    });
+    expect(requested).toEqual([LINEAR]);
+  });
+});
+
+describe("discovery records why no card was newly shown", () => {
+  const recording = (
+    transport: Transport,
+    options: Parameters<typeof runtimeWith>[1],
+  ): { runtime: LazyToolRuntime; events: DiscoveryCardEvent[] } => {
+    const events: DiscoveryCardEvent[] = [];
+    const runtime = runtimeWith(transport, options);
+    runtime.setDiscoveryCardSink((event) => {
+      events.push(event);
+    });
+    return { runtime, events };
+  };
+  const settled = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  test("a shown card records nothing", async () => {
+    const { request } = cardTool();
+    const { runtime, events } = recording("generic_dispatch", { matches: [CLICKUP], request });
+    await runtime.prepareSearch({ query: "create a ClickUp task" });
+    await settled();
+    expect(events).toEqual([]);
+  });
+
+  test("skipped: a name read as an ordinary word, or several names", async () => {
+    const { request } = cardTool();
+    const plain = recording("generic_dispatch", { matches: [AIRTABLE], request });
+    await plain.runtime.prepareSearch({ query: "list vendors in my airtable base" });
+    const several = recording("generic_dispatch", { matches: [GMAIL, CALENDAR], request });
+    await several.runtime.prepareSearch({
+      query: "compare my Gmail with my Google Calendar invites",
+    });
+    await settled();
+    expect(plain.events).toEqual([
+      {
+        source: "tool_search",
+        outcome: "skipped",
+        reason: "not_distinctive",
+        query: "list vendors in my airtable base",
+        integrations: [{ capabilityId: AIRTABLE.capabilityId, name: "Airtable" }],
+      },
+    ]);
+    expect(several.events).toMatchObject([
+      { outcome: "skipped", reason: "several_named", integrations: [{ name: "Gmail" }, {}] },
+    ]);
+  });
+
+  test("skipped: a plain mention beside a strong installed match", async () => {
+    // A capitalised word elsewhere lets the lookup run; the lower-case
+    // one-word name is still read as an ordinary word.
+    const query = "Add a task for the Launch checklist to our airtable list";
+    expect(strongly(query)).toContain(TASKS);
+    const { requested, request } = cardTool();
+    const { runtime, events } = recording("generic_dispatch", { matches: [AIRTABLE], request });
+    await runtime.prepareSearch({ query });
+    await settled();
+    expect(requested).toEqual([]);
+    expect(events).toMatchObject([
+      { outcome: "skipped", reason: "not_distinctive", integrations: [{ name: "Airtable" }] },
+    ]);
+  });
+
+  test("skipped: a catalog lookup that failed or did not finish", async () => {
+    const { request } = cardTool();
+    const failed = recording("generic_dispatch", {
+      matches: [],
+      request,
+      lookup: async () => {
+        throw new Error("catalog unavailable");
+      },
+    });
+    await failed.runtime.prepareSearch({ query: "create a ClickUp task" });
+    const slow = recording("generic_dispatch", {
+      matches: [],
+      request,
+      lookup: async () => {
+        const error = new Error("The operation timed out.");
+        error.name = "TimeoutError";
+        throw error;
+      },
+    });
+    await slow.runtime.prepareSearch({ query: "create a ClickUp task" });
+    await settled();
+    expect(failed.events).toMatchObject([
+      { outcome: "skipped", reason: "lookup_failed", integrations: [] },
+    ]);
+    expect(slow.events).toMatchObject([
+      { outcome: "skipped", reason: "lookup_timed_out", integrations: [] },
+    ]);
+  });
+
+  test("a catalog lookup failure is recorded once per run, until the next run's recorder", async () => {
+    const { request } = cardTool();
+    const failed = recording("generic_dispatch", {
+      matches: [],
+      request,
+      lookup: async () => {
+        throw new Error("catalog unavailable");
+      },
+    });
+    await failed.runtime.prepareSearch({ query: "create a ClickUp task" });
+    await failed.runtime.prepareSearch({ query: "find contacts in HubSpot" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(failed.events).toHaveLength(1);
+    const next: DiscoveryCardEvent[] = [];
+    const sink = (event: DiscoveryCardEvent) => {
+      next.push(event);
+    };
+    failed.runtime.setDiscoveryCardSink(sink);
+    await failed.runtime.prepareSearch({ query: "create a ClickUp task" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(next).toHaveLength(1);
+    // Releasing another run's recorder keeps this one; releasing this one stops it.
+    failed.runtime.releaseDiscoveryCardSink(() => undefined);
+    failed.runtime.releaseDiscoveryCardSink(sink);
+    failed.runtime.setDiscoveryCardSink(undefined);
+    expect(next).toHaveLength(1);
+  });
+
+  test("skipped without a card tool; not shown, already shown and failed card calls", async () => {
+    const noTool = recording("generic_dispatch", { matches: [CLICKUP] });
+    await noTool.runtime.prepareSearch({ query: "create a ClickUp task" });
+    const notShown = recording("generic_dispatch", {
+      matches: [CLICKUP],
+      request: cardTool(() => null).request,
+    });
+    await notShown.runtime.prepareSearch({ query: "create a ClickUp task" });
+    const already = recording("generic_dispatch", {
+      matches: [CLICKUP],
+      request: cardTool(() => ({ eventId: "e0", alreadyShown: true, message: "already" })).request,
+    });
+    await already.runtime.prepareSearch({ query: "create a ClickUp task" });
+    const timeout = new Error("The operation timed out.");
+    timeout.name = "TimeoutError";
+    const timedOut = recording("generic_dispatch", {
+      matches: [CLICKUP],
+      request: cardTool(() => timeout).request,
+    });
+    await timedOut.runtime.prepareSearch({ query: "create a ClickUp task" });
+    const failed = recording("generic_dispatch", {
+      matches: [CLICKUP],
+      request: cardTool(() => new Error("approval required")).request,
+    });
+    await failed.runtime.prepareSearch({ query: "create a ClickUp task" });
+    await settled();
+    const clickup = [{ capabilityId: CLICKUP.capabilityId, name: "ClickUp" }];
+    expect(noTool.events).toMatchObject([
+      { outcome: "skipped", reason: "no_card_tool", integrations: clickup },
+    ]);
+    expect(notShown.events).toEqual([
+      {
+        source: "tool_search",
+        outcome: "not_shown",
+        query: "create a ClickUp task",
+        integrations: clickup,
+      },
+    ]);
+    expect(already.events).toMatchObject([{ outcome: "already_shown", integrations: clickup }]);
+    expect(timedOut.events).toMatchObject([{ outcome: "failed", reason: "timeout" }]);
+    expect(failed.events).toMatchObject([{ outcome: "failed", reason: "error" }]);
+  });
+
+  test("a failing recorder never fails the search", async () => {
+    const runtime = runtimeWith("generic_dispatch", { matches: [AIRTABLE] });
+    runtime.setDiscoveryCardSink(() => {
+      throw new Error("sink down");
+    });
+    const result = await runtime.prepareSearch({ query: "list vendors in my airtable base" });
+    await settled();
+    expect(outputOf(result).connectCard).toEqual({ shown: false });
+  });
+});
+
+describe("tool_list browsing that names an integration not installed", () => {
+  const listing = async (
+    runtime: LazyToolRuntime,
+    args: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> => {
+    const list = runtime.controlTools.find((t) => t.type === "function" && t.name === "tool_list");
+    if (!list || list.type !== "function") throw new Error("missing list");
+    return JSON.parse(String(await list.invoke({} as never, JSON.stringify(args))));
+  };
+
+  test("an empty filtered listing shows the card of the one integration it names", async () => {
+    for (const args of [
+      { view: "tools", group: "connection/0799034d9553", namePrefix: "clickup" },
+      { namePrefix: "clickup_" },
+      { view: "groups", namePrefix: "ClickUp" },
+    ]) {
+      const { requested, request } = cardTool();
+      const events: DiscoveryCardEvent[] = [];
+      const runtime = runtimeWith("generic_dispatch", { matches: [CLICKUP], request });
+      runtime.setDiscoveryCardSink((event) => {
+        events.push(event);
+      });
+      const output = await listing(runtime, args);
+      expect(requested).toEqual([CLICKUP]);
+      expect(output.total).toBe(0);
+      expect(output.notConnected).toBe(
+        'Not connected yet: ClickUp (capabilityId "mcp:clickup"). Its Connect card is now shown in this chat. The recommendation was posted for human confirmation.',
+      );
+      expect(output.connectCard).toEqual({
+        shown: true,
+        capabilityId: "mcp:clickup",
+        eventId: "event-1",
+      });
+      expect(events).toEqual([]);
+    }
+  });
+
+  test("a listing the card tool shows no card for says none is shown, and records it", async () => {
+    const events: DiscoveryCardEvent[] = [];
+    const runtime = runtimeWith("generic_dispatch", {
+      matches: [CLICKUP],
+      request: cardTool(() => null).request,
+    });
+    runtime.setDiscoveryCardSink((event) => {
+      events.push(event);
+    });
+    const output = await listing(runtime, { namePrefix: "clickup" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(output.connectCard).toEqual({ shown: false });
+    expect(output.notConnected).toEndWith("No card is shown until you do.");
+    expect(events).toMatchObject([{ source: "tool_list", outcome: "not_shown", query: "clickup" }]);
+  });
+
+  test("a listing filter naming several integrations names them without a card", async () => {
+    const { requested, request } = cardTool();
+    const runtime = runtimeWith("generic_dispatch", { matches: [GMAIL, CALENDAR], request });
+    const output = await listing(runtime, { namePrefix: "gmail google calendar" });
+    expect(requested).toEqual([]);
+    expect(output.notConnected).toStartWith(
+      'Not connected yet: Gmail (capabilityId "api:gmail"), Google Calendar',
+    );
+    expect(output.connectCard).toEqual({ shown: false });
+  });
+
+  test("generic browsing, a listing with tools, or a later page looks nothing up", async () => {
+    let lookups = 0;
+    const { requested, request } = cardTool();
+    const runtime = runtimeWith("generic_dispatch", {
+      matches: [],
+      request,
+      lookup: async () => {
+        lookups += 1;
+        return [CLICKUP];
+      },
+    });
+    for (const args of [
+      { view: "groups" },
+      {},
+      { namePrefix: "mcp_" },
+      { group: "connection/0799034d9553" },
+      { namePrefix: "mcp_0799034d9553__" },
+      { namePrefix: "opengeni__" },
+      { namePrefix: "clickup", cursor: "x" },
+    ]) {
+      const output = await listing(runtime, args);
+      expect(output).not.toHaveProperty("notConnected");
+      expect(output).not.toHaveProperty("connectCard");
+    }
+    expect(lookups).toBe(0);
+    expect(requested).toEqual([]);
+  });
+
+  test("an installed integration's prefix is never offered", async () => {
+    const { requested, request } = cardTool();
+    const accounts = new Map<string, ConnectedToolAccount>([
+      [
+        LINEAR_ISSUES,
+        { source: "linear", label: "Linear", connector: "Linear", providerDomain: "linear.app" },
+      ],
+    ]);
+    const runtime = runtimeWith("generic_dispatch", {
+      matches: [LINEAR],
+      request,
+      withLinear: true,
+      accounts,
+    });
+    const output = await listing(runtime, { namePrefix: "linear_create" });
+    expect(requested).toEqual([]);
+    expect(output).not.toHaveProperty("connectCard");
+  });
+});
+
+describe("one connection's tools are browsable from one tool's digest", () => {
+  test("a namePrefix of one aliased tool's digest lists every tool of its connection", async () => {
+    const registry = "slack-workspace";
+    const listChannels = prefixedMcpToolName(registry, "slack_list_channels");
+    const sendMessage = prefixedMcpToolName(registry, "slack_send_message");
+    const other = prefixedMcpToolName("other-server", "other_tool");
+    expect(listChannels.slice(0, 28)).not.toBe(sendMessage.slice(0, 28));
+    const mapping = new Map([
+      [listChannels, registry],
+      [sendMessage, registry],
+      [other, "other-server"],
+    ]);
+    const runtime = new LazyToolRuntime(
+      "generic_dispatch",
+      new Set(mapping.values()),
+      undefined,
+      new Set(mapping.values()),
+      new Set(),
+      () => mapping,
+    );
+    runtime.refresh([
+      candidate(listChannels, "List Slack channels"),
+      candidate(sendMessage, "Send a Slack message"),
+      candidate(other, "Other tool"),
+    ]);
+    const list = runtime.controlTools.find((t) => t.type === "function" && t.name === "tool_list");
+    if (!list || list.type !== "function") throw new Error("missing list");
+    const invoke = async (args: unknown) =>
+      JSON.parse(String(await list.invoke({} as never, JSON.stringify(args))));
+    for (const namePrefix of [listChannels.slice(0, 28), listChannels.slice(0, 30)]) {
+      const output = await invoke({ namePrefix });
+      expect(new Set(output.tools.map((t: { name: string }) => t.name))).toEqual(
+        new Set([listChannels, sendMessage]),
+      );
+      expect(output.message).toBe(
+        "namePrefix is one tool's own digest, so this lists every tool of that tool's connection.",
+      );
+    }
+    // Within a group, only that group's tools of the connection.
+    const grouped = await invoke({ namePrefix: listChannels.slice(0, 28), group: "absent" });
+    expect(grouped.tools).toEqual([]);
+    const inGroup = await invoke({
+      namePrefix: listChannels.slice(0, 28),
+      group: (await invoke({ view: "groups" })).groups.find(
+        (entry: { group: string; count: number }) => entry.count === 2,
+      ).group,
+    });
+    expect(inGroup.tools).toHaveLength(2);
+    // The full name still lists that one tool.
+    const exact = await invoke({ namePrefix: listChannels });
+    expect(exact.tools.map((t: { name: string }) => t.name)).toEqual([listChannels]);
+    expect(exact).not.toHaveProperty("message");
   });
 });

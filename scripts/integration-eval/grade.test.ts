@@ -640,6 +640,22 @@ describe("gradeCase", () => {
       [false, false],
     ]);
   });
+
+  test("content blocks led by the runtime's MCP error block are an errored call", () => {
+    const failed = JSON.stringify([
+      { text: "The tool reported an error.", type: "text" },
+      { text: "channel_not_found", type: "text" },
+    ]);
+    // The same lead text elsewhere (a message body quoting it) is not.
+    const quoted = JSON.stringify([
+      { text: "Posted.", type: "text" },
+      { text: "The tool reported an error.", type: "text" },
+    ]);
+    const receipts = parseReceipts(
+      events(...linearCall("c1", failed), ...linearCall("c2", quoted)),
+    );
+    expect(receipts.tools.map((tool) => tool.errored)).toEqual([true, false]);
+  });
 });
 
 describe("catalogue", () => {
