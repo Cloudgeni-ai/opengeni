@@ -1,5 +1,14 @@
 # @opengeni/github
 
+## 6.22.0
+
+### Patch Changes
+
+- Updated dependencies [d50092b]
+  - @opengeni/contracts@6.22.0
+  - @opengeni/config@6.22.0
+  - @opengeni/network@6.22.0
+
 ## 6.21.0
 
 ### Patch Changes
