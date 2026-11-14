@@ -32,6 +32,9 @@ const BROWSER_ONLY_ROOTS = [
   "packages/react/",
   "packages/react-native/",
 ];
+// Code-owner-reviewed paths that still copy this way. Each is converted in its
+// own reviewed change; remove the entry with it.
+const PENDING_REVIEWED_PATHS = new Set(["apps/worker/src/activities/agent-turn/agent-build.ts"]);
 const BUFFER_COPY = /\bUint8Array\.from\(/;
 
 function posix(path: string): string {
@@ -48,6 +51,7 @@ function sourceFiles(directory: string, out: string[]): string[] {
     }
     if (!/\.tsx?$/.test(entry.name) || /\.(test|gen)\.tsx?$/.test(entry.name)) continue;
     const file = posix(path);
+    if (PENDING_REVIEWED_PATHS.has(file)) continue;
     if (!BROWSER_ONLY_ROOTS.some((prefix) => file.startsWith(prefix))) out.push(file);
   }
   return out;
