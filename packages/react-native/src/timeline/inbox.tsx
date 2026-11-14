@@ -154,7 +154,7 @@ function Spans({ spans }: { spans: NotificationSpan[] }) {
         key={index}
         accessibilityRole="link"
         onPress={() => openLink(span.href)}
-        style={{ color: c.fg, textDecorationLine: "underline" }}
+        style={{ color: c.link, textDecorationLine: "underline" }}
       >
         {span.text}
       </Text>

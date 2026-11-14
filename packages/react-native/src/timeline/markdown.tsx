@@ -1,4 +1,5 @@
 import {
+  cloneElement,
   createContext,
   Fragment,
   useContext,
@@ -6,9 +7,18 @@ import {
   useRef,
   useState,
   type ComponentRef,
+  type ReactElement,
   type ReactNode,
 } from "react";
-import { Image, Pressable, ScrollView, Text, View, type TextStyle } from "react-native";
+import {
+  Image,
+  Pressable,
+  ScrollView,
+  Text,
+  View,
+  type TextProps,
+  type TextStyle,
+} from "react-native";
 import Markdown, { MarkdownIt, renderRules, type RenderRules } from "react-native-markdown-display";
 import Svg, { Defs, LinearGradient, Rect, Stop } from "react-native-svg";
 import {
@@ -150,11 +160,15 @@ export function webMarkdownStyles(
       paddingHorizontal: 12,
       paddingVertical: 10,
     },
-    // Web MARKDOWN_LINK_CLASS: medium weight in accent-strong, no underline.
+    // Web MARKDOWN_LINK_CLASS (`og-link`): medium weight in the link color with
+    // a resting underline tinted from it, so a link never reads as body text.
+    // Text children inherit these, so every link kind (web URLs, autolinks,
+    // artifact, Site, chat and file links, links in lists and tables) matches.
     link: {
       ...fontStyle(theme, 500),
-      color: c["accent-strong"],
-      textDecorationLine: "none" as const,
+      color: c.link,
+      textDecorationLine: "underline" as const,
+      textDecorationColor: withAlphaColor(c.link, 0.55),
     },
     blockquote: {
       // Web blockquote text is fg-muted; text styles inherit through the renderer.
@@ -448,6 +462,25 @@ function TableCell({
   );
 }
 
+/**
+ * The renderer's link with press feedback: a soft wash of the link color while
+ * the finger is down, the way iOS marks a tapped link in text. Opening stays the
+ * renderer's own (`onLinkPress`, then the system for an ordinary URL).
+ */
+function PressableMarkdownLink({ link }: { link: ReactElement<TextProps> }) {
+  const theme = useNativeTimelineTheme();
+  const [pressed, setPressed] = useState(false);
+  return cloneElement(link, {
+    accessibilityRole: "link",
+    onPressIn: () => setPressed(true),
+    onPressOut: () => setPressed(false),
+    style: [
+      link.props.style,
+      pressed ? { backgroundColor: withAlphaColor(theme.colors.link, 0.18) } : null,
+    ],
+  });
+}
+
 function webRules(
   theme: NativeTimelineTheme,
   tone: "body" | "muted",
@@ -491,7 +524,8 @@ function webRules(
           return <Fragment key={node.key}>{drawn}</Fragment>;
         }
       }
-      return renderRules.link!(node, children, parent, styles, onLinkPress);
+      const link = renderRules.link!(node, children, parent, styles, onLinkPress);
+      return <PressableMarkdownLink key={node.key} link={link as ReactElement<TextProps>} />;
     },
     // Web lists use a disc marker in fg-subtle; the library's iOS default is a middle dot.
     list_item: (node, children, parent, styles, inheritedStyles = {}) => {

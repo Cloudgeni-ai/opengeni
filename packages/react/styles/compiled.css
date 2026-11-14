@@ -288,6 +288,11 @@
   inherits: true;
   initial-value: #242424;
 }
+@property --og-color-link {
+  syntax: "*";
+  inherits: true;
+  initial-value: #8ab4f8;
+}
 @property --og-color-primary {
   syntax: "*";
   inherits: true;
@@ -3138,7 +3143,7 @@
     overscroll-behavior-y: contain;
   }
 :where(.og-root).og-link,:where(.og-root) .og-link {
-    color: var(--og-color-accent-strong);
+    color: var(--og-color-link);
     text-decoration-line: underline;
     text-decoration-thickness: 1px;
     text-decoration-color: currentColor;
@@ -3152,6 +3157,9 @@
       &:hover {
         text-decoration-color: currentColor;
       }
+    }
+    &:active {
+      text-decoration-color: currentColor;
     }
     &:focus-visible {
       text-decoration-color: currentColor;
@@ -12904,6 +12912,7 @@
   --og-color-accent-strong: #383838;
   --og-color-accent-deep: #383838;
   --og-color-accent-fg: #ffffff;
+  --og-color-link: #0b57d0;
   --og-color-accent-soft: var(--og-color-accent);
   --og-color-primary: #ebf2f0;
   --og-color-primary-fg: #292929;
@@ -13732,6 +13741,7 @@
     --og-color-accent-deep: CanvasText;
     --og-color-accent-fg: CanvasText;
     --og-color-accent-soft: Canvas;
+    --og-color-link: LinkText;
     --og-color-status-queued: CanvasText;
     --og-color-status-running: CanvasText;
     --og-color-charge: Highlight;
