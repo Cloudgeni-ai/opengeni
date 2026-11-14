@@ -213,6 +213,9 @@ describe("Microsoft Dynamics MCP endpoints", () => {
     for (const value of [
       "https://businesscentral.dynamics.com/SignIn?ReturnUrl=%2F",
       `https://businesscentral.dynamics.com/${BC_TENANT}/deeplink?company=X`,
+      // A device client page is a page, never a tenant (it looks like a domain).
+      "https://businesscentral.dynamics.com/tablet.aspx?company=CRONUS",
+      "https://businesscentral.dynamics.com/phone.aspx",
       "https://businesscentral.dynamics.com/not an environment",
     ])
       expect(microsoftDynamicsAddressProblem(value)).toContain("doesn't name an environment");
@@ -220,7 +223,12 @@ describe("Microsoft Dynamics MCP endpoints", () => {
       microsoftDynamicsAddressProblem(
         "https://api.businesscentral.dynamics.com/v2.0/opengenitest2026/Production/api/v2.0",
       ),
-    ).toContain("API");
+    ).toContain("only the standard API");
+    expect(
+      microsoftDynamicsAddressProblem(
+        "https://api.businesscentral.dynamics.com/v2.0/Production/api/microsoft/automation/v2.0",
+      ),
+    ).toContain("only the standard API");
   });
 
   test("valid Business Central addresses keep working and have no problem", () => {
@@ -249,6 +257,7 @@ describe("Microsoft Dynamics MCP endpoints", () => {
         "https://api.businesscentral.dynamics.com/v2.0/Production/api/v2.0",
       ],
       [BC_ROOT, BC_ROOT],
+      [`https://businesscentral.dynamics.com/${BC_TENANT}/Production/phone.aspx`, BC_ROOT],
     ];
     for (const [value, mcpUrl] of cases) {
       expect(microsoftDynamicsMcpEndpoint(value)).toEqual({ product: "business_central", mcpUrl });

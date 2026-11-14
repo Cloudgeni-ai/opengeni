@@ -144,7 +144,7 @@ function businessCentralAddress(url: URL): BusinessCentralAddress | null {
     const parsed = businessCentralApiEnvironment(url);
     if (!parsed || (parsed.rest[0] && parsed.rest[0] !== "v2.0"))
       return {
-        problem: `That isn't the address of a Business Central environment's API. ${BUSINESS_CENTRAL_ADDRESS_HINT}`,
+        problem: `That Business Central API address isn't one an environment can be read from (only the standard API, /v2.0/<tenant>/<environment>/api/v2.0, is). ${BUSINESS_CENTRAL_ADDRESS_HINT}`,
       };
     return { mcpUrl: businessCentralApiRoot(parsed.environment) };
   }
@@ -162,7 +162,8 @@ function businessCentralAddress(url: URL): BusinessCentralAddress | null {
   const isClientPage = (segment: string | undefined) =>
     segment !== undefined && BUSINESS_CENTRAL_WEB_CLIENT_PAGES.has(segment.toLowerCase());
   let tenant: string | null = null;
-  if (segments[0] && BUSINESS_CENTRAL_TENANT.test(segments[0])) {
+  // A web client page (tablet.aspx) looks like a domain but is never a tenant.
+  if (segments[0] && !isClientPage(segments[0]) && BUSINESS_CENTRAL_TENANT.test(segments[0])) {
     tenant = segments.shift()!.toLowerCase();
   } else if (segments.length > 1 && !(segments.length === 2 && isClientPage(segments[1]))) {
     return {
