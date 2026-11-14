@@ -385,6 +385,10 @@
     "./microsoft-dynamics": {
       "types": "./src/microsoft-dynamics.ts",
       "default": "./src/microsoft-dynamics.ts"
+    },
+    "./capability-connect-inputs": {
+      "types": "./src/capability-connect-inputs.ts",
+      "default": "./src/capability-connect-inputs.ts"
     }
   },
   "publishConfig": {

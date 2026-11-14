@@ -10,7 +10,7 @@ import {
   type FirstPartyMcpToolName,
   type SessionToolPolicy,
 } from "@opengeni/contracts";
-import type { ApiRouteDeps } from "@opengeni/core";
+import { createCatalogItem, type ApiRouteDeps } from "@opengeni/core";
 import {
   enableCapabilityInstallation,
   upsertCapabilityCatalogItem,
@@ -838,7 +838,7 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
       "Not installed. The person can review what the sentry plugin adds and install it for the workspace from its card.",
     );
   }, 60_000);
-  test("'connect Microsoft Dynamics' asks for the environment and turns its address into the card's endpoint", async () => {
+  test("'connect Microsoft Dynamics' shows a card that asks for the environment, and turns an address into the card's endpoint", async () => {
     if (!shared) return;
     const settings = testSettings({
       microsoftDynamicsClientId: "dynamics-client",
@@ -885,14 +885,26 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
       };
       expect(searched.matches[0]).toMatchObject({
         capabilityId: "api:microsoft-dynamics",
-        setup: { status: "authorization_required" },
+        setup: {
+          status: "authorization_required",
+          connectInputs: [{ id: "endpointUrl", label: "Environment address" }],
+          nextAction: { toolName: "capability_authorization_request" },
+        },
       });
-      expect(searched.matches[0]!.setup.detail).toContain("custom_mcp_setup_request");
-      const requested = await mcp.callTool({
-        name: "capability_authorization_request",
-        arguments: { capabilityId: "api:microsoft-dynamics", rationale: "Answer CRM questions." },
+      expect(searched.matches[0]!.setup.detail).toContain("capability_authorization_request");
+      // The card asks the person for the environment: no question in chat first.
+      const requested = mcpJson(
+        await mcp.callTool({
+          name: "capability_authorization_request",
+          arguments: { capabilityId: "api:microsoft-dynamics", rationale: "Answer CRM questions." },
+        }),
+      ) as Record<string, unknown>;
+      expect(requested).toMatchObject({
+        capabilityId: "api:microsoft-dynamics",
+        status: "authorization_requested",
+        cardShown: true,
       });
-      expect(mcpJson(requested)).toMatchObject({ status: "input_required" });
+      expect(requested.message).toContain("asks the person for the environment address");
       const proposed = await mcp.callTool({
         name: "custom_mcp_setup_request",
         arguments: {
@@ -905,9 +917,26 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
       const notices = (
         await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId)
       ).filter((event) => event.type === "tool.auth_needed");
-      // Only the setup request posts a card; asking for the environment does not.
-      expect(notices).toHaveLength(1);
+      expect(notices).toHaveLength(2);
       expect(notices[0]!.payload).toMatchObject({
+        reason: "missing_connection",
+        capability: {
+          id: "api:microsoft-dynamics",
+          inputs: [
+            {
+              id: "endpointUrl",
+              label: "Environment address",
+              placeholder: "https://contoso.crm4.dynamics.com",
+            },
+          ],
+        },
+      });
+      expect(
+        (notices[0]!.payload as { capability: { inputs: Array<Record<string, unknown>> } })
+          .capability.inputs[0],
+      ).not.toHaveProperty("value");
+      // An address the person names still posts its environment's own card.
+      expect(notices[1]!.payload).toMatchObject({
         providerDomain: "contoso.crm4.dynamics.com",
         setupRequest: { endpointUrl: "https://contoso.crm4.dynamics.com/api/mcp" },
       });
@@ -943,7 +972,7 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
         (await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId)).filter(
           (event) => event.type === "tool.auth_needed",
         ),
-      ).toHaveLength(1);
+      ).toHaveLength(2);
       // Finance and Operations posts its own card for its MCP endpoint.
       const finance = await mcp.callTool({
         name: "custom_mcp_setup_request",
@@ -957,13 +986,122 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
       const after = (
         await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId)
       ).filter((event) => event.type === "tool.auth_needed");
-      expect(after).toHaveLength(2);
-      expect(after[1]!.payload).toMatchObject({
+      expect(after).toHaveLength(3);
+      expect(after[2]!.payload).toMatchObject({
         providerDomain: "contoso.operations.dynamics.com",
         setupRequest: { endpointUrl: "https://contoso.operations.dynamics.com/mcp" },
       });
     } finally {
       await Promise.all([mcp.close(), server.close()]);
+    }
+  });
+
+  test("a card that asks for connect-time inputs takes the agent's values and is shown once from discovery", async () => {
+    if (!shared) return;
+    const settings = testSettings({
+      microsoftDynamicsClientId: "dynamics-client",
+      microsoftDynamicsClientSecret: "dynamics-secret",
+    });
+    const attempt = await seedAttempt(false);
+    const server = buildOpenGeniMcpServer(
+      { settings, db: client.db, bus: new MemoryEventBus() } as ApiRouteDeps,
+      {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        subjectId: "worker:first-party-mcp",
+        permissions: ["workspace:read"],
+        principalKind: "agent_attempt",
+        metadata: {
+          ...attempt,
+          firstPartyMcpTools: ["capability_catalog_search", "capability_authorization_request"],
+        },
+      },
+    );
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const mcp = new Client({ name: "connect-inputs", version: "1" });
+    await server.connect(st);
+    await mcp.connect(ct);
+    const cards = async () =>
+      (await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId)).filter(
+        (event) => event.type === "tool.auth_needed",
+      );
+    const request = async (args: Record<string, unknown>, fromDiscovery = false) => {
+      const result = await mcp.callTool({
+        name: "capability_authorization_request",
+        arguments: {
+          capabilityId: "api:microsoft-dynamics",
+          rationale: "Answer CRM questions.",
+          ...args,
+        },
+        ...(fromDiscovery ? { _meta: { [TOOL_DISCOVERY_CARD_META_KEY]: true } } : {}),
+      });
+      expect(result.isError, JSON.stringify(result)).not.toBe(true);
+      return mcpJson(result) as Record<string, unknown>;
+    };
+    try {
+      // Discovery shows the card once; a repeat names that card.
+      const discovered = await request({}, true);
+      expect(discovered).toMatchObject({ cardShown: true, status: "authorization_requested" });
+      const repeated = await request({}, true);
+      expect(repeated).toMatchObject({
+        cardShown: true,
+        alreadyShown: true,
+        eventId: discovered.eventId,
+      });
+      expect(repeated.message).toContain("is already in this chat");
+      expect(await cards()).toHaveLength(1);
+      // A value the person gave is filled in, as typed.
+      const filled = await request({
+        inputs: { endpointUrl: "contoso.crm4.dynamics.com/main.aspx" },
+      });
+      expect(filled).toMatchObject({ cardShown: true });
+      expect(filled.message).not.toContain("was not filled in");
+      const [, withValue] = await cards();
+      expect(withValue!.payload).toMatchObject({
+        capability: {
+          inputs: [{ id: "endpointUrl", value: "contoso.crm4.dynamics.com/main.aspx" }],
+        },
+      });
+      // A value that fails the entry's rule is left out, and the agent is told why.
+      const refused = await request({ inputs: { endpointUrl: "https://home.dynamics.com/" } });
+      expect(refused).toMatchObject({ cardShown: true });
+      expect(refused.message).toContain("What you passed was not filled in: That isn't a Dynamics");
+      const [, , withoutValue] = await cards();
+      expect(
+        (withoutValue!.payload as { capability: { inputs: Array<Record<string, unknown>> } })
+          .capability.inputs[0],
+      ).not.toHaveProperty("value");
+    } finally {
+      await Promise.all([mcp.close(), server.close()]);
+    }
+  });
+
+  test("a connection added from a card's inputs follows the entry's rule and is added once", async () => {
+    if (!shared) return;
+    const add = (endpointUrl: string) =>
+      createCatalogItem({
+        db: client.db,
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        payload: {
+          kind: "mcp",
+          source: "manual",
+          name: "Microsoft Dynamics",
+          category: "custom",
+          tags: [],
+          metadata: {},
+          connectFor: "api:microsoft-dynamics",
+          connectInputs: { endpointUrl },
+        },
+      });
+    const created = await add("northwind.crm4.dynamics.com/main.aspx");
+    try {
+      expect(created.endpointUrl).toBe("https://northwind.crm4.dynamics.com/api/mcp");
+      // Connect again (a retry, or another person): the same connection.
+      expect((await add("https://northwind.crm4.dynamics.com/")).id).toBe(created.id);
+      await expect(add("https://attacker.example/")).rejects.toMatchObject({ status: 422 });
+    } finally {
+      await shared.admin`DELETE FROM capability_catalog_items WHERE workspace_id=${workspace.workspaceId} AND id=${created.id}`;
     }
   });
 
@@ -1082,6 +1220,35 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
           cardShown: false,
         });
         expect(requested.message).toContain(capabilityId);
+        // Another environment named in inputs gets the card that asks for it,
+        // filled in; the one here, named in inputs, is still just ready.
+        const another = await ready.call("capability_authorization_request", {
+          capabilityId: "api:microsoft-dynamics",
+          rationale: "Answer CRM questions.",
+          inputs: { endpointUrl: "https://contoso.crm4.dynamics.com/main.aspx" },
+        });
+        expect(another).toMatchObject({
+          capabilityId: "api:microsoft-dynamics",
+          status: "authorization_requested",
+          cardShown: true,
+        });
+        const asked = (
+          await listSessionEvents(client.db, workspace.workspaceId, ready.attempt.sessionId)
+        ).filter((event) => event.type === "tool.auth_needed");
+        expect(asked.at(-1)!.payload).toMatchObject({
+          capability: {
+            id: "api:microsoft-dynamics",
+            inputs: [{ id: "endpointUrl", value: "https://contoso.crm4.dynamics.com/main.aspx" }],
+          },
+        });
+        const here = await ready.call("capability_authorization_request", {
+          capabilityId: "api:microsoft-dynamics",
+          rationale: "Answer CRM questions.",
+          inputs: { endpointUrl: "fabrikam.crm4.dynamics.com" },
+        });
+        expect(here).toMatchObject({ capabilityId, status: "ready", cardShown: false });
+        // Inputs that chose that environment were used.
+        expect(here.message).not.toContain("were not used");
       } finally {
         await ready.close();
       }
@@ -1104,6 +1271,31 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
         ).filter((event) => event.type === "tool.auth_needed");
         expect(cards).toHaveLength(1);
         expect(cards[0]!.payload).toMatchObject({ capability: { id: capabilityId } });
+        // Naming this environment posts its own card; inputs it can't use are
+        // reported, and the card that asks for an environment follows.
+        const named = await missing.call("capability_authorization_request", {
+          capabilityId: "api:microsoft-dynamics",
+          rationale: "Answer CRM questions.",
+          inputs: { endpointUrl: "https://fabrikam.crm4.dynamics.com/main.aspx" },
+        });
+        expect(named).toMatchObject({ capabilityId, cardShown: true });
+        expect(named.message).not.toContain("were not used");
+        const refused = await missing.call("capability_authorization_request", {
+          capabilityId: "api:microsoft-dynamics",
+          rationale: "Answer CRM questions.",
+          inputs: { endpointUrl: "https://home.dynamics.com/" },
+        });
+        expect(refused).toMatchObject({ capabilityId: "api:microsoft-dynamics", cardShown: true });
+        expect(refused.message).toContain("What you passed was not filled in");
+        // The environment's own card asks for nothing: inputs to it are unused.
+        const direct = await missing.call("capability_authorization_request", {
+          capabilityId,
+          rationale: "Answer CRM questions.",
+          inputs: { endpointUrl: "https://fabrikam.crm4.dynamics.com" },
+        });
+        expect(direct.message).toContain(
+          "The inputs you passed were not used: this card asks for none.",
+        );
       } finally {
         await missing.close();
       }
@@ -1118,7 +1310,12 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
           capabilityId: "api:microsoft-dynamics",
           rationale: "Answer CRM questions.",
         });
-        expect(requested).toMatchObject({ status: "input_required", cardShown: false });
+        // The card asks for an environment, and the agent learns of this one.
+        expect(requested).toMatchObject({
+          capabilityId: "api:microsoft-dynamics",
+          status: "authorization_requested",
+          cardShown: true,
+        });
         expect(requested.message).toContain(capabilityId);
       } finally {
         await unusable.close();
