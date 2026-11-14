@@ -217,3 +217,59 @@ test("OpenAI-compatible check failures are actionable and never reflect the endp
   // Shown to the person as is: the API replaces every 502 with a generic outage message.
   expect(unreachable?.status).toBe(422);
 });
+
+test("a compatible endpoint's named refusal reason is shown, and its reply text never is", async () => {
+  const config = {
+    provider: "openai_compatible" as const,
+    baseUrl: "https://api.example.com/v1",
+    model: "deepseek-v4.1-flash",
+  };
+  const status = async (response: Response) =>
+    await verifyDirectModelAccess(config, "private-test-key", (async () => response) as typeof fetch)
+      .then(() => "")
+      .catch((caught: unknown) => (caught as Error).message);
+
+  // The refusal this exists for: the provider names a missing header as a
+  // machine-readable type, which is the only part of its reply worth quoting.
+  const named = await status(
+    Response.json(
+      {
+        type: "error",
+        error: { type: "MissingSessionID", message: "Request is missing x-opencode-session" },
+      },
+      { status: 400 },
+    ),
+  );
+  expect(named).toContain("(MissingSessionID)");
+  expect(named).toContain("model ID exactly");
+  // The provider's prose is not reflected, the same as any other reply text.
+  expect(named).not.toContain("x-opencode-session");
+
+  // error.code is the fallback when the provider names no type.
+  expect(await status(Response.json({ error: { code: "model_not_found" } }, { status: 404 }))).toContain(
+    "(model_not_found)",
+  );
+
+  // A reason that is prose (and here carries the key) is not a reason we quote.
+  const prose = await status(
+    Response.json({ error: { type: "private-test-key is not allowed" } }, { status: 400 }),
+  );
+  expect(prose).not.toContain("private-test-key");
+  expect(prose).not.toContain("(");
+
+  // A non-JSON refusal is survived with today's message.
+  const html = await status(new Response("<html>private-test-key</html>", { status: 400 }));
+  expect(html).toContain("couldn’t use this model");
+  expect(html).not.toContain("private-test-key");
+
+  // Non-compatible providers keep their own message, unchanged.
+  const openai = await verifyDirectModelAccess(
+    { provider: "openai", model: "gpt-6-sol" },
+    "private-test-key",
+    (async () => Response.json({ error: { type: "MissingSessionID" } }, { status: 400 })) as typeof fetch,
+  )
+    .then(() => "")
+    .catch((caught: unknown) => (caught as Error).message);
+  expect(openai).toContain("OpenAI couldn’t use this model");
+  expect(openai).not.toContain("MissingSessionID");
+});
