@@ -152,6 +152,10 @@ export { OpStreamExecClient, type OpStreamOutputFrame } from "./selfhosted/op-st
 export {
   replayConnectedCommandOutput,
   connectedCommandExitProof,
+  connectedCommandFailureReason,
+  connectedCommandReplayDeadline,
+  ConnectedCommandCollectionError,
+  type ConnectedCommandCollectionFailure,
 } from "./selfhosted/terminal-replay";
 
 // The provider registry surface — the descriptor table self-test, the per-

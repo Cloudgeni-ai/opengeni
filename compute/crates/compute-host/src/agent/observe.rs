@@ -234,6 +234,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             slot.reported = Some(reading);
         }
         observer.emit(event);
+        for event in report.notes.events.drain(..) {
+            observer.emit(
+                event
+                    .with("compute.sandbox.id", sandbox.clone())
+                    .with("compute.op.id", running.op.0)
+                    .with("compute.step", step_name(running.step))
+                    .traced(running.why.trace),
+            );
+        }
         for (alarm, what) in report.notes.alarms.drain(..) {
             let event = alarm_event(what)
                 .with("compute.sandbox.id", sandbox.clone())

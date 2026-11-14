@@ -4560,6 +4560,8 @@ export function isApiContractProtectedMutation(method: string, pathname: string)
     pathname === "/v1/integrations/slack/events" ||
     pathname === "/v1/integrations/slack/commands" ||
     pathname === "/v1/integrations/slack/interactions" ||
+    // Nango calls this itself and signs it with the webhook signing key.
+    pathname === "/v1/integrations/nango/webhook" ||
     pathname.startsWith("/v1/github/") ||
     // A stale tab must still report the error that follows a rollout.
     pathname === CLIENT_ERRORS_PATH ||

@@ -4,6 +4,12 @@
 //! from the same source identity. This intentionally keeps
 //! the historical one-file updater valid: after its atomic executable swap, the
 //! new process materializes its own complete helper generation before use.
+//!
+//! The helpers are written out, or checked, when the first browser controller
+//! starts, not when the agent starts: a release embeds some 230 MB of them,
+//! and reading that back on every start delayed every agent by a second or
+//! more on a cold disk. Their names and digests come from `build.rs`, so the
+//! agent reads its own embedded copy only to write a helper out.
 
 use std::path::{Path, PathBuf};
 
@@ -19,12 +25,43 @@ const COMPUTER_NATIVE: &[u8] = include_bytes!(env!("OPENGENI_EMBEDDED_COMPUTER_N
 #[cfg(opengeni_embedded_cua)]
 const CUA_RUNTIME: &[(&str, &[u8])] = &include!(env!("OPENGENI_EMBEDDED_CUA_RUNTIME"));
 
-/// The helper generation this process materialized, once it has.
-static CURRENT_GENERATION: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+#[cfg(opengeni_embedded_runtime)]
+mod digests {
+    include!(concat!(env!("OUT_DIR"), "/embedded_runtime_digests.rs"));
+}
+
+#[cfg(opengeni_embedded_cua)]
+const _: () = assert!(digests::CUA_DIGESTS.len() == CUA_RUNTIME.len());
+
+/// Whether this build embeds the runtime: then [`materialize`] provides
+/// browserd, and nothing needs to be looked up beside the agent.
+pub const EMBEDDED: bool = cfg!(opengeni_embedded_runtime);
+
+/// The directory this build's helper generation lives in under
+/// `config_dir`, whether or not it was written out yet. `None` for a build
+/// without an embedded runtime.
+#[allow(clippy::missing_const_for_fn)]
+fn generation_directory(config_dir: &Path) -> Option<PathBuf> {
+    #[cfg(not(opengeni_embedded_runtime))]
+    {
+        let _ = config_dir;
+        None
+    }
+    #[cfg(opengeni_embedded_runtime)]
+    {
+        Some(
+            config_dir
+                .join("interaction-runtime")
+                .join(digests::GENERATION),
+        )
+    }
+}
 
 /// Materializes the release-contained runtime and returns its browserd path.
 /// Development builds carry no payload and return `None`, preserving explicit
-/// local/operator sidecar discovery.
+/// local/operator sidecar discovery. Reads every helper already written out
+/// (some 230 MB in a release), so it runs once, before the first browser
+/// controller starts.
 #[allow(clippy::unnecessary_wraps)]
 pub fn materialize(config_dir: &Path) -> PlatformResult<Option<PathBuf>> {
     #[cfg(not(opengeni_embedded_runtime))]
@@ -34,30 +71,35 @@ pub fn materialize(config_dir: &Path) -> PlatformResult<Option<PathBuf>> {
     }
     #[cfg(opengeni_embedded_runtime)]
     {
-        let generation = runtime_digest();
-        let directory = config_dir
-            .join("interaction-runtime")
-            .join(&generation[..24]);
+        let Some(directory) = generation_directory(config_dir) else {
+            return Ok(None);
+        };
         create_private_directory(&directory)?;
-        for (name, bytes) in [
+        for (name, bytes, digest) in [
             (
                 companion_name(crate::browser_sidecar::BROWSERD_FILE),
                 BROWSERD,
+                &digests::BROWSERD_DIGEST,
             ),
             (
                 companion_name(crate::browser_sidecar::COMPUTER_NATIVE_FILE),
                 COMPUTER_NATIVE,
+                &digests::COMPUTER_NATIVE_DIGEST,
             ),
         ] {
-            materialize_executable(&directory.join(name), bytes)?;
+            materialize_executable(&directory.join(name), bytes, digest)?;
         }
         #[cfg(opengeni_embedded_cua)]
-        for (name, bytes) in CUA_RUNTIME {
+        for ((name, bytes), (digested, digest)) in CUA_RUNTIME.iter().zip(digests::CUA_DIGESTS) {
+            if name != digested {
+                return Err(PlatformError::os(
+                    "embedded interaction runtime digests do not name its assets",
+                ));
+            }
             let path = directory.join(name);
             create_private_directory(path.parent().expect("CUA asset parent"))?;
-            materialize_executable(&path, bytes)?;
+            materialize_executable(&path, bytes, digest)?;
         }
-        let _ = CURRENT_GENERATION.set(directory.clone());
         Ok(Some(directory.join(companion_name(
             crate::browser_sidecar::BROWSERD_FILE,
         ))))
@@ -65,20 +107,19 @@ pub fn materialize(config_dir: &Path) -> PlatformResult<Option<PathBuf>> {
 }
 
 /// Removes the helper generations earlier agent releases materialized beside
-/// this process's own. Each release adds one (about 100-170 MB) and nothing
-/// else ever removes them.
+/// this build's own under `config_dir`, written out yet or not. Each release
+/// adds one (about 100-230 MB) and nothing else ever removes them.
 ///
-/// Only the single running agent calls this, while it holds the instance lock
-/// and after materializing its own generation, so no agent uses the others.
-/// Processes an earlier agent left behind keep their already-open executables
-/// on Unix. Windows refuses to delete a running executable; that generation
-/// stays partly removed, and the next start retries it. Returns the number of
-/// generations removed.
-pub fn prune_stale_generations() -> usize {
-    let Some(current) = CURRENT_GENERATION.get() else {
+/// Only the single running agent calls this, while it holds the instance lock,
+/// so no agent uses the others. Processes an earlier agent left behind keep
+/// their already-open executables on Unix. Windows refuses to delete a running
+/// executable; that generation stays partly removed, and the next start
+/// retries it. Returns the number of generations removed.
+pub fn prune_stale_generations(config_dir: &Path) -> usize {
+    let Some(current) = generation_directory(config_dir) else {
         return 0;
     };
-    prune_generations_except(current)
+    prune_generations_except(&current)
 }
 
 fn prune_generations_except(current: &Path) -> usize {
@@ -116,7 +157,8 @@ fn is_generation_name(name: &std::ffi::OsStr) -> bool {
         .is_some_and(|name| name.len() == 24 && name.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
-#[cfg(opengeni_embedded_runtime)]
+/// The generation the embedded bytes name, as `build.rs` computes it.
+#[cfg(all(test, opengeni_embedded_runtime))]
 fn runtime_digest() -> String {
     let mut hasher = blake3::Hasher::new();
     for bytes in [BROWSERD, COMPUTER_NATIVE] {
@@ -147,9 +189,10 @@ fn create_private_directory(path: &Path) -> PlatformResult<()> {
 }
 
 #[cfg(opengeni_embedded_runtime)]
-fn materialize_executable(path: &Path, expected: &[u8]) -> PlatformResult<()> {
-    match std::fs::read(path) {
-        Ok(bytes) if blake3::hash(&bytes) == blake3::hash(expected) => return Ok(()),
+fn materialize_executable(path: &Path, expected: &[u8], digest: &[u8; 32]) -> PlatformResult<()> {
+    let digest = blake3::Hash::from_bytes(*digest);
+    match file_digest(path) {
+        Ok(found) if found == digest => return Ok(()),
         Ok(_) => {
             return Err(PlatformError::os(
                 "embedded interaction runtime helper failed its immutable digest",
@@ -162,6 +205,12 @@ fn materialize_executable(path: &Path, expected: &[u8]) -> PlatformResult<()> {
                 &error,
             ));
         }
+    }
+    // Writing reads the embedded copy anyway: it must be what was digested.
+    if blake3::hash(expected) != digest {
+        return Err(PlatformError::os(
+            "embedded interaction runtime helper does not match its build digest",
+        ));
     }
     let mut temporary = path.as_os_str().to_os_string();
     temporary.push(format!(".new.{}", std::process::id()));
@@ -182,6 +231,15 @@ fn materialize_executable(path: &Path, expected: &[u8]) -> PlatformResult<()> {
         ));
     }
     Ok(())
+}
+
+/// The digest of the file at `path`, read in pieces rather than whole: the
+/// largest helper is over 100 MB.
+#[cfg(opengeni_embedded_runtime)]
+fn file_digest(path: &Path) -> std::io::Result<blake3::Hash> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update_reader(std::fs::File::open(path)?)?;
+    Ok(hasher.finalize())
 }
 
 #[cfg(test)]
@@ -232,6 +290,52 @@ mod tests {
             COMPUTER_NATIVE
         );
         assert_eq!(materialize(root.path()).expect("replay"), Some(browserd));
+    }
+
+    /// What `build.rs` digested is what the agent embeds: the generation is
+    /// the one the embedded bytes name, and each helper's digest is theirs.
+    /// The runtime trusts these without hashing its embedded copy again.
+    #[test]
+    fn build_digests_name_and_check_the_embedded_bytes() {
+        assert_eq!(digests::GENERATION, &runtime_digest()[..24]);
+        assert_eq!(&digests::BROWSERD_DIGEST, blake3::hash(BROWSERD).as_bytes());
+        assert_eq!(
+            &digests::COMPUTER_NATIVE_DIGEST,
+            blake3::hash(COMPUTER_NATIVE).as_bytes()
+        );
+        #[cfg(opengeni_embedded_cua)]
+        for ((name, bytes), (digested, digest)) in CUA_RUNTIME.iter().zip(digests::CUA_DIGESTS) {
+            assert_eq!(name, digested);
+            assert_eq!(digest, blake3::hash(bytes).as_bytes());
+        }
+        let root = tempfile::tempdir().expect("runtime root");
+        assert_eq!(
+            materialize(root.path())
+                .expect("materialize")
+                .expect("embedded"),
+            generation_directory(root.path())
+                .expect("generation")
+                .join(companion_name(crate::browser_sidecar::BROWSERD_FILE))
+        );
+    }
+
+    /// Pruning needs no helper written out: it keeps this build's generation
+    /// by name and removes the others.
+    #[test]
+    fn prunes_earlier_generations_before_this_one_is_written() {
+        let root = tempfile::tempdir().expect("config root");
+        let earlier = root
+            .path()
+            .join("interaction-runtime")
+            .join("0123456789abcdef01234567");
+        std::fs::create_dir_all(&earlier).expect("earlier generation");
+        assert_eq!(prune_stale_generations(root.path()), 1);
+        assert!(!earlier.exists());
+        let browserd = materialize(root.path())
+            .expect("materialize")
+            .expect("embedded");
+        assert_eq!(prune_stale_generations(root.path()), 0);
+        assert!(browserd.is_file());
     }
 
     #[cfg(opengeni_embedded_cua)]

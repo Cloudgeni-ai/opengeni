@@ -15,7 +15,7 @@ import {
   setTeamsReach,
 } from "@opengeni/db";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
-import type { ApiRouteDeps } from "@opengeni/core";
+import { stampDelegatedHumanAuthorization, type ApiRouteDeps } from "@opengeni/core";
 import { createApp } from "../src/app";
 import { drainTeamsBotOnce, handleTeamsActivity } from "../src/integrations/teams-bot";
 
@@ -171,6 +171,49 @@ async function fixture(options: { routing?: boolean; personal?: boolean } = {}) 
       .filter((activity) => activity.type === "message")
       .map((activity) => activity.text as string);
   };
+  /**
+   * A thumbs down on a reply the pump delivered, as Teams sends it; returns
+   * the Teams outcome logged for it.
+   */
+  const rate = async (
+    replyText: string,
+    from = actor,
+    where: { conversation?: Record<string, unknown>; channelData?: Record<string, unknown> } = {},
+  ) => {
+    const index = delivered.findIndex((text) => text.endsWith(replyText));
+    if (index < 0) throw new Error(`no delivered reply ${replyText}`);
+    const before = outcomes.length;
+    await handleTeamsActivity(deps, app, {
+      type: "invoke",
+      name: "message/submitAction",
+      id: crypto.randomUUID(),
+      channelId: "msteams",
+      serviceUrl,
+      from: { id: `29:${from}`, aadObjectId: from },
+      recipient: { id: botId },
+      conversation: where.conversation ?? {
+        id: `a:${from}`,
+        conversationType: "personal",
+        tenantId: tenant,
+      },
+      channelData: where.channelData ?? { tenant: { id: tenant } },
+      replyToId: `sent-${index + 1}`,
+      value: {
+        actionName: "feedback",
+        actionValue: {
+          reaction: "dislike",
+          feedback: JSON.stringify({ feedbackText: "Too long" }),
+        },
+      },
+    });
+    return outcomes.slice(before);
+  };
+  const feedbackRows = () =>
+    shared.admin<
+      { workspace_id: string; subject_id: string; session_id: string; sentiment: string }[]
+    >`
+      select workspace_id::text as workspace_id,subject_id,session_id::text as session_id,sentiment
+      from feedback_submissions where account_id=${accountId} order by created_at`;
   /** What the pump delivered, in order. */
   const delivered: string[] = [];
   const pump = async () => {
@@ -261,6 +304,9 @@ async function fixture(options: { routing?: boolean; personal?: boolean } = {}) 
     app,
     channelMention,
     sender,
+    rate,
+    feedbackRows,
+    tenant,
   };
 }
 
@@ -674,4 +720,187 @@ test("an organization agent closed after a message is queued starts nothing", as
     0,
   );
   expect(f.delivered).toEqual([]);
+});
+
+test("feedback on a routed 1:1 reply is recorded in its chat's workspace, as its owner, while they may use it", async () => {
+  const f = await fixture({ personal: true });
+  // The Personal workspace (the default).
+  await f.say("Plan the launch");
+  await f.pump();
+  const personal = await f.latestSession();
+  expect(personal.workspace_id).toBe(f.personal);
+  await f.answer(personal, "Launch plan");
+  await f.pump();
+  expect(await f.rate("Launch plan")).toContain("feedback_recorded");
+  // Another workspace the person is a member of.
+  await f.say("switch Research");
+  await f.say("Start the study");
+  await f.pump();
+  const research = await f.latestSession();
+  expect(research.workspace_id).toBe(f.research);
+  await f.answer(research, "Study plan");
+  await f.pump();
+  expect(await f.rate("Study plan")).toContain("feedback_recorded");
+  expect(await f.feedbackRows()).toEqual([
+    {
+      workspace_id: f.personal,
+      subject_id: f.subject,
+      session_id: personal.session_id,
+      sentiment: "negative",
+    },
+    {
+      workspace_id: f.research,
+      subject_id: f.subject,
+      session_id: research.session_id,
+      sentiment: "negative",
+    },
+  ]);
+  // Someone else in the tenant can't rate it: not when unlinked, and not as
+  // another linked member of the organization in this chat.
+  const owners = { conversation: { id: `a:${f.actor}`, conversationType: "personal" } };
+  expect(await f.rate("Study plan", crypto.randomUUID(), owners)).toContain(
+    "feedback_actor_unlinked",
+  );
+  const other = crypto.randomUUID();
+  const otherSubject = `user:teams:${crypto.randomUUID()}`;
+  const [otherPersonal] = await shared.admin<{ id: string }[]>`
+    insert into workspaces(account_id,name) values(${f.accountId},'Other Personal') returning id::text as id`;
+  await shared.admin`insert into organization_memberships(account_id,subject_id,role,status,personal_workspace_id)
+    values(${f.accountId},${otherSubject},'member','active',${otherPersonal!.id})`;
+  await shared.admin`insert into workspace_memberships(account_id,workspace_id,subject_id,subject_label,role,permissions)
+    select account_id,workspace_id,${otherSubject},subject_label,role,permissions from workspace_memberships
+    where workspace_id=${f.research} and subject_id=${f.subject}`;
+  await shared.admin`insert into teams_bot_links(account_id,workspace_id,tenant_id,actor_id,subject_id)
+    values(${f.accountId},${f.home},${f.tenant},${other},${otherSubject})`;
+  expect(await f.rate("Study plan", other, owners)).toContain("feedback_target_missing");
+  // Losing the workspace, the Personal workspace or the organization stops it.
+  await shared.admin`delete from workspace_memberships where workspace_id=${f.research} and subject_id=${f.subject}`;
+  expect(await f.rate("Study plan")).toContain("feedback_not_permitted");
+  await setTeamsReach(client.db, f.i, { workspaceIds: null, personalWorkspaces: false });
+  expect(await f.rate("Launch plan")).toContain("feedback_not_permitted");
+  await shared.admin`update organization_memberships set status='suspended' where account_id=${f.accountId} and subject_id=${f.subject}`;
+  expect(await f.rate("Launch plan")).toContain("feedback_actor_unlinked");
+  expect(await f.feedbackRows()).toHaveLength(2);
+});
+
+test("feedback on an organization agent's reply is recorded on its chat, as the agent, while the asker may use it", async () => {
+  const f = await fixture();
+  const auditor = await f.agent(f.finance, "Auditor", { open: true });
+  await f.say("Auditor: check the books");
+  await f.pump();
+  const session = await f.latestSession();
+  expect(session.route_id).toStartWith("teams-agent:");
+  await f.answer(session, "Books checked");
+  await f.pump();
+  expect(await f.rate("Books checked")).toContain("feedback_recorded");
+  expect(await f.feedbackRows()).toEqual([
+    {
+      workspace_id: f.finance,
+      subject_id: `teams-agent:${auditor}`,
+      session_id: session.session_id,
+      sentiment: "negative",
+    },
+  ]);
+  // The asker leaving the organization stops it.
+  await shared.admin`update organization_memberships set status='suspended' where account_id=${f.accountId} and subject_id=${f.subject}`;
+  expect(await f.rate("Books checked")).toContain("feedback_actor_unlinked");
+  await shared.admin`update organization_memberships set status='active' where account_id=${f.accountId} and subject_id=${f.subject}`;
+  // Closed to the organization: nothing more is recorded.
+  await shared.admin`update agents set organization_access=false where id=${auditor}`;
+  expect(await f.rate("Books checked")).toContain("feedback_not_permitted");
+  expect(await f.feedbackRows()).toHaveLength(1);
+});
+
+test("only the signed-in person links Teams: an agent acting for them, or a token, is refused", async () => {
+  const f = await fixture();
+  const secret = "teams-routing-link-delegation-secret";
+  const server = createApp({
+    settings: { ...f.deps.settings, delegationSecret: secret },
+    db: client.db,
+    bus: {} as never,
+    workflowClient: {} as never,
+    managedAuth: null,
+  } as never);
+  // A real Opengeni person, so the agent's authority resolves and the link
+  // route itself must refuse it.
+  const userId = f.subject.slice("user:".length);
+  await shared.admin`insert into auth_users (id, name, email, email_verified)
+    values (${userId}, 'Ida', ${`${userId}@example.test`}, true)`;
+  const links = async () =>
+    (
+      await shared.admin`select count(*)::int as n from teams_bot_links where subject_id=${f.subject}`
+    )[0]!.n as number;
+  const before = await links();
+  for (const suffix of ["link", "link/microsoft-sign-in"]) {
+    const url = `http://localhost/v1/workspaces/${f.home}/integrations/teams/${suffix}`;
+    const body = JSON.stringify({ token: "proof" });
+    // An agent's app action carrying the person's delegated authority.
+    const delegated = new Request(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "content-length": String(Buffer.byteLength(body)),
+      },
+      body,
+    });
+    stampDelegatedHumanAuthorization(delegated, {
+      organizationId: f.accountId,
+      subjectId: f.subject,
+      permissions: ["workspace:read", "sessions:read", "sessions:create"] as never,
+      workspaceScope: { kind: "all" },
+    });
+    const refused = await server.request(delegated);
+    expect({ status: refused.status, body: await refused.json() }).toMatchObject({
+      status: 403,
+      body: { error: { message: "A signed-in human account is required." } },
+    });
+    // A delegated bearer token for the same person.
+    const token = await signDelegatedAccessToken(secret, {
+      accountId: f.accountId,
+      workspaceId: f.home,
+      subjectId: f.subject,
+      permissions: ["workspace:read", "sessions:read", "sessions:create"],
+      principalKind: "human_session",
+      exp: Math.floor(Date.now() / 1000) + 3_600,
+    });
+    const bearer = await server.request(url, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body,
+    });
+    expect(bearer.status).toBe(401);
+  }
+  expect(await links()).toBe(before);
+});
+
+test("feedback in a channel keeps the installation's rules with routing on", async () => {
+  const f = await fixture();
+  const mention = f.channelMention("Summarize the thread");
+  await handleTeamsActivity(f.deps, f.app, mention);
+  await f.pump();
+  const session = await f.latestSession();
+  expect(session.workspace_id).toBe(f.home);
+  await f.answer(session, "Thread summary");
+  await f.pump();
+  const channel = { conversation: mention.conversation, channelData: mention.channelData };
+  expect(await f.rate("Thread summary", f.actor, channel)).toContain("feedback_recorded");
+  // In a shared chat any linked member who may use the connected workspace
+  // rates replies, as before routing.
+  const other = crypto.randomUUID();
+  const otherSubject = `user:teams:${crypto.randomUUID()}`;
+  const [otherPersonal] = await shared.admin<{ id: string }[]>`
+    insert into workspaces(account_id,name) values(${f.accountId},'Other Personal') returning id::text as id`;
+  await shared.admin`insert into organization_memberships(account_id,subject_id,role,status,personal_workspace_id)
+    values(${f.accountId},${otherSubject},'member','active',${otherPersonal!.id})`;
+  await shared.admin`insert into workspace_memberships(account_id,workspace_id,subject_id,subject_label,role,permissions)
+    select account_id,workspace_id,${otherSubject},subject_label,role,permissions from workspace_memberships
+    where workspace_id=${f.home} and subject_id=${f.subject}`;
+  await shared.admin`insert into teams_bot_links(account_id,workspace_id,tenant_id,actor_id,subject_id)
+    values(${f.accountId},${f.home},${f.tenant},${other},${otherSubject})`;
+  expect(await f.rate("Thread summary", other, channel)).toContain("feedback_recorded");
+  // Unlinked people still can't.
+  expect(await f.rate("Thread summary", crypto.randomUUID(), channel)).toContain(
+    "feedback_actor_unlinked",
+  );
+  expect((await f.feedbackRows()).map((row) => row.subject_id)).toEqual([f.subject, otherSubject]);
 });

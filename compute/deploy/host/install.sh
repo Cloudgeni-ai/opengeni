@@ -149,7 +149,7 @@ has() { echo "$2  $1" | sha256sum -c --quiet --status - 2>/dev/null; }
 
 log "packages"
 missing=
-for tool in ip:iproute2 nft:nftables mkfs.ext4:e2fsprogs mkfs.xfs:xfsprogs curl:curl findmnt:util-linux flock:util-linux \
+for tool in ip:iproute2 nft:nftables mkfs.ext4:e2fsprogs e2fsck:e2fsprogs mkfs.xfs:xfsprogs curl:curl findmnt:util-linux flock:util-linux \
   jq:jq openssl:openssl rsync:rsync; do
   command -v "${tool%%:*}" >/dev/null || missing="$missing ${tool#*:}"
 done

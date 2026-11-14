@@ -15,6 +15,8 @@ import {
 } from "@opengeni/capabilities";
 import {
   NANGO_DEFAULT_API_BASE_URL,
+  OPENGENI_API_CONTRACT_HEADER,
+  OPENGENI_API_CONTRACT_REVISION,
   OAuthStartResponse,
   type ConnectionMetadata,
   type ConnectionOwnership,
@@ -301,7 +303,7 @@ const PAGE_SCRIPT = `(() => {
       const response = await fetch(data.completeUrl, {
         method: "POST",
         credentials: "same-origin",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", [data.contractHeader]: data.contractRevision },
         body: JSON.stringify({ state: data.state }),
       });
       const body = await response.json().catch(() => ({}));
@@ -408,6 +410,10 @@ export async function nangoConnectPage(
   const data = {
     state: input.state,
     completeUrl: `${baseUrl}${NANGO_CONNECT_COMPLETE_PATH}`,
+    // This page is rendered by the deployment that completes it; a page
+    // left open across a rollout is refused like any stale client.
+    contractHeader: OPENGENI_API_CONTRACT_HEADER,
+    contractRevision: OPENGENI_API_CONTRACT_REVISION,
     connectOrigin,
     sessionToken: session.token,
     expiresAtMs: Number.isFinite(expiresAtMs) ? expiresAtMs : Date.now() + 30 * 60 * 1000,

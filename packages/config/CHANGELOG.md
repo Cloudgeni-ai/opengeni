@@ -1,5 +1,29 @@
 # @opengeni/config
 
+## 6.21.0
+
+### Minor Changes
+
+- 7d0d52b: Dynamics 365 Finance and Operations now works in every Microsoft Dynamics connection without a flag. Its tools run on the environment's OData data entities with the person's own sign-in, so customers no longer add Opengeni to **Allowed MCP clients** and calls don't use Copilot Credits. Agents list and describe data entities, query one company or all of them (with counts), and create, update and delete records; changes ask first. `OPENGENI_MICROSOFT_DYNAMICS_FINANCE_OPERATIONS_ENABLED` is removed and ignored if still set.
+
+  Existing Finance and Operations connections switch from the ERP MCP server's tools to the `fno_*` tools, so tool permissions saved under the old tool names no longer apply; set them again on the new tools. Tenants that consented before the app requested **Access Dynamics AX data** (`Odata.FullAccess`) need an administrator to consent again.
+
+- 6acbb24: Ultrafast turns on a Codex subscription no longer ask for a reasoning summary, so the answer starts sooner.
+
+  - On Codex the answer waits until the summary is written. On GPT-6.1 Sol at Ultrafast and medium effort, the first answer token came a median 1.3 s (WebSocket) to 2.4 s (HTTP) sooner without it.
+  - These turns show no thinking row. Every other speed and route sends exactly what it sent before: `detailed` on Codex, `auto` on direct OpenAI and Azure.
+  - `OPENGENI_REASONING_SUMMARY_JSON` sets the summary per route (`codex`, `openai`, `azure`) and speed (`standard`, `priority`, `fast`, `ultrafast`) to `auto`, `detailed` or `none`, for example `{"codex":{"fast":"none"}}`. Cells you leave out keep their defaults; an unknown route, speed or value fails startup.
+
+### Patch Changes
+
+- Updated dependencies [7d0d52b]
+- Updated dependencies [ef4c334]
+- Updated dependencies [ce864c0]
+- Updated dependencies [6ac2cd4]
+  - @opengeni/contracts@6.21.0
+  - @opengeni/codex@6.21.0
+  - @opengeni/xai-subscription@6.21.0
+
 ## 6.20.1
 
 ### Patch Changes
