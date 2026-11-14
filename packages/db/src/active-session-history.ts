@@ -1,6 +1,7 @@
 import { MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL } from "@opengeni/codex";
 import { and, eq, gt, gte, sql } from "drizzle-orm";
 import { rawRows, withWorkspaceRls, type Database } from "./database";
+import { jsonbNodeCountSql, jsonbPropertyCountSql } from "./jsonb-shape-counts";
 import { fromPostgresLosslessJson } from "./lossless-json";
 import * as schema from "./schema";
 
@@ -550,46 +551,28 @@ export async function readActiveSessionHistory(
       footprint.rows = safeCount(size?.rows, "row count");
       check("rows", footprint.rows, limits.rows);
 
-      // Bound decoded shape independently from bytes. LIMIT maximum+1 keeps
-      // rejection work proportional to the admitted envelope.
-      const [nodeCount] = await rawRows<{ nodes: string }>(
+      // Bound decoded shape independently from bytes, in time linear in the
+      // items (see jsonb-shape-counts). Counts are reported as at most
+      // maximum + 1, the bounded measurement callers already see.
+      const [shape] = await rawRows<{ nodes: string; properties: string }>(
         scopedDb,
         sql`
-          select count(*)::text as nodes
+          select least(coalesce(sum(nodes), 0), ${limits.jsonNodes + 1})::text as nodes,
+                 least(coalesce(sum(properties), 0), ${limits.jsonProperties + 1})::text
+                   as properties
           from (
-            select node
+            select ${jsonbNodeCountSql(sql`history.item`)} as nodes,
+                   ${jsonbPropertyCountSql(sql`history.item`)} as properties
             from session_history_items history
-            cross join lateral jsonb_path_query(history.item, 'strict $.**') as node
             where history.workspace_id = ${workspaceId}
               and history.session_id = ${sessionId}
               and ${historyRowsFilter("history", rowsMode)}
-            limit ${limits.jsonNodes + 1}
-          ) bounded_nodes
+          ) shapes
         `,
       );
-      footprint.jsonNodes = safeCount(nodeCount?.nodes, "JSON node count");
+      footprint.jsonNodes = safeCount(shape?.nodes, "JSON node count");
       check("json_nodes", footprint.jsonNodes, limits.jsonNodes);
-
-      const [propertyCount] = await rawRows<{ properties: string }>(
-        scopedDb,
-        sql`
-          select count(*)::text as properties
-          from (
-            select property
-            from session_history_items history
-            cross join lateral jsonb_path_query(
-              history.item,
-              'strict $.** ? (@.type() == "object")'
-            ) as object_value
-            cross join lateral jsonb_object_keys(object_value) as property
-            where history.workspace_id = ${workspaceId}
-              and history.session_id = ${sessionId}
-              and ${historyRowsFilter("history", rowsMode)}
-            limit ${limits.jsonProperties + 1}
-          ) bounded_properties
-        `,
-      );
-      footprint.jsonProperties = safeCount(propertyCount?.properties, "JSON property count");
+      footprint.jsonProperties = safeCount(shape?.properties, "JSON property count");
       check("json_properties", footprint.jsonProperties, limits.jsonProperties);
 
       const over = exceeded as ActiveSessionHistoryLimitExceededError | null;
@@ -676,17 +659,8 @@ async function measureActiveHistoryRows(
             'g'
           )
         )::text as elided_bytes,
-        (
-          select count(*) from jsonb_path_query(history.item, 'strict $.**')
-        )::text as nodes,
-        (
-          select count(*)
-          from jsonb_path_query(
-            history.item,
-            'strict $.** ? (@.type() == "object")'
-          ) as object_value
-          cross join lateral jsonb_object_keys(object_value) as property
-        )::text as properties,
+        ${jsonbNodeCountSql(sql`history.item`)}::text as nodes,
+        ${jsonbPropertyCountSql(sql`history.item`)}::text as properties,
         coalesce(history.item->>'type' = 'message', false) as message
       from session_history_items history
       where history.workspace_id = ${workspaceId}
