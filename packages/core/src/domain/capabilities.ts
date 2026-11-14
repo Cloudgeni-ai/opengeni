@@ -105,6 +105,7 @@ import { isPersonalIntegrationSetupCandidate } from "@opengeni/contracts/persona
 import { PERSONAL_GITHUB_CAPABILITY_ID } from "@opengeni/contracts/personal-github";
 import {
   canonicalMcpEndpointUrl,
+  microsoftDynamicsAddressProblem,
   microsoftDynamicsProductForMcpUrl,
   MICROSOFT_DYNAMICS_CAPABILITY_ID,
   MICROSOFT_DYNAMICS_CONNECTION_NAME,
@@ -527,6 +528,9 @@ export async function createCatalogItem(input: {
   // A Dynamics environment address is stored as its MCP endpoint, so a pasted
   // browser address reaches the reviewed Microsoft Dynamics sign-in.
   if (input.payload.endpointUrl) {
+    // An unreadable Dynamics address is refused, never stored as a server.
+    const addressProblem = microsoftDynamicsAddressProblem(input.payload.endpointUrl);
+    if (addressProblem) throw new HTTPException(422, { message: addressProblem });
     const endpointUrl = canonicalMcpEndpointUrl(input.payload.endpointUrl);
     if (endpointUrl !== input.payload.endpointUrl)
       input = { ...input, payload: { ...input.payload, endpointUrl } };

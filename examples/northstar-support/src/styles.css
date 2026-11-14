@@ -65,6 +65,7 @@ body {
   --og-color-accent-strong: #19695a;
   --og-color-accent-deep: #13564a;
   --og-color-accent-soft: color-mix(in oklch, #1f7a66 10%, transparent);
+  --og-color-link: #19695a;
   --og-color-bg: #fbfbf8;
   --og-color-surface-1: #ffffff;
   --og-color-surface-2: #f4f5f1;

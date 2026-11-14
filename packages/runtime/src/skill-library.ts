@@ -508,7 +508,7 @@ function materializeSkillLibraryFiles(root: string, current = ""): MaterializedS
       if (!child.isFile() || !isRealFile(childPath)) {
         throw new Error(`Skill library artifact contains a non-regular file: ${path}`);
       }
-      return [{ path, bytes: Uint8Array.from(readFileSync(childPath)) }];
+      return [{ path, bytes: new Uint8Array(readFileSync(childPath)) }];
     });
 }
 

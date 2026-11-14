@@ -17,6 +17,8 @@ import {
   listTaskNotes,
   nestedPostgresSqlState,
   replaceTaskNote,
+  TaskNoteRefusedError,
+  type TaskNoteRefusalReason,
   transitionSessionVisibility,
   updateOrganizationPrivateSessionSettings,
   withSessionRlsActorContext,
@@ -50,6 +52,41 @@ async function expectSqlState(action: () => Promise<unknown>, state: string): Pr
     failure = error;
   }
   expect(nestedPostgresSqlState(failure)).toBe(state);
+}
+
+/**
+ * A task-note routine's refusal arrives classified, keeps the SQLSTATE on its
+ * cause, and its message carries no SQL, parameters or note text.
+ */
+function expectRefusalError(
+  failure: unknown,
+  state: string,
+  reason: TaskNoteRefusalReason,
+  privateText?: string,
+): void {
+  expect(failure).toBeInstanceOf(TaskNoteRefusedError);
+  const refusal = failure as TaskNoteRefusedError;
+  expect(refusal.reason).toBe(reason);
+  expect(refusal.sqlState).toBe(state);
+  expect(nestedPostgresSqlState(refusal)).toBe(state);
+  expect(refusal.message).not.toContain("Failed query");
+  expect(refusal.message).not.toContain("_for_attempt");
+  if (privateText) expect(refusal.message).not.toContain(privateText);
+}
+
+async function expectRefusal(
+  action: () => Promise<unknown>,
+  state: string,
+  reason: TaskNoteRefusalReason,
+  privateText?: string,
+): Promise<void> {
+  let failure: unknown;
+  try {
+    await action();
+  } catch (error) {
+    failure = error;
+  }
+  expectRefusalError(failure, state, reason, privateText);
 }
 
 async function fixture(options: { privateRoot?: boolean; child?: boolean } = {}) {
@@ -442,13 +479,14 @@ describe("task-tree notes PostgreSQL authority", () => {
       initiatorSubjectId: outsider,
       initiatingHumanSubjectId: outsider,
     });
-    await expectSqlState(
+    await expectRefusal(
       async () =>
         await withSessionRlsActorContext(
           { subjectId: "worker:outsider", initiatingHumanSubjectId: outsider },
           async () => await listTaskNotes(client!.db, claims(outsiderAttempt)),
         ),
       "42501",
+      "attempt_not_authorized",
     );
   });
 
@@ -505,7 +543,7 @@ describe("task-tree notes PostgreSQL authority", () => {
       initiatorSubjectId: "service:goal-continuation",
       initiatingHumanSubjectId: null,
     });
-    await expectSqlState(
+    await expectRefusal(
       async () =>
         await withSessionRlsActorContext(
           { subjectId: "worker:service" },
@@ -516,6 +554,7 @@ describe("task-tree notes PostgreSQL authority", () => {
             }),
         ),
       "23505",
+      "operation_conflict",
     );
 
     await shared.admin.begin(async (sql) => {
@@ -530,13 +569,14 @@ describe("task-tree notes PostgreSQL authority", () => {
       generation: 2,
       turnId: attempt.turnId,
     });
-    await expectSqlState(
+    await expectRefusal(
       async () =>
         await withSessionRlsActorContext(
           { subjectId: "worker:service" },
           async () => await createTaskNote(client!.db, { ...input, ...claims(recovery) }),
         ),
       "23505",
+      "operation_conflict",
     );
   });
 
@@ -618,6 +658,62 @@ describe("task-tree notes PostgreSQL authority", () => {
     });
   });
 
+  test("refuses an unknown note or invalid routine input with a classified refusal", async () => {
+    if (!shared || !client) return;
+    const f = await fixture();
+    const attempt = await seedAttempt({
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      sessionId: f.root.id,
+      initiatorSubjectId: f.ownerSubjectId,
+      initiatingHumanSubjectId: f.ownerSubjectId,
+    });
+    const reason = "Archive reason that must stay private to the caller.";
+    await expectRefusal(
+      async () =>
+        await archiveTaskNote(client!.db, {
+          ...claims(attempt),
+          operationId: crypto.randomUUID(),
+          noteId: crypto.randomUUID(),
+          expectedVersion: 1,
+          reason,
+        }),
+      "P0002",
+      "note_not_found",
+      reason,
+    );
+    await expectRefusal(
+      async () =>
+        await replaceTaskNote(client!.db, {
+          ...claims(attempt),
+          operationId: crypto.randomUUID(),
+          replacedNoteId: crypto.randomUUID(),
+          expectedReplacedVersion: 1,
+          replacementKind: "finding",
+          replacementText: "Replacement text that must stay private.",
+          replacementExpiresInDays: 1,
+          reason,
+        }),
+      "P0002",
+      "note_not_found",
+      "Replacement text",
+    );
+    // The routine's own input check, which the tool schema normally pre-empts.
+    await expectRefusal(
+      async () =>
+        await archiveTaskNote(client!.db, {
+          ...claims(attempt),
+          operationId: crypto.randomUUID(),
+          noteId: crypto.randomUUID(),
+          expectedVersion: 2,
+          reason,
+        }),
+      "22023",
+      "invalid_input",
+      reason,
+    );
+  });
+
   test("atomically replaces and reverts an exact note with immutable replay-safe lineage", async () => {
     if (!shared || !client) return;
     const f = await fixture();
@@ -662,17 +758,19 @@ describe("task-tree notes PostgreSQL authority", () => {
       replayed: false,
     });
     expect(retry).toEqual({ ...first, replayed: true });
-    await expectSqlState(
+    await expectRefusal(
       async () =>
         await replaceTaskNote(client!.db, {
           ...input,
           replacementText: "A changed retry must not overwrite lineage.",
         }),
       "23505",
+      "operation_conflict",
     );
-    await expectSqlState(
+    await expectRefusal(
       async () => await replaceTaskNote(client!.db, { ...input, operationId: crypto.randomUUID() }),
       "40001",
+      "note_not_active",
     );
 
     const reverted = await replaceTaskNote(client.db, {
@@ -727,9 +825,10 @@ describe("task-tree notes PostgreSQL authority", () => {
       `;
     });
     const recovery = await seedAttempt({ ...attempt, generation: 2, turnId: attempt.turnId });
-    await expectSqlState(
+    await expectRefusal(
       async () => await replaceTaskNote(client!.db, { ...input, ...claims(recovery) }),
       "23505",
+      "operation_conflict",
     );
   });
 
@@ -768,7 +867,7 @@ describe("task-tree notes PostgreSQL authority", () => {
     expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
     const rejected = results.find((result) => result.status === "rejected");
     expect(rejected?.status).toBe("rejected");
-    expect(nestedPostgresSqlState((rejected as PromiseRejectedResult).reason)).toBe("40001");
+    expectRefusalError((rejected as PromiseRejectedResult).reason, "40001", "note_not_active");
     const [durable] = await shared.admin<
       Array<{ receipt_count: number; active_successor_count: number }>
     >`
@@ -908,7 +1007,9 @@ describe("task-tree notes PostgreSQL authority", () => {
     expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
     const rejected = results.find((result) => result.status === "rejected");
     expect(rejected?.status).toBe("rejected");
-    expect(nestedPostgresSqlState((rejected as PromiseRejectedResult).reason)).toBe("54000");
+    // The losing save is told the tree is full, without its own note text.
+    const loser = (rejected as PromiseRejectedResult).reason;
+    expectRefusalError(loser, "54000", "active_note_limit", "boundary winner");
   });
 
   test("rejects multibyte payloads beyond the 4096 UTF-8 byte contract", async () => {

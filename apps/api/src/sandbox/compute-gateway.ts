@@ -551,7 +551,7 @@ class AgentLink implements ApiWebSocketConnection {
     }
     if (frame.t === "pub") {
       // The payload is a view of the socket's buffer; keep a copy past this call.
-      frame = { ...frame, payload: Uint8Array.from(frame.payload) };
+      frame = { ...frame, payload: new Uint8Array(frame.payload) };
       this.pendingBytes += frame.payload.byteLength;
     }
     this.pending.push(frame);

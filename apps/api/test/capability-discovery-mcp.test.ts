@@ -921,6 +921,29 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
         },
       });
       expect(mcpJson(refused)).toMatchObject({ status: "unavailable" });
+      // A Business Central address whose tenant can't be read is refused with
+      // what to paste, under any name, and never posted as an ordinary server.
+      for (const name of ["Microsoft Dynamics", "Business Central"]) {
+        const ambiguous = mcpJson(
+          await mcp.callTool({
+            name: "custom_mcp_setup_request",
+            arguments: {
+              name,
+              endpointUrl:
+                "https://businesscentral.dynamics.com/opengenitest2026/Production?company=CRONUS",
+              rationale: "Answer finance questions.",
+            },
+          }),
+        ) as { status: string; message: string };
+        expect(ambiguous.status).toBe("unavailable");
+        expect(ambiguous.message).toContain('"opengenitest2026" isn\'t a tenant ID or domain');
+        expect(ambiguous.message).toContain("<tenant>.onmicrosoft.com/<environment>");
+      }
+      expect(
+        (await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId)).filter(
+          (event) => event.type === "tool.auth_needed",
+        ),
+      ).toHaveLength(1);
       // Finance and Operations posts its own card for its MCP endpoint.
       const finance = await mcp.callTool({
         name: "custom_mcp_setup_request",

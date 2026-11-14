@@ -166,6 +166,7 @@ import {
   createTaskNote,
   listTaskNotes,
   replaceTaskNote,
+  TaskNoteRefusedError,
   releaseWorkClaim,
   upsertWorkClaim,
   acceptSessionHumanInputResponse,
@@ -309,6 +310,7 @@ import {
   MICROSOFT_DYNAMICS_CAPABILITY_ID,
   MICROSOFT_DYNAMICS_CONNECTION_NAME,
   microsoftDynamicsEnvironmentAddress,
+  microsoftDynamicsAddressProblem,
   microsoftDynamicsMcpEndpoint,
   microsoftDynamicsProductForMcpUrl,
   type MicrosoftDynamicsProduct,
@@ -386,12 +388,15 @@ const SETUP_CARD_CONTINUES =
 function microsoftDynamicsSetupProblem(
   settings: ApiRouteDeps["settings"],
   product: MicrosoftDynamicsProduct | null,
+  addressProblem: string | null = null,
 ): string | null {
   if (
     !settings.microsoftDynamicsClientId?.trim() ||
     !settings.microsoftDynamicsClientSecret?.trim()
   )
     return "Microsoft Dynamics isn't available on this Opengeni deployment yet. Nothing was posted; tell the person.";
+  if (!product && addressProblem)
+    return `${addressProblem} Nothing was posted; ask the person for that address, then call custom_mcp_setup_request again.`;
   if (!product)
     return "That isn't a Dynamics environment address. Ask the person to open Dynamics and copy the address bar (it looks like https://contoso.crm4.dynamics.com), or find Environment URL in the Power Platform admin center, then call custom_mcp_setup_request again.";
   return null;
@@ -518,6 +523,7 @@ import {
   markToolArgumentRejection,
   toolArgumentRejectionResult,
 } from "./tool-argument-error";
+import { databaseToolFailureResult, taskNoteRefusalResult } from "./database-tool-failure";
 import {
   boundSessionEventCompactResult,
   boundSessionEventMcpPage,
@@ -1283,8 +1289,16 @@ export class PolicyMcpServer extends McpServer {
     }
     this.registeredToolCount += 1;
     const handler = cb as (...args: unknown[]) => unknown;
-    return super.registerTool(name, config, ((...args: unknown[]) => {
-      return dispatchWithSessionAuthorizationReadReuse(() => handler(...args));
+    return super.registerTool(name, config, (async (...args: unknown[]) => {
+      try {
+        return await dispatchWithSessionAuthorizationReadReuse(() => handler(...args));
+      } catch (error) {
+        // The SDK would return the thrown message verbatim; a raw database
+        // error's message is its query and every parameter.
+        const databaseFailure = databaseToolFailureResult(name, error);
+        if (databaseFailure) return databaseFailure;
+        throw error;
+      }
     }) as ToolCallback<InputArgs>);
   }
 
@@ -4557,6 +4571,15 @@ function registerTaskNoteTools(
   const authorize = async () => {
     await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
   };
+  // A refusal the task-note routines raise becomes a typed, actionable result.
+  const result = async (run: () => Promise<unknown>) => {
+    try {
+      return json(await run());
+    } catch (error) {
+      if (error instanceof TaskNoteRefusedError) return taskNoteRefusalResult(error);
+      throw error;
+    }
+  };
   const boundedUtf8 = (maxBytes: number, label: string) =>
     z4
       .string()
@@ -4586,12 +4609,13 @@ function registerTaskNoteTools(
     },
     async ({ includeArchived, limit }) => {
       await authorize();
-      return json(
-        await listTaskNotes(deps.db, {
-          ...attemptClaims(),
-          includeArchived,
-          limit,
-        }),
+      return await result(
+        async () =>
+          await listTaskNotes(deps.db, {
+            ...attemptClaims(),
+            includeArchived,
+            limit,
+          }),
       );
     },
   );
@@ -4610,14 +4634,15 @@ function registerTaskNoteTools(
     },
     async ({ operationId, kind, text, expiresInDays }) => {
       await authorize();
-      return json(
-        await createTaskNote(deps.db, {
-          ...attemptClaims(),
-          operationId,
-          kind,
-          text,
-          expiresInDays,
-        }),
+      return await result(
+        async () =>
+          await createTaskNote(deps.db, {
+            ...attemptClaims(),
+            operationId,
+            kind,
+            text,
+            expiresInDays,
+          }),
       );
     },
   );
@@ -4636,14 +4661,15 @@ function registerTaskNoteTools(
     },
     async ({ operationId, noteId, expectedVersion, reason }) => {
       await authorize();
-      return json(
-        await archiveTaskNote(deps.db, {
-          ...attemptClaims(),
-          operationId,
-          noteId,
-          expectedVersion,
-          reason,
-        }),
+      return await result(
+        async () =>
+          await archiveTaskNote(deps.db, {
+            ...attemptClaims(),
+            operationId,
+            noteId,
+            expectedVersion,
+            reason,
+          }),
       );
     },
   );
@@ -4680,17 +4706,18 @@ function registerTaskNoteTools(
       reason,
     }) => {
       await authorize();
-      return json(
-        await replaceTaskNote(deps.db, {
-          ...attemptClaims(),
-          operationId,
-          replacedNoteId,
-          expectedReplacedVersion,
-          replacementKind,
-          replacementText,
-          replacementExpiresInDays,
-          reason,
-        }),
+      return await result(
+        async () =>
+          await replaceTaskNote(deps.db, {
+            ...attemptClaims(),
+            operationId,
+            replacedNoteId,
+            expectedReplacedVersion,
+            replacementKind,
+            replacementText,
+            replacementExpiresInDays,
+            reason,
+          }),
       );
     },
   );
@@ -8291,7 +8318,9 @@ function registerCapabilityDiscoveryTools(
           .url()
           .max(2048)
           .refine((url) => {
-            if (microsoftDynamicsMcpEndpoint(url)) return true;
+            // An unreadable Dynamics address is answered with what to paste instead.
+            if (microsoftDynamicsMcpEndpoint(url) || microsoftDynamicsAddressProblem(url))
+              return true;
             const parsed = new URL(url);
             return (
               parsed.protocol === "https:" &&
@@ -8348,12 +8377,18 @@ function registerCapabilityDiscoveryTools(
       // A Dynamics environment address becomes its connection endpoint and
       // signs in through Microsoft; say plainly when this deployment can't.
       const dynamics = microsoftDynamicsMcpEndpoint(suppliedEndpointUrl);
+      const addressProblem = dynamics ? null : microsoftDynamicsAddressProblem(suppliedEndpointUrl);
       if (
         dynamics ||
+        addressProblem ||
         (name.trim().toLowerCase() === MICROSOFT_DYNAMICS_CONNECTION_NAME.toLowerCase() &&
           looksLikeMicrosoftDynamicsPage(suppliedEndpointUrl))
       ) {
-        const unavailable = microsoftDynamicsSetupProblem(deps.settings, dynamics?.product ?? null);
+        const unavailable = microsoftDynamicsSetupProblem(
+          deps.settings,
+          dynamics?.product ?? null,
+          addressProblem,
+        );
         if (unavailable) return json({ status: "unavailable", message: unavailable });
       }
       const endpointUrl = dynamics

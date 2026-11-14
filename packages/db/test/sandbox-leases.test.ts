@@ -894,6 +894,220 @@ describe("archive object publication binding and disposition", () => {
   }, 60_000);
 });
 
+describe("an interrupted cold restore keeps the selected durable archive", () => {
+  // A worker that dies while a successor box is being created and restored
+  // leaves a WARMING lease with no instance id. Both reapers must hand the next
+  // turn the same saved workspace, whatever form its archive is stored in, and
+  // must never turn a lease that had an archive into an ordinary empty one.
+  type Shape = "inline" | "object" | "object_with_previous";
+  const sweeps = ["global", "workspace"] as const;
+
+  async function seedExpiredWarming(input: {
+    shape: Shape | "missing";
+    archiveGeneration: number | null;
+    withoutDescriptor?: boolean;
+    extra?: Record<string, unknown>;
+  }) {
+    const ids = await freshWorkspace();
+    const scope = {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+    };
+    const archive = Buffer.from("saved workspace").toString("base64");
+    const descriptor = archiveDescriptor(archive, 1_900_000_000_333);
+    const previousArchive = Buffer.from("older workspace").toString("base64");
+    const previous = archiveDescriptor(previousArchive, 1_900_000_000_111);
+    const ref = archiveObjectRef(ids, descriptor, crypto.randomUUID());
+    const previousRef = archiveObjectRef(ids, previous, crypto.randomUUID());
+    const sessionState: Record<string, unknown> =
+      input.shape === "inline"
+        ? { workspaceArchive: archive, workspaceArchiveMeta: descriptor }
+        : input.shape === "object"
+          ? { workspaceArchiveRef: ref, workspaceArchiveMeta: descriptor }
+          : input.shape === "object_with_previous"
+            ? {
+                workspaceArchiveRef: ref,
+                workspaceArchiveMeta: descriptor,
+                workspaceArchivePrevRef: previousRef,
+                workspaceArchivePrevMeta: previous,
+              }
+            : {};
+    if (input.shape !== "missing") sessionState.workspaceArchiveAt = descriptor.capturedAt;
+    if (input.withoutDescriptor) delete sessionState.workspaceArchiveMeta;
+    // The dead attempt's in-progress restore state, as the cold acquire and
+    // rematerialization left it.
+    const resumeState = {
+      backendId: "modal",
+      sessionState: { ...sessionState, providerState: { sandboxId: "never-created" } },
+      ...input.extra,
+      opengeniRecovery: {
+        provider: { status: "creating", instanceId: null, observedAt: null },
+        restore: {
+          status: "restoring",
+          rematerializationId: crypto.randomUUID(),
+          selectedRevision: input.shape === "missing" ? null : descriptor.revision,
+          startedAt: new Date().toISOString(),
+          completedAt: null,
+        },
+        workspace: { status: "not_ready", verifiedRevision: null, verifiedAt: null },
+      },
+    };
+    await admin`insert into sandbox_leases
+      (id, account_id, workspace_id, sandbox_group_id, backend, liveness, lease_epoch,
+       workspace_generation, archive_generation, resume_backend_id, resume_state, expires_at)
+      values (${crypto.randomUUID()}, ${ids.accountId}, ${ids.workspaceId}, ${ids.groupId},
+        'modal', 'warming', 3, 7, ${input.archiveGeneration}, 'modal',
+        ${admin.json(resumeState)}, now() - interval '1 second')`;
+    return { ids, scope, descriptor, previous, sessionState };
+  }
+
+  async function reap(sweep: (typeof sweeps)[number], workspaceId: string) {
+    const input = { viewerHolderTtlMs: 90_000, turnHolderTtlMs: 0, idleGraceMs: 45_000 };
+    if (sweep === "global") await reapStaleLeaseHoldersGlobal(db, input);
+    else expect((await reapStaleLeaseHolders(db, { ...input, workspaceId })).warmingReset).toBe(1);
+  }
+
+  test("the global and workspace-scoped resets write the same resume state", async () => {
+    if (!available) return;
+    const markers = {
+      opengeniHistoricalArchiveRecoveryId: crypto.randomUUID(),
+      opengeniAutomaticCheckpointRecovery: { version: 1, revision: "kept" },
+      opengeniWorkspaceRecoveryRequest: { operationId: crypto.randomUUID() },
+    };
+    const cases = [
+      { shape: "object", archiveGeneration: 7, extra: markers },
+      { shape: "object_with_previous", archiveGeneration: 6 },
+      { shape: "object", archiveGeneration: 7, withoutDescriptor: true },
+      { shape: "inline", archiveGeneration: 7 },
+      { shape: "missing", archiveGeneration: 7 },
+      { shape: "missing", archiveGeneration: null },
+    ] as const;
+    const normalize = (value: unknown) =>
+      JSON.parse(
+        JSON.stringify(value ?? null)
+          .replaceAll(/"(observedAt|completedAt)":"[^"]+"/g, '"$1":"<reset>"')
+          .replaceAll(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g, "<uuid>")
+          .replaceAll(/[0-9a-f]{64}/g, "<sha256>"),
+      ) as unknown;
+    for (const c of cases) {
+      const states = [];
+      for (const sweep of sweeps) {
+        const f = await seedExpiredWarming(c);
+        await reap(sweep, f.ids.workspaceId);
+        const [row] = await admin<{ resume_state: unknown; liveness: string }[]>`
+          select resume_state, liveness from sandbox_leases
+          where workspace_id = ${f.ids.workspaceId} and sandbox_group_id = ${f.ids.groupId}`;
+        expect(row?.liveness).toBe("cold");
+        states.push(normalize(row?.resume_state));
+      }
+      expect({ case: c, state: states[0] }).toEqual({ case: c, state: states[1] });
+    }
+    // The generation gap and the missing descriptor still keep the archive,
+    // degraded rather than erased.
+    const gap = await seedExpiredWarming({ shape: "object", archiveGeneration: 6 });
+    await reap("global", gap.ids.workspaceId);
+    expect(await readLease(db, gap.ids.workspaceId, gap.ids.groupId)).toMatchObject({
+      recovery: {
+        archive: { status: "available" },
+        restore: { status: "degraded", failureCode: "archive_generation_mismatch" },
+      },
+      resumeState: { sessionState: { workspaceArchiveRef: gap.sessionState.workspaceArchiveRef } },
+    });
+  }, 60_000);
+
+  for (const sweep of sweeps) {
+    for (const shape of ["inline", "object", "object_with_previous"] as const) {
+      test(`${sweep} reset of a dead ${shape} restore restores the same archive next turn`, async () => {
+        if (!available) return;
+        const f = await seedExpiredWarming({ shape, archiveGeneration: 7 });
+        await reap(sweep, f.ids.workspaceId);
+
+        const reset = await readLease(db, f.ids.workspaceId, f.ids.groupId);
+        expect(reset).toMatchObject({
+          liveness: "cold",
+          leaseEpoch: 4,
+          instanceId: null,
+          recovery: {
+            provider: { status: "not_created", instanceId: null },
+            archive: { status: "available", current: { revision: f.descriptor.revision } },
+            restore: {
+              status: "pending",
+              rematerializationId: null,
+              selectedRevision: f.descriptor.revision,
+            },
+            workspace: { status: "not_ready" },
+          },
+        });
+        // Exactly the durable archive slots survive; the dead box's provider
+        // state does not.
+        expect(reset?.resumeState?.backendId).toBe("modal");
+        expect(reset?.resumeState?.sessionState).toEqual(f.sessionState);
+
+        const next = await acquireLease(db, {
+          ...f.scope,
+          kind: "turn",
+          holderId: "turn-attempt:after-worker-death",
+          backend: "modal",
+          leaseTtlMs: 45_000,
+        });
+        expect(next.role).toBe("spawner");
+        const begun = await beginSandboxRematerialization(db, {
+          ...f.scope,
+          expectedEpoch: 4,
+          rematerializationId: crypto.randomUUID(),
+        });
+        expect(begun.status).toBe("started");
+        expect(begun.lease?.archiveComplete).toBe(true);
+        expect(begun.lease?.recovery.restore.selectedRevision).toBe(f.descriptor.revision);
+        expect(begun.lease?.resumeState?.sessionState).toMatchObject(f.sessionState);
+      }, 60_000);
+    }
+
+    test(`${sweep} reset never turns a lease that had an archive into an empty one`, async () => {
+      if (!available) return;
+      // archive_generation records that a workspace archive was published for
+      // this lease. If its pointer is nevertheless gone, the next turn must be
+      // told the workspace could not be restored, not get a silent empty box.
+      const f = await seedExpiredWarming({ shape: "missing", archiveGeneration: 7 });
+      await reap(sweep, f.ids.workspaceId);
+      expect(await readLease(db, f.ids.workspaceId, f.ids.groupId)).toMatchObject({
+        liveness: "cold",
+        leaseEpoch: 4,
+        recovery: {
+          archive: { status: "none" },
+          restore: { status: "unrecoverable", failureCode: "archive_unavailable" },
+          workspace: { status: "unrecoverable" },
+        },
+      });
+      const next = await acquireLease(db, {
+        ...f.scope,
+        kind: "turn",
+        holderId: "turn-attempt:after-lost-pointer",
+        backend: "modal",
+        leaseTtlMs: 45_000,
+      });
+      expect(next).toMatchObject({ role: "blocked", code: "restore_unrecoverable" });
+    }, 60_000);
+
+    test(`${sweep} reset of a lease that never had an archive stays an ordinary new lease`, async () => {
+      if (!available) return;
+      const f = await seedExpiredWarming({ shape: "missing", archiveGeneration: null });
+      await reap(sweep, f.ids.workspaceId);
+      const reset = await readLease(db, f.ids.workspaceId, f.ids.groupId);
+      expect(reset).toMatchObject({ liveness: "cold", leaseEpoch: 4, resumeState: null });
+      const next = await acquireLease(db, {
+        ...f.scope,
+        kind: "turn",
+        holderId: "turn-attempt:first-box",
+        backend: "modal",
+        leaseTtlMs: 45_000,
+      });
+      expect(next.role).toBe("spawner");
+    }, 60_000);
+  }
+});
+
 describe("Modal create outcome fencing", () => {
   test("owner-death discovery binds one exact receipt without renewing or publishing the workspace", async () => {
     if (!available) return;

@@ -66,6 +66,7 @@ export const STOCK_COLOR_TOKENS: Readonly<Record<string, readonly [string, strin
   "--og-color-accent-strong": ["#dcdcdc", "#383838"],
   "--og-color-accent-deep": ["#d5d5d5", "#383838"],
   "--og-color-accent-fg": ["#242424", "#ffffff"],
+  "--og-color-link": ["#8ab4f8", "#0b57d0"],
   "--og-color-primary": ["#2b3432", "#ebf2f0"],
   "--og-color-primary-fg": ["#eeeeee", "#292929"],
   "--og-color-primary-border": ["#4e5e59", "#c4d5d0"],

@@ -1,5 +1,13 @@
 # @opengeni/observability
 
+## 6.22.0
+
+### Patch Changes
+
+- 07ecbcc: Skills whose SKILL.md description is a multi-line YAML block install again: the installed Skill's summary folds line breaks into spaces, and any remaining invalid Skill metadata returns a 422 instead of a server error. Chat titles now work on chat-API routes that report unset usage counters as null, and a failed title logs a content-free reason (the failing stage, error name and provider status or code).
+- Updated dependencies [d50092b]
+  - @opengeni/contracts@6.22.0
+
 ## 6.21.0
 
 ### Patch Changes

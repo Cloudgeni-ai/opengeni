@@ -13,7 +13,7 @@ import { registerSkillRoutes } from "../src/routes/skills";
 import { registerPreferenceRegistryRoutes } from "../src/routes/preference-registry";
 
 const delegationSecret = "portable-skill-route-secret";
-const skillMarkdown = `---
+let skillMarkdown = `---
 name: release-operator
 description: Prepare, verify, and publish a safe release.
 ---
@@ -686,5 +686,47 @@ describe("portable Skill routes", () => {
         },
       ],
     });
+  }, 60_000);
+
+  test("installs a Skill whose description is a YAML block scalar", async () => {
+    if (!available) return;
+    const original = skillMarkdown;
+    skillMarkdown = `---
+name: release-operator
+description: >
+  Prepare, verify, and publish
+  a safe release.
+---
+# Release operator
+`;
+    sourceCommit = "d".repeat(40);
+    try {
+      const sourceUrl = "https://skills.sh/acme/skills/release-operator";
+      const preview = await request("/skills/preview", {
+        method: "POST",
+        body: JSON.stringify({ url: sourceUrl }),
+      }).then(async (response) => await response.json());
+      const installedResponse = await request("/skills/install", {
+        method: "POST",
+        body: JSON.stringify({
+          url: sourceUrl,
+          expectedSourceCommit: preview.sourceCommit,
+          expectedContentSha256: preview.contentSha256,
+          ...(preview.installationVersion === null
+            ? {}
+            : { expectedInstallationVersion: preview.installationVersion }),
+        }),
+      });
+      expect(installedResponse.status).toBeLessThan(300);
+      const installed = await installedResponse.json();
+      const [facet] = await shared!.admin<Array<{ description: string }>>`
+        select description from capability_skill_facets
+        where capability_id = ${installed.capabilityId} and source_commit = ${"d".repeat(40)}
+      `;
+      expect(facet?.description).toBe("Prepare, verify, and publish a safe release.");
+    } finally {
+      skillMarkdown = original;
+      sourceCommit = "a".repeat(40);
+    }
   }, 60_000);
 });

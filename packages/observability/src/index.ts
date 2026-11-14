@@ -678,6 +678,7 @@ const PUBLIC_TELEMETRY_ERROR_CLASSES = new Set([
   "GitCredentialRenewalOperationError",
   "HostExportOperationError",
   "HttpOperationError",
+  "IndependentSessionTitleError",
   "KnowledgeIndexOperationError",
   "McpLifecycleError",
   "McpOperationError",
@@ -733,6 +734,11 @@ const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
   "host_export_retention_prune_failed",
   "idempotency_conflict",
   "incompatible_exposed_ports",
+  "independent_session_title_admission_failed",
+  "independent_session_title_billing_failed",
+  "independent_session_title_provider_request_failed",
+  "independent_session_title_response_failed",
+  "independent_session_title_settlement_failed",
   "internal_error",
   "knowledge_index_defer_failed",
   "knowledge_index_embedding_failed",
@@ -1984,6 +1990,7 @@ function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
       ...projectHttpDiagnosticAttributes(attributes),
       ...projectSnapshotDiagnosticAttributes(attributes),
       ...projectKnowledgeIndexDiagnosticAttributes(attributes),
+      ...projectIndependentSessionTitleDiagnosticAttributes(attributes),
       ...projectTemporalSdkDiagnosticAttributes(attributes),
       ...projectContextCompactionAttributes(attributes),
       ...projectPublicDiagnosticAttributes(attributes),
@@ -2205,6 +2212,29 @@ function projectKnowledgeIndexDiagnosticAttributes(attributes: Attributes): Attr
   const sqlState = attributes.sqlState;
   // A SQLSTATE is a five-character protocol code, never message or SQL text.
   return typeof sqlState === "string" && /^[0-9A-Z]{5}$/.test(sqlState) ? { sqlState } : {};
+}
+
+const SESSION_TITLE_ERROR_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+
+function projectIndependentSessionTitleDiagnosticAttributes(attributes: Attributes): Attributes {
+  if (attributes.errorClass !== "IndependentSessionTitleError") return {};
+  // The failing error's class name and the provider's identifier-shaped error
+  // code and type (worker independent-session-title.ts). Never message text.
+  const { sessionTitleErrorName, providerErrorCode, providerErrorType } = attributes;
+  return {
+    ...(typeof sessionTitleErrorName === "string" &&
+    SESSION_TITLE_ERROR_NAME_PATTERN.test(sessionTitleErrorName)
+      ? { sessionTitleErrorName }
+      : {}),
+    ...(typeof providerErrorCode === "string" &&
+    REALTIME_PROVIDER_ERROR_TOKEN_PATTERN.test(providerErrorCode)
+      ? { providerErrorCode }
+      : {}),
+    ...(typeof providerErrorType === "string" &&
+    REALTIME_PROVIDER_ERROR_TOKEN_PATTERN.test(providerErrorType)
+      ? { providerErrorType }
+      : {}),
+  };
 }
 
 function projectTemporalSdkDiagnosticAttributes(attributes: Attributes): Attributes {

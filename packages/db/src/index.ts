@@ -1196,6 +1196,7 @@ import {
 } from "./new-session-drafts";
 import {
   isRetryableDatabaseTransportFailure,
+  nestedErrorRecords,
   nestedPostgresSqlState,
   runIdempotentPersistenceTransaction,
   safeDatabaseErrorFacts,
@@ -8565,6 +8566,42 @@ export class PortableSkillSourcePathConflictError extends Error {
   readonly name = "PortableSkillSourcePathConflictError";
 }
 
+/** The Skill's metadata (for example its description) cannot be stored. */
+export class PortableSkillMetadataError extends Error {
+  readonly name = "PortableSkillMetadataError";
+}
+
+/** Row checks on a Skill's own metadata and files: rejected input, not a fault. */
+const PORTABLE_SKILL_METADATA_CONSTRAINT =
+  /^(?:capability_skill_facets_[a-z_]+_chk|capability_skill_files_[a-z_]+_chk|capability_plugins_text_chk)$/u;
+
+function isPortableSkillMetadataViolation(error: unknown): boolean {
+  for (const record of nestedErrorRecords(error)) {
+    const constraint = record.constraint_name ?? record.constraint;
+    if (typeof constraint === "string" && PORTABLE_SKILL_METADATA_CONSTRAINT.test(constraint))
+      return true;
+  }
+  return false;
+}
+
+const SKILL_FACET_DESCRIPTION_MAX_CHARS = 2048;
+
+/**
+ * The Skill facet stores a one-line summary. SKILL.md descriptions may be YAML
+ * block scalars (`description: |` or `>`) that keep line breaks; fold every
+ * whitespace run to one space. The plugin row and the SKILL.md content keep the
+ * original text, and nothing compares the facet summary back to SKILL.md.
+ */
+export function portableSkillFacetDescription(description: string): string {
+  const line = description.replace(/\s+/gu, " ").trim();
+  if (line.length === 0 || line.length > SKILL_FACET_DESCRIPTION_MAX_CHARS) {
+    throw new PortableSkillMetadataError(
+      `A Skill description must be 1 to ${SKILL_FACET_DESCRIPTION_MAX_CHARS} characters`,
+    );
+  }
+  return line;
+}
+
 export type EnabledMcpCapabilityServer = {
   capabilityId: string;
   id: string;
@@ -11403,7 +11440,25 @@ export async function installPortableSkill(
 ): Promise<InstalledPortableSkill> {
   if (!input.skillActor)
     throw new Error("Portable Skill installation requires a truthful unified Skill actor");
-  const skillActor = input.skillActor;
+  // Fail fast, before any write, with the named error every caller maps.
+  const facetDescription = portableSkillFacetDescription(input.description);
+  try {
+    return await installPortableSkillRows(db, input, facetDescription);
+  } catch (error) {
+    if (!(error instanceof PortableSkillMetadataError) && isPortableSkillMetadataViolation(error))
+      throw new PortableSkillMetadataError("The Skill's metadata cannot be stored", {
+        cause: error,
+      });
+    throw error;
+  }
+}
+
+async function installPortableSkillRows(
+  db: Database,
+  input: InstallPortableSkillInput,
+  facetDescription: string,
+): Promise<InstalledPortableSkill> {
+  const skillActor = input.skillActor!;
   const skillOperationId = input.skillOperationId ?? randomUUID();
   const {
     skillActor: _actor,
@@ -11595,7 +11650,7 @@ export async function installPortableSkill(
             facetId: facet.id,
             capabilityId: input.capabilityId,
             name: input.name,
-            description: input.description,
+            description: facetDescription,
             sourceUrl: input.sourceUrl,
             sourceCommit: input.sourceCommit,
             sourcePath: input.sourcePath,
@@ -50324,6 +50379,66 @@ function archiveOnlyResumeState(
   };
 }
 
+/** The cold envelope of a WARMING lease whose creator died before any provider
+ * instance was recorded. The global reaper's SQL routine
+ * opengeni_private.warming_reset_resume_state_v2 implements the same rules;
+ * keep the two identical. The selected archive (inline or object reference)
+ * and every recovery marker survive. A lease that recorded a published archive
+ * generation but lost its archive pointer fails closed as unrecoverable, so the
+ * next turn is blocked visibly instead of starting on an empty workspace. Only
+ * a lease that never had an archive or recovery state resets to null. */
+function warmingResetResumeState(row: LeaseRow, resetAt: string): Record<string, unknown> | null {
+  const current = recoveryStateFromLeaseRow(row);
+  const hasArchive = current.archive.status !== "none";
+  if (
+    !hasArchive &&
+    // An authorized empty-workspace continuation keeps its decision (and its
+    // blocked lost-workspace truth) when no archive exists.
+    pendingFreshWorkspaceRecovery(row.resume_state) === null &&
+    providerLossRecord(row.resume_state) === null &&
+    row.archive_generation === null
+  ) {
+    return null;
+  }
+  const restoreStatus: SandboxRestoreStatus = hasCompleteWorkspaceArchive(row)
+    ? "pending"
+    : hasArchive
+      ? "degraded"
+      : "unrecoverable";
+  return archiveOnlyResumeState(row, {
+    provider: { status: "not_created", instanceId: null, observedAt: resetAt },
+    archive: current.archive,
+    restore: {
+      status: restoreStatus,
+      rematerializationId: null,
+      selectedRevision: current.archive.current?.revision ?? null,
+      startedAt: null,
+      completedAt: resetAt,
+      ...(restoreStatus === "degraded"
+        ? {
+            failureCode:
+              current.archive.status === "available"
+                ? "archive_generation_mismatch"
+                : "archive_unverified",
+            retryable: false,
+          }
+        : restoreStatus === "unrecoverable"
+          ? { failureCode: "archive_unavailable", retryable: false }
+          : {}),
+    },
+    workspace: {
+      status:
+        restoreStatus === "pending"
+          ? "not_ready"
+          : restoreStatus === "degraded"
+            ? "degraded"
+            : "unrecoverable",
+      verifiedRevision: null,
+      verifiedAt: null,
+    },
+  });
+}
+
 function providerStateFromLeaseResumeState(row: LeaseRow): Record<string, unknown> | null {
   const resume = row.resume_state;
   if (!resume || typeof resume !== "object") return null;
@@ -51132,16 +51247,9 @@ function validatedLegacyNativeSnapshotAdoption(
     | null
     | undefined,
 ): { archiveBase64: string; descriptor: SandboxNativeSnapshotRevision } | null {
-  if (!value || value.archiveBase64.length === 0 || value.archiveBase64.length % 4 !== 0) {
-    return null;
-  }
-  let bytes: Uint8Array;
-  try {
-    bytes = Uint8Array.from(Buffer.from(value.archiveBase64, "base64"));
-  } catch {
-    return null;
-  }
-  if (Buffer.from(bytes).toString("base64") !== value.archiveBase64) return null;
+  if (!value) return null;
+  const bytes = decodeCanonicalBase64(value.archiveBase64);
+  if (!bytes) return null;
   const descriptor = parseArchiveRevision(value.descriptor);
   const native = decodeNativeSnapshotRef(bytes);
   if (
@@ -55239,8 +55347,15 @@ function decodeCanonicalBase64(value: unknown): Uint8Array | null {
   ) {
     return null;
   }
-  const bytes = Uint8Array.from(Buffer.from(value, "base64"));
-  return Buffer.from(bytes).toString("base64") === value ? bytes : null;
+  // Archives reach hundreds of MB: decode once into a view (no copy), and
+  // prove canonical form from the length and the final quantum, the only place
+  // non-zero pad bits can hide, instead of re-encoding the whole payload.
+  const decoded = Buffer.from(value, "base64");
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  if (decoded.length !== (value.length / 4) * 3 - padding) return null;
+  const lastQuantumStart = (value.length / 4 - 1) * 3;
+  if (decoded.subarray(lastQuantumStart).toString("base64") !== value.slice(-4)) return null;
+  return new Uint8Array(decoded.buffer, decoded.byteOffset, decoded.length);
 }
 
 function modalProviderObject(bytes: Uint8Array | null): {
@@ -58792,56 +58907,13 @@ export async function reapStaleLeaseHolders(
           // A lost reply can still name a live provider. Keep the same epoch
           // available for late attribution; time is not termination proof.
           if (row.provider_create_attempt?.instanceId === null) continue;
-          const current = recoveryStateFromLeaseRow(row);
-          const hasArchive = current.archive.status !== "none";
-          // An authorized empty-workspace continuation keeps its decision (and
-          // its blocked lost-workspace truth) when no archive exists.
-          const freshPending = pendingFreshWorkspaceRecovery(row.resume_state) !== null;
-          const resetAt = new Date().toISOString();
-          const restoreStatus: SandboxRestoreStatus = !hasArchive
-            ? "unrecoverable"
-            : current.archive.status === "available"
-              ? "pending"
-              : "degraded";
-          const resetResumeState =
-            hasArchive || freshPending
-              ? archiveOnlyResumeState(row, {
-                  provider: {
-                    status: "not_created",
-                    instanceId: null,
-                    observedAt: resetAt,
-                  },
-                  archive: current.archive,
-                  restore: {
-                    status: restoreStatus,
-                    rematerializationId: null,
-                    selectedRevision: current.archive.current?.revision ?? null,
-                    startedAt: null,
-                    completedAt: resetAt,
-                    ...(restoreStatus === "degraded"
-                      ? { failureCode: "archive_unverified", retryable: false }
-                      : restoreStatus === "unrecoverable"
-                        ? { failureCode: "archive_unavailable", retryable: false }
-                        : {}),
-                  },
-                  workspace: {
-                    status:
-                      restoreStatus === "pending"
-                        ? "not_ready"
-                        : restoreStatus === "unrecoverable"
-                          ? "unrecoverable"
-                          : "degraded",
-                    verifiedRevision: null,
-                    verifiedAt: null,
-                  },
-                })
-              : null;
+          const resetResumeState = warmingResetResumeState(row, new Date().toISOString());
           const reset = await tx.execute<{ id: string }>(sql`
           update sandbox_leases set
             liveness = 'cold', instance_id = null,
             lease_epoch = lease_epoch + 1,
             reaper_hold_id = null, reaper_hold_until = null, reaper_hold_reason = null,
-            resume_backend_id = case when ${hasArchive || freshPending} then coalesce(resume_backend_id, backend) else null end,
+            resume_backend_id = case when ${resetResumeState !== null} then coalesce(resume_backend_id, backend) else null end,
             resume_state = ${resetResumeState ? JSON.stringify(resetResumeState) : null}::jsonb,
             data_plane_url = null, terminal_data_plane_url = null,
             controller_data_plane_url = null,
@@ -65738,13 +65810,8 @@ function validatedModalCheckpoint(input: {
   ) {
     throw new Error("Checkpoint artifact registration requires a verified Modal snapshot");
   }
-  let bytes: Uint8Array;
-  try {
-    bytes = Uint8Array.from(Buffer.from(input.workspaceArchive, "base64"));
-  } catch {
-    throw new Error("Checkpoint artifact archive is not valid base64");
-  }
-  if (Buffer.from(bytes).toString("base64") !== input.workspaceArchive) {
+  const bytes = decodeCanonicalBase64(input.workspaceArchive);
+  if (!bytes) {
     throw new Error("Checkpoint artifact archive is not canonical base64");
   }
   const native = decodeNativeSnapshotRef(bytes);

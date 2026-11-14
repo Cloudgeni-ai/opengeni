@@ -42,7 +42,7 @@
     },
     {
       "path": ".github/workflows/compute-ci.yml",
-      "sha256": "40772b57688c638e28e001ab3a565509f19e27b23c32875a3245e14128a20c4d"
+      "sha256": "fca68a908ed15847b2ac24d3d36d57f1feaee0f7cea9827c7e74a4030f456f39"
     },
     {
       "path": ".github/workflows/compute-release.yml",
@@ -1195,7 +1195,7 @@
       "workflow": ".github/workflows/compute-ci.yml",
       "job": "kvm",
       "step": "Huge pages for the nested profile",
-      "sha256": "95ace5da0c3accf0b6d576b14a4506fa109de0c2eb8739bb1139bbd08be122e3"
+      "sha256": "fa09370bdc763c645f1b575f098108f3429f13df58bc124122c5ca36cb64eb75"
     },
     {
       "workflow": ".github/workflows/compute-ci.yml",

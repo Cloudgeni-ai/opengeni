@@ -231,7 +231,7 @@ function assertEqualBytes(label: string, left: Uint8Array, right: Uint8Array): v
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const digest = new Uint8Array(
-    await crypto.subtle.digest("SHA-256", Uint8Array.from(bytes).buffer),
+    await crypto.subtle.digest("SHA-256", new Uint8Array(bytes).buffer),
   );
   return [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }

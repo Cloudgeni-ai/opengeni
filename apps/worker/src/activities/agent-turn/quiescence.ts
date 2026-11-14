@@ -193,8 +193,17 @@ export async function persistOrSignalSessionAttemptQuiescence(input: {
  * caller durably persists or signals the exact quiescence receipt.
  */
 export async function drainAttemptOwnedSandboxWriters(input: {
-  toolCancellationFence: Pick<TurnToolCancellationFence, "cancel" | "waitForQuiescence"> | null;
+  toolCancellationFence: Pick<
+    TurnToolCancellationFence,
+    "cancel" | "waitForQuiescence" | "handOffRemoteOperations"
+  > | null;
   cancellationReason?: unknown;
+  /** The attempt ends because its worker is shutting down: hand still-running
+   * machine operations to the session's command ledger with a stop request
+   * instead of waiting for each machine to answer. The worker's force stop
+   * follows within seconds, and a drain still waiting then would leave the
+   * attempt unsettled until its heartbeat timeout. */
+  handOffRemoteOperations?: boolean;
   gitCredentialRenewals: readonly Pick<GitCredentialRenewalController, "stop">[];
   codemodeTokenRenewal: Pick<CodemodeTokenRenewalController, "stop"> | null;
   runCredentialRenewal: Pick<RunCredentialRenewalController, "stop"> | null;
@@ -202,6 +211,7 @@ export async function drainAttemptOwnedSandboxWriters(input: {
 }): Promise<void> {
   input.onStage?.("tool_writers");
   if (input.toolCancellationFence) {
+    if (input.handOffRemoteOperations) input.toolCancellationFence.handOffRemoteOperations?.();
     input.toolCancellationFence.cancel(
       input.cancellationReason ?? new Error("TURN_ATTEMPT_FENCED"),
     );

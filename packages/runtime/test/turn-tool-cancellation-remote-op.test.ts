@@ -1076,3 +1076,148 @@ describe("a Steer during a Connected Machine command's foreground wait", () => {
     expect(rig.runner.runs.get("not_backgroundable:0")?.exit.cancelled).toBe(true);
   });
 });
+
+describe("a worker shutdown during a Connected Machine command's foreground wait", () => {
+  const commandId = "44444444-4444-4444-8444-444444444444";
+  // The machine accepts the start and then answers nothing: no frames, no
+  // control replies (cancel, observe, query). Production silence detection,
+  // reconnect hold and control timeouts all take far longer than the few
+  // seconds between WORKER_SHUTDOWN and the worker's force stop.
+  const silentMachineRig = () => {
+    const machineSilent = deferred();
+    let silent = false;
+    const transport = new InMemoryOpStreamTransport();
+    const runner = new FakeOpRunner({
+      transport,
+      workspaceId: WORKSPACE,
+      agentId: AGENT,
+      connectionInstanceId: CONNECTION,
+      defaultScript: () => ({ frames: [], live: true, holdUntilCancel: true }),
+    });
+    const requests: ControlRequest[] = [];
+    const controlRpc: ControlRpc = {
+      request: async (subject, request, options) => {
+        requests.push(request);
+        if (silent) await machineSilent.promise;
+        if (request.op?.$case === "opStart") silent = true;
+        return await runner.request(subject, request, options);
+      },
+    };
+    const adoptions: SelfhostedBackgroundCommandAdoption[] = [];
+    const session = new SelfhostedSession({
+      workspaceId: WORKSPACE,
+      workspaceRoot: "/workspace",
+      agentId: AGENT,
+      connectionInstanceId: CONNECTION,
+      relay: { host: "relay.test", tls: true },
+      controlRpc,
+      timeoutMs: 30_000,
+      execTimeoutMs: 120_000,
+      retryClock: { sleep: async () => {}, jitter: () => 0.5 },
+      opStream: { transport, ackIntervalMs: 10 },
+      adoptBackgroundCommand: async (input) => {
+        adoptions.push(input);
+        return { commandId };
+      },
+    });
+    const release = () => {
+      silent = false;
+      machineSilent.resolve();
+    };
+    return { runner, requests, session, adoptions, release };
+  };
+
+  test("hands a lifecycle command to the command ledger instead of waiting for the machine", async () => {
+    const rig = silentMachineRig();
+    const controller = createTurnToolCancellationController();
+    try {
+      const invocation = controller.runSandboxCommand(rig.session, {
+        cmd: "download a generated file",
+        yieldTimeMs: 120_000,
+      });
+      const invocationSettled = invocation.then(
+        () => "returned",
+        (error: unknown) => error,
+      );
+      await waitFor(() => rig.runner.starts.length === 1, "the command to start");
+      const opId = rig.runner.starts[0]!.opId;
+      controller.handOffRemoteOperations?.();
+      const drain = controller.waitForQuiescence();
+      await Promise.race([
+        drain,
+        Bun.sleep(2_000).then(() => {
+          throw new Error("the shutdown drain waited for a silent machine");
+        }),
+      ]);
+      expect(controller.outstandingWriters()).toEqual([]);
+      expect(await invocationSettled).toBeInstanceOf(TurnSandboxCommandCancelledError);
+      expect(rig.adoptions).toEqual([
+        {
+          controlWorkspaceId: WORKSPACE,
+          enrollmentId: AGENT,
+          connectionInstanceId: CONNECTION,
+          opId,
+          command: "download a generated file",
+          abandoned: true,
+        },
+      ]);
+    } finally {
+      rig.release();
+    }
+  });
+
+  test("hands a model exec_command to the command ledger before its yield window ends", async () => {
+    const rig = silentMachineRig();
+    const controller = createTurnToolCancellationController(undefined, {
+      cutPolling: true,
+      finishFloor: true,
+    });
+    try {
+      const invocation = sdkExec(controller, rig.session)
+        .invoke({} as never, JSON.stringify({ cmd: "npm test", tty: false }), {
+          toolCall: {
+            type: "function_call",
+            callId: "shutdown_wait",
+            name: "exec_command",
+            arguments: "{}",
+          },
+        })
+        .catch((error: unknown) => error);
+      await waitFor(() => rig.runner.starts.length === 1, "the command to start");
+      controller.handOffRemoteOperations?.();
+      const drain = controller.waitForQuiescence();
+      await Promise.race([
+        drain,
+        Bun.sleep(2_000).then(() => {
+          throw new Error("the shutdown drain waited for a silent machine");
+        }),
+      ]);
+      expect(controller.outstandingWriters()).toEqual([]);
+      expect(await remainsPending(invocation)).toBe(false);
+      expect(rig.adoptions.map(({ opId, abandoned }) => ({ opId, abandoned }))).toEqual([
+        { opId: "shutdown_wait:0", abandoned: true },
+      ]);
+    } finally {
+      rig.release();
+    }
+  });
+
+  test("without a hand-off, cancellation still waits for the machine's exit proof", async () => {
+    const rig = silentMachineRig();
+    const controller = createTurnToolCancellationController();
+    const invocation = controller
+      .runSandboxCommand(rig.session, { cmd: "download a generated file", yieldTimeMs: 120_000 })
+      .catch((error: unknown) => error);
+    await waitFor(() => rig.runner.starts.length === 1, "the command to start");
+    const drain = controller.waitForQuiescence();
+    expect(await remainsPending(drain)).toBe(true);
+    await Bun.sleep(250);
+    expect(await remainsPending(drain)).toBe(true);
+    expect(rig.adoptions).toEqual([]);
+    rig.release();
+    await drain;
+    await invocation;
+    expect(rig.runner.runs.get(rig.runner.starts[0]!.opId)?.exit.cancelled).toBe(true);
+    expect(rig.adoptions).toEqual([]);
+  });
+});

@@ -1,5 +1,37 @@
 # @opengeni/runtime
 
+## 6.22.0
+
+### Patch Changes
+
+- 3bf1c71: A Connected Machine command's completion no longer reaches its session minutes late on a slow uplink. The agent sent the few-byte completion notice, its retries and its operation inventory through the same first-in-first-out connection as command output, so the notice waited behind every output frame already queued (or was dropped from a full queue) until the next reconnect. The agent now sends them on its control connection, repeating an unacknowledged completion with every heartbeat. Opengeni's collector also used to give up on a completed command's output after five seconds without it, attach again (queuing the same frames once more) and back off for up to five minutes; it now follows one attachment until the exit arrives or its claim budget ends. `replayConnectedCommandOutput` requires a deadline for terminal replays. Failed completion, inventory collection, probe, settlement and output release warnings now carry a closed `reason` code (`claim_deadline`, `exit_frontier_not_reached`, `exit_frontier_mismatch`, `output_transport_unavailable`, `control_<code>`, `database_<sqlstate>` or `unclassified`), exported by the new `connectedCommandFailureReason`, since telemetry does not export error text.
+- d50092b: `tool_list` browsing now shows an integration's Connect card the way `tool_search` does: a first page that a `namePrefix` or `group` filter left empty, when the filter's words name exactly one integration the person can connect and nobody installed, adds the same `notConnected` notice and `connectCard` field, through the same lookup, card tool, dedupe and policy. Browsing without such a filter is unchanged. A search that opens with a one-word integration name as the label of what follows ("Airtable list records…", "Linear: create an issue") now names it distinctively, so it shows the card too; a sentence-opening capital before an ordinary word ("Linear regression") still does not.
+
+  When tool discovery shows no new card for an integration a request may name, the run records a new `tool.discovery_card` session event (in `@opengeni/contracts` `SessionEventType` and `@opengeni/sdk` `SESSION_EVENT_TYPES`) with its source, outcome (`skipped`, `already_shown`, `not_shown`, `failed`), reason and the integrations concerned.
+
+  A `tool_list` `namePrefix` that is one digest-aliased MCP tool's `mcp_<digest>` now lists every tool of that tool's connection, since each aliased tool has its own digest.
+
+  The Slack tools' `channel` argument now also accepts a channel name (`#general` or `general`), resolved to its conversation ID, with a clear error when the name is not found, ambiguous or cannot be looked up. Conversation IDs work as before.
+
+- 3604f11: Gemini 3 and later on Google's own OpenAI-compatible endpoints (AI Studio and Vertex) no longer fail on the first request after a tool call. Streamed Chat Completions tool calls now keep the fields the provider returned beyond the call itself, such as Gemini's `extra_content` thought signature, as non-streamed calls already did, so the follow-up request sends the signature back. Parallel tool calls streamed without an `index`, as Gemini on AI Studio sends them, now stay separate calls instead of being merged into one. The call records the provider that returned these fields: only that provider receives them again, and any other provider on Chat Completions or Responses gets the plain call. Provider error bodies wrapped in a JSON array, as Google sends them, are now read for the provider's bounded message and status code, so a failed turn shows the provider's reason instead of "400 status code (no body)". An exhausted-quota 429 sent this way now also stops the SDK's retries and fails the turn as provider quota, as object-shaped quota errors already did.
+- Updated dependencies [d50092b]
+- Updated dependencies [07ecbcc]
+  - @opengeni/contracts@6.22.0
+  - @opengeni/sdk@6.22.0
+  - @opengeni/observability@6.22.0
+  - @opengeni/capabilities@6.22.0
+  - @opengeni/codemode@6.22.0
+  - @opengeni/codex@6.22.0
+  - @opengeni/config@6.22.0
+  - @opengeni/decisions@6.22.0
+  - @opengeni/interaction@6.22.0
+  - @opengeni/tool-gateway@6.22.0
+  - @opengeni/vaults@6.22.0
+  - @opengeni/jev@6.22.0
+  - @opengeni/agent-proto@6.22.0
+  - @opengeni/network@6.22.0
+  - @opengeni/xai-subscription@6.22.0
+
 ## 6.21.0
 
 ### Minor Changes

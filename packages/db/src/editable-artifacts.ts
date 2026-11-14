@@ -3686,7 +3686,7 @@ function committedTransactionFromRow(
   if (row.modality !== durableModality) {
     throw corrupt("Stored transaction modality differs from its durable artifact");
   }
-  const bytes = Uint8Array.from(row.committed_transaction_bytes);
+  const bytes = new Uint8Array(row.committed_transaction_bytes);
   const declaredByteSize = validateInteger(
     row.committed_transaction_byte_size,
     "committed transaction byte size",
@@ -5411,7 +5411,7 @@ function readNativeReceiptBytes(row: CommittedTransactionRow): Uint8Array {
   if (!(row.native_receipt_bytes instanceof Uint8Array)) {
     throw corrupt("Serialized native receipt bytes are missing");
   }
-  const bytes = Uint8Array.from(row.native_receipt_bytes);
+  const bytes = new Uint8Array(row.native_receipt_bytes);
   const byteSize = validateInteger(
     row.native_receipt_byte_size,
     "serialized native receipt byte size",

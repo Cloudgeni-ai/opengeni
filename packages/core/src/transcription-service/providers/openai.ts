@@ -170,7 +170,7 @@ function seconds(value: unknown): number | null {
 }
 
 function audioBlob(audio: Uint8Array, mimeType: string): Blob {
-  return new Blob([Uint8Array.from(audio).buffer], { type: mimeType });
+  return new Blob([new Uint8Array(audio).buffer], { type: mimeType });
 }
 
 /**
