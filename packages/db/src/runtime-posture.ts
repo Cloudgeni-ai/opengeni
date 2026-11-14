@@ -140,7 +140,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * 1359 withholds the session content collector and its inventory; until they
  * are granted, unreferenced content blobs stay until the session is archived.
  * 1404 withheld the inventory of cold sandboxes whose chats are all archived
- * and 1405 grants it.
+ * and 1407 grants it.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",

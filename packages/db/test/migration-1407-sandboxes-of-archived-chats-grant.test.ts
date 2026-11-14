@@ -5,7 +5,7 @@ import { migrate } from "../src/migrate";
 
 const signature = "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)";
 
-test("1405 grants the archived-chats sandbox inventory 1404 withheld to every configured role", async () => {
+test("1407 grants the archived-chats sandbox inventory 1404 withheld to every configured role", async () => {
   const owned = await acquireOwnerMigratedTestDatabase("archived-chats-sandbox-grant");
   if (!owned) {
     if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") throw new Error("PostgreSQL is required");
@@ -24,17 +24,17 @@ test("1405 grants the archived-chats sandbox inventory 1404 withheld to every co
     return row;
   };
   try {
-    // The whole chain runs 1404 and then 1405, so the runtime ends with it.
+    // The whole chain runs 1404 and then 1407, so the runtime ends with it.
     await migrate(owned.ownerUrl);
     expect(await execute("opengeni_app")).toEqual({ granted: true, public_execute: false });
     for (let index = 0; index < 2; index++) {
-      const role = `migration_1405_${crypto.randomUUID().replaceAll("-", "")}`;
+      const role = `migration_1407_${crypto.randomUUID().replaceAll("-", "")}`;
       await owned.admin.unsafe(`CREATE ROLE "${role}" NOSUPERUSER NOBYPASSRLS`);
       roles.push(role);
       await recordTestRoleOwner(owned.admin, role);
     }
     const source = await Bun.file(
-      new URL("../drizzle/1405_sandboxes_of_archived_chats_grant.sql", import.meta.url),
+      new URL("../drizzle/1407_sandboxes_of_archived_chats_grant.sql", import.meta.url),
     ).text();
     expect(source).toStartWith("-- deployment-mode: rolling");
     expect(source).not.toMatch(/\b(DROP|REVOKE)\b/i);
