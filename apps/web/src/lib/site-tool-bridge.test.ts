@@ -213,7 +213,10 @@ describe("Site tool bridge direct calls", () => {
         },
         { signal },
       ),
-    ).rejects.toThrow("This requested tool is not enabled in the workspace");
+    ).rejects.toMatchObject({
+      code: "site_tool_unavailable",
+      detail: "This requested tool is not enabled in the workspace",
+    });
     expect(callCount).toBe(1);
   });
 });

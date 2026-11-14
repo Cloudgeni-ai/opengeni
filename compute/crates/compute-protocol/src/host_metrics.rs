@@ -86,9 +86,9 @@ pub const OUTCOME_CLASSES: [&str; 3] = ["done", "cancelled", "failed"];
 /// it, fetched from it, or freed for the host.
 pub const BYTE_KINDS: [&str; 4] = ["uploaded", "copied", "fetched", "freed"];
 /// The kinds of request the host answers.
-pub const REQUESTS: [&str; 15] = [
+pub const REQUESTS: [&str; 16] = [
     "create", "remove", "touch", "wake", "connect", "sleep", "hold", "release", "status", "adopt",
-    "hand_off", "restart", "prepare", "capture", "invalid",
+    "hand_off", "restart", "prepare", "keep", "capture", "invalid",
 ];
 /// What a request's answer was: `ok`, or its error code.
 pub const RESULTS: [&str; 14] = [

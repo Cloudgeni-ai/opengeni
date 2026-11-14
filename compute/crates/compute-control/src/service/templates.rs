@@ -144,6 +144,9 @@ impl<S: Store> Service<S> {
             match archive.get_pointer(&image.pointer()).await {
                 Ok(Some(_)) => {
                     tracing::info!(sandbox = %id, template = %template.id, %image, length, "captured a sandbox as a template");
+                    // Every live host fetches it now, over the image the
+                    // sandbox started from (ADR 41).
+                    self.settings.images.spread(image, row.spec.config.image);
                     return Ok(template);
                 }
                 Ok(None) => {

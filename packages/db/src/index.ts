@@ -10,6 +10,8 @@ import {
 export { continueSessionWaitingWork, getSessionMachineAccess } from "./session-machine-access";
 export { canonicalSecretPermissions } from "./canonical-secret-permissions";
 import { agentInstructionsSql } from "./agents";
+import { jsonbNodeCountSql, jsonbPropertyCountSql } from "./jsonb-shape-counts";
+import { measureJsonObjectText } from "./json-object-text-measurement";
 import { listWorkspaceBackgroundCommandsInScope } from "./session-background-commands";
 import { automationRunPresentation } from "./automation-run-presentation";
 import { resolveSessionAppActionAuthority } from "./session-admin-access";
@@ -1416,6 +1418,7 @@ export * from "./managed-user-setup";
 export * from "./signup-network";
 export * from "./verified-signup-trial-switch";
 export * from "./managed-auth-new-signups-switch";
+export * from "./nango-integrations";
 export * from "./organization-membership-backfill";
 export * from "./connection-tenancy-backfill";
 export * from "./generated-images";
@@ -14606,6 +14609,7 @@ async function revokeConnectionAuditedInScope(
   updatedBySubjectId: string | null | undefined,
   expectedVersion: number | undefined,
   audit: DisconnectAuditActor | null | undefined,
+  replacementCredentialEncrypted?: string,
 ): Promise<ConnectionMetadataWithVerification | null> {
   if (!audit) {
     return await revokeConnectionInScope(
@@ -14614,6 +14618,7 @@ async function revokeConnectionAuditedInScope(
       connectionId,
       updatedBySubjectId,
       expectedVersion,
+      replacementCredentialEncrypted,
     );
   }
   const [prior] = await db
@@ -14633,6 +14638,7 @@ async function revokeConnectionAuditedInScope(
     connectionId,
     updatedBySubjectId,
     expectedVersion,
+    replacementCredentialEncrypted,
   );
   if (revoked && prior && prior.status !== "revoked") {
     await auditConnectionDisconnectInScope(db, revoked, audit);
@@ -14646,11 +14652,20 @@ async function revokeConnectionInScope(
   connectionId: string,
   updatedBySubjectId?: string | null,
   expectedVersion?: number,
+  /**
+   * When set, the stored credential is replaced in the same write, so the
+   * revoked row no longer holds the provider's tokens (the column is NOT NULL,
+   * so callers pass an encrypted credential without tokens).
+   */
+  replacementCredentialEncrypted?: string,
 ): Promise<ConnectionMetadataWithVerification | null> {
   const [row] = await db
     .update(schema.connections)
     .set({
       status: "revoked",
+      ...(replacementCredentialEncrypted !== undefined
+        ? { credentialEncrypted: replacementCredentialEncrypted }
+        : {}),
       // The version bump invalidates any in-flight refresh's (id, version) CAS,
       // so a racing refresh cannot commit and flip the row back to active.
       version: sql`${schema.connections.version} + 1`,
@@ -14688,6 +14703,12 @@ export async function revokeConnection(
   options: {
     /** A person's, key's or agent's disconnect: audited in the same transaction. */
     audit?: DisconnectAuditActor | null;
+    /**
+     * Replaces the stored credential in the same write (for example an
+     * encrypted credential without tokens once the provider grant is revoked).
+     * Omitted: status-only revocation keeps the stored credential.
+     */
+    replacementCredentialEncrypted?: string | undefined;
   } = {},
 ): Promise<ConnectionMetadataWithVerification | null> {
   return await withConnectionSubjectRls(
@@ -14702,6 +14723,7 @@ export async function revokeConnection(
         updatedBySubjectId,
         expectedVersion,
         options.audit,
+        options.replacementCredentialEncrypted,
       ),
   );
 }
@@ -42691,48 +42713,78 @@ function safeEnvelopeInteger(value: string, label: string): number {
   return parsed;
 }
 
-function assertApprovalRunStateMeasurement(
+function approvalRunStateMeasurementViolation(
   measured: ApprovalRunStateMeasurement,
   limits: ApprovalRunStateMaterializationLimits,
-): void {
+): ApprovalRunStateLimitExceededError | null {
   if (measured.actualBytes > limits.maximumJsonBytes) {
-    throw new ApprovalRunStateLimitExceededError(
+    return new ApprovalRunStateLimitExceededError(
       "json_bytes",
       measured.actualBytes,
       limits.maximumJsonBytes,
     );
   }
   if (!measured.validJsonObject) {
-    throw new ApprovalRunStateLimitExceededError("invalid_json", 1, 0);
+    return new ApprovalRunStateLimitExceededError("invalid_json", 1, 0);
   }
   if (measured.actualNodes > limits.maximumJsonNodes) {
-    throw new ApprovalRunStateLimitExceededError(
+    return new ApprovalRunStateLimitExceededError(
       "json_nodes",
       measured.actualNodes,
       limits.maximumJsonNodes,
     );
   }
   if (measured.actualProperties > limits.maximumJsonProperties) {
-    throw new ApprovalRunStateLimitExceededError(
+    return new ApprovalRunStateLimitExceededError(
       "json_properties",
       measured.actualProperties,
       limits.maximumJsonProperties,
     );
   }
   if (measured.pendingApprovalBytes > limits.maximumPendingApprovalBytes) {
-    throw new ApprovalRunStateLimitExceededError(
+    return new ApprovalRunStateLimitExceededError(
       "pending_approval_bytes",
       measured.pendingApprovalBytes,
       limits.maximumPendingApprovalBytes,
     );
   }
   if (measured.pendingApprovalItems > limits.maximumPendingApprovalItems) {
-    throw new ApprovalRunStateLimitExceededError(
+    return new ApprovalRunStateLimitExceededError(
       "pending_approval_items",
       measured.pendingApprovalItems,
       limits.maximumPendingApprovalItems,
     );
   }
+  return null;
+}
+
+function assertApprovalRunStateMeasurement(
+  measured: ApprovalRunStateMeasurement,
+  limits: ApprovalRunStateMaterializationLimits,
+): void {
+  const violation = approvalRunStateMeasurementViolation(measured, limits);
+  if (violation) throw violation;
+}
+
+/**
+ * Validate and count RunState text in-process (linear, no decoding). Counts are
+ * reported as at most limit + 1, the bounded measurement callers already see.
+ */
+function boundedApprovalRunStateTextMeasurement(
+  serializedRunState: string,
+  actualBytes: number,
+  limits: ApprovalRunStateMaterializationLimits,
+): Pick<
+  ApprovalRunStateMeasurement,
+  "actualBytes" | "validJsonObject" | "actualNodes" | "actualProperties"
+> {
+  const measured = measureJsonObjectText(serializedRunState);
+  return {
+    actualBytes,
+    validJsonObject: measured.validJsonObject,
+    actualNodes: Math.min(measured.nodes, limits.maximumJsonNodes + 1),
+    actualProperties: Math.min(measured.properties, limits.maximumJsonProperties + 1),
+  };
 }
 
 function approvalRunStateNullableDate(value: Date | string | null): Date | null {
@@ -42745,7 +42797,9 @@ function approvalRunStateNullableDate(value: Date | string | null): Date | null 
 }
 
 /**
- * Read the one approval/human-input RunState through a server-measured envelope.
+ * Read the one approval/human-input RunState through a bounded envelope: the
+ * database withholds text over the byte bound, and the JSON shape of the rest
+ * is measured in one linear pass before anything decodes it.
  * Ordinary turns never call this path; they use canonical history items only.
  */
 export async function getLatestRunState(
@@ -42771,9 +42825,6 @@ export async function getLatestRunState(
       pending_approvals_codec_version: number | null;
       provider_artifact_invalidated_at: Date | string | null;
       actual_bytes: string;
-      valid_json_object: boolean;
-      actual_nodes: string;
-      actual_properties: string;
       pending_approval_bytes: string;
       pending_approval_items: string;
     }>(
@@ -42791,87 +42842,44 @@ export async function getLatestRunState(
         ), measured as materialized (
           select latest.*,
                  octet_length(serialized_run_state)::bigint as actual_bytes,
-                 (serialized_run_state is json value) as valid_json,
                  octet_length(pending_approvals::text)::bigint as pending_approval_bytes,
                  case when jsonb_typeof(pending_approvals) = 'array'
                    then jsonb_array_length(pending_approvals)::bigint
                    else ${limits.maximumPendingApprovalItems + 1}::bigint
                  end as pending_approval_items
           from latest
-        ), decoded as materialized (
-          select measured.*,
-                 case
-                   when actual_bytes <= ${limits.maximumJsonBytes} and valid_json
-                   then case
-                     when jsonb_typeof(serialized_run_state::jsonb) = 'object'
-                     then serialized_run_state::jsonb
-                     else null
-                   end
-                   else null
-                 end as state_json
-          from measured
-        ), bounded_nodes as materialized (
-          select count(*)::bigint as actual_nodes
-          from (
-            select node
-            from decoded
-            cross join lateral jsonb_path_query(decoded.state_json, 'strict $.**') as node
-            where decoded.state_json is not null
-            limit ${limits.maximumJsonNodes + 1}
-          ) nodes
-        ), bounded_properties as materialized (
-          select count(*)::bigint as actual_properties
-          from (
-            select property
-            from decoded
-            cross join lateral jsonb_path_query(
-              decoded.state_json,
-              'strict $.** ? (@.type() == "object")'
-            ) as object_value
-            cross join lateral jsonb_object_keys(object_value) as property
-            where decoded.state_json is not null
-            limit ${limits.maximumJsonProperties + 1}
-          ) properties
         )
-        select decoded.id,
-               decoded.turn_id,
+        select id,
+               turn_id,
                case
-                 when decoded.state_json is not null
-                   and bounded_nodes.actual_nodes <= ${limits.maximumJsonNodes}
-                   and bounded_properties.actual_properties <= ${limits.maximumJsonProperties}
-                 then decoded.serialized_run_state
+                 when actual_bytes <= ${limits.maximumJsonBytes}
+                 then serialized_run_state
                  else null
                end as serialized_run_state,
                case
-                 when decoded.pending_approval_bytes <= ${limits.maximumPendingApprovalBytes}
-                   and decoded.pending_approval_items <= ${limits.maximumPendingApprovalItems}
-                 then decoded.pending_approvals
+                 when pending_approval_bytes <= ${limits.maximumPendingApprovalBytes}
+                   and pending_approval_items <= ${limits.maximumPendingApprovalItems}
+                 then pending_approvals
                  else null
                end as pending_approvals,
-               decoded.serialized_run_state_codec_version,
-               decoded.pending_approvals_codec_version,
-               decoded.provider_artifact_invalidated_at,
-               decoded.actual_bytes::text as actual_bytes,
-               (decoded.valid_json and decoded.state_json is not null) as valid_json_object,
-               bounded_nodes.actual_nodes::text as actual_nodes,
-               bounded_properties.actual_properties::text as actual_properties,
-               decoded.pending_approval_bytes::text as pending_approval_bytes,
-               decoded.pending_approval_items::text as pending_approval_items
-        from decoded
-        cross join bounded_nodes
-        cross join bounded_properties
+               serialized_run_state_codec_version,
+               pending_approvals_codec_version,
+               provider_artifact_invalidated_at,
+               actual_bytes::text as actual_bytes,
+               pending_approval_bytes::text as pending_approval_bytes,
+               pending_approval_items::text as pending_approval_items
+        from measured
       `,
     );
     if (!row) return null;
+    // Only text within the byte bound leaves the database. Its JSON shape is
+    // measured here in one linear pass, before anything decodes it.
+    const actualBytes = safeEnvelopeInteger(row.actual_bytes, "approval run-state bytes");
     assertApprovalRunStateMeasurement(
       {
-        actualBytes: safeEnvelopeInteger(row.actual_bytes, "approval run-state bytes"),
-        validJsonObject: row.valid_json_object,
-        actualNodes: safeEnvelopeInteger(row.actual_nodes, "approval run-state JSON nodes"),
-        actualProperties: safeEnvelopeInteger(
-          row.actual_properties,
-          "approval run-state JSON properties",
-        ),
+        ...(row.serialized_run_state === null
+          ? { actualBytes, validJsonObject: false, actualNodes: 0, actualProperties: 0 }
+          : boundedApprovalRunStateTextMeasurement(row.serialized_run_state, actualBytes, limits)),
         pendingApprovalBytes: safeEnvelopeInteger(
           row.pending_approval_bytes,
           "pending-approval JSON bytes",
@@ -45579,18 +45587,8 @@ export async function appendSessionHistoryItemsInTransaction(
             // bytes of the ordered JSON text, shape of the jsonb projection
             // the insert trigger maintains.
             jsonBytes: sql<string>`octet_length(${schema.sessionHistoryItems.item}::text)`,
-            jsonNodes: sql<string>`(
-                  select count(*)
-                  from jsonb_path_query(session_history_items.item, 'strict $.**')
-                )`,
-            jsonProperties: sql<string>`(
-                  select count(*)
-                  from jsonb_path_query(
-                    session_history_items.item,
-                    'strict $.** ? (@.type() == "object")'
-                  ) as object_value
-                  cross join lateral jsonb_object_keys(object_value) as property
-                )`,
+            jsonNodes: jsonbNodeCountSql(sql`session_history_items.item`),
+            jsonProperties: jsonbPropertyCountSql(sql`session_history_items.item`),
           });
   // Rows skipped by ON CONFLICT were already stored, so only fresh inserts
   // add to the active footprint.
@@ -73165,6 +73163,8 @@ export async function saveRunState(
     pendingApprovals: unknown[];
   },
 ): Promise<boolean> {
+  // Measured before the transaction; a stale attempt still reports stale first.
+  const violation = approvalRunStateSaveViolation(input.serializedRunState, input.pendingApprovals);
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -73178,7 +73178,7 @@ export async function saveRunState(
           attemptId: input.expectedAttemptId,
         });
         if (!allowed.allowed) return false;
-        await assertApprovalRunStateForSave(tx, input.serializedRunState, input.pendingApprovals);
+        if (violation) throw violation;
         const [{ maxVersion } = { maxVersion: 0 }] = await tx
           .select({
             maxVersion: sql<number>`coalesce(max(${schema.agentRunStates.stateVersion}), 0)`,
@@ -73215,22 +73215,27 @@ export async function saveRunState(
   );
 }
 
-async function assertApprovalRunStateForSave(
-  executor: Pick<Database, "execute">,
+/**
+ * Check a RunState against its materialization envelope before any database
+ * work. The measurement is linear in the text (see measureJsonObjectText), so
+ * callers run it before opening their transaction and throw the returned error
+ * at the point where they would otherwise insert the row.
+ */
+function approvalRunStateSaveViolation(
   serializedRunState: string,
   pendingApprovals: unknown[],
-): Promise<void> {
+): ApprovalRunStateLimitExceededError | null {
   const limits = DEFAULT_APPROVAL_RUN_STATE_LIMITS;
   const actualBytes = Buffer.byteLength(serializedRunState, "utf8");
   if (actualBytes > limits.maximumJsonBytes) {
-    throw new ApprovalRunStateLimitExceededError(
+    return new ApprovalRunStateLimitExceededError(
       "json_bytes",
       actualBytes,
       limits.maximumJsonBytes,
     );
   }
   if (pendingApprovals.length > limits.maximumPendingApprovalItems) {
-    throw new ApprovalRunStateLimitExceededError(
+    return new ApprovalRunStateLimitExceededError(
       "pending_approval_items",
       pendingApprovals.length,
       limits.maximumPendingApprovalItems,
@@ -73239,78 +73244,15 @@ async function assertApprovalRunStateForSave(
   const pendingApprovalJson = JSON.stringify(pendingApprovals);
   const pendingApprovalBytes = Buffer.byteLength(pendingApprovalJson, "utf8");
   if (pendingApprovalBytes > limits.maximumPendingApprovalBytes) {
-    throw new ApprovalRunStateLimitExceededError(
+    return new ApprovalRunStateLimitExceededError(
       "pending_approval_bytes",
       pendingApprovalBytes,
       limits.maximumPendingApprovalBytes,
     );
   }
-
-  const [row] = await rawRows<{
-    actual_bytes: string;
-    valid_json_object: boolean;
-    actual_nodes: string;
-    actual_properties: string;
-  }>(
-    executor,
-    sql`
-      with candidate as materialized (
-        select ${serializedRunState}::text as serialized_run_state
-      ), measured as materialized (
-        select serialized_run_state,
-               octet_length(serialized_run_state)::bigint as actual_bytes,
-               (serialized_run_state is json value) as valid_json
-        from candidate
-      ), decoded as materialized (
-        select measured.*,
-               case when valid_json then case
-                 when jsonb_typeof(serialized_run_state::jsonb) = 'object'
-                 then serialized_run_state::jsonb
-                 else null
-               end else null end as state_json
-        from measured
-      ), bounded_nodes as materialized (
-        select count(*)::bigint as actual_nodes
-        from (
-          select node
-          from decoded
-          cross join lateral jsonb_path_query(decoded.state_json, 'strict $.**') as node
-          where decoded.state_json is not null
-          limit ${limits.maximumJsonNodes + 1}
-        ) nodes
-      ), bounded_properties as materialized (
-        select count(*)::bigint as actual_properties
-        from (
-          select property
-          from decoded
-          cross join lateral jsonb_path_query(
-            decoded.state_json,
-            'strict $.** ? (@.type() == "object")'
-          ) as object_value
-          cross join lateral jsonb_object_keys(object_value) as property
-          where decoded.state_json is not null
-          limit ${limits.maximumJsonProperties + 1}
-        ) properties
-      )
-      select decoded.actual_bytes::text as actual_bytes,
-             (decoded.valid_json and decoded.state_json is not null) as valid_json_object,
-             bounded_nodes.actual_nodes::text as actual_nodes,
-             bounded_properties.actual_properties::text as actual_properties
-      from decoded
-      cross join bounded_nodes
-      cross join bounded_properties
-    `,
-  );
-  if (!row) throw new Error("Approval run-state save envelope returned no measurement");
-  assertApprovalRunStateMeasurement(
+  return approvalRunStateMeasurementViolation(
     {
-      actualBytes: safeEnvelopeInteger(row.actual_bytes, "approval run-state bytes"),
-      validJsonObject: row.valid_json_object,
-      actualNodes: safeEnvelopeInteger(row.actual_nodes, "approval run-state JSON nodes"),
-      actualProperties: safeEnvelopeInteger(
-        row.actual_properties,
-        "approval run-state JSON properties",
-      ),
+      ...boundedApprovalRunStateTextMeasurement(serializedRunState, actualBytes, limits),
       pendingApprovalBytes,
       pendingApprovalItems: pendingApprovals.length,
     },
@@ -88517,6 +88459,14 @@ export async function applySessionTurnSettlement(
     maxAttempts: 3,
   };
   const terminalTurn = isTerminalSessionTurnStatus(input.turnStatus);
+  // Measured once, before the transaction and its retries, so no lock is held
+  // while it runs. Stale and superseded attempts still settle as before.
+  const runStateViolation = input.runState
+    ? approvalRunStateSaveViolation(
+        input.runState.serializedRunState,
+        input.runState.pendingApprovals,
+      )
+    : null;
   return await retrySessionActivityRls(db, workspaceId, persistence, async (scopedDb) => {
     // A terminal settlement cancels the turn's still-pending human-input rows.
     // Their parent resolution notices need the parent locked with the child,
@@ -88701,11 +88651,7 @@ export async function applySessionTurnSettlement(
               eq(schema.agentRunStates.sessionId, input.sessionId),
             ),
           );
-        await assertApprovalRunStateForSave(
-          tx,
-          input.runState.serializedRunState,
-          input.runState.pendingApprovals,
-        );
+        if (runStateViolation) throw runStateViolation;
         await tx.insert(schema.agentRunStates).values(
           withLosslessContentWriteVersion(
             withLosslessContentWriteVersion(

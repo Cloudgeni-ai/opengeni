@@ -188,12 +188,16 @@ export type RuntimeMetricsHooks = {
    * only landed after ≥1 retry (the leading indicator of the next unhealed fault);
    * `replyBytes` is set only on a payload-wall fault. Wired from the runtime's
    * `SelfhostedOpObserver` seam.
+   * `infrastructure` marks a failure whose fault class is an infrastructure fault
+   * (machine offline, draining, stream, protocol, …) rather than an answer to what
+   * the caller asked (a missing path, a consent gate, a fence). Absent on success.
    */
   onSandboxOp?: (input: {
     backend: string;
     op: string;
     outcome: "ok" | "failed";
     code?: string;
+    infrastructure?: boolean;
     healed: boolean;
     retries: number;
     durationSeconds: number;

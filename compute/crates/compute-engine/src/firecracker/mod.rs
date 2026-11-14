@@ -10,6 +10,7 @@
 mod api;
 mod balloon;
 mod bounds;
+mod command_line;
 mod drives;
 mod freed;
 mod holder;
@@ -39,6 +40,7 @@ use tokio::time::{Instant, sleep, timeout};
 use self::api::Api;
 pub use self::api::ApiError;
 use self::balloon::Balloon;
+use self::command_line::boot_args;
 use self::drives::drive_config;
 pub use self::jail::BINARY_NAME;
 use self::jail::{Jail, Launch, PID_FILE, jailer_args, remove_if_present, tidy};
@@ -72,46 +74,6 @@ const ADOPT_TIMEOUT: Duration = Duration::from_secs(2);
 /// system profile, which holds what those hold elsewhere: there `/bin` has
 /// only `sh`, and a holder's shell would find no `sleep`.
 const SYSTEM_PATH: &str = "/usr/sbin:/usr/bin:/sbin:/bin:/run/current-system/sw/bin";
-
-/// Guest clock source that restore can correct.
-///
-/// A restored guest's clock otherwise stands still for as long as the VM was
-/// saved. Firecracker fixes that on restore (`clock_realtime`) by moving the
-/// paravirtual KVM clock forward, which only helps a guest that reads time from
-/// that clock. Left to choose, Linux prefers the processor's own counter (TSC),
-/// so boot pins it unless the caller already chose a clock source.
-const CLOCK_SOURCE: &str = "clocksource=kvm-clock";
-
-/// The kernel command line to boot with: the caller's, plus [`CLOCK_SOURCE`]
-/// if it names no clock source of its own, plus the
-/// [`reporting_order`](balloon::reporting_order) for `reporting`, the pages
-/// backing a guest that reports freed memory, if it names no order of its
-/// own. A guest keeps the order it booted with.
-fn boot_args(requested: &str, reporting: Option<PageSize>) -> String {
-    let names = |parameter: &str| {
-        requested.split_whitespace().any(|arg| {
-            arg.split_once('=')
-                .is_some_and(|(name, _)| name == parameter)
-        })
-    };
-    let mut args = requested.trim().to_owned();
-    let mut add = |arg: &str| {
-        if !args.is_empty() {
-            args.push(' ');
-        }
-        args.push_str(arg);
-    };
-    if !names("clocksource") {
-        add(CLOCK_SOURCE);
-    }
-    if let Some(pages) = reporting
-        && !names(balloon::REPORTING_ORDER)
-    {
-        let order = balloon::reporting_order(pages);
-        add(&format!("{}={order}", balloon::REPORTING_ORDER));
-    }
-    args
-}
 
 /// Firecracker's name for a page size.
 fn huge_pages(pages: PageSize) -> &'static str {

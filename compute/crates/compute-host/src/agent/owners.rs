@@ -117,6 +117,7 @@ impl Command {
             Self::Traced(_, command) => command.sandbox(),
             Self::Release { .. }
             | Self::Status { .. }
+            | Self::Keep { .. }
             | Self::Inventory { .. }
             | Self::Adopt { .. }
             | Self::HandOff { .. }
@@ -137,6 +138,7 @@ impl Command {
             | Self::Check { reply, .. }
             | Self::Adopt { reply, .. }
             | Self::HandOff { reply, .. }
+            | Self::Keep { reply, .. }
             | Self::Reconcile { reply, .. } => {
                 let _ = reply.send(Err(error));
             }

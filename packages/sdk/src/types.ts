@@ -323,6 +323,12 @@ export type ToolGatewaySiteConsentAccount = {
   identity: ToolGatewayIdentity;
   connector: string;
   account: string;
+  /** The viewer's own connection behind the route, for reconnecting it. */
+  connectionId?: string;
+  /** The catalog capability that reconnects it, when there is one. */
+  capabilityId?: string | null;
+  /** The connection is shared with the workspace rather than the viewer's own. */
+  shared?: boolean;
 };
 /** The provider's own reading of the call (for Gmail, the message as it would be sent). */
 export type ToolGatewaySiteConsentReview = {
@@ -2842,6 +2848,7 @@ export const SESSION_EVENT_TYPES = [
   "agent.model.request",
   "agent.model.usage",
   "tool.auth_needed",
+  "tool.discovery_card",
   "credential.auth_needed",
   "agent.updated",
   "rig.setup.started",

@@ -19,7 +19,6 @@ import {
   googleCalendarToolSupportsScopes,
 } from "@opengeni/runtime/google-calendar-rest-mcp";
 import {
-  MICROSOFT_DYNAMICS_PRODUCT_LABELS,
   microsoftDynamicsDefaultScope,
   microsoftDynamicsProductForMcpUrl,
 } from "@opengeni/contracts/microsoft-dynamics";
@@ -152,8 +151,6 @@ export type OAuthProviderProfile = {
    * resources.
    */
   requireDeploymentClient?: { key: DeploymentManagedClientKey; message: string };
-  /** Deployment switch for the matched endpoint: a 503 message when it is off. */
-  unavailableMessage?: (settings: Settings, mcpUrl: string) => string | null;
   /** Suggested ownership; explicit choices remain subject to requiredOwnership. */
   defaultOwnership?: ConnectionOwnership;
   /** Built-in-only ownership restriction, including old reconnect/callback state. */
@@ -519,11 +516,6 @@ const MICROSOFT_DYNAMICS_PROFILE: OAuthProviderProfile = {
     message:
       "Microsoft Dynamics requires OPENGENI_MICROSOFT_DYNAMICS_CLIENT_ID and OPENGENI_MICROSOFT_DYNAMICS_CLIENT_SECRET",
   },
-  unavailableMessage: (settings, mcpUrl) =>
-    microsoftDynamicsProductForMcpUrl(mcpUrl) === "finance_operations" &&
-    !settings.microsoftDynamicsFinanceOperationsEnabled
-      ? `${MICROSOFT_DYNAMICS_PRODUCT_LABELS.finance_operations} isn't available on this deployment yet.`
-      : null,
   authorizationServer: {
     issuerOrigins: [MICROSOFT_LOGIN_ORIGIN],
     authorizationEndpointOrigins: [MICROSOFT_LOGIN_ORIGIN],
@@ -542,12 +534,10 @@ const MICROSOFT_DYNAMICS_PROFILE: OAuthProviderProfile = {
   },
   sendResourceParameter: false,
   sendScopeOnRefresh: true,
-  // Each person reaches Dynamics with their own security roles.
+  // Each call runs with the signed-in person's Dynamics security roles, so a
+  // connection is personal by default; whoever may add workspace connections
+  // can still share one account, and everyone then acts with its roles.
   defaultOwnership: "personal",
-  requiredOwnership: {
-    ownership: "personal",
-    message: "Microsoft Dynamics connects each person's own account",
-  },
 };
 
 const BUILT_IN_OAUTH_PROFILES: readonly OAuthProviderProfile[] = [

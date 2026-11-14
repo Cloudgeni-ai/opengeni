@@ -15,6 +15,46 @@ use crate::store::Store;
 const PREPARE_WAIT: Duration = Duration::from_secs(30);
 
 impl<S: Store> Service<S> {
+    /// Every live host, to send requests to.
+    #[must_use]
+    pub fn live_hosts(&self) -> Vec<crate::view::Target> {
+        self.view
+            .hosts()
+            .into_iter()
+            .filter(|known| known.state == HostState::Live)
+            .map(|known| known.target)
+            .collect()
+    }
+
+    /// Asks the host `target` to keep the stored image `image`, fetched
+    /// over `before` (ADR 41). A host from before the request refuses it,
+    /// which counts as asked: it fetches on its first create, as before.
+    ///
+    /// # Errors
+    ///
+    /// When the host cannot be reached, or refuses for another reason.
+    pub async fn keep_on(
+        &self,
+        target: &crate::view::Target,
+        image: ImageId,
+        before: Option<ImageId>,
+    ) -> Result<(), Failure> {
+        let request = Request::Keep { image, before };
+        let answered = self
+            .hosts
+            .call(target, None, &request, PREPARE_WAIT)
+            .await
+            .map_err(|error| Failure::Unavailable(error.to_string()))?;
+        match &answered.answer.reply {
+            Reply::Done
+            | Reply::Error {
+                code: compute_protocol::host::ErrorCode::Invalid,
+                ..
+            } => Ok(()),
+            _ => Err(host_failure(&answered)),
+        }
+    }
+
     /// The guest programs most live hosts build images with, by their
     /// digest (the lowest of those most say, for a tie), or `None` when no
     /// live host says: what this release's images are built with.
@@ -68,6 +108,9 @@ impl<S: Store> Service<S> {
         let target = &live[turn % live.len()].target;
         let request = Request::Prepare {
             image: source.to_owned(),
+            // What the name starts from now: the host builds over it if it
+            // keeps it (ADR 40).
+            before: self.settings().images.get(name).flatten(),
         };
         let answered = self
             .hosts

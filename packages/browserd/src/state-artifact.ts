@@ -57,6 +57,13 @@ const EXCLUDED_DIRECTORY_NAMES = new Set([
   "DawnWebGPUCache",
   "GPUCache",
   "GrShaderCache",
+  // Installed service workers with their script and Cache Storage copies of a
+  // site's assets. Web apps fill these with hundreds of MB that the site
+  // downloads again, so carrying them made a checkpoint many times larger
+  // than the sign-ins and site storage it exists for. Without the directory a
+  // site simply installs its service worker again on the next visit, as on a
+  // first visit; cookies, local storage and IndexedDB live elsewhere.
+  "Service Worker",
   "ShaderCache",
 ]);
 

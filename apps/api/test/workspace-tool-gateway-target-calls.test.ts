@@ -192,6 +192,7 @@ const {
   resolveWorkspaceToolTarget,
   resolveWorkspaceToolManifest,
 } = await import("../src/workspace-tool-target");
+const { declareSiteToolsForEveryViewer } = await import("../src/site-tool-routing");
 import type { TargetGatewayOptions } from "../src/workspace-tool-target";
 
 afterAll(() => mock.restore());
@@ -1719,16 +1720,89 @@ describe("Site tool consent", () => {
         declaredIdentity: canonical,
       });
       // Without a canonical declaration another member's route stays theirs:
-      // the same non-enumerating answer as an unavailable tool.
+      // still the unavailable-tool status, now saying why.
       f.state.resolved.length = 0;
       await expectHttpStatus(
         invoke(f, f.identity(f.foreign), {
           readSiteVersion: siteVersion([f.identity(f.foreign)]),
         }),
         404,
+        "site_tool_not_available_for_viewer",
       );
       expect(f.state.resolved).toHaveLength(0);
       expect(f.grafana.calls).toHaveLength(1);
+    } finally {
+      f.close();
+    }
+  });
+
+  test("a declared workspace-shared account works for every viewer, not only the publisher", async () => {
+    const f = createFixture();
+    try {
+      // The publisher declares the shared account's route; this viewer owns no account.
+      const declared = [f.identity(f.shared)];
+      const outcome = await invoke(
+        f,
+        f.identity(f.shared),
+        { readSiteVersion: siteVersion(declared) },
+        { authorization: targetAuthorization("human:target-call-none") },
+      );
+      expect(outcome.result.isError).not.toBe(true);
+      expect(outcome.tool.entry.identity).toEqual(f.identity(f.shared));
+      expect(usedConnections(f)).toEqual([f.shared.id]);
+    } finally {
+      f.close();
+    }
+  });
+
+  test("a published Site pairs the publisher's account routes with their connector, so other viewers use their own or connect", async () => {
+    const f = createFixture();
+    try {
+      ownOnly(f);
+      // An agent sees only its own account routes, so that is what the
+      // publisher (the owner of `foreign`) declares.
+      const declared = await declareSiteToolsForEveryViewer(f.deps, grantFor(otherSubjectId), [
+        f.identity(f.foreign),
+      ]);
+      expect(declared).toEqual([f.identity(f.foreign), canonical]);
+      // Pairing again adds nothing.
+      expect(
+        await declareSiteToolsForEveryViewer(f.deps, grantFor(otherSubjectId), declared),
+      ).toEqual(declared);
+      // Routes the publisher does not own are kept as declared, never resolved.
+      expect(
+        await declareSiteToolsForEveryViewer(f.deps, grantFor("human:target-call-none"), [
+          f.identity(f.foreign),
+        ]),
+      ).toEqual([f.identity(f.foreign)]);
+      // Another viewer runs the call on their own account...
+      const outcome = await invoke(f, f.identity(f.foreign), {
+        readSiteVersion: siteVersion(declared),
+      });
+      expect(outcome.tool.entry.identity).toEqual(f.identity(f.personal));
+      expect(usedConnections(f)).toEqual([f.personal.id]);
+      // ...and a viewer without one is asked to connect, not told the tool is missing.
+      await expectHttpStatus(
+        invoke(
+          f,
+          f.identity(f.foreign),
+          { readSiteVersion: siteVersion(declared) },
+          { authorization: targetAuthorization("human:target-call-none") },
+        ),
+        409,
+        "site_tool_connection_required",
+      );
+      const consent = await describeWorkspaceSiteToolConsent(
+        f.deps,
+        targetAuthorization("human:target-call-none"),
+        { ...site, identity: f.identity(f.foreign) },
+        targetOptions({ readSiteVersion: siteVersion(declared) }),
+      );
+      expect(consent.accounts).toEqual([]);
+      expect(consent.connect).toMatchObject({ providerDomain: "127.0.0.1" });
+      expect(f.state.resolved.map((input) => input.connectionRef.connectionId)).not.toContain(
+        f.foreign.id,
+      );
     } finally {
       f.close();
     }
@@ -2135,6 +2209,10 @@ describe("Site tool consent", () => {
       expect(choices.selected).toBeNull();
       expect(choices.accounts.map((account) => account.identity).sort(byServer)).toEqual(
         [f.identity(f.shared), f.identity(f.personal)].sort(byServer),
+      );
+      // Each names the viewer's own connection, so the frame can reconnect it.
+      expect(choices.accounts.every((account) => typeof account.connectionId === "string")).toBe(
+        true,
       );
       const none = await describeWorkspaceSiteToolConsent(
         f.deps,

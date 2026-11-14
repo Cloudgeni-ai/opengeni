@@ -11497,6 +11497,7 @@
       "terminal.pty.output.delta",
       "terminal.pty.started",
       "tool.auth_needed",
+      "tool.discovery_card",
       "turn.cancelled",
       "turn.capacity_waiting",
       "turn.completed",
@@ -29271,7 +29272,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"agent.message.completed\\\"\",\"\\\"agent.message.delta\\\"\",\"\\\"agent.model.request\\\"\",\"\\\"agent.model.usage\\\"\",\"\\\"agent.reasoning.delta\\\"\",\"\\\"agent.toolCall.created\\\"\",\"\\\"agent.toolCall.output\\\"\",\"\\\"agent.updated\\\"\",\"\\\"artifact.created\\\"\",\"\\\"codex.account.selection.changed\\\"\",\"\\\"codex.account.switched\\\"\",\"\\\"codex.capacity.resumed\\\"\",\"\\\"codex.capacity.superseded\\\"\",\"\\\"codex.capacity.waiting\\\"\",\"\\\"codex.credential.selected\\\"\",\"\\\"codex.fleet.decision\\\"\",\"\\\"credential.auth_needed\\\"\",\"\\\"fs.changed\\\"\",\"\\\"git.changed\\\"\",\"\\\"goal.cleared\\\"\",\"\\\"goal.completed\\\"\",\"\\\"goal.continuation\\\"\",\"\\\"goal.held\\\"\",\"\\\"goal.paused\\\"\",\"\\\"goal.progress\\\"\",\"\\\"goal.resumed\\\"\",\"\\\"goal.rewrite.proposed\\\"\",\"\\\"goal.rewrite.rejected\\\"\",\"\\\"goal.set\\\"\",\"\\\"goal.updated\\\"\",\"\\\"instruction.confirmation.recovered\\\"\",\"\\\"knowledge.confirmation.recovered\\\"\",\"\\\"knowledge.source.failed\\\"\",\"\\\"knowledge.source.prepared\\\"\",\"\\\"machine.link.lost\\\"\",\"\\\"machine.link.restored\\\"\",\"\\\"machine.op.failed\\\"\",\"\\\"machine.op.recovered\\\"\",\"\\\"machine.runner.restarted\\\"\",\"\\\"memory.corrected\\\"\",\"\\\"memory.saved\\\"\",\"\\\"model_account.selection.changed\\\"\",\"\\\"recording.available\\\"\",\"\\\"recording.failed\\\"\",\"\\\"recording.started\\\"\",\"\\\"rig.setup.completed\\\"\",\"\\\"rig.setup.failed\\\"\",\"\\\"rig.setup.skipped\\\"\",\"\\\"rig.setup.started\\\"\",\"\\\"sandbox.box.created\\\"\",\"\\\"sandbox.box.lost\\\"\",\"\\\"sandbox.box.snapshot\\\"\",\"\\\"sandbox.box.terminated\\\"\",\"\\\"sandbox.command.output.delta\\\"\",\"\\\"sandbox.env.drift\\\"\",\"\\\"sandbox.operation.completed\\\"\",\"\\\"sandbox.operation.failed\\\"\",\"\\\"sandbox.operation.started\\\"\",\"\\\"sandbox.recovery.selected\\\"\",\"\\\"session.agent.updated\\\"\",\"\\\"session.agentCall.ringing\\\"\",\"\\\"session.agentCall.settled\\\"\",\"\\\"session.command.backgrounded\\\"\",\"\\\"session.command.finished\\\"\",\"\\\"session.context.cleared\\\"\",\"\\\"session.context.compacted\\\"\",\"\\\"session.context.compaction.requested\\\"\",\"\\\"session.context.compaction.skipped\\\"\",\"\\\"session.context.compaction.started\\\"\",\"\\\"session.control.paused\\\"\",\"\\\"session.control.resumed\\\"\",\"\\\"session.control.steer_requested\\\"\",\"\\\"session.created\\\"\",\"\\\"session.event.envelope_omitted\\\"\",\"\\\"session.humanInput.requested\\\"\",\"\\\"session.mcp.approval_policy.updated\\\"\",\"\\\"session.model_settings.updated\\\"\",\"\\\"session.notification.posted\\\"\",\"\\\"session.notification.withdrawn\\\"\",\"\\\"session.personal_resources.attached\\\"\",\"\\\"session.profile_set\\\"\",\"\\\"session.queue.changed\\\"\",\"\\\"session.queue.history\\\"\",\"\\\"session.queue.prompt.cancelled\\\"\",\"\\\"session.realtime.ended\\\"\",\"\\\"session.realtime.started\\\"\",\"\\\"session.requiresAction\\\"\",\"\\\"session.resources.added\\\"\",\"\\\"session.resources.removed\\\"\",\"\\\"session.route.reconciled\\\"\",\"\\\"session.runtime.configured\\\"\",\"\\\"session.skills.updated\\\"\",\"\\\"session.status.changed\\\"\",\"\\\"session.title_set\\\"\",\"\\\"session.tool_policy.updated\\\"\",\"\\\"session.usage_limit.updated\\\"\",\"\\\"session.variable_sets.updated\\\"\",\"\\\"session.visibility.changed\\\"\",\"\\\"session.wait.finished\\\"\",\"\\\"session.wait.started\\\"\",\"\\\"stream.closed\\\"\",\"\\\"stream.opened\\\"\",\"\\\"stream.revoked\\\"\",\"\\\"stream.url.rotated\\\"\",\"\\\"subscription.account.selected\\\"\",\"\\\"subscription.account.switched\\\"\",\"\\\"system.update.cancelled\\\"\",\"\\\"system.update.delivered\\\"\",\"\\\"system.update.pending\\\"\",\"\\\"system.update.settled\\\"\",\"\\\"system.update.superseded\\\"\",\"\\\"terminal.pty.exited\\\"\",\"\\\"terminal.pty.output.delta\\\"\",\"\\\"terminal.pty.started\\\"\",\"\\\"tool.auth_needed\\\"\",\"\\\"turn.cancelled\\\"\",\"\\\"turn.capacity_waiting\\\"\",\"\\\"turn.completed\\\"\",\"\\\"turn.dispatch.expired\\\"\",\"\\\"turn.event.rejected_late\\\"\",\"\\\"turn.failed\\\"\",\"\\\"turn.queued\\\"\",\"\\\"turn.recovery.requested\\\"\",\"\\\"turn.started\\\"\",\"\\\"turn.startup.phase.completed\\\"\",\"\\\"turn.startup.phase.failed\\\"\",\"\\\"turn.startup.phase.started\\\"\",\"\\\"turn.superseded\\\"\",\"\\\"usage.exhausted\\\"\",\"\\\"usage.period_reset\\\"\",\"\\\"usage.threshold_reached\\\"\",\"\\\"user.approvalDecision\\\"\",\"\\\"user.humanInputResponse\\\"\",\"\\\"user.message\\\"\",\"\\\"user.pause\\\"\",\"\\\"workspace.inference.paused\\\"\",\"\\\"workspace.inference.resumed\\\"\",\"\\\"workspace.revision.captured\\\"\",\"\\\"workspace.revision.degraded\\\"\"]"
+        "$": "enum=[\"\\\"agent.message.completed\\\"\",\"\\\"agent.message.delta\\\"\",\"\\\"agent.model.request\\\"\",\"\\\"agent.model.usage\\\"\",\"\\\"agent.reasoning.delta\\\"\",\"\\\"agent.toolCall.created\\\"\",\"\\\"agent.toolCall.output\\\"\",\"\\\"agent.updated\\\"\",\"\\\"artifact.created\\\"\",\"\\\"codex.account.selection.changed\\\"\",\"\\\"codex.account.switched\\\"\",\"\\\"codex.capacity.resumed\\\"\",\"\\\"codex.capacity.superseded\\\"\",\"\\\"codex.capacity.waiting\\\"\",\"\\\"codex.credential.selected\\\"\",\"\\\"codex.fleet.decision\\\"\",\"\\\"credential.auth_needed\\\"\",\"\\\"fs.changed\\\"\",\"\\\"git.changed\\\"\",\"\\\"goal.cleared\\\"\",\"\\\"goal.completed\\\"\",\"\\\"goal.continuation\\\"\",\"\\\"goal.held\\\"\",\"\\\"goal.paused\\\"\",\"\\\"goal.progress\\\"\",\"\\\"goal.resumed\\\"\",\"\\\"goal.rewrite.proposed\\\"\",\"\\\"goal.rewrite.rejected\\\"\",\"\\\"goal.set\\\"\",\"\\\"goal.updated\\\"\",\"\\\"instruction.confirmation.recovered\\\"\",\"\\\"knowledge.confirmation.recovered\\\"\",\"\\\"knowledge.source.failed\\\"\",\"\\\"knowledge.source.prepared\\\"\",\"\\\"machine.link.lost\\\"\",\"\\\"machine.link.restored\\\"\",\"\\\"machine.op.failed\\\"\",\"\\\"machine.op.recovered\\\"\",\"\\\"machine.runner.restarted\\\"\",\"\\\"memory.corrected\\\"\",\"\\\"memory.saved\\\"\",\"\\\"model_account.selection.changed\\\"\",\"\\\"recording.available\\\"\",\"\\\"recording.failed\\\"\",\"\\\"recording.started\\\"\",\"\\\"rig.setup.completed\\\"\",\"\\\"rig.setup.failed\\\"\",\"\\\"rig.setup.skipped\\\"\",\"\\\"rig.setup.started\\\"\",\"\\\"sandbox.box.created\\\"\",\"\\\"sandbox.box.lost\\\"\",\"\\\"sandbox.box.snapshot\\\"\",\"\\\"sandbox.box.terminated\\\"\",\"\\\"sandbox.command.output.delta\\\"\",\"\\\"sandbox.env.drift\\\"\",\"\\\"sandbox.operation.completed\\\"\",\"\\\"sandbox.operation.failed\\\"\",\"\\\"sandbox.operation.started\\\"\",\"\\\"sandbox.recovery.selected\\\"\",\"\\\"session.agent.updated\\\"\",\"\\\"session.agentCall.ringing\\\"\",\"\\\"session.agentCall.settled\\\"\",\"\\\"session.command.backgrounded\\\"\",\"\\\"session.command.finished\\\"\",\"\\\"session.context.cleared\\\"\",\"\\\"session.context.compacted\\\"\",\"\\\"session.context.compaction.requested\\\"\",\"\\\"session.context.compaction.skipped\\\"\",\"\\\"session.context.compaction.started\\\"\",\"\\\"session.control.paused\\\"\",\"\\\"session.control.resumed\\\"\",\"\\\"session.control.steer_requested\\\"\",\"\\\"session.created\\\"\",\"\\\"session.event.envelope_omitted\\\"\",\"\\\"session.humanInput.requested\\\"\",\"\\\"session.mcp.approval_policy.updated\\\"\",\"\\\"session.model_settings.updated\\\"\",\"\\\"session.notification.posted\\\"\",\"\\\"session.notification.withdrawn\\\"\",\"\\\"session.personal_resources.attached\\\"\",\"\\\"session.profile_set\\\"\",\"\\\"session.queue.changed\\\"\",\"\\\"session.queue.history\\\"\",\"\\\"session.queue.prompt.cancelled\\\"\",\"\\\"session.realtime.ended\\\"\",\"\\\"session.realtime.started\\\"\",\"\\\"session.requiresAction\\\"\",\"\\\"session.resources.added\\\"\",\"\\\"session.resources.removed\\\"\",\"\\\"session.route.reconciled\\\"\",\"\\\"session.runtime.configured\\\"\",\"\\\"session.skills.updated\\\"\",\"\\\"session.status.changed\\\"\",\"\\\"session.title_set\\\"\",\"\\\"session.tool_policy.updated\\\"\",\"\\\"session.usage_limit.updated\\\"\",\"\\\"session.variable_sets.updated\\\"\",\"\\\"session.visibility.changed\\\"\",\"\\\"session.wait.finished\\\"\",\"\\\"session.wait.started\\\"\",\"\\\"stream.closed\\\"\",\"\\\"stream.opened\\\"\",\"\\\"stream.revoked\\\"\",\"\\\"stream.url.rotated\\\"\",\"\\\"subscription.account.selected\\\"\",\"\\\"subscription.account.switched\\\"\",\"\\\"system.update.cancelled\\\"\",\"\\\"system.update.delivered\\\"\",\"\\\"system.update.pending\\\"\",\"\\\"system.update.settled\\\"\",\"\\\"system.update.superseded\\\"\",\"\\\"terminal.pty.exited\\\"\",\"\\\"terminal.pty.output.delta\\\"\",\"\\\"terminal.pty.started\\\"\",\"\\\"tool.auth_needed\\\"\",\"\\\"tool.discovery_card\\\"\",\"\\\"turn.cancelled\\\"\",\"\\\"turn.capacity_waiting\\\"\",\"\\\"turn.completed\\\"\",\"\\\"turn.dispatch.expired\\\"\",\"\\\"turn.event.rejected_late\\\"\",\"\\\"turn.failed\\\"\",\"\\\"turn.queued\\\"\",\"\\\"turn.recovery.requested\\\"\",\"\\\"turn.started\\\"\",\"\\\"turn.startup.phase.completed\\\"\",\"\\\"turn.startup.phase.failed\\\"\",\"\\\"turn.startup.phase.started\\\"\",\"\\\"turn.superseded\\\"\",\"\\\"usage.exhausted\\\"\",\"\\\"usage.period_reset\\\"\",\"\\\"usage.threshold_reached\\\"\",\"\\\"user.approvalDecision\\\"\",\"\\\"user.humanInputResponse\\\"\",\"\\\"user.message\\\"\",\"\\\"user.pause\\\"\",\"\\\"workspace.inference.paused\\\"\",\"\\\"workspace.inference.resumed\\\"\",\"\\\"workspace.revision.captured\\\"\",\"\\\"workspace.revision.degraded\\\"\"]"
       }
     },
     "SessionGoal": {
@@ -32686,8 +32687,11 @@
       "shape": {
         "$": "object",
         "$.account": "string!",
+        "$.capabilityId": "string? null",
+        "$.connectionId": "string?",
         "$.connector": "string!",
-        "$.identity": "ref(AttemptToolIdentity)!"
+        "$.identity": "ref(AttemptToolIdentity)!",
+        "$.shared": "boolean?"
       }
     },
     "ToolGatewaySiteConsentResponse": {
@@ -38259,12 +38263,17 @@
       "SiteTakedownRequest": "type",
       "SiteToolBridge": "type",
       "SiteToolCaller": "type",
+      "SiteToolCallFailedError": "value",
       "SiteToolCallRequest": "type",
       "SiteToolConnectionRequiredError": "value",
       "SiteToolConnectPrompt": "type",
       "SiteToolConsentDecision": "type",
       "SiteToolConsentDeclinedError": "value",
       "SiteToolConsentPrompt": "type",
+      "SiteToolFailure": "type",
+      "SiteToolFailureCode": "type",
+      "siteToolFailureMessage": "value",
+      "SiteToolFailurePrompt": "type",
       "SiteViewAs": "type",
       "SiteViewer": "type",
       "SiteViewerCapabilities": "type",
@@ -39872,12 +39881,17 @@
       "siteSessionPath": "value",
       "SiteToolBridge": "type",
       "SiteToolCaller": "type",
+      "SiteToolCallFailedError": "value",
       "SiteToolCallRequest": "type",
       "SiteToolConnectionRequiredError": "value",
       "SiteToolConnectPrompt": "type",
       "SiteToolConsentDecision": "type",
       "SiteToolConsentDeclinedError": "value",
-      "SiteToolConsentPrompt": "type"
+      "SiteToolConsentPrompt": "type",
+      "SiteToolFailure": "type",
+      "SiteToolFailureCode": "type",
+      "siteToolFailureMessage": "value",
+      "SiteToolFailurePrompt": "type"
     },
     "@opengeni/sdk/site-bridge-host": {
       "handleSiteBridgeRequest": "value",
@@ -40154,6 +40168,7 @@
       "ComposerBusySend": "type",
       "ComposerControllerState": "type",
       "ComposerDraftMapContext": "type",
+      "ComposerModelPicker": "value",
       "ComposerPolicy": "type",
       "ComposerQueuedRecall": "type",
       "ComposerSendExtras": "type",
@@ -40397,6 +40412,9 @@
       "ModelDisplayInput": "type",
       "modelDisplayName": "value",
       "modelHasMark": "value",
+      "ModelLevel": "type",
+      "ModelLevelPicker": "value",
+      "ModelLevelPickerProps": "type",
       "ModelMark": "value",
       "ModelName": "value",
       "ModelPicker": "value",
@@ -40604,6 +40622,7 @@
       "SessionListProps": "type",
       "SessionMcpCapabilityCard": "value",
       "SessionMcpCapabilityCardProps": "type",
+      "SessionModelPickerProps": "type",
       "SessionSecretsVault": "type",
       "SessionSecretsView": "type",
       "SessionStatus": "value",
@@ -41382,6 +41401,7 @@
       "ComposerFrameProps": "type",
       "ComposerHintProps": "type",
       "ComposerInputProps": "type",
+      "ComposerModelPicker": "value",
       "ComposerModelPickerProps": "type",
       "ComposerPauseButtonProps": "type",
       "ComposerRootProps": "type",
@@ -41406,6 +41426,9 @@
       "Hint": "value",
       "IndexedDbVoiceRecordingStore": "value",
       "Input": "value",
+      "ModelLevel": "type",
+      "ModelLevelPicker": "value",
+      "ModelLevelPickerProps": "type",
       "ModelPicker": "value",
       "ModelPolicyPicker": "value",
       "ModelPolicyPickerGroupPresentation": "type",
@@ -41849,6 +41872,15 @@
       "SingleSendWording": "value",
       "useOpenGeniLocale": "value",
       "useOpenGeniText": "value"
+    },
+    "@opengeni/react/model-levels": {
+      "ModelLevel": "type",
+      "modelLevelChoice": "value",
+      "ModelLevelChoice": "type",
+      "ModelLevelsInput": "type",
+      "ModelLevelState": "type",
+      "modelLevelsView": "value",
+      "ModelLevelsView": "type"
     },
     "@opengeni/react/model-mark-paths": {
       "CHATGPT_MARK_PATH": "value",
@@ -42624,6 +42656,7 @@
     "@opengeni/react/this-computer.css": {},
     "@opengeni/react/timeline-model": {
       "ActivityGroup": "type",
+      "activityHasUnloadedSteps": "value",
       "AgentTitleParts": "type",
       "agentWorkHumanInputSummary": "value",
       "ANNOTATION_MAX_NOTE_LENGTH": "value",
@@ -42757,6 +42790,7 @@
       "timelineGroupIndexAtSequence": "value",
       "timelineGroupSequences": "value",
       "timelineTurnsWithOutput": "value",
+      "timelineTurnsWithUnloadedSteps": "value",
       "TOOL_STEP_IDS": "value",
       "ToolBody": "type",
       "ToolChip": "type",
@@ -42777,6 +42811,7 @@
       "truncatePreview": "value",
       "tryParseJson": "value",
       "TurnGroup": "type",
+      "turnGroupHasUnloadedSteps": "value",
       "TurnSummaryContext": "type",
       "TurnSummaryFacet": "type",
       "TurnSummaryFacetConfiguration": "type",
@@ -46493,6 +46528,14 @@
       "ports",
       "start"
     ],
+    "SiteToolCallFailedError": [
+      "code",
+      "detail",
+      "details",
+      "outcomeUnknown",
+      "retryable",
+      "system"
+    ],
     "SiteToolConnectionRequiredError": [
       "code",
       "outcomeUnknown",
@@ -49692,6 +49735,26 @@
       ],
       "update": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateSiteAuthConnectionRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SiteAuthConnectionMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ]
+    },
+    "@opengeni/sdk:SiteToolCallFailedError": {
+      "code": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SiteToolFailureCode\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "detail": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSStringKeyword\"}}"
+      ],
+      "details": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"code\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"}}"
+      ],
+      "outcomeUnknown": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSBooleanKeyword\"}}"
+      ],
+      "retryable": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSBooleanKeyword\"}}"
+      ],
+      "system": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSStringKeyword\"}]}}"
       ]
     },
     "@opengeni/sdk:SiteToolConnectionRequiredError": {
@@ -60930,6 +60993,26 @@
     "@opengeni/sdk/site:OpenGeniSiteBridgeError": {},
     "@opengeni/sdk/site:OpenGeniSiteDataError": {},
     "@opengeni/sdk/site:OpenGeniSiteSqlError": {},
+    "@opengeni/sdk/site:SiteToolCallFailedError": {
+      "code": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SiteToolFailureCode\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "detail": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSStringKeyword\"}}"
+      ],
+      "details": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"code\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"}}"
+      ],
+      "outcomeUnknown": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSBooleanKeyword\"}}"
+      ],
+      "retryable": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSBooleanKeyword\"}}"
+      ],
+      "system": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSStringKeyword\"}]}}"
+      ]
+    },
     "@opengeni/sdk/site:SiteToolConnectionRequiredError": {
       "code": [
         "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":null}"

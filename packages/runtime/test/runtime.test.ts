@@ -9600,6 +9600,18 @@ describe("runtime event normalization", () => {
         structuralResults.push(await structural.executeCatalogTool("inspect", {}));
       }
 
+      // A call that needs its connection signed in again says so in a typed
+      // code, beside the same text.
+      expect(structuralResults[1]).toMatchObject({
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: "Authentication required - a connection link was posted to the session.",
+          },
+        ],
+        structuredContent: { error: { code: "connection_auth_needed", outcomeUnknown: false } },
+      });
       expect(structuralResults[2]).toMatchObject({
         isError: true,
         structuredContent: {

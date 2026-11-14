@@ -13,6 +13,8 @@ import {
 } from "@opengeni/core";
 import { storedConnectionIntegrationKey } from "../integrations/stored-connection-integration-key";
 import { withDesktopAppReturnPath } from "../desktop-app-return";
+import { nangoBackendsFor, projectConnectionsForBackends } from "@opengeni/core";
+import { deleteNangoConnectionFor } from "../integrations/nango-connect";
 import {
   assertClaudeWorkspaceCredential,
   prepareClaudeWorkspaceCredential,
@@ -136,6 +138,7 @@ import {
   type SlackBotInstallCallbackFailureStage,
 } from "@opengeni/db";
 import type { ApiRouteDeps } from "@opengeni/core";
+import type { ConnectionMetadata as ConnectionMetadataRecord } from "@opengeni/contracts";
 import { KNOWLEDGE_SOURCE_SYNC_RETIRED_MESSAGE } from "@opengeni/contracts/knowledge-source-sync-retirement";
 import { pinnedFetch } from "@opengeni/network";
 import type { Hono } from "hono";
@@ -186,6 +189,7 @@ import { oauthStateTtlMs, requireIntegrationsStateSecret } from "../integrations
 import { withAccountIdentityState } from "../integrations/oauth-account-identity";
 import { parseRequestBody, parseRequestJson, requestValidationError } from "../http/request-body";
 import { disconnectAuditActor } from "../http/disconnect-audit-actor";
+import { prepareGoogleOAuthDisconnect } from "../integrations/google-oauth-revocation";
 import { parsePathParam } from "../http/path-identifier";
 
 type OpenGeniSlackInstallState = {
@@ -215,7 +219,11 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId);
     const reach = connectionReadReach(grant);
-    const connections = await listConnectionsMetadata(db, workspaceId, grant.subjectId);
+    // While a backend is switched, accounts read as the switch projects them.
+    const connections = projectConnectionsForBackends(
+      await listConnectionsMetadata(db, workspaceId, grant.subjectId),
+      await nangoBackendsFor(db, settings),
+    );
     return c.json(
       ListConnectionsResponse.parse({
         // The personal setup permission sees only the caller's own accounts.
@@ -249,10 +257,11 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(
       ListConnectionsResponse.parse({
         connections: withAccountIdentityState(
-          (
+          projectConnectionsForBackends(
             await listOwnConnectionAccountsForGrant(db, grant, {
               includeInactive: includeInactive === "true",
-            })
+            }),
+            await nangoBackendsFor(db, settings),
           ).filter((connection) => reach === "all" || connection.subjectId === grant.subjectId),
         ),
       }),
@@ -896,7 +905,22 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!connection) {
       throw new HTTPException(404, { message: "connection not found" });
     }
-    return c.json(ConnectionResponse.parse({ connection }));
+    // Read as the lists read it while a backend is switched. Only a native
+    // connection of a Nango-backed service needs its owner's other accounts
+    // (to tell whether a Nango connection has superseded it); a personal one
+    // also counts the owner's personal accounts in other workspaces.
+    const backends = await nangoBackendsFor(db, settings);
+    const siblings = new Map<string, ConnectionMetadataRecord>();
+    if (backends.size > 0 && !connection.providerDomain.startsWith("nango:")) {
+      for (const other of await listConnectionsMetadata(db, workspaceId, grant.subjectId))
+        if (other.subjectId === connection.subjectId) siblings.set(other.id, other);
+      if (connection.subjectId !== null && connection.subjectId === grant.subjectId)
+        for (const other of await listOwnConnectionAccountsForGrant(db, grant))
+          if (other.subjectId === connection.subjectId) siblings.set(other.id, other);
+      siblings.delete(connection.id);
+    }
+    const [projected] = projectConnectionsForBackends([connection, ...siblings.values()], backends);
+    return c.json(ConnectionResponse.parse({ connection: projected ?? connection }));
   });
 
   app.patch("/v1/workspaces/:workspaceId/connections/:connectionId", async (c) => {
@@ -1353,6 +1377,12 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     // Each writer records the disconnect in its own transaction.
     const audit = disconnectAuditActor(c, { subjectId: grant.subjectId, grant });
+    // Google OAuth: drop the stored tokens in the revoke write, then end the
+    // grant at Google once that write committed.
+    const googleDisconnect =
+      isPersonalGitHub || isOpenGeniSlackBotConnection(existing) || workspaceProviderKind
+        ? undefined
+        : await prepareGoogleOAuthDisconnect(deps, existing, grant.subjectId);
     const connection = isPersonalGitHub
       ? await disconnectPersonalGitHub(deps, {
           workspaceId,
@@ -1388,11 +1418,17 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
               connectionId,
               grant.subjectId,
               existing.version,
-              { audit },
+              {
+                audit,
+                replacementCredentialEncrypted: googleDisconnect?.replacementCredentialEncrypted,
+              },
             );
     if (!connection) {
       throw new HTTPException(409, { message: "connection changed during disconnect; try again" });
     }
+    // A Nango connection is deleted in Nango too, so its billing stops.
+    await deleteNangoConnectionFor({ db, settings }, existing);
+    await googleDisconnect?.revokeAtGoogle?.();
     return c.json(ConnectionResponse.parse({ connection }));
   });
 

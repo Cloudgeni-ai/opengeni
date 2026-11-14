@@ -3400,6 +3400,19 @@ export const englishMessages = {
   "messageTimeline.attemptFailedRetried": "Attempt failed · retried",
   "messageTimeline.youAnswered": "You answered",
   "messageTimeline.youLetTheAgentDecide": "You let the agent decide",
+  /** How to turn on Ultrafast on a level that offers it: press and hold (on the last level, pushing past the end also works). */
+  "modelLevelPicker.holdForUltrafast": "Hold for Ultrafast",
+  /** The composer's level control (host-defined levels such as Standard and Thorough). */
+  "modelLevelPicker.label": "Thinking level",
+  /** Screen-reader value while the chat runs Ultrafast on that level. */
+  "modelLevelPicker.levelWithUltrafast": "{label}, Ultrafast",
+  "modelLevelPicker.loading": "Loading levels",
+  /** Screen-reader value while the chat runs a model that is none of the levels. */
+  "modelLevelPicker.outsideLevels": "{label}, not one of the levels",
+  /** Screen-reader action that turns Ultrafast off and keeps the level. */
+  "modelLevelPicker.turnOffUltrafast": "Turn off Ultrafast",
+  /** Screen-reader action standing in for the hold and push gestures. */
+  "modelLevelPicker.turnOnUltrafast": "Turn on Ultrafast",
   "modelPicker.codexOnlySession": "Codex-only session",
   "modelPicker.model": "Model",
   "modelPickerModel.billedToTheConnectedProvider": "Billed to the connected provider account",
@@ -5057,6 +5070,11 @@ export const englishMessages = {
   "sessionStatusModel.running": "Running",
   "sessionStatusModel.stuck": "Stuck",
   "sessionStatusModel.waitingOnYou": "Waiting on you",
+  "siteToolRecover.askSiteOwner": "Ask the Site owner to publish it again.",
+  "siteToolRecover.askWhoeverManages": "Ask whoever manages your {system} access.",
+  "siteToolRecover.close": "Close",
+  "siteToolRecover.details": "Details",
+  "siteToolRecover.tryAgain": "Try again",
   "sitesUi.archiveSite": "Archive Site",
   "sitesUi.archiveThisSiteForWorkspace": "Archive this Site for workspace users?",
   "sitesUi.chooseAVersion": "Choose a version",

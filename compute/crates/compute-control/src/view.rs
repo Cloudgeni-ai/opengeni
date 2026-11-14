@@ -620,8 +620,52 @@ impl View {
             reach: inner.reach(reach)?,
             ..*demand
         };
-        let refused = Refused::Place(demand);
-        let passed: Vec<HostId> = inner
+        let passed = Self::passed(inner, silent_after, &demand);
+        let placement = if passed.is_empty() {
+            inner.fleet.place(&demand, exclude, &mut inner.rng)
+        } else {
+            let mut exclude = exclude.clone();
+            exclude.extend(passed);
+            inner.fleet.place(&demand, &exclude, &mut inner.rng)
+        }
+        .ok_or(Unplaced::NoRoom)?;
+        Ok((placement, demand))
+    }
+
+    /// Whether a host outside `exclude` that [`Self::place`] may choose
+    /// could take `demand`, reaching `reach`, at once by what it last
+    /// reported, booking nothing. Unlike [`Self::has_room`], a host whose
+    /// memory could hold it only once it makes room does not count.
+    #[must_use]
+    pub fn has_room_now(
+        &self,
+        demand: &Demand,
+        reach: &[String],
+        exclude: &HashSet<HostId>,
+    ) -> bool {
+        let mut inner = self.write();
+        let inner = &mut *inner;
+        if inner
+            .read_at
+            .is_none_or(|at| at.elapsed() > self.silent_after)
+        {
+            return false;
+        }
+        let Ok(reach) = inner.reach(reach) else {
+            return false;
+        };
+        let demand = Demand { reach, ..*demand };
+        let mut exclude = exclude.clone();
+        exclude.extend(Self::passed(inner, self.silent_after, &demand));
+        inner.fleet.fits_now(&demand, &exclude)
+    }
+
+    /// The hosts placement passes over for `demand`: those not heard
+    /// renewing within `silent_after`, and those that just refused it as
+    /// full.
+    fn passed(inner: &Inner, silent_after: Duration, demand: &Demand) -> Vec<HostId> {
+        let refused = Refused::Place(*demand);
+        inner
             .heard
             .iter()
             .filter(|(_, (_, at))| at.elapsed() > silent_after)
@@ -633,16 +677,7 @@ impl View {
                     .copied()
                     .filter(|host| inner.refuses(*host, &refused)),
             )
-            .collect();
-        let placement = if passed.is_empty() {
-            inner.fleet.place(&demand, exclude, &mut inner.rng)
-        } else {
-            let mut exclude = exclude.clone();
-            exclude.extend(passed);
-            inner.fleet.place(&demand, &exclude, &mut inner.rng)
-        }
-        .ok_or(Unplaced::NoRoom)?;
-        Ok((placement, demand))
+            .collect()
     }
 
     /// Every host, by name.

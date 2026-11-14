@@ -1465,8 +1465,12 @@ test("published page tools: declarations, audiences, live membership and approva
   const f = await pageToolsFixture();
   try {
     const catalog = (await f.post("catalog")).json;
+    // Publishing the owner's own account routes also declares their connector
+    // for search_documents, so every viewer can use their own account. A tool
+    // neither the version nor its pairing declares is still refused, on the
+    // connector and on a declared account route alike.
     for (const identity of [
-      { serverId: "grafana", toolName: "search_documents" },
+      { serverId: "grafana", toolName: "fetch_document" },
       { ...f.prod.identity, toolName: "fetch_document" },
     ]) {
       for (const [method, body] of [
@@ -1482,8 +1486,13 @@ test("published page tools: declarations, audiences, live membership and approva
         expect(f.provider.requests.length).toBe(requests);
       }
     }
-    expect((await f.post("resolve", { target: { identity: f.foreign.identity } })).status).toBe(
-      404,
+    // The owner's personal account route never runs for the member: through
+    // the paired connector it resolves to an account the member can use.
+    const foreign = await f.post("resolve", { target: { identity: f.foreign.identity } });
+    expect(foreign.status, JSON.stringify(foreign.json)).toBe(200);
+    expect(foreign.json.entry.identity.serverId).not.toBe(f.foreign.identity.serverId);
+    expect([f.prod, f.staging, f.personal].map((entry) => entry.identity.serverId)).toContain(
+      foreign.json.entry.identity.serverId,
     );
     const forgedApproval = `ogta_${"a".repeat(43)}`;
     await updateConnectorToolPermissionPolicies(db.db, {

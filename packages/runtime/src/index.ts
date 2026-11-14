@@ -1,10 +1,22 @@
 export { isOfficialDriveMcpConfig, mergeDriveMcpTools } from "./drive-mcp";
+export {
+  NANGO_PROXY_TRANSPORTS,
+  sendWithCredential,
+  type NangoUsageRecorder,
+  type NangoUsageReport,
+} from "./nango-transport";
 // Nothing was sent: callers render the message, which names the choices.
 export {
   McpAccountParameterChoiceError,
   isMcpAccountParameterChoiceError,
 } from "./mcp-account-parameters";
 import type { SearchRecordForm } from "./hosted-search-evidence";
+import type { NangoIntegrationDefinition, NangoProxyTransport } from "@opengeni/contracts/nango";
+import { NANGO_TOOLS_MCP_BRIDGE_ADAPTER, type NangoToolsMcpBridgeContext } from "./nango-tools-mcp";
+import {
+  NANGO_PROXY_TRANSPORTS as NANGO_PREFLIGHT_TRANSPORTS,
+  type NangoUsageRecorder,
+} from "./nango-transport";
 export {
   COMMAND_COMPLETION_NOTICE_MAX_BYTES,
   CommandCompletionDelivery,
@@ -334,12 +346,44 @@ import {
 } from "./slack-rest-mcp";
 import {
   DATAVERSE_WEB_API_MCP_BRIDGE_ADAPTER,
+  DATAVERSE_WEB_API_TOOLS,
+  isDataverseMcpConfig,
   type DataverseWebApiMcpBridgeContext,
 } from "./dataverse-web-api-mcp";
 import {
   BUSINESS_CENTRAL_API_MCP_BRIDGE_ADAPTER,
+  BUSINESS_CENTRAL_API_TOOLS,
+  isBusinessCentralApiConfig,
   type BusinessCentralApiMcpBridgeContext,
 } from "./business-central-api-mcp";
+import {
+  FINANCE_OPERATIONS_ODATA_MCP_BRIDGE_ADAPTER,
+  FINANCE_OPERATIONS_ODATA_TOOLS,
+  isFinanceOperationsMcpConfig,
+  type FinanceOperationsODataMcpBridgeContext,
+} from "./finance-operations-odata-mcp";
+
+/**
+ * The fixed tool set of a built-in bridge that runs instead of a connector's
+ * hosted MCP server, or null when the connector's own server serves its tools.
+ * Anything that lists a connector's tools outside a run (such as its tool
+ * permissions) uses this, so it shows the tools agents actually call without
+ * asking a hosted server the bridge never uses.
+ */
+export function fixedBridgeConnectorTools(
+  url: string,
+  connectionRef: McpServerConnectionRef | undefined,
+): ReadonlyArray<{
+  name: string;
+  description?: string | undefined;
+  annotations?: Readonly<Record<string, boolean>>;
+  _meta?: Readonly<Record<string, unknown>>;
+}> | null {
+  if (isDataverseMcpConfig(url, connectionRef)) return DATAVERSE_WEB_API_TOOLS;
+  if (isBusinessCentralApiConfig(url, connectionRef)) return BUSINESS_CENTRAL_API_TOOLS;
+  if (isFinanceOperationsMcpConfig(url, connectionRef)) return FINANCE_OPERATIONS_ODATA_TOOLS;
+  return null;
+}
 
 import { McpResultCustomDataBridge, unwrapSdkMcpResultProjection } from "./mcp-result-custom-data";
 import {
@@ -1167,7 +1211,9 @@ type BuiltInMcpBridgeContext = GmailRestMcpBridgeContext &
   SlackRestMcpBridgeContext &
   DataverseWebApiMcpBridgeContext &
   BusinessCentralApiMcpBridgeContext &
-  DriveMcpBridgeContext;
+  FinanceOperationsODataMcpBridgeContext &
+  DriveMcpBridgeContext &
+  NangoToolsMcpBridgeContext;
 const BUILT_IN_MCP_BRIDGE_ADAPTERS: readonly LocalMcpBridgeAdapter<
   GmailRestMcpBridgeConfig,
   BuiltInMcpBridgeContext
@@ -1177,7 +1223,9 @@ const BUILT_IN_MCP_BRIDGE_ADAPTERS: readonly LocalMcpBridgeAdapter<
   SLACK_REST_MCP_BRIDGE_ADAPTER,
   DATAVERSE_WEB_API_MCP_BRIDGE_ADAPTER,
   BUSINESS_CENTRAL_API_MCP_BRIDGE_ADAPTER,
+  FINANCE_OPERATIONS_ODATA_MCP_BRIDGE_ADAPTER,
   DRIVE_MCP_BRIDGE_ADAPTER,
+  NANGO_TOOLS_MCP_BRIDGE_ADAPTER,
 ]);
 const SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS = 120_000;
 
@@ -1208,6 +1256,8 @@ export type ResolveConnectionCredentialInput = {
   preflightAcceptsRefreshableExpiry?: boolean;
   /** Frozen provider authority generation captured by the calling integration/catalog. */
   expectedAuthorityGeneration?: number;
+  /** Transports the bridge can apply; a Nango connection resolves only with `nango_proxy`. */
+  acceptedTransports?: readonly "nango_proxy"[];
 };
 
 export type ResolveConnectionCredentialResult =
@@ -1220,6 +1270,10 @@ export type ResolveConnectionCredentialResult =
       /** Metadata-only immutable authority binding supplied by the trusted worker resolver. */
       operationAuthorityDigest?: string;
       expiresAt?: Date | null;
+      /** The provider's actual grants, when the connection broker knows them. */
+      grantedScopes?: string[];
+      /** Send the provider request through this Nango proxy (docs/nango.md). */
+      proxy?: NangoProxyTransport;
     }
   | {
       status: "auth_needed";
@@ -2641,8 +2695,11 @@ export type BuildAgentOptions = {
     response: HumanInputResponse;
   };
   reasoningEffort?: ReasoningEffort;
-  /** Provider-generated Responses summaries. Omitted preserves the existing wire. */
-  reasoningSummary?: "auto" | "detailed";
+  /**
+   * Provider-generated Responses summaries. Omitted preserves the existing wire
+   * (`detailed`); `none` sends no `reasoning.summary`, so none is written.
+   */
+  reasoningSummary?: "auto" | "detailed" | "none";
   /** Product latency selection frozen onto this turn. */
   latencyMode?: LatencyMode;
   /** Provider-specific wire value resolved by the worker (`fast` or `priority`). */
@@ -4133,6 +4190,7 @@ export function buildOpenGeniAgent(
       : null;
   if (embeddedSkillReadTool) agentTools.push(embeddedSkillReadTool);
   const instructionInspection = inspectPersistentAgentInstructions(settings, instructionOptions);
+  const reasoningSummary = options.reasoningSummary ?? "detailed";
   const baseConfig = {
     name: "Opengeni Agent",
     model: options.model ?? settings.openaiModel,
@@ -4163,7 +4221,7 @@ export function buildOpenGeniAgent(
     modelSettings: {
       reasoning: {
         effort: options.reasoningEffort ?? settings.openaiReasoningEffort,
-        summary: options.reasoningSummary ?? "detailed",
+        ...(reasoningSummary === "none" ? {} : { summary: reasoningSummary }),
       },
       ...(options.textVerbosity ? { text: { verbosity: options.textVerbosity } } : {}),
       // Round-trip the encrypted reasoning payload with every call so chains
@@ -6236,6 +6294,10 @@ export type PrepareToolsOptions = {
    */
   materializeConnectorAttachments?: ConnectorAttachmentMaterializer;
   materializeGmailFile?: GmailRestMcpBridgeContext["materializeGmailFile"];
+  /** Best-effort Nango usage accounting for proxy requests and tool calls. */
+  recordNangoUsage?: NangoUsageRecorder;
+  /** Operator definitions of the Nango-backed integrations, read once per turn. */
+  nangoIntegrationDefinitions?: ReadonlyMap<string, NangoIntegrationDefinition>;
   readGmailFile?: GmailRestMcpBridgeContext["readGmailFile"];
   /** Private host callback that materializes exact bytes a reviewed connector downloaded. */
   materializeConnectorFile?: (request: ConnectorFileMaterializationRequest) => Promise<unknown>;
@@ -6916,7 +6978,13 @@ export async function prepareAgentTools(
                 request.destinationUrl,
                 request.toolName,
                 request.forceRefresh === true,
+                "acceptedTransports" in request ? request.acceptedTransports : undefined,
               ),
+            ...(options.recordNangoUsage ? { recordNangoUsage: options.recordNangoUsage } : {}),
+            ...(options.nangoIntegrationDefinitions
+              ? { nangoIntegrationDefinitions: options.nangoIntegrationDefinitions }
+              : {}),
+            ...(settings.nangoApiBaseUrl ? { nangoApiBaseUrl: settings.nangoApiBaseUrl } : {}),
             onAuthNeeded: async (payload) => {
               await publishAuthNeeded(options, payload);
             },
@@ -8454,6 +8522,9 @@ function connectionApprovalPreflight(
       forceRefresh: false,
       credentialResolutionMode: "preflight",
       preflightAcceptsRefreshableExpiry: true,
+      // The preflight never sends a provider request, so a proxy-only
+      // (Nango) credential is checked like any other connection.
+      acceptedTransports: NANGO_PREFLIGHT_TRANSPORTS,
       ...(options.credentialSubjectId ? { subjectId: options.credentialSubjectId } : {}),
     });
     if (result.status !== "ok") throw new ConnectionApprovalPreflightError(result.reason);
@@ -8467,6 +8538,7 @@ async function resolveConnectionForRequest(
   destinationUrl: string,
   toolName: string | undefined,
   forceRefresh: boolean,
+  acceptedTransports?: readonly "nango_proxy"[],
 ): Promise<ResolveConnectionCredentialResult> {
   if (!options.workspaceId || !options.resolveCredential) {
     return {
@@ -8490,6 +8562,7 @@ async function resolveConnectionForRequest(
     forceRefresh,
     ...(toolName ? { toolName } : {}),
     ...(options.credentialSubjectId ? { subjectId: options.credentialSubjectId } : {}),
+    ...(acceptedTransports?.length ? { acceptedTransports } : {}),
   };
   try {
     return await measureMcpPhase(
@@ -8821,6 +8894,22 @@ function mcpOutcomeUncertainResponse(
       headers: { "content-type": "application/json" },
     },
   );
+}
+
+/**
+ * The typed error of a tool call that needs its connection signed in again:
+ * nothing reached the provider, so hosts such as a Site frame can offer
+ * Reconnect and run it again.
+ */
+function connectionAuthNeededError(message: string) {
+  return {
+    error: {
+      code: "connection_auth_needed",
+      message,
+      retryable: false,
+      outcomeUnknown: false,
+    },
+  };
 }
 
 function isAuthNeededMcpError(error: unknown): boolean {
@@ -11077,6 +11166,7 @@ export class PrefixedMcpServer implements MCPServer {
         return boundedMcpToolResult({
           isError: true,
           content: [{ type: "text", text: error.message }],
+          structuredContent: connectionAuthNeededError(error.message),
         });
       }
       // A brokered tools/call that receives 401 may already have changed provider
@@ -11119,6 +11209,7 @@ export class PrefixedMcpServer implements MCPServer {
         return boundedMcpToolResult({
           isError: true,
           content: [{ type: "text", text: MCP_AUTH_NEEDED_ERROR.message }],
+          structuredContent: connectionAuthNeededError(MCP_AUTH_NEEDED_ERROR.message),
         });
       }
       // A routed workspace mutation crossed provider admission but lost exact
@@ -11784,6 +11875,16 @@ export async function runAgentStream(
 ) {
   const gate = agentInputWaitYields.get(agent);
   const scope = gate?.beginStream(overrides.signal);
+  // Discovery cards a search or listing skipped, or failed to show, become
+  // session events of this run.
+  const onRuntimeEvent = overrides.onRuntimeEvent;
+  const discoveryCards = lazyToolRuntimeForAgent(agent);
+  const discoveryCardSink = onRuntimeEvent
+    ? (event: unknown) => onRuntimeEvent({ type: "tool.discovery_card", payload: event })
+    : undefined;
+  discoveryCards?.setDiscoveryCardSink(discoveryCardSink);
+  // A later event never reaches a finished run's publisher.
+  const releaseDiscoveryCards = () => discoveryCards?.releaseDiscoveryCardSink(discoveryCardSink);
   const contentless = contentlessModelResponseGuard(overrides.onContentlessModelResponse);
   try {
     if (scope) agent.toolUseBehavior = scope.toolUseBehavior;
@@ -11816,9 +11917,11 @@ export async function runAgentStream(
       const finish = () => scope.endStream(stream.cancelled);
       void stream.completed.then(finish, finish);
     }
+    void stream.completed.then(releaseDiscoveryCards, releaseDiscoveryCards);
     return stream;
   } catch (error) {
     scope?.endStream();
+    releaseDiscoveryCards();
     throw error;
   }
 }

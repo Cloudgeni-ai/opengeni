@@ -395,8 +395,15 @@ Site calls that need approval are confirmed by the viewer in the Opengeni frame:
 `POST tools/site-consent` for the viewer's own accounts and the provider's own
 review of the exact arguments (for Gmail, the message as it would be sent), then mints
 `tools/target-approvals` (optionally `rememberForSite`) and retries the same
-operation. See "Host-native consent" in
-`docs/design/workspace-html-sites-2026-09-01.md`.
+operation. A declared Site tool the viewer can neither use nor connect answers
+404 with `details.code` `site_tool_not_available_for_viewer`; publishing pairs
+the publisher's own account routes with their connector so other viewers get
+their own account or the connect card instead. Every other way a Site call
+stops reaches the viewer as a plain state and the Site as a typed `code`
+(`site_tool_reconnect_required`, `site_tool_permission_denied`,
+`site_tool_not_available_for_viewer`, `site_tool_outcome_unknown`,
+`site_tool_unavailable`); see "Failures" in the same design. See
+"Host-native consent" in `docs/design/workspace-html-sites-2026-09-01.md`.
 
 `POST tools/target-approvals` issues a version-2 binding over the existing
 executable effect digest and Site tuple. Exact caller, identity, arguments and
@@ -601,6 +608,26 @@ alreadyShown? }`, and every `capability_authorization_request` result carries
 `cardShown`, so neither the agent nor a client has to infer whether a card was
 shown.
 
+A request that opens with a one-word integration name, capitalised, as the
+label of an operation word that follows, with or without a colon ("Airtable
+list records…", "Linear: create an issue")
+names it distinctively; a sentence-opening capital before an ordinary word
+("Linear regression") still does not. `tool_list` browsing gets the same card:
+a first page that a `namePrefix` or `group` filter left empty, whose filter
+words (digests, `mcp_` and `connection/` keys and separators removed, at most
+six words) name exactly one connectable integration nobody installed, adds the
+same `notConnected` notice and `connectCard` field through the same lookup
+(bounded at 1.5 s), card tool, dedupe and policy. Browsing without such a
+filter, a listing with tools and later pages are unchanged. Whenever discovery
+shows no new card for an integration a request may name, the run records a
+`tool.discovery_card` session event with the `source` (`tool_search` or
+`tool_list`), the `outcome` (`skipped`, `already_shown`, `not_shown` or
+`failed`), a `reason` (`several_named`, `not_distinctive`, `lookup_timed_out`,
+`lookup_failed`, `no_card_tool`, `timeout` or `error`), the query bounded to
+500 characters, and the capability ids and names concerned. A catalog lookup
+that failed or timed out is recorded once per run and source. Recording is best
+effort, stops when the run ends, and never delays or fails discovery.
+
 ### Recovery from tool-search misses
 
 Progressive discovery uses the same authorized deferred pool on every transport.
@@ -633,6 +660,10 @@ part after the server separator (`projects.` or `projects_`). Digest aliases sor
 that readable part. An invalid cursor requires restarting
 the listing against the current pool. Names and prefixes are display/routing
 keys, never authorization identities.
+Each digest-aliased tool has its own digest, so one tool's `mcp_<digest>` is no
+connection prefix; a `namePrefix` that is such a digest (or a start of one of
+at least four hex digits) and matches only MCP tools lists every tool of those
+tools' connections, within any `group`, and says so in `message`.
 
 Use `tool_search` with `query: ""` and `names: ["exact_name"]` to disclose the
 listed tool's full schema without keyword ranking. Exact lookup cannot admit

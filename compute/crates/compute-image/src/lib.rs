@@ -36,6 +36,11 @@ pub struct Build {
     pub output: PathBuf,
     /// Free space the file system leaves for sandboxes.
     pub free_bytes: u64,
+    /// An image built earlier, usually of the OCI image's version before,
+    /// to make this one by changing a copy of ([`ext4::update`]), so the
+    /// two share all but what changed. Without one, or if changing it
+    /// fails, the image is a new file system ([`ext4::make`]).
+    pub before: Option<PathBuf>,
 }
 
 /// What a build made.
@@ -54,6 +59,8 @@ pub struct Built {
     pub pull_seconds: f64,
     pub unpack_seconds: f64,
     pub ext4_seconds: f64,
+    /// Whether the image was made by changing the earlier image given.
+    pub over_before: bool,
 }
 
 /// Builds `build.output` from `build.reference`.
@@ -69,17 +76,26 @@ pub async fn build(build: &Build) -> Result<Built> {
         .with_context(|| format!("pull {}", build.reference))?;
     let pulled_at = Instant::now();
     let config = assemble::image_config(pulled.image.config.as_ref());
-    let (added, unpacked_at, size, contents) = {
+    let (added, unpacked_at, size, contents, over_before) = {
         let (root, guest, output) = (root.clone(), build.guest.clone(), build.output.clone());
         let (layers, config, free) = (pulled.layers.clone(), config.clone(), build.free_bytes);
+        let (before, work) = (build.before.clone(), build.work.clone());
         tokio::task::spawn_blocking(move || -> Result<_> {
             std::fs::create_dir_all(&root)?;
             layers::apply_all(&root, &layers)?;
             let added = assemble::finish(&root, &guest, &config)?;
             let unpacked_at = Instant::now();
             let contents = ext4::measure(&root)?;
-            let size = ext4::make(&root, &output, free)?;
-            Ok((added, unpacked_at, size, contents))
+            let updated = before.map(|before| ext4::update(&before, &root, &output, free, &work));
+            let (size, over_before) = match updated {
+                Some(Ok(size)) => (size, true),
+                Some(Err(error)) => {
+                    tracing::warn!(error = %format!("{error:#}"), "changing the earlier image failed; making a new one");
+                    (ext4::make(&root, &output, free)?, false)
+                }
+                None => (ext4::make(&root, &output, free)?, false),
+            };
+            Ok((added, unpacked_at, size, contents, over_before))
         })
         .await??
     };
@@ -97,6 +113,7 @@ pub async fn build(build: &Build) -> Result<Built> {
         pull_seconds: (pulled_at - started).as_secs_f64(),
         unpack_seconds: (unpacked_at - pulled_at).as_secs_f64(),
         ext4_seconds: (done - unpacked_at).as_secs_f64(),
+        over_before,
     })
 }
 

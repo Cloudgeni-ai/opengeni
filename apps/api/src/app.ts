@@ -371,6 +371,7 @@ import { registerOrganizationIntegrationPolicyRoutes } from "./routes/organizati
 import { registerOrganizationConnectorRoutes } from "./routes/organization-connectors";
 import { registerSuperGrokRoutes } from "./routes/supergrok";
 import { registerConnectionRoutes } from "./routes/connections";
+import { registerNangoRoutes } from "./routes/nango";
 import { registerWorkspaceModelKeyPriceRoutes } from "./routes/workspace-model-key-prices";
 import { registerVaultProviderRoutes, vaultProviderRegistryFor } from "./routes/vault-providers";
 import { registerConnectRoutes } from "./routes/connect";
@@ -512,6 +513,7 @@ export {
   withDefaultEnabledCapabilityMcpTools,
 } from "@opengeni/core";
 export { workflowIdForSession } from "@opengeni/core";
+import { nangoBackendsFor, nangoReplacedSocialProviders } from "@opengeni/core";
 export { replaySessionEvents, sseSessionStream, sseWorkspaceControlStream } from "./http/sse";
 
 export const API_MAX_REQUEST_BODY_BYTES = 32 * 1024 * 1024;
@@ -2315,6 +2317,9 @@ export function createAppComposition(
         const mcp = buildOpenGeniMcpServer(mcpDeps, grant, {
           requestOrigin: new URL(c.req.url).origin,
           slackBotAvailable,
+          nangoReplacedSocialProviders: nangoReplacedSocialProviders(
+            await nangoBackendsFor(routeDeps.db, routeDeps.settings),
+          ),
           appActions: sessionScope
             ? {
                 access: {
@@ -2730,6 +2735,7 @@ export function createAppComposition(
   registerPersonalGitHubGitBrokerRoutes(app, routeDeps);
   registerPersonalGitHubGatewayRoutes(app, routeDeps);
   registerConnectionRoutes(app, routeDeps);
+  registerNangoRoutes(app, routeDeps);
   registerWorkspaceModelKeyPriceRoutes(app, routeDeps);
   registerVaultProviderRoutes(app, routeDeps);
   registerConnectRoutes(app, routeDeps);
@@ -4356,6 +4362,13 @@ const routeLabelPatterns: Array<{
     pattern: /^\/v1\/integrations\/oauth\/callback$/,
     label: "/v1/integrations/oauth/callback",
   },
+  { pattern: /^\/v1\/integrations\/nango\/connect$/, label: "/v1/integrations/nango/connect" },
+  {
+    pattern: /^\/v1\/integrations\/nango\/connect\/complete$/,
+    label: "/v1/integrations/nango/connect/complete",
+  },
+  { pattern: /^\/v1\/integrations\/nango\/webhook$/, label: "/v1/integrations/nango/webhook" },
+  { pattern: /^\/v1\/billing\/integration-usage$/, label: "/v1/billing/integration-usage" },
   {
     pattern: /^\/v1\/integrations\/provider-oauth\/callback$/,
     label: "/v1/integrations/provider-oauth/callback",
@@ -4547,6 +4560,8 @@ export function isApiContractProtectedMutation(method: string, pathname: string)
     pathname === "/v1/integrations/slack/events" ||
     pathname === "/v1/integrations/slack/commands" ||
     pathname === "/v1/integrations/slack/interactions" ||
+    // Nango calls this itself and signs it with the webhook signing key.
+    pathname === "/v1/integrations/nango/webhook" ||
     pathname.startsWith("/v1/github/") ||
     // A stale tab must still report the error that follows a rollout.
     pathname === CLIENT_ERRORS_PATH ||

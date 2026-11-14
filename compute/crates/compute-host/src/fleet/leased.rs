@@ -80,8 +80,13 @@ impl<S: Store> Store for Leased<S> {
         self.store.image_len(image).await
     }
 
-    async fn fetch_image(&self, image: ImageId, path: &Path) -> Result<bool, EngineError> {
-        self.store.fetch_image(image, path).await
+    async fn fetch_image(
+        &self,
+        image: ImageId,
+        path: &Path,
+        seed: Option<&Path>,
+    ) -> Result<bool, EngineError> {
+        self.store.fetch_image(image, path, seed).await
     }
 
     async fn put_image(&self, path: &Path) -> Result<Option<ImageId>, EngineError> {
@@ -118,7 +123,7 @@ mod tests {
         assert!(!leased.gate.is_open());
         assert_eq!(leased.image_len(image).await.unwrap(), Some(8));
         let copy = dir.path().join("copy.ext4");
-        assert!(leased.fetch_image(image, &copy).await.unwrap());
+        assert!(leased.fetch_image(image, &copy, None).await.unwrap());
         assert_eq!(std::fs::read(&copy).unwrap(), b"an image");
     }
 }

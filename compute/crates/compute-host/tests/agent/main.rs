@@ -35,6 +35,7 @@ mod disk_reading;
 mod disk_relief;
 mod fleet;
 mod images;
+mod kernel;
 mod link;
 mod memory;
 mod observe;
@@ -1584,6 +1585,7 @@ const NEVER: SleepConfig = SleepConfig {
     evict_after_ms: None,
     forget_after_ms: None,
     compress: false,
+    earlier_compress: compute_host::protocol::Dropped,
     checkpoint_every_ms: None,
 };
 

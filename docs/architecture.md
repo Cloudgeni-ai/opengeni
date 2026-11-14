@@ -473,9 +473,11 @@ inventory classifier. Results are discarded after resolution, arrivals during a
 read start a fresh batch, and claims still revalidate the command. Missing rows
 remain unacknowledged so exits racing adoption retain their heartbeat retry.
 Pushes cannot steal an active reaper claim; a racing push preserves an immediate retry. The runner
-retries unacknowledged terminal records on reconnect and its existing heartbeat
-cadence over the bulk connection. Completion collectors use independent ingestion
-capacity and yield before their claim expires, preserving heartbeat/control liveness.
+sends `OperationCompleted` and its operation inventory on the control connection,
+never queued behind output frames on the bulk connection, and retries
+unacknowledged terminal records on reconnect and with every heartbeat. Completion
+collectors use independent ingestion capacity, follow one output attachment to
+the exit frame and yield before their claim expires, preserving heartbeat/control liveness.
 An exact-operation delivery receipt stops notification retries after durable server
 ownership; it never grants output custody. A dedicated first-notification timestamp
 bypasses polling backoff once, while failed collection keeps reconciliation backoff.
@@ -3443,6 +3445,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Composer draft submission or native embedding host seam | `packages/core/src/application/composer-submit.ts`, `apps/api/src/routes/sessions.ts`, `packages/react/src/embedded-session-client.ts` | [`embedding.md`](embedding.md), package READMEs, and §7.1 |
 | Providers and social connectors | `apps/api/src/integrations/`, `apps/api/src/mcp/server.ts`, `packages/core/src/application/new-session-drafts.ts`, `packages/network/src/mcp-oauth-discovery.ts`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
 | Microsoft Teams delegated tools and bot conversations | `packages/capabilities/src/integration-definitions.ts`, `apps/api/src/integrations/teams-bot.ts`, `apps/api/src/integrations/teams-protocol.ts`, `apps/api/src/integrations/teams-group.ts`, `apps/api/src/integrations/teams-admin-proof.ts`, `apps/api/src/integrations/teams-onboarding-limit.ts`, `packages/db/src/teams-conversations.ts` | [`microsoft-teams-release-readiness.md`](microsoft-teams-release-readiness.md) |
+| Nango-backed integrations (backend switch, Connect, proxy, tools bridge, usage) | `packages/contracts/src/nango.ts`, `packages/capabilities/src/nango.ts`, `packages/db/src/nango-integrations.ts`, `packages/core/src/domain/nango-integrations.ts`, `packages/runtime/src/nango-transport.ts`, `packages/runtime/src/nango-tools-mcp.ts`, `apps/api/src/integrations/nango-connect.ts`, `scripts/operator/nango.ts` | [`nango.md`](nango.md) |
 | Slack user-token MCP tools and shared provider quota | `packages/runtime/src/slack-rest-mcp.ts`, `packages/contracts/src/slack-rest-mcp.ts`, `packages/db/src/slack-api-rate-limits.ts` | [`design/first-party-mcp-bridges.md`](design/first-party-mcp-bridges.md), [`slack-bot.md`](slack-bot.md) |
 | Slack app identity and icons | `packages/contracts/src/slack-bot-scopes.ts`, `scripts/generate-slack-bot-icons.ts`, `deploy/slack/` | [`slack-bot.md`](slack-bot.md) |
 | Slack bot availability, scheduled posting and prepared delivery | `packages/db/src/organization-slack-bots.ts`, `apps/api/src/routes/slack-bot-access.ts`, `apps/api/src/integrations/slack-bot.ts` | [`slack-bot.md`](slack-bot.md) |

@@ -83,6 +83,54 @@ screen readers. The default is no mark.
 />
 ```
 
+### Model levels
+
+To give people two or three named levels instead of every model, put
+`ModelLevelControl` in the composer's `options`, where you would put the model
+pill. Each level is one catalog model at one reasoning effort and may offer
+Ultrafast; the levels are the same `ModelLevel` objects as on web
+(`@opengeni/react` `modelPickerProps.levels`).
+
+```tsx
+import { ModelLevelControl } from "@opengeni/react-native/timeline";
+
+const levels = [
+  { id: "standard", label: "Standard", model: "example/everyday", effort: "high" },
+  { id: "thorough", label: "Thorough", model: "example/frontier", effort: "high", ultrafast: true },
+] as const;
+
+<NativeSessionScreen
+  controller={controller}
+  composer={{
+    options: (
+      <ModelLevelControl
+        levels={levels}
+        models={models}
+        model={model}
+        effort={effort}
+        latencyMode={latencyMode}
+        onModelChange={setModel}
+        onEffortChange={setEffort}
+        onLatencyModeChange={setLatencyMode}
+        onSelectionFeedback={(kind) => haptics(kind)}
+        fallback={<YourModelPill />}
+      />
+    ),
+  }}
+/>;
+```
+
+Tap or swipe the control to change level. Ultrafast shows only on levels with
+`ultrafast: true` whose model can run it, and turns on only when people press
+and hold the control until the charge fills (on the last level, pushing past
+the end works too); screen readers get "Turn on Ultrafast" as an action. `onSelectionFeedback` reports `level`, `armed` (the
+charge is full) and `ultrafast` so you can play haptics. Levels whose model the
+workspace cannot run are left out; with none left, `fallback` is shown. A chat
+on another model keeps it, and the control shows that model's name until a
+level is picked. On a new-chat screen pass `startOnFirstLevel` so the chat
+starts on the first level instead of the workspace default. To keep the full picker for some people, render your model
+pill instead.
+
 ### Approval cards
 
 Each pending approval shows a review card above the composer. On its own the

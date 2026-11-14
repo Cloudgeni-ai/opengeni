@@ -221,7 +221,7 @@ async fn respond(
             Ok(status) => Reply::Status(Box::new(status)),
             Err(error) => error_reply(&error),
         },
-        Request::Prepare { image } => match handle.prepare(&image) {
+        Request::Prepare { image, before } => match handle.prepare(&image, before) {
             Ok(Progress::Preparing) => Reply::Preparing,
             Ok(Progress::Prepared(prepared)) => Reply::Prepared {
                 image: prepared.image,
@@ -237,6 +237,7 @@ async fn respond(
                 },
             },
         },
+        Request::Keep { image, before } => done(handle.keep(image, before).await),
         Request::Capture {
             id,
             generation,

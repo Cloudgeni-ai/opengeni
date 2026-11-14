@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/contracts",
-  "version": "6.20.1",
+  "version": "6.21.0",
   "description": "Shared zod schemas and wire-contract types for the Opengeni API.",
   "license": "Apache-2.0",
   "repository": {
@@ -229,6 +229,10 @@
     "./connector-destinations": {
       "types": "./src/connector-destinations.ts",
       "default": "./src/connector-destinations.ts"
+    },
+    "./nango": {
+      "types": "./src/nango.ts",
+      "default": "./src/nango.ts"
     },
     "./connector-attachments": {
       "types": "./src/connector-attachments.ts",

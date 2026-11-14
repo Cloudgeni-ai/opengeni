@@ -170,6 +170,8 @@ import {
   OpStreamExecClient,
   replayConnectedCommandOutput,
   connectedCommandExitProof,
+  connectedCommandFailureReason,
+  connectedCommandReplayDeadline,
   defaultSelfhostedRetryClock,
   stripExecBanner,
   parseExecBannerExitCode,
@@ -1971,6 +1973,24 @@ async function adoptLegacyModalCheckpointReceipts(
   return adopted;
 }
 
+/** When a reaper's terminal output replay stops following its attachment: at
+ * most one sweep period, so one slow link cannot hold up the rest of the
+ * maintenance pass, and always before its claim can be taken over. */
+function reaperReplayDeadline(
+  settings: Pick<ActivityServices["settings"], "sandboxLeaseReaperPeriodMs">,
+  claimedAtMs: number,
+  controlTimeoutMs: number,
+): number {
+  return Math.min(
+    Date.now() + settings.sandboxLeaseReaperPeriodMs,
+    connectedCommandReplayDeadline(
+      claimedAtMs,
+      CONNECTED_COMMAND_RECONCILIATION_CLAIM_TTL_MS,
+      controlTimeoutMs,
+    ),
+  );
+}
+
 /** A stop or query that no host receives wakes the compute sandbox it
  * addresses, as any other request to that sandbox does, and is retried at the
  * same locator; a Connected Machine keeps its ordinary offline retry. */
@@ -2038,6 +2058,7 @@ export async function reconcileConnectedMachineBackgroundCommands(
   // remaining maintenance work each period; retries belong to a later sweep.
   do {
     const claimId = crypto.randomUUID();
+    const claimedAtMs = Date.now();
     let claims: ConnectedMachineBackgroundCommandClaim[];
     try {
       claims = await claimConnectedMachineSessionBackgroundCommands(db, {
@@ -2141,6 +2162,14 @@ export async function reconcileConnectedMachineBackgroundCommands(
               async (frames) => {
                 await captureConnectedCommandOutput(db, claim, bus)(claim.commandId, frames);
               },
+              reaperReplayDeadline(
+                settings,
+                claimedAtMs,
+                Math.min(
+                  settings.sandboxSelfhostedControlTimeoutMs,
+                  RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS,
+                ),
+              ),
             );
           }
           if (!proof) {
@@ -2190,6 +2219,7 @@ export async function reconcileConnectedMachineBackgroundCommands(
               commandId: claim.commandId,
               enrollmentId: claim.enrollmentId,
               connectionInstanceId: claim.connectionInstanceId,
+              reason: connectedCommandFailureReason(error),
               error: errorMessage(error),
             });
           }
@@ -2252,6 +2282,7 @@ export async function reconcileConnectedMachineBackgroundCommands(
         recordConnectedCommandReconciliation(observability, "settlement_failed");
         observability.warn("sandbox reaper: connected-command settlement failed", {
           commandId: claim.commandId,
+          reason: connectedCommandFailureReason(error),
           error: errorMessage(error),
         });
         await deferConnectedCommandClaim(db, settings, observability, claim, "settlement_failed");
@@ -2280,6 +2311,7 @@ export async function reconcileConnectedCommandOutputReleases(
   const lookups: ConnectedOutputReleaseLookups = { runners: new Map(), modes: new Map() };
   do {
     let claims: Awaited<ReturnType<typeof claimConnectedCommandOutputReleases>>;
+    const claimedAtMs = Date.now();
     try {
       claims = await claimConnectedCommandOutputReleases(db, {
         claimId: crypto.randomUUID(),
@@ -2296,7 +2328,7 @@ export async function reconcileConnectedCommandOutputReleases(
     }
     await forEachWithConcurrency(claims, SANDBOX_MAINTENANCE_ITEM_CONCURRENCY, async (claim) =>
       releaseClaimedConnectedCommandOutput(
-        { db, settings, observability, bus, controlRpc, lookups },
+        { db, settings, observability, bus, controlRpc, lookups, claimedAtMs },
         claim,
       ),
     );
@@ -2356,10 +2388,13 @@ export async function releaseClaimedConnectedCommandOutput(
     bus: ActivityServices["bus"];
     controlRpc: ControlRpc;
     lookups?: ConnectedOutputReleaseLookups;
+    /** When the claim was taken; now when unknown. */
+    claimedAtMs?: number;
   },
   claim: Awaited<ReturnType<typeof claimConnectedCommandOutputReleases>>[number],
 ): Promise<void> {
   const { db, settings, observability, bus, controlRpc } = deps;
+  const claimedAtMs = deps.claimedAtMs ?? Date.now();
   const lookups = deps.lookups ?? { runners: new Map(), modes: new Map() };
   const modeKey = JSON.stringify([
     claim.controlWorkspaceId,
@@ -2455,8 +2490,12 @@ export async function releaseClaimedConnectedCommandOutput(
       }
       if (status.state !== OpState.OP_STATE_COMPLETE)
         throw new Error("Terminal command output returned a live operation");
-      const replay = await replayConnectedCommandOutput(client, claim.opId, true, async (frames) =>
-        captureConnectedCommandOutput(db, claim, bus)(claim.commandId, frames),
+      const replay = await replayConnectedCommandOutput(
+        client,
+        claim.opId,
+        true,
+        async (frames) => captureConnectedCommandOutput(db, claim, bus)(claim.commandId, frames),
+        reaperReplayDeadline(settings, claimedAtMs, controlTimeoutMs),
       );
       const terminal = replay.status === "completed" ? replay : replay.terminal;
       receipt =
@@ -2513,7 +2552,11 @@ export async function releaseClaimedConnectedCommandOutput(
       recorded === "unavailable"
         ? "sandbox reaper: connected-command output expired uncaptured"
         : "sandbox reaper: connected-command output release deferred",
-      { commandId: claim.commandId, error: errorMessage(error) },
+      {
+        commandId: claim.commandId,
+        reason: connectedCommandFailureReason(error),
+        error: errorMessage(error),
+      },
     );
   }
 }

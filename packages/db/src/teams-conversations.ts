@@ -955,10 +955,14 @@ export async function teamsReplyPending(
 /** An agent reply the bot delivered in one Teams conversation, found by its Teams message id. */
 export type TeamsDeliveredReply = {
   route_id: string;
+  /** The installation's workspace, which holds the route. */
+  workspace_id: string;
   subject_id: string;
+  actor_id: string;
   personal: boolean;
   session_id: string;
   session_workspace_id: string | null;
+  agent_id: string | null;
   turn_id: string | null;
 };
 export async function getTeamsDeliveredReply(
@@ -973,7 +977,7 @@ export async function getTeamsDeliveredReply(
       (
         await rawRows<TeamsDeliveredReply>(
           tx,
-          sql`select r.route_id,r.subject_id,r.personal,r.session_id,r.session_workspace_id,o.payload->>'turnId' as turn_id from teams_bot_routes r join teams_bot_outbox o on o.route_id=r.route_id where r.tenant_id=${i.tenant_id}::uuid and r.generation=${i.generation}::uuid and split_part(r.conversation_id,';',1)=${input.conversationId.split(";")[0]} and r.session_bound and o.state='delivered' and o.provider_message_id=${input.providerMessageId} and o.payload->>'ai'='true' limit 1`,
+          sql`select r.route_id,r.workspace_id::text as workspace_id,r.subject_id,r.actor_id::text as actor_id,r.personal,r.session_id,r.session_workspace_id,r.agent_id::text as agent_id,o.payload->>'turnId' as turn_id from teams_bot_routes r join teams_bot_outbox o on o.route_id=r.route_id where r.tenant_id=${i.tenant_id}::uuid and r.generation=${i.generation}::uuid and split_part(r.conversation_id,';',1)=${input.conversationId.split(";")[0]} and r.session_bound and o.state='delivered' and o.provider_message_id=${input.providerMessageId} and o.payload->>'ai'='true' limit 1`,
         )
       )[0] ?? null,
   );

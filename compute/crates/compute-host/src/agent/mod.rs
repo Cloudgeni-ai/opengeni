@@ -342,6 +342,12 @@ enum Command {
         into: std::path::PathBuf,
         reply: Reply<u64>,
     },
+    /// See [`crate::protocol::Request::Keep`].
+    Keep {
+        image: ImageId,
+        before: Option<ImageId>,
+        reply: Reply<()>,
+    },
     /// A named hold from the API, with an optional expiry.
     Hold {
         id: Id,
@@ -391,6 +397,12 @@ enum Command {
 
 #[derive(Debug)]
 enum Event<V> {
+    /// The image a [`Command::Keep`] asked for is on this host: the
+    /// templates of `before`'s shapes are built on it.
+    ImageKept {
+        image: ImageId,
+        before: Option<ImageId>,
+    },
     /// A change of owner of `id` landed or failed; `reply` waits for it.
     OwnerTaken {
         id: Id,

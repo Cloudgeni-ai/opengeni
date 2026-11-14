@@ -40,6 +40,7 @@ import * as runtimePosture from "../src/runtime-posture";
 import {
   postureBeforeMigration,
   privateRoutinesCreatedAfter,
+  targetRoutinesCreatedAfter,
   publicTablesCreatedAfter,
 } from "./predecessor-runtime-posture";
 import {
@@ -976,8 +977,33 @@ describe("runtime database posture evaluator", () => {
       rlsStrategy: "force",
       tablesCreatedByLaterMigrations: publicTablesCreatedAfter(automation, true),
       routinesCreatedByLaterMigrations: privateRoutinesCreatedAfter(automation, true),
+      targetRoutinesCreatedByLaterMigrations: targetRoutinesCreatedAfter(automation, true),
     });
+    // Owner-internal target-schema helpers a later file creates are excused too.
+    const nango = "1406_nango_integrations.sql";
+    expect(targetRoutinesCreatedAfter(nango, true)).toContain("set_integration_backend");
+    expect(targetRoutinesCreatedAfter(nango, false)).not.toContain("set_integration_backend");
+    expect(targetRoutinesCreatedAfter(automation, true)).not.toContain(
+      "set_credit_promotion_policy",
+    );
+    expect(targetRoutinesCreatedAfter(automation, true)).not.toContain("opengeni_private");
     expect(() => postureBeforeMigration("9999_missing.sql")).toThrow("unknown migration");
+  });
+
+  test("a predecessor database may lack an owner-internal helper a later file creates", () => {
+    const posture = safePosture();
+    posture.targetRoutines = posture.targetRoutines.filter(
+      (routine) => !routine.name.startsWith("set_integration_backend("),
+    );
+    const missing =
+      "owner-internal target-schema helper set_integration_backend(text, text, text, boolean, jsonb, text, text) is missing or ambiguous";
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(missing);
+    expect(
+      evaluateRuntimeDatabasePosture(posture, {
+        ...options,
+        targetRoutinesCreatedByLaterMigrations: ["set_integration_backend"],
+      }),
+    ).not.toContain(missing);
   });
 
   test("predecessor definer lists come from the private functions later migration files create", () => {

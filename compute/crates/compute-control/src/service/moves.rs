@@ -309,7 +309,12 @@ impl<S: Store> Service<S> {
     /// Has `host`, the owner, hand `row`'s sandbox off, even while it is
     /// awake with `awake`, and clears its owner under a raised epoch once
     /// it has.
-    async fn hand_off(&self, row: &SandboxRow, host: HostId, awake: bool) -> Result<(), Failure> {
+    pub(super) async fn hand_off(
+        &self,
+        row: &SandboxRow,
+        host: HostId,
+        awake: bool,
+    ) -> Result<(), Failure> {
         let epoch = row.ownership.epoch;
         let target = self
             .view

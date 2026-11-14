@@ -13,7 +13,7 @@ import { cn } from "../lib/cn";
 import type { NewSessionRealtimeControl } from "../realtime/realtime-control";
 import { ChatComposer } from "./chat-composer";
 import type { ComposerVoiceInputOptions } from "./composer-transcription-control";
-import { ModelPolicyPicker } from "./model-policy-picker";
+import { ComposerModelPicker } from "./model-level-picker";
 import { useComposerTranscription, type SessionConversationProps } from "./session-conversation";
 import { SessionProxyScope, type SessionProxyBaseUrl } from "./session-proxy-scope";
 import { ConversationRenderBoundary } from "./conversation-render-boundary";
@@ -154,7 +154,9 @@ export function NewConversationView({
         controlsStart={
           composerProps?.controlsStart ??
           (composer.policy ? (
-            <ModelPolicyPicker
+            <ComposerModelPicker
+              levels={modelPickerProps?.levels}
+              startOnFirstLevel
               groupPresentation={modelPickerProps?.groupPresentation}
               messages={modelPickerProps?.messages}
               rows={catalog.rows}

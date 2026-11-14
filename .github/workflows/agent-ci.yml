@@ -270,7 +270,11 @@ jobs:
           export OPENGENI_EMBEDDED_COMPUTER_NATIVE="$runtime_fixture/computer-native"
           for proof in \
             browser_sidecar::tests::complete_embedded_bundle_ignores_stale_adjacent_helpers_and_refuses_changed_materialization \
+            browser_sidecar::tests::an_embedded_runtime_is_written_out_for_the_first_controller_not_at_start \
+            browser_sidecar::tests::a_changed_embedded_helper_answers_as_an_agent_without_browser_control \
             embedded_runtime::tests::materializes_the_exact_complete_runtime_idempotently \
+            embedded_runtime::tests::build_digests_name_and_check_the_embedded_bytes \
+            embedded_runtime::tests::prunes_earlier_generations_before_this_one_is_written \
             browser_sidecar::tests::ready_document_requires_the_exact_runtime_identity \
             browser_sidecar::tests::incompatible_ready_document_names_every_mismatched_field \
             shell_tools::tests::embedded_tools_materialize_and_run; do

@@ -30,6 +30,7 @@ import {
   type TimelineItem,
   type TurnStepsItem,
 } from "../src/timeline";
+import type { TurnSummaryContext, TurnSummaryFacet } from "../src/timeline/turn-summary-model";
 import { TurnStepsAction, TurnStepsLoader } from "../src/timeline/turn-steps";
 import {
   isPreparingWork,
@@ -554,6 +555,78 @@ describe("conversation-first session history", () => {
       unretain?.();
       await hook.unmount();
     }
+  });
+
+  test("a summary facet learns when a collapsed live turn holds only its newest steps", async () => {
+    // Each call is two step events, so 328 calls overflow the live tail and 50 do not.
+    const observe = async (calls: number) => {
+      const working = [
+        at(1, "user.message", { text: "go", routing: "accepted_for_execution" }, null),
+        at(2, "turn.started", { turnId: "T1" }, "T1"),
+      ];
+      const live: SessionEvent[] = [];
+      for (let index = 0; index < calls; index += 1) {
+        const id = `T1-call-${index}`;
+        live.push(
+          at(3 + index * 2, "agent.toolCall.created", { id, name: "fetch", arguments: {} }, "T1"),
+        );
+        live.push(at(4 + index * 2, "agent.toolCall.output", { id, output: "ok" }, "T1"));
+      }
+      const { client } = historyClient({
+        store: () => working,
+        live: () => live,
+        head: () => ({ lastSequence: 2, activeTurnId: "T1" }),
+      });
+      const hook = await renderHook(
+        () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        undefined,
+      );
+      const seen: TurnSummaryContext[] = [];
+      const facet: TurnSummaryFacet = {
+        id: "fetched",
+        summarize: (context) => {
+          seen.push(context);
+          return null;
+        },
+      };
+      try {
+        await settle(60);
+        const timeline = hook.result.current.timeline;
+        const views = [];
+        for (const rolling of [true, false]) {
+          seen.length = 0;
+          const view = await renderComponent(
+            <MessageTimeline
+              items={timeline}
+              turnSummary={{ rolling, facets: { add: [facet] } }}
+            />,
+          );
+          await view.unmount();
+          const context = seen.at(-1)!;
+          views.push({
+            unloadedSteps: context.unloadedSteps,
+            toolCalls: context.toolCalls.length,
+          });
+        }
+        return { marker: stepMarkers(timeline)[0]?.state, views };
+      } finally {
+        await hook.unmount();
+      }
+    };
+
+    const long = await observe(328);
+    expect(long.marker).toBe("partial");
+    for (const view of long.views) {
+      expect(view.unloadedSteps).toBe(true);
+      expect(view.toolCalls).toBeGreaterThan(0);
+      expect(view.toolCalls).toBeLessThan(328);
+    }
+    const short = await observe(50);
+    expect(short.marker).toBe("complete");
+    expect(short.views).toEqual([
+      { unloadedSteps: false, toolCalls: 50 },
+      { unloadedSteps: false, toolCalls: 50 },
+    ]);
   });
 
   test("opening a working session catches up the conversation and reads only the latest steps", async () => {

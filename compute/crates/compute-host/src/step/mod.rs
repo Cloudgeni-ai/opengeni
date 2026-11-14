@@ -21,6 +21,7 @@
 mod checkpoint;
 mod guest;
 mod remote;
+mod repair;
 mod restore;
 #[cfg(test)]
 mod tests;
@@ -1039,6 +1040,9 @@ impl<E: Engine, S: Store> Job<E, S> {
             return (state_failure(&error), After::NoVm);
         }
         drop_snapshot(&self.paths);
+        // No VM has the disk open and no memory image depends on it any
+        // more: the one moment its file system can be repaired (ADR 43).
+        repair::repair_disk(&self.paths, self.spec.uid, self.spec.gid).await;
         // Linked now rather than at creation, so a kernel upgrade reaches
         // every sandbox's next boot. No VMM of this sandbox runs meanwhile.
         let (kernel, paths) = (self.kernel.clone(), self.paths.clone());

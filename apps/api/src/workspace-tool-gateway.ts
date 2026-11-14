@@ -3,6 +3,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { withSiteSessionOrigin } from "@opengeni/core";
+import { nangoBackendsFor, nangoReplacedSocialProviders } from "@opengeni/core";
 import { resolveSiteSessionOrigin } from "./site-session-origin";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -54,6 +55,7 @@ import {
 import {
   buildConnectionTokenResolver,
   buildSlackApiRateLimiter,
+  recordNangoUsageEvent,
   lockActiveExternalOrganizationKeyAuthority,
   withAccountRls,
   requireWorkspace,
@@ -940,6 +942,8 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
       ...input,
       ...(input.connectionRef.subjectScope === "subject" ? { subjectId: grant.subjectId } : {}),
     });
+  // Read once per gateway request: a backend flip reaches the next request.
+  const nangoBackends = await nangoBackendsFor(routeDeps.db, routeDeps.settings);
   const firstPartyServers = await Promise.all([
     ...(gatewayServerIds.has("opengeni")
       ? [
@@ -947,7 +951,10 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
           resolveSlackBotToolAvailability(routeDeps.db, grant).then((slackBotAvailable) =>
             inMemoryMcpRegistration(
               "opengeni",
-              buildOpenGeniMcpServer(deps, grant, { slackBotAvailable }),
+              buildOpenGeniMcpServer(deps, grant, {
+                slackBotAvailable,
+                nangoReplacedSocialProviders: nangoReplacedSocialProviders(nangoBackends),
+              }),
             ),
           ),
         ]
@@ -1049,6 +1056,16 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
       // every connection-backed server gets the non-refreshing preflight.
       connectionApprovalPreflight: true,
       credentialSubjectId: grant.subjectId,
+      nangoIntegrationDefinitions: new Map(
+        [...nangoBackends].map(([key, integration]) => [key, integration.definition] as const),
+      ),
+      recordNangoUsage: (report) =>
+        recordNangoUsageEvent(routeDeps.db, {
+          ...report,
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          subjectId: grant.subjectId,
+        }),
       mcpAccountLabels: accountRoutes.accountLabels,
       resolveCredential,
       slackRateLimit: buildSlackApiRateLimiter(routeDeps.db, gatewaySettings),

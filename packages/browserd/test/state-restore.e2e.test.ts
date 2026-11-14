@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type {
@@ -18,8 +18,12 @@ import { HEADLESS_SHELL_VERSION, resolvePinnedHeadlessShell } from "../src/headl
 
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
 
+// Incompressible, so a checkpoint that carried the service worker's copy
+// would be at least this large.
+const SERVICE_WORKER_ASSET = randomBytes(4 * 1024 * 1024);
+
 e2e.each(["restart", "stop"] as const)(
-  "preserves cookie, localStorage, and IndexedDB through a fresh encrypted profile restore (%s)",
+  "preserves cookie, localStorage, and IndexedDB but not service worker caches through a fresh encrypted profile restore (%s)",
   async (afterCapture) => {
     const directory = await mkdtemp("/tmp/ogb-state-restore-e2e-");
     const key = Buffer.alloc(32, 0x51);
@@ -30,12 +34,23 @@ e2e.each(["restart", "stop"] as const)(
       port: 0,
       idleTimeout: 30,
       fetch(request) {
-        if (new URL(request.url).pathname === "/profile.ogbs") {
+        const pathname = new URL(request.url).pathname;
+        if (pathname === "/profile.ogbs") {
           return uploaded
             ? new Response(new Uint8Array(uploaded), {
                 headers: { "content-length": String(uploaded.byteLength) },
               })
             : new Response("missing", { status: 404 });
+        }
+        if (pathname === "/sw.js") {
+          return new Response(serviceWorkerFixture(), {
+            headers: { "content-type": "text/javascript" },
+          });
+        }
+        if (pathname === "/asset.bin") {
+          return new Response(new Uint8Array(SERVICE_WORKER_ASSET), {
+            headers: { "content-type": "application/octet-stream" },
+          });
         }
         return new Response(identityFixture(), {
           headers: { "content-type": "text/html; charset=utf-8" },
@@ -75,6 +90,7 @@ e2e.each(["restart", "stop"] as const)(
         "cookie=present local=present idb=present",
       );
       expect(semanticNames(ready)).toContain("cookie=present local=present idb=present");
+      await waitForSemanticName(supervisor, source, created.observation.target.id, "sw=cached");
 
       const filled = await supervisor.action(
         command(ready, {
@@ -127,6 +143,9 @@ e2e.each(["restart", "stop"] as const)(
         },
       });
       expect(uploaded).not.toBeNull();
+      // The site's 4 MiB service worker copy stays behind; the sign-in state
+      // above is only a few KiB.
+      expect(captured.sizeBytes).toBeLessThan(SERVICE_WORKER_ASSET.byteLength);
       expect(captured.manifest.tabs.some((tab) => tab.url.startsWith("blob:"))).toBe(true);
       if (afterCapture === "restart") {
         const selected = (await supervisor.listTargets(source)).find((tab) => tab.selected)!;
@@ -187,6 +206,8 @@ e2e.each(["restart", "stop"] as const)(
       }
       expect(observed.target.url).toBe(`${origin}/account`);
       expect(semanticNames(observed)).toContain("cookie=present local=present idb=present");
+      // The site installs its service worker again, as on a first visit.
+      await waitForSemanticName(supervisor, target, restored.observation.target.id, "sw=cached");
       const restoredTargets = await supervisor.listTargets(target);
       expect(restoredTargets).toHaveLength(2);
       const unavailablePreview = restoredTargets.find(
@@ -303,14 +324,26 @@ function canonicalValue(value: unknown): unknown {
   );
 }
 
+function serviceWorkerFixture(): string {
+  return `
+    self.addEventListener('install', (event) => {
+      event.waitUntil(caches.open('assets').then((cache) => cache.add('/asset.bin')));
+    });
+    self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));`;
+}
+
 function identityFixture(): string {
   return `<!doctype html>
     <title>Identity fixture</title>
     <button id="initialize">Initialize identity</button>
     <button id="preview">Open temporary preview</button>
     <p id="status">loading</p>
+    <p id="sw">sw=missing</p>
     <label>Draft<input id="draft"></label><p id="draft-status">form=missing</p>
     <script>
+      navigator.serviceWorker.register('/sw.js').then(() => navigator.serviceWorker.ready).then(async () => {
+        if (await caches.has('assets')) document.getElementById('sw').textContent = 'sw=cached';
+      });
       const draft = document.getElementById('draft');
       draft.oninput = () => {
         document.getElementById('draft-status').textContent = 'form=' + (draft.value || 'missing');
