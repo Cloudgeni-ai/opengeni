@@ -542,6 +542,13 @@ export async function createCatalogItem(input: {
     if (!endpoint)
       throw new HTTPException(422, { message: "That entry doesn't take connection inputs." });
     if ("problem" in endpoint) throw new HTTPException(422, { message: endpoint.problem });
+    // A member's add needs their organization's permission, even when the
+    // connection is already here.
+    if (input.memberCreate)
+      await requireMemberIntegrationSetupAllowed(input.db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+      });
     // The connection is already here (added before, or by someone else): it
     // is the result, so a repeated Connect never adds a second one.
     const existing = (await listCapabilityCatalogItems(input.db, input.workspaceId)).find(

@@ -15811,6 +15811,7 @@ export const CreateCapabilityCatalogItemRequest = /* @__PURE__ */ defineSchema((
     /**
      * With `connectFor`: the values the person entered on that card, by
      * input id. The API turns them into the endpoint by the entry's rule.
+     * Ignored without `connectFor`.
      */
     connectInputs: z
       .record(z.string().min(1).max(64), z.string().max(2048))

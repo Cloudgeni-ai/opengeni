@@ -8143,7 +8143,9 @@ function registerCapabilityDiscoveryTools(
           ),
       },
     },
-    async ({ capabilityId, rationale, connectionId, inputs: suppliedInputs }, extra) => {
+    async ({ capabilityId, rationale, connectionId, inputs }, extra) => {
+      // No values is the same as no inputs.
+      const suppliedInputs = inputs && Object.keys(inputs).length > 0 ? inputs : undefined;
       await authorize();
       // Tool discovery shows a card for a search that clearly names one
       // integration; it shows that card at most once per chat.
