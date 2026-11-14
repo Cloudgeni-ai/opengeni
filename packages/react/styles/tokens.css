@@ -7,9 +7,9 @@
    themes can be nested and rebranded per subtree.
 
    The palette is deliberately calm: pure neutral greys (no hue tint), a
-   neutral grey "accent" for icons, links, focus and selected marks, and color
-   only where it carries meaning - the primary button's teal wash, the soft
-   teal/peach glow behind the rail and sign-in page, and the status hues.
+   neutral grey "accent" for icons, focus and selected marks, and color only
+   where it carries meaning - text links, the primary button's teal wash, the
+   soft teal/peach glow behind the rail and sign-in page, and the status hues.
    Information density comes from typography and spacing, not from color
    shouting. Neutral and brand values are exact studio hex values; status and
    danger values are tuned for WCAG AA as 11-12 px text on every surface.
@@ -117,12 +117,17 @@
      Surface 1-2 and the canvas. */
   --og-color-fg-subtle: #a3a3a3;
 
-  /* Accent - a neutral grey for icons, links, focus rings, the active tab bar
-     and selected rings. Color lives in the primary wash and the glow. */
+  /* Accent - a neutral grey for icons, focus rings, the active tab bar and
+     selected rings. Color lives in links, the primary wash and the glow. */
   --og-color-accent: #c4c4c4;
   --og-color-accent-strong: #dcdcdc;
   --og-color-accent-deep: #d5d5d5;
   --og-color-accent-fg: #242424;
+  /* Text links (chat Markdown and every og-link): a calm blue, the hue people
+     read as "you can open this". A grey link sat within a shade of body text
+     and read as plain prose. Keeps 4.9:1 or more on the canvas, bg and
+     Surface 1-3. */
+  --og-color-link: #8ab4f8;
   /* Legacy color-mix fallbacks stay in the base rule; supported values are
      grouped below so processors do not repeat this selector for every token. */
   --og-color-accent-soft: var(--og-color-accent);
@@ -277,6 +282,8 @@
   --og-color-accent-strong: #383838;
   --og-color-accent-deep: #383838;
   --og-color-accent-fg: #ffffff;
+  /* Keeps 4.9:1 or more on the canvas, bg and Surface 1-3. */
+  --og-color-link: #0b57d0;
   /* Match the dark-token fallback strategy without duplicating support rules. */
   --og-color-accent-soft: var(--og-color-accent);
 

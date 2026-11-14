@@ -37,3 +37,15 @@ The orb is back as the default preparing visual; the status text, slow-start cop
 | Before | After | After (animated) |
 | --- | --- | --- |
 | ![Small spinner beside Working](screenshots/preparing-orb/before-preparing.png) | ![Thinking orb beside Working](screenshots/preparing-orb/after-preparing.png) | ![Thinking orb animating beside Working](screenshots/preparing-orb/after-preparing.gif) |
+
+## Links
+
+Links in a reply used to be drawn in the near-white (dark) or near-black (light) neutral accent with no underline on the phone, so in dark mode "Open …" read as one more line of body text. Every link kind (web URLs, autolinked URLs, artifact, Site, chat and file links, links in lists and tables) now uses the `link` color token, a calm blue in both themes that keeps 4.9:1 or more on every chat surface, with a resting underline tinted from it. A press shows a soft wash of the link color. The web chat already underlined links and now uses the same token. Hosts rebrand it with `--og-color-link` on web and `link` in the native theme overrides.
+
+The new "Links" lab scenario renders the same reply on both. Native, from the actual `MessageTimeline` through react-native-web at iPhone width:
+
+![Native chat links before and after, light and dark](screenshots/chat-links/native-links-before-after.png)
+
+Web chat (`/dev/session-timeline?scenario=links`) at the same width:
+
+![Web chat links before and after, light and dark](screenshots/chat-links/web-links-before-after.png)

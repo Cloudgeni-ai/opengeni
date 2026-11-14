@@ -244,6 +244,7 @@
   --color-og-accent-deep: var(--og-color-accent-deep);
   --color-og-accent-fg: var(--og-color-accent-fg);
   --color-og-accent-soft: var(--og-color-accent-soft);
+  --color-og-link: var(--og-color-link);
 
   --color-og-primary: var(--og-color-primary);
   --color-og-primary-fg: var(--og-color-primary-fg);
@@ -406,15 +407,17 @@
   --og-component-line-height: var(--og-line-height-composer-wide);
 }
 
-/* The one text-link style. The default palette is neutral grey, so colour
-   alone cannot tell a link from body text: a resting underline carries the
-   affordance (WCAG 1.4.1). The underline is tinted from the link's own colour
-   so it stays quiet in dense rows and follows a call site's colour (muted
-   meta links); hover strengthens it to the full ink. A host that rebrands the
-   accent gets coloured links for free. Call-site utilities (text colour, focus
-   ring, outline-none) override these declarations. */
+/* The one text-link style: the link colour (a calm blue in the stock themes;
+   hosts rebrand it with --og-color-link) plus a resting underline, so a link
+   never depends on colour alone (WCAG 1.4.1). The underline is tinted from the
+   link's own colour so it stays quiet in dense rows and follows a call site's
+   colour (muted meta links); hover, keyboard focus and a press strengthen it
+   to the full ink. Visited links keep the same colour: chat links are actions
+   (open a file, a Site, a chat) more than reading history. Call-site
+   utilities (text colour, focus ring, outline-none) override these
+   declarations. */
 @utility og-link {
-  color: var(--og-color-accent-strong);
+  color: var(--og-color-link);
   text-decoration-line: underline;
   text-decoration-thickness: 1px;
   text-decoration-color: color-mix(in oklch, currentColor 45%, transparent);
@@ -425,6 +428,9 @@
     &:hover {
       text-decoration-color: currentColor;
     }
+  }
+  &:active {
+    text-decoration-color: currentColor;
   }
   &:focus-visible {
     text-decoration-color: currentColor;
@@ -800,6 +806,7 @@
     --og-color-accent-deep: CanvasText;
     --og-color-accent-fg: CanvasText;
     --og-color-accent-soft: Canvas;
+    --og-color-link: LinkText;
     --og-color-status-queued: CanvasText;
     --og-color-status-running: CanvasText;
     --og-color-charge: Highlight;
