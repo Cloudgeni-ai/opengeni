@@ -141,7 +141,7 @@ hex = "0.4"
 # not. Keep the compatible pair explicit so a routine lock refresh cannot
 # silently raise the agent's MSRV.
 atspi = { version = "0.30", default-features = false, features = ["connection", "proxies", "zbus"] }
-zbus = { version = "=5.5.0", default-features = false }
+zbus = { version = "=6.2.1", default-features = false }
 zvariant = { version = "=5.2.0", default-features = false }
 zvariant_utils = { version = "=3.2.0", default-features = false }
 # GNOME Wayland: Mutter reports its active keyboard layout group to EIS clients.
