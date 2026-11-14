@@ -136,7 +136,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(opengeni_machine_op_total{outcome=\"failed\"}[10m])) / clamp_min(sum(rate(opengeni_machine_op_total[10m])), 1)",
+          "expr": "sum(rate(opengeni_machine_op_total{outcome=\"failed\",infrastructure=\"true\"}[10m])) / clamp_min(sum(rate(opengeni_machine_op_total[10m])), 1)",
           "legendFormat": "",
           "datasource": {
             "type": "prometheus",
