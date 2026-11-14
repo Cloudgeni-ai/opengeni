@@ -14,6 +14,7 @@ import {
   bootstrapWorkspace,
   consoleSessionCounts,
   consoleSpendBreakdown,
+  consoleSpendByApiKey,
   consoleSpendByWorkspace,
   createDb,
   createSession,
@@ -32,7 +33,13 @@ import {
   setConsoleWorkspaceKind,
 } from "../src/index";
 import { sql } from "drizzle-orm";
-import { withSessionRlsActorContext } from "../src/database";
+import { consoleSessionSpendSql } from "../src/console";
+import {
+  rawRows,
+  withAccountRls,
+  withoutSessionRlsActor,
+  withSessionRlsActorContext,
+} from "../src/database";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -356,4 +363,128 @@ test("top models count billed calls and their tokens once per call", async () =>
       cachedTokens: 800,
     },
   ]);
+});
+
+type PlanNode = {
+  "Node Type": string;
+  "Relation Name"?: string;
+  "Index Name"?: string;
+  Plans?: PlanNode[];
+};
+function planNodes(plan: PlanNode): PlanNode[] {
+  return [plan, ...(plan.Plans ?? []).flatMap(planNodes)];
+}
+
+test("session cost sums each tree's debits through the ledger's idempotency index", async () => {
+  const { accountId, managedId, teamId } = await organization();
+  const apiKeyId = crypto.randomUUID();
+  await markWorkspaceManagedByApiKey(client.db, { accountId, workspaceId: managedId, apiKeyId });
+  await markWorkspaceManagedByApiKey(client.db, { accountId, workspaceId: teamId, apiKeyId });
+  const rootId = await session(accountId, managedId, { title: "Root" });
+  const childId = await session(accountId, managedId, {
+    title: "Sub-agent",
+    parentSessionId: rootId,
+  });
+  const otherId = await session(accountId, managedId, {
+    title: "End user",
+    ownerSubjectId: `external_user:${crypto.randomUUID()}`,
+  });
+  const idleId = await session(accountId, managedId, { title: "No calls" });
+
+  const call = async (
+    sessionId: string,
+    debits: { type: "model_usage_debit" | "byok_platform_fee"; amount: number }[],
+  ) => {
+    const turnId = crypto.randomUUID();
+    const sourceKey = `resp_${crypto.randomUUID()}`;
+    await shared.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`insert into model_call_facts (account_id, workspace_id, session_id, turn_id, source_key,
+          provider, provider_api, model, billing_path, occurred_at)
+        values (${accountId}, ${managedId}, ${sessionId}, ${turnId}, ${sourceKey},
+          'openai', 'responses', 'gpt-6-luna', 'opengeni_credits', now())`;
+      for (const debit of debits) {
+        await tx`insert into credit_ledger_entries
+            (account_id, workspace_id, type, amount_micros, source_type, source_id, idempotency_key)
+          values (${accountId}, ${managedId}, ${debit.type}, ${debit.amount}, 'model_response',
+            ${sourceKey}, ${`credit:${debit.type}:${turnId}:${sourceKey}`})`;
+      }
+    });
+  };
+  // A root's cost includes its sub-agents and BYOK platform fees.
+  await call(rootId, [
+    { type: "model_usage_debit", amount: -1_000 },
+    { type: "byok_platform_fee", amount: -200 },
+  ]);
+  await call(childId, [{ type: "model_usage_debit", amount: -300 }]);
+  await call(otherId, [{ type: "model_usage_debit", amount: -700 }]);
+  // A call without a debit (included or failed) costs nothing.
+  await call(otherId, []);
+  // Spend in another managed workspace of the same key, and a large ledger
+  // of unrelated rows the per-session lookups must not scan.
+  await shared.admin.begin(async (tx) => {
+    await tx`set local session_replication_role = replica`;
+    await tx`insert into credit_ledger_entries
+        (account_id, workspace_id, type, amount_micros, idempotency_key)
+      values (${accountId}, ${teamId}, 'model_usage_debit', -400, ${`team:${crypto.randomUUID()}`})`;
+    await tx`insert into credit_ledger_entries
+        (account_id, workspace_id, type, amount_micros, source_type, source_id, idempotency_key)
+      select gen_random_uuid(), gen_random_uuid(), 'model_usage_debit', -1, 'model_response',
+        'filler', 'credit:model_usage_debit:' || gen_random_uuid() || ':filler-' || n
+      from generate_series(1, 10000) n`;
+    await tx`analyze credit_ledger_entries`;
+  });
+
+  const page = await listConsoleSessions(client.db, {
+    accountId,
+    workspaces: [{ id: managedId, name: "Product tenant" }],
+    limit: 50,
+    cursor: null,
+    q: null,
+    includeContent: false,
+  });
+  const costs = new Map(page.sessions.map((entry) => [entry.id, entry.costMicros]));
+  expect(costs).toEqual(
+    new Map([
+      [rootId, 1_500],
+      [otherId, 700],
+      [idleId, 0],
+    ]),
+  );
+  const detail = await getConsoleSession(client.db, {
+    accountId,
+    workspace: { id: managedId, name: "Product tenant" },
+    sessionId: rootId,
+    includeContent: false,
+  });
+  expect(detail?.summary.costMicros).toBe(1_500);
+
+  const window = {
+    since: new Date(Date.now() - 86_400_000).toISOString(),
+    until: new Date(Date.now() + 60_000).toISOString(),
+  };
+  expect(await consoleSpendByApiKey(client.db, accountId, window)).toEqual([
+    { apiKeyId, workspaces: 2, spendMicros: 2_600 },
+  ]);
+
+  // Under the Console's row-level security scope, the ledger is probed by its
+  // unique idempotency key, never scanned.
+  const [explained] = await withoutSessionRlsActor(() =>
+    withAccountRls(client.db, accountId, async (tx) => {
+      await tx.execute(sql`select set_config('opengeni.console_review', 'on', true),
+        set_config('opengeni.workspace_id', ${managedId}, true)`);
+      return await rawRows<{ "QUERY PLAN": [{ Plan: PlanNode }] }>(
+        tx,
+        sql`explain (format json) ${consoleSessionSpendSql(accountId, managedId, [rootId, otherId, idleId])}`,
+      );
+    }),
+  );
+  const ledgerReads = planNodes(explained!["QUERY PLAN"][0].Plan).filter(
+    (node) => node["Relation Name"] === "credit_ledger_entries",
+  );
+  expect(ledgerReads.length).toBeGreaterThan(0);
+  for (const read of ledgerReads) {
+    expect(read["Node Type"]).toMatch(/^Index (Only )?Scan$/);
+    expect(read["Index Name"]).toBe("credit_ledger_entries_idempotency_idx");
+  }
 });
