@@ -587,6 +587,10 @@ test("an agent anyone in the organization may use answers a non-member as itself
 
   expect(await f.say("Auditor: check the books")).toEqual([]);
   await f.pump();
+  // Addressed once: the chat's choice is unchanged (there was none).
+  expect(
+    await shared.admin`select 1 from teams_bot_chat_choices where account_id=${f.accountId} and subject_id=${f.subject}`,
+  ).toHaveLength(0);
   const session = await f.latestSession();
   expect(session.workspace_id).toBe(f.finance);
   expect(session.session_workspace_id).toBe(f.finance);

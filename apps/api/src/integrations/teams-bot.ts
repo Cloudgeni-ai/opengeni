@@ -1301,7 +1301,7 @@ export async function recordTeamsFeedback(deps: ApiRouteDeps, f: TeamsFeedback):
     // routeActor checks the route's owner again, read live.
     const actor = await routeActor(deps, i, reply, f.actorId);
     grant = actor?.grant ?? null;
-    if (actor && actor.subjectId !== actor.grant.subjectId) asker = actor.subjectId;
+    if (actor && isTeamsOrganizationAgentRoute(reply)) asker = actor.subjectId;
   } else {
     // Channels, group chats and installations without routing: as before.
     const identity = await actorGrant(deps, i, f.actorId);
@@ -1839,7 +1839,7 @@ async function routeTeamsPersonalMessage(
     case "hint":
       return await reply("route_address_hint", resolution.text);
     case "ask":
-      return await showCard(m);
+      return await showCard(resolution.text === undefined ? m : { ...m, text: resolution.text });
     case "resolved":
       // Addressing a workspace, an agent or the main assistant is for this
       // one message; only a switch changes the chat's choice.

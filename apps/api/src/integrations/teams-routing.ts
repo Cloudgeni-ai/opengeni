@@ -73,14 +73,13 @@ export type TeamsRouteResolution =
       agentName: string | null;
       text: string;
       source: "prefix" | "main" | "agent" | "choice" | "personal" | "sole";
-      /** Remember this target as the chat's choice. Only a switch does. */
-      remember: false;
       /** Name the workspace on the first reply: routing made a real choice. */
       announce: boolean;
     }
   /** An agent's name or the app name on its own: how to ask, or to switch. */
   | { kind: "hint"; text: string }
-  | { kind: "ask"; options: TeamsRouteOption[] }
+  /** A real choice to make; `text` is the message to keep, when it isn't the whole message. */
+  | { kind: "ask"; options: TeamsRouteOption[]; text?: string }
   | { kind: "denied"; text: string; forgetChoice?: boolean };
 
 /** One numbered choice on a switch card. */
@@ -321,7 +320,6 @@ export function resolveTeamsRoute(input: {
       agentName: null,
       text: prefix.remainder,
       source: "prefix",
-      remember: false,
       announce: true,
     };
   }
@@ -342,15 +340,15 @@ export function resolveTeamsRoute(input: {
         text: teamsChoiceUnavailableText(null),
         forgetChoice: true,
       };
+    if (main.remainder === null)
+      return { kind: "hint", text: teamsMainAddressHintText(input.appName) };
     const base =
       input.choice && !leavingOrganizationAgent
         ? input.choice.workspaceId
         : defaultWorkspace(directory);
     if (!base && leavingOrganizationAgent && candidates.length > 0)
-      return { kind: "ask", options: teamsRouteOptions(directory) };
+      return { kind: "ask", options: teamsRouteOptions(directory), text: main.remainder };
     if (!base) return { kind: "denied", text: TEAMS_NO_WORKSPACE_TEXT };
-    if (main.remainder === null)
-      return { kind: "hint", text: teamsMainAddressHintText(input.appName) };
     return {
       kind: "resolved",
       target: { workspaceId: base, agentId: null },
@@ -358,7 +356,6 @@ export function resolveTeamsRoute(input: {
       agentName: null,
       text: main.remainder,
       source: "main",
-      remember: false,
       announce: many,
     };
   }
@@ -376,8 +373,16 @@ export function resolveTeamsRoute(input: {
     const several = ambiguous.get(agent.nameKey);
     if (several) return { kind: "denied", text: ambiguousAgentText(several) };
     if (!agent.usable) return { kind: "denied", text: teamsNoAccessToAgentText(agent) };
-    if (address.remainder === null)
-      return { kind: "hint", text: teamsAgentAddressHintText(agent.name) };
+    if (address.remainder === null) {
+      // `switch <name>` picks a workspace of the same name first.
+      const named = teamsRouteOptionNamed(directory, agent.name);
+      const switchable =
+        named !== null &&
+        named !== "ambiguous" &&
+        named.agentId === agent.id &&
+        named.workspaceId === agent.targetWorkspaceId;
+      return { kind: "hint", text: teamsAgentAddressHintText(agent.name, switchable) };
+    }
     return {
       kind: "resolved",
       target: { workspaceId: agent.targetWorkspaceId, agentId: agent.id },
@@ -385,7 +390,6 @@ export function resolveTeamsRoute(input: {
       agentName: agent.name,
       text: address.remainder,
       source: "agent",
-      remember: false,
       announce: true,
     };
   }
@@ -406,7 +410,6 @@ export function resolveTeamsRoute(input: {
       agentName: choiceAgent?.name ?? null,
       text: input.text,
       source: "choice",
-      remember: false,
       announce: many,
     };
   }
@@ -422,7 +425,6 @@ export function resolveTeamsRoute(input: {
       agentName: null,
       text: input.text,
       source: personal ? "personal" : "sole",
-      remember: false,
       announce: many,
     };
   }
@@ -455,8 +457,8 @@ export function teamsSwitchCardText(
 }
 
 /** The reply to an agent's name on its own: addressing asks once; switch changes the chat. */
-export function teamsAgentAddressHintText(agentName: string): string {
-  return `To ask **${agentName}**, start your message with **${agentName}:**. To use it for every new message, send **switch ${agentName}**.`;
+export function teamsAgentAddressHintText(agentName: string, switchable = true): string {
+  return `To ask **${agentName}**, start your message with **${agentName}:**. To use it for every new message, send **${switchable ? `switch ${agentName}` : "switch"}**${switchable ? "" : " and pick it"}.`;
 }
 
 /** The reply to the app's name on its own. */
