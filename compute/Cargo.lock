@@ -523,6 +523,7 @@ version = "0.0.0"
 name = "compute-engine"
 version = "0.0.0"
 dependencies = [
+ "crc32c",
  "rustix",
  "serde_json",
  "tempfile",

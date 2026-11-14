@@ -44,6 +44,7 @@ old one; old records stay as history.
 | 36 | [Idle memory stays in RAM](0036-idle-memory-stays-in-ram.md) | Accepted |
 | 37 | [Compressing idle memory is asked for](0037-compressing-idle-memory-is-asked-for.md) | Accepted |
 | 39 | [A fresh boot waits for nothing it does not use](0039-a-fresh-boot-waits-for-nothing-it-does-not-use.md) | Accepted |
+| 43 | [A fresh boot repairs a damaged file system](0043-a-fresh-boot-repairs-a-damaged-file-system.md) | Accepted |
 
 ## Format
 

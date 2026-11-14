@@ -544,7 +544,7 @@ impl Images {
                 len: memory_len,
             } => {
                 move_in(whole, memory)?;
-                let file = File::open(memory)?;
+                let file = fs::OpenOptions::new().read(true).write(true).open(memory)?;
                 let found = file.metadata()?.len();
                 if found != memory_len {
                     return Err(invalid(&format!(
@@ -553,11 +553,13 @@ impl Images {
                     .into());
                 }
                 let all: Vec<usize> = (0..chunk_count(memory_len)).collect();
+                let hashes = hash_chunks(&file, memory_len, &all)?;
+                punch_zero_chunks(&file, memory_len, &all, &hashes)?;
                 Staged {
                     parent: None,
                     state: Some(state),
                     memory_len,
-                    chunks: ChunkMap(hash_chunks(&file, memory_len, &all)?),
+                    chunks: ChunkMap(hashes),
                     remote: None,
                     filled: None,
                 }
@@ -586,11 +588,10 @@ impl Images {
                 let mut chunks = self.chunk_map(&parent)?;
                 let memory_len = parent.meta.memory_len;
                 let touched = merge(&self.memory(base), diff, memory, memory_len, freed)?;
-                let file = File::open(memory)?;
-                for (index, hash) in touched
-                    .iter()
-                    .zip(hash_chunks(&file, memory_len, &touched)?)
-                {
+                let file = fs::OpenOptions::new().read(true).write(true).open(memory)?;
+                let hashes = hash_chunks(&file, memory_len, &touched)?;
+                punch_zero_chunks(&file, memory_len, &touched, &hashes)?;
+                for (index, hash) in touched.iter().zip(hashes) {
                     chunks.0[*index] = hash;
                 }
                 fs::remove_file(diff)?;
@@ -943,6 +944,43 @@ pub(crate) fn hash_chunks(file: &File, len: u64, indices: &[usize]) -> io::Resul
         })
     })?;
     Ok(hashes)
+}
+
+/// Frees the blocks of the chunks of `file`, `len` bytes long, among
+/// `indices` that `hashes` (one per index) found to hold only zeros, so a
+/// memory image takes on disk only what is not zero. A guest of many GiB
+/// that touched a fraction of its memory would otherwise keep every zero
+/// it never wrote: a VMM writes its whole memory into a full snapshot. A
+/// hole reads as zeros, so the image is the same to every reader and its
+/// hashes stay as they are. Adjacent chunks are freed as one range.
+pub(crate) fn punch_zero_chunks(
+    file: &File,
+    len: u64,
+    indices: &[usize],
+    hashes: &[Hash],
+) -> io::Result<()> {
+    let data = data_ranges(file, len)?;
+    let mut run: Option<Range<u64>> = None;
+    let zeros = indices
+        .iter()
+        .zip(hashes)
+        .filter(|(_, hash)| **hash == ZERO)
+        .map(|(index, _)| chunk_range(*index, len))
+        .filter(|range| overlaps(&data, range));
+    for range in zeros {
+        match &mut run {
+            Some(open) if open.end == range.start => open.end = range.end,
+            _ => {
+                if let Some(done) = run.replace(range) {
+                    punch_hole(file, done)?;
+                }
+            }
+        }
+    }
+    if let Some(done) = run {
+        punch_hole(file, done)?;
+    }
+    Ok(())
 }
 
 /// Whether `range` touches any of the sorted, disjoint `data` ranges.
