@@ -166,6 +166,7 @@ import {
   createTaskNote,
   listTaskNotes,
   replaceTaskNote,
+  TaskNoteRefusedError,
   releaseWorkClaim,
   upsertWorkClaim,
   acceptSessionHumanInputResponse,
@@ -518,6 +519,7 @@ import {
   markToolArgumentRejection,
   toolArgumentRejectionResult,
 } from "./tool-argument-error";
+import { databaseToolFailureResult, taskNoteRefusalResult } from "./database-tool-failure";
 import {
   boundSessionEventCompactResult,
   boundSessionEventMcpPage,
@@ -1283,8 +1285,16 @@ export class PolicyMcpServer extends McpServer {
     }
     this.registeredToolCount += 1;
     const handler = cb as (...args: unknown[]) => unknown;
-    return super.registerTool(name, config, ((...args: unknown[]) => {
-      return dispatchWithSessionAuthorizationReadReuse(() => handler(...args));
+    return super.registerTool(name, config, (async (...args: unknown[]) => {
+      try {
+        return await dispatchWithSessionAuthorizationReadReuse(() => handler(...args));
+      } catch (error) {
+        // The SDK would return the thrown message verbatim; a raw database
+        // error's message is its query and every parameter.
+        const databaseFailure = databaseToolFailureResult(name, error);
+        if (databaseFailure) return databaseFailure;
+        throw error;
+      }
     }) as ToolCallback<InputArgs>);
   }
 
@@ -4557,6 +4567,15 @@ function registerTaskNoteTools(
   const authorize = async () => {
     await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
   };
+  // A refusal the task-note routines raise becomes a typed, actionable result.
+  const result = async (run: () => Promise<unknown>) => {
+    try {
+      return json(await run());
+    } catch (error) {
+      if (error instanceof TaskNoteRefusedError) return taskNoteRefusalResult(error);
+      throw error;
+    }
+  };
   const boundedUtf8 = (maxBytes: number, label: string) =>
     z4
       .string()
@@ -4586,12 +4605,13 @@ function registerTaskNoteTools(
     },
     async ({ includeArchived, limit }) => {
       await authorize();
-      return json(
-        await listTaskNotes(deps.db, {
-          ...attemptClaims(),
-          includeArchived,
-          limit,
-        }),
+      return await result(
+        async () =>
+          await listTaskNotes(deps.db, {
+            ...attemptClaims(),
+            includeArchived,
+            limit,
+          }),
       );
     },
   );
@@ -4610,14 +4630,15 @@ function registerTaskNoteTools(
     },
     async ({ operationId, kind, text, expiresInDays }) => {
       await authorize();
-      return json(
-        await createTaskNote(deps.db, {
-          ...attemptClaims(),
-          operationId,
-          kind,
-          text,
-          expiresInDays,
-        }),
+      return await result(
+        async () =>
+          await createTaskNote(deps.db, {
+            ...attemptClaims(),
+            operationId,
+            kind,
+            text,
+            expiresInDays,
+          }),
       );
     },
   );
@@ -4636,14 +4657,15 @@ function registerTaskNoteTools(
     },
     async ({ operationId, noteId, expectedVersion, reason }) => {
       await authorize();
-      return json(
-        await archiveTaskNote(deps.db, {
-          ...attemptClaims(),
-          operationId,
-          noteId,
-          expectedVersion,
-          reason,
-        }),
+      return await result(
+        async () =>
+          await archiveTaskNote(deps.db, {
+            ...attemptClaims(),
+            operationId,
+            noteId,
+            expectedVersion,
+            reason,
+          }),
       );
     },
   );
@@ -4680,17 +4702,18 @@ function registerTaskNoteTools(
       reason,
     }) => {
       await authorize();
-      return json(
-        await replaceTaskNote(deps.db, {
-          ...attemptClaims(),
-          operationId,
-          replacedNoteId,
-          expectedReplacedVersion,
-          replacementKind,
-          replacementText,
-          replacementExpiresInDays,
-          reason,
-        }),
+      return await result(
+        async () =>
+          await replaceTaskNote(deps.db, {
+            ...attemptClaims(),
+            operationId,
+            replacedNoteId,
+            expectedReplacedVersion,
+            replacementKind,
+            replacementText,
+            replacementExpiresInDays,
+            reason,
+          }),
       );
     },
   );
