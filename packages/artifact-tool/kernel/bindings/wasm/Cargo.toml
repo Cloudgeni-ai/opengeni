@@ -21,7 +21,7 @@ opengeni-artifact-kernel-binding-protocol = { path = "../protocol" }
 wasm-bindgen = "0.2.100"
 
 [dev-dependencies]
-sha2 = "0.10.9"
+sha2 = "0.11.1"
 opengeni-artifact-kernel = { path = "../.." }
 
 [profile.release]
