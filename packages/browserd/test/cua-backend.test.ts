@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setSystemTime, test } from "bun:test";
 import {
   CUA_DESKTOP_TOOLS,
   CUA_WINDOWS_DESKTOP_TOOLS,
@@ -1250,7 +1250,20 @@ describe("CUA desktop boundary", () => {
       expect(typed().every((call) => call.args.text !== "later" || call.args.x === undefined)).toBe(
         true,
       );
+
+      // A click long ago: the window may have changed by other means since
+      // (the person, a device's own tools), so nothing is clicked again at
+      // its point.
+      await click();
+      setSystemTime(new Date(Date.now() + 121_000));
+      await expect(type("stale")).rejects.toMatchObject(refusal);
+      expect(
+        typed()
+          .filter((call) => call.args.text === "stale")
+          .map((call) => call.args.x),
+      ).toEqual([undefined]);
     } finally {
+      setSystemTime();
       await backend.close();
     }
   });
