@@ -36,9 +36,11 @@ test("retained title usage preserves every billing field", () => {
     title: null,
     usage: null,
   });
-  expect(() =>
-    SessionTitleResponse.parse({ ...value, usage: { usage: { inputTokens: Infinity } } }),
-  ).toThrow();
+  // A non-finite count is never retained; it is dropped rather than failing the title.
+  expect(
+    SessionTitleResponse.parse({ ...value, usage: { usage: { inputTokens: Infinity } } }).usage
+      ?.usage.inputTokens,
+  ).toBeUndefined();
 });
 
 test("retains a chat completion whose usage details carry null entries", () => {
@@ -75,6 +77,24 @@ test("retains a chat completion whose usage details carry null entries", () => {
       usage: { usage: { inputTokens: 1, inputTokensDetails: null, outputTokensDetails: "n/a" } },
     }).usage?.usage,
   ).toEqual({ inputTokens: 1 });
+});
+
+test("retained title usage drops each unusable value without failing the title", () => {
+  const raw = {
+    inputTokens: Number.NaN,
+    outputTokens: 4,
+    inputTokensDetails: [{ cached_tokens: 1 }, null],
+    requestUsageEntries: [{ input_tokens: 3, output_tokens: null }, null],
+  };
+  const retained = SessionTitleResponse.parse({ title: "x", usage: { usage: raw } }).usage!.usage;
+  expect(retained).toEqual({
+    outputTokens: 4,
+    inputTokensDetails: [{ cached_tokens: 1 }, {}],
+    requestUsageEntries: [{ input_tokens: 3 }, {}],
+  });
+  expect(normalizeModelCallUsage(retained).telemetry).toEqual(
+    normalizeModelCallUsage(raw as never).telemetry,
+  );
 });
 
 test("a failed title reports a bounded, content-free reason", () => {

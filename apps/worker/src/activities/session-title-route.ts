@@ -81,7 +81,9 @@ export function sessionTitleFailureDiagnostic(
   try {
     if (error instanceof Error && ERROR_NAME.test(error.name))
       diagnostic.sessionTitleErrorName = error.name;
-    if (!error || typeof error !== "object") return diagnostic;
+    // Status, code and type are the provider's only for the provider request;
+    // elsewhere a `code` is a database or runtime code, not the provider's.
+    if (stage !== "provider_request" || !error || typeof error !== "object") return diagnostic;
     const fields = error as { status?: unknown; code?: unknown; type?: unknown };
     const status = Number(fields.status);
     if (Number.isInteger(status) && status >= 100 && status <= 599) diagnostic.status = status;
@@ -96,35 +98,45 @@ export function sessionTitleFailureDiagnostic(
 }
 
 /**
- * Chat-compatible providers report usage details with null or non-numeric
- * entries (for example `audio_tokens: null`). Such an entry carries no count;
- * retain only the finite numbers so the title response can still be settled.
+ * The retained title usage is validated field by field, never all or nothing:
+ * the title was already billed from the provider's raw usage, so a value this
+ * schema cannot keep must not fail the title. Chat-compatible providers report
+ * unset counters as null (for example `audio_tokens: null`), and raw usage is
+ * passed through unchecked for the shared normalizer. A null, non-finite or
+ * non-numeric count carries no count and is dropped; the normalizer treats an
+ * absent value the same, so billing and telemetry do not change. A malformed
+ * per-request slot is kept as an empty record so it still reads as unknown.
  */
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  !!value && typeof value === "object" && !Array.isArray(value);
+const finiteCount = z.preprocess(
+  (value) => (typeof value === "number" && Number.isFinite(value) ? value : undefined),
+  z.number().finite().optional(),
+);
 const tokenDetails = z.preprocess(
   (value) =>
-    value && typeof value === "object" && !Array.isArray(value)
+    isRecord(value)
       ? Object.fromEntries(
           Object.entries(value).filter(
             (entry): entry is [string, number] =>
               typeof entry[1] === "number" && Number.isFinite(entry[1]),
           ),
         )
-      : value,
+      : {},
   z.record(z.string(), z.number().finite()),
 );
 const tokenDetailsField = z.preprocess(
-  (value) =>
-    value === null || (typeof value !== "object" && value !== undefined) ? undefined : value,
-  z.union([tokenDetails, z.array(tokenDetails)]).optional(),
+  (value) => (isRecord(value) || Array.isArray(value) ? value : undefined),
+  z.union([z.array(tokenDetails), tokenDetails]).optional(),
 );
 const optionalTokenDetails = z.preprocess(
-  (value) => (value === null ? undefined : value),
+  (value) => (isRecord(value) ? value : undefined),
   tokenDetails.optional(),
 );
 const tokenCounts = {
-  inputTokens: z.number().finite().optional(),
-  outputTokens: z.number().finite().optional(),
-  totalTokens: z.number().finite().optional(),
+  inputTokens: finiteCount,
+  outputTokens: finiteCount,
+  totalTokens: finiteCount,
 };
 /** Only finite provider usage and the normalized title are retained for settlement. */
 export const SessionTitleResponse = z.object({
@@ -133,7 +145,7 @@ export const SessionTitleResponse = z.object({
     .object({
       responseId: z.string().optional(),
       serviceTier: z.string().optional(),
-      webSearchRequests: z.number().finite().optional(),
+      webSearchRequests: finiteCount,
       gatewayBilling: z
         .object({ finalProvider: z.string(), inferenceCostUsd: z.string() })
         .optional(),
@@ -141,20 +153,24 @@ export const SessionTitleResponse = z.object({
         ...tokenCounts,
         inputTokensDetails: tokenDetailsField,
         outputTokensDetails: tokenDetailsField,
-        requestUsageEntries: z
-          .array(
-            z.object({
-              ...tokenCounts,
-              input_tokens: z.number().finite().optional(),
-              output_tokens: z.number().finite().optional(),
-              total_tokens: z.number().finite().optional(),
-              inputTokensDetails: optionalTokenDetails,
-              outputTokensDetails: optionalTokenDetails,
-              input_tokens_details: optionalTokenDetails,
-              output_tokens_details: optionalTokenDetails,
-            }),
-          )
-          .optional(),
+        requestUsageEntries: z.preprocess(
+          (value) =>
+            Array.isArray(value) ? value.map((entry) => (isRecord(entry) ? entry : {})) : undefined,
+          z
+            .array(
+              z.object({
+                ...tokenCounts,
+                input_tokens: finiteCount,
+                output_tokens: finiteCount,
+                total_tokens: finiteCount,
+                inputTokensDetails: optionalTokenDetails,
+                outputTokensDetails: optionalTokenDetails,
+                input_tokens_details: optionalTokenDetails,
+                output_tokens_details: optionalTokenDetails,
+              }),
+            )
+            .optional(),
+        ),
       }),
     })
     .nullable(),

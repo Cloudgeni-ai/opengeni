@@ -16,7 +16,7 @@ import {
   listInstalledPortableSkills,
   PortableSkillInstallationVersionConflictError,
   PortableSkillInstallationVersionRequiredError,
-  PortableSkillDescriptionError,
+  PortableSkillMetadataError,
   portableSkillFacetDescription,
   uninstallPortableSkill,
   type DbClient,
@@ -150,9 +150,9 @@ describe("portable Skill persistence", () => {
     expect(portableSkillFacetDescription("Review releases.\nUse when\r\n  shipping.\n")).toBe(
       "Review releases. Use when shipping.",
     );
-    expect(() => portableSkillFacetDescription(" \n\t")).toThrow(PortableSkillDescriptionError);
+    expect(() => portableSkillFacetDescription(" \n\t")).toThrow(PortableSkillMetadataError);
     expect(() => portableSkillFacetDescription("x".repeat(2049))).toThrow(
-      PortableSkillDescriptionError,
+      PortableSkillMetadataError,
     );
   });
 
@@ -187,6 +187,19 @@ describe("portable Skill persistence", () => {
       capabilityId: input.capabilityId,
       expectedInstallationVersion: installed.installationVersion,
     });
+  }, 60_000);
+
+  test("rejects Skill metadata its rows cannot store with a named error", async () => {
+    if (!available || !client) return;
+    const blank = skillInput("blank-description");
+    await expect(
+      installPortableSkill(client.db, { ...blank, description: " \n " }),
+    ).rejects.toBeInstanceOf(PortableSkillMetadataError);
+    const badName = skillInput("bad-name");
+    await expect(
+      installPortableSkill(client.db, { ...badName, name: "bad\nname" }),
+    ).rejects.toBeInstanceOf(PortableSkillMetadataError);
+    expect(await listInstalledPortableSkills(client.db, first.workspaceId)).toEqual([]);
   }, 60_000);
 
   test("installs idempotently, isolates tenants, and removes an unowned runtime Skill", async () => {

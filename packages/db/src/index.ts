@@ -1197,6 +1197,7 @@ import {
 } from "./new-session-drafts";
 import {
   isRetryableDatabaseTransportFailure,
+  nestedErrorRecords,
   nestedPostgresSqlState,
   runIdempotentPersistenceTransaction,
   safeDatabaseErrorFacts,
@@ -8566,9 +8567,22 @@ export class PortableSkillSourcePathConflictError extends Error {
   readonly name = "PortableSkillSourcePathConflictError";
 }
 
-/** The Skill's description cannot be stored as its single-line facet summary. */
-export class PortableSkillDescriptionError extends Error {
-  readonly name = "PortableSkillDescriptionError";
+/** The Skill's metadata (for example its description) cannot be stored. */
+export class PortableSkillMetadataError extends Error {
+  readonly name = "PortableSkillMetadataError";
+}
+
+/** Row checks on a Skill's own metadata and files: rejected input, not a fault. */
+const PORTABLE_SKILL_METADATA_CONSTRAINT =
+  /^(?:capability_skill_facets_[a-z_]+_chk|capability_skill_files_[a-z_]+_chk|capability_plugins_text_chk)$/u;
+
+function isPortableSkillMetadataViolation(error: unknown): boolean {
+  for (const record of nestedErrorRecords(error)) {
+    const constraint = record.constraint_name ?? record.constraint;
+    if (typeof constraint === "string" && PORTABLE_SKILL_METADATA_CONSTRAINT.test(constraint))
+      return true;
+  }
+  return false;
 }
 
 const SKILL_FACET_DESCRIPTION_MAX_CHARS = 2048;
@@ -8582,7 +8596,7 @@ const SKILL_FACET_DESCRIPTION_MAX_CHARS = 2048;
 export function portableSkillFacetDescription(description: string): string {
   const line = description.replace(/\s+/gu, " ").trim();
   if (line.length === 0 || line.length > SKILL_FACET_DESCRIPTION_MAX_CHARS) {
-    throw new PortableSkillDescriptionError(
+    throw new PortableSkillMetadataError(
       `A Skill description must be 1 to ${SKILL_FACET_DESCRIPTION_MAX_CHARS} characters`,
     );
   }
@@ -11427,7 +11441,25 @@ export async function installPortableSkill(
 ): Promise<InstalledPortableSkill> {
   if (!input.skillActor)
     throw new Error("Portable Skill installation requires a truthful unified Skill actor");
-  const skillActor = input.skillActor;
+  // Fail fast, before any write, with the named error every caller maps.
+  const facetDescription = portableSkillFacetDescription(input.description);
+  try {
+    return await installPortableSkillRows(db, input, facetDescription);
+  } catch (error) {
+    if (!(error instanceof PortableSkillMetadataError) && isPortableSkillMetadataViolation(error))
+      throw new PortableSkillMetadataError("The Skill's metadata cannot be stored", {
+        cause: error,
+      });
+    throw error;
+  }
+}
+
+async function installPortableSkillRows(
+  db: Database,
+  input: InstallPortableSkillInput,
+  facetDescription: string,
+): Promise<InstalledPortableSkill> {
+  const skillActor = input.skillActor!;
   const skillOperationId = input.skillOperationId ?? randomUUID();
   const {
     skillActor: _actor,
@@ -11619,7 +11651,7 @@ export async function installPortableSkill(
             facetId: facet.id,
             capabilityId: input.capabilityId,
             name: input.name,
-            description: portableSkillFacetDescription(input.description),
+            description: facetDescription,
             sourceUrl: input.sourceUrl,
             sourceCommit: input.sourceCommit,
             sourcePath: input.sourcePath,
