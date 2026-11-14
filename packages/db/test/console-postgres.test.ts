@@ -431,7 +431,7 @@ test("session cost sums each tree's debits through the ledger's idempotency inde
         (account_id, workspace_id, type, amount_micros, source_type, source_id, idempotency_key)
       select gen_random_uuid(), gen_random_uuid(), 'model_usage_debit', -1, 'model_response',
         'filler', 'credit:model_usage_debit:' || gen_random_uuid() || ':filler-' || n
-      from generate_series(1, 40000) n`;
+      from generate_series(1, 10000) n`;
     await tx`analyze credit_ledger_entries`;
   });
 

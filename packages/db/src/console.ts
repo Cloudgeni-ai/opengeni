@@ -951,7 +951,7 @@ export function consoleSessionSpendSql(
     select keys.root_id::text as id, sum(-ledger.amount_micros)::bigint::text as spend
     from keys
     join credit_ledger_entries ledger on ledger.idempotency_key = keys.idempotency_key
-    where ledger.amount_micros < 0
+    where ledger.account_id = ${accountId}::uuid and ledger.amount_micros < 0
     group by keys.root_id`;
 }
 
