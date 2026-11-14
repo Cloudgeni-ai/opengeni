@@ -358,7 +358,7 @@ describe("turn-capacity Prometheus alerts", () => {
         [
           "opengeni_interaction_operations_total",
           'outcome=~"failed|denied|outcome_unknown"',
-          'reason!~"destination_.+"',
+          'reason!~"destination_.+|locator_.+|invalid_action"',
         ],
       ],
       [
