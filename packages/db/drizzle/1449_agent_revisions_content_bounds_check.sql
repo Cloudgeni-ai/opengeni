@@ -1,10 +1,10 @@
 -- deployment-mode: rolling
 -- First-message cleanup (docs/agents.md, "First message"): an older First
--- message is joined to its revision's Instructions (1422), which can make them
+-- message is joined to its revision's Instructions (1452), which can make them
 -- longer than 20,000 characters: at most the Instructions, a blank line, the
 -- "When a chat starts:" line and the First message (20,000 + 2 + 20 + 20,000).
 -- This adds the revision bounds again with that Instructions limit, NOT VALID
--- so it takes no long lock; 1420 validates it and 1421 drops the old check.
+-- so it takes no long lock; 1450 validates it and 1451 drops the old check.
 -- Every row either release writes satisfies both. The API still refuses more
 -- than 20,000 characters of Instructions from a person.
 SET LOCAL lock_timeout = '5s';

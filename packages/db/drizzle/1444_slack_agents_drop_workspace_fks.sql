@@ -2,7 +2,7 @@
 -- online-safety-exception: explicit-lock: dropping these keys takes ACCESS EXCLUSIVE on workspaces and slack_agents anyway; locking workspaces first matches the order a cascading workspace delete takes them in, so the drop cannot deadlock with one.
 -- contract-step: since the agents contract (migrations 1380 to 1399) no binary reads slack_agents or inserts into it (the contract only deletes an agent's leftover row, without touching the referenced tables), so its foreign keys protect nothing.
 -- Agents legacy drop: drop slack_agents's four foreign keys to workspaces
--- before the table (1415). Lock order as in 1412. 1412 and 1413 removed the
+-- before the table (1445). Lock order as in 1442. 1442 and 1443 removed the
 -- account and connection keys, so a cascade now reaches slack_agents only
 -- through workspaces, which this file locks first.
 SET LOCAL lock_timeout = '5s';

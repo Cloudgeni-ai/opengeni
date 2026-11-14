@@ -3,7 +3,7 @@
 -- contract-step: since the agents contract (migrations 1380 to 1399) every binary writes agent_slack_installs.install_workspace_id, so no running binary inserts a row without it.
 -- Agents legacy drop (docs/agents.md, "Legacy drop"): every agent_slack_installs
 -- row gets its installation's workspace, then a NOT VALID check requires it;
--- 1408 validates it and 1409 makes the column NOT NULL.
+-- 1438 validates it and 1439 makes the column NOT NULL.
 --
 -- Repair, so validation can't fail: a row still missing it gets its Slack
 -- connection's workspace (the installation's own workspace, which is what

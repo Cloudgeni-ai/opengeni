@@ -372,7 +372,7 @@ describe("agents data layer (restricted runtime role)", () => {
       version: current!.version,
     });
 
-    // Only the agent's own setting decides (since 1418); an installation's
+    // Only the agent's own setting decides (since 1448); an installation's
     // `open` is kept equal to it for the previous release, which reads it.
     await shared.admin`update agent_slack_installs set open = false
       where agent_id = ${agent.id} and connection_id = ${org.connectionId}`;

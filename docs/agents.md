@@ -38,15 +38,15 @@ Slack routes, interactions, proposals, intro posts, suggestions, the
 - `agent_revisions`: immutable content per revision: Instructions (up to
   20,000 characters from a person, up to 40,022 with an older First message
   joined; see [One text](#one-text)), the older `first_message` (empty since
-  migration 1422) and the name and description as of that revision. The
+  migration 1452) and the name and description as of that revision. The
   runtime role may only `SELECT` and `INSERT`; deleting the agent cascades.
 - `agent_slack_installs`: where an agent is available in Slack, one row per
   agent and Slack connection, owned by the agent's home workspace so a rename
   updates it in the same transaction. `name_key` is the Slack handle key (same
   normalisation as the old `slack_agents.name_key`), unique per connection;
-  `open` was the open-use switch (unread since migration 1418, kept equal to
+  `open` was the open-use switch (unread since migration 1448, kept equal to
   `agents.organization_access` for the previous release); `install_workspace_id` (migration 1380,
-  required since 1409) is the Slack
+  required since 1439) is the Slack
   installation's own workspace, where its routes and Slack records live.
   Deleting that workspace deletes the row. The announcement channel stays per
   installation in `slack_agent_update_settings`.
@@ -234,7 +234,7 @@ and other integrations (Teams) read the same way.
   (`agentOpenToOrganization`, `organizationAgentAskerPerson`); Slack's own
   team and conversation check stays in `slack-open-agents.ts`.
 - Storage: `agents.organization_access` (migration 1379, default false) on a
-  `workspace` agent, the only source since 1418
+  `workspace` agent, the only source since 1448
   ([Legacy drop](#legacy-drop)); the API says `organization`. Every write
   still keeps `open` on each of its installations equal to the column, for
   the previous release, which decided by `open` while an agent was in Slack
@@ -305,34 +305,34 @@ end when this release serves again.
 
 ### Legacy drop
 
-Migrations 1407 to 1417, after the contract is the previous release:
+Migrations 1437 to 1447, after the contract is the previous release:
 
-1. 1407 adds `CHECK (install_workspace_id IS NOT NULL) NOT VALID`; 1408
-   validates it; 1409 sets the column `NOT NULL` (no scan, thanks to the
+1. 1437 adds `CHECK (install_workspace_id IS NOT NULL) NOT VALID`; 1438
+   validates it; 1439 sets the column `NOT NULL` (no scan, thanks to the
    validated check) and drops the check. There is no second copy: 1380, its
    fill trigger and the contract's own writes leave no row without the
-   workspace. Should a row still lack it, 1407 repairs it first, so 1408
+   workspace. Should a row still lack it, 1437 repairs it first, so 1438
    can't fail: it sets the Slack connection's workspace (the installation's
    own workspace, what the API writes) and removes a row whose connection has
    none, as turning Slack off there would (the API places a shared agent again
    in every linked Slack workspace). A `NOTICE` reports both counts. It lifts
    FORCE row-level security on `agent_slack_installs` for this, and on
    `connections` only when a row needs repair.
-2. 1410 and 1411 drop the per-agent unique keys, so the same Slack person or
+2. 1440 and 1441 drop the per-agent unique keys, so the same Slack person or
    channel in two installations of one agent gets a record in each.
-3. 1412 to 1414 drop `slack_agents`'s own foreign keys, one referenced table
+3. 1442 to 1444 drop `slack_agents`'s own foreign keys, one referenced table
    per file, each locking the referenced table first and then `slack_agents`,
-   the order a cascading delete takes them in. 1415 drops `slack_agents`,
-   locking only it (and stops if a foreign key is left), and 1416
+   the order a cascading delete takes them in. 1445 drops `slack_agents`,
+   locking only it (and stops if a foreign key is left), and 1446
    `bot_templates`, locking `workspaces` first (no `CASCADE`: nothing
-   references them); 1417 drops
-   the sync and fill trigger functions. During 1413, a workspace or account
+   references them); 1447 drops
+   the sync and fill trigger functions. During 1443, a workspace or account
    delete that reaches `slack_agents` through its own cascade can still
    deadlock with it; PostgreSQL aborts one side and the file is safe to
    rerun. The contract release's delete of a leftover `slack_agents` row
    touches none of the referenced tables, and once the table is gone it
-   skips the delete. The explicit locks put 1412 onwards in the release's
-   maintenance span, and each of 1412 to 1414 and 1416 can hold up readers
+   skips the delete. The explicit locks put 1442 onwards in the release's
+   maintenance span, and each of 1442 to 1444 and 1446 can hold up readers
    of the referenced table for up to two 5 second lock timeouts, one per
    lock it takes (dropping such a key locks it anyway).
 
@@ -342,8 +342,8 @@ working: they never needed the legacy rows.
 
 The same release takes two more contract steps:
 
-- **Anyone in the organization** (1418): `agents.organization_access` becomes
-  the only source. 1418 copies onto it the value the previous release read
+- **Anyone in the organization** (1448): `agents.organization_access` becomes
+  the only source. 1448 copies onto it the value the previous release read
   while an agent was in Slack (open only if every installation's `open` is),
   as the migration owner with FORCE row-level security lifted on `agents` and
   `agent_slack_installs`; a `NOTICE` reports the count. Nothing reads `open`
@@ -353,11 +353,11 @@ The same release takes two more contract steps:
   servers. A later step stops writing and drops it. Every change the
   previous release makes during the rollout writes the column too, so it
   holds; a raw `open` change alone no longer counts.
-- **First message** (1419 to 1422; [One text](#one-text)): every revision's
-  older First message is joined to its Instructions and emptied. 1419 adds
+- **First message** (1449 to 1452; [One text](#one-text)): every revision's
+  older First message is joined to its Instructions and emptied. 1449 adds
   the revision bounds again with Instructions up to 40,022 characters (the
-  most the join makes) `NOT VALID`, 1420 validates it, 1421 drops the old
-  20,000-character check, and 1422 joins, as the migration owner with FORCE
+  most the join makes) `NOT VALID`, 1450 validates it, 1451 drops the old
+  20,000-character check, and 1452 joins, as the migration owner with FORCE
   row-level security lifted on `agent_revisions`; a `NOTICE` reports the
   count. The `first_message` column stays, empty, for the previous release
   until a later step drops it.
@@ -444,7 +444,7 @@ the First message is read as part of them: `agentInstructionsWithFirstMessage`
 (`@opengeni/contracts`) joins it after the Instructions as its own paragraph
 led by "When a chat starts:" (it was what a new chat opened with, so it stays
 something for the start of a chat rather than a standing rule), unless they
-already contain it. Since migration 1422 every stored revision is joined
+already contain it. Since migration 1452 every stored revision is joined
 that way ([Legacy drop](#legacy-drop)), so reads take the Instructions as
 stored; `first_message` stays, empty, until a later step drops it:
 

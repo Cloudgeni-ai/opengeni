@@ -1,4 +1,4 @@
-// First-message cleanup (1419 to 1422): on a database the previous release
+// First-message cleanup (1449 to 1452): on a database the previous release
 // left, every revision's older First message is joined to its Instructions
 // exactly as that release showed them (agentInstructionsWithFirstMessage),
 // even past the 20,000-character limit a person can send, and emptied; run as
@@ -14,7 +14,7 @@ import {
 } from "@opengeni/testing/shared-pg";
 import { migrate } from "../src/migrate";
 
-const firstMigration = "1419_agent_revisions_content_bounds_check.sql";
+const firstMigration = "1449_agent_revisions_content_bounds_check.sql";
 const realDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let owned: OwnerMigratedTestDatabase | null = null;
 let prefix: string | null = null;
@@ -38,7 +38,7 @@ afterAll(async () => {
   if (prefix) await rm(prefix, { recursive: true, force: true });
 }, 180_000);
 
-describe.skipIf(!realDatabase)("1419 to 1422 agents First-message cleanup", () => {
+describe.skipIf(!realDatabase)("1449 to 1452 agents First-message cleanup", () => {
   test("each older First message joins its Instructions as the previous release showed them", async () => {
     const admin = owned!.admin;
     const accountId = crypto.randomUUID();

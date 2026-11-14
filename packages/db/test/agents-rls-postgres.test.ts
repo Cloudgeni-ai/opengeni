@@ -332,7 +332,7 @@ describe("trigger functions", () => {
         and p.proname in ('sync_agent_from_bot_template', 'sync_agent_from_slack_agent',
           'fill_agent_slack_install_workspace', 'guard_session_agent_id_immutable')
       order by p.proname`;
-    // 1417 dropped the legacy tables' trigger functions.
+    // 1447 dropped the legacy tables' trigger functions.
     expect([...routines]).toEqual([
       { name: "guard_session_agent_id_immutable", definer: false, runtime: false },
     ]);

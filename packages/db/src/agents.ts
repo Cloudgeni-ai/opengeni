@@ -10,7 +10,7 @@
  * proposals, intro records, suggestions) point at its installation row.
  *
  * The legacy `bot_templates` and `slack_agents` tables are gone (the contract,
- * migrations 1380 to 1399, and the legacy drop, 1407 to 1417).
+ * migrations 1380 to 1399, and the legacy drop, 1437 to 1447).
  *
  * Authorization (who may read, change or enable what) is decided by callers
  * from live grants. Reads filter Only me agents explicitly; nothing here
@@ -41,7 +41,7 @@ export type AgentContent = {
 /**
  * Agents have one text, their Instructions. A First message an older client
  * or the previous release sends joins them as its own paragraph
- * (`agentInstructionsWithFirstMessage`); since migration 1422 every stored
+ * (`agentInstructionsWithFirstMessage`); since migration 1452 every stored
  * revision is that way, and nothing here reads `first_message` (kept, empty,
  * for the previous release until a later step drops it).
  */
@@ -64,7 +64,7 @@ export type AgentRecord = {
   /**
    * Who can use it: anyone in the organization from chat integrations, not
    * only the workspace. Always false for an Only me agent. The only source
-   * since migration 1418; each Slack installation's `open` is kept equal to
+   * since migration 1448; each Slack installation's `open` is kept equal to
    * it for the previous release, which still reads that.
    */
   organizationAccess: boolean;
@@ -630,7 +630,7 @@ export async function updateAgent(
           updated_at = now()
         where id = ${current.id}::uuid and workspace_id = ${home.workspaceId}::uuid`);
       // Only the previous release reads who can use it from each Slack
-      // installation's `open` (nothing here does since 1418): keep them the
+      // installation's `open` (nothing here does since 1448): keep them the
       // same until a later step drops the column.
       for (const install of installs) {
         if (install.open === organizationAccess) continue;

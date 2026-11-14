@@ -14,8 +14,8 @@ import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 
 const firstContractMigration = "1380_agent_slack_install_workspace.sql";
-// The legacy drop (1407 on) removes slack_agents; this suite stops before it.
-const firstLegacyDropMigration = "1407_agent_slack_installs_workspace_check.sql";
+// The legacy drop (1437 on) removes slack_agents; this suite stops before it.
+const firstLegacyDropMigration = "1437_agent_slack_installs_workspace_check.sql";
 const realDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let owned: OwnerMigratedTestDatabase | null = null;
 let prefix: string | null = null;

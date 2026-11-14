@@ -1,7 +1,7 @@
 -- deployment-mode: rolling
--- online-safety-exception: table-rewrite: SET NOT NULL on agent_slack_installs.install_workspace_id does not scan, because 1408 validated CHECK (install_workspace_id IS NOT NULL) and PostgreSQL uses it as the proof.
+-- online-safety-exception: table-rewrite: SET NOT NULL on agent_slack_installs.install_workspace_id does not scan, because 1438 validated CHECK (install_workspace_id IS NOT NULL) and PostgreSQL uses it as the proof.
 -- contract-step: since the agents contract (migrations 1380 to 1399) every binary writes agent_slack_installs.install_workspace_id, so no running binary inserts a row without it.
--- Agents legacy drop: install_workspace_id becomes NOT NULL and 1407's
+-- Agents legacy drop: install_workspace_id becomes NOT NULL and 1437's
 -- check, now redundant, goes.
 SET LOCAL lock_timeout = '5s';
 

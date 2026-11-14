@@ -1,4 +1,4 @@
-// Agents legacy drop (1407 to 1417) on a database left by the contract release
+// Agents legacy drop (1437 to 1447) on a database left by the contract release
 // (through 1399), run as the NOSUPERUSER migration owner: the installation
 // workspace becomes required, the per-agent unique keys go, and the legacy
 // tables and their trigger functions are dropped without CASCADE.
@@ -12,10 +12,10 @@ import {
 } from "@opengeni/testing/shared-pg";
 import { migrate } from "../src/migrate";
 
-const firstLegacyDropMigration = "1407_agent_slack_installs_workspace_check.sql";
-// 1412 to 1414 drop slack_agents's own foreign keys so its table drop locks no
-// other table; the suite checks that state before 1415.
-const tableDropMigration = "1415_slack_agents_drop.sql";
+const firstLegacyDropMigration = "1437_agent_slack_installs_workspace_check.sql";
+// 1442 to 1444 drop slack_agents's own foreign keys so its table drop locks no
+// other table; the suite checks that state before 1445.
+const tableDropMigration = "1445_slack_agents_drop.sql";
 const realDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let owned: OwnerMigratedTestDatabase | null = null;
 let prefix: string | null = null;
@@ -42,7 +42,7 @@ afterAll(async () => {
   if (beforeTableDrop) await rm(beforeTableDrop, { recursive: true, force: true });
 }, 180_000);
 
-describe.skipIf(!realDatabase)("1407 to 1417 agents legacy drop", () => {
+describe.skipIf(!realDatabase)("1437 to 1447 agents legacy drop", () => {
   test("requires the installation workspace and drops the legacy tables", async () => {
     const admin = owned!.admin;
     const accountId = crypto.randomUUID();
@@ -67,7 +67,7 @@ describe.skipIf(!realDatabase)("1407 to 1417 agents legacy drop", () => {
         origin)
       values (${agentId}, ${accountId}, ${home}, 'workspace', 'Desk', 'desk', 'slack')`;
     // One installation as the contract release writes it; one that slipped
-    // past 1380's fill (no workspace yet), which 1407 fills from its Slack
+    // past 1380's fill (no workspace yet), which 1437 fills from its Slack
     // connection's workspace.
     await admin`insert into agent_slack_installs (agent_id, account_id, workspace_id,
         connection_id, install_workspace_id, slack_team_id, name_key)
@@ -94,7 +94,7 @@ describe.skipIf(!realDatabase)("1407 to 1417 agents legacy drop", () => {
         where agent_id = ${agentId} and install_workspace_id is null`,
     ).toHaveLength(1);
 
-    // 1407 fills it from the Slack connection's workspace (as the
+    // 1437 fills it from the Slack connection's workspace (as the
     // NOSUPERUSER owner, through FORCE row level security), and the release
     // goes on.
     await migrate(owned!.ownerUrl, undefined, { migrationsDirectory: beforeTableDrop! });
@@ -108,8 +108,8 @@ describe.skipIf(!realDatabase)("1407 to 1417 agents legacy drop", () => {
         or confrelid = 'slack_agents'::regclass)`;
     expect([...legacyKeys]).toEqual([]);
 
-    // A foreign key 1412 to 1414 missed (a production name that differs)
-    // stops 1415 before it drops anything.
+    // A foreign key 1442 to 1444 missed (a production name that differs)
+    // stops 1445 before it drops anything.
     await admin`alter table slack_agents add constraint slack_agents_drifted_fk
       foreign key (connection_id) references connections (id) not valid`;
     await expect(migrate(owned!.ownerUrl)).rejects.toThrow(
@@ -134,7 +134,7 @@ describe.skipIf(!realDatabase)("1407 to 1417 agents legacy drop", () => {
       where attrelid = 'agent_slack_installs'::regclass and attname = 'install_workspace_id'`;
     expect(column?.notNull).toBe(true);
 
-    // The legacy tables, their functions, 1407's check and the per-agent keys
+    // The legacy tables, their functions, 1437's check and the per-agent keys
     // are gone; the per-installation keys stay.
     const [gone] = await admin<
       { slackAgents: string | null; botTemplates: string | null; functions: number }[]

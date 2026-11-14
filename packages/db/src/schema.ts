@@ -2423,7 +2423,7 @@ export const slackAgentUserStates = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    // 1398: per installation (1410 dropped the per-agent key).
+    // 1398: per installation (1440 dropped the per-agent key).
     installUser: uniqueIndex("slack_agent_user_states_install_user_uq").on(
       table.connectionId,
       table.slackAgentId,
@@ -2638,7 +2638,7 @@ export const slackAgentIntroPosts = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    // 1399: per installation (1411 dropped the per-agent key).
+    // 1399: per installation (1441 dropped the per-agent key).
     installChannel: uniqueIndex("slack_agent_intro_posts_install_channel_uq").on(
       table.connectionId,
       table.slackAgentId,

@@ -113,7 +113,7 @@ async function slackConnection(accountId: string, workspaceId: string, label: st
 /**
  * A shared agent as an older release left it, with no Slack row yet: an
  * agent row and its first revision. A bot template became one with the
- * template text as its First message and empty Instructions; migration 1422
+ * template text as its First message and empty Instructions; migration 1452
  * joined that into the Instructions.
  */
 async function olderAgent(
@@ -373,7 +373,7 @@ describe("an agent's Slack availability (real PostgreSQL)", () => {
     const afterRename = await call(install.admin, "GET", `${install.base}/${agent.id}`);
     expect(afterRename.json.agent.visibility).toBe("organization");
 
-    // Only the agent's own setting decides (1418 copied what the previous
+    // Only the agent's own setting decides (1448 copied what the previous
     // release read from the installations); each installation's open is
     // kept equal to it for that release, and the next edit writes it again.
     await shared!.admin`update agent_slack_installs set open = false where agent_id = ${agent.id}`;

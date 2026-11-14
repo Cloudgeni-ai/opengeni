@@ -1,4 +1,4 @@
-// Anyone in the organization, contract step (1418): on a database the
+// Anyone in the organization, contract step (1448): on a database the
 // previous release left, each shared agent in Slack gets the value that
 // release read from its installations (open only if every one is), run as the
 // NOSUPERUSER migration owner through FORCE row level security.
@@ -12,7 +12,7 @@ import {
 } from "@opengeni/testing/shared-pg";
 import { migrate } from "../src/migrate";
 
-const backfillMigration = "1418_agents_organization_access_backfill.sql";
+const backfillMigration = "1448_agents_organization_access_backfill.sql";
 const realDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let owned: OwnerMigratedTestDatabase | null = null;
 let prefix: string | null = null;
@@ -36,7 +36,7 @@ afterAll(async () => {
   if (prefix) await rm(prefix, { recursive: true, force: true });
 }, 180_000);
 
-describe.skipIf(!realDatabase)("1418 agents organization access backfill", () => {
+describe.skipIf(!realDatabase)("1448 agents organization access backfill", () => {
   test("each shared agent in Slack gets what the previous release read from its installations", async () => {
     const admin = owned!.admin;
     const accountId = crypto.randomUUID();

@@ -2,7 +2,7 @@
 -- online-safety-exception: explicit-lock: dropping this key takes ACCESS EXCLUSIVE on connections and slack_agents anyway; locking connections first matches the order a cascading connection delete (a Slack disconnect) takes them in, so the drop cannot deadlock with one.
 -- contract-step: since the agents contract (migrations 1380 to 1399) no binary reads slack_agents or inserts into it (the contract only deletes an agent's leftover row, without touching the referenced tables), so its foreign keys protect nothing.
 -- Agents legacy drop: drop slack_agents's foreign key to connections before
--- the table (1415). Lock order as in 1412. A workspace delete reaches both
+-- the table (1445). Lock order as in 1442. A workspace delete reaches both
 -- tables through its own cascades, in an order PostgreSQL does not fix; if it
 -- runs into this file's short lock wait, PostgreSQL aborts one side and the
 -- file is safe to rerun.
