@@ -8566,6 +8566,29 @@ export class PortableSkillSourcePathConflictError extends Error {
   readonly name = "PortableSkillSourcePathConflictError";
 }
 
+/** The Skill's description cannot be stored as its single-line facet summary. */
+export class PortableSkillDescriptionError extends Error {
+  readonly name = "PortableSkillDescriptionError";
+}
+
+const SKILL_FACET_DESCRIPTION_MAX_CHARS = 2048;
+
+/**
+ * The Skill facet stores a one-line summary. SKILL.md descriptions may be YAML
+ * block scalars (`description: |` or `>`) that keep line breaks; fold every
+ * whitespace run to one space. The plugin row and the SKILL.md content keep the
+ * original text, and nothing compares the facet summary back to SKILL.md.
+ */
+export function portableSkillFacetDescription(description: string): string {
+  const line = description.replace(/\s+/gu, " ").trim();
+  if (line.length === 0 || line.length > SKILL_FACET_DESCRIPTION_MAX_CHARS) {
+    throw new PortableSkillDescriptionError(
+      `A Skill description must be 1 to ${SKILL_FACET_DESCRIPTION_MAX_CHARS} characters`,
+    );
+  }
+  return line;
+}
+
 export type EnabledMcpCapabilityServer = {
   capabilityId: string;
   id: string;
@@ -11596,7 +11619,7 @@ export async function installPortableSkill(
             facetId: facet.id,
             capabilityId: input.capabilityId,
             name: input.name,
-            description: input.description,
+            description: portableSkillFacetDescription(input.description),
             sourceUrl: input.sourceUrl,
             sourceCommit: input.sourceCommit,
             sourcePath: input.sourcePath,

@@ -16,6 +16,8 @@ import {
   listInstalledPortableSkills,
   PortableSkillInstallationVersionConflictError,
   PortableSkillInstallationVersionRequiredError,
+  PortableSkillDescriptionError,
+  portableSkillFacetDescription,
   uninstallPortableSkill,
   type DbClient,
   type InstallPortableSkillInput,
@@ -144,6 +146,49 @@ async function deactivateInstalledSkill(
 }
 
 describe("portable Skill persistence", () => {
+  test("folds a block-scalar description into the one-line facet summary", () => {
+    expect(portableSkillFacetDescription("Review releases.\nUse when\r\n  shipping.\n")).toBe(
+      "Review releases. Use when shipping.",
+    );
+    expect(() => portableSkillFacetDescription(" \n\t")).toThrow(PortableSkillDescriptionError);
+    expect(() => portableSkillFacetDescription("x".repeat(2049))).toThrow(
+      PortableSkillDescriptionError,
+    );
+  });
+
+  test("installs a Skill whose SKILL.md description is a YAML block scalar", async () => {
+    if (!available || !client || !shared) return;
+    const base = skillInput("block-description");
+    const description = "Review releases safely.\nUse when shipping a\nversion.\n";
+    const content = `---\nname: block-description\ndescription: |\n  Review releases safely.\n  Use when shipping a\n  version.\n---\n# Block\n`;
+    const contentSha256 = sha256(content);
+    const input: InstallPortableSkillInput = {
+      ...base,
+      description,
+      contentSha256,
+      totalBytes: Buffer.byteLength(content),
+      files: [{ path: "SKILL.md", content, byteSize: Buffer.byteLength(content), contentSha256 }],
+    };
+    const installed = await installPortableSkill(client.db, input);
+    expect(installed.created).toBe(true);
+    const [facet] = await shared.admin<Array<{ description: string }>>`
+      select description from capability_skill_facets where capability_id = ${input.capabilityId}
+    `;
+    expect(facet?.description).toBe("Review releases safely. Use when shipping a version.");
+    expect(await installPortableSkill(client.db, input)).toEqual({
+      ...installed,
+      skillReceipt: { ...installed.skillReceipt, replayed: true },
+    });
+    await deactivateInstalledSkill(installed);
+    await uninstallPortableSkill(client.db, {
+      skillActor: { kind: "human", subjectId: first.subjectId, principalKind: "human_session" },
+      accountId: first.accountId,
+      workspaceId: first.workspaceId,
+      capabilityId: input.capabilityId,
+      expectedInstallationVersion: installed.installationVersion,
+    });
+  }, 60_000);
+
   test("installs idempotently, isolates tenants, and removes an unowned runtime Skill", async () => {
     if (!available || !client) return;
     const input = skillInput("release-operator");

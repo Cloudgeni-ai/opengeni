@@ -269,7 +269,14 @@ describe.skipIf(!enabled)("independent title native request custody", () => {
               title: "Coastal Lighthouse History",
               usage: {
                 responseId: "fixture-response",
-                usage: { inputTokens: 50, outputTokens: 12, totalTokens: 62 },
+                usage: {
+                  inputTokens: 50,
+                  outputTokens: 12,
+                  totalTokens: 62,
+                  // Chat-compatible routes report unset counters as null.
+                  inputTokensDetails: { cached_tokens: 0, audio_tokens: null },
+                  outputTokensDetails: { reasoning_tokens: 2, audio_tokens: null },
+                },
               },
             };
           },

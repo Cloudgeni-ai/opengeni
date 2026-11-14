@@ -24,6 +24,8 @@ import {
   getPortableSkillUninstallPreview,
   installPortableSkill,
   listInstalledSkills,
+  nestedPostgresSqlState,
+  PortableSkillDescriptionError,
   PortableSkillInstallationVersionConflictError,
   PortableSkillInstallationVersionRequiredError,
   PortableSkillSourcePathConflictError,
@@ -267,6 +269,15 @@ export function registerSkillRoutes(
 function portableSkillMutationHttpError(error: unknown): Error {
   if (error instanceof PortableSkillSourcePathConflictError) {
     return new HTTPException(409, { message: error.message });
+  }
+  if (error instanceof PortableSkillDescriptionError) {
+    return new HTTPException(422, { message: error.message });
+  }
+  // Any other metadata a stored row rejects is invalid Skill input, not a
+  // server fault.
+  const sqlState = nestedPostgresSqlState(error);
+  if (sqlState === "23514" || sqlState === "22001") {
+    return new HTTPException(422, { message: "The Skill's metadata cannot be stored" });
   }
   if (error instanceof PortableSkillInstallationVersionRequiredError) {
     return new HTTPException(400, { message: error.message });

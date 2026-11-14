@@ -54,7 +54,73 @@ export type SessionTitleRequest = z.infer<typeof SessionTitleRequest>;
 
 export class SessionTitleRouteUnavailableError extends Error {}
 
-const tokenDetails = z.record(z.string(), z.number().finite());
+export type SessionTitleFailureStage =
+  | "admission"
+  | "provider_request"
+  | "response"
+  | "billing"
+  | "settlement";
+
+const PROVIDER_ERROR_TOKEN = /^[A-Za-z0-9][A-Za-z0-9 _.:-]{0,63}$/u;
+const ERROR_NAME = /^[A-Za-z][A-Za-z0-9_]{0,63}$/u;
+
+/**
+ * A bounded, content-free reason for a failed title: the stage, the error's
+ * class name, and the provider's HTTP status and error code/type when the
+ * provider refused the request. Never a message, body or prompt.
+ */
+export function sessionTitleFailureDiagnostic(
+  error: unknown,
+  stage: SessionTitleFailureStage,
+): Record<string, string | number> {
+  const diagnostic: Record<string, string | number> = {
+    errorClass: "IndependentSessionTitleError",
+    errorCode: `independent_session_title_${stage}_failed`,
+    origin: "worker",
+  };
+  try {
+    if (error instanceof Error && ERROR_NAME.test(error.name))
+      diagnostic.sessionTitleErrorName = error.name;
+    if (!error || typeof error !== "object") return diagnostic;
+    const fields = error as { status?: unknown; code?: unknown; type?: unknown };
+    const status = Number(fields.status);
+    if (Number.isInteger(status) && status >= 100 && status <= 599) diagnostic.status = status;
+    if (typeof fields.code === "string" && PROVIDER_ERROR_TOKEN.test(fields.code))
+      diagnostic.providerErrorCode = fields.code;
+    if (typeof fields.type === "string" && PROVIDER_ERROR_TOKEN.test(fields.type))
+      diagnostic.providerErrorType = fields.type;
+  } catch {
+    // Diagnostics are best-effort and never replace the failure itself.
+  }
+  return diagnostic;
+}
+
+/**
+ * Chat-compatible providers report usage details with null or non-numeric
+ * entries (for example `audio_tokens: null`). Such an entry carries no count;
+ * retain only the finite numbers so the title response can still be settled.
+ */
+const tokenDetails = z.preprocess(
+  (value) =>
+    value && typeof value === "object" && !Array.isArray(value)
+      ? Object.fromEntries(
+          Object.entries(value).filter(
+            (entry): entry is [string, number] =>
+              typeof entry[1] === "number" && Number.isFinite(entry[1]),
+          ),
+        )
+      : value,
+  z.record(z.string(), z.number().finite()),
+);
+const tokenDetailsField = z.preprocess(
+  (value) =>
+    value === null || (typeof value !== "object" && value !== undefined) ? undefined : value,
+  z.union([tokenDetails, z.array(tokenDetails)]).optional(),
+);
+const optionalTokenDetails = z.preprocess(
+  (value) => (value === null ? undefined : value),
+  tokenDetails.optional(),
+);
 const tokenCounts = {
   inputTokens: z.number().finite().optional(),
   outputTokens: z.number().finite().optional(),
@@ -73,8 +139,8 @@ export const SessionTitleResponse = z.object({
         .optional(),
       usage: z.object({
         ...tokenCounts,
-        inputTokensDetails: z.union([tokenDetails, z.array(tokenDetails)]).optional(),
-        outputTokensDetails: z.union([tokenDetails, z.array(tokenDetails)]).optional(),
+        inputTokensDetails: tokenDetailsField,
+        outputTokensDetails: tokenDetailsField,
         requestUsageEntries: z
           .array(
             z.object({
@@ -82,10 +148,10 @@ export const SessionTitleResponse = z.object({
               input_tokens: z.number().finite().optional(),
               output_tokens: z.number().finite().optional(),
               total_tokens: z.number().finite().optional(),
-              inputTokensDetails: tokenDetails.optional(),
-              outputTokensDetails: tokenDetails.optional(),
-              input_tokens_details: tokenDetails.optional(),
-              output_tokens_details: tokenDetails.optional(),
+              inputTokensDetails: optionalTokenDetails,
+              outputTokensDetails: optionalTokenDetails,
+              input_tokens_details: optionalTokenDetails,
+              output_tokens_details: optionalTokenDetails,
             }),
           )
           .optional(),
