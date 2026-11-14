@@ -226,9 +226,7 @@ function privateKeyOf(key: Packed | undefined): string | null {
 }
 
 function credentialIdOf(passkey: ProtonPasskey): string | null {
-  return passkey.credential_id.length > 0
-    ? base64url(Uint8Array.from(passkey.credential_id))
-    : null;
+  return passkey.credential_id.length > 0 ? base64url(new Uint8Array(passkey.credential_id)) : null;
 }
 
 /** A login passkey's display metadata, without opening its key. */
@@ -246,7 +244,7 @@ export function decodeProtonPasskey(passkey: ProtonPasskey): ProviderPasskey | n
   const meta = protonPasskeyMeta(passkey);
   if (!meta || passkey.content.length === 0) return null;
   try {
-    const outer = unpack(Uint8Array.from(passkey.content));
+    const outer = unpack(new Uint8Array(passkey.content));
     if (field(outer, "v") !== 1) return null;
     const inner = bytesOf(field(outer, "c"));
     if (!inner) return null;
@@ -256,7 +254,7 @@ export function decodeProtonPasskey(passkey: ProtonPasskey): ProviderPasskey | n
     const counter = field(document, "cnt");
     const userHandle =
       bytesOf(field(document, "uhd")) ??
-      (passkey.user_handle.length > 0 ? Uint8Array.from(passkey.user_handle) : null);
+      (passkey.user_handle.length > 0 ? new Uint8Array(passkey.user_handle) : null);
     return {
       credentialId: meta.credentialId,
       rpId: meta.rpId,

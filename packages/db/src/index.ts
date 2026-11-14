@@ -51188,16 +51188,9 @@ function validatedLegacyNativeSnapshotAdoption(
     | null
     | undefined,
 ): { archiveBase64: string; descriptor: SandboxNativeSnapshotRevision } | null {
-  if (!value || value.archiveBase64.length === 0 || value.archiveBase64.length % 4 !== 0) {
-    return null;
-  }
-  let bytes: Uint8Array;
-  try {
-    bytes = Uint8Array.from(Buffer.from(value.archiveBase64, "base64"));
-  } catch {
-    return null;
-  }
-  if (Buffer.from(bytes).toString("base64") !== value.archiveBase64) return null;
+  if (!value) return null;
+  const bytes = decodeCanonicalBase64(value.archiveBase64);
+  if (!bytes) return null;
   const descriptor = parseArchiveRevision(value.descriptor);
   const native = decodeNativeSnapshotRef(bytes);
   if (
@@ -55295,8 +55288,15 @@ function decodeCanonicalBase64(value: unknown): Uint8Array | null {
   ) {
     return null;
   }
-  const bytes = Uint8Array.from(Buffer.from(value, "base64"));
-  return Buffer.from(bytes).toString("base64") === value ? bytes : null;
+  // Archives reach hundreds of MB: decode once into a view (no copy), and
+  // prove canonical form from the length and the final quantum, the only place
+  // non-zero pad bits can hide, instead of re-encoding the whole payload.
+  const decoded = Buffer.from(value, "base64");
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  if (decoded.length !== (value.length / 4) * 3 - padding) return null;
+  const lastQuantumStart = (value.length / 4 - 1) * 3;
+  if (decoded.subarray(lastQuantumStart).toString("base64") !== value.slice(-4)) return null;
+  return new Uint8Array(decoded.buffer, decoded.byteOffset, decoded.length);
 }
 
 function modalProviderObject(bytes: Uint8Array | null): {
@@ -65794,13 +65794,8 @@ function validatedModalCheckpoint(input: {
   ) {
     throw new Error("Checkpoint artifact registration requires a verified Modal snapshot");
   }
-  let bytes: Uint8Array;
-  try {
-    bytes = Uint8Array.from(Buffer.from(input.workspaceArchive, "base64"));
-  } catch {
-    throw new Error("Checkpoint artifact archive is not valid base64");
-  }
-  if (Buffer.from(bytes).toString("base64") !== input.workspaceArchive) {
+  const bytes = decodeCanonicalBase64(input.workspaceArchive);
+  if (!bytes) {
     throw new Error("Checkpoint artifact archive is not canonical base64");
   }
   const native = decodeNativeSnapshotRef(bytes);

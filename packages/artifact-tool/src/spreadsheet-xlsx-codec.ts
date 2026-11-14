@@ -1324,7 +1324,7 @@ async function workbookModelDigest(workbook: Workbook): Promise<string> {
 
 /** ExcelJS stamps ZIP headers with wall-clock time; normalize package metadata only. */
 function normalizeGeneratedZip(input: Uint8Array): Uint8Array {
-  const bytes = Uint8Array.from(input);
+  const bytes = new Uint8Array(input);
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const minimumEocdBytes = 22;
   if (bytes.byteLength < minimumEocdBytes) {

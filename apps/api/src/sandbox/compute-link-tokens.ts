@@ -38,7 +38,7 @@ const SKEW_MS = 60_000;
 
 function base64UrlBytes(value: string): Uint8Array<ArrayBuffer> {
   if (!/^[A-Za-z0-9_-]*$/u.test(value)) throw new ComputeLinkTokenError("token is not base64url");
-  return Uint8Array.from(Buffer.from(value, "base64url"));
+  return new Uint8Array(Buffer.from(value, "base64url"));
 }
 
 function jsonPart(value: string): Record<string, unknown> {

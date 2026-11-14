@@ -42,7 +42,7 @@ export async function rasterizeSvgToPng(
       : { fitTo: { mode: "zoom" as const, value: options.zoom } }),
     font,
   };
-  return Uint8Array.from(new Resvg(svg, resvgOptions).render().asPng());
+  return new Uint8Array(new Resvg(svg, resvgOptions).render().asPng());
 }
 
 async function importNativeRuntime<T>(specifier: string): Promise<T> {

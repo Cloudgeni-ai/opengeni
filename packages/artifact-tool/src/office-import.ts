@@ -94,7 +94,7 @@ export async function prepareArtifactOfficeImport(
   if (input.bytes.byteLength > EDITABLE_ARTIFACT_PRODUCT_MAX_SNAPSHOT_BYTES) {
     throw new RangeError("Office source exceeds the editable artifact product limit");
   }
-  const sourceBytes = Uint8Array.from(input.bytes);
+  const sourceBytes = new Uint8Array(input.bytes);
   const module = exactModule(input.facade);
   const fileBlob = exactNamespace(module.FileBlob, "FileBlob");
   const fromBytes = exactFunction(fileBlob.fromBytes, "FileBlob.fromBytes");
@@ -158,7 +158,7 @@ function validateSnapshot(
   ) {
     throw new TypeError("Imported snapshot bytes are outside the product limit");
   }
-  const bytes = Uint8Array.from(snapshot.snapshotBytes);
+  const bytes = new Uint8Array(snapshot.snapshotBytes);
   const common = {
     bytes,
     byteSize: bytes.byteLength,

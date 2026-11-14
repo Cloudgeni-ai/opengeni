@@ -208,12 +208,26 @@ function sha256(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+/**
+ * Decode canonical padded base64 in one pass. Workspace archives reach
+ * hundreds of MB, so the decoded bytes are returned as a view over the
+ * decoder's own buffer rather than copied, and canonical form is proven
+ * without re-encoding the whole payload: the alphabet/padding shape is
+ * checked up front, the decoded length must match the padding, and only the
+ * final quantum (the one place non-zero pad bits can hide) is re-encoded.
+ */
 function decodeBase64Strict(value: string): Uint8Array | null {
   if (value.length === 0 || value.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(value)) {
     return null;
   }
-  const bytes = Uint8Array.from(Buffer.from(value, "base64"));
-  return Buffer.from(bytes).toString("base64") === value ? bytes : null;
+  const decoded = Buffer.from(value, "base64");
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  if (decoded.length !== (value.length / 4) * 3 - padding) return null;
+  const lastQuantumStart = (value.length / 4 - 1) * 3;
+  if (decoded.subarray(lastQuantumStart).toString("base64") !== value.slice(-4)) return null;
+  // A plain Uint8Array view, not the Buffer subclass: callers compare and
+  // serialize it as ordinary bytes.
+  return new Uint8Array(decoded.buffer, decoded.byteOffset, decoded.length);
 }
 
 export function describeNativeSnapshotArchive(
@@ -258,6 +272,18 @@ export function readVerifiedWorkspaceArchive(
       "selected workspace archive is not a base64 string",
     );
   }
+  const descriptor = requireWorkspaceArchiveDescriptor(metadata);
+  const bytes = decodeBase64Strict(base64);
+  if (!bytes) {
+    throw new WorkspaceArchiveIntegrityError(
+      "archive_base64_invalid",
+      `workspace archive revision ${descriptor.revision} has invalid base64 bytes`,
+    );
+  }
+  return verifyDecodedWorkspaceArchive(bytes, base64, descriptor);
+}
+
+function requireWorkspaceArchiveDescriptor(metadata: unknown): WorkspaceArchiveDescriptor {
   if (metadata === undefined || metadata === null) {
     throw new WorkspaceArchiveIntegrityError(
       "archive_metadata_missing",
@@ -271,13 +297,14 @@ export function readVerifiedWorkspaceArchive(
       "selected workspace archive metadata is invalid",
     );
   }
-  const bytes = decodeBase64Strict(base64);
-  if (!bytes) {
-    throw new WorkspaceArchiveIntegrityError(
-      "archive_base64_invalid",
-      `workspace archive revision ${descriptor.revision} has invalid base64 bytes`,
-    );
-  }
+  return descriptor;
+}
+
+function verifyDecodedWorkspaceArchive(
+  bytes: Uint8Array,
+  base64: string,
+  descriptor: WorkspaceArchiveDescriptor,
+): VerifiedWorkspaceArchive {
   const actualHash = sha256(bytes);
   if (bytes.length !== descriptor.archiveBytes || actualHash !== descriptor.archiveSha256) {
     throw new WorkspaceArchiveIntegrityError(
@@ -337,7 +364,12 @@ export async function inlineWorkspaceArchiveForRestore(
       `workspace archive object ${ref.key} failed SHA-256/size verification`,
     );
   }
-  const base64 = Buffer.from(object.bytes).toString("base64");
+  const descriptor = requireWorkspaceArchiveDescriptor(sessionState.workspaceArchiveMeta);
+  const base64 = Buffer.from(
+    object.bytes.buffer,
+    object.bytes.byteOffset,
+    object.bytes.byteLength,
+  ).toString("base64");
   const inline = sessionState.workspaceArchive;
   if (typeof inline === "string" && inline.length > 0 && inline !== base64) {
     throw new WorkspaceArchiveIntegrityError(
@@ -345,7 +377,9 @@ export async function inlineWorkspaceArchiveForRestore(
       "inline workspace archive and object-storage ref disagree",
     );
   }
-  readVerifiedWorkspaceArchive(base64, sessionState.workspaceArchiveMeta);
+  // The fetched bytes are already in hand: verify them directly rather than
+  // decoding the base64 copy that was just made.
+  verifyDecodedWorkspaceArchive(object.bytes, base64, descriptor);
   return { ...sessionState, workspaceArchive: base64 };
 }
 
