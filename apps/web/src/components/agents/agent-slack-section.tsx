@@ -25,9 +25,13 @@ import { RowButton } from "@opengeni/react/ui/page-actions";
 import { SettingRow, SettingRowLink } from "@opengeni/react/ui/setting-row";
 import { Skeleton } from "@opengeni/react/ui/skeleton";
 
-/** How people ask the agent in Slack: `@Opengeni Data team`. */
-export function agentSlackCall(name: string): string {
-  return slackAgentCallText(name);
+/**
+ * How people ask the agent in Slack: `@Opengeni Data team`, with the app's
+ * name in that Slack workspace when the server says it (`@Opengeni Staging …`).
+ */
+export function agentSlackCall(name: string, botDisplayName?: string): string {
+  const bot = botDisplayName?.trim();
+  return bot ? slackAgentCallText(name, `@${bot}`) : slackAgentCallText(name);
 }
 
 /** Why Slack refused, in words; falls back to the server's own message. */
@@ -102,7 +106,7 @@ function InstallRow({
           <>
             People ask it with{" "}
             <span className="font-medium text-fg" data-agent-slack-handle="">
-              {agentSlackCall(agent.name)}
+              {agentSlackCall(agent.name, install.botDisplayName)}
             </span>
           </>
         ) : (

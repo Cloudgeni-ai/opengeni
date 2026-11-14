@@ -160,6 +160,23 @@ describe("API helpers", () => {
     ] as const) {
       expect(workspaceActorContextExempt(method, path)).toBe(false);
     }
+    // They match the decoded path the request is routed by (`c.req.path`):
+    // an encoded character in a fixed segment routes to the handler, so it is
+    // exempt with it, and not on the raw path alone.
+    const encoded = `/v1/workspaces/${workspace}/integrations/slack/user%2Dlink-intents`;
+    expect(workspaceActorContextExempt("POST", encoded, links)).toBe(true);
+    expect(workspaceActorContextExempt("POST", encoded)).toBe(false);
+    // HEAD and trailing slashes stay behind the ordinary check.
+    expect(workspaceActorContextExempt("HEAD", `${links}/request-1`)).toBe(false);
+    expect(workspaceActorContextExempt("POST", `${links}/`)).toBe(false);
+    expect(workspaceActorContextExempt("GET", `${links}/request-1/`)).toBe(false);
+    expect(workspaceActorContextExempt("POST", `${links}/request-1/link/`)).toBe(false);
+    // An encoded `/` (which routing leaves encoded) stays inside one segment:
+    // it is the request id, or it matches no route.
+    expect(workspaceActorContextExempt("GET", `${links}/request%2F1`)).toBe(true);
+    expect(workspaceActorContextExempt("POST", `${links}/request%2F1/link`)).toBe(true);
+    expect(workspaceActorContextExempt("POST", `${links}%2Frequest-1%2Flink`)).toBe(false);
+    expect(workspaceActorContextExempt("GET", `${links}%2Frequest-1`)).toBe(false);
   });
 
   test("keeps signed-state GitHub connect public until its route-specific browser grant", async () => {

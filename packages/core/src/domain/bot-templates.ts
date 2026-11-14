@@ -181,7 +181,6 @@ export async function createBotTemplateForViewer(input: {
         avatar: request.avatar,
         // A template's setup text is its Instructions.
         instructions: request.setupInstructions,
-        firstMessage: "",
         memoryEnabled: false,
         origin: "bot_template",
         sourceSessionId: request.sourceSessionId,

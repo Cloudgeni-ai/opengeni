@@ -923,9 +923,6 @@ export const RETIRING_FEATURE_TABLES = {
     "workspace_variable_set_variables",
     "workspace_variable_sets",
   ],
-  // The agents contract (1380 to 1399): nothing reads or writes the legacy bot
-  // templates and Slack agents tables any more; the legacy drop removes them.
-  agentsLegacy: ["bot_templates", "slack_agents"],
 } as const;
 const RETIRING_FEATURE_TABLE_NAMES: ReadonlySet<string> = new Set(
   Object.values(RETIRING_FEATURE_TABLES).flat(),
@@ -1890,21 +1887,6 @@ const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET = new Set<string
  */
 const AGENTS_TRIGGER_ROUTINES = ["guard_session_agent_id_immutable()"] as const;
 
-/**
- * Agents trigger functions bound to the legacy tables: 1243's sync functions
- * (their triggers were dropped by 1397) and 1380's installation workspace
- * fill. Checked like any owner-internal helper while present; the legacy drop
- * removes them with the tables, so readiness also accepts them absent.
- */
-export const AGENTS_LEGACY_TRIGGER_ROUTINES = [
-  "sync_agent_from_bot_template()",
-  "sync_agent_from_slack_agent()",
-  "fill_agent_slack_install_workspace()",
-] as const;
-const AGENTS_LEGACY_TRIGGER_ROUTINE_SET: ReadonlySet<string> = new Set(
-  AGENTS_LEGACY_TRIGGER_ROUTINES,
-);
-
 /** Owner-internal helpers that must exist but must never be callable by the runtime role. */
 export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   "guard_session_agent_creation_provenance()",
@@ -1929,7 +1911,6 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   "validate_usage_allowance_rule(jsonb)",
   "guard_slack_file_upload_operation()",
   ...AGENTS_TRIGGER_ROUTINES,
-  ...AGENTS_LEGACY_TRIGGER_ROUTINES,
   // 1276: refuses agent-chat claims from workers without the agent layer.
   "guard_agent_instructions_claim_protocol()",
   ...SESSION_USAGE_LIMIT_INTERNAL_ROUTINES,
@@ -1962,7 +1943,6 @@ export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
   "validate_usage_allowance_rule(jsonb)",
   "guard_slack_file_upload_operation()",
   ...AGENTS_TRIGGER_ROUTINES,
-  ...AGENTS_LEGACY_TRIGGER_ROUTINES,
   // 1276: refuses agent-chat claims from workers without the agent layer.
   "guard_agent_instructions_claim_protocol()",
   SESSION_USAGE_LIMIT_STATE_ROUTINE,
@@ -2012,7 +1992,6 @@ export const FORCE_RLS_TABLES = [
   "billing_credit_notifications",
   "billing_customers",
   "billing_subscription_operations",
-  "bot_templates",
   "browser_identities",
   "browser_revision_components",
   "browser_revisions",
@@ -2422,7 +2401,6 @@ export const FORCE_RLS_TABLES = [
   "slack_agent_update_recipients",
   "slack_agent_update_settings",
   "slack_agent_user_states",
-  "slack_agents",
   "slack_app_home_refreshes",
   "slack_ask_forms",
   "slack_bot_delete_operations",
@@ -2605,7 +2583,6 @@ export const RUNTIME_FULL_DML_TABLES = [
   "billing_credit_notification_deliveries",
   "billing_credit_notifications",
   "billing_customers",
-  "bot_templates",
   "browser_session_associations",
   "capability_catalog_items",
   "capability_component_owners",
@@ -2801,7 +2778,6 @@ export const RUNTIME_FULL_DML_TABLES = [
   "slack_agent_update_recipients",
   "slack_agent_update_settings",
   "slack_agent_user_states",
-  "slack_agents",
   "slack_api_rate_limits",
   "slack_app_home_refreshes",
   "slack_ask_forms",
@@ -4718,7 +4694,6 @@ export function evaluateRuntimeDatabasePosture(
   }
   for (const forbiddenRoutine of targetSchemaForbiddenRoutines) {
     const matches = posture.targetRoutines.filter((routine) => routine.name === forbiddenRoutine);
-    if (matches.length === 0 && AGENTS_LEGACY_TRIGGER_ROUTINE_SET.has(forbiddenRoutine)) continue;
     if (
       matches.length === 0 &&
       notYetCreatedTargetRoutines.has(forbiddenRoutine.slice(0, forbiddenRoutine.indexOf("(")))

@@ -75,8 +75,8 @@ async function fixture(options: { agent?: string; onlyMe?: boolean } = {}) {
         'Helper', 'helper', 'app', 1)`;
     await shared.admin`
       insert into agent_revisions (agent_id, account_id, workspace_id, revision, name,
-        instructions, first_message)
-      values (${agentId}, ${accountId}, ${workspaceId}, 1, 'Helper', ${options.agent}, '')`;
+        instructions)
+      values (${agentId}, ${accountId}, ${workspaceId}, 1, 'Helper', ${options.agent})`;
     await shared.admin`
       update sessions set agent_id = ${agentId}, agent_prompt_revision = 1
       where id = ${session.id}`;
@@ -101,16 +101,16 @@ async function fixture(options: { agent?: string; onlyMe?: boolean } = {}) {
     }
   }
   /** A new agent revision, as an edit in the app writes it. */
-  async function edit(instructions: string, firstMessage = "") {
+  async function edit(instructions: string) {
     await shared.admin.begin(async (tx) => {
       const [row] = await tx<{ revision: number }[]>`
         update agents set current_revision = current_revision + 1, updated_at = now()
         where id = ${agentId} returning current_revision as revision`;
       await tx`
         insert into agent_revisions (agent_id, account_id, workspace_id, revision, name,
-          instructions, first_message)
+          instructions)
         values (${agentId}, ${accountId}, ${workspaceId}, ${row!.revision}, 'Helper',
-          ${instructions}, ${firstMessage})`;
+          ${instructions})`;
     });
   }
   const deleteAgent = () => shared.admin`delete from agents where id = ${agentId}`;
@@ -264,12 +264,12 @@ test("an edit becomes one history item before the turn that first sees it; retri
   expect(await f.deliver(third)).toContain("Answer in Spanish.");
   await f.settle(third);
 
-  // Unchanged instructions write nothing new. An older First message (as an
-  // older release stores one) is part of the instructions: it joins them.
+  // Unchanged instructions write nothing new. An older client's First message
+  // is part of the instructions: it joins them.
   const fourth = await f.claim();
   expect(await f.deliver(fourth)).toContain("(revision 3)");
   await f.settle(fourth);
-  await f.edit("Answer in Spanish.", "Hola");
+  await f.edit("Answer in Spanish.\n\nWhen a chat starts:\nHola");
   const fifth = await f.claim();
   expect(await f.deliver(fifth)).toContain("Answer in Spanish.\n\nWhen a chat starts:\nHola");
   await f.settle(fifth);
@@ -422,7 +422,7 @@ test("every attempt of a turn builds the prompt its first attempt recorded", asy
 
 test("a revision with unchanged instructions and no earlier item writes nothing", async () => {
   const f = await fixture({ agent: "Hi." });
-  await f.edit("Hi.", "Hi.");
+  await f.edit("Hi.");
   const turn = await f.claim();
   expect(await f.deliver(turn)).toBeNull();
   // The turn stays frozen without an item, even after a real edit.
