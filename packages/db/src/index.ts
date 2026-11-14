@@ -57785,25 +57785,11 @@ function sandboxGroupOnlyOfArchivedChatsSql(input: {
     ))`;
 }
 
-/** Migration 1404's inventory, withheld from the runtime for one release. */
-export const COLD_SANDBOXES_OF_ARCHIVED_CHATS_ROUTINE =
-  "opengeni_private.cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)";
-
 export type ColdSandboxOfArchivedChats = {
   accountId: string;
   workspaceId: string;
   sandboxGroupId: string;
 };
-
-/** False while the deployment's database withholds the inventory (1404). */
-export async function coldSandboxesOfArchivedChatsAvailable(db: Database): Promise<boolean> {
-  const [row] = await rawRows<{ granted: boolean | null }>(
-    db,
-    sql`select has_function_privilege(
-      to_regprocedure(${COLD_SANDBOXES_OF_ARCHIVED_CHATS_ROUTINE})::oid, 'EXECUTE') as granted`,
-  );
-  return row?.granted === true;
-}
 
 /**
  * Cold sandboxes of a backend other than compute (a stopped Modal or Docker

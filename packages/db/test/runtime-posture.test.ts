@@ -4289,7 +4289,6 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "end_agent_call_rings_v1(uuid)",
       "session_content_garbage_candidates_v1(integer)",
       "collect_session_content_garbage_v1(uuid, uuid, integer)",
-      "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(

@@ -10,7 +10,6 @@ import {
   accrueWarmSeconds,
   acquireLease,
   bootstrapWorkspace,
-  coldSandboxesOfArchivedChatsAvailable,
   commitWarmingToWarm,
   computeSandboxNamed,
   computeSandboxOfEnrollment,
@@ -740,11 +739,6 @@ describe("the stopped sandbox of archived chats on other backends", () => {
     });
     return rows.some((row) => row.id === artifactId);
   }
-
-  test("the inventory is granted to the runtime", async () => {
-    if (!available) return;
-    expect(await coldSandboxesOfArchivedChatsAvailable(db)).toBe(true);
-  }, 60_000);
 
   test("is forgotten a day after its only chat is archived, and its snapshot collected", async () => {
     if (!available) return;

@@ -38,7 +38,6 @@ import {
   bindRetainedProcessProviderIdentity,
   claimWorkspaceArchiveCapture,
   computeSandboxNamed,
-  coldSandboxesOfArchivedChatsAvailable,
   endComputeGroupOfArchivedChats,
   forgetColdSandboxOfArchivedChats,
   listColdSandboxesOfArchivedChats,
@@ -1787,7 +1786,6 @@ export async function forgetColdSandboxesOfArchivedChats(
   options: { budgetMs?: number; pageSize?: number; now?: () => number } = {},
 ): Promise<{ examined: number; forgotten: number; failed: number }> {
   const result = { examined: 0, forgotten: 0, failed: 0 };
-  if (!(await coldSandboxesOfArchivedChatsAvailable(db))) return result;
   const now = options.now ?? Date.now;
   const deadline = now() + (options.budgetMs ?? ARCHIVED_CHAT_SANDBOX_SWEEP_BUDGET_MS);
   const pageSize = options.pageSize ?? ARCHIVED_CHAT_SANDBOX_SWEEP_PAGE;
