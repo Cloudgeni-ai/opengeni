@@ -309,6 +309,7 @@ import {
   MICROSOFT_DYNAMICS_CAPABILITY_ID,
   MICROSOFT_DYNAMICS_CONNECTION_NAME,
   microsoftDynamicsEnvironmentAddress,
+  microsoftDynamicsAddressProblem,
   microsoftDynamicsMcpEndpoint,
   microsoftDynamicsProductForMcpUrl,
   type MicrosoftDynamicsProduct,
@@ -386,12 +387,15 @@ const SETUP_CARD_CONTINUES =
 function microsoftDynamicsSetupProblem(
   settings: ApiRouteDeps["settings"],
   product: MicrosoftDynamicsProduct | null,
+  addressProblem: string | null = null,
 ): string | null {
   if (
     !settings.microsoftDynamicsClientId?.trim() ||
     !settings.microsoftDynamicsClientSecret?.trim()
   )
     return "Microsoft Dynamics isn't available on this Opengeni deployment yet. Nothing was posted; tell the person.";
+  if (!product && addressProblem)
+    return `${addressProblem} Nothing was posted; ask the person for that address, then call custom_mcp_setup_request again.`;
   if (!product)
     return "That isn't a Dynamics environment address. Ask the person to open Dynamics and copy the address bar (it looks like https://contoso.crm4.dynamics.com), or find Environment URL in the Power Platform admin center, then call custom_mcp_setup_request again.";
   return null;
@@ -8291,7 +8295,9 @@ function registerCapabilityDiscoveryTools(
           .url()
           .max(2048)
           .refine((url) => {
-            if (microsoftDynamicsMcpEndpoint(url)) return true;
+            // An unreadable Dynamics address is answered with what to paste instead.
+            if (microsoftDynamicsMcpEndpoint(url) || microsoftDynamicsAddressProblem(url))
+              return true;
             const parsed = new URL(url);
             return (
               parsed.protocol === "https:" &&
@@ -8348,12 +8354,18 @@ function registerCapabilityDiscoveryTools(
       // A Dynamics environment address becomes its connection endpoint and
       // signs in through Microsoft; say plainly when this deployment can't.
       const dynamics = microsoftDynamicsMcpEndpoint(suppliedEndpointUrl);
+      const addressProblem = dynamics ? null : microsoftDynamicsAddressProblem(suppliedEndpointUrl);
       if (
         dynamics ||
+        addressProblem ||
         (name.trim().toLowerCase() === MICROSOFT_DYNAMICS_CONNECTION_NAME.toLowerCase() &&
           looksLikeMicrosoftDynamicsPage(suppliedEndpointUrl))
       ) {
-        const unavailable = microsoftDynamicsSetupProblem(deps.settings, dynamics?.product ?? null);
+        const unavailable = microsoftDynamicsSetupProblem(
+          deps.settings,
+          dynamics?.product ?? null,
+          addressProblem,
+        );
         if (unavailable) return json({ status: "unavailable", message: unavailable });
       }
       const endpointUrl = dynamics
