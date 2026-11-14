@@ -123,7 +123,7 @@ export class EditableArtifactWebSocketConnection
       return;
     }
     const bytes =
-      message instanceof Uint8Array ? Uint8Array.from(message) : new Uint8Array(message).slice();
+      message instanceof Uint8Array ? new Uint8Array(message) : new Uint8Array(message).slice();
     this.queuedMessages += 1;
     this.queuedBytes += bytes.byteLength;
     const run = this.work.then(async () => {

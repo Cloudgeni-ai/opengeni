@@ -4188,7 +4188,7 @@ async function readBytes(
     }
     chunks.push(decoded);
   }
-  return Uint8Array.from(Buffer.concat(chunks));
+  return new Uint8Array(Buffer.concat(chunks));
 }
 
 async function runPrivateReadCommand(

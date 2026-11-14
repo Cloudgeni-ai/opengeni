@@ -190,7 +190,7 @@ async function consumeZipEntry(
   }
   let stream: ReadableStream<Uint8Array>;
   try {
-    stream = new Blob([Uint8Array.from(compressed)])
+    stream = new Blob([new Uint8Array(compressed)])
       .stream()
       .pipeThrough(new DecompressionStream("deflate-raw"));
   } catch {
@@ -238,7 +238,7 @@ async function inflateWithNode(
     if (output.byteLength !== entry.expandedSize || zipCrc32(output) !== entry.checksum) {
       fail("invalid", "ZIP entry failed size or checksum validation", entry.name);
     }
-    return collect ? Uint8Array.from(output) : undefined;
+    return collect ? new Uint8Array(output) : undefined;
   } catch (error) {
     if ((error as { code?: string }).code === "ERR_BUFFER_TOO_LARGE") {
       fail("limit", "Inflated ZIP entry exceeds its declared or configured size", entry.name);

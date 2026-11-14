@@ -336,7 +336,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
             "The sandbox image reference exceeds the per-image byte limit.",
           );
         }
-        return Uint8Array.from(Buffer.from(read.content, "base64"));
+        return new Uint8Array(Buffer.from(read.content, "base64"));
       },
     });
   const unrestrictedImageGenerationOption: Pick<BuildAgentOptions, "imageGeneration"> = (() => {

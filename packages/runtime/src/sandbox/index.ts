@@ -1333,7 +1333,8 @@ export function readWorkspaceArchiveFromEnvelopeSessionState(
     return undefined;
   }
   try {
-    return Uint8Array.from(Buffer.from(b64, "base64"));
+    const decoded = Buffer.from(b64, "base64");
+    return new Uint8Array(decoded.buffer, decoded.byteOffset, decoded.byteLength);
   } catch {
     return undefined;
   }
