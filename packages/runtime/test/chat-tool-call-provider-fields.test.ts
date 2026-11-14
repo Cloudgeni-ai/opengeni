@@ -11,11 +11,10 @@ import {
 } from "../src/model-provider-routing";
 import { ARTIFACT_ORIGIN_KEY, projectHistoryForProvider } from "../src/provider-history-adapter";
 import {
-  ReplayableJsonOpenAI,
-  requestBodyText,
   unwrappedErrorBody,
   WRAPPED_PROVIDER_ERROR_MESSAGE_MAX_CHARS,
-} from "../src/replayable-json-body";
+} from "../src/provider-quota";
+import { ReplayableJsonOpenAI, requestBodyText } from "../src/replayable-json-body";
 
 // Synthetic fixtures only: signatures are arbitrary opaque strings.
 const SIGNATURE = "synthetic-thought-signature";
