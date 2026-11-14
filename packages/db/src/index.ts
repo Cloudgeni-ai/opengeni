@@ -46387,6 +46387,34 @@ export async function listTurnOpenSuffixToolCalls(
 }
 
 /**
+ * Whether any tool-call receipt of the turn remains, interrupted or not. None
+ * means every call the turn made is settled in durable history (an open
+ * call's item lives only in its receipt until it is paired with a result), so
+ * there is nothing left for an approval or human-input resume to settle.
+ */
+export async function turnHasPendingToolCalls(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ id: schema.sessionPendingToolCalls.id })
+      .from(schema.sessionPendingToolCalls)
+      .where(
+        and(
+          eq(schema.sessionPendingToolCalls.workspaceId, workspaceId),
+          eq(schema.sessionPendingToolCalls.sessionId, sessionId),
+          eq(schema.sessionPendingToolCalls.turnId, turnId),
+        ),
+      )
+      .limit(1);
+    return row !== undefined;
+  });
+}
+
+/**
  * The interaction_request_human calls of a turn that hold an intervention: a
  * request recorded at a pause, or a wait attached to one. Any status counts;
  * a call not listed was refused (or never reached a pause).
