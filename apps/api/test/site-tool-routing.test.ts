@@ -102,8 +102,12 @@ describe("Site tool declarations for every viewer", () => {
     await expect(failed).rejects.toThrow("Nothing was published");
     // Readable bindings still pair the publisher's route with its connector.
     expect(
-      await declareSiteToolsForEveryViewer(deps, grant, declared, unusedInventory, async () =>
-        [account("account-a", "dynamics")] as never,
+      await declareSiteToolsForEveryViewer(
+        deps,
+        grant,
+        declared,
+        unusedInventory,
+        async () => [account("account-a", "dynamics")] as never,
       ),
     ).toEqual([...declared, { serverId: "dynamics", toolName: "query" }]);
   });

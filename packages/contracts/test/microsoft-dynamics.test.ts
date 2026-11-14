@@ -192,7 +192,9 @@ describe("Microsoft Dynamics MCP endpoints", () => {
       const problem = microsoftDynamicsAddressProblem(value);
       expect(problem).toContain("isn't a tenant ID or domain");
       expect(problem).toContain("address bar");
-      expect(problem).toContain("businesscentral.dynamics.com/<tenant>.onmicrosoft.com/<environment>");
+      expect(problem).toContain(
+        "businesscentral.dynamics.com/<tenant>.onmicrosoft.com/<environment>",
+      );
     }
     // Anything after the environment other than a web client page is refused too.
     for (const value of [
@@ -204,7 +206,9 @@ describe("Microsoft Dynamics MCP endpoints", () => {
       expect(microsoftDynamicsAddressProblem(value)).toEqual(expect.any(String));
     }
     expect(
-      microsoftDynamicsAddressProblem(`https://businesscentral.dynamics.com/${BC_TENANT}/Production/extra`),
+      microsoftDynamicsAddressProblem(
+        `https://businesscentral.dynamics.com/${BC_TENANT}/Production/extra`,
+      ),
     ).toContain('more after the environment "Production"');
     for (const value of [
       "https://businesscentral.dynamics.com/SignIn?ReturnUrl=%2F",
@@ -222,7 +226,10 @@ describe("Microsoft Dynamics MCP endpoints", () => {
   test("valid Business Central addresses keep working and have no problem", () => {
     const cases: Array<[string, string]> = [
       [`https://businesscentral.dynamics.com/${BC_TENANT}/Production`, BC_ROOT],
-      [`https://businesscentral.dynamics.com/${BC_TENANT}/Production/?company=CRONUS&page=22`, BC_ROOT],
+      [
+        `https://businesscentral.dynamics.com/${BC_TENANT}/Production/?company=CRONUS&page=22`,
+        BC_ROOT,
+      ],
       [`https://businesscentral.dynamics.com/${BC_TENANT}/Production/deeplink?company=X`, BC_ROOT],
       [`https://businesscentral.dynamics.com/${BC_TENANT}?company=X`, BC_ROOT],
       [
@@ -248,7 +255,11 @@ describe("Microsoft Dynamics MCP endpoints", () => {
       expect(microsoftDynamicsAddressProblem(value)).toBeNull();
     }
     // Other products and other servers never report a Business Central problem.
-    for (const value of ["https://contoso.crm4.dynamics.com/main.aspx", "https://mcp.example.com/a/b", "nope"])
+    for (const value of [
+      "https://contoso.crm4.dynamics.com/main.aspx",
+      "https://mcp.example.com/a/b",
+      "nope",
+    ])
       expect(microsoftDynamicsAddressProblem(value)).toBeNull();
   });
 });
