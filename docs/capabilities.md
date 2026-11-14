@@ -998,6 +998,12 @@ Ordinary new sessions include two first-party Opengeni tools:
   `eventId`). `tool_search` posts the same card itself, through this tool,
   when a search clearly names one integration the person can connect (see
   `docs/mcp-surfaces.md`, "Human integration setup in chat").
+- An integration whose connections each need a value first (for example one
+  environment's address) declares those connect-time inputs in
+  `@opengeni/contracts/capability-connect-inputs`. Its catalog match lists
+  them as `setup.connectInputs`, and its card asks the person for them, filled
+  in with any `inputs` the agent passed that follow the entry's rule. The card
+  adds the connection with `connectFor`, and the API applies the same rule.
 - `custom_mcp_setup_request` posts a human review card for a remote HTTPS MCP
   endpoint not yet in the workspace catalog. The agent may propose a name and
   exact URL, but cannot register or contact the server. The signed-in human

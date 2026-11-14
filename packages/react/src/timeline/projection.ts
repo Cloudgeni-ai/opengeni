@@ -4974,7 +4974,27 @@ function capabilityAuthorizationRequest(
     action: action as NonNullable<AuthNeededItem["capability"]>["action"],
     rationale: record.rationale,
     requiredVariables: stringList(record.requiredVariables),
+    ...connectInputs(record.inputs),
   };
+}
+
+/** The values a capability card asks the person for before connecting. */
+function connectInputs(value: unknown): Pick<NonNullable<AuthNeededItem["capability"]>, "inputs"> {
+  if (!Array.isArray(value)) return {};
+  const inputs = value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const input = entry as Record<string, unknown>;
+    if (typeof input.id !== "string" || !input.id || typeof input.label !== "string") return [];
+    return [
+      {
+        id: input.id,
+        label: input.label,
+        ...(typeof input.placeholder === "string" ? { placeholder: input.placeholder } : {}),
+        ...(typeof input.value === "string" ? { value: input.value } : {}),
+      },
+    ];
+  });
+  return inputs.length > 0 ? { inputs } : {};
 }
 
 function customMcpSetupRequest(value: unknown): NonNullable<AuthNeededItem["setupRequest"]> | null {

@@ -3191,6 +3191,15 @@ export type ToolAuthNeededPayload = {
         action: "connect" | "add_credentials" | "enable";
         rationale: string;
         requiredVariables: string[];
+        /** Values the person enters on the card before connecting; `value` is the agent's prefill. */
+        inputs?:
+          | Array<{
+              id: string;
+              label: string;
+              placeholder?: string | undefined;
+              value?: string | undefined;
+            }>
+          | undefined;
       }
     | undefined;
   /** Agent suggestion; never a connection or permission grant. */
@@ -10033,6 +10042,10 @@ export type CreateCapabilityCatalogItemRequest = {
   installUrl?: string | undefined;
   authModel?: string | undefined;
   metadata?: Record<string, unknown> | undefined;
+  /** The catalog entry whose Connect card asked for this connection's inputs. */
+  connectFor?: string | undefined;
+  /** With `connectFor`: the values the person entered on that card, by input id. */
+  connectInputs?: Record<string, string> | undefined;
 };
 
 export type EnableCapabilityRequest = {
