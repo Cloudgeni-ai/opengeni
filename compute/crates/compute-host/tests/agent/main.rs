@@ -35,6 +35,7 @@ mod disk_reading;
 mod disk_relief;
 mod fleet;
 mod images;
+mod kernel;
 mod link;
 mod memory;
 mod observe;
