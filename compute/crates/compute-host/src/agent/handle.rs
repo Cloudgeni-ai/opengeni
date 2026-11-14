@@ -290,6 +290,23 @@ impl Handle {
         .await?
     }
 
+    /// Has the stored image `image` on this host ahead of creates, with
+    /// the templates of `before`'s shapes on it (see
+    /// [`crate::protocol::Request::Keep`]). Returns once the request is
+    /// accepted, not once the image is here.
+    pub async fn keep(
+        &self,
+        image: crate::protocol::ImageId,
+        before: Option<crate::protocol::ImageId>,
+    ) -> Result<(), HostError> {
+        self.ask(|reply| Command::Keep {
+            image,
+            before,
+            reply,
+        })
+        .await?
+    }
+
     /// How long a stream may stay silent and still keep its sandbox awake
     /// (see [`super::HostConfig::stream_idle`]).
     #[must_use]

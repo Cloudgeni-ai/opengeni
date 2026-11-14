@@ -921,8 +921,17 @@ impl Store for Chunked {
         self.rootfs_len(image).await
     }
 
-    async fn fetch_image(&self, image: ImageId, path: &Path) -> Result<bool, EngineError> {
-        self.get_rootfs(image, path).await
+    async fn fetch_image(
+        &self,
+        image: ImageId,
+        path: &Path,
+        seed: Option<&Path>,
+    ) -> Result<bool, EngineError> {
+        let seed = match seed {
+            Some(seed) => self.seed(seed).await,
+            None => None,
+        };
+        self.get_rootfs(image, path, seed.as_deref()).await
     }
 
     async fn put_image(&self, path: &Path) -> Result<Option<ImageId>, EngineError> {

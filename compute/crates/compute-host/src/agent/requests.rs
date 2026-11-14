@@ -134,6 +134,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             | Command::Unhold { .. }
             | Command::Acquire { .. }
             | Command::Release { .. }) => self.on_hold_command(command),
+            Command::Keep {
+                image,
+                before,
+                reply,
+            } => {
+                self.keep_image(image, before);
+                let _ = reply.send(Ok(()));
+            }
             Command::Status { reply } => {
                 let _ = reply.send(self.status());
             }

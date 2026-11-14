@@ -189,6 +189,67 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         image.map_or_else(|| self.base_image.clone(), |image| self.rootfs.path(image))
     }
 
+    /// Fetches the stored image `image` in the background unless the host
+    /// has it, starting from `before` if the host has that, then has the
+    /// templates of `before`'s shapes built on it ([`Self::image_kept`]),
+    /// so no create waits for either (ADR 41).
+    pub(super) fn keep_image(&self, image: ImageId, before: Option<ImageId>) {
+        if !self.store.is_configured() {
+            return;
+        }
+        let (rootfs, store) = (Arc::clone(&self.rootfs), Arc::clone(&self.store));
+        let events = self.events_tx.clone();
+        tokio::spawn(async move {
+            let had = rootfs.has(image);
+            let started = Instant::now();
+            match rootfs.get_over(image, &*store, before).await {
+                Ok(held) => {
+                    drop(held);
+                    if !had {
+                        tracing::info!(
+                            %image,
+                            before = ?before.map(|before| before.to_string()),
+                            seconds = started.elapsed().as_secs_f64(),
+                            "fetched an image ahead of its creates"
+                        );
+                    }
+                    let _ = events.send(Event::ImageKept { image, before });
+                }
+                Err(error) => {
+                    tracing::warn!(%image, %error, "fetching an image ahead of its creates failed");
+                }
+            }
+        });
+    }
+
+    /// Builds, on the image `image` now on this host, the template of each
+    /// shape that has a template on `before`, and counts it used now, so a
+    /// template no create uses retires as any other does.
+    pub(super) fn image_kept(&mut self, image: ImageId, before: Option<ImageId>) {
+        let Some(before) = before.filter(|before| *before != image) else {
+            return;
+        };
+        let Some(warm) = &self.warm else {
+            return;
+        };
+        let shapes: Vec<Shape> = warm
+            .pool
+            .templates()
+            .iter()
+            .map(|template| template.shape())
+            .filter(|shape| shape.image == Some(before))
+            .map(|shape| Shape {
+                image: Some(image),
+                ..shape
+            })
+            .collect();
+        for shape in shapes {
+            tracing::info!(?shape, "building a template ahead of its creates");
+            self.template_used(shape);
+            self.want_template(shape);
+        }
+    }
+
     /// Removes the images no create used for as long as a template may go
     /// unused, unless a template of theirs is kept or being built; looks at
     /// most once a minute.
