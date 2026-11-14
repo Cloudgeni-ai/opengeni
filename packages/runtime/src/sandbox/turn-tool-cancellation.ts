@@ -310,6 +310,10 @@ type ActiveRemoteExec = {
   ownershipTransferred: boolean;
   observation: RemoteOperationObservation | null;
   settledPromise: Promise<void>;
+  /** Resolves when cancellation committed this operation to the durable
+   * command ledger. Under handOffRemoteOperations that can happen while the
+   * provider's foreground wait is still pending; the caller stops waiting. */
+  custodyCommitted: Promise<void>;
   settle(): void;
   startOwnershipTransfer(opId: string): void;
   failOwnershipTransfer(opId: string): void;
@@ -355,6 +359,16 @@ type PendingShellStart = {
 export type TurnToolCancellationFence = {
   cancel(reason?: unknown): void;
   waitForQuiescence(): Promise<void>;
+  /**
+   * The attempt is ending because its worker is shutting down, so nothing in
+   * this process will read the results of its remote (op-stream) operations.
+   * From now on, cancellation hands each still-running operation to the
+   * session's command ledger with a stop request as soon as that commits,
+   * instead of waiting for the machine to prove its exit. A machine that is
+   * slow or silent then cannot hold the attempt past the worker's force stop.
+   * Pause, Steer and ordinary completion keep waiting for exact exit proof.
+   */
+  handOffRemoteOperations?(): void;
   /** Content-free snapshot for slow/finalization containment diagnostics. */
   outstandingWriters?(): Array<{
     kind: "tool_call" | "shell_session" | "pending_shell_start" | "remote_operation";
@@ -1166,6 +1180,8 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   private foregroundWaitYield = false;
   private readonly pendingShellStarts = new Set<PendingShellStart>();
   private readonly remoteExecs = new Set<ActiveRemoteExec>();
+  /** See handOffRemoteOperations. */
+  private remoteHandOff = false;
   private rawExecInvoke: FunctionToolInvoke | null = null;
   private rawWriteInvoke: FunctionToolInvoke | null = null;
   private drainPromise: Promise<void> | null = null;
@@ -1208,6 +1224,30 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   async waitForQuiescence(): Promise<void> {
     this.cancel(this.reason);
     await this.ensureDrain();
+  }
+
+  handOffRemoteOperations(): void {
+    // Running cancellation loops read this on their next custody request.
+    this.remoteHandOff = true;
+  }
+
+  /**
+   * Wait for a remote operation's foreground invocation, unless cancellation
+   * commits the operation to durable custody first (handOffRemoteOperations):
+   * then the invocation ends as cancelled and the provider wait finishes, or
+   * dies with its worker, on its own. Its result has no reader either way.
+   */
+  private async untilRemoteCustody<T>(
+    remoteExec: ActiveRemoteExec | null,
+    operation: Promise<T>,
+  ): Promise<T> {
+    if (!remoteExec) return await operation;
+    const outcome = await Promise.race([
+      operation.then((value) => ({ kind: "returned" as const, value })),
+      remoteExec.custodyCommitted.then(() => ({ kind: "custody" as const })),
+    ]);
+    if (outcome.kind === "custody") throw cancellationError(this.reason);
+    return outcome.value;
   }
 
   outstandingWriters(): ReturnType<NonNullable<TurnToolCancellationFence["outstandingWriters"]>> {
@@ -1426,21 +1466,26 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
 
       let initialNative: Awaited<ReturnType<FunctionToolInvoke>>;
       try {
-        initialNative = await runWithToolCallCorrelation(
-          correlationId,
-          async () =>
-            await withPendingCommandSupervision(pendingStart?.supervision, () =>
-              invokeExecNative(commandInput),
-            ),
-          {
-            onDurableOpIdMinted: (opId) => remoteExec?.noteMinted(opId),
-            onDurableOpOwnershipTransferStarted: (opId) => remoteExec?.startOwnershipTransfer(opId),
-            onDurableOpOwnershipTransferFailed: (opId) => remoteExec?.failOwnershipTransfer(opId),
-            onDurableOpOwnershipTransferred: (opId) =>
-              remoteExec?.releaseCancellationAuthority(opId),
-            onRemoteOperationNotDispatched: (opId) => remoteExec?.settleNotDispatched(opId),
-            onRemoteOperationTransportSelected: (transport) => remoteExec?.bindTransport(transport),
-          },
+        initialNative = await this.untilRemoteCustody(
+          remoteExec,
+          runWithToolCallCorrelation(
+            correlationId,
+            async () =>
+              await withPendingCommandSupervision(pendingStart?.supervision, () =>
+                invokeExecNative(commandInput),
+              ),
+            {
+              onDurableOpIdMinted: (opId) => remoteExec?.noteMinted(opId),
+              onDurableOpOwnershipTransferStarted: (opId) =>
+                remoteExec?.startOwnershipTransfer(opId),
+              onDurableOpOwnershipTransferFailed: (opId) => remoteExec?.failOwnershipTransfer(opId),
+              onDurableOpOwnershipTransferred: (opId) =>
+                remoteExec?.releaseCancellationAuthority(opId),
+              onRemoteOperationNotDispatched: (opId) => remoteExec?.settleNotDispatched(opId),
+              onRemoteOperationTransportSelected: (transport) =>
+                remoteExec?.bindTransport(transport),
+            },
+          ),
         );
       } catch (error) {
         remoteExec?.settleIfNeverMinted();
@@ -1918,22 +1963,27 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     const startedAt = performance.now();
     let output: Awaited<ReturnType<FunctionToolInvoke>>;
     try {
-      output = await runWithSecretCarry(secretCarry, () =>
-        runWithToolCallCorrelation(
-          correlationId,
-          async () =>
-            await withPendingCommandSupervision(pendingStart?.supervision, () =>
-              tool.invoke(runContext, cancellableInput, details),
-            ),
-          {
-            onDurableOpIdMinted: (opId) => remoteExec?.noteMinted(opId),
-            onDurableOpOwnershipTransferStarted: (opId) => remoteExec?.startOwnershipTransfer(opId),
-            onDurableOpOwnershipTransferFailed: (opId) => remoteExec?.failOwnershipTransfer(opId),
-            onDurableOpOwnershipTransferred: (opId) =>
-              remoteExec?.releaseCancellationAuthority(opId),
-            onRemoteOperationNotDispatched: (opId) => remoteExec?.settleNotDispatched(opId),
-            onRemoteOperationTransportSelected: (transport) => remoteExec?.bindTransport(transport),
-          },
+      output = await this.untilRemoteCustody(
+        remoteExec,
+        runWithSecretCarry(secretCarry, () =>
+          runWithToolCallCorrelation(
+            correlationId,
+            async () =>
+              await withPendingCommandSupervision(pendingStart?.supervision, () =>
+                tool.invoke(runContext, cancellableInput, details),
+              ),
+            {
+              onDurableOpIdMinted: (opId) => remoteExec?.noteMinted(opId),
+              onDurableOpOwnershipTransferStarted: (opId) =>
+                remoteExec?.startOwnershipTransfer(opId),
+              onDurableOpOwnershipTransferFailed: (opId) => remoteExec?.failOwnershipTransfer(opId),
+              onDurableOpOwnershipTransferred: (opId) =>
+                remoteExec?.releaseCancellationAuthority(opId),
+              onRemoteOperationNotDispatched: (opId) => remoteExec?.settleNotDispatched(opId),
+              onRemoteOperationTransportSelected: (transport) =>
+                remoteExec?.bindTransport(transport),
+            },
+          ),
         ),
       );
     } catch (error) {
@@ -2876,6 +2926,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     const settledPromise = new Promise<void>((resolve) => {
       resolveSettled = resolve;
     });
+    let resolveCustody!: () => void;
+    const custodyCommitted = new Promise<void>((resolve) => {
+      resolveCustody = resolve;
+    });
     let cancellation: Promise<void> | null = null;
     let cancellationRequest: Promise<void> | null = null;
     let abandonmentRequest: Promise<void> | null = null;
@@ -2893,6 +2947,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       ownershipTransferred: false,
       observation: null,
       settledPromise,
+      custodyCommitted,
       settle: () => {
         if (entry.settled) return;
         entry.settled = true;
@@ -2967,10 +3022,15 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                   });
               }
               if (!abandonmentRequest && exactTransport.abandonExecCommand) {
-                abandonmentRequest = exactTransport
-                  .abandonExecCommand(opId)
+                abandonmentRequest = (
+                  this.remoteHandOff
+                    ? exactTransport.abandonExecCommand(opId, { consumerEnding: true })
+                    : exactTransport.abandonExecCommand(opId)
+                )
                   .then((committed) => {
-                    if (committed) entry.releaseCancellationAuthority(opId);
+                    if (!committed) return;
+                    entry.releaseCancellationAuthority(opId);
+                    resolveCustody();
                   })
                   .catch(() => undefined)
                   .finally(() => {
