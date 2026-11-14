@@ -1181,6 +1181,60 @@ describe("CUA desktop boundary", () => {
     }
   });
 
+  test("a click's receipt names the frame last shown, not the capture the click took", async () => {
+    // A viewer is shown the window scaled down, while a click captures it at
+    // full size to send its input, and shows no image of that capture. A
+    // second click on the frame the receipt names, with the pixels of the
+    // screenshot last shown, lands where the same pixels did the first time.
+    class ScaledFixture extends Fixture {
+      async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        const response = await super.callTool(name, argumentsJson);
+        const longEdge = (JSON.parse(argumentsJson) as { max_image_dimension?: number })
+          .max_image_dimension;
+        if (name !== "get_window_state" || !response.images?.length || !longEdge || longEdge >= 200)
+          return response;
+        const state = JSON.parse(response.structuredJson!);
+        Object.assign(state, { screenshot_width: longEdge, screenshot_height: longEdge / 2 });
+        const png = Buffer.alloc(24);
+        png.writeUInt32BE(0x89504e47, 0);
+        png.writeUInt32BE(longEdge, 16);
+        png.writeUInt32BE(longEdge / 2, 20);
+        response.images = [{ mimeType: "image/png", dataBase64: png.toString("base64") }];
+        response.structuredJson = JSON.stringify(state);
+        return response;
+      }
+    }
+    const fixture = new ScaledFixture();
+    const backend = await CuaComputerBackend.open(fixture, "macos");
+    try {
+      const target = (await backend.targets())[0]!;
+      const shown = await backend.capture(target.id, {
+        format: "png",
+        quality: 80,
+        maxWidth: 100,
+        maxHeight: 100,
+      });
+      expect([shown.width, shown.height]).toEqual([100, 50]);
+      const click = async (frameId: string) =>
+        await backend.dispatch({
+          ...command(await backend.observe(target.id)),
+          expectedFrameId: frameId,
+          action: { type: "pointer", action: "click", frameId, x: 10, y: 10 },
+        });
+      const receipt = await click(shown.frameId);
+      expect(receipt?.frameId).toBe(shown.frameId);
+      expect((await backend.observe(target.id)).frameId).toBe(shown.frameId);
+      await click(receipt!.frameId!);
+      const clicks = fixture.calls.filter((call) => call.name === "click");
+      expect(clicks.map((call) => [call.args.x, call.args.y])).toEqual([
+        [20, 20],
+        [20, 20],
+      ]);
+    } finally {
+      await backend.close();
+    }
+  });
+
   test("typing right after a click goes to the clicked point when accessibility shows no focused field", async () => {
     // A Simulator device (or a sign-in sheet in one) is drawn outside the
     // window's accessibility tree: the field a click focused is not seen as
