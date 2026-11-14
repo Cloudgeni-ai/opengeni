@@ -4822,6 +4822,40 @@ describe("worker shutdown preemption", () => {
     expect(receipts).toBe(1);
   });
 
+  test("a worker shutdown hands remote operations to the command ledger before the drain", async () => {
+    for (const handOffRemoteOperations of [true, false]) {
+      const steps: string[] = [];
+      await drainAttemptOwnedSandboxWriters({
+        toolCancellationFence: {
+          handOffRemoteOperations: () => steps.push("hand-off"),
+          cancel: () => steps.push("cancel"),
+          waitForQuiescence: async () => {
+            steps.push("drain");
+          },
+        },
+        handOffRemoteOperations,
+        gitCredentialRenewals: [],
+        codemodeTokenRenewal: null,
+        runCredentialRenewal: null,
+      });
+      expect(steps).toEqual(
+        handOffRemoteOperations ? ["hand-off", "cancel", "drain"] : ["cancel", "drain"],
+      );
+    }
+    // The finalizer asks for it exactly when Temporal cancelled the attempt
+    // because its worker is shutting down (Pause and Steer keep exit proof).
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn/finalization.ts", import.meta.url),
+    ).text();
+    const drainAt = source.indexOf("await drainAttemptOwnedSandboxWriters({");
+    expect(
+      source.indexOf(
+        "handOffRemoteOperations: isWorkerShutdownCancellation(cancellationSignal?.reason),",
+        drainAt,
+      ),
+    ).toBeGreaterThan(drainAt);
+  });
+
   test("retries the proof-bearing turn release outside Temporal cancellation", async () => {
     const proofFlags: boolean[] = [];
     const delays: number[] = [];

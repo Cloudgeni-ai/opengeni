@@ -50518,6 +50518,66 @@ function archiveOnlyResumeState(
   };
 }
 
+/** The cold envelope of a WARMING lease whose creator died before any provider
+ * instance was recorded. The global reaper's SQL routine
+ * opengeni_private.warming_reset_resume_state_v2 implements the same rules;
+ * keep the two identical. The selected archive (inline or object reference)
+ * and every recovery marker survive. A lease that recorded a published archive
+ * generation but lost its archive pointer fails closed as unrecoverable, so the
+ * next turn is blocked visibly instead of starting on an empty workspace. Only
+ * a lease that never had an archive or recovery state resets to null. */
+function warmingResetResumeState(row: LeaseRow, resetAt: string): Record<string, unknown> | null {
+  const current = recoveryStateFromLeaseRow(row);
+  const hasArchive = current.archive.status !== "none";
+  if (
+    !hasArchive &&
+    // An authorized empty-workspace continuation keeps its decision (and its
+    // blocked lost-workspace truth) when no archive exists.
+    pendingFreshWorkspaceRecovery(row.resume_state) === null &&
+    providerLossRecord(row.resume_state) === null &&
+    row.archive_generation === null
+  ) {
+    return null;
+  }
+  const restoreStatus: SandboxRestoreStatus = hasCompleteWorkspaceArchive(row)
+    ? "pending"
+    : hasArchive
+      ? "degraded"
+      : "unrecoverable";
+  return archiveOnlyResumeState(row, {
+    provider: { status: "not_created", instanceId: null, observedAt: resetAt },
+    archive: current.archive,
+    restore: {
+      status: restoreStatus,
+      rematerializationId: null,
+      selectedRevision: current.archive.current?.revision ?? null,
+      startedAt: null,
+      completedAt: resetAt,
+      ...(restoreStatus === "degraded"
+        ? {
+            failureCode:
+              current.archive.status === "available"
+                ? "archive_generation_mismatch"
+                : "archive_unverified",
+            retryable: false,
+          }
+        : restoreStatus === "unrecoverable"
+          ? { failureCode: "archive_unavailable", retryable: false }
+          : {}),
+    },
+    workspace: {
+      status:
+        restoreStatus === "pending"
+          ? "not_ready"
+          : restoreStatus === "degraded"
+            ? "degraded"
+            : "unrecoverable",
+      verifiedRevision: null,
+      verifiedAt: null,
+    },
+  });
+}
+
 function providerStateFromLeaseResumeState(row: LeaseRow): Record<string, unknown> | null {
   const resume = row.resume_state;
   if (!resume || typeof resume !== "object") return null;
@@ -58986,56 +59046,13 @@ export async function reapStaleLeaseHolders(
           // A lost reply can still name a live provider. Keep the same epoch
           // available for late attribution; time is not termination proof.
           if (row.provider_create_attempt?.instanceId === null) continue;
-          const current = recoveryStateFromLeaseRow(row);
-          const hasArchive = current.archive.status !== "none";
-          // An authorized empty-workspace continuation keeps its decision (and
-          // its blocked lost-workspace truth) when no archive exists.
-          const freshPending = pendingFreshWorkspaceRecovery(row.resume_state) !== null;
-          const resetAt = new Date().toISOString();
-          const restoreStatus: SandboxRestoreStatus = !hasArchive
-            ? "unrecoverable"
-            : current.archive.status === "available"
-              ? "pending"
-              : "degraded";
-          const resetResumeState =
-            hasArchive || freshPending
-              ? archiveOnlyResumeState(row, {
-                  provider: {
-                    status: "not_created",
-                    instanceId: null,
-                    observedAt: resetAt,
-                  },
-                  archive: current.archive,
-                  restore: {
-                    status: restoreStatus,
-                    rematerializationId: null,
-                    selectedRevision: current.archive.current?.revision ?? null,
-                    startedAt: null,
-                    completedAt: resetAt,
-                    ...(restoreStatus === "degraded"
-                      ? { failureCode: "archive_unverified", retryable: false }
-                      : restoreStatus === "unrecoverable"
-                        ? { failureCode: "archive_unavailable", retryable: false }
-                        : {}),
-                  },
-                  workspace: {
-                    status:
-                      restoreStatus === "pending"
-                        ? "not_ready"
-                        : restoreStatus === "unrecoverable"
-                          ? "unrecoverable"
-                          : "degraded",
-                    verifiedRevision: null,
-                    verifiedAt: null,
-                  },
-                })
-              : null;
+          const resetResumeState = warmingResetResumeState(row, new Date().toISOString());
           const reset = await tx.execute<{ id: string }>(sql`
           update sandbox_leases set
             liveness = 'cold', instance_id = null,
             lease_epoch = lease_epoch + 1,
             reaper_hold_id = null, reaper_hold_until = null, reaper_hold_reason = null,
-            resume_backend_id = case when ${hasArchive || freshPending} then coalesce(resume_backend_id, backend) else null end,
+            resume_backend_id = case when ${resetResumeState !== null} then coalesce(resume_backend_id, backend) else null end,
             resume_state = ${resetResumeState ? JSON.stringify(resetResumeState) : null}::jsonb,
             data_plane_url = null, terminal_data_plane_url = null,
             controller_data_plane_url = null,
