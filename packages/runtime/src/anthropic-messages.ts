@@ -1471,6 +1471,8 @@ export class AnthropicMessagesModel implements Model {
   private readonly sizeImage = createModelImageSizer(2000, ANTHROPIC_IMAGE_MAX_ENCODED_BYTES);
   /** Pooled API keys Anthropic refused for lack of credits while this model ran. */
   private readonly refusedApiKeys = new Set<string>();
+  /** The pooled API key each accepted response was sent with. */
+  private readonly responseApiKeys = new WeakMap<Response, string>();
   constructor(
     readonly provider: ResolvedModelProvider,
     readonly model: string,
@@ -1509,6 +1511,19 @@ export class AnthropicMessagesModel implements Model {
       accountScope: anthropicSearchAccountScope(provider),
       replayScope: claudeReplayScope(request, this.model, provider),
     };
+  }
+
+  /**
+   * Leave a pooled API key out for the rest of this model's requests and
+   * report it, so later turns skip it too. True when `error` is Anthropic
+   * refusing that key for lack of credits; the caller then sends the same
+   * request again, which goes to the session's next key.
+   */
+  private refusedForCredits(apiKeyId: string | undefined, error: unknown): boolean {
+    if (apiKeyId === undefined || !isAnthropicApiKeyCreditRefusal(error)) return false;
+    this.refusedApiKeys.add(apiKeyId);
+    apiKeyRefusalReporters.getStore()?.(this.provider.id, apiKeyId);
+    return true;
   }
 
   /** Project inline images only; never fetch arbitrary URLs or edit stored history. */
@@ -1724,17 +1739,14 @@ export class AnthropicMessagesModel implements Model {
               reason: REPLAY_TRANSFORMATION_REASON[replay.fallback as "refused" | "plain"],
             })),
           );
+        if (prepared.apiKeyId !== undefined) this.responseApiKeys.set(response, prepared.apiKeyId);
         return response;
       } catch (error) {
         // A pooled API key whose organization is out of credits: it is left
         // out from now on (and reported), and the same request goes to the
         // session's next key. Its signed thinking and searches stay behind,
         // since they belong to the refused key's Anthropic organization.
-        if (prepared.apiKeyId !== undefined && isAnthropicApiKeyCreditRefusal(error)) {
-          this.refusedApiKeys.add(prepared.apiKeyId);
-          apiKeyRefusalReporters.getStore()?.(this.provider.id, prepared.apiKeyId);
-          continue;
-        }
+        if (this.refusedForCredits(prepared.apiKeyId, error)) continue;
         if (
           prepared.replay === "plain" ||
           !(error instanceof AnthropicRequestError) ||
@@ -1970,6 +1982,28 @@ export class AnthropicMessagesModel implements Model {
     },
     partial: AnthropicPartialMessage = {},
   ): AsyncGenerator<ResponseStreamEvent, { message: Json; requestId: string | undefined }> {
+    // A pooled API key can also be refused for lack of credits after its
+    // response began: Anthropic then reports it as an error event in the
+    // stream. That key is left out like one refused before the stream, and
+    // the same request goes to the session's next key. The response has
+    // started only once; what the refused stream had sent stays as it was.
+    const started = { value: continuation.started };
+    for (;;) {
+      const streamed = yield* this.streamAttempt(request, continuation, partial, started);
+      if (streamed) return streamed;
+    }
+  }
+
+  /** One streamed request; undefined when Anthropic refused its pooled key for lack of credits. */
+  private async *streamAttempt(
+    request: ModelRequest,
+    continuation: { baseId?: string; offset: number; textRunStart?: number },
+    partial: AnthropicPartialMessage,
+    started: { value: boolean },
+  ): AsyncGenerator<
+    ResponseStreamEvent,
+    { message: Json; requestId: string | undefined } | undefined
+  > {
     partial.message = undefined;
     partial.blocks = undefined;
     const response = await this.send(request, true);
@@ -2025,6 +2059,19 @@ export class AnthropicMessagesModel implements Model {
           status === undefined
             ? "Claude returned an unrecognized stream error. Automatic retries stopped."
             : `Claude stream failed (HTTP ${status})`;
+        const cause = new AnthropicRequestError(
+          failureMessage,
+          status,
+          code,
+          event.error,
+          response.headers,
+          { subscription: this.provider.anthropic?.auth === "oauth" },
+        );
+        if (this.refusedForCredits(this.responseApiKeys.get(response), cause)) {
+          partial.message = undefined;
+          partial.blocks = undefined;
+          return undefined;
+        }
         throw Object.assign(new Error(failureMessage), {
           ...(status !== undefined ? { status } : {}),
           code,
@@ -2034,14 +2081,7 @@ export class AnthropicMessagesModel implements Model {
             : {},
           // Keep the structural stream wrapper stable for provider rejection
           // guards while the typed cause keeps provider text private.
-          cause: new AnthropicRequestError(
-            failureMessage,
-            status,
-            code,
-            event.error,
-            response.headers,
-            { subscription: this.provider.anthropic?.auth === "oauth" },
-          ),
+          cause,
         });
       }
       switch (event.type) {
@@ -2049,7 +2089,10 @@ export class AnthropicMessagesModel implements Model {
           if (message) throw new AnthropicProtocolError("Duplicate Claude message_start");
           message = object(event.message);
           partial.message = message;
-          if (!continuation.started) yield { type: "response_started" };
+          if (!started.value) {
+            started.value = true;
+            yield { type: "response_started" };
+          }
           break;
         case "content_block_start":
           if (!message || blocks.has(event.index) || finalDelta)

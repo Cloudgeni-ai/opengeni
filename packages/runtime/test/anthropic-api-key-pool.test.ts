@@ -213,3 +213,151 @@ test("MP-KEYS-03: a rate limit is not a credit refusal and never moves the sessi
   expect(sent).toHaveLength(1);
   expect(reported).toEqual([]);
 });
+
+// Anthropic can also refuse a key for lack of credits after its response began
+// (HTTP 200): the stream then carries an error event instead of message_stop.
+const sse = (events: { type: string }[]) =>
+  new Response(
+    events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""),
+    { headers: { "content-type": "text/event-stream", "request-id": "req_stream" } },
+  );
+const streamStart = (id: string) => ({
+  type: "message_start",
+  message: { ...message, id, content: [], stop_reason: null },
+});
+const thinkingStarted = [
+  { type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } },
+  {
+    type: "content_block_delta",
+    index: 0,
+    delta: { type: "thinking_delta", thinking: "Wrapping up" },
+  },
+];
+const creditRefusalEvent = {
+  type: "error",
+  error: {
+    type: "invalid_request_error",
+    message:
+      "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.",
+  },
+};
+const finished = (id: string, stopReason = "end_turn") =>
+  sse([
+    streamStart(id),
+    { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+    { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Done" } },
+    { type: "content_block_stop", index: 0 },
+    { type: "message_delta", delta: { stop_reason: stopReason }, usage: { output_tokens: 1 } },
+    { type: "message_stop" },
+  ]);
+
+/** A fake Anthropic whose `refuse` keys start streaming, then refuse for lack of credits. */
+function streamingAnthropic(refuse: Set<string>, respond: () => Response) {
+  const sent: { key: string | null; body: string }[] = [];
+  const fetch = (async (_url: string, init?: RequestInit) => {
+    const key = new Headers(init?.headers).get("x-api-key");
+    sent.push({ key, body: String(init?.body) });
+    return key && refuse.has(key)
+      ? sse([streamStart("msg_refused"), ...thinkingStarted, creditRefusalEvent])
+      : respond();
+  }) as typeof globalThis.fetch;
+  return { sent, fetch };
+}
+
+async function streamAll(model: AnthropicMessagesModel, request: ModelRequest, reported: string[]) {
+  const events: { type: string }[] = [];
+  await withAnthropicApiKeyRefusals(
+    (_provider, keyId) => reported.push(keyId),
+    async () => {
+      for await (const event of model.getStreamedResponse(request)) events.push(event);
+    },
+  );
+  return events;
+}
+
+test("MP-KEYS-03: a credit refusal inside a started stream moves the same request to the next key", async () => {
+  const session = "session-mid-stream";
+  const order = anthropicApiKeyOrder(keys, session);
+  const { sent, fetch } = streamingAnthropic(new Set([order[0]!.apiKey]), () =>
+    finished("msg_next"),
+  );
+  const reported: string[] = [];
+  const model = new AnthropicMessagesModel(provider(keys), "claude-test", fetch);
+  const events = await streamAll(model, modelRequest(session), reported);
+  expect(sent.map((request) => request.key)).toEqual([order[0]!.apiKey, order[1]!.apiKey]);
+  expect(sent[1]!.body).toBe(sent[0]!.body);
+  expect(reported).toEqual([order[0]!.id]);
+  // The response started once and finished on the next key.
+  expect(events.filter((event) => event.type === "response_started")).toHaveLength(1);
+  const done = events.at(-1) as { type: string; response: { output: { id?: string }[] } };
+  expect(done.type).toBe("response_done");
+  expect(done.response.output.map((item) => item.id)).toEqual(["msg_next:0"]);
+  // The refused key stays out for the model's later requests.
+  await streamAll(model, modelRequest(session), reported);
+  expect(sent.at(-1)!.key).toBe(order[1]!.apiKey);
+  expect(reported).toEqual([order[0]!.id]);
+});
+
+test("MP-KEYS-03: a credit refusal while continuing a paused response moves it to the next key", async () => {
+  const session = "session-continuation";
+  const order = anthropicApiKeyOrder(keys, session);
+  // The session's key serves the first request, which pauses, then is refused.
+  let served = 0;
+  const sent: (string | null)[] = [];
+  const fetch = (async (_url: string, init?: RequestInit) => {
+    const key = new Headers(init?.headers).get("x-api-key");
+    sent.push(key);
+    if (key === order[0]!.apiKey && served++ === 0) return finished("msg_paused", "pause_turn");
+    if (key === order[0]!.apiKey) return sse([streamStart("msg_refused"), creditRefusalEvent]);
+    return finished("msg_resumed");
+  }) as typeof globalThis.fetch;
+  const reported: string[] = [];
+  const model = new AnthropicMessagesModel(provider(keys), "claude-test", fetch);
+  const events = await streamAll(model, modelRequest(session), reported);
+  expect(sent).toEqual([order[0]!.apiKey, order[0]!.apiKey, order[1]!.apiKey]);
+  expect(reported).toEqual([order[0]!.id]);
+  expect(events.at(-1)?.type).toBe("response_done");
+});
+
+test("MP-KEYS-03: the turn fails only when every key refused inside its stream", async () => {
+  const { sent, fetch } = streamingAnthropic(new Set(keys.map((key) => key.apiKey)), () =>
+    finished("msg_unused"),
+  );
+  const reported: string[] = [];
+  const model = new AnthropicMessagesModel(provider(keys), "claude-test", fetch);
+  const failure = await streamAll(model, modelRequest("session-all-stream"), reported).catch(
+    (error: unknown) => error,
+  );
+  expect(failure).toMatchObject({ code: ANTHROPIC_API_KEYS_OUT_OF_CREDITS });
+  expect(sent).toHaveLength(3);
+  expect(new Set(reported)).toEqual(new Set(keys.map((key) => key.id)));
+});
+
+test("MP-KEYS-03: another stream error never moves the session to another key", async () => {
+  const { sent, fetch } = streamingAnthropic(new Set(), () =>
+    sse([
+      streamStart("msg_overloaded"),
+      { type: "error", error: { type: "overloaded_error", message: "Overloaded" } },
+    ]),
+  );
+  const reported: string[] = [];
+  const model = new AnthropicMessagesModel(provider(keys), "claude-test", fetch);
+  await expect(
+    streamAll(model, modelRequest("session-overloaded"), reported),
+  ).rejects.toMatchObject({ status: 529 });
+  expect(sent).toHaveLength(1);
+  expect(reported).toEqual([]);
+});
+
+test("MP-KEYS-03: a single-key connection refused inside its stream fails as before", async () => {
+  const { sent, fetch } = streamingAnthropic(new Set(["sk-ant-api03-primary"]), () =>
+    finished("msg_unused"),
+  );
+  const reported: string[] = [];
+  const model = new AnthropicMessagesModel(provider(), "claude-test", fetch);
+  await expect(streamAll(model, modelRequest("session-single"), reported)).rejects.toMatchObject({
+    code: "anthropic_stream_error",
+  });
+  expect(sent).toHaveLength(1);
+  expect(reported).toEqual([]);
+});
