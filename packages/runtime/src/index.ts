@@ -27,6 +27,10 @@ export {
   type CommandCompletionSource,
 } from "./command-completion-delivery";
 import {
+  installRepeatedToolCallGuard,
+  repeatGuardedToolResolver,
+} from "./repeated-tool-call-guard";
+import {
   commandCompletionModelCallFilter,
   commandCompletionToolResolver,
   installCommandCompletionDelivery,
@@ -4291,6 +4295,7 @@ export function buildOpenGeniAgent(
       );
     }
     installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
+    installRepeatedToolCallGuard(agent);
     if (options.commandCompletionDelivery && settings.experimentCutPolling) {
       installCommandCompletionDelivery(agent, options.commandCompletionDelivery);
     }
@@ -4458,6 +4463,7 @@ export function buildOpenGeniAgent(
     );
   }
   installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
+  installRepeatedToolCallGuard(agent);
   if (options.commandCompletionDelivery && settings.experimentCutPolling) {
     installCommandCompletionDelivery(agent, options.commandCompletionDelivery);
   }
@@ -11474,7 +11480,7 @@ export async function restoreInterruptedRunState(
     clientToolSearchRehydration: "preserve_history",
     resolveMissingFunctionTool: commandCompletionToolResolver(
       agent,
-      mcpToolResolverForAgent(agent),
+      repeatGuardedToolResolver(agent, mcpToolResolverForAgent(agent)),
     ),
   });
 }
@@ -12473,7 +12479,7 @@ function lazyToolRunBindings(agent: Agent<any, any>): {
     ...(runtime ? { toolNotFoundBehavior: "return_error_to_model" as const } : {}),
     resolveMissingFunctionTool: commandCompletionToolResolver(
       agent,
-      mcpToolResolverForAgent(agent),
+      repeatGuardedToolResolver(agent, mcpToolResolverForAgent(agent)),
     ),
   };
 }

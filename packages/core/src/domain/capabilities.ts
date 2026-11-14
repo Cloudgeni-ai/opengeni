@@ -110,6 +110,7 @@ import {
   MICROSOFT_DYNAMICS_CAPABILITY_ID,
   MICROSOFT_DYNAMICS_CONNECTION_NAME,
 } from "@opengeni/contracts/microsoft-dynamics";
+import { capabilityConnectEndpoint } from "@opengeni/contracts/capability-connect-inputs";
 import {
   withOrganizationIntegrationAcquisition,
   withOrganizationIntegrationPolicyFence,
@@ -525,6 +526,23 @@ export async function createCatalogItem(input: {
    */
   memberCreate?: { settings: Settings } | undefined;
 }): Promise<CapabilityCatalogItem> {
+  // A connection a Connect card asked inputs for must follow the rule of the
+  // entry that asked: its endpoint is the one those inputs name, never another.
+  if (input.payload.connectFor !== undefined) {
+    const declaring = nativeConnectionCapabilityRecommendations({ microsoftDynamics: true }).find(
+      (candidate) => candidate.id === input.payload.connectFor,
+    );
+    const endpoint = declaring
+      ? capabilityConnectEndpoint(declaring.surfaceType, {
+          endpointUrl: input.payload.endpointUrl ?? "",
+        })
+      : null;
+    if (!endpoint)
+      throw new HTTPException(422, { message: "That entry doesn't take connection inputs." });
+    if ("problem" in endpoint) throw new HTTPException(422, { message: endpoint.problem });
+    const { connectFor: _connectFor, ...payload } = input.payload;
+    input = { ...input, payload: { ...payload, endpointUrl: endpoint.endpointUrl } };
+  }
   // A Dynamics environment address is stored as its MCP endpoint, so a pasted
   // browser address reaches the reviewed Microsoft Dynamics sign-in.
   if (input.payload.endpointUrl) {

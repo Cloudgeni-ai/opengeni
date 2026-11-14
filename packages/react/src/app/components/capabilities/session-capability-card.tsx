@@ -26,6 +26,7 @@ import { DetailBody, type ConnectAction } from "./capability-detail-sheet";
 import { performCapabilityAction } from "./perform-capability-action";
 import { useCapabilitiesCatalog } from "./use-capabilities-catalog";
 import { SessionCustomMcpCard } from "./session-custom-mcp-card";
+import { SessionConnectInputsCard } from "./session-connect-inputs-card";
 import {
   capabilityConnectPlan,
   capabilityErrorToast,
@@ -89,6 +90,16 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
     () => setRegistered((current) => (current?.open ? { ...current, open: false } : current)),
     [],
   );
+  if (props.item.capability?.inputs?.length && !registered) {
+    return (
+      <SessionConnectInputsCard
+        key={`${props.workspaceId}:${props.item.id}`}
+        item={props.item}
+        workspaceId={props.workspaceId}
+        onRegistered={onRegistered}
+      />
+    );
+  }
   if (props.item.setupRequest && !registered) {
     return (
       <SessionCustomMcpCard
@@ -107,11 +118,11 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
         setupRequest: null,
         capability: {
           id: registered.id,
-          name: props.item.setupRequest!.name,
+          name: props.item.setupRequest?.name ?? props.item.capability!.name,
           kind: "mcp" as const,
           source: "manual" as const,
           action: "connect" as const,
-          rationale: props.item.setupRequest!.rationale,
+          rationale: props.item.setupRequest?.rationale ?? props.item.capability!.rationale,
           requiredVariables: [],
         },
       }

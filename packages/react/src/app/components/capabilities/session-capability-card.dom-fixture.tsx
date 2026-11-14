@@ -648,6 +648,100 @@ describe("conversation connection card", () => {
     }
   });
 
+  test("a card with connect-time inputs asks for them in one field and adds that connection", async () => {
+    createdCatalogItem = null;
+    context.client.createCapability.mockClear();
+    const inputsNotice = (value?: string) =>
+      ({
+        ...item,
+        id: `inputs-notice-${value ?? "empty"}`,
+        providerDomain: "dynamics.com",
+        capability: {
+          id: "api:microsoft-dynamics",
+          name: "Microsoft Dynamics",
+          kind: "api",
+          source: "built_in",
+          action: "connect",
+          rationale: "Connect Microsoft Dynamics so the agent can use it for this task.",
+          requiredVariables: [],
+          inputs: [
+            {
+              id: "endpointUrl",
+              label: "Environment address",
+              placeholder: "https://contoso.crm4.dynamics.com",
+              ...(value ? { value } : {}),
+            },
+          ],
+        },
+      }) as AuthNeededItem;
+    // Without permission to add connections: say who can, and ask for nothing.
+    const viewer = await render(
+      false,
+      catalogItem,
+      catalogItem,
+      false,
+      "workspace",
+      inputsNotice("contoso.crm4.dynamics.com"),
+    );
+    try {
+      expect(viewer.host.textContent).toContain("Ask a workspace admin to add Microsoft Dynamics");
+      expect(viewer.host.querySelector("input")).toBeNull();
+    } finally {
+      await viewer.close();
+    }
+    context.accessContext.workspaceGrants = [
+      { workspaceId: "workspace", permissions: ["connections:write", "connections:read"] },
+    ];
+    const empty = await render(false, catalogItem, catalogItem, false, "workspace", inputsNotice());
+    try {
+      // One field and one action, which waits for a value.
+      expect(empty.host.querySelectorAll("input")).toHaveLength(1);
+      expect(empty.host.querySelector("input")!.placeholder).toBe(
+        "https://contoso.crm4.dynamics.com",
+      );
+      expect(empty.host.querySelectorAll("button")).toHaveLength(1);
+      expect(button(empty.host, "Connect").disabled).toBe(true);
+    } finally {
+      await empty.close();
+    }
+    const h = await render(
+      false,
+      catalogItem,
+      catalogItem,
+      false,
+      "workspace",
+      inputsNotice("contoso.crm4.dynamics.com/main.aspx"),
+    );
+    try {
+      expect(h.host.textContent).toContain("Environment address");
+      expect(h.host.querySelector("input")!.value).toBe("contoso.crm4.dynamics.com/main.aspx");
+      // A refusal is shown on the card, and nothing else changes.
+      context.client.createCapability.mockImplementationOnce(async () => {
+        throw new Error("That isn't a Dynamics environment address.");
+      });
+      await act(async () => button(h.host, "Connect").click());
+      expect(h.host.querySelector('[role="alert"]')).not.toBeNull();
+      expect(h.host.querySelector("input")).not.toBeNull();
+      await act(async () => button(h.host, "Connect").click());
+      expect(context.client.createCapability).toHaveBeenLastCalledWith("workspace", {
+        kind: "mcp",
+        source: "manual",
+        name: "Microsoft Dynamics",
+        endpointUrl: "https://contoso.crm4.dynamics.com/api/mcp",
+        connectFor: "api:microsoft-dynamics",
+      });
+      // The added environment's own card follows.
+      expect(h.host.textContent).toContain("Connect Microsoft Dynamics");
+      expect(h.host.querySelector("input")).toBeNull();
+    } finally {
+      context.accessContext.workspaceGrants = [
+        { workspaceId: "workspace", permissions: ["connections:read"] },
+      ];
+      createdCatalogItem = null;
+      await h.close();
+    }
+  });
+
   test("a viewer returning after an admin adds the proposed server sees the connection action", async () => {
     createdCatalogItem = CapabilityCatalogItem.parse({
       id: "mcp:reviewed",

@@ -15802,6 +15802,12 @@ export const CreateCapabilityCatalogItemRequest = /* @__PURE__ */ defineSchema((
     installUrl: z.string().url().optional(),
     authModel: z.string().min(1).optional(),
     metadata: z.record(primitives.string, z.unknown()).default({}),
+    /**
+     * The catalog entry whose Connect card asked for this connection's
+     * inputs. The endpoint must then follow that entry's rule (see
+     * `@opengeni/contracts/capability-connect-inputs`), or the request is refused.
+     */
+    connectFor: z.string().min(1).max(512).optional(),
   }),
 );
 export type CreateCapabilityCatalogItemRequest = z.infer<typeof CreateCapabilityCatalogItemRequest>;
@@ -18647,6 +18653,24 @@ export const ToolAuthNeededPayload = /* @__PURE__ */ defineSchema(() =>
           action: z.enum(["connect", "add_credentials", "enable"]),
           rationale: z.string().min(1).max(2000),
           requiredVariables: z.array(EnvironmentVariableName).max(64).default([]),
+          /**
+           * Values the person enters on the card before connecting (see
+           * `@opengeni/contracts/capability-connect-inputs`). `value` is what
+           * the agent filled in; the person can change it.
+           */
+          inputs: z
+            .array(
+              z
+                .object({
+                  id: z.string().min(1).max(64),
+                  label: z.string().min(1).max(128),
+                  placeholder: z.string().min(1).max(256).optional(),
+                  value: z.string().max(2048).optional(),
+                })
+                .strict(),
+            )
+            .max(8)
+            .optional(),
         })
         .optional(),
       /** An agent suggestion, not a catalog entry or authority to contact this URL. */

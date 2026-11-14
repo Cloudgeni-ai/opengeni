@@ -1796,6 +1796,38 @@ describe("API helpers", () => {
     await expect(created).rejects.toThrow('"opengenitest2026" isn\'t a tenant ID or domain');
   });
 
+  test("a connection a Connect card asked inputs for must follow its entry's rule", async () => {
+    const create = (endpointUrl: string, connectFor: string) =>
+      createCatalogItem({
+        db: {} as Database,
+        accountId: crypto.randomUUID(),
+        workspaceId: crypto.randomUUID(),
+        payload: {
+          kind: "mcp",
+          source: "manual",
+          name: "Microsoft Dynamics",
+          category: "custom",
+          tags: [],
+          endpointUrl,
+          metadata: {},
+          connectFor,
+        },
+      });
+    // Any other server is refused before anything is read or written.
+    const other = create("https://attacker.example/mcp", "api:microsoft-dynamics");
+    await expect(other).rejects.toMatchObject({ status: 422 });
+    await expect(other).rejects.toThrow("That isn't a Dynamics environment address");
+    const unreadable = create(
+      "https://businesscentral.dynamics.com/opengenitest2026/Production",
+      "api:microsoft-dynamics",
+    );
+    await expect(unreadable).rejects.toThrow('"opengenitest2026" isn\'t a tenant ID or domain');
+    // An entry without connect-time inputs can't be named.
+    await expect(
+      create("https://contoso.crm4.dynamics.com/", "api:github-app"),
+    ).rejects.toMatchObject({ status: 422 });
+  });
+
   test("omits credential-header capability MCPs when their headers cannot be decrypted", () => {
     const key = randomBytes(32);
     const otherKey = randomBytes(32);

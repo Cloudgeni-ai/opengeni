@@ -315,9 +315,34 @@ import {
   microsoftDynamicsProductForMcpUrl,
   type MicrosoftDynamicsProduct,
 } from "@opengeni/contracts/microsoft-dynamics";
+import {
+  capabilityConnectEndpoint,
+  capabilityConnectInputs,
+  type CapabilityConnectInput,
+} from "@opengeni/contracts/capability-connect-inputs";
 
-/** What the agent needs before it can show a Microsoft Dynamics Connect card. */
-const MICROSOFT_DYNAMICS_SETUP_DETAIL = `Each connection is one Dynamics environment. Ask the person for the web address they open Dynamics at (for example https://contoso.crm4.dynamics.com, or https://businesscentral.dynamics.com/<tenant>/<environment> for Business Central; any page of it works). If they don't know it, they can open Dynamics and copy the address bar, or find Environment URL in the Power Platform admin center. Then call custom_mcp_setup_request with name "${MICROSOFT_DYNAMICS_CONNECTION_NAME}" and that address as endpointUrl. Its card signs them in with their Microsoft work account.`;
+/**
+ * How to show a card that asks the person for its connect-time inputs: the
+ * card tool posts it, and the agent may fill in values the person already gave.
+ */
+function connectInputsCardDetail(inputs: readonly CapabilityConnectInput[]): string {
+  const asks = inputs.map((input) => input.label.toLowerCase()).join(" and ");
+  const keys = inputs.map((input) => input.id).join(", ");
+  return `Call capability_authorization_request: its card asks the person for the ${asks}, then signs them in. If they already gave it, also pass it in inputs (${keys}) to fill it in.`;
+}
+
+/** A catalog match's connect-time inputs, which its card asks the person for. */
+function connectInputsOf(
+  item: CapabilityCatalogItem,
+  setup: CapabilitySetupProjection,
+): { connectInputs?: { id: string; label: string }[] } {
+  const inputs =
+    setup.status === "authorization_required" && capabilityConnectInputs(item.surfaceType);
+  return inputs ? { connectInputs: inputs.map(({ id, label }) => ({ id, label })) } : {};
+}
+
+/** How a Microsoft Dynamics environment is connected. */
+const MICROSOFT_DYNAMICS_SETUP_DETAIL = `Each connection is one Dynamics environment. ${connectInputsCardDetail(capabilityConnectInputs("microsoft_dynamics") ?? [])}`;
 
 /** The workspace's own Dynamics environments: catalog entries for an exact environment endpoint. */
 function microsoftDynamicsEnvironments(
@@ -8047,6 +8072,7 @@ function registerCapabilityDiscoveryTools(
           setup: {
             ...setup,
             requiredVariables: capabilityRequiredVariables(item),
+            ...connectInputsOf(item, setup),
             nextAction:
               setup.status === "authorization_required" ||
               setup.reconnect?.some((account) => account.reconnectHere)
@@ -8106,14 +8132,22 @@ function registerCapabilityDiscoveryTools(
           .describe(
             "When setup.reconnect lists accounts that stopped working: the connectionId of the one to reconnect. The card then reconnects that same account.",
           ),
+        inputs: z4
+          .record(z4.string().min(1).max(64), z4.string().max(2048))
+          .optional()
+          .describe(
+            "When setup.connectInputs lists values the card asks for: those the person already gave, by id. The card shows them filled in.",
+          ),
       },
     },
-    async ({ capabilityId, rationale, connectionId }, extra) => {
+    async ({ capabilityId, rationale, connectionId, inputs: suppliedInputs }, extra) => {
       await authorize();
       // Tool discovery shows a card for a search that clearly names one
       // integration; it shows that card at most once per chat.
       const fromDiscovery = extra?._meta?.[TOOL_DISCOVERY_CARD_META_KEY] === true;
       const current = await catalog();
+      // What the card's message adds about connections already here.
+      let alsoHere = "";
       let item =
         [...current.items, ...recommendations()].find(
           (candidate) => candidate.id === capabilityId,
@@ -8140,16 +8174,28 @@ function registerCapabilityDiscoveryTools(
           ({ setup }) => setup.status === "authorization_required",
         );
         const fromEnvironments = microsoftDynamicsSetupFromEnvironments(environments);
-        if (fromEnvironments?.status !== "ready" && connectable.length === 1) {
-          item = connectable[0]!.item;
-        } else {
+        if (fromEnvironments?.status === "ready")
           return json({
             capabilityId: item.id,
-            status: fromEnvironments?.status === "ready" ? "ready" : "input_required",
+            status: "ready",
             cardShown: false,
-            message: fromEnvironments?.detail ?? MICROSOFT_DYNAMICS_SETUP_DETAIL,
+            message: fromEnvironments.detail,
           });
-        }
+        // The only environment this person can still connect needs no
+        // address, unless the agent named another one; otherwise the card
+        // asks for one.
+        const named = suppliedInputs
+          ? capabilityConnectEndpoint(item.surfaceType, suppliedInputs)
+          : null;
+        const only = connectable.length === 1 ? connectable[0]!.item : null;
+        if (
+          only &&
+          (!named ||
+            !("endpointUrl" in named) ||
+            named.endpointUrl === (only.mcpUrl ?? only.endpointUrl))
+        )
+          item = only;
+        else if (fromEnvironments) alsoHere = ` ${fromEnvironments.detail}`;
       }
       const [[setup], inventory] = await Promise.all([
         setupProjections([item]),
@@ -8226,11 +8272,26 @@ function registerCapabilityDiscoveryTools(
       const personCannotConnect =
         person !== null &&
         inChatCapabilitySetup(person, item.id, item, memberIntegrationSetup).kind === "unavailable";
+      // A card for a new connection asks for the entry's connect-time inputs,
+      // filled in with what the agent passed when that is usable.
+      const declaredInputs = reconnect ? null : capabilityConnectInputs(item.surfaceType);
+      const supplied = declaredInputs && suppliedInputs ? suppliedInputs : null;
+      const suppliedEndpoint = supplied
+        ? capabilityConnectEndpoint(item.surfaceType, supplied)
+        : null;
+      const cardInputs = declaredInputs?.map((input) => {
+        const value = supplied?.[input.id]?.trim();
+        return {
+          ...input,
+          ...(value && suppliedEndpoint && "endpointUrl" in suppliedEndpoint ? { value } : {}),
+        };
+      });
       const { eventId, alreadyShown } = await appendCapabilityCardEvent(deps, grant, sessionId, {
         item,
         action: reconnect ? "connect" : (setup.action ?? "connect"),
         rationale,
         ...(reconnect ? { reconnect } : {}),
+        ...(cardInputs ? { inputs: cardInputs } : {}),
         // Tool discovery's card is not posted again until the person writes.
         // A model call always posts: a card whose state changed (a machine
         // just connected) is worth showing again.
@@ -8297,11 +8358,13 @@ function registerCapabilityDiscoveryTools(
             ? "The Connected Machine card was posted. It shows the person what to do, so do not describe its buttons or steps; nothing is connected yet. Do not paste an enroll token into the chat."
             : item.id === EXCEL_ADDIN_CAPABILITY_ID
               ? "The Excel add-in card was posted with its install link and steps, so do not repeat them; no workbook is connected yet. excel_run works once the person opens the add-in in their workbook."
-              : item.surfaceType === "integration_definition"
-                ? integrationDefinitionCardPostedMessage(item)
-                : item.kind === "plugin"
-                  ? `The ${item.name} plugin card was posted. The person reviews what it adds and installs it for the workspace; nothing is installed yet. Once they do, its Skills are yours from your next turn, and its MCP servers may still need connecting: search the catalog for them then.`
-                  : `The recommendation was posted for human confirmation. No access has been granted yet. ${SETUP_CARD_CONTINUES}`,
+              : declaredInputs
+                ? `The card was posted. It asks the person for the ${declaredInputs.map((input) => input.label.toLowerCase()).join(" and ")}, then signs them in; nothing is connected yet.${suppliedEndpoint && "problem" in suppliedEndpoint ? ` What you passed was not filled in: ${suppliedEndpoint.problem}` : ""} ${SETUP_CARD_CONTINUES}${alsoHere}`
+                : item.surfaceType === "integration_definition"
+                  ? integrationDefinitionCardPostedMessage(item)
+                  : item.kind === "plugin"
+                    ? `The ${item.name} plugin card was posted. The person reviews what it adds and installs it for the workspace; nothing is installed yet. Once they do, its Skills are yours from your next turn, and its MCP servers may still need connecting: search the catalog for them then.`
+                    : `The recommendation was posted for human confirmation. No access has been granted yet. ${SETUP_CARD_CONTINUES}`,
       });
     },
   );
@@ -8706,6 +8769,8 @@ async function appendCapabilityCardEvent(
     toolName?: string;
     /** The account that stopped working which this card reconnects. */
     reconnect?: ConnectionNeedingReconnect;
+    /** The connect-time inputs the card asks for, with the agent's values. */
+    inputs?: NonNullable<ToolAuthNeededPayload["capability"]>["inputs"];
     /**
      * Post the card only when no current card of the same kind for the
      * capability is already shown in this turn, or (`since_latest_message`)
@@ -8763,6 +8828,7 @@ function capabilityCardPayload(
     rationale: string;
     toolName?: string;
     reconnect?: Pick<ConnectionNeedingReconnect, "connectionId" | "ownership">;
+    inputs?: NonNullable<ToolAuthNeededPayload["capability"]>["inputs"];
   },
 ): ToolAuthNeededPayload {
   return ToolAuthNeededPayload.parse({
@@ -8787,6 +8853,7 @@ function capabilityCardPayload(
       action: input.action,
       rationale: input.rationale,
       requiredVariables: capabilityRequiredVariables(item),
+      ...(input.inputs?.length ? { inputs: input.inputs } : {}),
     },
   });
 }
