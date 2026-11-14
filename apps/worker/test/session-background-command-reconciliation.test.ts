@@ -148,6 +148,7 @@ describe("Connected Machine background-command reconciliation", () => {
         async () => {
           if (mode === "capture-failure") throw new Error("capture failed");
         },
+        Date.now() + 60_000,
       );
       if (mode === "running") await result;
       else
@@ -177,9 +178,15 @@ describe("Connected Machine background-command reconciliation", () => {
           : { status: "running", replaySequence: String(reads) };
       },
     } as unknown as Parameters<typeof replayConnectedCommandOutput>[0];
-    await replayConnectedCommandOutput(reader, "durable-op", true, async (frames) => {
-      captured.push(...frames.map((frame) => frame.sequence));
-    });
+    await replayConnectedCommandOutput(
+      reader,
+      "durable-op",
+      true,
+      async (frames) => {
+        captured.push(...frames.map((frame) => frame.sequence));
+      },
+      Date.now() + 60_000,
+    );
     expect(captured).toEqual(["1", "2", "3", "4", "5"]);
     expect(reads).toBe(5);
   });
@@ -195,7 +202,13 @@ describe("Connected Machine background-command reconciliation", () => {
           : { status: "running", replaySequence: String(reads * 1024) };
       },
     } as unknown as Parameters<typeof replayConnectedCommandOutput>[0];
-    await replayConnectedCommandOutput(reader, "quiet-completed-command", true, async () => {});
+    await replayConnectedCommandOutput(
+      reader,
+      "quiet-completed-command",
+      true,
+      async () => {},
+      Date.now() + 60_000,
+    );
     expect(reads).toBe(4);
   });
 

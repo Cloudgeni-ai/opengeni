@@ -9,6 +9,7 @@ use std::fmt::Display;
 use std::future::Future;
 use std::time::{Duration, Instant};
 
+use super::Event;
 use super::metrics::Alarm;
 
 /// Everything a step noted.
@@ -25,6 +26,9 @@ pub(crate) struct Notes {
     pub details: Vec<(&'static str, &'static str)>,
     /// Alarms raised, with what happened.
     pub alarms: Vec<(Alarm, String)>,
+    /// Events of their own, such as a disk's repair, which the step's
+    /// sandbox, operation and trace are added to.
+    pub events: Vec<Event>,
     /// When the current phase began.
     mark: Option<Instant>,
 }
@@ -99,6 +103,11 @@ pub(crate) fn detail(key: &'static str, value: &'static str) {
         notes.details.retain(|(known, _)| *known != key);
         notes.details.push((key, value));
     });
+}
+
+/// Emits `event` for the step's sandbox once the step ends.
+pub(crate) fn event(event: Event) {
+    with(|notes| notes.events.push(event));
 }
 
 /// Raises `alarm` for the step's sandbox.

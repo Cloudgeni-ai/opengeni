@@ -14607,6 +14607,7 @@ async function revokeConnectionAuditedInScope(
   updatedBySubjectId: string | null | undefined,
   expectedVersion: number | undefined,
   audit: DisconnectAuditActor | null | undefined,
+  replacementCredentialEncrypted?: string,
 ): Promise<ConnectionMetadataWithVerification | null> {
   if (!audit) {
     return await revokeConnectionInScope(
@@ -14615,6 +14616,7 @@ async function revokeConnectionAuditedInScope(
       connectionId,
       updatedBySubjectId,
       expectedVersion,
+      replacementCredentialEncrypted,
     );
   }
   const [prior] = await db
@@ -14634,6 +14636,7 @@ async function revokeConnectionAuditedInScope(
     connectionId,
     updatedBySubjectId,
     expectedVersion,
+    replacementCredentialEncrypted,
   );
   if (revoked && prior && prior.status !== "revoked") {
     await auditConnectionDisconnectInScope(db, revoked, audit);
@@ -14647,11 +14650,20 @@ async function revokeConnectionInScope(
   connectionId: string,
   updatedBySubjectId?: string | null,
   expectedVersion?: number,
+  /**
+   * When set, the stored credential is replaced in the same write, so the
+   * revoked row no longer holds the provider's tokens (the column is NOT NULL,
+   * so callers pass an encrypted credential without tokens).
+   */
+  replacementCredentialEncrypted?: string,
 ): Promise<ConnectionMetadataWithVerification | null> {
   const [row] = await db
     .update(schema.connections)
     .set({
       status: "revoked",
+      ...(replacementCredentialEncrypted !== undefined
+        ? { credentialEncrypted: replacementCredentialEncrypted }
+        : {}),
       // The version bump invalidates any in-flight refresh's (id, version) CAS,
       // so a racing refresh cannot commit and flip the row back to active.
       version: sql`${schema.connections.version} + 1`,
@@ -14689,6 +14701,12 @@ export async function revokeConnection(
   options: {
     /** A person's, key's or agent's disconnect: audited in the same transaction. */
     audit?: DisconnectAuditActor | null;
+    /**
+     * Replaces the stored credential in the same write (for example an
+     * encrypted credential without tokens once the provider grant is revoked).
+     * Omitted: status-only revocation keeps the stored credential.
+     */
+    replacementCredentialEncrypted?: string | undefined;
   } = {},
 ): Promise<ConnectionMetadataWithVerification | null> {
   return await withConnectionSubjectRls(
@@ -14703,6 +14721,7 @@ export async function revokeConnection(
         updatedBySubjectId,
         expectedVersion,
         options.audit,
+        options.replacementCredentialEncrypted,
       ),
   );
 }
