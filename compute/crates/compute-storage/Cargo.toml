@@ -10,7 +10,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-base64 = "0.22"
+base64 = "0.23"
 blake3 = "1.8"
 bytes = "1"
 chrono = { version = "0.4.34", default-features = false, features = ["clock"] }
