@@ -6613,6 +6613,44 @@ export const files = pgTable(
   },
   (table) => ({
     workspaceCreated: index("files_workspace_created_idx").on(table.workspaceId, table.createdAt),
+    // File lists read one page newest first from each of these (migrations
+    // 1409-1412): a workspace's shared files, a person's own files in one
+    // workspace, and a person's own files that may reach other workspaces or
+    // stay in their own. A private file has one owner (1407).
+    sharedCreated: index("files_shared_created_idx")
+      .on(table.workspaceId, table.status, table.createdAt, table.id)
+      .where(sql`private_owner_subject_ids IS NULL`),
+    privateWorkspaceCreated: index("files_private_workspace_created_idx")
+      .on(
+        table.workspaceId,
+        sql`(private_owner_subject_ids[1])`,
+        table.status,
+        table.createdAt,
+        table.id,
+      )
+      .where(sql`private_owner_subject_ids IS NOT NULL`),
+    privateRoamingCreated: index("files_private_roaming_created_idx")
+      .on(
+        table.accountId,
+        sql`(private_owner_subject_ids[1])`,
+        table.status,
+        table.createdAt,
+        table.id,
+      )
+      .where(
+        sql`private_owner_subject_ids IS NOT NULL AND (reach_workspace_ids IS NULL OR cardinality(reach_workspace_ids) > 0)`,
+      ),
+    privateLocalCreated: index("files_private_local_created_idx")
+      .on(
+        table.accountId,
+        sql`(private_owner_subject_ids[1])`,
+        table.status,
+        table.createdAt,
+        table.id,
+      )
+      .where(
+        sql`private_owner_subject_ids IS NOT NULL AND reach_workspace_ids IS NOT NULL AND cardinality(reach_workspace_ids) = 0`,
+      ),
     objectKey: uniqueIndex("files_object_key_idx").on(table.objectKey),
     scopeIdentity: uniqueIndex("files_scope_id_uq").on(
       table.accountId,

@@ -1145,12 +1145,13 @@ import {
   ne,
   notInArray,
   or,
+  Param,
   sql,
   type SQL,
   type SQLWrapper,
 } from "drizzle-orm";
 import { anyOf } from "./sql-arrays";
-import type { PgTransactionConfig } from "drizzle-orm/pg-core";
+import { unionAll, type PgTransactionConfig } from "drizzle-orm/pg-core";
 import { getLiveSessionAttemptTurn } from "./live-session-attempt";
 import {
   contextForCausalTurn,
@@ -1511,6 +1512,7 @@ import {
   setRlsContext,
   setSubjectRlsContext,
   withAccountRls,
+  withDatabaseQueryCancellation,
   withRlsContext,
   withRestoredSessionActivityRlsContext,
   withSessionActivityRlsContext,
@@ -1542,6 +1544,7 @@ export {
   setRlsContext,
   setSubjectRlsContext,
   withAccountRls,
+  withDatabaseQueryCancellation,
   withDatabaseStatementTimeout,
   withRlsContext,
   withSessionActivityRlsContext,
@@ -9299,7 +9302,21 @@ export async function resolveDocumentOriginalFileForSubject(
 }
 
 /** Batch form of requireFileForSubject; unauthorized or missing ids are omitted. */
-/** Ready originals, filtered by owner RLS and provider ACL before pagination. */
+/**
+ * Ready originals the caller can see here, newest first, filtered by owner RLS
+ * and provider ACL before pagination.
+ *
+ * A page costs about its size, not the organization's file count. The files
+ * the caller can see are disjoint sets, and each is read newest first from its
+ * own index, stopping after one page (`fileListCandidates`). Row-level
+ * security still applies to every read. Another person's private file is
+ * readable only through a capability that one function call holds for its
+ * own duration, so no listing returns one.
+ *
+ * The provider ACL function writes a capability row per call, so it runs only
+ * for the page's candidates after they are ordered and limited. A rejected
+ * candidate is skipped and the walk continues after it.
+ */
 export async function listFilesForSubject(
   db: Database,
   input: {
@@ -9309,12 +9326,14 @@ export async function listFilesForSubject(
     scope?: "all" | "workspace" | "personal";
     limit?: number;
     cursor?: string | undefined;
+    /** Cancels the running statement when the caller has gone away. */
+    signal?: AbortSignal | undefined;
   },
 ): Promise<{ files: FileAsset[]; nextCursor: string | null }> {
   const limit = input.limit ?? 30;
   if (!Number.isInteger(limit) || limit < 1 || limit > 50)
     throw new RangeError("Invalid file page size");
-  let after: { id: string; at: string } | null = null;
+  let after: FileListPosition | null = null;
   if (input.cursor) {
     try {
       after = z
@@ -9325,49 +9344,168 @@ export async function listFilesForSubject(
       throw new z.ZodError([{ code: "custom", path: ["cursor"], message: "Invalid file cursor" }]);
     }
   }
-  const reaching = filesReachingWorkspace(input);
-  return withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (tx) => {
-      if (input.subjectId) await setSubjectRlsContext(tx, input.subjectId);
-      const rows = await tx
-        .select({
-          file: schema.files,
-          position: sql<string>`to_char(${schema.files.createdAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
-        })
-        .from(schema.files)
-        .where(
-          and(
-            eq(schema.files.accountId, input.accountId),
-            eq(schema.files.status, "ready"),
-            reaching,
-            input.scope === "workspace"
-              ? isNull(schema.files.privateOwnerSubjectIds)
-              : input.scope === "personal"
-                ? isNotNull(schema.files.privateOwnerSubjectIds)
-                : undefined,
-            sql`google_drive_file_authorized(${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId}::text, ${schema.files.id})`,
-            after
-              ? sql`(${schema.files.createdAt}, ${schema.files.id}) < (${after.at}::text::timestamptz, ${after.id}::uuid)`
-              : undefined,
-          ),
-        )
-        .orderBy(desc(schema.files.createdAt), desc(schema.files.id))
-        .limit(limit + 1);
-      const page = rows.slice(0, limit),
-        last = page.at(-1);
-      return {
-        files: page.map((row) => mapFile(row.file)),
-        nextCursor:
-          rows.length > limit && last
-            ? Buffer.from(JSON.stringify({ id: last.file.id, at: last.position })).toString(
-                "base64url",
-              )
-            : null,
-      };
-    },
+  return withDatabaseQueryCancellation(db, input.signal, () =>
+    withRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (tx) => {
+        if (input.subjectId) await setSubjectRlsContext(tx, input.subjectId);
+        // A person sees all their own files in their Personal workspace. A
+        // read without a person keeps to what reaches this workspace.
+        const personalWorkspace =
+          input.subjectId !== null && input.scope !== "workspace"
+            ? (
+                await rawRows<{ kind: string }>(
+                  tx,
+                  sql`select get_workspace_kind(${input.accountId}::uuid, ${input.workspaceId}::uuid) as kind`,
+                )
+              )[0]?.kind === "personal"
+            : false;
+        const rows: FileListCandidate[] = [];
+        for (let from = after; ;) {
+          const wanted = limit + 1 - rows.length;
+          const candidates = await fileListCandidates(
+            tx,
+            { ...input, personalWorkspace },
+            from,
+            wanted,
+          );
+          const authorized = await providerAuthorizedFileIds(
+            tx,
+            input,
+            candidates.map((row) => row.file.id),
+          );
+          rows.push(...candidates.filter((row) => authorized.has(row.file.id)));
+          const last = candidates.at(-1);
+          if (!last || candidates.length < wanted || rows.length > limit) break;
+          from = { id: last.file.id, at: last.position };
+        }
+        const page = rows.slice(0, limit),
+          last = page.at(-1);
+        return {
+          files: page.map((row) => mapFile(row.file)),
+          nextCursor:
+            rows.length > limit && last
+              ? Buffer.from(JSON.stringify({ id: last.file.id, at: last.position })).toString(
+                  "base64url",
+                )
+              : null,
+        };
+      },
+    ),
   );
+}
+
+type FileListPosition = { id: string; at: string };
+type FileListCandidate = { file: typeof schema.files.$inferSelect; position: string };
+
+/**
+ * The next `limit` files the caller may see, newest first, before the provider
+ * ACL. Each branch is an ordered walk of one index (migrations 1409-1412) that
+ * stops after `limit` rows:
+ *
+ * - shared: this workspace's shared files;
+ * - own files, keyed on their one owner (1407) and the owner the row-level
+ *   security policy reads; a read without an owner sees none. In a Personal
+ *   workspace that is every own file: those that may reach other workspaces
+ *   (reach null or listed) and those that stay where they were made. Elsewhere
+ *   it is the own files made here, plus own files made elsewhere whose reach
+ *   includes here.
+ *
+ * Owner and status are index conditions because subscripting and text
+ * equality are leakproof, which row-level security requires; array operators
+ * and `coalesce` are not. Reach is a partial-index predicate for the same
+ * reason. A walk skips only rows whose explicit reach list leaves this
+ * workspace out.
+ */
+async function fileListCandidates(
+  tx: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    scope?: "all" | "workspace" | "personal";
+    personalWorkspace: boolean;
+  },
+  after: FileListPosition | null,
+  limit: number,
+): Promise<FileListCandidate[]> {
+  const newestFirst = [desc(schema.files.createdAt), desc(schema.files.id)] as const;
+  const walk = (where: SQL | undefined) =>
+    tx
+      .select({
+        file: schema.files,
+        position: sql<string>`to_char(${schema.files.createdAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
+      })
+      .from(schema.files)
+      .where(
+        and(
+          eq(schema.files.accountId, input.accountId),
+          eq(schema.files.status, "ready"),
+          after
+            ? sql`(${schema.files.createdAt}, ${schema.files.id}) < (${after.at}::text::timestamptz, ${after.id}::uuid)`
+            : undefined,
+          where,
+        ),
+      )
+      .orderBy(...newestFirst)
+      .limit(limit);
+  const own = sql`${schema.files.privateOwnerSubjectIds} IS NOT NULL AND ${schema.files.privateOwnerSubjectIds}[1] = nullif(current_setting('opengeni.private_file_owner', true), '')`;
+  const roaming = sql`(${schema.files.reachWorkspaceIds} IS NULL OR cardinality(${schema.files.reachWorkspaceIds}) > 0)`;
+  const branches = [];
+  if (input.scope !== "personal")
+    branches.push(
+      walk(
+        and(
+          eq(schema.files.workspaceId, input.workspaceId),
+          isNull(schema.files.privateOwnerSubjectIds),
+        ),
+      ),
+    );
+  if (input.scope !== "workspace" && input.personalWorkspace)
+    branches.push(
+      walk(and(own, roaming)),
+      walk(
+        and(
+          own,
+          sql`${schema.files.reachWorkspaceIds} IS NOT NULL AND cardinality(${schema.files.reachWorkspaceIds}) = 0`,
+        ),
+      ),
+    );
+  if (input.scope !== "workspace" && !input.personalWorkspace)
+    branches.push(
+      walk(and(own, eq(schema.files.workspaceId, input.workspaceId))),
+      walk(
+        and(
+          own,
+          roaming,
+          ne(schema.files.workspaceId, input.workspaceId),
+          or(
+            isNull(schema.files.reachWorkspaceIds),
+            sql`${input.workspaceId}::uuid = ANY(${schema.files.reachWorkspaceIds})`,
+          ),
+        ),
+      ),
+    );
+  const [first, second, ...rest] = branches;
+  if (!second) return await first!;
+  return await unionAll(first!, second, ...rest)
+    .orderBy(...newestFirst)
+    .limit(limit);
+}
+
+/** The candidates the Google Drive provider ACL allows, one function call each. */
+async function providerAuthorizedFileIds(
+  tx: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string | null },
+  fileIds: readonly string[],
+): Promise<Set<string>> {
+  if (fileIds.length === 0) return new Set();
+  const rows = await rawRows<{ id: string }>(
+    tx,
+    sql`select candidate.id from unnest(${new Param([...fileIds])}::uuid[]) as candidate(id)
+      where google_drive_file_authorized(${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId}::text, candidate.id)`,
+  );
+  return new Set(rows.map((row) => row.id));
 }
 
 export async function getFilesForSubject(
