@@ -144,18 +144,16 @@ describe("native Markdown links are recognisable", () => {
     const theme = createNativeTimelineTheme("dark");
     rendered = undefined;
     const shell = await renderComponent(
-      createElement(NativeTimelineThemeProvider, {
-        scheme: "dark",
-        children: render("[Open report](https://example.com/report)", { tone: "body" }),
-      }),
+      <NativeTimelineThemeProvider scheme="dark">
+        {render("[Open report](https://example.com/report)", { tone: "body" })}
+      </NativeTimelineThemeProvider>,
     );
     const { rules, style, onLinkPress } = rendered!;
     const node = { key: "link-1", attributes: { href: "https://example.com/report" } };
     const view = await renderComponent(
-      createElement(NativeTimelineThemeProvider, {
-        scheme: "dark",
-        children: rules.link!(node, "Open report", [], style, onLinkPress),
-      }),
+      <NativeTimelineThemeProvider scheme="dark">
+        {rules.link!(node, "Open report", [], style, onLinkPress)}
+      </NativeTimelineThemeProvider>,
     );
     const link = view.container.querySelector("span")!;
     expect(link.getAttribute("role")).toBe("link");
