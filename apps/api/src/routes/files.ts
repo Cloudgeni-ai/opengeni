@@ -478,20 +478,26 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
       { status: 422, message: "Invalid file list request" },
     );
     c.header("cache-control", "private, no-store");
-    return c.json(
-      FileListResponse.parse(
-        await listFilesForSubject(db, {
-          accountId: grant.accountId,
-          workspaceId,
-          subjectId: grant.subjectId,
-          ...parsed,
-        }).catch((error: unknown) => {
-          if (error instanceof ZodError)
-            throw new HTTPException(422, { message: "Invalid file cursor" });
-          throw error;
-        }),
-      ),
-    );
+    // A caller that goes away (a closed tab, a timed-out agent tool call)
+    // cancels the database read instead of leaving it running for nobody.
+    const signal = c.req.raw.signal;
+    let listed: Awaited<ReturnType<typeof listFilesForSubject>>;
+    try {
+      listed = await listFilesForSubject(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+        ...parsed,
+        signal,
+      });
+    } catch (error) {
+      // The client-gone convention (mcp/request-abort.ts): 499, empty body.
+      if (signal.aborted) return c.body(null, 499 as never);
+      if (error instanceof ZodError)
+        throw new HTTPException(422, { message: "Invalid file cursor" });
+      throw error;
+    }
+    return c.json(FileListResponse.parse(listed));
   });
 
   const readRequestedFile = async (
