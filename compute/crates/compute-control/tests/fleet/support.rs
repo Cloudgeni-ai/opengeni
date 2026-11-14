@@ -1442,7 +1442,7 @@ async fn ordinary(inner: &HostInner, envelope: &Envelope) -> Reply {
         Request::Restart { .. } => error(ErrorCode::NotFound, "no such sandbox"),
         Request::Status => status(inner),
         // The first ask starts the build; later ones find it stored.
-        Request::Prepare { image } => {
+        Request::Prepare { image, .. } => {
             let mut prepares = inner.prepares.lock().unwrap();
             let asked = prepares.entry(image.clone()).or_default();
             *asked += 1;

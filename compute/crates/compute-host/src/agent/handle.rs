@@ -248,9 +248,10 @@ impl Handle {
     pub fn prepare(
         &self,
         image: &str,
+        before: Option<crate::protocol::ImageId>,
     ) -> Result<crate::rootfs::Progress, crate::rootfs::PrepareError> {
         match &self.preparer {
-            Some(preparer) => preparer.prepare(image),
+            Some(preparer) => preparer.prepare(image, before),
             None => Err(crate::rootfs::PrepareError::Unavailable(
                 "it has no guest programs to build with, or no store to keep images in",
             )),
