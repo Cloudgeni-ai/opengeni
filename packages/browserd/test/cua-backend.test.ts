@@ -3925,6 +3925,75 @@ describe("CUA desktop boundary", () => {
     }
   });
 
+  test("a Mac window on screen that accessibility does not show is read from its screenshot, and input to it says why none was sent", async () => {
+    class AxlessFixture extends Fixture {
+      axless = true;
+      async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+        if (name === "get_window_state" && args.include_accessibility_tree && this.axless) {
+          this.calls.push({ name, args });
+          return result({
+            pid: 42,
+            window_id: args.window_id,
+            degraded_reason:
+              "ax_window_unresolved: window_id 1 exists and is owned by pid 42, but none of the 0 AXWindow element(s) under that pid reports this CGWindowID",
+          });
+        }
+        if (name === "click" && this.axless) {
+          this.calls.push({ name, args });
+          return result(
+            {
+              effect: "refused",
+              refusal: {
+                code: "off_space_or_ax_unresolved",
+                message:
+                  "Background input refused (off_space_or_ax_unresolved): window 1 is not among the process's current AXWindows (another Space, or its AX surface is unresolved); background input is refused so a sibling window cannot receive it. Observation (capture/list_windows) remains available",
+              },
+            },
+            true,
+          );
+        }
+        return await super.callTool(name, argumentsJson);
+      }
+    }
+    const fixture = new AxlessFixture();
+    const backend = await CuaComputerBackend.open(fixture, "macos");
+    try {
+      const [target] = await backend.targets();
+      const frame = await backend.capture(target!.id);
+      // The reading is the window's screenshot with no elements, not a refusal.
+      const observation = await backend.observe(target!.id);
+      expect(observation).toMatchObject({
+        target: { id: target!.id },
+        frameId: frame.frameId,
+        roots: [],
+        nodeCount: 0,
+        focusedRef: null,
+      });
+      // CUA sends nothing that could reach another of the app's windows; the
+      // refusal says the window is on screen and what to do instead.
+      await expect(
+        backend.dispatch({
+          targetId: target!.id,
+          expectedTargetGeneration: observation.target.targetGeneration,
+          expectedObservationId: observation.observationId,
+          expectedFrameId: frame.frameId,
+          action: { type: "pointer", action: "click", frameId: frame.frameId, x: 20, y: 20 },
+        }),
+      ).rejects.toMatchObject({
+        code: "invalid_action",
+        dispatched: false,
+        message:
+          "This window is on screen but shows no accessibility elements, so input sent to it in the background could reach another window of its app, and none was sent: use the app or menu bar control that opened it, or ask the person to click it at the computer",
+      });
+      // Once accessibility shows it, it reads with its elements again.
+      fixture.axless = false;
+      expect((await backend.observe(target!.id)).roots.length).toBeGreaterThan(0);
+    } finally {
+      await backend.close();
+    }
+  });
+
   test("macOS offers no window while the screen is locked or shows another user's session", async () => {
     // macOS keeps listing this session's windows meanwhile, but reading one
     // finds no AXWindow for it.
