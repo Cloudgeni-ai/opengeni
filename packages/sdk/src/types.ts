@@ -10044,6 +10044,8 @@ export type CreateCapabilityCatalogItemRequest = {
   metadata?: Record<string, unknown> | undefined;
   /** The catalog entry whose Connect card asked for this connection's inputs. */
   connectFor?: string | undefined;
+  /** With `connectFor`: the values the person entered on that card, by input id. */
+  connectInputs?: Record<string, string> | undefined;
 };
 
 export type EnableCapabilityRequest = {

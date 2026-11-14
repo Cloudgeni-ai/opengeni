@@ -22,6 +22,9 @@ export const REPEATED_CALL_LIMIT = 8;
 /** An identical call this long after the last one started runs again (polling). */
 export const REPEATED_CALL_WINDOW_MS = 30_000;
 
+/** Distinct calls remembered per turn; the least recently run are forgotten first. */
+export const REPEATED_CALL_MEMORY = 512;
+
 /** The model-facing result of a call the guard did not run. */
 export const REPEATED_CALL_NOTICE = `Not run again: this exact call already returned the same result ${REPEATED_CALL_LIMIT} times in a row in this turn. Use that result, change the arguments, or continue with another step.`;
 
@@ -60,7 +63,8 @@ function callKey(toolName: string, input: unknown): string {
   } else {
     args = canonicalJson(input);
   }
-  return `${toolName}\u0000${args}`;
+  // A digest, so large arguments (patches, file contents) are not kept.
+  return createHash("sha256").update(`${toolName}\u0000${args}`).digest("hex");
 }
 
 /** A digest of a result, or null when it can't be compared (never counted). */
@@ -102,11 +106,18 @@ export async function guardRepeatedToolCall<T>(
     return output;
   }
   const latest = guard.calls.get(key);
+  // Re-inserted, so the map's order is least recently run first.
+  guard.calls.delete(key);
   guard.calls.set(key, {
     result,
     streak: latest?.result === result ? latest.streak + 1 : 1,
     startedAt,
   });
+  while (guard.calls.size > REPEATED_CALL_MEMORY) {
+    const oldest = guard.calls.keys().next().value;
+    if (oldest === undefined) break;
+    guard.calls.delete(oldest);
+  }
   return output;
 }
 
@@ -146,9 +157,9 @@ type GuardedAgent = {
 const agentGuards = new WeakMap<object, RepeatedToolCallGuard>();
 
 /**
- * Guard the agent's function tools against repeated identical calls. Install
- * it outside the tool wrappers that shape results, so the guard compares what
- * the model receives. Clones share the same counts.
+ * Guard the agent's function tools against repeated identical calls. It is
+ * installed inside command-completion delivery, so it compares the tool's own
+ * result. Clones share the same counts.
  */
 export function installRepeatedToolCallGuard(
   agent: GuardedAgent,

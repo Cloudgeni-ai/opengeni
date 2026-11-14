@@ -3,6 +3,7 @@ import { RunContext, tool } from "@openai/agents";
 import { z } from "zod";
 import {
   REPEATED_CALL_LIMIT,
+  REPEATED_CALL_MEMORY,
   REPEATED_CALL_NOTICE,
   REPEATED_CALL_WINDOW_MS,
   createRepeatedToolCallGuard,
@@ -37,6 +38,24 @@ describe("repeated tool call guard", () => {
     // Other arguments are another call, and run.
     expect(await call('{"detail":true}')).toBe('{"model":"m"}');
     expect(runs).toBe(REPEATED_CALL_LIMIT + 1);
+  });
+
+  test("remembers a bounded number of distinct calls, by digest, least recently run forgotten first", async () => {
+    const guard = createRepeatedToolCallGuard(clock().now);
+    const big = "x".repeat(100_000);
+    for (let index = 0; index < REPEATED_CALL_LIMIT; index += 1)
+      await guardRepeatedToolCall(guard, "write", `{"content":"${big}"}`, async () => "ok");
+    for (let index = 0; index < REPEATED_CALL_MEMORY; index += 1)
+      await guardRepeatedToolCall(guard, "read", `{"page":${index}}`, async () => "page");
+    expect(guard.calls.size).toBe(REPEATED_CALL_MEMORY);
+    expect([...guard.calls.keys()].every((key) => key.length === 64)).toBe(true);
+    // The large call was forgotten, so it runs again.
+    let ran = false;
+    await guardRepeatedToolCall(guard, "write", `{"content":"${big}"}`, async () => {
+      ran = true;
+      return "ok";
+    });
+    expect(ran).toBe(true);
   });
 
   test("the same arguments in another key order are the same call", async () => {

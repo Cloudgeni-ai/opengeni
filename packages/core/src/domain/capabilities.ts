@@ -110,7 +110,10 @@ import {
   MICROSOFT_DYNAMICS_CAPABILITY_ID,
   MICROSOFT_DYNAMICS_CONNECTION_NAME,
 } from "@opengeni/contracts/microsoft-dynamics";
-import { capabilityConnectEndpoint } from "@opengeni/contracts/capability-connect-inputs";
+import {
+  capabilityConnectEndpoint,
+  capabilityConnectInputs,
+} from "@opengeni/contracts/capability-connect-inputs";
 import {
   withOrganizationIntegrationAcquisition,
   withOrganizationIntegrationPolicyFence,
@@ -529,18 +532,27 @@ export async function createCatalogItem(input: {
   // A connection a Connect card asked inputs for must follow the rule of the
   // entry that asked: its endpoint is the one those inputs name, never another.
   if (input.payload.connectFor !== undefined) {
-    const declaring = nativeConnectionCapabilityRecommendations({ microsoftDynamics: true }).find(
-      (candidate) => candidate.id === input.payload.connectFor,
-    );
+    const declaring = connectInputsDeclaringEntry(input.payload.connectFor);
     const endpoint = declaring
-      ? capabilityConnectEndpoint(declaring.surfaceType, {
-          endpointUrl: input.payload.endpointUrl ?? "",
-        })
+      ? capabilityConnectEndpoint(
+          declaring.surfaceType,
+          input.payload.connectInputs ?? { endpointUrl: input.payload.endpointUrl ?? "" },
+        )
       : null;
     if (!endpoint)
       throw new HTTPException(422, { message: "That entry doesn't take connection inputs." });
     if ("problem" in endpoint) throw new HTTPException(422, { message: endpoint.problem });
-    const { connectFor: _connectFor, ...payload } = input.payload;
+    // The connection is already here (added before, or by someone else): it
+    // is the result, so a repeated Connect never adds a second one.
+    const existing = (await listCapabilityCatalogItems(input.db, input.workspaceId)).find(
+      (candidate) =>
+        candidate.workspaceId === input.workspaceId &&
+        candidate.kind === "mcp" &&
+        !candidate.stale &&
+        candidate.endpointUrl === endpoint.endpointUrl,
+    );
+    if (existing) return existing;
+    const { connectFor: _connectFor, connectInputs: _connectInputs, ...payload } = input.payload;
     input = { ...input, payload: { ...payload, endpointUrl: endpoint.endpointUrl } };
   }
   // A Dynamics environment address is stored as its MCP endpoint, so a pasted
@@ -3954,6 +3966,24 @@ function normalizeCapabilitySearchText(value: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
+}
+
+/**
+ * The native catalog entry with this id, when its Connect card asks for
+ * connect-time inputs. Every native entry is considered, whatever this
+ * deployment offers, because only the entry's own rule is applied here.
+ */
+function connectInputsDeclaringEntry(capabilityId: string): CapabilityCatalogItem | null {
+  return (
+    nativeConnectionCapabilityRecommendations({
+      connectedMachines: true,
+      personalGitHub: true,
+      microsoftDynamics: true,
+    }).find(
+      (candidate) =>
+        candidate.id === capabilityId && capabilityConnectInputs(candidate.surfaceType) !== null,
+    ) ?? null
+  );
 }
 
 function generatedCapabilityId(payload: CreateCapabilityCatalogItemRequest): string {

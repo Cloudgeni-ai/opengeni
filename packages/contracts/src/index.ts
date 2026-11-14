@@ -15808,6 +15808,14 @@ export const CreateCapabilityCatalogItemRequest = /* @__PURE__ */ defineSchema((
      * `@opengeni/contracts/capability-connect-inputs`), or the request is refused.
      */
     connectFor: z.string().min(1).max(512).optional(),
+    /**
+     * With `connectFor`: the values the person entered on that card, by
+     * input id. The API turns them into the endpoint by the entry's rule.
+     */
+    connectInputs: z
+      .record(z.string().min(1).max(64), z.string().max(2048))
+      .refine((values) => Object.keys(values).length <= 8, "At most 8 inputs.")
+      .optional(),
   }),
 );
 export type CreateCapabilityCatalogItemRequest = z.infer<typeof CreateCapabilityCatalogItemRequest>;

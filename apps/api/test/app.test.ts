@@ -1822,6 +1822,24 @@ describe("API helpers", () => {
       "api:microsoft-dynamics",
     );
     await expect(unreadable).rejects.toThrow('"opengenitest2026" isn\'t a tenant ID or domain');
+    // The card's own inputs follow the same rule.
+    await expect(
+      createCatalogItem({
+        db: {} as Database,
+        accountId: crypto.randomUUID(),
+        workspaceId: crypto.randomUUID(),
+        payload: {
+          kind: "mcp",
+          source: "manual",
+          name: "Microsoft Dynamics",
+          category: "custom",
+          tags: [],
+          metadata: {},
+          connectFor: "api:microsoft-dynamics",
+          connectInputs: { endpointUrl: "attacker.example" },
+        },
+      }),
+    ).rejects.toThrow("That isn't a Dynamics environment address");
     // An entry without connect-time inputs can't be named.
     await expect(
       create("https://contoso.crm4.dynamics.com/", "api:github-app"),

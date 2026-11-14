@@ -82,13 +82,16 @@ const context = {
       ],
     }),
     createCapability: mock(
-      async (_workspaceId: string, input: { name: string; endpointUrl: string }) => {
+      async (
+        _workspaceId: string,
+        input: { name: string; endpointUrl?: string; connectInputs?: Record<string, string> },
+      ) => {
         createdCatalogItem = CapabilityCatalogItem.parse({
           id: "mcp:reviewed",
           kind: "mcp",
           source: "manual",
           name: input.name,
-          endpointUrl: input.endpointUrl,
+          endpointUrl: input.endpointUrl ?? "https://contoso.crm4.dynamics.com/api/mcp",
           runtime: { available: true, mcpServerId: "reviewed" },
         });
         return createdCatalogItem;
@@ -727,8 +730,8 @@ describe("conversation connection card", () => {
         kind: "mcp",
         source: "manual",
         name: "Microsoft Dynamics",
-        endpointUrl: "https://contoso.crm4.dynamics.com/api/mcp",
         connectFor: "api:microsoft-dynamics",
+        connectInputs: { endpointUrl: "contoso.crm4.dynamics.com/main.aspx" },
       });
       // The added environment's own card follows.
       expect(h.host.textContent).toContain("Connect Microsoft Dynamics");

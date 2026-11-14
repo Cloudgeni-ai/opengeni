@@ -325,10 +325,13 @@ import {
  * How to show a card that asks the person for its connect-time inputs: the
  * card tool posts it, and the agent may fill in values the person already gave.
  */
-function connectInputsCardDetail(inputs: readonly CapabilityConnectInput[]): string {
+function connectInputsCardDetail(
+  capabilityId: string,
+  inputs: readonly CapabilityConnectInput[],
+): string {
   const asks = inputs.map((input) => input.label.toLowerCase()).join(" and ");
   const keys = inputs.map((input) => input.id).join(", ");
-  return `Call capability_authorization_request: its card asks the person for the ${asks}, then signs them in. If they already gave it, also pass it in inputs (${keys}) to fill it in.`;
+  return `Call capability_authorization_request with capabilityId ${capabilityId}: its card asks the person for the ${asks}, then signs them in. If they already gave it, also pass it in inputs (${keys}) to fill it in.`;
 }
 
 /** A catalog match's connect-time inputs, which its card asks the person for. */
@@ -342,7 +345,7 @@ function connectInputsOf(
 }
 
 /** How a Microsoft Dynamics environment is connected. */
-const MICROSOFT_DYNAMICS_SETUP_DETAIL = `Each connection is one Dynamics environment. ${connectInputsCardDetail(capabilityConnectInputs("microsoft_dynamics") ?? [])}`;
+const MICROSOFT_DYNAMICS_SETUP_DETAIL = `Each connection is one Dynamics environment. ${connectInputsCardDetail(MICROSOFT_DYNAMICS_CAPABILITY_ID, capabilityConnectInputs("microsoft_dynamics") ?? [])}`;
 
 /** The workspace's own Dynamics environments: catalog entries for an exact environment endpoint. */
 function microsoftDynamicsEnvironments(
@@ -8148,6 +8151,11 @@ function registerCapabilityDiscoveryTools(
       const current = await catalog();
       // What the card's message adds about connections already here.
       let alsoHere = "";
+      // The agent's inputs chose an existing connection instead of a card field.
+      let inputsConsumed = false;
+      // The agent's inputs name a connection not here yet: the card asks for
+      // it even when another connection of the entry is ready.
+      let anotherConnection = false;
       let item =
         [...current.items, ...recommendations()].find(
           (candidate) => candidate.id === capabilityId,
@@ -8170,38 +8178,51 @@ function registerCapabilityDiscoveryTools(
             message: own.detail,
           });
         const environments = await dynamicsEnvironmentSetups(current.items);
-        const connectable = environments.filter(
-          ({ setup }) => setup.status === "authorization_required",
-        );
         const fromEnvironments = microsoftDynamicsSetupFromEnvironments(environments);
-        if (fromEnvironments?.status === "ready")
-          return json({
-            capabilityId: item.id,
-            status: "ready",
-            cardShown: false,
-            message: fromEnvironments.detail,
-          });
-        // The only environment this person can still connect needs no
-        // address, unless the agent named another one; otherwise the card
-        // asks for one.
+        // Inputs that name an environment already here answer with that
+        // environment. Inputs that name another one, or can't be used, get
+        // the card that asks for it.
         const named = suppliedInputs
           ? capabilityConnectEndpoint(item.surfaceType, suppliedInputs)
           : null;
-        const only = connectable.length === 1 ? connectable[0]!.item : null;
-        if (
-          only &&
-          (!named ||
-            !("endpointUrl" in named) ||
-            named.endpointUrl === (only.mcpUrl ?? only.endpointUrl))
-        )
-          item = only;
-        else if (fromEnvironments) alsoHere = ` ${fromEnvironments.detail}`;
+        const namedHere =
+          named && "endpointUrl" in named
+            ? environments.find(
+                ({ item: environment }) =>
+                  (environment.mcpUrl ?? environment.endpointUrl) === named.endpointUrl,
+              )
+            : undefined;
+        if (namedHere) {
+          item = namedHere.item;
+          inputsConsumed = true;
+        } else if (suppliedInputs) {
+          anotherConnection = true;
+        } else {
+          if (fromEnvironments?.status === "ready")
+            return json({
+              capabilityId: item.id,
+              status: "ready",
+              cardShown: false,
+              message: fromEnvironments.detail,
+            });
+          // The only environment this person can still connect needs no
+          // address.
+          const connectable = environments.filter(
+            ({ setup }) => setup.status === "authorization_required",
+          );
+          if (connectable.length === 1) item = connectable[0]!.item;
+          else if (fromEnvironments) alsoHere = ` ${fromEnvironments.detail}`;
+        }
       }
-      const [[setup], inventory] = await Promise.all([
+      const [[projected], inventory] = await Promise.all([
         setupProjections([item]),
         reconnectInventory([item]),
       ]);
-      if (!setup) throw new Error("Capability setup projection is unavailable.");
+      if (!projected) throw new Error("Capability setup projection is unavailable.");
+      const setup: CapabilitySetupProjection =
+        anotherConnection && projected.status === "ready"
+          ? { status: "authorization_required", action: "connect", detail: projected.detail }
+          : projected;
       // An account of this entry that stopped working is reconnected in place:
       // a first-time Connect cannot replace it. The agent names the one the
       // task needs; without a name, the only one here is used while no
@@ -8301,15 +8322,19 @@ function registerCapabilityDiscoveryTools(
       // never report one that was not shown. A card already there keeps the
       // status and guidance it would have had, and says it was not reposted.
       const shown = { cardShown: eventId !== null, ...(alreadyShown ? { alreadyShown } : {}) };
+      const inputsUnused =
+        suppliedInputs && !declaredInputs && !inputsConsumed
+          ? " The inputs you passed were not used: this card asks for none."
+          : "";
       const posted = (body: { message: string } & Record<string, unknown>) =>
-        json(
-          alreadyShown
-            ? {
-                ...body,
-                message: `${body.message.replace(" was posted", " is already in this chat")} It was not posted again.`,
-              }
-            : body,
-        );
+        json({
+          ...body,
+          message: `${
+            alreadyShown
+              ? `${body.message.replace(" was posted", " is already in this chat")} It was not posted again.`
+              : body.message
+          }${inputsUnused}`,
+        });
       if (reconnect) {
         return posted({
           capabilityId: item.id,

@@ -1,5 +1,4 @@
 import { useEffect, useId, useState } from "react";
-import { canonicalMcpEndpointUrl } from "@opengeni/contracts/microsoft-dynamics";
 import type { AuthNeededItem } from "../../../timeline";
 import { useAppContext } from "../../app-context";
 import { userErrorText } from "../../../ui/api-error";
@@ -15,13 +14,6 @@ type Props = {
   workspaceId: string;
   onRegistered: (id: string, restoreFocus: boolean, openSetup?: boolean) => void;
 };
-
-/** An address as the person typed it, as a URL the API reads. */
-function connectionAddress(value: string): string {
-  const trimmed = value.trim();
-  const url = /^[a-z][a-z0-9+.-]*:\/\//iu.test(trimmed) ? trimmed : `https://${trimmed}`;
-  return canonicalMcpEndpointUrl(url);
-}
 
 /**
  * A Connect card that asks for the values its integration needs before
@@ -47,51 +39,38 @@ export function SessionConnectInputsCard({ item, workspaceId, onRegistered }: Pr
   const entry = context.workspaceCapabilityCatalog.find(
     (candidate) => candidate.id === capability.id,
   );
-  // The service's mark from its catalog entry, else from the example address.
-  const example = inputs.find((input) => input.id === "endpointUrl")?.placeholder;
+  // The service's mark from its catalog entry, else from an example address.
+  const example = inputs
+    .map((input) => input.placeholder)
+    .find((placeholder) => placeholder && /^https:\/\//u.test(placeholder));
   const logo =
     (entry ? capabilityLogoSource(entry, (path) => context.client.catalogAssetUrl(path)) : null) ??
-    (example
-      ? bundledServiceLogo({ id: capability.id, mcpUrl: connectionAddress(example) })
-      : null);
-  const endpointUrl = values.endpointUrl?.trim() ? connectionAddress(values.endpointUrl) : null;
-  const existing = async (url: string) =>
-    (await context.client.listCapabilities(workspaceId)).items.find(
-      (candidate) => candidate.kind === "mcp" && candidate.endpointUrl === url && !candidate.stale,
-    );
+    (example ? bundledServiceLogo({ id: capability.id, mcpUrl: example }) : null);
   const filled = inputs.every((input) => values[input.id]?.trim());
   useEffect(() => setError(null), [values]);
 
   async function connect(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (busy || !canManage || !filled || !endpointUrl) return;
+    if (busy || !canManage || !filled) return;
     setBusy(true);
     setError(null);
     try {
-      const found = await existing(endpointUrl);
-      const id =
-        found?.id ??
-        (
-          await context.client.createCapability(workspaceId, {
-            kind: "mcp",
-            source: "manual",
-            name: capability.name,
-            endpointUrl,
-            connectFor: capability.id,
-          })
-        ).id;
+      // The API applies the entry's rule to the values, and answers with the
+      // connection already here when there is one, so a retry never adds two.
+      const { id } = await context.client.createCapability(workspaceId, {
+        kind: "mcp",
+        source: "manual",
+        name: capability.name,
+        connectFor: capability.id,
+        connectInputs: Object.fromEntries(
+          inputs.map((input) => [input.id, values[input.id]?.trim() ?? ""]),
+        ),
+      });
       // The chat reads the new entry from the workspace catalog: reload it
       // first, so the card that follows is the connection's sign-in.
       await context.refreshWorkspaceMcpServers(workspaceId).catch(() => undefined);
       onRegistered(id, false, true);
     } catch (failure) {
-      // A lost response may still have added it: look again before retrying.
-      const found = await existing(endpointUrl).catch(() => undefined);
-      if (found) {
-        await context.refreshWorkspaceMcpServers(workspaceId).catch(() => undefined);
-        onRegistered(found.id, false, true);
-        return;
-      }
       setError(userErrorText(failure));
     } finally {
       setBusy(false);
