@@ -9405,7 +9405,7 @@ type FileListCandidate = { file: typeof schema.files.$inferSelect; position: str
  * stops after `limit` rows:
  *
  * - shared: this workspace's shared files;
- * - own files, keyed on their one owner (1407) and the owner the row-level
+ * - own files, keyed on their one owner (1431) and the owner the row-level
  *   security policy reads; a read without an owner sees none. In a Personal
  *   workspace that is every own file: those that may reach other workspaces
  *   (reach null or listed) and those that stay where they were made. Elsewhere

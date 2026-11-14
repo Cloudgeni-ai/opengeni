@@ -145,7 +145,7 @@ async function listAll(reader: Reader, limit: number): Promise<string[]> {
 }
 
 /**
- * The visibility rule as the single statement before migration 1407 wrote it:
+ * The visibility rule as the single statement before migration 1431 wrote it:
  * every ready file of the organization that reaches this workspace, filtered
  * by row-level security and the provider ACL, newest first.
  */

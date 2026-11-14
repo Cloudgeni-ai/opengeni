@@ -6616,7 +6616,7 @@ export const files = pgTable(
     // File lists read one page newest first from each of these (migrations
     // 1409-1412): a workspace's shared files, a person's own files in one
     // workspace, and a person's own files that may reach other workspaces or
-    // stay in their own. A private file has one owner (1407).
+    // stay in their own. A private file has one owner (1431).
     sharedCreated: index("files_shared_created_idx")
       .on(table.workspaceId, table.status, table.createdAt, table.id)
       .where(sql`private_owner_subject_ids IS NULL`),

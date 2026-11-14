@@ -6,7 +6,7 @@
 -- matches the row-level security test `owner = ANY(private_owner_subject_ids)`
 -- only while the array has one element, so the schema now says so.
 --
--- Rolling: a check added NOT VALID in a short transaction; 1408 validates it.
+-- Rolling: a check added NOT VALID in a short transaction; 1432 validates it.
 -- The previous release writes only the two allowed shapes.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '1min';
