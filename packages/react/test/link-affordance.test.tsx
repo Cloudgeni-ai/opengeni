@@ -54,9 +54,10 @@ describe("links are recognisable at rest", () => {
     expect(utility).toBeDefined();
     const resting = restingDeclarations(utility!);
     expect(resting.get("text-decoration-line")).toBe("underline");
-    expect(resting.get("color")).toBe("var(--og-color-accent-strong)");
+    expect(resting.get("color")).toBe("var(--og-color-link)");
     expect(resting.get("text-decoration-color")).toContain("currentColor");
     expect(utility!.toString()).toMatch(/&:hover\s*\{\s*text-decoration-color:\s*currentColor/);
+    expect(utility!.toString()).toMatch(/&:active\s*\{\s*text-decoration-color:\s*currentColor/);
     expect(utility!.toString()).toMatch(/&:focus-visible\s*\{[^}]*outline:/);
   });
 
