@@ -189,7 +189,7 @@ async fn a_guest_that_cannot_shrink_has_its_vm_ended_loudly() {
 /// On a host that compresses running VMs, a borrower is bounded to its
 /// request and a level of borrowed memory as the host tightens, and the
 /// bound is lifted once there is room again. Its request is always its
-/// `memory.low`, with what it compressed on top.
+/// `memory.min`, with what it compressed on top.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn borrowers_are_bounded_as_the_host_tightens_and_freed_after() {
     let (lab, _observer) = lab().await;

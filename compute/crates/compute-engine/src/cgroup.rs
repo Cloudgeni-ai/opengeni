@@ -9,9 +9,39 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 use std::thread;
 use std::time::Duration;
 
-/// Serializes updates of a parent group's `memory.low`, so that the last
-/// one written counts every child's.
-static PARENT_LOW: Mutex<()> = Mutex::new(());
+/// Serializes updates of a parent group's `memory.min` and `memory.low`,
+/// so that the last one written counts every child's.
+static PARENT_CLAIMS: Mutex<()> = Mutex::new(());
+
+/// How a group's guaranteed memory is kept from reclaim for others.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Protection {
+    /// `memory.low`: kept while the kernel finds other memory to take. A
+    /// best effort: with the multi-generation LRU, the kernel's reclaim
+    /// for the whole host moves a group under it to the back of its queue
+    /// once and takes from it the next time round, other memory left or
+    /// not.
+    Low,
+    /// `memory.min`: never taken for others. Reclaim the group's own limits
+    /// or a write to its own `memory.reclaim` start still takes it.
+    Min,
+}
+
+impl Protection {
+    fn file(self) -> &'static str {
+        match self {
+            Self::Low => "memory.low",
+            Self::Min => "memory.min",
+        }
+    }
+
+    fn other(self) -> Self {
+        match self {
+            Self::Low => Self::Min,
+            Self::Min => Self::Low,
+        }
+    }
+}
 
 /// How often [`Cgroup::set_memory_high`] looks whether the limit it is
 /// writing applies yet.
@@ -312,13 +342,47 @@ impl Cgroup {
         Ok(Cache::of(&stat).droppable())
     }
 
-    /// Sets the memory the group is protected from reclaim for others
-    /// (`memory.low`): the kernel takes it only when nothing unprotected is
-    /// left to take. Updates the parent's too; see
-    /// [`Cgroup::protect_parent`].
-    pub fn set_memory_low(&self, bytes: u64) -> io::Result<()> {
-        fs::write(self.path.join("memory.low"), bytes.to_string())?;
+    /// Sets the memory the group is protected from reclaim for others, as
+    /// `protection` keeps it, and clears the other kind, which an agent of
+    /// an earlier release or another setting may have left. Updates the
+    /// parent's too; see [`Cgroup::protect_parent`].
+    pub fn protect_memory(&self, bytes: u64, protection: Protection) -> io::Result<()> {
+        fs::write(self.path.join(protection.file()), bytes.to_string())?;
+        fs::write(self.path.join(protection.other().file()), "0")?;
         self.protect_parent()
+    }
+
+    /// Bytes of page cache that the group's children keep under their
+    /// `memory.min`: what each holds up to its `memory.min`, less what it
+    /// holds that is not cache the kernel can drop at once (see
+    /// [`Cgroup::memory_held`]). That cache is clean and mapped by no
+    /// process like any other, yet neither the kernel's reclaim for others
+    /// nor [`Cgroup::drop_cache`] on this group takes it.
+    pub fn kept_cache_of_children(&self) -> io::Result<u64> {
+        let mut kept = 0_u64;
+        for entry in fs::read_dir(&self.path)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let child = Self::at(entry.path());
+            let read = (|| {
+                let min = read_u64(&child.path.join("memory.min"))?;
+                if min == 0 {
+                    return Ok(0);
+                }
+                let current = child.memory_current()?;
+                let stat = fs::read_to_string(child.path.join("memory.stat"))?;
+                Ok(current.min(min).saturating_sub(held_memory(current, &stat)))
+            })();
+            match read {
+                Ok(bytes) => kept = kept.saturating_add(bytes),
+                // A child group removed meanwhile keeps nothing.
+                Err(error) if gone(&error) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(kept)
     }
 
     /// Sets the group's share of contended processor time (`cpu.weight`,
@@ -375,9 +439,10 @@ impl Cgroup {
         parse_limit(&value)
     }
 
-    /// Sets the parent group's `memory.low` to the sum of its children's.
-    /// A group is protected only as far as its ancestors are, so a parent
-    /// left at 0 would protect none of its VMs from the rest of the host.
+    /// Sets the parent group's `memory.min` and `memory.low` each to the sum
+    /// of its children's. A group is protected only as far as its ancestors
+    /// are, so a parent left at 0 would protect none of its VMs from the
+    /// rest of the host.
     /// The sum, not more: on a mount with `memory_recursiveprot` the kernel
     /// hands protection a parent has beyond its children's claims to the
     /// children claiming none, such as paused VMs.
@@ -385,19 +450,19 @@ impl Cgroup {
         let Some(parent) = self.path.parent() else {
             return Ok(());
         };
-        let _serial = PARENT_LOW.lock().unwrap_or_else(PoisonError::into_inner);
+        let _serial = PARENT_CLAIMS.lock().unwrap_or_else(PoisonError::into_inner);
         claim_for_children(parent)
     }
 
     /// Removes the child groups no process is in, then sets the group's
-    /// `memory.low` to the sum of what the rest claim, as
+    /// `memory.min` and `memory.low` to the sums of what the rest claim, as
     /// [`Cgroup::protect_parent`] does. VMs that ended while nobody
     /// managed them, such as when the host agent was killed, leave their
     /// groups behind, and each would go on claiming its VM's protection.
     /// Only for a parent whose children are all VMs of one engine, before
     /// it starts any: a group being set up is empty for a moment too.
     pub fn remove_empty_children(&self) -> io::Result<()> {
-        let _serial = PARENT_LOW.lock().unwrap_or_else(PoisonError::into_inner);
+        let _serial = PARENT_CLAIMS.lock().unwrap_or_else(PoisonError::into_inner);
         for entry in fs::read_dir(&self.path)? {
             let entry = entry?;
             if !entry.file_type()?.is_dir() {
@@ -890,27 +955,35 @@ pub fn swap_total() -> io::Result<u64> {
         .map_or(0, |kib| kib << 10))
 }
 
-/// Sets `parent`'s `memory.low` to the sum of its child groups'. The caller
-/// holds [`PARENT_LOW`].
+/// Sets `parent`'s `memory.min` and `memory.low` each to the sum of its
+/// child groups'. The caller holds [`PARENT_CLAIMS`].
 fn claim_for_children(parent: &Path) -> io::Result<()> {
-    let mut total = 0_u64;
+    let (mut min, mut low) = (0_u64, 0_u64);
     for entry in fs::read_dir(parent)? {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
             continue;
         }
-        match fs::read_to_string(entry.path().join("memory.low")) {
-            Ok(low) => total = total.saturating_add(low.trim().parse().unwrap_or(0)),
-            // A child group removed meanwhile claims nothing: its directory
-            // is gone, or its files answer that it no longer exists while
-            // the kernel takes it down.
-            Err(error)
-                if error.kind() == io::ErrorKind::NotFound
-                    || error.raw_os_error() == Some(rustix::io::Errno::NODEV.raw_os_error()) => {}
-            Err(error) => return Err(error),
+        for (file, total) in [("memory.min", &mut min), ("memory.low", &mut low)] {
+            match fs::read_to_string(entry.path().join(file)) {
+                Ok(claim) => *total = total.saturating_add(claim.trim().parse().unwrap_or(0)),
+                // A child group removed meanwhile claims nothing, nor does
+                // one without the file.
+                Err(error) if gone(&error) => {}
+                Err(error) => return Err(error),
+            }
         }
     }
-    fs::write(parent.join("memory.low"), total.to_string())
+    fs::write(parent.join("memory.min"), min.to_string())?;
+    fs::write(parent.join("memory.low"), low.to_string())
+}
+
+/// Whether `error` says that a group is gone: its directory or file is
+/// not there, or its files answer that it no longer exists while the kernel
+/// takes it down.
+fn gone(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::NotFound
+        || error.raw_os_error() == Some(rustix::io::Errno::NODEV.raw_os_error())
 }
 
 fn read_u64(path: &Path) -> io::Result<u64> {

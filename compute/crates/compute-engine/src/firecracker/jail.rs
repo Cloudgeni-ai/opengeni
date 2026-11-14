@@ -17,6 +17,7 @@ use std::ffi::OsString;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
+use crate::cgroup::Protection;
 use crate::spec::VmSpec;
 
 /// The file name the Firecracker binary must have: the jailer names every
@@ -132,6 +133,8 @@ pub struct Launch<'a> {
     /// Whether the kernel may compress the running VM's memory in RAM
     /// (zswap, never written to a swap device) when the host is short.
     pub compress_running: bool,
+    /// How its request is kept from reclaim for others.
+    pub protection: Protection,
 }
 
 /// The jailer's command line for `spec`.
@@ -164,14 +167,15 @@ pub fn jailer_args(spec: &VmSpec, jail: &Jail, launch: &Launch<'_>) -> Vec<OsStr
     );
     push("--cgroup", format!("memory.swap.max={compressible}").into());
     // What the VM is guaranteed: its requested memory is kept from reclaim
-    // for others (reclaim the agent asks of this group itself, to compress
-    // it, is not held back), and contended processors are shared by
-    // request. `memory.low` rather than `memory.min`: admission keeps the
-    // requests within the host, so the kernel always finds unprotected
-    // memory first, and should it not, slowing a VM beats the out-of-memory
-    // killer that `memory.min` would call instead.
-    let low = u64::from(spec.memory_request_mib) << 20;
-    push("--cgroup", format!("memory.low={low}").into());
+    // for others as the engine says (reclaim the agent asks of this group
+    // itself, to compress it, is not held back), and contended processors
+    // are shared by request.
+    let request = u64::from(spec.memory_request_mib) << 20;
+    let file = match launch.protection {
+        Protection::Low => "memory.low",
+        Protection::Min => "memory.min",
+    };
+    push("--cgroup", format!("{file}={request}").into());
     push(
         "--cgroup",
         format!("cpu.weight={}", spec.cpu_weight.clamp(1, 10_000)).into(),
@@ -316,6 +320,7 @@ mod tests {
                 cgroup_parent: Path::new("compute"),
                 netns: Some(Path::new("/run/netns/ogc-abc")),
                 compress_running: false,
+                protection: Protection::Low,
             },
         );
         let text: Vec<String> = args
@@ -345,6 +350,7 @@ mod tests {
                 cgroup_parent: Path::new("compute"),
                 netns: None,
                 compress_running: true,
+                protection: Protection::Min,
             },
         );
         let text: Vec<String> = args
@@ -355,5 +361,8 @@ mod tests {
         assert!(text.contains("--cgroup memory.zswap.writeback=0"), "{text}");
         assert!(text.contains("--cgroup memory.zswap.max=max"), "{text}");
         assert!(text.contains("--cgroup memory.swap.max=max"), "{text}");
+        // Its request is never taken for others (ADR 44).
+        assert!(text.contains("--cgroup memory.min=268435456"), "{text}");
+        assert!(!text.contains("memory.low"), "{text}");
     }
 }
