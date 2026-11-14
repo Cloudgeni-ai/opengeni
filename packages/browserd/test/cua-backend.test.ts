@@ -1656,8 +1656,9 @@ describe("CUA desktop boundary", () => {
       try {
         const target = (await backend.targets())[0]!;
         await expect(backend.capture(target.id)).rejects.toMatchObject({
-          code: "unavailable",
+          code: "unsupported",
           dispatched: false,
+          message: expect.stringContaining("no usable picture"),
         });
         expect(
           fixture.calls.some((call) => call.name === "click" || call.name === "set_value"),
@@ -1665,6 +1666,39 @@ describe("CUA desktop boundary", () => {
       } finally {
         await backend.close();
       }
+    }
+  });
+
+  test("a window whose picture cannot be verified is still observed through its elements", async () => {
+    // A window with a sheet sticking out past it: CUA reads its tree, but the
+    // picture it takes does not match the window's size.
+    const fixture = new Fixture();
+    const original = fixture.callTool.bind(fixture);
+    fixture.callTool = async (name, argumentsJson) => {
+      const response = await original(name, argumentsJson);
+      const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+      if (name === "get_window_state" && args.include_screenshot)
+        response.structuredJson = JSON.stringify({
+          ...JSON.parse(response.structuredJson!),
+          screenshot_frame_valid: false,
+        });
+      return response;
+    };
+    const backend = await CuaComputerBackend.open(fixture);
+    try {
+      const target = (await backend.targets())[0]!;
+      const observation = await backend.observe(target.id);
+      expect(observation.nodeCount).toBeGreaterThan(0);
+      expect(observation.frameId).toBeNull();
+      // The picture alone is refused, saying what still works.
+      await expect(backend.capture(target.id)).rejects.toMatchObject({
+        code: "unsupported",
+        retryable: false,
+        dispatched: false,
+        message: expect.stringContaining("Its elements can still be read"),
+      });
+    } finally {
+      await backend.close();
     }
   });
 
@@ -3783,15 +3817,28 @@ describe("CUA desktop boundary", () => {
         failed += 1;
         return { ...result({}, true), structuredJson: null, text: "No content" } as never;
       };
-      for (const read of [() => backend.observe(target.id), () => backend.capture(target.id)]) {
+      // It is the window's state, not an outage: refused as unsupported, so
+      // callers are shown the message.
+      for (const [read, message, calls] of [
+        [
+          () => backend.observe(target.id),
+          `${target.id} is still open, but it could not be read, even when tried again a moment later. Its app may be busy or changing the window: observe it once more in a few seconds, and if it still cannot be read, use another way the app offers or ask the person to finish it at the computer.`,
+          2,
+        ],
+        [
+          () => backend.capture(target.id),
+          `${target.id} is still open, but no usable picture of it could be taken, even when tried again a moment later, for example while a dialog sticks out past it. Its elements can still be read and used with semantic actions; observe it again for pixels once the dialog is closed.`,
+          2,
+        ],
+      ] as const) {
         const tries = failed;
         await expect(read()).rejects.toMatchObject({
-          code: "unavailable",
+          code: "unsupported",
           retryable: false,
           dispatched: false,
-          message: `${target.id} is still open, but it could not be read, even when tried again a moment later. Its app may be busy or changing the window: observe it once more in a few seconds, and if it still cannot be read, use another way the app offers or ask the person to finish it at the computer.`,
+          message,
         });
-        expect(failed - tries).toBe(2);
+        expect(failed - tries).toBe(calls);
       }
       // A window that closed meanwhile is gone, not unreadable.
       fixture.callTool = async (name, argumentsJson) => {

@@ -383,7 +383,7 @@ export class CuaComputerBackend implements ComputerBackend {
   observe(targetId: string): Promise<ComputerBackendObservation> {
     return this.run(async () => {
       const observation = await this.whileOnScreen(false, () =>
-        this.readOnScreen(targetId, () => this.observeTarget(targetId)),
+        this.readOnScreen(targetId, "elements", () => this.observeTarget(targetId)),
       );
       const personInputSecondsAgo = this.recentPersonInput();
       return personInputSecondsAgo === undefined
@@ -410,7 +410,7 @@ export class CuaComputerBackend implements ComputerBackend {
   ): Promise<ComputerBackendFrame> {
     return this.run(() =>
       this.whileOnScreen(false, () =>
-        this.readOnScreen(targetId, () => this.captureTarget(targetId, options)),
+        this.readOnScreen(targetId, "picture", () => this.captureTarget(targetId, options)),
       ),
     );
   }
@@ -1325,9 +1325,14 @@ export class CuaComputerBackend implements ComputerBackend {
    * failed read of a window still listed on screen is tried once more a
    * moment later (CUA can fail the first read of a window that is changing
    * size, and read it at once afterwards); only a read was asked, so nothing
-   * is sent twice. A second failure is refused as unavailable, with what to
-   * do next. */
-  private async readOnScreen<T>(targetId: string, read: () => Promise<T>): Promise<T> {
+   * is sent twice. A second failure is refused as unsupported for this window
+   * now, with what to do next: it is the window's state, not an outage, so
+   * callers are shown the message instead of a generic "unavailable". */
+  private async readOnScreen<T>(
+    targetId: string,
+    reading: "elements" | "picture",
+    read: () => Promise<T>,
+  ): Promise<T> {
     const offScreen = () =>
       new ComputerBackendError(
         "unsupported",
@@ -1373,8 +1378,10 @@ export class CuaComputerBackend implements ComputerBackend {
         )
           throw again;
         throw new ComputerBackendError(
-          "unavailable",
-          `${targetId} is still open, but it could not be read, even when tried again a moment later. Its app may be busy or changing the window: observe it once more in a few seconds, and if it still cannot be read, use another way the app offers or ask the person to finish it at the computer.`,
+          "unsupported",
+          reading === "picture"
+            ? `${targetId} is still open, but no usable picture of it could be taken, even when tried again a moment later, for example while a dialog sticks out past it. Its elements can still be read and used with semantic actions; observe it again for pixels once the dialog is closed.`
+            : `${targetId} is still open, but it could not be read, even when tried again a moment later. Its app may be busy or changing the window: observe it once more in a few seconds, and if it still cannot be read, use another way the app offers or ask the person to finish it at the computer.`,
           // Not retryable: it was tried again already, and a frame stream
           // must not replace the helper for one window's failed read.
           false,
@@ -1659,9 +1666,18 @@ export class CuaComputerBackend implements ComputerBackend {
       ![...this.frames.values()].some((frame) => frame.targetId === targetId)
     )
       await this.captureTarget(targetId).catch((error: unknown) => {
-        // CUA captures nothing for a sheet's own window; its tree read below
-        // says whether this is one.
-        if (!this.sheetHosts(target).length) throw error;
+        // A picture CUA cannot verify (a sheet's own window, or a window
+        // whose sheet sticks out past it) leaves the elements readable: the
+        // observation goes on without a frame, and the tree read below says
+        // what else is wrong with the window.
+        if (this.sheetHosts(target).length) return;
+        if (
+          error instanceof ComputerBackendError &&
+          !error.dispatched &&
+          error.code === "driver_failed"
+        )
+          return;
+        throw error;
       });
     // Viewer polling must never retire a native CUA element-token snapshot.
     // Once native tools own observations, the legacy viewer receives geometry
