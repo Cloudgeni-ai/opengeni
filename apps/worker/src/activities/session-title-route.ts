@@ -54,11 +54,89 @@ export type SessionTitleRequest = z.infer<typeof SessionTitleRequest>;
 
 export class SessionTitleRouteUnavailableError extends Error {}
 
-const tokenDetails = z.record(z.string(), z.number().finite());
+export type SessionTitleFailureStage =
+  | "admission"
+  | "provider_request"
+  | "response"
+  | "billing"
+  | "settlement";
+
+const PROVIDER_ERROR_TOKEN = /^[A-Za-z0-9][A-Za-z0-9 _.:-]{0,63}$/u;
+const ERROR_NAME = /^[A-Za-z][A-Za-z0-9_]{0,63}$/u;
+
+/**
+ * A bounded, content-free reason for a failed title: the stage, the error's
+ * class name, and the provider's HTTP status and error code/type when the
+ * provider refused the request. Never a message, body or prompt.
+ */
+export function sessionTitleFailureDiagnostic(
+  error: unknown,
+  stage: SessionTitleFailureStage,
+): Record<string, string | number> {
+  const diagnostic: Record<string, string | number> = {
+    errorClass: "IndependentSessionTitleError",
+    errorCode: `independent_session_title_${stage}_failed`,
+    origin: "worker",
+  };
+  try {
+    if (error instanceof Error && ERROR_NAME.test(error.name))
+      diagnostic.sessionTitleErrorName = error.name;
+    // Status, code and type are the provider's only for the provider request;
+    // elsewhere a `code` is a database or runtime code, not the provider's.
+    if (stage !== "provider_request" || !error || typeof error !== "object") return diagnostic;
+    const fields = error as { status?: unknown; code?: unknown; type?: unknown };
+    const status = Number(fields.status);
+    if (Number.isInteger(status) && status >= 100 && status <= 599) diagnostic.status = status;
+    if (typeof fields.code === "string" && PROVIDER_ERROR_TOKEN.test(fields.code))
+      diagnostic.providerErrorCode = fields.code;
+    if (typeof fields.type === "string" && PROVIDER_ERROR_TOKEN.test(fields.type))
+      diagnostic.providerErrorType = fields.type;
+  } catch {
+    // Diagnostics are best-effort and never replace the failure itself.
+  }
+  return diagnostic;
+}
+
+/**
+ * The retained title usage is validated field by field, never all or nothing:
+ * the title was already billed from the provider's raw usage, so a value this
+ * schema cannot keep must not fail the title. Chat-compatible providers report
+ * unset counters as null (for example `audio_tokens: null`), and raw usage is
+ * passed through unchecked for the shared normalizer. A null, non-finite or
+ * non-numeric count carries no count and is dropped; the normalizer treats an
+ * absent value the same, so billing and telemetry do not change. A malformed
+ * per-request slot is kept as an empty record so it still reads as unknown.
+ */
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  !!value && typeof value === "object" && !Array.isArray(value);
+const finiteCount = z.preprocess(
+  (value) => (typeof value === "number" && Number.isFinite(value) ? value : undefined),
+  z.number().finite().optional(),
+);
+const tokenDetails = z.preprocess(
+  (value) =>
+    isRecord(value)
+      ? Object.fromEntries(
+          Object.entries(value).filter(
+            (entry): entry is [string, number] =>
+              typeof entry[1] === "number" && Number.isFinite(entry[1]),
+          ),
+        )
+      : {},
+  z.record(z.string(), z.number().finite()),
+);
+const tokenDetailsField = z.preprocess(
+  (value) => (isRecord(value) || Array.isArray(value) ? value : undefined),
+  z.union([z.array(tokenDetails), tokenDetails]).optional(),
+);
+const optionalTokenDetails = z.preprocess(
+  (value) => (isRecord(value) ? value : undefined),
+  tokenDetails.optional(),
+);
 const tokenCounts = {
-  inputTokens: z.number().finite().optional(),
-  outputTokens: z.number().finite().optional(),
-  totalTokens: z.number().finite().optional(),
+  inputTokens: finiteCount,
+  outputTokens: finiteCount,
+  totalTokens: finiteCount,
 };
 /** Only finite provider usage and the normalized title are retained for settlement. */
 export const SessionTitleResponse = z.object({
@@ -67,28 +145,32 @@ export const SessionTitleResponse = z.object({
     .object({
       responseId: z.string().optional(),
       serviceTier: z.string().optional(),
-      webSearchRequests: z.number().finite().optional(),
+      webSearchRequests: finiteCount,
       gatewayBilling: z
         .object({ finalProvider: z.string(), inferenceCostUsd: z.string() })
         .optional(),
       usage: z.object({
         ...tokenCounts,
-        inputTokensDetails: z.union([tokenDetails, z.array(tokenDetails)]).optional(),
-        outputTokensDetails: z.union([tokenDetails, z.array(tokenDetails)]).optional(),
-        requestUsageEntries: z
-          .array(
-            z.object({
-              ...tokenCounts,
-              input_tokens: z.number().finite().optional(),
-              output_tokens: z.number().finite().optional(),
-              total_tokens: z.number().finite().optional(),
-              inputTokensDetails: tokenDetails.optional(),
-              outputTokensDetails: tokenDetails.optional(),
-              input_tokens_details: tokenDetails.optional(),
-              output_tokens_details: tokenDetails.optional(),
-            }),
-          )
-          .optional(),
+        inputTokensDetails: tokenDetailsField,
+        outputTokensDetails: tokenDetailsField,
+        requestUsageEntries: z.preprocess(
+          (value) =>
+            Array.isArray(value) ? value.map((entry) => (isRecord(entry) ? entry : {})) : undefined,
+          z
+            .array(
+              z.object({
+                ...tokenCounts,
+                input_tokens: finiteCount,
+                output_tokens: finiteCount,
+                total_tokens: finiteCount,
+                inputTokensDetails: optionalTokenDetails,
+                outputTokensDetails: optionalTokenDetails,
+                input_tokens_details: optionalTokenDetails,
+                output_tokens_details: optionalTokenDetails,
+              }),
+            )
+            .optional(),
+        ),
       }),
     })
     .nullable(),
