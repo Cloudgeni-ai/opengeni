@@ -10,6 +10,7 @@ import {
 export { continueSessionWaitingWork, getSessionMachineAccess } from "./session-machine-access";
 export { canonicalSecretPermissions } from "./canonical-secret-permissions";
 import { agentInstructionsSql } from "./agents";
+import { jsonbNodeCountSql, jsonbPropertyCountSql } from "./jsonb-shape-counts";
 import { measureJsonObjectText } from "./json-object-text-measurement";
 import { listWorkspaceBackgroundCommandsInScope } from "./session-background-commands";
 import { automationRunPresentation } from "./automation-run-presentation";
@@ -45586,18 +45587,8 @@ export async function appendSessionHistoryItemsInTransaction(
             // bytes of the ordered JSON text, shape of the jsonb projection
             // the insert trigger maintains.
             jsonBytes: sql<string>`octet_length(${schema.sessionHistoryItems.item}::text)`,
-            jsonNodes: sql<string>`(
-                  select count(*)
-                  from jsonb_path_query(session_history_items.item, 'strict $.**')
-                )`,
-            jsonProperties: sql<string>`(
-                  select count(*)
-                  from jsonb_path_query(
-                    session_history_items.item,
-                    'strict $.** ? (@.type() == "object")'
-                  ) as object_value
-                  cross join lateral jsonb_object_keys(object_value) as property
-                )`,
+            jsonNodes: jsonbNodeCountSql(sql`session_history_items.item`),
+            jsonProperties: jsonbPropertyCountSql(sql`session_history_items.item`),
           });
   // Rows skipped by ON CONFLICT were already stored, so only fresh inserts
   // add to the active footprint.
