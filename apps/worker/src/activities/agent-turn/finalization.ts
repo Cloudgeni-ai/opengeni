@@ -43,7 +43,7 @@ import { XAI_CORE_REFUSAL } from "./xai-core";
 import { wakeSubscriptionCoreCodexWaitersAndDeliver } from "../subscription-core-codex-waits";
 import { finalizeCoreClaudeTurn } from "./claude-core";
 import { drainPhysicalSandboxResumes } from "./sandbox-provision";
-import { safeErrorDiagnostic, safeErrorForTelemetry } from "./errors";
+import { isWorkerShutdownCancellation, safeErrorDiagnostic, safeErrorForTelemetry } from "./errors";
 import {
   assertPhysicalToolQuiescenceForCancellation,
   assertSessionAttemptQuiescenceRecoveryDurable,
@@ -247,6 +247,7 @@ async function finalizeTurnAttemptSteps(
       toolCancellationFence,
       onStage: monitor.enter,
       cancellationReason: cancellationSignal?.reason ?? new Error("TURN_ATTEMPT_FINALIZED"),
+      handOffRemoteOperations: isWorkerShutdownCancellation(cancellationSignal?.reason),
       gitCredentialRenewals: gitRenewalsToStop,
       codemodeTokenRenewal: codemodeRenewalToStop,
       runCredentialRenewal: runRenewalToStop,

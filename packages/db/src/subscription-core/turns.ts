@@ -60,6 +60,7 @@ import {
   persistSubscriptionCoreRefreshWithPlan,
   readSubscriptionSessionBinding,
   releaseSubscriptionTurnLease,
+  subscriptionTurnLeaseHeldSql,
   writeSubscriptionSessionBinding,
   type SubscriptionSessionBinding,
 } from "../subscription-core-repository";
@@ -1153,7 +1154,7 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
     }>(
       tx,
       sql`select connection_id::text as connection_id, provider, holder_id, generation,
-        leased_until, leased_until > clock_timestamp() as live
+        leased_until, ${subscriptionTurnLeaseHeldSql()} as live
       from subscription_leases
       where account_id = ${identity.accountId}::uuid
         and workspace_id = ${identity.workspaceId}::uuid
