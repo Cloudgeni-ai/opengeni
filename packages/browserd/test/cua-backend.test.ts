@@ -3550,6 +3550,88 @@ describe("CUA desktop boundary", () => {
     }
   });
 
+  test("a shortcut macOS did not confirm observes the one window its app opened late", async () => {
+    // CUA runs cmd+n as the menu command behind it: the press comes back
+    // unconfirmed, the window it acted on reads as before, and the new
+    // window is listed only from the second listing after the press, with
+    // no report of it from CUA.
+    type Opened = { pid: number; window_id: number; title: string; bounds: Record<string, number> };
+    class ShortcutFixture extends Fixture {
+      pressed = false;
+      listingsAfter = 0;
+      opens: Opened[] = [];
+      relabels = false;
+      async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+        if (name === "hotkey") {
+          this.pressed = true;
+          if (this.relabels) this.applyLabel = "Applied";
+        }
+        const response = await super.callTool(name, argumentsJson);
+        if (name === "list_windows" && this.pressed && ++this.listingsAfter > 1) {
+          const data = JSON.parse(response.structuredJson!);
+          for (const window of this.opens) data.windows.push({ ...window, app_name: "Fixture" });
+          response.structuredJson = JSON.stringify(data);
+        }
+        if (name === "get_window_state" && args.window_id !== 1) {
+          const data = JSON.parse(response.structuredJson!);
+          Object.assign(data, { pid: args.pid, window_id: args.window_id });
+          response.structuredJson = JSON.stringify(data);
+        }
+        return response;
+      }
+    }
+    const beside = { x: 300, y: 50, width: 200, height: 100 };
+    const document = { pid: 42, window_id: 2, title: "Start Page", bounds: beside };
+    const unconfirmed = result({ effect: "unverifiable", route: "accessibility" });
+    for (const { opens, mutation, relabels, observed } of [
+      // The one new window of the app is where the shortcut went.
+      { opens: [document], mutation: unconfirmed, relabels: false, observed: 2 },
+      // A confirmed press needs no other window to show where it went.
+      {
+        opens: [document],
+        mutation: result({ effect: "confirmed", route: "accessibility" }),
+        relabels: false,
+        observed: 1,
+      },
+      // The press changed its own window, so that window shows its effect.
+      { opens: [document], mutation: unconfirmed, relabels: true, observed: 1 },
+      // Two candidates are never guessed between.
+      {
+        opens: [document, { ...document, window_id: 3 }],
+        mutation: unconfirmed,
+        relabels: false,
+        observed: 1,
+      },
+      // Another app's window is not this press's.
+      { opens: [{ ...document, pid: 43 }], mutation: unconfirmed, relabels: false, observed: 1 },
+      // Nor is a sheet, which is read through the window it is attached to.
+      {
+        opens: [{ ...document, bounds: { x: 60, y: 60, width: 100, height: 50 } }],
+        mutation: unconfirmed,
+        relabels: false,
+        observed: 1,
+      },
+    ]) {
+      const fixture = new ShortcutFixture();
+      fixture.opens = opens;
+      fixture.mutation = mutation;
+      fixture.relabels = relabels;
+      const backend = await CuaComputerBackend.open(fixture, "macos");
+      try {
+        const target = (await backend.targets())[0]!;
+        const observation = await backend.observe(target.id);
+        const after = await backend.dispatch({
+          ...command(observation),
+          action: { type: "keyboard", action: "press", value: "Meta+n" },
+        });
+        expect(after?.target.id).toBe(`cua:window:42:${observed}`);
+      } finally {
+        await backend.close();
+      }
+    }
+  });
+
   test("apps launch in the background by each platform's own app name", async () => {
     const fixture = new Fixture();
     const original = fixture.callTool.bind(fixture);

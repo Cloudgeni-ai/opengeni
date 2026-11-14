@@ -129,6 +129,12 @@ const UNTITLED_STRIP_MAX_SIDE = 100;
 /** How long a field check waits before reading a window again, when the
  * reading straight after the input does not show it yet. */
 const INPUT_REREAD_MS = 150;
+/** How long a key press macOS did not confirm, which left its window as it
+ * was, waits for a window its app opens, and how often it lists windows
+ * meanwhile. A shortcut CUA runs as a menu command (cmd+n) opens its window
+ * only after the command returns. */
+const KEY_WINDOW_WAIT_MS = 600;
+const KEY_WINDOW_POLL_MS = 150;
 /** CUA's refusal of background typing when the window's focused element is
  * not a text input (see typeAtClick). */
 const NO_FOCUSED_TEXT_INPUT = "no_focused_text_input";
@@ -602,6 +608,19 @@ export class CuaComputerBackend implements ComputerBackend {
       }
       if (unconfirmedInput) unconfirmed?.();
       const after = await this.observeAfter(command.targetId, acted, known, report, observed);
+      // CUA's report misses a window that a shortcut it ran as a menu command
+      // opens late (cmd+n): the press comes back unconfirmed and its window
+      // reads as before. Its app's one new window is then where it went.
+      if (
+        unconfirmedInput &&
+        command.action.type === "keyboard" &&
+        after?.target.id === command.targetId &&
+        sameReading(after, observed)
+      ) {
+        const opened = await this.windowOpenedAfterKey(acted, known).catch(() => null);
+        const reading = opened ? await this.observeTarget(opened).catch(() => null) : null;
+        if (reading) return reading;
+      }
       const click = operations[0];
       if (
         clickFrame &&
@@ -1426,6 +1445,29 @@ export class CuaComputerBackend implements ComputerBackend {
       )
       .map(([id]) => id);
     return opened.length === 1 ? opened[0]! : null;
+  }
+
+  /** The window a key press opened when CUA did not report it: the one
+   * window of the acted window's app, other than a sheet, that was not
+   * listed before the press, looked for until KEY_WINDOW_WAIT_MS. Two
+   * candidates are never guessed between. */
+  private async windowOpenedAfterKey(
+    acted: Target,
+    known: ReadonlySet<string>,
+  ): Promise<string | null> {
+    const deadline = Date.now() + KEY_WINDOW_WAIT_MS;
+    for (;;) {
+      await this.discover();
+      const opened = [...this.targetsById.entries()]
+        .filter(
+          ([id, target]) =>
+            !known.has(id) && target.pid === acted.pid && this.sheetHosts(target).length === 0,
+        )
+        .map(([id]) => id);
+      if (opened.length === 1) return opened[0]!;
+      if (opened.length > 1 || Date.now() + KEY_WINDOW_POLL_MS > deadline) return null;
+      await new Promise((resolve) => setTimeout(resolve, KEY_WINDOW_POLL_MS));
+    }
   }
 
   /** Other windows of the same macOS app that a window lies within: where a
@@ -3242,9 +3284,6 @@ function reportNames(report: string, target: Target): boolean {
   if (target.title) return report.includes(`"${target.title}"`);
   return report.split("; ").includes(target.appName);
 }
-
-/** How long an action whose window can no longer be read waits for the
- * window it opened. */
 
 /** A launched app's processes and the windows launch_app reported, which
  * have list_windows' shape. */
