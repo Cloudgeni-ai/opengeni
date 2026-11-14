@@ -9,8 +9,8 @@ import {
 } from "@opengeni/testing/shared-pg";
 import { migrate } from "../src/migrate";
 
-const firstDetach = "1407_detach_knowledge_sync_from_managed_accounts.sql";
-const drop = "1418_drop_knowledge_source_sync_tables.sql";
+const firstDetach = "1419_detach_knowledge_sync_from_managed_accounts.sql";
+const drop = "1430_drop_knowledge_source_sync_tables.sql";
 const realDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const DROPPED = [
   "google_drive_object_acl_evidence",
@@ -143,7 +143,7 @@ async function survivingTablesLocked(name: string): Promise<string[]> {
 }
 
 describe.skipIf(!realDatabase)(
-  "1407 to 1418 drop the retired Knowledge sync tables (real PostgreSQL)",
+  "1419 to 1430 drop the retired Knowledge sync tables (real PostgreSQL)",
   () => {
     test("detaches one referenced table per migration, then drops exactly the seven sync tables and the index wake routine", async () => {
       const beforeRelations = await relations();

@@ -39,9 +39,9 @@ const LINEAR = "https://linear.example.test/mcp";
 let owned: OwnerMigratedTestDatabase | null = null;
 let ownerSql: postgres.Sql | null = null;
 let prefix: string | null = null;
-// 1407 to 1418 detach and drop the retired Knowledge sync tables this merge
+// 1419 to 1430 detach and drop the retired Knowledge sync tables this merge
 // still touched, so replay it against the schema as it stood before them.
-const firstDropMigration = "1407_detach_knowledge_sync_from_managed_accounts.sql";
+const firstDropMigration = "1419_detach_knowledge_sync_from_managed_accounts.sql";
 
 beforeAll(async () => {
   owned = await acquireOwnerMigratedTestDatabase("merge-duplicate-personal-logins");

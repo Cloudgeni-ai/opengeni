@@ -266,7 +266,7 @@ describe.skipIf(!realDatabase)("1275 removes retired Knowledge sync rows", () =>
       };
     });
 
-    // Apply 1275 alone: 1407 to 1418 then drop the sync tables this checks.
+    // Apply 1275 alone: 1419 to 1430 then drop the sync tables this checks.
     await copyFile(join(import.meta.dir, "../drizzle", migration), join(prefix!, migration));
     await migrate(owned!.ownerUrl, undefined, { migrationsDirectory: prefix! });
 

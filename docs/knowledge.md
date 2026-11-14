@@ -56,8 +56,8 @@ scheduler decides what the company should remember.
 
 Integration Knowledge sync (Google Drive, OneDrive, Jira/Confluence) was
 removed. Migration 1275 deleted the leftover source sync tasks with their runs,
-sync state and wakes, and the stored `knowledge_source` facets. Migrations 1407
-to 1418 then detached and dropped the seven sync tables. Requests that
+sync state and wakes, and the stored `knowledge_source` facets. Migrations 1419
+to 1430 then detached and dropped the seven sync tables. Requests that
 still carry `agentConfig.knowledgeSource`, or call the remaining source routes
 of the public SDK, answer 410 with the message in
 `packages/contracts/src/knowledge-source-sync-retirement.ts` until the next SDK

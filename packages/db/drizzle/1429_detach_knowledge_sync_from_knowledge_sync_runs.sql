@@ -1,7 +1,7 @@
 -- deployment-mode: rolling
 -- contract-step: PR #6919 (migration 1275) stopped every application path and SQL routine from using the Knowledge sync tables; queue only once the release containing #6919 is the previous production release and the runtime-posture baseline pins it.
--- Detach the retired Knowledge sync tables from knowledge_sync_runs before 1418
--- drops them (see 1407: one referenced table per file, found in the catalog).
+-- Detach the retired Knowledge sync tables from knowledge_sync_runs before 1430
+-- drops them (see 1419: one referenced table per file, found in the catalog).
 -- Expected here: knowledge_source_sync_item_outcomes_sync_run_fk.
 DO $detach$
 DECLARE

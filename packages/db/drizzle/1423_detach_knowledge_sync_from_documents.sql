@@ -1,8 +1,8 @@
 -- deployment-mode: rolling
 -- contract-step: PR #6919 (migration 1275) stopped every application path and SQL routine from using the Knowledge sync tables; queue only once the release containing #6919 is the previous production release and the runtime-posture baseline pins it.
--- Detach the retired Knowledge sync tables from knowledge_sources before 1418
--- drops them (see 1407: one referenced table per file, found in the catalog).
--- Expected here: knowledge_source_sync_states_source_fk, knowledge_source_sync_wakes_source_fk, knowledge_source_sync_object_observations_source_fk, knowledge_source_sync_item_outcomes_source_fk, knowledge_source_sync_index_obligations_source_fk, google_drive_object_acl_evidence_source_id_fkey.
+-- Detach the retired Knowledge sync tables from documents before 1430
+-- drops them (see 1419: one referenced table per file, found in the catalog).
+-- Expected here: knowledge_source_sync_index_obligations_document_fk, google_drive_object_acl_evidence_document_id_fkey.
 DO $detach$
 DECLARE
   foreign_key record;
@@ -11,7 +11,7 @@ BEGIN
     SELECT c.conrelid::regclass AS child, c.conname AS name
     FROM pg_catalog.pg_constraint c
     WHERE c.contype = 'f'
-      AND c.confrelid = to_regclass('knowledge_sources')
+      AND c.confrelid = to_regclass('documents')
       AND c.conrelid = ANY (ARRAY[
         to_regclass('knowledge_source_sync_states'),
         to_regclass('knowledge_source_sync_wakes'),

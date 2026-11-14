@@ -1821,7 +1821,7 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
-          // 1418 drops the seven retired Knowledge sync tables: five with full
+          // 1430 drops the seven retired Knowledge sync tables: five with full
           // runtime DML and two append-only ACL evidence tables.
           -(tables === FORCE_RLS_TABLES || tables === RUNTIME_DML_TABLES
             ? 7
@@ -2309,7 +2309,7 @@ describe("runtime database posture evaluator", () => {
       ]);
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount +
-          -7 + // 1418 drops the retired Knowledge sync tables.
+          -7 + // 1430 drops the retired Knowledge sync tables.
           1 + // 1106 external member revocation markers.
           1 + // 1092 chat share links.
           3 + // 0981-0982 promotional funding and signed machine evidence.
@@ -2327,7 +2327,7 @@ describe("runtime database posture evaluator", () => {
       );
       expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(
         tableCount +
-          -7 + // 1418 drops the retired Knowledge sync tables.
+          -7 + // 1430 drops the retired Knowledge sync tables.
           1 + // 1106 external member revocation markers.
           1 + // 1092 chat share links.
           3 + // 0981-0982 promotional funding and signed machine evidence.

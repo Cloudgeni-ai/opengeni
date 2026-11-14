@@ -4,7 +4,7 @@
 -- the trigger function that woke indexing from one of them.
 --
 -- Nothing else references them: no other table has a foreign key into them,
--- and no routine, view or policy outside them reads them. 1407 to 1417 already
+-- and no routine, view or policy outside them reads them. 1419 to 1429 already
 -- removed their foreign keys into surviving tables, one referenced table per
 -- transaction, so this drop locks only the seven retired tables. Their
 -- remaining foreign keys among themselves, triggers, policies and indexes go
