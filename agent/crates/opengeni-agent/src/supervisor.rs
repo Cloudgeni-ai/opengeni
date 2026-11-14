@@ -46,7 +46,6 @@ use opengeni_agent_proto::v1::{
 };
 use opengeni_agent_stream::RelayCredential;
 use prost::Message as _;
-use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
@@ -1064,7 +1063,43 @@ impl<P: Platform + 'static> Supervisor<P> {
     /// Links share the operation engine, capacity sampling, and global shutdown;
     /// each retains independent transport, relay, reconnect, and credential state.
     #[must_use]
+    #[cfg(test)]
     pub fn new_links(links: &[SupervisorLink<P>], agent_version: impl Into<String>) -> Self {
+        Self::with_identity(
+            links,
+            agent_version,
+            crate::build_identity::running_binary_sha256(None),
+        )
+    }
+
+    /// Builds one process-wide supervisor over every configured connection of
+    /// an agent keeping its state in `config_dir`. The engine spools to that
+    /// disk (a real filesystem, unlike a tmpfs temp dir, which would spool
+    /// "to disk" in RAM and defeat the budgets), and the running executable's
+    /// digest is remembered there, so a start does not read the whole binary
+    /// again ([`crate::build_identity`]).
+    #[must_use]
+    pub fn in_config_dir(
+        links: &[SupervisorLink<P>],
+        agent_version: impl Into<String>,
+        config_dir: Option<&std::path::Path>,
+    ) -> Self {
+        let supervisor = Self::with_identity(
+            links,
+            agent_version,
+            crate::build_identity::running_binary_sha256(config_dir),
+        );
+        match config_dir {
+            Some(dir) => supervisor.with_spool_root(dir.join("spool")),
+            None => supervisor,
+        }
+    }
+
+    fn with_identity(
+        links: &[SupervisorLink<P>],
+        agent_version: impl Into<String>,
+        binary_sha256: String,
+    ) -> Self {
         let spool_key = links
             .first()
             .map_or("multi".to_string(), |link| link.connection_id.clone());
@@ -1077,7 +1112,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             links: links.to_vec(),
             platform_type: std::marker::PhantomData,
             agent_version: agent_version.into(),
-            binary_sha256: running_binary_sha256(),
+            binary_sha256,
             started: Instant::now(),
             metrics: Arc::new(std::sync::RwLock::new(v1::MetricsSample::default())),
             browser_bridge: None,
@@ -3480,35 +3515,6 @@ pub(crate) fn hostname_or_default() -> String {
         |_| "unknown".to_string(),
         |h| h.to_string_lossy().into_owned(),
     )
-}
-
-/// Hash the exact executable mapped for this process once at startup. A failure
-/// is loud in logs and leaves an empty digest (older/unknown truth), never a
-/// fabricated value that could falsely complete an update.
-fn running_binary_sha256() -> String {
-    use std::io::Read as _;
-
-    let Ok(path) = std::env::current_exe() else {
-        warn!("could not resolve running executable for build identity");
-        return String::new();
-    };
-    let Ok(mut file) = std::fs::File::open(&path) else {
-        warn!(path = %path.display(), "could not open running executable for build identity");
-        return String::new();
-    };
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0_u8; 128 * 1024].into_boxed_slice();
-    loop {
-        match file.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(read) => hasher.update(&buffer[..read]),
-            Err(error) => {
-                warn!(path = %path.display(), %error, "could not hash running executable");
-                return String::new();
-            }
-        }
-    }
-    format!("{:x}", hasher.finalize())
 }
 
 /// Hands every running job to the successor image of a verified update and
