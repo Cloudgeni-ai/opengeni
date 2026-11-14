@@ -18,6 +18,7 @@ use crate::store::{Directory, NoStore};
 /// A VMM with one VM, which counts what it is asked to do.
 #[derive(Debug, Default)]
 struct Counting {
+    boots: AtomicUsize,
     restores: AtomicUsize,
     resumes: AtomicUsize,
     stops: AtomicUsize,
@@ -59,7 +60,8 @@ impl Engine for Counting {
     }
 
     async fn boot(&self, _: &VmSpec) -> Result<(), EngineError> {
-        unreachable!("no step here boots")
+        self.boots.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 
     async fn restore(&self, _: &VmSpec, _: &RestoreFiles) -> Result<(), EngineError> {
@@ -168,6 +170,11 @@ impl Sandbox {
 
     /// Inserts the sandbox's record and applies `change` to it.
     async fn record(&self, change: Change) -> Record {
+        self.record_as(1_000_000, change).await
+    }
+
+    /// Like [`Self::record`], with its VM's user and group `uid`.
+    async fn record_as(&self, uid: u32, change: Change) -> Record {
         let config = SandboxConfig {
             disk_mib: None,
             reach: Vec::new(),
@@ -180,8 +187,8 @@ impl Sandbox {
             link: None,
         };
         let allocation = Allocation {
-            uid: 1_000_000,
-            gid: 1_000_000,
+            uid,
+            gid: uid,
             link: None,
             disk_bytes: None,
         };
@@ -1038,4 +1045,101 @@ fn snapshot_outputs_must_be_plain_files_of_their_own() {
     fs::write(&files.state, "state").unwrap();
     assert!(take_written(&files, &scratch).is_err());
     assert_eq!(fs::read_to_string(&secret).unwrap(), "host only");
+}
+
+/// Runs `debugfs -w` with each of `requests` on the file system at `disk`.
+fn debugfs(disk: &Path, requests: &[&str]) {
+    for request in requests {
+        let ran = std::process::Command::new("debugfs")
+            .args(["-w", "-R", request])
+            .arg(disk)
+            .output()
+            .unwrap();
+        assert!(ran.status.success(), "debugfs {request}: {ran:?}");
+    }
+}
+
+/// A fresh boot repairs a disk whose superblock records errors before its
+/// VM starts, as the VM's own user, and its step says what was fixed; the
+/// next fresh boot finds the disk healthy and leaves it alone (ADR 43).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fresh_boot_repairs_a_file_system_its_guest_found_errors_in() {
+    let sandbox = Sandbox::new().await;
+    let disk = &sandbox.paths.disk;
+    fs::File::create(disk).unwrap().set_len(64 << 20).unwrap();
+    let made = std::process::Command::new("mkfs.ext4")
+        .args(["-q", "-F"])
+        .arg(disk)
+        .status();
+    if !made.is_ok_and(|made| made.success()) {
+        eprintln!("skipped: no mkfs.ext4");
+        return;
+    }
+    // A directory entry naming a cleared inode, as lost writes leave one,
+    // and the errors the guest's kernel recorded meeting it.
+    debugfs(
+        disk,
+        &[
+            "mkdir work",
+            "write /dev/null work/file",
+            "clri work/file",
+            "ssv state 3",
+            "ssv error_count 12",
+            "ssv first_error_time 20261106000914",
+            "ssv first_error_func ext4_orphan_get",
+            "ssv last_error_time 20261113182733",
+            "ssv last_error_func ext4_lookup",
+        ],
+    );
+    fs::write(sandbox.root.path().join("vmlinux"), "kernel").unwrap();
+    // As root the repair runs as the VM's own user; otherwise as the
+    // test's, which is all it can hand the disk to.
+    let euid = rustix::process::geteuid().as_raw();
+    let uid = if euid == 0 { 1_000_000 } else { euid };
+    let record = sandbox.record_as(uid, Change::new()).await;
+
+    let ran = sandbox.job(NoStore, record, false).run(Step::Boot).await;
+    assert_eq!(ran.outcome, Outcome::Done);
+    assert_eq!(Counting::count(&sandbox.engine.boots), 1);
+    let [event] = ran.report.notes.events.as_slice() else {
+        panic!("no single repair event: {:?}", ran.report.notes.events);
+    };
+    assert_eq!(event.name, "compute.disk.repair");
+    let attribute = |key: &str| {
+        event
+            .attributes
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.clone())
+    };
+    assert_eq!(
+        attribute("compute.disk.repair"),
+        Some("repaired".into()),
+        "{event:?}"
+    );
+    assert_eq!(attribute("compute.disk.errors"), Some(12_u32.into()));
+    assert_eq!(
+        attribute("compute.disk.last_error_function"),
+        Some("ext4_lookup:0".to_owned().into())
+    );
+    let checked = std::process::Command::new("e2fsck")
+        .args(["-f", "-n"])
+        .arg(disk)
+        .output()
+        .unwrap();
+    assert!(checked.status.success(), "{checked:?}");
+    assert_eq!(
+        std::os::unix::fs::MetadataExt::uid(&fs::metadata(disk).unwrap()),
+        uid
+    );
+
+    // Healthy now: the next fresh boot only reads its superblock.
+    let record = sandbox.records.settle(sandbox.id).await.unwrap();
+    let ran = sandbox.job(NoStore, record, false).run(Step::Boot).await;
+    assert_eq!(ran.outcome, Outcome::Done);
+    assert!(
+        ran.report.notes.events.is_empty(),
+        "{:?}",
+        ran.report.notes.events
+    );
 }

@@ -39,6 +39,7 @@ mod backoff;
 mod browser_bridge;
 mod browser_control_http;
 mod browser_sidecar;
+mod build_identity;
 mod capacity;
 mod cli;
 mod codemode;
@@ -607,9 +608,9 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     platform = next_platform;
     // Only the agent holding the instance lock may remove helper generations
     // that earlier releases left behind; the removal runs off the startup path.
-    if instance_lock_guard.is_some() {
-        std::thread::spawn(|| {
-            let removed = embedded_runtime::prune_stale_generations();
+    if let (Some(_), Some(directory)) = (&instance_lock_guard, config_dir.clone()) {
+        std::thread::spawn(move || {
+            let removed = embedded_runtime::prune_stale_generations(&directory);
             if removed > 0 {
                 info!(removed, "removed earlier interaction runtime generations");
             }
@@ -641,13 +642,10 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
         sidecars.observe_attached_inventory(bridge.inventory());
     }
 
-    // The engine's disk spool lives under the config dir — a real filesystem
-    // (a tmpfs temp dir would spool "to disk" in RAM and defeat the budgets).
-    let mut supervisor = match &config_dir {
-        Some(dir) => Supervisor::new_links(&links, env!("CARGO_PKG_VERSION"))
-            .with_spool_root(dir.join("spool")),
-        None => Supervisor::new_links(&links, env!("CARGO_PKG_VERSION")),
-    };
+    // The engine's disk spool and the binary's remembered digest live under
+    // the config dir.
+    let mut supervisor =
+        Supervisor::in_config_dir(&links, env!("CARGO_PKG_VERSION"), config_dir.as_deref());
     supervisor = supervisor.with_update_drain(update_drain);
     if screen_control_turned_off() {
         supervisor = supervisor.with_screen_control_turned_off();
@@ -872,11 +870,8 @@ async fn run_compute(args: &RunArgs, link_file: &Path) -> anyhow_lite::Result {
     let links = vec![link];
     let (_keep_links, updates_rx) = tokio::sync::watch::channel(links.clone());
 
-    let mut supervisor = match &config_dir {
-        Some(dir) => Supervisor::new_links(&links, env!("CARGO_PKG_VERSION"))
-            .with_spool_root(dir.join("spool")),
-        None => Supervisor::new_links(&links, env!("CARGO_PKG_VERSION")),
-    };
+    let mut supervisor =
+        Supervisor::in_config_dir(&links, env!("CARGO_PKG_VERSION"), config_dir.as_deref());
     supervisor = supervisor.with_update_drain(update_drain);
     #[cfg(unix)]
     {

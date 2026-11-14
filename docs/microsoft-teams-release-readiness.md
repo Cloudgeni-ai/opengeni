@@ -750,6 +750,12 @@ conversation, organization connected or not, account linked or not).
   the person may no longer see, answers the invoke and records nothing. The
   reply is found by its Teams message id through the partial index
   `teams_bot_outbox_delivered_message`, then its chat by primary key.
+  With workspace routing, a 1:1 reply's feedback is checked against the chat it
+  belongs to rather than the installation's workspace: the reacting person must
+  be the chat's linked owner, with live organization membership and current
+  access to the chat's workspace (their own Personal workspace included). On a
+  chat with an agent anyone in the organization may use, it is recorded as that
+  agent (`teams-agent:<agentId>`) while the agent is still open to them.
 
 ## Publisher verification and Store submission
 
