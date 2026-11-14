@@ -156,14 +156,18 @@ mock.module("react-native", () => {
     Image: host("img"),
     Linking: { openURL: async () => {} },
     Share: { share: async () => ({}) },
-    AccessibilityInfo: { isReduceMotionEnabled: async () => false },
+    AccessibilityInfo: {
+      isReduceMotionEnabled: async () => false,
+      addEventListener: () => ({ remove: () => {} }),
+    },
     useWindowDimensions: () => ({ width: 390, height: 844 }),
   };
 });
 mock.module("react-native-svg", () => {
   const nothing = () => null;
   return {
-    default: nothing,
+    // Only the drawing surface is a DOM stand-in, so a test can find the orb.
+    default: (props: { testID?: string }) => createElement("svg", { "data-testid": props.testID }),
     Circle: nothing,
     Defs: nothing,
     Line: nothing,
@@ -371,6 +375,8 @@ test("startup disappears on first useful output, not just on turn completion", a
   const view = await renderComponent(<MessageTimeline events={events} />);
   try {
     expect(view.container.textContent).toContain("Working");
+    // The animated orb is the default visual while the reply is prepared.
+    expect(view.container.querySelector('[data-testid="thinking-orb"]')).not.toBeNull();
     await view.rerender(
       <MessageTimeline
         events={[
@@ -382,6 +388,7 @@ test("startup disappears on first useful output, not just on turn completion", a
     expect(view.container.textContent).toContain("Start with a short walk.");
     expect(view.container.textContent).not.toContain("Working");
     expect(view.container.textContent).not.toContain("Waiting for a response");
+    expect(view.container.querySelector('[data-testid="thinking-orb"]')).toBeNull();
   } finally {
     await view.unmount();
   }

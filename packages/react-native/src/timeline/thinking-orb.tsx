@@ -61,6 +61,7 @@ export function ThinkingOrb({
       width={displaySize ?? size}
       height={displaySize ?? size}
       viewBox={`0 0 ${size} ${size}`}
+      testID="thinking-orb"
       accessibilityElementsHidden
       importantForAccessibility="no"
     >
