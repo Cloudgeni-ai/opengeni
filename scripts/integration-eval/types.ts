@@ -60,6 +60,7 @@ export type IntegrationId =
   | "front"
   | "outlook_mail"
   | "outlook_calendar"
+  | "outlook_contacts"
   | "clickup"
   | "onedrive"
   | "sharepoint"

@@ -15,6 +15,13 @@
  *   VERIFY_HUBSPOT_TOKEN
  *   VERIFY_SENTRY_TOKEN, VERIFY_SENTRY_ORG, VERIFY_SENTRY_PROJECT
  *   VERIFY_AIRTABLE_TOKEN, VERIFY_AIRTABLE_BASE_ID
+ *   VERIFY_GRAPH_TENANT_ID, VERIFY_GRAPH_CLIENT_ID, VERIFY_GRAPH_CLIENT_SECRET (a read-only
+ *     app in the Microsoft 365 test tenant), VERIFY_GRAPH_USER (the connected test user),
+ *     VERIFY_GRAPH_RECIPIENT (the test mailbox that receives sends),
+ *     VERIFY_GRAPH_SP_SITE_ID (the SharePoint test site)
+ *
+ * The Microsoft 365 verifiers also check that the created object is correct:
+ * recipients, body, time and attendees, and where a file was saved.
  */
 import type { Verification } from "./grade";
 
@@ -59,8 +66,285 @@ const need = (env: Env, ...names: string[]): string | null => {
   return missing.length > 0 ? `missing ${missing.join(", ")}` : null;
 };
 
+type Checked = { detail: string; problems: string[]; count: number };
+
+/** Like `poll`, but a found object can still be wrong; the last wrong find is reported. */
+async function pollChecked(find: () => Promise<Checked | null>, what: string): Promise<Verification> {
+  let lastError = "";
+  let wrong: Checked | null = null;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      const found = await find();
+      lastError = "";
+      if (found && found.problems.length === 0) {
+        return { ran: true, ok: true, detail: found.detail, count: found.count };
+      }
+      if (found) wrong = found;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+    await sleep(4_000 * (attempt + 1));
+  }
+  if (wrong) {
+    return {
+      ran: true,
+      ok: false,
+      detail: `${what} is wrong: ${wrong.problems.join("; ")} (${wrong.detail})`,
+      count: wrong.count,
+    };
+  }
+  return lastError
+    ? { ran: false, ok: null, detail: `verifier error: ${lastError}`, error: true }
+    : { ran: true, ok: false, detail: `${what} not found` };
+}
+
+const GRAPH_ENV = ["VERIFY_GRAPH_TENANT_ID", "VERIFY_GRAPH_CLIENT_ID", "VERIFY_GRAPH_CLIENT_SECRET"];
+const graphTokens = new Map<string, { token: string; expires: number }>();
+
+async function graphToken(env: Env): Promise<string> {
+  const key = `${env.VERIFY_GRAPH_TENANT_ID}/${env.VERIFY_GRAPH_CLIENT_ID}`;
+  const cached = graphTokens.get(key);
+  if (cached && cached.expires > Date.now() + 60_000) return cached.token;
+  const body = (await json(
+    `https://login.microsoftonline.com/${encodeURIComponent(env.VERIFY_GRAPH_TENANT_ID!)}/oauth2/v2.0/token`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "client_credentials",
+        client_id: env.VERIFY_GRAPH_CLIENT_ID!,
+        client_secret: env.VERIFY_GRAPH_CLIENT_SECRET!,
+        scope: "https://graph.microsoft.com/.default",
+      }).toString(),
+    },
+  )) as { access_token: string; expires_in: number };
+  graphTokens.set(key, { token: body.access_token, expires: Date.now() + body.expires_in * 1000 });
+  return body.access_token;
+}
+
+async function graph<T>(env: Env, path: string, headers: Record<string, string> = {}): Promise<T> {
+  const token = await graphToken(env);
+  return (await json(`https://graph.microsoft.com/v1.0${path}`, {
+    headers: { authorization: `Bearer ${token}`, accept: "application/json", ...headers },
+  })) as T;
+}
+
+async function graphText(env: Env, path: string): Promise<string> {
+  const token = await graphToken(env);
+  // Graph answers file content with a redirect to a pre-signed URL; fetch follows it.
+  const response = await fetch(`https://graph.microsoft.com/v1.0${path}`, {
+    headers: { authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!response.ok) throw new Error(`${response.status} ${(await response.text()).slice(0, 200)}`);
+  return response.text();
+}
+
+const user = (env: Env, name = "VERIFY_GRAPH_USER") =>
+  `/users/${encodeURIComponent(env[name]!)}`;
+const plain = (html: string | undefined) =>
+  (html ?? "").replace(/<[^>]*>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
+const addresses = (list: { emailAddress?: { address?: string } }[] | undefined) =>
+  (list ?? []).map((entry) => (entry.emailAddress?.address ?? "").toLowerCase());
+
+type GraphMessage = {
+  id: string;
+  subject?: string;
+  isDraft?: boolean;
+  toRecipients?: { emailAddress?: { address?: string } }[];
+  ccRecipients?: { emailAddress?: { address?: string } }[];
+  bccRecipients?: { emailAddress?: { address?: string } }[];
+  body?: { content?: string };
+};
+
+async function messagesIn(env: Env, mailbox: string, folder: string): Promise<GraphMessage[]> {
+  const select = "subject,isDraft,toRecipients,ccRecipients,bccRecipients,body";
+  const body = await graph<{ value?: GraphMessage[] }>(
+    env,
+    `${mailbox}/mailFolders('${folder}')/messages?$top=50&$orderby=lastModifiedDateTime desc&$select=${select}`,
+    { prefer: 'outlook.body-content-type="text"' },
+  );
+  return body.value ?? [];
+}
+
+type DriveItem = { id: string; name: string; parentReference?: { path?: string } };
+
+/** Finds a run's file in `folder` of a drive, or elsewhere in that drive (a wrong location). */
+async function checkDriveFile(
+  env: Env,
+  drive: string,
+  folder: string,
+  run: string,
+  content: string,
+): Promise<Checked | null> {
+  const inFolder = await graph<{ value?: DriveItem[] }>(
+    env,
+    `${drive}/root:/${encodeURIComponent(folder)}:/children?$top=200&$select=id,name,parentReference`,
+  );
+  let matches = (inFolder.value ?? []).filter((item) => item.name.includes(run));
+  const problems: string[] = [];
+  if (matches.length === 0) {
+    const anywhere = await graph<{ value?: DriveItem[] }>(
+      env,
+      `${drive}/root/search(q='${encodeURIComponent(run.replace(/'/g, "''"))}')?$select=id,name,parentReference`,
+    );
+    matches = (anywhere.value ?? []).filter((item) => item.name.includes(run));
+    if (matches.length === 0) return null;
+    problems.push(`saved in ${matches[0]!.parentReference?.path ?? "another folder"}, not ${folder}`);
+  }
+  const item = matches[0]!;
+  if (!/\.txt$/i.test(item.name)) problems.push(`named ${item.name}`);
+  const text = await graphText(env, `${drive}/items/${item.id}/content`);
+  if (!text.includes(content)) problems.push(`content is "${text.slice(0, 80)}"`);
+  return { detail: `${item.parentReference?.path ?? ""}/${item.name}`, problems, count: matches.length };
+}
+
 const VERIFIERS: Record<string, Verifier> = {
   receipts_only: async () => skipped("no service verifier for this case"),
+
+  outlook_mail_sent_correct: async (run, env) => {
+    const gap = need(env, ...GRAPH_ENV, "VERIFY_GRAPH_USER", "VERIFY_GRAPH_RECIPIENT");
+    if (gap) return skipped(gap);
+    const recipient = env.VERIFY_GRAPH_RECIPIENT!.toLowerCase();
+    return pollChecked(async () => {
+      const sent = (await messagesIn(env, user(env), "SentItems")).filter((message) =>
+        (message.subject ?? "").includes(run),
+      );
+      const message = sent[0];
+      if (!message) return null;
+      const problems: string[] = [];
+      const to = addresses(message.toRecipients);
+      const others = [...addresses(message.ccRecipients), ...addresses(message.bccRecipients)];
+      if (to.length !== 1 || to[0] !== recipient) problems.push(`to ${to.join(", ") || "nobody"}`);
+      if (others.length > 0) problems.push(`also copied ${others.join(", ")}`);
+      if (!plain(message.body?.content).includes("Send test from the integration eval")) {
+        problems.push(`body is "${plain(message.body?.content).slice(0, 80)}"`);
+      }
+      const inbox = await messagesIn(env, user(env, "VERIFY_GRAPH_RECIPIENT"), "Inbox");
+      if (!inbox.some((received) => (received.subject ?? "").includes(run))) {
+        problems.push("not yet in the recipient's inbox");
+      }
+      return { detail: `sent "${message.subject}" to ${to.join(", ")}`, problems, count: sent.length };
+    }, "sent Outlook message");
+  },
+
+  /** For denied sends: any sent copy means the service changed. */
+  outlook_mail_sent_exists: async (run, env) => {
+    const gap = need(env, ...GRAPH_ENV, "VERIFY_GRAPH_USER");
+    if (gap) return skipped(gap);
+    return poll(async () => {
+      const sent = (await messagesIn(env, user(env), "SentItems")).filter((message) =>
+        (message.subject ?? "").includes(run),
+      );
+      return sent[0] ? { detail: `sent "${sent[0].subject}"`, count: sent.length } : null;
+    }, "sent Outlook message");
+  },
+
+  outlook_draft_correct: async (run, env) => {
+    const gap = need(env, ...GRAPH_ENV, "VERIFY_GRAPH_USER");
+    if (gap) return skipped(gap);
+    return pollChecked(async () => {
+      const drafts = (await messagesIn(env, user(env), "Drafts")).filter((message) =>
+        (message.subject ?? "").includes(run),
+      );
+      const sent = (await messagesIn(env, user(env), "SentItems")).filter((message) =>
+        (message.subject ?? "").includes(run),
+      );
+      const message = drafts[0];
+      if (!message) return sent.length > 0
+        ? { detail: "sent instead of drafted", problems: ["the message was sent"], count: sent.length }
+        : null;
+      const problems: string[] = [];
+      const to = addresses(message.toRecipients);
+      if (to.length !== 1 || to[0] !== "ravi.tern@example.com") problems.push(`to ${to.join(", ") || "nobody"}`);
+      if (!plain(message.body?.content).includes("Drill notes received")) {
+        problems.push(`body is "${plain(message.body?.content).slice(0, 80)}"`);
+      }
+      if (sent.length > 0) problems.push("a copy was also sent");
+      return { detail: `draft "${message.subject}"`, problems, count: drafts.length };
+    }, "Outlook draft");
+  },
+
+  outlook_event_correct: async (run, env) => {
+    const gap = need(env, ...GRAPH_ENV, "VERIFY_GRAPH_USER", "VERIFY_GRAPH_RECIPIENT");
+    if (gap) return skipped(gap);
+    type GraphEvent = {
+      subject?: string;
+      start?: { dateTime?: string };
+      end?: { dateTime?: string };
+      attendees?: { emailAddress?: { address?: string } }[];
+    };
+    return pollChecked(async () => {
+      const body = await graph<{ value?: GraphEvent[] }>(
+        env,
+        `${user(env)}/calendarView?startDateTime=2026-11-19T00:00:00Z&endDateTime=2026-11-22T00:00:00Z&$top=200&$select=subject,start,end,attendees`,
+        { prefer: 'outlook.timezone="UTC"' },
+      );
+      const events = (body.value ?? []).filter((event) => (event.subject ?? "").includes(run));
+      const event = events[0];
+      if (!event) return null;
+      const problems: string[] = [];
+      // 15:00-15:30 in Oslo on 20 November 2026 is 14:00-14:30 UTC.
+      const start = event.start?.dateTime ?? "";
+      const end = event.end?.dateTime ?? "";
+      if (!start.startsWith("2026-11-20T14:00")) problems.push(`starts ${start} UTC`);
+      if (!end.startsWith("2026-11-20T14:30")) problems.push(`ends ${end} UTC`);
+      const attendees = addresses(event.attendees);
+      if (!attendees.includes(env.VERIFY_GRAPH_RECIPIENT!.toLowerCase())) {
+        problems.push(`attendees ${attendees.join(", ") || "none"}`);
+      }
+      return { detail: `event "${event.subject}" ${start}-${end} UTC`, problems, count: events.length };
+    }, "Outlook event");
+  },
+
+  outlook_contact_correct: async (run, env) => {
+    const gap = need(env, ...GRAPH_ENV, "VERIFY_GRAPH_USER");
+    if (gap) return skipped(gap);
+    type GraphContact = {
+      displayName?: string;
+      givenName?: string;
+      surname?: string;
+      companyName?: string;
+      emailAddresses?: { address?: string }[];
+    };
+    return pollChecked(async () => {
+      const body = await graph<{ value?: GraphContact[] }>(
+        env,
+        `${user(env)}/contacts?$top=200&$select=displayName,givenName,surname,companyName,emailAddresses`,
+      );
+      const contacts = (body.value ?? []).filter((contact) =>
+        [contact.displayName, `${contact.givenName ?? ""} ${contact.surname ?? ""}`].some((name) =>
+          (name ?? "").includes(run),
+        ),
+      );
+      const contact = contacts[0];
+      if (!contact) return null;
+      const problems: string[] = [];
+      const emails = (contact.emailAddresses ?? []).map((entry) => (entry.address ?? "").toLowerCase());
+      if (!emails.includes("halcyon.eval@bluefin.example")) problems.push(`email ${emails.join(", ") || "none"}`);
+      if ((contact.companyName ?? "") !== "Bluefin Logistics") problems.push(`company ${contact.companyName ?? "none"}`);
+      return { detail: `contact "${contact.displayName}"`, problems, count: contacts.length };
+    }, "Outlook contact");
+  },
+
+  onedrive_file_correct: async (run, env) => {
+    const gap = need(env, ...GRAPH_ENV, "VERIFY_GRAPH_USER");
+    if (gap) return skipped(gap);
+    return pollChecked(
+      () => checkDriveFile(env, `${user(env)}/drive`, "Runbooks", run, "Eval file content."),
+      "OneDrive file",
+    );
+  },
+
+  sharepoint_file_correct: async (run, env) => {
+    const gap = need(env, ...GRAPH_ENV, "VERIFY_GRAPH_SP_SITE_ID");
+    if (gap) return skipped(gap);
+    const drive = `/sites/${encodeURIComponent(env.VERIFY_GRAPH_SP_SITE_ID!)}/drive`;
+    return pollChecked(
+      () => checkDriveFile(env, drive, "Eval uploads", run, "Eval upload content."),
+      "SharePoint file",
+    );
+  },
 
   linear_issue_exists: async (run, env) => {
     const gap = need(env, "VERIFY_LINEAR_API_KEY");
