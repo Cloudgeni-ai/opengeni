@@ -27,7 +27,7 @@ import { findPickerRow } from "../../../model-policy";
 import { sessionDisplayTitle, withLineageAutomationFacts } from "../../../session-list-model";
 import { useLastStartedTurnPolicy } from "../../../hooks/use-last-started-turn-policy";
 import { useSessionLineage } from "../../../hooks/use-session-lineage";
-import { BrandMark, Wordmark } from "../brand-mark";
+import { Wordmark, WordmarkMark } from "../brand-mark";
 import { SessionHeader } from "./session-header";
 import { SessionStartupProvider } from "../../../lib/session-startup";
 import {
@@ -507,7 +507,7 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
           params={{ workspaceId: rail.workspaceId }}
           className="flex items-center gap-2 text-fg"
         >
-          <BrandMark className="w-5" />
+          <WordmarkMark className="w-5" tileClassName="size-6" />
           <Wordmark className="text-[17px]" />
         </Link>
       ) : null}

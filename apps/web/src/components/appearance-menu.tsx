@@ -1,4 +1,4 @@
-import { MonitorIcon, MoonIcon, SunIcon, SunMoonIcon } from "lucide-react";
+import { LayoutPanelLeftIcon, MonitorIcon, MoonIcon, SunIcon, SunMoonIcon } from "lucide-react";
 
 import {
   DropdownMenuCheck,
@@ -13,6 +13,7 @@ import {
   DropdownMenuSubTrigger,
 } from "@opengeni/react/ui/dropdown-menu";
 import { parseAppearance, useAppearance } from "@opengeni/react/app/lib/appearance";
+import { useSimplifiedInterface } from "@opengeni/react/app/lib/simplified-interface";
 
 const options = [
   { value: "light", label: "Light", icon: SunIcon },
@@ -74,5 +75,30 @@ export function AppearanceSubmenu() {
         ))}
       </DropdownMenuSubContent>
     </DropdownMenuSub>
+  );
+}
+
+/**
+ * The account menu's "Simplified interface" switch, for a browser that has
+ * the flag: on shows the Geni name and its shorter navigation, off shows
+ * everything as in Opengeni. A browser that never arrived with the flag has
+ * nothing to switch and sees no row.
+ */
+export function SimplifiedInterfaceMenuItem() {
+  const { simplified, chosen, setSimplified } = useSimplifiedInterface();
+  if (!chosen) return null;
+
+  return (
+    <DropdownMenuItem
+      onSelect={(event) => {
+        // Keep the menu open so the check mark shows the change.
+        event.preventDefault();
+        setSimplified(!simplified);
+      }}
+    >
+      <LayoutPanelLeftIcon />
+      Simplified interface
+      <DropdownMenuCheck checked={simplified} />
+    </DropdownMenuItem>
   );
 }

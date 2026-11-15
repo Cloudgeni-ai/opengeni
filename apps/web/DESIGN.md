@@ -670,3 +670,71 @@ Components use only the semantic utilities (`bg-surface`, `text-fg-muted`, `bord
 write the 10px and 14px radii as literals (`rounded-[10px]`, `rounded-[14px]`); a radius restyle
 means moving those to `rounded-md` / `rounded-lg` first. Check the result in `/dev/ui-kit` with
 the Side by side theme before shipping.
+
+## 11. Simplified interface
+
+The web app has one flag, the simplified interface. On, it shows the same product under the Geni
+name with fewer destinations, one model and credits only, for people who arrive from gogeni.ai.
+Off (the default), it is the full Opengeni console. The flag is presentation only, like light or
+dark. It lives in this browser (`localStorage` `opengeni.simplifiedInterface`, `on` or `off`), is
+never sent to the server, and changes no permission: every page still opens by its address either
+way.
+
+- **How a browser gets it.** A landing URL with `?simplified_interface=1` (`=0` turns it off).
+  The inline bootstrap in `index.html` applies it before the first paint and
+  `src/lib/simplified-interface-landing.ts` removes the parameter. Someone arriving with the flag
+  and no appearance of their own starts in the light look. After that the account menu shows a
+  "Simplified interface" switch; a browser that never arrived with the flag sees no switch.
+- **Reading it.** `useSimplifiedInterface()` from `@opengeni/react/app/lib/simplified-interface`
+  gives `simplified` and `productName`. `<html data-og-simplified-interface>` is the hook for
+  styles. Components rendered without the provider (embeds) never use it.
+- **The name.** `Wordmark`, the page title and the built-in `{product}` text say "Geni" while the
+  flag is on. Write `productName` in new visible copy that names the product, and in its labels
+  ("Geni home"); a rail destination's tooltip writes `{product}` (`itemDescription`). Keep
+  "Opengeni" where it names something that stays Opengeni for everyone: the Slack bot, the
+  desktop and phone apps, the Excel add-in, the community registry's "Not reviewed by Opengeni",
+  emails, payment receipts, the SDK and its docs.
+- **The mark.** Beside the wordmark, `WordmarkMark` draws the Geni mark from gogeni.ai: the same
+  iconmark knocked out of a rounded tile in the primary ink, which inverts with the appearance.
+  The page icon becomes the same tile (`public/geni-icon.svg`); the home-screen icon stays.
+  Everywhere else (chips, provider tiles) `BrandMark` is unchanged.
+- **What it leaves out.** One place: the `SIMPLIFIED_UNLISTED_*` sets in
+  `src/components/rail/workspace-nav-data.ts` (rail destinations, workspace settings sections,
+  organization settings pages). Its settings list only the workspace (General, Access), the
+  organization (General, People, Billing) and sign-in security, and its workspace General page
+  shows only the name, agent activity and deletion. Add a destination to those sets rather than
+  branching in a component. Hide from lists only; never make a route unreachable or a decision
+  depend on the flag.
+- **The rail.** Capabilities, Agents and Artifacts stay at the top level. Knowledge and
+  Automations sit under a closed "Advanced" group (`advancedWorkspaceItems` in the same file),
+  which opens by itself for the page you are on and for anything waiting for you. The icon rail
+  has no room for a group and keeps both icons.
+- **The composer.** One action is left beside the message: add photos and files, shown as a
+  button instead of the "+" menu (`ComposerMobilePlus`). Voice stays. Capabilities, repositories,
+  secrets, visibility, usage limit, voice model and chat settings are not offered, and a new chat
+  always takes the workspace's capabilities: a choice left in a draft by the full console is
+  dropped.
+- **Capabilities.** One list: the apps to connect, without the Skills and Plugins tabs.
+  `src/components/capabilities/simplified-interface-services.ts` names the apps it puts first
+  (mail, calendar, files, chat, social, payments) by the name people see; only apps the
+  deployment offers appear. The rest of the catalog is behind "Show more apps" and search. The
+  Skills address still opens the full page.
+- **Suggestions.** `SIMPLIFIED_INTERFACE_STARTERS`: Slack, the inbox and the calendar first, then
+  the general asks. Nothing about code hosting or issue trackers.
+- **Automation templates.** `SIMPLIFIED_INTERFACE_AUTOMATION_TEMPLATES`
+  (`src/components/schedules/schedule-model.ts`) replace the shared built-in ones: a morning brief
+  of the day's meetings and inbox, a weekly drafted update for each client, a Friday report. They
+  run on a schedule, never send anything themselves, and the empty state and the message
+  placeholder give business examples too. A `?template=` link to either set opens in both.
+- **One model, on credits.** The simplified interface has no model choice.
+  `simplifiedInterfaceModelPolicy` (`@opengeni/react/app/lib/simplified-interface-model`) names
+  GPT-6.1 Sol at medium reasoning among the credit-billed models, or the deployment default where
+  that model is not offered. App state pins the new-chat policy to it, so a default, a restored
+  draft or a fallback cannot change it, and the request names the model explicitly. The composer,
+  session and schedule pickers are not rendered, new schedules name the same policy instead of
+  following a default, and nothing offers a plan or provider account: onboarding and the credit
+  notices offer credits only (where billing is off, onboarding keeps the usual list, since
+  connecting is then the only way to start). A chat started without the flag keeps its own model.
+- **The look.** It takes the Geni site's palette (`src/styles.css`): warm paper chrome, soft
+  hairlines, the site's green ink as the accent, a solid ink primary button, pill buttons and
+  page titles in the display face. Change tokens there. Do not fork components.

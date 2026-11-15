@@ -1,3 +1,4 @@
+import { useSimplifiedInterface } from "../../lib/simplified-interface";
 import { AlertTriangleIcon } from "lucide-react";
 import { machineAccessNeededMessage } from "@opengeni/contracts/machine-access";
 import { Link } from "../../lib/navigation";
@@ -134,7 +135,9 @@ export function FailedSessionBanner({
   // ways to keep going. Every other model keeps the generic daily-limit copy.
   const freeModelLimit = freeModel && dailyLimit && !structuralFailure;
   const offerCredits = Boolean(workspaceId && canBuyCredits);
-  const offerConnect = Boolean(workspaceId && canConnectModel);
+  // The simplified interface runs on credits only, so it never offers a provider account.
+  const { simplified } = useSimplifiedInterface();
+  const offerConnect = Boolean(workspaceId && canConnectModel && !simplified);
   const codexUsageFailure =
     codexUsage && isCodexUsageLimitFailure(failure.failureCode) && !structuralFailure
       ? codexUsage
@@ -283,7 +286,7 @@ export function FailedSessionBanner({
             </>
           ) : workspaceId && canBuyCredits ? (
             <BuyCreditsLink workspaceId={workspaceId} primary onAddCredits={onAddCredits} />
-          ) : workspaceId && canConnectModel ? (
+          ) : workspaceId && offerConnect ? (
             <ConnectModelLink workspaceId={workspaceId} label="Use your own provider account" />
           ) : null
         ) : sandboxRecovery ? (
