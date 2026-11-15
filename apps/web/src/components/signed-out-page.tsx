@@ -1,4 +1,5 @@
 import {
+  CloudIcon,
   CreditCardIcon,
   EraserIcon,
   GitPullRequestIcon,
