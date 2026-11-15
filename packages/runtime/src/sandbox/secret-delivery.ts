@@ -675,10 +675,13 @@ function renderTokens(
 }
 
 /**
- * `apply_patch` (Q-24): resolve references in every patch line except the
- * `*** …` header lines that name paths, at the Opengeni wrapper just before
- * the editor writes. The model-facing patch (run state, spans) keeps the
- * references. Returns null when nothing changes (byte-identical fast path).
+ * `apply_patch` (Q-24): resolve references in the lines the patch adds (`+`),
+ * at the Opengeni wrapper just before the editor writes. Context, removed and
+ * `@@` lines describe text already in the file, so their references stay text
+ * (escapes removed) and match a reference written there literally. `*** …`
+ * header lines that name paths are never touched. The model-facing patch (run
+ * state, spans) keeps the references. Returns null when nothing changes
+ * (byte-identical fast path).
  */
 export async function resolveSecretPatchText(
   text: string,
@@ -697,14 +700,18 @@ export async function resolveSecretPatchText(
   const content = lines.filter((line) => !isHeader(line)).join("");
   if (!containsSecretReference(content)) return null;
   const tokensByLine = lines.map((line) => (isHeader(line) ? null : tokenizeSecretText(line)));
+  const invalid = invalidFailures(tokensByLine.flatMap((tokens) => tokens ?? []));
+  if (invalid.length > 0) throw new SecretReferenceError(invalid);
+  const added = (index: number) => lines[index]!.startsWith("+");
   const replacements = await resolveTokens(
-    tokensByLine.flatMap((tokens) => tokens ?? []),
+    tokensByLine.flatMap((tokens, index) => (tokens && added(index) ? tokens : [])),
     { resolver, use: options.use, writeFiles: options.writeFiles },
   );
   const resolved = lines
     .map((line, index) => {
       const tokens = tokensByLine[index];
-      return tokens ? renderTokens(tokens, replacements) : line;
+      if (!tokens) return line;
+      return added(index) ? renderTokens(tokens, replacements) : unescapedText(tokens);
     })
     .join("");
   return resolved === text ? null : resolved;

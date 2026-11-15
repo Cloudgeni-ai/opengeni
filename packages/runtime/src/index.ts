@@ -634,6 +634,7 @@ import {
   withRunCredentialsClient,
   withRunCredentialsSession,
   type RunCredentialSessionReady,
+  secretLedgerKeyFor,
 } from "./sandbox";
 import { SynchronousCommandOutcomeUnknownError } from "./sandbox/synchronous-command";
 import { runWithToolCallCorrelation } from "./sandbox/op-correlation";
@@ -5910,6 +5911,11 @@ function buildAgentCapabilitiesFromComposition(
           sandboxTemporaryDirectory:
             (options.sandboxEnvironment ?? collectSandboxEnvironment(settings)).TMPDIR || "/tmp",
           ...(options.secretResolver ? { secretResolver: options.secretResolver } : {}),
+          // Every worker derives the same key, so a later turn reads the
+          // sandbox ledger an earlier one wrote.
+          ...(options.secretResolver
+            ? { secretLedgerKey: secretLedgerKeyFor(settings.delegationSecret) }
+            : {}),
           ...(options.credentials ? { credentials: options.credentials } : {}),
         })
       : null;

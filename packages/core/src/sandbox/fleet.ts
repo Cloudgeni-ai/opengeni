@@ -53,6 +53,11 @@ import {
   prepareSecretExec,
   resolveSecretLiteralText,
   runWithSecretCarry,
+  SecretLeakGuard,
+  secretLedgerKeyFor,
+  type SecretLedgerKey,
+  type SecretLeakGuardRunner,
+  type SecretLedgerWriter,
   type CredentialEnvironment,
   type SecretExecCarry,
   selfhostedLiveness,
@@ -1136,6 +1141,11 @@ export type RunOnSelfhostedMachine = {
    */
   secretResolver?: SecretResolver | null;
   /**
+   * Key of the secret leak guard's ledger on the machine (docs/secrets.md,
+   * "Keeping values out of commits"). Omitted, a key of this process is used.
+   */
+  secretLedgerKey?: SecretLedgerKey;
+  /**
    * The calling session's credential profile: exec receives its variables
    * in ExecRequest.env (below the command's own assignments). Absent: none.
    */
@@ -1274,13 +1284,49 @@ export async function executeRunOnSelfhostedMachine(
   });
 
   const secretUse = { surface: "run_on" as const, toolName: "run_on", destination: target };
+  // Values delivered to the machine join its secret ledger, and a git commit
+  // or push carrying one is refused (docs/secrets.md). The helper is POSIX
+  // shell, so a Windows machine is not checked.
+  const leakGuard = machine.secretResolver
+    ? new SecretLeakGuard(machine.secretLedgerKey ?? secretLedgerKeyFor(null))
+    : null;
+  const secretResolver =
+    leakGuard && machine.secretResolver
+      ? leakGuard.wrapResolver(machine.secretResolver)
+      : (machine.secretResolver ?? null);
+  const guardRunner: SecretLeakGuardRunner | null =
+    leakGuard && session.describeShellDialect() === "posix"
+      ? async ({ cmd, workdir }) => {
+          const result = await session.exec({
+            cmd,
+            shell: "/bin/sh",
+            ...(workdir ? { workdir } : {}),
+          });
+          return { stdout: result.stdout, exitCode: result.exitCode };
+        }
+      : null;
+  const ledgerWriter: SecretLedgerWriter | null = leakGuard
+    ? async (file) => {
+        await session.writePlacementPrivate({ ...file, createParents: true });
+      }
+    : null;
   try {
     if (op.kind === "exec") {
       const deadlineMs = session.effectiveExecDeadlineMs;
+      const refusal = await leakGuard?.check(op.cmd, guardRunner, op.workdir);
+      if (refusal) {
+        return {
+          target,
+          kind: "exec",
+          ok: false,
+          reason: refusal,
+          deadlineMs,
+        };
+      }
       // Resolve before dispatch (all-or-nothing); the machine adapter splices
       // in its own dialect from the in-memory carry. `op.cmd` keeps references.
       const prepared = await prepareSecretExec(op.cmd, {
-        resolver: machine.secretResolver,
+        resolver: secretResolver,
         dialect: null,
         use: secretUse,
         credentials: machine.credentials ?? null,
@@ -1300,6 +1346,8 @@ export async function executeRunOnSelfhostedMachine(
         if (!commandRetained && prepared?.carry && hasSecretFileReference(prepared.carry)) {
           await session.clearSecretFilesForAttempt().catch(() => undefined);
         }
+        // After the command, so the ledger write never delays or precedes it.
+        await leakGuard?.flush(ledgerWriter);
       }
       // Read after dispatch: the machine may add a delivery note to the same list.
       const profileNote = credentialProfileNoteText(prepared?.notes);
@@ -1362,10 +1410,11 @@ export async function executeRunOnSelfhostedMachine(
     const bytesWritten = await session.writeFile({
       path: op.path,
       content: await resolveSecretLiteralText(op.content, {
-        resolver: machine.secretResolver,
+        resolver: secretResolver,
         use: { ...secretUse, surface: "file_write" },
       }),
     });
+    await leakGuard?.flush(ledgerWriter);
     return { target, kind: "write", ok: true, bytesWritten };
   } catch (error) {
     // Nothing was dispatched. Let the MCP boundary preserve the canonical
@@ -1647,6 +1696,9 @@ export async function runOnSandbox(
         ? { transientExecEnvironment: options.transientExecEnvironment }
         : {}),
       ...(options.secretResolver ? { secretResolver: options.secretResolver } : {}),
+      ...(options.secretResolver
+        ? { secretLedgerKey: secretLedgerKeyFor(services.settings.delegationSecret) }
+        : {}),
       ...(options.credentials ? { credentials: options.credentials } : {}),
       ...(services.settings.agentOpStreamEnabled === true &&
       enrollment.opStream === true &&

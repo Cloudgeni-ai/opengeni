@@ -162,7 +162,7 @@ implementation: `packages/contracts/src/secret-references.ts`,
 | Connected machines | POSIX hosts use `/bin/sh`, Windows uses PowerShell; values travel in `ExecRequest.env`. `cmd.exe`, fish and unknown shells return `unsupported_shell`. No run credentials or tokens are copied onto machines. |
 | `run_on` | The gateway preserves references and escapes for the target delivery boundary. Exec uses the same shell splicing and per-command env/file delivery as `exec_command`, including `secretfile`; file writes resolve content once; reads resolve nothing. |
 | Credential profiles | Opt-in variables (for example `GH_TOKEN`) added to the environment of every `exec_command` and `run_on` exec, resolved per command through the same resolver. The command text is unchanged. See [Credential profiles](#credential-profiles). |
-| `write_stdin`, `apply_patch`, `view_image` | Resolved in the runtime wrapper; stored patches and inputs keep the reference. |
+| `write_stdin`, `apply_patch`, `view_image` | Resolved in the runtime wrapper; stored patches and inputs keep the reference. `apply_patch` resolves only added lines; context and removed lines are matched as written, with escapes removed, so a patch can edit a file that holds a literal reference. |
 | `{{secretfile:…}}` | Written to a 0600 file under an attempt-private directory in `/tmp/opengeni-private/secrets/` and replaced by its path; deletion is attempted at attempt end on the original recipient. An unavailable provider can leave the file behind, but cannot block turn completion. Use it for binary values and anything over 100 KiB. |
 | MCP connectors, Codex apps, Codemode `ogtool` | Arguments are resolved after approval and passed only to the executing call; the journal, approval and receipts keep the reference. `secretfile` is not allowed in ordinary tool arguments; Opengeni's `run_on` retains its exec delivery boundary through these callers. Inside a shell command, `ogtool call` arguments are command text: escape a reference there (`\{{secret:Item}}`) or the shell resolves it before the tool sees it. |
 | Opengeni's hand-off tools: sessions, messages, Steer, goals, schedules, task notes, Knowledge, instructions, Skills, artifacts, Sites data, notifications, and every Opengeni tool not named in the next row | Never resolved. The tool receives the reference text and stores or forwards it; the session, scheduled run or goal continuation that receives it resolves it only when it executes something (a shell command, `run_on`, browser typing, a connector call), under its own vault policy. A missing or malformed reference does not fail the call, and `secretfile` stays text. An escaped reference (`\{{secret:Item}}`) still arrives as `{{secret:Item}}`, so escaping here is optional. Opengeni tools added later are hand-off tools by default. Opengeni's built-in tools that send text to outside systems (Slack bot messages, X, Reddit and social replies, Fiken contacts and invoices, `web_fetch` URLs) are hand-off tools too: the recipient gets the reference text, never the value. |
@@ -189,6 +189,9 @@ into a turn that another person started resolves later under that turn's
 person, exactly as if it had been typed in that chat. Inside a shell command or
 a script, including `ogtool call`, the escape is still needed: the command or
 file write puts the value in before any tool runs. With the `secrets`
+capability on, the same escape keeps a reference as literal text in a file on
+every write path (shell redirects, `apply_patch`, `write_stdin` to an editor,
+`run_on` writes), for example in a README that documents one. With the `secrets`
 capability off for an agent, nothing resolves in that agent's tool calls and
 text passes unchanged, backslash included. A tool call nested in
 `admin_action_call` (`tools/invoke`, `tools/calls`) is resolved by the app
@@ -212,6 +215,39 @@ only while a command that references it runs. Scripts that read ambient
 variables should take them from a reference instead, for example
 `API_TOKEN={{secret:Stripe}} ./deploy.sh`, or from a credential profile when
 every command should have the variable.
+
+## Keeping values out of commits
+
+An agent once documented a harness by writing an unescaped reference into its
+README (15 November 2026): the file write resolved it, and the value was
+committed and pushed; GitHub push protection stopped it. Opengeni now refuses a
+`git commit` or `git push` that would carry a value it filled in for a
+reference earlier in the same sandbox.
+
+- Every value the resolver delivers into a sandbox (commands, stdin,
+  `apply_patch`, `run_on`) is recorded as a ledger entry: its length, a keyed
+  rolling hash and a keyed 128-bit HMAC, never the value. Values shorter than 8
+  characters are not tracked; each line of 16 or more characters of a
+  multi-line value (a PEM body) is tracked on its own. One-time codes and
+  binary `secretfile` values are not tracked. The key derives from the server's
+  delegation secret, so the ledger cannot be used to test guesses.
+- Entries are kept in memory for the attempt and in private files under
+  `/tmp/opengeni-private/secret-ledger/` in the sandbox, so later turns and
+  sessions sharing the sandbox see them. Attempt-end cleanup leaves them.
+- Before an `exec_command` or `run_on` exec whose command runs `git commit` or
+  `git push` (also after `cd` or with `-C`), one read-only helper prints what
+  git would take: staged changes; for `git add`, `commit -a` or pathspecs, the
+  tracked changes they would stage; for `git add`, untracked files that are not
+  ignored (up to 2 MiB each); for a push, the commits not on any remote. Every
+  added line is matched exactly against the ledger. A match returns "Nothing
+  was run:" with the file, line and commit, and how to write the reference
+  literally, amend a commit or ignore a local file. Nothing else is matched.
+- A value in a file that is not committed (an ignored `.env`, an untracked
+  file not being added) never blocks.
+
+Limits: git run inside a script or alias, connector or API pushes, and Windows
+machines are not checked; the scan stops at 8 MiB of diff; recreating the
+sandbox loses the ledger. If the helper fails, the command runs.
 
 ## Credential profiles
 
