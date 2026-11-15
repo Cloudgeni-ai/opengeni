@@ -595,6 +595,8 @@ describe("API Integration persistence", () => {
         ...base,
         subjectId,
         ownership: "subject",
+        // The earlier person let the change tool run without asking.
+        ...(revision === "1" ? { autoApprovedTools: ["update_item"] } : {}),
         revision: {
           ...base.revision,
           id: `openapi:${revision.repeat(24)}`,
@@ -618,9 +620,19 @@ describe("API Integration persistence", () => {
       return { ...installed, connectionId: connection.id, input: base };
     };
     const earlier = await personalInstall(earlierSubjectId, "1");
+    expect(
+      (await listInstalledApiIntegrations(client.db, first.workspaceId, earlierSubjectId))[0]!
+        .requireApproval,
+    ).toEqual([]);
     const later = await personalInstall(laterSubjectId, "2");
 
     expect(later.instanceId).not.toBe(earlier.instanceId);
+    // The changed tool asks the earlier person again, though the later
+    // person made the change.
+    expect(
+      (await listInstalledApiIntegrations(client.db, first.workspaceId, earlierSubjectId))[0]!
+        .requireApproval,
+    ).toEqual(["update_item"]);
     const expectInstances = async () => {
       for (const [subjectId, own] of [
         [earlierSubjectId, earlier],
@@ -657,6 +669,92 @@ describe("API Integration persistence", () => {
       }),
     ).rejects.toBeInstanceOf(IntegrationFacetBindingOwnershipConflictError);
     await expectInstances();
+  }, 60_000);
+
+  test("moving other people's instances to a new revision never narrows what they can reach", async () => {
+    if (!available || !client) return;
+    const suffix = crypto.randomUUID();
+    const key = `inventory-reach-${suffix.slice(0, 8)}`;
+    const install = async (
+      subjectId: string,
+      revision: InstallApiIntegrationInput["revision"],
+      choices: Partial<InstallApiIntegrationInput> = {},
+    ) => {
+      const connection = await createConnection(client!.db, {
+        accountId: first.accountId,
+        workspaceId: first.workspaceId,
+        subjectId,
+        providerDomain: "inventory.example.com",
+        kind: "api_key",
+        credentialEncrypted: "test-only-personal-encrypted-bundle",
+        grantedScopes: ["inventory.read", "inventory.write"],
+        createdBySubjectId: subjectId,
+      });
+      return await installApiIntegration(client!.db, {
+        ...integrationInput(connection.id, key),
+        subjectId,
+        ownership: "subject",
+        revision,
+        ...choices,
+      });
+    };
+    const base = integrationInput(undefined, key).revision;
+    if (base.protocol !== "openapi") throw new Error("The fixture is an OpenAPI revision");
+    // The newer revision drops update_item, adds archive_item and a generic
+    // change tool that reaches operations no other tool covers.
+    const newer: InstallApiIntegrationInput["revision"] = {
+      ...base,
+      id: `openapi:${"2".repeat(24)}`,
+      contentSha256: "2".repeat(64),
+      tools: [
+        base.tools[0]!,
+        { ...base.tools[1]!, id: "archive_item", operationKey: "archiveItem", name: "Archive" },
+        {
+          ...base.tools[1]!,
+          id: "call_change_operation",
+          operationKey: "callChangeOperation",
+          name: "Call API change operation",
+          safety: "destructive",
+        },
+      ],
+      bindings: {
+        list_items: base.bindings.list_items!,
+        archive_item: { ...base.bindings.update_item!, pathTemplate: "/items/{id}/archive" },
+        call_change_operation: {
+          method: "post",
+          pathTemplate: "/",
+          serverUrl: "https://inventory.example.com/v1/",
+          parameters: [],
+          genericPath: { role: "change" },
+        },
+      },
+    };
+    const everything = `user:api-integration-reach-all-${suffix}`;
+    const some = `user:api-integration-reach-some-${suffix}`;
+    const kept = `user:api-integration-reach-kept-${suffix}`;
+    const later = `user:api-integration-reach-later-${suffix}`;
+    await install(everything, base);
+    await install(some, base, { allowedTools: ["update_item"] });
+    await install(kept, base, { allowedTools: ["list_items"] });
+    await install(later, newer);
+
+    const allowed = async (subjectId: string) => {
+      const [instance] = await listInstalledApiIntegrations(
+        client!.db,
+        first.workspaceId,
+        subjectId,
+      );
+      expect(instance!.revision.id).toBe(newer.id);
+      return [...instance!.allowedTools].sort();
+    };
+    // Every tool before: every tool after.
+    expect(await allowed(everything)).toEqual(
+      ["archive_item", "call_change_operation", "list_items"].sort(),
+    );
+    // A chosen tool that was dropped stays reachable through the generic tool.
+    expect(await allowed(some)).toEqual(["call_change_operation"]);
+    // A choice the new revision keeps is left exactly as it was.
+    expect(await allowed(kept)).toEqual(["list_items"]);
   }, 60_000);
 
   test("keeps a victim personal instance unchanged across cross-subject rebind attempts", async () => {

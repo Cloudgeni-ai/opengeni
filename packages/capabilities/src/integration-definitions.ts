@@ -215,7 +215,7 @@ export const MICROSOFT_GRAPH_OPENAPI_URL =
   "https://raw.githubusercontent.com/microsoftgraph/msgraph-metadata/master/openapi/v1.0/openapi.yaml";
 /**
  * The reviewed Graph description the built-ins are compiled from. Update it
- * with scripts/integration-definitions/graph-pin.ts, which prints the
+ * with scripts/graph-openapi-pin.ts --diff, which prints the
  * operation changes each definition would see.
  */
 export const MICROSOFT_GRAPH_OPENAPI_PIN = {

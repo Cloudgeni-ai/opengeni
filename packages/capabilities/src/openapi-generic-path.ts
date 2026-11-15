@@ -35,6 +35,10 @@ const BLOCKED_HEADERS = new Set([
   "content-length",
   "connection",
   "transfer-encoding",
+  // A read call must stay a read where an API honours method overrides.
+  "x-http-method-override",
+  "x-http-method",
+  "x-method-override",
 ]);
 
 const queryProperty = {

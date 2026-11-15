@@ -198,6 +198,7 @@ describe("generic path tools", () => {
       { path: "me/messages" },
       { path: "/me//messages" },
       { path: "/me/mailFolders/inbox/messageRules", header: { Authorization: "Bearer x" } },
+      { path: "/me/messages/1", header: { "X-HTTP-Method-Override": "DELETE" } },
     ]) {
       await expect(call("call_read_operation", args)).rejects.toMatchObject({
         code: "parameter_invalid",

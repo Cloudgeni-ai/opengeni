@@ -2230,6 +2230,15 @@ async function migrateApiIntegrationFacetInstallations(
     )
     .for("update");
   const available = new Set(input.revision.tools.map((tool) => tool.id));
+  const previousTools = input.previousRevision?.tools.map((tool) => tool.id) ?? [];
+  // Tools that call operations no other tool covers (a reviewed definition's
+  // generic path tools). They keep a removed tool's operation reachable.
+  const genericTools = input.revision.tools
+    .map((tool) => tool.id)
+    .filter((id) => {
+      const binding = (input.revision.bindings as Record<string, { genericPath?: unknown }>)[id];
+      return binding?.genericPath !== undefined;
+    });
   for (const row of bindings) {
     const binding = row.binding;
     const targetFacet = input.facetDefinitions.get(row.facetKey);
@@ -2238,9 +2247,21 @@ async function migrateApiIntegrationFacetInstallations(
     }
     const config = objectValue(binding.config);
     const toolsConfig = row.facetKind === "tools";
-    const selected = toolsConfig
-      ? (stringArray(config.allowedTools) ?? []).filter((tool) => available.has(tool))
-      : [];
+    const previouslySelected = toolsConfig ? (stringArray(config.allowedTools) ?? []) : [];
+    const selected = !toolsConfig
+      ? []
+      : previousTools.length > 0 && previousTools.every((tool) => previouslySelected.includes(tool))
+        ? // An instance that had every tool keeps having every tool, so
+          // moving other people's instances never narrows them.
+          [...available]
+        : [
+            ...new Set([
+              ...previouslySelected.filter((tool) => available.has(tool)),
+              // A selected tool the new revision drops stays reachable
+              // through the generic tools, when the definition has them.
+              ...(previouslySelected.some((tool) => !available.has(tool)) ? genericTools : []),
+            ]),
+          ];
     const requireApproval = toolsConfig
       ? apiIntegrationRequiredApprovals({
           revision: input.revision,
