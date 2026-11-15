@@ -639,6 +639,7 @@ async function lockConnectionFinalizationMode(
   >,
 ) {
   await lockSessionEventWriteRows(db, {
+    rowProjection: "event",
     workspaceId: input.workspaceId,
     controlLock: "share",
     sessionIds: [input.sessionId],
@@ -1670,6 +1671,7 @@ export async function appendSessionRealtimeOutboundInTransaction(
 ): Promise<AppendSessionRealtimeOutboundResult> {
   assertConnectionEpoch(input.connectionEpoch);
   await lockSessionEventWriteRows(db, {
+    rowProjection: "event",
     workspaceId: input.workspaceId,
     controlLock: "share",
     sessionIds: [input.sessionId],

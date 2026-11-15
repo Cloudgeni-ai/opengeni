@@ -135,6 +135,7 @@ export async function recordConnectedCommandOutputConsumption(
   }
   await withSessionActivityRlsContext(db, input, async (tx) => {
     await lockSessionEventWriteRows(tx, {
+      rowProjection: "event",
       workspaceId: input.workspaceId,
       controlLock: "share",
       sessionIds: [input.sessionId],
@@ -237,6 +238,7 @@ export async function claimConnectedCommandOutputCollection(
 ): Promise<boolean> {
   return await withSessionActivityRlsContext(db, input, async (tx) => {
     await lockSessionEventWriteRows(tx, {
+      rowProjection: "event",
       workspaceId: input.workspaceId,
       controlLock: "share",
       sessionIds: [input.sessionId],
@@ -270,6 +272,7 @@ export async function returnConnectedCommandOutputCollection(
 ): Promise<void> {
   await withSessionActivityRlsContext(db, input, async (tx) => {
     await lockSessionEventWriteRows(tx, {
+      rowProjection: "event",
       workspaceId: input.workspaceId,
       controlLock: "share",
       sessionIds: [input.sessionId],
@@ -294,6 +297,7 @@ export async function recordConnectedCommandOutputRelease(
 ): Promise<boolean> {
   return await withSessionActivityRlsContext(db, input, async (tx) => {
     await lockSessionEventWriteRows(tx, {
+      rowProjection: "event",
       workspaceId: input.workspaceId,
       controlLock: "share",
       sessionIds: [input.sessionId],
@@ -395,6 +399,7 @@ async function settleConnectedCommandOutputClaim(
   const released = input.outcome === "not_retained";
   return await withSessionActivityRlsContext(db, input.claim, async (tx) => {
     await lockSessionEventWriteRows(tx, {
+      rowProjection: "event",
       workspaceId: input.claim.workspaceId,
       controlLock: "share",
       sessionIds: [input.claim.sessionId],
@@ -1715,6 +1720,7 @@ export async function observeSessionBackgroundCommandCompletion(
 ): Promise<SessionBackgroundCommand | null> {
   return await withSessionActivityRlsContext(db, input, async (tx) => {
     const locks = await lockSessionEventWriteRows(tx, {
+      rowProjection: "event",
       workspaceId: input.workspaceId,
       controlLock: "share",
       sessionIds: [input.sessionId],
@@ -2373,6 +2379,7 @@ export async function claimPendingBackgroundCommandResults(
   if (probe.length === 0) return [];
   return await withSessionActivityRlsContext(db, input, async (tx) => {
     const locks = await lockSessionEventWriteRows(tx, {
+      rowProjection: "event",
       workspaceId: input.workspaceId,
       controlLock: "share",
       sessionIds: [input.sessionId],
