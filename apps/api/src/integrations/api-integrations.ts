@@ -7,12 +7,15 @@ import {
   fetchGraphqlIntrospection,
   fetchIntegrationSourceDocument,
   filterOpenApiDocumentForDefinition,
+  genericPathScopeOperations,
   googleDiscoveryToOpenApi,
   integrationDefinitionById,
   integrationDefinitionReadOnlyOperations,
   parseOpenApiDocument,
+  IntegrationProtocolError,
   MAX_CURATED_INTEGRATION_SPEC_BYTES,
   type IntegrationCredentialResolver,
+  type IntegrationDefinition,
   type IntegrationInvocationAuthority,
   type IntegrationTransport,
   type OpenApiAuthDiscovery,
@@ -48,6 +51,8 @@ export async function resolveApiIntegrationPreview(input: {
   transport: IntegrationTransport;
   credentialResolver?: IntegrationCredentialResolver;
   authority: IntegrationInvocationAuthority;
+  /** Reviewed definitions by id; tests substitute their own. */
+  definitionLookup?: (definitionId: string) => IntegrationDefinition | undefined;
 }): Promise<ResolvedApiIntegrationPreview> {
   if (input.source.kind === "definition") {
     return await resolveDefinition(input);
@@ -86,23 +91,33 @@ async function resolveDefinition(
   input: Parameters<typeof resolveApiIntegrationPreview>[0],
 ): Promise<ResolvedApiIntegrationPreview> {
   if (input.source.kind !== "definition") throw new Error("Expected a provider definition source");
-  const definition = integrationDefinitionById(input.source.definitionId);
+  const definition = (input.definitionLookup ?? integrationDefinitionById)(
+    input.source.definitionId,
+  );
   if (!definition) throw new Error(`Unknown Integration definition: ${input.source.definitionId}`);
+  const pinned = definition.source.kind === "openapi" ? definition.source.pinned : undefined;
   const bytes = await fetchIntegrationSourceDocument(
     input.transport,
-    definition.source.url,
+    pinned?.url ?? definition.source.url,
     MAX_CURATED_INTEGRATION_SPEC_BYTES,
   );
+  if (pinned && createHash("sha256").update(bytes).digest("hex") !== pinned.sha256) {
+    // A reviewed document that changed is never compiled into tools.
+    throw new IntegrationProtocolError(
+      "integration_definition_pin_mismatch",
+      `${definition.name}'s reviewed API description did not match its pinned digest`,
+    );
+  }
   let document: Record<string, unknown>;
+  let genericPathOperations: ReturnType<typeof genericPathScopeOperations> = [];
   if (definition.source.kind === "google_discovery") {
     document = googleDiscoveryToOpenApi(JSON.parse(new TextDecoder().decode(bytes)));
   } else {
-    document = filterOpenApiDocumentForDefinition(
-      parseOpenApiDocument(bytes, {
-        maxBytes: MAX_CURATED_INTEGRATION_SPEC_BYTES,
-      }),
-      definition,
-    );
+    const full = parseOpenApiDocument(bytes, {
+      maxBytes: MAX_CURATED_INTEGRATION_SPEC_BYTES,
+    });
+    genericPathOperations = genericPathScopeOperations(full, definition);
+    document = filterOpenApiDocumentForDefinition(full, definition);
   }
   const identity = integrationInstallationIdentity("openapi", definition.id, definition.source.url);
   const revision = compileOpenApiRevision(document, {
@@ -114,6 +129,7 @@ async function resolveDefinition(
       ? { schemaMode: definition.source.schemaMode }
       : {}),
     readOnlyOperations: integrationDefinitionReadOnlyOperations(definition),
+    ...(genericPathOperations.length > 0 ? { genericPathOperations } : {}),
   });
   const baseUrl = firstOpenApiServerUrl(revision);
   const providerDomain = definition.provider.domain;

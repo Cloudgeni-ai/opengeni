@@ -556,6 +556,9 @@ export async function resolveForRoute(input: {
       source,
       connection: connectionDescriptor(connection),
       transport: input.transport,
+      ...(input.deps.apiIntegrationDefinitionLookup
+        ? { definitionLookup: input.deps.apiIntegrationDefinitionLookup }
+        : {}),
       authority: {
         accountId: connection?.accountId ?? "preview",
         workspaceId: input.workspaceId,

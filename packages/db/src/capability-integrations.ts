@@ -105,6 +105,16 @@ export type StoredOpenApiOperationBinding = {
   readonly requiredScopeAlternatives?: readonly (readonly string[])[];
   /** Reviewed Microsoft Search entity types a read-only search may request. */
   readonly searchEntityTypes?: readonly string[];
+  /** One of the generic find and call tools of a reviewed definition's path scope. */
+  readonly genericPath?: {
+    readonly role: "find" | "read" | "change";
+    readonly operations?: readonly {
+      readonly method: "get" | "put" | "post" | "delete" | "patch";
+      readonly path: string;
+      readonly summary?: string;
+      readonly scopes?: readonly (readonly string[])[];
+    }[];
+  };
 };
 
 export type StoredGraphqlOperationBinding = {

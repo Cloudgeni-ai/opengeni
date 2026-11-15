@@ -8,6 +8,7 @@ import {
   MICROSOFT_OUTLOOK_CONTACTS_INTEGRATION_DEFINITION,
   MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
   MICROSOFT_SHAREPOINT_INTEGRATION_DEFINITION,
+  integrationDefinitionById,
 } from "@opengeni/capabilities";
 import type { Settings } from "@opengeni/config";
 import {
@@ -182,17 +183,18 @@ function providerFixture() {
         info: { title: sourceTitle, version: "1" },
         servers: [{ url: "https://graph.microsoft.com/v1.0" }],
         paths: {
-          "/me/drive/root/children": {
+          "/drives/{drive-id}/items/{driveItem-id}/children": {
             get: { operationId: "listFiles", responses: { "200": { description: "Files" } } },
           },
           "/me/joinedTeams": {
             get: { operationId: "listJoinedTeams", responses: { "200": { description: "Teams" } } },
           },
-          "/me/drive/items/{itemId}": {
+          "/drives/{drive-id}/items/{driveItem-id}": {
             get: {
               operationId: "getFile",
               parameters: [
-                { name: "itemId", in: "path", required: true, schema: { type: "string" } },
+                { name: "drive-id", in: "path", required: true, schema: { type: "string" } },
+                { name: "driveItem-id", in: "path", required: true, schema: { type: "string" } },
               ],
               responses: { "200": { description: "File" } },
             },
@@ -271,6 +273,13 @@ function testApp(fixture: ReturnType<typeof providerFixture>) {
     managedAuth: null,
     apiIntegrationOAuthFetch: fixture.fetch,
     apiIntegrationSourceFetch: fixture.fetch,
+    // The fixture serves a changing document at each definition's own source URL.
+    apiIntegrationDefinitionLookup: (definitionId: string) => {
+      const definition = integrationDefinitionById(definitionId);
+      if (definition?.source.kind !== "openapi") return definition;
+      const { pinned: _pinned, ...source } = definition.source;
+      return { ...definition, source };
+    },
   } as never);
 }
 
@@ -678,7 +687,9 @@ describe("API Integration provider OAuth", () => {
     expect(previewResponse.status).toBe(200);
     const preview = await previewResponse.json();
     expect(preview.state).toBe("preview");
-    expect(preview.nextAction.operations).toHaveLength(2);
+    // The fixture backs three reviewed tools (its item read also backs the read
+    // by path), and the definition adds its three generic path tools.
+    expect(preview.nextAction.operations).toHaveLength(6);
     const installInput = {
       expectedRevision: 3,
       idempotencyKey: crypto.randomUUID(),
@@ -1484,7 +1495,7 @@ describe("API Integration provider OAuth", () => {
       connectionRef: { connectionId: current.account.id },
     });
     // Every reviewed tool, exactly as the app's automatic install chose.
-    expect(installed!.allowedTools).toHaveLength(2);
+    expect(installed!.allowedTools).toHaveLength(6);
     // Nothing is pending for the app to resume.
     const pending = await (await app.request(base, { headers })).json();
     expect(JSON.stringify(pending)).not.toContain(attempt.id);
@@ -1670,7 +1681,7 @@ describe("API Integration provider OAuth", () => {
       definitionId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
       connectionRef: { connectionId: completed[0].account.id },
     });
-    expect(installed!.allowedTools).toHaveLength(2);
+    expect(installed!.allowedTools).toHaveLength(6);
     // Opening it again finds nothing left to do.
     expect(await (await finish()).json()).toEqual([]);
   }, 60_000);

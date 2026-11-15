@@ -21,8 +21,8 @@ test("Contacts and OneDrive request delegated scopes supported by personal accou
   const filtered = filterOpenApiDocumentForDefinition(
     {
       paths: {
-        "/me/drive": {},
-        "/me/followedSites": {},
+        "/me/drive": { get: {} },
+        "/me/followedSites": { get: {} },
         "/me/followedSites/{id}": {},
       },
     },
