@@ -700,7 +700,8 @@ export const CASES: readonly EvalCase[] = [
     id: "outlook_calendar.read.account",
     integration: "outlook_calendar",
     kind: "read",
-    prompt: "Whose Microsoft account is my own Outlook Calendar connection signed in as? Give the email address.",
+    prompt:
+      "Whose Microsoft account is my own Outlook Calendar connection signed in as? Give the email address.",
     expectAnswer: [i("iris\\.tenley@opengenitest2026")],
   },
 
@@ -712,7 +713,8 @@ export const CASES: readonly EvalCase[] = [
     id: "outlook_contacts.read.phone",
     integration: "outlook_contacts",
     kind: "read",
-    prompt: "What's Ada Quill's mobile number in my Outlook contacts, and which company is she with?",
+    prompt:
+      "What's Ada Quill's mobile number in my Outlook contacts, and which company is she with?",
     expectAnswer: [i("400 ?12 ?345"), i("bluefin")],
   },
   {

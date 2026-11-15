@@ -69,7 +69,10 @@ const need = (env: Env, ...names: string[]): string | null => {
 type Checked = { detail: string; problems: string[]; count: number };
 
 /** Like `poll`, but a found object can still be wrong; the last wrong find is reported. */
-async function pollChecked(find: () => Promise<Checked | null>, what: string): Promise<Verification> {
+async function pollChecked(
+  find: () => Promise<Checked | null>,
+  what: string,
+): Promise<Verification> {
   let lastError = "";
   let wrong: Checked | null = null;
   for (let attempt = 0; attempt < 4; attempt += 1) {
@@ -98,7 +101,11 @@ async function pollChecked(find: () => Promise<Checked | null>, what: string): P
     : { ran: true, ok: false, detail: `${what} not found` };
 }
 
-const GRAPH_ENV = ["VERIFY_GRAPH_TENANT_ID", "VERIFY_GRAPH_CLIENT_ID", "VERIFY_GRAPH_CLIENT_SECRET"];
+const GRAPH_ENV = [
+  "VERIFY_GRAPH_TENANT_ID",
+  "VERIFY_GRAPH_CLIENT_ID",
+  "VERIFY_GRAPH_CLIENT_SECRET",
+];
 const graphTokens = new Map<string, { token: string; expires: number }>();
 
 async function graphToken(env: Env): Promise<string> {
@@ -140,10 +147,13 @@ async function graphText(env: Env, path: string): Promise<string> {
   return response.text();
 }
 
-const user = (env: Env, name = "VERIFY_GRAPH_USER") =>
-  `/users/${encodeURIComponent(env[name]!)}`;
+const user = (env: Env, name = "VERIFY_GRAPH_USER") => `/users/${encodeURIComponent(env[name]!)}`;
 const plain = (html: string | undefined) =>
-  (html ?? "").replace(/<[^>]*>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
+  (html ?? "")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 const addresses = (list: { emailAddress?: { address?: string } }[] | undefined) =>
   (list ?? []).map((entry) => (entry.emailAddress?.address ?? "").toLowerCase());
 
@@ -190,13 +200,19 @@ async function checkDriveFile(
     );
     matches = (anywhere.value ?? []).filter((item) => item.name.includes(run));
     if (matches.length === 0) return null;
-    problems.push(`saved in ${matches[0]!.parentReference?.path ?? "another folder"}, not ${folder}`);
+    problems.push(
+      `saved in ${matches[0]!.parentReference?.path ?? "another folder"}, not ${folder}`,
+    );
   }
   const item = matches[0]!;
   if (!/\.txt$/i.test(item.name)) problems.push(`named ${item.name}`);
   const text = await graphText(env, `${drive}/items/${item.id}/content`);
   if (!text.includes(content)) problems.push(`content is "${text.slice(0, 80)}"`);
-  return { detail: `${item.parentReference?.path ?? ""}/${item.name}`, problems, count: matches.length };
+  return {
+    detail: `${item.parentReference?.path ?? ""}/${item.name}`,
+    problems,
+    count: matches.length,
+  };
 }
 
 const VERIFIERS: Record<string, Verifier> = {
@@ -224,7 +240,11 @@ const VERIFIERS: Record<string, Verifier> = {
       if (!inbox.some((received) => (received.subject ?? "").includes(run))) {
         problems.push("not yet in the recipient's inbox");
       }
-      return { detail: `sent "${message.subject}" to ${to.join(", ")}`, problems, count: sent.length };
+      return {
+        detail: `sent "${message.subject}" to ${to.join(", ")}`,
+        problems,
+        count: sent.length,
+      };
     }, "sent Outlook message");
   },
 
@@ -251,12 +271,18 @@ const VERIFIERS: Record<string, Verifier> = {
         (message.subject ?? "").includes(run),
       );
       const message = drafts[0];
-      if (!message) return sent.length > 0
-        ? { detail: "sent instead of drafted", problems: ["the message was sent"], count: sent.length }
-        : null;
+      if (!message)
+        return sent.length > 0
+          ? {
+              detail: "sent instead of drafted",
+              problems: ["the message was sent"],
+              count: sent.length,
+            }
+          : null;
       const problems: string[] = [];
       const to = addresses(message.toRecipients);
-      if (to.length !== 1 || to[0] !== "ravi.tern@example.com") problems.push(`to ${to.join(", ") || "nobody"}`);
+      if (to.length !== 1 || to[0] !== "ravi.tern@example.com")
+        problems.push(`to ${to.join(", ") || "nobody"}`);
       if (!plain(message.body?.content).includes("Drill notes received")) {
         problems.push(`body is "${plain(message.body?.content).slice(0, 80)}"`);
       }
@@ -293,7 +319,11 @@ const VERIFIERS: Record<string, Verifier> = {
       if (!attendees.includes(env.VERIFY_GRAPH_RECIPIENT!.toLowerCase())) {
         problems.push(`attendees ${attendees.join(", ") || "none"}`);
       }
-      return { detail: `event "${event.subject}" ${start}-${end} UTC`, problems, count: events.length };
+      return {
+        detail: `event "${event.subject}" ${start}-${end} UTC`,
+        problems,
+        count: events.length,
+      };
     }, "Outlook event");
   },
 
@@ -320,9 +350,13 @@ const VERIFIERS: Record<string, Verifier> = {
       const contact = contacts[0];
       if (!contact) return null;
       const problems: string[] = [];
-      const emails = (contact.emailAddresses ?? []).map((entry) => (entry.address ?? "").toLowerCase());
-      if (!emails.includes("halcyon.eval@bluefin.example")) problems.push(`email ${emails.join(", ") || "none"}`);
-      if ((contact.companyName ?? "") !== "Bluefin Logistics") problems.push(`company ${contact.companyName ?? "none"}`);
+      const emails = (contact.emailAddresses ?? []).map((entry) =>
+        (entry.address ?? "").toLowerCase(),
+      );
+      if (!emails.includes("halcyon.eval@bluefin.example"))
+        problems.push(`email ${emails.join(", ") || "none"}`);
+      if ((contact.companyName ?? "") !== "Bluefin Logistics")
+        problems.push(`company ${contact.companyName ?? "none"}`);
       return { detail: `contact "${contact.displayName}"`, problems, count: contacts.length };
     }, "Outlook contact");
   },
