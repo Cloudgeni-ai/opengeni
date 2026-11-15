@@ -115,6 +115,9 @@ export interface FakeOpScript {
   live?: boolean;
   /** Keep a live op RUNNING with no frames until OpCancel is received. */
   holdUntilCancel?: boolean;
+  /** The op is still RUNNING and has already produced every scripted data
+   *  frame, which the runner retains: an attach replays them, never the exit. */
+  runningRetained?: boolean;
   /** Seqs whose LIVE emission is dropped (retention keeps them). */
   dropLiveSeqs?: ReadonlySet<number>;
   /** Seqs whose LIVE emission is duplicated (delivered twice back-to-back). */
@@ -363,6 +366,17 @@ export class FakeOpRunner implements ControlRpc {
       run.highestGeneration = attachGeneration;
     }
     const subject = opFrameSubject(this.workspaceId, this.agentId, opId, run.connectionInstanceId);
+    if (run.script.runningRetained) {
+      const retained = run.frames.filter(
+        (frame) => BigInt(frame.seq) > fromSeq && BigInt(frame.seq) < run.exitSeq,
+      );
+      queueMicrotask(() => {
+        for (const frame of retained) {
+          this.transport.deliver(subject, OpFrame.encode(frame).finish());
+        }
+      });
+      return statusOnly(requestId, this.statusOf(opId, run));
+    }
     if (run.script.live && !run.liveEmitted) {
       // First attach on a live op: nothing retained yet worth replaying — the
       // child "runs now" and the (faulty) live flow begins.
@@ -497,6 +511,15 @@ export class FakeOpRunner implements ControlRpc {
   }
 
   private statusOf(opId: string, run: FakeOpRun): OpStatus {
+    if (run.script.runningRetained)
+      return {
+        opId,
+        state: OpState.OP_STATE_RUNNING,
+        nextSeq: run.exitSeq.toString(),
+        writeOffset: "0",
+        exit: undefined,
+        lostReason: OpLostReason.OP_LOST_REASON_UNSPECIFIED,
+      };
     // The fake's ops are instant: COMPLETE the moment their frames exist. A
     // live op that has not yet emitted reads RUNNING with nothing produced;
     // once emission ran (even if the wire dropped frames), the runner-side

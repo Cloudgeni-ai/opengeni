@@ -9,7 +9,11 @@ import {
   settleClaimedConnectedMachineBackgroundCommand,
   type DbClient,
 } from "../src";
-import { appendSessionCommandOutput } from "../src/session-command-output";
+import {
+  appendSessionCommandOutput,
+  appendSessionCommandOutputs,
+  createConnectedCommandOutputCapture,
+} from "../src/session-command-output";
 import {
   readSessionBackgroundCommandOutput,
   recordConnectedMachineBackgroundCommandProof,
@@ -415,6 +419,33 @@ test("a replay that changes a captured part is rejected without inserting anythi
   const [count] =
     await shared.admin`select count(*)::int as n from session_events where session_id=${sessionId} and type='sandbox.command.output.delta' and payload->>'commandId'=${identity.commandId}`;
   expect(count!.n).toBe(1);
+});
+
+test("a replay stores many frames a batch at a time, and a later replay of the same frames adds only what is new", async () => {
+  const identity = await connected();
+  const capture = createConnectedCommandOutputCapture(client.db, identity);
+  const frames = (from: number, to: number) =>
+    Array.from({ length: to - from + 1 }, (_, index) => ({
+      sequence: String(from + index),
+      stream: (index % 3 === 0 ? "stderr" : "stdout") as "stdout" | "stderr",
+      chunk: `line ${from + index}\n`,
+    }));
+  // An earlier collector stored a prefix before its claim ended.
+  await capture(identity.commandId, frames(1, 300));
+  // The next one replays from the start and reaches the exit.
+  await capture(identity.commandId, frames(1, 700));
+  const rows =
+    await shared.admin`select sequence, payload->>'chunk' as chunk, payload->>'stream' as stream from session_events where session_id=${sessionId} and type='sandbox.command.output.delta' and payload->>'commandId'=${identity.commandId} order by sequence`;
+  expect(rows.map((row) => row.chunk)).toEqual(frames(1, 700).map((frame) => frame.chunk));
+  expect(rows.map((row) => row.stream)).toEqual(frames(1, 700).map((frame) => frame.stream));
+  // A batch belongs to one command.
+  const other = await connected();
+  await expect(
+    appendSessionCommandOutputs(client.db, [
+      { ...identity, chunkId: "op-frame:701", stream: "stdout", chunk: "x" },
+      { ...other, chunkId: "op-frame:1", stream: "stdout", chunk: "y" },
+    ]),
+  ).rejects.toThrow("belongs to one command");
 });
 
 test("a head-and-tail read returns the start and end of large output, and paging still visits every byte", async () => {

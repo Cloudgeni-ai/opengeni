@@ -1228,6 +1228,20 @@ affects future operations only. A connection blip detaches the stream without
 killing the command; replay or exact-instance reconciliation collects its
 terminal result after reconnect.
 
+**Background commands survive machine switches.** A command the session has
+adopted keeps running on the machine that started it when the session switches
+to another machine, switches back, or starts a later turn; only Stop, Pause and
+terminal Cancel end it. Its output stays readable from the session throughout:
+`command_read` and `command_wait` in any later attempt read it from the machine
+the command's ledger names (its frozen enrollment, connection instance and op
+ID), never from the session's current machine, and the reconciler's looks at a
+running command do the same. Each look follows its attachment until it holds
+everything the runner had retained when it attached, so it stores the output
+produced since the previous one, and it never wakes a sleeping sandbox. Its
+terminal status is always reconciled the same way: the pushed exit, or the
+reconciler's query, settles it `exited` with its exit code once its output is
+stored, or `lost` when the runner no longer has it.
+
 The runner pushes an `OperationCompleted` event after exit and pipe drain,
 independently of the output consumer and its credit. API ingestion uses the
 authenticated control-workspace/enrollment/connection subject and operation ID
@@ -1250,8 +1264,13 @@ Completion collectors have independent ingestion capacity, so even a saturated
 collection queue cannot delay machine heartbeats. A collector follows one output attachment
 until the exit frame arrives, however slowly the link delivers it, and yields to
 reconciliation before its existing claim lease expires; attaching again would
-only queue the same frames once more behind those in flight. This never cancels
-or time-limits the command. A failed collection logs a closed `reason` code
+only queue the same frames once more behind those in flight. The runner's output
+lane never drops a frame for want of room: when it is full, the operation holds
+its next frame and sends it once the lane drains, so a replay of a large retained
+backlog arrives whole and at the lane's speed. A collector stores the replayed
+frames a batch per transaction, and frames an earlier collector already stored
+cost only an existence check, so each retry gets further than the one before.
+This never cancels or time-limits the command. A failed collection logs a closed `reason` code
 (`claim_deadline`, `exit_frontier_not_reached`, `control_<code>`,
 `database_<sqlstate>`, …), since telemetry does not export error text.
 
