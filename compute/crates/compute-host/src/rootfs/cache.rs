@@ -5,6 +5,8 @@
 //!   <id>.ext4                   an image, whole and checked against its id
 //!   <id>.ext4.fetching.<n>      one being fetched; removed on start
 //!   used/<id>                   modified when a create last used the image
+//!   checked/<id>                which file of the image was found to match
+//!                               its id: device, inode, length, modified time
 //! ```
 //!
 //! A create that names an image the host does not have fetches it from the
@@ -22,9 +24,17 @@
 //! The cache keeps a share of the state root's ownership, and so does every
 //! piece of its work in flight, blocking work included: a fetch or removal
 //! an agent started ends before a successor takes the root. A successor
-//! still trusts no file by its name alone: an image an earlier agent left
-//! is checked against its id the first time a create wants it, and removed
-//! (then fetched again) if it does not match.
+//! still trusts no file by its name alone. An image found to match its id
+//! (fetched and checked, built here, or checked after a restart) is synced
+//! and then stamped with its file's identity (device, inode, length,
+//! modified time), the same identity fetching a disk over it trusts. A
+//! successor takes an image whose file still has its stamp's identity as
+//! checked; any other image an earlier agent left (unstamped, or a file
+//! that changed or was replaced since) is checked against its id the first
+//! time a create wants it, and removed (then fetched again) if it does not
+//! match. Checking hashes the whole file, holes included: a 64 GiB image
+//! took a create 15 to 33 seconds the first time after each restart, so
+//! the stamp spares every restart that.
 //!
 //! An image's file is never written once it is in place, not even its
 //! times: fetching a disk over it trusts chunk hashes of the file taken
@@ -61,6 +71,8 @@ const SUFFIX: &str = ".ext4";
 const FETCHING: &str = ".ext4.fetching";
 /// The directory of the use marks.
 const USED: &str = "used";
+/// The directory of the stamps of images found to match their ids.
+const CHECKED: &str = "checked";
 
 /// Why an image could not be had.
 #[derive(Debug, thiserror::Error)]
@@ -115,7 +127,7 @@ impl Cache {
     /// marks of images it no longer has. Blocks.
     pub fn open(dir: PathBuf, unused_after: Duration, owner: Ownership) -> io::Result<Self> {
         fs::create_dir_all(&dir)?;
-        let mut recovered = HashSet::new();
+        let mut found = HashSet::new();
         for entry in fs::read_dir(&dir)? {
             let entry = entry?;
             let name = entry.file_name();
@@ -126,29 +138,39 @@ impl Cache {
                 .strip_suffix(SUFFIX)
                 .and_then(|id| id.parse::<ImageId>().ok())
             {
-                recovered.insert(image);
+                found.insert(image);
             }
         }
-        match fs::read_dir(dir.join(USED)) {
-            Ok(marks) => {
-                for entry in marks {
-                    let entry = entry?;
-                    let kept = entry
-                        .file_name()
-                        .to_str()
-                        .and_then(|name| name.parse::<ImageId>().ok())
-                        .is_some_and(|image| recovered.contains(&image));
-                    if !kept {
-                        remove_if_present(&entry.path())?;
+        // Marks and stamps of images no longer here are removed.
+        for marks in [USED, CHECKED] {
+            match fs::read_dir(dir.join(marks)) {
+                Ok(entries) => {
+                    for entry in entries {
+                        let entry = entry?;
+                        let kept = entry
+                            .file_name()
+                            .to_str()
+                            .and_then(|name| name.parse::<ImageId>().ok())
+                            .is_some_and(|image| found.contains(&image));
+                        if !kept {
+                            remove_if_present(&entry.path())?;
+                        }
                     }
                 }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
         }
+        // One whose file is the one its stamp names needs no check.
+        let (present, recovered): (HashSet<ImageId>, HashSet<ImageId>) =
+            found.into_iter().partition(|image| {
+                let path = dir.join(format!("{image}{SUFFIX}"));
+                let stamp = dir.join(CHECKED).join(image.to_string());
+                stamped(&path, &stamp)
+            });
         Ok(Self {
             dir,
-            present: Mutex::default(),
+            present: Mutex::new(present),
             recovered: Mutex::new(recovered),
             locks: Mutex::default(),
             unused_after,
@@ -195,6 +217,8 @@ impl Cache {
             return;
         }
         let path = self.path(image);
+        let stamp = self.stamp(image);
+        let started = std::time::Instant::now();
         let checked = self
             .blocking(move || {
                 let mut hasher = blake3::Hasher::new();
@@ -203,21 +227,27 @@ impl Cache {
                     fs::File::open(&path)?,
                 ))?;
                 let matches = *hasher.finalize().as_bytes() == image.0;
-                if !matches {
+                if matches {
+                    stamp_checked(&path, &stamp);
+                } else {
                     remove_if_present(&path)?;
                 }
                 Ok(matches)
             })
             .await;
+        let took_ms = started.elapsed().as_millis();
         match checked {
             Ok(true) => {
+                tracing::info!(%image, took_ms, "checked a kept image against its id");
                 self.present
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .insert(image);
             }
-            Ok(false) => tracing::warn!(%image, "a kept image did not match its id; removed"),
-            Err(error) => tracing::warn!(%image, %error, "could not check a kept image"),
+            Ok(false) => {
+                tracing::warn!(%image, took_ms, "a kept image did not match its id; removed");
+            }
+            Err(error) => tracing::warn!(%image, %error, took_ms, "could not check a kept image"),
         }
         self.recovered
             .lock()
@@ -241,6 +271,11 @@ impl Cache {
     /// The use mark of `image`.
     fn mark(&self, image: ImageId) -> PathBuf {
         self.dir.join(USED).join(image.to_string())
+    }
+
+    /// The stamp of `image`'s file checked against its id.
+    fn stamp(&self, image: ImageId) -> PathBuf {
+        self.dir.join(CHECKED).join(image.to_string())
     }
 
     /// Whether the host has `image`, checked, without waiting for
@@ -304,6 +339,7 @@ impl Cache {
         };
         if fetching.is_some() && !self.has(image) {
             let staging = self.staging(image);
+            let stamp = self.stamp(image);
             // Kept until the fetch's last write: the store writes into the
             // staging file.
             let owner = self.owner.clone();
@@ -320,7 +356,10 @@ impl Cache {
                     move || {
                         if found {
                             fs::rename(&staging, &path)?;
-                            sync_parent(&path)
+                            sync_parent(&path)?;
+                            // The fetch checked it against its id.
+                            stamp_checked(&path, &stamp);
+                            Ok(())
                         } else {
                             remove_if_present(&staging)
                         }
@@ -358,6 +397,7 @@ impl Cache {
         let work = self.locks(image).work;
         let _work = work.lock().await;
         let kept = self.path(image);
+        let stamp = self.stamp(image);
         let have = self.has(image);
         let from = path.to_owned();
         self.blocking({
@@ -368,7 +408,10 @@ impl Cache {
                 }
                 fs::File::open(&from)?.sync_all()?;
                 fs::rename(&from, &kept)?;
-                sync_parent(&kept)
+                sync_parent(&kept)?;
+                // Its id was taken from it.
+                stamp_checked(&kept, &stamp);
+                Ok(())
             }
         })
         .await?;
@@ -474,7 +517,7 @@ impl Cache {
         let Ok(_lock) = self.locks(image).file.try_write_owned() else {
             return false;
         };
-        let (path, mark) = (self.path(image), self.mark(image));
+        let (path, mark, stamp) = (self.path(image), self.mark(image), self.stamp(image));
         let used = self
             .blocking({
                 let (path, mark) = (path.clone(), mark.clone());
@@ -492,12 +535,13 @@ impl Cache {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&image);
-        // A mark left behind if this stops between the two is removed
-        // when the next agent opens the cache.
+        // A mark or stamp left behind if this stops between them is
+        // removed when the next agent opens the cache.
         match self
             .blocking(move || {
                 remove_if_present(&path)?;
-                remove_if_present(&mark)
+                remove_if_present(&mark)?;
+                remove_if_present(&stamp)
             })
             .await
         {
@@ -518,6 +562,53 @@ fn last_used(path: &Path, mark: &Path) -> io::Result<SystemTime> {
         Ok(marked) => marked.modified(),
         Err(error) if error.kind() == io::ErrorKind::NotFound => fs::metadata(path)?.modified(),
         Err(error) => Err(error),
+    }
+}
+
+/// What a stamp says of an image's file: its device, inode, length and
+/// modified time in nanoseconds, as one line. `None` if it cannot be read.
+fn identity(path: &Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt as _;
+    let metadata = fs::metadata(path).ok()?;
+    let modified = metadata
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some(format!(
+        "{} {} {} {modified}\n",
+        metadata.dev(),
+        metadata.ino(),
+        metadata.len()
+    ))
+}
+
+/// Whether the file at `path` is the one `stamp` says was found to match
+/// its id. Blocks.
+fn stamped(path: &Path, stamp: &Path) -> bool {
+    match (fs::read_to_string(stamp), identity(path)) {
+        (Ok(stamped), Some(now)) => stamped == now,
+        _ => false,
+    }
+}
+
+/// Stamps the image file at `path`, just found to match its id, once it is
+/// synced, so a later agent takes it as checked while it is the same file.
+/// Best effort: an image without a stamp is only checked again. Blocks.
+fn stamp_checked(path: &Path, stamp: &Path) {
+    let stamped = (|| {
+        // The stamp vouches for what the file holds: that must outlast a
+        // crash first.
+        fs::File::open(path)?.sync_all()?;
+        let line = identity(path).ok_or_else(|| io::Error::other("its file has no identity"))?;
+        if let Some(dir) = stamp.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        fs::write(stamp, line)
+    })();
+    if let Err(error) = stamped {
+        tracing::warn!(path = %path.display(), %error, "could not stamp a checked image");
     }
 }
 
