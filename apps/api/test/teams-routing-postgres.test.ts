@@ -587,6 +587,10 @@ test("an agent anyone in the organization may use answers a non-member as itself
 
   expect(await f.say("Auditor: check the books")).toEqual([]);
   await f.pump();
+  // Addressed once: the chat's choice is unchanged (there was none).
+  expect(
+    await shared.admin`select 1 from teams_bot_chat_choices where account_id=${f.accountId} and subject_id=${f.subject}`,
+  ).toHaveLength(0);
   const session = await f.latestSession();
   expect(session.workspace_id).toBe(f.finance);
   expect(session.session_workspace_id).toBe(f.finance);
@@ -610,8 +614,8 @@ test("an agent anyone in the organization may use answers a non-member as itself
   await f.answer(session, "Books checked");
   await f.pump();
   expect(f.delivered.at(-1)).toBe("**Auditor** · Finance\n\nBooks checked");
-  // The agent is now the chat's choice: a follow-up continues the same chat, without the notice again.
-  expect(await f.say("And the ledger?")).toEqual([]);
+  // Asking it again continues the same chat, without the notice again.
+  expect(await f.say("Auditor: and the ledger?")).toEqual([]);
   await f.pump();
   expect((await f.latestSession()).session_id).toBe(session.session_id);
   expect(f.delivered.filter((text) => text.includes(notice))).toHaveLength(1);
@@ -741,6 +745,12 @@ test("feedback on a routed 1:1 reply is recorded in its chat's workspace, as its
   await f.answer(research, "Study plan");
   await f.pump();
   expect(await f.rate("Study plan")).toContain("feedback_recorded");
+  expect(
+    (
+      await shared.admin`select count(*)::int as n from feedback_submissions
+        where account_id=${f.accountId} and diagnostics ? 'onBehalfOf'`
+    )[0]!.n,
+  ).toBe(0);
   expect(await f.feedbackRows()).toEqual([
     {
       workspace_id: f.personal,
@@ -801,6 +811,11 @@ test("feedback on an organization agent's reply is recorded on its chat, as the 
       sentiment: "negative",
     },
   ]);
+  // Recorded as the agent, for the person who rated it.
+  const [diagnostics] = await shared.admin<{ on_behalf_of: string | null }[]>`
+    select diagnostics->'onBehalfOf'->>'subjectId' as on_behalf_of
+    from feedback_submissions where session_id=${session.session_id}`;
+  expect(diagnostics!.on_behalf_of).toBe(f.subject);
   // The asker leaving the organization stops it.
   await shared.admin`update organization_memberships set status='suspended' where account_id=${f.accountId} and subject_id=${f.subject}`;
   expect(await f.rate("Books checked")).toContain("feedback_actor_unlinked");
@@ -903,4 +918,71 @@ test("feedback in a channel keeps the installation's rules with routing on", asy
     "feedback_actor_unlinked",
   );
   expect((await f.feedbackRows()).map((row) => row.subject_id)).toEqual([f.subject, otherSubject]);
+});
+
+test("an agent addressed by name answers that one message and leaves the chat's choice", async () => {
+  const f = await fixture();
+  const planner = await f.agent(f.research, "Planner");
+  expect(await f.say("switch Home")).toEqual([
+    "Now using **Home**. New messages start work there. Send **switch** to change.",
+  ]);
+  const choice = async () =>
+    (
+      await shared.admin<{ workspace_id: string; agent_id: string | null }[]>`
+        select target_workspace_id::text as workspace_id, agent_id::text as agent_id
+        from teams_bot_chat_choices where account_id=${f.accountId} and subject_id=${f.subject}`
+    ).at(0);
+  const before = await choice();
+  expect(before).toEqual({ workspace_id: f.home, agent_id: null });
+
+  expect(await f.say("Planner: draft the roadmap")).toEqual([]);
+  await f.pump();
+  const agentChat = await f.latestSession();
+  expect(agentChat.agent_id).toBe(planner);
+  await f.answer(agentChat, "Roadmap drafted");
+  await f.pump();
+  expect(f.delivered.at(-1)).toBe("**Planner** · Research\n\nRoadmap drafted");
+  expect(await choice()).toEqual(before);
+  // Asking again continues the chat with that agent.
+  await f.say("+planner add milestones");
+  await f.pump();
+  expect((await f.latestSession()).session_id).toBe(agentChat.session_id);
+  expect(await choice()).toEqual(before);
+
+  // The next plain message goes to the chat's choice, not the agent.
+  await f.say("Plain question");
+  await f.pump();
+  const plain = await f.latestSession();
+  expect(plain.workspace_id).toBe(f.home);
+  expect(plain.agent_id).toBeNull();
+  // The switch card still names the choice.
+  await f.say("switch");
+  const card = f.calls.at(-1)!.text as string;
+  expect(card).toStartWith("This chat uses **Home**.");
+  expect(card).not.toContain("**Planner** in");
+  // A name on its own explains rather than switching.
+  for (const text of ["Planner", "+planner"])
+    expect(await f.say(text)).toEqual([
+      "To ask **Planner**, start your message with **Planner:**. To use it for every new message, send **switch Planner**.",
+    ]);
+  expect(await f.say("Opengeni")).toEqual([
+    "To ask the main assistant, start your message with **Opengeni:**. Send **switch** to choose what this chat uses.",
+  ]);
+  expect(await choice()).toEqual(before);
+  // Only switch changes it.
+  expect(await f.say("switch Planner")).toEqual([
+    "Now using **Planner** in **Research**. New messages go to this agent. Send **switch** to change.",
+  ]);
+  expect(await choice()).toEqual({ workspace_id: f.research, agent_id: planner });
+  // The main assistant, addressed once, answers in the chat's workspace and
+  // leaves the agent as the choice.
+  await f.say("Opengeni: summarize");
+  await f.pump();
+  const main = await f.latestSession();
+  expect(main.workspace_id).toBe(f.research);
+  expect(main.agent_id).toBeNull();
+  await f.answer(main, "Summary");
+  await f.pump();
+  expect(f.delivered.at(-1)).toEndWith("**Research**\n\nSummary");
+  expect(await choice()).toEqual({ workspace_id: f.research, agent_id: planner });
 });
