@@ -1,3 +1,4 @@
+import { NangoClient } from "@opengeni/capabilities";
 import { environmentsEncryptionKeyBytes } from "@opengeni/config";
 import type { ConnectionMetadata } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
@@ -26,14 +27,18 @@ const GOOGLE_ACCOUNT_EMAIL_KEYS = [
 ] as const;
 
 type DisconnectDeps = Pick<ApiRouteDeps, "db" | "settings" | "observability" | "googleDriveFetch">;
+type NangoDisconnectDeps = DisconnectDeps & Pick<ApiRouteDeps, "nangoFetch">;
 type DisconnectingConnection = Pick<
   ConnectionMetadata,
   "id" | "workspaceId" | "subjectId" | "kind" | "providerDomain" | "status" | "metadata"
 >;
 
 export type GoogleOAuthDisconnect = {
-  /** Encrypted credential without tokens, written by the revoke itself. */
-  replacementCredentialEncrypted: string;
+  /**
+   * Encrypted credential without tokens, written by the revoke itself. Absent
+   * when Opengeni stores no Google token (a Nango connection).
+   */
+  replacementCredentialEncrypted?: string;
   /**
    * Ends the grant at Google. Call it only after the revoke write committed,
    * so a disconnect that loses its version check never cuts off a connection
@@ -238,5 +243,92 @@ export async function prepareGoogleOAuthDisconnect(
   return {
     replacementCredentialEncrypted,
     revokeAtGoogle: async () => await revokeGoogleToken(deps, connection.id, token),
+  };
+}
+
+/** Nango-backed integrations that reach Google through Nango's managed Google app. */
+const NANGO_GOOGLE_INTEGRATION_KEYS: ReadonlySet<string> = new Set([
+  "gmail",
+  "google-calendar",
+  "google-drive",
+]);
+
+function nangoGoogleConnection(
+  metadata: Record<string, unknown>,
+): { nangoConnectionId: string; providerConfigKey: string } | undefined {
+  if (metadata.integrationBackend !== "nango") return undefined;
+  const integrationKey = textValue(metadata.nangoIntegrationKey);
+  const nangoConnectionId = textValue(metadata.nangoConnectionId);
+  const providerConfigKey = textValue(metadata.nangoProviderConfigKey);
+  if (!integrationKey || !NANGO_GOOGLE_INTEGRATION_KEYS.has(integrationKey)) return undefined;
+  if (!nangoConnectionId || !providerConfigKey) return undefined;
+  return { nangoConnectionId, providerConfigKey };
+}
+
+/**
+ * Disconnecting a Nango-backed Gmail, Calendar or Drive connection ends the
+ * grant at Google, as for native Google connections. Opengeni stores no Google
+ * token for these, and deleting the connection in Nango only drops Nango's
+ * copy, so `revokeAtGoogle` reads the token from Nango and revokes it at
+ * Google. Call it after the revoke write committed and before the connection
+ * is deleted in Nango. Best effort: a failure never blocks the disconnect.
+ *
+ * Gmail, Calendar and Drive share one Nango-managed Google app, so the grant
+ * is kept while another live Nango Google connection visible to the person
+ * may belong to the same Google account.
+ *
+ * Returns undefined when the connection is not a Nango Google connection.
+ */
+export async function prepareNangoGoogleDisconnect(
+  deps: NangoDisconnectDeps,
+  connection: DisconnectingConnection,
+  viewerSubjectId: string,
+): Promise<GoogleOAuthDisconnect | undefined> {
+  if (connection.kind !== "oauth2" || connection.status === "revoked") return undefined;
+  const nango = nangoGoogleConnection(connection.metadata);
+  if (!nango) return undefined;
+  const secretKey = deps.settings.nangoSecretKey;
+  if (!secretKey) return {};
+  let shared: boolean;
+  try {
+    shared = (await listConnectionsMetadata(deps.db, connection.workspaceId, viewerSubjectId)).some(
+      (candidate) =>
+        candidate.id !== connection.id &&
+        candidate.kind === "oauth2" &&
+        candidate.status !== "revoked" &&
+        nangoGoogleConnection(candidate.metadata) !== undefined &&
+        !provablyDifferentGoogleAccounts(connection.metadata, candidate.metadata),
+    );
+  } catch (error) {
+    deps.observability?.warn("Google OAuth disconnect could not check for a shared grant", {
+      connectionId: connection.id,
+      reason: error instanceof Error ? error.name : "unknown",
+    });
+    shared = true;
+  }
+  if (shared) {
+    deps.observability?.info("Google OAuth grant kept for another live connection", {
+      connectionId: connection.id,
+    });
+    return {};
+  }
+  return {
+    revokeAtGoogle: async () => {
+      let token: string | null;
+      try {
+        token = await new NangoClient({
+          secretKey,
+          baseUrl: deps.settings.nangoApiBaseUrl,
+          ...(deps.nangoFetch ? { fetchImpl: deps.nangoFetch } : {}),
+        }).connectionTokenForRevocation(nango.nangoConnectionId, nango.providerConfigKey);
+      } catch (error) {
+        deps.observability?.warn("Google OAuth disconnect could not read the Nango token", {
+          connectionId: connection.id,
+          reason: error instanceof Error ? error.name : "unknown",
+        });
+        return;
+      }
+      if (token) await revokeGoogleToken(deps, connection.id, token);
+    },
   };
 }

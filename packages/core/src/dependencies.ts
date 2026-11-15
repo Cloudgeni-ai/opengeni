@@ -318,6 +318,8 @@ export type AppDependencies = {
   slackFetch?: typeof fetch;
   /** Injectable Google OAuth/Drive transport for deterministic connector tests. */
   googleDriveFetch?: typeof fetch;
+  /** Injectable Nango API transport for deterministic connection tests. */
+  nangoFetch?: typeof fetch;
   /** Injectable transport for reading event sources (MCP servers and Gmail), for tests. */
   eventSourceFetch?: typeof fetch;
   /** Injectable Fiken API transport for deterministic connector tests. */

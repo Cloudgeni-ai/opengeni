@@ -189,7 +189,10 @@ import { oauthStateTtlMs, requireIntegrationsStateSecret } from "../integrations
 import { withAccountIdentityState } from "../integrations/oauth-account-identity";
 import { parseRequestBody, parseRequestJson, requestValidationError } from "../http/request-body";
 import { disconnectAuditActor } from "../http/disconnect-audit-actor";
-import { prepareGoogleOAuthDisconnect } from "../integrations/google-oauth-revocation";
+import {
+  prepareGoogleOAuthDisconnect,
+  prepareNangoGoogleDisconnect,
+} from "../integrations/google-oauth-revocation";
 import { parsePathParam } from "../http/path-identifier";
 
 type OpenGeniSlackInstallState = {
@@ -1382,7 +1385,8 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const googleDisconnect =
       isPersonalGitHub || isOpenGeniSlackBotConnection(existing) || workspaceProviderKind
         ? undefined
-        : await prepareGoogleOAuthDisconnect(deps, existing, grant.subjectId);
+        : ((await prepareGoogleOAuthDisconnect(deps, existing, grant.subjectId)) ??
+          (await prepareNangoGoogleDisconnect(deps, existing, grant.subjectId)));
     const connection = isPersonalGitHub
       ? await disconnectPersonalGitHub(deps, {
           workspaceId,
@@ -1426,9 +1430,14 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!connection) {
       throw new HTTPException(409, { message: "connection changed during disconnect; try again" });
     }
-    // A Nango connection is deleted in Nango too, so its billing stops.
-    await deleteNangoConnectionFor({ db, settings }, existing);
+    // End the grant at Google first: a Nango connection's token is read from
+    // Nango, which no longer has it once the connection is deleted there.
     await googleDisconnect?.revokeAtGoogle?.();
+    // A Nango connection is deleted in Nango too, so its billing stops.
+    await deleteNangoConnectionFor(
+      { db, settings, ...(deps.nangoFetch ? { fetchImpl: deps.nangoFetch } : {}) },
+      existing,
+    );
     return c.json(ConnectionResponse.parse({ connection }));
   });
 

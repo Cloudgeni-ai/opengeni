@@ -80,7 +80,12 @@ Nango reports none. The organization integration acquisition policy
 and setup permissions apply as for native connectors; in allowlist mode the
 policy key is the integration key (`gmail`, `linkedin`, `x`, …).
 
-Disconnect deletes the connection in Nango too, so its billing stops. Rows
+Disconnect deletes the connection in Nango too, so its billing stops. Deleting
+in Nango only drops Nango's copy of the tokens, so for Gmail, Calendar and
+Drive Opengeni first reads the refresh token from Nango and revokes the grant
+at Google (best effort, as for native Google connections). The grant is kept
+while another live Nango Google connection of possibly the same account is
+visible to the person, because the three share Nango's managed Google app. Rows
 removed by SQL cascades (workspace or organization deletion, member removal)
 are not deleted in Nango at that moment; `integrations:nango orphans` finds and
 deletes them (below).

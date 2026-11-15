@@ -27,6 +27,9 @@ let client: DbClient;
 let app: ReturnType<typeof createApp>;
 let revokeRequests: Array<{ url: string; body: string; method: string }> = [];
 let revokeReply: () => Promise<Response> = async () => new Response("{}", { status: 200 });
+/** Google revoke and Nango API calls in the order they were made. */
+let timeline: string[] = [];
+let nangoReply: (url: URL, method: string) => Promise<Response | undefined> = async () => undefined;
 
 beforeAll(async () => {
   const acquired = await acquireSharedTestDatabase("google-oauth-disconnect");
@@ -42,6 +45,8 @@ beforeAll(async () => {
       environmentsEncryptionKey: encryptionKey.toString("base64"),
       mcpOauthEnabled: true,
       integrationsEnabled: true,
+      nangoSecretKey: "nango-secret-test",
+      nangoApiBaseUrl: "https://nango.test",
     }),
     db: client.db,
     bus: new MemoryEventBus(),
@@ -49,7 +54,30 @@ beforeAll(async () => {
     googleDriveFetch: async (input, init) => {
       const url = input instanceof Request ? input.url : input.toString();
       revokeRequests.push({ url, method: init?.method ?? "GET", body: String(init?.body ?? "") });
+      timeline.push(`google ${new URLSearchParams(String(init?.body ?? "")).get("token")}`);
       return await revokeReply();
+    },
+    nangoFetch: async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      const method = init?.method ?? "GET";
+      timeline.push(`nango ${method} ${url.pathname}${url.search}`);
+      const override = await nangoReply(url, method);
+      if (override) return override;
+      const single = /^\/connections\/([^/]+)$/u.exec(url.pathname);
+      if (single && method === "DELETE") return new Response(null, { status: 204 });
+      if (single && method === "GET")
+        return Response.json({
+          connection_id: single[1],
+          provider_config_key: url.searchParams.get("provider_config_key"),
+          credentials: {
+            type: "OAUTH2",
+            access_token: `${single[1]}-access-secret`,
+            ...(url.searchParams.get("refresh_token") === "true"
+              ? { refresh_token: `${single[1]}-refresh-secret` }
+              : {}),
+          },
+        });
+      return new Response("not found", { status: 404 });
     },
   });
 }, 180_000);
@@ -62,6 +90,8 @@ afterAll(async () => {
 beforeEach(() => {
   revokeRequests = [];
   revokeReply = async () => new Response("{}", { status: 200 });
+  timeline = [];
+  nangoReply = async () => undefined;
 });
 
 function browser(cookie: string): Record<string, string> {
@@ -277,4 +307,130 @@ describe("Google OAuth disconnect", () => {
     await disconnect(person, unidentified.id);
     expect(revokedAtGoogle()).toEqual(["unidentified-refresh-secret"]);
   });
+
+  test("a Nango Google connection's grant is revoked at Google before Nango deletes it", async () => {
+    const person = await signedInPerson();
+    const connection = await nangoGoogleConnection(person, "gmail", "nc-gmail", "ada@example.test");
+    await disconnect(person, connection.id);
+    expect(timeline).toEqual([
+      "nango GET /connections/nc-gmail?provider_config_key=google-mail&refresh_token=true",
+      "google nc-gmail-refresh-secret",
+      "nango DELETE /connections/nc-gmail?provider_config_key=google-mail",
+    ]);
+    expect(revokeRequests[0]?.url).toBe(GOOGLE_OAUTH_REVOKE_URL);
+  });
+
+  test("Nango Google connections of one account share the grant; native ones do not", async () => {
+    const person = await signedInPerson();
+    // Gmail, Calendar and Drive use one Nango-managed Google app.
+    const gmail = await nangoGoogleConnection(person, "gmail", "nc-1", "ada@example.test");
+    const calendar = await nangoGoogleConnection(
+      person,
+      "google-calendar",
+      "nc-2",
+      "ada@example.test",
+    );
+    const otherAccount = await nangoGoogleConnection(
+      person,
+      "google-drive",
+      "nc-3",
+      "bob@example.test",
+    );
+    // A native connection of the same account uses Opengeni's own client.
+    await googleConnection(person, true, GOOGLE_TOKEN_ENDPOINT, {
+      metadata: { gmailEmail: "ada@example.test" },
+      refreshToken: "native-refresh-secret",
+    });
+
+    await disconnect(person, gmail.id);
+    expect(revokedAtGoogle()).toEqual([]);
+    expect(timeline).toContain("nango DELETE /connections/nc-1?provider_config_key=google-mail");
+
+    await disconnect(person, calendar.id);
+    expect(revokedAtGoogle()).toEqual(["nc-2-refresh-secret"]);
+
+    revokeRequests = [];
+    await disconnect(person, otherAccount.id);
+    expect(revokedAtGoogle()).toEqual(["nc-3-refresh-secret"]);
+  });
+
+  test("a Nango or Google failure never blocks the disconnect or the Nango deletion", async () => {
+    const person = await signedInPerson();
+    for (const reply of [
+      async () => new Response("gone", { status: 404 }),
+      async () => new Response("refresh exhausted", { status: 424 }),
+      async () => new Response("unavailable", { status: 503 }),
+      async (): Promise<Response> => {
+        throw new TypeError("network down");
+      },
+    ]) {
+      timeline = [];
+      revokeRequests = [];
+      nangoReply = async (_url, method) => (method === "GET" ? await reply() : undefined);
+      const connection = await nangoGoogleConnection(
+        person,
+        "gmail",
+        "nc-fail",
+        "ada@example.test",
+      );
+      await disconnect(person, connection.id);
+      expect(revokeRequests).toEqual([]);
+      expect(timeline.at(-1)).toBe(
+        "nango DELETE /connections/nc-fail?provider_config_key=google-mail",
+      );
+    }
+    nangoReply = async () => undefined;
+    revokeReply = async () => new Response("unavailable", { status: 503 });
+    timeline = [];
+    const connection = await nangoGoogleConnection(
+      person,
+      "gmail",
+      "nc-google-down",
+      "ada@example.test",
+    );
+    await disconnect(person, connection.id);
+    expect(timeline.at(-1)).toBe(
+      "nango DELETE /connections/nc-google-down?provider_config_key=google-mail",
+    );
+  });
 });
+
+const NANGO_PROVIDER_CONFIG_KEYS: Record<string, string> = {
+  gmail: "google-mail",
+  "google-calendar": "google-calendar",
+  "google-drive": "google-drive",
+};
+const NANGO_EMAIL_KEYS: Record<string, string> = {
+  gmail: "gmailEmail",
+  "google-calendar": "googleCalendarEmail",
+  "google-drive": "googleDriveEmail",
+};
+
+/** A personal Nango-backed Google connection as Nango Connect stores it. */
+async function nangoGoogleConnection(
+  person: Person,
+  integrationKey: "gmail" | "google-calendar" | "google-drive",
+  nangoConnectionId: string,
+  email: string,
+) {
+  const providerConfigKey = NANGO_PROVIDER_CONFIG_KEYS[integrationKey]!;
+  return await createConnection(client.db, {
+    accountId: person.accountId,
+    workspaceId: person.workspaceId,
+    subjectId: person.subjectId,
+    providerDomain: `nango:${integrationKey}`,
+    kind: "oauth2",
+    credentialEncrypted: encryptEnvironmentValue(
+      encryptionKey,
+      JSON.stringify({ type: "nango", nangoConnectionId, providerConfigKey }),
+    ),
+    metadata: {
+      integrationBackend: "nango",
+      nangoIntegrationKey: integrationKey,
+      nangoProviderConfigKey: providerConfigKey,
+      nangoConnectionId,
+      [NANGO_EMAIL_KEYS[integrationKey]!]: email,
+    },
+    createdBySubjectId: person.subjectId,
+  });
+}

@@ -328,6 +328,44 @@ export class NangoClient {
   }
 
   /**
+   * The provider token to revoke when a person disconnects: the refresh token
+   * (requested with `refresh_token=true`), else the access token, or null when
+   * Nango no longer knows the connection or cannot refresh it (424). Deleting a
+   * connection in Nango only drops Nango's copy of the tokens; the grant at the
+   * provider stays until it is revoked there, so read this before deleting.
+   */
+  async connectionTokenForRevocation(
+    connectionId: string,
+    providerConfigKey: string,
+  ): Promise<string | null> {
+    const query = new URLSearchParams({
+      provider_config_key: providerConfigKey,
+      refresh_token: "true",
+    });
+    const path = `/connections/${encodeURIComponent(connectionId)}?${query.toString()}`;
+    const result = await this.json("GET", path);
+    if (result.status === 404 || result.status === 424) return null;
+    if (result.status < 200 || result.status >= 300)
+      throw new NangoApiError(
+        `Nango GET /connections/{id} failed with ${result.status}`,
+        result.status,
+        errorCode(result.body),
+      );
+    const raw = (result.body ?? {}) as Record<string, unknown>;
+    if (
+      (typeof raw.connection_id === "string" && raw.connection_id !== connectionId) ||
+      (typeof raw.provider_config_key === "string" && raw.provider_config_key !== providerConfigKey)
+    )
+      return null;
+    const credentials = raw.credentials as Record<string, unknown> | null | undefined;
+    for (const key of ["refresh_token", "access_token"] as const) {
+      const value = credentials?.[key];
+      if (typeof value === "string" && value.trim()) return value;
+    }
+    return null;
+  }
+
+  /**
    * Every connection of the environment (optionally of one integration), page
    * by page until a page adds nothing new. For operator reconciliation.
    */
