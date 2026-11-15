@@ -100,7 +100,7 @@ export async function fileOwnerContextForAgent(
   }).catch((error: unknown) => {
     const message = nestedAuthorityRefusalMessage(error);
     if (message !== null && isAgentAttemptLivenessFence(message)) {
-      throw Object.assign(new SessionAuthorizationDeniedError("caller_stale"), { cause: error });
+      throw new SessionAuthorizationDeniedError("caller_stale", { cause: error });
     }
     throw error;
   });

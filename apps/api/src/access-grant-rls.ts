@@ -3,6 +3,7 @@ import {
   agentPrivateFileOwnerSubjectId,
   billingOriginForGrant,
   fundedBillingOrigin,
+  requestAuthenticatedAsAgentAttempt,
   requireLiveAgentAttemptAuthorization,
   SessionAuthorizationDeniedError,
   type ApiRouteDeps,
@@ -69,9 +70,12 @@ function staleAttemptFenceAsRefusal(error: unknown): never {
  * (Hono hands their errors straight to `onError`, past the request context's
  * own mapping), or by the database's attempt fence on a later read. Both are
  * the same stale attempt the request context refuses up front, so they get its
- * refusal, never a 500. Every other session refusal keeps its route's meaning.
+ * refusal, never a 500. Only a request that authenticated as an agent attempt
+ * is answered this way; every other caller and every other session refusal
+ * keeps its existing handling.
  */
-export function agentAttemptStaleHttpError(error: unknown): ApiHttpError | null {
+export function agentAttemptStaleHttpError(error: unknown, request: Request): ApiHttpError | null {
+  if (!requestAuthenticatedAsAgentAttempt(request)) return null;
   if (error instanceof SessionAuthorizationDeniedError) {
     return error.reason === "caller_stale"
       ? agentAttemptAuthorityError("caller_stale", error)

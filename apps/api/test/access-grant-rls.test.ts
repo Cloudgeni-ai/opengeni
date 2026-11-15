@@ -349,35 +349,43 @@ describe("access-grant session RLS context", () => {
   });
 
   test("a stale attempt found after the request context is answered centrally as stale", () => {
+    const request = new Request("http://127.0.0.1:8000/v1/workspaces/x/files/y");
+    const agent = spyOn(core, "requestAuthenticatedAsAgentAttempt").mockReturnValue(true);
     const denied = new core.SessionAuthorizationDeniedError("caller_stale");
-    expect(agentAttemptStaleHttpError(denied)).toMatchObject({
+    expect(agentAttemptStaleHttpError(denied, request)).toMatchObject({
       status: 403,
       code: "forbidden",
       details: { code: "agent_attempt_caller_stale" },
       cause: denied,
     });
+    expect(agent).toHaveBeenCalledWith(request);
     const fenced = Object.assign(new Error("Failed query"), {
       cause: { code: "42501", message: "Knowledge attempt is interrupted" },
     });
-    expect(agentAttemptStaleHttpError(fenced)).toMatchObject({
+    expect(agentAttemptStaleHttpError(fenced, request)).toMatchObject({
       status: 403,
       details: { code: "agent_attempt_caller_stale" },
       cause: fenced,
     });
     // Other session refusals keep their route's own meaning.
     for (const reason of ["not_found", "forbidden", "revoked"] as const) {
-      expect(agentAttemptStaleHttpError(new core.SessionAuthorizationDeniedError(reason))).toBe(
-        null,
-      );
+      expect(
+        agentAttemptStaleHttpError(new core.SessionAuthorizationDeniedError(reason), request),
+      ).toBe(null);
     }
     expect(
       agentAttemptStaleHttpError(
         Object.assign(new Error("Failed query"), {
           cause: { code: "42501", message: "Knowledge workspace unavailable" },
         }),
+        request,
       ),
     ).toBe(null);
-    expect(agentAttemptStaleHttpError(new Error("boom"))).toBe(null);
+    expect(agentAttemptStaleHttpError(new Error("boom"), request)).toBe(null);
+    // A request that did not authenticate as an agent attempt is never relabelled.
+    agent.mockReturnValue(false);
+    expect(agentAttemptStaleHttpError(denied, request)).toBe(null);
+    expect(agentAttemptStaleHttpError(fenced, request)).toBe(null);
   });
 
   test("work started alongside a gate is dropped when the gate refuses", async () => {

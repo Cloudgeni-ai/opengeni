@@ -1,10 +1,11 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, mock, spyOn, test } from "bun:test";
 import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   signDelegatedAccessToken,
 } from "@opengeni/contracts";
 import type { SessionWorkflowClient } from "@opengeni/core";
+import * as db from "@opengeni/db";
 import {
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
@@ -36,6 +37,7 @@ type StaleRoute = { method: "POST" | "GET"; path: string };
 // The first-party MCP routes, and a REST file route whose file-owner check
 // reads the same learning policy before its handler runs.
 const ROUTES: StaleRoute[] = [
+  { method: "POST", path: "mcp" },
   { method: "POST", path: "mcp/docs" },
   { method: "GET", path: "mcp/docs" },
   { method: "POST", path: "mcp/files" },
@@ -65,6 +67,10 @@ beforeAll(async () => {
   pooled = postgres(shared.appUrl, { max: 8, prepare: false });
   await pooled`select 1`;
 }, 180_000);
+
+afterEach(() => {
+  mock.restore();
+});
 
 afterAll(async () => {
   await pooled?.end();
@@ -176,12 +182,43 @@ async function fixture() {
   return { request, staleCredential, turnId: claimed.turn.id };
 }
 
+type AttemptProbe = { liveReads: number; staleReads: number; fenceRefusals: number };
+
 /**
- * Wait until the request's database fence is queued behind our turn locks and
- * nothing else in this database is still running: the liveness check has
- * already read the turn as it was before the change commits.
+ * Count what the request's attempt checks saw, so a race test proves its 403
+ * came from the database fence after a passing liveness check, not from a
+ * liveness check that already read the changed turn.
  */
-async function untilFenceWaits(): Promise<void> {
+function probeAttemptChecks(): AttemptProbe {
+  const probe: AttemptProbe = { liveReads: 0, staleReads: 0, fenceRefusals: 0 };
+  const readFacts = db.getSessionAuthorizationFacts;
+  spyOn(db, "getSessionAuthorizationFacts").mockImplementation(async (database, input) => {
+    const facts = await readFacts(database, input);
+    if (input.caller) {
+      if (facts.caller?.turn) probe.liveReads += 1;
+      else probe.staleReads += 1;
+    }
+    return facts;
+  });
+  const freeze = db.freezeAgentLearningPolicy;
+  spyOn(db, "freezeAgentLearningPolicy").mockImplementation(async (database, context) => {
+    try {
+      return await freeze(database, context);
+    } catch (error) {
+      const message = db.nestedAuthorityRefusalMessage(error);
+      if (message !== null && db.isAgentAttemptLivenessFence(message)) probe.fenceRefusals += 1;
+      throw error;
+    }
+  });
+  return probe;
+}
+
+/**
+ * Wait until the request's liveness checks have read the turn as it was and
+ * its database fence is queued behind our turn locks, with nothing else in
+ * this database still running.
+ */
+async function untilFenceWaits(probe: AttemptProbe, liveReads: number): Promise<void> {
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
     const [row] = await shared.admin<{ waiting: number; busy: number }[]>`
@@ -195,44 +232,64 @@ async function untilFenceWaits(): Promise<void> {
         and backend_type = 'client backend'
         and pid <> pg_backend_pid()
     `;
-    if (row && row.waiting >= 1 && row.busy === 0) return;
+    if (row && row.waiting >= 1 && row.busy === 0 && probe.liveReads >= liveReads) return;
     await Bun.sleep(10);
   }
   throw new Error("the request's attempt fence never waited on the turn");
 }
 
+/**
+ * Send the request while the turn's next execution generation is being
+ * written (a recovery or a finish), committing it only once the request's
+ * liveness checks have passed against the earlier state.
+ */
+async function requestWhileTurnMovesOn(
+  send: () => Promise<Response>,
+  turnId: string,
+  liveReads: number,
+): Promise<Response> {
+  const probe = probeAttemptChecks();
+  const writer = await shared.admin.reserve();
+  let response: Response;
+  try {
+    await writer`begin`;
+    // Session before turn, the order turn writers lock them in.
+    await writer`
+      select 1 from sessions
+      where id = (select session_id from session_turns where id = ${turnId})
+      for update
+    `;
+    await writer`select 1 from session_turns where id = ${turnId} for update`;
+    const pending = send();
+    await untilFenceWaits(probe, liveReads);
+    await writer`
+      update session_turns
+      set execution_generation = execution_generation + 1
+      where id = ${turnId}
+    `;
+    await writer`commit`;
+    response = await pending;
+  } finally {
+    writer.release();
+  }
+  // The liveness checks passed and the database fence refused.
+  expect(probe.staleReads).toBe(0);
+  expect(probe.liveReads).toBeGreaterThanOrEqual(liveReads);
+  expect(probe.fenceRefusals).toBeGreaterThanOrEqual(1);
+  return response;
+}
+
+function routeLabel(route: StaleRoute): string {
+  return route.path.startsWith("files/") ? "/files/:fileId" : `/${route.path}`;
+}
+
 describe("agent requests from an attempt that goes stale in flight", () => {
   for (const route of ROUTES) {
-    const label = route.path.startsWith("files/") ? "/files/:fileId" : `/${route.path}`;
-    test(`${route.method} ${label} answers a stale attempt with 403, never 500`, async () => {
+    test(`${route.method} ${routeLabel(route)} answers a stale attempt with 403, never 500`, async () => {
       const { request, turnId } = await fixture();
-      // The turn's next execution generation is being written (a recovery or
-      // a finish) while the request arrives; it commits only once the
-      // request's liveness check has passed against the earlier state.
-      const writer = await shared.admin.reserve();
-      let response: Response;
-      try {
-        await writer`begin`;
-        // Session before turn, the order turn writers lock them in.
-        await writer`
-          select 1 from sessions
-          where id = (select session_id from session_turns where id = ${turnId})
-          for update
-        `;
-        await writer`select 1 from session_turns where id = ${turnId} for update`;
-        const pending = request(route);
-        await untilFenceWaits();
-        await writer`
-          update session_turns
-          set execution_generation = execution_generation + 1
-          where id = ${turnId}
-        `;
-        await writer`commit`;
-        response = await pending;
-      } finally {
-        writer.release();
-      }
-      await expectStaleAttemptRefusal(response);
+      await expectStaleAttemptRefusal(
+        await requestWhileTurnMovesOn(() => request(route), turnId, 1),
+      );
     }, 60_000);
   }
 });
@@ -243,39 +300,19 @@ describe("a file route whose own file-owner check sees the attempt go stale", ()
     const route: StaleRoute = { method: "GET", path: `files/${crypto.randomUUID()}` };
     // A first request leaves the attempt's learning policy remembered, so the
     // next one's request context does not read it again. Only the file
-    // route's own owner check reads it, after its own liveness check.
+    // route's own owner check reads it, after its own liveness check (the
+    // request context's check and the route's: two live reads).
     const warm = await request(route);
     expect(warm.status).toBe(404);
-    const writer = await shared.admin.reserve();
-    let response: Response;
-    try {
-      await writer`begin`;
-      await writer`
-        select 1 from sessions
-        where id = (select session_id from session_turns where id = ${turnId})
-        for update
-      `;
-      await writer`select 1 from session_turns where id = ${turnId} for update`;
-      const pending = request(route);
-      await untilFenceWaits();
-      await writer`
-        update session_turns
-        set execution_generation = execution_generation + 1
-        where id = ${turnId}
-      `;
-      await writer`commit`;
-      response = await pending;
-    } finally {
-      writer.release();
-    }
-    await expectStaleAttemptRefusal(response);
+    await expectStaleAttemptRefusal(await requestWhileTurnMovesOn(() => request(route), turnId, 2));
   }, 60_000);
 });
 
-describe("agent requests from an attempt that is already stale", () => {
+// Guards: these already answered 403 before this change (the liveness check
+// refuses the attempt up front); they keep the new mappings from changing it.
+describe("guard: agent requests from an attempt that is already stale", () => {
   for (const route of ROUTES) {
-    const label = route.path.startsWith("files/") ? "/files/:fileId" : `/${route.path}`;
-    test(`${route.method} ${label} answers with 403, never 500`, async () => {
+    test(`${route.method} ${routeLabel(route)} answers with 403, never 500`, async () => {
       const { request, staleCredential } = await fixture();
       await expectStaleAttemptRefusal(await request(route, await staleCredential()));
     }, 60_000);
