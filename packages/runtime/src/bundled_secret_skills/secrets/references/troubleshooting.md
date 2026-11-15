@@ -57,7 +57,7 @@ the inventory; never automatically repeat the create.
   Knowledge), which keeps references by design. Write it unescaped in the
   command, typing action or connector call that uses it.
 - A `git commit` or `git push` was refused with "Nothing was run" and a file
-  and line: that file holds a secret value resolved earlier in the session.
+  and line: that file holds a secret value filled in earlier on this sandbox.
   Replace it with the escaped reference (`\{{secret:...}}`), or ignore a
   local-only file such as `.env`, then retry; amend an earlier commit that
   already holds it.

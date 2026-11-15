@@ -12,7 +12,11 @@
 // single op WITHOUT touching the active pointer.
 
 import type { VaultProviderRegistry } from "@opengeni/vaults";
-import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
+import {
+  environmentsEncryptionKeyBytes,
+  resolveFirstPartyDelegationSecret,
+  type Settings,
+} from "@opengeni/config";
 import {
   agentCapabilityEnabled,
   type SandboxBackend,
@@ -1288,7 +1292,10 @@ export async function executeRunOnSelfhostedMachine(
   // or push carrying one is refused (docs/secrets.md). The helper is POSIX
   // shell, so a Windows machine is not checked.
   const leakGuard = machine.secretResolver
-    ? new SecretLeakGuard(machine.secretLedgerKey ?? secretLedgerKeyFor(null))
+    ? new SecretLeakGuard(
+        machine.secretLedgerKey ?? secretLedgerKeyFor(null),
+        machine.secretResolver.principal.workspaceId,
+      )
     : null;
   const secretResolver =
     leakGuard && machine.secretResolver
@@ -1697,7 +1704,11 @@ export async function runOnSandbox(
         : {}),
       ...(options.secretResolver ? { secretResolver: options.secretResolver } : {}),
       ...(options.secretResolver
-        ? { secretLedgerKey: secretLedgerKeyFor(services.settings.delegationSecret) }
+        ? {
+            secretLedgerKey: secretLedgerKeyFor(
+              resolveFirstPartyDelegationSecret(services.settings),
+            ),
+          }
         : {}),
       ...(options.credentials ? { credentials: options.credentials } : {}),
       ...(services.settings.agentOpStreamEnabled === true &&

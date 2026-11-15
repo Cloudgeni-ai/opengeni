@@ -222,32 +222,48 @@ An agent once documented a harness by writing an unescaped reference into its
 README (15 November 2026): the file write resolved it, and the value was
 committed and pushed; GitHub push protection stopped it. Opengeni now refuses a
 `git commit` or `git push` that would carry a value it filled in for a
-reference earlier in the same sandbox.
+reference earlier in the same sandbox. It is a guardrail against mistakes, not
+a security control: an agent that runs git another way is not stopped.
 
 - Every value the resolver delivers into a sandbox (commands, stdin,
-  `apply_patch`, `run_on`) is recorded as a ledger entry: its length, a keyed
-  rolling hash and a keyed 128-bit HMAC, never the value. Values shorter than 8
-  characters are not tracked; each line of 16 or more characters of a
-  multi-line value (a PEM body) is tracked on its own. One-time codes and
-  binary `secretfile` values are not tracked. The key derives from the server's
-  delegation secret, so the ledger cannot be used to test guesses.
+  `apply_patch`, `run_on`) from a concealed field (or a field of unknown kind)
+  is recorded as a ledger entry: its length, a keyed rolling hash truncated to
+  16 bits and a keyed 128-bit HMAC, never the value. Usernames, emails and other
+  plain-text fields, values shorter than 8 characters, one-time codes and
+  binary `secretfile` values are not tracked; each line of 16 or more
+  characters of a multi-line value (a PEM body) is tracked on its own. The key
+  derives from the server's first-party delegation secret and the workspace,
+  and never leaves the server: an entry reveals at most a 16-bit hint about a
+  value, and other workspaces on a shared machine neither read nor match it.
 - Entries are kept in memory for the attempt and in private files under
   `/tmp/opengeni-private/secret-ledger/` in the sandbox, so later turns and
-  sessions sharing the sandbox see them. Attempt-end cleanup leaves them.
+  sessions of the workspace sharing the sandbox see them. Attempt-end cleanup
+  leaves them; each attempt that resolves a new value adds one small file.
 - Before an `exec_command` or `run_on` exec whose command runs `git commit` or
-  `git push` (also after `cd` or with `-C`), one read-only helper prints what
-  git would take: staged changes; for `git add`, `commit -a` or pathspecs, the
-  tracked changes they would stage; for `git add`, untracked files that are not
-  ignored (up to 2 MiB each); for a push, the commits not on any remote. Every
-  added line is matched exactly against the ledger. A match returns "Nothing
-  was run:" with the file, line and commit, and how to write the reference
-  literally, amend a commit or ignore a local file. Nothing else is matched.
-- A value in a file that is not committed (an ignored `.env`, an untracked
-  file not being added) never blocks.
+  `git push` (also after `cd`, with `-C`, or inside `sh -c`/`bash -c`), one
+  helper replays the command's `git add` and `git commit` steps, in order and
+  in their directories, on a throwaway copy of each repository's index, and
+  prints exactly what each commit would take (with `-a`, `--include`,
+  `--only` or paths as git applies them) and, for a push, the commits of the
+  pushed branches (`HEAD` by default) that no remote has. The real index, work
+  tree and refs are untouched. Every added line is matched exactly against the
+  ledger. A match returns "Nothing was run:" with the file, line and commit,
+  and how to write the reference literally, amend a commit or ignore a local
+  file. Nothing else is matched.
+- A value in a file that the commit or push does not take (an ignored `.env`,
+  an untracked or unstaged file the command does not add, staged changes when
+  only pushing) never blocks.
+- The helper stops after 15 seconds (with `timeout`, and the runtime stops
+  waiting shortly after, or at once when the turn is stopped); then the command
+  runs unchecked. Commands without `git commit` or `git push` run no helper.
 
-Limits: git run inside a script or alias, connector or API pushes, and Windows
-machines are not checked; the scan stops at 8 MiB of diff; recreating the
-sandbox loses the ledger. If the helper fails, the command runs.
+Limits: not checked are git run from a script file or alias, with
+`--git-dir`/`--work-tree` or in a directory named by a variable; git typed
+through `write_stdin`; interactive adds; changes made in merge commits;
+connector or API pushes; Windows machines. A value written and committed by the
+same command is not in the files yet when the helper runs, so only a later push
+catches it. The scan stops at 8 MiB of diff; recreating the sandbox loses the
+ledger. If the helper fails, the command runs.
 
 ## Credential profiles
 

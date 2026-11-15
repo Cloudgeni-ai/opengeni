@@ -62,6 +62,7 @@ import {
   type SecretFilesWriter,
 } from "./secret-delivery";
 import {
+  SECRET_LEAK_SCAN_DEADLINE_SECONDS,
   SECRET_LEAK_SCAN_MAX_BYTES,
   SecretLeakGuard,
   secretLedgerKeyFor,
@@ -288,7 +289,7 @@ function secretLeakGuardRunner(session?: CommandCancellationSession): SecretLeak
     const result = await execReadOnly.call(session, {
       cmd,
       ...(workdir ? { workdir } : {}),
-      yieldTimeMs: 60_000,
+      yieldTimeMs: (SECRET_LEAK_SCAN_DEADLINE_SECONDS + 5) * 1000,
       maxOutputTokens: SECRET_LEAK_SCAN_MAX_BYTES,
     });
     return { stdout: result.stdout ?? "", exitCode: result.exitCode ?? null };
@@ -1244,7 +1245,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     this.finishFloor = this.cutPolling && options.finishFloor === true;
     const resolver = options.secretResolver ?? null;
     this.leakGuard = resolver
-      ? new SecretLeakGuard(options.secretLedgerKey ?? secretLedgerKeyFor(null))
+      ? new SecretLeakGuard(
+          options.secretLedgerKey ?? secretLedgerKeyFor(null),
+          resolver.principal.workspaceId,
+        )
       : null;
     this.secretResolver = resolver && this.leakGuard ? this.leakGuard.wrapResolver(resolver) : null;
     this.credentials = options.credentials ?? null;
@@ -1938,6 +1942,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         parsed.cmd,
         guardRunner,
         typeof parsed.workdir === "string" ? parsed.workdir : undefined,
+        this.observationCancellation.signal,
       );
       if (refusal !== null) return refusal;
       if (this.cancelled) throw cancellationError(this.reason);

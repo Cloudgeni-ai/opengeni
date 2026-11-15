@@ -5914,7 +5914,7 @@ function buildAgentCapabilitiesFromComposition(
           // Every worker derives the same key, so a later turn reads the
           // sandbox ledger an earlier one wrote.
           ...(options.secretResolver
-            ? { secretLedgerKey: secretLedgerKeyFor(settings.delegationSecret) }
+            ? { secretLedgerKey: secretLedgerKeyFor(resolveFirstPartyDelegationSecret(settings)) }
             : {}),
           ...(options.credentials ? { credentials: options.credentials } : {}),
         })

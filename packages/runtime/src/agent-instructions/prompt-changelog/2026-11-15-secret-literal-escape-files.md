@@ -28,7 +28,7 @@ resolution say the escape applies to files as well as commands:
 ```
 
 A `git commit` or `git push` through `exec_command` or `run_on` whose content
-contains a secret value resolved earlier in the session is no longer run. The
+contains a secret value Opengeni filled in earlier in that sandbox is no longer run. The
 tool result starts with "Nothing was run:", names each file and line (and the
 commit for a push), and says how to write the reference literally, amend an
 earlier commit or ignore a local file. It appears only when such a value is

@@ -57,7 +57,17 @@ const sha256 = (value: string) => createHash("sha256").update(value).digest("hex
 
 const sessions: LocalSession[] = [];
 const shellTempRoot = mkdtempSync(join(tmpdir(), "opengeni-secret-exec-test-"));
-afterAll(() => rmSync(shellTempRoot, { recursive: true, force: true }));
+// The local backend's sandbox is this host: its secret leak guard writes
+// ledger files there, which these tests remove again.
+const LEDGER_DIRECTORY = "/tmp/opengeni-private/secret-ledger";
+const ledgerFiles = () => (existsSync(LEDGER_DIRECTORY) ? readdirSync(LEDGER_DIRECTORY) : []);
+const ledgerBefore = new Set(ledgerFiles());
+afterAll(() => {
+  for (const name of ledgerFiles()) {
+    if (!ledgerBefore.has(name)) rmSync(join(LEDGER_DIRECTORY, name), { force: true });
+  }
+  rmSync(shellTempRoot, { recursive: true, force: true });
+});
 afterEach(async () => {
   await Promise.all(sessions.splice(0).map(async (session) => await session.close()));
   // Tests that never reach attempt-end cleanup leave the stub attempt's

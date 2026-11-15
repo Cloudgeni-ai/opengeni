@@ -173,6 +173,37 @@ describe("git commit and push on the local backend", () => {
     expect(await run("cd repo && git add -A && git commit -qm all && echo DONE")).toContain("DONE");
   }, 60_000);
 
+  test("only what the commit or push takes is checked", async () => {
+    const box = await sandbox();
+    const run = box.attempt();
+    await run(
+      "git init -q --bare remote.git && git init -q repo && git init -q other && cd repo && git remote add origin ../remote.git && git commit -q --allow-empty -m init && git push -q origin HEAD:refs/heads/main && git fetch -q origin && cd ../other && git commit -q --allow-empty -m init",
+    );
+    // An untracked note holds the value; other files are committed by name.
+    await run("cd repo && printf 'TOKEN=%s\\n' '{{secret:Token}}' > notes.txt");
+    await run("cd repo && printf 'a\\n' > a.txt && printf 'b\\n' > b.txt && git add b.txt");
+    expect(await run("cd repo && git add a.txt && git commit -qm a && echo DONE")).toContain(
+      "DONE",
+    );
+    expect(
+      await run("cd repo && printf a2 >> a.txt && git add -u && git commit -qm u && echo DONE"),
+    ).toContain("DONE");
+    // A staged value that the push does not send never blocks the push.
+    await run("cd repo && git add notes.txt");
+    expect(await run("cd repo && git push -q origin HEAD:refs/heads/main && echo DONE")).toContain(
+      "DONE",
+    );
+    // Committing in another repository is not about this repository's index.
+    expect(
+      await run("cd repo && cd ../other && git commit -q --allow-empty -m e && echo DONE"),
+    ).toContain("DONE");
+    // A commit run through a shell wrapper is checked.
+    const refused = await run(`cd repo && bash -c 'git commit -qm notes' && echo DONE`);
+    expect(refused).toContain("Nothing was run");
+    expect(refused).toContain("notes.txt line 1");
+    expect(refused).not.toContain("DONE");
+  }, 60_000);
+
   test("a later attempt refuses to push a commit holding a value from an earlier one", async () => {
     const box = await sandbox();
     const first = box.attempt();

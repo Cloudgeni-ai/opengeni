@@ -112,42 +112,89 @@ describe("ledger and matching", () => {
     ]);
   });
 
-  test("reads which content a command hands to git", () => {
+  test("plain-text fields are not tracked, and keys are scoped per workspace", () => {
+    const username = { ...resolved("user", TOKEN), fieldKind: "text" as const };
+    expect(secretLedgerEntriesFor(key, [username])).toEqual([]);
+    const concealed = { ...resolved("pw", TOKEN), fieldKind: "concealed" as const };
+    expect(secretLedgerEntriesFor(key, [concealed])).toHaveLength(1);
+    const one = key.scoped("workspace-1");
+    const text = new TextDecoder().decode(
+      secretLedgerFile(one, secretLedgerEntriesFor(one, [concealed])).content,
+    );
+    expect(parseSecretLedger(one, text)).toHaveLength(1);
+    expect(parseSecretLedger(key.scoped("workspace-2"), text)).toEqual([]);
+    expect(parseSecretLedger(key, text)).toEqual([]);
+    // The stored hash is only a 16-bit hint.
+    expect(parseSecretLedger(one, text)[0]!.hash).toBeLessThan(65_536);
+  });
+});
+
+describe("reading git steps from a command", () => {
+  test("commands without a commit or push need no helper", () => {
     expect(gitLeakPlan("ls -la && git status")).toBeNull();
     expect(gitLeakPlan("git log --grep=push")).toBeNull();
-    expect(gitLeakPlan("git commit -m 'add -a flag'")).toEqual({
-      directories: ["."],
-      commit: true,
-      stagesTracked: false,
-      stagesUntracked: false,
-      push: false,
-    });
-    expect(gitLeakPlan("git commit -am wip 2>&1 > log.txt")).toMatchObject({
-      stagesTracked: true,
-      stagesUntracked: false,
-    });
-    expect(gitLeakPlan('git commit -m "x" -- src/a.ts')).toMatchObject({ stagesTracked: true });
-    expect(
-      gitLeakPlan('cd repos/app && git add -A && git commit -m "docs" && git -C ../lib push'),
-    ).toEqual({
-      directories: [".", "repos/app", "../lib"],
-      commit: true,
-      stagesTracked: true,
-      stagesUntracked: true,
-      push: true,
-    });
-    expect(gitLeakPlan("git push origin HEAD")).toMatchObject({ commit: false, push: true });
+    expect(gitLeakPlan("echo git commit && echo git push")).toBeNull();
+    expect(gitLeakPlan("git add -A")).toBeNull();
+    expect(gitLeakPlan("git commit --dry-run -a")).toBeNull();
+    expect(gitLeakPlan("git push --delete origin old")).toBeNull();
   });
 
-  test("the helper only reads untracked files when the command runs git add", () => {
-    const commit = gitLeakScanScript(gitLeakPlan("git commit -m x")!, { ledgerKnown: true });
-    expect(commit).toContain("diff --cached");
-    expect(commit).not.toContain("ls-files");
-    expect(commit).not.toContain("git -c core.quotePath=false log");
-    const all = gitLeakScanScript(gitLeakPlan("git add . && git commit -m x && git push")!, {
+  test("commit staging modes", () => {
+    expect(gitLeakPlan("git commit -m 'add -a flag'")?.steps).toEqual([
+      { kind: "commit", directory: ".", stage: "index", paths: [] },
+    ]);
+    expect(gitLeakPlan("git commit -am wip 2>&1 > log.txt")?.steps).toEqual([
+      { kind: "commit", directory: ".", stage: "all", paths: [] },
+    ]);
+    expect(gitLeakPlan("git commit -uno -m x")?.steps).toEqual([
+      { kind: "commit", directory: ".", stage: "index", paths: [] },
+    ]);
+    expect(gitLeakPlan('git commit -m "x" -- src/a.ts')?.steps).toEqual([
+      { kind: "commit", directory: ".", stage: "only", paths: ["src/a.ts"] },
+    ]);
+    expect(gitLeakPlan("git commit -i -m x b.ts")?.steps).toEqual([
+      { kind: "commit", directory: ".", stage: "include", paths: ["b.ts"] },
+    ]);
+  });
+
+  test("directories, adds, pushes and shell wrappers", () => {
+    expect(
+      gitLeakPlan(
+        'cd repos/app && git add docs/a.md && git commit -m "docs" && git -C ../lib push origin feature:main',
+      )?.steps,
+    ).toEqual([
+      { kind: "add", directory: "repos/app", args: ["docs/a.md"] },
+      { kind: "commit", directory: "repos/app", stage: "index", paths: [] },
+      { kind: "push", directory: "repos/app/../lib", revisions: ["feature"] },
+    ]);
+    expect(gitLeakPlan("git push")?.steps).toEqual([
+      { kind: "push", directory: ".", revisions: ["HEAD"] },
+    ]);
+    expect(gitLeakPlan("git push --all origin")?.steps).toEqual([
+      { kind: "push", directory: ".", revisions: ["--branches"] },
+    ]);
+    expect(gitLeakPlan(`bash -lc 'cd app && git commit -qm x'`)?.steps).toEqual([
+      { kind: "commit", directory: "app", stage: "index", paths: [] },
+    ]);
+    expect(gitLeakPlan("GIT_AUTHOR_NAME=x env -i GIT_DIR_X=1 git commit -m y")?.steps).toHaveLength(
+      1,
+    );
+    // Interactive adds and unknown directories are not replayed or checked.
+    expect(gitLeakPlan("git add -p && git commit -m x")?.steps).toEqual([
+      { kind: "commit", directory: ".", stage: "index", paths: [] },
+    ]);
+    expect(gitLeakPlan('cd "$REPO" && git commit -m x')).toBeNull();
+    expect(gitLeakPlan("git --git-dir=/x/.git commit -m x")).toBeNull();
+  });
+
+  test("the helper replays adds on a throwaway index and has a deadline", () => {
+    const script = gitLeakScanScript(gitLeakPlan("git add . && git commit -m x && git push")!, {
       ledgerKnown: false,
     });
-    expect(all).toContain("ls-files --others --exclude-standard");
-    expect(all).toContain("HEAD --not --remotes");
+    expect(script).toContain("exec timeout -k 2 15 sh -c");
+    expect(script).toContain(`GIT_INDEX_FILE="$ix" git add '.'`);
+    expect(script).toContain("diff --cached");
+    expect(script).toContain("'HEAD' --not --remotes");
+    expect(script).not.toContain("ls-files");
   });
 });
