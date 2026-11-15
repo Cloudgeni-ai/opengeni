@@ -677,7 +677,7 @@ export const CASES: readonly EvalCase[] = [
     integration: "outlook_calendar",
     kind: "read",
     prompt: "When is the Halcyon launch review on my Outlook Calendar?",
-    expectAnswer: [i("wed|18"), i("\\b(10|09)([:.]00)?\\b")],
+    expectAnswer: [i("wed|18"), i("\\b(10|0?9)[:.]00\\b|\\b(10|9) ?(a\\.?m|am)\\b")],
   },
   {
     id: "outlook_calendar.write.event",
