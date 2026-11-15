@@ -828,6 +828,8 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           expectedRevision: input.expectedRevision,
           operationId: input.idempotencyKey,
           inputDigest: createHash("sha256").update(stableJson(input)).digest("hex"),
+          // Resolving the source only reads it; the preview is saved in commit.
+          releaseClaimOnFailure: true,
           authorize: (tx, _attempt, origin) =>
             requireConnectOwnerAuthority(tx, scope, "connections:write", origin),
           execute: async (attempt) => {
@@ -1279,6 +1281,11 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         expectedRevision: input.expectedRevision,
         operationId: input.idempotencyKey,
         inputDigest: createHash("sha256").update(stableJson(input)).digest("hex"),
+        // Preview and install only read the source and the saved account; the
+        // install is written in commit's one transaction. A failure (for
+        // example the install refused by the database) leaves the attempt
+        // ready to advance again rather than refused as in flight.
+        releaseClaimOnFailure: true,
         authorize: (tx, _attempt, origin) =>
           requireConnectOwnerAuthority(tx, scope, advancePermission, origin),
         execute: async (attempt) => {

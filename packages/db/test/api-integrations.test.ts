@@ -572,6 +572,49 @@ describe("API Integration persistence", () => {
     });
   }, 60_000);
 
+  test("a new revision installed by one person moves other people's personal instances too", async () => {
+    // Each person's personal Connection is visible only to them, but a new
+    // revision moves every instance of the integration in the workspace.
+    if (!available || !client) return;
+    const suffix = crypto.randomUUID();
+    const earlierSubjectId = `user:api-integration-upgrade-earlier-${suffix}`;
+    const laterSubjectId = `user:api-integration-upgrade-later-${suffix}`;
+    const personalInstall = async (subjectId: string, revision: "1" | "2") => {
+      const connection = await createConnection(client!.db, {
+        accountId: first.accountId,
+        workspaceId: first.workspaceId,
+        subjectId,
+        providerDomain: "inventory.example.com",
+        kind: "api_key",
+        credentialEncrypted: "test-only-personal-encrypted-bundle",
+        grantedScopes: ["inventory.read", "inventory.write"],
+        createdBySubjectId: subjectId,
+      });
+      const base = integrationInput(connection.id, `inventory-upgrade-${suffix.slice(0, 8)}`);
+      return await installApiIntegration(client!.db, {
+        ...base,
+        subjectId,
+        ownership: "subject",
+        revision: {
+          ...base.revision,
+          id: `openapi:${revision.repeat(24)}`,
+          contentSha256: revision.repeat(64),
+        },
+      });
+    };
+    const earlier = await personalInstall(earlierSubjectId, "1");
+    const later = await personalInstall(laterSubjectId, "2");
+
+    expect(later.instanceId).not.toBe(earlier.instanceId);
+    for (const subjectId of [earlierSubjectId, laterSubjectId])
+      expect(await listInstalledApiIntegrations(client.db, first.workspaceId, subjectId)).toEqual([
+        expect.objectContaining({
+          revision: expect.objectContaining({ id: `openapi:${"2".repeat(24)}` }),
+          connectionStatus: "active",
+        }),
+      ]);
+  }, 60_000);
+
   test("keeps a victim personal instance unchanged across cross-subject rebind attempts", async () => {
     if (!available || !client || !shared) return;
     const suffix = crypto.randomUUID();

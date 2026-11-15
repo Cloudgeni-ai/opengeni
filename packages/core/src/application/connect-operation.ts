@@ -5,6 +5,7 @@ import { integrationKeyForConnectProvider } from "../domain/organization-integra
 import {
   claimConnectOperation,
   finishConnectOperation,
+  releaseConnectOperation,
   type ConnectActorScope,
   type ConnectOperationAuthorization,
   type Database,
@@ -24,7 +25,8 @@ export type PreparedConnectOperation = {
  * No remote effects may occur inside authorize or commit.
  *
  * A failed execute/authorization/commit keeps the durable claim occupied. It
- * does not release or retry work whose provider outcome may be unknown.
+ * does not release or retry work whose provider outcome may be unknown. An
+ * adapter whose execute has no remote effects sets releaseClaimOnFailure.
  */
 export async function executeConnectOperation(input: {
   db: Database;
@@ -40,6 +42,11 @@ export async function executeConnectOperation(input: {
   /** Trusted adapter's exact attempt fence, inside the organization policy
    * prefix and before Connect row locks, for both claim and final commit. */
   beforeOperation?: ((tx: Database) => Promise<void>) | undefined;
+  /** Trusted adapter declaration that execute only reads (no remote effects)
+   * and commit is its only write. A failure after this request's own claim
+   * then leaves nothing uncertain, so the claim is freed and the attempt can
+   * be advanced again instead of being refused as in flight. */
+  releaseClaimOnFailure?: boolean;
   authorize: ConnectOperationAuthorization;
   execute: (attempt: ConnectAttempt) => Promise<PreparedConnectOperation>;
 }): Promise<ConnectAttempt> {
@@ -67,19 +74,29 @@ export async function executeConnectOperation(input: {
     });
   });
   if (claim.status === "replayed") return claim.attempt;
-  const prepared = await execute(structuredClone(claim.attempt));
-  return withOrganizationIntegrationPolicyFence(db, scope, async (tx, policy) => {
-    await beforeOperation?.(tx);
-    return finishConnectOperation(tx, scope, {
-      ...operation,
-      commit: prepared.commit,
-      authorizeAcquisition: async (_tx, attempt) => {
-        if (purpose === "cancellation") return;
-        assertOrganizationIntegrationAllowed(
-          policy,
-          integrationKeyForConnectProvider(attempt.providerId),
-        );
-      },
+  if (!input.releaseClaimOnFailure) return await finish();
+  try {
+    return await finish();
+  } catch (error) {
+    await releaseConnectOperation(db, scope, operation).catch(() => undefined);
+    throw error;
+  }
+
+  async function finish(): Promise<ConnectAttempt> {
+    const prepared = await execute(structuredClone(claim.attempt));
+    return withOrganizationIntegrationPolicyFence(db, scope, async (tx, policy) => {
+      await beforeOperation?.(tx);
+      return finishConnectOperation(tx, scope, {
+        ...operation,
+        commit: prepared.commit,
+        authorizeAcquisition: async (_tx, attempt) => {
+          if (purpose === "cancellation") return;
+          assertOrganizationIntegrationAllowed(
+            policy,
+            integrationKeyForConnectProvider(attempt.providerId),
+          );
+        },
+      });
     });
-  });
+  }
 }

@@ -486,6 +486,33 @@ export async function claimConnectOperation(
   });
 }
 
+/**
+ * Free this operation's claim after it failed, so the attempt can be advanced
+ * again. Only for an operation whose work has no remote effects (it reads and
+ * then writes in finishConnectOperation's one transaction): when that fails,
+ * nothing is uncertain. Changes nothing when the claim is no longer this
+ * operation's, including when the operation did finish.
+ */
+export async function releaseConnectOperation(
+  db: Database,
+  scope: ConnectActorScope,
+  input: { attemptId: string; operationId: string; inputDigest: string },
+): Promise<boolean> {
+  validateOperation(input.operationId, input.inputDigest);
+  return scoped(db, scope, async (tx) => {
+    const released = await rawRows<{ id: string }>(
+      tx,
+      sql`update connect_attempts set operation_id = null, operation_digest = null,
+      updated_at = now()
+      where id = ${input.attemptId}::uuid and account_id = ${scope.accountId}::uuid
+        and workspace_id = ${scope.workspaceId}::uuid and subject_id = ${scope.subjectId}
+        and operation_id = ${input.operationId} and operation_digest = ${input.inputDigest}
+      returning id`,
+    );
+    return released.length === 1;
+  });
+}
+
 /** Pass the same transaction to credential/installation persistence through
  * commit so its receipt and the public setup result become visible atomically.
  * Do not perform network effects inside commit. */
