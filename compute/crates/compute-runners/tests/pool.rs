@@ -173,6 +173,44 @@ async fn a_job_runs_in_a_fresh_sandbox_that_ends_with_it() {
     assert_eq!(fake.world().sessions_closed, 1);
 }
 
+/// An idle runner's sandbox ends a lifetime after it started; a job it
+/// takes, however late, gets a whole lifetime from its start, so a runner
+/// that waited hours for its job does not cut the job short.
+#[tokio::test]
+async fn a_job_gets_a_whole_lifetime_however_long_its_runner_waited() {
+    let Running {
+        fake,
+        mut leading,
+        stop,
+        done,
+    } = listening(Fake::start().await, 1).await;
+    until_leading(&mut leading, true).await;
+    fake.until("an idle runner", |world| {
+        world.sandboxes.len() == 1 && world.runners.len() == 1
+    })
+    .await;
+    assert!(fake.world().timeouts.is_empty(), "idle, its end stays");
+
+    let (sandbox, name, id) = {
+        let world = fake.world();
+        let (sandbox, started) = world.sandboxes.iter().next().unwrap();
+        let id: u64 = started.metadata[ID_KEY].parse().unwrap();
+        (sandbox.clone(), started.metadata[NAME_KEY].clone(), id)
+    };
+    fake.world().runners.insert(id, (name.clone(), true));
+    fake.send(
+        &json!([{"messageType": "JobStarted", "runnerRequestId": 7, "runnerName": name}]),
+        1,
+    );
+    fake.until("the sandbox's end moved", |world| {
+        world.timeouts == [(sandbox.clone(), 600)]
+    })
+    .await;
+
+    stop.cancel();
+    done.await.unwrap();
+}
+
 #[tokio::test]
 async fn idle_runners_are_kept_and_replaced() {
     let Running {
