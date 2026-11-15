@@ -419,7 +419,10 @@ async function serviceFixture(provider: Provider, unrelated = 0, url = provider.
 }
 
 /** A Site version pinning the fixture's target and `fillers` more of its tools. */
-async function siteFixture(fixture: Awaited<ReturnType<typeof serviceFixture>>, fillers: number) {
+async function siteFixture(
+  fixture: Pick<Awaited<ReturnType<typeof serviceFixture>>, "grant" | "identity">,
+  fillers: number,
+) {
   const artifactId = crypto.randomUUID();
   const identities = [
     fixture.identity,
@@ -915,6 +918,115 @@ describe("targeted tool fence on PostgreSQL", () => {
       });
       expect(invoked.status).toBe(409);
       expect(provider.server.calls).toHaveLength(0);
+    } finally {
+      provider.server.close();
+    }
+  }, 120_000);
+
+  test("a person's Site Ask call through the HTTP routes: consent describes it, Send runs it once, Cancel runs nothing", async () => {
+    if (!shared) return;
+    const provider = startProvider();
+    try {
+      // The signed-in person viewing the Site in the Opengeni frame: the local
+      // install's canonical human, whose request fence keeps its fresh grant.
+      const settings = providerSettings(provider, { productAccessMode: "local" });
+      const access = await bootstrapWorkspace(seed!.db, {
+        accountExternalSource: "opengeni:local",
+        accountExternalId: "default",
+        accountName: "Local",
+        workspaceExternalSource: "opengeni:local",
+        workspaceExternalId: "default",
+        workspaceName: "Local",
+        subjectId: "dev",
+        subjectLabel: "Local dev",
+      });
+      const grant = access.workspaceGrants[0]!;
+      const connection = await createConnection(seed!.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        providerDomain: "127.0.0.1",
+        kind: "api_key",
+        credentialEncrypted: providerCredential(settings),
+        metadata: { displayName: "Shared Grafana" },
+        createdBySubjectId: grant.subjectId,
+      });
+      const identity = {
+        serverId: mcpAccountRouteId("grafana", connection.id),
+        toolName: "search_documents",
+      };
+      await updateConnectorToolPermissionPolicies(seed!.db, {
+        ...grant,
+        connectionId: connection.id,
+        serverId: "grafana",
+        toolNames: ["search_documents"],
+        policy: "ask",
+      });
+      const site = await siteFixture({ grant, identity }, 0);
+      const replica = createApp({
+        settings,
+        db,
+        bus: {} as never,
+        workflowClient: {} as never,
+        objectStorage: null,
+      });
+      const post = (operation: string, body: unknown) =>
+        replica.request(`http://localhost/v1/workspaces/${grant.workspaceId}/tools/${operation}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+      const args = { query: "vector(1)" };
+      const siteRef = { siteArtifactId: site.siteArtifactId, siteVersionId: site.siteVersionId };
+      const invoke = (operationId: string, approvalToken?: string) =>
+        post("invoke", {
+          target: { identity },
+          operationId,
+          arguments: args,
+          ...siteRef,
+          ...(approvalToken ? { approvalToken } : {}),
+        });
+      provider.reset();
+
+      // The Site's direct call needs the viewer's confirmation first.
+      const cancelled = crypto.randomUUID();
+      expect((await invoke(cancelled)).status).toBe(409);
+      // The frame's prompt reads what the call would do on the viewer's own
+      // route, under the person's fresh grant: never a server error.
+      const consent = await post("site-consent", {
+        identity,
+        arguments: args,
+        ...siteRef,
+      });
+      expect(consent.status).toBe(200);
+      const described = (await consent.json()) as {
+        accounts: { identity: unknown }[];
+        connect: unknown;
+      };
+      expect(described.connect).toBeNull();
+      expect(described.accounts.map((account) => account.identity)).toEqual([identity]);
+      // Cancel: no approval is minted, so the call stays blocked.
+      expect((await invoke(cancelled)).status).toBe(409);
+      expect(provider.server.calls).toHaveLength(0);
+
+      // Send: the host mints the approval, and the call runs exactly once.
+      const sent = crypto.randomUUID();
+      const resolved = await post("resolve", { target: { identity }, ...siteRef });
+      expect(resolved.status).toBe(200);
+      const { definitionDigest } = (await resolved.json()) as { definitionDigest: string };
+      const approval = await post("target-approvals", {
+        identity,
+        operationId: sent,
+        arguments: args,
+        expectedDefinitionDigest: definitionDigest,
+        ...siteRef,
+      });
+      expect(approval.status).toBe(201);
+      const { approvalToken } = (await approval.json()) as { approvalToken: string };
+      expect((await invoke(sent, approvalToken)).status).toBe(200);
+      expect(provider.server.calls).toHaveLength(1);
+      // A repeated delivery of the same confirmed operation never runs it again.
+      await invoke(sent, approvalToken);
+      expect(provider.server.calls).toHaveLength(1);
     } finally {
       provider.server.close();
     }

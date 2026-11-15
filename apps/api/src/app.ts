@@ -2353,6 +2353,26 @@ export function createAppComposition(
   });
 
   // Known calls need no preceding full-catalog discovery or replica-local attestation.
+  // Every targeted tool route, the Site consent prompt included, keeps the
+  // caller's fresh grant: a person's request fence requires it. Organization
+  // keys and external actors are re-read by the request fence itself.
+  const freshToolCaller =
+    (
+      c: Context,
+      workspaceId: string,
+      authorization: Awaited<ReturnType<typeof requireAccessGrantAuthorization>>,
+    ) =>
+    async () => {
+      const live = await requireFreshAccessGrant(c, routeDeps, workspaceId, "workspace:read");
+      const original = authorization.grant;
+      if (
+        live.accountId !== original.accountId ||
+        live.subjectId !== original.subjectId ||
+        live.principalKind !== original.principalKind ||
+        original.permissions.some((permission) => !hasPermission(live.permissions, permission))
+      )
+        throw new HTTPException(403, { message: "tool_access_changed" });
+    };
   for (const operation of ["resolve", "invoke", "target-approvals", "manifest"] as const) {
     app.post(`/v1/workspaces/:workspaceId/tools/${operation}`, async (c) => {
       const workspaceId = c.req.param("workspaceId");
@@ -2365,19 +2385,7 @@ export function createAppComposition(
       let fence: TargetAuthorityFence | undefined;
       const options = {
         signal: c.req.raw.signal,
-        // Human callers keep their fresh grant. Organization keys and external
-        // actors are re-read by the request fence itself.
-        reauthorize: async () => {
-          const live = await requireFreshAccessGrant(c, routeDeps, workspaceId, "workspace:read");
-          const original = authorization.grant;
-          if (
-            live.accountId !== original.accountId ||
-            live.subjectId !== original.subjectId ||
-            live.principalKind !== original.principalKind ||
-            original.permissions.some((permission) => !hasPermission(live.permissions, permission))
-          )
-            throw new HTTPException(403, { message: "tool_access_changed" });
-        },
+        reauthorize: freshToolCaller(c, workspaceId, authorization),
         onFence: (created: TargetAuthorityFence) => {
           fence = created;
         },
@@ -2470,6 +2478,9 @@ export function createAppComposition(
     return c.json(
       await describeWorkspaceSiteToolConsent(routeDeps, authorization, body, {
         signal: c.req.raw.signal,
+        // Reading what the call would do prepares the viewer's route under
+        // the same request fence as the call itself.
+        reauthorize: freshToolCaller(c, workspaceId, authorization),
       }),
     );
   });
