@@ -722,6 +722,160 @@ describe("rig provider image build ledger", () => {
     expect(upgrade.image.coldBootValidation).toBeUndefined();
   });
 
+  test("a build abandoned past 20 minutes is taken over, and the stopped build cannot publish", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const staleAfterMs = 20 * 60_000;
+    const newVersion = async (name: string) => {
+      const rig = await createRig(db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        name,
+        initialVersion: { setupScript: "echo ready" },
+      });
+      const versionId = rig.activeVersion!.id;
+      const claimAt = (ageMs: number) =>
+        claimRigVersionProviderImageBuild(db, {
+          workspaceId: ws.workspaceId,
+          versionId,
+          image: rigProviderImage({
+            provenance: { kind: "rig_verification", targetKind: "version", targetId: versionId },
+            startedAt: new Date(Date.now() - ageMs).toISOString(),
+          }),
+          staleAfterMs,
+        });
+      return { versionId, claimAt };
+    };
+
+    // A build that started 19 minutes ago is still its worker's.
+    const running = await newVersion("provider-image-running");
+    const young = await running.claimAt(19 * 60_000);
+    expect(young.status).toBe("claimed");
+    expect(await running.claimAt(0)).toEqual({ status: "in_progress", image: young.image });
+
+    // A build that claimed the record 21 minutes ago and stopped is taken over.
+    const { versionId, claimAt } = await newVersion("provider-image-takeover");
+    const stopped = await claimAt(21 * 60_000);
+    expect(stopped.status).toBe("claimed");
+    const takeover = await claimAt(0);
+    expect(takeover.status).toBe("claimed");
+    if (takeover.status !== "claimed") throw new Error("expected a takeover");
+    expect(takeover.replaced).toEqual(stopped.image);
+    expect(takeover.image.buildRequestId).toBe(stopped.image.buildRequestId);
+    expect(takeover.image.startedAt).not.toBe(stopped.image.startedAt);
+    // While the takeover runs, a second build waits for it.
+    expect((await claimAt(0)).status).toBe("in_progress");
+
+    // The stopped build resumes and tries to publish; the takeover owns the record.
+    const stoppedArtifact = await registerRigProviderImageArtifact(ws, versionId, "im-stopped");
+    expect(
+      await finalizeRigVersionProviderImageBuild(db, {
+        workspaceId: ws.workspaceId,
+        versionId,
+        image: rigProviderImage({
+          ...stopped.image,
+          status: "ready",
+          imageId: "im-stopped",
+          artifactId: stoppedArtifact.artifactId,
+          providerBindingKeyHash: stoppedArtifact.providerBindingKeyHash,
+          finishedAt: new Date().toISOString(),
+          error: null,
+        }),
+      }),
+    ).toBe(false);
+    expect((await getRigVersionById(db, ws.workspaceId, versionId))?.providerImages.modal).toEqual(
+      takeover.image,
+    );
+
+    const artifact = await registerRigProviderImageArtifact(ws, versionId, "im-takeover");
+    const ready = rigProviderImage({
+      ...takeover.image,
+      status: "ready",
+      imageId: "im-takeover",
+      artifactId: artifact.artifactId,
+      providerBindingKeyHash: artifact.providerBindingKeyHash,
+      finishedAt: new Date().toISOString(),
+      error: null,
+    });
+    expect(
+      await finalizeRigVersionProviderImageBuild(db, {
+        workspaceId: ws.workspaceId,
+        versionId,
+        image: ready,
+      }),
+    ).toBe(true);
+    expect((await getRigVersionById(db, ws.workspaceId, versionId))?.providerImages.modal).toEqual(
+      ready,
+    );
+  });
+
+  test("a failed build of the same content is claimed again by its rebuild", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const rig = await createRig(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      name: "provider-image-retry",
+      initialVersion: { setupScript: "echo ready" },
+    });
+    const versionId = rig.activeVersion!.id;
+    const provenance = {
+      kind: "rig_verification" as const,
+      targetKind: "version" as const,
+      targetId: versionId,
+    };
+    const first = await claimRigVersionProviderImageBuild(db, {
+      workspaceId: ws.workspaceId,
+      versionId,
+      image: rigProviderImage({ provenance }),
+      staleAfterMs: 20 * 60_000,
+    });
+    expect(first.status).toBe("claimed");
+    const failed = rigProviderImage({
+      ...first.image,
+      status: "failed",
+      finishedAt: new Date().toISOString(),
+      error: { code: "provider_image_build_failed", message: "Timeout expired", retryable: true },
+    });
+    expect(
+      await finalizeRigVersionProviderImageBuild(db, {
+        workspaceId: ws.workspaceId,
+        versionId,
+        image: failed,
+      }),
+    ).toBe(true);
+    // A late repeat of the same finalization stays idempotent.
+    expect(
+      await finalizeRigVersionProviderImageBuild(db, {
+        workspaceId: ws.workspaceId,
+        versionId,
+        image: failed,
+      }),
+    ).toBe(true);
+
+    const retry = await claimRigVersionProviderImageBuild(db, {
+      workspaceId: ws.workspaceId,
+      versionId,
+      image: rigProviderImage({
+        provenance,
+        startedAt: new Date(Date.now() + 1_000).toISOString(),
+      }),
+      staleAfterMs: 20 * 60_000,
+    });
+    expect(retry.status).toBe("claimed");
+    if (retry.status !== "claimed") throw new Error("expected a retry claim");
+    expect(retry.replaced).toEqual(failed);
+    expect(retry.image.buildRequestId).toBe(failed.buildRequestId);
+    // The failed build's own finalization no longer matches the retry's claim.
+    expect(
+      await finalizeRigVersionProviderImageBuild(db, {
+        workspaceId: ws.workspaceId,
+        versionId,
+        image: failed,
+      }),
+    ).toBe(false);
+  });
+
   test("an unsupported record retries only after the caller proves provider support", async () => {
     if (!available) return;
     const ws = await freshWorkspace();

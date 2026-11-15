@@ -20,6 +20,7 @@ const REFRESH_REASONS: ReadonlySet<RigProviderImageSelectionReason> = new Set([
   "content_mismatch",
   "unbuilt",
   "build_abandoned",
+  "build_failed_retryable",
 ]);
 
 /**
@@ -27,7 +28,8 @@ const REFRESH_REASONS: ReadonlySet<RigProviderImageSelectionReason> = new Set([
  * stale: the deployment base image (or the content identity protocol) moved
  * after it was built. On compute, a version with setup that was never built
  * (built before compute could build) is unbuilt, and a build that stopped
- * without finishing is abandoned. Each way the turn uses the ordinary setup
+ * without finishing is abandoned, on Modal too. On Modal, a build of this
+ * content that failed retryably is retried. Each way the turn uses the ordinary setup
  * path, and asks once in the background for a build on the current base so
  * later fresh sandboxes start from a prebuilt image. Never awaited by the turn.
  */

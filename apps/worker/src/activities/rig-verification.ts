@@ -1275,7 +1275,7 @@ export async function buildVerifiedRigProviderImage(
       settings: input.settings,
       session: input.established.session,
       requestId: building.buildRequestId,
-      timeoutMs: input.settings.sandboxSnapshotTimeoutMs,
+      timeoutMs: input.settings.rigProviderImageSnapshotTimeoutMs,
       signal: input.signal,
     });
     if (!built || (!built.imageId && !built.imageDigest)) {

@@ -973,3 +973,148 @@ describe("compute environment templates", () => {
     expect(seen!.modalWorkspacePersistence).toBe(computeSettings().modalWorkspacePersistence);
   });
 });
+
+describe("Modal provider image rebuilds", () => {
+  const settings = platformSettings();
+  const base = version();
+  const current = readyImage(settings, base);
+  const { coldBootValidation: _proof, ...unproven } = current;
+  const now = Date.parse("2026-11-15T12:00:00.000Z");
+  const select = (image: RigProviderImage) =>
+    resolveRigProviderImageSelection(
+      settings,
+      { ...base, providerImages: { modal: image } },
+      "modal",
+      image.providerBindingKeyHash,
+      now,
+    );
+  const building = (ageMs: number): RigProviderImage => ({
+    ...unproven,
+    status: "building",
+    imageId: null,
+    artifactId: null,
+    startedAt: new Date(now - ageMs).toISOString(),
+    finishedAt: null,
+  });
+  const failed = (retryable: boolean): RigProviderImage => ({
+    ...unproven,
+    status: "failed",
+    imageId: null,
+    artifactId: null,
+    error: { code: "provider_image_build_failed", message: "Timeout expired", retryable },
+  });
+
+  test("a build abandoned for the claim's staleness window is taken over", () => {
+    const abandoned = select(building(RIG_PROVIDER_IMAGE_BUILD_STALE_AFTER_MS));
+    expect(abandoned.reason).toBe("build_abandoned");
+    expect(abandoned.contentHash).toBe(current.contentHash);
+    expect(abandoned.imageId).toBeNull();
+    expect(abandoned.settings).toBe(settings);
+    expect(select(building(24 * 60 * 60_000)).reason).toBe("build_abandoned");
+    expect(select({ ...building(0), startedAt: "not a time" }).reason).toBe("build_abandoned");
+    // The same window as the build claim, so the rebuild can take it over.
+    expect(RIG_PROVIDER_IMAGE_BUILD_STALE_AFTER_MS).toBe(20 * 60_000);
+    expect(RIG_PROVIDER_IMAGE_BUILD_STALE_AFTER_MS).toBe(RIG_VERIFICATION_OWNER_TTL_MS);
+  });
+
+  test("a build younger than 20 minutes is left to its worker", () => {
+    for (const age of [0, 60_000, RIG_PROVIDER_IMAGE_BUILD_STALE_AFTER_MS - 1]) {
+      const running = select(building(age));
+      expect(running.reason).toBe("not_ready");
+      expect(running.settings).toBe(settings);
+    }
+  });
+
+  test("a retryable failure of this content is rebuilt, a non-retryable one is not", () => {
+    const retryable = select(failed(true));
+    expect(retryable.reason).toBe("build_failed_retryable");
+    expect(retryable.contentHash).toBe(current.contentHash);
+    expect(retryable.imageId).toBeNull();
+    expect(select(failed(false)).reason).toBe("not_ready");
+    expect(select({ ...failed(true), error: null }).reason).toBe("not_ready");
+    expect(select({ ...failed(true), status: "unsupported" }).reason).toBe("not_ready");
+  });
+
+  test("a failed or building record for other content asks for a build of this content", () => {
+    const earlier = readyImage(platformSettings({ modalImageRef: `${PLATFORM_IMAGE}-old` }), base);
+    for (const status of ["failed", "building"] as const) {
+      const other = select({
+        ...earlier,
+        status,
+        imageId: null,
+        startedAt: new Date(now).toISOString(),
+        error: null,
+      });
+      expect(other.reason).toBe("content_mismatch");
+      expect(other.contentHash).toBe(current.contentHash);
+    }
+  });
+
+  test("a ready image and a version with no record keep their selection", () => {
+    expect(select(current).reason).toBe("selected");
+    expect(resolveRigProviderImageSelection(settings, base, "modal", null, now).reason).toBe(
+      "missing",
+    );
+  });
+
+  test("the image build snapshots with its own timeout, not the ordinary snapshot one", async () => {
+    const buildSettings = platformSettings({
+      sandboxSnapshotTimeoutMs: 60_000,
+      rigProviderImageSnapshotTimeoutMs: 420_000,
+    });
+    const timeouts: number[] = [];
+    const finalized: RigProviderImage[] = [];
+    const stop = new AbortController();
+    const result = await buildVerifiedRigProviderImage(
+      {
+        settings: buildSettings,
+        db: {} as never,
+        observability: { warn: () => undefined } as never,
+        accountId: "33333333-3333-4333-8333-333333333333",
+        workspaceId: "44444444-4444-4444-8444-444444444444",
+        existingVersionId: VERSION_ID,
+        definition: base,
+        target: { kind: "version", id: VERSION_ID },
+        established: {
+          backendId: "modal",
+          client: {},
+          instanceId: "sb-build",
+          session: { state: { sandboxId: "sb-build" } },
+          sessionState: {},
+        } as never,
+        ownership: {
+          leaseId: "lease-build",
+          leaseEpoch: 1,
+          workspaceGeneration: 0,
+          instanceId: "sb-build",
+        },
+        lifecycle: { signal: stop.signal, cleanupDeadlineAtMs: null, dispose: () => undefined },
+        signal: stop.signal,
+      },
+      {
+        buildImage: async (input) => {
+          timeouts.push(input.timeoutMs);
+          throw new Error("Timeout expired");
+        },
+        verifyColdBoot: async () => {
+          throw new Error("not reached");
+        },
+        claim: async (_db, input) => ({ status: "claimed", image: input.image, replaced: null }),
+        finalize: async (_db, input) => {
+          finalized.push(input.image);
+          return true;
+        },
+        currentImage: async () => null,
+        deleteComputeTemplate: async () => undefined,
+      },
+    );
+    expect(timeouts).toEqual([420_000]);
+    // A timed-out build is recorded as retryable, so a later turn rebuilds it.
+    expect(result.status).toBe("failed");
+    expect(result.error?.retryable).toBe(true);
+    expect(finalized.map((image) => image.status)).toEqual(["failed"]);
+    expect(
+      select({ ...result, contentHash: current.contentHash, startedAt: current.startedAt }).reason,
+    ).toBe("build_failed_retryable");
+  });
+});

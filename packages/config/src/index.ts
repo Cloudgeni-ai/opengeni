@@ -2161,6 +2161,18 @@ const SettingsSchema = z.object({
   // default (a rig may compile/install heavy tooling on first cold create).
   // Env: OPENGENI_RIG_SETUP_TIMEOUT_MS. Default 10min.
   rigSetupTimeoutMs: z.coerce.number().int().positive().default(600_000),
+  // Provider budget for the one filesystem snapshot that turns a verified
+  // Sandbox Environment into its prebuilt image. A whole set-up filesystem
+  // takes much longer to snapshot than a turn's best-effort workspace save, so
+  // it does not share OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS. Keep it well inside
+  // the 15-minute verification activity. Env:
+  // OPENGENI_RIG_PROVIDER_IMAGE_SNAPSHOT_TIMEOUT_MS. Default 5min.
+  rigProviderImageSnapshotTimeoutMs: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(SANDBOX_SNAPSHOT_MAX_TIMEOUT_MS)
+    .default(300_000),
   // --- sandbox warm-time billing (P2.1) ---
   // Per-backend warm rate (usd_micros/sec), like modelPricingJson: an empty {}
   // means warm-cost is not debited (warm-seconds are still metered for audit).
@@ -6561,6 +6573,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     sandboxWarmingTimeoutMs: optional("OPENGENI_SANDBOX_WARMING_TIMEOUT_MS"),
     workspaceControlLockTimeoutMs: optional("OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS"),
     rigSetupTimeoutMs: optional("OPENGENI_RIG_SETUP_TIMEOUT_MS"),
+    rigProviderImageSnapshotTimeoutMs: optional("OPENGENI_RIG_PROVIDER_IMAGE_SNAPSHOT_TIMEOUT_MS"),
     sandboxWarmRateMicrosPerSecondJson: optional(
       "OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON",
     ),
