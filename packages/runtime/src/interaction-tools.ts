@@ -123,6 +123,7 @@ import {
 } from "./computer-current-window";
 import {
   describeInvalidToolArguments,
+  cachedJsonSchemaConversion,
   interactionToolInputJsonSchema,
   browserActModelInputSchema,
   computerActModelInputSchema,
@@ -283,6 +284,9 @@ const CompactBrowserActionReceipt = z
   })
   .strict();
 const BrowserAgentActionReceipt = z.union([BrowserActionReceipt, CompactBrowserActionReceipt]);
+// Module constants so their JSON Schema conversion is cached per process.
+const BrowserDownloadsOutput = z.union([BrowserDownloadListResponse, BrowserDownload]);
+const BrowserRecordingOutput = z.union([BrowserRecordingSummary, BrowserRecordingSaveResponse]);
 /** Browser tools default to the browser and tab the agent used last. */
 const CurrentBrowserSessionId = z
   .string()
@@ -1838,9 +1842,9 @@ export function createInteractionAttemptToolDefinitions(
       title: options.title,
       description: options.description,
       inputSchema: (options.modelInputSchema ?? ((schema) => schema))(
-        interactionToolInputJsonSchema(options.input),
+        modelInputJsonSchema(options.input),
       ),
-      outputSchema: jsonSchema(options.output),
+      outputSchema: outputJsonSchema(options.output),
       annotations: {
         title: options.title,
         readOnlyHint: options.readOnly,
@@ -2474,7 +2478,7 @@ export function createInteractionAttemptToolDefinitions(
     description:
       "List browser-produced files or get one exact download by id. Metadata identifies completed bytes and their SHA-256; diagnostics alone do not expose a download id or file bytes. Use browser_download_save to materialize a completed download in its source session's workspace. In attached Chrome the person's own file also stays in their downloads folder. Lightpanda has no downloads.",
     input: BrowserDownloadsInput,
-    output: z.union([BrowserDownloadListResponse, BrowserDownload]),
+    output: BrowserDownloadsOutput,
     readOnly: true,
     idempotent: true,
     execute: async (value) =>
@@ -2552,7 +2556,7 @@ export function createInteractionAttemptToolDefinitions(
     description:
       "Record a browser flow as a video, for proof of work or a demo. operation=start records the tab and follows the tabs you act on, open or select; frames are captured only when the page changes, so waiting costs nothing. Work normally, then operation=stop with the returned recordingId. Stop saves an MP4 in the workspace (default recordings/browser-<time>.mp4) with a .actions.json log beside it giving the time of each action, and returns the video's artifactId: show it with ![what it shows](artifact:<artifactId>). For edits such as cutting idle parts, speeding up, captions or narration, use ffmpeg (or install another tool), take timings from the action log, then publish the result with sandbox_file_publish. One recording per browser at a time, up to 30 minutes. Requires sessions:control and files:upload.",
     input: BrowserRecordInput,
-    output: z.union([BrowserRecordingSummary, BrowserRecordingSaveResponse]),
+    output: BrowserRecordingOutput,
     readOnly: false,
     idempotent: false,
     execute: async (value, context) => {
@@ -6711,6 +6715,10 @@ export function secretReferenceToolResult(error: unknown): AttemptToolResultValu
 function jsonSchema(schema: z.ZodType): AttemptToolJsonSchema {
   return z.toJSONSchema(schema, { target: "draft-2020-12" }) as AttemptToolJsonSchema;
 }
+
+// Tool schemas are module constants, so each is converted once per process.
+const modelInputJsonSchema = cachedJsonSchemaConversion(interactionToolInputJsonSchema);
+const outputJsonSchema = cachedJsonSchemaConversion(jsonSchema);
 
 function hasToolPermission(
   permissions: readonly Permission[],

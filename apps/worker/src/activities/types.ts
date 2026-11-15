@@ -150,6 +150,11 @@ export type SharedActivityServices = {
   // observes that same recorded event is consulted without double-charging:
   // admission and metering are separate operations, and only metering carries
   // the idempotency key.
+  //
+  // CONCURRENCY: before each model request the worker calls `admitRun`
+  // together with its local admission reads (task usage limit, allowance,
+  // static limits), so it may be consulted for a request that a local check
+  // then refuses. The reported refusal keeps the sequential order.
   entitlements?: EntitlementsPort | null;
   // §7.6 connection-credential provider — host connection-credential provider, the WORKER half of the
   // federated-connection boundary. When set, the run's per-run credential mint

@@ -351,19 +351,33 @@ export async function ensureSessionUsageLimitAllows(
   db: ActivityServices["db"],
   input: { accountId: string; workspaceId: string; sessionId: string },
 ): Promise<void> {
+  await flushHeldSessionUsageReceiptsBeforeAdmission(db, input.sessionId);
+  await checkSessionUsageLimitAllows(db, input);
+}
+
+async function flushHeldSessionUsageReceiptsBeforeAdmission(
+  db: ActivityServices["db"],
+  sessionId: string,
+): Promise<void> {
   // Receipts this process holds (a settlement write failed) are made durable
   // before the next request is admitted; a still-failing write throws a
   // database error and blocks the request without replaying provider work.
   // It is an unreadable usage state (never a credit or limit stop); the
   // database cause keeps it in the attempt's DB-only recovery lane.
   try {
-    await flushHeldSessionUsageReceipts(db, input.sessionId);
+    await flushHeldSessionUsageReceipts(db, sessionId);
   } catch (error) {
     throw new SessionUsageLimitUnavailableError(
       "Recorded task usage could not be saved before the next model request",
       { cause: error },
     );
   }
+}
+
+async function checkSessionUsageLimitAllows(
+  db: ActivityServices["db"],
+  input: { accountId: string; workspaceId: string; sessionId: string },
+): Promise<void> {
   const admission = await checkSessionUsageLimitAdmission(db, { ...input, runtime: true });
   if (!admission.allowed) throw new SessionUsageLimitReachedError(admission.refusal);
 }
@@ -476,13 +490,71 @@ export async function ensureRunAllowed(
   byok = false,
   ownSubscription = false,
 ): Promise<number | undefined> {
-  let creditPolicyRevision: number | undefined;
   if (ownSubscription && connectedSubscriptionsRefusedForOrigin(settings, billingOrigin)) {
     throw new TurnAdmissionRefusedError(SUBSCRIPTION_API_UNAVAILABLE_MESSAGE);
   }
-  // Per-task usage limit: independent of funding, so it applies to
-  // credit, subscription, workspace-key and free paths alike.
-  if (sessionId) await ensureSessionUsageLimitAllows(db, { accountId, workspaceId, sessionId });
+  // Receipts this process still holds are written before any admission read.
+  if (sessionId) await flushHeldSessionUsageReceiptsBeforeAdmission(db, sessionId);
+  // The checks below are independent reads, each in its own transaction, and
+  // this runs before every model request. They run together; all of them
+  // settle before any outcome is reported, and a failure surfaces in the
+  // original order (task usage limit, funding, allowance, static limits), so
+  // a refusal is the same one the sequential checks would have produced.
+  const [sessionLimit, funding, allowance, staticLimits] = await Promise.allSettled([
+    sessionId
+      ? checkSessionUsageLimitAllows(db, { accountId, workspaceId, sessionId })
+      : Promise.resolve(),
+    ensureRunFunding(settings, db, {
+      accountId,
+      workspaceId,
+      entitlements,
+      chargesOpenGeniCredits,
+      modelId,
+      billingOrigin,
+      byok,
+      ownSubscription,
+    }),
+    checkWorkspaceAllowance(db, {
+      accountId,
+      workspaceId,
+      subjectId: initiatingHumanSubjectId,
+      ...(chargesOpenGeniCredits ? {} : { fundedWithoutCredits: true }),
+    }),
+    ensureStaticUsageLimits(settings, db, workspaceId, countsTowardTokenCap),
+  ]);
+  if (sessionLimit.status === "rejected") throw sessionLimit.reason;
+  if (funding.status === "rejected") throw funding.reason;
+  if (allowance.status === "rejected") throw allowance.reason;
+  if (allowance.value) throw new AllowanceExhaustedError(allowance.value);
+  if (staticLimits.status === "rejected") throw staticLimits.reason;
+  return funding.value;
+}
+
+async function ensureRunFunding(
+  settings: Settings,
+  db: ActivityServices["db"],
+  input: {
+    accountId: string;
+    workspaceId: string;
+    entitlements: ActivityServices["entitlements"] | undefined;
+    chargesOpenGeniCredits: boolean;
+    modelId: string | undefined;
+    billingOrigin: BillingOrigin;
+    byok: boolean;
+    ownSubscription: boolean;
+  },
+): Promise<number | undefined> {
+  const {
+    accountId,
+    workspaceId,
+    entitlements,
+    chargesOpenGeniCredits,
+    modelId,
+    billingOrigin,
+    byok,
+    ownSubscription,
+  } = input;
+  let creditPolicyRevision: number | undefined;
   // Upstream settlement and workspace-facing cost are independent. External
   // metering skips the token cap; free/subscription/workspace cost skips the
   // Opengeni credit gate. The agent-run COUNT cap below is a volume/fairness
@@ -554,13 +626,15 @@ export async function ensureRunAllowed(
       );
     }
   }
-  const refusal = await checkWorkspaceAllowance(db, {
-    accountId,
-    workspaceId,
-    subjectId: initiatingHumanSubjectId,
-    ...(chargesOpenGeniCredits ? {} : { fundedWithoutCredits: true }),
-  });
-  if (refusal) throw new AllowanceExhaustedError(refusal);
+  return creditPolicyRevision;
+}
+
+async function ensureStaticUsageLimits(
+  settings: Settings,
+  db: ActivityServices["db"],
+  workspaceId: string,
+  countsTowardTokenCap: boolean,
+): Promise<void> {
   if (settings.usageLimitsMode === "static" || settings.usageLimitsMode === "managed") {
     const limits = configuredStaticUsageLimits(settings);
     if (limits.maxMonthlyAgentRunsPerWorkspace) {
@@ -591,5 +665,4 @@ export async function ensureRunAllowed(
       }
     }
   }
-  return creditPolicyRevision;
 }

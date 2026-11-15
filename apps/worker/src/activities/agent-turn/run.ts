@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { agentPrivateFileOwnerSubjectId, unboundGitHubRepositoryResources } from "@opengeni/core";
 import {
   getSessionAuthorityProjection,
@@ -2423,7 +2424,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         "opengeni.trigger_kind": input.trigger.kind,
         correlationId,
       },
-      { parent: null },
+      {
+        parent: null,
+        ...(sampleSegmentDatabaseSpans(input.attemptId)
+          ? { childSpanLimit: SEGMENT_DATABASE_CHILD_SPAN_LIMIT }
+          : {}),
+      },
     );
     try {
       return await withMcpTelemetry(resolvedServices.observability, correlationId, () =>
@@ -2456,4 +2462,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       span.end();
     }
   };
+}
+
+/**
+ * Child (database) spans for a deterministic sample of segments: the same
+ * statement names the API's request spans export, so heavy queries map to the
+ * worker code path that ran them. Only exported when OTLP is configured.
+ */
+const SEGMENT_DATABASE_SPAN_SAMPLE_PERCENT = 5;
+const SEGMENT_DATABASE_CHILD_SPAN_LIMIT = 2_048;
+
+export function sampleSegmentDatabaseSpans(attemptId: string): boolean {
+  const bucket = createHash("sha256").update(attemptId).digest().readUInt16BE(0) % 100;
+  return bucket < SEGMENT_DATABASE_SPAN_SAMPLE_PERCENT;
 }

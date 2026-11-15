@@ -25725,7 +25725,11 @@ export async function claimRigVersionProviderImageBuild(
   });
 }
 
-/** Finalize only the exact claimed build request; late callbacks are fenced. */
+/** Finalize only the exact claimed build request; late callbacks are fenced.
+ * A build that takes over an abandoned claim of the same content keeps the
+ * deterministic build request id, so the claim's start time tells the two
+ * builds apart: the stopped build cannot publish over the one that replaced
+ * it. */
 export async function finalizeRigVersionProviderImageBuild(
   db: Database,
   input: {
@@ -25755,12 +25759,14 @@ export async function finalizeRigVersionProviderImageBuild(
     if (
       current?.status !== "building" ||
       current.buildRequestId !== finalized.buildRequestId ||
+      current.startedAt !== finalized.startedAt ||
       current.contentHash !== finalized.contentHash ||
       current.setupHash !== finalized.setupHash
     ) {
       return (
         current?.status === finalized.status &&
         current.buildRequestId === finalized.buildRequestId &&
+        current.startedAt === finalized.startedAt &&
         current.contentHash === finalized.contentHash
       );
     }

@@ -1269,15 +1269,21 @@ export async function buildVerifiedRigProviderImage(
       });
     });
   };
+  // Only a snapshot that ran out of time is worth an automatic rebuild; every
+  // other failure (an incomplete identity, a failed cold boot, a provider
+  // refusal) would fail the same way again.
+  let snapshotting = false;
   try {
+    snapshotting = true;
     const built = await dependencies.buildImage({
       backend,
       settings: input.settings,
       session: input.established.session,
       requestId: building.buildRequestId,
-      timeoutMs: input.settings.sandboxSnapshotTimeoutMs,
+      timeoutMs: input.settings.rigProviderImageSnapshotTimeoutMs,
       signal: input.signal,
     });
+    snapshotting = false;
     if (!built || (!built.imageId && !built.imageDigest)) {
       throw new Error("provider image builder returned no immutable image identity");
     }
@@ -1443,10 +1449,32 @@ export async function buildVerifiedRigProviderImage(
       error: {
         code: "provider_image_build_failed",
         message: message || "provider image build failed",
-        retryable: true,
+        retryable: snapshotting && isProviderTimeoutError(error),
       },
     });
   }
+}
+
+/** A provider call that ran out of its time budget (transient by nature). */
+function isProviderTimeoutError(error: unknown): boolean {
+  for (let current = error, depth = 0; current && depth < 4; depth++) {
+    if (typeof current !== "object") return false;
+    const { name, code, message } = current as {
+      name?: unknown;
+      code?: unknown;
+      message?: unknown;
+    };
+    if (name === "TimeoutError" || code === "DEADLINE_EXCEEDED" || code === "ETIMEDOUT")
+      return true;
+    if (
+      typeof message === "string" &&
+      /\b(timeout expired|timed out|deadline exceeded)\b/i.test(message)
+    ) {
+      return true;
+    }
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
 }
 
 /**

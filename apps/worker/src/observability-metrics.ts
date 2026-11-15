@@ -3184,6 +3184,17 @@ export class StreamTimingMetrics {
   private readonly stageMs = new Map<ModelRequestPreDispatchStage, number>();
   private dispatchedAt: number | null = null;
   private readonly providerFirstRecorded = new Set<ProviderFirstContent>();
+  /** When the previous call's terminal response was read, until the next model entry. */
+  private responseEndedAt: number | null = null;
+  /** Response end to model entry of the request now in preparation. */
+  private beforeModelEntryMs: number | null = null;
+  /**
+   * Set when the previous response's end was read after the request now in
+   * preparation had already entered (the SDK starts the next request before
+   * the terminal event is read): the gap starts at that read, and each stage
+   * counts only its time after it.
+   */
+  private lateResponseEnd: { at: number; stageMsBefore: Map<string, number> } | null = null;
   /** The model call awaiting its terminal response, if one was dispatched. */
   private openCall: {
     dispatchedAt: number;
@@ -3207,6 +3218,9 @@ export class StreamTimingMetrics {
     if (point !== "model_entry") return;
     if (this.modelEntryAt !== null) return;
     this.modelEntryAt = this.now();
+    this.beforeModelEntryMs =
+      this.responseEndedAt === null ? null : Math.max(0, this.modelEntryAt - this.responseEndedAt);
+    this.responseEndedAt = null;
     this.stageMs.clear();
     this.stage = { name: "settlement_wait", since: this.modelEntryAt };
   }
@@ -3254,10 +3268,34 @@ export class StreamTimingMetrics {
           value: ms / 1000,
         });
       }
+      if (this.beforeModelEntryMs !== null) {
+        // The whole gap from the previous response to this dispatch, split
+        // into the time before the SDK asked for this request (tools and the
+        // run loop) and this request's own pre-dispatch stages.
+        const gap = (phase: string, ms: number) =>
+          this.observability.observeHistogram({
+            name: "opengeni_model_response_to_next_dispatch_seconds",
+            help: "Seconds from a model response's end to the next request's literal provider dispatch in the same stream, by phase; total is the whole gap.",
+            buckets: MODEL_REQUEST_PRE_DISPATCH_BUCKETS,
+            labels: { provider: this.options.provider, phase },
+            value: ms / 1000,
+          });
+        const late = this.lateResponseEnd;
+        gap("total", late ? Math.max(0, at - late.at) : this.beforeModelEntryMs + preDispatchMs);
+        gap("before_model_entry", this.beforeModelEntryMs);
+        for (const [stage, ms] of this.stageMs) {
+          gap(stage, Math.max(0, ms - (late?.stageMsBefore.get(stage) ?? 0)));
+        }
+      }
+      this.beforeModelEntryMs = null;
+      this.lateResponseEnd = null;
       this.stageMs.clear();
       this.stage = null;
       this.modelEntryAt = null;
     }
+    // A response end not yet claimed by a model entry never carries over a
+    // dispatch into a later request's gap.
+    this.responseEndedAt = null;
     // A transport retry re-dispatches the same request; the first delta then
     // belongs to the latest dispatch.
     this.dispatchedAt = at;
@@ -3319,6 +3357,22 @@ export class StreamTimingMetrics {
     const call = this.openCall;
     if (!call) return null;
     this.openCall = null;
+    const endedAt = this.now();
+    if (this.modelEntryAt === null) {
+      this.responseEndedAt = endedAt;
+    } else {
+      // The next request already entered: its gap starts now, with nothing
+      // before its model entry, and its stages count only from here.
+      const stageMsBefore = new Map<string, number>(this.stageMs);
+      if (this.stage) {
+        stageMsBefore.set(
+          this.stage.name,
+          (stageMsBefore.get(this.stage.name) ?? 0) + Math.max(0, endedAt - this.stage.since),
+        );
+      }
+      this.beforeModelEntryMs = 0;
+      this.lateResponseEnd = { at: endedAt, stageMsBefore };
+    }
     const since = (at: number | null) =>
       at === null ? null : Math.round(Math.max(0, at - call.dispatchedAt));
     return {
@@ -3377,6 +3431,10 @@ const MODEL_STEP_PHASE_BUCKETS = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.
  *     the moment the next model request is allowed to proceed (`settle`).
  *   - `response_usage` — the part of settlement that meters the response
  *     (lease renewal, usage and credit recording, the usage event).
+ *   - `response_usage_lease`, `response_usage_billing`, `response_usage_cache`,
+ *     `response_usage_checkpoint` — the serial parts of `response_usage`:
+ *     serving lease renewal, usage and credit recording, the prompt cache
+ *     observation, and the usage event with its history checkpoint.
  *   - `response_history` — the part that retains media and reconciles history.
  *   - `settlement_wait` — producer: a model request entered and waited this
  *     long for the previous response's settlement.
@@ -3387,9 +3445,16 @@ const MODEL_STEP_PHASE_BUCKETS = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.
  * with settlement; only `settlement_wait` and `admission` delay the next
  * request beyond the tools themselves.
  */
+export type ResponseUsageStepPhase =
+  | "response_usage_lease"
+  | "response_usage_billing"
+  | "response_usage_cache"
+  | "response_usage_checkpoint";
+
 export type ModelStepPhase =
   | "response_settlement"
   | "response_usage"
+  | ResponseUsageStepPhase
   | "response_history"
   | "settlement_wait"
   | "admission";
