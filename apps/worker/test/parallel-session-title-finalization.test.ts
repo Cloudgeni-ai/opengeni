@@ -59,6 +59,8 @@ for (const persistence of ["committed", "failed", "independent"] as const) {
       spyOn(db, "listTurnGitHubGatewayApprovals").mockResolvedValue([]),
       spyOn(db, "sessionTurnHasFinalReplyNudge").mockResolvedValue(false),
       spyOn(db, "isSubscriptionCoreCodexSourceDisconnected").mockResolvedValue(false),
+      spyOn(db, "refreshSessionWorkspaceGovernance").mockResolvedValue(null),
+      spyOn(db, "workspaceGovernanceSnapshotsAreCurrent").mockResolvedValue(true),
       spyOn(modelUsage, "processSessionTitleModelUsageEvent").mockImplementation(async (input) => {
         expect(input.usage).toBe(usage);
         expect(titleRequests.canRecover()).toBe(false);

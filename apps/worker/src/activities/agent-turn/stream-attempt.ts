@@ -35,6 +35,8 @@ import {
   nextSessionHistoryPosition,
   persistModelContextSnapshot,
   updateSessionTitleWithEvent,
+  refreshSessionWorkspaceGovernance,
+  workspaceGovernanceSnapshotsAreCurrent,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import { handOverWaitToSteer } from "./waiting-steer";
@@ -183,7 +185,9 @@ import {
   PostCompactionContinuationEmptyError,
   shouldRecoverCompactionProviderFailure,
   classifyContextWindowOverflowError,
+  WorkspaceGovernanceChangedError,
 } from "./errors";
+import type { GovernanceModelOk } from "./governance-model";
 import {
   pendingToolCallFromSdkEvent,
   toolCallProducesRetainableSessionImage,
@@ -384,6 +388,10 @@ export type TurnStreamAttemptDeps = {
   fileResourceDownloads: SandboxFileDownload[];
   runCredentialResolver: BoundRunCredentialResolver | null;
   videoGenerationAcceptancesByCallId: Map<string, { operationId: string; requestDigest: string }>;
+  /** This attempt's rendered workspace governance; null when none applies. */
+  workspaceGovernance: string | null;
+  /** The governance snapshots it was rendered from, checked before each request. */
+  workspaceGovernanceBasis: GovernanceModelOk["workspaceGovernanceBasis"];
 };
 
 export async function attachPendingUpdatesBeforePreparingModelInput(input: {
@@ -530,6 +538,8 @@ export async function runTurnStreamAttempt(
     sandboxCodemodeTokenExpiresAt,
     runCredentialResolver,
     videoGenerationAcceptancesByCallId,
+    workspaceGovernance,
+    workspaceGovernanceBasis,
   } = deps;
 
   // Build one attempt from canonical history. The provider adapter creates
@@ -953,7 +963,7 @@ export async function runTurnStreamAttempt(
     // is reported, and failures surface in the original order (durable
     // history, subscription source, usage, then a pending Steer), so a refusal
     // is the same one the sequential checks would have produced.
-    const [history, source, usage, pendingSteer] = await Promise.allSettled([
+    const [history, source, usage, pendingSteer, governance] = await Promise.allSettled([
       historySink.reconcileConversationTruth({ requireDurable: true }),
       revalidatePlacedSubscriptionCore(db, providerTurn),
       ensureRunAllowedBetweenModelCalls({
@@ -980,12 +990,23 @@ export async function runTurnStreamAttempt(
             turnId: activeTurnId,
           })
         : Promise.resolve(false),
+      // Governance activated since this attempt took its snapshots must reach
+      // the model before its next request (standalone compaction shows none).
+      turn.source === "compaction"
+        ? Promise.resolve(true)
+        : workspaceGovernanceSnapshotsAreCurrent(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            ...workspaceGovernanceBasis,
+          }),
     ]);
     if (history.status === "rejected") throw history.reason;
     if (source.status === "rejected") throw source.reason;
     if (usage.status === "rejected") throw usage.reason;
     creditPolicyRevision = usage.value;
     if (pendingSteer.status === "rejected") throw pendingSteer.reason;
+    if (governance.status === "rejected") throw governance.reason;
+    if (!governance.value) throw new WorkspaceGovernanceChangedError();
     // The Steer read ran alongside the slower checks, so the watch may have
     // seen a Steer committed after it. Such a watch is not proof of a
     // withdrawn Steer: read again before re-arming it, or the request would
@@ -2924,6 +2945,21 @@ export async function runTurnStreamAttempt(
   if (openSuffixResume.action === "requires_action") {
     control.activityStatus = "requires_action";
     return claimedResult({ status: "requires_action" });
+  }
+  // The turn may have been frozen on governance an earlier attempt saw (it
+  // waited for capacity, recovered, or governance changed mid-turn). The open
+  // suffix is settled, so the end of the history is a request boundary:
+  // append the governance this attempt runs under before loading its input.
+  if (turn.source !== "compaction") {
+    await refreshSessionWorkspaceGovernance(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: activeTurnId,
+      expectedExecutionGeneration: attempt.executionGeneration,
+      expectedAttemptId: input.attemptId,
+      governance: workspaceGovernance,
+    });
   }
   if (
     !(await attachPendingUpdatesBeforePreparingModelInput({

@@ -14,6 +14,10 @@ import {
   nestedPostgresSqlState,
   resolveCompanyBrainContextSelection,
   transitionSessionVisibility,
+  activateWorkspaceInstructionPolicyRevision,
+  createWorkspaceInstructionPolicyDraft,
+  updateCompanyProfile,
+  workspaceGovernanceSnapshotsAreCurrent,
   updateOrganizationPrivateSessionSettings,
   withSessionRlsActorContext,
   type DbClient,
@@ -238,6 +242,33 @@ async function resolve(attempt: Attempt) {
   );
 }
 
+/** The attempt's governance snapshots, as the worker takes them. */
+async function governanceSnapshots(attempt: Attempt) {
+  return await withSessionRlsActorContext(
+    {
+      subjectId: "worker:context",
+      initiatingHumanSubjectId: attempt.ownerSubjectId,
+    },
+    async () => ({
+      policy: await getOrCreateWorkspaceInstructionPolicySnapshot(client!.db, claims(attempt)),
+      profile: await getOrCreateCompanyProfileSnapshot(client!.db, claims(attempt)),
+    }),
+  );
+}
+
+async function governanceIsCurrent(
+  attempt: Attempt,
+  snapshots: Awaited<ReturnType<typeof governanceSnapshots>>,
+) {
+  return await workspaceGovernanceSnapshotsAreCurrent(client!.db, {
+    accountId: attempt.accountId,
+    workspaceId: attempt.workspaceId,
+    policyRole: snapshots.policy.policyRole,
+    instructionPolicyEntryHash: snapshots.policy.entryHash,
+    companyProfileSnapshotHash: snapshots.profile.snapshotHash,
+  });
+}
+
 async function expectSqlState(action: () => Promise<unknown>, state: string): Promise<void> {
   let failure: unknown;
   try {
@@ -249,6 +280,107 @@ async function expectSqlState(action: () => Promise<unknown>, state: string): Pr
 }
 
 describe("accepted-turn Company Brain context selection", () => {
+  test("an attempt snapshots the governance active when it runs, not when its turn was accepted", async () => {
+    if (!shared || !client) return;
+    const f = await fixture({ mode: "retrieval_only" });
+    const scope = { accountId: f.grant.accountId, workspaceId: f.grant.workspaceId };
+    const activatePolicy = async (
+      content: string,
+      current: { id: string; version: number } | null,
+    ) => {
+      const draft = await createWorkspaceInstructionPolicyDraft(client!.db, {
+        ...scope,
+        kind: "policy",
+        scope: "global",
+        roleKey: null,
+        content,
+        provenanceSource: "human",
+        provenanceSourceId: null,
+        supersedesRevisionId: current?.id ?? null,
+        createdBySubjectId: f.ownerSubjectId,
+      });
+      await activateWorkspaceInstructionPolicyRevision(client!.db, {
+        ...scope,
+        revisionId: draft.id,
+        expectedCurrentRevisionId: current?.id ?? null,
+        expectedActivationVersion: current?.version ?? 0,
+        actorSubjectId: f.ownerSubjectId,
+        reason: "Governance test",
+      });
+      return { id: draft.id, version: (current?.version ?? 0) + 1 };
+    };
+    // The turn is accepted, then waits (for capacity, say) while an owner
+    // activates a policy. Its attempt runs under that policy.
+    const first = await seedAttempt({
+      ...scope,
+      sessionId: f.root.id,
+      ownerSubjectId: f.ownerSubjectId,
+    });
+    const ruleA = await activatePolicy("Keep production stable.", null);
+    const firstSnapshots = await governanceSnapshots(first);
+    expect(firstSnapshots.policy.entries.map((entry) => entry.revisionId)).toEqual([ruleA.id]);
+    expect(firstSnapshots.policy.entries[0]).toMatchObject({ content: "Keep production stable." });
+    await prepareSnapshots(first);
+    const firstReceipt = (await resolve(first)).receipt;
+    expect(firstReceipt.instructionPolicyEntryHash).toBe(firstSnapshots.policy.entryHash);
+    // The detector agrees with the snapshot byte for byte while nothing changes.
+    expect(await governanceIsCurrent(first, firstSnapshots)).toBe(true);
+
+    // A change during the attempt is detected before its next model request.
+    const ruleB = await activatePolicy("Keep production very stable.", ruleA);
+    expect(await governanceIsCurrent(first, firstSnapshots)).toBe(false);
+
+    // The turn continues in a recovery attempt, which snapshots the new rule;
+    // the turn's Company Brain receipt keeps its first attempt's record.
+    const second = await seedAttempt({
+      ...scope,
+      sessionId: f.root.id,
+      ownerSubjectId: f.ownerSubjectId,
+      turnId: first.turnId,
+      generation: 2,
+    });
+    const secondSnapshots = await governanceSnapshots(second);
+    expect(secondSnapshots.policy.entries.map((entry) => entry.revisionId)).toEqual([ruleB.id]);
+    await prepareSnapshots(second);
+    expect((await resolve(second)).receipt).toMatchObject({
+      id: firstReceipt.id,
+      instructionPolicyEntryHash: firstSnapshots.policy.entryHash,
+    });
+    expect(await governanceIsCurrent(second, secondSnapshots)).toBe(true);
+
+    // The organization profile follows the attempt the same way.
+    expect(secondSnapshots.profile.profile).toBeNull();
+    const profile = await updateCompanyProfile(client!.db, {
+      ...scope,
+      profile: {
+        identity: "A small software company.",
+        mission: null,
+        products: [],
+        customers: [],
+        goals: [],
+        constraints: [],
+      },
+      expectedCurrentRevisionId: null,
+      expectedActivationVersion: 0,
+      actorSubjectId: f.ownerSubjectId,
+      principalKind: "human_session",
+      reason: "Governance test",
+    });
+    expect(await governanceIsCurrent(second, secondSnapshots)).toBe(false);
+    const third = await seedAttempt({
+      ...scope,
+      sessionId: f.root.id,
+      ownerSubjectId: f.ownerSubjectId,
+      turnId: first.turnId,
+      generation: 3,
+    });
+    const thirdSnapshots = await governanceSnapshots(third);
+    expect(thirdSnapshots.profile.profile?.id).toBe(profile.revision!.id);
+    await prepareSnapshots(third);
+    expect((await resolve(third)).receipt.id).toBe(firstReceipt.id);
+    expect(await governanceIsCurrent(third, thirdSnapshots)).toBe(true);
+  }, 180_000);
+
   test("keeps both context-selection routines security definer with a pinned search path", async () => {
     if (!shared) return;
     const routines = await shared.admin<

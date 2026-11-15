@@ -146,6 +146,10 @@ test("a reached limit refuses the first request and the parallel title request b
   const recoveryNotice = spyOn(db, "getSandboxRecoveryDiscontinuity").mockResolvedValue(null);
   const operations = spyOn(db, "listTurnCodemodeApprovals").mockResolvedValue([]);
   const gatewayRequests = spyOn(db, "listTurnGitHubGatewayApprovals").mockResolvedValue([]);
+  const governance = spyOn(db, "refreshSessionWorkspaceGovernance").mockResolvedValue(null);
+  const governanceCurrent = spyOn(db, "workspaceGovernanceSnapshotsAreCurrent").mockResolvedValue(
+    true,
+  );
   const check = fresh(
     spyOn(db, "checkSessionUsageLimitAdmission").mockResolvedValue({
       allowed: false,
@@ -226,6 +230,8 @@ test("a reached limit refuses the first request and the parallel title request b
     recoveryNotice.mockRestore();
     operations.mockRestore();
     gatewayRequests.mockRestore();
+    governance.mockRestore();
+    governanceCurrent.mockRestore();
     check.mockRestore();
     allowance.mockRestore();
   }

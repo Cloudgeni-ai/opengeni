@@ -128,6 +128,17 @@ export type GovernanceModelOk = {
    */
   workspaceAgentIdentity: string | null;
   workspaceGovernance: ReturnType<typeof renderWorkspaceGovernanceContext>;
+  /**
+   * The snapshots this attempt's governance was rendered from. Model-call
+   * admission compares them with the active governance before each request
+   * (see `workspaceGovernanceSnapshotsAreCurrent`); the profile hash is null
+   * when the governance does not show the organization profile.
+   */
+  workspaceGovernanceBasis: {
+    policyRole: string | null;
+    instructionPolicyEntryHash: string;
+    companyProfileSnapshotHash: string | null;
+  };
   structuredWorkspacePolicyActive: boolean;
   /** False when the workspace turned Opengeni credits off (model policy). */
   workspaceCreditModelsAllowed: boolean;
@@ -585,6 +596,13 @@ export async function prepareGovernanceAndModel(
       workspaceAgentInstructions,
       workspaceAgentIdentity,
       workspaceGovernance,
+      workspaceGovernanceBasis: {
+        policyRole: instructionPolicySnapshot.policyRole,
+        instructionPolicyEntryHash: instructionPolicySnapshot.entryHash,
+        companyProfileSnapshotHash: companyProfileIncluded
+          ? companyProfileSnapshot.snapshotHash
+          : null,
+      },
       structuredWorkspacePolicyActive,
       workspaceCreditModelsAllowed: workspaceModelPolicy?.allowCreditModels !== false,
       hostedToolsBillCredits,

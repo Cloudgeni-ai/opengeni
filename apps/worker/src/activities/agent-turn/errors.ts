@@ -3251,3 +3251,27 @@ export function classifyClaudeProviderError(
   }
   return null;
 }
+
+/**
+ * The workspace governance (instruction policies or the organization profile)
+ * changed after this attempt took its snapshots. Raised by model-call
+ * admission before a request leaves the worker; the turn continues in a new
+ * attempt, which snapshots the current governance and shows it as a new
+ * history item before its first request.
+ */
+export class WorkspaceGovernanceChangedError extends Error {
+  readonly code = "workspace_governance_changed";
+  constructor() {
+    super("Workspace governance changed during this attempt");
+    this.name = "WorkspaceGovernanceChangedError";
+  }
+}
+
+export function isWorkspaceGovernanceChangedError(error: unknown): boolean {
+  let current = error;
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    if (current instanceof WorkspaceGovernanceChangedError) return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}

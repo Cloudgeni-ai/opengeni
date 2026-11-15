@@ -803,6 +803,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             workspaceAgentInstructions,
             workspaceAgentIdentity,
             workspaceGovernance,
+            workspaceGovernanceBasis,
             structuredWorkspacePolicyActive,
             workspaceCreditModelsAllowed,
             hostedToolsBillCredits,
@@ -2333,6 +2334,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               fileResourceDownloads,
               runCredentialResolver,
               videoGenerationAcceptancesByCallId,
+              workspaceGovernance: workspaceGovernance ?? null,
+              workspaceGovernanceBasis,
             });
           } finally {
             // Never leave a started setup's workspace admission running past

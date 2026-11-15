@@ -5,8 +5,10 @@
  * can change between turns and differs by who starts a turn. In the system
  * prompt, every such change rewrote text that earlier requests had already sent
  * and invalidated the whole cached history. It is therefore delivered as a
- * history item inserted before the turn that first sees a new value; earlier
- * items stay byte-identical, and the newest item replaces older ones.
+ * history item inserted before the turn that first sees a new value, or
+ * appended at the end before the next model request when a running turn sees
+ * a change; earlier items stay byte-identical, and the newest item replaces
+ * older ones.
  */
 export const WORKSPACE_GOVERNANCE_CONTEXT_PREFIX = "<opengeni_workspace_governance>\n";
 export const WORKSPACE_GOVERNANCE_CONTEXT_SUFFIX = "\n</opengeni_workspace_governance>";
