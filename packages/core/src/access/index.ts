@@ -86,6 +86,9 @@ const readGrantsByRequest = new WeakMap<
   WeakMap<object, Map<string, AccessGrantAuthorization>>
 >();
 const accessResolvedRequests = new WeakSet<Request>();
+// Requests whose resolved credential is an agent attempt's, for error mapping
+// that must not reinterpret a failure of any other caller.
+const agentAttemptRequests = new WeakSet<Request>();
 const developerSetupApiKeyContexts = new WeakSet<AccessContext>();
 const developerSetupAuthorizations = new WeakMap<AccessGrantAuthorization, AccessGrant>();
 const developerSetupGrants = new WeakSet<AccessGrant>();
@@ -822,7 +825,15 @@ export async function requireAccessContext(c: Context, deps: AccessDeps): Promis
   if (!context) {
     throw await authenticationRequired(c, deps);
   }
+  if (context.workspaceGrants.some((grant) => grant.principalKind === "agent_attempt")) {
+    agentAttemptRequests.add(c.req.raw);
+  }
   return context;
+}
+
+/** Whether this request authenticated with an agent attempt's credential. */
+export function requestAuthenticatedAsAgentAttempt(request: Request): boolean {
+  return agentAttemptRequests.has(request);
 }
 
 /**
