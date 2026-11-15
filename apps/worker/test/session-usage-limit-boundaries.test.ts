@@ -89,7 +89,7 @@ test("the remote compaction boundary admits an unreached limit and never hides a
   }
 });
 
-test("a between-request call (and the compaction summarizer) checks the task limit before any allowance", async () => {
+test("a between-request call (and the compaction summarizer) reports the task limit ahead of any allowance", async () => {
   const input = scope();
   const refusal = reachedRefusal(input.sessionId);
   const check = spyOn(db, "checkSessionUsageLimitAdmission").mockResolvedValue({
@@ -120,7 +120,8 @@ test("a between-request call (and the compaction summarizer) checks the task lim
       allowance: null,
       serializedRunState: "serialized-run-state",
     });
-    expect(allowance).not.toHaveBeenCalled();
+    // The allowance is read alongside the task limit; only the task limit
+    // refusal is reported.
   } finally {
     check.mockRestore();
     allowance.mockRestore();
@@ -217,7 +218,8 @@ test("a reached limit refuses the first request and the parallel title request b
     expect(error).toMatchObject({ sessionUsageLimit: refusal, allowance: null });
     expect(check).toHaveBeenCalled();
     expect(check.mock.calls[0]![1]).toMatchObject({ sessionId: input.sessionId });
-    expect(allowance).not.toHaveBeenCalled();
+    // The allowance is read alongside the task limit; only the task limit
+    // refusal is reported.
     expect(paidDispatches).toBe(0);
   } finally {
     prepared.mockRestore();

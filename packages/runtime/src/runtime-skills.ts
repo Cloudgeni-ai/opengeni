@@ -134,9 +134,22 @@ export function loadNativeToolSkillArtifacts(
   if (nativeTools.sites) directories.push("bundled_site_skills");
   if (nativeTools.secrets) directories.push("bundled_secret_skills");
   if (nativeTools.videoGeneration) directories.push("bundled_video_skills");
-  return directories.flatMap((directory) => {
-    const root = packagedSkillDirectory(directory);
-    return skillDirNames(root).map((name) => {
+  return directories.flatMap((directory) => packagedSkillArtifacts(directory));
+}
+
+// Packaged Skill directories ship with the process and do not change while it
+// runs, so each one is read, validated and hashed once per process instead of
+// on every turn. The generated Sites version file depends on the environment,
+// so it is part of the key. Artifacts are frozen; callers get a fresh array.
+const packagedSkillArtifactCache = new Map<string, readonly RuntimeSkillArtifact[]>();
+
+function packagedSkillArtifacts(directory: string): readonly RuntimeSkillArtifact[] {
+  const root = packagedSkillDirectory(directory);
+  const key = `${root}\u0000${process.env.OPENGENI_SITE_PACKAGE_VERSIONS ?? ""}`;
+  const cached = packagedSkillArtifactCache.get(key);
+  if (cached) return [...cached];
+  const artifacts = Object.freeze(
+    skillDirNames(root).map((name) => {
       const artifact = readSkillLibraryArtifact(join(root, name));
       const files = [...artifact.files];
       if (name === "sites") {
@@ -149,8 +162,10 @@ export function loadNativeToolSkillArtifacts(
         });
       }
       return buildPortableSkillArtifact(files);
-    });
-  });
+    }),
+  );
+  packagedSkillArtifactCache.set(key, artifacts);
+  return [...artifacts];
 }
 
 /**

@@ -1838,9 +1838,9 @@ export function createInteractionAttemptToolDefinitions(
       title: options.title,
       description: options.description,
       inputSchema: (options.modelInputSchema ?? ((schema) => schema))(
-        interactionToolInputJsonSchema(options.input),
+        memoizedJsonSchema(modelInputJsonSchemas, options.input, interactionToolInputJsonSchema),
       ),
-      outputSchema: jsonSchema(options.output),
+      outputSchema: memoizedJsonSchema(outputJsonSchemas, options.output, jsonSchema),
       annotations: {
         title: options.title,
         readOnlyHint: options.readOnly,
@@ -6710,6 +6710,25 @@ export function secretReferenceToolResult(error: unknown): AttemptToolResultValu
 
 function jsonSchema(schema: z.ZodType): AttemptToolJsonSchema {
   return z.toJSONSchema(schema, { target: "draft-2020-12" }) as AttemptToolJsonSchema;
+}
+
+// A Zod schema's JSON Schema depends only on the schema object, and the tool
+// schemas are module constants, so each one is converted once per process
+// instead of on every turn. Callers get their own copy, which they may change.
+const modelInputJsonSchemas = new WeakMap<z.ZodType, AttemptToolJsonSchema>();
+const outputJsonSchemas = new WeakMap<z.ZodType, AttemptToolJsonSchema>();
+
+function memoizedJsonSchema(
+  cache: WeakMap<z.ZodType, AttemptToolJsonSchema>,
+  schema: z.ZodType,
+  convert: (schema: z.ZodType) => AttemptToolJsonSchema,
+): AttemptToolJsonSchema {
+  let converted = cache.get(schema);
+  if (!converted) {
+    converted = convert(schema);
+    cache.set(schema, converted);
+  }
+  return structuredClone(converted);
 }
 
 function hasToolPermission(
