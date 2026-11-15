@@ -24,6 +24,7 @@ import {
   type QueuedTurnHold,
   type QueuedTurnHoldSummary,
   type SessionEventAppendPhaseObservation,
+  type SessionWriteLockTiming,
 } from "@opengeni/db";
 import {
   natsSubscriptionTerminationCounter,
@@ -881,6 +882,24 @@ export class ModelRequestLifecycleMetrics {
   private now(): number {
     return this.options.now?.() ?? Date.now();
   }
+}
+
+const SESSION_WRITE_LOCK_BUCKETS = [
+  0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5,
+];
+
+/** Client-observed acquisition time of a session-write lock statement. */
+export function observeSessionWriteLockTiming(
+  observability: Observability,
+  timing: SessionWriteLockTiming,
+): void {
+  observability.observeHistogram({
+    name: "opengeni_db_lock_acquire_seconds",
+    help: "Seconds from submitting a session-write lock statement to its return (mostly lock wait when contended), by lock, mode and outcome.",
+    buckets: SESSION_WRITE_LOCK_BUCKETS,
+    labels: { lock: timing.lock, mode: timing.mode, outcome: timing.outcome },
+    value: timing.durationSeconds,
+  });
 }
 
 export function recordTurnsQueuedGauge(observability: Observability, value: number): void {
@@ -3184,6 +3203,10 @@ export class StreamTimingMetrics {
   private readonly stageMs = new Map<ModelRequestPreDispatchStage, number>();
   private dispatchedAt: number | null = null;
   private readonly providerFirstRecorded = new Set<ProviderFirstContent>();
+  /** When the previous call's terminal response was read, until the next model entry. */
+  private responseEndedAt: number | null = null;
+  /** Response end to model entry of the request now in preparation. */
+  private beforeModelEntryMs: number | null = null;
   /** The model call awaiting its terminal response, if one was dispatched. */
   private openCall: {
     dispatchedAt: number;
@@ -3207,6 +3230,9 @@ export class StreamTimingMetrics {
     if (point !== "model_entry") return;
     if (this.modelEntryAt !== null) return;
     this.modelEntryAt = this.now();
+    this.beforeModelEntryMs =
+      this.responseEndedAt === null ? null : Math.max(0, this.modelEntryAt - this.responseEndedAt);
+    this.responseEndedAt = null;
     this.stageMs.clear();
     this.stage = { name: "settlement_wait", since: this.modelEntryAt };
   }
@@ -3253,6 +3279,23 @@ export class StreamTimingMetrics {
           labels: { provider: this.options.provider, stage },
           value: ms / 1000,
         });
+      }
+      if (this.beforeModelEntryMs !== null) {
+        // The whole gap from the previous response to this dispatch, split
+        // into the time before the SDK asked for this request (tools and the
+        // run loop) and this request's own pre-dispatch stages.
+        const gap = (phase: string, ms: number) =>
+          this.observability.observeHistogram({
+            name: "opengeni_model_response_to_next_dispatch_seconds",
+            help: "Seconds from a model response's end to the next request's literal provider dispatch in the same stream, by phase; total is the whole gap.",
+            buckets: MODEL_REQUEST_PRE_DISPATCH_BUCKETS,
+            labels: { provider: this.options.provider, phase },
+            value: ms / 1000,
+          });
+        gap("total", this.beforeModelEntryMs + preDispatchMs);
+        gap("before_model_entry", this.beforeModelEntryMs);
+        for (const [stage, ms] of this.stageMs) gap(stage, ms);
+        this.beforeModelEntryMs = null;
       }
       this.stageMs.clear();
       this.stage = null;
@@ -3319,6 +3362,7 @@ export class StreamTimingMetrics {
     const call = this.openCall;
     if (!call) return null;
     this.openCall = null;
+    this.responseEndedAt = this.now();
     const since = (at: number | null) =>
       at === null ? null : Math.round(Math.max(0, at - call.dispatchedAt));
     return {
@@ -3377,6 +3421,10 @@ const MODEL_STEP_PHASE_BUCKETS = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.
  *     the moment the next model request is allowed to proceed (`settle`).
  *   - `response_usage` — the part of settlement that meters the response
  *     (lease renewal, usage and credit recording, the usage event).
+ *   - `response_usage_lease`, `response_usage_billing`, `response_usage_cache`,
+ *     `response_usage_checkpoint` — the serial parts of `response_usage`:
+ *     serving lease renewal, usage and credit recording, the prompt cache
+ *     observation, and the usage event with its history checkpoint.
  *   - `response_history` — the part that retains media and reconciles history.
  *   - `settlement_wait` — producer: a model request entered and waited this
  *     long for the previous response's settlement.
@@ -3387,9 +3435,16 @@ const MODEL_STEP_PHASE_BUCKETS = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.
  * with settlement; only `settlement_wait` and `admission` delay the next
  * request beyond the tools themselves.
  */
+export type ResponseUsageStepPhase =
+  | "response_usage_lease"
+  | "response_usage_billing"
+  | "response_usage_cache"
+  | "response_usage_checkpoint";
+
 export type ModelStepPhase =
   | "response_settlement"
   | "response_usage"
+  | ResponseUsageStepPhase
   | "response_history"
   | "settlement_wait"
   | "admission";

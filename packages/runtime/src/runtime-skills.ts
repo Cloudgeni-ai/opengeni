@@ -141,6 +141,7 @@ export function loadNativeToolSkillArtifacts(
 // runs, so each one is read, validated and hashed once per process instead of
 // on every turn. The generated Sites version file depends on the environment,
 // so it is part of the key. Artifacts are frozen; callers get a fresh array.
+// A running dev worker picks up edits to a packaged SKILL.md only on restart.
 const packagedSkillArtifactCache = new Map<string, readonly RuntimeSkillArtifact[]>();
 
 function packagedSkillArtifacts(directory: string): readonly RuntimeSkillArtifact[] {

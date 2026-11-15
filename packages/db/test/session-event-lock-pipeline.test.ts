@@ -9,7 +9,11 @@ import {
   createSession,
   withWorkspaceRls,
 } from "../src/index";
-import { lockSessionEventWriteRows } from "../src/session-control";
+import {
+  lockSessionEventWriteRows,
+  setSessionWriteLockObserver,
+  type SessionWriteLockTiming,
+} from "../src/session-control";
 import { submitTestHumanPrompt } from "../../../test/integration/helpers/session-control";
 
 let shared: SharedTestDatabase;
@@ -128,6 +132,53 @@ test("queued attempt read waits for the canonical turn lock", async () => {
     expect(result.attempts[0]!.id).toBe(input.attemptIds[0]!);
     expect(result.turns[0]!.id).toBe(input.turnIds[0]!);
   } finally {
+    release.release();
+    await holder;
+    await pending.catch(() => {});
+  }
+});
+
+test("lock timing observer reports the advisory and session-row lock waits", async () => {
+  const input = await fixture();
+  const timings: SessionWriteLockTiming[] = [];
+  setSessionWriteLockObserver((timing) => timings.push(timing));
+  const held = gate(),
+    release = gate();
+  const holder = shared.admin.begin(async (tx) => {
+    await tx`select id from sessions where id = ${input.sessionIds[0]!} for update`;
+    held.release();
+    await release.promise;
+  });
+  await held.promise;
+  const started = gate();
+  let pid = 0;
+  const pending = withWorkspaceRls(client.db, input.workspaceId, async (tx) => {
+    const rows = await tx.execute(sql`select pg_backend_pid() as pid`);
+    pid = Number(rows[0].pid);
+    started.release();
+    return await lockSessionEventWriteRows(tx, {
+      ...input,
+      controlLock: "share",
+      rowProjection: "event",
+    });
+  });
+  try {
+    await started.promise;
+    await waitForLock(pid);
+    await Bun.sleep(100);
+    release.release();
+    await holder;
+    await pending;
+    expect(timings.filter((t) => t.lock === "workspace_control_advisory")).toEqual([
+      expect.objectContaining({ mode: "share", outcome: "acquired" }),
+    ]);
+    const sessionRows = timings.filter((t) => t.lock === "session_rows");
+    expect(sessionRows).toEqual([
+      expect.objectContaining({ mode: "no_key_update", outcome: "acquired" }),
+    ]);
+    expect(sessionRows[0]!.durationSeconds).toBeGreaterThanOrEqual(0.09);
+  } finally {
+    setSessionWriteLockObserver(null);
     release.release();
     await holder;
     await pending.catch(() => {});

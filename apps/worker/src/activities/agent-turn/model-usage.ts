@@ -45,6 +45,8 @@ import {
   recordModelInputTokens,
   recordPromptCacheDiagnostics,
   recordModelResponseUsage,
+  recordModelStepPhase,
+  type ResponseUsageStepPhase,
 } from "../../observability-metrics";
 import {
   type LatencyMode,
@@ -426,8 +428,25 @@ export async function processModelResponseTerminalEvent(input: {
   const lastInputTokens =
     finalInputTokens !== null && finalInputTokens > 0 ? finalInputTokens : null;
   let signalsCommitted = false;
+  // Response metering is serial; these split `response_usage` so the slow
+  // part (lease, billing, cache observation or checkpoint) is visible.
+  const timedUsagePhase = async <T>(
+    phase: ResponseUsageStepPhase,
+    run: () => Promise<T>,
+  ): Promise<T> => {
+    const startedAt = performance.now();
+    try {
+      return await run();
+    } finally {
+      recordModelStepPhase(input.observability, {
+        provider: input.metricProvider,
+        phase,
+        durationSeconds: (performance.now() - startedAt) / 1_000,
+      });
+    }
+  };
   await recordCompletedModelCallBeforeOwnershipFences({
-    renewLease: input.renewLease,
+    renewLease: () => timedUsagePhase("response_usage_lease", input.renewLease),
     leaseLost: input.leaseLost,
     leaseLostMessage: input.leaseLostMessage,
     recordUsage: async () => {
@@ -442,31 +461,33 @@ export async function processModelResponseTerminalEvent(input: {
         });
         return;
       }
-      const billing = await recordModelUsageAndDebitCredits(input.settings, input.db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        turnId: input.turnId,
-        turnAttemptId: input.turnAttemptId,
-        model: input.model,
-        creditPolicyRevision: input.creditPolicyRevision,
-        externallyBilled: input.externallyBilled,
-        ...(input.byok !== undefined ? { byok: input.byok } : {}),
-        ...(input.chargesOpenGeniCredits !== undefined
-          ? { chargesOpenGeniCredits: input.chargesOpenGeniCredits }
-          : {}),
-        ...(input.countsTowardTokenCap !== undefined
-          ? { countsTowardTokenCap: input.countsTowardTokenCap }
-          : {}),
-        usage: responseUsage.usage,
-        normalizedUsage,
-        gatewayBilling: responseUsage.gatewayBilling,
-        webSearchRequests: responseUsage.webSearchRequests,
-        sourceKey,
-        ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
-        observability: input.observability,
-        metricProvider: input.provider,
-      });
+      const billing = await timedUsagePhase("response_usage_billing", () =>
+        recordModelUsageAndDebitCredits(input.settings, input.db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          turnAttemptId: input.turnAttemptId,
+          model: input.model,
+          creditPolicyRevision: input.creditPolicyRevision,
+          externallyBilled: input.externallyBilled,
+          ...(input.byok !== undefined ? { byok: input.byok } : {}),
+          ...(input.chargesOpenGeniCredits !== undefined
+            ? { chargesOpenGeniCredits: input.chargesOpenGeniCredits }
+            : {}),
+          ...(input.countsTowardTokenCap !== undefined
+            ? { countsTowardTokenCap: input.countsTowardTokenCap }
+            : {}),
+          usage: responseUsage.usage,
+          normalizedUsage,
+          gatewayBilling: responseUsage.gatewayBilling,
+          webSearchRequests: responseUsage.webSearchRequests,
+          sourceKey,
+          ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
+          observability: input.observability,
+          metricProvider: input.provider,
+        }),
+      );
       const recordFact = (factDb: ActivityServices["db"]) =>
         billing
           ? recordAuthoritativeModelCallFact({
@@ -491,7 +512,9 @@ export async function processModelResponseTerminalEvent(input: {
               processingResidency: input.processingResidency,
             })
           : Promise.resolve();
-      const cacheObservation = await promptCacheObservation(responseUsage, promptCacheRequest);
+      const cacheObservation = await timedUsagePhase("response_usage_cache", () =>
+        promptCacheObservation(responseUsage, promptCacheRequest),
+      );
       const commitUsage = async (history?: SessionEventMutation<"event">) => {
         const completionEvents = input.completionEvents?.() ?? [];
         authoritative = await emitModelCallUsage({
@@ -540,8 +563,10 @@ export async function processModelResponseTerminalEvent(input: {
         if (input.checkpoint && input.leaseLost()) throw new Error(input.leaseLostMessage);
         return authoritative && signalsCommitted;
       };
-      if (input.checkpoint && !input.leaseLost()) await input.checkpoint(commitUsage);
-      else await commitUsage();
+      await timedUsagePhase("response_usage_checkpoint", async () => {
+        if (input.checkpoint && !input.leaseLost()) await input.checkpoint(commitUsage);
+        else await commitUsage();
+      });
       if (authoritative && billing) {
         if (!input.checkpoint) await recordFact(input.db);
         recordAuthoritativeModelUsageMetrics({
