@@ -1034,6 +1034,11 @@ database owner may create, but a managed service with an extension allowlist
 (Azure Database for PostgreSQL's `azure.extensions`, for example) must allow
 them before the migration that installs them runs.
 
+The Azure Terraform module also allows `pg_stat_statements` for query cost
+attribution. Migrations do not install it; an operator creates it and sets
+`pg_stat_statements.track` when statistics are wanted. Azure preloads the
+library by default, so neither step restarts the server.
+
 The ordinary SQL migration runner applies a transaction-local 5-second
 `lock_timeout` before each migration body. This bounds lock acquisition in
 migrations without a later timeout override, including 0510. Migration-specific
