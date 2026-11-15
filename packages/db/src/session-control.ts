@@ -526,52 +526,6 @@ function advisoryLockFunction(mode: Exclude<WorkspaceControlLockMode, "none">) {
     : sql.raw("pg_advisory_xact_lock_shared");
 }
 
-/**
- * Content-free timing of one lock-acquiring statement: the client-observed
- * time from submission to the statement's return, which is dominated by lock
- * wait when the lock is contended. Reported whether or not acquisition failed.
- */
-export type SessionWriteLockTiming = {
-  lock: "workspace_control_advisory" | "session_rows";
-  mode: "share" | "update" | "no_key_update" | "key_share";
-  durationSeconds: number;
-  outcome: "acquired" | "failed";
-};
-type SessionWriteLockObserver = (timing: SessionWriteLockTiming) => void;
-let sessionWriteLockObserver: SessionWriteLockObserver | null = null;
-
-/** Install the process-wide lock timing observer (worker and API set one at startup). */
-export function setSessionWriteLockObserver(observer: SessionWriteLockObserver | null): void {
-  sessionWriteLockObserver = observer;
-}
-
-async function timedLock<T>(
-  lock: SessionWriteLockTiming["lock"],
-  mode: SessionWriteLockTiming["mode"],
-  acquire: () => Promise<T>,
-): Promise<T> {
-  const observer = sessionWriteLockObserver;
-  if (!observer) return await acquire();
-  const startedAt = performance.now();
-  let outcome: SessionWriteLockTiming["outcome"] = "failed";
-  try {
-    const result = await acquire();
-    outcome = "acquired";
-    return result;
-  } finally {
-    try {
-      observer({
-        lock,
-        mode,
-        outcome,
-        durationSeconds: (performance.now() - startedAt) / 1_000,
-      });
-    } catch {
-      // Telemetry never changes the lock outcome.
-    }
-  }
-}
-
 function lockBudgetFor(options: WorkspaceControlLockOptions): WorkspaceControlLockBudget | null {
   if (options.budget) return options.budget;
   if (options.lockTimeoutMs === undefined) return null;
@@ -643,10 +597,8 @@ export async function lockWorkspaceInferenceControl(
     : [];
   if (mode !== "none") {
     await boundedLockStep(db, workspaceId, budget, () =>
-      timedLock("workspace_control_advisory", mode, () =>
-        db.execute(
-          sql`select ${advisoryLockFunction(mode)}(hashtextextended(${`workspace-control:${workspaceId}`}, 0))`,
-        ),
+      db.execute(
+        sql`select ${advisoryLockFunction(mode)}(hashtextextended(${`workspace-control:${workspaceId}`}, 0))`,
       ),
     );
   }
@@ -906,36 +858,29 @@ export async function lockSessionEventWriteRows(
   // Submit in canonical lock order on the transaction-pinned connection. The
   // server still executes separate statements with fresh READ COMMITTED
   // snapshots; only the client waits overlap. Cursor-dependent work stays below.
-  // Lock timing wraps the whole pair so the submission order is unchanged; the
-  // workspace key-share row lock rarely waits, so this is the session row wait.
-  const lockRows = () =>
-    Promise.all([
-      (input.workspaceLock ?? "key_share") === "key_share"
-        ? db
-            .select(eventOnly ? eventWorkspaceColumns : getTableColumns(schema.workspaces))
-            .from(schema.workspaces)
-            .where(eq(schema.workspaces.id, input.workspaceId))
-            .for("key share")
-            .limit(1)
-        : [],
-      sessionIds.length > 0
-        ? db
-            .select(sessionColumns)
-            .from(schema.sessions)
-            .where(
-              and(
-                eq(schema.sessions.workspaceId, input.workspaceId),
-                anyOf(schema.sessions.id, sessionIds),
-              ),
-            )
-            .orderBy(schema.sessions.id)
-            .for(sessionLock === "key_share" ? "key share" : "no key update")
-        : [],
-    ]);
-  const [workspaces, lockedSessions] =
+  const [workspaces, lockedSessions] = await Promise.all([
+    (input.workspaceLock ?? "key_share") === "key_share"
+      ? db
+          .select(eventOnly ? eventWorkspaceColumns : getTableColumns(schema.workspaces))
+          .from(schema.workspaces)
+          .where(eq(schema.workspaces.id, input.workspaceId))
+          .for("key share")
+          .limit(1)
+      : [],
     sessionIds.length > 0
-      ? await timedLock("session_rows", sessionLock, lockRows)
-      : await lockRows();
+      ? db
+          .select(sessionColumns)
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              anyOf(schema.sessions.id, sessionIds),
+            ),
+          )
+          .orderBy(schema.sessions.id)
+          .for(sessionLock === "key_share" ? "key share" : "no key update")
+      : [],
+  ]);
   const workspace = workspaces[0] ?? null;
   let sessions = lockedSessions;
 

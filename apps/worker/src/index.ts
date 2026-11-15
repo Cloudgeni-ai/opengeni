@@ -15,7 +15,6 @@ import {
   databasePoolOptions,
   observeDatabaseCredentialEvents,
   reportRuntimeDatabaseDegraded,
-  setSessionWriteLockObserver,
   getContextCompactionPendingSummary,
   markSessionWorkflowWakeDelivered,
   summarizeSessionRecoveryBacklog,
@@ -81,7 +80,6 @@ import {
   initializeContextCompactionMetrics,
   initializeWorkerOutcomeMetrics,
   observabilityEventBusOptions,
-  observeSessionWriteLockTiming,
   startContextCompactionPendingMonitor,
   startSessionRecoveryMonitor,
   startTurnCapacityMonitor,
@@ -1258,8 +1256,6 @@ export async function startWorker() {
   };
   // Before any NativeConnection: SDK and core logs become structured lines.
   installTemporalRuntimeLogging(observability);
-  // Session-write lock acquisition (workspace control advisory, session rows).
-  setSessionWriteLockObserver((timing) => observeSessionWriteLockTiming(observability, timing));
   // `kill -USR2 <pid>` samples this process for 30 s and logs where the event
   // loop was busy, so stalls can be attributed on a live worker.
   installCpuSamplingSignal({

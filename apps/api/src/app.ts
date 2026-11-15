@@ -128,7 +128,6 @@ import {
   configureCodeSearchDeploymentPolicy,
   configureWorkspaceControlRequestLockTimeoutMs,
   setConnectAttemptTransitionObserver,
-  setSessionWriteLockObserver,
   dbSql,
   getManagedAuthSessionSetSnapshot,
   getWorkspaceSettings,
@@ -614,17 +613,6 @@ export function createAppComposition(
   // transitions with bounded provider/state labels (integration-connect-metrics).
   setConnectAttemptTransitionObserver((transition) =>
     observeConnectAttemptTransition(observability, transition),
-  );
-  // Session-write lock acquisition (workspace control advisory, session rows);
-  // same histogram as the worker.
-  setSessionWriteLockObserver((timing) =>
-    observability.observeHistogram({
-      name: "opengeni_db_lock_acquire_seconds",
-      help: "Seconds from submitting a session-write lock statement to its return (mostly lock wait when contended), by lock, mode and outcome.",
-      buckets: [0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
-      labels: { lock: timing.lock, mode: timing.mode, outcome: timing.outcome },
-      value: timing.durationSeconds,
-    }),
   );
   const managedAuthNewSignupsGate = createManagedAuthNewSignupsGate({
     db: deps.db,

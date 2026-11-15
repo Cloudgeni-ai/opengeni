@@ -24,7 +24,6 @@ import {
   type QueuedTurnHold,
   type QueuedTurnHoldSummary,
   type SessionEventAppendPhaseObservation,
-  type SessionWriteLockTiming,
 } from "@opengeni/db";
 import {
   natsSubscriptionTerminationCounter,
@@ -882,24 +881,6 @@ export class ModelRequestLifecycleMetrics {
   private now(): number {
     return this.options.now?.() ?? Date.now();
   }
-}
-
-const SESSION_WRITE_LOCK_BUCKETS = [
-  0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5,
-];
-
-/** Client-observed acquisition time of a session-write lock statement. */
-export function observeSessionWriteLockTiming(
-  observability: Observability,
-  timing: SessionWriteLockTiming,
-): void {
-  observability.observeHistogram({
-    name: "opengeni_db_lock_acquire_seconds",
-    help: "Seconds from submitting a session-write lock statement to its return (mostly lock wait when contended), by lock, mode and outcome.",
-    buckets: SESSION_WRITE_LOCK_BUCKETS,
-    labels: { lock: timing.lock, mode: timing.mode, outcome: timing.outcome },
-    value: timing.durationSeconds,
-  });
 }
 
 export function recordTurnsQueuedGauge(observability: Observability, value: number): void {
