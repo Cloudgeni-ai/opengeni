@@ -643,9 +643,50 @@ export const CASES: readonly EvalCase[] = [
       'Create an Outlook draft to ravi.tern@example.com with subject "Halcyon eval {RUN}" and body "Drill notes received." Don\'t send it.',
     verify: "receipts_only",
   },
+  {
+    id: "outlook_mail.read.search-invoice",
+    integration: "outlook_mail",
+    kind: "read",
+    prompt:
+      "Search my Outlook mail for the Copperleaf Dental invoice. What's the invoice number and amount?",
+    expectAnswer: [i("INV-?58213"), i("7[ ,.\u00a0]?450")],
+  },
+  {
+    id: "outlook_mail.write.send",
+    integration: "outlook_mail",
+    kind: "write",
+    prompt:
+      'Send an email from my Outlook to it-inbox@opengenitest2026.onmicrosoft.com with subject "Halcyon eval {RUN}" and body "Send test from the integration eval."',
+    verify: "receipts_only",
+    note: "The recipient is a synthetic mailbox in the test tenant. Needs the connection's change tools set to Ask first.",
+  },
+  {
+    id: "outlook_mail.write.send-denied",
+    integration: "outlook_mail",
+    kind: "write",
+    decision: "reject",
+    prompt:
+      'Send an email from my Outlook to it-inbox@opengenitest2026.onmicrosoft.com with subject "Halcyon eval {RUN} denied" and body "This send should be denied."',
+    verify: "receipts_only",
+  },
   ...notConnected("outlook_calendar", [
     { slug: "meetings", prompt: "What meetings do I have in Outlook Calendar this week?" },
   ]),
+  {
+    id: "outlook_calendar.read.review",
+    integration: "outlook_calendar",
+    kind: "read",
+    prompt: "When is the Halcyon launch review on my Outlook Calendar?",
+    expectAnswer: [i("wed|18"), i("\\b(10|09)([:.]00)?\\b")],
+  },
+  {
+    id: "outlook_calendar.write.event",
+    integration: "outlook_calendar",
+    kind: "write",
+    prompt:
+      'Add an event to my Outlook Calendar called "Halcyon eval {RUN}" on Friday 20 November 2026 from 15:00 to 15:30 Oslo time.',
+    verify: "receipts_only",
+  },
   ...notConnected("onedrive", [
     { slug: "files", prompt: "Find the Kestrel runbook in my OneDrive.", core: true },
   ]),
