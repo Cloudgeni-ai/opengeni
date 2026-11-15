@@ -126,7 +126,10 @@ export async function isOwnAccountInstall(
  * time: the callback then saves only the account and the app finishes setup.
  */
 export async function resolveCuratedConnectTools(
-  deps: Pick<ApiRouteDeps, "settings" | "apiIntegrationSourceFetch">,
+  deps: Pick<
+    ApiRouteDeps,
+    "settings" | "apiIntegrationSourceFetch" | "apiIntegrationDefinitionLookup"
+  >,
   owner: { accountId: string; workspaceId: string; subjectId: string },
   definitionId: string,
   timeoutMs = CURATED_CONNECT_RESOLVE_TIMEOUT_MS,
@@ -141,6 +144,9 @@ export async function resolveCuratedConnectTools(
       source: { kind: "definition", definitionId },
       connection: null,
       transport,
+      ...(deps.apiIntegrationDefinitionLookup
+        ? { definitionLookup: deps.apiIntegrationDefinitionLookup }
+        : {}),
       authority: {
         accountId: owner.accountId,
         workspaceId: owner.workspaceId,
@@ -332,7 +338,10 @@ export function unfinishedCuratedSetup(attempt: ConnectAttempt): boolean {
   );
 }
 
-type FinishDeps = Pick<ApiRouteDeps, "db" | "settings" | "apiIntegrationSourceFetch">;
+type FinishDeps = Pick<
+  ApiRouteDeps,
+  "db" | "settings" | "apiIntegrationSourceFetch" | "apiIntegrationDefinitionLookup"
+>;
 
 /**
  * Finish one built-in integration setup whose account is saved but whose

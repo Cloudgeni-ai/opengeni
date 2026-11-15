@@ -1,3 +1,4 @@
+import type { IntegrationDefinition } from "@opengeni/capabilities";
 import type { Settings } from "@opengeni/config";
 import type {
   Document,
@@ -326,6 +327,11 @@ export type AppDependencies = {
   apiIntegrationOAuthFetch?: typeof fetch;
   /** Injectable specification/introspection transport, still network-policy checked. */
   apiIntegrationSourceFetch?: typeof fetch;
+  /**
+   * Reviewed Integration Definitions by id, for tests whose source documents
+   * differ from the pinned ones. Defaults to the deployment's definitions.
+   */
+  apiIntegrationDefinitionLookup?: (definitionId: string) => IntegrationDefinition | undefined;
   /**
    * Injectable MCP auto-connect transport (issuer discovery and key sets,
    * Client ID Metadata Documents, and redeeming ID-JAGs at an app), still
