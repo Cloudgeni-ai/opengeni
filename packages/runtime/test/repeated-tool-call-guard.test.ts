@@ -142,6 +142,37 @@ describe("repeated tool call guard", () => {
     }
   });
 
+  test("polling a command that is still running, or a tool's own text, keeps every line", async () => {
+    const time = clock();
+    const guard = createRepeatedToolCallGuard(time.now);
+    let polls = 0;
+    // A running command with no new output: only the wall time differs, and
+    // waiting on it is not a repeat.
+    for (let index = 0; index < REPEATED_CALL_LIMIT * 2; index += 1) {
+      const result = await guardRepeatedToolCall(
+        guard,
+        "write_stdin",
+        '{"session_id":7,"chars":""}',
+        async () => {
+          polls += 1;
+          return `Chunk ID: ${crypto.randomUUID().slice(0, 6)}\nWall time: ${polls}.0 seconds\nProcess running with session ID 7\nOutput:\n`;
+        },
+      );
+      expect(result).not.toBe(REPEATED_CALL_NOTICE);
+      time.advance(2_000);
+    }
+    // Text a tool wrote itself, without the runtime's chunk id or receipt.
+    const own = createRepeatedToolCallGuard(time.now);
+    let runs = 0;
+    for (let index = 0; index < REPEATED_CALL_LIMIT * 2; index += 1) {
+      const result = await guardRepeatedToolCall(own, "benchmark", "{}", async () => {
+        runs += 1;
+        return `Wall time: ${runs}.0 seconds\nProcess exited with code 0\nOutput:\nsame`;
+      });
+      expect(result).not.toBe(REPEATED_CALL_NOTICE);
+    }
+  });
+
   test("two identical calls that alternate are each counted", async () => {
     const time = clock();
     const guard = createRepeatedToolCallGuard(time.now);

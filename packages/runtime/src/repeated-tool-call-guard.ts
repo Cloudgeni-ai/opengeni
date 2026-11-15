@@ -69,12 +69,17 @@ function callKey(toolName: string, input: unknown): string {
 
 /**
  * Lines the runtime writes into a command result's metadata header that are
- * new on every call (a chunk id, a wall time, an output receipt id). Only the
- * header before the first `Output:` line is read; the command's own output is
- * compared as written.
+ * new on every call (a chunk id, a wall time, an output receipt id). They are
+ * left out only from the result of a command that has exited, in the header
+ * before the first `Output:` line, when that header carries a chunk id or a
+ * receipt the runtime wrote. A poll of a command still running keeps them, so
+ * waiting on a long command is never read as repeating; the command's own
+ * output is compared as written.
  */
 const PER_CALL_HEADER_LINE =
   /^(?:Chunk ID: \S+|Wall time: [\d.]+ seconds|[A-Z][A-Za-z]* output receipt: [0-9a-f-]{36})\r?$/u;
+const RUNTIME_HEADER_LINE = /^(?:Chunk ID: \S+|[A-Z][A-Za-z]* output receipt: [0-9a-f-]{36})\r?$/u;
+const EXITED_LINE = /^Process exited with code -?\d+\r?$/u;
 const OUTPUT_DELIMITER = /^Output:\r?$/mu;
 
 /** A result text without the metadata lines that differ on every call. */
@@ -82,8 +87,12 @@ function withoutPerCallMetadata(text: string): string {
   const delimiter = OUTPUT_DELIMITER.exec(text);
   if (!delimiter) return text;
   const header = text.slice(0, delimiter.index).split("\n");
+  if (
+    !header.some((line) => EXITED_LINE.test(line)) ||
+    !header.some((line) => RUNTIME_HEADER_LINE.test(line))
+  )
+    return text;
   const kept = header.filter((line) => !PER_CALL_HEADER_LINE.test(line));
-  if (kept.length === header.length) return text;
   return `${kept.join("\n")}${text.slice(delimiter.index)}`;
 }
 
