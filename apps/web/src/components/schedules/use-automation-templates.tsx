@@ -4,8 +4,10 @@
  */
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import {
+  CalendarCheckIcon,
   CircleAlertIcon,
   GitPullRequestIcon,
+  MailIcon,
   MessageSquareCodeIcon,
   NotebookPenIcon,
   SunriseIcon,
@@ -26,6 +28,10 @@ const TEMPLATE_ICONS: Record<string, ReactNode> = {
   "morning-brief": <SunriseIcon />,
   "dependency-pr": <GitPullRequestIcon />,
   "cost-check": <TrendingUpIcon />,
+  // The simplified interface's own (SIMPLIFIED_INTERFACE_AUTOMATION_TEMPLATES).
+  "day-brief": <SunriseIcon />,
+  "client-update": <MailIcon />,
+  "friday-report": <CalendarCheckIcon />,
 };
 
 /** A built-in template's own art; a saved one shows where its events come from. */

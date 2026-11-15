@@ -207,6 +207,7 @@ import { creationHandoffReconciled } from "../lib/session-creation-handoff";
 import { FollowUpRepositoryMenuBody } from "../components/follow-up-repository-picker";
 import { MarkdownText } from "../components/markdown";
 import { ModelPicker, type SessionToolSelection } from "../components/pickers";
+import { useSimplifiedInterface } from "../lib/simplified-interface";
 import {
   TerminalSessionArchive,
   TerminalSessionBanner,
@@ -2393,6 +2394,7 @@ function SessionChatPane(props: {
   const [composerFocusSignal, setComposerFocusSignal] = useState(0);
   const focusEvents = useUiEventTarget("window");
   const [modelPickerSession, setModelPickerSession] = useState<string | null>(null);
+  const { simplified: simplifiedInterface } = useSimplifiedInterface();
   // The API's authoritative "model is not available" refusal for this session,
   // which also covers connection-owned models the catalog cannot judge.
   const [refusedModel, setRefusedModel] = useState<{ sessionId: string; model: string } | null>(
@@ -4867,35 +4869,39 @@ function SessionChatPane(props: {
                 })}
                 controls={
                   <div className="@container/model-controls flex min-w-0 flex-1 items-center gap-1.5">
-                    <ModelPicker
-                      hasImageAttachments={attachments.attachments.some(
-                        (file) => file.status !== "failed" && file.contentType.startsWith("image/"),
-                      )}
-                      open={modelPickerSession === props.session.id && !pendingRetryInput}
-                      onOpenChange={(open) => {
-                        setModelPickerSession(open ? props.session.id : null);
-                        if (open) void modelCatalog.refresh();
-                      }}
-                      rows={modelCatalog.rows}
-                      model={model}
-                      effort={reasoningEffort}
-                      latencyMode={latencyMode}
-                      disabled={modelPickerDisabled}
-                      loading={modelCatalog.loading || composer.draftLoading}
-                      error={modelCatalog.error ?? composerPolicyError}
-                      sessionKey={props.session.id}
-                      menuSide="top"
-                      connectModelsHref={`/workspaces/${encodeURIComponent(props.session.workspaceId)}/settings?section=models`}
-                      claudeSubscriptionAvailable={
-                        context.clientConfig.claudeSubscriptionEnabled === true
-                      }
-                      onModelChange={(modelId) => {
-                        composer.setModel(modelId);
-                        usageModelSwitch.modelPicked(modelId);
-                      }}
-                      onEffortChange={composer.setReasoningEffort}
-                      onLatencyModeChange={composer.setLatencyMode}
-                    />
+                    {/* The simplified interface has one model policy: a chat keeps the one it started with. */}
+                    {simplifiedInterface ? null : (
+                      <ModelPicker
+                        hasImageAttachments={attachments.attachments.some(
+                          (file) =>
+                            file.status !== "failed" && file.contentType.startsWith("image/"),
+                        )}
+                        open={modelPickerSession === props.session.id && !pendingRetryInput}
+                        onOpenChange={(open) => {
+                          setModelPickerSession(open ? props.session.id : null);
+                          if (open) void modelCatalog.refresh();
+                        }}
+                        rows={modelCatalog.rows}
+                        model={model}
+                        effort={reasoningEffort}
+                        latencyMode={latencyMode}
+                        disabled={modelPickerDisabled}
+                        loading={modelCatalog.loading || composer.draftLoading}
+                        error={modelCatalog.error ?? composerPolicyError}
+                        sessionKey={props.session.id}
+                        menuSide="top"
+                        connectModelsHref={`/workspaces/${encodeURIComponent(props.session.workspaceId)}/settings?section=models`}
+                        claudeSubscriptionAvailable={
+                          context.clientConfig.claudeSubscriptionEnabled === true
+                        }
+                        onModelChange={(modelId) => {
+                          composer.setModel(modelId);
+                          usageModelSwitch.modelPicked(modelId);
+                        }}
+                        onEffortChange={composer.setReasoningEffort}
+                        onLatencyModeChange={composer.setLatencyMode}
+                      />
+                    )}
                     {durableToolsError ? (
                       <span className="sr-only" role="alert">
                         {durableToolsError}

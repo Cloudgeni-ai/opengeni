@@ -17,6 +17,7 @@ import {
 import { Link, useRouterState } from "../../lib/navigation";
 import { cn } from "../../lib/utils";
 import { useSessionUiFeature } from "../../lib/session-ui-features";
+import { useSimplifiedInterface } from "../../lib/simplified-interface";
 
 /**
  * The surface-owned sections of the session shell. Every slot is optional: a
@@ -68,6 +69,7 @@ export function RailHeader({ showSwitcher = true }: { showSwitcher?: boolean }) 
   // Without the brand (an embed), the row holds just the collapse toggle, at
   // its end.
   const brand = useSessionUiFeature("brand");
+  const { productName } = useSimplifiedInterface();
   const brandless = !brand;
   const toggleInWindowBar = SIDEBAR_TOGGLE_IN_WINDOW_BAR && !rail.isMobile;
   const collapseToggle = !rail.isMobile ? (
@@ -93,7 +95,7 @@ export function RailHeader({ showSwitcher = true }: { showSwitcher?: boolean }) 
             to="/workspaces/$workspaceId/sessions"
             params={{ workspaceId: rail.workspaceId }}
             className={RAIL_BRAND_LINK_CLASS}
-            aria-label="Opengeni home"
+            aria-label={`${productName} home`}
           >
             <RailBrandMark collapsed={rail.collapsed} />
           </Link>

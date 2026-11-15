@@ -1,7 +1,8 @@
 /**
- * "Create with Opengeni": say what should happen and how often, and a chat
- * researches the rest (repositories, secrets, integrations) and creates
- * the schedule with its scheduling tools. Starts the chat the same way
+ * "Create with Opengeni" ("Create with Geni" in the simplified interface): say
+ * what should happen and how often, and a chat researches the rest
+ * (repositories, secrets, integrations) and creates the schedule with its
+ * scheduling tools. Starts the chat the same way
  * Knowledge's "Ask Opengeni" does: context.startSession on the workspace's
  * model, then navigate to the new chat.
  */
@@ -13,6 +14,7 @@ import { Button } from "@opengeni/react/ui/button";
 import { Field, TextArea } from "@opengeni/react/ui/field";
 import { FormDialog } from "@opengeni/react/ui/form-dialog";
 import { useAppContext } from "@opengeni/react/app/app-context";
+import { useSimplifiedInterface } from "@opengeni/react/app/lib/simplified-interface";
 import { resolveAgentBrainPromptModel } from "@/lib/agent-brain-prompt-model";
 import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import { useAgentBrainPromptCatalog } from "@/routes/agent-brain-prompt";
@@ -44,10 +46,11 @@ export function useCreateWithOpenGeni(workspaceId: string) {
 }
 
 export function CreateWithOpenGeniButton({ onClick }: { onClick: () => void }) {
+  const { productName } = useSimplifiedInterface();
   return (
     <Button type="button" variant="outline" onClick={onClick} className="pointer-coarse:h-11">
       <SparklesIcon aria-hidden="true" />
-      Create with Opengeni
+      Create with {productName}
     </Button>
   );
 }
@@ -62,6 +65,7 @@ function CreateWithOpenGeniDialog({
   onOpenChange: (open: boolean) => void;
 }) {
   const context = useAppContext();
+  const { simplified, productName } = useSimplifiedInterface();
   const navigate = useNavigate();
   const catalog = useAgentBrainPromptCatalog(workspaceId);
   const [request, setRequest] = useState("");
@@ -96,8 +100,12 @@ function CreateWithOpenGeniDialog({
         }
       }}
       size="sm"
-      title="Create an automation with Opengeni"
-      description="It starts a chat, finds the repositories, secrets and integrations the automation needs, and creates it. It asks you only for what it can't find."
+      title={`Create an automation with ${productName}`}
+      description={
+        simplified
+          ? "It starts a chat, finds the apps the automation needs, and creates it. It asks you only for what it can't find."
+          : "It starts a chat, finds the repositories, secrets and integrations the automation needs, and creates it. It asks you only for what it can't find."
+      }
       submitLabel="Start chat"
       pendingLabel="Starting…"
       submitDisabled={catalog.loading || model === null || context.busy}
@@ -141,7 +149,11 @@ function CreateWithOpenGeniDialog({
         <TextArea
           rows={3}
           value={request}
-          placeholder="Every weekday morning, summarize new Sentry errors and post them to #eng"
+          placeholder={
+            simplified
+              ? "Every Monday morning, draft a short update for each client from last week's emails"
+              : "Every weekday morning, summarize new Sentry errors and post them to #eng"
+          }
           onChange={(event) => {
             setRequest(event.target.value);
             setFieldError(null);

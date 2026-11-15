@@ -1,3 +1,4 @@
+import { useSimplifiedInterface } from "@opengeni/react/app/lib/simplified-interface";
 import { modelDisplayName } from "@opengeni/sdk/model-display";
 import type { ChatClient } from "@opengeni/sdk";
 import { DirectModelProviderForm } from "@/components/direct-model-provider-connection";
@@ -173,6 +174,7 @@ export function ModelAccessOnboardingPanel({
   footer?: ReactNode;
   onComplete: () => void;
 }) {
+  const { simplified, productName } = useSimplifiedInterface();
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<DevicePending | null>(null);
   // The row whose connect step is open: a provider, or buying credits.
@@ -702,7 +704,7 @@ export function ModelAccessOnboardingPanel({
   const creditsRow = creditsPanel ? (
     <ListRow
       leading={<OpenGeniCreditsTile size="lg" />}
-      title={startingCredits || won ? "Buy more Opengeni credits" : "Opengeni credits"}
+      title={startingCredits || won ? `Buy more ${productName} credits` : `${productName} credits`}
       // Short enough for one line at phone width; the row under it names
       // provider accounts, so "nothing to set up" says the difference.
       meta={["Pay as you go", "Nothing to set up"]}
@@ -713,7 +715,19 @@ export function ModelAccessOnboardingPanel({
     />
   ) : null;
 
-  const connectOptions = (
+  // The simplified interface runs on credits only: where credits can be bought, its setup
+  // offers nothing else. Without billing it keeps the usual list, since
+  // connecting an account is then the only way to start.
+  const creditsOnly = simplified && creditsRow !== null;
+  const connectOptions = creditsOnly ? (
+    <ProviderConnectList
+      label="Ways to pay"
+      choices={[]}
+      expanded={null}
+      onOpen={() => {}}
+      leadingRows={creditsRow}
+    />
+  ) : (
     <ProviderConnectList
       label="Ways to pay"
       choices={subscriptionChoices}
@@ -887,11 +901,15 @@ export function ModelAccessOnboardingPanel({
   return (
     <section className="flex min-h-0 flex-1 overflow-y-auto px-4 py-8">
       <div className="m-auto w-full max-w-lg rounded-xl border border-border bg-surface p-6 shadow-sm sm:p-8">
-        <h1 className="text-xl font-semibold tracking-tight">Choose how to power your chats</h1>
+        <h1 className="text-xl font-semibold tracking-tight">
+          {creditsOnly ? "Add credits to start" : "Choose how to power your chats"}
+        </h1>
         <p className="mt-2 text-sm leading-relaxed text-fg-muted">
-          {billingMode === "stripe"
-            ? "Opengeni credits are the simplest way to start. You can also use a plan or provider account you already have."
-            : "Connect a plan or provider account you already have."}
+          {creditsOnly
+            ? "Chats are paid with credits as you go. There is nothing else to set up."
+            : billingMode === "stripe"
+              ? "Opengeni credits are the simplest way to start. You can also use a plan or provider account you already have."
+              : "Connect a plan or provider account you already have."}
         </p>
 
         <div className="mt-6">{connectOptions}</div>

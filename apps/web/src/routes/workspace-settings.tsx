@@ -2,6 +2,7 @@
 // (components/settings/workspace-settings-shell.tsx): General, Access,
 // API keys and Developer. Models lives in Organization settings (a
 // workspace's Models URL redirects there), as does the org/billing console.
+import { useSimplifiedInterface } from "@opengeni/react/app/lib/simplified-interface";
 import { t } from "@opengeni/react/app/lib/console-text";
 import { inferenceFeatureRestriction } from "@opengeni/react";
 import { NativeIdentityLinkAccounts } from "@/routes/identity-link";
@@ -320,6 +321,7 @@ function WorkspaceGeneralSettings({
   gatewayRevision: number;
 }) {
   const context = useAppContext();
+  const allSettings = !useSimplifiedInterface().simplified;
   const { captureWorkspaceInvocation, ownsWorkspaceInvocation } = context;
   const navigate = useNavigate();
   const activeWorkspace =
@@ -439,14 +441,16 @@ function WorkspaceGeneralSettings({
             </RowValue>
           }
         />
-        <SettingRow
-          label="Workspace ID"
-          description={
-            <span className="mt-0.5 flex min-w-0">
-              <CopyField value={workspaceId} label="workspace ID" truncate="middle" />
-            </span>
-          }
-        />
+        {allSettings ? (
+          <SettingRow
+            label="Workspace ID"
+            description={
+              <span className="mt-0.5 flex min-w-0">
+                <CopyField value={workspaceId} label="workspace ID" truncate="middle" />
+              </span>
+            }
+          />
+        ) : null}
       </Section>
       <RenameWorkspaceDialog
         open={renaming}
@@ -478,74 +482,86 @@ function WorkspaceGeneralSettings({
         />
       </Section>
 
-      <Section title="Chats">
-        <BusySendPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
-      </Section>
+      {/* The simplified interface keeps this page to the workspace itself: its name,
+          whether agents are running, and deleting it. How chats, meetings and
+          new sessions behave stays at the defaults ("Show all features" in
+          the account menu brings these back). */}
+      {allSettings ? (
+        <>
+          <Section title="Chats">
+            <BusySendPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
+          </Section>
 
-      <MeetingDefaultsSection
-        workspaceId={workspaceId}
-        personal={personal}
-        canManage={canManageSettings}
-        onConnectModels={
-          canAddAccounts
-            ? () =>
+          <MeetingDefaultsSection
+            workspaceId={workspaceId}
+            personal={personal}
+            canManage={canManageSettings}
+            onConnectModels={
+              canAddAccounts
+                ? () =>
+                    void navigate({
+                      to: "/workspaces/$workspaceId/organization",
+                      params: { workspaceId },
+                      search: { section: "models", workspace: workspaceId },
+                    })
+                : undefined
+            }
+          />
+
+          <Section
+            title="New session defaults"
+            description="Applied when someone starts a new session in this workspace."
+          >
+            <SettingNavRow
+              label="Agent"
+              description="What agents can do and who they are."
+              value={workspaceAgentDefaultsSummary(
+                activeWorkspace.settings,
+                context.clientConfig.agentConfig,
+              )}
+              onOpen={() =>
                 void navigate({
-                  to: "/workspaces/$workspaceId/organization",
+                  to: "/workspaces/$workspaceId/settings",
                   params: { workspaceId },
-                  search: { section: "models", workspace: workspaceId },
+                  search: { section: "general", view: "agent-defaults" },
                 })
-            : undefined
-        }
-      />
+              }
+            />
+            <DefaultMachineRow workspaceId={workspaceId} />
+            <MyDefaultMachineRow workspaceId={workspaceId} />
+            <DefaultSandboxEnvironmentRow workspaceId={workspaceId} />
+            <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
+            <VideoGenerationPreferenceRow
+              workspaceId={workspaceId}
+              canManage={canManageSettings}
+              refreshKey={gatewayRevision}
+              onConnectGateway={
+                canAddAccounts
+                  ? () =>
+                      void navigate({
+                        to: "/workspaces/$workspaceId/organization",
+                        params: { workspaceId },
+                        search: {
+                          section: "models",
+                          workspace: workspaceId,
+                          view: "connect:vercel",
+                        },
+                      })
+                  : undefined
+              }
+            />
+            <WorkspaceSandboxImageRow
+              client={context.client}
+              workspaceId={workspaceId}
+              canManage={canAdminister}
+            />
+            <CodeSearchPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
+            <ConnectedAppsDefaultRow workspaceId={workspaceId} canManage={canManageSettings} />
+          </Section>
 
-      <Section
-        title="New session defaults"
-        description="Applied when someone starts a new session in this workspace."
-      >
-        <SettingNavRow
-          label="Agent"
-          description="What agents can do and who they are."
-          value={workspaceAgentDefaultsSummary(
-            activeWorkspace.settings,
-            context.clientConfig.agentConfig,
-          )}
-          onOpen={() =>
-            void navigate({
-              to: "/workspaces/$workspaceId/settings",
-              params: { workspaceId },
-              search: { section: "general", view: "agent-defaults" },
-            })
-          }
-        />
-        <DefaultMachineRow workspaceId={workspaceId} />
-        <MyDefaultMachineRow workspaceId={workspaceId} />
-        <DefaultSandboxEnvironmentRow workspaceId={workspaceId} />
-        <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
-        <VideoGenerationPreferenceRow
-          workspaceId={workspaceId}
-          canManage={canManageSettings}
-          refreshKey={gatewayRevision}
-          onConnectGateway={
-            canAddAccounts
-              ? () =>
-                  void navigate({
-                    to: "/workspaces/$workspaceId/organization",
-                    params: { workspaceId },
-                    search: { section: "models", workspace: workspaceId, view: "connect:vercel" },
-                  })
-              : undefined
-          }
-        />
-        <WorkspaceSandboxImageRow
-          client={context.client}
-          workspaceId={workspaceId}
-          canManage={canAdminister}
-        />
-        <CodeSearchPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
-        <ConnectedAppsDefaultRow workspaceId={workspaceId} canManage={canManageSettings} />
-      </Section>
-
-      <NativeIdentityLinkAccounts workspaceId={workspaceId} />
+          <NativeIdentityLinkAccounts workspaceId={workspaceId} />
+        </>
+      ) : null}
 
       {/* A personal workspace belongs to its person's membership and is never
           deleted from here, so its settings show no delete section at all. */}

@@ -126,6 +126,8 @@ import {
   type RepoDraft,
 } from "./lib/session-tools";
 import { useCapabilityToolDefaults } from "./lib/use-capability-tool-defaults";
+import { useSimplifiedInterface } from "./lib/simplified-interface";
+import { simplifiedInterfaceModelPolicy } from "./lib/simplified-interface-model";
 import { useManualRepositoryCatalogReconciliation } from "./lib/use-manual-repository-catalog-reconciliation";
 import { upsertWorkspace } from "./lib/workspaces";
 import { deleteWorkspaceWithReconciliation } from "./lib/workspace-deletion";
@@ -453,9 +455,19 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   const [accessLoading, setAccessLoading] = useState(false);
   const [accessError, setAccessError] = useState<BootstrapErrorPresentation | null>(null);
   const [creditRequired, setCreditRequired] = useState<CreditRequired | null>(null);
-  const [model, setModel] = useState("gpt-6-astra");
-  const [reasoningEffort, setReasoningEffort] = useState<IntelligenceEffort>("low");
-  const [latencyMode, setLatencyMode] = useState<LatencyMode>("standard");
+  const [chosenModel, setModel] = useState("gpt-6-astra");
+  const [chosenReasoningEffort, setReasoningEffort] = useState<IntelligenceEffort>("low");
+  const [chosenLatencyMode, setLatencyMode] = useState<LatencyMode>("standard");
+  // The simplified interface has no model choice: whatever a default, a
+  // restored draft or a fallback sets, new chats carry its one policy.
+  const { simplified } = useSimplifiedInterface();
+  const simplifiedPolicy = useMemo(
+    () => (simplified && clientConfig ? simplifiedInterfaceModelPolicy(clientConfig) : null),
+    [clientConfig, simplified],
+  );
+  const model = simplifiedPolicy?.model ?? chosenModel;
+  const reasoningEffort = simplifiedPolicy?.reasoningEffort ?? chosenReasoningEffort;
+  const latencyMode = simplifiedPolicy ? "standard" : chosenLatencyMode;
   // Changes/Files dock starts collapsed; user opens via the session-panel toggle.
   // No localStorage — only an in-memory default (toggle still works for the session).
   const [inspectorOpen, setInspectorOpen] = useState(false);
