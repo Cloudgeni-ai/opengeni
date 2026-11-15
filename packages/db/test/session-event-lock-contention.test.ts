@@ -259,13 +259,21 @@ test("parallel worker and API appends, admission churn and output custody keep o
     }
   };
   const claimWins = new Map<string, number>();
+  const owners = new Map<string, number>();
+  let maxOwners = 0;
   const custodian = async (index: number) => {
     let round = 0;
     while (!actors.stop) {
       const identity = custody[(index + round++) % custody.length]!;
       const claimId = crypto.randomUUID();
       if (await claimConnectedCommandOutputCollection(client.db, { ...identity, claimId })) {
+        const holding = (owners.get(identity.commandId) ?? 0) + 1;
+        owners.set(identity.commandId, holding);
+        maxOwners = Math.max(maxOwners, holding);
         claimWins.set(identity.commandId, (claimWins.get(identity.commandId) ?? 0) + 1);
+        // Yield so a concurrent claim gets a chance to (wrongly) win.
+        await new Promise((done) => setTimeout(done, 1));
+        owners.set(identity.commandId, holding - 1);
         await returnConnectedCommandOutputCollection(client.db, { ...identity, claimId });
       }
     }
@@ -304,21 +312,24 @@ test("parallel worker and API appends, admission churn and output custody keep o
     expect(Number(cursor!.last_sequence)).toBe(rows.length);
     expect(Number(cursor!.session_last)).toBeLessThanOrEqual(rows.length);
   }
-  // Every command's output stayed claimable by exactly one owner at a time and
+  // Every command's output had exactly one owner at a time and
   // ends unclaimed.
   const commands = await admin<{ reconcile_claim_id: string | null }[]>`
     select reconcile_claim_id from session_background_commands
     where id in ${admin(custody.map((identity) => identity.commandId))}`;
   expect(commands.every((row) => row.reconcile_claim_id === null)).toBe(true);
   expect([...claimWins.values()].reduce((sum, value) => sum + value, 0)).toBeGreaterThan(0);
+  expect(maxOwners).toBe(1);
 
   // A workspace Pause committed during appends: every append that starts after
   // it commits is refused and stores nothing; nothing accepted is lost.
   const late = await Promise.all(Array.from({ length: 4 }, () => runningSession(grant)));
   let pausedAt = Number.POSITIVE_INFINITY;
   const outcomes: Array<{ sessionId: string; token: string; startedAt: number; ok: boolean }> = [];
+  const lateProgress = { accepted: 0 };
   const lateWorker = async (run: Running) => {
-    for (let step = 0; step < 40; step += 1) {
+    // Append until refused; the cap only bounds a broken Pause.
+    for (let step = 0; step < 5000; step += 1) {
       const token = `late:${run.sessionId}:${step}`;
       const startedAt = performance.now();
       const result = await appendSessionEventsForTurnAttempt(
@@ -332,14 +343,16 @@ test("parallel worker and API appends, admission churn and output custody keep o
       );
       outcomes.push({ sessionId: run.sessionId, token, startedAt, ok: result.accepted });
       if (!result.accepted) return;
+      lateProgress.accepted += 1;
     }
   };
   const lateRuns = late.map(lateWorker);
-  await new Promise((done) => setTimeout(done, 30));
+  // Pause while appends are demonstrably in flight.
+  while (lateProgress.accepted < 8) await new Promise((done) => setTimeout(done, 2));
   await controlWorkspace(grant, "pause");
   pausedAt = performance.now();
   await Promise.all(lateRuns);
-  expect(outcomes.some((outcome) => !outcome.ok)).toBe(true);
+  expect(outcomes.filter((outcome) => !outcome.ok)).toHaveLength(late.length);
   for (const outcome of outcomes) {
     if (outcome.startedAt > pausedAt) expect(outcome.ok).toBe(false);
   }

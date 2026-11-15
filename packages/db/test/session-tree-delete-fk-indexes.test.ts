@@ -54,6 +54,22 @@ test("session-tree cascade foreign keys are served by a valid index leading with
             @> constraint_row.conkey
           and (index_row.indkey::int2[])[0:cardinality(constraint_row.conkey) - 1]
             <@ constraint_row.conkey
+          -- A partial index serves the cascade only when its predicate is
+          -- implied by the FK column being non-null.
+          and (
+            index_row.indpred is null
+            or (
+              cardinality(constraint_row.conkey) = 1
+              and pg_get_expr(index_row.indpred, index_row.indrelid) = format(
+                '(%s IS NOT NULL)',
+                (
+                  select quote_ident(attribute.attname) from pg_attribute attribute
+                  where attribute.attrelid = constraint_row.conrelid
+                    and attribute.attnum = constraint_row.conkey[1]
+                )
+              )
+            )
+          )
       ) as covered
     from pg_constraint constraint_row
     where constraint_row.contype = 'f'

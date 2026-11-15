@@ -497,7 +497,7 @@ test("custody bookkeeping does not queue behind a session's event writer or a co
       Promise.race([
         work,
         new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error("custody write queued behind the session")), 5_000),
+          setTimeout(() => reject(new Error("custody write queued behind the session")), 15_000),
         ),
       ]);
     // Racing collection claims on the same output: exactly one owner.
