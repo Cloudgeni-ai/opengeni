@@ -5711,6 +5711,8 @@ export type CodexUsagePayload = {
     fiveHour: CodexUsageWindow | null;
     weekly: CodexUsageWindow | null;
     unknownWindowExhausted: boolean;
+    /** The provider flags this feature limit as spent. */
+    limitReached?: boolean;
   }>;
   credits?: {
     hasCredits: boolean;
