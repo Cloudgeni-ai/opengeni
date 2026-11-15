@@ -6,7 +6,7 @@
 //!   <id>.ext4.fetching.<n>      one being fetched; removed on start
 //!   used/<id>                   modified when a create last used the image
 //!   checked/<id>                which file of the image was found to match
-//!                               its id: device, inode, length, modified time
+//!                               its id: inode, length, modified time
 //! ```
 //!
 //! A create that names an image the host does not have fetches it from the
@@ -26,8 +26,8 @@
 //! an agent started ends before a successor takes the root. A successor
 //! still trusts no file by its name alone. An image found to match its id
 //! (fetched and checked, built here, or checked after a restart) is synced
-//! and then stamped with its file's identity (device, inode, length,
-//! modified time), the same identity fetching a disk over it trusts. A
+//! and then stamped with its file's identity (inode, length, modified
+//! time), much as fetching a disk over it trusts its file's metadata. A
 //! successor takes an image whose file still has its stamp's identity as
 //! checked; any other image an earlier agent left (unstamped, or a file
 //! that changed or was replaced since) is checked against its id the first
@@ -565,8 +565,10 @@ fn last_used(path: &Path, mark: &Path) -> io::Result<SystemTime> {
     }
 }
 
-/// What a stamp says of an image's file: its device, inode, length and
-/// modified time in nanoseconds, as one line. `None` if it cannot be read.
+/// What a stamp says of an image's file: its inode, length and modified
+/// time in nanoseconds, as one line. The device is left out: it is always
+/// the cache's own directory, and a loop device may be renumbered at boot.
+/// `None` if it cannot be read.
 fn identity(path: &Path) -> Option<String> {
     use std::os::unix::fs::MetadataExt as _;
     let metadata = fs::metadata(path).ok()?;
@@ -577,8 +579,7 @@ fn identity(path: &Path) -> Option<String> {
         .ok()?
         .as_nanos();
     Some(format!(
-        "{} {} {} {modified}\n",
-        metadata.dev(),
+        "{} {} {modified}\n",
         metadata.ino(),
         metadata.len()
     ))
