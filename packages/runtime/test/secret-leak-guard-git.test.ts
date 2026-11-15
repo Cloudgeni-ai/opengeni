@@ -143,6 +143,12 @@ describe("git commit and push on the local backend", () => {
     expect(refused).not.toContain(TOKEN);
     expect(await run("cd repo && git rev-list --count HEAD")).toMatch(/\b1\b/u);
     expect(await run("cd repo && git diff --cached --name-only | wc -l")).toMatch(/\b0\b/u);
+    // The check wrote nothing into the repository, not even the file's blob.
+    expect(
+      await run(
+        "cd repo && git cat-file -e $(git hash-object README.md) && echo PRESENT || echo ABSENT",
+      ),
+    ).toContain("ABSENT");
 
     // Written with the escape, the reference stays text and commits.
     await run("cd repo && printf 'Key: %s\\n' '\\{{secret:Token}}' > README.md");

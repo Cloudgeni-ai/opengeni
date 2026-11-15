@@ -245,8 +245,9 @@ a security control: an agent that runs git another way is not stopped.
   in their directories, on a throwaway copy of each repository's index, and
   prints exactly what each commit would take (with `-a`, `--include`,
   `--only` or paths as git applies them) and, for a push, the commits of the
-  pushed branches (`HEAD` by default) that no remote has. The real index, work
-  tree and refs are untouched. Every added line is matched exactly against the
+  pushed branches (`HEAD` by default) that no remote has. Nothing is written
+  into the repository: the index copy and the objects the replayed adds create
+  live in a temporary directory. Every added line is matched exactly against the
   ledger. A match returns "Nothing was run:" with the file, line and commit,
   and how to write the reference literally, amend a commit or ignore a local
   file. Nothing else is matched.
@@ -258,12 +259,13 @@ a security control: an agent that runs git another way is not stopped.
   runs unchecked. Commands without `git commit` or `git push` run no helper.
 
 Limits: not checked are git run from a script file or alias, with
-`--git-dir`/`--work-tree` or in a directory named by a variable; git typed
-through `write_stdin`; interactive adds; changes made in merge commits;
-connector or API pushes; Windows machines. A value written and committed by the
-same command is not in the files yet when the helper runs, so only a later push
-catches it. The scan stops at 8 MiB of diff; recreating the sandbox loses the
-ledger. If the helper fails, the command runs.
+`--git-dir`/`--work-tree` or `GIT_DIR`-style variables, or in a directory named
+by a variable; git typed through `write_stdin`; interactive adds; changes made
+in merge commits; connector or API pushes; Windows machines. A value written by
+a command is not in its files yet when the helper runs: if the same command
+commits it, a later push catches it, and if it also pushes it, nothing does.
+The scan stops at 8 MiB of diff; recreating the sandbox loses the ledger. If the
+helper fails, the command runs.
 
 ## Credential profiles
 

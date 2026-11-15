@@ -179,6 +179,8 @@ describe("reading git steps from a command", () => {
     expect(gitLeakPlan("GIT_AUTHOR_NAME=x env -i GIT_DIR_X=1 git commit -m y")?.steps).toHaveLength(
       1,
     );
+    expect(gitLeakPlan("sudo -u bob git commit -am x")?.steps).toHaveLength(1);
+    expect(gitLeakPlan("GIT_DIR=/x/.git git commit -m x")).toBeNull();
     // Interactive adds and unknown directories are not replayed or checked.
     expect(gitLeakPlan("git add -p && git commit -m x")?.steps).toEqual([
       { kind: "commit", directory: ".", stage: "index", paths: [] },

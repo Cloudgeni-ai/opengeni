@@ -345,9 +345,20 @@ function shellCommands(command: string): string[][] {
 
 const GIT_OPTIONS_WITH_VALUE = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace"]);
 /** Words that run the next word as a command (after their own options). */
-const COMMAND_PREFIXES = new Set(["env", "command", "exec", "time", "nice", "nohup", "sudo"]);
+/** Words that run the next word as a command, with their options that take a value. */
+const COMMAND_PREFIXES = new Map<string, ReadonlySet<string>>([
+  ["env", new Set(["-u", "-C", "-S"])],
+  ["command", new Set()],
+  ["exec", new Set(["-a"])],
+  ["time", new Set(["-f", "-o"])],
+  ["nice", new Set(["-n"])],
+  ["nohup", new Set()],
+  ["sudo", new Set(["-u", "-g", "-C", "-p", "-U", "-h", "-r", "-t", "-D"])],
+]);
 const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh"]);
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/u;
+/** Variables that point git at another repository, work tree or index. */
+const GIT_LOCATION_VARIABLE = /^GIT_(?:DIR|WORK_TREE|INDEX_FILE|OBJECT_DIRECTORY)=/u;
 /** Directories the helper cannot know: expansions, globs, home. */
 const UNKNOWN_DIRECTORY = /[$`*?[\]~]/u;
 
@@ -472,11 +483,16 @@ function collectGitSteps(
   let directory: string | null = start;
   for (const words of shellCommands(command)) {
     let at = 0;
+    let elsewhere = false;
     for (;;) {
       const word = words[at];
-      if (word === undefined || !(ASSIGNMENT.test(word) || COMMAND_PREFIXES.has(word))) break;
+      if (word === undefined) break;
+      const prefixOptions = COMMAND_PREFIXES.get(word);
+      if (!prefixOptions && !ASSIGNMENT.test(word)) break;
+      if (GIT_LOCATION_VARIABLE.test(word)) elsewhere = true;
       at += 1;
-      if (COMMAND_PREFIXES.has(word)) while (words[at]?.startsWith("-")) at += 1;
+      if (!prefixOptions) continue;
+      while (words[at]?.startsWith("-")) at += prefixOptions.has(words[at]!) ? 2 : 1;
     }
     const name = words[at];
     if (name === undefined) continue;
@@ -499,7 +515,7 @@ function collectGitSteps(
       continue;
     }
     if (program !== "git") continue;
-    let gitDirectory: string | null = directory;
+    let gitDirectory: string | null = elsewhere ? null : directory;
     let index = at + 1;
     while (index < words.length && words[index]!.startsWith("-")) {
       const option = words[index]!;
@@ -586,16 +602,23 @@ export function gitLeakScanScript(plan: GitLeakPlan, options: { ledgerKnown: boo
     `t=$(mktemp -d 2>/dev/null) || exit 0`,
     `trap 'rm -rf "$t"' EXIT`,
     `trap 'rm -rf "$t"; exit 0' HUP INT TERM`,
-    // Moves into a step's directory and sets its repository and throwaway index.
+    // Moves into a step's directory and sets its repository, throwaway index
+    // and throwaway object directory: objects the replayed adds write go to
+    // the temporary directory, with the repository's own objects readable
+    // as an alternate, so nothing is written into the repository.
     `enter() {`,
+    `  unset GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES`,
     `  cd "$start" && cd "$1" 2>/dev/null || return 1`,
     `  top=$(git rev-parse --show-toplevel 2>/dev/null) || return 1`,
     `  ix="$t/$(printf '%s' "$top" | cksum | tr ' ' _)"`,
+    `  objects=$(cd "$(git rev-parse --git-path objects 2>/dev/null)" 2>/dev/null && pwd) || return 1`,
     `  if [ ! -e "$ix.ready" ]; then`,
     `    real=$(git rev-parse --git-path index 2>/dev/null) || return 1`,
     `    if [ -f "$real" ]; then cp "$real" "$ix" || return 1; fi`,
+    `    mkdir -p "$ix.objects" || return 1`,
     `    : > "$ix.ready"`,
     `  fi`,
+    `  export GIT_OBJECT_DIRECTORY="$ix.objects" GIT_ALTERNATE_OBJECT_DIRECTORIES="$objects"`,
     `}`,
     `show() {`,
     `  printf '${REPO_MARKER}%s\\n' "$top"`,
