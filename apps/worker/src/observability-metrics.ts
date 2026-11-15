@@ -3188,6 +3188,13 @@ export class StreamTimingMetrics {
   private responseEndedAt: number | null = null;
   /** Response end to model entry of the request now in preparation. */
   private beforeModelEntryMs: number | null = null;
+  /**
+   * Set when the previous response's end was read after the request now in
+   * preparation had already entered (the SDK starts the next request before
+   * the terminal event is read): the gap starts at that read, and each stage
+   * counts only its time after it.
+   */
+  private lateResponseEnd: { at: number; stageMsBefore: Map<string, number> } | null = null;
   /** The model call awaiting its terminal response, if one was dispatched. */
   private openCall: {
     dispatchedAt: number;
@@ -3273,15 +3280,22 @@ export class StreamTimingMetrics {
             labels: { provider: this.options.provider, phase },
             value: ms / 1000,
           });
-        gap("total", this.beforeModelEntryMs + preDispatchMs);
+        const late = this.lateResponseEnd;
+        gap("total", late ? Math.max(0, at - late.at) : this.beforeModelEntryMs + preDispatchMs);
         gap("before_model_entry", this.beforeModelEntryMs);
-        for (const [stage, ms] of this.stageMs) gap(stage, ms);
-        this.beforeModelEntryMs = null;
+        for (const [stage, ms] of this.stageMs) {
+          gap(stage, Math.max(0, ms - (late?.stageMsBefore.get(stage) ?? 0)));
+        }
       }
+      this.beforeModelEntryMs = null;
+      this.lateResponseEnd = null;
       this.stageMs.clear();
       this.stage = null;
       this.modelEntryAt = null;
     }
+    // A response end not yet claimed by a model entry never carries over a
+    // dispatch into a later request's gap.
+    this.responseEndedAt = null;
     // A transport retry re-dispatches the same request; the first delta then
     // belongs to the latest dispatch.
     this.dispatchedAt = at;
@@ -3343,7 +3357,22 @@ export class StreamTimingMetrics {
     const call = this.openCall;
     if (!call) return null;
     this.openCall = null;
-    this.responseEndedAt = this.now();
+    const endedAt = this.now();
+    if (this.modelEntryAt === null) {
+      this.responseEndedAt = endedAt;
+    } else {
+      // The next request already entered: its gap starts now, with nothing
+      // before its model entry, and its stages count only from here.
+      const stageMsBefore = new Map<string, number>(this.stageMs);
+      if (this.stage) {
+        stageMsBefore.set(
+          this.stage.name,
+          (stageMsBefore.get(this.stage.name) ?? 0) + Math.max(0, endedAt - this.stage.since),
+        );
+      }
+      this.beforeModelEntryMs = 0;
+      this.lateResponseEnd = { at: endedAt, stageMsBefore };
+    }
     const since = (at: number | null) =>
       at === null ? null : Math.round(Math.max(0, at - call.dispatchedAt));
     return {
