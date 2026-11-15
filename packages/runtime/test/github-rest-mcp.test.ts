@@ -452,6 +452,21 @@ describe("GitHub read tools", () => {
     expect(new URL(urls[1]!).searchParams.get("affiliation")).toBe("owner");
   });
 
+  test("an enterprise managed user's login is a valid owner", async () => {
+    const urls: string[] = [];
+    const server = openServer(async (url) => {
+      urls.push(String(url));
+      return String(url) === "https://api.github.com/users/octocat_acme"
+        ? response({ login: "octocat_acme", type: "User" })
+        : response([]);
+    });
+    const result = await server.callToolResult("owner_repositories_list", {
+      owner: "octocat_acme",
+    });
+    expect(result.isError).toBeUndefined();
+    expect(new URL(urls[0]!).pathname).toBe("/users/octocat_acme");
+  });
+
   test("filters workflow runs by pull request head", async () => {
     const urls: string[] = [];
     const sha = "a".repeat(40);

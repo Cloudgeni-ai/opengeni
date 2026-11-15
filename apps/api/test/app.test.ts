@@ -136,6 +136,47 @@ describe("API helpers", () => {
       false,
     );
     expect(workspaceActorContextExempt("GET", `/v1/workspaces/${workspace}/not-mcp`)).toBe(false);
+
+    // Slack account linking from a Slack link, for people who may have no
+    // workspace access yet: exactly these methods and paths.
+    const links = `/v1/workspaces/${workspace}/integrations/slack/user-link-intents`;
+    for (const [method, path] of [
+      ["POST", links],
+      ["GET", `${links}/request-1`],
+      ["POST", `${links}/request-1/link`],
+      ["POST", `${links}/request-1/request-access`],
+      ["POST", `${links}/request-1/cancel`],
+    ] as const) {
+      expect(workspaceActorContextExempt(method, path)).toBe(true);
+    }
+    for (const [method, path] of [
+      ["GET", links],
+      ["DELETE", `${links}/request-1`],
+      ["GET", `${links}/request-1/link`],
+      ["POST", `${links}/request-1/approve`],
+      ["POST", `${links}/request-1/link/extra`],
+      ["GET", `/v1/workspaces/${workspace}/members/access-requests/slack`],
+      ["POST", `/v1/workspaces/${workspace}/integrations/slack/user-links`],
+    ] as const) {
+      expect(workspaceActorContextExempt(method, path)).toBe(false);
+    }
+    // They match the decoded path the request is routed by (`c.req.path`):
+    // an encoded character in a fixed segment routes to the handler, so it is
+    // exempt with it, and not on the raw path alone.
+    const encoded = `/v1/workspaces/${workspace}/integrations/slack/user%2Dlink-intents`;
+    expect(workspaceActorContextExempt("POST", encoded, links)).toBe(true);
+    expect(workspaceActorContextExempt("POST", encoded)).toBe(false);
+    // HEAD and trailing slashes stay behind the ordinary check.
+    expect(workspaceActorContextExempt("HEAD", `${links}/request-1`)).toBe(false);
+    expect(workspaceActorContextExempt("POST", `${links}/`)).toBe(false);
+    expect(workspaceActorContextExempt("GET", `${links}/request-1/`)).toBe(false);
+    expect(workspaceActorContextExempt("POST", `${links}/request-1/link/`)).toBe(false);
+    // An encoded `/` (which routing leaves encoded) stays inside one segment:
+    // it is the request id, or it matches no route.
+    expect(workspaceActorContextExempt("GET", `${links}/request%2F1`)).toBe(true);
+    expect(workspaceActorContextExempt("POST", `${links}/request%2F1/link`)).toBe(true);
+    expect(workspaceActorContextExempt("POST", `${links}%2Frequest-1%2Flink`)).toBe(false);
+    expect(workspaceActorContextExempt("GET", `${links}%2Frequest-1`)).toBe(false);
   });
 
   test("keeps signed-state GitHub connect public until its route-specific browser grant", async () => {
@@ -610,6 +651,140 @@ describe("API helpers", () => {
     expect(externalResponse.headers.get("access-control-expose-headers")?.toLowerCase()).toContain(
       "x-opengeni-actor-state",
     );
+  });
+
+  test("sends no CORS grant to a request without an Origin header", async () => {
+    const app = createApp({
+      settings: testSettings({ productAccessMode: "managed" }),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+    for (const path of ["/v1/config/client", "/healthz", "/v1/no-such-route"]) {
+      const response = await app.request(`http://localhost${path}`);
+      expect(response.headers.get("access-control-allow-origin")).toBeNull();
+      expect(response.headers.get("access-control-allow-credentials")).toBeNull();
+      expect(response.headers.get("access-control-expose-headers")).toBeNull();
+      // A cache must not reuse this grant-less answer for a browser request.
+      expect(response.headers.get("vary")?.toLowerCase()).toContain("origin");
+      expect(response.headers.get("x-opengeni-correlation-id")).toBeTruthy();
+    }
+    // A preflight-shaped request without an Origin is not a browser preflight:
+    // it gets no grant either.
+    const originless = await app.request("http://localhost/v1/config/client", {
+      method: "OPTIONS",
+      headers: { "access-control-request-method": "GET" },
+    });
+    expect(originless.headers.get("access-control-allow-origin")).toBeNull();
+    expect(originless.headers.get("access-control-allow-methods")).toBeNull();
+    // Browser requests keep their grants: wildcard without credentials for any
+    // origin, credentialed CORS for allowlisted console origins. Both vary by
+    // Origin so a cache never serves one to the other or to a no-Origin caller.
+    const external = await app.request("http://localhost/v1/config/client", {
+      headers: { origin: "https://product.example" },
+    });
+    expect(external.headers.get("access-control-allow-origin")).toBe("*");
+    expect(external.headers.get("access-control-allow-credentials")).toBeNull();
+    expect(external.headers.get("vary")?.toLowerCase()).toContain("origin");
+    const nullOrigin = await app.request("http://localhost/v1/config/client", {
+      headers: { origin: "null" },
+    });
+    expect(nullOrigin.headers.get("access-control-allow-origin")).toBe("*");
+    expect(nullOrigin.headers.get("access-control-allow-credentials")).toBeNull();
+    const allowlisted = await app.request("http://localhost/v1/config/client", {
+      headers: { origin: "http://localhost:5173" },
+    });
+    expect(allowlisted.headers.get("access-control-allow-origin")).toBe("http://localhost:5173");
+    expect(allowlisted.headers.get("access-control-allow-credentials")).toBe("true");
+    expect(allowlisted.headers.get("vary")?.toLowerCase()).toContain("origin");
+    const preflight = await app.request("http://localhost/v1/config/client", {
+      method: "OPTIONS",
+      headers: { origin: "https://product.example", "access-control-request-method": "GET" },
+    });
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get("access-control-allow-origin")).toBe("*");
+    expect(preflight.headers.get("access-control-allow-credentials")).toBeNull();
+  });
+
+  test("sends nosniff on every API response", async () => {
+    const app = createApp({
+      settings: testSettings({ productAccessMode: "managed" }),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+    const requests: Array<[string, RequestInit?]> = [
+      ["/v1/config/client"],
+      ["/v1/config/client", { headers: { origin: "https://product.example" } }],
+      ["/v1/config/client", { headers: { origin: "http://localhost:5173" } }],
+      ["/healthz"],
+      ["/v1/no-such-route"],
+      ["/v1/auth/get-session"],
+      ["/v1/auth/sign-in/email", { method: "POST", body: "{}" }],
+      // Fails inside the route with the empty test database: the error answer.
+      ["/v1/access/me", { headers: { authorization: "Bearer not-a-key" } }],
+      [
+        "/v1/config/client",
+        {
+          method: "OPTIONS",
+          headers: { origin: "https://product.example", "access-control-request-method": "GET" },
+        },
+      ],
+    ];
+    for (const [path, init] of requests) {
+      const response = await app.request(`http://localhost${path}`, init);
+      expect({ path, nosniff: response.headers.get("x-content-type-options") }).toEqual({
+        path,
+        nosniff: "nosniff",
+      });
+    }
+
+    // A route's own streamed Response, and one whose headers are immutable
+    // (as fetch() returns), get it too; a route's own value is kept.
+    const routed = createApp({
+      settings: testSettings({ productAccessMode: "managed" }),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+    routed.get("/v1/test-only/stream", () => {
+      const body = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("data: ready\n\n"));
+          controller.close();
+        },
+      });
+      return new Response(body, { headers: { "content-type": "text/event-stream" } });
+    });
+    routed.get("/v1/test-only/immutable", () =>
+      Response.redirect("http://localhost/elsewhere", 302),
+    );
+    routed.get(
+      "/v1/test-only/own",
+      () => new Response("x", { headers: { "x-content-type-options": "route-value" } }),
+    );
+    routed.get("/v1/test-only/throws", () => {
+      throw new Error("deliberate failure");
+    });
+    for (const path of [
+      "/v1/test-only/stream",
+      "/v1/test-only/immutable",
+      "/v1/test-only/throws",
+    ]) {
+      const response = await routed.request(`http://localhost${path}`);
+      expect({ path, status: response.status }).not.toEqual({ path, status: 404 });
+      expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+      expect(response.headers.get("x-opengeni-correlation-id")).toBeTruthy();
+    }
+    // A route's own value wins.
+    const own = await routed.request("http://localhost/v1/test-only/own");
+    expect(own.headers.get("x-content-type-options")).toBe("route-value");
+    expect((await routed.request("http://localhost/v1/test-only/throws")).status).toBe(500);
+    const stream = await routed.request("http://localhost/v1/test-only/stream");
+    expect(await stream.text()).toBe("data: ready\n\n");
   });
 
   test("allows every header a Site bridge sets on cross-origin preflights", async () => {
@@ -1613,6 +1788,79 @@ describe("API helpers", () => {
         },
       }),
     ).rejects.toThrow("reserved for the canonical Codex Apps service");
+  });
+
+  test("refuses a Business Central address that would drop its environment", async () => {
+    const created = createCatalogItem({
+      db: {} as Database,
+      accountId: crypto.randomUUID(),
+      workspaceId: crypto.randomUUID(),
+      payload: {
+        kind: "mcp",
+        source: "manual",
+        name: "Microsoft Dynamics",
+        description: null,
+        category: "custom",
+        tags: [],
+        homepageUrl: null,
+        endpointUrl: "https://businesscentral.dynamics.com/opengenitest2026/Production",
+        installUrl: null,
+        authModel: null,
+        metadata: {},
+      },
+    });
+    await expect(created).rejects.toMatchObject({ status: 422 });
+    await expect(created).rejects.toThrow('"opengenitest2026" isn\'t a tenant ID or domain');
+  });
+
+  test("a connection a Connect card asked inputs for must follow its entry's rule", async () => {
+    const create = (endpointUrl: string, connectFor: string) =>
+      createCatalogItem({
+        db: {} as Database,
+        accountId: crypto.randomUUID(),
+        workspaceId: crypto.randomUUID(),
+        payload: {
+          kind: "mcp",
+          source: "manual",
+          name: "Microsoft Dynamics",
+          category: "custom",
+          tags: [],
+          endpointUrl,
+          metadata: {},
+          connectFor,
+        },
+      });
+    // Any other server is refused before anything is read or written.
+    const other = create("https://attacker.example/mcp", "api:microsoft-dynamics");
+    await expect(other).rejects.toMatchObject({ status: 422 });
+    await expect(other).rejects.toThrow("That isn't a Dynamics environment address");
+    const unreadable = create(
+      "https://businesscentral.dynamics.com/opengenitest2026/Production",
+      "api:microsoft-dynamics",
+    );
+    await expect(unreadable).rejects.toThrow('"opengenitest2026" isn\'t a tenant ID or domain');
+    // The card's own inputs follow the same rule.
+    await expect(
+      createCatalogItem({
+        db: {} as Database,
+        accountId: crypto.randomUUID(),
+        workspaceId: crypto.randomUUID(),
+        payload: {
+          kind: "mcp",
+          source: "manual",
+          name: "Microsoft Dynamics",
+          category: "custom",
+          tags: [],
+          metadata: {},
+          connectFor: "api:microsoft-dynamics",
+          connectInputs: { endpointUrl: "attacker.example" },
+        },
+      }),
+    ).rejects.toThrow("That isn't a Dynamics environment address");
+    // An entry without connect-time inputs can't be named.
+    await expect(
+      create("https://contoso.crm4.dynamics.com/", "api:github-app"),
+    ).rejects.toMatchObject({ status: 422 });
   });
 
   test("omits credential-header capability MCPs when their headers cannot be decrypted", () => {

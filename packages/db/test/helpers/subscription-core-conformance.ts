@@ -79,11 +79,7 @@ import {
   setSubjectRlsContext,
   withWorkspaceSubjectSessionActivityRls,
 } from "../../src/database";
-import {
-  CODEX_CAPACITY_FALSE_RESUMPTION_LIMIT,
-  CODEX_CAPACITY_RECOVERY_KEY,
-  SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES,
-} from "../../src/codex-capacity-recovery";
+import { CODEX_CAPACITY_RECOVERY_KEY } from "../../src/codex-capacity-recovery";
 import { encryptEnvironmentValue } from "../../src/environment-crypto";
 import {
   subscriptionAuthorityV2ForAcceptanceInTransaction,
@@ -983,6 +979,14 @@ export function describeSubscriptionCoreConformance<Credential>(
     if (result.status !== "completed") throw new Error("placement world was not visible");
     const world = result.value;
     const binding = world.session.binding;
+    const providerConnections = world.connections.filter(
+      (connection) => connection.provider === providerId,
+    );
+    const catalogDecides =
+      upstreamModelId !== null &&
+      providerConnections.some(
+        (connection) => connection.observedModelSlugs?.includes(upstreamModelId) === true,
+      );
     return {
       ...world,
       session: {
@@ -996,18 +1000,17 @@ export function describeSubscriptionCoreConformance<Credential>(
         }),
       },
       settings: { ...world.settings, crossProviderFailover: false, fallbackOrder: {} },
-      connections: world.connections
-        .filter((connection) => connection.provider === providerId)
-        .map((connection) =>
-          upstreamModelId !== null && connection.observedModelSlugs != null
-            ? {
-                ...connection,
-                entitledModelIds: connection.observedModelSlugs.includes(upstreamModelId)
-                  ? [turn.productModelId]
-                  : [],
-              }
-            : connection,
-        ),
+      connections: providerConnections.map((connection) =>
+        // A fresh catalog decides only when some account lists the model.
+        catalogDecides && connection.observedModelSlugs != null
+          ? {
+              ...connection,
+              entitledModelIds: connection.observedModelSlugs.includes(upstreamModelId!)
+                ? [turn.productModelId]
+                : [],
+            }
+          : connection,
+      ),
     } satisfies PlacementInput;
   }
 
@@ -3374,6 +3377,26 @@ export function describeSubscriptionCoreConformance<Credential>(
       ).toEqual({ kind: "unavailable" });
     });
 
+    test("a disconnected source lends its live lease no credential", async () => {
+      const org = await organization();
+      const connectionId = await sharedConnection(org, `disconnected-${crypto.randomUUID()}`);
+      const turn = await runningTurn(org);
+      expect(await placeChecked(turn)).toMatchObject({ kind: "run", connectionId });
+      const lease = leaseOf(turn, connectionId);
+      expect(
+        await runtime().loadSubscriptionCoreCredential(db(), settings, turn.identity, lease),
+      ).toMatchObject({ kind: "loaded" });
+      // A disconnected row is disabled and scrubbed (a table check), so the
+      // read itself refuses it: a turn needs no separate source read first.
+      await admin()`update subscription_connections set disconnected_at = clock_timestamp(),
+          status = 'disabled', credential_encrypted = '', provider_account_id = null,
+          allocator_enabled = false
+        where id = ${connectionId}::uuid`;
+      expect(
+        await runtime().loadSubscriptionCoreCredential(db(), settings, turn.identity, lease),
+      ).toEqual({ kind: "unavailable" });
+    });
+
     test("each request is reserved and settled; an unknown outcome is never replayed", async () => {
       const org = await organization();
       const connectionId = await sharedConnection(org, `request-${crypto.randomUUID()}`);
@@ -4797,16 +4820,61 @@ export function describeSubscriptionCoreConformance<Credential>(
       };
       await catalog(broad, [m0.upstreamModelId, m1.upstreamModelId]);
       await catalog(single, [m1.upstreamModelId]);
-      // No connection lists the third vendor's model: the turn waits.
-      const unserved = await runningTurn(org, { model: m2, frozenUpstreamModel: true });
-      expect(await placeChecked(unserved, new Date(), m2.upstreamModelId)).toMatchObject({
-        kind: "wait",
-      });
       // Only the connection whose catalog lists the model serves it.
       const served = await runningTurn(org, { model: m0, frozenUpstreamModel: true });
       expect(await placeChecked(served, new Date(), m0.upstreamModelId)).toMatchObject({
         kind: "run",
         connectionId: broad,
+      });
+    });
+
+    test("a model no fresh catalog lists runs on capacity and the provider's answer decides", async () => {
+      // A provider can hide a model from every account at once, for example
+      // when it gates the model above the client version this deployment
+      // presents. The catalog then cannot choose an account; the turn must
+      // not wait behind another account's unrelated reset.
+      const org = await organization();
+      const healthy = await sharedConnection(org, `healthy-${crypto.randomUUID()}`);
+      const exhausted = await sharedConnection(org, `exhausted-${crypto.randomUUID()}`);
+      const operations = subscriptionCoreOperations(provider);
+      const scope = {
+        kind: "workspace" as const,
+        accountId: org.accountId,
+        workspaceId: org.sharedWorkspaceId,
+        subjectId: org.ownerSubjectId,
+      };
+      const [row] = await admin()<{ refresh_generation: string }[]>`
+        select refresh_generation::text as refresh_generation from subscription_connections
+        where id = ${healthy}::uuid`;
+      // The healthy account's fresh catalog lists other models, not this one.
+      expect(
+        await operations.recordSubscriptionCoreModelCatalog(db(), scope, healthy, {
+          slugs: [m1.upstreamModelId],
+          refreshGeneration: Number(row!.refresh_generation),
+          observedAt: Date.now() - 1_000,
+        }),
+      ).toBe(true);
+      // The other account has no fresh catalog and is exhausted for days.
+      const resetAt = Date.now() + 4 * 24 * 60 * 60 * 1000;
+      await admin()`
+        insert into subscription_connection_quota (
+          account_id, connection_id, quota, observed_refresh_generation, revision, updated_at
+        ) values (
+          ${org.accountId}::uuid, ${exhausted}::uuid, ${admin().json({
+            windows: [
+              { id: "fixture_weekly", usedPercent: 100, resetsAt: resetAt, status: "exhausted" },
+            ],
+            modelCooldowns: {},
+            exhaustedUntil: resetAt,
+            exhaustedKind: "quota",
+            source: "refusal",
+          })}::jsonb, 1, 1, clock_timestamp()
+        )
+        on conflict (connection_id) do update set quota = excluded.quota`;
+      const hidden = await runningTurn(org, { model: m0, frozenUpstreamModel: true });
+      expect(await placeChecked(hidden, new Date(), m0.upstreamModelId)).toMatchObject({
+        kind: "run",
+        connectionId: healthy,
       });
     });
 
@@ -5934,7 +6002,7 @@ export function describeSubscriptionCoreConformance<Credential>(
       );
     }
     test.skipIf(!sessionWaits)(
-      "a false resumption counts toward the shared breaker; at its limit the turn stops with this provider's code",
+      "a false resumption backs the next resume off but never ends the turn; progress resets it",
       async () => {
         const waits = sessionWaits!;
         const org = await organization();
@@ -5998,22 +6066,28 @@ export function describeSubscriptionCoreConformance<Credential>(
         expect(counted.turn.metadata[CODEX_CAPACITY_RECOVERY_KEY]).toMatchObject({
           falseResumptions: 4,
         });
-        const productive = await arm(CODEX_CAPACITY_FALSE_RESUMPTION_LIMIT - 1, true);
+        const productive = await arm(9, true);
         expect(productive.armed.action).toBe("waiting");
         expect(productive.turn.metadata[CODEX_CAPACITY_RECOVERY_KEY]).toMatchObject({
           falseResumptions: 0,
           retryNotBefore: null,
         });
-        const stopped = await arm(CODEX_CAPACITY_FALSE_RESUMPTION_LIMIT - 1);
-        expect(stopped.armed.action).toBe("stopped");
-        expect(stopped.turn.status).toBe("failed");
-        expect(stopped.armed.events[0]).toMatchObject({
-          type: "turn.failed",
-          payload: {
-            code: SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES[waits.provider],
-            recoveryExhausted: true,
-          },
-        });
+        // The tenth, and any later, false resumption keeps the message
+        // queued for capacity: the turn waits on, with the capped backoff.
+        for (const before of [9, 40]) {
+          const kept = await arm(before);
+          expect(kept.armed.action).toBe("waiting");
+          expect(kept.turn.status).toBe("waiting_capacity");
+          expect(kept.armed.events.map((event) => event.type)).not.toContain("turn.failed");
+          const recovery = kept.turn.metadata[CODEX_CAPACITY_RECOVERY_KEY] as {
+            falseResumptions: number;
+            retryNotBefore: string;
+          };
+          expect(recovery.falseResumptions).toBe(before + 1);
+          const delay = Date.parse(recovery.retryNotBefore) - Date.now();
+          expect(delay).toBeGreaterThan(0);
+          expect(delay).toBeLessThanOrEqual(15 * 60_000);
+        }
       },
     );
 

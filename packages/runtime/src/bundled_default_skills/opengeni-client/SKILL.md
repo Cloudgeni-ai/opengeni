@@ -133,7 +133,9 @@ read it in `resolve`.
 Workspaces and memberships are created on first use (the key needs
 `members:manage`, which full-access keys have). To remove a user, stop
 resolving them. Chats are private to the user who started them;
-`chats: "shared"` on the handler shares them with the workspace. A tenant is
+`chats: "shared"` on the handler shares them with the workspace. Files attached
+in a private chat are the uploader's own (Only me), read by them and that chat's
+agent; in shared chats they are workspace files. A tenant is
 the product's team, organization, or customer: the group that shares data and
 tools. Derive `user` and `tenant` from the product's session, never from the
 request body or path. Anonymous visitors on a public site share one fixed
@@ -144,6 +146,13 @@ unless the component turns it on
 (`<OpenGeniChat conversationProps={{ realtimeVoice: true }} />`).
 Server-side code gets the same workspace with
 `og.workspaceId({ tenant })` or `og.workspaceId({ user })`.
+
+Workspaces the product's organization key creates are managed by the product.
+Organization owners and admins read those users' sessions, cost and an audit
+log in Opengeni Console (console.opengeni.ai, or `/console` in the app), where
+they also manage members, billing and API keys without opening the app; the
+organization chooses full transcripts, metadata only or off. See
+[opengeni-console.md](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/opengeni-console.md).
 
 ### The agent
 
@@ -158,9 +167,12 @@ Per-message facts such as today's date or the current page go in
 Without `reasoningEffort`, chats use the deployment default, which can be high:
 deeper answers, slower replies. A lighter effort (`"medium"` or `"low"`) suits
 quick end-user chat; keep the default where answer quality matters more than
-speed. End users do not choose models unless the handler sets
-`modelSelection: true`; the picker then lists the workspace's model catalog, so
-the workspace's allowed-model settings decide which models appear.
+speed. The stock UI shows end users a model picker only when the handler sets
+`modelSelection: true`; the component's `modelPicker` prop overrides this
+either way. The picker lists the workspace's model catalog, so the workspace's
+allowed-model settings decide which models appear. The option itself defaults
+to `true`, so the relay accepts model choices a custom browser client sends;
+set `modelSelection: false` to remove them.
 
 ### The product's tools
 

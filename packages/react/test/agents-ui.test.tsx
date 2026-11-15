@@ -56,6 +56,7 @@ const {
   INSTRUCTIONS_LONG_HINT,
   INSTRUCTIONS_OVER_LIMIT_HINT,
   ONLY_ME_UNAVAILABLE,
+  ORGANIZATION_ACCESS_ADMIN_ONLY,
   agentChanges,
   lengthCount,
   lengthError,
@@ -541,7 +542,7 @@ test("the count and the error measure the same text: outer spaces don't count", 
   expect(lengthError("x".repeat(121), 120)).toBe("Shorten it to 120 characters. It has 121.");
 });
 
-test("an agent available in Slack can't be made Only me", async () => {
+test("an agent in Slack can be made Only me, and the form says it leaves Slack", async () => {
   const agent = makeAgent({ slack: [slackAvailability()] });
   const container = await render(
     <AgentsTestHost context={appContext(fakeAgentsClient([agent]))}>
@@ -552,7 +553,35 @@ test("an agent available in Slack can't be made Only me", async () => {
   const onlyMe = [...container.querySelectorAll<HTMLElement>("[role='radio']")].find(
     (element) => element.textContent?.trim() === "Only me",
   );
-  expect(onlyMe?.getAttribute("aria-disabled") ?? onlyMe?.getAttribute("disabled")).not.toBeNull();
+  expect(onlyMe?.getAttribute("aria-disabled")).not.toBe("true");
+  expect(onlyMe?.hasAttribute("disabled")).toBe(false);
+  expect(container.textContent).not.toContain("stops answering in Slack");
+  await act(async () => onlyMe!.click());
+  expect(container.textContent).toContain(
+    "Only me agents stay in the app, so it stops answering in Slack.",
+  );
+});
+
+test("an agent's image icon shows in the form and is kept when saving other changes", async () => {
+  const avatar = { kind: "image" as const, artifactId: "bbbbbbbb-bbbb-4bbb-8bbb-000000000001" };
+  const agent = makeAgent({ avatar });
+  const client = fakeAgentsClient([agent]);
+  const container = await render(
+    <AgentsTestHost context={appContext(client)}>
+      <EditAgentPage workspaceId={WORKSPACE_ID} agentId={agent.id} />
+    </AgentsTestHost>,
+  );
+  const tile = container.querySelector<HTMLElement>("[aria-label='Change icon']")!;
+  expect(tile.querySelector(".border-dashed")).toBeNull();
+  const name = container.querySelector<HTMLInputElement>("input[placeholder='Release manager']")!;
+  await act(async () => setValue(name, "Release desk"));
+  await act(async () => button(container, "Save").click());
+  await flush();
+  const update = client.calls.find((call) => call[0] === "updateAgent")?.[3] as
+    | Record<string, unknown>
+    | undefined;
+  expect(update).toMatchObject({ name: "Release desk" });
+  expect(update && "avatar" in update).toBe(false);
 });
 
 // --- Composer chip -------------------------------------------------------------
@@ -871,6 +900,59 @@ test("an agent over the limit as stored still saves other changes, and says why 
   expect(update && "instructions" in update).toBe(false);
 });
 
+test("Anyone in the organization takes an organization admin, and says who can then see the chat", async () => {
+  const radio = (container: HTMLElement, label: string) =>
+    [...container.querySelectorAll<HTMLElement>("[role='radio']")].find(
+      (element) => element.textContent?.trim() === label,
+    );
+  const member = await render(
+    <AgentsTestHost context={appContext(fakeAgentsClient([]))}>
+      <NewAgentPage workspaceId={WORKSPACE_ID} />
+    </AgentsTestHost>,
+  );
+  const memberOption = radio(member, "Anyone in Acme");
+  expect(memberOption).toBeDefined();
+  expect(
+    memberOption?.getAttribute("aria-disabled") ?? memberOption?.getAttribute("disabled"),
+  ).not.toBeNull();
+  expect(ORGANIZATION_ACCESS_ADMIN_ONLY).toBe("Only an organization admin can choose this.");
+  const first = mounted!;
+  await act(async () => first.unmount());
+  first.container.remove();
+
+  const client = fakeAgentsClient([]);
+  const orgAdmin = appContext(client, {
+    accessContext: {
+      subjectId: "user-me",
+      subjectLabel: "Maja",
+      workspaceGrants: [],
+      accountGrants: [
+        {
+          accountId: "account-1",
+          subjectId: "user-me",
+          permissions: ["account:admin"],
+          metadata: { accountName: "Acme" },
+        },
+      ],
+    },
+  });
+  const container = await render(
+    <AgentsTestHost context={orgAdmin}>
+      <NewAgentPage workspaceId={WORKSPACE_ID} />
+    </AgentsTestHost>,
+  );
+  const name = container.querySelector<HTMLInputElement>("input[placeholder='Release manager']")!;
+  await act(async () => setValue(name, "Help desk"));
+  await act(async () => radio(container, "Anyone in Acme")!.click());
+  expect(container.textContent).toContain("People in your organization can ask Help desk");
+  await act(async () => button(container, "Create agent").click());
+  await flush();
+  const created = client.calls.find((call) => call[0] === "createAgent")?.[2] as
+    | Record<string, unknown>
+    | undefined;
+  expect(created?.visibility).toBe("organization");
+});
+
 test("Only me is off with a reason where Only me chats aren't available", async () => {
   const container = await render(
     <AgentsTestHost context={appContext(fakeAgentsClient([], { canCreatePrivate: false }))}>
@@ -938,6 +1020,11 @@ test("Export writes an .agent.json that Import reads back with its Instructions"
   expect(older.ok && older.request.firstMessage).toBe("Which repositories?");
   const onlyMe = parseAgentFile(JSON.stringify({ ...file, visibility: "private" }));
   expect(onlyMe.ok && onlyMe.request.visibility).toBe("private");
+  // An organization agent's file imports as a shared one: opening it to the
+  // organization stays an organization admin's choice.
+  const organization = parseAgentFile(JSON.stringify({ ...file, visibility: "organization" }));
+  expect(organization.ok).toBe(true);
+  expect(organization.ok && organization.request.visibility).toBeUndefined();
   expect(parseAgentFile(JSON.stringify({ ...file, visibility: "team" })).ok).toBe(false);
   expect(parseAgentFile(JSON.stringify({ ...file, version: 2 })).ok).toBe(false);
   expect(parseAgentFile(JSON.stringify({ ...file, instructions: 3 })).ok).toBe(false);

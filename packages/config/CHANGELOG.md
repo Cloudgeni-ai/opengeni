@@ -1,5 +1,213 @@
 # @opengeni/config
 
+## 6.23.0
+
+### Patch Changes
+
+- Updated dependencies [c0089e1]
+- Updated dependencies [9dd96b0]
+- Updated dependencies [adc2409]
+- Updated dependencies [f6a7c28]
+  - @opengeni/contracts@6.23.0
+  - @opengeni/codex@6.23.0
+  - @opengeni/xai-subscription@6.23.0
+
+## 6.22.0
+
+### Patch Changes
+
+- Updated dependencies [d50092b]
+  - @opengeni/contracts@6.22.0
+  - @opengeni/codex@6.22.0
+  - @opengeni/xai-subscription@6.22.0
+
+## 6.21.0
+
+### Minor Changes
+
+- 7d0d52b: Dynamics 365 Finance and Operations now works in every Microsoft Dynamics connection without a flag. Its tools run on the environment's OData data entities with the person's own sign-in, so customers no longer add Opengeni to **Allowed MCP clients** and calls don't use Copilot Credits. Agents list and describe data entities, query one company or all of them (with counts), and create, update and delete records; changes ask first. `OPENGENI_MICROSOFT_DYNAMICS_FINANCE_OPERATIONS_ENABLED` is removed and ignored if still set.
+
+  Existing Finance and Operations connections switch from the ERP MCP server's tools to the `fno_*` tools, so tool permissions saved under the old tool names no longer apply; set them again on the new tools. Tenants that consented before the app requested **Access Dynamics AX data** (`Odata.FullAccess`) need an administrator to consent again.
+
+- 6acbb24: Ultrafast turns on a Codex subscription no longer ask for a reasoning summary, so the answer starts sooner.
+
+  - On Codex the answer waits until the summary is written. On GPT-6.1 Sol at Ultrafast and medium effort, the first answer token came a median 1.3 s (WebSocket) to 2.4 s (HTTP) sooner without it.
+  - These turns show no thinking row. Every other speed and route sends exactly what it sent before: `detailed` on Codex, `auto` on direct OpenAI and Azure.
+  - `OPENGENI_REASONING_SUMMARY_JSON` sets the summary per route (`codex`, `openai`, `azure`) and speed (`standard`, `priority`, `fast`, `ultrafast`) to `auto`, `detailed` or `none`, for example `{"codex":{"fast":"none"}}`. Cells you leave out keep their defaults; an unknown route, speed or value fails startup.
+
+### Patch Changes
+
+- Updated dependencies [7d0d52b]
+- Updated dependencies [ef4c334]
+- Updated dependencies [ce864c0]
+- Updated dependencies [6ac2cd4]
+  - @opengeni/contracts@6.21.0
+  - @opengeni/codex@6.21.0
+  - @opengeni/xai-subscription@6.21.0
+
+## 6.20.1
+
+### Patch Changes
+
+- @opengeni/codex@6.20.1
+- @opengeni/contracts@6.20.1
+- @opengeni/xai-subscription@6.20.1
+
+## 6.20.0
+
+### Minor Changes
+
+- 0e273b0: Opengeni Console can run as its own platform on a `console.*` or `*.console.*` host (console.opengeni.ai, staging.console.opengeni.ai). There, every page stays in Console: Console's own sign-in, Members, Usage and billing and the organization name inside Console, an account menu with Sign out, and no links into the app. Verification emails, invitation links, Google sign-in returns and Stripe returns open on the allowed host the request came from (`OPENGENI_BETTER_AUTH_ALLOWED_HOSTS`).
+
+  New optional `OPENGENI_BETTER_AUTH_COOKIE_PREFIX` renames the auth cookies (for example to keep staging apart from production on a shared parent domain). Unset keeps the current cookie names, so existing sessions stay signed in.
+
+  Console usage by model now reports calls and input, output and cached tokens from the credit ledger instead of zeros. GitHub sign-in is hidden on the Console host.
+
+- e37485b: An organization's Anthropic API connection can hold several API keys, for example one per Anthropic organization whose credits it uses. The connection's own key stays the first, so an organization with one key works exactly as before, and model ids stay `organization-anthropic/…`. Admins add, rename and remove keys under Models on the Anthropic API page; each new key is checked with Anthropic's free model listing first, stored encrypted and never shown again.
+
+  Each chat keeps one key, so its prompt cache stays warm, and moves to another key only when Anthropic refuses its key for lack of credits. A refused key is marked **Out of credits** and left out until an admin chooses **Serve again**; when every key is out of credits, the request fails without being sent. Rate limits keep their usual handling. Claude subscription models never use these keys, and nothing buys credits or enables top-ups.
+
+  New routes under `/v1/organizations/:organizationId/model-providers/anthropic/api-keys`; the SDK calls them with `listOrganizationAnthropicApiKeys`, `addOrganizationAnthropicApiKey`, `updateOrganizationAnthropicApiKey`, `removeOrganizationAnthropicApiKey` and `serveOrganizationAnthropicApiKeyAgain`.
+
+### Patch Changes
+
+- 52ef65b: An organization's several Anthropic API keys are no longer part of a model's definition. Before this, the first turn of a new chat on an organization Anthropic API model with several keys failed after five recoveries, and adding a key or a key running out of credits failed the turns already running.
+- Updated dependencies [ae3972e]
+- Updated dependencies [e37485b]
+- Updated dependencies [6c10a4d]
+- Updated dependencies [9c17a87]
+  - @opengeni/contracts@6.20.0
+  - @opengeni/codex@6.20.0
+  - @opengeni/xai-subscription@6.20.0
+
+## 6.19.0
+
+### Patch Changes
+
+- Updated dependencies [a85adef]
+  - @opengeni/contracts@6.19.0
+  - @opengeni/codex@6.19.0
+  - @opengeni/xai-subscription@6.19.0
+
+## 6.18.0
+
+### Patch Changes
+
+- 9188c1d: Claude accounts now show whether paid usage credits ("extra usage") are on. The usage read takes the account's usage-credits setting from the reset programs' `event_props.extra_usage_state` (`enabled`, `disabled`, `not_configured`) and keeps the `extra_usage` object when Claude sends it (whether the credits can pay right now, and the month's cap and spend in cents). Before, the usage-credits state came only from `extra_usage`, which reads that skip spend reporting always answer with `null`, so an account with usage credits switched on showed as having none. `ClaudeExtraUsage` gains `state`, and `claudeUsageCreditsState()` gives `on`, `off` or `unknown`: a missing or unrecognized report is unknown, never off. The pooled usage response gains `usageCredits` (Claude only), each pooled account's state. Account rows carry a "Usage credits on" chip, the account page says whether usage credits are on, off or not reported, and the pooled-limits card and the organization's Claude heading name or count the accounts that have them on. This is read and display only: Opengeni never turns usage credits on, buys credits or changes auto-reload.
+- Updated dependencies [f313a0e]
+- Updated dependencies [6813960]
+- Updated dependencies [9188c1d]
+- Updated dependencies [3105a8b]
+- Updated dependencies [a16189c]
+- Updated dependencies [89cf4ba]
+  - @opengeni/contracts@6.18.0
+  - @opengeni/codex@6.18.0
+  - @opengeni/xai-subscription@6.18.0
+
+## 6.17.0
+
+### Minor Changes
+
+- 668c5ed: Add a Microsoft Dynamics connection. Dynamics 365 Sales and other Dataverse environments sign in with Microsoft Entra ID through a deployment-registered app (`OPENGENI_MICROSOFT_DYNAMICS_CLIENT_ID` / `_CLIENT_SECRET`) and get generic Dataverse tools over the environment's Web API: list and describe tables, OData and FetchXML queries, and create, update and delete records (changes ask first by default). Finance and Operations uses Microsoft's ERP MCP server behind `OPENGENI_MICROSOFT_DYNAMICS_FINANCE_OPERATIONS_ENABLED`.
+
+### Patch Changes
+
+- 8073ab6: Owners and admins can be asked to confirm admin changes with a passkey. With `OPENGENI_ADMIN_PASSKEY_STEP_UP=required`, changes to members, invitations, billing, API keys, shared integrations and settings from a browser need a session confirmed with a passkey: signed in with one, or confirmed once in that session. Creating a personal API key needs it too for an owner or admin. Otherwise the API refuses with `ADMIN_PASSKEY_STEP_UP_REQUIRED` and the console asks for the passkey, then sends the change again; the session stays confirmed until it ends. The phone app, and agents and personal API keys acting for a person, are not asked. Migration 1365 adds `auth_sessions.mfa_verified_at`.
+- 241ce71: Teams workspace routing, behind `OPENGENI_TEAMS_WORKSPACE_ROUTING_ENABLED` (off by default). When it's on, a linked person's 1:1 chat can start work in any workspace of the connecting organization they can start chats in, as in Slack:
+
+  - `switch` shows a card with their workspaces and agents. A message sent before they choose waits on the card.
+  - `in <Workspace>: …` sends one message elsewhere.
+  - `Name: …` or `+name` asks one of the organization's shared agents.
+  - Agent replies carry an "**Agent** · Workspace" header, and the first reply after a choice says where the chat is saved.
+
+  Organization membership, the person's authority in the target workspace and the organization's reach are read live at enqueue, admission and delivery. A choice that no longer works is refused, never served from another workspace.
+
+  With routing on:
+
+  - Linking is open to any active full member of the organization, still bound to the Teams user's Microsoft identity. The link card opens `/teams/connect`.
+  - Organization admins limit which workspaces Teams can reach with the same **Available in Opengeni** control as Slack, through `GET`/`PUT /v1/workspaces/:workspaceId/integrations/teams/reach` (`TeamsBot.getReach` and `setReach` in the SDK).
+  - `TeamsBotStatus.workspaceRouting` says whether routing is on.
+
+  Group chats and channels are unchanged.
+
+  Database: migration 1373 adds where an organization lets its Teams connection start work (`teams_bot_installations.reach_*`: every workspace by default, or selected ones, plus Personal workspaces), the agent a 1:1 route runs as (`teams_bot_routes.agent_id`), each linked person's chosen workspace and agent (`teams_bot_chat_choices`) and the switch cards they were shown (`teams_bot_route_prompts`, `teams_bot_route_prompt_options`). Every new target column has a same-account CHECK and composite foreign keys, and the new tables use workspace row-level security. Migration 1374 indexes `teams_bot_routes.agent_id` concurrently. `enqueueTeamsMessage` accepts an agent and a caller-supplied live authority check for a 1:1 route's workspace and agent, and refuses a route that names an agent without one. Disconnecting Teams removes waiting switch cards. Both migrations are rolling: the previous release ignores the new columns and tables.
+
+- Updated dependencies [8073ab6]
+- Updated dependencies [43aa19d]
+- Updated dependencies [b1b69fc]
+- Updated dependencies [deccb54]
+- Updated dependencies [668c5ed]
+- Updated dependencies [e3cb3c1]
+  - @opengeni/contracts@6.17.0
+  - @opengeni/codex@6.17.0
+  - @opengeni/xai-subscription@6.17.0
+
+## 6.16.0
+
+### Patch Changes
+
+- Updated dependencies [fb19875]
+- Updated dependencies [54dc5da]
+- Updated dependencies [01feadc]
+  - @opengeni/contracts@6.16.0
+  - @opengeni/xai-subscription@6.16.0
+  - @opengeni/codex@6.16.0
+
+## 6.15.0
+
+### Minor Changes
+
+- 60d067d: Claude subscription usage now matches what Claude reports today. The usage refresh reads the account's limit reset grants (presenting Claude Code's CLI surface, which Claude requires for them) and, while at a limit, the at-limit reset program. `ClaudeSubscriptionUsage` gains optional `limitResets`, `wallReset`, `limits`, `extraUsage`, `surfaceWindows` and `serviceState`, and the SDK exports their types. The account page lists each grant with what it clears, resets left, expiry and whether it can be used now. `@opengeni/db` adds the adapter-level claim and claim-then-refresh helpers (idempotent request ids); Opengeni never claims a grant on its own.
+
+  The weekly limit model responses call `seven_day_overage_included` is treated as the weekly Fable limit: it limits Fable models only and shows as "Fable week". Responses served in the slow tier or grace zone mark a connection constrained (`SubscriptionQuota.constrainedUntil`): it still serves, but placement prefers accounts with plain capacity, and busy slow-tier slots are a short rate limit rather than the weekly limit.
+
+- 3bab763: `ConnectPanel` now keeps the organization approval help up when a sign-in comes back cancelled or denied with an administrator approval link stored on the attempt, for example after someone leaves Microsoft's "Need admin approval" page with Cancel or "Return to the application without granting consent". It used to treat the cancel as finished and quietly go back to the service list. The help offers the message for IT, the approval link, "Try signing in again" (a fresh setup for the same service unless the host passes `onRetry`) and "Back to connections". A plain cancel that stores no approval link still closes quietly.
+
+  `ConnectPanel`, `ConnectChooser`, `ConnectAccounts` and `ConnectionDiscovery` accept `finishInPopup`. Set it when your `onAuthorize` opens the provider's sign-in in a popup: the popup then ends on a small page that closes itself instead of loading your return URL, a second copy of your app, inside it. The closing page now says "Go back to where you started to continue" rather than naming the chat.
+
+  Once a service connects, older unfinished setups by the same person for the same service, owner and destination no longer appear in the pending list (`GET /v1/workspaces/:workspaceId/connect/attempts`), so a host's "continue setup" entry for that service goes away. Custom connections (MCP servers, OpenAPI and GraphQL sources) share one provider ID across different services and are never hidden this way.
+
+  The page a sign-in popup ends on and the page an administrator sees after the Microsoft approval link can now use the deployment's language: set `OPENGENI_CONNECT_RESULT_PAGE_TEXT_JSON` (fields `lang`, `signInFinishedTitle`, `signInFinishedBody`, `adminApprovedTitle`, `adminApprovedBody`, `adminNotApprovedTitle`, `adminNotApprovedBody`, `closeWindow`). Any field left out stays in English. `@opengeni/config` exports `parseConnectResultPageTextJson` and `ConnectResultPageTextSchema`.
+
+### Patch Changes
+
+- b110015: The API now drains its HTTP connections on shutdown instead of resetting them. A client that reused a pooled keep-alive connection while the pod was stopping could get ECONNRESET for a request the server had completed. From SIGTERM the API stops listening, closes idle keep-alive connections, marks every later response `Connection: close`, ends live event streams and closes WebSockets with 1001 so their clients resume elsewhere, and lets in-flight requests finish before closing its database, NATS and Temporal clients. New setting `OPENGENI_API_SHUTDOWN_GRACE_MS` (default 30000) is the time the process has after SIGTERM; the Helm chart renders it as the API pod's termination grace less its preStop drain, and requests still running 10 seconds before it ends are closed.
+- Updated dependencies [708848c]
+- Updated dependencies [5525e63]
+- Updated dependencies [60d067d]
+- Updated dependencies [da60317]
+- Updated dependencies [19ab8c3]
+- Updated dependencies [cd033ae]
+- Updated dependencies [f92ff08]
+- Updated dependencies [060c983]
+- Updated dependencies [dfeab20]
+- Updated dependencies [9885d37]
+- Updated dependencies [f22647a]
+- Updated dependencies [850b4d5]
+  - @opengeni/contracts@6.15.0
+  - @opengeni/codex@6.15.0
+  - @opengeni/xai-subscription@6.15.0
+
+## 6.14.0
+
+### Minor Changes
+
+- 5628a56: The Microsoft Teams bot names itself with the configured Teams app name, `OPENGENI_TEAMS_APP_NAME` (default `Opengeni`, at most 30 characters), the same variable the app package generator uses for `name.short`. It appears in the welcome, help, the connect welcome and reminder, the not-available and not-turned-on notices and the AI notice on a new task; text about the Opengeni service and accounts is unchanged. The app package's full description and command descriptions also name the bot by that app name, keeping Opengeni for the service, accounts and workspace. The package generator also accepts a full app name, `OPENGENI_TEAMS_APP_FULL_NAME` (at most 100 characters), for `name.full`, which defaults to the short name. Existing deployments and packages are unchanged.
+
+### Patch Changes
+
+- 6ae0528: Managed sign-in now allows at most 100 password attempts per account per hour (20 from one address), down from up to 200. New passwords found in the Have I Been Pwned breach corpus are refused at sign-up, password reset, password change and invited-user account setup; only a five-character hash prefix leaves the API, the check is on outside local and test environments by default (`OPENGENI_MANAGED_AUTH_BREACHED_PASSWORD_CHECK` overrides it), and an unreachable lookup never blocks anyone. Better Auth log lines no longer carry request bodies, links, tokens or email addresses. Delegated access tokens (`ogd_`) that would stay valid for more than 24 hours are refused.
+- e33947d: Claude Fable 5.2 (`claude-fable-5-2`) is a supported Claude model on Anthropic API keys and Claude subscriptions. It can be added from the Claude model list, runs with all five reasoning efforts (default high), a 1M-token context and 128K output, compacts automatically at 300K tokens like Opus 5.5, shows its progress updates between tool calls like Opus 5.5, keeps its signed thinking valid when the history is compacted, and is priced at $8 / $40 per million tokens ($0.20 cache reads, $10 five-minute cache writes).
+- Updated dependencies [c976c87]
+- Updated dependencies [6ae0528]
+- Updated dependencies [3b853ca]
+- Updated dependencies [dd11dad]
+- Updated dependencies [91320a4]
+- Updated dependencies [c472500]
+  - @opengeni/contracts@6.14.0
+  - @opengeni/codex@6.14.0
+  - @opengeni/xai-subscription@6.14.0
+
 ## 6.13.0
 
 ### Patch Changes

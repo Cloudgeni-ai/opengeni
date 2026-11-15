@@ -61,6 +61,13 @@ public class OpenGeniCallModule: Module {
     }
     .runOnQueue(.main)
 
+    // Voice commands: the signed-in account's chats that Siri and the Shortcuts
+    // app offer by name. An empty list removes them all (signed out).
+    AsyncFunction("setCallCommands") { (commands: [[String: Any]]) in
+      OpenGeniCallCommands.replace(commands.compactMap { OpenGeniCallCommand($0) })
+    }
+    .runOnQueue(.main)
+
     // Agent calls: the PushKit token the server rings, the calls that rang
     // before JavaScript listened, and ending a ring settled elsewhere.
     AsyncFunction("getVoipToken") { () -> String? in

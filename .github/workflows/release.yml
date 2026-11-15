@@ -86,7 +86,7 @@ jobs:
 
   version:
     name: Open or update Version PR
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     # Dormant until opted in: skips cleanly (no red) on pushes to main until the
     # repo variable RELEASE_ENABLED is set to 'true'. See the header for setup.
@@ -97,23 +97,19 @@ jobs:
       actions: write # dispatch trusted main CI for the token-authored Version PR
     steps:
       - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
           persist-credentials: false
 
       - name: Restore complete checkout history without listing refs
         shell: bash
-        timeout-minutes: 5
+        timeout-minutes: 7
         env:
           EXPECTED_CHECKOUT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           checked_out_sha="$(git rev-parse HEAD 2>/dev/null)"
-          fetch_args=()
-          if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
-            fetch_args+=(--unshallow)
-          fi
           selected_fetch="$checked_out_sha"
           if [ -n "${EXPECTED_SELECTED_PULL_REF:-}" ]; then
             if [[ ! "$EXPECTED_SELECTED_PULL_REF" =~ ^refs/pull/[0-9]+/head$ ]]; then
@@ -122,11 +118,25 @@ jobs:
             fi
             selected_fetch="+$EXPECTED_SELECTED_PULL_REF:refs/remotes/origin/selected-pull"
           fi
-          if ! git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
-            '+refs/heads/main:refs/remotes/origin/main' \
-            '+refs/heads/production:refs/remotes/origin/production' \
-            '+refs/tags/*:refs/tags/*' \
-            "$selected_fetch" >/dev/null 2>&1; then
+          # A fetch occasionally stalls on GitHub's side; a normal one takes
+          # about a minute. Bound each attempt and try again a few times.
+          fetched=false
+          for attempt in 1 2 3; do
+            fetch_args=()
+            if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
+              fetch_args+=(--unshallow)
+            fi
+            if timeout --kill-after=10s 120s git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
+              '+refs/heads/main:refs/remotes/origin/main' \
+              '+refs/heads/production:refs/remotes/origin/production' \
+              '+refs/tags/*:refs/tags/*' \
+              "$selected_fetch" >/dev/null 2>&1; then
+              fetched=true
+              break
+            fi
+            echo "::warning::Repository history fetch attempt $attempt failed or stalled"
+          done
+          if [ "$fetched" != true ]; then
             echo "::error::Could not restore complete repository history"
             exit 1
           fi
@@ -219,7 +229,7 @@ jobs:
     name: Publish verified release
     environment: production-release
     needs: admission
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     if: ${{ github.event_name == 'workflow_dispatch' && vars.RELEASE_ENABLED == 'true' }}
     env:
@@ -241,7 +251,7 @@ jobs:
       candidateSourceTreeSha: ${{ steps.preflight.outputs.candidate_source_tree_sha }}
     steps:
       - name: Check out evidence-bound source
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_sha }}
           fetch-depth: 1
@@ -249,16 +259,12 @@ jobs:
 
       - name: Restore complete checkout history without listing refs
         shell: bash
-        timeout-minutes: 5
+        timeout-minutes: 7
         env:
           EXPECTED_CHECKOUT_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
           checked_out_sha="$(git rev-parse HEAD 2>/dev/null)"
-          fetch_args=()
-          if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
-            fetch_args+=(--unshallow)
-          fi
           selected_fetch="$checked_out_sha"
           if [ -n "${EXPECTED_SELECTED_PULL_REF:-}" ]; then
             if [[ ! "$EXPECTED_SELECTED_PULL_REF" =~ ^refs/pull/[0-9]+/head$ ]]; then
@@ -267,11 +273,25 @@ jobs:
             fi
             selected_fetch="+$EXPECTED_SELECTED_PULL_REF:refs/remotes/origin/selected-pull"
           fi
-          if ! git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
-            '+refs/heads/main:refs/remotes/origin/main' \
-            '+refs/heads/production:refs/remotes/origin/production' \
-            '+refs/tags/*:refs/tags/*' \
-            "$selected_fetch" >/dev/null 2>&1; then
+          # A fetch occasionally stalls on GitHub's side; a normal one takes
+          # about a minute. Bound each attempt and try again a few times.
+          fetched=false
+          for attempt in 1 2 3; do
+            fetch_args=()
+            if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
+              fetch_args+=(--unshallow)
+            fi
+            if timeout --kill-after=10s 120s git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
+              '+refs/heads/main:refs/remotes/origin/main' \
+              '+refs/heads/production:refs/remotes/origin/production' \
+              '+refs/tags/*:refs/tags/*' \
+              "$selected_fetch" >/dev/null 2>&1; then
+              fetched=true
+              break
+            fi
+            echo "::warning::Repository history fetch attempt $attempt failed or stalled"
+          done
+          if [ "$fetched" != true ]; then
             echo "::error::Could not restore complete repository history"
             exit 1
           fi
@@ -296,7 +316,7 @@ jobs:
             exit 1
           fi
       - name: Check out exact retained release controller
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.controller_sha }}
           path: .release/controller
@@ -491,7 +511,7 @@ jobs:
         run: bun run test:runtime-embedding-consumer
 
       - name: Restore the controller after source verification
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.controller_sha }}
           path: .release/controller
@@ -571,7 +591,7 @@ jobs:
       # Persist the intended destructive boundary before npm can be mutated. A
       # later dispatch can reconcile an interrupted publish by gitHead+integrity.
       - name: Upload pre-publication release plan
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: verified-release-plan-${{ steps.preflight.outputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -583,7 +603,7 @@ jobs:
 
       - name: Set up Node for npm publish
         if: steps.package-plan.outputs.needs_publish == 'true'
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
@@ -608,7 +628,7 @@ jobs:
           OPENGENI_EXPECTED_PACKAGES: ${{ steps.acceptance-bundle.outputs.expected_packages }}
 
       - name: Restore the controller after source publication
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.controller_sha }}
           path: .release/controller
@@ -662,7 +682,7 @@ jobs:
             }' > evidence/verified-release.json
 
       - name: Upload verified release receipt
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: verified-release-receipt-${{ steps.preflight.outputs.source_sha }}
           path: |
@@ -674,7 +694,7 @@ jobs:
 
   images:
     name: Promote accepted OCI images
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     # Image bytes were already built and accepted through release-candidate.yml.
     # This job creates release aliases for those exact manifests, verifies every
@@ -693,13 +713,13 @@ jobs:
       name: production-release
     steps:
       - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.publish.outputs.sourceSha }}
           persist-credentials: false
 
       - name: Check out exact retained release controller
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.controller_sha }}
           path: .release/controller
@@ -771,7 +791,7 @@ jobs:
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Log in to the public OCI registry
         id: registry-auth
@@ -974,7 +994,7 @@ jobs:
           }
 
       - name: Upload complete release BOM
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: release-bom-${{ needs.publish.outputs.sourceSha }}
           path: |

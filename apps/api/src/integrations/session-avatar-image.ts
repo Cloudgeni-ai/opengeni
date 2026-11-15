@@ -12,10 +12,16 @@ import { SESSION_AVATAR_ICON_SVG } from "./session-avatar-icons";
  * image in the chat's workspace that its chat already shows. A link keeps
  * drawing what it was minted for, so posts made before an avatar changed keep
  * their picture.
+ *
+ * Slack refuses a post whose `icon_url` is 256 characters or longer, so new
+ * links carry the signature truncated to 128 bits; links minted before still
+ * carry the full one, and both verify.
  */
 
 const TOKEN_LABEL = "opengeni/session-avatar-image/v1";
 const MAX_TOKEN_LENGTH = 2_048;
+/** Bytes of the HMAC-SHA256 a new link carries (128 bits). */
+const SIGNATURE_BYTES = 16;
 export const SESSION_AVATAR_IMAGE_SIZE = 256;
 export const SESSION_AVATAR_IMAGE_PATH_PREFIX = "/v1/public/session-avatars/";
 
@@ -33,7 +39,11 @@ export function createSessionAvatarImageToken(
     JSON.stringify({ w: claim.workspaceId, a: claim.avatar }),
     "utf8",
   ).toString("base64url");
-  const signature = createHmac("sha256", signingKey(secret)).update(payload).digest("base64url");
+  const signature = createHmac("sha256", signingKey(secret))
+    .update(payload)
+    .digest()
+    .subarray(0, SIGNATURE_BYTES)
+    .toString("base64url");
   return `${payload}.${signature}`;
 }
 
@@ -44,10 +54,11 @@ export function verifySessionAvatarImageToken(
   if (token.length > MAX_TOKEN_LENGTH) return null;
   const [payload, signature, extra] = token.split(".");
   if (!payload || !signature || extra !== undefined) return null;
-  const expected = Buffer.from(
-    createHmac("sha256", signingKey(secret)).update(payload).digest("base64url"),
-    "utf8",
-  );
+  const digest = createHmac("sha256", signingKey(secret)).update(payload).digest();
+  // A new link's truncated signature, or the full one of a link minted before.
+  const full = digest.toString("base64url");
+  const short = digest.subarray(0, SIGNATURE_BYTES).toString("base64url");
+  const expected = Buffer.from(signature.length === short.length ? short : full, "utf8");
   const actual = Buffer.from(signature, "utf8");
   if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) return null;
   try {

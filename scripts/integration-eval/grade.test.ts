@@ -89,6 +89,50 @@ describe("gradeCase", () => {
     expect(gradeCase(testCase, receipts)).toMatchObject({ pass: false, category: "missing_card" });
   });
 
+  test("a clarify case passes when the agent asks which system, and fails when it picks one", () => {
+    const testCase: EvalCase = {
+      id: "microsoft_dynamics.clarify.x",
+      integration: "microsoft_dynamics",
+      kind: "clarify",
+      prompt: "Which of my opportunities close this month?",
+      expectAnswer: [/which (crm|system)/i],
+      forbidAnswer: [/[$€£]\s?\d/],
+    };
+    const asked = parseReceipts(
+      events({
+        type: "agent.message.completed",
+        payload: { text: "Which CRM do you use: HubSpot, Salesforce or Dynamics?" },
+      }),
+    );
+    expect(gradeCase(testCase, asked)).toMatchObject({ pass: true });
+    const askedAndInvented = parseReceipts(
+      events({
+        type: "agent.message.completed",
+        payload: { text: "Which CRM do you use? Acme renewal ($40,000) closes on the 28th." },
+      }),
+    );
+    expect(gradeCase(testCase, askedAndInvented)).toMatchObject({
+      pass: false,
+      category: "hallucinated_result",
+    });
+    const card = {
+      capabilityId: "api:microsoft-dynamics",
+      capabilityName: "Microsoft Dynamics",
+      providerDomain: "dynamics.com",
+      integration: "microsoft_dynamics" as const,
+      sequence: 1,
+    };
+    const picked = { ...asked, cards: [card] };
+    expect(gradeCase(testCase, picked)).toMatchObject({ pass: false, category: "wrong_tool" });
+    const silent = parseReceipts(
+      events({ type: "agent.message.completed", payload: { text: "Let me look." } }),
+    );
+    expect(gradeCase(testCase, silent)).toMatchObject({
+      pass: false,
+      category: "incomplete_answer",
+    });
+  });
+
   test("needs an approval before a write", () => {
     const testCase: EvalCase = {
       id: "linear.write.x",
@@ -596,6 +640,22 @@ describe("gradeCase", () => {
       [false, false],
     ]);
   });
+
+  test("content blocks led by the runtime's MCP error block are an errored call", () => {
+    const failed = JSON.stringify([
+      { text: "The tool reported an error.", type: "text" },
+      { text: "channel_not_found", type: "text" },
+    ]);
+    // The same lead text elsewhere (a message body quoting it) is not.
+    const quoted = JSON.stringify([
+      { text: "Posted.", type: "text" },
+      { text: "The tool reported an error.", type: "text" },
+    ]);
+    const receipts = parseReceipts(
+      events(...linearCall("c1", failed), ...linearCall("c2", quoted)),
+    );
+    expect(receipts.tools.map((tool) => tool.errored)).toEqual([true, false]);
+  });
 });
 
 describe("catalogue", () => {
@@ -619,6 +679,25 @@ describe("catalogue", () => {
     const skipped = INTEGRATIONS.filter((spec) => spec.skipReason).map((spec) => spec.id);
     for (const testCase of selectCases("all")) expect(skipped).not.toContain(testCase.integration);
     expect(selectCases("linear").every((testCase) => testCase.integration === "linear")).toBe(true);
+  });
+
+  test("a close-date range that restates the request is not an invented close date", () => {
+    const row = CASES.find((item) => item.id === "microsoft_dynamics.clarify.unnamed-crm")!;
+    const invented = (answer: string) =>
+      (row.forbidAnswer ?? []).some((pattern) => pattern.test(answer));
+    for (const answer of [
+      "Which CRM should I check for opportunities closing November 1–30, 2026?",
+      "Opportunities closing Nov 1 - Nov 30 need a connected CRM. Which one do you use?",
+      "Deals closing 2026-11-01 to 2026-11-30: which system are they in?",
+      "Should I count deals that close in 30 days?",
+    ])
+      expect(invented(answer)).toBe(false);
+    for (const answer of [
+      "Acme renewal closes November 14, 2026 for $48,000.",
+      "Two opportunities: Contoso closing on Nov 21 and Fabrikam closing the 28th.",
+      "Northwind closes 2026-11-30.",
+    ])
+      expect(invented(answer)).toBe(true);
   });
 });
 

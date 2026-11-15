@@ -15,8 +15,8 @@ import {
  * follows, an optional First message the app puts in the composer when a chat
  * starts, and an optional Memory. It belongs to one home workspace, where its
  * chats run, and is either Only me (`private`) or shared with everyone in that
- * workspace (`workspace`). It is always available in the app; it can also be
- * made available in a connected Slack workspace.
+ * workspace (`workspace`). It is always available in the app, and a shared
+ * one also in every Slack workspace linked to its home workspace.
  *
  * Every change to the Instructions is a new revision that records who made
  * it. Agents no longer have a First message: one sent by an older client
@@ -51,8 +51,8 @@ export const AGENT_FIRST_MESSAGE_LEAD = "When a chat starts:";
  * An agent's Instructions with an older First message joined as its own
  * paragraph after them, led by `AGENT_FIRST_MESSAGE_LEAD`. Nothing is added
  * when there is no First message or the Instructions already contain it, so
- * joining twice changes nothing. The database's `agentInstructionsSql` reads
- * stored revisions the same way.
+ * joining twice changes nothing. Migration 1452 joined stored revisions the
+ * same way.
  */
 export function agentInstructionsWithFirstMessage(
   instructions: string,
@@ -87,6 +87,41 @@ export function agentInitialsAvatar(name: string, id: string): SessionAvatar {
     ? { kind: "letters", letters, hue }
     : { kind: "icon", icon: "bot", hue };
 }
+
+/** Machine-readable `details.code` values on agent errors. */
+export const AGENT_ERROR_CODES = [
+  /** `expectedVersion` is stale: refresh and try again. */
+  "agent_version_conflict",
+  /** Another agent already answers to this name in that Slack workspace. */
+  "agent_slack_name_taken",
+  /** The name breaks a Slack name rule; `details.problem` says which. */
+  "agent_slack_name_invalid",
+  /** Only shared (`workspace`) agents can be available in Slack. */
+  "agent_slack_requires_workspace_visibility",
+  /**
+   * @deprecated Never returned: an agent is available in every linked Slack
+   * workspace at once. Kept so the exported type does not narrow within a major.
+   */
+  "agent_slack_single_install",
+  /**
+   * Agents are available in every Slack workspace linked to their workspace;
+   * there is nothing to turn off. Make one Only me to keep it out of Slack.
+   */
+  "agent_slack_always_available",
+  /** The Opengeni Slack app is not available in the agent's workspace. */
+  "slack_bot_unavailable",
+  /** A personal workspace's agents stay in the app. */
+  "agent_slack_personal_workspace",
+  /** The workspace keeps the most agents it can. */
+  "agent_limit_reached",
+  /** `POST /sessions`: the agent does not exist here or is someone else's Only me agent. */
+  "agent_not_found",
+  /** `POST /sessions`: an Only me agent's chats are Only me. */
+  "agent_requires_private_chat",
+  /** `POST /sessions`: a chat started from another chat cannot start an agent. */
+  "agent_child_chat",
+] as const;
+export type AgentErrorCode = (typeof AGENT_ERROR_CODES)[number];
 
 const Uuid = /* @__PURE__ */ defineSchema(() => z.string().uuid());
 
@@ -126,12 +161,20 @@ const AgentFirstMessage = /* @__PURE__ */ defineSchema(() =>
 
 /**
  * Who can use an agent: `private` (Only me) is its owner; `workspace` is
- * everyone in its home workspace. The same two words, and the same schema
- * shape, a chat uses; kept unexported so the public surface keeps naming it
- * `SessionVisibility`.
+ * everyone in its home workspace; `organization` is also anyone in its
+ * organization, from chat integrations such as Slack (their chats run in
+ * the agent's workspace, which its members can see). Clients must tolerate
+ * values added later.
  */
-const AgentVisibility = /* @__PURE__ */ defineSchema(() => z.enum(["private", "workspace"]));
+export const AgentVisibility = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["private", "workspace", "organization"]),
+);
 export type AgentVisibility = z.infer<typeof AgentVisibility>;
+
+/** Shared with its workspace, and maybe beyond: anything but Only me. */
+export function agentVisibilityIsShared(visibility: AgentVisibility): boolean {
+  return visibility !== "private";
+}
 
 /** What an agent was made from. Display and support only; grants nothing. */
 export const AgentOrigin = /* @__PURE__ */ defineSchema(() =>
@@ -167,7 +210,11 @@ export const AgentSlackAvailability = /* @__PURE__ */ defineSchema(() =>
     slackTeamName: z.string().nullable(),
     /** What people may type after `+`, for example `data-team`. */
     handle: z.string(),
-    /** Open use: people outside the agent's workspace can use it there too. */
+    /**
+     * Open use: people outside the agent's workspace can use it there too.
+     * This is the agent's own "Anyone in <organization>" (`visibility:
+     * "organization"`), the same in every Slack workspace.
+     */
     open: z.boolean(),
     enabledBySubjectId: z.string().nullable(),
     version: z.number().int().positive(),
@@ -187,7 +234,10 @@ export const AgentViewerAccess = /* @__PURE__ */ defineSchema(() =>
     canEdit: z.boolean(),
     /** Make it available in Slack, or not: an admin of its workspace. */
     canManageSlack: z.boolean(),
-    /** Turn open use in Slack on: an organization admin. Turning it off needs `canManageSlack`. */
+    /**
+     * Choose "Anyone in <organization>" under who can use it: an organization
+     * admin. Narrowing it back needs `canEdit`.
+     */
     canOpenInSlack: z.boolean(),
   }),
 );
@@ -364,13 +414,25 @@ export const AgentSlackInstall = /* @__PURE__ */ defineSchema(() =>
     connectionId: Uuid,
     slackTeamId: z.string(),
     slackTeamName: z.string().nullable(),
+    /**
+     * The Opengeni app's name in this Slack workspace, which people mention
+     * (`Opengeni Staging`). Absent from older servers and for an installation
+     * no longer linked here; read it as `Opengeni`.
+     */
+    botDisplayName: z.string().optional(),
     /** Null when the agent is not available in this Slack workspace. */
     availability: AgentSlackAvailability.nullable(),
+    /**
+     * Why it isn't, when it isn't: an `AGENT_ERROR_CODES` value such as
+     * `agent_slack_name_taken`. Shared agents are available in every linked
+     * Slack workspace unless something here stops it.
+     */
+    unavailable: z.enum(AGENT_ERROR_CODES).nullable().default(null),
   }),
 );
 export type AgentSlackInstall = z.infer<typeof AgentSlackInstall>;
 
-/** The Slack workspaces an agent can be made available in, seen from its home workspace. */
+/** The Slack workspaces linked to an agent's home workspace, and whether it is available in each. */
 export const ListAgentSlackInstallsResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     installs: z.array(AgentSlackInstall),
@@ -381,9 +443,10 @@ export const ListAgentSlackInstallsResponse = /* @__PURE__ */ defineSchema(() =>
 export type ListAgentSlackInstallsResponse = z.infer<typeof ListAgentSlackInstallsResponse>;
 
 /**
- * Make the agent available in one Slack workspace, or change how. Idempotent.
- * Needs a shared (`workspace`) agent, an admin of its workspace, and a name
- * Slack can use; turning `open` on needs an organization admin.
+ * Change how the agent works in one Slack workspace (open use), making it
+ * available there first if it isn't yet. Idempotent. Needs a shared
+ * (`workspace`) agent, an admin of its workspace, and a name Slack can use;
+ * turning `open` on needs an organization admin.
  */
 export const PutAgentSlackAvailabilityRequest = /* @__PURE__ */ defineSchema(() =>
   z
@@ -408,30 +471,3 @@ export const AgentSlackIntroRequest = SlackAgentIntroRequest;
 export type AgentSlackIntroRequest = z.infer<typeof AgentSlackIntroRequest>;
 export const AgentSlackIntroResponse = SlackAgentIntroResponse;
 export type AgentSlackIntroResponse = z.infer<typeof AgentSlackIntroResponse>;
-
-/** Machine-readable `details.code` values on agent errors. */
-export const AGENT_ERROR_CODES = [
-  /** `expectedVersion` is stale: refresh and try again. */
-  "agent_version_conflict",
-  /** Another agent already answers to this name in that Slack workspace. */
-  "agent_slack_name_taken",
-  /** The name breaks a Slack name rule; `details.problem` says which. */
-  "agent_slack_name_invalid",
-  /** Only shared (`workspace`) agents can be available in Slack. */
-  "agent_slack_requires_workspace_visibility",
-  /** For now an agent is available in at most one Slack workspace. */
-  "agent_slack_single_install",
-  /** The Opengeni Slack app is not available in the agent's workspace. */
-  "slack_bot_unavailable",
-  /** A personal workspace's agents stay in the app. */
-  "agent_slack_personal_workspace",
-  /** The workspace keeps the most agents it can. */
-  "agent_limit_reached",
-  /** `POST /sessions`: the agent does not exist here or is someone else's Only me agent. */
-  "agent_not_found",
-  /** `POST /sessions`: an Only me agent's chats are Only me. */
-  "agent_requires_private_chat",
-  /** `POST /sessions`: a chat started from another chat cannot start an agent. */
-  "agent_child_chat",
-] as const;
-export type AgentErrorCode = (typeof AGENT_ERROR_CODES)[number];

@@ -539,7 +539,10 @@ Two read tools are added, both deferred (loaded through tool search):
   `readyToAdd` the [ready sources](#ready-sources) they don't have yet; with a
   `sourceId` (a source's id or a ready id) it returns that source's event
   types, the fields conditions can match and an MCP event type's subscription
-  arguments. A trigger's `sourceId` can also be a ready id. Either use adds
+  arguments. When every type has the same fields and arguments schema, as on
+  an MCP server whose hundreds of types share one shape, they come once in
+  `everyEventType` instead of with each type. A trigger's `sourceId` can also
+  be a ready id. Either use adds
   the caller's own source, so an agent that may manage automations never has
   to ask a person to add one first; one that may not gets "Event source not
   found" for a ready id.

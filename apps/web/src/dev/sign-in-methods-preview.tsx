@@ -23,6 +23,8 @@ export function SignInMethodsPreview() {
   // that signs in with passkeys alone (no email address, password or providers).
   const passkeyMode = params.get("passkeys");
   const passkeysOnly = passkeyMode === "only";
+  // `&desktop=1`: as in the desktop app, where passkeys are added in the browser.
+  const inBrowser = params.get("desktop") === "1";
   const [passkeys, setPasskeys] = useState(previewPasskeys);
   const [recentAuthRequired, setRecentAuthRequired] = useState(params.get("state") === "reauth");
   const [hasPassword, setHasPassword] = useState(false);
@@ -74,12 +76,19 @@ export function SignInMethodsPreview() {
                 items: passkeys,
                 available: true,
                 supported: true,
+                inBrowser,
                 canRemove: passkeysOnly ? passkeys.length > 1 : true,
                 onlyMethod: passkeysOnly,
               }
             : null
         }
         onAddPasskey={() => {
+          if (inBrowser) {
+            setSuccess(
+              "Add your passkey in the browser window that opened, signed in as ada@example.com. It shows here when you come back.",
+            );
+            return;
+          }
           setPasskeys((current) => [
             ...current,
             {

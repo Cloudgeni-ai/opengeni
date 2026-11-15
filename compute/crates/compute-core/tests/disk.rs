@@ -24,7 +24,7 @@ fn archived() -> State {
 }
 
 fn rules() -> SleepPolicy {
-    SleepPolicy::new(SleepRules::RECOMMENDED).unwrap()
+    SleepPolicy::new(SleepRules::RECOMMENDED.keeping_memory()).unwrap()
 }
 
 struct Rig {
@@ -319,19 +319,20 @@ fn a_vm_the_host_never_saves_books_its_save_only_from_a_request_on() {
     rig.disk(4 * GIB, 10_000);
     assert_eq!(rig.booked(), GIB, "only its disk's growth");
     assert_eq!(
-        rig.host.save_room(SandboxId(1)),
+        rig.host.save_room(SandboxId(1), true),
         CreateRoom::Short(Resource::Disk, 4 * GIB, 2 * GIB)
     );
 
     // With room, the request books its save at once, and nothing waits.
     rig.disk(6 * GIB, 10_000);
-    assert_eq!(rig.host.save_room(SandboxId(1)), CreateRoom::Fits);
+    assert_eq!(rig.host.save_room(SandboxId(1), true), CreateRoom::Fits);
     let actions = rig.send(Input::Sleep {
         sandbox: SandboxId(1),
         level: Level::Saved,
+        keep: true,
     });
     assert_eq!(rig.booked(), 5 * GIB, "its save and its disk's growth");
-    assert_eq!(rig.host.save_room(SandboxId(1)), CreateRoom::Fits);
+    assert_eq!(rig.host.save_room(SandboxId(1), true), CreateRoom::Fits);
     let [(1, Step::Pause, op)] = started(&actions)[..] else {
         panic!("no pause: {actions:?}");
     };
@@ -366,7 +367,7 @@ fn a_save_short_only_of_what_ended_since_the_last_reading_awaits_the_next() {
     rig.add_with(1, State::RUNNING, Size::whole(2 * GIB), SleepPolicy::NEVER);
     // Before the first reading, only that reading can tell.
     assert_eq!(
-        rig.host.save_room(SandboxId(1)),
+        rig.host.save_room(SandboxId(1), true),
         CreateRoom::AwaitsReading(Resource::Disk, 2 * GIB, 0)
     );
     // 4 GiB available, 1 GiB of it reserved; a spare VM's copy of 2 GiB
@@ -386,17 +387,17 @@ fn a_save_short_only_of_what_ended_since_the_last_reading_awaits_the_next() {
         });
     }
     assert_eq!(
-        rig.host.save_room(SandboxId(1)),
+        rig.host.save_room(SandboxId(1), true),
         CreateRoom::AwaitsReading(Resource::Disk, 2 * GIB, GIB)
     );
     // A reading that shows the copy wrote nothing has room for it.
     rig.disk(4 * GIB, 10_000);
-    assert_eq!(rig.host.save_room(SandboxId(1)), CreateRoom::Fits);
+    assert_eq!(rig.host.save_room(SandboxId(1), true), CreateRoom::Fits);
     // One that shows it wrote all of it leaves too little, and with
     // nothing ended since, the save is short.
     rig.disk(2 * GIB, 10_000);
     assert_eq!(
-        rig.host.save_room(SandboxId(1)),
+        rig.host.save_room(SandboxId(1), true),
         CreateRoom::Short(Resource::Disk, 2 * GIB, GIB)
     );
 }
@@ -413,6 +414,7 @@ fn a_failed_save_asked_of_a_vm_the_host_never_saves_keeps_its_booking() {
     let actions = rig.send(Input::Sleep {
         sandbox: SandboxId(1),
         level: Level::Saved,
+        keep: true,
     });
     let [(1, Step::Save, op)] = started(&actions)[..] else {
         panic!("no save: {actions:?}");
@@ -446,10 +448,11 @@ fn a_save_booked_ahead_starts_on_an_overdrawn_disk() {
     // Both book a save of 1 GiB, beyond the 1 GiB the disk has.
     rig.disk(2 * GIB, 10_000);
     assert_eq!(rig.host.disk().unwrap().free().bytes, 0);
-    assert_eq!(rig.host.save_room(SandboxId(1)), CreateRoom::Fits);
+    assert_eq!(rig.host.save_room(SandboxId(1), true), CreateRoom::Fits);
     let actions = rig.send(Input::Sleep {
         sandbox: SandboxId(1),
         level: Level::Saved,
+        keep: true,
     });
     assert!(steps(&actions).contains(&(1, Step::Save)), "{actions:?}");
 }
@@ -496,7 +499,7 @@ fn copies_that_cannot_live_in_object_storage_are_kept() {
     let local_only = SleepPolicy::new(SleepRules {
         archive_after: None,
         evict_after: None,
-        ..SleepRules::RECOMMENDED
+        ..SleepRules::RECOMMENDED.keeping_memory()
     })
     .unwrap();
     rig.send(Input::Add {

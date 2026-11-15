@@ -91,6 +91,7 @@ import {
   SITE_CHAT_MAX_WIDTH,
   SITE_CHAT_MIN_WIDTH,
   SITE_MIN_WIDTH,
+  newlyWaitingConversation,
   useSiteChatPanelLayout,
   type SiteChatPanelLayout,
 } from "../lib/site-chat-panel";
@@ -796,6 +797,22 @@ function SiteChatPanel({
   }, [canCreate, composing]);
   const selectedId = composing ? null : (conversation ?? pinned);
   const showComposer = composing || (list.loaded && selectedId === null);
+  // A Site conversation that starts waiting for the person (an approval its
+  // own ai.run hit) opens here, so they can answer it without hunting for
+  // it. Waits already there when the Site opened, or while they write a new
+  // message, don't move the panel.
+  const waitsSeen = useRef<Set<string> | null>(null);
+  useEffect(() => {
+    if (!list.loaded) return;
+    const { next, seen } = newlyWaitingConversation(
+      list.sessions,
+      waitsSeen.current ?? new Set(),
+      selectedId,
+    );
+    const opening = waitsSeen.current === null;
+    waitsSeen.current = seen;
+    if (!opening && next && !composing) toSite({ conversation: next });
+  }, [composing, list.loaded, list.sessions, selectedId, toSite]);
   const startNew = () => {
     setComposing(true);
     setFocusRequest((request) => request + 1);

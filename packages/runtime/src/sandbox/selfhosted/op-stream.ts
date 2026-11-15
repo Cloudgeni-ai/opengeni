@@ -239,6 +239,10 @@ export type OpStreamYieldOptions = {
    * attached; returning a running result is forbidden until this resolves. */
   onYield: () => void | Promise<void>;
   captureOutput?: (frames: OpStreamOutputFrame[]) => Promise<void>;
+  /** Also yield as soon as every frame the runner had retained when this
+   * consumer attached has been applied: a look at a running command returns
+   * the output produced so far, however long it is, and no more. */
+  untilCaughtUp?: boolean;
 };
 
 export type OpStreamOutputFrame = { sequence: string; stream: "stdout" | "stderr"; chunk: string };
@@ -499,12 +503,19 @@ export class OpStreamExecClient {
         const result = await consumer.run(exec, deadlineMs, wallMs, yieldOptions);
         if (result.status === "completed") {
           this.acknowledgedOps.delete(opId);
-          this.settled.push({
+          const settled: SettledOp = {
             opId,
             exitSeq: result.exitSeq,
             generation: consumer.generation,
             toolCallId,
-          });
+          };
+          this.settled.push(settled);
+          // An op no tool call owns has a random id that nothing can name
+          // again: a re-dispatch mints a new one, and its caller holds the
+          // whole result in memory now. Retaining it serves no reader, so it
+          // is released at once instead of waiting for a durability hook its
+          // caller may never reach.
+          if (toolCallId === null) this.releaseUnowned(settled);
           return { status: "completed", outcome: result.outcome };
         }
         return result;
@@ -519,11 +530,14 @@ export class OpStreamExecClient {
   /** Observe an already-adopted operation. Never issues OpStart, cancellation,
    * final ACK, or terminal model-observation acknowledgment. Output is delivered
    * through captureOutput, not accumulated in response stdout/stderr. Successful
-   * running reads reuse local integrity state; a new client replays from zero. */
+   * running reads reuse local integrity state; a new client replays from zero.
+   * `untilCaughtUp` ends a running read once it holds everything the runner had
+   * retained when it attached, rather than only at `yieldMs`. */
   async readExisting(
     opId: string,
     yieldMs: number,
     captureOutput: (frames: OpStreamOutputFrame[]) => Promise<void>,
+    options: { untilCaughtUp?: boolean } = {},
   ): Promise<
     OpStreamExecResult & { replaySequence: string; outputReceipt?: OpStreamOutputReceipt }
   > {
@@ -544,6 +558,7 @@ export class OpStreamExecClient {
           yieldMs: Math.max(1, yieldMs),
           onYield: () => {},
           captureOutput,
+          ...(options.untilCaughtUp ? { untilCaughtUp: true } : {}),
         });
       } catch (error) {
         // The runner's own terminal record: the op was cancelled before it
@@ -673,11 +688,21 @@ export class OpStreamExecClient {
     const eligible = this.settled.filter(
       (op) => selected === null || (op.toolCallId !== null && selected.has(op.toolCallId)),
     );
+    await this.queueFinalization(eligible);
+  }
+
+  /** Release one completed op that no tool result owns, in the background of
+   *  its caller. A failure keeps it settled for the next durability hook. */
+  private releaseUnowned(op: SettledOp): void {
+    this.queueFinalization([op]).catch(() => undefined);
+  }
+
+  private queueFinalization(eligible: readonly SettledOp[]): Promise<void> {
     const finalization = this.finalization.then(() => this.finalizeOps(eligible));
     // Serialize overlapping durability hooks without letting one failed
     // journal poison later attempts to finalize the same retained frontier.
     this.finalization = finalization.catch(() => undefined);
-    await finalization;
+    return finalization;
   }
 
   private async finalizeOps(eligible: readonly SettledOp[]): Promise<void> {
@@ -690,7 +715,9 @@ export class OpStreamExecClient {
     for (const op of eligible) {
       // A preceding queued hook may already have acknowledged this object.
       if (!this.settled.includes(op)) continue;
-      await this.deps.journal?.persistSettled(op.opId, op.exitSeq);
+      // The journal records frontiers a re-dispatched turn can resume by
+      // their durable ids; an unowned op's random id is never resumed.
+      if (op.toolCallId !== null) await this.deps.journal?.persistSettled(op.opId, op.exitSeq);
       if (this.deps.outputReleaseSupported === true) {
         // One answered exchange: the runner drops the op and confirms it.
         releasing.push(this.releaseSettled(op));
@@ -774,6 +801,9 @@ class OpConsumer {
   private creditAtLastAck = 0n;
   private exit: OpExit | undefined;
   private exitSeq: bigint | undefined;
+  /** The last seq the runner had retained when this consumer attached. */
+  private attachFrontier: bigint | undefined;
+  private caughtUpResolve: (() => void) | undefined;
   private heals = 0;
   private lastFrameAt: number;
   private silenceSince: number | undefined;
@@ -964,9 +994,15 @@ class OpConsumer {
       // initial window — for a FRESH op that is seq 0 (replay nothing, start live
       // flow); for a KNOWN op (re-dispatch) it replays everything we do not hold.
       // The op exists from here on, so no failure may say it did not run.
-      await startWall.race(this.attach(this.windowBytes)).catch((error: unknown) => {
-        throw startedOpError(error, this.startConfirmed);
-      });
+      const attachedStatus = await startWall
+        .race(this.attach(this.windowBytes))
+        .catch((error: unknown) => {
+          throw startedOpError(error, this.startConfirmed);
+        });
+      if (/^[0-9]+$/.test(attachedStatus.nextSeq)) {
+        const nextSeq = BigInt(attachedStatus.nextSeq);
+        this.attachFrontier = nextSeq > 0n ? nextSeq - 1n : 0n;
+      }
       attached = true;
       if (readyDuringStart) this.requestAttachHeal();
     } finally {
@@ -986,6 +1022,14 @@ class OpConsumer {
         const phase = await Promise.race([
           settled.then(() => "settled" as const),
           liveness.wall,
+          ...(yieldOptions.untilCaughtUp && this.attachFrontier !== undefined
+            ? [
+                new Promise<"yield">((resolve) => {
+                  this.caughtUpResolve = () => resolve("yield");
+                  this.maybeCaughtUp();
+                }),
+              ]
+            : []),
           new Promise<"yield">((resolve) => {
             yieldTimer = setTimeout(() => resolve("yield"), yieldOptions.yieldMs);
             // An early yield takes the same path as the window ending. It waits
@@ -1479,6 +1523,7 @@ class OpConsumer {
       this.applyFrame(stashed.frame);
     }
     this.maybeSettle();
+    this.maybeCaughtUp();
     this.maybeGrantCredit();
   }
 
@@ -1522,6 +1567,12 @@ class OpConsumer {
   private maybeSettle(): void {
     if (this.exitSeq !== undefined && this.lastApplied >= this.exitSeq) {
       this.settleResolve?.();
+    }
+  }
+
+  private maybeCaughtUp(): void {
+    if (this.attachFrontier !== undefined && this.lastApplied >= this.attachFrontier) {
+      this.caughtUpResolve?.();
     }
   }
 

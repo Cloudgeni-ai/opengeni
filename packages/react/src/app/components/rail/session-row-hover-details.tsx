@@ -18,7 +18,12 @@ import {
   useMinuteNow,
 } from "../../../ui/relative-time";
 import { StatusBadge } from "../../../ui/status-badge";
-import { type CreatorRef, creatorInitials, creatorLabel } from "../../lib/creator-initials";
+import {
+  type CreatorRef,
+  creatorInitials,
+  creatorLabel,
+  machineCreatorDisplay,
+} from "../../lib/creator-initials";
 import { sessionHoverFacts } from "../../lib/session-hover-facts";
 import type { RailSession } from "../../lib/session-list-entry";
 import { cn } from "../../lib/utils";
@@ -87,8 +92,11 @@ export function SessionRowHoverDetails({
   const now = fixedNow ?? Date.now();
   const facts = sessionHoverFacts(session, { descendantCount, descendantCountTruncated, now });
   const createdBy: CreatorRef = session.createdBy;
+  // API keys (even subject-frozen ones) and services get the bot icon.
+  const machineCreator = machineCreatorDisplay(createdBy) !== null;
   const creatorName =
-    showCreator && (createdBy.kind === "service" || creatorInitials(createdBy) !== null)
+    showCreator &&
+    (machineCreator || createdBy.kind === "service" || creatorInitials(createdBy) !== null)
       ? creatorLabel(createdBy)
       : null;
   const hasActivity = Boolean(facts.model || facts.subAgents || facts.commands);
@@ -183,7 +191,7 @@ export function SessionRowHoverDetails({
       >
         {creatorName ? (
           <div className="flex min-w-0 items-center gap-2">
-            {createdBy.kind === "subject" ? (
+            {createdBy.kind === "subject" && !machineCreator ? (
               <CreatorMonogram createdBy={createdBy} showTitle={false} />
             ) : (
               <span className="flex size-4 shrink-0 items-center justify-center">

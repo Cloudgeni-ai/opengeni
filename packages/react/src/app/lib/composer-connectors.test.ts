@@ -93,10 +93,24 @@ describe("composer connector inventory", () => {
     expect(composerConnectorOptions([], [entry], [personal], asset)[0]?.connectionStatus).toBe(
       "reconnect",
     );
+    // A removed (revoked) login is no account at all, so the person connects
+    // one, the same as having none.
     expect(
       composerConnectorOptions([], [entry], [{ ...personal, status: "revoked" }], asset)[0]
         ?.connectionStatus,
-    ).toBe("unavailable");
+    ).toBe("connect");
+    // A removed duplicate next to a working login leaves the connector ready.
+    expect(
+      composerConnectorOptions(
+        [],
+        [entry],
+        [
+          { ...personal, id: "removed-duplicate", status: "revoked" },
+          { ...personal, status: "active" },
+        ],
+        asset,
+      )[0]?.connectionStatus,
+    ).toBe("ready");
     expect(
       composerConnectorOptions([], [entry], [{ ...personal, status: "active" }], asset)[0]
         ?.connectionStatus,

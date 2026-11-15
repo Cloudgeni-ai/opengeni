@@ -38,6 +38,7 @@ fn policy() -> HostPolicy {
 const SAVE_SOON: SleepConfig = SleepConfig {
     pause_after_ms: Some(200),
     save_after_ms: Some(200),
+    keep_memory: true,
     ..NEVER
 };
 
@@ -45,6 +46,7 @@ const SAVE_SOON: SleepConfig = SleepConfig {
 const SAVE_WHEN_NEEDED: SleepConfig = SleepConfig {
     pause_after_ms: Some(3_600_000),
     save_after_ms: Some(7_200_000),
+    keep_memory: true,
     ..NEVER
 };
 

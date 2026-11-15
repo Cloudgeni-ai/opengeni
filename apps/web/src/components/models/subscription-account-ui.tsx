@@ -1,4 +1,4 @@
-import type { ComponentProps } from "react";
+import type { ComponentProps, ReactNode } from "react";
 import { ProviderTile } from "@opengeni/react/app/components/models/models-ui";
 import { ListRow } from "@opengeni/react/ui/list-row";
 import { MetaChip } from "@opengeni/react/ui/meta-chip";
@@ -46,18 +46,28 @@ export function SubscriptionAccountRow({
   provider,
   primary = false,
   email,
+  addon,
   ...row
 }: Omit<ComponentProps<typeof ListRow>, "leading" | "titleAddon"> & {
   provider: "codex" | "supergrok" | "claude_subscription";
   primary?: boolean;
   email?: string | null;
+  /** A fact worth a glance next to the title, after "Primary" (for example "Usage credits on"). */
+  addon?: ReactNode;
 }) {
   const identity = email && email.toLowerCase() !== String(row.title).toLowerCase() ? email : null;
   return (
     <ListRow
       {...row}
       leading={<ProviderTile provider={provider} size="lg" />}
-      titleAddon={primary ? <MetaChip variant="outline">Primary</MetaChip> : null}
+      titleAddon={
+        primary || addon ? (
+          <>
+            {primary ? <MetaChip variant="outline">Primary</MetaChip> : null}
+            {addon}
+          </>
+        ) : null
+      }
       meta={identity ? [...(row.meta ?? []), identity] : row.meta}
     />
   );

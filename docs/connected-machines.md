@@ -1228,16 +1228,32 @@ affects future operations only. A connection blip detaches the stream without
 killing the command; replay or exact-instance reconciliation collects its
 terminal result after reconnect.
 
+**Background commands survive machine switches.** A command the session has
+adopted keeps running on the machine that started it when the session switches
+to another machine, switches back, or starts a later turn; only Stop, Pause and
+terminal Cancel end it. Its output stays readable from the session throughout:
+`command_read` and `command_wait` in any later attempt read it from the machine
+the command's ledger names (its frozen enrollment, connection instance and op
+ID), never from the session's current machine, and the reconciler's looks at a
+running command do the same. Each look follows its attachment until it holds
+everything the runner had retained when it attached, so it stores the output
+produced since the previous one, and it never wakes a sleeping sandbox. Its
+terminal status is always reconciled the same way: the pushed exit, or the
+reconciler's query, settles it `exited` with its exit code once its output is
+stored, or `lost` when the runner no longer has it.
+
 The runner pushes an `OperationCompleted` event after exit and pipe drain,
 independently of the output consumer and its credit. API ingestion uses the
 authenticated control-workspace/enrollment/connection subject and operation ID
 to claim the original adopted command, even after its session changes routes.
 The collector durably captures retained output through the verified exit frontier
 before settlement, so a terminal read cannot race ahead of the final output.
-Duplicate events cannot steal an active collector's claim. The runner republishes
-unacknowledged terminal records on connection establishment and at its existing
-heartbeat cadence over the independent bulk connection, healing a full send queue
-or reconnect without waiting for reaper backoff. A delivery-only acknowledgement
+Duplicate events cannot steal an active collector's claim. The event and the
+runner's operation inventory go on the control connection, never the bulk
+connection that carries output frames: behind a slow uplink's queued output a
+few-byte notice would otherwise wait minutes. The runner republishes
+unacknowledged terminal records on connection establishment and with every
+heartbeat, healing a lost notice or reconnect without waiting for reaper backoff. A delivery-only acknowledgement
 stops these notifications after the server durably owns reconciliation; it never
 releases retained output. Only the first notification bypasses polling backoff.
 Failed collections reuse reconciliation's exponential backoff, and pending
@@ -1245,8 +1261,18 @@ duplicates coalesce per operation. Older agents and lost connections remain cove
 reconciliation. Terminal publication
 does not discard retained output; release remains separately retryable after custody.
 Completion collectors have independent ingestion capacity, so even a saturated
-collection queue cannot delay machine heartbeats. A collector yields to reconciliation
-before its existing claim lease expires; this never cancels or time-limits the command.
+collection queue cannot delay machine heartbeats. A collector follows one output attachment
+until the exit frame arrives, however slowly the link delivers it, and yields to
+reconciliation before its existing claim lease expires; attaching again would
+only queue the same frames once more behind those in flight. The runner's output
+lane never drops a frame for want of room: when it is full, the operation holds
+its next frame and sends it once the lane drains, so a replay of a large retained
+backlog arrives whole and at the lane's speed. A collector stores the replayed
+frames a batch per transaction, and frames an earlier collector already stored
+cost only an existence check, so each retry gets further than the one before.
+This never cancels or time-limits the command. A failed collection logs a closed `reason` code
+(`claim_deadline`, `exit_frontier_not_reached`, `control_<code>`,
+`database_<sqlstate>`, …), since telemetry does not export error text.
 
 The session shell capability also preserves an explicit `exec_command.shell`
 selection: Opengeni sends that shell as direct argv, with the requested login or
@@ -1364,8 +1390,11 @@ counters, never silently truncated.
 Foreground output can be released within a long turn once the exact tool's
 call/result receipt and structural output event are durable. The receipt preserves
 recovery while a parallel SDK call batch is still incomplete. Only completed
-operations owned by that tool are eligible: parallel results and unscoped setup
-work remain retained until their own durability boundary. Each final
+operations owned by that tool are eligible: parallel results remain retained
+until their own durability boundary. An operation no tool call owns (platform
+setup, workspace capture, Git and file reads) carries a random id that nothing
+can resume, so it is released as soon as its result returns to its caller,
+without waiting for any boundary and without a journal entry. Each final
 acknowledgement still follows journal persistence; failed persistence or publish
 keeps the frontier available for retry. Turn completion finalizes remaining
 accepted output. Durably adopted background commands keep their separate output
@@ -1595,6 +1624,20 @@ authoritative Hello settles the replaced process's unfinished request as
 version remains authoritative for current/ahead status; an old version still
 shows the failed attempt and can retry. A reconnect by the same process does not
 terminate its own active update, and superseded processes cannot settle it.
+
+An update outlives the connection its request arrived on: each connection
+lasts only as long as its five-minute broker credential and is closed when it
+ends. The agent reports update progress through its current connection. An
+unfinished update the server has not heard about for 30 minutes (an unanswered
+request after 10) counts as lost: a waiting agent repeats its wait every
+minute and only the download is quieter. Agents before 0.1.161 reported
+through the connection the request arrived on, so progress sent after it ended
+could be lost, and a failed or still-waiting update could read as
+`waiting_for_idle` with no blockers for good. The next heartbeat, or
+**Update now**, replaces a lost update with a
+request for the release promoted now. An agent still carrying the old one
+refuses it as `update_busy_updating` and is asked again after the busy backoff;
+its successor's Hello settles the machine either way.
 
 The running agent captures its executable install path before admitting managed
 updates. Unix apply, rollback/retry, and successor exec use that stable path: a

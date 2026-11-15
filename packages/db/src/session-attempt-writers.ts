@@ -225,3 +225,55 @@ export function sessionQuiescenceCandidateAttemptIdsSql(scope: SessionAttemptSco
     )
   )`;
 }
+
+/**
+ * A cheap test that must hold whenever some attempt of the session still owns
+ * the physical-quiescence gate, in any writer mode. Its three parts follow the
+ * three ways an exact attempt can await its receipt:
+ *
+ * - a pending writer, which needs an unsettled admission or an active retained
+ *   process in the session (`sessionPendingWriterAttemptIdsSql` is non-empty);
+ * - a settled or rejected-stale Pause/Steer interruption of a closed attempt
+ *   whose receipt is still missing;
+ * - same-turn recovery debt, which only the session's newest attempt can carry
+ *   (it needs an `interrupted_recoverable` outcome and no successor; newest
+ *   uses the same order as the candidate set).
+ *
+ * When it is false the exact predicate is false in the same snapshot, so the
+ * caller can answer without the exact query. That query mostly costs planning:
+ * its row-security subqueries take tens of milliseconds to plan on every call,
+ * and nearly every session has none of these rows. When it is true the caller
+ * still runs the exact predicate unchanged.
+ */
+export function sessionMayAwaitQuiescenceSql(scope: SessionAttemptScope): SQL {
+  return sql`(
+    exists ${sessionPendingWriterAttemptIdsSql(scope)}
+    or exists (
+      select 1
+      from session_attempt_interruptions interruption
+      join session_turn_attempts attempt
+        on attempt.workspace_id = interruption.workspace_id
+        and attempt.session_id = interruption.session_id
+        and attempt.id = interruption.attempt_id
+      where interruption.workspace_id = ${scope.workspaceId}
+        and interruption.session_id = ${scope.sessionId}
+        and interruption.state in ('settled', 'rejected_stale')
+        and attempt.state = 'closed'
+        and attempt.quiesced_at is null
+    )
+    or exists (
+      select 1
+      from (
+        select latest.state, latest.quiesced_at, latest.outcome
+        from session_turn_attempts latest
+        where latest.workspace_id = ${scope.workspaceId}
+          and latest.session_id = ${scope.sessionId}
+        order by latest.started_at desc, latest.id desc
+        limit 1
+      ) newest
+      where newest.state = 'closed'
+        and newest.quiesced_at is null
+        and newest.outcome = 'interrupted_recoverable'
+    )
+  )`;
+}

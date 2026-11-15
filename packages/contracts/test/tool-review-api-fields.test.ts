@@ -104,13 +104,15 @@ test("arguments that are not an HTTP request keep their usual fields", () => {
 });
 
 test("only an API integration's arguments read as an HTTP request", () => {
-  expect(rows({ body: { subject: "Hi" } }, { kind: "generic" })).toEqual([["Body", "1 field"]]);
+  expect(rows({ body: { subject: "Hi" } }, { kind: "generic" })).toEqual([
+    ["Body · Subject", "Hi"],
+  ]);
   expect(
     toolReviewFields({ query: { q: "x" } }, undefined, "search").fields.map((field) => [
       field.label,
       field.preview,
     ]),
-  ).toEqual([["Query", "1 field"]]);
+  ).toEqual([["Query · Q", "x"]]);
 });
 
 test("times keep their minutes, with seconds only when they matter", () => {
@@ -345,4 +347,39 @@ test("blocks break lines the way a browser lays them out", () => {
   expect(htmlMessage("<ul><li>a</li><li>b</li></ul>after").preview).toBe("a\nb\nafter");
   expect(htmlMessage("a<br>b<br><br>c<br><br><br>d").preview).toBe("a\nb\n\nc\n\nd");
   expect(htmlMessage("Hello\r\n  there&nbsp;you&shy;r").preview).toBe("Hello there your");
+});
+
+test("every field names the argument it stands for, so a host can label it", () => {
+  const event = {
+    body: {
+      subject: "Planning",
+      start: { dateTime: "2026-11-12T09:00:00", timeZone: "Europe/Oslo" },
+      isReminderOn: true,
+      showAs: "busy",
+    },
+    path: { "event-id": "AAMk" },
+  };
+  expect(
+    toolReviewFields(event, api, "api_tool").fields.map((field) => [field.key, field.label]),
+  ).toEqual([
+    ["subject", "Subject"],
+    ["start", "Starts"],
+    ["isReminderOn", "Is reminder on"],
+    ["showAs", "Show as"],
+    ["event-id", "Event ID"],
+  ]);
+  // A plain yes or no keeps its value, so a host can say it in its own language.
+  expect(
+    toolReviewFields(event, api, "api_tool").fields.find((field) => field.key === "isReminderOn"),
+  ).toMatchObject({ preview: "Yes", booleanValue: true });
+  expect(toolReviewFields({ notify: false }).fields[0]).toMatchObject({
+    preview: "No",
+    booleanValue: false,
+  });
+  // Plain tool arguments and the facts a server states keep the same rule.
+  expect(toolReviewFields({ channel: "general" }).fields[0]).toMatchObject({ key: "channel" });
+  expect(
+    toolReviewFields({}, { kind: "generic", targetFacts: [{ label: "Branch", value: "main" }] })
+      .fields[0]!.key,
+  ).toBeUndefined();
 });

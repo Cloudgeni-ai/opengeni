@@ -230,7 +230,9 @@ the smoke session in step 7):
 
 Add write-only `headers` or the supported
 `connectionRef`; never place a secret in the URL. Read the created session's
-`effectiveToolPolicy`/`effectiveTools` and then actually call a safe product
+`effectiveToolPolicy`; for the full `effectiveTools` catalog use the backend
+`GET /v1/workspaces/{workspaceId}/sessions/{sessionId}/configuration` read
+(`sessions:control` plus session access). Then actually call a safe product
 tool. `requireApproval: true` asks on every call; `false` removes this local
 policy but not catalog floors; an array asks on those exact MCP tool names.
 To change an attached server's policy:

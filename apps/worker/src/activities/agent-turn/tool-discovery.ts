@@ -3,6 +3,7 @@ import { knowledgeEmbeddingTarget } from "@opengeni/core";
 import { recordUsageEvent, type Database, type UsageEventProcessingResidency } from "@opengeni/db";
 import { DecisionError, type DecisionUsage, type DecisionModel } from "@opengeni/decisions";
 import { createDocumentEmbedder, type DocumentEmbedder } from "@opengeni/documents";
+import type { Observability } from "@opengeni/observability";
 import {
   createEmbeddingToolRanker,
   sideFeatureRouteRunnable,
@@ -59,6 +60,12 @@ export function configuredToolDecisionModel(input: {
   recordUsage: (modelId: string, usage: DecisionUsage, requestId: string) => Promise<void>;
   onUnavailable: () => void;
   fetch?: typeof fetch;
+  /**
+   * Each decision request becomes a span and a duration sample. A tool
+   * search decides before its result exists, inside the model step that
+   * asked for it, so without this the wait shows only as an unexplained gap.
+   */
+  observability?: Pick<Observability, "startSpan" | "observeHistogram">;
 }): DecisionModel | undefined {
   const route = configuredDecisionModel(input.settings, input.fetch ? { fetch: input.fetch } : {});
   if (!route) {
@@ -75,17 +82,79 @@ export function configuredToolDecisionModel(input: {
   return {
     async decide(state, questions, options = {}) {
       const requestId = crypto.randomUUID();
-      return await runAuxiliaryProviderDispatch(() =>
-        route.model.decide(state, questions, {
-          ...options,
-          onUsage: async (usage) => {
-            await input.recordUsage(route.id, usage, requestId);
-            await options.onUsage?.(usage);
-          },
-        }),
-      );
+      const started = performance.now();
+      const span = input.observability?.startSpan(TOOL_DECISION_SPAN, {
+        provider: route.id,
+        questions: Object.keys(questions).length,
+      });
+      let outcome: ToolDecisionOutcome = "failed";
+      let inputTokens: number | null = null;
+      let failure: unknown;
+      try {
+        const result = await runAuxiliaryProviderDispatch(() =>
+          route.model.decide(state, questions, {
+            ...options,
+            onUsage: async (usage) => {
+              inputTokens = usage.inputTokens;
+              await input.recordUsage(route.id, usage, requestId);
+              await options.onUsage?.(usage);
+            },
+          }),
+        );
+        outcome = "completed";
+        return result;
+      } catch (error) {
+        // A hedged request that lost the race, or a deadline, aborts this one.
+        outcome = options.signal?.aborted ? "cancelled" : "failed";
+        failure = error;
+        throw error;
+      } finally {
+        recordToolDecision(input.observability, span, {
+          outcome,
+          inputTokens,
+          failure,
+          durationSeconds: (performance.now() - started) / 1_000,
+        });
+      }
     },
   };
+}
+
+type ToolDecisionOutcome = "completed" | "cancelled" | "failed";
+
+export const TOOL_DECISION_SPAN = "worker.tool_search.decision";
+export const TOOL_DECISION_DURATION_METRIC = {
+  name: "opengeni_tool_search_decision_duration_seconds",
+  help: "Tool search decision-model requests by outcome; a hedged request is its own sample.",
+} as const;
+
+function recordToolDecision(
+  observability: Pick<Observability, "startSpan" | "observeHistogram"> | undefined,
+  span: ReturnType<Observability["startSpan"]> | undefined,
+  input: {
+    outcome: ToolDecisionOutcome;
+    inputTokens: number | null;
+    failure: unknown;
+    durationSeconds: number;
+  },
+): void {
+  // Telemetry never changes the decision.
+  try {
+    span?.end({
+      attributes: {
+        outcome: input.outcome,
+        ...(input.inputTokens === null ? {} : { input_tokens: input.inputTokens }),
+      },
+      ...(input.outcome === "failed" ? { error: input.failure } : {}),
+    });
+    observability?.observeHistogram({
+      ...TOOL_DECISION_DURATION_METRIC,
+      labels: { outcome: input.outcome },
+      value: input.durationSeconds,
+    });
+  } catch {
+    // Best effort.
+  }
 }
 
 export async function recordToolDecisionUsage(input: {

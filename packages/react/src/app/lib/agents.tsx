@@ -21,6 +21,7 @@ import {
 
 import { apiErrorFacts } from "../../ui/api-error";
 import { useAppContext } from "../app-context";
+import { saveBlob } from "./save-blob";
 
 export type AgentsState = {
   /** Undefined until the first read settles. */
@@ -277,7 +278,8 @@ export type AgentFile = {
   instructions: string;
   memoryEnabled: boolean;
   /** Who can use it; an import keeps an Only me agent Only me where it can. */
-  visibility: "private" | "workspace";
+  /** Older files say only "private" or "workspace". */
+  visibility: Agent["visibility"];
 };
 
 export function agentFile(agent: Agent): AgentFile {
@@ -309,14 +311,7 @@ export function downloadAgentFile(agent: Agent): void {
   const blob = new Blob([`${JSON.stringify(agentFile(agent), null, 2)}\n`], {
     type: "application/json",
   });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = agentFileName(agent);
-  document.body.append(link);
-  link.click();
-  link.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 0);
+  saveBlob(blob, agentFileName(agent));
 }
 
 const NOT_AN_AGENT = "This file isn't an agent. Choose an .agent.json or .bot.json file.";
@@ -361,7 +356,8 @@ export function parseAgentFile(
         (file.memoryEnabled !== undefined && typeof file.memoryEnabled !== "boolean") ||
         (file.visibility !== undefined &&
           file.visibility !== "private" &&
-          file.visibility !== "workspace") ||
+          file.visibility !== "workspace" &&
+          file.visibility !== "organization") ||
         (avatar !== null && !avatar.success)
       ) {
         return { ok: false, error: UNREADABLE };
@@ -375,6 +371,8 @@ export function parseAgentFile(
           ...(instructions !== undefined ? { instructions } : {}),
           ...(firstMessage !== undefined ? { firstMessage } : {}),
           ...(typeof file.memoryEnabled === "boolean" ? { memoryEnabled: file.memoryEnabled } : {}),
+          // An imported agent is never opened to the organization on its own:
+          // that is an organization admin's choice, made in the form.
           ...(file.visibility === "private" ? { visibility: "private" as const } : {}),
         },
       };

@@ -224,3 +224,90 @@ test("ordinary unchanged prefixes and older models do not opt into thinking rese
     );
   }
 });
+
+test("a prefix-bound thinking request survives a system prompt that changed since its signed thinking", async () => {
+  // The system prompt follows live workspace state (for example a repository
+  // Skill appearing after a branch checkout), so a later turn can replay
+  // thinking signed under different instructions. Claude rejects such a
+  // request outright unless it opts into dropping the invalidated blocks.
+  const signed = { type: "thinking", thinking: "earlier thought", signature: "earlier-signature" };
+  const history = [
+    { type: "message", role: "user", content: "First question" },
+    { type: "reasoning", providerData: { anthropic: { block: signed } } },
+    {
+      type: "message",
+      role: "assistant",
+      status: "completed",
+      content: [{ type: "output_text", text: "First answer" }],
+    },
+    { type: "message", role: "user", content: "Second question" },
+  ];
+  const bodies: any[] = [];
+  const betas: string[] = [];
+  const model = new AnthropicMessagesModel(provider, "claude-opus-5-5", (async (_url, init) => {
+    betas.push(new Headers(init?.headers).get("anthropic-beta") ?? "");
+    bodies.push(JSON.parse(String(init?.body)));
+    return response();
+  }) as typeof fetch);
+  for (const systemInstructions of ["Instructions before", "Instructions after a change"]) {
+    await model.getResponse({
+      ...request(""),
+      input: history,
+      systemInstructions,
+      modelSettings: { reasoning: { effort: "high" } },
+    } as ModelRequest);
+  }
+  for (const [index, body] of bodies.entries()) {
+    expect(betas[index]).toContain("thinking-binding-controls-2026-08-01");
+    expect(body.thinking).toEqual({
+      type: "adaptive",
+      display: "summarized",
+      block_binding: { prefix_mismatch_behavior: "drop_block" },
+    });
+    // Signed history is still sent verbatim; only the provider may drop it.
+    expect(body.messages.flatMap((message: any) => message.content)).toContainEqual(signed);
+  }
+  // The setting is the same on every request, so it never changes the cached prefix.
+  expect(bodies[0].thinking).toEqual(bodies[1].thinking);
+});
+
+test("a prefix-bound request without thinking is not moved into thinking", async () => {
+  const model = new AnthropicMessagesModel(provider, "claude-opus-5-5", (async (_url, init) => {
+    expect(new Headers(init?.headers).get("anthropic-beta") ?? "").not.toContain(
+      "thinking-binding-controls",
+    );
+    expect(JSON.parse(String(init?.body)).thinking).toBeUndefined();
+    return response();
+  }) as typeof fetch);
+  await model.getResponse({
+    ...request("No reasoning requested"),
+    modelSettings: { reasoning: { effort: "none" } },
+  } as ModelRequest);
+});
+
+test("a forced tool after a checkpoint is never moved into thinking", async () => {
+  // Claude refuses thinking together with a forced tool choice.
+  const model = new AnthropicMessagesModel(provider, "claude-opus-5-5", (async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    expect(body.tool_choice).toMatchObject({ type: "any" });
+    expect(body.thinking).toBeUndefined();
+    return response();
+  }) as typeof fetch);
+  await model.getResponse({
+    ...request(""),
+    input: [
+      buildSummaryItem("Earlier work is checkpointed."),
+      { type: "message", role: "user", content: "Inspect" },
+    ],
+    tools: [
+      {
+        type: "function",
+        name: "inspect",
+        description: "Inspect",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+        strict: false,
+      },
+    ],
+    modelSettings: { toolChoice: "required", reasoning: { effort: "high" } },
+  } as ModelRequest);
+});

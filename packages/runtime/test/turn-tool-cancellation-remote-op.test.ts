@@ -1,7 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import type { Tool } from "@openai/agents";
 import { shell } from "@openai/agents/sandbox";
-import { ErrorCode, OpFrame, type ControlRequest, type ExecRequest } from "@opengeni/agent-proto";
+import {
+  ErrorCode,
+  OpFrame,
+  type ControlRequest,
+  type ControlResponse,
+  type ExecRequest,
+} from "@opengeni/agent-proto";
+import { createStaticSecretResolver } from "@opengeni/vaults/testing";
 import { SelfhostedControlError, type ControlRpc } from "../src/sandbox/selfhosted/control-rpc";
 import {
   FakeOpRunner,
@@ -16,6 +23,7 @@ import {
   type SelfhostedSessionDeps,
 } from "../src/sandbox/selfhosted/session";
 import { SandboxChannelAService } from "../src/sandbox/channel-a";
+import { RoutingSandboxSession } from "../src/sandbox/routing/routing-session";
 import {
   COMMAND_FINISH_FLOOR_MS,
   createTurnToolCancellationController,
@@ -54,6 +62,8 @@ async function remainsPending(promise: Promise<unknown>): Promise<boolean> {
 
 function makeRig(input: {
   beforeRequest?: (request: ControlRequest) => void | Promise<void>;
+  /** Answer a request the fake runner does not serve (a file write). */
+  answerRequest?: (request: ControlRequest) => ControlResponse | undefined;
   defaultScript?: (exec: ExecRequest, opId: string) => FakeOpScript | Promise<FakeOpScript>;
   withOpStream?: boolean;
   sessionDeps?: Pick<
@@ -74,7 +84,7 @@ function makeRig(input: {
     request: async (subject, request, options) => {
       requests.push(request);
       await input.beforeRequest?.(request);
-      return await runner.request(subject, request, options);
+      return input.answerRequest?.(request) ?? (await runner.request(subject, request, options));
     },
   };
   const session = new SelfhostedSession({
@@ -848,6 +858,90 @@ describe("remote synchronous command custody", () => {
   );
 });
 
+describe("a command that fails before its operation exists", () => {
+  // Built from parts so this file holds no literal reference.
+  const SECRET_REFERENCE = ["{", "{secret:Token}}"].join("");
+
+  /** A workspace machine behind the routing session, as a turn sees it. A
+   *  command with a secret reference first writes its private env file there,
+   *  before the command itself is started. */
+  async function routedWorkspaceMachine(failEnvFileWrite: boolean) {
+    const rig = makeRig({
+      beforeRequest: (request) => {
+        if (request.op?.$case === "fsWrite" && failEnvFileWrite) throw machineOfflineError();
+      },
+      answerRequest: (request) =>
+        request.op?.$case === "fsWrite"
+          ? {
+              requestId: request.requestId,
+              result: {
+                $case: "fsWrite",
+                fsWrite: { bytesWritten: String(request.op.fsWrite.content.byteLength) },
+              },
+            }
+          : undefined,
+      defaultScript: () => ({ frames: [], live: true, holdUntilCancel: true }),
+      sessionDeps: { execTimeoutMs: 0 },
+    });
+    const routing = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({
+        session: rig.session as never,
+        sandboxId: null,
+        kind: "compute",
+        leaseEpoch: 1,
+        providerInstanceId: "instance",
+        activeEpoch: 0,
+      }),
+      beforeMutation: async () => ({}),
+      afterMutation: async () => undefined,
+    });
+    await routing.prime();
+    const controller = createTurnToolCancellationController(undefined, {
+      secretResolver: createStaticSecretResolver({ Token: "token-value" }),
+    });
+    const exec = shell({ configureTools: (tools) => controller.wrapTools(tools, routing as never) })
+      .clone()
+      .bind(routing as never)
+      .tools()
+      .find(
+        (tool): tool is Extract<Tool<unknown>, { type: "function" }> =>
+          tool.type === "function" && tool.name === "exec_command",
+      );
+    if (!exec) throw new Error("SDK shell did not expose exec_command");
+    const invoke = (callId: string) =>
+      exec.invoke({} as never, JSON.stringify({ cmd: `use ${SECRET_REFERENCE}` }), {
+        toolCall: { type: "function_call", callId, name: "exec_command", arguments: "{}" },
+      });
+    return { rig, controller, invoke };
+  }
+
+  test("a failed secret delivery does not hold the turn open", async () => {
+    const { rig, controller, invoke } = await routedWorkspaceMachine(true);
+    const result = await invoke("secret_delivery_failed");
+
+    expect(result).toContain("[workspace machine]");
+    // The command itself was never started anywhere.
+    expect(rig.runner.starts).toEqual([]);
+    const drain = controller.waitForQuiescence();
+    expect(await remainsPending(drain)).toBe(false);
+    await drain;
+  });
+
+  test("a started command still holds the turn until it is stopped", async () => {
+    const { rig, controller, invoke } = await routedWorkspaceMachine(false);
+    const result = invoke("secret_delivered");
+    await waitFor(() => rig.runner.starts.length === 1, "command start");
+    expect(rig.runner.starts.map((start) => start.opId)).toEqual(["secret_delivered:0"]);
+
+    const drain = controller.waitForQuiescence();
+    await drain;
+    // Finalization stopped the exact running operation before it settled.
+    expect(rig.runner.runs.get("secret_delivered:0")?.exit.cancelled).toBe(true);
+    await result.catch(() => undefined);
+  });
+});
+
 describe("a Steer during a Connected Machine command's foreground wait", () => {
   const commandId = "33333333-3333-4333-8333-333333333333";
   const steerRig = (
@@ -980,5 +1074,150 @@ describe("a Steer during a Connected Machine command's foreground wait", () => {
     await expect(invocation).rejects.toThrow();
     await drain;
     expect(rig.runner.runs.get("not_backgroundable:0")?.exit.cancelled).toBe(true);
+  });
+});
+
+describe("a worker shutdown during a Connected Machine command's foreground wait", () => {
+  const commandId = "44444444-4444-4444-8444-444444444444";
+  // The machine accepts the start and then answers nothing: no frames, no
+  // control replies (cancel, observe, query). Production silence detection,
+  // reconnect hold and control timeouts all take far longer than the few
+  // seconds between WORKER_SHUTDOWN and the worker's force stop.
+  const silentMachineRig = () => {
+    const machineSilent = deferred();
+    let silent = false;
+    const transport = new InMemoryOpStreamTransport();
+    const runner = new FakeOpRunner({
+      transport,
+      workspaceId: WORKSPACE,
+      agentId: AGENT,
+      connectionInstanceId: CONNECTION,
+      defaultScript: () => ({ frames: [], live: true, holdUntilCancel: true }),
+    });
+    const requests: ControlRequest[] = [];
+    const controlRpc: ControlRpc = {
+      request: async (subject, request, options) => {
+        requests.push(request);
+        if (silent) await machineSilent.promise;
+        if (request.op?.$case === "opStart") silent = true;
+        return await runner.request(subject, request, options);
+      },
+    };
+    const adoptions: SelfhostedBackgroundCommandAdoption[] = [];
+    const session = new SelfhostedSession({
+      workspaceId: WORKSPACE,
+      workspaceRoot: "/workspace",
+      agentId: AGENT,
+      connectionInstanceId: CONNECTION,
+      relay: { host: "relay.test", tls: true },
+      controlRpc,
+      timeoutMs: 30_000,
+      execTimeoutMs: 120_000,
+      retryClock: { sleep: async () => {}, jitter: () => 0.5 },
+      opStream: { transport, ackIntervalMs: 10 },
+      adoptBackgroundCommand: async (input) => {
+        adoptions.push(input);
+        return { commandId };
+      },
+    });
+    const release = () => {
+      silent = false;
+      machineSilent.resolve();
+    };
+    return { runner, requests, session, adoptions, release };
+  };
+
+  test("hands a lifecycle command to the command ledger instead of waiting for the machine", async () => {
+    const rig = silentMachineRig();
+    const controller = createTurnToolCancellationController();
+    try {
+      const invocation = controller.runSandboxCommand(rig.session, {
+        cmd: "download a generated file",
+        yieldTimeMs: 120_000,
+      });
+      const invocationSettled = invocation.then(
+        () => "returned",
+        (error: unknown) => error,
+      );
+      await waitFor(() => rig.runner.starts.length === 1, "the command to start");
+      const opId = rig.runner.starts[0]!.opId;
+      controller.handOffRemoteOperations?.();
+      const drain = controller.waitForQuiescence();
+      await Promise.race([
+        drain,
+        Bun.sleep(2_000).then(() => {
+          throw new Error("the shutdown drain waited for a silent machine");
+        }),
+      ]);
+      expect(controller.outstandingWriters()).toEqual([]);
+      expect(await invocationSettled).toBeInstanceOf(TurnSandboxCommandCancelledError);
+      expect(rig.adoptions).toEqual([
+        {
+          controlWorkspaceId: WORKSPACE,
+          enrollmentId: AGENT,
+          connectionInstanceId: CONNECTION,
+          opId,
+          command: "download a generated file",
+          abandoned: true,
+        },
+      ]);
+    } finally {
+      rig.release();
+    }
+  });
+
+  test("hands a model exec_command to the command ledger before its yield window ends", async () => {
+    const rig = silentMachineRig();
+    const controller = createTurnToolCancellationController(undefined, {
+      cutPolling: true,
+      finishFloor: true,
+    });
+    try {
+      const invocation = sdkExec(controller, rig.session)
+        .invoke({} as never, JSON.stringify({ cmd: "npm test", tty: false }), {
+          toolCall: {
+            type: "function_call",
+            callId: "shutdown_wait",
+            name: "exec_command",
+            arguments: "{}",
+          },
+        })
+        .catch((error: unknown) => error);
+      await waitFor(() => rig.runner.starts.length === 1, "the command to start");
+      controller.handOffRemoteOperations?.();
+      const drain = controller.waitForQuiescence();
+      await Promise.race([
+        drain,
+        Bun.sleep(2_000).then(() => {
+          throw new Error("the shutdown drain waited for a silent machine");
+        }),
+      ]);
+      expect(controller.outstandingWriters()).toEqual([]);
+      expect(await remainsPending(invocation)).toBe(false);
+      expect(rig.adoptions.map(({ opId, abandoned }) => ({ opId, abandoned }))).toEqual([
+        { opId: "shutdown_wait:0", abandoned: true },
+      ]);
+    } finally {
+      rig.release();
+    }
+  });
+
+  test("without a hand-off, cancellation still waits for the machine's exit proof", async () => {
+    const rig = silentMachineRig();
+    const controller = createTurnToolCancellationController();
+    const invocation = controller
+      .runSandboxCommand(rig.session, { cmd: "download a generated file", yieldTimeMs: 120_000 })
+      .catch((error: unknown) => error);
+    await waitFor(() => rig.runner.starts.length === 1, "the command to start");
+    const drain = controller.waitForQuiescence();
+    expect(await remainsPending(drain)).toBe(true);
+    await Bun.sleep(250);
+    expect(await remainsPending(drain)).toBe(true);
+    expect(rig.adoptions).toEqual([]);
+    rig.release();
+    await drain;
+    await invocation;
+    expect(rig.runner.runs.get(rig.runner.starts[0]!.opId)?.exit.cancelled).toBe(true);
+    expect(rig.adoptions).toEqual([]);
   });
 });

@@ -33,7 +33,6 @@ import {
   quotaBlockClaim,
   quotaCapacity,
   storedQuotaDocument,
-  subscriptionCoreCredentialRefresher,
   type StoredQuotaDocument,
   type SubscriptionQuota,
   type SubscriptionQuotaBlock,
@@ -41,13 +40,18 @@ import {
 
 import { rawRows, withRlsContext, withSessionRlsActorContext, type Database } from "../database";
 
-import { decryptEnvironmentValue, encryptEnvironmentValue } from "../environment-crypto";
-
 import { withSubscriptionCoreAcceptedTurn } from "../subscription-core-placement-world";
 
 import { subscriptionCoreTurns, type SubscriptionCoreTurnIdentity } from "./turns";
 
 import { subscriptionCoreRequests } from "./requests";
+
+import {
+  decodeSubscriptionCoreCredential,
+  rotateSubscriptionCoreCredential,
+  type SubscriptionCoreCredentialRefreshWriter,
+  type SubscriptionCoreCredentialRotationOutcome,
+} from "./credential-rotation";
 
 import {
   memoByProvider,
@@ -58,6 +62,7 @@ import {
 import {
   acquireSubscriptionOperationLease,
   decodeSubscriptionQuota,
+  persistSubscriptionCoreRefreshWithPlan,
   releaseSubscriptionOperationLease,
   renewSubscriptionOperationLease,
   resolveSubscriptionConnectionId,
@@ -146,11 +151,16 @@ export type SubscriptionCoreConnectionCredentialLoad =
   | { kind: "unavailable" };
 
 export type SubscriptionCoreConnectionRefreshOutcome =
-  | { kind: "refreshed"; credential: unknown; refreshGeneration: number }
-  | { kind: "superseded" }
-  | { kind: "relogin"; message: string; marked: boolean }
-  | { kind: "refused" }
-  | { kind: "error"; error: unknown };
+  | {
+      kind: "refreshed";
+      credential: unknown;
+      refreshGeneration: number;
+      /** The plan the rotated credential reported, already recorded. */
+      planType?: string | null;
+    }
+  | Exclude<SubscriptionCoreCredentialRotationOutcome, { kind: "refreshed" }>;
+
+export type { SubscriptionCoreCredentialRefreshWriter };
 
 export type SubscriptionCoreConnectionRefreshDeps = {
   now?: () => Date;
@@ -166,28 +176,6 @@ export type SubscriptionCoreConnectionCredentialRow = {
   provider_account_id: string | null;
   plan_type: string | null;
   provider_state: Record<string, unknown> | null;
-};
-
-/**
- * The writes of one credential refresh, under the caller's authority (each
- * runs in the caller's transaction): `begin` takes the per-connection
- * refresh lock, rechecks the caller's access and returns the stored
- * credential to rotate (null: refused); `persist` stores the rotated
- * credential and `fail` marks the connection needs-relogin, each fenced on
- * the refresh generation `begin` returned.
- */
-export type SubscriptionCoreCredentialRefreshWriter = {
-  begin(tx: Database): Promise<{ refreshGeneration: number; credentialEncrypted: string } | null>;
-  persist(
-    tx: Database,
-    input: {
-      refreshGeneration: number;
-      credentialEncrypted: string;
-      expiresAt: Date | null;
-      refreshedAt: Date;
-    },
-  ): Promise<boolean>;
-  fail(tx: Database, input: { refreshGeneration: number; message: string }): Promise<boolean>;
 };
 
 /** A stored quota row's columns (`subscription_connection_quota`). */
@@ -524,14 +512,7 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
   }
 
   function decodeCredential(key: Uint8Array, encrypted: string): unknown {
-    let plaintext: string;
-    try {
-      plaintext = decryptEnvironmentValue(key, encrypted);
-    } catch {
-      // Fixed text and no cause: never echo ciphertext or key material.
-      throw new Error(`A core ${provider.adapter.displayName} credential could not be decrypted`);
-    }
-    return provider.adapter.credential.decode(plaintext);
+    return decodeSubscriptionCoreCredential(provider, key, encrypted);
   }
 
   function routineArgs(
@@ -654,18 +635,8 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
             }
           : null;
       },
-      persist: async (tx, input) => {
-        const [persisted] = await rawRows<{ persisted: boolean }>(
-          tx,
-          sql`select opengeni_private.persist_subscription_core_connection_refresh(${providerId},
-            ${tenant.accountId}::uuid, ${tenant.workspaceId}::uuid, ${connectionId}::uuid,
-            ${input.refreshGeneration}::bigint, ${input.credentialEncrypted},
-            ${input.expiresAt?.toISOString() ?? null}::timestamptz,
-            ${input.refreshedAt.toISOString()}::timestamptz
-          ) as persisted`,
-        );
-        return persisted?.persisted === true;
-      },
+      persist: (tx, input) =>
+        persistSubscriptionCoreConnectionRefresh(tx, tenant, connectionId, input),
       fail: async (tx, input) => {
         const [marked] = await rawRows<{ marked: boolean }>(
           tx,
@@ -690,11 +661,8 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
   }
 
   /**
-   * One credential refresh in the caller's transaction, through the caller's
-   * writer: `begin` (lock and recheck), the adapter's rotation, then
-   * `persist` before any other fallible work (a rolled-back transaction
-   * would discard the only valid refresh token), or `fail` when only a new
-   * sign-in recovers.
+   * One connection credential refresh in the caller's transaction, through
+   * the caller's writer (the shared rotation every refresh path runs).
    */
   async function rotateSubscriptionCoreConnectionCredential(
     tx: Database,
@@ -704,57 +672,41 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
     deps: SubscriptionCoreConnectionRefreshDeps = {},
   ): Promise<SubscriptionCoreConnectionRefreshOutcome> {
     const key = encryptionKey(settings);
-    const now = deps.now ?? (() => new Date());
     await tx.execute(sql`set local lock_timeout = '30s'`);
-    const credential = await writer.begin(tx);
-    if (!credential) return { kind: "refused" };
-    const generation = credential.refreshGeneration;
-    if (generation !== observedRefreshGeneration) return { kind: "superseded" };
-    let current: unknown;
-    try {
-      current = decodeCredential(key, credential.credentialEncrypted);
-    } catch (error) {
-      return { kind: "error", error };
-    }
-    // Renewal depends on the credential's format, never on the provider.
-    const refresher = subscriptionCoreCredentialRefresher(provider.adapter, current);
-    if (!refresher) {
-      // A credential that never renews is refreshed only when it expired
-      // or the provider refused it: only a new sign-in recovers.
-      const message = provider.adapter.reloginText("");
-      const marked = await writer.fail(tx, { refreshGeneration: generation, message });
-      return { kind: "relogin", message, marked };
-    }
-    try {
-      const rotated = await refresher.rotate(current);
-      // Persist before any other fallible work: a rolled-back transaction
-      // would discard the only valid refresh token.
-      const persisted = await writer.persist(tx, {
-        refreshGeneration: generation,
-        credentialEncrypted: encryptEnvironmentValue(
-          key,
-          provider.adapter.credential.encode(rotated.credential),
-        ),
-        expiresAt: rotated.expiresAt ?? null,
-        refreshedAt: now(),
-      });
-      if (!persisted) return { kind: "superseded" };
-      return {
-        kind: "refreshed",
-        credential: rotated.credential,
-        refreshGeneration: generation + 1,
-      };
-    } catch (error) {
-      const relogin = refresher.reloginMessage(error);
-      if (relogin !== null) {
-        const marked = await writer.fail(tx, {
-          refreshGeneration: generation,
-          message: provider.adapter.reloginText(relogin),
-        });
-        return { kind: "relogin", message: relogin, marked };
-      }
-      return { kind: "error", error };
-    }
+    return rotateSubscriptionCoreCredential(
+      tx,
+      provider,
+      key,
+      writer,
+      observedRefreshGeneration,
+      deps.now ?? (() => new Date()),
+    );
+  }
+
+  /**
+   * The `persist` of a connection refresh outside a chat turn: the rotated
+   * credential and the plan it reports, on the one-shot authorization the
+   * connection or owned-connection `begin` minted in this transaction.
+   */
+  function persistSubscriptionCoreConnectionRefresh(
+    tx: Database,
+    tenant: { accountId: string; workspaceId: string },
+    connectionId: string,
+    input: Parameters<SubscriptionCoreCredentialRefreshWriter["persist"]>[1],
+  ): Promise<boolean> {
+    return persistSubscriptionCoreRefreshWithPlan(tx, {
+      provider: providerId,
+      accountId: tenant.accountId,
+      workspaceId: tenant.workspaceId,
+      sessionId: null,
+      turnId: null,
+      connectionId,
+      expectedRefreshGeneration: input.refreshGeneration,
+      credentialEncrypted: input.credentialEncrypted,
+      expiresAt: input.expiresAt,
+      lastRefreshAt: input.refreshedAt,
+      planType: input.planType,
+    });
   }
 
   /** Store a shared connection's successful catalog read without altering quota or admin policy. */
@@ -1009,6 +961,7 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
     refreshSubscriptionCoreConnectionCredential,
     subscriptionCoreConnectionCredentialLoad,
     rotateSubscriptionCoreConnectionCredential,
+    persistSubscriptionCoreConnectionRefresh,
     mergeSubscriptionCoreUsageObservation,
     recordSubscriptionCoreModelCatalog,
     recordSubscriptionCoreUsageObservation,

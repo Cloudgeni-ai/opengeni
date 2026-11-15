@@ -62,3 +62,52 @@ test("a dirty generation arriving during a child read is not acknowledged away",
     markStale: false,
   });
 });
+
+test("a hint refreshes an API key's group whichever kind the changed chat was frozen as", () => {
+  const subjectId = "api_key:7dbccefa-3591-437a-81d2-6319352f124d";
+  const legacy = {
+    ...root,
+    id: "legacy",
+    createdBy: { kind: "subject", subjectId },
+  } as RailSession;
+  const current = {
+    ...root,
+    id: "current",
+    createdBy: { kind: "service", subjectId },
+  } as RailSession;
+  const person = {
+    ...root,
+    id: "person",
+    createdBy: { kind: "subject", subjectId: "user:ada" },
+  } as RailSession;
+  const byId = new Map([legacy, current, person].map((session) => [session.id, session]));
+  const keyGroup = {
+    kind: "creator" as const,
+    key: `creator:${subjectId}`,
+    label: "Key",
+    creator: { subjectId },
+  };
+  const personGroup = {
+    kind: "creator" as const,
+    key: "creator:subject:user:ada",
+    label: "Ada",
+    creator: { kind: "subject" as const, subjectId: "user:ada" },
+  };
+  const first = invalidateSessionListScopes(emptySessionListDirtyScopes(), [current.id], byId);
+  expect(sessionListGroupRevision(first, keyGroup)).toBe(1);
+  expect(sessionListGroupRevision(first, personGroup)).toBe(0);
+  const second = invalidateSessionListScopes(first, [legacy.id], byId);
+  expect(sessionListGroupRevision(second, keyGroup)).toBe(2);
+  // A service frozen with a person's subject id never refreshes the person's group.
+  const impostor = {
+    ...root,
+    id: "impostor",
+    createdBy: { kind: "service", subjectId: "user:ada" },
+  } as RailSession;
+  const third = invalidateSessionListScopes(
+    second,
+    [impostor.id],
+    new Map([...byId, [impostor.id, impostor]]),
+  );
+  expect(sessionListGroupRevision(third, personGroup)).toBe(0);
+});

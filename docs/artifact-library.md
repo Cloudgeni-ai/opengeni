@@ -96,7 +96,10 @@ who can see a Site manages it like its owner: Site Data and Site SQL,
 publication settings, abuse reports, and taking it down or restoring it. Only an
 administrator lifts an administrator's takedown, raises resource limits, or
 grants a Site assistant extra workspace tools, and only the owner changes who
-can see an "Only me" Site.
+can see a Site (the whole workspace or "Only me"): from the Site page, with
+`PUT /v1/workspaces/:workspaceId/published-artifacts/:artifactId/visibility`,
+or through an agent turn acting for them with `sandbox_file_publish` and the
+Site's `artifactId`, as for a file. The Site keeps its link.
 
 ## Who can open a file
 
@@ -257,12 +260,18 @@ same sandbox path/content publication reuses its identity; changed bytes produce
 a distinct immutable output.
 
 `sandbox_file_publish` reads from the active session filesystem, not a fixed
-managed-sandbox alias. Pass a workspace-relative file path or an absolute path
-inside the resolved root: `/workspace` on managed sandboxes, or the actual
-host-native root on a Connected Machine (including Windows drive/UNC roots).
-The receipt preserves that canonical source path. Publication does not expand
-filesystem authority; traversal and paths outside the active root are rejected.
-Existing managed-sandbox publication identities remain unchanged. Older clients
+managed-sandbox alias. The session's own agent, and any caller allowed the
+session's terminal (`terminal:attach`), publishes any file that session's shell
+can read: an absolute path as given (for example scratch output in `/tmp`), or a
+relative path from the resolved root (`/workspace` on managed sandboxes, or the
+actual host-native root on a Connected Machine, including Windows drive/UNC
+roots). The file is read through the box's own shell on a managed sandbox and
+at its host path on a Connected Machine, so publication never reaches more than
+that shell already can. Other callers, who cannot run the shell, keep the
+workspace scope of their file reads: traversal and paths outside the active
+root are rejected. The receipt preserves the canonical source path. A file
+inside the root keeps its root-relative identity whichever way it is named, so
+existing publication identities remain unchanged. Older clients
 whose receipt validator assumes `/workspace` need the matching contract update
 to recognize native-path receipts.
 

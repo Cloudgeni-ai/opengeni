@@ -6,13 +6,14 @@ import {
   type UseNewConversationOptions,
 } from "../hooks/use-new-conversation";
 import { useRealtimeVoiceModels } from "../hooks/use-realtime-voice-models";
-import { useErrorMessage } from "../lib/error-message";
+import { normalizeError, useErrorMessage } from "../lib/error-message";
+import { newConversationErrorMessage } from "../lib/format";
 import { useHostTheme } from "../lib/host-theme";
 import { cn } from "../lib/cn";
 import type { NewSessionRealtimeControl } from "../realtime/realtime-control";
 import { ChatComposer } from "./chat-composer";
 import type { ComposerVoiceInputOptions } from "./composer-transcription-control";
-import { ModelPolicyPicker } from "./model-policy-picker";
+import { ComposerModelPicker } from "./model-level-picker";
 import { useComposerTranscription, type SessionConversationProps } from "./session-conversation";
 import { SessionProxyScope, type SessionProxyBaseUrl } from "./session-proxy-scope";
 import { ConversationRenderBoundary } from "./conversation-render-boundary";
@@ -153,7 +154,9 @@ export function NewConversationView({
         controlsStart={
           composerProps?.controlsStart ??
           (composer.policy ? (
-            <ModelPolicyPicker
+            <ComposerModelPicker
+              levels={modelPickerProps?.levels}
+              startOnFirstLevel
               groupPresentation={modelPickerProps?.groupPresentation}
               messages={modelPickerProps?.messages}
               rows={catalog.rows}
@@ -218,7 +221,9 @@ export function useNewConversationVoice(
 
 /**
  * What stands between a new chat and its creation: unavailable, a failed or
- * unconfirmed create (with Retry), or uploads still finishing.
+ * unconfirmed create (with Retry), or uploads still finishing. A refused
+ * create says the refusal's own reason; the host's `formatError` receives it
+ * as the default copy.
  */
 export function NewConversationStatus({
   creation,
@@ -243,7 +248,7 @@ export function NewConversationStatus({
             error.cause,
             error.cause instanceof OpenGeniApiError && error.cause.code === "route_not_allowed"
               ? labels.unavailable
-              : undefined,
+              : newConversationErrorMessage(t, normalizeError(error.cause)),
           )}
         </p>
       ) : null}

@@ -12,6 +12,7 @@ import { userErrorText } from "@opengeni/react/ui/api-error";
 // setup. Everything below the workspace shell consumes the state through
 // `useAppContext`.
 import { DESKTOP_APP_RETURN_PATH } from "@opengeni/contracts";
+import { onConsoleHost, socialProvidersForHost } from "@/lib/console-route";
 import { EXCEL_ADDIN_PATH } from "@/lib/excel-addin";
 import { Outlet, useRouterState } from "@tanstack/react-router";
 import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
@@ -47,6 +48,7 @@ import { Button } from "@opengeni/react/ui/button";
 import { SignInCallbackNotice } from "@/components/sign-in-callback-notice";
 import { NativeSignInProvider } from "@/lib/native-sign-in-context";
 import { PersonalSecurityProvider } from "@/lib/personal-security-context";
+import { renderedRoutePathname } from "@/lib/rendered-route-pathname";
 import { Input } from "@opengeni/react/ui/input";
 import { Label } from "@opengeni/react/ui/label";
 import { Toaster } from "@opengeni/react/app/components/toaster";
@@ -69,6 +71,7 @@ export {
   type SlackLinkPreparePhase,
 } from "@opengeni/react/app/app-state";
 import { desktopCapability } from "@opengeni/react/app/lib/desktop";
+import { passkeysNeedBrowser } from "@/lib/passkeys";
 
 const AnalyticsManager = lazy(() =>
   import("@/components/analytics-consent").then((module) => ({
@@ -79,6 +82,22 @@ const AnalyticsManager = lazy(() =>
 const DesktopDictationRoot = lazy(() =>
   import("@/components/desktop/dictation-host").then((module) => ({
     default: module.DesktopDictationRoot,
+  })),
+);
+
+// Loaded right after the shell renders, off the eager graph. Until it mounts,
+// a sign-out with recordings still uploading discards them without asking.
+const SignOutRecordingsDialog = lazy(() =>
+  import("@/components/sign-out-recordings-dialog").then((module) => ({
+    default: module.SignOutRecordingsDialog,
+  })),
+);
+
+// Loaded right after the shell renders, off the eager graph. A refusal that
+// arrives before it mounts is shown as the plain error it is.
+const AdminStepUpDialog = lazy(() =>
+  import("@/components/admin-step-up-dialog").then((module) => ({
+    default: module.AdminStepUpDialog,
   })),
 );
 
@@ -174,9 +193,10 @@ const webAppStateHost: AppStateHost = {
 };
 
 export function RootRouteComponent() {
-  const pathname = useRouterState({
-    select: (state) => state.location.pathname,
-  });
+  // Providers wrap the rendered page, so they follow the rendered route.
+  const pathname = useRouterState({ select: renderedRoutePathname });
+  // Analytics reports the address the person is on, not the route still shown.
+  const locationPathname = useRouterState({ select: (state) => state.location.pathname });
   const hasSearchParameters = useRouterState({
     select: (state) => Object.keys(state.location.search).length > 0,
   });
@@ -188,7 +208,9 @@ export function RootRouteComponent() {
       /^\/native-sign-in\/?$/.test(state.location.pathname) &&
       new URLSearchParams(state.location.searchStr).get("platform") === "office"
         ? "excel"
-        : "product",
+        : onConsoleHost()
+          ? "console"
+          : "general",
   });
   // Public surfaces render ahead of auth/config gates. `/reset-password` and
   // shared chats (`/share/<id>`) are always public; DEV visual harnesses are public and need no session.
@@ -243,6 +265,7 @@ export function RootRouteComponent() {
     revalidatePrincipalAccess,
     defaultWorkspaceId,
     slackLinkContinuationWorkspaceId,
+    slackLinkLinkedWorkspaceId,
     routedWorkspace,
     creditRequired,
     setCreditRequired,
@@ -346,10 +369,14 @@ export function RootRouteComponent() {
                   ? clientConfig.auth.signupChallengeSiteKey
                   : undefined
               }
-              socialProviders={managedSocialProviders}
+              socialProviders={socialProvidersForHost(
+                window.location.hostname,
+                managedSocialProviders,
+              )}
               onSocialSubmit={handleManagedSocialAuth}
-              passkeySignIn={managedPasskeySignIn}
-              passkeySignUp={managedPasskeySignUp}
+              // Passkey prompts can't open inside the desktop app.
+              passkeySignIn={managedPasskeySignIn && !passkeysNeedBrowser()}
+              passkeySignUp={managedPasskeySignUp && !passkeysNeedBrowser()}
               onPasskeySubmit={handleManagedPasskeyAuth}
             />
           )}
@@ -417,7 +444,8 @@ export function RootRouteComponent() {
     !accessLoading &&
     accessContext &&
     !defaultWorkspaceId &&
-    !slackLinkContinuationWorkspaceId ? (
+    !slackLinkContinuationWorkspaceId &&
+    !slackLinkLinkedWorkspaceId ? (
     browserAccountsEnabled ? (
       <BrowserAccountsOrganizationOnboardingPanel
         client={client}
@@ -457,7 +485,7 @@ export function RootRouteComponent() {
     )
   ) : accessLoading || !appContext ? (
     <LoadingPanel />
-  ) : !defaultWorkspaceId && !slackLinkContinuationWorkspaceId ? (
+  ) : !defaultWorkspaceId && !slackLinkContinuationWorkspaceId && !slackLinkLinkedWorkspaceId ? (
     <ProblemPanel
       title="No workspace access"
       description="You don't have access to any workspace yet."
@@ -520,11 +548,19 @@ export function RootRouteComponent() {
     : keyAuthRequired && !hasAccessKey
       ? null
       : (accessContext?.subjectId ?? undefined);
+  // Their recordings on this device carry their sign-in email, the one key a
+  // browser account's sign-out knows them by.
+  const recorderOwner = managedAuthRequired
+    ? authSession === undefined
+      ? undefined
+      : (authSession?.user.email ?? null)
+    : null;
   const recordSurface = (surface: ReactNode, key?: number) => (
     <ConsoleMeetingRecorderProvider
       key={key}
       workspaceId={routedWorkspace?.id ?? null}
       person={recorderPerson}
+      owner={recorderOwner}
       fallbackWorkspaceId={defaultWorkspaceId}
       client={client}
     >
@@ -560,6 +596,10 @@ export function RootRouteComponent() {
     // main grow past the viewport when a child mis-owned scroll.
     <main data-window-frame className="flex h-dvh max-h-dvh flex-col overflow-hidden bg-bg text-fg">
       <Toaster />
+      <Suspense fallback={null}>
+        <SignOutRecordingsDialog />
+        <AdminStepUpDialog />
+      </Suspense>
       <div ref={mountApiUpdateNotice} className="shrink-0" />
       <SignInCallbackNotice
         userId={authSession?.user.id ?? null}
@@ -587,7 +627,7 @@ export function RootRouteComponent() {
             config={clientConfig.analytics}
             hasSearchParameters={hasSearchParameters}
             isPublicAuthRoute={isPublicAuthRoute}
-            pathname={pathname}
+            pathname={locationPathname}
             search={analyticsSearch}
           />
         </Suspense>

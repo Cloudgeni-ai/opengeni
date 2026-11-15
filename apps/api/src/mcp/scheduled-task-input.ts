@@ -9,6 +9,7 @@ import {
   ScheduledTaskScheduleSpec,
 } from "@opengeni/contracts";
 import { z } from "zod/v4";
+import { ToolArgumentError } from "./tool-argument-error";
 
 const SCHEDULE_TIME_ZONE_DESCRIPTION =
   "IANA time zone the schedule's clock times are in, for example Europe/Oslo. Omit it to use the time zone of the message that asked for the schedule (an edited schedule keeps its current zone); UTC when there is none.";
@@ -58,13 +59,15 @@ export function resolveScheduledTaskCreateInput(
   const targetSessionId =
     input.targetSessionId ?? (runMode === "existing_session" ? sessionId : undefined);
   if (!runMode)
-    throw new Error(
+    throw new ToolArgumentError(
       "Choose an existing chat or explicitly select reusable_session or new_session_per_run for a separate agent",
     );
   if (runMode === "existing_session" && !targetSessionId)
-    throw new Error("Choose the chat that should receive scheduled messages");
+    throw new ToolArgumentError("Choose the chat that should receive scheduled messages");
   if (input.schedule === undefined && !hasEventTriggers(input))
-    throw new Error("Add a schedule, or event triggers for an automation that runs on events");
+    throw new ToolArgumentError(
+      "Add a schedule, or event triggers for an automation that runs on events",
+    );
   return CreateScheduledTaskRequest.parse({
     ...input,
     schedule: input.schedule ?? { type: "manual" },

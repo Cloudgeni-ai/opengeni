@@ -13,6 +13,14 @@
 //! keeps. The builder takes one of the pool's places ([`crate::room`]),
 //! so the pool and its builder never hold more sandboxes than its
 //! maximum.
+//!
+//! A refresh outlives restarts of compute's control service, which come
+//! with every release and cut whatever was streaming through it: the
+//! builder is created again (and one made by a create cut short ended), a
+//! command keeps running in the builder and is followed again, and the
+//! save is asked again or found by its name ([`crate::compute`]). A
+//! refresh fails only for what its commands did, or when compute stays
+//! away past the time they were given.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -24,7 +32,7 @@ use base64::engine::general_purpose::STANDARD;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use crate::compute::{Compute, Created, NewSandbox, Snapshot};
+use crate::compute::{Again, CREATE_WITHIN, Compute, Created, NewSandbox, Snapshot, unreachable};
 use crate::github::Github;
 use crate::room::Room;
 
@@ -158,7 +166,7 @@ pub async fn keep(
     loop {
         if *leading.borrow() {
             if !cleared && adopt(&settings, &compute, &current, &mut have, &mut tried).await {
-                clear_builders(&compute, &settings.pool).await;
+                clear_builders(&compute, &settings.pool, None).await;
                 cleared = true;
             }
             let due = cleared
@@ -276,11 +284,15 @@ async fn look(
     Ok((have.is_none_or(|have| !head.starts_with(&have.commit))).then_some(head))
 }
 
-/// Ends builders a stopped service left behind.
-async fn clear_builders(compute: &Compute, pool: &str) {
+/// Ends the pool's builders other than `kept`: those a stopped service
+/// left behind, or one a create cut short made after all.
+async fn clear_builders(compute: &Compute, pool: &str, kept: Option<&str>) {
     match compute.list(&[(BUILDER_KEY, pool)]).await {
-        Ok(left) => {
-            for builder in left {
+        Ok(found) => {
+            for builder in found
+                .into_iter()
+                .filter(|builder| Some(builder.id.as_str()) != kept)
+            {
                 tracing::info!(sandbox = %builder.id, "a template builder left behind goes");
                 if let Err(error) = compute.kill(&builder.id).await {
                     tracing::warn!(error = format!("{error:#}"), "killing a builder failed");
@@ -310,13 +322,7 @@ async fn refresh(
         bail!("this replica no longer leads");
     }
     tracing::info!(%commit, template = %name, "preparing a warm template");
-    let builder = compute
-        .create(&NewSandbox {
-            template: settings.base.clone(),
-            timeout_s: settings.within.as_secs() + 45 * 60,
-            metadata: BTreeMap::from([(BUILDER_KEY.into(), settings.pool.clone())]),
-            env: BTreeMap::new(),
-        })
+    let builder = start_builder(settings, compute, leading, stop)
         .await
         .context("starting a template builder")?;
     let prepared = tokio::select! {
@@ -341,6 +347,53 @@ async fn refresh(
         at,
         commit: short.into(),
     })
+}
+
+/// Creates a builder, again while compute cannot be reached or cuts the
+/// answer short, as while its control service restarts. A create cut
+/// short may have made a builder after all: once one is made, any other
+/// builder of the pool goes.
+async fn start_builder(
+    settings: &Settings,
+    compute: &Compute,
+    leading: &mut watch::Receiver<bool>,
+    stop: &CancellationToken,
+) -> Result<Created> {
+    let new = NewSandbox {
+        template: settings.base.clone(),
+        timeout_s: settings.within.as_secs() + 45 * 60,
+        metadata: BTreeMap::from([(BUILDER_KEY.into(), settings.pool.clone())]),
+        env: BTreeMap::new(),
+    };
+    let deadline = tokio::time::Instant::now() + CREATE_WITHIN;
+    let mut again = Again::default();
+    let mut cut_short = false;
+    loop {
+        match compute.create(&new).await {
+            Ok(builder) => {
+                if cut_short {
+                    clear_builders(compute, &settings.pool, Some(&builder.id)).await;
+                }
+                return Ok(builder);
+            }
+            Err(error) if unreachable(&error) => {
+                tracing::warn!(
+                    error = format!("{error:#}"),
+                    "creating a template builder was cut short; creating it again"
+                );
+                cut_short = true;
+                let due = tokio::select! {
+                    due = again.wait(deadline) => due,
+                    _ = leading.wait_for(|leads| !*leads) => false,
+                    () = stop.cancelled() => false,
+                };
+                if !due {
+                    return Err(error);
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// Clones the repository at `commit` in `builder`, runs the prepare command

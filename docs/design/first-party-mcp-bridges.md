@@ -59,6 +59,13 @@ descriptor. Compiler-wide OpenAPI destination governance remains separate work.
   `packages/db/src/slack-api-rate-limits.ts` coordinates history/replies and
   provider cooldowns across replicas, bot/personal tokens, and Opengeni tenants
   sharing one Slack app/workspace. Search is absent. See [Slack](../slack-bot.md).
+  A `channel` argument also takes a channel name (`#general` or `general`): the
+  tool resolves it through `conversations.list` (public and private channels the
+  granted scopes allow, archived excluded, up to 50 pages of 200), reuses a
+  resolved name for five minutes unless the request using it fails, and fails
+  with a clear message when the name is not found, ambiguous, beyond the pages
+  read, or not readable with the granted scopes. Conversation IDs (C, D or G,
+  then capitals and digits, with at least one digit) work as before.
 - **Google Drive** composes Google's remote MCP server with reviewed REST extensions
   under one personal connection. It does not replace provider tool discovery. Unknown
   writes never replay; its token binding permits only the reviewed Drive API routes.

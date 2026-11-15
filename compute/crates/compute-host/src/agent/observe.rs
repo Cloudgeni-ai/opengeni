@@ -221,19 +221,28 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             event = event.with(format!("compute.phase.{phase}_us"), *took);
         }
         for (what, bytes) in &report.notes.bytes {
+            observer
+                .metrics()
+                .step_bytes(running.step, running.why.cause, what, *bytes);
             event = event.with(format!("compute.bytes.{what}"), *bytes);
         }
         for (key, value) in &report.notes.details {
             event = event.with(*key, *value);
-        }
-        if let Some(paused) = report.notes.paused {
-            event = event.with("compute.paused_us", paused);
         }
         if let (Some(reading), Some(slot)) = (report.reading, self.slots.get_mut(&id.0)) {
             event = with_pressure(event, pressure_since(slot.reported, reading));
             slot.reported = Some(reading);
         }
         observer.emit(event);
+        for event in report.notes.events.drain(..) {
+            observer.emit(
+                event
+                    .with("compute.sandbox.id", sandbox.clone())
+                    .with("compute.op.id", running.op.0)
+                    .with("compute.step", step_name(running.step))
+                    .traced(running.why.trace),
+            );
+        }
         for (alarm, what) in report.notes.alarms.drain(..) {
             let event = alarm_event(what)
                 .with("compute.sandbox.id", sandbox.clone())

@@ -23,6 +23,21 @@ test("Gmail review counts exact unique IDs and exposes every label effect", () =
   ).toBeUndefined();
 });
 
+test("only the plain approve word carries a code a host can replace", () => {
+  expect(toolReviewAction("create_event", {}, { kind: "generic" })).toMatchObject({
+    approveLabel: "Approve action",
+    approveLabelCode: "approve_action",
+  });
+  expect(toolReviewAction("admin_action_call", {})).toMatchObject({
+    approveLabel: "Allow",
+    approveLabelCode: "allow",
+  });
+  // A label that names the action stays as it is.
+  expect(
+    toolReviewAction("trash_message", { messageId: "one" }, { kind: "gmail" }).approveLabelCode,
+  ).toBeUndefined();
+});
+
 test("generic review decodes once, bounds arrays and redacts nested credentials", () => {
   const args = {
     recipients: Array.from({ length: 600 }, (_, i) => `recipient-${i}@example.test`),
@@ -255,3 +270,29 @@ test.each([
       expect(JSON.stringify(toolReviewDetails(args, context, path, 0))).not.toContain("CANARY");
   },
 );
+
+test("a small object of plain values shows each value on the card", () => {
+  const args = {
+    table: "accounts",
+    record: { name: "Contoso Ltd", creditlimit: 5000, password: "hunter2" },
+    big: { a: 1, b: 2, c: 3, d: 4, e: 5 },
+    deep: { inner: { x: 1 } },
+  };
+  const { fields, moreFields } = toolReviewFields(args, {
+    kind: "generic",
+    protectedFields: ["password"],
+  });
+  expect(moreFields).toBe(0);
+  expect(fields.map((field) => [field.path, field.label, field.preview])).toEqual([
+    ["/table", "Table", "accounts"],
+    ["/record/name", "Record · Name", "Contoso Ltd"],
+    ["/record/creditlimit", "Record · Creditlimit", "5000"],
+    ["/record/password", "Record · Password", "[Protected value]"],
+    ["/big", "Big", "5 fields"],
+    ["/deep", "Deep", "1 field"],
+  ]);
+  expect(fields[1]).not.toHaveProperty("key");
+  expect(fields[3]).toMatchObject({ protected: true, truncated: false });
+  const details = toolReviewDetails(args, undefined, "/record/name", 0, 50);
+  expect(details.items[0]).toMatchObject({ value: "Contoso Ltd" });
+});

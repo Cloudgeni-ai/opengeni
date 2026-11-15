@@ -1120,7 +1120,7 @@ always stays after them.
   child "waiting for capacity" notice, goal fence (new `goal_id` and
   `goal_version` columns) and false-resumption budget (the same
   `codexCapacityRecoveryV1` turn metadata, ten resumptions with persisted
-  backoff). The row exists only while the turn waits: resuming or
+  backoff; since D-54 the backoff stays and the ten-resumption stop is gone). The row exists only while the turn waits: resuming or
   superseding deletes it (and, by cascade, its outbox rows), so a timer or
   signal that still carries an older waiter id finds nothing and is stale.
   The next check is the earliest reset placement knows (authoritative); else
@@ -1594,7 +1594,10 @@ enabled, and one added branch in the operation-lease guard.
   request); a people-scoped shared connection is refused for the same
   reason. Provider ordering selects the initial provider only: once the
   core provider is selected, every failure is `fallbackSafe: false`, so the
-  audio is never retried through another provider. Subscription
+  audio is never retried through another provider. The one exception is a
+  refusal for lack of credit, which heard nothing: it stays fallback-safe,
+  so the workspace's fallback setting may send the audio on, and the spent
+  provider is tried last for that workspace for 15 minutes. Subscription
   transcription stays non-chargeable (the provider has no deployment
   funding). Availability is "a candidate exists"; maintenance reports
   unavailable.
@@ -4602,6 +4605,8 @@ SuperGrok on the core:
   resumption and backs off (30 seconds to 15 minutes, jittered); at 10 the
   turn fails with the new terminal code `xai_capacity_recovery_exhausted`
   (`recoveryExhausted: true`, which clients already render generically).
+  Superseded on 2026-11-12 (D-54 in `docs/subscription-accounts.md`): a
+  false resumption only backs off, and no wait ends its turn.
   The SuperGrok transport now reports `meaningfulOutput` on its `completed`
   request event (assistant text, a complete tool call or an image, the
   Codex rule), so a productive resume resets the breaker exactly as for

@@ -3,14 +3,16 @@
 //! the guest's connections to [`AGENT_LINK_PORT`] go to the host's
 //! [`compute_link::Hub`], and the sandbox is attached to it with the link
 //! its record names, for as long as the host holds it. The hub keeps the
-//! session open while the sandbox sleeps, and wakes it for a message.
+//! session open while the sandbox sleeps, and wakes it for a message, as
+//! long as its agent process can come back: once its VM ended with no
+//! memory kept, that agent is gone for good, and so is its session.
 
 use std::sync::Arc;
 
 use compute_engine::{Engine, VmSpec};
 use compute_protocol::link::{AGENT_LINK_PORT, Busy, Running};
 
-use super::{HostAgent, Level, Toucher};
+use super::{HostAgent, Level, State, Toucher};
 use crate::guest_ports::{self, Activity, Listeners};
 use crate::protocol::Id;
 use crate::resume::RunClock;
@@ -108,6 +110,27 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             .contains_key(&id.0)
             .then_some(Busy::HandingOff);
         hub.busy(&id.to_string(), busy);
+    }
+
+    /// Ends the session of sandbox `id`'s agent once that agent is gone for
+    /// good: the sandbox, in `before` until now (`None` when it is new to
+    /// the host, as on its start), has no VM process left and no memory
+    /// kept to resume one. Nothing is then sent to that agent while the
+    /// next one boots: whoever wants the sandbox wakes it through the
+    /// control service and reaches the new agent. Only the change counts,
+    /// so a guest that connects later, to a VM the host runs, is never
+    /// taken for the agent that went.
+    pub(super) fn forget_a_gone_agent(&self, id: Id, before: Option<State>) {
+        let Some(hub) = &self.link else {
+            return;
+        };
+        let Some(view) = self.core.sandbox(id.0) else {
+            return;
+        };
+        let gone = |state: State| !state.level.has_process() && !state.memory_saved;
+        if gone(view.state) && !before.is_some_and(gone) {
+            hub.gone(&id.to_string());
+        }
     }
 
     /// Sandbox `id` leaves the host: its agent's session ends.

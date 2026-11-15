@@ -15,6 +15,46 @@ use crate::store::Store;
 const PREPARE_WAIT: Duration = Duration::from_secs(30);
 
 impl<S: Store> Service<S> {
+    /// Every live host, to send requests to.
+    #[must_use]
+    pub fn live_hosts(&self) -> Vec<crate::view::Target> {
+        self.view
+            .hosts()
+            .into_iter()
+            .filter(|known| known.state == HostState::Live)
+            .map(|known| known.target)
+            .collect()
+    }
+
+    /// Asks the host `target` to keep the stored image `image`, fetched
+    /// over `before` (ADR 41). A host from before the request refuses it,
+    /// which counts as asked: it fetches on its first create, as before.
+    ///
+    /// # Errors
+    ///
+    /// When the host cannot be reached, or refuses for another reason.
+    pub async fn keep_on(
+        &self,
+        target: &crate::view::Target,
+        image: ImageId,
+        before: Option<ImageId>,
+    ) -> Result<(), Failure> {
+        let request = Request::Keep { image, before };
+        let answered = self
+            .hosts
+            .call(target, None, &request, PREPARE_WAIT)
+            .await
+            .map_err(|error| Failure::Unavailable(error.to_string()))?;
+        match &answered.answer.reply {
+            Reply::Done
+            | Reply::Error {
+                code: compute_protocol::host::ErrorCode::Invalid,
+                ..
+            } => Ok(()),
+            _ => Err(host_failure(&answered)),
+        }
+    }
+
     /// The guest programs most live hosts build images with, by their
     /// digest (the lowest of those most say, for a tie), or `None` when no
     /// live host says: what this release's images are built with.
@@ -35,7 +75,8 @@ impl<S: Store> Service<S> {
     /// the live host with those programs `turn` places after the first by
     /// name and recorded now. `None` while that host is building it, when
     /// it built it with other programs (recorded, for whoever wants them),
-    /// or when no live host has them to build it.
+    /// when no live host has them to build it, or while the image recorded
+    /// for it is being forgotten, after which it is built again.
     ///
     /// # Errors
     ///
@@ -51,9 +92,7 @@ impl<S: Store> Service<S> {
         let key = built_key(source, guest);
         if let Some(image) = self.store.image_built(&key).await? {
             // Another replica recorded it: this name uses it now too.
-            return Ok(Some(
-                self.store.record_built(&key, name, image, now_ms()).await?,
-            ));
+            return Ok(self.store.record_built(&key, name, image, now_ms()).await?);
         }
         let live: Vec<_> = self
             .view
@@ -69,6 +108,9 @@ impl<S: Store> Service<S> {
         let target = &live[turn % live.len()].target;
         let request = Request::Prepare {
             image: source.to_owned(),
+            // What the name starts from now: the host builds over it if it
+            // keeps it (ADR 40).
+            before: self.settings().images.get(name).flatten(),
         };
         let answered = self
             .hosts
@@ -92,10 +134,13 @@ impl<S: Store> Service<S> {
                         .record_built(&plain, name, *image, now_ms())
                         .await?;
                 }
-                let kept = self
+                let Some(kept) = self
                     .store
                     .record_built(&built, name, *image, now_ms())
-                    .await?;
+                    .await?
+                else {
+                    return Ok(None);
+                };
                 tracing::info!(
                     host = %target.name,
                     %source,

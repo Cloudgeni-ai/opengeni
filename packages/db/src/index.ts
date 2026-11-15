@@ -9,7 +9,8 @@ import {
 } from "./personal-connection-approval";
 export { continueSessionWaitingWork, getSessionMachineAccess } from "./session-machine-access";
 export { canonicalSecretPermissions } from "./canonical-secret-permissions";
-import { agentInstructionsSql } from "./agents";
+import { jsonbNodeCountSql, jsonbPropertyCountSql } from "./jsonb-shape-counts";
+import { measureJsonObjectText } from "./json-object-text-measurement";
 import { listWorkspaceBackgroundCommandsInScope } from "./session-background-commands";
 import { automationRunPresentation } from "./automation-run-presentation";
 import { resolveSessionAppActionAuthority } from "./session-admin-access";
@@ -45,6 +46,7 @@ export * from "./active-session-history";
 import type { ActiveSessionHistoryFootprint } from "./active-session-history";
 export * from "./session-search-records";
 export * from "./model-call-timing";
+export * from "./sandbox-stop-notice";
 export * from "./turn-timing-profile";
 export * from "./turn-timing-profile-store";
 export * from "./model-provider-execution-inputs";
@@ -61,7 +63,7 @@ export * from "./credential-profiles";
 export * from "./connected-machine-audience";
 export * from "./disconnect-audit";
 import { type ActiveSandboxPointer } from "./active-sandbox";
-import { sessionRetentionFromRow } from "./session-archive";
+import { ARCHIVED_CHAT_SANDBOX_KEPT_SECONDS, sessionRetentionFromRow } from "./session-archive";
 import { sessionQueueIsEmptyInTransaction } from "./empty-session-queue";
 import {
   subscriptionCapacityWaitReasonText,
@@ -229,6 +231,7 @@ export {
   connectorActionPoliciesForAccountRoutes,
   connectorToolPolicyRevision,
   ConnectorToolPermissionConflictError,
+  type ResolvedConnectorActionPolicy,
 } from "./connector-action-policy";
 import {
   agentSelectionNotes,
@@ -314,6 +317,7 @@ export {
 } from "./subscription-core-codex-bindings";
 import type { GoalAdmissionPausedReason } from "@opengeni/contracts";
 import { accountContactEmail } from "@opengeni/contracts/passkey-only-account";
+import { microsoftDynamicsProductForMcpUrl } from "@opengeni/contracts/microsoft-dynamics";
 import { SessionAvatar as SessionAvatarSchema, type SessionAvatar } from "@opengeni/contracts";
 import { SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
 import { subscriptionExecutionAuthorityFromTurn } from "./accepted-subscription-authority";
@@ -443,6 +447,9 @@ import {
   ModalRouterProviderCommand,
   readSkillCatalogContext,
   skillCatalogContextItem,
+  REPOSITORY_SKILLS_CONTEXT_PREFIX,
+  readRepositorySkillsContext,
+  repositorySkillsContextItem,
   WORKSPACE_GOVERNANCE_CONTEXT_PREFIX,
   WORKSPACE_GOVERNANCE_NONE,
   readWorkspaceGovernanceContext,
@@ -465,6 +472,7 @@ import { settleExitedWorkerAdmissions } from "./exited-worker-admissions";
 import {
   crashedWorkerOrphanAdmissionSql,
   sessionAttemptPendingWritersSql,
+  sessionMayAwaitQuiescenceSql,
   sessionPendingWriterAttemptIdsSql,
   sessionQuiescenceCandidateAttemptIdsSql,
 } from "./session-attempt-writers";
@@ -545,6 +553,7 @@ export * from "./subscription-core-xai";
 // track C2a); every caller reads the Claude provider route first.
 export * from "./subscription-core-claude-usage";
 export * from "./subscription-core-claude-reads";
+export * from "./subscription-core-claude-limit-resets";
 // Provider-neutral operations outside chat (media, transcription, realtime,
 // usage and catalog probes), bound per provider by the caller.
 export {
@@ -623,7 +632,6 @@ export { buildSlackApiRateLimiter } from "./slack-api-rate-limits";
 export * from "./scheduled-human-wait";
 import {
   CODEX_CAPACITY_RECOVERY_KEY,
-  CODEX_CAPACITY_FALSE_RESUMPTION_LIMIT,
   readCodexCapacityRecovery,
   codexFalseResumptionBackoffMs,
   clearCodexCapacityRecovery,
@@ -1136,12 +1144,13 @@ import {
   ne,
   notInArray,
   or,
+  Param,
   sql,
   type SQL,
   type SQLWrapper,
 } from "drizzle-orm";
 import { anyOf } from "./sql-arrays";
-import type { PgTransactionConfig } from "drizzle-orm/pg-core";
+import { unionAll, type PgTransactionConfig } from "drizzle-orm/pg-core";
 import { getLiveSessionAttemptTurn } from "./live-session-attempt";
 import {
   contextForCausalTurn,
@@ -1188,6 +1197,7 @@ import {
 } from "./new-session-drafts";
 import {
   isRetryableDatabaseTransportFailure,
+  nestedErrorRecords,
   nestedPostgresSqlState,
   runIdempotentPersistenceTransaction,
   safeDatabaseErrorFacts,
@@ -1289,6 +1299,7 @@ import {
 } from "./child-lifecycle-notices";
 import {
   CAPACITY_WAIT_NOTICE_KEY,
+  CAPACITY_WAIT_PARENT_NOTICE_KEY,
   capacityWaitAttention,
   capacityWaitNoticeMarker,
   capacityWaitNoticeNeedsRestating,
@@ -1405,8 +1416,10 @@ export * from "./session-share-links";
 export * from "./work-claims";
 export * from "./managed-human-provisioning";
 export * from "./managed-user-setup";
+export * from "./signup-network";
 export * from "./verified-signup-trial-switch";
 export * from "./managed-auth-new-signups-switch";
+export * from "./nango-integrations";
 export * from "./organization-membership-backfill";
 export * from "./connection-tenancy-backfill";
 export * from "./generated-images";
@@ -1498,6 +1511,7 @@ import {
   setRlsContext,
   setSubjectRlsContext,
   withAccountRls,
+  withDatabaseQueryCancellation,
   withRlsContext,
   withRestoredSessionActivityRlsContext,
   withSessionActivityRlsContext,
@@ -1529,6 +1543,7 @@ export {
   setRlsContext,
   setSubjectRlsContext,
   withAccountRls,
+  withDatabaseQueryCancellation,
   withDatabaseStatementTimeout,
   withRlsContext,
   withSessionActivityRlsContext,
@@ -6215,6 +6230,12 @@ export async function deleteGitHubInstallationBinding(
     eventRouteSecret: Uint8Array | null;
     /** Who removed the installation from the workspace: audited in the same transaction. */
     audit?: DisconnectAuditActor | null;
+    /**
+     * The installation that replaces this one (a reinstall on the same GitHub
+     * account). Its approval choices move to the replacement in the same
+     * transaction; a choice already made there wins.
+     */
+    replacedByInstallationId?: number | undefined;
   },
 ): Promise<boolean> {
   return await withRlsContext(
@@ -6231,6 +6252,17 @@ export async function deleteGitHubInstallationBinding(
         )
         .returning({ id: schema.githubInstallations.id });
       await syncGitHubEventRoutes(scopedDb, input.workspaceId, input.eventRouteSecret);
+      const replacedBy = input.replacedByInstallationId;
+      const moved =
+        rows.length > 0 && replacedBy !== undefined && replacedBy !== input.installationId
+          ? await moveConnectorActionPoliciesInScope(scopedDb, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              fromConnectionId: `github-app:${input.installationId}`,
+              toConnectionId: `github-app:${replacedBy}`,
+              auditSubjectId: input.audit?.subjectId ?? null,
+            })
+          : null;
       if (input.audit && rows.length > 0) {
         await insertDisconnectAuditEventInScope(scopedDb, {
           accountId: input.accountId,
@@ -6243,11 +6275,123 @@ export async function deleteGitHubInstallationBinding(
             provider: "github",
             providerDomain: "github.com",
           },
+          ...(moved
+            ? {
+                details: {
+                  replacedByInstallationId: String(replacedBy),
+                  approvalPoliciesMoved: moved.movedPolicyIds.length,
+                  approvalPoliciesRemoved: moved.removedPolicyIds,
+                },
+              }
+            : {}),
         });
       }
       return rows.length > 0;
     },
   );
+}
+
+/**
+ * Moves one connection's approval choices to the connection that replaced it,
+ * in the caller's scoped transaction, and removes them from the old one. A
+ * choice already made on the new connection wins. Moved rows keep who created
+ * and last changed them, and when; the actor doing the move is audited.
+ */
+async function moveConnectorActionPoliciesInScope(
+  scopedDb: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    fromConnectionId: string;
+    toConnectionId: string;
+    auditSubjectId: string | null;
+  },
+): Promise<{ movedPolicyIds: string[]; removedPolicyIds: string[] }> {
+  const fromConnection = and(
+    eq(schema.connectorActionPolicies.workspaceId, input.workspaceId),
+    eq(schema.connectorActionPolicies.connectionId, input.fromConnectionId),
+  );
+  const previous = await scopedDb
+    .select()
+    .from(schema.connectorActionPolicies)
+    .where(fromConnection)
+    .orderBy(asc(schema.connectorActionPolicies.id))
+    .for("update");
+  if (previous.length === 0) return { movedPolicyIds: [], removedPolicyIds: [] };
+  const moved: Array<typeof schema.connectorActionPolicies.$inferSelect & { from: string }> = [];
+  for (let offset = 0; offset < previous.length; offset += 128) {
+    const batch = previous.slice(offset, offset + 128);
+    const inserted = await scopedDb
+      .insert(schema.connectorActionPolicies)
+      .values(
+        batch.map((policy) => ({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          connectionId: input.toConnectionId,
+          serverId: policy.serverId,
+          toolName: policy.toolName,
+          actionName: policy.actionName,
+          policy: policy.policy,
+          createdBySubjectId: policy.createdBySubjectId,
+          updatedBySubjectId: policy.updatedBySubjectId,
+          createdAt: policy.createdAt,
+          updatedAt: policy.updatedAt,
+        })),
+      )
+      .onConflictDoNothing({
+        target: [
+          schema.connectorActionPolicies.workspaceId,
+          schema.connectorActionPolicies.connectionId,
+          schema.connectorActionPolicies.serverId,
+          schema.connectorActionPolicies.toolName,
+          schema.connectorActionPolicies.actionName,
+        ],
+      })
+      .returning();
+    const scope = (policy: { serverId: string; toolName: string; actionName: string }) =>
+      JSON.stringify([policy.serverId, policy.toolName, policy.actionName]);
+    const sources = new Map(batch.map((policy) => [scope(policy), policy.id]));
+    for (const row of inserted) moved.push({ ...row, from: sources.get(scope(row))! });
+  }
+  const removed = await scopedDb
+    .delete(schema.connectorActionPolicies)
+    .where(fromConnection)
+    .returning({ id: schema.connectorActionPolicies.id });
+  if (input.auditSubjectId && moved.length > 0) {
+    for (let offset = 0; offset < moved.length; offset += 128)
+      await scopedDb.insert(schema.auditEvents).values(
+        moved.slice(offset, offset + 128).map((row) =>
+          withLosslessContentWriteVersion(
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              subjectId: input.auditSubjectId!,
+              action: "connector.action.policy_changed",
+              targetType: "connector_action_policy",
+              targetId: row.id,
+              metadata: {
+                connectionId: row.connectionId,
+                serverId: row.serverId,
+                toolName: row.toolName,
+                actionName: row.actionName,
+                policy: row.policy,
+                version: row.version,
+                previousPolicy: null,
+                previousVersion: null,
+                movedFromConnectionId: input.fromConnectionId,
+                movedFromPolicyId: row.from,
+              },
+            },
+            "metadata",
+            "metadataCodecVersion",
+          ),
+        ),
+      );
+  }
+  return {
+    movedPolicyIds: moved.map((row) => row.id),
+    removedPolicyIds: removed.map((row) => row.id),
+  };
 }
 
 /**
@@ -8190,6 +8334,10 @@ export type CreateCapabilityCatalogItemInput = {
   endpointUrl?: string | null;
   installUrl?: string | null;
   authModel?: string | null;
+  /** A known service's sign-in, when the address identifies it (e.g. Microsoft Dynamics). */
+  authKind?: "oauth2" | null;
+  mcpUrl?: string | null;
+  providerDomain?: string | null;
   metadata?: Record<string, unknown>;
   /**
    * Insert only: an existing workspace row with this id is returned unchanged
@@ -8419,6 +8567,42 @@ export class PortableSkillInstallationVersionRequiredError extends Error {
 
 export class PortableSkillSourcePathConflictError extends Error {
   readonly name = "PortableSkillSourcePathConflictError";
+}
+
+/** The Skill's metadata (for example its description) cannot be stored. */
+export class PortableSkillMetadataError extends Error {
+  readonly name = "PortableSkillMetadataError";
+}
+
+/** Row checks on a Skill's own metadata and files: rejected input, not a fault. */
+const PORTABLE_SKILL_METADATA_CONSTRAINT =
+  /^(?:capability_skill_facets_[a-z_]+_chk|capability_skill_files_[a-z_]+_chk|capability_plugins_text_chk)$/u;
+
+function isPortableSkillMetadataViolation(error: unknown): boolean {
+  for (const record of nestedErrorRecords(error)) {
+    const constraint = record.constraint_name ?? record.constraint;
+    if (typeof constraint === "string" && PORTABLE_SKILL_METADATA_CONSTRAINT.test(constraint))
+      return true;
+  }
+  return false;
+}
+
+const SKILL_FACET_DESCRIPTION_MAX_CHARS = 2048;
+
+/**
+ * The Skill facet stores a one-line summary. SKILL.md descriptions may be YAML
+ * block scalars (`description: |` or `>`) that keep line breaks; fold every
+ * whitespace run to one space. The plugin row and the SKILL.md content keep the
+ * original text, and nothing compares the facet summary back to SKILL.md.
+ */
+export function portableSkillFacetDescription(description: string): string {
+  const line = description.replace(/\s+/gu, " ").trim();
+  if (line.length === 0 || line.length > SKILL_FACET_DESCRIPTION_MAX_CHARS) {
+    throw new PortableSkillMetadataError(
+      `A Skill description must be 1 to ${SKILL_FACET_DESCRIPTION_MAX_CHARS} characters`,
+    );
+  }
+  return line;
 }
 
 export type EnabledMcpCapabilityServer = {
@@ -9117,7 +9301,21 @@ export async function resolveDocumentOriginalFileForSubject(
 }
 
 /** Batch form of requireFileForSubject; unauthorized or missing ids are omitted. */
-/** Ready originals, filtered by owner RLS and provider ACL before pagination. */
+/**
+ * Ready originals the caller can see here, newest first, filtered by owner RLS
+ * and provider ACL before pagination.
+ *
+ * A page costs about its size, not the organization's file count. The files
+ * the caller can see are disjoint sets, and each is read newest first from its
+ * own index, stopping after one page (`fileListCandidates`). Row-level
+ * security still applies to every read. Another person's private file is
+ * readable only through a capability that one function call holds for its
+ * own duration, so no listing returns one.
+ *
+ * The provider ACL function writes a capability row per call, so it runs only
+ * for the page's candidates after they are ordered and limited. A rejected
+ * candidate is skipped and the walk continues after it.
+ */
 export async function listFilesForSubject(
   db: Database,
   input: {
@@ -9127,12 +9325,14 @@ export async function listFilesForSubject(
     scope?: "all" | "workspace" | "personal";
     limit?: number;
     cursor?: string | undefined;
+    /** Cancels the running statement when the caller has gone away. */
+    signal?: AbortSignal | undefined;
   },
 ): Promise<{ files: FileAsset[]; nextCursor: string | null }> {
   const limit = input.limit ?? 30;
   if (!Number.isInteger(limit) || limit < 1 || limit > 50)
     throw new RangeError("Invalid file page size");
-  let after: { id: string; at: string } | null = null;
+  let after: FileListPosition | null = null;
   if (input.cursor) {
     try {
       after = z
@@ -9143,49 +9343,168 @@ export async function listFilesForSubject(
       throw new z.ZodError([{ code: "custom", path: ["cursor"], message: "Invalid file cursor" }]);
     }
   }
-  const reaching = filesReachingWorkspace(input);
-  return withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (tx) => {
-      if (input.subjectId) await setSubjectRlsContext(tx, input.subjectId);
-      const rows = await tx
-        .select({
-          file: schema.files,
-          position: sql<string>`to_char(${schema.files.createdAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
-        })
-        .from(schema.files)
-        .where(
-          and(
-            eq(schema.files.accountId, input.accountId),
-            eq(schema.files.status, "ready"),
-            reaching,
-            input.scope === "workspace"
-              ? isNull(schema.files.privateOwnerSubjectIds)
-              : input.scope === "personal"
-                ? isNotNull(schema.files.privateOwnerSubjectIds)
-                : undefined,
-            sql`google_drive_file_authorized(${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId}::text, ${schema.files.id})`,
-            after
-              ? sql`(${schema.files.createdAt}, ${schema.files.id}) < (${after.at}::text::timestamptz, ${after.id}::uuid)`
-              : undefined,
-          ),
-        )
-        .orderBy(desc(schema.files.createdAt), desc(schema.files.id))
-        .limit(limit + 1);
-      const page = rows.slice(0, limit),
-        last = page.at(-1);
-      return {
-        files: page.map((row) => mapFile(row.file)),
-        nextCursor:
-          rows.length > limit && last
-            ? Buffer.from(JSON.stringify({ id: last.file.id, at: last.position })).toString(
-                "base64url",
-              )
-            : null,
-      };
-    },
+  return withDatabaseQueryCancellation(db, input.signal, () =>
+    withRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (tx) => {
+        if (input.subjectId) await setSubjectRlsContext(tx, input.subjectId);
+        // A person sees all their own files in their Personal workspace. A
+        // read without a person keeps to what reaches this workspace.
+        const personalWorkspace =
+          input.subjectId !== null && input.scope !== "workspace"
+            ? (
+                await rawRows<{ kind: string }>(
+                  tx,
+                  sql`select get_workspace_kind(${input.accountId}::uuid, ${input.workspaceId}::uuid) as kind`,
+                )
+              )[0]?.kind === "personal"
+            : false;
+        const rows: FileListCandidate[] = [];
+        for (let from = after; ;) {
+          const wanted = limit + 1 - rows.length;
+          const candidates = await fileListCandidates(
+            tx,
+            { ...input, personalWorkspace },
+            from,
+            wanted,
+          );
+          const authorized = await providerAuthorizedFileIds(
+            tx,
+            input,
+            candidates.map((row) => row.file.id),
+          );
+          rows.push(...candidates.filter((row) => authorized.has(row.file.id)));
+          const last = candidates.at(-1);
+          if (!last || candidates.length < wanted || rows.length > limit) break;
+          from = { id: last.file.id, at: last.position };
+        }
+        const page = rows.slice(0, limit),
+          last = page.at(-1);
+        return {
+          files: page.map((row) => mapFile(row.file)),
+          nextCursor:
+            rows.length > limit && last
+              ? Buffer.from(JSON.stringify({ id: last.file.id, at: last.position })).toString(
+                  "base64url",
+                )
+              : null,
+        };
+      },
+    ),
   );
+}
+
+type FileListPosition = { id: string; at: string };
+type FileListCandidate = { file: typeof schema.files.$inferSelect; position: string };
+
+/**
+ * The next `limit` files the caller may see, newest first, before the provider
+ * ACL. Each branch is an ordered walk of one index (migrations 1409-1412) that
+ * stops after `limit` rows:
+ *
+ * - shared: this workspace's shared files;
+ * - own files, keyed on their one owner (1431) and the owner the row-level
+ *   security policy reads; a read without an owner sees none. In a Personal
+ *   workspace that is every own file: those that may reach other workspaces
+ *   (reach null or listed) and those that stay where they were made. Elsewhere
+ *   it is the own files made here, plus own files made elsewhere whose reach
+ *   includes here.
+ *
+ * Owner and status are index conditions because subscripting and text
+ * equality are leakproof, which row-level security requires; array operators
+ * and `coalesce` are not. Reach is a partial-index predicate for the same
+ * reason. A walk skips only rows whose explicit reach list leaves this
+ * workspace out.
+ */
+async function fileListCandidates(
+  tx: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    scope?: "all" | "workspace" | "personal";
+    personalWorkspace: boolean;
+  },
+  after: FileListPosition | null,
+  limit: number,
+): Promise<FileListCandidate[]> {
+  const newestFirst = [desc(schema.files.createdAt), desc(schema.files.id)] as const;
+  const walk = (where: SQL | undefined) =>
+    tx
+      .select({
+        file: schema.files,
+        position: sql<string>`to_char(${schema.files.createdAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
+      })
+      .from(schema.files)
+      .where(
+        and(
+          eq(schema.files.accountId, input.accountId),
+          eq(schema.files.status, "ready"),
+          after
+            ? sql`(${schema.files.createdAt}, ${schema.files.id}) < (${after.at}::text::timestamptz, ${after.id}::uuid)`
+            : undefined,
+          where,
+        ),
+      )
+      .orderBy(...newestFirst)
+      .limit(limit);
+  const own = sql`${schema.files.privateOwnerSubjectIds} IS NOT NULL AND ${schema.files.privateOwnerSubjectIds}[1] = nullif(current_setting('opengeni.private_file_owner', true), '')`;
+  const roaming = sql`(${schema.files.reachWorkspaceIds} IS NULL OR cardinality(${schema.files.reachWorkspaceIds}) > 0)`;
+  const branches = [];
+  if (input.scope !== "personal")
+    branches.push(
+      walk(
+        and(
+          eq(schema.files.workspaceId, input.workspaceId),
+          isNull(schema.files.privateOwnerSubjectIds),
+        ),
+      ),
+    );
+  if (input.scope !== "workspace" && input.personalWorkspace)
+    branches.push(
+      walk(and(own, roaming)),
+      walk(
+        and(
+          own,
+          sql`${schema.files.reachWorkspaceIds} IS NOT NULL AND cardinality(${schema.files.reachWorkspaceIds}) = 0`,
+        ),
+      ),
+    );
+  if (input.scope !== "workspace" && !input.personalWorkspace)
+    branches.push(
+      walk(and(own, eq(schema.files.workspaceId, input.workspaceId))),
+      walk(
+        and(
+          own,
+          roaming,
+          ne(schema.files.workspaceId, input.workspaceId),
+          or(
+            isNull(schema.files.reachWorkspaceIds),
+            sql`${input.workspaceId}::uuid = ANY(${schema.files.reachWorkspaceIds})`,
+          ),
+        ),
+      ),
+    );
+  const [first, second, ...rest] = branches;
+  if (!second) return await first!;
+  return await unionAll(first!, second, ...rest)
+    .orderBy(...newestFirst)
+    .limit(limit);
+}
+
+/** The candidates the Google Drive provider ACL allows, one function call each. */
+async function providerAuthorizedFileIds(
+  tx: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string | null },
+  fileIds: readonly string[],
+): Promise<Set<string>> {
+  if (fileIds.length === 0) return new Set();
+  const rows = await rawRows<{ id: string }>(
+    tx,
+    sql`select candidate.id from unnest(${new Param([...fileIds])}::uuid[]) as candidate(id)
+      where google_drive_file_authorized(${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId}::text, candidate.id)`,
+  );
+  return new Set(rows.map((row) => row.id));
 }
 
 export async function getFilesForSubject(
@@ -10968,11 +11287,11 @@ export async function upsertCapabilityCatalogItem(
         endpointUrl: input.endpointUrl ?? null,
         installUrl: input.installUrl ?? null,
         authModel: input.authModel ?? null,
-        providerDomain: null,
+        providerDomain: input.providerDomain ?? null,
         surfaceType: null,
         transport: null,
-        mcpUrl: null,
-        authKind: null,
+        mcpUrl: input.mcpUrl ?? null,
+        authKind: input.authKind ?? null,
         credentialFacts: [],
         tier: null,
         provenance: null,
@@ -11259,7 +11578,25 @@ export async function installPortableSkill(
 ): Promise<InstalledPortableSkill> {
   if (!input.skillActor)
     throw new Error("Portable Skill installation requires a truthful unified Skill actor");
-  const skillActor = input.skillActor;
+  // Fail fast, before any write, with the named error every caller maps.
+  const facetDescription = portableSkillFacetDescription(input.description);
+  try {
+    return await installPortableSkillRows(db, input, facetDescription);
+  } catch (error) {
+    if (!(error instanceof PortableSkillMetadataError) && isPortableSkillMetadataViolation(error))
+      throw new PortableSkillMetadataError("The Skill's metadata cannot be stored", {
+        cause: error,
+      });
+    throw error;
+  }
+}
+
+async function installPortableSkillRows(
+  db: Database,
+  input: InstallPortableSkillInput,
+  facetDescription: string,
+): Promise<InstalledPortableSkill> {
+  const skillActor = input.skillActor!;
   const skillOperationId = input.skillOperationId ?? randomUUID();
   const {
     skillActor: _actor,
@@ -11451,7 +11788,7 @@ export async function installPortableSkill(
             facetId: facet.id,
             capabilityId: input.capabilityId,
             name: input.name,
-            description: input.description,
+            description: facetDescription,
             sourceUrl: input.sourceUrl,
             sourceCommit: input.sourceCommit,
             sourcePath: input.sourcePath,
@@ -14464,6 +14801,7 @@ async function revokeConnectionAuditedInScope(
   updatedBySubjectId: string | null | undefined,
   expectedVersion: number | undefined,
   audit: DisconnectAuditActor | null | undefined,
+  replacementCredentialEncrypted?: string,
 ): Promise<ConnectionMetadataWithVerification | null> {
   if (!audit) {
     return await revokeConnectionInScope(
@@ -14472,6 +14810,7 @@ async function revokeConnectionAuditedInScope(
       connectionId,
       updatedBySubjectId,
       expectedVersion,
+      replacementCredentialEncrypted,
     );
   }
   const [prior] = await db
@@ -14491,6 +14830,7 @@ async function revokeConnectionAuditedInScope(
     connectionId,
     updatedBySubjectId,
     expectedVersion,
+    replacementCredentialEncrypted,
   );
   if (revoked && prior && prior.status !== "revoked") {
     await auditConnectionDisconnectInScope(db, revoked, audit);
@@ -14504,11 +14844,20 @@ async function revokeConnectionInScope(
   connectionId: string,
   updatedBySubjectId?: string | null,
   expectedVersion?: number,
+  /**
+   * When set, the stored credential is replaced in the same write, so the
+   * revoked row no longer holds the provider's tokens (the column is NOT NULL,
+   * so callers pass an encrypted credential without tokens).
+   */
+  replacementCredentialEncrypted?: string,
 ): Promise<ConnectionMetadataWithVerification | null> {
   const [row] = await db
     .update(schema.connections)
     .set({
       status: "revoked",
+      ...(replacementCredentialEncrypted !== undefined
+        ? { credentialEncrypted: replacementCredentialEncrypted }
+        : {}),
       // The version bump invalidates any in-flight refresh's (id, version) CAS,
       // so a racing refresh cannot commit and flip the row back to active.
       version: sql`${schema.connections.version} + 1`,
@@ -14546,6 +14895,12 @@ export async function revokeConnection(
   options: {
     /** A person's, key's or agent's disconnect: audited in the same transaction. */
     audit?: DisconnectAuditActor | null;
+    /**
+     * Replaces the stored credential in the same write (for example an
+     * encrypted credential without tokens once the provider grant is revoked).
+     * Omitted: status-only revocation keeps the stored credential.
+     */
+    replacementCredentialEncrypted?: string | undefined;
   } = {},
 ): Promise<ConnectionMetadataWithVerification | null> {
   return await withConnectionSubjectRls(
@@ -14560,6 +14915,7 @@ export async function revokeConnection(
         updatedBySubjectId,
         expectedVersion,
         options.audit,
+        options.replacementCredentialEncrypted,
       ),
   );
 }
@@ -26933,9 +27289,7 @@ export type SubscriptionCoreWaiterProvider = keyof typeof SUBSCRIPTION_CORE_WAIT
  * names of their legacy waiters, so a wait reads the same before and after
  * the provider's cutover.
  */
-type SubscriptionCoreWaitVocabulary<
-  P extends SubscriptionCoreWaiterProvider = SubscriptionCoreWaiterProvider,
-> = {
+type SubscriptionCoreWaitVocabulary = {
   /** Product name in internal error texts. */
   label: string;
   waitingEventType: "codex.capacity.waiting" | "turn.capacity_waiting";
@@ -26945,8 +27299,6 @@ type SubscriptionCoreWaitVocabulary<
   statusReason: string;
   /** Why pending tool calls close when the turn parks. */
   closeToolsReason: string;
-  /** The false-resumption limit's terminal code (also the status reason). */
-  exhaustedCode: (typeof SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES)[P];
   resumedEvent: (waiter: SubscriptionCoreCodexCapacityWait) => {
     type: "codex.capacity.resumed" | "turn.recovery.requested";
     payload: Record<string, unknown>;
@@ -26967,7 +27319,7 @@ type SubscriptionCoreWaitVocabulary<
 };
 
 const SUBSCRIPTION_CORE_WAIT_VOCABULARY: {
-  [P in SubscriptionCoreWaiterProvider]: SubscriptionCoreWaitVocabulary<P>;
+  [P in SubscriptionCoreWaiterProvider]: SubscriptionCoreWaitVocabulary;
 } = {
   codex: {
     label: "Codex",
@@ -26975,7 +27327,6 @@ const SUBSCRIPTION_CORE_WAIT_VOCABULARY: {
     waitingPayload: { recovery: "codex_capacity", retryable: true, rotated: true },
     statusReason: "codex_capacity",
     closeToolsReason: "codex_capacity_wait",
-    exhaustedCode: SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES.codex,
     resumedEvent: (waiter) => ({
       type: "codex.capacity.resumed",
       payload: {
@@ -27006,7 +27357,6 @@ const SUBSCRIPTION_CORE_WAIT_VOCABULARY: {
     },
     statusReason: "xai_capacity",
     closeToolsReason: "xai_capacity_wait",
-    exhaustedCode: SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES.xai,
     resumedEvent: (waiter) => ({
       type: "turn.recovery.requested",
       payload: {
@@ -27040,7 +27390,6 @@ const SUBSCRIPTION_CORE_WAIT_VOCABULARY: {
     },
     statusReason: "claude_capacity",
     closeToolsReason: "claude_capacity_wait",
-    exhaustedCode: SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES.claude,
     resumedEvent: (waiter) => ({
       type: "turn.recovery.requested",
       payload: {
@@ -27348,7 +27697,6 @@ export function subscriptionCoreCodexNextCheckAt(input: {
 
 export type ArmSubscriptionCoreCodexCapacityWaitResult =
   | { action: "waiting"; waiter: SubscriptionCoreCodexCapacityWait; events: SessionEvent[] }
-  | { action: "stopped"; sessionStatus: "queued" | "failed"; events: SessionEvent[] }
   | { action: "stale"; events: SessionEvent[] };
 
 /**
@@ -27518,20 +27866,20 @@ export async function armSubscriptionCoreCapacityWait(
         }
 
         // A resumed attempt that lands straight back on unavailable capacity
-        // without completing a model call is a false resumption; the same
-        // bounded budget and persisted backoff as the legacy Codex wait apply.
+        // without completing a model call is a false resumption. It delays
+        // the next resume by the persisted backoff; it never ends the turn.
+        // The reconcile resumes only when the turn's own placement would run
+        // (`refreshBeforeReconcile`), so a false resumption is a race with
+        // another turn taking the capacity, and the message is still owed
+        // an answer once capacity returns.
         const recovery = readCodexCapacityRecovery(turn.metadata);
         const falseResumption =
           recovery.resumeGeneration !== null &&
           recovery.resumeGeneration <= turn.executionGeneration;
         const falseResumptions = recovery.falseResumptions + (falseResumption ? 1 : 0);
-        const stopped = falseResumptions >= CODEX_CAPACITY_FALSE_RESUMPTION_LIMIT;
-        const retryNotBefore =
-          falseResumption && !stopped
-            ? new Date(
-                now.getTime() + codexFalseResumptionBackoffMs(falseResumptions),
-              ).toISOString()
-            : recovery.retryNotBefore;
+        const retryNotBefore = falseResumption
+          ? new Date(now.getTime() + codexFalseResumptionBackoffMs(falseResumptions)).toISOString()
+          : recovery.retryNotBefore;
         const recoveryMetadata = {
           ...metadataWithoutTurnDispatchAttempt(turn.metadata),
           [CODEX_CAPACITY_RECOVERY_KEY]: {
@@ -27542,14 +27890,12 @@ export async function armSubscriptionCoreCapacityWait(
         };
         // A long wait is announced once, as it starts: a worker's parent gets
         // child_waiting_capacity, a top-level chat's person an inbox notice.
-        const attention = stopped
-          ? null
-          : capacityWaitAttention({
-              waitReason: input.waitReason,
-              earliestResetAt: input.earliestResetAt,
-              healthRetryAt: input.healthRetryAt ?? null,
-              now,
-            });
+        const attention = capacityWaitAttention({
+          waitReason: input.waitReason,
+          earliestResetAt: input.earliestResetAt,
+          healthRetryAt: input.healthRetryAt ?? null,
+          now,
+        });
         const personNotice =
           attention && !session.parentSessionId
             ? SessionNotificationPostedPayload.parse(
@@ -27557,27 +27903,26 @@ export async function armSubscriptionCoreCapacityWait(
                   turnId: input.turnId,
                   provider,
                   resetsAt: attention.resetsAt,
+                  waitReason: input.waitReason,
                 }),
               )
             : null;
-        const waitingMetadata = personNotice
-          ? {
-              ...recoveryMetadata,
-              [CAPACITY_WAIT_NOTICE_KEY]: capacityWaitNoticeMarker(
-                personNotice.key,
-                attention!.resetsAt,
-              ),
-            }
-          : recoveryMetadata;
-        const waitingPrompt = stopped
-          ? await runnableQueuedTurnExists(tx, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              sources: ["user", "api"],
-            })
-          : false;
-        const sessionStatus = stopped ? (waitingPrompt ? "queued" : "failed") : "waiting_capacity";
+        // A worker's turn remembers the reset its parent is told below (set
+        // once the waiter exists), so a later check can restate it; a short
+        // wait tells the parent nothing.
+        const { [CAPACITY_WAIT_PARENT_NOTICE_KEY]: _toldParent, ...unannouncedMetadata } =
+          recoveryMetadata as Record<string, unknown>;
+        const waitingMetadata = {
+          ...unannouncedMetadata,
+          ...(personNotice
+            ? {
+                [CAPACITY_WAIT_NOTICE_KEY]: capacityWaitNoticeMarker(
+                  personNotice.key,
+                  attention!.resetsAt,
+                ),
+              }
+            : {}),
+        };
         await closeSessionTurnAttemptInTransaction(tx, {
           id: input.attemptId,
           accountId: input.accountId,
@@ -27585,7 +27930,7 @@ export async function armSubscriptionCoreCapacityWait(
           sessionId: input.sessionId,
           turnId: input.turnId,
           executionGeneration: turn.executionGeneration,
-          outcome: stopped ? "failed" : "waiting_capacity",
+          outcome: "waiting_capacity",
           closedAt: now,
         });
 
@@ -27603,24 +27948,14 @@ export async function armSubscriptionCoreCapacityWait(
             retryNotBefore ? Date.parse(retryNotBefore) : 0,
           ),
         );
-        let waiter: SubscriptionCoreCodexCapacityWait | null = null;
-        if (stopped) {
-          // The session's waiter row, whatever provider armed it (`existing`
-          // is read without a provider).
-          if (existing)
-            await tx.execute(sql`delete from subscription_capacity_waiters
-              where workspace_id = ${input.workspaceId}::uuid
-                and session_id = ${input.sessionId}::uuid
-                and waiter_id = ${existing.waiterId}::uuid`);
-        } else {
-          // Arming follows a placement evaluation, so this generation has
-          // already observed its own initial revision; only a later capacity
-          // change creates pending wake work.
-          const generation = (existing?.generation ?? 0) + 1;
-          const wakeRevision = (existing?.wakeRevision ?? 0) + 1;
-          const [row] = await rawRows<SubscriptionCoreCodexWaiterRow>(
-            tx,
-            sql`insert into subscription_capacity_waiters (
+        // Arming follows a placement evaluation, so this generation has
+        // already observed its own initial revision; only a later capacity
+        // change creates pending wake work.
+        const generation = (existing?.generation ?? 0) + 1;
+        const wakeRevision = (existing?.wakeRevision ?? 0) + 1;
+        const [row] = await rawRows<SubscriptionCoreCodexWaiterRow>(
+          tx,
+          sql`insert into subscription_capacity_waiters (
                 account_id, workspace_id, session_id, turn_id, provider, candidate_providers, wait_reason,
                 policy_hash, reset_kind, refresh_attempt, resumed_update_id, earliest_reset_at,
                 generation, wake_revision, observed_wake_revision, next_check_at,
@@ -27659,10 +27994,9 @@ export async function armSubscriptionCoreCapacityWait(
                     updated_at = excluded.updated_at
                 where subscription_capacity_waiters.account_id = excluded.account_id
               returning ${SUBSCRIPTION_CORE_CODEX_WAITER_COLUMNS}`,
-          );
-          if (!row) throw new Error(`Core ${label} capacity wait arm returned no waiter row`);
-          waiter = mapSubscriptionCoreCodexWaiter(row);
-        }
+        );
+        if (!row) throw new Error(`Core ${label} capacity wait arm returned no waiter row`);
+        const waiter = mapSubscriptionCoreCodexWaiter(row);
 
         let sequence = session.lastSequence;
         const closedTools = await closePendingSessionToolCallsInTransaction(tx, {
@@ -27673,7 +28007,7 @@ export async function armSubscriptionCoreCapacityWait(
           reason: vocabulary.closeToolsReason,
           sequence,
           now,
-          preserveInterruptionRows: !stopped,
+          preserveInterruptionRows: true,
         });
         sequence = closedTools.sequence;
         const inserted = await tx
@@ -27686,12 +28020,12 @@ export async function armSubscriptionCoreCapacityWait(
                   workspaceId: input.workspaceId,
                   sessionId: input.sessionId,
                   sequence: ++sequence,
-                  type: stopped ? "turn.failed" : vocabulary.waitingEventType,
+                  type: vocabulary.waitingEventType,
                   payload: {
                     ...input.failurePayload,
                     ...vocabulary.waitingPayload,
-                    waiterId: waiter?.waiterId ?? existing?.waiterId ?? null,
-                    generation: waiter?.generation ?? existing?.generation ?? null,
+                    waiterId: waiter.waiterId,
+                    generation: waiter.generation,
                     goalId,
                     goalVersion,
                     blockedTurnGeneration: turn.executionGeneration,
@@ -27700,17 +28034,6 @@ export async function armSubscriptionCoreCapacityWait(
                     earliestResetAt: input.earliestResetAt?.toISOString() ?? null,
                     nextCheckAt: nextCheckAt.toISOString(),
                     falseResumptions,
-                    ...(stopped
-                      ? {
-                          error:
-                            "Automatic capacity recovery stopped after 10 resumptions returned immediately to unavailable capacity. Use Retry or send Continue after checking subscription capacity.",
-                          code: vocabulary.exhaustedCode,
-                          recovery: "user_message",
-                          recoveryExhausted: true,
-                          retryable: false,
-                          ...("rotated" in vocabulary.waitingPayload ? { rotated: false } : {}),
-                        }
-                      : {}),
                   },
                   turnId: input.turnId,
                   turnGeneration: turn.executionGeneration,
@@ -27725,8 +28048,8 @@ export async function armSubscriptionCoreCapacityWait(
                   sequence: ++sequence,
                   type: "session.status.changed",
                   payload: {
-                    status: sessionStatus,
-                    reason: stopped ? vocabulary.exhaustedCode : vocabulary.statusReason,
+                    status: "waiting_capacity",
+                    reason: vocabulary.statusReason,
                   },
                   turnId: input.turnId,
                   turnGeneration: turn.executionGeneration,
@@ -27760,11 +28083,23 @@ export async function armSubscriptionCoreCapacityWait(
         const [waitingTurn] = await tx
           .update(schema.sessionTurns)
           .set({
-            status: stopped ? "failed" : "waiting_capacity",
+            status: "waiting_capacity",
             activeAttemptId: null,
-            metadata: waitingMetadata,
+            metadata:
+              attention && session.parentSessionId
+                ? {
+                    ...waitingMetadata,
+                    [CAPACITY_WAIT_PARENT_NOTICE_KEY]: capacityWaitNoticeMarker(
+                      childWaitingCapacityDedupeKey({
+                        childSessionId: input.sessionId,
+                        waiterId: waiter.waiterId,
+                      }),
+                      attention.resetsAt,
+                    ),
+                  }
+                : waitingMetadata,
             version: turn.version + 1,
-            finishedAt: stopped ? now : null,
+            finishedAt: null,
             updatedAt: now,
           })
           .where(
@@ -27780,10 +28115,9 @@ export async function armSubscriptionCoreCapacityWait(
         const [waitingSession] = await tx
           .update(schema.sessions)
           .set({
-            status: sessionStatus,
-            activeTurnId: stopped ? null : input.turnId,
+            status: "waiting_capacity",
+            activeTurnId: input.turnId,
             lastSequence: sequence,
-            ...(stopped ? { queueVersion: session.queueVersion + 1 } : {}),
             updatedAt: now,
           })
           .where(
@@ -27796,38 +28130,10 @@ export async function armSubscriptionCoreCapacityWait(
           )
           .returning({ id: schema.sessions.id });
         if (!waitingSession) throw new Error(`Core ${label} capacity session changed during arm`);
-        if (stopped) {
-          await cancelTurnInteractionInterventionsInTransaction(tx, input);
-          await settleSessionMaintenanceInTransaction(tx, input);
-          const terminalEvent = inserted[0]!;
-          await projectSessionRealtimeDelegationTerminalInTransaction(tx, {
-            ...input,
-            turnStatus: "failed",
-            terminalEvent: {
-              id: terminalEvent.id,
-              type: "turn.failed",
-              payload: sessionEventPayloadRecord(
-                terminalEvent.payload,
-                terminalEvent.payloadCodecVersion,
-              ),
-            },
-            now,
-          });
-          await enqueueFailedChildOutboxForTurnTx(tx, input.workspaceId, session, turn);
-          await tx
-            .update(schema.sessionGoals)
-            .set({ continuationSuppressedTurnId: turn.id, updatedAt: now })
-            .where(
-              and(
-                eq(schema.sessionGoals.workspaceId, input.workspaceId),
-                eq(schema.sessionGoals.sessionId, input.sessionId),
-                eq(schema.sessionGoals.status, "active"),
-              ),
-            );
-        } else if (attention) {
+        if (attention) {
           await enqueueChildWaitingCapacityOutboxTx(tx, input.workspaceId, session, {
             turnId: input.turnId,
-            waiterId: waiter!.waiterId,
+            waiterId: waiter.waiterId,
             provider,
             nextCheckAt,
             resetsAt: attention.resetsAt,
@@ -27844,14 +28150,7 @@ export async function armSubscriptionCoreCapacityWait(
               and generation = ${input.leaseFence.generation}`);
         }
         const events = [...closedTools.events, ...inserted.map(mapEvent)];
-        if (stopped) {
-          return {
-            action: "stopped",
-            sessionStatus: waitingPrompt ? "queued" : "failed",
-            events,
-          } as const;
-        }
-        return { action: "waiting", waiter: waiter!, events } as const;
+        return { action: "waiting", waiter, events } as const;
       }),
   );
 }
@@ -27943,14 +28242,32 @@ export async function reconcileSubscriptionCoreCapacityWait(
           return { action: "stale", events: [] } as const;
         }
         const vocabulary = subscriptionCoreWaitVocabulary(waiterRead.provider);
+        // A worker's parent is locked with it, as for every child lifecycle
+        // notice: the wait below may restate its reset to the parent.
+        const [preview] = await tx
+          .select({ parentSessionId: schema.sessions.parentSessionId })
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          )
+          .limit(1);
         const locks = await lockSessionEventWriteRows(tx, {
           workspaceId: input.workspaceId,
           controlLock: "already_locked",
           workspaceLock: "already_locked",
-          sessionIds: [input.sessionId],
+          sessionIds: [
+            input.sessionId,
+            ...(preview?.parentSessionId ? [preview.parentSessionId] : []),
+          ],
           turnIds: [waiterRead.blockedTurnId],
         });
-        const session = locks.sessions[0];
+        const session = locks.sessions.find((row) => row.id === input.sessionId);
+        if (session && session.parentSessionId !== (preview?.parentSessionId ?? null)) {
+          throw new Error(`Session parent changed while locking: ${input.sessionId}`);
+        }
         const blockedTurn = locks.turns[0];
         const effectiveControl = session
           ? await evaluateSessionControl(tx, input.workspaceId, input.sessionId, {
@@ -28102,14 +28419,16 @@ export async function reconcileSubscriptionCoreCapacityWait(
             waiter.waitReason !== waitEvaluation.waitReason
               ? subscriptionCapacityWaitReasonText(waitEvaluation.waitReason, vocabulary.label)
               : null;
-          // A top-level chat's person is told again, in place, once the reset
-          // their notification named no longer holds (it passed without
-          // capacity, or a longer limit binds), and told for the first time
-          // when a short wait has become a long one. Only an evaluation that
-          // found no capacity says when it returns; a held false-resumption
-          // delay or legacy evaluation leaves the notice as it is.
+          // Whoever was told when the wait ends (a top-level chat's person,
+          // or a worker's parent) is told again once the reset they heard no
+          // longer holds (it passed without capacity, or a longer limit
+          // binds), and told for the first time when a short wait has become
+          // a long one; the session's timeline gets a waiting event naming
+          // the reset that now holds. Only an evaluation that found no
+          // capacity says when it returns; a held false-resumption delay or
+          // legacy evaluation restates nothing.
           const attention =
-            session.parentSessionId || evaluation.kind !== "wait"
+            evaluation.kind !== "wait"
               ? null
               : capacityWaitAttention({
                   waitReason: waitEvaluation.waitReason,
@@ -28117,29 +28436,57 @@ export async function reconcileSubscriptionCoreCapacityWait(
                   healthRetryAt: waitEvaluation.healthRetryAt,
                   now,
                 });
-          const openNotice = readCapacityWaitNotice(blockedTurn.metadata);
+          const toldKey = session.parentSessionId
+            ? CAPACITY_WAIT_PARENT_NOTICE_KEY
+            : CAPACITY_WAIT_NOTICE_KEY;
+          const told = readCapacityWaitNotice(blockedTurn.metadata, toldKey);
+          const restate =
+            attention !== null &&
+            (!told || capacityWaitNoticeNeedsRestating(told, attention.resetsAt));
+          // What agents see (a worker's parent woken by a notice, the
+          // session's own timeline) is restated only for a real change: the
+          // first long wait, a told time that passed without capacity, a
+          // limit's reset that now binds later, or a reset that became
+          // unknown. A health-retry time that moves later at each check while
+          // the told time still lies ahead would otherwise wake the parent at
+          // every check; the person's silent in-place notification still
+          // follows it.
+          const toldTimePassed =
+            typeof told?.resetsAt === "string" && Date.parse(told.resetsAt) <= now.getTime();
+          const restateToAgents =
+            restate &&
+            (!told ||
+              toldTimePassed ||
+              waitEvaluation.earliestResetAt !== null ||
+              attention!.resetsAt === null);
+          const openNotice = session.parentSessionId ? null : told;
           const personNotice =
-            attention &&
-            (!openNotice || capacityWaitNoticeNeedsRestating(openNotice, attention.resetsAt))
+            restate && !session.parentSessionId
               ? SessionNotificationPostedPayload.parse({
                   ...capacityWaitNotificationPayload({
                     turnId: blockedTurn.id,
                     provider: waiter.provider,
-                    resetsAt: attention.resetsAt,
+                    resetsAt: attention!.resetsAt,
+                    waitReason: waitEvaluation.waitReason,
                   }),
                   // Same key: the open notification is updated in place, silently.
                   replaced: openNotice !== null,
                 })
               : null;
+          const waitingText =
+            changedReasonText ??
+            (restateToAgents
+              ? subscriptionCapacityWaitReasonText(waitEvaluation.waitReason, vocabulary.label)
+              : null);
           const restated = [
-            ...(changedReasonText
+            ...(waitingText
               ? [
                   {
                     type: vocabulary.waitingEventType,
                     payload: {
                       ...vocabulary.waitingPayload,
                       code: "subscription_capacity_unavailable",
-                      error: changedReasonText,
+                      error: waitingText,
                       waitReason: waitEvaluation.waitReason,
                       actionRequired: subscriptionCapacityWaitNeedsAction(
                         waitEvaluation.waitReason,
@@ -28191,18 +28538,37 @@ export async function reconcileSubscriptionCoreCapacityWait(
               );
             restatedEvents = insertedEvents.map(mapEvent);
           }
-          if (personNotice) {
-            // The turn remembers what the notification now says, and its key
-            // for the withdrawal when the wait ends.
+          // A worker's parent hears the restated reset in a new notice (the
+          // system-update outbox delivers it), keyed by that reset so it never
+          // collides with the arm's notice or an earlier restatement.
+          const parentNoticeKey =
+            restateToAgents && session.parentSessionId
+              ? childWaitingCapacityDedupeKey({
+                  childSessionId: session.id,
+                  waiterId: waiter.waiterId,
+                  restatedResetsAt: attention!.resetsAt?.toISOString() ?? null,
+                })
+              : null;
+          if (parentNoticeKey) {
+            await enqueueChildWaitingCapacityOutboxTx(tx, input.workspaceId, session, {
+              turnId: blockedTurn.id,
+              waiterId: waiter.waiterId,
+              provider: waiter.provider,
+              nextCheckAt,
+              resetsAt: attention!.resetsAt,
+              restated: true,
+            });
+          }
+          const noticeKey = personNotice?.key ?? parentNoticeKey;
+          if (noticeKey) {
+            // The turn remembers what it said and to whom; the person's
+            // notification key also serves its withdrawal when the wait ends.
             const [noticedTurn] = await tx
               .update(schema.sessionTurns)
               .set({
                 metadata: {
                   ...blockedTurn.metadata,
-                  [CAPACITY_WAIT_NOTICE_KEY]: capacityWaitNoticeMarker(
-                    personNotice.key,
-                    attention!.resetsAt,
-                  ),
+                  [toldKey]: capacityWaitNoticeMarker(noticeKey, attention!.resetsAt),
                 },
                 version: blockedTurn.version + 1,
                 updatedAt: now,
@@ -31755,17 +32121,21 @@ export async function resolveAttemptConnectorToolDecision(
     serverId: string;
     toolName: string;
     defaultDecision: "allow" | "ask";
+    /** Decide from the resolved policy instead of its plain decision. */
+    decide?: (resolved: ResolvedConnectorActionPolicy) => "allow" | "ask" | "block";
   },
 ): Promise<"allow" | "ask" | "block"> {
+  const { decide, ...policyInput } = input;
   return await withRlsContext(
     db,
     { accountId: identity.accountId, workspaceId: identity.workspaceId },
     async (scopedDb) => {
       const snapshot = await connectorActionAttemptSnapshot(scopedDb, identity);
       const resolved = resolveConnectorActionPolicy(snapshot, {
-        ...input,
-        actionName: input.toolName,
+        ...policyInput,
+        actionName: policyInput.toolName,
       });
+      if (decide) return decide(resolved);
       return resolved.managed ? connectorActionPolicyDecision(resolved) : input.defaultDecision;
     },
   );
@@ -32715,9 +33085,10 @@ async function existingSessionForCreateKey(
   tx: Database,
   workspaceId: string,
   createIdempotencyKey: string,
-): Promise<typeof schema.sessions.$inferSelect | undefined> {
+): Promise<SessionRowWithSkills | undefined> {
+  // A replay returns the complete existing Session, so this reads its Skills too.
   const [existing] = await tx
-    .select()
+    .select(sessionRowWithSkillsColumns)
     .from(schema.sessions)
     .where(
       and(
@@ -33265,7 +33636,7 @@ async function createSessionInTransaction(
         input.codeSearchDeploymentPolicy ?? codeSearchDeploymentPolicyForCreate(),
         id,
       );
-  let insertedRows: (typeof schema.sessions.$inferSelect)[];
+  let insertedRows: SessionRowWithSkills[];
   let privateCreateCapabilityId: string | null = null;
   let privateCreateOwnerMembershipId: string | null = null;
   let privateCreateOwnerSubjectId: string | null = null;
@@ -33404,7 +33775,6 @@ async function createSessionInTransaction(
         titleSource: "agent",
         resources: input.resources,
         removedRepositories,
-        skills: input.skills ?? [],
         tools: input.tools ?? [],
         toolPolicy: input.toolPolicy ?? {
           mode: "explicit",
@@ -33489,6 +33859,9 @@ async function createSessionInTransaction(
       "initialMessage",
       "initialMessageCodecVersion",
     );
+    // Skill folders are written through `sessionSkillSets`, never as part of
+    // the `sessions` row model (see that table's comment).
+    const skills = input.skills ?? [];
     if (
       input.createdByActor &&
       parentTurnId &&
@@ -33504,14 +33877,18 @@ async function createSessionInTransaction(
       const columns = getTableColumns(schema.sessions);
       // The creation seam's column allow-list predates removal records; the
       // inherited records are written right after, in this transaction.
-      const valuesByColumn = Object.fromEntries(
-        Object.entries(insertValues)
+      const valuesByColumn = Object.fromEntries([
+        ...Object.entries(insertValues)
           .filter(([key, value]) => value !== undefined && key !== "removedRepositories")
           .map(([key, value]) => {
             const column = columns[key as keyof typeof columns];
-            return [column.name, agentChildCreationColumnValue(column, value)];
+            return [column.name, agentChildCreationColumnValue(column, value)] as const;
           }),
-      );
+        [
+          schema.sessionSkillSets.skills.name,
+          agentChildCreationColumnValue(schema.sessionSkillSets.skills, skills),
+        ] as const,
+      ]);
       const actor = input.createdByActor;
       const created = await tx.execute<{
         id: string;
@@ -33527,17 +33904,35 @@ async function createSessionInTransaction(
               .update(schema.sessions)
               .set({ removedRepositories })
               .where(eq(schema.sessions.id, created[0]!.id))
-              .returning()
-          : await tx.select().from(schema.sessions).where(eq(schema.sessions.id, created[0]!.id));
+              .returning(sessionRowWithSkillsColumns)
+          : await tx
+              .select(sessionRowWithSkillsColumns)
+              .from(schema.sessions)
+              .where(eq(schema.sessions.id, created[0]!.id));
     } else {
       // Non-agent creates, unscoped legacy creates and turns with no initiating
       // human retain their original path. Never infer the request subject from
       // readable parent IDs: these creates gain no machine-tree witness.
-      insertedRows = await tx
+      const [insertedRow] = await tx
         .insert(schema.sessions)
         .values(insertValues)
         .onConflictDoNothing()
         .returning();
+      insertedRows = !insertedRow
+        ? []
+        : skills.length === 0
+          ? [{ ...insertedRow, skills: [] }]
+          : await tx
+              .update(schema.sessionSkillSets)
+              .set({ skills })
+              .where(
+                and(
+                  eq(schema.sessionSkillSets.workspaceId, input.workspaceId),
+                  eq(schema.sessionSkillSets.id, insertedRow.id),
+                ),
+              )
+              .returning({ skills: schema.sessionSkillSets.skills })
+              .then((rows) => rows.map((row) => ({ ...insertedRow, skills: row.skills })));
     }
     if (privateCreateCapabilityId) {
       await closePrivateSessionCreateCapability(tx, privateCreateCapabilityId);
@@ -33732,7 +34127,7 @@ export async function getSessionByCreateIdempotencyKey(
 ): Promise<Session | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
-      .select()
+      .select(sessionRowWithSkillsColumns)
       .from(schema.sessions)
       .where(
         and(
@@ -33995,11 +34390,25 @@ async function readSession(
   presentation: "full" | "model_gate",
 ): Promise<Session | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.sessions)
-      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
-      .limit(1);
+    // The model gate returns only the model fields, so it leaves the Skill
+    // folders unread; a full read takes them from the same statement.
+    const sessionWhere = and(
+      eq(schema.sessions.workspaceId, workspaceId),
+      eq(schema.sessions.id, sessionId),
+    );
+    const [row] =
+      presentation === "full"
+        ? await scopedDb
+            .select(sessionRowWithSkillsColumns)
+            .from(schema.sessions)
+            .where(sessionWhere)
+            .limit(1)
+        : await scopedDb
+            .select()
+            .from(schema.sessions)
+            .where(sessionWhere)
+            .limit(1)
+            .then((rows) => rows.map((sessionRow) => ({ ...sessionRow, skills: [] })));
     if (!row) return null;
     // mapSessionWithControl applies the effective policy after loading control.
     // Do not perform the same policy projection twice in this scoped read.
@@ -35255,7 +35664,7 @@ export async function getAnySessionInGroup(
 ): Promise<Session | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
-      .select()
+      .select(sessionRowWithSkillsColumns)
       .from(schema.sessions)
       .where(
         and(
@@ -35361,8 +35770,8 @@ export type SessionListFilterOptions = {
   siteConversations?: "include" | "group";
   /** Exact workspace project; null selects unfiled sessions. */
   channelId?: string | null;
-  /** Exact frozen creator identity. */
-  createdBy?: { kind: "subject" | "service"; subjectId: string };
+  /** Exact frozen creator identity; without a kind, every session the subject created. */
+  createdBy?: { kind?: "subject" | "service"; subjectId: string };
   /** Inclusive activity lower bound. */
   updatedFrom?: Date;
   /** Exclusive activity upper bound. */
@@ -35612,7 +36021,73 @@ function mapSessionPin(
 type SessionRow = typeof schema.sessions.$inferSelect & {
   currentInputWait?: Session["inputWait"];
   meaningfulSequence?: number;
+  /** See sessionFailureHandledByParentSql. */
+  failureHandled?: boolean;
 };
+
+/** A session row with its Skill folders, which a complete `Session` carries. */
+type SessionRowWithSkills = SessionRow & { skills: unknown[] };
+
+/**
+ * Every `sessions` row column plus the Skill folders, for readers that return
+ * a complete `Session` and must read both in one statement. Every other reader
+ * selects the row without them; see `schema.sessionSkillSets`.
+ */
+const sessionRowWithSkillsColumns = {
+  ...getTableColumns(schema.sessions),
+  skills: schema.sessionSkillSets.skills,
+};
+
+/**
+ * A Session for a response that never carries its Skill folders, such as the
+ * compact chat projection. Its readers leave the folders unread.
+ */
+export type SessionWithoutSkills = Omit<Session, "skills">;
+
+/** Whether a complete-Session reader also reads the Skill folders. */
+export type SessionSkillsRead = "read" | "omit";
+
+/**
+ * The columns of a complete-Session read. Without the Skill folders, SQL
+ * substitutes an empty set before transfer, so mapping is unchanged and the
+ * stored folders are never detoasted; `omitSessionSkills` then removes the key.
+ */
+function sessionReadColumns(skills: SessionSkillsRead) {
+  return skills === "read"
+    ? sessionRowWithSkillsColumns
+    : {
+        ...getTableColumns(schema.sessions),
+        skills: sql<SessionRowWithSkills["skills"]>`'[]'::jsonb`,
+      };
+}
+
+function omitSessionSkills<S extends Session>(session: S): Omit<S, "skills"> {
+  const { skills: _unread, ...rest } = session;
+  return rest;
+}
+
+/**
+ * The Skill folders of sessions whose rows the caller already holds locked, so
+ * they match the rows it read without them. Unlocked readers of a complete
+ * Session select `sessionRowWithSkillsColumns` in one statement instead.
+ */
+async function readSessionSkills(
+  db: Database,
+  workspaceId: string,
+  sessionIds: readonly string[],
+): Promise<Map<string, unknown[]>> {
+  if (sessionIds.length === 0) return new Map();
+  const rows = await db
+    .select({ id: schema.sessionSkillSets.id, skills: schema.sessionSkillSets.skills })
+    .from(schema.sessionSkillSets)
+    .where(
+      and(
+        eq(schema.sessionSkillSets.workspaceId, workspaceId),
+        anyOf(schema.sessionSkillSets.id, [...new Set(sessionIds)]),
+      ),
+    );
+  return new Map(rows.map((row) => [row.id, row.skills]));
+}
 
 /**
  * Turn sources a person starts: a human or API message, or an operator's
@@ -35735,11 +36210,11 @@ function sessionInputWaitDecidingTurnSql(
 }
 
 /** One bounded query in the caller's RLS scope; never infer waits from history text. */
-async function withCurrentSessionInputWait(
+async function withCurrentSessionInputWait<Row extends SessionRow>(
   db: Database,
   workspaceId: string,
-  rows: readonly SessionRow[],
-): Promise<SessionRow[]> {
+  rows: readonly Row[],
+): Promise<Row[]> {
   const candidates = rows.filter(
     (row) =>
       row.status === "idle" && !row.activeTurnId && row.inputWaitTurnId && row.inputWaitUntil,
@@ -35809,12 +36284,12 @@ export function currentSessionInputWaitTurnsQuery(
  * meaningful frontier; raw deltas and housekeeping must not create unread dots.
  * The compatibility column may lag raw deltas but cannot lead the durable cursor.
  */
-async function canonicalSessionRowsFromEventCursors(
+async function canonicalSessionRowsFromEventCursors<Row extends SessionRow>(
   db: Database,
   workspaceId: string,
-  rows: readonly SessionRow[],
+  rows: readonly Row[],
   includeEffectivePolicy = true,
-): Promise<SessionRow[]> {
+): Promise<Row[]> {
   if (rows.length === 0) return [];
   const sessionIds = [...new Set(rows.map((row) => row.id))];
   const cursors = await db
@@ -35833,6 +36308,7 @@ async function canonicalSessionRowsFromEventCursors(
       ),
     );
   const cursorBySessionId = new Map(cursors.map((cursor) => [cursor.sessionId, cursor]));
+  const handledFailures = await sessionIdsWithHandledFailure(db, workspaceId, rows);
   const canonical = (await withCurrentSessionInputWait(db, workspaceId, rows)).map((row) => {
     const cursor = cursorBySessionId.get(row.id);
     if (
@@ -35847,6 +36323,7 @@ async function canonicalSessionRowsFromEventCursors(
       ...row,
       lastSequence: cursor.lastSequence,
       meaningfulSequence: cursor.meaningfulSequence,
+      ...(handledFailures.has(row.id) ? { failureHandled: true } : {}),
     };
   });
   return includeEffectivePolicy
@@ -35957,6 +36434,89 @@ const EMPTY_SESSION_TREE_STATS: SessionTreeStats = {
   attentionSince: null,
   truncated: false,
 };
+
+/**
+ * Whether a failed session's failure already belongs to an agent rather than a
+ * person. The check is bound to the failure episode itself: the newest terminal
+ * outbox row the child wrote for its parent (committed in the same transaction
+ * as the failure) must be a failure, and the parent's copy of that exact notice
+ * (same dedupe key) must have been claimed into a parent turn (`delivered`).
+ * The parent agent then owns the follow-up (retry, restart or replace), so the
+ * rail does not ask a person to review it.
+ *
+ * Everything else stays unhandled, so a failure nobody took on keeps its red
+ * marker: a root session; a notice not yet delivered, still pending (parent
+ * paused or not yet run), dropped because the parent was cancelled or archived,
+ * or settled without the parent seeing it (`superseded`, `cancelled`,
+ * `failed`); and a child that finished another turn after that notice (for
+ * example one retired without a new notice), whose newer failure is not the
+ * one the parent saw. Viewer-independent by design.
+ */
+function sessionFailureHandledByParentSql(
+  workspaceId: string,
+  sessionId: SQL,
+  parentSessionId: SQL,
+): SQL {
+  return sql`(${parentSessionId} is not null and coalesce((
+    select episode.classification = 'failure'
+      and exists (
+        select 1
+        from ${schema.sessionSystemUpdates} notice
+        where notice.workspace_id = ${workspaceId}
+          and notice.session_id = ${parentSessionId}
+          and notice.dedupe_key = episode.dedupe_key
+          and notice.state = 'delivered'
+      )
+      and not exists (
+        select 1
+        from ${schema.sessionTurns} later
+        where later.workspace_id = ${workspaceId}
+          and later.session_id = ${sessionId}
+          and later.finished_at is not null
+          and later.finished_at > episode.created_at
+          -- The failed turn's own notice is keyed by that turn; any other
+          -- turn is newer work.
+          and episode.dedupe_key <> ${childFailedTurnDedupeKeySql(sessionId, sql`later.id`)}
+      )
+    from ${schema.sessionSystemUpdateOutbox} episode
+    where episode.workspace_id = ${workspaceId}
+      and episode.source_session_id = ${sessionId}
+      and episode.target_session_id = ${parentSessionId}
+      and episode.kind = 'child_terminal_result'
+    order by episode.created_at desc, episode.id desc
+    limit 1
+  ), false))`;
+}
+
+/** Failed sessions among `rows` whose failure their parent agent consumed. */
+async function sessionIdsWithHandledFailure(
+  db: Database,
+  workspaceId: string,
+  rows: readonly Pick<SessionRow, "id" | "status" | "parentSessionId">[],
+): Promise<Set<string>> {
+  const failedChildIds = [
+    ...new Set(
+      rows.filter((row) => row.status === "failed" && row.parentSessionId).map((row) => row.id),
+    ),
+  ];
+  if (failedChildIds.length === 0) return new Set();
+  const handled = await rawRows<{ id: string }>(
+    db,
+    sql`
+      select child.id
+      from ${schema.sessions} child
+      where child.workspace_id = ${workspaceId}
+        and ${anyOf(sql`child.id`, failedChildIds, "uuid")}
+        and child.status = 'failed'
+        and ${sessionFailureHandledByParentSql(
+          workspaceId,
+          sql`child.id`,
+          sql`child.parent_session_id`,
+        )}
+    `,
+  );
+  return new Set(handled.map((row) => row.id));
+}
 
 /**
  * Remove control metadata derived from sessions other than the exact target.
@@ -36140,6 +36700,7 @@ export async function sessionTreeStatsForSessions(
         -- without carrying a path, and the depth bound caps the work.
         with recursive descendants(
           id,
+          parent_session_id,
           status,
           active_turn_id,
           input_wait_until,
@@ -36150,6 +36711,7 @@ export async function sessionTreeStatsForSessions(
         ) as (
           select
             root.id,
+            root.parent_session_id,
             root.status,
             root.active_turn_id,
             root.input_wait_until,
@@ -36178,6 +36740,7 @@ export async function sessionTreeStatsForSessions(
 
           select
             child.id,
+            child.parent_session_id,
             child.status,
             child.active_turn_id,
             child.input_wait_until,
@@ -36215,8 +36778,8 @@ export async function sessionTreeStatsForSessions(
         ), bounded as materialized (
           -- PostgreSQL evaluates the recursive producer only as far as this
           -- unsorted LIMIT is consumed. One extra descendant is lookahead.
-          select id, status, active_turn_id, input_wait_until, input_wait_turn_id,
-            last_sequence, effective_pause_revision, depth
+          select id, parent_session_id, status, active_turn_id, input_wait_until,
+            input_wait_turn_id, last_sequence, effective_pause_revision, depth
           from descendants
           limit ${SESSION_TREE_STATS_MAX_DESCENDANTS + 2}
         ), numbered as (
@@ -36235,7 +36798,21 @@ export async function sessionTreeStatsForSessions(
                 else personal.acknowledged_sequence
               end,
               0
-            ) as unread
+            ) as unread,
+            -- Probed only for unread failed descendants, the only ones a
+            -- handled verdict changes; see sessionFailureHandledByParentSql.
+            case when numbered.status = 'failed' and ${subjectId ?? null}::text is not null
+              and numbered.last_sequence > coalesce(
+                case
+                  when personal.manually_unread_through is not null then -1
+                  else personal.acknowledged_sequence
+                end,
+                0
+              ) then ${sessionFailureHandledByParentSql(
+                workspaceId,
+                sql`numbered.id`,
+                sql`numbered.parent_session_id`,
+              )} else false end as failure_handled
           from numbered
           left join ${schema.sessionPins} personal
             on ${subjectId ?? null}::text is not null
@@ -36289,8 +36866,13 @@ export async function sessionTreeStatsForSessions(
               )
           )::int as "pausedWorkDescendants",
           count(*) filter (where status = 'failed')::int as "failedDescendants",
-          count(*) filter (where status = 'failed' and unread)::int as "unreadFailedDescendants",
-          count(*) filter (where unread)::int as "unreadDescendants",
+          -- A failure its parent agent already consumed is that agent's to handle,
+          -- including anything the failed session logs after it (for example a
+          -- late workspace capture): neither asks the person through an ancestor.
+          count(*) filter (
+            where status = 'failed' and unread and not failure_handled
+          )::int as "unreadFailedDescendants",
+          count(*) filter (where unread and not failure_handled)::int as "unreadDescendants",
           count(*) filter (where actively_working)::int as "activelyWorkingDescendants",
           -- Oldest still-open requires_action turn among the counted attention
           -- descendants. The correlated lookup runs only for rows passing the
@@ -36660,10 +37242,10 @@ async function sessionListTotalsInScope(
       ) personal on true
       where child.workspace_id = ${workspaceId} and child.parent_session_id is not null
         and exists (select 1 from roots root where root.related and root.id = child.root_session_id)
-    ), nodes(root_id, channel_id, id, account_id, status, active_turn_id,
+    ), nodes(root_id, channel_id, id, parent_session_id, account_id, status, active_turn_id,
         input_wait_until, input_wait_turn_id, pause_revision, pinned_path, related,
         acknowledged_sequence, actively_working) as (
-      select root.id, root.channel_id, root.id, root.account_id, root.status,
+      select root.id, root.channel_id, root.id, null::uuid, root.account_id, root.status,
         root.active_turn_id, root.input_wait_until, root.input_wait_turn_id,
         greatest(
           case when control.workspace_state = 'paused' and
@@ -36676,7 +37258,8 @@ async function sessionListTotalsInScope(
       from roots root join ${schema.workspaceInferenceControls} control
         on control.workspace_id = ${workspaceId}
       union all
-      select parent.root_id, parent.channel_id, child.id, child.account_id, child.status,
+      select parent.root_id, parent.channel_id, child.id, child.parent_session_id,
+        child.account_id, child.status,
         child.active_turn_id, child.input_wait_until, child.input_wait_turn_id,
         greatest(
           case when child.subtree_run_override_revision is null or
@@ -36703,6 +37286,14 @@ async function sessionListTotalsInScope(
         root.updated_at as root_updated_at, root.created_at as root_created_at,
         root.origin_title as root_origin_title,
         cursor.last_meaningful_sequence > nodes.acknowledged_sequence as unread,
+        -- Probed only for unread failures, the only ones it changes.
+        case when nodes.status = 'failed'
+          and cursor.last_meaningful_sequence > nodes.acknowledged_sequence
+        then ${sessionFailureHandledByParentSql(
+          workspaceId,
+          sql`nodes.id`,
+          sql`nodes.parent_session_id`,
+        )} else false end as failure_handled,
         nodes.actively_working as active_work,
         case when nodes.status = 'requires_action' then (
           select min(turn.updated_at) from ${schema.sessionTurns} turn
@@ -36749,13 +37340,13 @@ async function sessionListTotalsInScope(
       select channel_id as "channelId", count(*)::int as total,
         count(*) filter (where status = 'requires_action')::int as attention,
         min(attention_since) as "attentionSince",
-        count(*) filter (where status = 'failed' and unread)::int as failed,
+        count(*) filter (where status = 'failed' and unread and not failure_handled)::int as failed,
         count(*) filter (where pause_revision is null and
           (status in ('running', 'recovering') or input_wait))::int as active,
         count(*) filter (where pause_revision is null and
           status in ('queued', 'waiting_capacity'))::int as queued,
         count(*) filter (where pause_revision is null and input_wait)::int as waiting,
-        count(*) filter (where unread)::int as unread,
+        count(*) filter (where unread and not failure_handled)::int as unread,
         count(*) filter (where active_work)::int as "activeWork"
       from measured group by channel_id
     ), site_conv as (
@@ -36883,13 +37474,14 @@ async function sessionListTotalsInScope(
       select conv.site_id, conv.row_channel_id, count(*)::int as total,
         count(*) filter (where node.status = 'requires_action')::int as attention,
         min(node.attention_since) as "attentionSince",
-        count(*) filter (where node.status = 'failed' and node.unread)::int as failed,
+        count(*) filter (where node.status = 'failed' and node.unread
+          and not node.failure_handled)::int as failed,
         count(*) filter (where node.pause_revision is null and
           (node.status in ('running', 'recovering') or node.input_wait))::int as active,
         count(*) filter (where node.pause_revision is null and
           node.status in ('queued', 'waiting_capacity'))::int as queued,
         count(*) filter (where node.pause_revision is null and node.input_wait)::int as waiting,
-        count(*) filter (where node.unread)::int as unread,
+        count(*) filter (where node.unread and not node.failure_handled)::int as unread,
         count(*) filter (where node.active_work)::int as "activeWork"
       from measured node join site_conv conv on conv.id = node.root_id
       group by conv.site_id, conv.row_channel_id
@@ -37096,7 +37688,11 @@ function sessionFilters(
   }
   if (options.createdBy) {
     filters.push(
-      eq(schema.sessions.createdByKind, options.createdBy.kind),
+      // Without a kind, keep both kinds explicit so the creator index's
+      // leading kind column still bounds the scan.
+      options.createdBy.kind
+        ? eq(schema.sessions.createdByKind, options.createdBy.kind)
+        : inArray(schema.sessions.createdByKind, ["subject", "service"]),
       eq(schema.sessions.createdBySubjectId, options.createdBy.subjectId),
     );
   }
@@ -37316,7 +37912,9 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
     // `group` returns the same rows as the default; only `include` changes them.
     ...(options.siteConversations === "include" ? [["siteConversations", "include"]] : []),
     hasChannel ? ["channel", options.channelId] : null,
-    options.createdBy ? ["creator", options.createdBy.kind, options.createdBy.subjectId] : null,
+    options.createdBy
+      ? ["creator", options.createdBy.kind ?? null, options.createdBy.subjectId]
+      : null,
     options.updatedFrom ? ["updatedFrom", options.updatedFrom.toISOString()] : null,
     options.updatedBefore ? ["updatedBefore", options.updatedBefore.toISOString()] : null,
     options.createdFrom ? ["createdFrom", options.createdFrom.toISOString()] : null,
@@ -37615,17 +38213,42 @@ export async function listWorkspaceBackgroundCommandsForSubject(
  * the committed workspace revision and every continuation reads only `limit +
  * 1` candidate ids. Legacy short-lived snapshot cursors remain readable during
  * rolling upgrades, while hydration always joins live rows for current
- * lifecycle/title and authorization data.
+ * lifecycle/title and authorization data. A response that never carries the
+ * Skill folders passes `skills: "omit"`.
  */
 export async function listSessionsForSubject(
   db: Database,
   workspaceId: string,
   options: ListSessionsForSubjectOptions,
-): Promise<SessionListResponse> {
-  const page = await readSessionListForSubject(db, workspaceId, options, false);
+  skills: SessionSkillsRead,
+): Promise<SessionListWithoutSkillsResponse>;
+export async function listSessionsForSubject(
+  db: Database,
+  workspaceId: string,
+  options: ListSessionsForSubjectOptions,
+  skills?: "read",
+): Promise<SessionListResponse>;
+export async function listSessionsForSubject(
+  db: Database,
+  workspaceId: string,
+  options: ListSessionsForSubjectOptions,
+  skills: SessionSkillsRead = "read",
+): Promise<SessionListResponse | SessionListWithoutSkillsResponse> {
+  const page = await readSessionListForSubject(db, workspaceId, options, false, skills);
   if ("projection" in page) throw new Error("Unexpected compact session projection");
-  return page;
+  if (skills === "read") return page;
+  return {
+    ...page,
+    pinned: page.pinned.map(omitSessionSkills),
+    sessions: page.sessions.map(omitSessionSkills),
+  };
 }
+
+/** A session-list page whose sessions were read without their Skill folders. */
+export type SessionListWithoutSkillsResponse = Omit<SessionListResponse, "pinned" | "sessions"> & {
+  pinned: SessionWithoutSkills[];
+  sessions: SessionWithoutSkills[];
+};
 
 /** Same subject, paging and authorization fences, without execution configuration. */
 export async function listSessionEntriesForSubject(
@@ -37742,6 +38365,7 @@ async function readSessionListForSubject(
   workspaceId: string,
   options: ListSessionsForSubjectOptions,
   summary: boolean,
+  skills: SessionSkillsRead = "read",
 ): Promise<SessionListResponse | SessionListEntryResponse> {
   const requestedLimit = options.limit ?? 50;
   const limit = Number.isFinite(requestedLimit)
@@ -37863,13 +38487,15 @@ async function readSessionListForSubject(
 
         // Configuration is never exposed by the summary branch. SQL substitutes
         // typed placeholders before transfer, so large JSON/prompt fields do not
-        // become process allocations. Full reads select every original column.
-        const fullColumns = getTableColumns(schema.sessions);
+        // become process allocations. Full reads select every original column
+        // and, unless the caller omits them, the Skill folders a complete
+        // Session carries.
+        const fullColumns = sessionReadColumns(skills);
         const listColumns = summary
           ? {
               ...fullColumns,
               resources: sql<SessionRow["resources"]>`'[]'::jsonb`,
-              skills: sql<SessionRow["skills"]>`'[]'::jsonb`,
+              skills: sql<SessionRowWithSkills["skills"]>`'[]'::jsonb`,
               tools: sql<SessionRow["tools"]>`'[]'::jsonb`,
               instructions: sql<SessionRow["instructions"]>`null::text`,
               initialModelContext: sql<SessionRow["initialModelContext"]>`null::text`,
@@ -37897,7 +38523,7 @@ async function readSessionListForSubject(
         // or activity change and return content that no longer matches the page.
         let selectedOrdinaryRows:
           | Array<{
-              session: SessionRow;
+              session: SessionRowWithSkills;
               pin: typeof schema.sessionPins.$inferSelect | null;
             }>
           | undefined;
@@ -38443,17 +39069,35 @@ async function sessionFailureDiagnostics(
   };
 }
 
+/** A response that never carries the Skill folders passes `skills: "omit"`. */
+export async function getSessionForSubject(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  subjectId: string,
+  relatedSessionAccess: "target" | "root",
+  skills: SessionSkillsRead,
+): Promise<SessionWithoutSkills | null>;
+export async function getSessionForSubject(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  subjectId: string,
+  relatedSessionAccess?: "target" | "root",
+  skills?: "read",
+): Promise<Session | null>;
 export async function getSessionForSubject(
   db: Database,
   workspaceId: string,
   sessionId: string,
   subjectId: string,
   relatedSessionAccess: "target" | "root" = "root",
-): Promise<Session | null> {
+  skills: SessionSkillsRead = "read",
+): Promise<Session | SessionWithoutSkills | null> {
   return await withWorkspaceSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
     const [row] = await scopedDb
       .select({
-        session: schema.sessions,
+        session: sessionReadColumns(skills),
         pin: schema.sessionPins,
         cursor: schema.sessionEventCursors,
       })
@@ -38500,11 +39144,15 @@ export async function getSessionForSubject(
       throw new Error(`Session event cursor invariant failed for session ${sessionId}`);
     }
     // mapSessionWithControl projects the effective policy below, once.
+    const handledFailure = (
+      await sessionIdsWithHandledFailure(scopedDb, workspaceId, [row.session])
+    ).has(sessionId);
     const [session] = await withCurrentSessionInputWait(scopedDb, workspaceId, [
       {
         ...row.session,
         lastSequence: row.cursor.lastSequence,
         meaningfulSequence: row.cursor.lastMeaningfulSequence,
+        ...(handledFailure ? { failureHandled: true } : {}),
       },
     ]);
     if (!session) throw new Error(`Session event cursor missing for session ${sessionId}`);
@@ -38512,7 +39160,7 @@ export async function getSessionForSubject(
       sessionId,
     ]);
     const failureDiagnostics = await sessionFailureDiagnostics(scopedDb, workspaceId, session);
-    return projectSessionForRelatedAccess(
+    const projected = projectSessionForRelatedAccess(
       {
         ...(await mapSessionWithControl(
           scopedDb,
@@ -38528,6 +39176,7 @@ export async function getSessionForSubject(
       },
       relatedSessionAccess,
     );
+    return skills === "read" ? projected : omitSessionSkills(projected);
   });
 }
 
@@ -38561,7 +39210,7 @@ export async function setSessionPin(
         await lockSessionPersonalStateExclusive(tx, input.workspaceId, input.subjectId);
         await requireSessionPersonalStateWriteAuthority(tx, input);
         const [storedSession] = await tx
-          .select()
+          .select(sessionRowWithSkillsColumns)
           .from(schema.sessions)
           .where(
             and(
@@ -38712,7 +39361,7 @@ export async function setSessionAttention(
         await requireSessionPersonalStateWriteAuthority(tx, input);
 
         const [storedSession] = await tx
-          .select()
+          .select(sessionRowWithSkillsColumns)
           .from(schema.sessions)
           .where(
             and(
@@ -38889,7 +39538,7 @@ export async function listSessions(
       }
     }
     const rows = await scopedDb
-      .select()
+      .select(sessionRowWithSkillsColumns)
       .from(schema.sessions)
       .where(and(...filters))
       .orderBy(desc(schema.sessions.createdAt), desc(schema.sessions.id))
@@ -40326,6 +40975,17 @@ export type SessionLineage = {
   truncated: boolean;
 };
 
+/** A lineage whose sessions were read without their Skill folders. */
+export type SessionLineageWithoutSkills = {
+  ancestors: SessionWithoutSkills[];
+  children: LineageNodeWithoutSkills[];
+  truncated: boolean;
+};
+export type LineageNodeWithoutSkills = {
+  session: SessionWithoutSkills;
+  children: LineageNodeWithoutSkills[];
+};
+
 /**
  * Resolve a session tree to its root without materializing the full lineage.
  * Every recursive hop stays workspace-scoped and invalid/cyclic/deep chains
@@ -40457,13 +41117,27 @@ export async function listSessionTreeIds(
  * 200 total rows, returned as a nested tree with each level newest first (as
  * the sidebar lists chats). The cap keeps shallower agents before deeper ones
  * and newer before older, so a long fleet loses its oldest grandchildren
- * first, never a direct child picked at random.
+ * first, never a direct child picked at random. A response that never carries
+ * the Skill folders passes `skills: "omit"`.
  */
 export async function getSessionLineage(
   db: Database,
   workspaceId: string,
   sessionId: string,
-): Promise<SessionLineage | null> {
+  skills: SessionSkillsRead,
+): Promise<SessionLineageWithoutSkills | null>;
+export async function getSessionLineage(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  skills?: "read",
+): Promise<SessionLineage | null>;
+export async function getSessionLineage(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  skills: SessionSkillsRead = "read",
+): Promise<SessionLineage | SessionLineageWithoutSkills | null> {
   const descendantLimit = SESSION_TREE_DESCENDANT_LIMIT;
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     // Existence check on the ALREADY-SCOPED connection — never a nested
@@ -40523,7 +41197,7 @@ export async function getSessionLineage(
       return { ancestors: [], children: [], truncated: false };
     }
     const rows = await scopedDb
-      .select()
+      .select(sessionReadColumns(skills))
       .from(schema.sessions)
       .where(and(eq(schema.sessions.workspaceId, workspaceId), anyOf(schema.sessions.id, ids)));
     const canonicalRows = await canonicalSessionRowsFromEventCursors(scopedDb, workspaceId, rows);
@@ -40538,15 +41212,19 @@ export async function getSessionLineage(
       workspaceId,
       canonicalRows.filter((row) => row.status === "requires_action").map((row) => row.id),
     );
+    const omitUnreadSkills = (session: Session): Session | SessionWithoutSkills =>
+      skills === "read" ? session : omitSessionSkills(session);
     const sessionsById = new Map(
       canonicalRows.map((row) => {
         const control = controls.get(row.id);
         if (!control) throw new Error(`Effective control missing for session ${row.id}`);
         return [
           row.id,
-          withRequiresActionSince(
-            mapSession(row, control, grouped.get(row.id) ?? []),
-            requiresActionSince,
+          omitUnreadSkills(
+            withRequiresActionSince(
+              mapSession(row, control, grouped.get(row.id) ?? []),
+              requiresActionSince,
+            ),
           ),
         ] as const;
       }),
@@ -40554,16 +41232,16 @@ export async function getSessionLineage(
 
     const ancestors = ancestorRows
       .map((row) => sessionsById.get(row.id))
-      .filter((session): session is Session => Boolean(session));
+      .filter((session): session is Session | SessionWithoutSkills => Boolean(session));
 
-    const nodesById = new Map<string, LineageNode>();
+    const nodesById = new Map<string, LineageNodeWithoutSkills>();
     for (const row of descendantRows) {
       const session = sessionsById.get(row.id);
       if (session) {
         nodesById.set(row.id, { session, children: [] });
       }
     }
-    const children: LineageNode[] = [];
+    const children: LineageNodeWithoutSkills[] = [];
     for (const row of descendantRows) {
       const node = nodesById.get(row.id);
       if (!node) continue;
@@ -40573,7 +41251,8 @@ export async function getSessionLineage(
         nodesById.get(row.parentSessionId ?? "")?.children.push(node);
       }
     }
-    return { ancestors, children, truncated };
+    // Read with the Skill folders, every node carries them.
+    return { ancestors, children, truncated } as SessionLineage | SessionLineageWithoutSkills;
   });
 }
 
@@ -41060,6 +41739,15 @@ export async function listSessionEventPage(
           // Indexing the ordered ID array avoids rescanning an ordered CTE at
           // every recursion step. Keep the subsequent payload SELECT separate:
           // this is still metadata planning, not a new page-wide snapshot.
+          // The recursive step reads its next ID through a scalar subquery so
+          // the lookup compares the ID with a plain parameter (the subquery runs
+          // as an InitPlan). Under row-level security PostgreSQL uses a lookup
+          // as an index condition only when it is leakproof, and since the
+          // November 2026 minor releases (16.16, 17.12, 18.7; CVE-2026-116327)
+          // any non-leakproof function over a value from elsewhere in the query
+          // makes it leaky. `id = ordered.ids[bounded.row_number + 1]` written
+          // in the lookup itself is leaky because of `+`, and turns every step
+          // into a filtered scan of the whole session.
           const metadataRows = await rawRows<
             SessionEventProjectionMetadataRow & { sourceRowCount: number }
           >(
@@ -41091,12 +41779,13 @@ export async function listSessionEventPage(
                 select sized.id, sized.sequence,
                   bounded.row_number + 1, sized.bytes,
                   bounded.cumulative_bytes + 1 + sized.bytes
-                from bounded cross join ordered
-                cross join lateral (
+                from bounded cross join lateral (
                   select ${schema.sessionEvents.id}, ${schema.sessionEvents.sequence},
                     (${transferBytesSql})::int as bytes
                   from ${schema.sessionEvents}
-                  where ${schema.sessionEvents.id} = ordered.ids[bounded.row_number + 1]
+                  where ${schema.sessionEvents.id} = (
+                      select ordered.ids[bounded.row_number + 1] from ordered
+                    )
                     and ${schema.sessionEvents.workspaceId} = ${workspaceId}
                     and ${schema.sessionEvents.sessionId} = ${sessionId}
                   offset 0
@@ -42216,48 +42905,78 @@ function safeEnvelopeInteger(value: string, label: string): number {
   return parsed;
 }
 
-function assertApprovalRunStateMeasurement(
+function approvalRunStateMeasurementViolation(
   measured: ApprovalRunStateMeasurement,
   limits: ApprovalRunStateMaterializationLimits,
-): void {
+): ApprovalRunStateLimitExceededError | null {
   if (measured.actualBytes > limits.maximumJsonBytes) {
-    throw new ApprovalRunStateLimitExceededError(
+    return new ApprovalRunStateLimitExceededError(
       "json_bytes",
       measured.actualBytes,
       limits.maximumJsonBytes,
     );
   }
   if (!measured.validJsonObject) {
-    throw new ApprovalRunStateLimitExceededError("invalid_json", 1, 0);
+    return new ApprovalRunStateLimitExceededError("invalid_json", 1, 0);
   }
   if (measured.actualNodes > limits.maximumJsonNodes) {
-    throw new ApprovalRunStateLimitExceededError(
+    return new ApprovalRunStateLimitExceededError(
       "json_nodes",
       measured.actualNodes,
       limits.maximumJsonNodes,
     );
   }
   if (measured.actualProperties > limits.maximumJsonProperties) {
-    throw new ApprovalRunStateLimitExceededError(
+    return new ApprovalRunStateLimitExceededError(
       "json_properties",
       measured.actualProperties,
       limits.maximumJsonProperties,
     );
   }
   if (measured.pendingApprovalBytes > limits.maximumPendingApprovalBytes) {
-    throw new ApprovalRunStateLimitExceededError(
+    return new ApprovalRunStateLimitExceededError(
       "pending_approval_bytes",
       measured.pendingApprovalBytes,
       limits.maximumPendingApprovalBytes,
     );
   }
   if (measured.pendingApprovalItems > limits.maximumPendingApprovalItems) {
-    throw new ApprovalRunStateLimitExceededError(
+    return new ApprovalRunStateLimitExceededError(
       "pending_approval_items",
       measured.pendingApprovalItems,
       limits.maximumPendingApprovalItems,
     );
   }
+  return null;
+}
+
+function assertApprovalRunStateMeasurement(
+  measured: ApprovalRunStateMeasurement,
+  limits: ApprovalRunStateMaterializationLimits,
+): void {
+  const violation = approvalRunStateMeasurementViolation(measured, limits);
+  if (violation) throw violation;
+}
+
+/**
+ * Validate and count RunState text in-process (linear, no decoding). Counts are
+ * reported as at most limit + 1, the bounded measurement callers already see.
+ */
+function boundedApprovalRunStateTextMeasurement(
+  serializedRunState: string,
+  actualBytes: number,
+  limits: ApprovalRunStateMaterializationLimits,
+): Pick<
+  ApprovalRunStateMeasurement,
+  "actualBytes" | "validJsonObject" | "actualNodes" | "actualProperties"
+> {
+  const measured = measureJsonObjectText(serializedRunState);
+  return {
+    actualBytes,
+    validJsonObject: measured.validJsonObject,
+    actualNodes: Math.min(measured.nodes, limits.maximumJsonNodes + 1),
+    actualProperties: Math.min(measured.properties, limits.maximumJsonProperties + 1),
+  };
 }
 
 function approvalRunStateNullableDate(value: Date | string | null): Date | null {
@@ -42270,7 +42989,9 @@ function approvalRunStateNullableDate(value: Date | string | null): Date | null 
 }
 
 /**
- * Read the one approval/human-input RunState through a server-measured envelope.
+ * Read the one approval/human-input RunState through a bounded envelope: the
+ * database withholds text over the byte bound, and the JSON shape of the rest
+ * is measured in one linear pass before anything decodes it.
  * Ordinary turns never call this path; they use canonical history items only.
  */
 export async function getLatestRunState(
@@ -42296,9 +43017,6 @@ export async function getLatestRunState(
       pending_approvals_codec_version: number | null;
       provider_artifact_invalidated_at: Date | string | null;
       actual_bytes: string;
-      valid_json_object: boolean;
-      actual_nodes: string;
-      actual_properties: string;
       pending_approval_bytes: string;
       pending_approval_items: string;
     }>(
@@ -42316,87 +43034,44 @@ export async function getLatestRunState(
         ), measured as materialized (
           select latest.*,
                  octet_length(serialized_run_state)::bigint as actual_bytes,
-                 (serialized_run_state is json value) as valid_json,
                  octet_length(pending_approvals::text)::bigint as pending_approval_bytes,
                  case when jsonb_typeof(pending_approvals) = 'array'
                    then jsonb_array_length(pending_approvals)::bigint
                    else ${limits.maximumPendingApprovalItems + 1}::bigint
                  end as pending_approval_items
           from latest
-        ), decoded as materialized (
-          select measured.*,
-                 case
-                   when actual_bytes <= ${limits.maximumJsonBytes} and valid_json
-                   then case
-                     when jsonb_typeof(serialized_run_state::jsonb) = 'object'
-                     then serialized_run_state::jsonb
-                     else null
-                   end
-                   else null
-                 end as state_json
-          from measured
-        ), bounded_nodes as materialized (
-          select count(*)::bigint as actual_nodes
-          from (
-            select node
-            from decoded
-            cross join lateral jsonb_path_query(decoded.state_json, 'strict $.**') as node
-            where decoded.state_json is not null
-            limit ${limits.maximumJsonNodes + 1}
-          ) nodes
-        ), bounded_properties as materialized (
-          select count(*)::bigint as actual_properties
-          from (
-            select property
-            from decoded
-            cross join lateral jsonb_path_query(
-              decoded.state_json,
-              'strict $.** ? (@.type() == "object")'
-            ) as object_value
-            cross join lateral jsonb_object_keys(object_value) as property
-            where decoded.state_json is not null
-            limit ${limits.maximumJsonProperties + 1}
-          ) properties
         )
-        select decoded.id,
-               decoded.turn_id,
+        select id,
+               turn_id,
                case
-                 when decoded.state_json is not null
-                   and bounded_nodes.actual_nodes <= ${limits.maximumJsonNodes}
-                   and bounded_properties.actual_properties <= ${limits.maximumJsonProperties}
-                 then decoded.serialized_run_state
+                 when actual_bytes <= ${limits.maximumJsonBytes}
+                 then serialized_run_state
                  else null
                end as serialized_run_state,
                case
-                 when decoded.pending_approval_bytes <= ${limits.maximumPendingApprovalBytes}
-                   and decoded.pending_approval_items <= ${limits.maximumPendingApprovalItems}
-                 then decoded.pending_approvals
+                 when pending_approval_bytes <= ${limits.maximumPendingApprovalBytes}
+                   and pending_approval_items <= ${limits.maximumPendingApprovalItems}
+                 then pending_approvals
                  else null
                end as pending_approvals,
-               decoded.serialized_run_state_codec_version,
-               decoded.pending_approvals_codec_version,
-               decoded.provider_artifact_invalidated_at,
-               decoded.actual_bytes::text as actual_bytes,
-               (decoded.valid_json and decoded.state_json is not null) as valid_json_object,
-               bounded_nodes.actual_nodes::text as actual_nodes,
-               bounded_properties.actual_properties::text as actual_properties,
-               decoded.pending_approval_bytes::text as pending_approval_bytes,
-               decoded.pending_approval_items::text as pending_approval_items
-        from decoded
-        cross join bounded_nodes
-        cross join bounded_properties
+               serialized_run_state_codec_version,
+               pending_approvals_codec_version,
+               provider_artifact_invalidated_at,
+               actual_bytes::text as actual_bytes,
+               pending_approval_bytes::text as pending_approval_bytes,
+               pending_approval_items::text as pending_approval_items
+        from measured
       `,
     );
     if (!row) return null;
+    // Only text within the byte bound leaves the database. Its JSON shape is
+    // measured here in one linear pass, before anything decodes it.
+    const actualBytes = safeEnvelopeInteger(row.actual_bytes, "approval run-state bytes");
     assertApprovalRunStateMeasurement(
       {
-        actualBytes: safeEnvelopeInteger(row.actual_bytes, "approval run-state bytes"),
-        validJsonObject: row.valid_json_object,
-        actualNodes: safeEnvelopeInteger(row.actual_nodes, "approval run-state JSON nodes"),
-        actualProperties: safeEnvelopeInteger(
-          row.actual_properties,
-          "approval run-state JSON properties",
-        ),
+        ...(row.serialized_run_state === null
+          ? { actualBytes, validJsonObject: false, actualNodes: 0, actualProperties: 0 }
+          : boundedApprovalRunStateTextMeasurement(row.serialized_run_state, actualBytes, limits)),
         pendingApprovalBytes: safeEnvelopeInteger(
           row.pending_approval_bytes,
           "pending-approval JSON bytes",
@@ -44388,6 +45063,14 @@ const SKILL_CATALOG_CHANNEL: SessionContextChannel = {
   item: skillCatalogContextItem,
 };
 
+const REPOSITORY_SKILLS_CHANNEL: SessionContextChannel = {
+  label: "Repository skills",
+  metadataKey: "opengeniRepositorySkillsHistoryId",
+  contentPrefix: REPOSITORY_SKILLS_CONTEXT_PREFIX,
+  read: readRepositorySkillsContext,
+  item: repositorySkillsContextItem,
+};
+
 const WORKSPACE_GOVERNANCE_CHANNEL: SessionContextChannel = {
   label: "Workspace governance",
   metadataKey: "opengeniWorkspaceGovernanceHistoryId",
@@ -44430,6 +45113,41 @@ export async function ensureSessionSkillCatalog(
       { ...scope, text: catalog, ...(omitWhenEmpty ? { omitWhenAbsent: true } : {}) },
       SKILL_CATALOG_CHANNEL,
     )) ?? ""
+  );
+}
+
+/**
+ * Persist the repository Skill index the run discovered in the live
+ * workspace, once per logical turn, as a history item before the turn's first
+ * history item (with that turn's id). Retries reuse the turn's snapshot even
+ * when the workspace changed meanwhile. Nothing is written while the newest
+ * item already shows the same index. Null means this run did not index the
+ * workspace (a deferred run): nothing is written, and the turn keeps what the
+ * model already reads, so a later attempt of the turn cannot add an item
+ * between its requests. Returns the model-visible index, or null when there
+ * is none.
+ *
+ * Discovery runs inside the model run, after this turn's history was loaded,
+ * so the run shows the returned item at the same place itself (see the
+ * runtime's `publishRepositorySkills`).
+ */
+export async function ensureSessionRepositorySkills(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    expectedExecutionGeneration: number;
+    expectedAttemptId: string;
+    index: string | null;
+  },
+): Promise<string | null> {
+  const { index, ...scope } = input;
+  return await ensureSessionContextSnapshot(
+    db,
+    { ...scope, text: index },
+    REPOSITORY_SKILLS_CHANNEL,
   );
 }
 
@@ -44580,7 +45298,7 @@ export async function readSessionAgentPrompt(
     ? await readBoundAgentRows<{ instructions: string }>(
         db,
         scope,
-        sql`select ${agentInstructionsSql("r")} as instructions
+        sql`select r.instructions
           from agent_revisions r
           join agents a on a.workspace_id = r.workspace_id and a.id = r.agent_id
           where r.workspace_id = ${input.workspaceId}::uuid
@@ -44620,7 +45338,7 @@ export async function ensureSessionAgentInstructions(
     ? await readBoundAgentRows<{ revision: number; instructions: string | null }>(
         db,
         input,
-        sql`select a.current_revision as revision, ${agentInstructionsSql("r")} as instructions
+        sql`select a.current_revision as revision, r.instructions
           from agents a
           left join agent_revisions r
             on r.workspace_id = a.workspace_id
@@ -45061,18 +45779,8 @@ export async function appendSessionHistoryItemsInTransaction(
             // bytes of the ordered JSON text, shape of the jsonb projection
             // the insert trigger maintains.
             jsonBytes: sql<string>`octet_length(${schema.sessionHistoryItems.item}::text)`,
-            jsonNodes: sql<string>`(
-                  select count(*)
-                  from jsonb_path_query(session_history_items.item, 'strict $.**')
-                )`,
-            jsonProperties: sql<string>`(
-                  select count(*)
-                  from jsonb_path_query(
-                    session_history_items.item,
-                    'strict $.** ? (@.type() == "object")'
-                  ) as object_value
-                  cross join lateral jsonb_object_keys(object_value) as property
-                )`,
+            jsonNodes: jsonbNodeCountSql(sql`session_history_items.item`),
+            jsonProperties: jsonbPropertyCountSql(sql`session_history_items.item`),
           });
   // Rows skipped by ON CONFLICT were already stored, so only fresh inserts
   // add to the active footprint.
@@ -45675,6 +46383,34 @@ export async function listTurnOpenSuffixToolCalls(
         mcpInputRequest: row.mcpInputRequest ?? null,
       };
     });
+  });
+}
+
+/**
+ * Whether any tool-call receipt of the turn remains, interrupted or not. None
+ * means every call the turn made is settled in durable history (an open
+ * call's item lives only in its receipt until it is paired with a result), so
+ * there is nothing left for an approval or human-input resume to settle.
+ */
+export async function turnHasPendingToolCalls(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ id: schema.sessionPendingToolCalls.id })
+      .from(schema.sessionPendingToolCalls)
+      .where(
+        and(
+          eq(schema.sessionPendingToolCalls.workspaceId, workspaceId),
+          eq(schema.sessionPendingToolCalls.sessionId, sessionId),
+          eq(schema.sessionPendingToolCalls.turnId, turnId),
+        ),
+      )
+      .limit(1);
+    return row !== undefined;
   });
 }
 
@@ -49809,6 +50545,66 @@ function archiveOnlyResumeState(
   };
 }
 
+/** The cold envelope of a WARMING lease whose creator died before any provider
+ * instance was recorded. The global reaper's SQL routine
+ * opengeni_private.warming_reset_resume_state_v2 implements the same rules;
+ * keep the two identical. The selected archive (inline or object reference)
+ * and every recovery marker survive. A lease that recorded a published archive
+ * generation but lost its archive pointer fails closed as unrecoverable, so the
+ * next turn is blocked visibly instead of starting on an empty workspace. Only
+ * a lease that never had an archive or recovery state resets to null. */
+function warmingResetResumeState(row: LeaseRow, resetAt: string): Record<string, unknown> | null {
+  const current = recoveryStateFromLeaseRow(row);
+  const hasArchive = current.archive.status !== "none";
+  if (
+    !hasArchive &&
+    // An authorized empty-workspace continuation keeps its decision (and its
+    // blocked lost-workspace truth) when no archive exists.
+    pendingFreshWorkspaceRecovery(row.resume_state) === null &&
+    providerLossRecord(row.resume_state) === null &&
+    row.archive_generation === null
+  ) {
+    return null;
+  }
+  const restoreStatus: SandboxRestoreStatus = hasCompleteWorkspaceArchive(row)
+    ? "pending"
+    : hasArchive
+      ? "degraded"
+      : "unrecoverable";
+  return archiveOnlyResumeState(row, {
+    provider: { status: "not_created", instanceId: null, observedAt: resetAt },
+    archive: current.archive,
+    restore: {
+      status: restoreStatus,
+      rematerializationId: null,
+      selectedRevision: current.archive.current?.revision ?? null,
+      startedAt: null,
+      completedAt: resetAt,
+      ...(restoreStatus === "degraded"
+        ? {
+            failureCode:
+              current.archive.status === "available"
+                ? "archive_generation_mismatch"
+                : "archive_unverified",
+            retryable: false,
+          }
+        : restoreStatus === "unrecoverable"
+          ? { failureCode: "archive_unavailable", retryable: false }
+          : {}),
+    },
+    workspace: {
+      status:
+        restoreStatus === "pending"
+          ? "not_ready"
+          : restoreStatus === "degraded"
+            ? "degraded"
+            : "unrecoverable",
+      verifiedRevision: null,
+      verifiedAt: null,
+    },
+  });
+}
+
 function providerStateFromLeaseResumeState(row: LeaseRow): Record<string, unknown> | null {
   const resume = row.resume_state;
   if (!resume || typeof resume !== "object") return null;
@@ -50617,16 +51413,9 @@ function validatedLegacyNativeSnapshotAdoption(
     | null
     | undefined,
 ): { archiveBase64: string; descriptor: SandboxNativeSnapshotRevision } | null {
-  if (!value || value.archiveBase64.length === 0 || value.archiveBase64.length % 4 !== 0) {
-    return null;
-  }
-  let bytes: Uint8Array;
-  try {
-    bytes = Uint8Array.from(Buffer.from(value.archiveBase64, "base64"));
-  } catch {
-    return null;
-  }
-  if (Buffer.from(bytes).toString("base64") !== value.archiveBase64) return null;
+  if (!value) return null;
+  const bytes = decodeCanonicalBase64(value.archiveBase64);
+  if (!bytes) return null;
   const descriptor = parseArchiveRevision(value.descriptor);
   const native = decodeNativeSnapshotRef(bytes);
   if (
@@ -54724,8 +55513,15 @@ function decodeCanonicalBase64(value: unknown): Uint8Array | null {
   ) {
     return null;
   }
-  const bytes = Uint8Array.from(Buffer.from(value, "base64"));
-  return Buffer.from(bytes).toString("base64") === value ? bytes : null;
+  // Archives reach hundreds of MB: decode once into a view (no copy), and
+  // prove canonical form from the length and the final quantum, the only place
+  // non-zero pad bits can hide, instead of re-encoding the whole payload.
+  const decoded = Buffer.from(value, "base64");
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  if (decoded.length !== (value.length / 4) * 3 - padding) return null;
+  const lastQuantumStart = (value.length / 4 - 1) * 3;
+  if (decoded.subarray(lastQuantumStart).toString("base64") !== value.slice(-4)) return null;
+  return new Uint8Array(decoded.buffer, decoded.byteOffset, decoded.length);
 }
 
 function modalProviderObject(bytes: Uint8Array | null): {
@@ -57007,8 +57803,8 @@ function computeLeaseStaysWarmWhenIdle(
 async function requestComputeGroupEndTx(
   tx: Database,
   input: { workspaceId: string; sandboxGroupIds?: readonly string[] },
-): Promise<void> {
-  if (input.sandboxGroupIds && input.sandboxGroupIds.length === 0) return;
+): Promise<number> {
+  if (input.sandboxGroupIds && input.sandboxGroupIds.length === 0) return 0;
   const groupFilter = input.sandboxGroupIds
     ? sql`and lease.sandbox_group_id in (${sql.join(
         input.sandboxGroupIds.map((id) => sql`${id}::uuid`),
@@ -57159,7 +57955,9 @@ async function requestComputeGroupEndTx(
       `);
     }
   }
-  await tx.execute(sql`
+  const ended = await rawRows<{ id: string }>(
+    tx,
+    sql`
     update sandbox_leases lease set
       liveness = 'draining',
       group_end_requested_at = now(),
@@ -57173,7 +57971,233 @@ async function requestComputeGroupEndTx(
       and lease.reaper_hold_id is null
       and lease.archive_capture_id is null
       and not exists (select 1 from sandbox_lease_holders h where h.lease_id = lease.id)
-  `);
+    returning lease.id
+  `,
+  );
+  return ended.length;
+}
+
+/**
+ * End the compute group of a sandbox every chat of which is archived, as
+ * deleting those chats would: its idle lease drains now, and the reaper
+ * deletes the sandbox and revokes its agent's enrollment without a capture.
+ * A sandbox is kept for the chats that work in it, and an archived chat does
+ * no work. One restored later starts on a new sandbox, as a chat does whose
+ * sandbox was never created.
+ *
+ * A chat is archived with its root (see `sessionArchivedSql`), and one that
+ * still has work under way counts as in use whatever its archive state. A
+ * group no chat names is left alone: it is not a chat's sandbox. True when the
+ * group's end was asked for now; false when a chat still uses the sandbox,
+ * its lease is held, or its end was already asked for. A turn that arrives
+ * before the reaper claims the sandbox keeps it (the lease is re-armed).
+ */
+export async function endComputeGroupOfArchivedChats(
+  db: Database,
+  input: { workspaceId: string; sandboxGroupId: string },
+  bound?: DatabaseWorkBound,
+): Promise<boolean> {
+  const scoped = withinWorkBound(db, bound, (boundedDb, limit) =>
+    withWorkspaceRls(boundedDb, input.workspaceId, async (scopedDb) => {
+      // The tenancy lock is held: the statements below get only the time left.
+      await limit(scopedDb);
+      const rows = await rawRows<{ unused: boolean }>(
+        scopedDb,
+        sql`select ${sandboxGroupOnlyOfArchivedChatsSql(input)} as unused`,
+      );
+      if (rows[0]?.unused !== true) return false;
+      const ended = await requestComputeGroupEndTx(scopedDb, {
+        workspaceId: input.workspaceId,
+        sandboxGroupIds: [input.sandboxGroupId],
+      });
+      return ended > 0;
+    }),
+  );
+  try {
+    return await scoped;
+  } catch (error) {
+    // A deleted workspace took its chats and leases with it.
+    if (error instanceof Error && error.message === `Workspace not found: ${input.workspaceId}`) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Whether a sandbox group is named by chats that are all archived (the rule
+ * of {@link endComputeGroupOfArchivedChats}): each archived by the Archive
+ * action at least {@link ARCHIVED_CHAT_SANDBOX_KEPT_SECONDS} ago or stored by
+ * the idle archiver, a sub-chat with its root, and none with work under way.
+ * False for a group no chat names. Migration 1404's inventory repeats it.
+ */
+function sandboxGroupOnlyOfArchivedChatsSql(input: {
+  workspaceId: string;
+  sandboxGroupId: string;
+}): SQL {
+  const chat = sql`chat`;
+  const root = sql`root`;
+  // Archived for a day: a chat restored sooner, by Undo or later, returns
+  // with the sandbox it had. One stored by the idle archiver (no archived_at)
+  // was unused for weeks already.
+  const archived = (alias: SQL) =>
+    sql`(${sessionArchivedSql(alias)} and (${alias}.archived_at is null
+      or ${alias}.archived_at <= now() - make_interval(secs => ${ARCHIVED_CHAT_SANDBOX_KEPT_SECONDS})))`;
+  return sql`(exists (
+      select 1 from sessions chat
+      where chat.workspace_id = ${input.workspaceId}
+        and chat.sandbox_group_id = ${input.sandboxGroupId}
+    ) and not exists (
+      select 1 from sessions chat
+      left join sessions root
+        on root.workspace_id = chat.workspace_id
+       and root.id = chat.root_session_id
+      where chat.workspace_id = ${input.workspaceId}
+        and chat.sandbox_group_id = ${input.sandboxGroupId}
+        and (
+          chat.status in ('queued', 'running', 'requires_action', 'recovering',
+            'waiting_capacity')
+          or not (
+            ${archived(chat)}
+            or (root.id is not null and ${archived(root)})
+          )
+        )
+    ))`;
+}
+
+/** Migration 1404's inventory, withheld from the runtime for one release. */
+export const COLD_SANDBOXES_OF_ARCHIVED_CHATS_ROUTINE =
+  "opengeni_private.cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)";
+
+export type ColdSandboxOfArchivedChats = {
+  accountId: string;
+  workspaceId: string;
+  sandboxGroupId: string;
+};
+
+/** False while the deployment's database withholds the inventory (1404). */
+export async function coldSandboxesOfArchivedChatsAvailable(db: Database): Promise<boolean> {
+  const [row] = await rawRows<{ granted: boolean | null }>(
+    db,
+    sql`select has_function_privilege(
+      to_regprocedure(${COLD_SANDBOXES_OF_ARCHIVED_CHATS_ROUTINE})::oid, 'EXECUTE') as granted`,
+  );
+  return row?.granted === true;
+}
+
+/**
+ * Cold sandboxes of a backend other than compute (a stopped Modal or Docker
+ * box with its saved workspace) whose chats are all archived, by
+ * {@link sandboxGroupOnlyOfArchivedChatsSql}'s rule, in key order after
+ * `after`. Routing ids only; {@link forgetColdSandboxOfArchivedChats} checks
+ * again before it forgets one.
+ */
+export async function listColdSandboxesOfArchivedChats(
+  db: Database,
+  input: { after?: { workspaceId: string; sandboxGroupId: string } | null; limit: number },
+): Promise<ColdSandboxOfArchivedChats[]> {
+  const rows = await rawRows<{
+    account_id: string;
+    workspace_id: string;
+    sandbox_group_id: string;
+  }>(
+    db,
+    sql`select account_id, workspace_id, sandbox_group_id
+      from opengeni_private.cold_sandboxes_of_archived_chats_v1(
+        ${ARCHIVED_CHAT_SANDBOX_KEPT_SECONDS}::integer,
+        ${input.after?.workspaceId ?? null}::uuid,
+        ${input.after?.sandboxGroupId ?? null}::uuid,
+        ${input.limit}::integer
+      )`,
+  );
+  return rows.map((row) => ({
+    accountId: row.account_id,
+    workspaceId: row.workspace_id,
+    sandboxGroupId: row.sandbox_group_id,
+  }));
+}
+
+/**
+ * Forget the cold sandbox of chats that are all archived, as deleting those
+ * chats does: its lease rows go, with the saved workspace they name. The
+ * checkpoint ledger then deletes the provider snapshots nothing names any
+ * more (`gcSandboxCheckpointArtifacts`), and a chat restored later starts on
+ * a new sandbox, as one does whose sandbox was never created.
+ *
+ * Only a group whose every lease is cold and unheld, with no unsettled
+ * workspace write, running command or open terminal, is forgotten; anything
+ * else (a turn that arrived, a lock another writer holds) leaves it for a
+ * later pass. True when it was forgotten now.
+ */
+export async function forgetColdSandboxOfArchivedChats(
+  db: Database,
+  input: ColdSandboxOfArchivedChats,
+): Promise<boolean> {
+  try {
+    return await withRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (scopedDb) =>
+        await scopedDb.transaction(async (txRaw) => {
+          const tx = txRaw as unknown as Database;
+          const leases = await rawRows<{ id: string; forgettable: boolean }>(
+            tx,
+            sql`
+            select lease.id,
+              (lease.liveness = 'cold' and lease.backend not in ('compute', 'selfhosted')
+                and lease.refcount = 0 and lease.turn_holders = 0 and lease.viewer_holders = 0
+                and lease.instance_id is null and lease.archive_capture_id is null
+                and lease.reaper_hold_id is null and lease.rotation_requested_at is null
+                and lease.provider_deadline_at is null) as forgettable
+            from sandbox_leases lease
+            where lease.workspace_id = ${input.workspaceId}
+              and lease.sandbox_group_id = ${input.sandboxGroupId}
+            for update nowait
+          `,
+          );
+          if (leases.length === 0 || leases.some((lease) => !lease.forgettable)) return false;
+          const leaseIds = sql`(${sql.join(
+            leases.map((lease) => sql`${lease.id}::uuid`),
+            sql`, `,
+          )})`;
+          const [state] = await rawRows<{ unused: boolean; busy: boolean }>(
+            tx,
+            sql`select ${sandboxGroupOnlyOfArchivedChatsSql(input)} as unused,
+              (exists (select 1 from sandbox_lease_holders h where h.lease_id in ${leaseIds})
+                or exists (select 1 from sandbox_workspace_mutation_admissions admission
+                  where admission.lease_id in ${leaseIds} and admission.settled_at is null)
+                or exists (select 1 from sandbox_retained_processes process
+                  where process.lease_id in ${leaseIds} and process.state = 'active')
+                or exists (select 1 from sandbox_pty_sessions pty
+                  where pty.workspace_id = ${input.workspaceId}
+                    and pty.sandbox_group_id = ${input.sandboxGroupId}
+                    and pty.status = 'open')) as busy`,
+          );
+          if (state?.unused !== true || state.busy) return false;
+          await tx.execute(sql`delete from sandbox_leases where id in ${leaseIds}`);
+          return true;
+        }),
+    );
+  } catch (error) {
+    // Another writer holds the lease (55P03), or a row still names it: leave it
+    // for a later pass, as deleting the chats would.
+    let current: unknown = error;
+    for (let depth = 0; depth < 8 && current; depth += 1) {
+      const code =
+        typeof current === "object" && "code" in current
+          ? (current as { code?: unknown }).code
+          : undefined;
+      if (code === "55P03" || code === "23503") return false;
+      current =
+        typeof current === "object" && "cause" in current
+          ? (current as { cause?: unknown }).cause
+          : undefined;
+    }
+    if (error instanceof Error && error.message === `Workspace not found: ${input.workspaceId}`) {
+      return false;
+    }
+    throw error;
+  }
 }
 
 /** The SQL twin of {@link computeLeaseStaysWarmWhenIdle} over alias `L`. */
@@ -58049,56 +59073,13 @@ export async function reapStaleLeaseHolders(
           // A lost reply can still name a live provider. Keep the same epoch
           // available for late attribution; time is not termination proof.
           if (row.provider_create_attempt?.instanceId === null) continue;
-          const current = recoveryStateFromLeaseRow(row);
-          const hasArchive = current.archive.status !== "none";
-          // An authorized empty-workspace continuation keeps its decision (and
-          // its blocked lost-workspace truth) when no archive exists.
-          const freshPending = pendingFreshWorkspaceRecovery(row.resume_state) !== null;
-          const resetAt = new Date().toISOString();
-          const restoreStatus: SandboxRestoreStatus = !hasArchive
-            ? "unrecoverable"
-            : current.archive.status === "available"
-              ? "pending"
-              : "degraded";
-          const resetResumeState =
-            hasArchive || freshPending
-              ? archiveOnlyResumeState(row, {
-                  provider: {
-                    status: "not_created",
-                    instanceId: null,
-                    observedAt: resetAt,
-                  },
-                  archive: current.archive,
-                  restore: {
-                    status: restoreStatus,
-                    rematerializationId: null,
-                    selectedRevision: current.archive.current?.revision ?? null,
-                    startedAt: null,
-                    completedAt: resetAt,
-                    ...(restoreStatus === "degraded"
-                      ? { failureCode: "archive_unverified", retryable: false }
-                      : restoreStatus === "unrecoverable"
-                        ? { failureCode: "archive_unavailable", retryable: false }
-                        : {}),
-                  },
-                  workspace: {
-                    status:
-                      restoreStatus === "pending"
-                        ? "not_ready"
-                        : restoreStatus === "unrecoverable"
-                          ? "unrecoverable"
-                          : "degraded",
-                    verifiedRevision: null,
-                    verifiedAt: null,
-                  },
-                })
-              : null;
+          const resetResumeState = warmingResetResumeState(row, new Date().toISOString());
           const reset = await tx.execute<{ id: string }>(sql`
           update sandbox_leases set
             liveness = 'cold', instance_id = null,
             lease_epoch = lease_epoch + 1,
             reaper_hold_id = null, reaper_hold_until = null, reaper_hold_reason = null,
-            resume_backend_id = case when ${hasArchive || freshPending} then coalesce(resume_backend_id, backend) else null end,
+            resume_backend_id = case when ${resetResumeState !== null} then coalesce(resume_backend_id, backend) else null end,
             resume_state = ${resetResumeState ? JSON.stringify(resetResumeState) : null}::jsonb,
             data_plane_url = null, terminal_data_plane_url = null,
             controller_data_plane_url = null,
@@ -60964,6 +61945,23 @@ async function lockWorkspaceMutationSessionTx(
   return session;
 }
 
+/**
+ * False only when no attempt of the session can await its physical-quiescence
+ * receipt (see `sessionMayAwaitQuiescenceSql`). It lets the hot peek and claim
+ * paths skip the exact quiescence and writer queries, which cost tens of
+ * milliseconds of planning on every call, for the sessions that have none of
+ * their rows.
+ */
+async function sessionMayAwaitQuiescence(
+  db: Database,
+  scope: { workspaceId: string; sessionId: string },
+): Promise<boolean> {
+  const [row] = await db.execute<{ possible: boolean }>(
+    sql`select ${sessionMayAwaitQuiescenceSql(scope)} as possible`,
+  );
+  return row?.possible === true;
+}
+
 /** True while an exact closed attempt still owns the physical-quiescence gate.
  * Both user control interruptions and activity-owned recoverable shutdowns use
  * this predicate so wake delivery cannot turn an unfinished writer drain into
@@ -60979,6 +61977,7 @@ async function hasPendingSessionAttemptQuiescenceTx(
     writerMode?: "physical" | "containment";
   },
 ): Promise<boolean> {
+  if (!(await sessionMayAwaitQuiescence(tx, input))) return false;
   const [row] = await tx.execute<{ pending: boolean }>(sql`
     select exists (
       select 1
@@ -64977,13 +65976,8 @@ function validatedModalCheckpoint(input: {
   ) {
     throw new Error("Checkpoint artifact registration requires a verified Modal snapshot");
   }
-  let bytes: Uint8Array;
-  try {
-    bytes = Uint8Array.from(Buffer.from(input.workspaceArchive, "base64"));
-  } catch {
-    throw new Error("Checkpoint artifact archive is not valid base64");
-  }
-  if (Buffer.from(bytes).toString("base64") !== input.workspaceArchive) {
+  const bytes = decodeCanonicalBase64(input.workspaceArchive);
+  if (!bytes) {
     throw new Error("Checkpoint artifact archive is not canonical base64");
   }
   const native = decodeNativeSnapshotRef(bytes);
@@ -69609,6 +70603,11 @@ export async function beginEnrollmentAgentUpdate(
      * (null: none), so a decision made from an older read of the machine
      * never replaces a newer record. */
     expectedOperationId?: string | null;
+    /** Also replace an unfinished operation whose last progress is at or
+     * before this time: its runner was asked and has not been heard from
+     * since, so it is treated as lost. A fresh progress event moves the
+     * operation past this time and keeps it. */
+    replaceUnfinishedBefore?: Date;
   },
 ): Promise<EnrollmentRecord | null> {
   return await withRlsContext(
@@ -69683,6 +70682,9 @@ export async function beginEnrollmentAgentUpdate(
               sql`${schema.enrollments.agentUpdateStatus} is null`,
               eq(schema.enrollments.agentUpdateStatus, "succeeded"),
               eq(schema.enrollments.agentUpdateStatus, "failed"),
+              input.replaceUnfinishedBefore === undefined
+                ? undefined
+                : sql`${schema.enrollments.agentUpdateUpdatedAt} <= ${input.replaceUnfinishedBefore.toISOString()}::timestamptz`,
             ),
             input.expectedOperationId === undefined
               ? undefined
@@ -72407,6 +73409,8 @@ export async function saveRunState(
     pendingApprovals: unknown[];
   },
 ): Promise<boolean> {
+  // Measured before the transaction; a stale attempt still reports stale first.
+  const violation = approvalRunStateSaveViolation(input.serializedRunState, input.pendingApprovals);
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -72420,7 +73424,7 @@ export async function saveRunState(
           attemptId: input.expectedAttemptId,
         });
         if (!allowed.allowed) return false;
-        await assertApprovalRunStateForSave(tx, input.serializedRunState, input.pendingApprovals);
+        if (violation) throw violation;
         const [{ maxVersion } = { maxVersion: 0 }] = await tx
           .select({
             maxVersion: sql<number>`coalesce(max(${schema.agentRunStates.stateVersion}), 0)`,
@@ -72457,22 +73461,27 @@ export async function saveRunState(
   );
 }
 
-async function assertApprovalRunStateForSave(
-  executor: Pick<Database, "execute">,
+/**
+ * Check a RunState against its materialization envelope before any database
+ * work. The measurement is linear in the text (see measureJsonObjectText), so
+ * callers run it before opening their transaction and throw the returned error
+ * at the point where they would otherwise insert the row.
+ */
+function approvalRunStateSaveViolation(
   serializedRunState: string,
   pendingApprovals: unknown[],
-): Promise<void> {
+): ApprovalRunStateLimitExceededError | null {
   const limits = DEFAULT_APPROVAL_RUN_STATE_LIMITS;
   const actualBytes = Buffer.byteLength(serializedRunState, "utf8");
   if (actualBytes > limits.maximumJsonBytes) {
-    throw new ApprovalRunStateLimitExceededError(
+    return new ApprovalRunStateLimitExceededError(
       "json_bytes",
       actualBytes,
       limits.maximumJsonBytes,
     );
   }
   if (pendingApprovals.length > limits.maximumPendingApprovalItems) {
-    throw new ApprovalRunStateLimitExceededError(
+    return new ApprovalRunStateLimitExceededError(
       "pending_approval_items",
       pendingApprovals.length,
       limits.maximumPendingApprovalItems,
@@ -72481,78 +73490,15 @@ async function assertApprovalRunStateForSave(
   const pendingApprovalJson = JSON.stringify(pendingApprovals);
   const pendingApprovalBytes = Buffer.byteLength(pendingApprovalJson, "utf8");
   if (pendingApprovalBytes > limits.maximumPendingApprovalBytes) {
-    throw new ApprovalRunStateLimitExceededError(
+    return new ApprovalRunStateLimitExceededError(
       "pending_approval_bytes",
       pendingApprovalBytes,
       limits.maximumPendingApprovalBytes,
     );
   }
-
-  const [row] = await rawRows<{
-    actual_bytes: string;
-    valid_json_object: boolean;
-    actual_nodes: string;
-    actual_properties: string;
-  }>(
-    executor,
-    sql`
-      with candidate as materialized (
-        select ${serializedRunState}::text as serialized_run_state
-      ), measured as materialized (
-        select serialized_run_state,
-               octet_length(serialized_run_state)::bigint as actual_bytes,
-               (serialized_run_state is json value) as valid_json
-        from candidate
-      ), decoded as materialized (
-        select measured.*,
-               case when valid_json then case
-                 when jsonb_typeof(serialized_run_state::jsonb) = 'object'
-                 then serialized_run_state::jsonb
-                 else null
-               end else null end as state_json
-        from measured
-      ), bounded_nodes as materialized (
-        select count(*)::bigint as actual_nodes
-        from (
-          select node
-          from decoded
-          cross join lateral jsonb_path_query(decoded.state_json, 'strict $.**') as node
-          where decoded.state_json is not null
-          limit ${limits.maximumJsonNodes + 1}
-        ) nodes
-      ), bounded_properties as materialized (
-        select count(*)::bigint as actual_properties
-        from (
-          select property
-          from decoded
-          cross join lateral jsonb_path_query(
-            decoded.state_json,
-            'strict $.** ? (@.type() == "object")'
-          ) as object_value
-          cross join lateral jsonb_object_keys(object_value) as property
-          where decoded.state_json is not null
-          limit ${limits.maximumJsonProperties + 1}
-        ) properties
-      )
-      select decoded.actual_bytes::text as actual_bytes,
-             (decoded.valid_json and decoded.state_json is not null) as valid_json_object,
-             bounded_nodes.actual_nodes::text as actual_nodes,
-             bounded_properties.actual_properties::text as actual_properties
-      from decoded
-      cross join bounded_nodes
-      cross join bounded_properties
-    `,
-  );
-  if (!row) throw new Error("Approval run-state save envelope returned no measurement");
-  assertApprovalRunStateMeasurement(
+  return approvalRunStateMeasurementViolation(
     {
-      actualBytes: safeEnvelopeInteger(row.actual_bytes, "approval run-state bytes"),
-      validJsonObject: row.valid_json_object,
-      actualNodes: safeEnvelopeInteger(row.actual_nodes, "approval run-state JSON nodes"),
-      actualProperties: safeEnvelopeInteger(
-        row.actual_properties,
-        "approval run-state JSON properties",
-      ),
+      ...boundedApprovalRunStateTextMeasurement(serializedRunState, actualBytes, limits),
       pendingApprovalBytes,
       pendingApprovalItems: pendingApprovals.length,
     },
@@ -80120,17 +81066,25 @@ export async function claimSessionWorkForAttempt(
           )
           .orderBy(desc(schema.sessionAttemptInterruptions.requestedAt))
           .limit(1);
-        const [unsettledWriters] = await tx.execute<{ pending: boolean }>(sql`
-          select exists (
-            select 1 from session_turn_attempts attempt
-            where attempt.workspace_id = ${workspaceId}
-              and attempt.session_id = ${sessionId}
-              and attempt.state = 'closed'
-              and attempt.quiesced_at is null
-              and attempt.id in ${sessionPendingWriterAttemptIdsSql({ workspaceId, sessionId })}
-              and ${sessionAttemptPendingWritersSql(sql`attempt`, "inference")}
-          ) as pending
+        // Only a session with an unsettled admission or an active retained
+        // process can have a pending writer. Most have neither, and then the
+        // exact predicate below (mostly planning cost) need not run.
+        const [writerCandidates] = await tx.execute<{ present: boolean }>(sql`
+          select exists ${sessionPendingWriterAttemptIdsSql({ workspaceId, sessionId })} as present
         `);
+        const [unsettledWriters] = writerCandidates?.present
+          ? await tx.execute<{ pending: boolean }>(sql`
+              select exists (
+                select 1 from session_turn_attempts attempt
+                where attempt.workspace_id = ${workspaceId}
+                  and attempt.session_id = ${sessionId}
+                  and attempt.state = 'closed'
+                  and attempt.quiesced_at is null
+                  and attempt.id in ${sessionPendingWriterAttemptIdsSql({ workspaceId, sessionId })}
+                  and ${sessionAttemptPendingWritersSql(sql`attempt`, "inference")}
+              ) as pending
+            `)
+          : [];
         if (unquiescedInterruption || unsettledWriters?.pending) {
           return { action: "unclaimed", reason: "control-pending" };
         }
@@ -80874,7 +81828,7 @@ export async function claimSessionWorkForAttempt(
                     savepoint as unknown as Database,
                     {
                       sessionId,
-                      session: mapSession(
+                      session: mapSessionWithoutSkills(
                         claimedSession,
                         serializeEffectiveSessionControl(effectiveControl),
                         connectorMetadata.get(sessionId) ?? [],
@@ -81656,7 +82610,7 @@ export async function claimSessionWorkForAttempt(
               tx as unknown as Database,
               {
                 sessionId,
-                session: mapSession(
+                session: mapSessionWithoutSkills(
                   session,
                   serializeEffectiveSessionControl(effectiveControl),
                   connectorMetadata.get(sessionId) ?? [],
@@ -83357,6 +84311,7 @@ export type SessionWorkPeek =
       waitTurnId: string;
       deadlineAt: string;
     }
+  | { kind: "read-only" }
   | { kind: "idle" };
 
 /**
@@ -83378,6 +84333,7 @@ async function nextSessionAttemptAwaitingQuiescence(
 ): Promise<{
   attemptId: string;
 } | null> {
+  if (!(await sessionMayAwaitQuiescence(db, { workspaceId, sessionId }))) return null;
   const [row] = await db
     .select({
       attemptId: schema.sessionTurnAttempts.id,
@@ -83733,6 +84689,19 @@ export function repairMissingQuiescenceReceiptWakes(
   return repairMissingQuiescenceReceiptWakesWith(peekSessionWork, db, limit, after);
 }
 
+async function sessionRowExists(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<boolean> {
+  const [row] = await db
+    .select({ id: schema.sessions.id })
+    .from(schema.sessions)
+    .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+    .limit(1);
+  return row !== undefined;
+}
+
 export async function peekSessionWork(
   db: Database,
   workspaceId: string,
@@ -83751,9 +84720,25 @@ export async function peekSessionWork(
         .limit(1);
       if (!visible) return { kind: "unavailable" };
     }
-    const effectiveControl = await evaluateSessionControl(scopedDb, workspaceId, sessionId, {
-      lock: "share",
-    });
+    let effectiveControl: Awaited<ReturnType<typeof evaluateSessionControl>>;
+    try {
+      effectiveControl = await evaluateSessionControl(scopedDb, workspaceId, sessionId, {
+        lock: "share",
+      });
+    } catch (error) {
+      // The shared workspace-control lock waits for a concurrent deletion to
+      // commit, so the session can vanish between the read above and this one.
+      // That is an absent session, observed exactly like the read below
+      // observes it, not a broken invariant (which would fail the activity and
+      // retry until the next attempt saw the deletion).
+      if (
+        error instanceof SessionControlInvariantError &&
+        !(await sessionRowExists(scopedDb, workspaceId, sessionId))
+      ) {
+        return { kind: observerAccountId ? "unavailable" : "idle" };
+      }
+      throw error;
+    }
     // This is an advisory control observation, not a session/configuration
     // read. Do not transfer frozen prompts, tool catalogs or other payloads
     // that none of the decisions below consumes.
@@ -83767,11 +84752,20 @@ export async function peekSessionWork(
         compactRequested: schema.sessions.compactRequested,
         inputWaitTurnId: schema.sessions.inputWaitTurnId,
         inputWaitUntil: schema.sessions.inputWaitUntil,
+        contentArchiveState: schema.sessions.contentArchiveState,
+        importedArchiveImportId: schema.sessions.importedArchiveImportId,
       })
       .from(schema.sessions)
       .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
       .limit(1);
     if (!session) return { kind: observerAccountId ? "unavailable" : "idle" };
+    // An archived (or archiving) or imported session is read-only: the
+    // database refuses every turn, attempt and wake write for it, so there is
+    // no work to admit and no receipt that could still commit. Restoring its
+    // content makes it live again and the next wake peeks it afresh.
+    if (session.contentArchiveState !== null || session.importedArchiveImportId !== null) {
+      return { kind: "read-only" };
+    }
     // Pure event appends can leave the wide session projection behind. Admission
     // settlement fences against the allocation cursor, so observe that same
     // authority here without taking a writer lock during this advisory peek.
@@ -87711,6 +88705,14 @@ export async function applySessionTurnSettlement(
     maxAttempts: 3,
   };
   const terminalTurn = isTerminalSessionTurnStatus(input.turnStatus);
+  // Measured once, before the transaction and its retries, so no lock is held
+  // while it runs. Stale and superseded attempts still settle as before.
+  const runStateViolation = input.runState
+    ? approvalRunStateSaveViolation(
+        input.runState.serializedRunState,
+        input.runState.pendingApprovals,
+      )
+    : null;
   return await retrySessionActivityRls(db, workspaceId, persistence, async (scopedDb) => {
     // A terminal settlement cancels the turn's still-pending human-input rows.
     // Their parent resolution notices need the parent locked with the child,
@@ -87895,11 +88897,7 @@ export async function applySessionTurnSettlement(
               eq(schema.agentRunStates.sessionId, input.sessionId),
             ),
           );
-        await assertApprovalRunStateForSave(
-          tx,
-          input.runState.serializedRunState,
-          input.runState.pendingApprovals,
-        );
+        if (runStateViolation) throw runStateViolation;
         await tx.insert(schema.agentRunStates).values(
           withLosslessContentWriteVersion(
             withLosslessContentWriteVersion(
@@ -90997,6 +91995,8 @@ async function enqueueChildWaitingCapacityOutboxTx(
     provider: "codex" | "xai" | "claude";
     nextCheckAt: Date | null;
     resetsAt: Date | null;
+    /** A later notice restating the reset of a wait the parent already heard of. */
+    restated?: boolean;
   },
 ): Promise<boolean> {
   if (!session.parentSessionId || !childLifecycleNoticesEnabled()) return false;
@@ -91012,6 +92012,7 @@ async function enqueueChildWaitingCapacityOutboxTx(
     dedupeKey: childWaitingCapacityDedupeKey({
       childSessionId: session.id,
       waiterId: input.waiterId,
+      ...(input.restated ? { restatedResetsAt: payload.resetsAt } : {}),
     }),
     kind: "child_waiting_capacity",
     classification: "info",
@@ -91089,8 +92090,22 @@ async function enqueueFailedChildOutboxForTurnTx(
   }
   await enqueueFailedChildOutboxTx(tx, workspaceId, session, {
     turnId: turn.id,
-    dedupeKey: `child-completion:${turn.sessionId}:turn:${turn.id}`,
+    dedupeKey: childFailedTurnDedupeKey(turn.sessionId, turn.id),
   });
+}
+
+/**
+ * Dedupe key of the notice a child's failed turn sends its parent. The SQL twin
+ * below must build the same string: sessionFailureHandledByParentSql relies on
+ * it to tell the failed turn itself from later work.
+ */
+export function childFailedTurnDedupeKey(childSessionId: string, turnId: string): string {
+  return `child-completion:${childSessionId}:turn:${turnId}`;
+}
+
+/** SQL form of childFailedTurnDedupeKey; keep the two in step. */
+function childFailedTurnDedupeKeySql(childSessionId: SQL, turnId: SQL): SQL {
+  return sql`('child-completion:' || (${childSessionId})::text || ':turn:' || (${turnId})::text)`;
 }
 
 async function enqueueFailedChildOutboxWithoutTurnTx(
@@ -92308,6 +93323,12 @@ export type EnqueueCapabilitySetupContinuationInput = {
   sessionId: string;
   capabilityId: string;
   /**
+   * The capability's MCP endpoint. An agent's request to add a server
+   * (custom_mcp_setup_request) posts its card before the capability exists, so
+   * that card names the endpoint rather than a capability id.
+   */
+  endpointUrl?: string;
+  /**
    * The card is a connected account's own notice (expired access, more access
    * a tool needs) rather than a capability card: find it by this connection.
    */
@@ -92533,9 +93554,15 @@ async function latestAuthCardTx(
   tx: Database,
   input: Pick<
     EnqueueCapabilitySetupContinuationInput,
-    "workspaceId" | "sessionId" | "capabilityId" | "connectionId"
+    "workspaceId" | "sessionId" | "capabilityId" | "connectionId" | "endpointUrl"
   >,
 ): Promise<Array<{ id: string; sequence: number; payload: unknown }>> {
+  const capabilityCard = sql`${schema.sessionEvents.payload} -> 'capability' ->> 'id' = ${input.capabilityId}`;
+  // The card keeps the address as the agent gave it; ignore case and a
+  // trailing slash so the saved server's address still finds it.
+  const setupRequestCard = input.endpointUrl
+    ? sql`rtrim(lower(${schema.sessionEvents.payload} -> 'setupRequest' ->> 'endpointUrl'), '/') = rtrim(lower(${input.endpointUrl}), '/')`
+    : null;
   return await tx
     .select({
       id: schema.sessionEvents.id,
@@ -92550,7 +93577,9 @@ async function latestAuthCardTx(
         eq(schema.sessionEvents.type, "tool.auth_needed"),
         input.connectionId
           ? sql`${schema.sessionEvents.payload} ->> 'connectionId' = ${input.connectionId}`
-          : sql`${schema.sessionEvents.payload} -> 'capability' ->> 'id' = ${input.capabilityId}`,
+          : setupRequestCard
+            ? sql`(${capabilityCard} or ${setupRequestCard})`
+            : capabilityCard,
       ),
     )
     .orderBy(desc(schema.sessionEvents.sequence))
@@ -95195,6 +96224,12 @@ export async function appendSessionEventsForTurnAttempt(
  * the Chrome setup card, the same purpose). The lookup runs inside the attempt
  * write fence, which locks the session row, so parallel callers in one turn
  * cannot both append. Cards for other capabilities are never consulted.
+ * Only the same kind of card counts: a first connection, or a reconnect of the
+ * same connection. With `sinceLatestMessage`, a current card of any turn since
+ * the person's latest message counts instead of only this turn's: repeated
+ * requests do not stack cards while the person has not written, and a card
+ * from before their latest message, which may be stale, is not reused. A chat
+ * with no message from a person (a scheduled run) reuses only this turn's.
  */
 export async function appendTurnCapabilityCardOnce(
   db: Database,
@@ -95206,10 +96241,23 @@ export async function appendTurnCapabilityCardOnce(
   capabilityId: string,
   input: AppendEventInput,
   requestedSandboxId: string | null = null,
+  options: { sinceLatestMessage?: boolean } = {},
 ): Promise<{ events: SessionEvent[]; accepted: boolean; existingEventId: string | null }> {
   let existingEventId: string | null = null;
   const payloadPurpose = (input.payload as { purpose?: unknown } | undefined)?.purpose;
   const purpose = typeof payloadPurpose === "string" ? payloadPurpose : "";
+  const payloadText = (key: string) => {
+    const value = (input.payload as Record<string, unknown> | undefined)?.[key];
+    return typeof value === "string" ? value : "";
+  };
+  const scope = options.sinceLatestMessage
+    ? sql`and coalesce(sequence > (
+              select max(message.sequence) from session_events message
+              where message.workspace_id = ${workspaceId}::uuid
+                and message.session_id = ${sessionId}::uuid
+                and message.type = 'user.message'
+            ), turn_id = ${turnId}::uuid)`
+    : sql`and turn_id = ${turnId}::uuid`;
   const result = await mutateAndAppendSessionEventsForTurnAttempt(
     db,
     workspaceId,
@@ -95227,13 +96275,15 @@ export async function appendTurnCapabilityCardOnce(
           select id from session_events
           where workspace_id = ${workspaceId}::uuid
             and session_id = ${sessionId}::uuid
-            and turn_id = ${turnId}::uuid
+            ${scope}
             and type = 'tool.auth_needed'
             and duplicate_of_event_id is null
             and (turn_association is null or turn_association = 'current')
             and payload -> 'capability' ->> 'id' = ${capabilityId}
             and coalesce(payload ->> 'requestedSandboxId', '') = ${requestedSandboxId ?? ""}
             and coalesce(payload ->> 'purpose', '') = ${purpose}
+            and coalesce(payload ->> 'reason', '') = ${payloadText("reason")}
+            and coalesce(payload ->> 'connectionId', '') = ${payloadText("connectionId")}
           order by sequence
           limit 1
         `,
@@ -96239,9 +97289,21 @@ export async function appendSessionEventsWithLockedSessionUpdate(
         if (!sessionRow) {
           throw new Error(`Session not found: ${sessionId}`);
         }
+        // The callback receives complete Sessions; the rows are locked, so
+        // their Skill folders read here are the ones this update replaces.
+        const lockedSkills = await readSessionSkills(
+          tx as unknown as Database,
+          workspaceId,
+          locks.sessions.map((row) => row.id),
+        );
+        const withLockedSkills = (row: (typeof locks.sessions)[number]): SessionRowWithSkills => {
+          const skills = lockedSkills.get(row.id);
+          if (!skills) throw new Error(`Session not found: ${row.id}`);
+          return { ...row, skills };
+        };
         const mappedSession = await mapSessionWithControl(
           tx as unknown as Database,
-          sessionRow,
+          withLockedSkills(sessionRow),
           [],
           undefined,
           undefined,
@@ -96281,7 +97343,7 @@ export async function appendSessionEventsWithLockedSessionUpdate(
             return row
               ? await mapSessionWithControl(
                   tx as unknown as Database,
-                  row,
+                  withLockedSkills(row),
                   [],
                   undefined,
                   undefined,
@@ -96363,7 +97425,6 @@ export async function appendSessionEventsWithLockedSessionUpdate(
               : {}),
             ...(update.agentConfig !== undefined ? { agentConfig: update.agentConfig } : {}),
             ...(update.instructions !== undefined ? { instructions: update.instructions } : {}),
-            ...(update.skills !== undefined ? { skills: update.skills } : {}),
             ...(update.toolPolicy !== undefined ? { toolPolicy: update.toolPolicy } : {}),
             ...(update.toolPolicyVersion !== undefined
               ? { toolPolicyVersion: update.toolPolicyVersion }
@@ -96395,6 +97456,18 @@ export async function appendSessionEventsWithLockedSessionUpdate(
           throw new SessionToolPolicyVersionConflictError(
             Number(current?.toolPolicyVersion ?? update.expectedToolPolicyVersion ?? 1),
           );
+        }
+        if (update.skills !== undefined) {
+          // Written with the tool-policy CAS above, under the same row lock.
+          await tx
+            .update(schema.sessionSkillSets)
+            .set({ skills: update.skills })
+            .where(
+              and(
+                eq(schema.sessionSkillSets.workspaceId, workspaceId),
+                eq(schema.sessionSkillSets.id, sessionId),
+              ),
+            );
         }
         return inserted.map(mapEvent);
       }),
@@ -96430,7 +97503,7 @@ async function sessionControlProjections(
 
 async function mapSessionWithControl(
   db: Database,
-  row: typeof schema.sessions.$inferSelect,
+  row: SessionRowWithSkills,
   mcpServers: SessionMcpServerMetadata[] = [],
   pin: Pick<Session, "pinned" | "pinnedAt" | "pinVersion"> = mapSessionPin(null),
   attention: Pick<Session, "unread" | "activelyWorking" | "attentionVersion"> = {
@@ -96531,8 +97604,38 @@ function mapSessionTenancy(
   };
 }
 
-function mapSession(
+type MapSessionDecorations = [
+  effectiveControl: Session["effectiveControl"],
+  mcpServers?: SessionMcpServerMetadata[],
+  pin?: Pick<Session, "pinned" | "pinnedAt" | "pinVersion">,
+  attention?: Pick<Session, "unread" | "activelyWorking" | "attentionVersion">,
+  archive?: ReturnType<typeof mapSessionArchive>,
+  tenancyViewer?: { subjectId: string },
+];
+
+function mapSession(row: SessionRowWithSkills, ...decorations: MapSessionDecorations): Session {
+  // mapSessionFields sets `skills` whenever it is given them.
+  return mapSessionFields(
+    row,
+    StoredSessionSkills.parse(row.skills ?? []),
+    ...decorations,
+  ) as Session;
+}
+
+/**
+ * A session's configuration without its Skill folders, for internal callers
+ * that never use them and read the row without them.
+ */
+function mapSessionWithoutSkills(
   row: SessionRow,
+  ...decorations: MapSessionDecorations
+): Omit<Session, "skills"> {
+  return mapSessionFields(row, undefined, ...decorations);
+}
+
+function mapSessionFields(
+  row: SessionRow,
+  skills: Session["skills"] | undefined,
   effectiveControl: Session["effectiveControl"],
   mcpServers: SessionMcpServerMetadata[] = [],
   pin: Pick<Session, "pinned" | "pinnedAt" | "pinVersion"> = mapSessionPin(null),
@@ -96543,7 +97646,7 @@ function mapSession(
   },
   archive: ReturnType<typeof mapSessionArchive> = mapSessionArchive(null),
   tenancyViewer?: { subjectId: string },
-): Session {
+): Omit<Session, "skills"> & Partial<Pick<Session, "skills">> {
   const bundledSkillIds = bundledSkillSelectionFromMetadata(row.metadata);
   return {
     id: row.id,
@@ -96579,7 +97682,8 @@ function mapSession(
     memoryScope: sessionMemoryScopeFromRow(row),
     resources: row.resources as ResourceRef[],
     ...sessionRemovedRepositoriesProjection(row.removedRepositories),
-    skills: StoredSessionSkills.parse(row.skills ?? []),
+    // Same key position as always, so serialized sessions keep their bytes.
+    ...(skills !== undefined ? { skills } : {}),
     ...(bundledSkillIds !== undefined ? { bundledSkillIds } : {}),
     tools: row.tools as ToolRef[],
     toolPolicy: row.toolPolicy as SessionToolPolicy,
@@ -96624,6 +97728,7 @@ function mapSession(
     mcpServers,
     parentSessionId: row.parentSessionId ?? null,
     rootSessionId: row.rootSessionId,
+    ...(row.failureHandled ? { failureHandled: true } : {}),
     nestedAgentDepth: row.nestedAgentDepth,
     maxNestedAgentDepthOverride: row.maxNestedAgentDepthOverride ?? null,
     effectiveMaxNestedAgentDepth: row.effectiveMaxNestedAgentDepth,
@@ -97020,6 +98125,20 @@ function catalogExposureState(
   return "legacy_active";
 }
 
+/**
+ * A workspace's Microsoft Dynamics entry keeps its MCP address only in
+ * `endpoint_url`: `mcp_url` takes part in the registry's cross-workspace
+ * uniqueness, which two workspaces using one environment would break.
+ */
+function workspaceDynamicsMcpUrl(row: typeof schema.capabilityCatalogItems.$inferSelect) {
+  return row.workspaceId &&
+    row.kind === "mcp" &&
+    row.endpointUrl &&
+    microsoftDynamicsProductForMcpUrl(row.endpointUrl)
+    ? row.endpointUrl
+    : null;
+}
+
 function mapCapabilityCatalogItem(
   row: typeof schema.capabilityCatalogItems.$inferSelect,
   exposure: "trusted" | "legacy_active" | "unverified" = capabilityCatalogItemIsTrustedForExposure({
@@ -97085,7 +98204,7 @@ function mapCapabilityCatalogItem(
     providerDomain: row.providerDomain,
     surfaceType: row.surfaceType,
     transport: row.transport,
-    mcpUrl: row.mcpUrl,
+    mcpUrl: row.mcpUrl ?? workspaceDynamicsMcpUrl(row),
     authKind: row.authKind as CapabilityCatalogItem["authKind"],
     credentialFacts: row.credentialFacts,
     tier: row.tier as CapabilityCatalogItem["tier"],
@@ -97773,6 +98892,7 @@ export * from "./attempt-tool-catalogs";
 export * from "./model-context-snapshots";
 export * from "./session-content-blobs";
 export * from "./session-content-compaction";
+export * from "./session-content-garbage";
 export * from "./session-secret-redaction";
 export * from "./session-archive";
 export * from "./session-unattended";
@@ -97801,9 +98921,10 @@ export * from "./event-triggers";
 export * from "./mcp-event-subscriptions";
 export * from "./event-source-feeds";
 export * from "./automation-templates";
-export * from "./bot-templates";
 export * from "./organization-model-providers";
 export * from "./organization-compatible-model-endpoints";
+export * from "./organization-anthropic-api-keys";
+export * from "./workspace-model-key-list-price";
 export * from "./organization-model-defaults";
 export * from "./session-admin-access";
 export * from "./subscription-core-claude-oauth";
@@ -97821,6 +98942,7 @@ export async function listDueWorkspacePauseTimers(db: Database, limit = 100) {
 }
 
 export * from "./feedback";
+export * from "./console";
 export * from "./session-final-reply";
 export * from "./knowledge-entries";
 
@@ -98039,5 +99161,7 @@ export * from "./boot-connect";
 export * from "./teams-conversations";
 
 export * from "./teams-private-session";
+
+export * from "./teams-routing";
 
 export { recordMachinePromotionProof } from "./promotion-abuse";

@@ -157,12 +157,17 @@ impl Chunked {
 
     /// Writes the stored image `image` to `path`. False if the store does
     /// not hold it.
-    pub async fn get_rootfs(&self, image: ImageId, path: &Path) -> Result<bool, EngineError> {
+    pub(super) async fn get_rootfs(
+        &self,
+        image: ImageId,
+        path: &Path,
+        seed: Option<&super::Seed>,
+    ) -> Result<bool, EngineError> {
         const OP: &str = "fetch image";
         let Some(head) = self.rootfs_head(OP, image).await? else {
             return Ok(false);
         };
-        self.get_file(&head.disk, path, None).await?;
+        self.get_file(&head.disk, path, seed).await?;
         let fetched = file_id(path).await?;
         if fetched != image {
             let _ = std::fs::remove_file(path);

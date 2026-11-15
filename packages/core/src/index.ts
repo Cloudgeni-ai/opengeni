@@ -87,6 +87,7 @@ export {
 } from "./managed-session";
 export * from "./transcription";
 export * from "./recording-transcription";
+export * from "./recording-transcription-request";
 export * from "./xai-operation-availability";
 export * from "./recording-transcription-azure";
 export * from "./model-catalog";
@@ -148,6 +149,7 @@ export * from "./domain/event-triggers";
 export * from "./domain/personal-connection-delegations";
 export * from "./domain/personal-github-repository-access";
 export * from "./domain/connections-needing-reconnect";
+export * from "./domain/nango-integrations";
 export {
   listApiIntegrationsWithPersonalExtension,
   type PersonalWorkspaceExtensionApiIntegration,

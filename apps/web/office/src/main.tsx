@@ -3,6 +3,8 @@
 // other chat) can work in it live through `excel_run`.
 // It uses the published, scoped stylesheet, as any product embedding the
 // session app does.
+// Before anything renders or parses: the page's content hosting and Zod's JIT.
+import "../../src/lib/content-security-boot";
 import "@fontsource-variable/inter/wght.css";
 import "@fontsource-variable/inter/wght-italic.css";
 import "@fontsource-variable/jetbrains-mono/wght.css";
@@ -13,6 +15,7 @@ import {
   type SessionAppSurfaces,
 } from "@opengeni/react/session-app";
 import { enableWorkbench } from "@opengeni/react/workbench";
+import { setImageProxyTicket } from "@opengeni/react/app/lib/content-hosting";
 import { OpenGeniClient, type Workspace } from "@opengeni/sdk";
 import {
   lazy,
@@ -299,8 +302,51 @@ function PaneAccount(props: {
   );
 }
 
+/** Image proxy tickets last 12 hours; renew well before. */
+const IMAGE_PROXY_TICKET_REFRESH_MS = 60 * 60 * 1000;
+
+/**
+ * The pane signs in with a bearer token, which an `<img>` cannot send, so
+ * images the page's policy does not list load through the API's image proxy
+ * with a ticket instead of the sign-in cookie.
+ */
+/**
+ * Keeps this pane's image proxy ticket current. Returns false until the first
+ * attempt settles, so images never render (and fail) before the ticket exists.
+ */
+function useImageProxyTicket(token: string): boolean {
+  const [settled, setSettled] = useState(false);
+  useEffect(() => {
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const refresh = async () => {
+      try {
+        const response = await fetch(`${apiBaseUrl}/v1/image-proxy/ticket`, {
+          headers: { Authorization: `Bearer ${token}` },
+          // The pane waits for this first attempt; never let it hang.
+          signal: AbortSignal.timeout(10_000),
+        });
+        const body = response.ok ? ((await response.json()) as { ticket?: unknown }) : null;
+        if (!stopped && typeof body?.ticket === "string") setImageProxyTicket(body.ticket);
+      } catch {
+        // Images from unlisted origins stay unavailable until the next try.
+      }
+      if (!stopped) setSettled(true);
+      if (!stopped) timer = setTimeout(() => void refresh(), IMAGE_PROXY_TICKET_REFRESH_MS);
+    };
+    void refresh();
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+      setImageProxyTicket(null);
+    };
+  }, [token]);
+  return settled;
+}
+
 function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }) {
   const client = useMemo(() => new OpenGeniClient({ baseUrl: apiBaseUrl, apiKey: token }), [token]);
+  const imageTicketSettled = useImageProxyTicket(token);
   const [workspaces, setWorkspaces] = useState<Workspace[] | null>(null);
   const [workspaceId, setWorkspaceId] = useState<string | null>(remembered(WORKSPACE_KEY));
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -416,7 +462,7 @@ function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }
       />
     );
   }
-  if (!workspaces) return null;
+  if (!workspaces || !imageTicketSettled) return null;
   if (!workspaceId) {
     return (
       <PaneNotice

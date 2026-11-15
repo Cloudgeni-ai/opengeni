@@ -13,7 +13,8 @@ import { mayStartOnlyMe, scheduledTaskViewerSubjectForGrant } from "./scheduled-
  * and a schedule: the whole workspace, or only its owner ("Only me").
  * Everyone with workspace access sees workspace ones. An Only me one is
  * visible to its owner alone; admins cannot see it, exactly like an Only me
- * chat. Only the owner changes the audience.
+ * chat. Only the owner changes the audience, or their agent acting for them,
+ * like a file's.
  *
  * Every surface that reads or changes them (HTTP, agent tools, the artifact
  * library, Site tools and Site conversations) resolves its viewer here; the
@@ -27,13 +28,8 @@ export function artifactPrivateOwnerMessage(noun: ArtifactAudienceNoun): string 
   return `Only a person can have an Only me ${noun}.`;
 }
 
-export function artifactAudienceHumanMessage(noun: ArtifactAudienceNoun): string {
-  return `Only the ${noun}'s owner can change who can see it, from the app.`;
-}
-
 export const SITE_PRIVATE_OWNER_MESSAGE = artifactPrivateOwnerMessage("Site");
 export const SITE_PRIVATE_DISABLED_MESSAGE = "Only me is turned off for this organization.";
-export const SITE_AUDIENCE_HUMAN_MESSAGE = artifactAudienceHumanMessage("Site");
 
 /**
  * The person a request reads Sites and documents as: the human caller, or the
@@ -135,9 +131,11 @@ export async function resolveNewSiteAudience(input: {
 }
 
 /**
- * The stored audience for an owner's change. Sharing with the workspace is
- * always allowed; limiting to Only me needs Only me to be allowed for them.
- * Whether the caller owns it is checked atomically by the database.
+ * The stored audience for an owner's change, made by the owner or by an agent
+ * turn acting for them (the viewer is that person). Sharing with the
+ * workspace is always allowed; limiting to Only me needs Only me to be
+ * allowed for them. Whether the viewer owns it is checked atomically by the
+ * database, so a key, service or run without a person can never change it.
  */
 export async function resolveArtifactAudienceChange(input: {
   db: Database;
@@ -147,9 +145,6 @@ export async function resolveArtifactAudienceChange(input: {
   requested: WorkspaceArtifactVisibility;
   noun: ArtifactAudienceNoun;
 }): Promise<"user_private" | "workspace_shared"> {
-  // Like a chat's audience, this is a person's own decision, not an agent's.
-  if (input.grant.principalKind === "agent_attempt")
-    throw new HTTPException(403, { message: artifactAudienceHumanMessage(input.noun) });
   if (input.requested === "private")
     await requireOnlyMeAllowed({
       db: input.db,

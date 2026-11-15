@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { ManagedAuthPanel } from "./managed-auth-panel";
 import { SignedOutPage } from "./signed-out-page";
 
-test("signed-out page presents the landing copy around the existing social/email form", () => {
+test("signed-out page sells real work in connected apps around the existing form", () => {
   const html = renderToStaticMarkup(
     <SignedOutPage>
       <ManagedAuthPanel
@@ -14,12 +14,17 @@ test("signed-out page presents the landing copy around the existing social/email
       />
     </SignedOutPage>,
   );
-  expect(html).toContain("Agents in your product.");
-  expect(html).toContain("Infrastructure out of the box.");
-  expect(html).toContain("Build AI products without building the infrastructure from scratch.");
-  expect(html).toContain("Durable sessions that keep working, even when you close your laptop");
-  expect(html).toContain("Tools and sandboxes, with approvals and permissions");
-  expect(html).toContain("Observability out of the box");
+  expect(html).toContain("Hand off real work.");
+  expect(html).toContain("Get it back done.");
+  expect(html).toContain(
+    "Agents that work in the background in GitHub, Gmail, Calendar, Slack and more, and check with you before anything goes out.",
+  );
+  expect(html).toContain("Reviews pull requests and fixes failing builds");
+  expect(html).toContain("Answers your inbox and preps tomorrow&#x27;s meetings");
+  expect(html).toContain("Uses its own computer and browser, day and night");
+  expect(html).not.toContain("Get things done,");
+  // Model subscriptions are optional, so the general pitch does not promise them.
+  expect(html).not.toContain("subscription");
   expect(html.match(/<li\b/g)).toHaveLength(3);
   expect(html.match(/<h1\b/g)).toHaveLength(1);
   expect(html).toContain('<h2 class="text-base font-semibold">Sign in</h2>');
@@ -51,8 +56,8 @@ test("the Excel pitch speaks to Excel users and keeps the same form and links", 
   expect(html).toContain("Builds tables, formulas and summaries in your sheets");
   expect(html).toContain("Cleans up messy data and formats sheets");
   expect(html).toContain("Explains what is in a workbook");
-  expect(html).not.toContain("Agents in your product.");
-  expect(html).not.toContain("Infrastructure out of the box.");
+  expect(html).not.toContain("Hand off real work.");
+  expect(html).not.toContain("Get it back done.");
   expect(html.match(/<li\b/g)).toHaveLength(3);
   expect(html.match(/<h1\b/g)).toHaveLength(1);
   expect(html).toContain("Continue with Google");
@@ -122,4 +127,18 @@ test("provider configuration and invitation precedence remain owned by the form"
   expect(invited).toContain("Example team");
   expect(invited).not.toContain("Continue with Google");
   expect(invited).not.toContain("Continue with GitHub");
+});
+
+test("on Opengeni Console's host, sign-in is Console's own", () => {
+  const html = renderToStaticMarkup(
+    <SignedOutPage pitch="console">
+      <ManagedAuthPanel presentation="embedded" onSubmit={async () => undefined} />
+    </SignedOutPage>,
+  );
+  expect(html).toContain(">Console</span>");
+  expect(html).toContain("Your product&#x27;s agents,");
+  expect(html).toContain("Your users&#x27; questions and answers");
+  expect(html).not.toContain("Hand off real work.");
+  expect(html).not.toContain("One workspace.");
+  expect(html).toContain("Forgot password?");
 });

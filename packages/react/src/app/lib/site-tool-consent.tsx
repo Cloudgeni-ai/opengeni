@@ -11,7 +11,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { ConnectRequest } from "./site-tool-consent-dialog";
+import type { ConnectRequest, RecoverRequest } from "./site-tool-consent-dialog";
 
 // The dialog code loads only when a Site first asks (the eager-graph budget).
 const SiteToolConsentDialog = lazy(() =>
@@ -21,6 +21,9 @@ const SiteToolConsentDialog = lazy(() =>
 );
 const SiteToolConnect = lazy(() =>
   import("./site-tool-consent-dialog").then((module) => ({ default: module.SiteToolConnect })),
+);
+const SiteToolRecover = lazy(() =>
+  import("./site-tool-consent-dialog").then((module) => ({ default: module.SiteToolRecover })),
 );
 
 /** Questions waiting at once; a Site that keeps calling is refused beyond this. */
@@ -33,11 +36,24 @@ type Pending = { id: number } & (
       done: (value: SiteToolConsentDecision) => void;
     }
   | { kind: "connect"; prompt: ConnectRequest; done: (value: boolean) => void }
+  | {
+      kind: "recover";
+      prompt: RecoverRequest;
+      done: (value: boolean) => void;
+      /** Other calls that stopped the same way: one answer serves them all. */
+      also: ((value: boolean) => void)[];
+    }
 );
 export type SiteToolConsentHost = {
   confirmToolCall: (prompt: SiteToolConsentPrompt) => Promise<SiteToolConsentDecision>;
   connectForToolCall: (prompt: ConnectRequest) => Promise<boolean>;
+  recoverToolCall: (prompt: RecoverRequest) => Promise<boolean>;
 };
+
+/** Failures shown once however many of the Site's calls hit them. */
+function recoverKey({ failure }: RecoverRequest): string {
+  return JSON.stringify([failure.code, failure.system, failure.reconnect?.connectionId ?? null]);
+}
 const SiteToolConsentContext = createContext<SiteToolConsentHost | null>(null);
 
 /** Asks for every Site in the console, one confirmation at a time. */
@@ -51,6 +67,7 @@ export function SiteToolConsentProvider({ children }: { children: ReactNode }) {
     setQueue(queued.current);
     if (item.kind === "confirm") item.done(value as SiteToolConsentDecision);
     else item.done(value as boolean);
+    if (item.kind === "recover") for (const done of item.also) done(value as boolean);
   }, []);
   useEffect(
     () => () => {
@@ -88,6 +105,23 @@ export function SiteToolConsentProvider({ children }: { children: ReactNode }) {
           prompt.signal,
           false,
         ),
+      recoverToolCall: (prompt) => {
+        const same = queued.current.find(
+          (item): item is Extract<Pending, { kind: "recover" }> =>
+            item.kind === "recover" && recoverKey(item.prompt) === recoverKey(prompt),
+        );
+        if (!same)
+          return enqueue<boolean>(
+            (done, id) => ({ id, kind: "recover", prompt, done, also: [] }),
+            prompt.signal,
+            false,
+          );
+        return new Promise<boolean>((resolve) => {
+          if (prompt.signal.aborted) return resolve(false);
+          same.also.push(resolve);
+          prompt.signal.addEventListener("abort", () => resolve(false), { once: true });
+        });
+      },
     }),
     [enqueue],
   );
@@ -107,6 +141,12 @@ export function SiteToolConsentProvider({ children }: { children: ReactNode }) {
             key={current.id}
             request={current.prompt}
             onDone={(ok) => settle(current, ok)}
+          />
+        ) : current?.kind === "recover" ? (
+          <SiteToolRecover
+            key={current.id}
+            request={current.prompt}
+            onDone={(again) => settle(current, again)}
           />
         ) : null}
       </Suspense>

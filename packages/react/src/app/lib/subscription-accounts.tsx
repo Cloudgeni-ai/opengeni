@@ -127,7 +127,9 @@ const ADAPTERS: Record<string, SubscriptionAdapter> = {
       seven_day_fable: { label: "Fable week", order: 21, scoped: true },
       seven_day_opus: { label: "Opus week", order: 22, scoped: true },
       seven_day_sonnet: { label: "Sonnet week", order: 23, scoped: true },
-      seven_day_overage_included: { label: "Included extra", order: 80, extra: true },
+      // Claude's model responses name the weekly Fable limit this way (the
+      // usage endpoint says `seven_day_fable`); its reset grants clear it.
+      seven_day_overage_included: { label: "Fable week", order: 21, scoped: true },
     },
     planQuiet: (plan) => (CLAUDE_ULTRA_PLANS.has(plan.toLowerCase()) ? ["five_hour"] : []),
     listedWhenLimited: ["five_hour"],

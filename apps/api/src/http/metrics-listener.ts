@@ -2,6 +2,7 @@ import type { Settings } from "@opengeni/config";
 import { Hono } from "hono";
 
 import { requireAccessKey } from "./auth";
+import type { HttpServerDrain } from "./server-drain";
 
 type PrometheusSource = { prometheusMetrics(): Promise<string> };
 
@@ -33,6 +34,10 @@ export function createMetricsListenerApp(
   observability: PrometheusSource,
 ): Hono {
   const app = new Hono();
+  app.use("*", async (c, next) => {
+    await next();
+    if (!c.res.headers.has("x-content-type-options")) c.header("x-content-type-options", "nosniff");
+  });
   app.use("*", requireAccessKey(settings));
   registerPrometheusMetricsRoute(app, observability);
   return app;
@@ -42,6 +47,7 @@ export function createMetricsListenerApp(
 export function startApiMetricsListener(
   settings: Settings,
   observability: PrometheusSource,
+  drain?: Pick<HttpServerDrain, "fetch">,
 ): ReturnType<typeof Bun.serve> | undefined {
   const port = settings.apiMetricsPort;
   if (port === undefined) return undefined;
@@ -49,9 +55,10 @@ export function startApiMetricsListener(
     throw new Error("OPENGENI_API_METRICS_PORT must differ from OPENGENI_API_PORT");
   }
   const app = createMetricsListenerApp(settings, observability);
+  const fetch = (request: Request) => app.fetch(request);
   return Bun.serve({
     hostname: settings.apiHost,
     port,
-    fetch: (request) => app.fetch(request),
+    fetch: drain ? drain.fetch(fetch) : fetch,
   });
 }

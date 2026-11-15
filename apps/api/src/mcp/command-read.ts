@@ -3,6 +3,7 @@ import {
   COMMAND_OUTPUT_DEFAULT_BYTES,
   COMMAND_OUTPUT_MAX_BYTES,
 } from "@opengeni/db/session-background-commands";
+import { ToolArgumentError } from "./tool-argument-error";
 
 export const COMMAND_READ_MAX_WAIT_SECONDS = 50;
 export const COMMAND_WAIT_DEFAULT_SECONDS = 45;
@@ -37,7 +38,7 @@ function validateWaitControls(input: {
 }) {
   const seconds = input.waitSeconds ?? 0;
   if (!Number.isInteger(seconds) || seconds < 0 || seconds > COMMAND_READ_MAX_WAIT_SECONDS) {
-    throw new Error("waitSeconds must be between 0 and 50");
+    throw new ToolArgumentError("waitSeconds must be between 0 and 50");
   }
   if (
     input.maxOutputBytes !== undefined &&
@@ -45,7 +46,7 @@ function validateWaitControls(input: {
       input.maxOutputBytes < 4 ||
       input.maxOutputBytes > COMMAND_OUTPUT_MAX_BYTES)
   ) {
-    throw new Error("maxOutputBytes must be between 4 and 65536");
+    throw new ToolArgumentError("maxOutputBytes must be between 4 and 65536");
   }
   return seconds;
 }
@@ -191,9 +192,11 @@ export async function readCommandsWithWait<T extends CommandReadShape>(
 ) {
   const seconds = validateWaitControls(input);
   const commandIds = [...new Set(input.commandIds)];
-  if (commandIds.length === 0) throw new Error("Pass at least one command ID");
+  if (commandIds.length === 0) throw new ToolArgumentError("Pass at least one command ID");
   if (commandIds.length > COMMAND_WAIT_MAX_COMMANDS)
-    throw new Error(`command_wait accepts at most ${COMMAND_WAIT_MAX_COMMANDS} commands`);
+    throw new ToolArgumentError(
+      `command_wait accepts at most ${COMMAND_WAIT_MAX_COMMANDS} commands`,
+    );
   const waitFor = input.waitFor ?? "all";
   const started = Date.now();
   let liveFanout = true;

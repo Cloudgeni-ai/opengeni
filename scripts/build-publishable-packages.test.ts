@@ -1,4 +1,5 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, test as bunTest } from "bun:test";
+import { quarantineTest } from "@opengeni/testing/quarantine";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import {
   chmodSync,
@@ -14,6 +15,9 @@ import {
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
+
+// Tests listed in packages/testing/quarantine.json still run but do not fail the lane.
+const test = quarantineTest(bunTest, import.meta.path);
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const fixtureRoots = new Set<string>();

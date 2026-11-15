@@ -367,7 +367,11 @@ describe("Connected Machine to managed-home turn transition", () => {
         expect(acknowledgeLostAttemptOwnership).toHaveBeenCalledTimes(action === "stale" ? 1 : 0);
         expect(control.activityStatus).toBe(action === "stale" ? "cancelled" : "recovering");
         expect(control.turnMetricOutcome).toBe(action === "stale" ? "cancelled" : "recovering");
-        if (action === "recovering") expect(control.activityError).toBe(error);
+        if (action === "recovering") {
+          expect(control.activityError).toBe(error);
+          // A deliberate route move is the designed boundary, not a sandbox fault.
+          expect(control.turnRecoveryCause).toBe("route_change");
+        }
       } finally {
         requestRecovery.mockRestore();
       }

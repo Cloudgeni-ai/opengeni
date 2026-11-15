@@ -318,7 +318,7 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
-  "packages/db/src/session-command-output.ts#appendSessionCommandOutput": {
+  "packages/db/src/session-command-output.ts#appendSessionCommandOutputs": {
     inserts: 1,
     contract: "canonical",
   },
@@ -492,9 +492,6 @@ const expectedOutboxWriters: Record<
 
 const expectedFailedChildOutboxCallers = [
   "applySessionTurnSettlement",
-  // arm owns the canonical child-lifecycle prefix (including parent session)
-  // before atomically emitting a false-capacity-recovery terminal boundary.
-  "armSubscriptionCoreCapacityWait",
   "settleSessionWorkBeforeAttemptClaim",
   "recoverSessionOwner",
 ];
@@ -527,7 +524,12 @@ const expectedChildLifecycleNoticeProducers: Record<string, string[]> = {
     "applySessionTurnSettlement",
     "settleSessionWorkBeforeAttemptClaim",
   ],
-  enqueueChildWaitingCapacityOutboxTx: ["armSubscriptionCoreCapacityWait"],
+  // The reconcile locks the waiting child with its parent, then restates a
+  // reset the parent was told that no longer holds.
+  enqueueChildWaitingCapacityOutboxTx: [
+    "armSubscriptionCoreCapacityWait",
+    "reconcileSubscriptionCoreCapacityWait",
+  ],
   enqueueChildProgressOutboxTx: ["recordSessionGoalProgressWithEvent"],
 };
 const expectedControlPlaneChildOutboxWrappers: Record<string, string[]> = {
@@ -709,12 +711,14 @@ const expectedTenancyCascadeRootDeletes: Record<string, string[]> = {
   "packages/db/src/index.ts#deleteSessionTreeIfQuiescent": ["sandbox_leases"],
   "packages/db/src/index.ts#deleteWorkspace": ["workspaces"],
   "packages/db/src/index.ts#deleteWorkspaceIfQuiescent": ["workspaces"],
+  "packages/db/src/index.ts#forgetColdSandboxOfArchivedChats": ["sandbox_leases"],
   "scripts/operator/turn-density-profile.ts#deleteDensityProfileAccount": ["managed_accounts"],
 };
 
 const expectedTenancyCascadeRootFenceCalls: Record<string, string> = {
   "packages/db/src/index.ts#deleteSessionTreeIfQuiescent": "withWorkspaceSubjectRls",
   "packages/db/src/index.ts#deleteWorkspaceIfQuiescent": "withRlsContext",
+  "packages/db/src/index.ts#forgetColdSandboxOfArchivedChats": "withRlsContext",
   "scripts/operator/turn-density-profile.ts#deleteDensityProfileAccount": "withWorkspaceRls",
 };
 

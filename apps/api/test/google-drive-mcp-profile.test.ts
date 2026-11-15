@@ -29,7 +29,8 @@ describe("official Drive MCP setup", () => {
     expect(drive).toMatchObject({
       defaultOwnership: "personal",
       sendResourceParameter: false,
-      extraAuthorizeParams: { access_type: "offline", prompt: "consent" },
+      extraAuthorizeParams: { access_type: "offline", prompt: "consent select_account" },
+      reconnectLoginHint: { metadataKey: "googleDriveEmail", prompt: "consent" },
       reportedScopesRequired: true,
       freshRefreshTokenRequired: true,
       fullRequestedScopesRequired: true,

@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { applyClaudeCodeIdentity } from "./claude-code-identity";
 import { AnthropicRequestError } from "./anthropic-request-error";
@@ -25,7 +26,19 @@ import {
 import { withClaudeModelRequest } from "./claude-subscription-usage";
 import { createModelImageSizer } from "./model-image-sizing";
 import { isModelPreempted, preemptedResponseDone } from "./model-preemption";
-import { projectHistoryForProvider } from "./provider-history-adapter";
+import {
+  ARTIFACT_ORIGIN_KEY,
+  artifactOrigin,
+  MACHINE_CONTINUATION_TEXT,
+  projectHistoryForProvider,
+} from "./provider-history-adapter";
+import {
+  claudeSignedThinkingBlock,
+  claudeThinkingFingerprint,
+  opaqueReasoningFingerprint,
+  refusedOpaqueReasoning,
+  rememberRefusedOpaqueReasoning,
+} from "./opaque-reasoning-replay";
 import { projectHostedSearchEvidence } from "./hosted-search-evidence";
 import { splitStableSystemPromptPrefix } from "./system-prompt-cache-prefix";
 import {
@@ -101,6 +114,57 @@ export class AnthropicStreamInterruptedError extends Error {
   readonly code = "anthropic_stream_interrupted";
 }
 
+/**
+ * The order in which a session tries an organization's Anthropic API keys
+ * (rendezvous hashing of the session over the key ids). A session keeps its
+ * first key while that key serves: Anthropic's prompt cache, signed thinking
+ * and search results belong to the key's Anthropic organization, so moving
+ * would throw them away. Removing or refusing one key moves only the sessions
+ * that were on it, and adding one moves only the sessions it now ranks first.
+ */
+export function anthropicApiKeyOrder<T extends { id: string }>(
+  keys: readonly T[],
+  session: string,
+): T[] {
+  const score = (id: string) =>
+    createHash("sha256").update(`${session}\0${id}`).digest().readBigUInt64BE(0);
+  return keys
+    .map((key) => ({ key, score: score(key.id) }))
+    .sort((a, b) => (a.score === b.score ? 0 : a.score > b.score ? -1 : 1))
+    .map(({ key }) => key);
+}
+
+/**
+ * Anthropic refused an API key because its organization can't pay: the
+ * credit balance is too low (HTTP 400), a billing error (402), or the
+ * organization's own spend limit. Credits don't come back by themselves, so
+ * the key stays out until an administrator checks it again.
+ */
+export function isAnthropicApiKeyCreditRefusal(error: unknown): boolean {
+  if (!(error instanceof AnthropicRequestError)) return false;
+  if (error.status === 402 || error.errorType === "billing_error") return true;
+  if (error.code === "anthropic_billing_error" || error.code === "enforced_spend_limit_reached")
+    return true;
+  return error.status === 400 && /\bcredit balance is too low\b/i.test(error.detail ?? "");
+}
+
+/** Every key of the organization's pool is out of credits; nothing was sent. */
+export const ANTHROPIC_API_KEYS_OUT_OF_CREDITS = "anthropic_api_keys_out_of_credits";
+
+type AnthropicApiKeyRefusalReporter = (providerId: string, keyId: string) => void;
+const apiKeyRefusalReporters = new AsyncLocalStorage<AnthropicApiKeyRefusalReporter>();
+
+/**
+ * Runs `run` with `report` told of each pooled Anthropic API key that runs
+ * out of credits during it, so the caller can record it for later turns.
+ */
+export function withAnthropicApiKeyRefusals<T>(
+  report: AnthropicApiKeyRefusalReporter,
+  run: () => Promise<T>,
+): Promise<T> {
+  return apiKeyRefusalReporters.run(report, run);
+}
+
 /** Preserve documented spend proof, without retaining an arbitrary error body. */
 function anthropicSpendLimitCode(error: unknown): string | undefined {
   if (!error || typeof error !== "object" || Array.isArray(error)) return undefined;
@@ -125,6 +189,206 @@ function anthropicHttpSpendLimitCode(detail: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Claude refused a signed thinking block that the request replayed: its
+ * signature is bound to a different prefix (system prompt, tools, earlier
+ * messages), model, organization or platform than this request has.
+ */
+export const CLAUDE_REASONING_REPLAY_REJECTED = "anthropic_reasoning_replay_rejected";
+const REASONING_REPLAY_REJECTION =
+  /\binvalid\W+(?:signature|data)\W+in\W+(?:redacted_)?thinking\W+block\b|\bthinking\W+block\b[^.]{0,80}\bbound to a different\b/i;
+
+/**
+ * The binding a signed thinking block issued for this request is valid under,
+ * recorded on it and compared on every later request (see
+ * opaque-reasoning-replay). Anthropic binds a signature to the organization,
+ * platform and model that issued it; a prefix-bound model's signature also
+ * binds the system prompt, which a session can change between turns (for
+ * example a repository Skill added mid-chat); that is what Claude's refusal
+ * names. Tools are left out: loading a tool changes them between requests of
+ * one turn. Earlier messages change only through compaction, which resets the
+ * prefix explicitly. Any other refusal is caught by the one retry. A digest
+ * keeps credentials and prompt text out of stored history.
+ */
+export function claudeReplayScope(
+  request: Pick<ModelRequest, "systemInstructions">,
+  model: string,
+  provider: ClaudeRequestProvider,
+): string {
+  const binding = createHash("sha256")
+    .update(provider.baseUrl ?? "https://api.anthropic.com/v1")
+    .update("\0")
+    .update(anthropicSearchAccountScope(provider) ?? `provider:${provider.id}`);
+  if (claudeNativeModelProfile(model)?.prefixBoundThinking)
+    binding.update("\0").update(request.systemInstructions ?? "");
+  return `claude:${model}:${binding.digest("base64url").slice(0, 22)}`;
+}
+
+/**
+ * Signed thinking in earlier turns goes back natively only under the binding
+ * it was issued with (`claudeReplayScope`); elsewhere it is left out of the
+ * request, which is what Claude itself does with a block whose binding no
+ * longer matches (`drop_block`). It is never resent as readable text: Claude's
+ * own reasoning shown back to it as assistant text in a later turn can trip
+ * Claude's safety systems, which refuse the whole request and every retry of
+ * it (a turn "blocked by Claude's safety systems"). The turn
+ * boundary is the one Claude sees: the last user message that is not only
+ * tool results (a machine-origin continuation has its own). The reply in
+ * progress keeps its thinking native whatever binding it records: the system
+ * prompt can legitimately differ between requests of one turn (a one-shot
+ * directive on its first request), Claude accepts that, and text in place of
+ * leaving out the turn's thinking would turn thinking off for the rest of the
+ * turn. A refusal is still caught by the retry. (That Claude accepts the reply in
+ * progress under a changed system prompt is inferred from production, not
+ * documented; if it is wrong, the cost is one refusal and retry.) Claude binds
+ * every block to the prefix before it, so once a block of an earlier turn
+ * is left out, the later blocks of that turn are too.
+ */
+function omitEarlierThinkingUnderOtherBinding(
+  messages: Message[],
+  origins: ReadonlyMap<string, string>,
+  scope: string,
+): void {
+  if (!origins.size) return;
+  let turnStart = -1;
+  const opensTurn = (message: Message) =>
+    message.role === "user" && message.content.some((block) => block.type !== "tool_result");
+  messages.forEach((message, index) => {
+    if (opensTurn(message)) turnStart = index;
+  });
+  let omitted = false;
+  for (const message of messages.slice(0, Math.max(turnStart, 0))) {
+    if (opensTurn(message)) omitted = false;
+    if (message.role !== "assistant") continue;
+    message.content = message.content.filter((block) => {
+      const fingerprint = claudeThinkingFingerprint(block);
+      if (!fingerprint) return true;
+      const origin = origins.get(fingerprint);
+      if (!omitted && (origin === undefined || origin === scope)) return true;
+      omitted = true;
+      return false;
+    });
+  }
+}
+
+/**
+ * Messages with no content left (an assistant message that held only thinking
+ * that was left out) are removed, and the neighbours they separated are joined
+ * when they share a role, as Claude would join them. This depends only on the
+ * messages themselves, so every later request reproduces the same prefix.
+ */
+function withoutEmptyMessages(messages: Message[]): Message[] {
+  const kept: Message[] = [];
+  for (const message of messages) {
+    if (!message.content.length) continue;
+    const previous = kept.at(-1);
+    if (previous?.role === message.role) previous.content.push(...message.content);
+    else kept.push(message);
+  }
+  return kept;
+}
+
+/** The binding recorded on each signed thinking block of a request's history. */
+function recordedThinkingOrigins(input: ModelRequest["input"]): Map<string, string> {
+  const origins = new Map<string, string>();
+  if (typeof input === "string") return origins;
+  for (const raw of input as unknown[]) {
+    const item = object(raw);
+    const block = claudeSignedThinkingBlock(item);
+    const origin = block ? artifactOrigin(item) : undefined;
+    if (block && origin !== undefined) origins.set(claudeThinkingFingerprint(block)!, origin);
+  }
+  return origins;
+}
+
+/** Fingerprints of the signed thinking blocks a request body sends natively. */
+function sentThinkingFingerprints(messages: readonly Message[]): string[] {
+  return messages.flatMap((message) =>
+    message.role === "assistant"
+      ? message.content.flatMap((block) => claudeThinkingFingerprint(block) ?? [])
+      : [],
+  );
+}
+
+/**
+ * The signed thinking a request's history holds: every block, and those with
+ * no recorded binding (stored before bindings were recorded, or carried on an
+ * assistant message by older progress-update history).
+ */
+function historyThinking(input: ModelRequest["input"]): { all: number; unbound: string[] } {
+  let all = 0;
+  const unbound: string[] = [];
+  if (typeof input === "string") return { all, unbound };
+  for (const raw of input as unknown[]) {
+    const item = object(raw);
+    const block = claudeSignedThinkingBlock(item);
+    if (block) {
+      all += 1;
+      if (artifactOrigin(item) === undefined) unbound.push(claudeThinkingFingerprint(block)!);
+      continue;
+    }
+    if (item.type !== "message" && item.type !== undefined) continue;
+    if (item.role !== "assistant" || !Array.isArray(item.content)) continue;
+    for (const part of item.content) {
+      const signed = part?.providerData?.anthropic?.block;
+      const fingerprint = signed?.type === "thinking" ? claudeThinkingFingerprint(signed) : null;
+      if (!fingerprint) continue;
+      all += 1;
+      unbound.push(fingerprint);
+    }
+  }
+  return { all, unbound };
+}
+
+/**
+ * The signed blocks a replay refusal implicates: the one it names
+ * (`messages.N.content.M`) and every signed block after it, whose prefix was
+ * built with the named block native.
+ */
+function refusedBlockFingerprints(
+  error: AnthropicRequestError,
+  body: Json,
+  sent: readonly string[],
+): string[] {
+  const at = /\bmessages\.(\d+)\.content\.(\d+)\b/.exec(String(error.detail ?? ""));
+  if (!at) return [];
+  const block = body.messages?.[Number(at[1])]?.content?.[Number(at[2])];
+  const named = block && typeof block === "object" ? claudeThinkingFingerprint(block) : null;
+  const from = named ? sent.indexOf(named) : -1;
+  return from < 0 ? [] : sent.slice(from);
+}
+
+/**
+ * How far a request fell back from replaying signed thinking natively:
+ * `binding` leaves out blocks issued under another binding (or already
+ * refused); `refused` additionally leaves out the blocks a refusal points at;
+ * `plain` sends history with no opaque provider state.
+ */
+type ThinkingReplay = "binding" | "refused" | "plain";
+
+/**
+ * Operator-only record of the thinking a fallback request left out.
+ * The steady-state binding projection is not a fallback and is not recorded.
+ */
+const REPLAY_TRANSFORMATION_REASON: Record<Exclude<ThinkingReplay, "binding">, string> = {
+  refused: "opengeni_refused_replay",
+  plain: "opengeni_plain_history",
+};
+const replayTransformations = new WeakMap<Response, Json[]>();
+
+/** A response's message, with the thinking its request left out recorded. */
+function withReplayTransformations(message: Json, response: Response): Json {
+  const recorded = replayTransformations.get(response);
+  if (!recorded?.length) return message;
+  return {
+    ...message,
+    input_transformations: [
+      ...(Array.isArray(message.input_transformations) ? message.input_transformations : []),
+      ...recorded,
+    ],
+  };
 }
 
 /** Closed provider rejections carry authored copy, never arbitrary response text. */
@@ -317,7 +581,11 @@ function imageSource(value: unknown): Json {
 
 function contentBlocks(
   value: unknown,
-  options: { citations?: boolean; assistant?: boolean } = {},
+  options: {
+    citations?: boolean;
+    assistant?: boolean;
+    isRefusedThinking?: (fingerprint: string | null) => boolean;
+  } = {},
 ): Json[] {
   if (typeof value === "string") return value ? [{ type: "text", text: value }] : [];
   const blocks = Array.isArray(value) ? value : [value];
@@ -326,8 +594,13 @@ function contentBlocks(
     // History recorded while progress updates became assistant messages keeps
     // Claude's own signed thinking block on the message. It goes back exactly
     // as received, never as the summary text it was shown as.
+    // One this provider refused is left out (see omitEarlierThinkingUnderOtherBinding).
     const signed = options.assistant ? block.providerData?.anthropic?.block : undefined;
-    if (signed?.type === "thinking") return [structuredClone(object(signed))];
+    if (signed?.type === "thinking") {
+      if (!options.isRefusedThinking?.(claudeThinkingFingerprint(signed)))
+        return [structuredClone(object(signed))];
+      return [];
+    }
     if (["text", "input_text", "output_text", "refusal"].includes(block.type)) {
       const blockText = text(block.text ?? block.refusal, "text");
       // Claude rejects an empty text block. Other providers can record one (a
@@ -375,7 +648,12 @@ function contentBlocks(
  */
 export function anthropicMessages(
   input: ModelRequest["input"],
-  options: { webSearch?: boolean; accountScope?: string | null } = {},
+  options: {
+    webSearch?: boolean;
+    accountScope?: string | null;
+    /** A signed thinking block (by fingerprint) this provider already refused. */
+    isRefusedThinking?: (fingerprint: string | null) => boolean;
+  } = {},
 ): Message[] {
   const messages: Message[] = [];
   let foreignSearch = false;
@@ -432,6 +710,7 @@ export function anthropicMessages(
           contentBlocks(item.content, {
             citations: role === "assistant" && options.webSearch === true && !foreignSearch,
             assistant: role === "assistant",
+            ...(options.isRefusedThinking ? { isRefusedThinking: options.isRefusedThinking } : {}),
           }),
         );
         break;
@@ -467,8 +746,12 @@ export function anthropicMessages(
       }
       case "reasoning": {
         const block = item.providerData?.anthropic?.block;
-        if (block) append("assistant", [structuredClone(object(block))]);
-        else if (item.content?.length) append("assistant", contentBlocks(item.content));
+        if (block) {
+          // Claude's own thinking this provider refused is left out, never
+          // resent as readable text (see omitEarlierThinkingUnderOtherBinding).
+          if (!options.isRefusedThinking?.(claudeThinkingFingerprint(object(block))))
+            append("assistant", [structuredClone(object(block))]);
+        } else if (item.content?.length) append("assistant", contentBlocks(item.content));
         break;
       }
       case "compaction":
@@ -648,12 +931,7 @@ function placeConversationSystems(messages: Message[]): Message[] {
     if (result.at(-1)?.role !== "user")
       result.push({
         role: "user",
-        content: [
-          {
-            type: "text",
-            text: "Opengeni continuation (machine-origin input; no new human message).",
-          },
-        ],
+        content: [{ type: "text", text: MACHINE_CONTINUATION_TEXT }],
       });
     result.push({ role: "system", content: systems });
     systems = [];
@@ -672,12 +950,20 @@ function placeConversationSystems(messages: Message[]): Message[] {
   return result;
 }
 
+type ClaudeRequestProvider = Pick<ResolvedModelProvider, "anthropic"> &
+  Partial<Pick<ResolvedModelProvider, "kind" | "apiKey" | "id" | "baseUrl">>;
+
 export function buildAnthropicRequest(
   request: ModelRequest,
   model: string,
-  provider: Pick<ResolvedModelProvider, "anthropic"> &
-    Partial<Pick<ResolvedModelProvider, "kind" | "apiKey">>,
+  provider: ClaudeRequestProvider,
   stream: boolean,
+  options: {
+    /** Fallback of last resort: history with no opaque provider state at all. */
+    plainHistory?: boolean;
+    /** Signed thinking (by fingerprint) to leave out of this request only. */
+    omitThinking?: ReadonlySet<string>;
+  } = {},
 ): Json {
   if (request.previousResponseId || request.conversationId)
     throw new AnthropicProtocolError(
@@ -703,14 +989,34 @@ export function buildAnthropicRequest(
       );
     return matches[0]![0];
   };
+  // Signed thinking goes back natively only under the binding it was issued
+  // with, and never once this provider refused it (opaque-reasoning-replay).
+  const remembered = provider.id ? refusedOpaqueReasoning(provider.id) : undefined;
+  const { plainHistory, omitThinking } = options;
+  const isRefused =
+    plainHistory === true
+      ? () => true
+      : remembered || omitThinking?.size
+        ? (fingerprint: string | null) =>
+            fingerprint !== null &&
+            (omitThinking?.has(fingerprint) === true || remembered?.(fingerprint) === true)
+        : undefined;
   const input =
     typeof request.input === "string"
       ? request.input
-      : (projectHistoryForProvider(request.input, "anthropic-messages") as ModelRequest["input"]);
+      : (projectHistoryForProvider(request.input, "anthropic-messages", {
+          // Claude's own signed thinking is handled below and never becomes text.
+          isRejectedArtifact: (item) =>
+            !claudeSignedThinkingBlock(item) &&
+            isRefused?.(opaqueReasoningFingerprint(item)) === true,
+        }) as ModelRequest["input"]);
   const webSearch = request.tools.some(isHostedWebSearchTool);
   let messages = anthropicMessages(input, {
-    webSearch,
+    // Plain history replays earlier searches as readable facts, never as
+    // provider-encrypted results or citations into them.
+    webSearch: webSearch && plainHistory !== true,
     accountScope: anthropicSearchAccountScope(provider),
+    ...(isRefused ? { isRefusedThinking: isRefused } : {}),
   });
   if (!messages.length) throw new AnthropicProtocolError("Claude requires at least one message");
   // A recorded session-independent prefix becomes its own block so it can
@@ -733,6 +1039,20 @@ export function buildAnthropicRequest(
   while (messages[0]?.role === "system") system.push(...messages.shift()!.content);
   if (!messages.length) throw new AnthropicProtocolError("Claude requires a conversation message");
   messages = placeConversationSystems(messages);
+  omitEarlierThinkingUnderOtherBinding(
+    messages,
+    recordedThinkingOrigins(request.input),
+    claudeReplayScope(request, model, provider),
+  );
+  // Plain history carries no thinking block of any kind, signed or not.
+  if (plainHistory === true)
+    for (const message of messages)
+      if (message.role === "assistant")
+        message.content = message.content.filter(
+          (block) => block.type !== "thinking" && block.type !== "redacted_thinking",
+        );
+  messages = withoutEmptyMessages(messages);
+  if (!messages.length) throw new AnthropicProtocolError("Claude requires a conversation message");
   const tools: Json[] = request.tools.map((tool) => {
     // Claude's own server-side search, at the agent's tool position so the
     // tools prefix is identical on every request of the conversation.
@@ -852,6 +1172,7 @@ function thinkingDropCounts(transformations: unknown): Record<string, number> | 
         "prefix_binding_mismatch",
         "model_binding_mismatch",
         "organization_binding_mismatch",
+        ...Object.values(REPLAY_TRANSFORMATION_REASON),
       ].includes(entry.reason)
     )
       continue;
@@ -979,6 +1300,8 @@ export function anthropicResponse(
     progressUpdates?: boolean;
     /** The search results the request sent, in order, read only when needed. */
     requestSearchResults?: () => readonly ClaudeCiteSource[];
+    /** The request's binding (`claudeReplayScope`), recorded on signed thinking. */
+    replayScope?: string;
   } = {},
 ): ModelResponse {
   // A refused response can be HTTP 200 with no content blocks. It must not
@@ -1105,6 +1428,7 @@ export function anthropicResponse(
                 ? { progressUpdate: true }
                 : {}),
             },
+            ...(options.replayScope ? { [ARTIFACT_ORIGIN_KEY]: options.replayScope } : {}),
           },
         });
         break;
@@ -1145,11 +1469,62 @@ export class AnthropicMessagesModel implements Model {
   // The same bound applies from the first image onward. A growing conversation
   // must not resize its old prefix when it crosses the many-image threshold.
   private readonly sizeImage = createModelImageSizer(2000, ANTHROPIC_IMAGE_MAX_ENCODED_BYTES);
+  /** Pooled API keys Anthropic refused for lack of credits while this model ran. */
+  private readonly refusedApiKeys = new Set<string>();
+  /** The pooled API key each accepted response was sent with. */
+  private readonly responseApiKeys = new WeakMap<Response, string>();
   constructor(
     readonly provider: ResolvedModelProvider,
     readonly model: string,
     private readonly fetch: typeof globalThis.fetch = globalThis.fetch,
   ) {}
+
+  /**
+   * The provider as this request sends it: with an organization's several
+   * API keys (`anthropic.apiKeys`), its key is the session's first key that
+   * Anthropic has not refused for lack of credits (`anthropicApiKeyOrder`).
+   * The search and replay scopes follow that key. Without a pool it is the
+   * provider itself, unchanged.
+   */
+  private providerFor(request: ModelRequest): ResolvedModelProvider & { apiKeyId?: string } {
+    const keys = this.provider.anthropic?.apiKeys;
+    if (!keys) return this.provider;
+    const session = request.modelSettings.providerData?.prompt_cache_key;
+    const key = anthropicApiKeyOrder(
+      keys,
+      typeof session === "string" && session ? session : this.fallbackSessionId,
+    ).find((candidate) => !this.refusedApiKeys.has(candidate.id));
+    if (!key)
+      throw new AnthropicRequestError(
+        "Every Anthropic API key of this organization is out of credits. An organization administrator can add a key, or check the keys again in Models after adding credits.",
+        402,
+        ANTHROPIC_API_KEYS_OUT_OF_CREDITS,
+        undefined,
+        new Headers(),
+      );
+    return { ...this.provider, apiKey: key.apiKey, apiKeyId: key.id };
+  }
+
+  private requestScopes(request: ModelRequest) {
+    const provider = this.providerFor(request);
+    return {
+      accountScope: anthropicSearchAccountScope(provider),
+      replayScope: claudeReplayScope(request, this.model, provider),
+    };
+  }
+
+  /**
+   * Leave a pooled API key out for the rest of this model's requests and
+   * report it, so later turns skip it too. True when `error` is Anthropic
+   * refusing that key for lack of credits; the caller then sends the same
+   * request again, which goes to the session's next key.
+   */
+  private refusedForCredits(apiKeyId: string | undefined, error: unknown): boolean {
+    if (apiKeyId === undefined || !isAnthropicApiKeyCreditRefusal(error)) return false;
+    this.refusedApiKeys.add(apiKeyId);
+    apiKeyRefusalReporters.getStore()?.(this.provider.id, apiKeyId);
+    return true;
+  }
 
   /** Project inline images only; never fetch arbitrary URLs or edit stored history. */
   private async sizeImageBlocks(
@@ -1203,42 +1578,65 @@ export class AnthropicMessagesModel implements Model {
    */
   private requestSearchResults(request: ModelRequest): ClaudeCiteSource[] {
     return requestSearchResultSources(
-      buildAnthropicRequest(request, this.model, this.provider, false),
+      buildAnthropicRequest(request, this.model, this.providerFor(request), false),
     );
   }
 
-  private async prepare(request: ModelRequest, stream: boolean) {
+  private async prepare(
+    request: ModelRequest,
+    stream: boolean,
+    replay: { fallback: ThinkingReplay; omitThinking?: ReadonlySet<string> } = {
+      fallback: "binding",
+    },
+  ) {
     request.signal?.throwIfAborted();
-    const body = buildAnthropicRequest(request, this.model, this.provider, stream);
+    const provider = this.providerFor(request);
+    const body = buildAnthropicRequest(request, this.model, provider, stream, {
+      plainHistory: replay.fallback === "plain",
+      ...(replay.omitThinking ? { omitThinking: replay.omitThinking } : {}),
+    });
     const projection = { resized: false };
     for (const message of body.messages) {
       message.content = await this.sizeImageBlocks(message.content, projection, request.signal);
     }
+    const signedThinking = sentThinkingFingerprints(body.messages);
     request.signal?.throwIfAborted();
-    const base = this.provider.baseUrl ?? "https://api.anthropic.com/v1";
+    const base = provider.baseUrl ?? "https://api.anthropic.com/v1";
     const url = new URL(`${base.replace(/\/$/, "")}/messages`);
-    for (const [key, value] of Object.entries(this.provider.defaultQuery ?? {}))
+    for (const [key, value] of Object.entries(provider.defaultQuery ?? {}))
       url.searchParams.set(key, value);
-    const headers = new Headers(this.provider.defaultHeaders);
+    const headers = new Headers(provider.defaultHeaders);
     headers.set("content-type", "application/json");
     headers.set("accept", stream ? "text/event-stream" : "application/json");
     headers.set("anthropic-version", "2023-06-01");
-    // A portable checkpoint (including a standalone tool-less summary request)
-    // rewrites the prefix. Image-policy upgrades can do so too. Keep signed
-    // blocks verbatim and use the provider's explicit invalid-block reset, never
-    // strip signatures ourselves. Retained checkpoints/images make this choice
-    // reproducible after worker/model-instance restarts. A summary request that
-    // reuses the prepared ordinary prefix keeps its thinking mode unchanged (the
-    // mode is part of the cache key) and only opts its existing thinking into
-    // the reset, in case the checkpoint history differs from what was sent.
-    const preparedCompaction =
-      request.modelSettings.providerData?.opengeni_compaction_prefix === "prepared";
+    // Prefix-bound thinking blocks are valid only after the exact prefix they
+    // were created with, and that prefix legitimately changes between
+    // requests: a portable checkpoint (including a standalone tool-less
+    // summary request) or an image-policy upgrade rewrites history, and the
+    // system prompt follows live workspace state (for example the repository
+    // Skills index after a branch checkout). Without the provider's explicit
+    // reset Claude rejects the whole request, and every retry, with HTTP 400.
+    // Keep signed blocks verbatim and let the provider drop only the blocks the
+    // changed prefix invalidated (reported as thinkingBlocksDropped); never
+    // strip signatures ourselves. An unchanged prefix drops nothing. Every
+    // request that already asks for thinking opts in, so the setting never
+    // flips inside a conversation; a request without thinking is moved into it
+    // only while its input carries a checkpoint summary or a resized image, and
+    // never when it forces a tool (Claude refuses thinking with a forced tool).
+    // A summary request that reuses the prepared ordinary prefix therefore
+    // keeps its thinking mode unchanged (the mode is part of the cache key).
+    // Where drop_block is unavailable (a gateway that strips it) or does not
+    // apply (another model, account or platform), our own replay policy still
+    // keeps every request valid (opaque-reasoning-replay).
     const resetsPrefix =
       projection.resized ||
       request.modelSettings.providerData?.opengeni_portable_compaction === true ||
-      (Array.isArray(request.input) && request.input.some(isCompactionSummary)) ||
-      (preparedCompaction && Boolean(body.thinking));
-    if (claudeNativeModelProfile(this.model)?.prefixBoundThinking && resetsPrefix) {
+      (Array.isArray(request.input) && request.input.some(isCompactionSummary));
+    const forcesTool = body.tool_choice?.type === "any" || body.tool_choice?.type === "tool";
+    if (
+      claudeNativeModelProfile(this.model)?.prefixBoundThinking &&
+      (Boolean(body.thinking) || (resetsPrefix && !forcesTool))
+    ) {
       body.thinking = {
         type: "adaptive",
         display: "summarized",
@@ -1261,22 +1659,21 @@ export class AnthropicMessagesModel implements Model {
       betas.add("mid-conversation-system-2026-04-07");
       headers.set("anthropic-beta", [...betas].join(","));
     }
-    if (this.provider.kind !== "anonymous") {
-      if (!this.provider.apiKey)
-        throw new AnthropicProtocolError("Claude credentials are unavailable");
-      if (this.provider.anthropic?.auth === "oauth") {
+    if (provider.kind !== "anonymous") {
+      if (!provider.apiKey) throw new AnthropicProtocolError("Claude credentials are unavailable");
+      if (provider.anthropic?.auth === "oauth") {
         headers.delete("x-api-key");
-        headers.set("authorization", `Bearer ${this.provider.apiKey}`);
+        headers.set("authorization", `Bearer ${provider.apiKey}`);
         const betas = new Set((headers.get("anthropic-beta") ?? "").split(",").filter(Boolean));
         betas.add("oauth-2025-04-20");
         headers.set("anthropic-beta", [...betas].join(","));
       } else {
         headers.delete("authorization");
-        headers.set("x-api-key", this.provider.apiKey);
+        headers.set("x-api-key", provider.apiKey);
       }
     }
-    if (this.provider.anthropic?.auth === "oauth") {
-      const identity = this.provider.anthropic.identity;
+    if (provider.anthropic?.auth === "oauth") {
+      const identity = provider.anthropic.identity;
       if (!identity)
         throw new AnthropicProtocolError(
           "Claude subscription identity is missing. Replace the connection with its Claude account UUID and device ID in Models.",
@@ -1294,7 +1691,16 @@ export class AnthropicMessagesModel implements Model {
       });
     }
     const serialized = JSON.stringify(body);
-    return { url, headers, serialized, size: anthropicRequestSize(body, serialized) };
+    return {
+      url,
+      headers,
+      serialized,
+      size: anthropicRequestSize(body, serialized),
+      signedThinking,
+      body,
+      replay: replay.fallback,
+      apiKeyId: provider.apiKeyId,
+    };
   }
 
   /** Uses the same final serialization as dispatch, but performs no network I/O. */
@@ -1302,8 +1708,77 @@ export class AnthropicMessagesModel implements Model {
     return (await this.prepare(request, stream)).size;
   }
 
+  /**
+   * Replayed signed thinking never fails a turn. A request carries native
+   * thinking only under the binding it was issued with (opaque-reasoning-
+   * replay). If Claude still refuses a replayed signature (history stored
+   * before bindings were recorded, or a binding Claude checks that we do
+   * not record), the request is sent once more with the blocks the refusal
+   * concerns left out: those with no recorded binding and the one it
+   * names. They are remembered for this provider, so later requests do not
+   * repeat the refusal. If Claude refuses that too, the request is sent with
+   * no opaque provider state at all, which it always accepts, and every block
+   * the retry still carried is remembered. Each fallback is recorded for
+   * operators (`thinkingBlocksDropped`), never shown to the person.
+   */
   private async send(request: ModelRequest, stream: boolean): Promise<Response> {
-    const { url, headers, serialized, size } = await this.prepare(request, stream);
+    let replay: { fallback: ThinkingReplay; omitThinking?: ReadonlySet<string> } = {
+      fallback: "binding",
+    };
+    const history = historyThinking(request.input);
+    for (;;) {
+      const prepared = await this.prepare(request, stream, replay);
+      try {
+        const response = await this.dispatch(request, prepared);
+        const leftOut = history.all - prepared.signedThinking.length;
+        if (leftOut > 0 && replay.fallback !== "binding")
+          replayTransformations.set(
+            response,
+            Array.from({ length: leftOut }, () => ({
+              type: "thinking_dropped",
+              reason: REPLAY_TRANSFORMATION_REASON[replay.fallback as "refused" | "plain"],
+            })),
+          );
+        if (prepared.apiKeyId !== undefined) this.responseApiKeys.set(response, prepared.apiKeyId);
+        return response;
+      } catch (error) {
+        // A pooled API key whose organization is out of credits: it is left
+        // out from now on (and reported), and the same request goes to the
+        // session's next key. Its signed thinking and searches stay behind,
+        // since they belong to the refused key's Anthropic organization.
+        if (this.refusedForCredits(prepared.apiKeyId, error)) continue;
+        if (
+          prepared.replay === "plain" ||
+          !(error instanceof AnthropicRequestError) ||
+          error.code !== CLAUDE_REASONING_REPLAY_REJECTED
+        )
+          throw error;
+        if (prepared.replay === "binding" && prepared.signedThinking.length > 0) {
+          const suspects = new Set(
+            history.unbound.filter((fingerprint) => prepared.signedThinking.includes(fingerprint)),
+          );
+          for (const fingerprint of refusedBlockFingerprints(
+            error,
+            prepared.body,
+            prepared.signedThinking,
+          ))
+            suspects.add(fingerprint);
+          // A refusal we cannot attribute concerns every block it carried.
+          const refused = suspects.size ? suspects : new Set(prepared.signedThinking);
+          rememberRefusedOpaqueReasoning(this.provider.id, refused);
+          replay = { fallback: "refused", omitThinking: refused };
+        } else {
+          rememberRefusedOpaqueReasoning(this.provider.id, prepared.signedThinking);
+          replay = { fallback: "plain" };
+        }
+      }
+    }
+  }
+
+  private async dispatch(
+    request: ModelRequest,
+    { url, headers, serialized, size }: Awaited<ReturnType<AnthropicMessagesModel["prepare"]>>,
+  ): Promise<Response> {
     if (size.requestBytes > ANTHROPIC_REQUEST_MAX_BYTES)
       throw new AnthropicRequestSizeError(size, "preflight");
     request.signal?.throwIfAborted();
@@ -1344,6 +1819,8 @@ export class AnthropicMessagesModel implements Model {
       // then fails as a whole instead of returning a search error.
       const webSearchDisabled =
         response.status === 400 && /web[ _]search[^"]{0,40}not enabled/i.test(detail);
+      const reasoningReplayRejected =
+        response.status === 400 && REASONING_REPLAY_REJECTION.test(detail);
       // Classify the bounded provider detail without leaking echoed prompts or credentials.
       const message = contextExceeded
         ? "Claude context window exceeded"
@@ -1365,11 +1842,13 @@ export class AnthropicMessagesModel implements Model {
           ? "context_length_exceeded"
           : webSearchDisabled
             ? "anthropic_web_search_disabled"
-            : response.status === 402
-              ? "anthropic_billing_error"
-              : response.status === 400 || response.status === 429
-                ? (anthropicHttpSpendLimitCode(detail) ?? "anthropic_http_error")
-                : "anthropic_http_error",
+            : reasoningReplayRejected
+              ? CLAUDE_REASONING_REPLAY_REJECTED
+              : response.status === 402
+                ? "anthropic_billing_error"
+                : response.status === 400 || response.status === 429
+                  ? (anthropicHttpSpendLimitCode(detail) ?? "anthropic_http_error")
+                  : "anthropic_http_error",
         source,
         response.headers,
         { subscription: this.provider.anthropic?.auth === "oauth" },
@@ -1382,16 +1861,18 @@ export class AnthropicMessagesModel implements Model {
   async getResponse(request: ModelRequest): Promise<ModelResponse> {
     const names = toolNames(request);
     const searchQueries = anthropicWebSearchQueries(request.input);
-    const accountScope = anthropicSearchAccountScope(this.provider);
+    let { accountScope, replayScope } = this.requestScopes(request);
     let merged: Json | undefined;
     let requestId: string | undefined;
     for (let continuation = 0; ; continuation += 1) {
       const current = merged
-        ? pausedTurnRequest(request, merged, names, searchQueries, accountScope)
+        ? pausedTurnRequest(request, merged, names, searchQueries, accountScope, replayScope)
         : request;
       const response = await this.send(current, false);
+      // A pooled key out of credits moves the request to the next key.
+      ({ accountScope, replayScope } = this.requestScopes(request));
       requestId = response.headers.get("request-id") ?? undefined;
-      const message = object(await response.json());
+      const message = withReplayTransformations(object(await response.json()), response);
       if (message.stop_reason === "refusal")
         throw new AnthropicProviderRejection("content_policy_violation", 200, requestId);
       merged = mergePausedMessage(merged, message);
@@ -1408,6 +1889,7 @@ export class AnthropicMessagesModel implements Model {
       {
         progressUpdates: anthropicWritesProgressUpdates(this.model),
         requestSearchResults: () => this.requestSearchResults(request),
+        replayScope,
       },
     );
   }
@@ -1415,14 +1897,14 @@ export class AnthropicMessagesModel implements Model {
   async *getStreamedResponse(request: ModelRequest): AsyncIterable<ResponseStreamEvent> {
     const names = toolNames(request);
     const searchQueries = anthropicWebSearchQueries(request.input);
-    const accountScope = anthropicSearchAccountScope(this.provider);
+    let { accountScope, replayScope } = this.requestScopes(request);
     let merged: Json | undefined;
     let requestId: string | undefined;
     const partial: AnthropicPartialMessage = {};
     try {
       for (let continuation = 0; ; continuation += 1) {
         const current = merged
-          ? pausedTurnRequest(request, merged, names, searchQueries, accountScope)
+          ? pausedTurnRequest(request, merged, names, searchQueries, accountScope, replayScope)
           : request;
         // A continuation's blocks extend the same logical response: stream
         // their text under the ids the merged response will give them.
@@ -1437,6 +1919,8 @@ export class AnthropicMessagesModel implements Model {
           partial,
         );
         requestId = streamed.requestId;
+        // A pooled key out of credits moves the request to the next key.
+        ({ accountScope, replayScope } = this.requestScopes(request));
         merged = mergePausedMessage(merged, streamed.message);
         if (streamed.message.stop_reason !== "pause_turn") break;
         assertPauseContinuationAllowed(continuation);
@@ -1479,6 +1963,7 @@ export class AnthropicMessagesModel implements Model {
       {
         progressUpdates: anthropicWritesProgressUpdates(this.model),
         requestSearchResults: () => this.requestSearchResults(request),
+        replayScope,
       },
     );
     yield protocol.StreamEventResponseCompleted.parse({
@@ -1497,6 +1982,28 @@ export class AnthropicMessagesModel implements Model {
     },
     partial: AnthropicPartialMessage = {},
   ): AsyncGenerator<ResponseStreamEvent, { message: Json; requestId: string | undefined }> {
+    // A pooled API key can also be refused for lack of credits after its
+    // response began: Anthropic then reports it as an error event in the
+    // stream. That key is left out like one refused before the stream, and
+    // the same request goes to the session's next key. The response has
+    // started only once; what the refused stream had sent stays as it was.
+    const started = { value: continuation.started };
+    for (;;) {
+      const streamed = yield* this.streamAttempt(request, continuation, partial, started);
+      if (streamed) return streamed;
+    }
+  }
+
+  /** One streamed request; undefined when Anthropic refused its pooled key for lack of credits. */
+  private async *streamAttempt(
+    request: ModelRequest,
+    continuation: { baseId?: string; offset: number; textRunStart?: number },
+    partial: AnthropicPartialMessage,
+    started: { value: boolean },
+  ): AsyncGenerator<
+    ResponseStreamEvent,
+    { message: Json; requestId: string | undefined } | undefined
+  > {
     partial.message = undefined;
     partial.blocks = undefined;
     const response = await this.send(request, true);
@@ -1552,6 +2059,19 @@ export class AnthropicMessagesModel implements Model {
           status === undefined
             ? "Claude returned an unrecognized stream error. Automatic retries stopped."
             : `Claude stream failed (HTTP ${status})`;
+        const cause = new AnthropicRequestError(
+          failureMessage,
+          status,
+          code,
+          event.error,
+          response.headers,
+          { subscription: this.provider.anthropic?.auth === "oauth" },
+        );
+        if (this.refusedForCredits(this.responseApiKeys.get(response), cause)) {
+          partial.message = undefined;
+          partial.blocks = undefined;
+          return undefined;
+        }
         throw Object.assign(new Error(failureMessage), {
           ...(status !== undefined ? { status } : {}),
           code,
@@ -1561,14 +2081,7 @@ export class AnthropicMessagesModel implements Model {
             : {},
           // Keep the structural stream wrapper stable for provider rejection
           // guards while the typed cause keeps provider text private.
-          cause: new AnthropicRequestError(
-            failureMessage,
-            status,
-            code,
-            event.error,
-            response.headers,
-            { subscription: this.provider.anthropic?.auth === "oauth" },
-          ),
+          cause,
         });
       }
       switch (event.type) {
@@ -1576,7 +2089,10 @@ export class AnthropicMessagesModel implements Model {
           if (message) throw new AnthropicProtocolError("Duplicate Claude message_start");
           message = object(event.message);
           partial.message = message;
-          if (!continuation.started) yield { type: "response_started" };
+          if (!started.value) {
+            started.value = true;
+            yield { type: "response_started" };
+          }
           break;
         case "content_block_start":
           if (!message || blocks.has(event.index) || finalDelta)
@@ -1679,7 +2195,10 @@ export class AnthropicMessagesModel implements Model {
           message.content = [...blocks.entries()]
             .sort(([a], [b]) => a - b)
             .map(([, state]) => state.block);
-          return { message, requestId: response.headers.get("request-id") ?? undefined };
+          return {
+            message: withReplayTransformations(message, response),
+            requestId: response.headers.get("request-id") ?? undefined,
+          };
         }
       }
     }
@@ -1840,7 +2359,9 @@ function pausedTurnRequest(
   names: Map<string, { name: string; namespace?: string }>,
   searchQueries: ReadonlyMap<string, string>,
   accountScope: string | null,
+  replayScope: string,
 ): ModelRequest {
+  // Its thinking was signed under this same request's binding moments ago.
   const replay = anthropicResponse(
     { ...paused, stop_reason: "pause_turn" },
     undefined,
@@ -1848,6 +2369,7 @@ function pausedTurnRequest(
     searchQueries,
     [],
     accountScope,
+    { replayScope },
   ).output;
   const input =
     typeof request.input === "string"

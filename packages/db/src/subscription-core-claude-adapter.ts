@@ -27,7 +27,11 @@
  * every shared runtime refuses it, and the worker never reaches it without
  * the `claude` cutover receipt.
  */
-import { ClaudeSubscriptionCredential, type ClaudeUsageObservation } from "@opengeni/config";
+import {
+  ClaudeSubscriptionCredential,
+  claudeServiceStateInGrace,
+  type ClaudeUsageObservation,
+} from "@opengeni/config";
 import {
   CLAUDE_SUBSCRIPTION_PROVIDER_IDS,
   claudeSubscriptionModelIdForms,
@@ -36,6 +40,7 @@ import {
 import type { z } from "zod";
 import type {
   QuotaBlockClaim,
+  QuotaProviderDetail,
   SubscriptionCoreAdapter,
   SubscriptionQuota,
 } from "@opengeni/subscriptions";
@@ -138,7 +143,9 @@ export function subscriptionCoreClaudeAdapter(
   const now = deps.now ?? Date.now;
   const capabilities = {
     autoRenews: true,
-    resetCredits: false,
+    // Limit reset grants the provider offers some plans, claimed on request
+    // (`subscription-core-claude-limit-resets.ts`).
+    resetCredits: true,
     // Claude's paid overage is the provider's own setting, read from its
     // usage reports (`decodeSubscriptionCoreClaudeQuota`), not a consent
     // Opengeni stores per connection.
@@ -253,10 +260,23 @@ export function subscriptionCoreClaudeModelPolicyProviderIds(modelId: string): r
 }
 
 const ACCOUNT_WINDOWS = new Set(["five_hour", "seven_day"]);
+/**
+ * The weekly limit of the models Claude includes beyond the plan's weekly
+ * limit (`seven_day_overage_included`, header prefix `7d_oi`) is the Fable
+ * limit: its percentage equals the Fable entry of the usage endpoint's
+ * scoped limits (`seven_day_fable`), and Fable reset grants clear it.
+ */
 const FAMILY_WINDOWS: Record<string, RegExp> = {
   seven_day_opus: /^claude-opus-/,
   seven_day_sonnet: /^claude-sonnet-/,
   seven_day_fable: /^claude-fable-/,
+  seven_day_overage_included: /^claude-fable-/,
+};
+
+/** Window ids that name the same limit (see `FAMILY_WINDOWS`). */
+export const SUBSCRIPTION_CORE_CLAUDE_WINDOW_ALIASES: Readonly<Record<string, string>> = {
+  seven_day_overage_included: "seven_day_fable",
+  seven_day_fable: "seven_day_overage_included",
 };
 const allowed = (status: string | null | undefined) =>
   status === "allowed" || status === "allowed_warning";
@@ -319,6 +339,17 @@ function addClaim(current: Set<string> | null | undefined, claim: string | null)
  *   the full window itself, or the representative claim a refusal named.
  *   A block any part of which names no claim, or a limit this build does
  *   not recognize, carries none and never ends before its own reset.
+ * - Reduced service past a limit is neither exhaustion nor plain capacity:
+ *   a response served in the grace zone (grace utilization above zero, not
+ *   rejected) or in the slow tier (`slow-status: active`) blocks nothing,
+ *   reports its full windows as `warning`, and marks the connection
+ *   constrained (`constrainedUntil`) until the latest full window resets.
+ *   A refusal because the slow tier's slots are busy (`slot_busy`) rests
+ *   the connection as a rate limit for the slow tier's retry-after (else
+ *   the rate-limit fallback) and is constrained until the plan reset.
+ * - Everything else the observation reported (reset grants, the limit
+ *   list, extra usage, service state) is kept as provider details, each
+ *   part stamped with the observation time.
  *
  * `upstreamModelIds` must list every Claude model the connection can serve
  * (the organization's catalog when decoded), so a family limit reaches each
@@ -335,8 +366,16 @@ export function decodeSubscriptionCoreClaudeQuota(input: {
   const rejected = request?.status === "rejected";
   const own = request?.upstreamModelId ?? null;
   const overageReset = request?.overageResetsAt ? Date.parse(request.overageResetsAt) : null;
-  const overageCovers =
+  const paidOverage =
     rejected && allowed(request.overageStatus) && (overageReset ?? Infinity) > observedAt;
+  // Reduced service: served past the limit (grace zone, slow tier), or
+  // refused only because the slow tier's slots are busy for now.
+  const service = observation.details?.serviceState ?? null;
+  const slowStatus = service?.slow?.status ?? null;
+  const reduced =
+    !paidOverage && ((claudeServiceStateInGrace(service) && !rejected) || slowStatus === "active");
+  const slotBusy = !paidOverage && rejected && slowStatus === "slot_busy";
+  const overageCovers = paidOverage || reduced || slotBusy;
   const base = (reset: string | null, at: string) =>
     reset === null ? Date.parse(at) + SUBSCRIPTION_CORE_CLAUDE_UNKNOWN_RESET_MS : Date.parse(reset);
   // Only while the request's own plan limit still runs, and only when the
@@ -445,7 +484,7 @@ export function decodeSubscriptionCoreClaudeQuota(input: {
     // Restrictions carry no overage of their own: the response's allowed
     // overage covers those it postdates, and a later allowance of the same
     // model lifts its restriction.
-    if (overageCovers && item.observedAt <= request.observedAt) continue;
+    if (overageCovers && request && item.observedAt <= request.observedAt) continue;
     const lifted = restrictions.some(
       (other) =>
         item.upstreamModelId !== null &&
@@ -464,16 +503,38 @@ export function decodeSubscriptionCoreClaudeQuota(input: {
     if (claim) modelCooldownClaims[modelId] = claim;
   }
   const exhaustedClaim = exhaustedUntil === null ? null : claimOf(exhaustedClaims, exhaustedUntil);
+  // Reduced service lasts until the latest limit it went past resets.
+  let constrainedUntil: number | null = null;
+  if (reduced || slotBusy) {
+    const passed = observation.windows
+      .filter((window) => window.status === "rejected" || (window.usedPercent ?? 0) >= 100)
+      .map((window) => base(window.resetsAt, window.observedAt));
+    if (request && (rejected || passed.length === 0))
+      passed.push(base(request.resetsAt, request.observedAt));
+    constrainedUntil = Math.max(observedAt + SUBSCRIPTION_CORE_CLAUDE_UNKNOWN_RESET_MS, ...passed);
+  }
+  if (slotBusy) {
+    const retryAfter = service?.slow?.retryAfterSeconds ?? null;
+    const until =
+      observedAt +
+      (retryAfter === null ? SUBSCRIPTION_CORE_CLAUDE_RATE_LIMIT_FALLBACK_MS : retryAfter * 1000);
+    exhaustedUntil = Math.max(exhaustedUntil ?? until, until);
+  }
+  const providerDetails: Record<string, QuotaProviderDetail> = {};
+  for (const [key, value] of Object.entries(observation.details ?? {}))
+    if (value !== undefined) providerDetails[key] = { observedAt, value };
   return {
     windows,
     modelCooldowns,
     ...(Object.keys(modelCooldownClaims).length > 0 ? { modelCooldownClaims } : {}),
     exhaustedUntil,
-    exhaustedKind: exhaustedUntil === null ? null : "quota",
-    ...(exhaustedClaim ? { exhaustedClaim } : {}),
+    exhaustedKind: exhaustedUntil === null ? null : slotBusy ? "rate_limit" : "quota",
+    ...(exhaustedClaim && !slotBusy ? { exhaustedClaim } : {}),
     observedAt,
     observedRefreshGeneration: input.refreshGeneration,
     source: observation.source === "provider" ? "usage_endpoint" : "response_headers",
+    ...(constrainedUntil !== null ? { constrainedUntil } : {}),
+    ...(Object.keys(providerDetails).length > 0 ? { providerDetails } : {}),
   };
 }
 

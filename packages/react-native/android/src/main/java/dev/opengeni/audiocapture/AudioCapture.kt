@@ -16,6 +16,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Base64
+import dev.opengeni.foreground.ForegroundService
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
@@ -37,6 +38,9 @@ object AudioCapture {
   private const val LIVE_BLOCK_SAMPLES = LIVE_SAMPLE_RATE / 10
 
   @Volatile var emit: ((String, Map<String, Any?>) -> Unit)? = null
+
+  /** The foreground service that keeps capture going in the background. */
+  val service = ForegroundService(OpenGeniAudioCaptureService::class.java)
 
   private val lock = Object()
   private var options = AudioCaptureStartOptions()
@@ -90,71 +94,97 @@ object AudioCapture {
     synchronized(lock) {
       if (active != null) throw AudioCaptureException("Another recording is in progress.")
       this.options = options
-      val folder =
-        if (options.directory.startsWith("file:")) File(Uri.parse(options.directory).path!!)
-        else File(options.directory)
-      folder.mkdirs()
-      directory = folder
       appContext = context
+      var audio: AudioRecord? = null
+      var encoder: MediaCodec? = null
+      var serviceStarted = false
+      try {
+        val folder =
+          if (options.directory.startsWith("file:")) File(Uri.parse(options.directory).path!!)
+          else File(options.directory)
+        folder.mkdirs()
+        directory = folder
 
-      val minimum =
-        AudioRecord.getMinBufferSize(
-          SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-      if (minimum <= 0) throw AudioCaptureException("No microphone could be opened.")
-      val audio =
-        AudioRecord(
-          MediaRecorder.AudioSource.MIC,
-          SAMPLE_RATE,
-          AudioFormat.CHANNEL_IN_MONO,
-          AudioFormat.ENCODING_PCM_16BIT,
-          max(minimum, SAMPLE_RATE / 5 * 2))
-      if (audio.state != AudioRecord.STATE_INITIALIZED) {
-        audio.release()
-        throw AudioCaptureException("No microphone could be opened.")
-      }
-      val format =
-        MediaFormat.createAudioFormat(MIME, SAMPLE_RATE, 1).apply {
-          setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-          setInteger(MediaFormat.KEY_BIT_RATE, options.bitRate.coerceIn(24_000, 192_000))
-          setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16_384)
+        val minimum =
+          AudioRecord.getMinBufferSize(
+            SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+        if (minimum <= 0) throw AudioCaptureException("No microphone could be opened.")
+        val opened =
+          try {
+            AudioRecord(
+              MediaRecorder.AudioSource.MIC,
+              SAMPLE_RATE,
+              AudioFormat.CHANNEL_IN_MONO,
+              AudioFormat.ENCODING_PCM_16BIT,
+              max(minimum, SAMPLE_RATE / 5 * 2))
+          } catch (error: Exception) {
+            throw AudioCaptureException("No microphone could be opened.")
+          }
+        audio = opened
+        if (opened.state != AudioRecord.STATE_INITIALIZED) {
+          throw AudioCaptureException("No microphone could be opened.")
         }
-      val encoder = MediaCodec.createEncoderByType(MIME)
-      try {
-        encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        encoder.start()
-      } catch (error: Exception) {
-        encoder.release()
-        audio.release()
-        throw AudioCaptureException("The audio encoder could not start.")
-      }
+        val format =
+          MediaFormat.createAudioFormat(MIME, SAMPLE_RATE, 1).apply {
+            setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+            setInteger(MediaFormat.KEY_BIT_RATE, options.bitRate.coerceIn(24_000, 192_000))
+            setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16_384)
+          }
+        val created =
+          try {
+            MediaCodec.createEncoderByType(MIME).also {
+              encoder = it
+              it.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+              it.start()
+            }
+          } catch (error: Exception) {
+            throw AudioCaptureException("The audio encoder could not start.")
+          }
 
-      // Foreground first: Android only lets a foreground service keep the microphone in the background.
-      startService(context, options)
-      try {
-        audio.startRecording()
-      } catch (error: Exception) {
-        encoder.release()
-        audio.release()
-        stopService(context)
-        throw AudioCaptureException("No microphone could be opened.")
-      }
+        // Foreground first: Android only lets a foreground service keep the microphone in the
+        // background. Without it, recording goes on while the app is open.
+        serviceStarted = true
+        if (!service.start(context, serviceIntent(options))) reportForegroundUnavailable("")
+        try {
+          opened.startRecording()
+        } catch (error: Exception) {
+          throw AudioCaptureException("No microphone could be opened.")
+        }
 
-      record = audio
-      codec = encoder
-      samplesFed = 0
-      livePcm = false
-      liveReset = true
-      samplesEncoded = 0
-      chunkNumber = 0
-      pausedByPerson = false
-      silenced = false
-      lastChunk = null
-      openChunk()
-      watchSilencing(context, audio)
+        samplesFed = 0
+        livePcm = false
+        liveReset = true
+        samplesEncoded = 0
+        chunkNumber = 0
+        pausedByPerson = false
+        silenced = false
+        lastChunk = null
+        try {
+          openChunk()
+        } catch (error: Exception) {
+          throw AudioCaptureException("The recording could not be saved.")
+        }
+        watchSilencing(context, opened)
+        record = opened
+        codec = created
+      } catch (error: Exception) {
+        // Nothing stays open: the microphone, the encoder, the chunk file and the service.
+        unwatchSilencing()
+        discardChunk()
+        quietly { encoder?.stop() }
+        quietly { encoder?.release() }
+        quietly { audio?.release() }
+        if (serviceStarted) service.stop(context)
+        throw error as? AudioCaptureException
+          ?: AudioCaptureException("Recording could not start. ${error.message ?: ""}".trim())
+      }
+      val started = record!!
+      val startedEncoder = codec!!
       active = options.recordingId
       running = true
-      thread = Thread({ loop(audio, encoder) }, "opengeni-audio-capture").also { it.start() }
-      val device = audio.routedDevice?.productName?.toString()
+      thread =
+        Thread({ loop(started, startedEncoder) }, "opengeni-audio-capture").also { it.start() }
+      val device = started.routedDevice?.productName?.toString()
       return mapOf("sampleRate" to SAMPLE_RATE, "inputName" to (device ?: ""))
     }
   }
@@ -190,26 +220,32 @@ object AudioCapture {
     try {
       record?.stop()
     } catch (_: Exception) {}
-    thread?.join(10_000)
-    thread = null
-    val encoder = codec
     var last: Map<String, Any?>? = null
-    if (cancel) {
-      discardChunk()
-    } else if (encoder != null) {
-      drain(encoder, endOfStream = true)
-      last = closeChunk(emitEvent = true)
-    }
     try {
-      encoder?.stop()
-    } catch (_: Exception) {}
-    encoder?.release()
-    codec = null
-    record?.release()
-    record = null
-    unwatchSilencing()
-    appContext?.let { stopService(it) }
-    active = null
+      thread?.join(10_000)
+      thread = null
+      val encoder = codec
+      if (cancel) {
+        discardChunk()
+      } else if (encoder != null) {
+        drain(encoder, endOfStream = true)
+        last = closeChunk(emitEvent = true)
+      }
+    } finally {
+      // Whatever finishing the last chunk did, the microphone and the service are let go.
+      // An unfinished chunk file stays for recovery.
+      quietly { chunkStream?.close() }
+      chunkStream = null
+      chunkPart = null
+      quietly { codec?.stop() }
+      quietly { codec?.release() }
+      codec = null
+      quietly { record?.release() }
+      record = null
+      quietly { unwatchSilencing() }
+      appContext?.let { service.stop(it) }
+      active = null
+    }
     send("onState", mapOf("recordingId" to id, "state" to "stopped"))
     return last
   }
@@ -217,6 +253,23 @@ object AudioCapture {
   // --- Capture loop ---------------------------------------------------------------
 
   private fun loop(audio: AudioRecord, encoder: MediaCodec) {
+    try {
+      capture(audio, encoder)
+    } catch (error: Exception) {
+      // An exception here would end the app: report it, and stop() still finishes the recording.
+      if (!running) return
+      active?.let {
+        send(
+          "onError",
+          mapOf(
+            "recordingId" to it,
+            "code" to "capture_failed",
+            "message" to "Recording stopped unexpectedly. ${error.message ?: ""}".trim()))
+      }
+    }
+  }
+
+  private fun capture(audio: AudioRecord, encoder: MediaCodec) {
     val buffer = ShortArray(SAMPLE_RATE / 10)
     var presentationUs = 0L
     while (running) {
@@ -459,17 +512,15 @@ object AudioCapture {
 
   // --- Foreground service ---------------------------------------------------------------
 
-  private fun startService(context: Context, options: AudioCaptureStartOptions) {
-    val intent =
-      Intent(context, OpenGeniAudioCaptureService::class.java)
-        .putExtra(OpenGeniAudioCaptureService.EXTRA_TITLE, options.notificationTitle)
-        .putExtra(OpenGeniAudioCaptureService.EXTRA_TEXT, options.notificationText)
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(intent)
-    else context.startService(intent)
-  }
+  private fun serviceIntent(options: AudioCaptureStartOptions): Intent =
+    Intent()
+      .putExtra(OpenGeniAudioCaptureService.EXTRA_TITLE, options.notificationTitle)
+      .putExtra(OpenGeniAudioCaptureService.EXTRA_TEXT, options.notificationText)
 
-  private fun stopService(context: Context) {
-    context.stopService(Intent(context, OpenGeniAudioCaptureService::class.java))
+  private inline fun quietly(action: () -> Unit) {
+    try {
+      action()
+    } catch (_: Exception) {}
   }
 
   /** The service could not go to the foreground: capture continues only while the app is open. */

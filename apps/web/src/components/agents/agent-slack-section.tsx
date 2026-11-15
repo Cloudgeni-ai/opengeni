@@ -1,14 +1,14 @@
 /**
- * Where an agent is available in Slack: one row per connected Slack workspace,
- * with its handle, open use and channel intros. Turning it on checks its name
- * against Slack's rules there; the API says what it can't take.
+ * Where an agent works in Slack: one row per Slack workspace linked to its
+ * workspace. A shared agent is available in each of them on its own; a row
+ * says how people ask it there, or why it can't be (Only me, its name), with
+ * channel intros under it. Who can use it, including anyone in the
+ * organization, is the agent's own setting.
  */
-import { useState } from "react";
 import {
-  SLACK_AGENT_OPEN_LABEL,
-  SLACK_AGENT_OPEN_NARROWED_NOTICE,
+  slackAgentCallText,
+  slackAgentNameProblem,
   slackAgentNameProblemText,
-  slackAgentOpenDisclosure,
   type SlackAgentNameProblem,
 } from "@opengeni/contracts";
 import type { Agent, AgentSlackInstall } from "@opengeni/sdk";
@@ -24,11 +24,14 @@ import { Notice } from "@opengeni/react/ui/notice";
 import { RowButton } from "@opengeni/react/ui/page-actions";
 import { SettingRow, SettingRowLink } from "@opengeni/react/ui/setting-row";
 import { Skeleton } from "@opengeni/react/ui/skeleton";
-import { Switch } from "@opengeni/react/ui/switch";
 
-/** How people ask the agent in Slack: `@Opengeni +data-team`. */
-export function agentSlackCall(handle: string): string {
-  return `@Opengeni +${handle}`;
+/**
+ * How people ask the agent in Slack: `@Opengeni Data team`, with the app's
+ * name in that Slack workspace when the server says it (`@Opengeni Staging …`).
+ */
+export function agentSlackCall(name: string, botDisplayName?: string): string {
+  const bot = botDisplayName?.trim();
+  return bot ? slackAgentCallText(name, `@${bot}`) : slackAgentCallText(name);
 }
 
 /** Why Slack refused, in words; falls back to the server's own message. */
@@ -45,8 +48,6 @@ export function agentSlackErrorText(error: unknown, agentName: string): string {
     }
     case "agent_slack_requires_workspace_visibility":
       return "Only agents everyone in the workspace can use can be in Slack. Change Who can use it first.";
-    case "agent_slack_single_install":
-      return "It's already available in another Slack workspace. Turn that off first.";
     case "slack_bot_unavailable":
       return "The Opengeni Slack app isn't on for this workspace. An organization admin can turn it on from the Slack page.";
     case "agent_slack_personal_workspace":
@@ -58,64 +59,44 @@ export function agentSlackErrorText(error: unknown, agentName: string): string {
   }
 }
 
-// An agent is in one Slack workspace at a time for now (`agent_slack_single_install`).
-// This and its `otherInstallReason` uses go once it can be in several.
-function otherInstallReason(
-  installs: readonly AgentSlackInstall[],
-  connectionId: string,
-): string | null {
-  const other = installs.find(
-    (row) => row.connectionId !== connectionId && row.availability !== null,
-  );
-  return other
-    ? `It's available in ${other.slackTeamName ?? "another Slack workspace"}. Turn that off first.`
-    : null;
+/** Why the agent isn't available in one linked Slack workspace, in words. */
+export function agentSlackUnavailableText(
+  agent: Pick<Agent, "name">,
+  install: AgentSlackInstall,
+  workspaceName: string,
+): string {
+  switch (install.unavailable) {
+    case "agent_slack_requires_workspace_visibility":
+      return `Only me agents stay in the app. Choose ${workspacePeopleLabel(workspaceName)} under Who can use it to use it in Slack.`;
+    case "agent_slack_personal_workspace":
+      return "Agents in a personal workspace stay in the app.";
+    case "agent_slack_name_taken":
+      return `Another agent here is already called “${agent.name}”. Rename this one to use it in Slack.`;
+    case "agent_slack_name_invalid": {
+      const problem = slackAgentNameProblem(agent.name);
+      return problem
+        ? `${slackAgentNameProblemText(agent.name, problem)} Rename it to use it in Slack.`
+        : "Slack can't use this name. Rename it to use it in Slack.";
+    }
+    default:
+      return "Not available yet. Reload to try again.";
+  }
 }
-
-const ADMIN_ONLY = "Only a workspace admin can change this.";
-const ORG_ADMIN_ONLY = "Only an organization admin can turn this on.";
 
 function InstallRow({
   agent,
   install,
   workspaceName,
-  otherInstall,
-  onChange,
   onIntroduce,
 }: {
   agent: Agent;
   install: AgentSlackInstall;
   workspaceName: string;
-  /** Why it can't be turned on here while it is on in another Slack workspace. */
-  otherInstall: string | null;
-  onChange: (agent: Agent, install: AgentSlackInstall) => void;
   onIntroduce: (connectionId: string) => void;
 }) {
-  const { client } = useAppContext();
-  const [pending, setPending] = useState<"availability" | "open" | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const availability = install.availability;
-  const on = availability !== null;
   const teamName = install.slackTeamName ?? "Slack workspace";
   const canManage = agent.viewer.canManageSlack;
-  const shared = agent.visibility === "workspace";
-  const privateReason = `Needs ${workspacePeopleLabel(workspaceName)} under Who can use it.`;
-
-  async function run(
-    kind: "availability" | "open",
-    action: () => Promise<{ agent: Agent; availability: AgentSlackInstall["availability"] }>,
-  ) {
-    setPending(kind);
-    setError(null);
-    try {
-      const result = await action();
-      onChange(result.agent, { ...install, availability: result.availability });
-    } catch (failure) {
-      setError(agentSlackErrorText(failure, agent.name));
-    } finally {
-      setPending(null);
-    }
-  }
 
   return (
     <SettingRow
@@ -125,70 +106,16 @@ function InstallRow({
           <>
             People ask it with{" "}
             <span className="font-medium text-fg" data-agent-slack-handle="">
-              {agentSlackCall(availability.handle)}
+              {agentSlackCall(agent.name, install.botDisplayName)}
             </span>
           </>
-        ) : shared ? (
-          (otherInstall ?? "Off")
         ) : (
-          privateReason
+          agentSlackUnavailableText(agent, install, workspaceName)
         )
-      }
-      error={error ?? undefined}
-      control={
-        <Switch
-          aria-label={`Available in ${teamName}`}
-          checked={on}
-          pending={pending === "availability"}
-          disabled={!canManage || (!on && (!shared || otherInstall !== null))}
-          disabledReason={!canManage ? ADMIN_ONLY : !shared ? privateReason : otherInstall}
-          onCheckedChange={(next) =>
-            void run("availability", () =>
-              next
-                ? client.putAgentSlackAvailability(
-                    agent.workspaceId,
-                    agent.id,
-                    install.connectionId,
-                    {},
-                  )
-                : client.deleteAgentSlackAvailability(
-                    agent.workspaceId,
-                    agent.id,
-                    install.connectionId,
-                  ),
-            )
-          }
-        />
       }
     >
       {availability ? (
         <>
-          <SettingRow
-            label={SLACK_AGENT_OPEN_LABEL}
-            description={slackAgentOpenDisclosure(agent.name, workspaceName)}
-            control={
-              <Switch
-                aria-label={SLACK_AGENT_OPEN_LABEL}
-                checked={availability.open}
-                pending={pending === "open"}
-                disabled={!canManage || (!availability.open && !agent.viewer.canOpenInSlack)}
-                disabledReason={!canManage ? ADMIN_ONLY : ORG_ADMIN_ONLY}
-                onCheckedChange={(next) =>
-                  void run("open", () =>
-                    client.putAgentSlackAvailability(
-                      agent.workspaceId,
-                      agent.id,
-                      install.connectionId,
-                      { expectedVersion: availability.version, open: next },
-                    ),
-                  )
-                }
-              />
-            }
-          />
-          {availability.open ? (
-            <Notice className="my-3">{SLACK_AGENT_OPEN_NARROWED_NOTICE}</Notice>
-          ) : null}
           {canManage ? (
             <SettingRow
               label="Introduce in channels"
@@ -206,11 +133,9 @@ function InstallRow({
 
 export function AgentSlackSection({
   agent,
-  onAgentChange,
   onIntroduce,
 }: {
   agent: Agent;
-  onAgentChange: (agent: Agent) => void;
   onIntroduce: (connectionId: string) => void;
 }) {
   const { workspaces } = useAppContext();
@@ -258,6 +183,22 @@ export function AgentSlackSection({
     );
   }
   const anyOn = value.installs.some((install) => install.availability !== null);
+  // A reason that comes from the agent itself, such as Only me, is the same
+  // in every Slack workspace, so it is said once.
+  const first = value.installs[0]!;
+  if (
+    !anyOn &&
+    (first.unavailable === "agent_slack_requires_workspace_visibility" ||
+      first.unavailable === "agent_slack_personal_workspace") &&
+    value.installs.every((install) => install.unavailable === first.unavailable)
+  ) {
+    return (
+      <SettingRow
+        label="Slack"
+        description={agentSlackUnavailableText(agent, first, workspaceName)}
+      />
+    );
+  }
   return (
     <>
       {!value.routingEnabled && anyOn ? (
@@ -271,17 +212,7 @@ export function AgentSlackSection({
           agent={agent}
           install={install}
           workspaceName={workspaceName}
-          otherInstall={otherInstallReason(value.installs, install.connectionId)}
           onIntroduce={onIntroduce}
-          onChange={(nextAgent, nextInstall) => {
-            onAgentChange(nextAgent);
-            installs.set({
-              ...value,
-              installs: value.installs.map((row) =>
-                row.connectionId === nextInstall.connectionId ? nextInstall : row,
-              ),
-            });
-          }}
         />
       ))}
     </>

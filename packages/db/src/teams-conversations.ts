@@ -31,8 +31,12 @@ export type TeamsRoute = TeamsInstallation & {
   bot_id: string;
   session_id: string;
   /** Where a 1:1 route's session lives when not in the installation's workspace:
-   * the linked person's own Personal workspace. Null keeps the installation's. */
+   * the linked person's own Personal workspace, or (with workspace routing) a
+   * workspace of the organization they can start work in. Null keeps the
+   * installation's. */
   session_workspace_id: string | null;
+  /** The agent a 1:1 route's chat runs as, or null for the plain assistant. */
+  agent_id?: string | null;
   session_bound: boolean;
   delivered_sequence: number;
   /** The latest reply, request for input or failure event in the route's session. */
@@ -625,6 +629,10 @@ export async function disconnectTeamsBot(
     await tx.execute(
       sql`delete from teams_bot_context_cutoffs where workspace_id=${i.workspace_id}::uuid`,
     );
+    // Parked switch-card messages are unusable after the generation changes.
+    await tx.execute(
+      sql`delete from teams_bot_route_prompts where workspace_id=${i.workspace_id}::uuid`,
+    );
     if (options.audit && prior?.active) {
       await insertDisconnectAuditEventInScope(tx, {
         accountId: i.account_id,
@@ -655,11 +663,27 @@ export async function enqueueTeamsMessage(
     payload: unknown;
     /** A 1:1 route's session in the sender's own Personal workspace. */
     sessionWorkspaceId?: string | null;
+    /**
+     * The caller's live authority check for a 1:1 route that names another
+     * workspace of the organization or an agent, run in the enqueue
+     * transaction with `tx` (read everything through it). It replaces the
+     * Personal-workspace-only rule and must also confirm the agent may run in
+     * that workspace. A route that names an agent is refused without it.
+     * Throws `teams_reach_changed` when the organization's Teams reach
+     * changed while it ran; the caller may check again.
+     */
+    authorizeSessionWorkspace?: (
+      tx: Database,
+      target: { workspaceId: string; agentId: string | null },
+    ) => Promise<boolean>;
+    /** The agent a 1:1 route's chat runs as. */
+    agentId?: string | null;
   },
 ) {
   if (input.groupAudience && input.groupRevision === undefined)
     throw new Error("teams_group_revision_missing");
   const sessionWorkspaceId = input.sessionWorkspaceId ?? null;
+  const agentId = input.agentId ?? null;
   if (
     sessionWorkspaceId &&
     (!input.personal ||
@@ -668,10 +692,33 @@ export async function enqueueTeamsMessage(
       sessionWorkspaceId === i.workspace_id)
   )
     throw new Error("teams_route_unavailable");
+  if (agentId && (!input.personal || input.groupAudience || input.channelId))
+    throw new Error("teams_route_unavailable");
   return teamsScoped(db, i, async (tx) => {
     // Only the linked person's own Personal workspace, named by their active
-    // organization membership, can hold their 1:1 chat.
-    if (
+    // organization membership, can hold their 1:1 chat, unless workspace
+    // routing checks their live access to the workspace (and the agent) here.
+    // The check reads the organization's Teams reach; the reach version it
+    // saw must still be current once the installation row is locked below,
+    // so a reach change committed meanwhile refuses the message instead of
+    // racing it (a later one waits for this transaction).
+    let checkedReachVersion: string | null = null;
+    if (input.authorizeSessionWorkspace && (sessionWorkspaceId || agentId)) {
+      const [before] = await rawRows<{ reach_version: string | number }>(
+        tx,
+        sql`select reach_version from teams_bot_installations where tenant_id=${i.tenant_id}::uuid`,
+      );
+      if (!before) throw new Error("teams_installation_changed");
+      checkedReachVersion = String(before.reach_version);
+      if (
+        !(await input.authorizeSessionWorkspace(tx, {
+          workspaceId: sessionWorkspaceId ?? i.workspace_id,
+          agentId,
+        }))
+      )
+        throw new Error("teams_route_unavailable");
+    } else if (agentId) throw new Error("teams_route_unavailable");
+    else if (
       sessionWorkspaceId &&
       (await namedSubjectPersonalWorkspaceId(tx, {
         accountId: i.account_id,
@@ -679,11 +726,13 @@ export async function enqueueTeamsMessage(
       })) !== sessionWorkspaceId
     )
       throw new Error("teams_route_unavailable");
-    const active = await rawRows(
+    const active = await rawRows<{ reach_version: string | number }>(
       tx,
-      sql`select 1 from teams_bot_installations where tenant_id=${i.tenant_id}::uuid and active and generation=${i.generation}::uuid and (${input.groupRevision ?? null}::bigint is null or group_revision=${input.groupRevision ?? null}::bigint) for update`,
+      sql`select reach_version from teams_bot_installations where tenant_id=${i.tenant_id}::uuid and active and generation=${i.generation}::uuid and (${input.groupRevision ?? null}::bigint is null or group_revision=${input.groupRevision ?? null}::bigint) for update`,
     );
     if (!active.length) throw new Error("teams_installation_changed");
+    if (checkedReachVersion !== null && String(active[0]!.reach_version) !== checkedReachVersion)
+      throw new Error("teams_reach_changed");
     if (input.groupAudience) {
       const [current] = await rawRows<{ route_id: string; group_audience: TeamsGroupAudience }>(
         tx,
@@ -706,7 +755,12 @@ export async function enqueueTeamsMessage(
         input = { ...input, routeId: `teams-group:${randomUUID()}` };
       }
     }
-    await tx.execute(sql`insert into teams_bot_routes(account_id,workspace_id,tenant_id,route_id,generation,actor_id,subject_id,personal,channel_id,conversation_id,thread_id,service_url,bot_id,group_audience,group_active,session_workspace_id)
+    // A route that names no agent keeps the shape a previous release writes.
+    if (agentId)
+      await tx.execute(sql`insert into teams_bot_routes(account_id,workspace_id,tenant_id,route_id,generation,actor_id,subject_id,personal,channel_id,conversation_id,thread_id,service_url,bot_id,group_audience,group_active,session_workspace_id,agent_id)
+   values(${i.account_id}::uuid,${i.workspace_id}::uuid,${i.tenant_id}::uuid,${input.routeId},${i.generation}::uuid,${input.actorId}::uuid,${input.subjectId},${input.personal},${input.channelId ?? null},${input.conversationId},${input.threadId},${input.serviceUrl},${input.botId},null::jsonb,false,${sessionWorkspaceId}::uuid,${agentId}::uuid) on conflict(route_id) do nothing`);
+    else
+      await tx.execute(sql`insert into teams_bot_routes(account_id,workspace_id,tenant_id,route_id,generation,actor_id,subject_id,personal,channel_id,conversation_id,thread_id,service_url,bot_id,group_audience,group_active,session_workspace_id)
    values(${i.account_id}::uuid,${i.workspace_id}::uuid,${i.tenant_id}::uuid,${input.routeId},${i.generation}::uuid,${input.actorId}::uuid,${input.subjectId},${input.personal},${input.channelId ?? null},${input.conversationId},${input.threadId},${input.serviceUrl},${input.botId},${input.groupAudience ? JSON.stringify(input.groupAudience) : null}::jsonb,${Boolean(input.groupAudience)},${sessionWorkspaceId}::uuid) on conflict(route_id) do nothing`);
     const [route] = await rawRows<TeamsRoute>(
       tx,
@@ -716,7 +770,8 @@ export async function enqueueTeamsMessage(
       !route ||
       route.generation !== i.generation ||
       (route.personal && route.actor_id !== input.actorId) ||
-      (route.session_workspace_id ?? null) !== sessionWorkspaceId
+      (route.session_workspace_id ?? null) !== sessionWorkspaceId ||
+      (route.agent_id ?? null) !== agentId
     )
       throw new Error("teams_route_unavailable");
     const inserted = await rawRows(
@@ -818,6 +873,31 @@ export async function markTeamsTurnAnswered(
     );
   });
 }
+/**
+ * The routing notes (`payload.teamsRouting`) of the messages a turn answers,
+ * oldest first: what the ingress recorded about where each one was sent.
+ */
+export async function getTeamsTurnRouting(
+  db: Database,
+  i: TeamsInstallation,
+  r: TeamsRoute,
+  turnId: string,
+): Promise<Record<string, unknown>[]> {
+  return teamsScoped(db, i, async (tx) =>
+    (
+      await rawRows<{ routing: unknown }>(
+        tx,
+        sql`select payload->'teamsRouting' as routing from teams_bot_inbox
+          where route_id=${r.route_id} and turn_id=${turnId}::uuid order by created_at,event_id limit 20`,
+      )
+    )
+      .map((row) => row.routing)
+      .filter(
+        (routing): routing is Record<string, unknown> =>
+          typeof routing === "object" && routing !== null && !Array.isArray(routing),
+      ),
+  );
+}
 export async function enqueueTeamsOutput(
   db: Database,
   i: TeamsInstallation,
@@ -875,10 +955,14 @@ export async function teamsReplyPending(
 /** An agent reply the bot delivered in one Teams conversation, found by its Teams message id. */
 export type TeamsDeliveredReply = {
   route_id: string;
+  /** The installation's workspace, which holds the route. */
+  workspace_id: string;
   subject_id: string;
+  actor_id: string;
   personal: boolean;
   session_id: string;
   session_workspace_id: string | null;
+  agent_id: string | null;
   turn_id: string | null;
 };
 export async function getTeamsDeliveredReply(
@@ -893,7 +977,7 @@ export async function getTeamsDeliveredReply(
       (
         await rawRows<TeamsDeliveredReply>(
           tx,
-          sql`select r.route_id,r.subject_id,r.personal,r.session_id,r.session_workspace_id,o.payload->>'turnId' as turn_id from teams_bot_routes r join teams_bot_outbox o on o.route_id=r.route_id where r.tenant_id=${i.tenant_id}::uuid and r.generation=${i.generation}::uuid and split_part(r.conversation_id,';',1)=${input.conversationId.split(";")[0]} and r.session_bound and o.state='delivered' and o.provider_message_id=${input.providerMessageId} and o.payload->>'ai'='true' limit 1`,
+          sql`select r.route_id,r.workspace_id::text as workspace_id,r.subject_id,r.actor_id::text as actor_id,r.personal,r.session_id,r.session_workspace_id,r.agent_id::text as agent_id,o.payload->>'turnId' as turn_id from teams_bot_routes r join teams_bot_outbox o on o.route_id=r.route_id where r.tenant_id=${i.tenant_id}::uuid and r.generation=${i.generation}::uuid and split_part(r.conversation_id,';',1)=${input.conversationId.split(";")[0]} and r.session_bound and o.state='delivered' and o.provider_message_id=${input.providerMessageId} and o.payload->>'ai'='true' limit 1`,
         )
       )[0] ?? null,
   );

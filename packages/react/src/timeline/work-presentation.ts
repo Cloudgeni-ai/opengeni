@@ -23,6 +23,41 @@ export function timelineTurnsWithOutput(items: readonly TimelineItem[]): Set<str
   );
 }
 
+/** Turns with steps that are not all loaded (their `turn-steps` marker is not complete). */
+export function timelineTurnsWithUnloadedSteps(items: readonly TimelineItem[]): Set<string> {
+  return new Set(
+    items.flatMap((item) =>
+      item.kind === "turn-steps" && item.state !== "complete" ? [item.turnId] : [],
+    ),
+  );
+}
+
+/** Whether any of these activity items belongs to a turn with unloaded steps. */
+export function activityHasUnloadedSteps(
+  items: readonly ActivityItem[],
+  turnsWithUnloadedSteps: ReadonlySet<string>,
+): boolean {
+  if (turnsWithUnloadedSteps.size === 0) return false;
+  return items.some((item) => item.turnId !== null && turnsWithUnloadedSteps.has(item.turnId));
+}
+
+/** Whether a settled turn fold holds a turn with unloaded steps. */
+export function turnGroupHasUnloadedSteps(
+  group: TurnGroup,
+  turnsWithUnloadedSteps: ReadonlySet<string>,
+): boolean {
+  return group.groups.some((child) => {
+    if (child.kind === "item") {
+      return child.item.kind === "turn-steps" && child.item.state !== "complete";
+    }
+    if (child.kind === "turn") return turnGroupHasUnloadedSteps(child, turnsWithUnloadedSteps);
+    return (
+      (!!child.work?.steps && child.work.steps.state !== "complete") ||
+      activityHasUnloadedSteps(child.items, turnsWithUnloadedSteps)
+    );
+  });
+}
+
 export function durationBetween(startedAt: string, endedAt: string): number | undefined {
   const started = Date.parse(startedAt);
   const ended = Date.parse(endedAt);

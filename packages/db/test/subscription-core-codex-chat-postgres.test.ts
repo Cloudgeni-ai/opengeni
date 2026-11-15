@@ -1836,6 +1836,53 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
       },
     ]);
   });
+
+  test("an older attempt's lease stops holding the turn once that attempt is quiesced", async () => {
+    const org = await organization();
+    const connectionId = await sharedConnection(org, {
+      workspaceId: org.sharedWorkspaceId,
+      label: "quiesced",
+    });
+    const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    // The previous generation's worker died before it could release its lease.
+    const previous = await withSessionRlsActorContext(
+      subscriptionCoreTurnActor(turn.identity),
+      () =>
+        withRlsContext(
+          client!.db,
+          { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
+          (db) =>
+            acquireSubscriptionTurnLease(db, {
+              ...turn.identity,
+              provider: "codex",
+              connectionId,
+              holderId: "codex-turn:previous",
+              generation: turn.executionGeneration,
+              ttlMs: 300_000,
+            }),
+        ),
+    );
+    expect(previous).not.toBeNull();
+    await shared!.admin`
+      update session_turns set execution_generation = execution_generation + 1
+      where id = ${turn.identity.turnId}::uuid`;
+    const redispatched = { ...turn, executionGeneration: turn.executionGeneration + 1 };
+    // Its attempt has not quiesced yet: the lease still holds the turn.
+    expect(await place(redispatched)).toMatchObject({ kind: "lease_busy" });
+    // Its quiescence receipt ends the hold long before the lease expires.
+    await shared!.admin`
+      update session_turn_attempts set quiesced_at = clock_timestamp()
+      where turn_id = ${turn.identity.turnId}::uuid
+        and execution_generation = ${turn.executionGeneration}`;
+    expect(await place(redispatched)).toMatchObject({ kind: "run", connectionId });
+    expect(await leaseRows(org, turn)).toEqual([
+      {
+        connection_id: connectionId,
+        holder_id: turn.holderId,
+        generation: String(turn.executionGeneration + 1),
+      },
+    ]);
+  });
 });
 
 describe("core Codex resolver single-flight", () => {
@@ -2078,6 +2125,20 @@ describe.skipIf(!realDb)("durable model catalog observations", () => {
     expect(await place(turn)).toMatchObject({ kind: "run", connectionId: b });
     expect(await evaluate()).toMatchObject({ kind: "run", connectionId: b });
     expect(await observe(b, [])).toBe(true);
+    // No fresh catalog lists the model (a provider can hide it from every
+    // account, for example above the presented client version): the catalog
+    // cannot choose, so placement runs on capacity and the provider decides.
+    expect(await place(turn)).toMatchObject({ kind: "run" });
+    // Once an account lists it, the catalog chooses again: the listing
+    // account is exhausted, so the turn waits instead of using the account
+    // whose catalog omits the model.
+    expect(await observe(a, [upstream])).toBe(true);
+    await shared!.admin`update subscription_connection_quota set quota=${shared!.admin.json({
+      windows: [],
+      modelCooldowns: {},
+      exhaustedUntil: Date.now() + 3600_000,
+      exhaustedKind: "quota",
+    })}::jsonb, observed_refresh_generation=1 where connection_id=${a}::uuid`;
     expect(await place(turn)).toMatchObject({ kind: "wait", reason: "no_eligible_capacity" });
     // The same evaluator used immediately after arming a waiter must not wake
     // the turn on the model-ineligible account it just rejected.

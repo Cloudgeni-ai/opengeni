@@ -203,8 +203,10 @@ the agent's connections (`compute-guest`'s `resume` module, the host's
   connection. A stream ends once both directions ended and were
   acknowledged, or when the guest gives up reconnecting (about 30 s of its
   own running time). The host ends a stream no connection carried again
-  within 10 s after another stream of the sandbox was taken up, and every
-  stream when it stops listening for the sandbox; it holds at most 64.
+  within 10 s after another stream of the sandbox was taken up, every
+  stream when it boots the sandbox afresh (the new guest holds none of
+  them, so no command is sent into one), and every stream when it stops
+  listening for the sandbox; it holds at most 64.
 
 Inside the stream, the host answers as a NATS server would, for the subset
 the agent's client uses:
@@ -317,8 +319,10 @@ Until `opened`, the host keeps what the guest sends for the session.
 - **Liveness.** While a session is open the gateway renews the claim's
   lease, every five seconds, whether or not the sandbox runs; a renewal that
   finds a later epoch or another instance ends the session with `closed`.
-- **Sleep.** The host keeps a session open while its sandbox sleeps. A
-  request, a `msg` with a `reply`, for a sandbox that is not running wakes
+- **Sleep.** The host keeps a session open while its sandbox sleeps, as
+  long as its agent process can come back: its VM is paused, or a copy of
+  its memory is kept to resume it. A request, a `msg` with a `reply`, for
+  a sandbox that is not running wakes
   it; any other `msg` (an acknowledgement, a receipt) reaches the agent
   whenever it next runs and never wakes it. The agent's connection
   outlives sleep (section 3), so a message for a subscription it holds is
@@ -341,8 +345,12 @@ Until `opened`, the host keeps what the guest sends for the session.
   the lost subscription gets "no responders" (section 6), whose sender
   wakes it through the fleet.
 - **Ending.** The host closes a session when it hands off or removes the
-  sandbox. Revoking the enrollment, when the sandbox is deleted, makes the
-  gateway end it with `revoked`.
+  sandbox, and when the sandbox's VM ends with no memory kept: that agent
+  process is gone for good, and the next boot starts another, so nothing
+  may wait for it or be sent to it meanwhile. The sandbox then has no
+  session until its next agent connects (section 6 says how a sender
+  reaches it). Revoking the enrollment, when the sandbox is deleted, makes
+  the gateway end it with `revoked`.
 
 What the host does, exactly (`compute-link`, its `core` module):
 
@@ -428,11 +436,13 @@ What the host does, exactly (`compute-link`, its `core` module):
 
 ## 6. When no one answers
 
-A message to an agent whose sandbox has no session (its host was lost, or
-it was handed off and not yet adopted) gets "no responders". Opengeni's
-compute backend then calls `POST /v1/sandboxes/{id}/wake` and retries the
-request under its replay identity until the agent answers or the request's
-deadline passes.
+A message to an agent whose sandbox has no session (its host was lost, it
+was handed off and not yet adopted, or its VM ended with no memory kept)
+gets "no responders", and the agent's connection no longer resolves.
+Opengeni's compute backend then calls `POST /v1/sandboxes/{id}/wake`,
+and retries the request under its replay identity until the agent answers
+or the request's deadline passes; an operation whose agent came back on
+another connection is admitted again on that one.
 
 A no-wake request is never retried that way. "No responders", the host's
 `Opengeni-Agent-Unanswered` reply and a timeout all mean the same to its

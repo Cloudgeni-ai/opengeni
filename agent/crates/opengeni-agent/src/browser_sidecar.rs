@@ -124,7 +124,7 @@ impl Sidecar {
 #[derive(Debug)]
 pub struct BrowserSidecarManager {
     config_dir: PathBuf,
-    binary: PathBuf,
+    binary: BrowserdBinary,
     sidecars: Mutex<HashMap<String, Sidecar>>,
     update_drain: Arc<crate::uploads::update_drain::UpdateDrain>,
     /// Process groups of controllers that ended without a clean cooperative
@@ -143,16 +143,33 @@ pub struct BrowserSidecarManager {
     computer_control: bool,
 }
 
+/// Where the controller's executable comes from.
+#[derive(Debug)]
+enum BrowserdBinary {
+    /// Installed beside the agent, or named by the operator.
+    Installed(PathBuf),
+    /// Embedded in this agent, and written out or checked once, before the
+    /// first controller starts ([`crate::embedded_runtime::materialize`]).
+    /// A failure is kept: browser control then stays unavailable, as it
+    /// was when the agent checked the helpers at start.
+    Embedded(tokio::sync::OnceCell<Result<PathBuf, ()>>),
+}
+
 impl BrowserSidecarManager {
     /// Resolves the packaged sidecar and creates a manager rooted in the agent's
-    /// owner-only configuration directory.
+    /// owner-only configuration directory. An embedded runtime is only named
+    /// here: reading back the helpers it wrote out, some 230 MB in a release,
+    /// waits for the first controller, so it never delays the agent's start.
     pub fn discover(config_dir: impl Into<PathBuf>) -> PlatformResult<Self> {
         let config_dir = config_dir.into();
-        let binary = select_packaged_browserd(
-            &config_dir,
-            std::env::var_os(BROWSERD_BINARY_ENV).is_some(),
-            discover_browserd_binary,
-        )?;
+        let explicit = std::env::var_os(BROWSERD_BINARY_ENV).is_some();
+        if !explicit && crate::embedded_runtime::EMBEDDED {
+            return Self::new(
+                config_dir,
+                BrowserdBinary::Embedded(tokio::sync::OnceCell::new()),
+            );
+        }
+        let binary = select_packaged_browserd(&config_dir, explicit, discover_browserd_binary)?;
         Self::with_binary(config_dir, binary)
     }
 
@@ -161,7 +178,6 @@ impl BrowserSidecarManager {
         config_dir: impl Into<PathBuf>,
         binary: impl Into<PathBuf>,
     ) -> PlatformResult<Self> {
-        let config_dir = config_dir.into();
         let binary = binary.into();
         let metadata = std::fs::metadata(&binary)
             .map_err(|error| PlatformError::from_io("inspect browserd binary", &error))?;
@@ -170,6 +186,10 @@ impl BrowserSidecarManager {
                 "browser controller sidecar is not a regular file".to_string(),
             ));
         }
+        Self::new(config_dir.into(), BrowserdBinary::Installed(binary))
+    }
+
+    fn new(config_dir: PathBuf, binary: BrowserdBinary) -> PlatformResult<Self> {
         Ok(Self {
             config_dir,
             binary,
@@ -180,6 +200,38 @@ impl BrowserSidecarManager {
             http_client: crate::browser_control_http::client()?,
             http_spool: std::sync::Mutex::default(),
             computer_control: true,
+        })
+    }
+
+    /// The controller's executable. An embedded one is written out, or
+    /// checked, by the first call; one that fails its check leaves browser
+    /// control unavailable, answered as if this agent had none.
+    async fn browserd(&self) -> PlatformResult<PathBuf> {
+        let cell = match &self.binary {
+            BrowserdBinary::Installed(binary) => return Ok(binary.clone()),
+            BrowserdBinary::Embedded(cell) => cell,
+        };
+        let resolved = cell
+            .get_or_init(|| async {
+                let config_dir = self.config_dir.clone();
+                let selected = tokio::task::spawn_blocking(move || {
+                    select_packaged_browserd(&config_dir, false, discover_browserd_binary)
+                })
+                .await
+                .unwrap_or_else(|error| {
+                    Err(PlatformError::os(format!(
+                        "embedded interaction runtime check did not finish: {error}"
+                    )))
+                });
+                selected.map_err(|error| {
+                    tracing::warn!(%error, "browser controller sidecar unavailable; browser-native control is disabled");
+                })
+            })
+            .await;
+        resolved.clone().map_err(|()| {
+            PlatformError::Unsupported(
+                "browser_control_ensure: browser controller sidecar is unavailable".to_string(),
+            )
         })
     }
 
@@ -444,7 +496,8 @@ impl BrowserSidecarManager {
         write_owner_only(&token_file, format!("{admin_token}\n").as_bytes())?;
         write_scope_record(&authority_dir, scope_id, scope_generation, allowed_origins)?;
 
-        let mut command = Command::new(&self.binary);
+        let binary = self.browserd().await?;
+        let mut command = Command::new(&binary);
         command
             .kill_on_drop(true)
             .stdin(Stdio::piped())
@@ -469,7 +522,7 @@ impl BrowserSidecarManager {
         // handler, then the manager's second SIGINT kills it mid-cleanup and
         // leaves its browser daemon/profile lock behind.
         command.process_group(0);
-        configure_companion_binaries(&mut command, &self.binary);
+        configure_companion_binaries(&mut command, &binary);
         if !self.computer_control {
             without_computer_backend(&mut command);
         }
@@ -666,6 +719,8 @@ impl BrowserControlBackend for BrowserSidecarManager {
         &self,
         req: &v1::BrowserControlEnsureRequest,
     ) -> PlatformResult<BrowserControlEndpoint> {
+        // First, as an agent without a controller answers.
+        self.browserd().await?;
         let scope_id =
             bounded_identifier(&req.scope_id, MAX_SCOPE_BYTES, "browser authority scope")?;
         let scope_generation = bounded_identifier(
@@ -2304,6 +2359,57 @@ mod tests {
             serde_json::from_str::<ReadyDocument>(&current).expect("current ready document");
         assert_eq!(ready.runtime_build_id, expected_runtime_build_id());
         assert!(ready_document_mismatches(&ready, "test-secret").is_none());
+    }
+
+    /// Starting the agent only names an embedded runtime: the helpers are
+    /// written out (or read back and checked) when the first controller
+    /// needs them, and once.
+    #[cfg(opengeni_embedded_runtime)]
+    #[tokio::test]
+    async fn an_embedded_runtime_is_written_out_for_the_first_controller_not_at_start() {
+        let config = tempfile::tempdir().expect("config root");
+        let manager = BrowserSidecarManager::discover(config.path()).expect("discover");
+        assert!(
+            !config.path().join("interaction-runtime").exists(),
+            "discovery must not touch the embedded helpers"
+        );
+        let binary = manager.browserd().await.expect("first controller's helper");
+        assert!(binary.is_file());
+        assert!(binary.starts_with(config.path().join("interaction-runtime")));
+        assert_eq!(manager.browserd().await.expect("again"), binary);
+    }
+
+    /// A helper that fails its check leaves browser control answering as an
+    /// agent without a controller does, for good, as when it was checked at
+    /// start.
+    #[cfg(opengeni_embedded_runtime)]
+    #[tokio::test]
+    async fn a_changed_embedded_helper_answers_as_an_agent_without_browser_control() {
+        let config = tempfile::tempdir().expect("config root");
+        let binary = crate::embedded_runtime::materialize(config.path())
+            .expect("materialize")
+            .expect("embedded");
+        std::fs::write(&binary, b"changed materialized helper").expect("modify helper");
+        let manager = BrowserSidecarManager::discover(config.path()).expect("discover");
+        let request = v1::BrowserControlEnsureRequest {
+            scope_id: "scope".to_string(),
+            scope_generation: "generation".to_string(),
+            admin_token: "t".repeat(MIN_TOKEN_BYTES),
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            match manager.ensure(&request).await {
+                Err(PlatformError::Unsupported(message)) => assert_eq!(
+                    message,
+                    "browser_control_ensure: browser controller sidecar is unavailable"
+                ),
+                other => panic!("expected the no-controller answer, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            std::fs::read(&binary).expect("helper"),
+            b"changed materialized helper"
+        );
     }
 
     #[cfg(opengeni_embedded_runtime)]

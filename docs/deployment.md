@@ -1034,6 +1034,11 @@ database owner may create, but a managed service with an extension allowlist
 (Azure Database for PostgreSQL's `azure.extensions`, for example) must allow
 them before the migration that installs them runs.
 
+The Azure Terraform module also allows `pg_stat_statements` for query cost
+attribution. Migrations do not install it; an operator creates it and sets
+`pg_stat_statements.track` when statistics are wanted. Azure preloads the
+library by default, so neither step restarts the server.
+
 The ordinary SQL migration runner applies a transaction-local 5-second
 `lock_timeout` before each migration body. This bounds lock acquisition in
 migrations without a later timeout override, including 0510. Migration-specific
@@ -1081,6 +1086,17 @@ out of API and worker pods. Its default command serializes `db:migrate`,
 `db:provision-roles`, and `db:assert-runtime-posture`; any failure aborts
 `helm upgrade` before workload replacement begins. Operators running without
 Helm must preserve the same order explicitly.
+
+API and worker readiness probes evaluate the same posture on every probe, with
+one difference in how they read it: each probe first computes a fingerprint of
+the schema, privilege, ownership, policy, trigger, role and membership catalog
+rows the inspection depends on, in the inspection's own snapshot, and re-reads
+those catalogs only when the fingerprint changed since the previous probe.
+Identity, activation and cutover receipts are read live on every probe. Any
+DDL, GRANT, REVOKE or role change changes the fingerprint, so a stray grant
+still fails the next probe. The release-gate assertion and the startup check
+always read every catalog. See
+[the readiness catalog fingerprint benchmark](benchmarks/readiness-catalog-fingerprint.md).
 
 After a successful install or upgrade, the default-on `catalogImport` hook Job
 imports the committed reviewed integrations snapshot. It receives the runtime
@@ -1462,6 +1478,19 @@ start the matching release. Do not restart an older API that exposes the raw
 provider-management routes. This feature does not authorize changing the
 deployment's configured browser session-set mode.
 
+### Opengeni Console host
+
+Opengeni Console can be served on its own host (`console.opengeni.ai`,
+`staging.console.opengeni.ai`) by the same web and API deployment. Add the
+host to `OPENGENI_BETTER_AUTH_ALLOWED_HOSTS` and its origin to
+`OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS`, optionally share the session with
+`OPENGENI_BETTER_AUTH_COOKIE_DOMAIN` (unset, the Console host has its own
+sign-in), and register its Google sign-in callback (the Console host offers
+no GitHub sign-in). `OPENGENI_BETTER_AUTH_COOKIE_PREFIX` optionally renames the
+auth cookies (for example to keep staging and production apart on one parent
+domain); changing it signs everyone out, and leaving it unset keeps Better
+Auth's default names. See [`opengeni-console.md`](opengeni-console.md#its-own-host).
+
 ### Managed passkey sign-in
 
 Managed deployments in the legacy browser session-set mode offer passkey
@@ -1497,6 +1526,22 @@ them, and readiness requires them from then on. A release that still has the
 - Removing a passkey signs the person out everywhere, as a password change
   does: sessions don't record which passkey opened them, so ending all of them
   is the only way to shut out a removed passkey.
+- `OPENGENI_ADMIN_PASSKEY_STEP_UP=required` (default `off`) makes owners and
+  admins change who can access the organization and its data from a browser
+  session confirmed with a passkey: members, roles, invitations, service
+  accounts and ownership recovery; creating organization and workspace API keys
+  (or changing what one may do), and creating a personal API key; and creating,
+  changing or removing shared connections, including Gmail. Settings, billing,
+  policies, integration installs and revoking keys are not asked. A session signed in with a passkey is confirmed;
+  otherwise the API refuses with `ADMIN_PASSKEY_STEP_UP_REQUIRED` in the error
+  details, the console asks for the passkey once and sends the change again,
+  and the session stays confirmed until it ends (`auth_sessions.mfa_verified_at`,
+  removed with the session on sign-out or revocation). Someone without a
+  passkey is sent to add one. The phone app, and agents and personal API keys
+  acting for a person, act under the person's existing authority and are not
+  asked; normal members, personal workspaces, reads and organization or
+  workspace API keys are not affected. It applies only where passkey sign-in
+  is offered. Production sets `required` (CASA 3.3.1).
 - Ceremonies are single use, expire after five minutes and are bound to the
   origin that started them. Requests for new ceremonies are rate limited per
   client address. Credentials are stored as public keys only; the signature
@@ -1794,6 +1839,10 @@ without per-application origin registration. `OPENGENI_CORS_ALLOW_ORIGIN_REGEX`
 is only the allowlist for origins that may send browser cookies cross-origin.
 Keep that regex narrow; unlisted origins receive wildcard, non-credentialed
 CORS responses and therefore cannot use a managed-login session cookie.
+A request without an `Origin` header (servers, command-line clients,
+same-origin page loads) is not a cross-origin browser read and receives no CORS
+headers at all, only `Vary: Origin` so caches keep the two answers apart. Every
+API response carries `X-Content-Type-Options: nosniff`.
 Browser and desktop controller requests also admit the configured
 `OPENGENI_PUBLIC_BASE_URL` and `OPENGENI_WEB_BASE_URL` origins directly; this
 does not grant those origins credentialed cross-origin responses.
@@ -2087,9 +2136,70 @@ from the previous builds' assets listed in `OPENGENI_WEB_PREVIOUS_ASSET_ROOTS`
 [Web assets across rollouts](#web-assets-across-rollouts). Every shell response carries
 `X-Content-Type-Options: nosniff` and `Referrer-Policy:
 strict-origin-when-cross-origin` (the setup-account page keeps its stricter
-`no-referrer`). The server deliberately sets no `X-Frame-Options`,
-`frame-ancestors`, or other CSP, because the console supports embedding. The
-API compresses JSON responses and leaves SSE and other streaming transports
+`no-referrer`).
+
+### Console Content-Security-Policy
+
+Every HTML page the web server serves carries an enforced
+`Content-Security-Policy` built in `apps/web/src/csp.ts`. Its fixed part is
+`default-src 'self'`; `script-src 'self' 'wasm-unsafe-eval'` plus the sha256
+hash of each inline script in the exact bytes served (hashed when the page is
+rendered, so they never drift from the build); `object-src 'none'`;
+`base-uri 'self'`; `form-action 'self'`; `frame-ancestors 'self'` (Office's
+hosts for the Excel add-in pages under `/office/`, which also get
+`https://appsforoffice.microsoft.com` and Office's other script hosts);
+`img-src`/`media-src 'self' data: blob:`; `font-src 'self' data:`;
+`connect-src 'self' blob:` (pdf.js reads downloaded bytes from a blob: URL);
+`worker-src`/`child-src 'self' blob:`; and `style-src`/`style-src-elem 'self'`
+plus a fresh nonce on every response, with `style-src-attr 'unsafe-inline'`.
+Libraries such as the toast, scroll-lock, terminal and diff components create
+`<style>` elements at runtime, so a hashed bootstrap script that runs first
+reads the response's nonce from a `csp-nonce` meta element and stamps it on
+every `<style>` element the page creates. Style attributes (React `style`
+props and the attributes the diff and terminal components write into markup)
+cannot carry a nonce or hash, so only `style-src-attr` allows them inline;
+they cannot load resources or run script. Pages are therefore rendered per
+response (the cached page holds a placeholder nonce). No directive ever contains `*` or a bare scheme such as
+`https:`. Other responses keep `frame-ancestors 'self'` and
+`X-Frame-Options: SAMEORIGIN` (none on `/office/`).
+
+The deployment-specific hosts come from the API's public
+`GET /v1/config/content-security`, derived from existing API settings:
+the object storage origin of signed URLs, the API origin when it differs from
+the console's, the relay and Modal tunnel sockets, Turnstile when the sign-up
+challenge is on, PostHog/Reo/GA4 when analytics is configured, Google and
+GitHub avatar hosts when those sign-ins are configured, catalog model logo
+hosts, `https://github.com` in `form-action` outside platform-managed mode
+(the GitHub App manifest form), and the HTML frame host
+`https://og.<sites domain>`. The web server reads it from
+`OPENGENI_WEB_CONTENT_SECURITY_API_URL` (the Helm chart sets it to the
+in-cluster API service when the chart deploys the API), else
+`OPENGENI_PUBLIC_BASE_URL`. It waits up to five seconds for the first answer
+before serving pages, then refreshes every five minutes; after a failure it
+logs one warning, keeps the last policy (or the base policy, which fails
+closed) and retries after 1, 2, 4 and then every 10 seconds. No new Helm value
+is needed.
+
+Agent-authored HTML (chat visualizations, HTML artifacts and Sites in the
+console) does not run under the console policy: it renders in an
+opaque-origin sandboxed frame of the HTML frame host page
+(`/_og/html-frame`), which the Sites gateway serves on `og.<sites domain>`
+(deploy the gateway with or before a web release that uses it) and the web
+server serves on the console origin only when there is no Sites domain (its
+policy cannot restrict the agent's HTML, so a deployment with a Sites domain
+keeps every console page under the strict policy). Both frame hosts may be framed by the console and by Office's
+hosts. Images from hosts the policy does not list load through the API's
+signed-in image proxy `GET /v1/image-proxy?url=`: public HTTPS images only,
+SSRF-checked on every redirect, magic-byte sniffed (SVG is served with
+`default-src 'none'; style-src 'unsafe-inline'; sandbox`), size and time
+capped, and rate limited. When the API has its own origin the console uses the
+absolute proxy URL the API publishes. The Excel add-in signs in with a bearer
+token, which an `<img>` cannot send, so it fetches a short-lived signed ticket
+from `GET /v1/image-proxy/ticket` and appends it to proxy URLs; tickets are
+signed with a key derived from the Better Auth secret (or the delegation or
+integration state secret), and without one the ticket route answers 404.
+
+The API compresses JSON responses and leaves SSE and other streaming transports
 uncompressed.
 
 Set `OPENGENI_WEB_NOINDEX=true` on a deployment search engines should not
@@ -2953,6 +3063,8 @@ OPENGENI_CONFORMANCE_ACCESS_KEY="$OPENGENI_ACCESS_KEY" \
 ```
 
 The chart defaults API, web, relay, control-worker and turn-worker deployments to surge rolling updates (`maxSurge: 1`, `maxUnavailable: 0`). API, web and relay pods drain for `preStopDrainSeconds` before SIGTERM; turn pods may take up to their termination grace to finish in-flight turns. One-node smoke clusters without spare capacity can select zero-surge updates (`maxSurge: 0`, `maxUnavailable: 1`), as the local Kubernetes and preview examples do.
+
+Removing a pod from the Service endpoints does not move connections clients already hold in a keep-alive pool, so the API keeps serving them through the preStop sleep and drains them on SIGTERM: it stops listening, closes idle keep-alive connections, marks every later response `Connection: close`, ends live event streams and closes WebSockets with 1001 (their clients resume on another replica), and lets in-flight requests finish. Requests still running when `OPENGENI_API_SHUTDOWN_GRACE_MS` less a 10-second exit margin has passed are closed, and the process then closes its database, NATS and Temporal clients and exits within that grace. The chart renders the variable as `api.terminationGracePeriodSeconds` less `api.preStopDrainSeconds` (20000 by default); without it the API assumes 30000. A deployment outside the chart should set it the same way.
 
 ### Web assets across rollouts
 
@@ -4169,6 +4281,7 @@ Service endpoints:
 - API: `GET /healthz` on `OPENGENI_API_PORT` (default `8000`); `GET /traffic-readyz` checks Postgres for traffic routing, while `GET /readyz` reports Postgres, NATS, and Temporal with bounded timeouts. `GET /metrics` is served on `OPENGENI_API_METRICS_PORT` when it is set, and then never on `OPENGENI_API_PORT`, so an ingress that forwards every path to the API cannot publish it. Without it, `/metrics` stays on `OPENGENI_API_PORT` (the local and Docker Compose default). The Helm chart sets it from `api.metricsPort` (default `9464`) behind a separate always-ClusterIP `<release>-api-metrics` Service that the ServiceMonitor, scrape annotations, and bundled collector use; do not route it through an Ingress. The ServiceMonitor relabels those series back to the public API Service's `service`/`job` identity, so alerts keyed on `service="<release>-api"` keep matching; annotation-based scrapers see the new Service name. `api.metricsPort: null` restores the legacy single-port layout.
 - Worker: `GET /metrics`, `GET /healthz`, and `GET /readyz` on `OPENGENI_WORKER_HTTP_PORT` (default `8001`); readiness requires lifecycle state `ready` plus healthy Postgres, NATS, and Temporal checks. The standalone worker reserves a one-connection Postgres probe pool so ordinary activity-pool saturation cannot create false readiness failures. A draining worker stays live but becomes unready before polling stops.
 - Relay: `GET /healthz` on `OPENGENI_RELAY_BIND` (the wss port, default `8443`) when the relay is enabled. `GET /metrics` is served on `OPENGENI_RELAY_METRICS_BIND` (a `host:port`) when it is set, and then never on the wss port, so an ingress that forwards every path of the relay host cannot publish it. Without it, `/metrics` stays on the wss port (the local development default, where the relay binds loopback). The relay refuses to start when both binds share a port. The Helm chart sets it from `relay.metricsPort` (default `9464`) behind a separate always-ClusterIP `<release>-relay-metrics` Service that the relay ServiceMonitor and scrape annotations use; do not route it through an Ingress. The ServiceMonitor relabels those series back to the public relay Service's `service`/`job` identity; annotation-based scrapers see the new `<release>-relay-metrics` Service name. The default needs a relay image from the same release or later; `relay.metricsPort: null` restores the legacy single-port layout, including for an older pinned relay image.
+- Bundled Temporal (`temporal.enabled`): Temporal's own Prometheus metrics (`service_latency`, `service_errors`, `persistence_latency` and the rest for frontend, history and matching) on `temporal.metrics.port` (default `9090`) of the `<release>-temporal` Service, port name `metrics`. The chart renders a ServiceMonitor for it with `observability.serviceMonitor.enabled`, and `networkPolicy.monitoring` admits the scraper. These tell a slow Temporal server apart from a slow client: a workflow start or signal that is slow at the client but fast in `service_latency` points at the network or client, and a slow `persistence_latency` at the database. `temporal.metrics.port: null` turns the endpoint off.
 
 API and worker health responses include the non-fatal warning
 `github_app_bot_identity_unavailable` when that process has partial workspace
@@ -4274,7 +4387,7 @@ that the rules are healthy in a live deployment.
 Minimum production dashboards should cover:
 
 - API traffic: request rate, error rate, and p50/p95/p99 latency by `route` and `method`, scoped to one environment/deployment. Request counts carry exact `status`; duration histograms carry bounded `status_class` (`1xx` through `5xx`, or `unknown`) and `component`. The API Latency dashboard separates successful latency, request volume, the exact ≤500 ms fraction, and failures; successful history begins at the status-class rollout, while all-status historical queries remain continuous. `route` is a bounded template, never a raw path: an explicit established label, or else the registered path template of the Hono handler that answers the request (for example `/v1/organizations/:organizationId/members`). Better Auth endpoints behind the `/v1/auth/*` registration keep a closed set of labels (`/v1/auth/sign-up/email`, `/v1/auth/callback/google`, and so on). `/v1/unknown` and `/unknown` now mean that no registered handler matched, so a sustained rise indicates 404 probing or a client/server route mismatch rather than unlabeled product traffic.
-- Sign-up funnel (managed access mode): `opengeni_auth_events_total{event="sign_up"|"email_verified"|"sign_in",method="email"|"google"|"github"|"other"}`, `opengeni_organization_setup_total{outcome="created"|"failed"}` for the self-service post-sign-in organization setup, and `opengeni_signup_acquisition_total{source="producthunt"|"website"|"direct"|"other"}` for new accounts. Every series initializes at zero. `sign_up` counts Better Auth user creation (a duplicate sign-up for an existing address is not counted); `sign_in` counts non-discarded provider sessions, including the first session of a new social account and, in the default `legacy` session-set mode, the session that the first successful email-verification click creates (a reused link creates none). A new email user's first `sign_in` is therefore normally that click, the session they continue into organization setup with, not a later password sign-in; read the funnel as `sign_up` -> `email_verified` -> `sign_in` -> organization setup `created`. `sign_in` is a session count that includes returning sign-ins, not a unique-user count. A mail link scanner that follows the verification link first takes that automatic sign-in, so the person's later password sign-in is a second `sign_in` and `sign_in` can exceed one per new email user. Invited-user account setup is not a sign-up. The acquisition source is normalized server-side from first-touch `utm_*`/`ref` parameters the web app forwards with the sign-up request or OAuth state (including the session-set social start in `dual`/`broker` mode); no per-user acquisition data is stored. The acquisition counter increments when the account is created, before email verification, so it includes accounts that never verify (and bot sign-ups); `email_verified` carries no source label, so compare the two only in aggregate. A Product Hunt listing adds `?ref=producthunt` to its link, and a `producthunt` `ref` wins over any `utm_source`: point the listing at `https://app.opengeni.ai/?mode=signup&ref=producthunt`, or at the marketing site only while it forwards the inbound `ref` onto its app links, otherwise those visitors count as `website`. An idempotent replay of a committed organization setup request counts `created` again. These counters are process-local; aggregate them with `sum` across API replicas and use `increase()` over the reporting window.
+- Sign-up funnel (managed access mode): `opengeni_auth_events_total{event="sign_up"|"email_verified"|"sign_in",method="email"|"google"|"github"|"other"}`, `opengeni_organization_setup_total{outcome="created"|"failed"|"rate_limited"}` for the self-service post-sign-in organization setup (`rate_limited` is a refusal by the signup network rate limit), and `opengeni_signup_acquisition_total{source="producthunt"|"website"|"direct"|"other"}` for new accounts. Every series initializes at zero. `sign_up` counts Better Auth user creation (a duplicate sign-up for an existing address is not counted); `sign_in` counts non-discarded provider sessions, including the first session of a new social account and, in the default `legacy` session-set mode, the session that the first successful email-verification click creates (a reused link creates none). A new email user's first `sign_in` is therefore normally that click, the session they continue into organization setup with, not a later password sign-in; read the funnel as `sign_up` -> `email_verified` -> `sign_in` -> organization setup `created`. `sign_in` is a session count that includes returning sign-ins, not a unique-user count. A mail link scanner that follows the verification link first takes that automatic sign-in, so the person's later password sign-in is a second `sign_in` and `sign_in` can exceed one per new email user. Invited-user account setup is not a sign-up. The acquisition source is normalized server-side from first-touch `utm_*`/`ref` parameters the web app forwards with the sign-up request or OAuth state (including the session-set social start in `dual`/`broker` mode); no per-user acquisition data is stored. The acquisition counter increments when the account is created, before email verification, so it includes accounts that never verify (and bot sign-ups); `email_verified` carries no source label, so compare the two only in aggregate. A Product Hunt listing adds `?ref=producthunt` to its link, and a `producthunt` `ref` wins over any `utm_source`: point the listing at `https://app.opengeni.ai/?mode=signup&ref=producthunt`, or at the marketing site only while it forwards the inbound `ref` onto its app links, otherwise those visitors count as `website`. An idempotent replay of a committed organization setup request counts `created` again. These counters are process-local; aggregate them with `sum` across API replicas and use `increase()` over the reporting window.
 - Product usage (server-side, consent-independent): `opengeni_sessions_created_total{surface,created_by_kind,root}` counts newly created sessions (`surface` is the fixed turn-surface list plus `unknown`; `created_by_kind` is `subject` or `service`; `root` is `true` for a session without a parent and `false` for a child), and `opengeni_user_messages_total{surface}` counts accepted user messages: the initial message of a created session unless its first turn is deferred, every accepted Send/Steer (web, API key, Slack, MCP, embedded), and each accepted scheduled occurrence (`surface="scheduled"`). Idempotent replays are not counted. Both are process-local counters that initialize at zero: aggregate with `sum` across API and control-worker replicas. `opengeni_active_users{window="5m"|"15m"|"1h"|"24h"|"7d"|"30d"}` is the number of distinct managed people active inside the window: a canonical managed browser request that the web console marks with `x-opengeni-user-activity: active`, which it sends only while the tab is visible and the person interacted with it in the last 5 minutes. Idle open tabs, background polling, and event streams never count. API processes record presence throttled to once per person per minute and batched off the request path; API keys, services, agents, embedded-host and local subjects are never counted. Every control worker publishes the same global database value, so aggregate it with `max`, never `sum`. `opengeni_credit_grants_total{grant_class="signup_trial"|"coupon"|"manual"|"other"}` and `opengeni_credit_granted_micros_total{grant_class}` are cumulative totals of positive credit grants observed by a ledger trigger since migration 0565, so they include the verified-signup trial grant (written by a database trigger) and operator grants that no application process writes; they are global gauges, so take `max` across control workers first and then subtract the same expression `offset` by the window. Do not apply `increase()` per pod series: every control-worker restart starts a new series, so a per-pod `increase()` sees only that pod's lifetime and undercounts. `opengeni_credit_micros_total{kind="grant"}` remains the process-local counter for grants written in application code. Per-person history for the same activity is the `user.active`, `credits.granted`, and `connection.revoked` lifecycle facts; see [`embedding.md`](embedding.md#product-lifecycle-facts).
 - Analytics consent: `opengeni_analytics_consent_total{decision="granted"|"denied"}` counts answers to the web console's optional-analytics banner, and `opengeni_analytics_consent_reports_rejected_total{reason}` counts refused reports; both initialize at zero. Only a changed answer is counted, so it is a count of decisions, not of people. Use the `denied` share to state how much of the consenting audience PostHog cannot see; people who never answer the banner are not counted at all, so also compare PostHog's consented sign-ins with the server `sign_in` counter. See [`application-observability.md`](application-observability.md#analytics-consent).
 - Advisory work discovery: request/outcome rate, p50/p95/p99 duration, result count, response bytes, overlap count, stable match-class distribution, and observer errors from the `opengeni_work_discovery_*` family. Keep only its fixed surface/mode/outcome/scope/match labels; never add workspace, session, query, subject, title, goal, claim, version, or provenance labels. See [`work-discovery.md`](work-discovery.md).
@@ -4384,7 +4497,7 @@ Minimum production alerts:
 - Turn stuck: a physical worker attempt has made no durable progress for more than 15 minutes for 5 minutes. Overlapping recovery attempts are counted and aged independently.
 - Turn admission: Temporal's oldest eligible `runAgentTurn` backlog is above 30 seconds for 5 minutes, or a pod remains above 90% of memory-safe slots while eligible work waits. Durable prompts behind a pause do not count.
 - Turn startup SLOs: cumulative queue p95 above 5 seconds, queue-to-provider-dispatch p95 above 20 seconds (warning; a paging critical tier above 60 seconds replaces it), or queue-to-first-byte p95 above 120 seconds for 15 minutes with at least five samples. The Helm values are configurable; use the phase dashboard before assigning the delay to the sandbox or provider.
-- Model-request latency split: Opengeni's own per-request pre-dispatch work (`opengeni_model_request_pre_dispatch_seconds`: SDK model entry through admission, durable history/audit checkpoints and credit revalidation to the literal provider dispatch) warns when its p95 exceeds 2 seconds for 10 minutes with at least 20 requests. Provider time-to-first-token (`opengeni_model_provider_ttft_seconds{content="any"}`: literal dispatch to the first streamed reasoning-or-answer delta) never alerts on an absolute number; `OpenGeniModelProviderTtftRegression` warns only when a provider's 30-minute p90 exceeds 2x its own trailing 24-hour p90 (offset by 30 minutes), above a 5-second floor, with at least 30 recent and 200 baseline requests, and not while the pre-dispatch condition holds. A provider that is simply slower - reasoning models, subscription routes - stays quiet; the absolute `opengeni_stream_ttft_seconds` view remains on Streaming Health for investigation. Ratio, floor and sample gates are Helm values; a freshly deployed metric has no baseline and stays quiet until it accrues one.
+- Model-request latency split: Opengeni's own per-request pre-dispatch work (`opengeni_model_request_pre_dispatch_seconds`: SDK model entry through admission, durable history/audit checkpoints and credit revalidation to the literal provider dispatch) warns when its p95 exceeds 2 seconds for 10 minutes with at least 20 requests. Provider time-to-first-token (`opengeni_model_provider_ttft_seconds{content="any"}`: literal dispatch to the first streamed reasoning-or-answer delta) never alerts on an absolute number; `OpenGeniModelProviderTtftRegression` warns only when a provider's 30-minute p90 exceeds 2x its own trailing 24-hour p90 (offset by 30 minutes), above a 5-second floor, with at least 30 recent and 200 baseline requests, and not while the pre-dispatch condition holds. Where a provider reports response start (`opengeni_model_request_phase_duration_seconds{phase="headers"}`: response headers, or the first provider event on a persistent socket) in its baseline window, the alert judges that (`signal="headers"`), because context size and reasoning length barely move it; other providers are judged on first streamed content (`signal="first_content"`). A provider that is simply slower - reasoning models, subscription routes - stays quiet; the absolute `opengeni_stream_ttft_seconds` view remains on Streaming Health for investigation. Ratio, floor and sample gates are Helm values; a freshly deployed metric has no baseline and stays quiet until it accrues one.
 - Streaming write and delivery latency: durable session-event append p99 above 1 second for 10 minutes (warning) or above 2 seconds over 5 minutes (critical), and live NATS publish p99 above 500 ms for 10 minutes. Each needs at least 100 observations in its window (`observability.prometheusRule.sessionEventMinSamples`): below 100, a p99 is just the slowest single observation, so one slow write on a quiet deployment must not page.
 - Context compaction: an exact active attempt's latest automatic compaction landmark remains durably `started` for 15 minutes. Terminal skips settle normally, and the control-worker projection survives turn-worker replacement while following each resolved model's actual threshold.
 - Sandbox create failures: sandbox create failure ratio is above 20% for 10 minutes.

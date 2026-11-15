@@ -24,7 +24,11 @@
  * Capture and upload go on; the screens get the latest state when the app
  * is back.
  */
-import { useRecorder, type UseRecorderResult } from "@opengeni/react/recordings";
+import {
+  registerLiveRecordingCapture,
+  useRecorder,
+  type UseRecorderResult,
+} from "@opengeni/react/recordings";
 import {
   createContext,
   useContext,
@@ -184,12 +188,26 @@ function RecorderHost({
   workspaceId?: string;
 }) {
   const platform = useNativeRecorderPlatform(platformOptions);
+  const ownerId = platformOptions.storeScope;
   const recorder = useRecorder({
     ...(client ? { client } : {}),
     ...(workspaceId ? { workspaceId } : {}),
+    ...(ownerId ? { ownerId } : {}),
     platform,
     onFinished: (recordingId) => store.markFinished(recordingId),
   });
+  // Signing this account out while it records discards the capture when the
+  // person chooses to, so no audio is written after its files are gone.
+  const capturing = recorder.state === "recording" || recorder.state === "paused";
+  const discardCapture = useRef(recorder.discard);
+  discardCapture.current = recorder.discard;
+  useEffect(() => {
+    if (!capturing) return;
+    return registerLiveRecordingCapture({
+      ownerId: ownerId ?? null,
+      discard: () => discardCapture.current(),
+    });
+  }, [capturing, ownerId]);
   const published = useRef(recorder);
   useLayoutEffect(() => {
     published.current = recorder;

@@ -24,7 +24,7 @@ fn archived() -> State {
 }
 
 fn rules() -> SleepPolicy {
-    SleepPolicy::new(SleepRules::RECOMMENDED).unwrap()
+    SleepPolicy::new(SleepRules::RECOMMENDED.keeping_memory()).unwrap()
 }
 
 fn space(bytes: u64) -> DiskSpace {
@@ -261,7 +261,7 @@ fn what_cannot_be_freed_is_never_counted() {
     let local = SleepPolicy::new(SleepRules {
         archive_after: None,
         evict_after: None,
-        ..SleepRules::RECOMMENDED
+        ..SleepRules::RECOMMENDED.keeping_memory()
     })
     .unwrap();
     rig.add(2, archived(), local, 3 * GIB);

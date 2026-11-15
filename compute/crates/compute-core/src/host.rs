@@ -278,6 +278,15 @@ pub enum Input {
         /// The sandbox.
         sandbox: SandboxId,
     },
+    /// The sandbox's guest did not say it wrote its files out as its VM
+    /// was paused: writes may live in its memory alone. Until it runs
+    /// again its VM does not end unsaved, whatever its rules say: where
+    /// they would end it, its memory is saved first, as for a sandbox
+    /// whose memory is kept. Ignored unless its VM is paused.
+    Unsynced {
+        /// The sandbox.
+        sandbox: SandboxId,
+    },
     /// The sandbox's VM did not take the [`Action::Balloon`] of `request`,
     /// or it was not asked, as when the VM had paused or ended: what its
     /// balloon takes is not known. It is asked again after a backoff.
@@ -425,6 +434,13 @@ pub enum Input {
         sandbox: SandboxId,
         /// The least depth to reach.
         level: Level,
+        /// Whether its programs are to be kept on the way: a VM whose
+        /// memory is not saved is then saved before its process ends,
+        /// whatever its rules say, as for a sandbox moved while in use.
+        /// Without it the sandbox goes as its rules say, so one whose
+        /// memory is never saved ([`crate::SleepRules::keep_memory`]) has
+        /// its process ended unsaved.
+        keep: bool,
     },
     /// Boot the sandbox afresh from its disk where it is: any step under
     /// way that would keep or bring back its running programs is
@@ -596,9 +612,9 @@ pub enum Action {
         /// The sandbox.
         sandbox: SandboxId,
     },
-    /// Set the sandbox's running VM's `memory.low` to `low` and its
-    /// `memory.high` to `high` (`None` for none). A VM starts, resumes and
-    /// is adopted with its request as `memory.low` and no `memory.high`;
+    /// Set the sandbox's running VM's `memory.min` (ADR 44) to `low` and
+    /// its `memory.high` to `high` (`None` for none). A VM starts, resumes
+    /// and is adopted with its request as `memory.min` and no `memory.high`;
     /// this comes only when that or the last setting changes, or when the
     /// kernel holds the VM above it and the VM has since come down
     /// (ADR 24). The engine never sets a high below what the VM holds: it
@@ -892,6 +908,14 @@ impl Host {
         self.in_flight[step.index()]
     }
 
+    /// Takes a sleep request for `sandbox`; see [`Input::Sleep`].
+    fn asked_to_sleep(&mut self, sandbox: SandboxId, level: Level, keep: bool) {
+        if let Some(slot) = self.sandboxes.get_mut(&sandbox) {
+            slot.request_sleep(level, keep);
+            self.mark(sandbox);
+        }
+    }
+
     fn apply(&mut self, now: At, input: Input, out: &mut Vec<Action>) {
         match input {
             Input::Add {
@@ -962,6 +986,7 @@ impl Host {
                     self.unsavable(sandbox, out);
                 }
             }
+            Input::Unsynced { sandbox } => self.unsynced(sandbox),
             Input::Memory { available } => self.memory_read(now, available),
             Input::Disk { available } => self.disk_read(available),
             Input::CpuBudget { millis } => self.set_cpu_budget(millis),
@@ -982,12 +1007,11 @@ impl Host {
             | Input::ShrinkFailed { .. }) => {
                 self.outgrowth_input(now, input);
             }
-            Input::Sleep { sandbox, level } => {
-                if let Some(slot) = self.sandboxes.get_mut(&sandbox) {
-                    slot.request_sleep(level);
-                    self.mark(sandbox);
-                }
-            }
+            Input::Sleep {
+                sandbox,
+                level,
+                keep,
+            } => self.asked_to_sleep(sandbox, level, keep),
             Input::Restart { sandbox } => self.restart(sandbox),
             Input::Tick => {}
         }
@@ -1021,8 +1045,8 @@ impl Host {
 
     /// Takes in [`Input::Busy`].
     fn busy(&mut self, now: At, sandbox: SandboxId) {
-        // A checkpoint pauses the VM only while it captures it: its guest
-        // runs, and works, through the rest.
+        // A checkpoint never pauses the VM: its guest runs, and works,
+        // throughout.
         if let Some(slot) = self.sandboxes.get_mut(&sandbox)
             && slot.state.level == Level::Running
             && slot
@@ -1111,6 +1135,11 @@ impl Host {
             let (state, lost) = slot.state.without_process();
             slot.state = state;
             slot.renew();
+            // Without its process it is as deep as a sleep asked of it may
+            // have wanted, as after a sleep step that got it there.
+            if !slot.wants_awake() && slot.state.level >= slot.requested {
+                slot.requested = Level::Running;
+            }
             // A restart ends its programs on purpose.
             if lost && slot.restart.is_none() {
                 out.push(Action::Notify {
@@ -1184,17 +1213,17 @@ impl Host {
         // What a step wrote stays booked until a reading shows it. A
         // failed save or fetch may leave what it wrote, such as a failed
         // copy kept in quarantine, while a retry books its writes afresh.
-        // A checkpoint leaves its sandbox running, booking its next save as
-        // before, so what it wrote, its new memory image, is booked here
-        // whatever it came to: one cancelled while it uploads has written
-        // it too, and one cancelled while its guest wrote its disks out may
-        // have had the guest trim them. A step that certainly wrote
-        // nothing, such as one cancelled before it began, books nothing: a
-        // checkpoint cancelled so, and due again at once, would otherwise
-        // book an image each time it is tried.
+        // A checkpoint leaves nothing of its own behind: it copies the disk
+        // alone and removes its clone as it ends. What its guest's disk
+        // took meanwhile, through the clone's shared blocks or a trim it
+        // took back, which one cancelled while the guest wrote its disks
+        // out may also have had, stays booked until a reading measures it,
+        // as anything a booking stops standing for does. A step that
+        // certainly wrote nothing, such as one cancelled before it began,
+        // books nothing.
         let written = match (flight.step, outcome) {
             _ if !wrote => DiskSpace::default(),
-            (Step::Checkpoint, _) | (Step::Save, Outcome::Failed(_)) => slot.save_space(),
+            (Step::Save, Outcome::Failed(_)) => slot.save_space(),
             (Step::Fetch, Outcome::Failed(_)) => {
                 DiskSpace::save(slot.size.fetch.saturating_add(slot.size.disk))
             }

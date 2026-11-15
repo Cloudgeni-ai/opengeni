@@ -280,6 +280,21 @@ spec:
             headline: 'Session-recovery monitor not reporting'
             user_impact: 'No user-visible impact by itself; we just cannot see stuck sessions until it recovers.'
             next_step: 'Check that the worker-control pods are running and being scraped; restore the monitor before trusting session-recovery alerts.'
+        # Readiness stays up when only a required runtime EXECUTE grant is
+        # missing (an unsafe posture still fails readiness), so this alert is
+        # what makes the broken feature visible.
+        - alert: OpenGeniRuntimeDatabaseGrantMissing
+          expr: max by (component) (opengeni_runtime_database_degraded_findings{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'The runtime database role is missing an EXECUTE grant that this release needs; pods stay ready, but the features behind those routines fail.'
+            headline: 'Runtime database grant missing'
+            value: '{{ "{{ printf `%.0f` $value }}" }} finding(s)'
+            user_impact: 'Features that call the affected database routines fail with a permission error; everything else keeps working.'
+            next_step: 'Read the "Runtime database posture is degraded" warning for the routine names, then apply the migration or grant that provides them.'
+            description: Startup and readiness report a missing required runtime EXECUTE grant as degraded instead of failing. The strict posture check in the migration job and the compatibility workflow still rejects it.
         # Runnable prompts, not prompts held behind a running turn, a Pause,
         # a capacity wait or a required human action. Time queued behind an
         # active turn in the same chat is normal serialization and never pages.
@@ -473,7 +488,7 @@ spec:
         - alert: OpenGeniTurnRecoveryRatioHigh
           expr: |
             (
-              sum(increase(opengeni_turn_recoveries_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},cause!="provider"}[10m]))
+              sum(increase(opengeni_turn_recoveries_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},cause!~"provider|route_change"}[10m]))
               /
               clamp_min(sum(increase(opengeni_turns_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])), 1)
             ) > 0.2
@@ -483,12 +498,12 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: 'More than 20% of agent turns needed an automatic retry for a reason other than the model provider over the last 10 minutes.'
+            summary: 'More than 20% of agent turns needed an automatic retry for a reason other than the model provider or a deliberate sandbox move over the last 10 minutes.'
             headline: 'Many agent turns needing automatic retries'
             value: '{{ "{{ $value | humanizePercentage }}" }} of turns retried (10 min)'
             user_impact: 'Replies are slower and may pause briefly while turns retry automatically; no work is lost.'
             next_step: 'Split opengeni_turn_recoveries_total by cause (sandbox, tool, worker, database, control, other) and follow the matching sandbox, MCP, worker or Postgres evidence.'
-            description: Recovery is preserving logical turns but consuming capacity and adding latency. Provider-caused retries (outages, rate limits, subscription capacity and lease changes) are excluded; OpenGeniModelCallFailureRatioHigh covers the provider per model route. Inspect the dominant non-provider cause.
+            description: Recovery is preserving logical turns but consuming capacity and adding latency. Provider-caused retries (outages, rate limits, subscription capacity and lease changes) are excluded; OpenGeniModelCallFailureRatioHigh covers the provider per model route. Deliberate active-sandbox moves mid-turn (cause route_change) continue on the new route by design and are excluded too. Inspect the dominant remaining cause.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniTurnWorkerRestarted
           expr: |
@@ -629,10 +644,10 @@ spec:
             (
               sum(increase(opengeni_mcp_tool_calls_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome=~"provider_declared_error|auth_needed|outcome_uncertain|timeout|thrown_transport_error|thrown_protocol_error"}[10m]))
               /
-              clamp_min(sum(increase(opengeni_mcp_tool_calls_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])), 1)
+              clamp_min(sum(increase(opengeni_mcp_tool_calls_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome!="rejected"}[10m])), 1)
             ) > 0.2
             and on()
-            sum(increase(opengeni_mcp_tool_calls_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])) >= 5
+            sum(increase(opengeni_mcp_tool_calls_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome!="rejected"}[10m])) >= 5
           for: 5m
           labels:
             severity: warning
@@ -642,7 +657,7 @@ spec:
             value: '{{ "{{ $value | humanizePercentage }}" }} of tool calls failed (10 min)'
             user_impact: 'Agents hit errors when using tools, so tasks take longer or fail.'
             next_step: 'Split by outcome in Grafana: auth_needed means users must reconnect; timeouts or transport errors point at a tool server outage.'
-            description: Includes provider-declared, authentication, timeout, uncertain, transport, and protocol outcomes. User cancellation remains visible in Grafana but does not page operators.
+            description: Includes provider-declared, authentication, timeout, uncertain, transport, and protocol outcomes. User cancellation and calls a tool refused because of the caller's own arguments (outcome rejected, the agent's mistake rather than a tool failure) remain visible in Grafana but do not page operators.
         - alert: OpenGeniMcpToolOutcomeUncertain
           expr: |
             sum(increase(opengeni_mcp_tool_calls_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="outcome_uncertain"}[5m])) > 0
@@ -680,11 +695,11 @@ spec:
           expr: |
             histogram_quantile(
               0.95,
-              sum by (le, route) (rate(opengeni_http_request_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",method="GET",route=~"/v1/workspaces/:workspaceId|/v1/workspaces/:workspaceId/sessions|/v1/workspaces/:workspaceId/sessions/:id"}[10m]))
+              sum by (le, route) (rate(opengeni_http_request_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",method="GET",route=~"/v1/workspaces/:workspaceId|/v1/workspaces/:workspaceId/sessions|/v1/workspaces/:workspaceId/sessions/:id"}[5m]))
             ) > 2
             and on(route)
-            sum by (route) (increase(opengeni_http_request_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",method="GET",route=~"/v1/workspaces/:workspaceId|/v1/workspaces/:workspaceId/sessions|/v1/workspaces/:workspaceId/sessions/:id"}[10m])) >= 10
-          for: 5m
+            sum by (route) (increase(opengeni_http_request_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",method="GET",route=~"/v1/workspaces/:workspaceId|/v1/workspaces/:workspaceId/sessions|/v1/workspaces/:workspaceId/sessions/:id"}[5m])) >= 10
+          for: 10m
           labels:
             severity: warning
           annotations:
@@ -693,7 +708,7 @@ spec:
             value: 'p95 {{ "{{ $value | humanizeDuration }}" }}'
             user_impact: 'Opening workspaces and session lists feels slow in the app.'
             next_step: 'Check database CPU and slow queries before adding API pods.'
-            description: Workspace or session reads are slow enough to degrade the interactive control plane. Inspect database CPU, active queries, event append latency, and request volume before scaling API pods.
+            description: Workspace or session reads have stayed slow (p95 over 2 seconds in every 5-minute window for 10 minutes) and degrade the interactive control plane. A few-second burst, such as one page load during a slow query or pod start, does not page. Inspect database CPU, active queries, event append latency, and request volume before scaling API pods.
         # Product-level failure safety net: a route whose refusals (401/403/409/422)
         # jump against its own one-day baseline, or that refuses most of its
         # traffic. Use the classified rejection counter so an ended attempt's
@@ -767,14 +782,22 @@ spec:
             next_step: 'Check the API logs for this route: rejectionReason permission:stream:view means the viewer''s grant lacks stream:view; other reasons point at Connected Machine consent or a stale session. Fix the grant before users retry.'
             description: 'More than 25% of POST .../attachments requests on the browser or computer session route failed with a 4xx over 30 minutes, with at least 3 failures.'
         - alert: OpenGeniInteractionOperationFailureRatio
+          # A website that does not answer or cannot be reached
+          # (reason="destination_*") is the website's failure, not ours: it is
+          # left out of both sides of the ratio, so an agent retrying a site
+          # that is down neither pages nor dilutes our own failures.
+          # The same holds for the agent's own addressing mistakes: a locator
+          # that matched nothing or several elements (reason="locator_*") or an
+          # action the page cannot take (reason="invalid_action") means the
+          # browser answered correctly; the agent re-observes and retries.
           expr: |
             (
-              sum by (resource, operation) (increase(opengeni_interaction_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome=~"failed|denied|outcome_unknown"}[15m]))
+              sum by (resource, operation) (increase(opengeni_interaction_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome=~"failed|denied|outcome_unknown",reason!~"destination_.+|locator_.+|invalid_action"}[15m]))
               /
-              clamp_min(sum by (resource, operation) (increase(opengeni_interaction_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[15m])), 1)
+              clamp_min(sum by (resource, operation) (increase(opengeni_interaction_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},reason!~"destination_.+|locator_.+|invalid_action"}[15m])), 1)
             ) > 0.25
             and on (resource, operation)
-            sum by (resource, operation) (increase(opengeni_interaction_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome=~"failed|denied|outcome_unknown"}[15m])) >= 5
+            sum by (resource, operation) (increase(opengeni_interaction_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome=~"failed|denied|outcome_unknown",reason!~"destination_.+|locator_.+|invalid_action"}[15m])) >= 5
           for: 10m
           labels:
             severity: warning
@@ -784,8 +807,8 @@ spec:
             headline: '{{ "{{ $labels.resource }}" }} {{ "{{ $labels.operation }}" }} operations failing'
             value: '{{ "{{ $value | humanizePercentage }}" }} failed or refused (15 min)'
             user_impact: 'The agent (or a person) cannot drive the browser or computer: pages do not open, observations fail, or actions are refused, so tasks that need a browser stall.'
-            next_step: 'Split opengeni_interaction_operations_total by reason in Grafana: permission_denied/access_denied is an authorization bug, control_* is a Connected Machine problem, stale is usually benign churn.'
-            description: 'Counts every Browser/Computer control route (including observe, tab, and attach routes) plus receipt outcomes; denied means a 401/403 refusal.'
+            next_step: 'Split opengeni_interaction_operations_total by reason in Grafana: permission_denied/access_denied is an authorization bug, control_* is a Connected Machine problem, timeout/controller_lost/driver_failed/tab_* point at the browser or its controller, stale is usually benign churn.'
+            description: 'Counts every Browser/Computer control route (including observe, tab, and attach routes) plus receipt outcomes; denied means a 401/403 refusal. Websites that did not answer or could not be reached (reason destination_*) are excluded; if every site fails that way at once, check the browser''s network. The agent''s own addressing mistakes (reason locator_* or invalid_action) are excluded too.'
         - alert: OpenGeniHandoffsExpiringUnanswered
           expr: |
             (
@@ -1595,6 +1618,7 @@ spec:
             ) > 0
             and on (node)
             opengeni:workload_node:present{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
+          for: 10m
           labels:
             severity: warning
           annotations:
@@ -1602,8 +1626,8 @@ spec:
             headline: 'Server {{ "{{ $labels.node }}" }}: container runtime errors'
             value: '{{ "{{ printf `%.0f` $value }}" }} error(s) (5 min)'
             user_impact: 'Pods on this server may fail to start or restart, making services look down.'
-            next_step: 'Check the operation type and node health; confirm repeated errors or affected pods before replacing the node.'
-            description: Runtime errors during node pressure can make unrelated services appear unavailable and can prevent clean replacement capacity from starting.
+            next_step: 'Check the operation type and node health; confirm affected pods before replacing the node.'
+            description: Runtime errors have kept recurring on this node for at least 10 minutes. Persistent runtime errors during node pressure can make unrelated services appear unavailable and can prevent clean replacement capacity from starting. A single burst, such as kubelet retrying the removal of a container the runtime is already removing during a rollout, does not page.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniNodeNotReady
           expr: |
@@ -1627,10 +1651,10 @@ spec:
         # layer: the model (TTFT), the durable write path (append), or delivery
         # (publish). Thresholds are starters — tune per deployment.
         # Provider time-to-first-token (literal dispatch -> first streamed
-        # reasoning or answer delta) judged against each provider's OWN
-        # trailing baseline. A provider that is simply slower (reasoning
-        # models, subscription routes) never alerts; a real regression does.
-        # The absolute view stays on the Streaming Health dashboard.
+        # reasoning or answer delta) against each provider's OWN trailing
+        # baseline. On reasoning models it follows context size and reasoning
+        # length, so for providers that report response start (below) it is a
+        # dashboard view, not the regression signal.
         - record: opengeni:model_provider_ttft_seconds:p90_30m
           expr: |
             histogram_quantile(0.9, sum by (le, provider) (rate(opengeni_model_provider_ttft_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},content="any"}[30m])))
@@ -1643,16 +1667,57 @@ spec:
         - record: opengeni:model_provider_ttft_requests:24h_baseline
           expr: |
             sum by (provider) (increase(opengeni_model_provider_ttft_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},content="any"}[24h] offset 30m))
+        # Provider response start: dispatch -> response headers, or the first
+        # provider event on a persistent socket. The provider has accepted the
+        # request but not yet read or reasoned over it, so request shape barely
+        # moves it. Only providers with native request events report it.
+        - record: opengeni:model_provider_headers_seconds:p90_30m
+          expr: |
+            histogram_quantile(0.9, sum by (le, provider) (rate(opengeni_model_request_phase_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="headers"}[30m])))
+        - record: opengeni:model_provider_headers_seconds:p90_24h_baseline
+          expr: |
+            histogram_quantile(0.9, sum by (le, provider) (rate(opengeni_model_request_phase_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="headers"}[24h] offset 30m)))
+        - record: opengeni:model_provider_headers_requests:30m
+          expr: |
+            sum by (provider) (increase(opengeni_model_request_phase_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="headers"}[30m]))
+        - record: opengeni:model_provider_headers_requests:24h_baseline
+          expr: |
+            sum by (provider) (increase(opengeni_model_request_phase_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="headers"}[24h] offset 30m))
+        # The regression signal per provider, labelled `signal`: response start
+        # (`headers`) where the provider reported it in the baseline window,
+        # otherwise first streamed content (`first_content`). All four series
+        # make the same choice, so a window is never judged against a baseline
+        # of the other signal.
+        - record: opengeni:model_provider_regression_signal_seconds:p90_30m
+          expr: |
+            label_replace(opengeni:model_provider_headers_seconds:p90_30m{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} and on(provider) (opengeni:model_provider_headers_requests:24h_baseline{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 0), "signal", "headers", "", "")
+            or
+            label_replace(opengeni:model_provider_ttft_seconds:p90_30m{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} unless on(provider) (opengeni:model_provider_headers_requests:24h_baseline{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 0), "signal", "first_content", "", "")
+        - record: opengeni:model_provider_regression_signal_seconds:p90_24h_baseline
+          expr: |
+            label_replace(opengeni:model_provider_headers_seconds:p90_24h_baseline{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} and on(provider) (opengeni:model_provider_headers_requests:24h_baseline{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 0), "signal", "headers", "", "")
+            or
+            label_replace(opengeni:model_provider_ttft_seconds:p90_24h_baseline{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} unless on(provider) (opengeni:model_provider_headers_requests:24h_baseline{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 0), "signal", "first_content", "", "")
+        - record: opengeni:model_provider_regression_signal_requests:30m
+          expr: |
+            label_replace(opengeni:model_provider_headers_requests:30m{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} and on(provider) (opengeni:model_provider_headers_requests:24h_baseline{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 0), "signal", "headers", "", "")
+            or
+            label_replace(opengeni:model_provider_ttft_requests:30m{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} unless on(provider) (opengeni:model_provider_headers_requests:24h_baseline{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 0), "signal", "first_content", "", "")
+        - record: opengeni:model_provider_regression_signal_requests:24h_baseline
+          expr: |
+            label_replace(opengeni:model_provider_headers_requests:24h_baseline{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 0, "signal", "headers", "", "")
+            or
+            label_replace(opengeni:model_provider_ttft_requests:24h_baseline{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} unless on(provider) (opengeni:model_provider_headers_requests:24h_baseline{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 0), "signal", "first_content", "", "")
         - alert: OpenGeniModelProviderTtftRegression
           expr: |
-            opengeni:model_provider_ttft_seconds:p90_30m{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
-              > {{ $providerTtftRegressionRatio }} * opengeni:model_provider_ttft_seconds:p90_24h_baseline{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
+            opengeni:model_provider_regression_signal_seconds:p90_30m{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
+              > {{ $providerTtftRegressionRatio }} * opengeni:model_provider_regression_signal_seconds:p90_24h_baseline{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
             and
-            opengeni:model_provider_ttft_seconds:p90_30m{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > {{ $providerTtftRegressionFloorSeconds }}
+            opengeni:model_provider_regression_signal_seconds:p90_30m{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > {{ $providerTtftRegressionFloorSeconds }}
             and
-            opengeni:model_provider_ttft_requests:30m{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} >= {{ $providerTtftRecentMinSamples }}
+            opengeni:model_provider_regression_signal_requests:30m{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} >= {{ $providerTtftRecentMinSamples }}
             and
-            opengeni:model_provider_ttft_requests:24h_baseline{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} >= {{ $providerTtftBaselineMinSamples }}
+            opengeni:model_provider_regression_signal_requests:24h_baseline{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} >= {{ $providerTtftBaselineMinSamples }}
             unless on()
             (
               histogram_quantile(
@@ -1667,13 +1732,13 @@ spec:
             severity: warning
             notification_policy: investigate
           annotations:
-            summary: '{{ "{{ $labels.provider }}" }} takes more than {{ $providerTtftRegressionRatio }}x its usual time to start streaming replies.'
-            headline: '{{ "{{ $labels.provider }}" }}: slower than usual to reply'
-            value: 'p90 first token {{ "{{ $value | humanizeDuration }}" }}'
+            summary: '{{ "{{ $labels.provider }}" }} takes more than {{ $providerTtftRegressionRatio }}x its usual time to start responding.'
+            headline: '{{ "{{ $labels.provider }}" }}: slower than usual to respond'
+            value: 'p90 {{ "{{ $labels.signal }}" }} latency {{ "{{ $value | humanizeDuration }}" }}'
             user_impact: 'Users on this model wait noticeably longer before replies start.'
-            next_step: 'Check the provider''s status; usually recovers on its own; if it persists, steer users to another model.'
-            description: Measured from the literal provider dispatch, so Opengeni pre-dispatch work is excluded; a regression here is the provider (network, queueing, prefill or reasoning before the first streamed token). Suppressed while Opengeni's own pre-dispatch latency alert condition holds (including its {{ $modelRequestMinSamples }}-request minimum), so platform saturation is attributed to us first. A provider without a {{ $providerTtftBaselineMinSamples }}-request baseline does not alert.
-            action: Compare the provider's p90 against its baseline on Streaming Health, check provider status and the request phase (headers/first byte) panels, and consider steering traffic to another route if the regression persists.
+            next_step: 'Check the provider''s status and error rates. On the first_content signal, first rule out a change in request mix (larger contexts, longer reasoning) on Streaming Health; steer users away only if the provider itself stays slow.'
+            description: Each provider is judged against its own 24h baseline. Where its transport reports response start (signal `headers`, dispatch to response headers or to the first provider event on a persistent socket), that is the signal; request shape barely moves it, so a regression there is the provider accepting requests slowly. Other providers use `first_content`, dispatch to the first streamed reasoning or answer delta, which also grows with context size and reasoning length, so a few long sessions can raise it without any provider change. Opengeni pre-dispatch work is excluded, and the alert is suppressed while Opengeni's own pre-dispatch latency alert condition holds (including its {{ $modelRequestMinSamples }}-request minimum), so platform saturation is attributed to us first. A provider without a {{ $providerTtftBaselineMinSamples }}-request baseline does not alert.
+            action: Compare the provider's signal against its baseline on Streaming Health and check provider status. On first_content, check whether a few long sessions with large contexts dominate the window before steering traffic to another route.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         # A p99 means something only with at least 100 observations: below
         # that, the 99th-percentile rank lies above every observation but the
@@ -1823,9 +1888,12 @@ spec:
             description: For 15m, at least 3 Codex-subscription calls and over 5% of those reporting usage in 30m have omitted cached-token fields, or active HTTP-success traffic has produced no call that reported usage. Calls without any usage count as status="no_usage", not missing. Cache-hit ratio remains unknown rather than being fabricated as zero; inspect provider usage payload compatibility, stream failures and worker usage persistence.
         # ── Connected Machines (op-outcome plane) ────────────────────────────
         - alert: OpenGeniMachineOpInfraFailuresHigh
+          # Only infrastructure faults count (infrastructure="true": offline,
+          # draining, stream, protocol, …). A missing path, a consent gate or a
+          # fence is the machine answering what the agent asked, not a fault.
           expr: |
             (
-              sum(increase(opengeni_machine_op_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="failed"}[10m]))
+              sum(increase(opengeni_machine_op_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="failed",infrastructure="true"}[10m]))
               /
               clamp_min(sum(increase(opengeni_machine_op_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])), 1)
             ) > 0.1
@@ -1835,9 +1903,9 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: 'More than 10% of operations on Connected Machines failed over 10 minutes.'
+            summary: 'More than 10% of operations on Connected Machines failed for an infrastructure reason over 10 minutes. Missing files, consent refusals and similar answers to what the agent asked are not counted.'
             headline: 'Connected Machines: operations failing'
-            value: '{{ "{{ $value | humanizePercentage }}" }} of operations failed (10 min)'
+            value: '{{ "{{ $value | humanizePercentage }}" }} infra failures (10 min)'
             user_impact: 'Agents running on users'' own machines hit errors running commands or file operations.'
             next_step: 'Check NATS and relay health and the typed fault codes in Grafana.'
         - alert: OpenGeniMachineOpHealedFaultsSpiking
@@ -1996,7 +2064,7 @@ spec:
         - alert: OpenGeniTurnCapacityMonitorStale
           expr: |
             absent(opengeni:turn_capacity_monitor:fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}})
-          for: 30s
+          for: 5m
           labels:
             severity: warning
             notification_policy: investigate
@@ -2005,7 +2073,7 @@ spec:
             headline: 'Turn-capacity monitoring is blind'
             user_impact: 'No direct user impact, but queue backlog alerts cannot fire until this recovers.'
             next_step: 'Check worker-turns pods and their metrics scrape, and their connection to Temporal.'
-            description: No complete healthy ready-worker projection is available for 30 seconds; at least one scrape is down/absent, a monitor value/timestamp is missing, a successful queue sample is at least 60 seconds old, or deployment availability cannot be verified. Queue threshold alerts fail closed to unknown until all required observations recover; absence is not zero backlog or zero load.
+            description: No complete healthy ready-worker projection has been available for 5 minutes, longer than a worker rollout leaves new or draining pods unreported; at least one scrape is down/absent, a monitor value/timestamp is missing, a successful queue sample is at least 60 seconds old, or deployment availability cannot be verified. Queue threshold alerts fail closed to unknown until all required observations recover; absence is not zero backlog or zero load.
             action: Check worker-turns ServiceMonitor targets, ready deployment replicas, monitor errors and Temporal DescribeTaskQueue connectivity; restore evidence before acting on queue values.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniTurnWorkerPodPending

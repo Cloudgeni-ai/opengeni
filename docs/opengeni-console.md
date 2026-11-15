@@ -1,0 +1,170 @@
+# Opengeni Console
+
+Opengeni Console is the administration surface for organizations that embed
+Opengeni in their own product. Organization owners and admins use it to read
+what their product's end users asked and what the agent answered, see the
+metered cost, create organization API keys and choose how much of their end
+users' sessions they review. It is served by the web app under `/console`
+with the app's account, sign-in and organization switcher, and has no chat
+sidebar.
+
+## Its own host
+
+Console is also a separate platform on its own host: `console.opengeni.ai` in
+production and `staging.console.opengeni.ai` on staging. The web app treats a
+host whose first or second label is `console` as a Console host
+(`apps/web/src/lib/console-route.ts`); `consolex.*` and `app.*` are not. On a
+Console host:
+
+- every app path opens a Console page: `/` opens Overview, organization
+  settings sections open their Console page (People → Members, Billing and
+  Insights → Usage and billing, Developer → API keys, General → Settings), and
+  workspaces or chats open Overview. Sign-in returns, password reset, account
+  setup, shared chats and other fixed public pages keep their path.
+- sign-in, sign-up, password reset and email verification use Console's own
+  sign-in page, and post-sign-in, Google sign-in and invitation
+  links return to the Console host.
+- Members (invite, roles, remove), Usage and billing (top-ups, plans, budgets,
+  Stripe returns), API keys and the organization name work inside Console with
+  the app's organization settings pages. End users (`external_user:`) are
+  never listed as members.
+- the account menu has Sign out, and nothing links into the app.
+
+The API takes the host a link should open on from the request: an allowed
+`x-forwarded-host` (`OPENGENI_BETTER_AUTH_ALLOWED_HOSTS`), else
+`OPENGENI_PUBLIC_BASE_URL`. That chooses the host of verification emails,
+invitation account-setup links (a resent invitation keeps the host it was
+first sent from), Google sign-in returns and the Stripe return
+pages Console asks for.
+
+A deployment serving Console on its own host sets:
+
+| Setting | Value |
+| --- | --- |
+| `OPENGENI_BETTER_AUTH_ALLOWED_HOSTS` | the app and Console hosts, e.g. `app.opengeni.ai,console.opengeni.ai` |
+| `OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS` | both origins, e.g. `https://app.opengeni.ai,https://console.opengeni.ai` (browser mutations, passkeys) |
+| `OPENGENI_BETTER_AUTH_COOKIE_DOMAIN` | optional: the shared parent, e.g. `.opengeni.ai`, so one sign-in covers both hosts. Unset, each host keeps its own host-only sign-in (same accounts and organizations); everything above works on the Console host either way |
+| `OPENGENI_BETTER_AUTH_COOKIE_PREFIX` | optional; a distinct prefix (e.g. `opengeni-staging`) keeps staging's cookies apart from production's on a shared parent domain. Unset keeps Better Auth's default name, so existing sessions stay signed in |
+| Google OAuth client | add `https://<console host>/v1/auth/callback/google` as a redirect URI |
+
+The web server proxies `/v1` with the incoming host as `x-forwarded-host`, and
+its Content-Security-Policy uses `'self'`, so no other change is needed there.
+Passkeys are bound to the hostname they were made on: a passkey made on the
+app host does not sign in on the Console host (one made there does, with the
+Console origin in `OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS`). A GitHub OAuth app
+has a single callback host, so the Console host offers Google and email
+sign-in, not GitHub.
+
+## Managed workspaces
+
+A workspace is **managed by the product** when an organization API key created
+it (`POST /v1/workspaces` or `PUT /v1/workspaces/external` with an
+organization key). The API marks it in `organization_managed_workspaces` with
+the creating key. Migration 1377 backfilled existing shared workspaces from
+their creation provenance: an `api_key:` owner membership, a key-created
+organization workspace lifecycle event, or an external identity
+(`externalSource`) set by an SDK integration. Opengeni's own sources
+(`opengeni:*`, such as an added organization's default workspace) do not count
+on their own. Personal workspaces are never managed. An owner or admin can mark or unmark a shared workspace in Console;
+each change is audited. Every other shared workspace is a **team** workspace.
+
+The main app shows managed workspaces exactly as before.
+
+## Who may review what
+
+| Reader | Allowed |
+| --- | --- |
+| Organization owner or admin (a person, `holdsOrganizationAdministration`) | Console, under the review level |
+| Organization member | Nothing in Console |
+| Any API key, including a full organization key | Nothing in Console (`403`) |
+| A product's end user (`external_user:`) | Nothing in Console (`403`) |
+
+Within Console, for an owner or admin:
+
+| Session | Managed workspace | Team workspace |
+| --- | --- | --- |
+| Shared session | Listed and readable | Cost and counts only |
+| Private session of a product end user (`external_user:` owner) | Listed and readable | Cost and counts only |
+| Private ("Only me") chat of an Opengeni account | Never shown | Never shown |
+| Sub-agent session | Not listed; its cost counts toward its root session | Cost only |
+| Site visitor conversation | Never shown | Never shown |
+
+Personal workspaces are never listed. Reads run as the system sees the tenant
+(no session actor) under the ordinary workspace tenancy RLS, and the
+reviewable-session predicate is applied in SQL on every list, detail and
+transcript read (`packages/db/src/console.ts`). Console reads never write
+session data. Thumbs ratings, which are otherwise readable only by their
+author, are read through the `console_review_read` policy on
+`feedback_submissions`, which admits SELECT only inside Console's review scope
+(`opengeni.console_review`), still bounded by workspace tenancy and session
+visibility.
+
+## Review level
+
+An organization setting, `organization_session_review_settings`:
+
+- `full` (default, no row): titles, opening messages, transcripts and rating
+  comments.
+- `metadata`: who, when, status, turns, ratings, tokens and cost; no titles,
+  messages, comments or transcripts, and no content search.
+- `off`: no session list or detail (`403`); Overview, Workspaces, Usage and
+  API keys still work.
+
+## Audit log
+
+Every session detail open writes `session.transcript_viewed` (full) or
+`session.metadata_viewed` (metadata) to `organization_console_audit_events`
+before the response is returned; a transcript events read writes
+`session.transcript_viewed` too, unless the same reader already has one for that
+session from the last ten minutes, with the reader, workspace, session and end
+user. Review level changes and workspace kind changes are also logged. The
+runtime role may only insert and read the log. Owners and admins read it in
+Console Settings.
+
+## Cost
+
+Cost is the metered credit the organization was charged, from the credit
+ledger (the numbers billing uses): usage debits and the bring-your-own-key
+platform fee. Per session, model debits are joined to the session tree's model
+call facts by their idempotency keys; per workspace, organization and API key,
+debits are summed by workspace. Tokens come from model call facts.
+
+## End users
+
+Console shows the product's own user id (`asUser(id)`) for an end user. The
+API records it in `organization_end_user_labels` when it resolves an external
+actor (best effort, never failing the request), and migration 1377 backfilled
+existing identities. It is a label, never authority.
+
+## API
+
+All routes are under `/v1/organizations/:organizationId/console` and are
+mirrored by `@opengeni/sdk` methods. Contracts: `packages/contracts/src/console.ts`.
+
+| Route | SDK method |
+| --- | --- |
+| `GET summary?range=7d\|30d\|90d` | `getConsoleSummary` |
+| `GET workspaces?range&kind=all\|managed\|team` | `listConsoleWorkspaces` |
+| `PUT workspaces/:workspaceId` `{ kind }` | `updateConsoleWorkspace` |
+| `GET sessions?limit&cursor&workspaceId&q` | `listConsoleSessions` |
+| `GET workspaces/:workspaceId/sessions/:sessionId` (audited) | `getConsoleSession` |
+| `GET workspaces/:workspaceId/sessions/:sessionId/events?after&limit` (audited) | `listConsoleSessionEvents` |
+| `GET` / `PUT settings` `{ reviewLevel }` | `getConsoleSettings` / `updateConsoleSettings` |
+| `GET audit-log?limit&cursor&sessionId` | `listConsoleAuditLog` |
+| `GET api-keys?range` | `getConsoleApiKeyUsage` |
+
+Keys are created and revoked with the ordinary organization API-key routes
+(`createOrganizationApiKey`, `deleteOrganizationApiKey`).
+
+The session list reads the organization's 2,000 most recently created managed
+workspaces and sets `truncated: true` when there are more.
+
+## Not yet
+
+GitHub sign-in and passkeys shared between the app and Console hosts, a Console-specific
+onboarding for someone who has no organization yet (they get the app's
+organization setup, then land in Console), and Insights inside Console.
+Organization-level agents shared across managed workspaces, end-user opt-out,
+content masking, hiding managed workspaces in the app, time-boxed support
+access and compliance access are planned. A future compliance mode must cover
+only chats created after it is turned on.

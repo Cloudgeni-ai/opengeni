@@ -10,6 +10,7 @@ export {
 } from "./app/embed/session-app";
 export type { MessageContextInput, MessageContextItem } from "./app/lib/message-context";
 export type { SessionViewState } from "./app/lib/app-host";
+export type { AdminStepUpHandler, AdminStepUpRequest } from "./admin-step-up";
 export {
   SESSION_UI_PRESETS,
   type SessionUiFeatures,

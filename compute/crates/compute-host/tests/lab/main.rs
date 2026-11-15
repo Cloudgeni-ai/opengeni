@@ -45,6 +45,8 @@ mod spoofing;
 mod squeeze;
 #[path = "../support/state.rs"]
 mod state;
+#[path = "../support/vms.rs"]
+mod vms;
 
 use required::skip;
 
@@ -81,6 +83,8 @@ fn id(n: usize) -> Id {
 struct Agent {
     child: Child,
     client: Client,
+    /// The cgroup that holds its VMs.
+    cgroup: PathBuf,
 }
 
 struct Host {
@@ -169,7 +173,11 @@ impl Host {
             assert!(Instant::now() < deadline, "the agent never came up");
             sleep(Duration::from_millis(20)).await;
         }
-        Agent { child, client }
+        Agent {
+            child,
+            client,
+            cgroup: self.cgroup.clone(),
+        }
     }
 
     /// Keeps the agent's log with the results, then deletes the host's
@@ -217,12 +225,8 @@ impl Drop for Agent {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        if std::thread::panicking()
-            && let Ok(vms) = std::fs::read_dir(CGROUP)
-        {
-            for vm in vms.flatten().filter(|vm| vm.path().is_dir()) {
-                let _ = std::fs::write(vm.path().join("cgroup.kill"), "1");
-            }
+        if std::thread::panicking() {
+            vms::end_vms(&self.cgroup);
         }
     }
 }
@@ -473,11 +477,13 @@ enum Kind {
 const NEVER: SleepConfig = SleepConfig {
     pause_after_ms: None,
     save_after_ms: None,
+    keep_memory: false,
     archive_after_ms: None,
     drop_after_ms: None,
     evict_after_ms: None,
     forget_after_ms: None,
     compress: false,
+    earlier_compress: compute_host::protocol::Dropped,
     checkpoint_every_ms: None,
 };
 
@@ -485,6 +491,7 @@ const NEVER: SleepConfig = SleepConfig {
 const SAVE_SOON: SleepConfig = SleepConfig {
     pause_after_ms: Some(300),
     save_after_ms: Some(600),
+    keep_memory: true,
     drop_after_ms: Some(900),
     ..NEVER
 };
@@ -504,11 +511,13 @@ impl Kind {
             Self::SavedInPlace => SleepConfig {
                 pause_after_ms: Some(500),
                 save_after_ms: Some(1_000),
+                keep_memory: true,
                 ..NEVER
             },
             Self::Saved => SleepConfig {
                 pause_after_ms: Some(500),
                 save_after_ms: Some(1_000),
+                keep_memory: true,
                 drop_after_ms: Some(1_500),
                 ..NEVER
             },

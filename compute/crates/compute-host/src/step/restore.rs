@@ -85,7 +85,7 @@ impl<E: Engine, S: Store> Job<E, S> {
         // On any failure below the VM process is gone before its memory's
         // pager and hydration are stopped and joined, so a retry never
         // fills the same file beside them.
-        if let Err(error) = self.launching() {
+        if let Err(error) = self.launching(false) {
             live_memory.close().await;
             return (io_failure(OP, error), After::NoVm);
         }

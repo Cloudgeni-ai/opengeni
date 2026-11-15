@@ -20,7 +20,9 @@ import {
 } from "react";
 import type { SiteSnapshotClient } from "./artifacts/chat-interactive-block";
 import type { ClientOverride } from "../session-context";
-import { ModelPolicyPicker, type ModelPolicyPickerProps } from "./model-policy-picker";
+import { type ModelPolicyPickerProps } from "./model-policy-picker";
+import { ComposerModelPicker, type ModelLevel } from "./model-level-picker";
+
 import { ConversationRenderBoundary } from "./conversation-render-boundary";
 import { LazyPart } from "./lazy-part";
 import {
@@ -95,6 +97,19 @@ import {
 import { SingleSendWording, useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 import { ClientPaymentPageActivity } from "../timeline/payment-page-activity";
 import { ThisComputerCard, type ThisComputerCardProps } from "./this-computer/this-computer-card";
+
+/** What a host may set on the composer's model control. */
+export type SessionModelPickerProps = Pick<
+  ModelPolicyPickerProps,
+  "groupPresentation" | "messages"
+> & {
+  /**
+   * Show these levels (for example Standard and Thorough, each one model and
+   * effort) instead of the full picker. Omit or pass an empty list to keep the
+   * full picker; that is the switch for people who should see every option.
+   */
+  levels?: readonly ModelLevel[] | undefined;
+};
 
 export type SessionConversationLabels = {
   /** Banner action after a refresh failure; the conversation stays mounted. */
@@ -222,8 +237,12 @@ export type SessionConversationProps = ClientOverride<ChatClient> &
      * reports `modelSelection: true` (`createSessionProxyHandler({ modelSelection: true })`).
      */
     modelPicker?: boolean | undefined;
-    /** Model-picker appearance only; visibility, policy and delivery remain owned here. */
-    modelPickerProps?: Pick<ModelPolicyPickerProps, "groupPresentation" | "messages"> | undefined;
+    /**
+     * Model-picker appearance and choices; visibility, policy and delivery
+     * remain owned here. `levels` replaces the full picker with the host's
+     * short list of levels (see `ModelLevel`); omit it for the full picker.
+     */
+    modelPickerProps?: SessionModelPickerProps | undefined;
     /**
      * Show how the agent works behind the scenes: above the composer, the
      * goal pill and the agents and commands segments a host passes in
@@ -922,7 +941,8 @@ function ConversationView({
                 controlsStart={
                   composerProps?.controlsStart ??
                   (showModelPicker && composer.policy && (
-                    <ModelPolicyPicker
+                    <ComposerModelPicker
+                      levels={modelPickerProps?.levels}
                       groupPresentation={modelPickerProps?.groupPresentation}
                       messages={modelPickerProps?.messages}
                       rows={catalog.rows}

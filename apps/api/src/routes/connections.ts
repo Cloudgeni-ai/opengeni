@@ -1,3 +1,7 @@
+import {
+  oauthBrowserBindingForStart,
+  oauthCallbackBrowser,
+} from "../integrations/oauth-browser-binding";
 import { createHash, createHmac } from "node:crypto";
 import {
   authorizationHoldsOrganizationAdministration,
@@ -7,13 +11,17 @@ import {
   WORKSPACE_SETTINGS_REFUSAL,
   workspaceSettingsAuthorized,
 } from "@opengeni/core";
+import { storedConnectionIntegrationKey } from "../integrations/stored-connection-integration-key";
 import { withDesktopAppReturnPath } from "../desktop-app-return";
+import { nangoBackendsFor, projectConnectionsForBackends } from "@opengeni/core";
+import { deleteNangoConnectionFor } from "../integrations/nango-connect";
 import {
   assertClaudeWorkspaceCredential,
   prepareClaudeWorkspaceCredential,
 } from "../claude-workspace-connection";
 import {
   createConnectionIdempotently,
+  setWorkspaceModelKeyListPriceInScope,
   upsertWorkspaceProviderApiKeyConnection,
   rotateWorkspaceProviderApiKeyConnection,
   revokeWorkspaceProviderApiKeyConnections,
@@ -44,6 +52,9 @@ import {
   opperCredentialProblem,
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
   VERCEL_AI_GATEWAY_CONNECTION_ROLE,
+  parseConnectResultPageTextJson,
+  connectedModelPriceBasisFromReportedModel,
+  workspaceModelKeyListPriceKnown,
 } from "@opengeni/config";
 import {
   ATLASSIAN_PROVIDER_DOMAIN,
@@ -127,6 +138,7 @@ import {
   type SlackBotInstallCallbackFailureStage,
 } from "@opengeni/db";
 import type { ApiRouteDeps } from "@opengeni/core";
+import type { ConnectionMetadata as ConnectionMetadataRecord } from "@opengeni/contracts";
 import { KNOWLEDGE_SOURCE_SYNC_RETIRED_MESSAGE } from "@opengeni/contracts/knowledge-source-sync-retirement";
 import { pinnedFetch } from "@opengeni/network";
 import type { Hono } from "hono";
@@ -177,6 +189,7 @@ import { oauthStateTtlMs, requireIntegrationsStateSecret } from "../integrations
 import { withAccountIdentityState } from "../integrations/oauth-account-identity";
 import { parseRequestBody, parseRequestJson, requestValidationError } from "../http/request-body";
 import { disconnectAuditActor } from "../http/disconnect-audit-actor";
+import { prepareGoogleOAuthDisconnect } from "../integrations/google-oauth-revocation";
 import { parsePathParam } from "../http/path-identifier";
 
 type OpenGeniSlackInstallState = {
@@ -206,13 +219,23 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId);
     const reach = connectionReadReach(grant);
-    const connections = await listConnectionsMetadata(db, workspaceId, grant.subjectId);
+    // While a backend is switched, accounts read as the switch projects them.
+    const connections = projectConnectionsForBackends(
+      await listConnectionsMetadata(db, workspaceId, grant.subjectId),
+      await nangoBackendsFor(db, settings),
+    );
     return c.json(
       ListConnectionsResponse.parse({
         // The personal setup permission sees only the caller's own accounts.
         connections: withAccountIdentityState(
           reach === "all"
-            ? connections
+            ? connections.map((connection) => {
+                // A workspace model key says whether its usage gets a cost estimate.
+                const listPriceKnown = workspaceModelKeyListPriceKnown(settings, connection);
+                return listPriceKnown === undefined
+                  ? connection
+                  : { ...connection, listPriceKnown };
+              })
             : connections.filter((connection) => connection.subjectId === grant.subjectId),
         ),
       }),
@@ -234,10 +257,11 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(
       ListConnectionsResponse.parse({
         connections: withAccountIdentityState(
-          (
+          projectConnectionsForBackends(
             await listOwnConnectionAccountsForGrant(db, grant, {
               includeInactive: includeInactive === "true",
-            })
+            }),
+            await nangoBackendsFor(db, settings),
           ).filter((connection) => reach === "all" || connection.subjectId === grant.subjectId),
         ),
       }),
@@ -281,6 +305,8 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = access.grant;
     const beforeCommit = externalContinuationCommitAuthorizer(access);
     const payload = await parseRequestJson(c, CreateConnectionRequest);
+    // The catalogue model a new OpenAI or Azure OpenAI key's model is priced like.
+    let detectedListPrice: { basis: "model"; modelId: string } | undefined;
     if (
       payload.metadata?.directModelProvider !== undefined ||
       String(payload.metadata?.credentialRole ?? "").startsWith("direct_")
@@ -316,7 +342,18 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
                   requireHttpsOutsideLocalTest: true,
                 })) as typeof fetch)
             : undefined);
-        await verifyDirectModelAccess(config.data, payload.credential.apiKey as string, modelFetch);
+        const { reportedModel } = await verifyDirectModelAccess(
+          config.data,
+          payload.credential.apiKey as string,
+          modelFetch,
+        );
+        // OpenAI and Azure OpenAI answer with the model they served (for
+        // Azure, the deployment's base model), which prices the key's usage.
+        // An OpenAI-compatible endpoint's own answer is not trusted for that.
+        if (config.data.provider !== "openai_compatible") {
+          const modelId = connectedModelPriceBasisFromReportedModel(settings, reportedModel);
+          if (modelId) detectedListPrice = { basis: "model", modelId };
+        }
         // An OpenAI-compatible model's reasoning levels, when the request
         // doesn't set them, come from the endpoint's own model listing.
         if (config.data.provider === "openai_compatible" && config.data.reasoning === undefined) {
@@ -380,6 +417,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       // integration credentials still require an explicit broker destination.
       if (!workspaceProviderKind && !directModelKey)
         assertBrokeredApiKeyCredential(payload.kind, payload.credential);
+      let priced: Awaited<ReturnType<typeof setWorkspaceModelKeyListPriceInScope>> = null;
       // Workspace model-provider keys decide what every session runs on: a
       // settings action, unlike a member's own or shared integration credential.
       if (subjectId === null && (workspaceProviderKind || directModelKey))
@@ -448,6 +486,19 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
             expiresAt: payload.expiresAt ? new Date(payload.expiresAt) : null,
             metadata: payload.metadata,
             createdBySubjectId: grant.subjectId,
+            ...(directModelKey && detectedListPrice
+              ? {
+                  onCreated: async (tx: Database, created: { id: string }) => {
+                    priced = await setWorkspaceModelKeyListPriceInScope(tx, {
+                      accountId: grant.accountId,
+                      workspaceId,
+                      connectionId: created.id,
+                      actorSubjectId: grant.subjectId,
+                      price: detectedListPrice!,
+                    });
+                  },
+                }
+              : {}),
             ...(payload.operationId
               ? {
                   operation: {
@@ -473,7 +524,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
             }
             throw error;
           });
-      return c.json(ConnectionResponse.parse({ connection }), 201);
+      return c.json(ConnectionResponse.parse({ connection: priced ?? connection }), 201);
     };
     const commit = (database: Database) =>
       beforeCommit
@@ -483,7 +534,9 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           })
         : persist(database);
     // Only the canonical workspace model-key lane is outside integration policy.
-    // Generic credentials have no validated protocol/curated target in this contract.
+    // Other credentials count as the integration their own data names (an MCP
+    // server's OAuth credential), else as unclassified, which a restricted
+    // policy refuses.
     const modelKey = workspaceProviderApiKeyConnectionKind({
       subjectId: createConnectionSubjectId(payload, grant.subjectId),
       providerDomain: canonicalProviderDomain(payload.providerDomain),
@@ -495,7 +548,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       : withOrganizationIntegrationAcquisition(
           db,
           { accountId: grant.accountId, workspaceId },
-          [null],
+          [storedConnectionIntegrationKey({ kind: payload.kind, metadata: payload.metadata })],
           commit,
         );
   });
@@ -852,7 +905,22 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!connection) {
       throw new HTTPException(404, { message: "connection not found" });
     }
-    return c.json(ConnectionResponse.parse({ connection }));
+    // Read as the lists read it while a backend is switched. Only a native
+    // connection of a Nango-backed service needs its owner's other accounts
+    // (to tell whether a Nango connection has superseded it); a personal one
+    // also counts the owner's personal accounts in other workspaces.
+    const backends = await nangoBackendsFor(db, settings);
+    const siblings = new Map<string, ConnectionMetadataRecord>();
+    if (backends.size > 0 && !connection.providerDomain.startsWith("nango:")) {
+      for (const other of await listConnectionsMetadata(db, workspaceId, grant.subjectId))
+        if (other.subjectId === connection.subjectId) siblings.set(other.id, other);
+      if (connection.subjectId !== null && connection.subjectId === grant.subjectId)
+        for (const other of await listOwnConnectionAccountsForGrant(db, grant))
+          if (other.subjectId === connection.subjectId) siblings.set(other.id, other);
+      siblings.delete(connection.id);
+    }
+    const [projected] = projectConnectionsForBackends([connection, ...siblings.values()], backends);
+    return c.json(ConnectionResponse.parse({ connection: projected ?? connection }));
   });
 
   app.patch("/v1/workspaces/:workspaceId/connections/:connectionId", async (c) => {
@@ -1193,7 +1261,14 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
                   Date.parse(payload.expiresAt) > Date.parse(existing.expiresAt))) ||
               (payload.status === "active" && existing.status !== "active"))
           ) {
-            assertOrganizationIntegrationAllowed(policy, null);
+            // Judged by what the connection is after this update.
+            assertOrganizationIntegrationAllowed(
+              policy,
+              storedConnectionIntegrationKey({
+                kind: payload.kind ?? existing.kind,
+                metadata: payload.metadata ?? existing.metadata,
+              }),
+            );
           }
           if (changesCredentialDestination && existing.subjectId === null) {
             // A shared credential stays bound to the destination it was issued
@@ -1302,6 +1377,12 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     // Each writer records the disconnect in its own transaction.
     const audit = disconnectAuditActor(c, { subjectId: grant.subjectId, grant });
+    // Google OAuth: drop the stored tokens in the revoke write, then end the
+    // grant at Google once that write committed.
+    const googleDisconnect =
+      isPersonalGitHub || isOpenGeniSlackBotConnection(existing) || workspaceProviderKind
+        ? undefined
+        : await prepareGoogleOAuthDisconnect(deps, existing, grant.subjectId);
     const connection = isPersonalGitHub
       ? await disconnectPersonalGitHub(deps, {
           workspaceId,
@@ -1337,11 +1418,17 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
               connectionId,
               grant.subjectId,
               existing.version,
-              { audit },
+              {
+                audit,
+                replacementCredentialEncrypted: googleDisconnect?.replacementCredentialEncrypted,
+              },
             );
     if (!connection) {
       throw new HTTPException(409, { message: "connection changed during disconnect; try again" });
     }
+    // A Nango connection is deleted in Nango too, so its billing stops.
+    await deleteNangoConnectionFor({ db, settings }, existing);
+    await googleDisconnect?.revokeAtGoogle?.();
     return c.json(ConnectionResponse.parse({ connection }));
   });
 
@@ -1366,6 +1453,9 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         workspaceId,
         subjectId: grant.subjectId,
         personalOwnershipAllowed: isPersonalConnectionOwnerPrincipal(access),
+        browserBinding: oauthBrowserBindingForStart(c, settings, access, {
+          externalContinuation: externalActorContinuationForAuthorization(access),
+        }),
         requestUrl: c.req.url,
         payload,
       },
@@ -1393,6 +1483,9 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           workspaceId,
           subjectId: grant.subjectId,
           personalOwnershipAllowed: isPersonalConnectionOwnerPrincipal(access),
+          browserBinding: oauthBrowserBindingForStart(c, settings, access, {
+            externalContinuation: externalActorContinuationForAuthorization(access),
+          }),
           requestUrl: c.req.url,
           payload: withDesktopAppReturnPath(c, parsed),
         }),
@@ -1404,11 +1497,21 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     assertIntegrationsEnabled();
     // An administrator returning from an approval link derived from a
     // Microsoft sign-in that uses this callback, not a connect attempt.
-    if (c.req.query("state") === MICROSOFT_ADMIN_CONSENT_STATE)
-      return microsoftAdminConsentResultPage({
-        adminConsent: c.req.query("admin_consent"),
-        error: c.req.query("error"),
-      });
+    // A plain approval link (as in the setup guide) carries no state; Microsoft
+    // still returns admin_consent or the tenant, which no sign-in has.
+    if (
+      c.req.query("state") === MICROSOFT_ADMIN_CONSENT_STATE ||
+      (!c.req.query("state") &&
+        !c.req.query("code") &&
+        (c.req.query("admin_consent") !== undefined || c.req.query("tenant") !== undefined))
+    )
+      return microsoftAdminConsentResultPage(
+        {
+          adminConsent: c.req.query("admin_consent"),
+          error: c.req.query("error"),
+        },
+        parseConnectResultPageTextJson(settings.connectResultPageTextJson),
+      );
     const input = {
       ...(c.req.query("code") ? { code: c.req.query("code") } : {}),
       ...(c.req.query("state") ? { state: c.req.query("state") } : {}),
@@ -1416,6 +1519,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       ...(c.req.query("error_description")
         ? { errorDescription: c.req.query("error_description") }
         : {}),
+      browser: await oauthCallbackBrowser(c, deps),
       requestUrl: c.req.url,
     };
     const result = isApiIntegrationProviderOAuthState(input.state, deps.settings)
@@ -1435,11 +1539,21 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/integrations/provider-oauth/callback", async (c) => {
     assertIntegrationsEnabled();
     // An administrator returning from the Microsoft approval link, not a connect attempt.
-    if (c.req.query("state") === MICROSOFT_ADMIN_CONSENT_STATE)
-      return microsoftAdminConsentResultPage({
-        adminConsent: c.req.query("admin_consent"),
-        error: c.req.query("error"),
-      });
+    // A plain approval link (as in the setup guide) carries no state; Microsoft
+    // still returns admin_consent or the tenant, which no sign-in has.
+    if (
+      c.req.query("state") === MICROSOFT_ADMIN_CONSENT_STATE ||
+      (!c.req.query("state") &&
+        !c.req.query("code") &&
+        (c.req.query("admin_consent") !== undefined || c.req.query("tenant") !== undefined))
+    )
+      return microsoftAdminConsentResultPage(
+        {
+          adminConsent: c.req.query("admin_consent"),
+          error: c.req.query("error"),
+        },
+        parseConnectResultPageTextJson(settings.connectResultPageTextJson),
+      );
     const result = await completeApiIntegrationProviderOAuth(deps, {
       ...(c.req.query("code") ? { code: c.req.query("code") } : {}),
       ...(c.req.query("state") ? { state: c.req.query("state") } : {}),
@@ -1447,6 +1561,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       ...(c.req.query("error_description")
         ? { errorDescription: c.req.query("error_description") }
         : {}),
+      browser: await oauthCallbackBrowser(c, deps),
       requestUrl: c.req.url,
     });
     if (result.exactReturn)

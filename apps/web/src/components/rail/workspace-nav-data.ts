@@ -32,6 +32,7 @@ export type WorkspaceConfigItem = {
   to: WorkspaceConfigTarget;
   icon: WorkspaceConfigIcon;
   label: string;
+  /** Its tooltip; `{product}` is the name people know the product by (`itemDescription`). */
   description: string;
   /** When true, only include for subjects with workspace:admin. */
   requiresAdmin?: boolean;
@@ -79,7 +80,7 @@ export const PRIMARY_WORKSPACE_ITEMS: WorkspaceConfigItem[] = [
     to: "/workspaces/$workspaceId/artifacts",
     icon: "panels-top-left",
     label: "Artifacts",
-    description: "Sites, images, documents, and files built with Opengeni",
+    description: "Sites, images, documents, and files built with {product}",
   },
 ];
 
@@ -139,6 +140,95 @@ export const WORKSPACE_CONFIG_GROUPS: WorkspaceConfigGroup[] = [
 export const WORKSPACE_BROWSE_ITEMS: WorkspaceConfigItem[] = WORKSPACE_CONFIG_GROUPS.flatMap(
   (group) => group.items,
 ).filter((item) => item.to !== "/workspaces/$workspaceId/settings");
+
+/** A destination's tooltip, naming the product the way the current interface does. */
+export function itemDescription(
+  item: Pick<WorkspaceConfigItem, "description">,
+  productName: string,
+) {
+  return item.description.replaceAll("{product}", productName);
+}
+
+/**
+ * What the simplified interface leaves out of its navigation. It is for people
+ * using the product, not running or building on it, so its rail and settings list
+ * only what such a team needs: chats and what they produce, the workspace and
+ * its members, the organization and its people, billing and sign-in security.
+ * Models are not listed at all, because every chat there runs one model on
+ * credits (see `@opengeni/react/app/lib/simplified-interface-model`).
+ *
+ * This only shortens the lists: each page still opens by its address, by
+ * settings search and by links elsewhere in the app, and no permission
+ * depends on it. Turning "Simplified interface" off in the account menu lists
+ * everything.
+ */
+const SIMPLIFIED_UNLISTED_DESTINATIONS: ReadonlySet<WorkspaceConfigTarget> = new Set([
+  "/workspaces/$workspaceId/meetings",
+  "/workspaces/$workspaceId/insights",
+  "/workspaces/$workspaceId/secrets",
+  "/workspaces/$workspaceId/rigs",
+  "/workspaces/$workspaceId/machines",
+]);
+
+/** Destinations the simplified interface keeps but folds under "Advanced" in the rail. */
+const SIMPLIFIED_ADVANCED_DESTINATIONS: ReadonlySet<WorkspaceConfigTarget> = new Set([
+  "/workspaces/$workspaceId/state",
+  "/workspaces/$workspaceId/automations",
+]);
+
+/** Workspace settings sections (and "My things") the simplified interface leaves out of the settings rail. */
+const SIMPLIFIED_UNLISTED_SETTINGS_SECTIONS: ReadonlySet<string> = new Set([
+  "available",
+  "learning",
+  "usage",
+  "api-keys",
+  "developer",
+  "mine",
+]);
+
+/** Organization settings pages the simplified interface leaves out of the settings rail. */
+const SIMPLIFIED_UNLISTED_ORGANIZATION_SECTIONS: ReadonlySet<string> = new Set([
+  "workspaces",
+  "identity",
+  "shared",
+  "models",
+  "integrations",
+  "agents",
+  "insights",
+  "developer",
+  "security",
+]);
+
+/** Whether the interface lists a destination in its navigation. */
+export function interfaceListsDestination(simplified: boolean, to: string): boolean {
+  return !simplified || !SIMPLIFIED_UNLISTED_DESTINATIONS.has(to as WorkspaceConfigTarget);
+}
+
+/** Whether the interface lists a workspace settings section in the settings rail. */
+export function interfaceListsSettingsSection(simplified: boolean, section: string): boolean {
+  return !simplified || !SIMPLIFIED_UNLISTED_SETTINGS_SECTIONS.has(section);
+}
+
+/** Whether the interface lists an organization settings page in the settings rail. */
+export function interfaceListsOrganizationSection(simplified: boolean, section: string): boolean {
+  return !simplified || !SIMPLIFIED_UNLISTED_ORGANIZATION_SECTIONS.has(section);
+}
+
+/** The rail destinations the interface lists at the top level, in catalog order. */
+export function primaryWorkspaceItems(simplified: boolean): WorkspaceConfigItem[] {
+  return PRIMARY_WORKSPACE_ITEMS.filter(
+    (item) =>
+      interfaceListsDestination(simplified, item.to) &&
+      !(simplified && SIMPLIFIED_ADVANCED_DESTINATIONS.has(item.to)),
+  );
+}
+
+/** The rail destinations the interface folds under "Advanced": none in the full console. */
+export function advancedWorkspaceItems(simplified: boolean): WorkspaceConfigItem[] {
+  return simplified
+    ? PRIMARY_WORKSPACE_ITEMS.filter((item) => SIMPLIFIED_ADVANCED_DESTINATIONS.has(item.to))
+    : [];
+}
 
 export function filterWorkspaceConfigGroups(
   groups: WorkspaceConfigGroup[],

@@ -51,7 +51,9 @@ export interface ComputeAgentPlane {
   opStreamTransport(): OpStreamTransport | null;
   /** The enrollment's current live connection, or null when it has none (its
    * host has not opened the agent's session at the gateway, or it was revoked).
-   * A sleeping sandbox's session stays open, so it resolves. */
+   * A sleeping sandbox's session stays open, so it resolves, unless its VM
+   * ended with no memory kept: that agent is gone, and the next one opens a
+   * new session when it boots. */
   resolveConnection(input: {
     workspaceId: string;
     enrollmentId: string;

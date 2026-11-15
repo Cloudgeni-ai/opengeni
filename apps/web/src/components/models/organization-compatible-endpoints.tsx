@@ -8,6 +8,7 @@ import {
 } from "@opengeni/contracts";
 import type { ChatClient } from "@opengeni/sdk";
 import type {
+  ConnectedModelListPrice,
   OrganizationCompatibleEndpoint as Endpoint,
   OrganizationCompatibleEndpointModel as CustomModel,
 } from "@opengeni/sdk";
@@ -35,6 +36,7 @@ import { ModelsFormPage, ProviderTile } from "@opengeni/react/app/components/mod
 import { labelEffort } from "@opengeni/react/app/lib/session-tools";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 import { providerRefusalText } from "@/components/organization-model-provider-connection";
+import { listPriceSummary, ModelListPriceDialog } from "@/components/models/model-list-price";
 import { Button } from "@opengeni/react/ui/button";
 import { Field, FieldStack, TextInput, useField } from "@opengeni/react/ui/field";
 import { FormDialog } from "@opengeni/react/ui/form-dialog";
@@ -357,6 +359,36 @@ export function useCompatibleEndpointConnection({
     }
   }
 
+  /** Saves what a model's usage costs (null: unknown). */
+  async function savePrice(
+    model: CustomModel,
+    listPrice: ConnectedModelListPrice | null,
+  ): Promise<boolean> {
+    if (!endpoint) return false;
+    try {
+      const saved = await once(() =>
+        client.setOrganizationCompatibleEndpointModelListPrice(
+          organizationId,
+          endpoint.id,
+          model.id,
+          { expectedVersion: model.version, listPrice },
+        ),
+      );
+      writeEndpoint(client, organizationId, {
+        ...endpoint,
+        models: endpoint.models.map((candidate) => (candidate.id === saved.id ? saved : candidate)),
+      });
+      toast.success(
+        listPrice
+          ? `Price saved for ${model.upstreamModelId}`
+          : `Price removed from ${model.upstreamModelId}`,
+      );
+      return true;
+    } catch (error) {
+      throw new Error(providerRefusalText(error), { cause: error });
+    }
+  }
+
   const modelById = (id: string) => models.find((candidate) => candidate.id === id);
 
   return {
@@ -397,15 +429,39 @@ export function useCompatibleEndpointConnection({
     disconnect,
     addCustomModel,
     removeCustomModel,
-    customModelDetail: (row) => reasoningSummary(modelById(row.id)?.reasoning ?? null),
+    customModelDetail: (row) => {
+      const model = modelById(row.id);
+      const price = model ? listPriceSummary(model) : null;
+      return (
+        <>
+          <span className="block">{reasoningSummary(model?.reasoning ?? null)}</span>
+          {price ? <span className="block">{price}</span> : null}
+        </>
+      );
+    },
     customModelAction: (row) => {
       const model = modelById(row.id);
       return model ? (
-        <ReasoningLevelsDialog
-          key={`${model.id}:${model.version}`}
-          model={model}
-          onSave={(reasoning) => saveReasoning(model, reasoning)}
-        />
+        <>
+          <ReasoningLevelsDialog
+            key={`${model.id}:${model.version}`}
+            model={model}
+            onSave={(reasoning) => saveReasoning(model, reasoning)}
+          />
+          <ModelListPriceDialog
+            key={`price:${model.id}:${model.version}`}
+            model={model}
+            providerName="Your endpoint"
+            basisHint="Choose the model it serves, if it’s one of these."
+            scope={client}
+            cacheKey={["model-settings", "organization-compatible-endpoints", organizationId]}
+            loadPriceBasisModelIds={async () =>
+              (await client.listOrganizationCompatibleEndpoints(organizationId))
+                .priceBasisModelIds ?? []
+            }
+            onSave={(listPrice) => savePrice(model, listPrice)}
+          />
+        </>
       ) : null;
     },
   };

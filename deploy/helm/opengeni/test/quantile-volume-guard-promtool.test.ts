@@ -226,21 +226,155 @@ test("streaming p99 alerts stay silent on low volume and fire on sustained slow 
   );
 }, 180_000);
 
+type ProviderSignal = {
+  p90: number;
+  baselineP90: number;
+  requests: number;
+  baselineRequests: number;
+};
+
+/**
+ * The provider regression alert reads the chart's recording rules. Feed the
+ * per-signal base records directly (their expressions are covered structurally)
+ * and evaluate the real regression-signal records and alert over them.
+ */
+function providerSignals(
+  provider: string,
+  signals: { ttft: ProviderSignal; headers?: ProviderSignal },
+): Input[] {
+  const series = (family: "ttft" | "headers", signal: ProviderSignal): Input[] =>
+    (
+      [
+        [`opengeni:model_provider_${family}_seconds:p90_30m`, signal.p90],
+        [`opengeni:model_provider_${family}_seconds:p90_24h_baseline`, signal.baselineP90],
+        [`opengeni:model_provider_${family}_requests:30m`, signal.requests],
+        [`opengeni:model_provider_${family}_requests:24h_baseline`, signal.baselineRequests],
+      ] as const
+    ).map(([metric, value]) => ({
+      series: `${metric}{${scopeLabels},provider="${provider}"}`,
+      values: `${value}+0x${minutes}`,
+    }));
+  return [
+    ...series("ttft", signals.ttft),
+    ...(signals.headers ? series("headers", signals.headers) : []),
+  ];
+}
+
+function providerRegressionRules() {
+  const rules = renderRules();
+  const alert = rules.find((item: any) => item.alert === ttftRegression);
+  const signalRecords = rules.filter((item: any) =>
+    String(item.record ?? "").startsWith("opengeni:model_provider_regression_signal_"),
+  );
+  expect(signalRecords).toHaveLength(4);
+  return { alert, rules: [...signalRecords, alert] };
+}
+
+function providerAlert(
+  alert: any,
+  firing: { provider: string; signal: "headers" | "first_content"; value: number }[],
+) {
+  return {
+    eval_time: "25m",
+    alertname: ttftRegression,
+    exp_alerts: firing.map(({ provider, signal, value }) => ({
+      exp_labels: { ...scope, ...alert.labels, provider, signal },
+      exp_annotations: expandAlertAnnotations(alert.annotations, {
+        value,
+        labels: { provider, signal },
+      }),
+    })),
+  };
+}
+
+const flatHeaders: ProviderSignal = {
+  p90: 1.5,
+  baselineP90: 1.2,
+  requests: 100,
+  baselineRequests: 1000,
+};
+// First content at 4x its own baseline with plenty of requests.
+const regressedContent: ProviderSignal = {
+  p90: 20,
+  baselineP90: 5,
+  requests: 100,
+  baselineRequests: 1000,
+};
+
+test("providers that report response start are judged on it, others on first content", async () => {
+  await tools();
+  const { alert, rules } = providerRegressionRules();
+  runPromtool(rules, [
+    {
+      name: "a request-mix rise in first content with flat response start stays silent",
+      interval: "1m",
+      input_series: providerSignals("socket-provider", {
+        ttft: regressedContent,
+        headers: flatHeaders,
+      }),
+      alert_rule_test: [providerAlert(alert, [])],
+      promql_expr_test: [
+        {
+          expr: `opengeni:model_provider_regression_signal_seconds:p90_30m{${scopeLabels}}`,
+          eval_time: "25m",
+          exp_samples: [
+            {
+              labels: `opengeni:model_provider_regression_signal_seconds:p90_30m{${scopeLabels},provider="socket-provider",signal="headers"}`,
+              value: 1.5,
+            },
+          ],
+        },
+      ],
+    },
+    {
+      name: "a response-start regression fires on the headers signal",
+      interval: "1m",
+      input_series: providerSignals("socket-provider", {
+        ttft: { ...regressedContent, p90: 6 },
+        headers: { ...flatHeaders, p90: 8 },
+      }),
+      alert_rule_test: [
+        providerAlert(alert, [{ provider: "socket-provider", signal: "headers", value: 8 }]),
+      ],
+    },
+    {
+      name: "a provider without response start still fires on a first-content regression",
+      interval: "1m",
+      input_series: [
+        ...providerSignals("content-provider", { ttft: regressedContent }),
+        ...providerSignals("socket-provider", { ttft: regressedContent, headers: flatHeaders }),
+      ],
+      alert_rule_test: [
+        providerAlert(alert, [
+          { provider: "content-provider", signal: "first_content", value: 20 },
+        ]),
+      ],
+    },
+    {
+      name: "a provider whose response start has no baseline yet waits for one on that signal",
+      interval: "1m",
+      // A provider that just started reporting it: headers in the window, an
+      // empty headers baseline (no baseline quantile at all).
+      input_series: providerSignals("socket-provider", {
+        ttft: regressedContent,
+        headers: { p90: 8, baselineP90: 0, requests: 100, baselineRequests: 0 },
+      }).filter(
+        (input) =>
+          !input.series.startsWith("opengeni:model_provider_headers_seconds:p90_24h_baseline"),
+      ),
+      // With no headers baseline the provider is still judged on first content.
+      alert_rule_test: [
+        providerAlert(alert, [{ provider: "socket-provider", signal: "first_content", value: 20 }]),
+      ],
+    },
+  ]);
+}, 180_000);
+
 test("one slow pre-dispatch request does not hide a provider TTFT regression", async () => {
   await tools();
-  const rule = renderRules().find((item: any) => item.alert === ttftRegression);
+  const { alert, rules } = providerRegressionRules();
   const provider = 'provider="fixture-provider"';
-  // The alert reads the chart's recording rules; feed their outputs directly:
-  // a provider at 4x its own baseline with plenty of requests.
-  const regressed: Input[] = [
-    [`opengeni:model_provider_ttft_seconds:p90_30m`, 20],
-    [`opengeni:model_provider_ttft_seconds:p90_24h_baseline`, 5],
-    [`opengeni:model_provider_ttft_requests:30m`, 100],
-    [`opengeni:model_provider_ttft_requests:24h_baseline`, 1000],
-  ].map(([metric, value]) => ({
-    series: `${metric}{${scopeLabels},${provider}}`,
-    values: `${value}+0x${minutes}`,
-  }));
+  const regressed = providerSignals("fixture-provider", { ttft: regressedContent });
   const preDispatch = (observations: Observations[]) =>
     histogram(
       "opengeni_model_request_pre_dispatch_seconds",
@@ -248,43 +382,26 @@ test("one slow pre-dispatch request does not hide a provider TTFT regression", a
       observations,
       `,${provider}`,
     );
-  const alert = (firing: boolean) => ({
-    eval_time: "25m",
-    alertname: ttftRegression,
-    exp_alerts: firing
-      ? [
-          {
-            exp_labels: { ...scope, ...rule.labels, provider: "fixture-provider" },
-            exp_annotations: expandAlertAnnotations(rule.annotations, {
-              value: 20,
-              labels: { provider: "fixture-provider" },
-            }),
-          },
-        ]
-      : [],
-  });
-  runPromtool(
-    [rule],
-    [
-      {
-        name: "a single slow pre-dispatch request among a few does not suppress the alert",
-        interval: "1m",
-        input_series: [...regressed, ...preDispatch([steady(0.1, 0.5), once(8, 15)])],
-        alert_rule_test: [alert(true)],
-        promql_expr_test: [
-          {
-            expr: `histogram_quantile(0.95, sum by (le) (rate(opengeni_model_request_pre_dispatch_seconds_bucket{${scopeLabels}}[15m]))) > bool 2`,
-            eval_time: "25m",
-            exp_samples: [{ labels: "{}", value: 1 }],
-          },
-        ],
-      },
-      {
-        name: "sustained slow pre-dispatch at volume still attributes the slowness to Opengeni",
-        interval: "1m",
-        input_series: [...regressed, ...preDispatch([steady(0.1, 2), steady(8, 0.5)])],
-        alert_rule_test: [alert(false)],
-      },
-    ],
-  );
+  const firing = [{ provider: "fixture-provider", signal: "first_content" as const, value: 20 }];
+  runPromtool(rules, [
+    {
+      name: "a single slow pre-dispatch request among a few does not suppress the alert",
+      interval: "1m",
+      input_series: [...regressed, ...preDispatch([steady(0.1, 0.5), once(8, 15)])],
+      alert_rule_test: [providerAlert(alert, firing)],
+      promql_expr_test: [
+        {
+          expr: `histogram_quantile(0.95, sum by (le) (rate(opengeni_model_request_pre_dispatch_seconds_bucket{${scopeLabels}}[15m]))) > bool 2`,
+          eval_time: "25m",
+          exp_samples: [{ labels: "{}", value: 1 }],
+        },
+      ],
+    },
+    {
+      name: "sustained slow pre-dispatch at volume still attributes the slowness to Opengeni",
+      interval: "1m",
+      input_series: [...regressed, ...preDispatch([steady(0.1, 2), steady(8, 0.5)])],
+      alert_rule_test: [providerAlert(alert, [])],
+    },
+  ]);
 }, 180_000);

@@ -64,20 +64,45 @@ export async function fileAccessFor(
     file: Pick<FileAsset, "scope" | "ownerSubjectId">;
   },
 ): Promise<FileAccess> {
-  const visibility = fileVisibility(input.file);
+  return await audienceAccessFor(db, {
+    workspace: input.workspace,
+    visibility: fileVisibility(input.file),
+    ownerSubjectId: input.file.ownerSubjectId ?? null,
+    noun: "file",
+  });
+}
+
+/**
+ * The same sentence for anything with a file's two audiences, such as a Site.
+ * Someone else's Only me Site reads as missing, so only a file's link says
+ * it is private.
+ */
+export async function audienceAccessFor(
+  db: Database,
+  input: {
+    workspace: Pick<Workspace, "name" | "kind">;
+    visibility: WorkspaceArtifactVisibility;
+    ownerSubjectId: string | null;
+    noun: "file" | "Site";
+  },
+): Promise<FileAccess> {
+  const { visibility, noun } = input;
   if (visibility === "workspace")
     return {
       visibility,
       whoCanOpen:
         input.workspace.kind === "personal"
-          ? `Everyone in the personal workspace “${input.workspace.name.slice(0, 200)}” can open this file; only its owner is in it.`
-          : `Everyone in the workspace “${input.workspace.name.slice(0, 200)}” can open this file.`,
+          ? `Everyone in the personal workspace “${input.workspace.name.slice(0, 200)}” can open this ${noun}; only its owner is in it.`
+          : `Everyone in the workspace “${input.workspace.name.slice(0, 200)}” can open this ${noun}.`,
     };
-  const name = await personName(db, input.file.ownerSubjectId ?? null);
-  const only = name ? `Only ${name} can open this file` : "Only its owner can open this file";
+  const name = await personName(db, input.ownerSubjectId);
+  const only = name ? `Only ${name} can open this ${noun}` : `Only its owner can open this ${noun}`;
   return {
     visibility,
-    whoCanOpen: `${only}. Anyone else who opens its link is told it is private.`,
+    whoCanOpen:
+      noun === "file"
+        ? `${only}. Anyone else who opens its link is told it is private.`
+        : `${only}.`,
   };
 }
 

@@ -39,6 +39,7 @@ export default defineConfig({
     "src/this-computer.ts",
     "src/usage.ts",
     "src/model-policy.ts",
+    "src/model-levels.ts",
     "src/queue-presentation-model.ts",
     "src/composer-messages.ts",
     "src/messages.ts",

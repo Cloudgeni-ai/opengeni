@@ -1769,7 +1769,9 @@ export function OpenGeniNativeAttachmentStrip({
               {attachment.status === "preparing"
                 ? labels.preparingAttachment
                 : attachment.status === "uploading"
-                  ? labels.uploading
+                  ? attachment.progress === undefined
+                    ? labels.uploading
+                    : `${labels.uploading} ${Math.round(attachment.progress * 100)}%`
                   : attachment.status === "failed"
                     ? labels.uploadFailed
                     : formatBytes(attachment.sizeBytes)}

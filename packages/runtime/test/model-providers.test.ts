@@ -42,6 +42,7 @@ import {
   type XaiSubscriptionRequestContext,
 } from "@opengeni/xai-subscription";
 import { testSettings } from "@opengeni/testing/settings";
+import { ARTIFACT_ORIGIN_KEY, projectHistoryForProvider } from "../src/provider-history-adapter";
 import OpenAI from "openai";
 import {
   buildModelInstance,
@@ -792,6 +793,96 @@ describe("pinned Responses large-output boundary", () => {
       ]);
       expect(source.status).toBe(status);
       expect(persisted.status).toBe(status);
+    }
+  });
+
+  test("native apply_patch history replays with its required status after a switch to Codex", async () => {
+    const { getInputItems } = await pinnedResponsesModule();
+    const operation = { type: "update_file", path: "src/a.ts", diff: "@@\n-a\n+b\n" };
+    // Rows persisted before the fix, exactly as stored in production: the
+    // canonical history had already dropped `status`.
+    const legacyRows = [
+      {
+        providerData: {},
+        id: "apc_legacy",
+        type: "apply_patch_call",
+        callId: "call_legacy",
+        operation,
+      },
+      { type: "apply_patch_call_output", callId: "call_legacy" },
+    ];
+    // Rows produced by a turn on another billing route after the fix.
+    const liveRows = [
+      { type: "apply_patch_call", callId: "call_live", status: "completed", operation },
+      {
+        type: "apply_patch_call_output",
+        callId: "call_live",
+        status: "failed",
+        output: "patch did not apply",
+      },
+    ].map((item) => JSON.parse(JSON.stringify(canonicalizePersistedHistoryItem(item))));
+
+    const wire = normalizedCodexRequestBody(
+      { input: getInputItems([...legacyRows, ...liveRows] as never) },
+      (s) => s,
+    );
+    expect(wire.input).toEqual([
+      { type: "apply_patch_call", call_id: "call_legacy", status: "in_progress", operation },
+      { type: "apply_patch_call_output", call_id: "call_legacy", status: "completed" },
+      { type: "apply_patch_call", call_id: "call_live", status: "completed", operation },
+      {
+        type: "apply_patch_call_output",
+        call_id: "call_live",
+        status: "failed",
+        output: "patch did not apply",
+      },
+    ]);
+  });
+
+  test("a credits-to-Codex switch replays required status and never prior reasoning as text", async () => {
+    // The production shape: GPT-6 Astra on Opengeni credits reasoned (summary
+    // plus ciphertext bound to the credits route) and used native apply_patch;
+    // the next turn ran on a Codex subscription.
+    const { getInputItems } = await pinnedResponsesModule();
+    const reasoningSummary = "Plan: patch the Ask Pronta panel before merging.";
+    const operation = { type: "update_file", path: "src/panel.tsx", diff: "@@\n-a\n+b\n" };
+    const stored = [
+      { type: "message", role: "user", content: "Fix the panel" },
+      {
+        type: "reasoning",
+        id: "rs_credits",
+        content: [{ type: "input_text", text: reasoningSummary }],
+        providerData: {
+          id: "rs_credits",
+          type: "reasoning",
+          encrypted_content: "credits-ciphertext",
+          [ARTIFACT_ORIGIN_KEY]: "credits-route",
+        },
+      },
+      { type: "apply_patch_call", id: "apc_1", callId: "call_patch", operation },
+      { type: "apply_patch_call_output", callId: "call_patch" },
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "Patched." }] },
+      { type: "message", role: "user", content: "Is this where the chat will appear?" },
+    ].map((item) => JSON.parse(JSON.stringify(canonicalizePersistedHistoryItem(item))));
+
+    const codexInput = getInputItems(
+      projectHistoryForProvider(stored, "responses", { artifactScope: "codex-route" }) as never,
+    );
+    const wire = normalizedCodexRequestBody({ input: codexInput }, (s) => s);
+    const input = wire.input as Array<Record<string, unknown>>;
+    expect(input.filter((item) => String(item.type).startsWith("apply_patch"))).toEqual([
+      { type: "apply_patch_call", call_id: "call_patch", status: "in_progress", operation },
+      { type: "apply_patch_call_output", call_id: "call_patch", status: "completed" },
+    ]);
+    expect(input.some((item) => item.type === "reasoning")).toBe(false);
+    for (const api of ["responses", "chat", "anthropic-messages"] as const) {
+      const sent = JSON.stringify(
+        api === "responses" ? wire : projectHistoryForProvider(stored, api),
+      );
+      expect(sent).not.toContain(reasoningSummary);
+      expect(sent).not.toContain("credits-ciphertext");
+      expect(sent).not.toContain("Historical reasoning");
+      expect(sent).toContain("Patched.");
     }
   });
 
@@ -1892,6 +1983,79 @@ describe("buildModelInstance — chat vs responses Model selection per provider 
     expect(capturedHeaders.get("x-opengeni-request-id")).toBeNull();
     expect(capturedHeaders.get("idempotency-key")).toBe("request-1");
     expect(opaqueObservations).toEqual([{ requestId: "request-1", fingerprints: [] }]);
+  });
+
+  test("a `none` reasoning summary leaves only the summary field off the Codex wire", async () => {
+    const provider: ResolvedModelProvider = {
+      id: CODEX_PROVIDER_ID,
+      label: "Subscription",
+      kind: "codex-subscription",
+      api: "responses",
+      builtin: false,
+    };
+    const bodies = new Map<string, Record<string, any>>();
+    for (const reasoningSummary of [undefined, "detailed", "auto", "none"] as const) {
+      const codexClient = new ReplayableJsonOpenAI(
+        {
+          apiKey: "placeholder",
+          baseURL: CODEX_PROVIDER_BASE_URL,
+          maxRetries: 0,
+          fetch: codexSubscriptionFetch(async (_input, init) => {
+            bodies.set(
+              String(reasoningSummary),
+              JSON.parse(await requestBodyText(init?.body)) as Record<string, any>,
+            );
+            const message = responseMessage("msg_summary", "Done");
+            return new Response(
+              [
+                { type: "response.output_item.done", output_index: 0, item: message },
+                {
+                  type: "response.completed",
+                  response: { id: "r1", status: "completed", output: [message], usage: null },
+                },
+              ]
+                .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+                .join(""),
+              { status: 200, headers: { "content-type": "text/event-stream" } },
+            );
+          }),
+        },
+        { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
+      );
+      const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+        model: buildModelInstance(provider, codexClient, "gpt-6.1-sol"),
+        reasoningEffort: "medium",
+        serviceTier: "ultrafast",
+        encryptedReasoning: true,
+        ...(reasoningSummary ? { reasoningSummary } : {}),
+      });
+      await codexRequestStorage.run(codexTestContext(), async () => {
+        const result = await new Runner({ tracingDisabled: true }).run(agent, "hello", {
+          maxTurns: 1,
+          stream: true,
+        });
+        for await (const _event of result) {
+          // consume
+        }
+        await result.completed;
+      });
+    }
+    expect([...bodies.keys()]).toEqual(["undefined", "detailed", "auto", "none"]);
+    const detailed = bodies.get("detailed")!;
+    // Omitting the option is the earlier wire, byte for byte.
+    expect(JSON.stringify(bodies.get("undefined"))).toBe(JSON.stringify(detailed));
+    expect(detailed.reasoning).toEqual({ effort: "medium", summary: "detailed" });
+    expect(detailed.service_tier).toBe("ultrafast");
+    expect(bodies.get("auto")!.reasoning).toEqual({ effort: "medium", summary: "auto" });
+    const none = bodies.get("none")!;
+    expect(none.reasoning).toStrictEqual({ effort: "medium" });
+    expect("summary" in none.reasoning).toBe(false);
+    // Nothing else in the request changes: instructions, tools, input,
+    // include, prompt-cache fields and service tier are identical.
+    const { reasoning: _detailedReasoning, ...detailedRest } = detailed;
+    const { reasoning: _noneReasoning, ...noneRest } = none;
+    expect(JSON.stringify(noneRest)).toBe(JSON.stringify(detailedRest));
+    expect(none.include).toContain("reasoning.encrypted_content");
   });
 
   test("normalizes a SuperGrok request at the owned object stage with native hosted search", async () => {

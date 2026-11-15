@@ -30,6 +30,9 @@ import {
   isAutomationRunBatch,
   isPreparingWork,
   timelineTurnsWithOutput,
+  timelineTurnsWithUnloadedSteps,
+  activityHasUnloadedSteps,
+  turnGroupHasUnloadedSteps,
   noticeDisplayText,
   noticeIsResolvedApproval,
   noticeTone,
@@ -250,6 +253,7 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
     [t, items, pauses],
   );
   const turnsWithOutput = useMemo(() => timelineTurnsWithOutput(items), [items]);
+  const unloadedStepTurns = useMemo(() => timelineTurnsWithUnloadedSteps(items), [items]);
   const sources = useMemo(() => annotationSources(items), [items]);
   useNativeTextAnnotation(sources, props.onAnnotate);
   const foldMemory = useRef(new Map<string, "open" | "closed">()).current;
@@ -653,6 +657,7 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
   );
   const context: GroupContext = {
     turnsWithOutput,
+    unloadedStepTurns,
     // Without turn detail a turn row is only its status ("Working · 8s").
     facets: turnDetail ? props.facets : STATUS_ONLY_FACETS,
     agentSignals: turnDetail,
@@ -873,6 +878,8 @@ const STATUS_ONLY_FACETS: TurnSummaryFacetConfiguration = { replace: [] };
 
 type GroupContext = {
   turnsWithOutput: ReadonlySet<string>;
+  /** Turns whose steps are not all loaded, for `TurnSummaryContext.unloadedSteps`. */
+  unloadedStepTurns: ReadonlySet<string>;
   facets?: TurnSummaryFacetConfiguration | undefined;
   agentSignals: boolean;
   renderLiveMark?: ((state: TurnSummaryLiveMarkState) => ReactNode) | undefined;
@@ -1036,6 +1043,7 @@ function TimelineGroupView({
           }
           foldKey={group.id}
           facets={context.facets}
+          unloadedSteps={activityHasUnloadedSteps(group.items, context.unloadedStepTurns)}
         >
           <TurnRailFrame>
             <ActivityRail items={group.items} startupActive={false} />
@@ -1056,6 +1064,7 @@ function TimelineGroupView({
           bare={insideTurn}
           foldKey={group.id}
           facets={context.facets}
+          unloadedSteps={turnGroupHasUnloadedSteps(group, context.unloadedStepTurns)}
           contextCompactionCount={group.contextCompactionCount}
         >
           {insideTurn ? (
@@ -1241,8 +1250,9 @@ function NoticeRow({ item }: { item: Extract<TimelineItem, { kind: "notice" }> }
   const c = theme.colors;
   const [open, setOpen] = useState(false);
   // An agent's own wait is ordinary progress, not a warning: a quiet line that
-  // discloses the reason, as on web.
-  if (item.recordedOutcome) {
+  // discloses the reason, as on web. So is an attempt a Retry reopened: the
+  // turn's outcome carries the failure that still matters.
+  if (item.recordedOutcome || item.retriedAttempt) {
     return (
       <Pressable
         accessibilityRole="button"
@@ -1254,8 +1264,15 @@ function NoticeRow({ item }: { item: Extract<TimelineItem, { kind: "notice" }> }
           <View style={{ transform: [{ rotate: open ? "90deg" : "0deg" }] }}>
             <Icon name="chevron-right" size={14} color={c["fg-muted"]} />
           </View>
+          {item.retriedAttempt ? (
+            <View
+              style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: c["status-failed"] }}
+            />
+          ) : null}
           <Text style={{ ...fontStyle(theme), fontSize: theme.size.sm, color: c["fg-muted"] }}>
-            {recordedWaitSummaryText(t, item).replace(" at ", ", ")}
+            {item.retriedAttempt
+              ? t("messageTimeline.attemptFailedRetried")
+              : recordedWaitSummaryText(t, item).replace(" at ", ", ")}
           </Text>
         </View>
         {open ? (
@@ -1269,7 +1286,11 @@ function NoticeRow({ item }: { item: Extract<TimelineItem, { kind: "notice" }> }
               color: c["fg-muted"],
             }}
           >
-            {item.text}
+            {item.retriedAttempt && typeof item.details?.value === "string"
+              ? `${noticeDisplayText(t, item)}\n\n${item.details.value}`
+              : item.retriedAttempt
+                ? noticeDisplayText(t, item)
+                : item.text}
           </Text>
         ) : null}
       </Pressable>

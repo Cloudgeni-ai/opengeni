@@ -18,6 +18,7 @@ import {
   ClaudeAccountUsageReadout,
   type ClaudePlaces,
 } from "./claude-subscription-models";
+import { claudeUsageCreditsChip } from "./claude-usage";
 import type {
   CodexAccount,
   ConnectionMetadata,
@@ -1140,6 +1141,7 @@ function sharedAccountRows(
           provider="claude_subscription"
           title={subscriptionAccountName(account)}
           email={account.email}
+          addon={claudeUsageCreditsChip(account.usage?.extraUsage)}
           meta={[labels.organization, usedIn(where), claudePlan(account)]}
           cells={{ usage: claudeUsageCell(account) }}
         />,

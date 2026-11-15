@@ -18,7 +18,7 @@ use core::fmt;
 use super::{Action, Input, Size};
 use super::{CreateRoom, Host};
 use crate::ids::{CacheId, SandboxId};
-use crate::level::{Durability, Level, Step};
+use crate::level::{Level, Step};
 use crate::policy::SleepPolicy;
 use crate::sandbox::Sandbox;
 use crate::time::At;
@@ -225,11 +225,10 @@ pub(super) struct Cache {
 }
 
 impl Sandbox {
-    /// Whether its VM holds state no copy has yet, or it is waking into
+    /// Whether its VM holds memory no copy has yet, or it is waking into
     /// one.
     pub(super) fn unsaved(&self) -> bool {
-        self.reserves()
-            || (self.state.level.has_process() && self.state.durability == Durability::Volatile)
+        self.reserves() || (self.state.level.has_process() && !self.state.memory_saved)
     }
 
     /// Whether it books disk for its next save: it is [`Self::unsaved`],
@@ -237,13 +236,17 @@ impl Sandbox {
     /// [`crate::SleepPolicy::saves`]), a save of it is asked for or one
     /// runs. One the host never saves so books its save from the request
     /// on, which the host refuses unless it fits ([`Host::save_room`]), so
-    /// its VM is never paused for a save the disk cannot take.
+    /// its VM is never paused for a save the disk cannot take. One whose
+    /// process ends unsaved ([`Self::ends_unsaved`]) has no save to book;
+    /// one whose rules would end it so, but whose guest left writes in its
+    /// memory ([`crate::Input::Unsynced`]), books the save it gets instead.
     pub(super) fn books_save(&self) -> bool {
-        let asked = self.requested.max(self.floor) >= Level::Saved;
+        let asked = self.requested.max(self.floor) >= Level::Saved && !self.ends_unsaved();
         let saving = self
             .in_flight
             .is_some_and(|flight| flight.step == Step::Save);
-        self.unsaved() && (self.policy().saves() || asked || saving)
+        let unsynced = self.unsynced && self.policy().ends_unsaved();
+        self.unsaved() && (self.policy().saves() || asked || saving || unsynced)
     }
 
     /// What its next save may need at most.
@@ -492,23 +495,41 @@ impl Host {
         })
     }
 
+    /// Takes in [`Input::Unsynced`]: `sandbox`'s paused VM may hold writes
+    /// in its memory alone, so it books the save it gets before its VM ends
+    /// (see [`Sandbox::books_save`]).
+    pub(super) fn unsynced(&mut self, sandbox: SandboxId) {
+        if let Some(slot) = self.sandboxes.get_mut(&sandbox)
+            && matches!(slot.state.level, Level::Paused | Level::Compressed)
+        {
+            slot.unsynced = true;
+            self.mark(sandbox);
+        }
+    }
+
     /// Whether a save asked of `sandbox`, an [`crate::Input::Sleep`] to
-    /// [`Level::Saved`] or deeper, can be booked on local disk now. One the
+    /// [`Level::Saved`] or deeper with its programs, can be booked on local
+    /// disk now. One the
     /// host never saves unasked books its next save only from such a
     /// request on ([`Sandbox::books_save`]), so the host agent refuses a
     /// request this finds short at once rather than pause its VM for a
     /// save that would wait for room, as a hand-off would. Fits for a
     /// sandbox that books its save already or has nothing to save, and on
-    /// a host that books no disk. Short by no more than what bookings that
+    /// a host that books no disk; and without `keep`, for one whose process
+    /// ends unsaved, which the request then does not save either. Short by
+    /// no more than what bookings that
     /// ended since the last reading stood for, it awaits the next reading
     /// (see [`Self::disk_awaits_reading`]), which decides it, as a create
     /// does; before the first reading, it awaits that one.
     #[must_use]
-    pub fn save_room(&self, sandbox: SandboxId) -> CreateRoom {
+    pub fn save_room(&self, sandbox: SandboxId, keep: bool) -> CreateRoom {
         let Some(slot) = self.sandboxes.get(&sandbox) else {
             return CreateRoom::Fits;
         };
         if !slot.unsaved() || slot.books_save() || slot.cannot_save() {
+            return CreateRoom::Fits;
+        }
+        if !keep && slot.policy().ends_unsaved() && !slot.unsynced {
             return CreateRoom::Fits;
         }
         let Some(mut room) = self.disk_room() else {

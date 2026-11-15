@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { createHmac } from "node:crypto";
 import { resolve } from "node:path";
 import { SESSION_AVATAR_ICONS, type SessionAvatar } from "@opengeni/contracts";
 import sharp from "sharp";
@@ -46,6 +47,30 @@ describe("bot avatar pictures for Slack", () => {
         avatar,
       }),
     ).toBe(`https://app.example.test/v1/public/session-avatars/${token}.png`);
+  });
+
+  test("an image avatar's link fits Slack's icon_url limit; older full-signature links still verify", () => {
+    const avatar: SessionAvatar = { kind: "image", artifactId: crypto.randomUUID() };
+    const claim = { workspaceId: crypto.randomUUID(), avatar };
+    // Slack refuses an icon_url of 256 characters or more.
+    for (const host of [
+      "https://staging.app.opengeni.ai",
+      "https://opengeni.customer-company.example.com",
+    ]) {
+      expect(sessionAvatarImageUrl(host, SECRET, claim).length).toBeLessThan(256);
+    }
+    const token = createSessionAvatarImageToken(SECRET, claim);
+    const [payload, signature] = token.split(".");
+    expect(signature).toHaveLength(22);
+    // A link minted before carries the full HMAC-SHA256.
+    const key = createHmac("sha256", SECRET).update("opengeni/session-avatar-image/v1").digest();
+    const full = createHmac("sha256", key).update(payload!).digest("base64url");
+    expect(full).toHaveLength(43);
+    expect(verifySessionAvatarImageToken(SECRET, `${payload}.${full}`)).toEqual(claim);
+    // Any other length or a tampered signature is refused.
+    expect(verifySessionAvatarImageToken(SECRET, `${payload}.${full.slice(0, 30)}`)).toBeNull();
+    const flipped = `${signature!.slice(0, -1)}${signature!.endsWith("A") ? "B" : "A"}`;
+    expect(verifySessionAvatarImageToken(SECRET, `${payload}.${flipped}`)).toBeNull();
   });
 
   test("colours match the console's oklch tiles", () => {

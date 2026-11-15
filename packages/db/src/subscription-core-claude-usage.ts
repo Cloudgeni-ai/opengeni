@@ -23,10 +23,27 @@
  *   `scope_required` when the adapter-owned `provider_state.oauthScopes`
  *   (written by the connect writers; `[]` for a setup token, absent when
  *   unknown) lacks `user:profile`.
+ *
+ * Usage reads present Claude Code's CLI surface (its account-API user
+ * agent): Claude reports limit reset grants only to that surface. The
+ * read asks for the reset status (`cedar_ember=1`); while that status says
+ * the account is at a limit, a second read asks for the at-the-limit
+ * program (`at_wall=1`), as Claude Code does. Both skip spend reporting.
  */
-import { parseClaudeUsageResponse, type ClaudeUsageObservation } from "@opengeni/config";
 import {
+  CLAUDE_CLI_SURFACE_USER_AGENT,
+  parseClaudeUsageResponse,
+  parseClaudeWallReset,
+  type ClaudeUsageObservation,
+} from "@opengeni/config";
+import {
+  ClaudeExtraUsage,
+  ClaudeLimitResets,
+  ClaudeServiceState,
+  ClaudeSurfaceUsageWindow,
+  ClaudeUsageLimit,
   ClaudeUsageWindowId,
+  ClaudeWallReset,
   type ClaudeSubscriptionUsage,
   type ClaudeUsageWindow,
 } from "@opengeni/contracts";
@@ -41,6 +58,7 @@ import {
 import {
   decodeSubscriptionCoreClaudeQuota,
   SUBSCRIPTION_CORE_CLAUDE_CLAIMABLE_WINDOW_IDS,
+  SUBSCRIPTION_CORE_CLAUDE_WINDOW_ALIASES,
   type SubscriptionCoreClaudeCredential,
 } from "./subscription-core-claude-adapter";
 import { claudeSubscriptionUpstreamModelId } from "@opengeni/contracts/claude-subscription-model-ids";
@@ -48,10 +66,24 @@ import { decodeSubscriptionQuota } from "./subscription-core-repository";
 
 /** The Claude usage endpoint (the legacy `requestClaudeUsage` URL). */
 export const SUBSCRIPTION_CORE_CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
+/** The usage read with the limit reset status (Claude Code's ordinary reset check). */
+export const SUBSCRIPTION_CORE_CLAUDE_RESET_STATUS_URL = `${SUBSCRIPTION_CORE_CLAUDE_USAGE_URL}?cedar_ember=1&skip_spend=1`;
+/** The usage read at a limit, which also reports the at-the-limit program. */
+export const SUBSCRIPTION_CORE_CLAUDE_AT_LIMIT_URL = `${SUBSCRIPTION_CORE_CLAUDE_USAGE_URL}?at_wall=1&skip_spend=1`;
 /** The OAuth scope the usage endpoint requires. */
 export const SUBSCRIPTION_CORE_CLAUDE_USAGE_SCOPE = "user:profile";
 const USAGE_DEADLINE_MS = 10_000;
 const USAGE_BODY_LIMIT_BYTES = 64 * 1024;
+
+/** The headers of an account-API read: the bearer and Claude Code's CLI surface. */
+export function subscriptionCoreClaudeAccountHeaders(token: string): Record<string, string> {
+  return {
+    authorization: `Bearer ${token}`,
+    "content-type": "application/json",
+    "cache-control": "no-cache",
+    "user-agent": CLAUDE_CLI_SURFACE_USER_AGENT,
+  };
+}
 
 /** One usage read: the legacy refresh outcome and, when available, its observation. */
 export type SubscriptionCoreClaudeUsageReading = {
@@ -73,12 +105,8 @@ export async function fetchSubscriptionCoreClaudeUsage(
   let observation: ClaudeUsageObservation | null = null;
   try {
     const signal = AbortSignal.timeout(USAGE_DEADLINE_MS);
-    const response = await read.fetch(SUBSCRIPTION_CORE_CLAUDE_USAGE_URL, {
-      headers: {
-        authorization: `Bearer ${credential.token}`,
-        "content-type": "application/json",
-        "cache-control": "no-cache",
-      },
+    const response = await read.fetch(SUBSCRIPTION_CORE_CLAUDE_RESET_STATUS_URL, {
+      headers: subscriptionCoreClaudeAccountHeaders(credential.token),
       redirect: "error",
       signal,
     });
@@ -92,6 +120,8 @@ export async function fetchSubscriptionCoreClaudeUsage(
       if (response.ok) {
         observation = parseClaudeUsageResponse(body, new Date(checkedAt));
         status = observation ? "available" : "unavailable";
+        if (observation?.details?.limitResets?.atLimit === true)
+          observation = await withAtLimitProgram(read, credential.token, observation, checkedAt);
       } else {
         const error = body && typeof body === "object" && "error" in body ? body.error : null;
         const message =
@@ -113,6 +143,46 @@ export async function fetchSubscriptionCoreClaudeUsage(
     observation = null;
   }
   return { status, observation, checkedAt };
+}
+
+/**
+ * The at-the-limit program from a second read, added to an at-limit
+ * observation. Its failure leaves the observation as it was: the program
+ * is information, never a condition of the usage reading.
+ */
+async function withAtLimitProgram(
+  read: SubscriptionCoreConnectionRead<SubscriptionCoreClaudeCredential>,
+  token: string,
+  observation: ClaudeUsageObservation,
+  checkedAt: string,
+): Promise<ClaudeUsageObservation> {
+  try {
+    const signal = AbortSignal.timeout(USAGE_DEADLINE_MS);
+    const response = await read.fetch(SUBSCRIPTION_CORE_CLAUDE_AT_LIMIT_URL, {
+      headers: subscriptionCoreClaudeAccountHeaders(token),
+      redirect: "error",
+      signal,
+    });
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      return observation;
+    }
+    const body = await readResponseJsonBounded<unknown>(
+      response,
+      USAGE_BODY_LIMIT_BYTES,
+      "Claude usage",
+      { signal },
+    );
+    const program =
+      body && typeof body === "object" && !Array.isArray(body)
+        ? parseClaudeWallReset((body as Record<string, unknown>).juniper_tide, new Date(checkedAt))
+        : undefined;
+    return program === undefined
+      ? observation
+      : { ...observation, details: { ...observation.details, wallReset: program } };
+  } catch {
+    return observation;
+  }
 }
 
 function isUsageReading(value: unknown): value is SubscriptionCoreClaudeUsageReading {
@@ -161,7 +231,10 @@ export function decodeSubscriptionCoreClaudeUsage(input: {
 const ACCOUNT_WINDOW_IDS = ["five_hour", "seven_day"] as const;
 
 function reportsBelowLimit(reading: SubscriptionCoreClaudeUsageReading, id: string): boolean {
-  const window = reading.observation?.windows.find((candidate) => candidate.id === id);
+  // The usage endpoint reports the Fable limit as `seven_day_fable`; a
+  // refusal names it `seven_day_overage_included`.
+  const ids = [id, SUBSCRIPTION_CORE_CLAUDE_WINDOW_ALIASES[id]];
+  const window = reading.observation?.windows.find((candidate) => ids.includes(candidate.id));
   return window !== undefined && window.usedPercent !== null && window.usedPercent < 100;
 }
 
@@ -279,6 +352,7 @@ const FAMILY_PREFIXES: Partial<Record<ClaudeUsageWindow["id"], string>> = {
   seven_day_opus: "claude-opus-",
   seven_day_sonnet: "claude-sonnet-",
   seven_day_fable: "claude-fable-",
+  seven_day_overage_included: "claude-fable-",
 };
 
 /**
@@ -327,6 +401,43 @@ function iso(value: number | null): string | null {
   if (value === null || !Number.isFinite(value)) return null;
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+/**
+ * The stored provider details as usage response fields. Each part is
+ * checked against its contract and dropped when it does not match (a
+ * newer build may have stored a shape this one does not know).
+ */
+export function subscriptionCoreClaudeUsageDetails(
+  quota: SubscriptionQuota | null,
+): Pick<
+  ClaudeSubscriptionUsage,
+  "limitResets" | "wallReset" | "limits" | "extraUsage" | "surfaceWindows" | "serviceState"
+> {
+  const details = quota?.providerDetails ?? {};
+  const part = <T>(
+    key: string,
+    schema: { safeParse(value: unknown): { success: boolean; data?: T } },
+  ) => {
+    const stored = details[key];
+    if (!stored) return undefined;
+    const parsed = schema.safeParse(stored.value);
+    return parsed.success ? (parsed.data as T) : undefined;
+  };
+  const limitResets = part("limitResets", ClaudeLimitResets.nullable());
+  const wallReset = part("wallReset", ClaudeWallReset.nullable());
+  const limits = part("limits", ClaudeUsageLimit.array().max(16));
+  const extraUsage = part("extraUsage", ClaudeExtraUsage.nullable());
+  const surfaceWindows = part("surfaceWindows", ClaudeSurfaceUsageWindow.array().max(3));
+  const serviceState = part("serviceState", ClaudeServiceState.nullable());
+  return {
+    ...(limitResets !== undefined ? { limitResets } : {}),
+    ...(wallReset !== undefined ? { wallReset } : {}),
+    ...(limits !== undefined ? { limits } : {}),
+    ...(extraUsage !== undefined ? { extraUsage } : {}),
+    ...(surfaceWindows !== undefined ? { surfaceWindows } : {}),
+    ...(serviceState !== undefined ? { serviceState } : {}),
+  };
 }
 
 /**
@@ -405,5 +516,6 @@ export function projectSubscriptionCoreClaudeUsage(
     source,
     refreshStatus: derived.status,
     refreshCheckedAt: derived.checkedAt,
+    ...subscriptionCoreClaudeUsageDetails(stored),
   };
 }

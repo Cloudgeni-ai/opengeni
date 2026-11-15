@@ -64,7 +64,7 @@ export function appendChatReasoningDetails(accumulated: JsonObject[], deltas: Js
   }
 }
 
-/** Only readable detail types may enter the thinking UI or foreign-model text. */
+/** Only readable detail types may enter the thinking UI. */
 export function chatReasoningDetailsText(details: JsonObject[] | undefined): string {
   return (details ?? [])
     .map((part) => {
@@ -81,12 +81,19 @@ export function chatReasoningDetailsText(details: JsonObject[] | undefined): str
 
 /** Claude rejects plaintext thinking without a signature. OpenRouter can turn
  * either Chat reasoning alias into such a block, including from older histories.
- * Keep unsigned text as ordinary historical context on this request only.
+ * Leave unsigned reasoning out of this request: it is never inlined as reply
+ * text, because Claude shown its own (or another model's) reasoning as text can
+ * refuse the whole request and every retry through its safety systems. An
+ * assistant message left with no content and no tool calls is removed.
  */
 export function projectUnsignedClaudeChatReasoning(messages: JsonObject[]): JsonObject[] {
   let changed = false;
-  const projected = messages.map((message) => {
-    if (message?.role !== "assistant") return message;
+  const projected: JsonObject[] = [];
+  for (const message of messages) {
+    if (message?.role !== "assistant") {
+      projected.push(message);
+      continue;
+    }
     const details = chatReasoningDetails(message);
     const isClaude = (detail: JsonObject) =>
       detail.format == null || detail.format === "anthropic-claude-v1";
@@ -106,35 +113,21 @@ export function projectUnsignedClaudeChatReasoning(messages: JsonObject[]): Json
             detail.data.length > 0)),
     );
     const reasoning = chatReasoning(message);
-    if (!unsigned.length && (hasNativeDetails || !reasoning)) return message;
-    const removedText = chatReasoningDetailsText(unsigned);
-    const aliasText = !hasNativeDetails ? reasoning?.text : undefined;
-    const text = [
-      ...(aliasText ? [aliasText] : []),
-      ...(removedText && !aliasText?.includes(removedText) ? [removedText] : []),
-    ].join("\n");
+    if (!unsigned.length && (hasNativeDetails || !reasoning)) {
+      projected.push(message);
+      continue;
+    }
     const result = { ...message };
     // An aggregate alias can include stripped blocks; signed details remain the
     // authoritative replay representation whenever any block was removed.
     delete result.reasoning;
     delete result.reasoning_content;
     if (details) result.reasoning_details = retained;
-    if (text) {
-      const content = emptyContent(message.content)
-        ? []
-        : typeof message.content === "string"
-          ? [{ type: "text", text: message.content }]
-          : Array.isArray(message.content)
-            ? message.content
-            : [message.content];
-      result.content = [
-        { type: "text", text: `[Historical reasoning without a provider signature]\n${text}` },
-        ...content,
-      ];
-    }
     changed = true;
-    return result;
-  });
+    const hasToolCalls = Array.isArray(result.tool_calls) && result.tool_calls.length > 0;
+    if (emptyContent(result.content) && !hasToolCalls && !hasNativeDetails) continue;
+    projected.push(result);
+  }
   return changed ? projected : messages;
 }
 

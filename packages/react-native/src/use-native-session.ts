@@ -5,6 +5,7 @@ import type { SessionEvent, SessionStatus } from "@opengeni/sdk";
 import {
   groupTimeline,
   projectPendingApprovals,
+  uploadScopeForSession,
   useComposer,
   useGoal,
   useHumanInputRequests,
@@ -179,6 +180,8 @@ export function useOpenGeniNativeSession(
     client: input.client,
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
+    // As in the web app: a private chat's attachments are its owner's alone.
+    scope: uploadScopeForSession(session.session),
     files: environment.adapters.files,
     crypto: environment.adapters.crypto,
   });

@@ -50,6 +50,7 @@ describe("@opengeni/react/meetings-recorder", () => {
       "meetings-recorder.ts",
       "meetings/recorder-context.tsx",
       "meetings/recorder-state.ts",
+      "meetings/sign-out-recordings.ts",
     ]);
     // The recorder host and everything it needs arrive in a separate chunk.
     expect(readFileSync(resolve(SOURCE, "meetings/recorder-context.tsx"), "utf8")).toContain(
@@ -62,7 +63,7 @@ describe("@opengeni/react/meetings-recorder", () => {
   test("shares its recorder module with the Meetings UI", () => {
     const full = staticImports(readFileSync(resolve(SOURCE, "meetings.ts"), "utf8"));
     const light = staticImports(readFileSync(resolve(SOURCE, "meetings-recorder.ts"), "utf8"));
-    expect(light).toEqual(["./meetings/recorder-context"]);
+    expect(light).toEqual(["./meetings/recorder-context", "./meetings/sign-out-recordings"]);
     expect(full).toContain("./meetings/recorder-context");
   });
 });

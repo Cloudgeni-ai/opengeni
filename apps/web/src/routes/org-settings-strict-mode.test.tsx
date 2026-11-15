@@ -78,6 +78,24 @@ const createBillingCheckout = mock(async () => {
 const createBillingPortalSession = mock(async () => {
   throw new Error("bounded portal failure");
 });
+const listBillingReceipts = mock(async (_query: unknown) => ({
+  receipts: [
+    {
+      id: "ch_auto",
+      createdAt: timestamp,
+      kind: "auto_top_up" as const,
+      description: "Automatic top-up",
+      amount: 2500,
+      currency: "usd",
+      amountRefunded: 0,
+      refunded: false,
+      receiptUrl: "https://pay.stripe.com/receipts/ch_auto",
+      invoiceUrl: null,
+      invoicePdfUrl: null,
+    },
+  ],
+  nextCursor: null,
+}));
 const listOrganizationApiKeys = mock(async (_accountId: string) => []);
 const createOrganizationApiKey = mock(async () => {
   throw new Error("not used");
@@ -160,6 +178,7 @@ const context = {
     getOrganizationUsageWorkspacePage,
     createBillingCheckout,
     createBillingPortalSession,
+    listBillingReceipts,
     listOrganizationApiKeys,
     createOrganizationApiKey,
     deleteOrganizationApiKey,
@@ -435,7 +454,11 @@ describe("organization billing StrictMode ownership", () => {
     expect(getOrganizationUsageSummary).not.toHaveBeenCalled();
     expect(container.textContent).toContain("Open Insights");
     expect(useBillingUsage).not.toHaveBeenCalled();
-    expect(container.textContent).toContain("Invoices and payment details");
+    expect(container.textContent).toContain("Payment details");
+    expect(listBillingReceipts).toHaveBeenCalledWith({ accountId, limit: 10 });
+    const receipt = container.querySelector<HTMLAnchorElement>('a[href$="/receipts/ch_auto"]');
+    expect(receipt?.textContent).toContain("Receipt");
+    expect(receipt?.target).toBe("_blank");
     expect(container.textContent).not.toContain("OG-0042");
 
     await act(async () => button(container, "Add credits").click());
@@ -452,7 +475,7 @@ describe("organization billing StrictMode ownership", () => {
     });
     expect(button(container, "Add credits").disabled).toBe(false);
 
-    await act(async () => button(container, "Open Stripe billing").click());
+    await act(async () => button(container, "Open Stripe").click());
     await flush();
     expect(createBillingPortalSession).toHaveBeenCalledTimes(1);
     expect(createBillingPortalSession).toHaveBeenCalledWith({
@@ -462,7 +485,7 @@ describe("organization billing StrictMode ownership", () => {
     expect(toastError).toHaveBeenCalledWith("Couldn't open Stripe billing", {
       description: "bounded portal failure",
     });
-    expect(button(container, "Open Stripe billing").disabled).toBe(false);
+    expect(button(container, "Open Stripe").disabled).toBe(false);
 
     await act(async () => root.unmount());
     container.remove();

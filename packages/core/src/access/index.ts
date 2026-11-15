@@ -40,6 +40,7 @@ import {
   externalIdentityReadGranted,
   lockExternalWorkspaceMembershipLifecycleShared,
   readExternalIdentity,
+  rememberEndUserLabel,
   resolveExternalIdentityLink,
   managedPersonalWorkspacePermissions,
   nestedPostgresSqlState,
@@ -85,6 +86,9 @@ const readGrantsByRequest = new WeakMap<
   WeakMap<object, Map<string, AccessGrantAuthorization>>
 >();
 const accessResolvedRequests = new WeakSet<Request>();
+// Requests whose resolved credential is an agent attempt's, for error mapping
+// that must not reinterpret a failure of any other caller.
+const agentAttemptRequests = new WeakSet<Request>();
 const developerSetupApiKeyContexts = new WeakSet<AccessContext>();
 const developerSetupAuthorizations = new WeakMap<AccessGrantAuthorization, AccessGrant>();
 const developerSetupGrants = new WeakSet<AccessGrant>();
@@ -263,6 +267,27 @@ const delegatedHumanRequests = new WeakMap<Request, DelegatedHumanAuthorization>
 const delegatedHumanContexts = new WeakMap<AccessContext, DelegatedHumanAuthorization>();
 /** Exact-workspace proofs for external users (see stampWorkspacePersonAuthorization). */
 const workspaceExternalPersonProofs = new WeakSet<DelegatedHumanAuthorization>();
+/** The verified Better Auth session (its id and user) behind a canonical managed-cookie context. */
+const managedCookieSessions = new WeakMap<
+  AccessContext,
+  { authUserId: string; authSessionId: string }
+>();
+
+/**
+ * The person signed in in this browser session, with the session's id, from
+ * how access resolution actually authenticated the request (never from
+ * request headers). Null for an approved native app, an agent or API key
+ * acting as a person, organization and workspace API keys, services,
+ * host-signed delegation, external people and local installs.
+ */
+export function managedBrowserSessionForAccessContext(
+  context: AccessContext,
+): { authUserId: string; authSessionId: string } | null {
+  if (context.mode !== "managed" || !context.subjectId.startsWith("user:")) return null;
+  const session = managedCookieSessions.get(context);
+  if (!canonicalManagedCookieContexts.has(context) || !session) return null;
+  return { ...session };
+}
 const delegatedHumanProfileSchema = z.object({
   id: z.string(),
   name: z.string().nullable(),
@@ -800,7 +825,35 @@ export async function requireAccessContext(c: Context, deps: AccessDeps): Promis
   if (!context) {
     throw await authenticationRequired(c, deps);
   }
+  if (context.workspaceGrants.some((grant) => grant.principalKind === "agent_attempt")) {
+    agentAttemptRequests.add(c.req.raw);
+  }
   return context;
+}
+
+/** Whether this request authenticated with an agent attempt's credential. */
+export function requestAuthenticatedAsAgentAttempt(request: Request): boolean {
+  return agentAttemptRequests.has(request);
+}
+
+/**
+ * The `user:` person this request's own managed sign-in (the Better Auth
+ * browser session, or an approved native app credential) belongs to, or null.
+ * Bearer keys, delegated tokens, services and local access name no one here.
+ * Never throws: no, expired or unusable credentials mean nobody is signed in.
+ */
+export async function managedHumanSubjectForRequest(
+  c: Context,
+  deps: AccessDeps,
+): Promise<string | null> {
+  try {
+    const context = await requireAccessContext(c, deps);
+    return canonicalManagedCookieContexts.has(context) && context.subjectId.startsWith("user:")
+      ? context.subjectId
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -2212,6 +2265,10 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
         bindPendingInvitations: false,
       });
       canonicalManagedCookieContexts.add(context);
+      const authSessionId = (session as { session?: { id?: unknown } }).session?.id;
+      const authUserId = (session as { user?: { id?: unknown } }).user?.id;
+      if (typeof authSessionId === "string" && typeof authUserId === "string")
+        managedCookieSessions.set(context, { authUserId, authSessionId });
       markAppCredentialGrants(context);
       recordUserPresence(c, deps, context.subjectId);
       return context;
@@ -2509,6 +2566,14 @@ async function apiKeyAccessContext(
       }
       throw new HTTPException(503, { message: "external identity authority is unavailable" });
     }
+    // Console shows the product's own user id beside the end user's sessions.
+    // Display only and best effort: it never delays or fails authentication.
+    void rememberEndUserLabel(deps.db, {
+      accountId: identity.accountId,
+      subjectId: identity.subjectId,
+      source: identity.source,
+      externalId: identity.externalId,
+    });
     const linked =
       selection.mode === "linked_native"
         ? await resolveExternalIdentityLink(deps.db, {

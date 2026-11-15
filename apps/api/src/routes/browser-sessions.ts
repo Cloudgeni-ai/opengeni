@@ -31,6 +31,7 @@ import {
   BrowserDownload,
   BrowserDownloadSaveRequest,
   BrowserDownloadSaveResponse,
+  BrowserDownloadSaveProgress,
   BrowserRecordingSaveProgress,
   BrowserRecordingSaveRequest,
   BrowserRecordingSaveResponse,
@@ -297,7 +298,6 @@ import {
 } from "../browser-recording-save";
 import {
   recordSourcePlacementMove,
-  reconcileListedSourcePlacementMoves,
   retireFormerPlacementControllers,
   retireSourceFormerPlacements,
 } from "../former-placement-retirement";
@@ -431,28 +431,20 @@ export function registerBrowserSessionRoutes(
   app.get("/v1/workspaces/:workspaceId/browser-sessions", async (context) => {
     const workspaceId = context.req.param("workspaceId") ?? "";
     const grant = await requireAccessGrant(context, deps, workspaceId, "sessions:read");
-    const list = async () => {
-      const listed = await listBrowserSessions(deps.db, {
-        accountId: grant.accountId,
-        workspaceId,
-        ...parseInteractionSessionListQuery(context.req.query()),
-      });
-      return {
+    // Reading a list changes nothing. A browser on a machine its chat has
+    // moved away from keeps running there with its profile, so the chat can
+    // move back and continue in it; only its End retires it.
+    const listed = await listBrowserSessions(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      ...parseInteractionSessionListQuery(context.req.query()),
+    });
+    return context.json(
+      BrowserSessionListResponse.parse({
         ...listed,
         sessions: await filterInteractionSessionsForGrant(deps, grant, listed.sessions),
-      };
-    };
-    let listed = await list();
-    // A browser left behind by its task's move is retired, not reusable.
-    if (
-      await reconcileListedSourcePlacementMoves(channelServices, {
-        grant,
-        sessions: listed.sessions,
-      })
-    ) {
-      listed = await list();
-    }
-    return context.json(BrowserSessionListResponse.parse(listed));
+      }),
+    );
   });
 
   app.get("/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId", async (context) => {
@@ -1030,6 +1022,8 @@ export function registerBrowserSessionRoutes(
       const browserSessionId = requireUuidParam(context, "browserSessionId");
       const downloadId = requireUuidParam(context, "downloadId");
       const request = await parseJsonBody(context, BrowserDownloadSaveRequest);
+      // Existing raw HTTP callers keep the final-only response contract.
+      const respondAsync = context.req.query("respondAsync") === "true";
       const objectStorage = deps.objectStorage;
       const identity = {
         accountId: grant.accountId,
@@ -1218,7 +1212,7 @@ export function registerBrowserSessionRoutes(
                 }
                 const current = await sessionClient.download(downloadId);
                 assertBrowserDownloadSaveSource(current, preparedSave.download);
-                return await sessionClient.exportDownload(downloadId, {
+                const exportRequest = {
                   operationId: request.operationId,
                   downloadId,
                   upload: {
@@ -1226,9 +1220,28 @@ export function registerBrowserSessionRoutes(
                     requiredHeaders: put.requiredHeaders,
                     expiresAt: put.expiresAt.toISOString(),
                   },
-                });
+                };
+                if (respondAsync) {
+                  const status = await sessionClient.uploadDownload({
+                    ...exportRequest,
+                    waitMs: 45_000,
+                  });
+                  if (status) return status.receipt;
+                }
+                return await sessionClient.exportDownload(downloadId, exportRequest);
               },
             );
+            if (!receipt) {
+              return context.json(
+                BrowserDownloadSaveProgress.parse({
+                  state: "uploading",
+                  operationId: request.operationId,
+                  downloadId,
+                  retryAfterMs: 2_000,
+                }),
+                202,
+              );
+            }
             if (
               receipt.sizeBytes !== save.download.receivedBytes ||
               receipt.sha256 !== save.download.sha256
@@ -1749,7 +1762,7 @@ export function registerBrowserSessionRoutes(
       let resolvedFences: BrowserActionFences | null = null;
       // The response waits for the whole batch, which may outlast the
       // server's idle timeout.
-      const result = await withoutRequestIdleTimeout(
+      const controllerResult = await withoutRequestIdleTimeout(
         context,
         async () =>
           await withActiveBrowserController(
@@ -1895,7 +1908,9 @@ export function registerBrowserSessionRoutes(
             stages,
           ),
       );
-      observeBrowserActionResult(deps.observability, startedAtMs, request, result);
+      // The operator-only failure reason is for metrics; callers never see it.
+      const { failureReason, ...result } = controllerResult;
+      observeBrowserActionResult(deps.observability, startedAtMs, request, result, failureReason);
       reportInteractionRouteStages(context, deps.observability, stages);
       return context.json(result);
     },
@@ -6608,7 +6623,7 @@ export function browserScreenshotResponse(
 ): Response {
   // Node Buffers can be views into a larger backing allocation. Copy exactly
   // the image bytes before constructing the Response.
-  return new Response(Uint8Array.from(frame.data).buffer, {
+  return new Response(new Uint8Array(frame.data).buffer, {
     status: 200,
     headers: {
       "cache-control": "no-store",

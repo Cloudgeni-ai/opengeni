@@ -2257,7 +2257,13 @@ describe("session realtime ledger", () => {
       claimed.turn.id,
       claimed.turn.executionGeneration,
       attemptId,
-      [{ type: "agent.message.delta", payload: { text: "Still working on it." } }],
+      [
+        { type: "agent.message.delta", payload: { text: "Still working on it." } },
+        {
+          type: "agent.message.completed",
+          payload: { text: "Still working on it.", phase: "commentary" },
+        },
+      ],
     );
     expect(appended.accepted).toBe(true);
     const settled = await applySessionTurnSettlement(client.db, active.owner.workspaceId, {
@@ -2289,7 +2295,7 @@ describe("session realtime ledger", () => {
     );
     expect(rows).toHaveLength(2);
     expect(rows[0]).toMatchObject({
-      text: "Still working on it.",
+      text: "Still working on it.\n",
       payload: { source: "assistant_progress", channel: "commentary", route: "session_context" },
     });
     expect(rows[1]).toMatchObject({
@@ -2325,7 +2331,12 @@ describe("session realtime ledger", () => {
       execution.turn.id,
       execution.turn.executionGeneration,
       execution.attemptId,
-      [{ type: "agent.message.delta", payload: { text: "Resumed delegation progress." } }],
+      [
+        {
+          type: "agent.message.completed",
+          payload: { text: "Resumed delegation progress.", phase: "commentary" },
+        },
+      ],
     );
     const settled = await applySessionTurnSettlement(client.db, active.owner.workspaceId, {
       sessionId: active.owner.sessionId,
@@ -2355,7 +2366,7 @@ describe("session realtime ledger", () => {
         .orderBy(asc(schema.sessionRealtimeEntries.sequence)),
     );
     expect(rows.map((row) => [row.text, row.payload.channel])).toEqual([
-      ["Resumed delegation progress.", "commentary"],
+      ["Resumed delegation progress.\n", "commentary"],
       ["Old delegation finished.", "speakable"],
     ]);
     expect(rows.every((row) => row.payload.priorRealtimeId === original.started.mode.id)).toBe(
@@ -2471,7 +2482,7 @@ describe("session realtime ledger", () => {
     expect(lostResponseRetry.outbound.map((entry) => entry.id)).not.toContain(terminalRows[0]!.id);
   });
 
-  test("projects accepted delegated assistant deltas as ordered durable progress", async () => {
+  test("projects accepted delegated working notes as ordered durable progress", async () => {
     const value = await fixture();
     const first = await claimInitial(value);
     await complete(value, first.claimed.connection);
@@ -2488,11 +2499,17 @@ describe("session realtime ledger", () => {
       [
         { type: "agent.message.delta", payload: { text: "Checking " } },
         { type: "agent.message.delta", payload: { text: "the workspace." } },
+        {
+          type: "agent.message.completed",
+          payload: { text: "Checking the workspace.", phase: "commentary" },
+        },
+        // The answer reaches the voice once, as the terminal result.
+        { type: "agent.message.completed", payload: { text: "Done.", phase: "final_answer" } },
       ],
     );
     expect(appended.accepted).toBe(true);
 
-    const [progress] = await transaction(value.owner.workspaceId, (tx) =>
+    const progressRows = await transaction(value.owner.workspaceId, (tx) =>
       tx
         .select()
         .from(schema.sessionRealtimeEntries)
@@ -2503,15 +2520,18 @@ describe("session realtime ledger", () => {
           ),
         ),
     );
+    // One whole note, never the streaming fragments or the final answer.
+    expect(progressRows).toHaveLength(1);
+    const [progress] = progressRows;
     expect(progress).toMatchObject({
       realtimeId: value.started.mode.id,
       delegationItemId: execution.admitted.accepted[0]!.entry.delegationItemId,
       direction: "provider_out",
-      text: "Checking the workspace.",
+      text: "Checking the workspace.\n",
       payload: {
         status: "running",
         turnId: execution.turn.id,
-        sourceEventIds: appended.events.map((event) => event.id),
+        sourceEventIds: [appended.events[2]!.id],
       },
     });
 

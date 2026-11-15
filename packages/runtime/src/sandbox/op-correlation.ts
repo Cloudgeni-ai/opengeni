@@ -28,6 +28,8 @@ interface ToolCallCorrelation {
   callId: string;
   /** The next sub-op ordinal within this tool invocation (mutable). */
   ordinal: number;
+  /** Called when an op id is minted, before anything carrying it is sent. */
+  onDurableOpIdMinted?: (opId: string) => void;
   /** Called before durable adoption starts. The live op-stream client owns
    * cancellation during the transaction, but joined cleanup is not settled. */
   onDurableOpOwnershipTransferStarted?: (opId: string) => void;
@@ -54,8 +56,12 @@ export type RemoteOperationControl = {
   observeExecCommand?(opId: string): Promise<RemoteOperationObservation>;
   /** After the foreground consumer ends without terminal proof, transfer this
    * exact operation to the durable command ledger with a stop request. True
-   * means custody committed, never merely that cancellation was requested. */
-  abandonExecCommand?(opId: string): Promise<boolean>;
+   * means custody committed, never merely that cancellation was requested.
+   * `consumerEnding` says the attempt that owns the foreground wait is ending
+   * for good (its worker is shutting down) and will never read the result, so
+   * custody may transfer while that wait is still pending: the process that
+   * holds it is about to exit, and the ledger's stop request outlives it. */
+  abandonExecCommand?(opId: string, options?: { consumerEnding?: boolean }): Promise<boolean>;
   /**
    * End this operation's foreground wait now, as if its yield window ended: a
    * command that may continue in the background returns its handle and keeps
@@ -89,6 +95,7 @@ export function runWithToolCallCorrelation<T>(
   callId: string,
   fn: () => T,
   options: {
+    onDurableOpIdMinted?: (opId: string) => void;
     onDurableOpOwnershipTransferStarted?: (opId: string) => void;
     onDurableOpOwnershipTransferFailed?: (opId: string) => void;
     onDurableOpOwnershipTransferred?: (opId: string) => void;
@@ -101,6 +108,7 @@ export function runWithToolCallCorrelation<T>(
       sourceCallId: callId,
       callId: sanitizeOpIdToken(callId),
       ordinal: 0,
+      ...(options.onDurableOpIdMinted ? { onDurableOpIdMinted: options.onDurableOpIdMinted } : {}),
       ...(options.onDurableOpOwnershipTransferStarted
         ? { onDurableOpOwnershipTransferStarted: options.onDurableOpOwnershipTransferStarted }
         : {}),
@@ -132,6 +140,9 @@ export function currentOpToolCallId(): string | null {
  * exec). Callers fall back to a random unique id — safe (never collides, never
  * wrongly dedups), merely not stable across a turn re-dispatch, which degrades
  * that one op to today's at-least-once semantics.
+ *
+ * Every remote operation is minted here before anything carrying its id is
+ * sent, so an id that was never minted names no operation anywhere.
  */
 export function nextDurableOpId(): string | null {
   const context = storage.getStore();
@@ -140,7 +151,9 @@ export function nextDurableOpId(): string | null {
   }
   const ordinal = context.ordinal;
   context.ordinal += 1;
-  return `${context.callId}:${ordinal}`;
+  const opId = `${context.callId}:${ordinal}`;
+  context.onDurableOpIdMinted?.(opId);
+  return opId;
 }
 
 /** Delegate cancellation to the live transfer path without settling joined

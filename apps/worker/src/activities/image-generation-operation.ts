@@ -374,7 +374,7 @@ function digest(prefix: string, ...values: string[]): string {
 }
 
 function uuidFromDigest(digestValue: string): string {
-  const bytes = Uint8Array.from(Buffer.from(digestValue.slice(0, 32), "hex"));
+  const bytes = new Uint8Array(Buffer.from(digestValue.slice(0, 32), "hex"));
   bytes[6] = (bytes[6]! & 0x0f) | 0x80;
   bytes[8] = (bytes[8]! & 0x3f) | 0x80;
   const hex = Buffer.from(bytes).toString("hex");

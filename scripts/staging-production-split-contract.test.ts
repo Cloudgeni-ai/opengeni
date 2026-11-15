@@ -17,8 +17,8 @@ describe("staging / production split workflows", () => {
     expect(source).toContain(":canary-sha-$SOURCE_SHA");
     expect(source).toContain("canary-sha tags missing; refuse unsigned rebuild");
     expect(source).toContain("pendingChangesetsAllowed:true");
-    expect(source).toContain("docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0");
-    expect(source).toContain("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a");
+    expect(source).toContain("docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550");
+    expect(source).toContain("actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9");
     expect(source).not.toContain("docker/build-push-action");
     expect(source).not.toContain(":ci");
   });

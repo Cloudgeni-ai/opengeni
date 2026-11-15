@@ -571,6 +571,74 @@ describe("durable Connect attempts", () => {
     expect(effects).toBe(1);
   });
 
+  test("a read-only operation that failed frees its claim so the attempt can advance again", async () => {
+    const value = await begin();
+    const failing = {
+      db: client.db,
+      scope,
+      attemptId: value.id,
+      expectedRevision: 1,
+      operationId: crypto.randomUUID(),
+      inputDigest: digest,
+      releaseClaimOnFailure: true,
+      authorize: async () => {},
+      execute: async () => ({
+        commit: async (): Promise<ConnectAttempt> => {
+          throw new Error("Test install refused by the database");
+        },
+      }),
+    };
+    await expect(executeConnectOperation(failing)).rejects.toThrow(
+      "Test install refused by the database",
+    );
+    const stored = await getConnectAttempt(client.db, scope, value.id);
+    expect(stored.operationInFlight).toBe(false);
+    expect(stored.attempt.revision).toBe(1);
+
+    // A failure inside execute frees it too.
+    await expect(
+      executeConnectOperation({
+        ...failing,
+        operationId: crypto.randomUUID(),
+        execute: async () => {
+          throw new Error("Test source unreadable");
+        },
+      }),
+    ).rejects.toThrow("Test source unreadable");
+
+    const advanced = await executeConnectOperation({
+      ...failing,
+      operationId: crypto.randomUUID(),
+      execute: async () => ({
+        commit: async (_tx, current) => ({ ...current, revision: current.revision + 1 }),
+      }),
+    });
+    expect(advanced.revision).toBe(2);
+    expect((await getConnectAttempt(client.db, scope, value.id)).operationInFlight).toBe(false);
+  });
+
+  test("a failed duplicate request never frees the claim of the request still running", async () => {
+    const value = await begin();
+    const input = {
+      attemptId: value.id,
+      expectedRevision: 1,
+      operationId: crypto.randomUUID(),
+      inputDigest: digest,
+    };
+    await claimConnectOperation(client.db, scope, input);
+    await expect(
+      executeConnectOperation({
+        db: client.db,
+        scope,
+        ...input,
+        releaseClaimOnFailure: true,
+        authorize: async () => {},
+        execute: async () => ({ commit: async (_tx, current) => current }),
+      }),
+    ).rejects.toThrow("in flight or uncertain");
+    expect((await getConnectAttempt(client.db, scope, value.id)).operationInFlight).toBe(true);
+  });
+
   test("FORCE RLS denies another actor even without application actor predicates", async () => {
     const value = await begin();
     const rows = await withWorkspaceSubjectRls(
@@ -652,6 +720,56 @@ describe("durable Connect attempts", () => {
     await expect(
       getConnectAttempt(client.db, { ...scope, accountId: crypto.randomUUID() }, value.id),
     ).rejects.toThrow("not found");
+  });
+
+  test("an unfinished setup is no longer offered once a later one connected the same service", async () => {
+    const person = { ...scope, subjectId: "test:connect-superseded" };
+    const start = (overrides: Partial<ConnectAttempt>) => {
+      const value = { ...attempt(), completionRequirement: "connection" as const, ...overrides };
+      return beginConnectAttempt(client.db, person, {
+        idempotencyKey: value.id,
+        requestDigest: digest,
+        returnUrl: "https://host.example.com/settings",
+        attempt: value,
+      });
+    };
+    const connect = async (value: ConnectAttempt) => {
+      const input = {
+        attemptId: value.id,
+        operationId: crypto.randomUUID(),
+        expectedRevision: value.revision,
+        inputDigest: digest,
+      };
+      await claimConnectOperation(client.db, person, input);
+      await finishConnectOperation(client.db, person, {
+        ...input,
+        commit: async (_tx, current) => ({
+          ...current,
+          revision: current.revision + 1,
+          credentialsCommitted: true,
+          state: "complete",
+          nextAction: { type: "none" },
+        }),
+      });
+    };
+    const outlook = await start({ providerId: "microsoft-outlook-mail" });
+    const personalOutlook = await start({
+      providerId: "microsoft-outlook-mail",
+      ownership: "personal",
+    });
+    const gmail = await start({ providerId: "gmail" });
+    const mcp = await start({ providerId: "mcp-oauth" });
+    const pendingIds = async () =>
+      (await listPendingConnectAttempts(client.db, person)).map((value) => value.id).sort();
+    expect(await pendingIds()).toEqual([outlook.id, personalOutlook.id, gmail.id, mcp.id].sort());
+    // Outlook connects (for the workspace) in a later setup, and another MCP
+    // server connects, which says nothing about the first one.
+    await connect(await start({ providerId: "microsoft-outlook-mail" }));
+    await connect(await start({ providerId: "mcp-oauth" }));
+    expect(await pendingIds()).toEqual([personalOutlook.id, gmail.id, mcp.id].sort());
+    // A setup begun after the connection is still offered.
+    const again = await start({ providerId: "microsoft-outlook-mail" });
+    expect(await pendingIds()).toContain(again.id);
   });
 
   test("one committed claim prevents duplicate physical work and completion replays its receipt", async () => {

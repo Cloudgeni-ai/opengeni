@@ -9,6 +9,7 @@ use std::fmt::Display;
 use std::future::Future;
 use std::time::{Duration, Instant};
 
+use super::Event;
 use super::metrics::Alarm;
 
 /// Everything a step noted.
@@ -23,11 +24,11 @@ pub(crate) struct Notes {
     /// Facts about how the step went, such as where a restore's memory
     /// came from.
     pub details: Vec<(&'static str, &'static str)>,
-    /// How long the step kept a guest that goes on running paused, as a
-    /// checkpoint does while it captures its state.
-    pub paused: Option<Duration>,
     /// Alarms raised, with what happened.
     pub alarms: Vec<(Alarm, String)>,
+    /// Events of their own, such as a disk's repair, which the step's
+    /// sandbox, operation and trace are added to.
+    pub events: Vec<Event>,
     /// When the current phase began.
     mark: Option<Instant>,
 }
@@ -104,9 +105,9 @@ pub(crate) fn detail(key: &'static str, value: &'static str) {
     });
 }
 
-/// Adds `took` to how long the step kept its running guest paused.
-pub(crate) fn paused(took: Duration) {
-    with(|notes| *notes.paused.get_or_insert_default() += took);
+/// Emits `event` for the step's sandbox once the step ends.
+pub(crate) fn event(event: Event) {
+    with(|notes| notes.events.push(event));
 }
 
 /// Raises `alarm` for the step's sandbox.

@@ -104,17 +104,37 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
 }
 
 const stores = new Map<string, FileRecordingChunkStore>();
+let backupExcluded = false;
+
+function recordingsDirectory(scope?: string): Directory {
+  const base = new Directory(Paths.document, "opengeni-recordings");
+  return scope ? new Directory(base, safeScope(scope)) : base;
+}
+
+/** Keep unsent recordings off iCloud backups (Android: the config plugin's backup rules). */
+function excludeRecordingsFromBackup(): void {
+  if (backupExcluded || Platform.OS !== "ios") return;
+  const exclude = nativeAudioCapture()?.excludeFromBackup;
+  if (!exclude) return;
+  try {
+    exclude(recordingsDirectory().uri);
+    backupExcluded = true;
+  } catch {
+    // Tried again with the next store; recording works either way.
+  }
+}
 
 /**
  * A recording store in the app's documents, kept until uploaded:
- * `opengeni-recordings`, or `opengeni-recordings/<scope>` with a scope.
+ * `opengeni-recordings`, or `opengeni-recordings/<scope>` with a scope. The
+ * folder is kept off device backups.
  */
 export function expoRecordingChunkStore(scope?: string): FileRecordingChunkStore {
   const key = scope ?? "";
+  excludeRecordingsFromBackup();
   let store = stores.get(key);
   if (!store) {
-    const base = new Directory(Paths.document, "opengeni-recordings");
-    const directory = scope ? new Directory(base, safeScope(scope)) : base;
+    const directory = recordingsDirectory(scope);
     store = createFileRecordingChunkStore({
       fs: expoRecordingFileSystem,
       root: directory.uri.replace(/\/+$/u, ""),
@@ -123,6 +143,16 @@ export function expoRecordingChunkStore(scope?: string): FileRecordingChunkStore
     stores.set(key, store);
   }
   return store;
+}
+
+/**
+ * Delete everything {@link expoRecordingChunkStore} keeps for `scope` (an
+ * account that signed out), including files a capture left half-written.
+ */
+export function forgetRecordingStore(scope?: string): void {
+  stores.delete(scope ?? "");
+  const directory = recordingsDirectory(scope);
+  if (directory.exists) directory.delete();
 }
 
 function safeScope(scope: string): string {

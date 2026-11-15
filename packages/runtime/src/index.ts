@@ -1,10 +1,22 @@
 export { isOfficialDriveMcpConfig, mergeDriveMcpTools } from "./drive-mcp";
+export {
+  NANGO_PROXY_TRANSPORTS,
+  sendWithCredential,
+  type NangoUsageRecorder,
+  type NangoUsageReport,
+} from "./nango-transport";
 // Nothing was sent: callers render the message, which names the choices.
 export {
   McpAccountParameterChoiceError,
   isMcpAccountParameterChoiceError,
 } from "./mcp-account-parameters";
 import type { SearchRecordForm } from "./hosted-search-evidence";
+import type { NangoIntegrationDefinition, NangoProxyTransport } from "@opengeni/contracts/nango";
+import { NANGO_TOOLS_MCP_BRIDGE_ADAPTER, type NangoToolsMcpBridgeContext } from "./nango-tools-mcp";
+import {
+  NANGO_PROXY_TRANSPORTS as NANGO_PREFLIGHT_TRANSPORTS,
+  type NangoUsageRecorder,
+} from "./nango-transport";
 export {
   COMMAND_COMPLETION_NOTICE_MAX_BYTES,
   CommandCompletionDelivery,
@@ -14,6 +26,10 @@ export {
   type BackgroundCommandCompletion,
   type CommandCompletionSource,
 } from "./command-completion-delivery";
+import {
+  installRepeatedToolCallGuard,
+  repeatGuardedToolResolver,
+} from "./repeated-tool-call-guard";
 import {
   commandCompletionModelCallFilter,
   commandCompletionToolResolver,
@@ -28,6 +44,7 @@ import {
 } from "./sandbox-setup-notices";
 export { queueSandboxSetupNotice, takeSandboxSetupNotices } from "./sandbox-setup-notices";
 import {
+  isRetryableSetupFileWriteFailure,
   SOFT_SETUP_FAILURE_NOTICE_PREFIX,
   softFailingSetupHooks,
   softSetupFailureNotice,
@@ -67,7 +84,14 @@ export {
   fitCompactionPrefix,
   compactionPrefixCuts,
 } from "./anthropic-compaction";
-export { AnthropicProviderRejection, AnthropicStreamInterruptedError } from "./anthropic-messages";
+export {
+  AnthropicProviderRejection,
+  AnthropicStreamInterruptedError,
+  ANTHROPIC_API_KEYS_OUT_OF_CREDITS,
+  anthropicApiKeyOrder,
+  isAnthropicApiKeyCreditRefusal,
+  withAnthropicApiKeyRefusals,
+} from "./anthropic-messages";
 export {
   createModelImageSizer,
   sniffModelImageType,
@@ -195,6 +219,7 @@ import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS,
   FIRST_PARTY_MCP_CALLER_META_KEY,
+  FIRST_PARTY_TOOL_ARGUMENT_REJECTED_META_KEY,
   assertUniqueResourceMountPaths,
   gitCredentialBindingIdForRepository,
   gitCredentialProviderForRepository,
@@ -209,6 +234,7 @@ import {
   prefixedMcpToolName as sharedPrefixedMcpToolName,
   resourceMountPath,
   renderSessionGoalContext,
+  repositorySkillsContextItem,
   signDelegatedAccessToken,
   GenerateImageToolInput,
   GenerateVideoToolInput,
@@ -285,6 +311,7 @@ import {
 import {
   LazyToolModelProvider,
   catalogConnectableIntegrationLookup,
+  catalogConnectCardRequest,
   createResolveMissingFunctionTool,
   installLazyToolRuntime,
   lazyToolRuntimeForAgent,
@@ -321,6 +348,46 @@ import {
   type SlackApiRateLimiter,
   type SlackRestMcpBridgeContext,
 } from "./slack-rest-mcp";
+import {
+  DATAVERSE_WEB_API_MCP_BRIDGE_ADAPTER,
+  DATAVERSE_WEB_API_TOOLS,
+  isDataverseMcpConfig,
+  type DataverseWebApiMcpBridgeContext,
+} from "./dataverse-web-api-mcp";
+import {
+  BUSINESS_CENTRAL_API_MCP_BRIDGE_ADAPTER,
+  BUSINESS_CENTRAL_API_TOOLS,
+  isBusinessCentralApiConfig,
+  type BusinessCentralApiMcpBridgeContext,
+} from "./business-central-api-mcp";
+import {
+  FINANCE_OPERATIONS_ODATA_MCP_BRIDGE_ADAPTER,
+  FINANCE_OPERATIONS_ODATA_TOOLS,
+  isFinanceOperationsMcpConfig,
+  type FinanceOperationsODataMcpBridgeContext,
+} from "./finance-operations-odata-mcp";
+
+/**
+ * The fixed tool set of a built-in bridge that runs instead of a connector's
+ * hosted MCP server, or null when the connector's own server serves its tools.
+ * Anything that lists a connector's tools outside a run (such as its tool
+ * permissions) uses this, so it shows the tools agents actually call without
+ * asking a hosted server the bridge never uses.
+ */
+export function fixedBridgeConnectorTools(
+  url: string,
+  connectionRef: McpServerConnectionRef | undefined,
+): ReadonlyArray<{
+  name: string;
+  description?: string | undefined;
+  annotations?: Readonly<Record<string, boolean>>;
+  _meta?: Readonly<Record<string, unknown>>;
+}> | null {
+  if (isDataverseMcpConfig(url, connectionRef)) return DATAVERSE_WEB_API_TOOLS;
+  if (isBusinessCentralApiConfig(url, connectionRef)) return BUSINESS_CENTRAL_API_TOOLS;
+  if (isFinanceOperationsMcpConfig(url, connectionRef)) return FINANCE_OPERATIONS_ODATA_TOOLS;
+  return null;
+}
 
 import { McpResultCustomDataBridge, unwrapSdkMcpResultProjection } from "./mcp-result-custom-data";
 import {
@@ -479,6 +546,7 @@ import {
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, posix as posixPath } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { gzipSync } from "node:zlib";
 
 import { z } from "zod";
@@ -556,11 +624,17 @@ import {
   setOpenSandboxApplyDiff,
   setSelfhostedApplyDiff,
   codemodeTokenFileFromEnvironment,
+  GIT_SESSION_CONFIG_LINES,
+  gitSessionDirectoryExport,
+  gitSessionKey,
+  withGitSessionClient,
+  withGitSessionSession,
   withCodemodeTokenClient,
   withCodemodeTokenSession,
   withRunCredentialsClient,
   withRunCredentialsSession,
   type RunCredentialSessionReady,
+  secretLedgerKeyFor,
 } from "./sandbox";
 import { SynchronousCommandOutcomeUnknownError } from "./sandbox/synchronous-command";
 import { runWithToolCallCorrelation } from "./sandbox/op-correlation";
@@ -624,6 +698,12 @@ export {
 } from "./input-wait-yield";
 import { withModelStepHandover } from "./model-step-handover";
 export { ModelStepHandover } from "./model-step-handover";
+import { contentlessModelResponseGuard } from "./contentless-model-response";
+export {
+  ContentlessModelResponseHandover,
+  isContentlessModelResponse,
+  stoppedAtOutputLimit,
+} from "./contentless-model-response";
 export {
   ModelPreemption,
   isModelPreempted,
@@ -658,8 +738,23 @@ import {
   recordRuntimeMcpToolCallMetric,
   resolveTurnModel,
 } from "./model-provider";
-import { workspaceSkills, type WorkspaceSkillSearchPath } from "./workspace-skills";
+import {
+  workspaceSkills,
+  type RepositorySkillsIndex,
+  type WorkspaceSkillSearchPath,
+} from "./workspace-skills";
+import {
+  repositorySkillsContextInputFilter,
+  type HistoryWithRepositorySkills,
+  type PublishRepositorySkills,
+  type RepositorySkillsContextState,
+} from "./repository-skills-context";
 export { REPOSITORY_SKILL_DISCOVERY_ERROR_CLASSES } from "./workspace-skills";
+export type { RepositorySkillsIndex } from "./workspace-skills";
+export type {
+  HistoryWithRepositorySkills,
+  PublishRepositorySkills,
+} from "./repository-skills-context";
 import {
   composeRuntimeSkills,
   readRuntimeSkill,
@@ -1119,7 +1214,11 @@ ensureReadableStreamFrom();
 type BuiltInMcpBridgeContext = GmailRestMcpBridgeContext &
   GoogleCalendarRestMcpBridgeContext &
   SlackRestMcpBridgeContext &
-  DriveMcpBridgeContext;
+  DataverseWebApiMcpBridgeContext &
+  BusinessCentralApiMcpBridgeContext &
+  FinanceOperationsODataMcpBridgeContext &
+  DriveMcpBridgeContext &
+  NangoToolsMcpBridgeContext;
 const BUILT_IN_MCP_BRIDGE_ADAPTERS: readonly LocalMcpBridgeAdapter<
   GmailRestMcpBridgeConfig,
   BuiltInMcpBridgeContext
@@ -1127,7 +1226,11 @@ const BUILT_IN_MCP_BRIDGE_ADAPTERS: readonly LocalMcpBridgeAdapter<
   GMAIL_REST_MCP_BRIDGE_ADAPTER,
   GOOGLE_CALENDAR_REST_MCP_BRIDGE_ADAPTER,
   SLACK_REST_MCP_BRIDGE_ADAPTER,
+  DATAVERSE_WEB_API_MCP_BRIDGE_ADAPTER,
+  BUSINESS_CENTRAL_API_MCP_BRIDGE_ADAPTER,
+  FINANCE_OPERATIONS_ODATA_MCP_BRIDGE_ADAPTER,
   DRIVE_MCP_BRIDGE_ADAPTER,
+  NANGO_TOOLS_MCP_BRIDGE_ADAPTER,
 ]);
 const SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS = 120_000;
 
@@ -1158,6 +1261,8 @@ export type ResolveConnectionCredentialInput = {
   preflightAcceptsRefreshableExpiry?: boolean;
   /** Frozen provider authority generation captured by the calling integration/catalog. */
   expectedAuthorityGeneration?: number;
+  /** Transports the bridge can apply; a Nango connection resolves only with `nango_proxy`. */
+  acceptedTransports?: readonly "nango_proxy"[];
 };
 
 export type ResolveConnectionCredentialResult =
@@ -1170,6 +1275,10 @@ export type ResolveConnectionCredentialResult =
       /** Metadata-only immutable authority binding supplied by the trusted worker resolver. */
       operationAuthorityDigest?: string;
       expiresAt?: Date | null;
+      /** The provider's actual grants, when the connection broker knows them. */
+      grantedScopes?: string[];
+      /** Send the provider request through this Nango proxy (docs/nango.md). */
+      proxy?: NangoProxyTransport;
     }
   | {
       status: "auth_needed";
@@ -1248,6 +1357,13 @@ export type PreparedAgentInput = {
   input: string | AgentInputItem[] | RunState<any, any>;
   /** Canonical durable prefix already present before this attempt adds items. */
   persistedHistoryCount: number;
+  /**
+   * The durable prefix (`persistedHistoryCount` items) as later turns load it
+   * once this run stores a new Repository skills index before the turn. The
+   * run shows the index only through it. Defaults to the index after the
+   * history.
+   */
+  historyWithRepositorySkills?: HistoryWithRepositorySkills;
   sandboxSessionState?: SandboxSessionState;
   modelInputAlreadyProjected?: boolean;
 };
@@ -1345,6 +1461,8 @@ export type GenerateSessionTitleOptions = {
    * lowest runnable effort to leave room in the output budget for the title.
    */
   reasoningEffort?: ReasoningEffort;
+  /** The host's `agent.titleInstructions`, added after the fixed rules. */
+  titleInstructions?: string;
   signal?: AbortSignal;
 };
 
@@ -1434,7 +1552,12 @@ export async function generateSessionTitle(
     : { model: options.model! };
   const result = await runSingleModelCall(target, {
     messages: [
-      { role: "system", content: SESSION_TITLE_GENERATION_INSTRUCTIONS },
+      {
+        role: "system",
+        content: options.titleInstructions
+          ? `${SESSION_TITLE_GENERATION_INSTRUCTIONS}\n\n${options.titleInstructions}`
+          : SESSION_TITLE_GENERATION_INSTRUCTIONS,
+      },
       { role: "user", content: boundedPrompt },
     ],
     maxOutputTokens: SESSION_TITLE_GENERATION_MAX_OUTPUT_TOKENS,
@@ -2577,8 +2700,11 @@ export type BuildAgentOptions = {
     response: HumanInputResponse;
   };
   reasoningEffort?: ReasoningEffort;
-  /** Provider-generated Responses summaries. Omitted preserves the existing wire. */
-  reasoningSummary?: "auto" | "detailed";
+  /**
+   * Provider-generated Responses summaries. Omitted preserves the existing wire
+   * (`detailed`); `none` sends no `reasoning.summary`, so none is written.
+   */
+  reasoningSummary?: "auto" | "detailed" | "none";
   /** Product latency selection frozen onto this turn. */
   latencyMode?: LatencyMode;
   /** Provider-specific wire value resolved by the worker (`fast` or `priority`). */
@@ -2901,6 +3027,14 @@ export type BuildAgentOptions = {
    */
   deferRepositorySkillIndex?: boolean;
   /**
+   * Stores the run's repository Skill index durably (see
+   * `PublishRepositorySkills`). Called once per run before the first model
+   * request: with the index when discovery finishes, or null for a deferred
+   * index. Without it no index is shown; the system prompt still says where
+   * repository skills live.
+   */
+  publishRepositorySkills?: PublishRepositorySkills;
+  /**
    * Receives the physical sandbox-tool fence at agent construction time. A
    * cancelled/fenced worker attempt must await it before publishing its durable
    * attempt-quiesced receipt.
@@ -3220,7 +3354,7 @@ export function agentPromptResourcesFor(
   };
 }
 
-const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u;
+const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,38})$/u;
 
 /**
  * Which GitHub identity each mounted GitHub repository acts as: the person's
@@ -3513,11 +3647,15 @@ const agentGitTokenSeeds = new WeakMap<object, GitTokenSeeds>();
 const agentGitCredentialBindings = new WeakMap<object, GitCredentialBindingSeed[]>();
 const agentCodemodeTokenSeed = new WeakMap<object, string>();
 const agentCodemodeTokenSessionId = new WeakMap<object, string>();
+const agentGitSessionKey = new WeakMap<object, string>();
 const agentCodemodeClientDownload = new WeakMap<object, ManagedCodemodeClientDownload>();
-// A missing-title directive is consumed by runAgentStream exactly once for the
-// freshly-built agent. It must not remain in Agent.instructions: those
-// instructions are presented again on every internal model/tool loop.
+// A missing title is requested in the turn's operational notice (see
+// prepareRunInput). It must not change Agent.instructions: that would change
+// the system prompt between turns and between requests of one turn.
 const agentsNeedingGenesisTitleDirective = new WeakSet<object>();
+// The repository Skill index each agent's runs published (see
+// repositorySkillsContextInputFilter).
+const agentRepositorySkillsContext = new WeakMap<object, RepositorySkillsContextState>();
 // Per-turn model modality used by the literal pre-provider input filter. The
 // durable session history remains canonical; only the request clone is shaped.
 const agentSupportsImageInput = new WeakMap<object, boolean>();
@@ -4057,6 +4195,7 @@ export function buildOpenGeniAgent(
       : null;
   if (embeddedSkillReadTool) agentTools.push(embeddedSkillReadTool);
   const instructionInspection = inspectPersistentAgentInstructions(settings, instructionOptions);
+  const reasoningSummary = options.reasoningSummary ?? "detailed";
   const baseConfig = {
     name: "Opengeni Agent",
     model: options.model ?? settings.openaiModel,
@@ -4087,7 +4226,7 @@ export function buildOpenGeniAgent(
     modelSettings: {
       reasoning: {
         effort: options.reasoningEffort ?? settings.openaiReasoningEffort,
-        summary: options.reasoningSummary ?? "detailed",
+        ...(reasoningSummary === "none" ? {} : { summary: reasoningSummary }),
       },
       ...(options.textVerbosity ? { text: { verbosity: options.textVerbosity } } : {}),
       // Round-trip the encrypted reasoning payload with every call so chains
@@ -4157,6 +4296,7 @@ export function buildOpenGeniAgent(
       );
     }
     installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
+    installRepeatedToolCallGuard(agent);
     if (options.commandCompletionDelivery && settings.experimentCutPolling) {
       installCommandCompletionDelivery(agent, options.commandCompletionDelivery);
     }
@@ -4171,6 +4311,7 @@ export function buildOpenGeniAgent(
   if (options.activeSandboxBackend === "selfhosted" && !options.sandboxWorkspaceRoot) {
     throw new Error("A Connected Machine agent requires its reported workspace root");
   }
+  const repositorySkillsContext: RepositorySkillsContextState = { visible: null };
   const agent = new SandboxAgent({
     ...baseConfig,
     baseInstructions: sandboxBaseInstructions(),
@@ -4197,6 +4338,13 @@ export function buildOpenGeniAgent(
       ...(options.videoGeneration ? { videoGenerationAvailable: true } : {}),
       ...repositoryWorkspaceSkillPathsOption(resources),
       ...(options.deferRepositorySkillIndex ? { deferRepositorySkillIndex: true } : {}),
+      publishRepositorySkills: async (index) => {
+        // Without a publisher nothing is stored, so nothing is shown: an
+        // index later turns do not load would change their request prefix.
+        repositorySkillsContext.visible = options.publishRepositorySkills
+          ? await options.publishRepositorySkills(index)
+          : null;
+      },
       ...(options.structuredToolTransport !== undefined
         ? { structuredToolTransport: options.structuredToolTransport }
         : {}),
@@ -4220,6 +4368,7 @@ export function buildOpenGeniAgent(
   });
   agentSkillSelections.set(agent, skillComposition.selections);
   agentRuntimeSkillIndex.set(agent, skillComposition.index);
+  agentRepositorySkillsContext.set(agent, repositorySkillsContext);
   if (options.inputWaitYield) agentInputWaitYields.set(agent, options.inputWaitYield);
   agentInstructionInspection.set(agent, instructionInspection);
   if (options.missingSessionTitleHint ?? options.genesisTitleHint) {
@@ -4315,6 +4464,7 @@ export function buildOpenGeniAgent(
     );
   }
   installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
+  installRepeatedToolCallGuard(agent);
   if (options.commandCompletionDelivery && settings.experimentCutPolling) {
     installCommandCompletionDelivery(agent, options.commandCompletionDelivery);
   }
@@ -4465,6 +4615,7 @@ function maybeInstallLazyToolTransport(
       return published;
     },
     options.toolRouterExpected !== false,
+    harnessControlServer ? catalogConnectCardRequest(harnessControlServer) : undefined,
   );
   if (options.openingToolNames?.length) lazyRuntime.loadAtOpening(options.openingToolNames);
 }
@@ -5734,6 +5885,7 @@ function buildAgentCapabilitiesFromComposition(
     videoGenerationAvailable?: boolean;
     workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
     deferRepositorySkillIndex?: boolean;
+    publishRepositorySkills?: (index: RepositorySkillsIndex | null) => Promise<void>;
     structuredToolTransport?: boolean;
     supportsImageInput?: boolean;
     computerToolMode?: ComputerToolMode;
@@ -5759,6 +5911,11 @@ function buildAgentCapabilitiesFromComposition(
           sandboxTemporaryDirectory:
             (options.sandboxEnvironment ?? collectSandboxEnvironment(settings)).TMPDIR || "/tmp",
           ...(options.secretResolver ? { secretResolver: options.secretResolver } : {}),
+          // Every worker derives the same key, so a later turn reads the
+          // sandbox ledger an earlier one wrote.
+          ...(options.secretResolver
+            ? { secretLedgerKey: secretLedgerKeyFor(resolveFirstPartyDelegationSecret(settings)) }
+            : {}),
           ...(options.credentials ? { credentials: options.credentials } : {}),
         })
       : null;
@@ -5831,7 +5988,10 @@ function buildAgentCapabilitiesFromComposition(
         options.workspaceSkillPaths,
         skillComposition.configuredNames,
         skillComposition.nativeToolNames,
-        options.deferRepositorySkillIndex ? { deferred: true } : {},
+        {
+          ...(options.deferRepositorySkillIndex ? { deferred: true } : {}),
+          ...(options.publishRepositorySkills ? { publish: options.publishRepositorySkills } : {}),
+        },
       ),
     );
   }
@@ -6146,6 +6306,10 @@ export type PrepareToolsOptions = {
    */
   materializeConnectorAttachments?: ConnectorAttachmentMaterializer;
   materializeGmailFile?: GmailRestMcpBridgeContext["materializeGmailFile"];
+  /** Best-effort Nango usage accounting for proxy requests and tool calls. */
+  recordNangoUsage?: NangoUsageRecorder;
+  /** Operator definitions of the Nango-backed integrations, read once per turn. */
+  nangoIntegrationDefinitions?: ReadonlyMap<string, NangoIntegrationDefinition>;
   readGmailFile?: GmailRestMcpBridgeContext["readGmailFile"];
   /** Private host callback that materializes exact bytes a reviewed connector downloaded. */
   materializeConnectorFile?: (request: ConnectorFileMaterializationRequest) => Promise<unknown>;
@@ -6826,7 +6990,13 @@ export async function prepareAgentTools(
                 request.destinationUrl,
                 request.toolName,
                 request.forceRefresh === true,
+                "acceptedTransports" in request ? request.acceptedTransports : undefined,
               ),
+            ...(options.recordNangoUsage ? { recordNangoUsage: options.recordNangoUsage } : {}),
+            ...(options.nangoIntegrationDefinitions
+              ? { nangoIntegrationDefinitions: options.nangoIntegrationDefinitions }
+              : {}),
+            ...(settings.nangoApiBaseUrl ? { nangoApiBaseUrl: settings.nangoApiBaseUrl } : {}),
             onAuthNeeded: async (payload) => {
               await publishAuthNeeded(options, payload);
             },
@@ -8364,6 +8534,9 @@ function connectionApprovalPreflight(
       forceRefresh: false,
       credentialResolutionMode: "preflight",
       preflightAcceptsRefreshableExpiry: true,
+      // The preflight never sends a provider request, so a proxy-only
+      // (Nango) credential is checked like any other connection.
+      acceptedTransports: NANGO_PREFLIGHT_TRANSPORTS,
       ...(options.credentialSubjectId ? { subjectId: options.credentialSubjectId } : {}),
     });
     if (result.status !== "ok") throw new ConnectionApprovalPreflightError(result.reason);
@@ -8377,6 +8550,7 @@ async function resolveConnectionForRequest(
   destinationUrl: string,
   toolName: string | undefined,
   forceRefresh: boolean,
+  acceptedTransports?: readonly "nango_proxy"[],
 ): Promise<ResolveConnectionCredentialResult> {
   if (!options.workspaceId || !options.resolveCredential) {
     return {
@@ -8400,6 +8574,7 @@ async function resolveConnectionForRequest(
     forceRefresh,
     ...(toolName ? { toolName } : {}),
     ...(options.credentialSubjectId ? { subjectId: options.credentialSubjectId } : {}),
+    ...(acceptedTransports?.length ? { acceptedTransports } : {}),
   };
   try {
     return await measureMcpPhase(
@@ -8733,6 +8908,22 @@ function mcpOutcomeUncertainResponse(
   );
 }
 
+/**
+ * The typed error of a tool call that needs its connection signed in again:
+ * nothing reached the provider, so hosts such as a Site frame can offer
+ * Reconnect and run it again.
+ */
+function connectionAuthNeededError(message: string) {
+  return {
+    error: {
+      code: "connection_auth_needed",
+      message,
+      retryable: false,
+      outcomeUnknown: false,
+    },
+  };
+}
+
 function isAuthNeededMcpError(error: unknown): boolean {
   try {
     if (!(error instanceof Error)) {
@@ -8866,6 +9057,27 @@ function exactErrorMessage(error: unknown): string {
   } catch {
     return "MCP tool call failed";
   }
+}
+
+/**
+ * Read and remove the first-party server's mark that it refused the caller's
+ * arguments. The mark is honored only from the first-party server, and is
+ * removed so the result every caller sees is unchanged.
+ */
+function takeFirstPartyArgumentRejection(
+  result: AttemptToolResultValue,
+  firstParty: boolean,
+): { result: AttemptToolResultValue; argumentRejected: boolean } {
+  const meta = result._meta;
+  if (!firstParty || !meta || !Object.hasOwn(meta, FIRST_PARTY_TOOL_ARGUMENT_REJECTED_META_KEY)) {
+    return { result, argumentRejected: false };
+  }
+  const { [FIRST_PARTY_TOOL_ARGUMENT_REJECTED_META_KEY]: mark, ...rest } = meta;
+  const { _meta: _removed, ...withoutMeta } = result;
+  return {
+    result: Object.keys(rest).length > 0 ? { ...withoutMeta, _meta: rest } : withoutMeta,
+    argumentRejected: mark === true && result.isError === true,
+  };
 }
 
 function mcpThrownToolCallOutcome(error: unknown, signal?: AbortSignal): McpToolCallOutcome {
@@ -10929,14 +11141,21 @@ export class PrefixedMcpServer implements MCPServer {
           });
         },
       });
-      const result = AttemptToolResult.parse(output);
+      const { result, argumentRejected } = takeFirstPartyArgumentRejection(
+        AttemptToolResult.parse(output),
+        this.firstPartyCatalog,
+      );
       assertMcpPayloadWithinBytes(
         result,
         options?.maxResultBytes ?? MCP_MAX_TOOL_RESULT_BYTES,
         "MCP tool result",
       );
       recordOutcome(
-        result.isError === true && !exchange?.requested ? "provider_declared_error" : "success",
+        result.isError !== true || exchange?.requested
+          ? "success"
+          : argumentRejected
+            ? "rejected"
+            : "provider_declared_error",
       );
       const delivered = completeWait && result.isError !== true ? completeWait(true) : false;
       if (finalReply !== null && result.isError !== true && !delivered) {
@@ -10959,6 +11178,7 @@ export class PrefixedMcpServer implements MCPServer {
         return boundedMcpToolResult({
           isError: true,
           content: [{ type: "text", text: error.message }],
+          structuredContent: connectionAuthNeededError(error.message),
         });
       }
       // A brokered tools/call that receives 401 may already have changed provider
@@ -11001,6 +11221,7 @@ export class PrefixedMcpServer implements MCPServer {
         return boundedMcpToolResult({
           isError: true,
           content: [{ type: "text", text: MCP_AUTH_NEEDED_ERROR.message }],
+          structuredContent: connectionAuthNeededError(MCP_AUTH_NEEDED_ERROR.message),
         });
       }
       // A routed workspace mutation crossed provider admission but lost exact
@@ -11265,7 +11486,7 @@ export async function restoreInterruptedRunState(
     clientToolSearchRehydration: "preserve_history",
     resolveMissingFunctionTool: commandCompletionToolResolver(
       agent,
-      mcpToolResolverForAgent(agent),
+      repeatGuardedToolResolver(agent, mcpToolResolverForAgent(agent)),
     ),
   });
 }
@@ -11279,7 +11500,18 @@ export async function prepareRunInput(
 ): Promise<PreparedAgentInput> {
   if (input.kind === "message") {
     const trailingMessages: AgentInputItem[] = [];
-    if (input.internalContext?.trim()) {
+    // A missing title is requested once, in this turn's operational notice: it
+    // is stored where it was sent, and later turns read it as historical.
+    // Once per agent: input prepared again for the same agent (a nudge, a
+    // retry after compaction) follows a run that already saw the request.
+    const titleRequested = agentsNeedingGenesisTitleDirective.delete(agent);
+    const internalContext = [
+      input.internalContext?.trim() ? input.internalContext : undefined,
+      titleRequested ? GENESIS_TITLE_DIRECTIVE : undefined,
+    ]
+      .filter((part): part is string => part !== undefined)
+      .join("\n\n");
+    if (internalContext) {
       trailingMessages.push({
         type: "message",
         role: "system",
@@ -11288,7 +11520,7 @@ export async function prepareRunInput(
           "This status applies to the execution turn where this notice first appears. " +
           "On later turns it is historical context, not current availability or authorization. " +
           "Use the latest operational status and tool results; this notice grants no permissions.\n\n" +
-          input.internalContext,
+          internalContext,
       } as AgentInputItem);
     }
     if (input.text?.trim()) {
@@ -11323,10 +11555,14 @@ export async function prepareRunInput(
       // Preserve the SDK's simple first-message form without creating a second
       // history path: this is merely the zero-history representation.
       input:
-        sanitizedHistory.length === 0 && !input.internalContext?.trim() && input.text?.trim()
+        sanitizedHistory.length === 0 && !internalContext && input.text?.trim()
           ? input.text
           : assembled,
       persistedHistoryCount: sanitizedHistory.length,
+      historyWithRepositorySkills: async (index) => [
+        ...sanitizedHistory,
+        repositorySkillsContextItem(index) as unknown as AgentInputItem,
+      ],
       ...(sandboxSessionState ? { sandboxSessionState } : {}),
       ...(input.modelInputAlreadyProjected ? { modelInputAlreadyProjected: true } : {}),
     };
@@ -11374,6 +11610,12 @@ export type RunAgentStreamOptions = {
   beforeModelRequest?: ModelCallLifecycle["beforeModelRequest"];
   /** Register terminal response settlement before the next producer model request. */
   onModelResponse?: ModelCallLifecycle["onModelResponse"];
+  /**
+   * Called when the run ends at a model-step boundary because the previous
+   * response had no text and no tool call (see contentlessModelResponseGuard).
+   * The run then finishes with an empty final output.
+   */
+  onContentlessModelResponse?: () => void;
   /** Lets a Steer cut the in-flight model request short (see streamWithPreemption). */
   modelPreemption?: ModelCallLifecycle["modelPreemption"];
   /** Abort the provider/tool loop when the owning activity is cancelled. */
@@ -11486,11 +11728,10 @@ export const GENESIS_TITLE_DIRECTIVE =
   "This session still needs a semantic display title. Before responding to the user, call opengeni__set_session_title once with a concise 3-7 word topic label for the actual task or subject, then address the request normally. Write a stable noun phrase, not a quote or prefix of the user's message. Omit greetings, request boilerplate such as ‘I want you to’ or ‘please’, URLs, identifiers, credentials, tokens, and other sensitive values.";
 
 /**
- * Inject the missing-title directive into exactly one model request. Agent
- * instructions are reused for every model call in a tool loop, so placing this
- * directive there turned a nominally one-shot setup action into repeated title
- * calls. The closure is intentionally consumed even when the first request
- * fails; if no title is persisted, a later attempt or turn will request it again.
+ * Inject the missing-title directive into exactly one model request's
+ * instructions.
+ * @deprecated Live execution puts the directive in the turn's operational
+ * notice, a history item, so the system prompt never changes.
  */
 export function oneShotGenesisTitleInputFilter(): CallModelInputFilter {
   let pending = true;
@@ -11508,12 +11749,19 @@ export function oneShotGenesisTitleInputFilter(): CallModelInputFilter {
   };
 }
 
-function takeGenesisTitleInputFilter(agent: Agent<any, any>): CallModelInputFilter | undefined {
-  if (!agentsNeedingGenesisTitleDirective.has(agent)) {
-    return undefined;
-  }
-  agentsNeedingGenesisTitleDirective.delete(agent);
-  return oneShotGenesisTitleInputFilter();
+function repositorySkillsInputFilterForRun(
+  agent: Agent<any, any>,
+  prepared: PreparedAgentInput,
+): CallModelInputFilter | undefined {
+  const state = agentRepositorySkillsContext.get(agent);
+  return state
+    ? repositorySkillsContextInputFilter(
+        state,
+        prepared.input,
+        prepared.persistedHistoryCount,
+        prepared.historyWithRepositorySkills,
+      )
+    : undefined;
 }
 
 // Generic substrate prompting for programmatic tool calling (codemode). Same
@@ -11531,7 +11779,7 @@ export const CODE_SEARCH_DIRECTIVE =
   "To find where something is implemented, configured or decided in the code, start with one `code_search` call (a precise question plus 6-15 likely identifiers, file-name fragments, config keys or error strings) instead of a series of separate searches and file reads. When the question asks whether something is required, enforced or the default, add a subQuestion and keywords for what could skip, bypass or override it. Use the returned passages directly instead of re-reading them. Their evidence rating covers only what the search returned, so spend follow-up searches outside those passages: other entry points to the same outcome (API routes, automatic or self-service paths), defaults, flags, exceptions and its unfollowed leads.";
 
 export const CODEMODE_PROGRAMMATIC_DIRECTIVE =
-  "Every tool in the Codemode catalog (what `ogtool list` shows) is also callable programmatically from the sandbox through the same frozen catalog, authority, credentials, policy, and execution path. Built-in sandbox tools for the shell, file patching, image viewing and terminal input are not in that catalog; inside the sandbox, use the shell and filesystem directly. Prefer Codemode for loops, polling, bulk filtering, and intermediate data that should remain in the sandbox instead of consuming your context window. " +
+  "Every tool in the Codemode catalog (what `ogtool list` shows) is also callable programmatically from the sandbox through the same frozen catalog, authority, credentials, policy, and execution path. Built-in sandbox tools for the shell, file patching, image viewing and terminal input are not in that catalog; inside the sandbox, use the shell and filesystem directly. Prefer Codemode for loops, polling, bulk filtering, and intermediate data within the live attempt instead of consuming your context window. Background commands keep the launching attempt's credentials; a new turn does not renew those processes. Do not leave a sleeping script or polling loop to make Codemode calls after ending your turn. For a later recheck, let the session wake, then launch a fresh command. " +
   'When $OPENGENI_CODEMODE_NATIVE_CLIENT is available, prefer the connection-bound native client even if an older `ogtool` is installed: `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode` takes the same list, show, call, and read commands and uses the same public Codemode operation journal. Otherwise use a compatible `ogtool` from PATH (managed sandboxes put the worker-release client there for every command); if none is compatible, with Bun and $OPENGENI_OGTOOL_PACKAGE_SPEC use the exact pinned `bun x -p "$OPENGENI_OGTOOL_PACKAGE_SPEC" ogtool ...`; never guess a version or install `latest`. ' +
   "Default `ogtool list` enumerates every authorized tool with a compact summary, without schemas or an output-size cutoff; `list --json` is structured and `list --full` includes all schemas. Inspect a tool with `ogtool show <tool-path>` and call it with `ogtool call <tool-path> '<json-args>'`. " +
   'When OPENGENI_CODEMODE_CLIENT_MODULE is set, persistent Bun programs must use `const { tools, openGeni } = await import(process.env.OPENGENI_CODEMODE_CLIENT_MODULE!)` (do not import the older image-baked package or invoke /usr/local/bin/ogtool directly); otherwise import them from "@opengeni/codemode"; `ogtool declarations <file.d.ts>` writes catalog types. ' +
@@ -11639,14 +11887,31 @@ export async function runAgentStream(
 ) {
   const gate = agentInputWaitYields.get(agent);
   const scope = gate?.beginStream(overrides.signal);
+  // Discovery cards a search or listing skipped, or failed to show, become
+  // session events of this run.
+  const onRuntimeEvent = overrides.onRuntimeEvent;
+  const discoveryCards = lazyToolRuntimeForAgent(agent);
+  const discoveryCardSink = onRuntimeEvent
+    ? (event: unknown) => onRuntimeEvent({ type: "tool.discovery_card", payload: event })
+    : undefined;
+  discoveryCards?.setDiscoveryCardSink(discoveryCardSink);
+  // A later event never reaches a finished run's publisher.
+  const releaseDiscoveryCards = () => discoveryCards?.releaseDiscoveryCardSink(discoveryCardSink);
+  const contentless = contentlessModelResponseGuard(overrides.onContentlessModelResponse);
   try {
     if (scope) agent.toolUseBehavior = scope.toolUseBehavior;
     const stream = await withModelCallLifecycle(
       {
-        ...(overrides.beforeModelRequest
-          ? { beforeModelRequest: overrides.beforeModelRequest }
-          : {}),
-        ...(overrides.onModelResponse ? { onModelResponse: overrides.onModelResponse } : {}),
+        // The host's admission (a waiting Steer, cancellation) decides first;
+        // only then does a contentless previous response end the run.
+        beforeModelRequest: async (point) => {
+          await overrides.beforeModelRequest?.(point);
+          if (point === "model_entry") contentless.check();
+        },
+        onModelResponse: (event) => {
+          contentless.observe(event);
+          return overrides.onModelResponse?.(event) ?? Promise.resolve();
+        },
         ...(overrides.modelPreemption ? { modelPreemption: overrides.modelPreemption } : {}),
       },
       () =>
@@ -11664,9 +11929,11 @@ export async function runAgentStream(
       const finish = () => scope.endStream(stream.cancelled);
       void stream.completed.then(finish, finish);
     }
+    void stream.completed.then(releaseDiscoveryCards, releaseDiscoveryCards);
     return stream;
   } catch (error) {
     scope?.endStream();
+    releaseDiscoveryCards();
     throw error;
   }
 }
@@ -11691,7 +11958,6 @@ async function runAgentStreamInternal(
     codemodeTokenFile && agentActiveSandboxBackend.get(agent) !== "selfhosted"
       ? managedCodemodeClientDirectory(await loadManagedCodemodeClient())
       : undefined;
-  const genesisTitleInputFilter = takeGenesisTitleInputFilter(agent);
   const modelRequestCapture = bindModelVisibleContextCapture(
     agent,
     overrides.onModelVisibleContext,
@@ -11718,9 +11984,13 @@ async function runAgentStreamInternal(
     // whose per-op pointer re-read could land these execs on a machine swapped in
     // mid-turn.
     const setupSession = (overrides.ownedSandbox.setupSession ?? session) as SandboxSessionLike;
-    const credentialAgentSession = overrides.runCredentialSessionId
+    const chatGitSessionKey = gitSessionKeyForAgent(agent);
+    const runCredentialAgentSession = overrides.runCredentialSessionId
       ? withRunCredentialsSession(session as SandboxSessionLike, overrides.runCredentialSessionId)
       : (session as SandboxSessionLike);
+    const credentialAgentSession = chatGitSessionKey
+      ? withGitSessionSession(runCredentialAgentSession, chatGitSessionKey)
+      : runCredentialAgentSession;
     const agentSession = codemodeTokenFile
       ? withCodemodeTokenSession(
           credentialAgentSession,
@@ -11729,9 +11999,12 @@ async function runAgentStreamInternal(
           codemodeClientDirectory,
         )
       : credentialAgentSession;
-    const credentialSetupSession = overrides.runCredentialSessionId
+    const runCredentialSetupSession = overrides.runCredentialSessionId
       ? withRunCredentialsSession(setupSession, overrides.runCredentialSessionId)
       : setupSession;
+    const credentialSetupSession = chatGitSessionKey
+      ? withGitSessionSession(runCredentialSetupSession, chatGitSessionKey)
+      : runCredentialSetupSession;
     const decoratedSetupSession = codemodeTokenFile
       ? withCodemodeTokenSession(
           credentialSetupSession,
@@ -11810,6 +12083,7 @@ async function runAgentStreamInternal(
       ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
       ...(ownedGitTokenSeeds ? { gitTokenSeeds: ownedGitTokenSeeds } : {}),
       ...(ownedGitCredentialBindings ? { gitCredentialBindings: ownedGitCredentialBindings } : {}),
+      ...(chatGitSessionKey ? { gitSessionKey: chatGitSessionKey } : {}),
       ...(ownedCodemodeTokenSeed ? { codemodeTokenSeed: ownedCodemodeTokenSeed } : {}),
       ...(codemodeTokenFile ? { codemodeTokenFile } : {}),
       ...(ownedCodemodeClientDownload
@@ -11821,13 +12095,16 @@ async function runAgentStreamInternal(
     // Keep both credential seeding and lifecycle decoration as a safety net for
     // any session the SDK does create/resume during this run. They are inert for
     // the provided session, which remains the normal ownership-inverted path.
-    const credentialResourceClient = overrides.runCredentialSessionId
+    const runCredentialResourceClient = overrides.runCredentialSessionId
       ? withRunCredentialsClient(
           resourceClient,
           overrides.runCredentialSessionId,
           overrides.onRunCredentialSessionReady,
         )
       : resourceClient;
+    const credentialResourceClient = chatGitSessionKey
+      ? withGitSessionClient(runCredentialResourceClient, chatGitSessionKey)
+      : runCredentialResourceClient;
     const codemodeResourceClient = codemodeTokenFile
       ? withCodemodeTokenClient(
           credentialResourceClient,
@@ -11843,6 +12120,9 @@ async function runAgentStreamInternal(
     );
     const ownedFilter = composeCallModelInputFilters(
       [
+        // First, over the SDK's own input: the index takes the place later
+        // turns load it from, and every filter below treats it like history.
+        repositorySkillsInputFilterForRun(agent, prepared),
         inputWaitYield?.modelInputFilter,
         commandCompletionModelCallFilter(agent),
         measuredModelInputFilter(
@@ -11851,7 +12131,6 @@ async function runAgentStreamInternal(
             searchRecordForm: overrides.searchRecordForm,
           }),
         ),
-        measuredModelInputFilter("input_filter_genesis", genesisTitleInputFilter),
         measuredModelInputFilter("input_filter_host", overrides.callModelInputFilter),
         // A caller filter may synthesize model input. Re-apply the idempotent
         // canonical bound at the literal final seam before accounting/provider
@@ -11956,7 +12235,7 @@ async function runAgentStreamInternal(
           ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
         })
       : refreshedClient;
-  const credentialClient =
+  const runCredentialClient =
     resourceClient && overrides.runCredentialSessionId
       ? withRunCredentialsClient(
           resourceClient,
@@ -11964,6 +12243,11 @@ async function runAgentStreamInternal(
           overrides.onRunCredentialSessionReady,
         )
       : resourceClient;
+  const chatGitSessionKey = gitSessionKeyForAgent(agent);
+  const credentialClient =
+    runCredentialClient && chatGitSessionKey
+      ? withGitSessionClient(runCredentialClient, chatGitSessionKey)
+      : runCredentialClient;
   const codemodeClient =
     credentialClient && codemodeTokenFile
       ? withCodemodeTokenClient(
@@ -12004,6 +12288,7 @@ async function runAgentStreamInternal(
           ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
           ...(gitTokenSeeds ? { gitTokenSeeds } : {}),
           ...(gitCredentialBindings ? { gitCredentialBindings } : {}),
+          ...(chatGitSessionKey ? { gitSessionKey: chatGitSessionKey } : {}),
           ...(codemodeTokenSeed ? { codemodeTokenSeed } : {}),
           ...(codemodeTokenFile ? { codemodeTokenFile } : {}),
           ...(legacyRigSetup ? { rigSetup: legacyRigSetup } : {}),
@@ -12024,6 +12309,7 @@ async function runAgentStreamInternal(
   // pass an SDK session and reconciles durable truth from the untouched input.
   const callModelInputFilter = composeCallModelInputFilters(
     [
+      repositorySkillsInputFilterForRun(agent, prepared),
       inputWaitYield?.modelInputFilter,
       commandCompletionModelCallFilter(agent),
       measuredModelInputFilter(
@@ -12032,7 +12318,6 @@ async function runAgentStreamInternal(
           searchRecordForm: overrides.searchRecordForm,
         }),
       ),
-      measuredModelInputFilter("input_filter_genesis", genesisTitleInputFilter),
       measuredModelInputFilter("input_filter_host", overrides.callModelInputFilter),
       measuredModelInputFilter(
         "input_filter_tool_output",
@@ -12200,7 +12485,7 @@ function lazyToolRunBindings(agent: Agent<any, any>): {
     ...(runtime ? { toolNotFoundBehavior: "return_error_to_model" as const } : {}),
     resolveMissingFunctionTool: commandCompletionToolResolver(
       agent,
-      mcpToolResolverForAgent(agent),
+      repeatGuardedToolResolver(agent, mcpToolResolverForAgent(agent)),
     ),
   };
 }
@@ -12678,7 +12963,7 @@ export async function pinProvidedSessionManifestEnvironment(
 export async function runOwnedSandboxSetup(
   agent: Agent<any, any>,
   session: SandboxSessionLike,
-  setupSession: SandboxSessionLike,
+  ownerSetupSession: SandboxSessionLike,
   opts: {
     settings: Settings;
     environment: Record<string, string>;
@@ -12707,6 +12992,12 @@ export async function runOwnedSandboxSetup(
   },
 ): Promise<void> {
   const { settings, environment } = opts;
+  // Every setup command (rig setup included) runs in this chat's own Git
+  // credential directory, never the one of the chat that set up last.
+  const setupChatGitSessionKey = gitSessionKeyForAgent(agent);
+  const setupSession = setupChatGitSessionKey
+    ? withGitSessionSession(ownerSetupSession, setupChatGitSessionKey)
+    : ownerSetupSession;
   // ENV PIN (provided sessions): the SDK validates the FULL recomputed manifest
   // env against the live box's baked env before applying its entry-only delta
   // (validateNoEnvironmentDelta — session-fatal on ANY difference). Adopt the
@@ -12747,6 +13038,7 @@ export async function runOwnedSandboxSetup(
     ...(opts.onRuntimeEvent ? { onRuntimeEvent: opts.onRuntimeEvent } : {}),
     ...(Object.keys(ownedGitTokenSeeds).length > 0 ? { gitTokenSeeds: ownedGitTokenSeeds } : {}),
     ...(ownedGitCredentialBindings ? { gitCredentialBindings: ownedGitCredentialBindings } : {}),
+    ...(gitSessionKeyForAgent(agent) ? { gitSessionKey: gitSessionKeyForAgent(agent)! } : {}),
     ...(ownedCodemodeTokenSeed ? { codemodeTokenSeed: ownedCodemodeTokenSeed } : {}),
     ...(ownedCodemodeTokenFile ? { codemodeTokenFile: ownedCodemodeTokenFile } : {}),
     ...(ownedCodemodeClientDownload ? { codemodeClientDownload: ownedCodemodeClientDownload } : {}),
@@ -13512,16 +13804,25 @@ function normalizeSandboxFileDownloads(downloads: SandboxFileDownload[]): Sandbo
   });
 }
 
+/**
+ * One path segment inside the file's own mount directory. Separators, NUL and
+ * the `.`/`..` segments are what can leave that directory; a name that only
+ * contains two dots (`notes..txt`, `v1..2.csv`) is an ordinary file name.
+ */
+function isSafeSandboxFilename(filename: string): boolean {
+  return (
+    filename.length > 0 &&
+    filename !== "." &&
+    filename !== ".." &&
+    !filename.includes("/") &&
+    !filename.includes("\\") &&
+    !filename.includes("\0")
+  );
+}
+
 function assertSafeSandboxFilename(filename: string, fileId: string): void {
-  if (
-    !filename ||
-    filename.includes("/") ||
-    filename.includes("\\") ||
-    filename === "." ||
-    filename === ".." ||
-    filename.includes("..")
-  ) {
-    throw new Error(`Invalid sandbox file name for ${fileId}: ${filename}`);
+  if (!isSafeSandboxFilename(filename)) {
+    throw new Error(`Invalid sandbox file name for ${fileId}`);
   }
 }
 
@@ -13631,6 +13932,12 @@ export type SandboxLifecycleHookContext = {
   // bearers use the private editor/file ingress and never enter command text.
   gitTokenSeeds?: GitTokenSeeds;
   gitCredentialBindings?: GitCredentialBindingSeed[];
+  /**
+   * The chat these credentials belong to (sandbox/git-session.ts gitSessionKey).
+   * Its Git credential files go to its own directory, so chats sharing the box
+   * keep their own.
+   */
+  gitSessionKey?: string;
   codemodeTokenSeed?: string;
   codemodeTokenFile?: string;
   codemodeClientDownload?: ManagedCodemodeClientDownload;
@@ -13962,6 +14269,22 @@ function codemodeTokenSeedForAgent(agent: Agent<any, any>): string | undefined {
   return agentCodemodeTokenSeed.get(agent);
 }
 
+function gitSessionKeyForAgent(agent: Agent<any, any>): string | undefined {
+  return agentGitSessionKey.get(agent);
+}
+
+/**
+ * Names the chat an agent runs for on a managed sandbox. Each chat sharing a
+ * box keeps its Git credential files (broker pass, routes, helper, gh
+ * selection) in its own directory, and every command of this chat, including
+ * setup, selects that directory (sandbox/git-session.ts). Read when the agent
+ * runs, so bind it after building and before running. Connected Machines get
+ * their Git credentials per exec instead; don't bind those.
+ */
+export function bindAgentGitCredentialSession(agent: Agent<any, any>, sessionId: string): void {
+  agentGitSessionKey.set(agent, gitSessionKey(sessionId));
+}
+
 function codemodeTokenSessionIdForAgent(agent: Agent<any, any>): string | undefined {
   return agentCodemodeTokenSessionId.get(agent);
 }
@@ -14268,11 +14591,97 @@ function gitCredentialBindingSeedExportPrefix(bindings: GitCredentialBindingSeed
     .join("\n");
 }
 
+const GIT_BROKER_CREDENTIAL_DELIVERY_FAILED = "Sandbox could not receive the Git broker credential";
+const GIT_BROKER_SEED_WRITE_RETRY_DELAYS_MS = [200, 1_000];
+const GIT_BROKER_DELIVERY_CAUSE_MAX_CHARS = 300;
+
+/**
+ * A private Git broker credential could not be written into the box. The
+ * message names the underlying failure with every broker bearer redacted, and
+ * `cause` keeps the original error, so setup can tell a full disk (fails softly
+ * with a notice) or an unanswered machine agent (recovered or replaced by the
+ * worker) from other failures.
+ */
+export class GitBrokerCredentialDeliveryError extends Error {
+  override readonly name = "GitBrokerCredentialDeliveryError";
+
+  constructor(detail: string, cause: unknown) {
+    super(
+      detail
+        ? `${GIT_BROKER_CREDENTIAL_DELIVERY_FAILED}: ${detail}`
+        : GIT_BROKER_CREDENTIAL_DELIVERY_FAILED,
+      { cause },
+    );
+  }
+}
+
+function redactGitBrokerCredentials(text: string, bindings: GitCredentialBindingSeed[]): string {
+  let redacted = text;
+  for (const binding of bindings) {
+    for (const secret of [binding.token, ...binding.token.split("\n")]) {
+      if (secret.length >= 4) redacted = redacted.split(secret).join("[redacted]");
+    }
+  }
+  return redacted;
+}
+
+function redactGitBrokerCredentialDetail(
+  error: unknown,
+  bindings: GitCredentialBindingSeed[],
+): string {
+  const detail = redactGitBrokerCredentials(errorMessage(error), bindings)
+    .replace(/\s+/g, " ")
+    .trim();
+  return detail.length > GIT_BROKER_DELIVERY_CAUSE_MAX_CHARS
+    ? `${detail.slice(0, GIT_BROKER_DELIVERY_CAUSE_MAX_CHARS)}…`
+    : detail;
+}
+
+/**
+ * Redact broker bearers in place from every error in the cause graph that is
+ * kept as `cause`, so serializing the chain (for example into workflow
+ * history) cannot carry one. Typed fields the classifiers read are unchanged.
+ */
+function redactGitBrokerCredentialCauseGraph(
+  error: unknown,
+  bindings: GitCredentialBindingSeed[],
+): void {
+  const queue: unknown[] = [error];
+  const seen = new Set<object>();
+  for (let index = 0; index < queue.length && seen.size < 64; index += 1) {
+    const node = queue[index];
+    if (!node || typeof node !== "object" || seen.has(node)) continue;
+    seen.add(node);
+    try {
+      if (node instanceof Error) {
+        for (const field of ["message", "stack"] as const) {
+          const value = node[field];
+          if (typeof value !== "string") continue;
+          const redacted = redactGitBrokerCredentials(value, bindings);
+          if (redacted !== value) {
+            Object.defineProperty(node, field, {
+              value: redacted,
+              writable: true,
+              configurable: true,
+            });
+          }
+        }
+      }
+      const record = node as { cause?: unknown; error?: unknown; errors?: unknown };
+      queue.push(record.cause, record.error);
+      if (Array.isArray(record.errors)) queue.push(...record.errors.slice(0, 16));
+    } catch {
+      // A frozen or unreadable node keeps its text; the wrapper's message is
+      // redacted regardless.
+    }
+  }
+}
+
 async function stageGitHttpBrokerBindingSeeds(
   session: GitCredentialTokenWriterSession,
   bindings: GitCredentialBindingSeed[],
   runAs?: string,
-  options: { ghGatewayKit?: boolean } = {},
+  options: { ghGatewayKit?: boolean; retryDelaysMs?: readonly number[] } = {},
 ): Promise<{
   editor: ReturnType<NonNullable<GitCredentialTokenWriterSession["createEditor"]>> | null;
   staged: StagedGitCredentialBindingSeed[];
@@ -14292,27 +14701,53 @@ async function stageGitHttpBrokerBindingSeeds(
     : Promise.resolve<string | null>(null);
   const staged: StagedGitCredentialBindingSeed[] = [];
   const cleanupEligible: StagedGitCredentialBindingSeed[] = [];
+  const retryDelaysMs = options.retryDelaysMs ?? GIT_BROKER_SEED_WRITE_RETRY_DELAYS_MS;
   try {
     for (const binding of brokered) {
       const bindingHash = gitCredentialBindingHash(binding.credentialBindingId);
-      const path = `/workspace/.opengeni/git-broker-seeds/${randomUUID()}`;
-      const candidate = { bindingHash, path };
       const diff = binding.token
         .split("\n")
         .map((line) => `+${line}`)
         .join("\n");
-      // A routed editor write can take effect remotely and still reject if its
-      // response is lost. Register the random path for best-effort cleanup
-      // before awaiting, but expose it to the token command only after success.
-      cleanupEligible.push(candidate);
-      await editor.createFile({ type: "create_file", path, diff });
-      staged.push(candidate);
+      for (let attempt = 0; ; attempt += 1) {
+        // A fresh random path per attempt: a routed editor write can take
+        // effect remotely and still reject if its response is lost. Register
+        // the path for best-effort cleanup before awaiting, but expose it to
+        // the token command only after success.
+        const candidate = { bindingHash, path: `${GIT_BROKER_SEED_ROOT}/${randomUUID()}` };
+        cleanupEligible.push(candidate);
+        try {
+          await editor.createFile({ type: "create_file", path: candidate.path, diff });
+          staged.push(candidate);
+          break;
+        } catch (error) {
+          const delayMs = retryDelaysMs[attempt];
+          if (delayMs === undefined || !isRetryableSetupFileWriteFailure(error)) throw error;
+          console.warn(
+            `[opengeni] Git broker credential write failed (attempt ${attempt + 1}); retrying: ${redactGitBrokerCredentialDetail(error, brokered)}`,
+          );
+          await delay(delayMs);
+          // The abandoned attempt may still have landed: remove it now (after
+          // the delay, so a late write has landed), since a later successful
+          // attempt hands only its own path onward. A failed delete keeps the
+          // path for the final cleanup on failure.
+          try {
+            await editor.deleteFile({ type: "delete_file", path: candidate.path });
+            cleanupEligible.splice(cleanupEligible.indexOf(candidate), 1);
+          } catch {
+            // Best effort, as in cleanupStagedGitCredentialSeeds.
+          }
+        }
+      }
     }
     return { editor, staged, ghGatewayKit: await ghGatewayKit };
-  } catch {
+  } catch (error) {
     const kit = await ghGatewayKit;
     await cleanupStagedGitCredentialSeeds(editor, cleanupEligible, kit);
-    throw new Error("Sandbox could not receive the Git broker credential");
+    redactGitBrokerCredentialCauseGraph(error, brokered);
+    const detail = redactGitBrokerCredentialDetail(error, brokered);
+    console.warn(`[opengeni] ${GIT_BROKER_CREDENTIAL_DELIVERY_FAILED}: ${detail}`);
+    throw new GitBrokerCredentialDeliveryError(detail, error);
   }
 }
 
@@ -14813,6 +15248,28 @@ function sandboxGitProvisioningCommand(command: string): string {
   return ["set +x", SANDBOX_GIT_PROVISIONING_TARGET_ASSIGNMENT, command].join("\n");
 }
 
+/**
+ * In the box-wide dispatchers: the chat directory a command names, or for a
+ * process outside any chat (a person's terminal) the chat set up last.
+ */
+const GIT_SESSION_DIR_OR_LATEST =
+  "${OPENGENI_GIT_SESSION_DIR:-${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/sessions/latest}";
+
+/**
+ * The directory of the chat a setup or renewal command runs for (see
+ * sandbox/git-session.ts): named by OPENGENI_GIT_SESSION_DIR, which Opengeni
+ * exports for each chat's commands. A command without it (a direct caller)
+ * uses `sessions/default`.
+ */
+const GIT_SESSION_DIRECTORY_LINES: readonly string[] = [
+  'git_credentials_root="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}"',
+  'git_session_dir="${OPENGENI_GIT_SESSION_DIR:-$git_credentials_root/sessions/default}"',
+  'export OPENGENI_GIT_SESSION_DIR="$git_session_dir"',
+  // Touched on every use, so another chat's stale-directory cleanup never
+  // removes a directory this chat is writing again.
+  '(umask 077 && mkdir -p "$git_session_dir" && touch "$git_session_dir")',
+];
+
 function gitCredentialTokenWriterCommandLines(
   bindings: GitCredentialBindingSeed[] = [],
   stagedSeeds: StagedGitCredentialBindingSeed[] = [],
@@ -14851,11 +15308,14 @@ function gitCredentialTokenWriterCommandLines(
     "    *) printf '%s\\n' \"${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/$provider-token\" ;;",
     "  esac",
     "}",
+    // Binding tokens (and broker passes) belong to one chat: they go to the
+    // chat's own directory, so chats sharing the box never overwrite them.
+    ...GIT_SESSION_DIRECTORY_LINES,
     "write_git_binding_token() {",
     '  binding_hash="$1"',
     '  token="$2"',
     '  [ -n "$token" ] || return 0',
-    '  credential_dir="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}"',
+    '  credential_dir="$git_session_dir"',
     '  mkdir -p "$credential_dir"',
     '  token_file="$credential_dir/$binding_hash-token"',
     '  printf \'%s\' "$token" > "$token_file.tmp.$$"',
@@ -14865,7 +15325,7 @@ function gitCredentialTokenWriterCommandLines(
     '  binding_hash="$1"',
     '  seed_file="$2"',
     '  [ -f "$seed_file" ] && [ ! -L "$seed_file" ] || return 73',
-    '  credential_dir="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}"',
+    '  credential_dir="$git_session_dir"',
     '  mkdir -p "$credential_dir"',
     '  token_file="$credential_dir/$binding_hash-token"',
     '  command cat -- "$seed_file" > "$token_file.tmp.$$"',
@@ -15025,8 +15485,11 @@ function gitHttpBrokerConfigCommandLines(routes: RuntimeGitHttpBrokerRouteDescri
   const rewrites = gitHttpBrokerRewrites(routes);
   const brokeredRepositoryUris = new Set(rewrites.map((rewrite) => rewrite.repositoryUri));
   return [
-    'git_http_broker_config="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/http-broker.gitconfig"',
-    'mkdir -p "$(dirname "$git_http_broker_config")"',
+    // The chat's own routes. Its commands include them through
+    // GIT_CONFIG_PARAMETERS and the git wrapper, never the shared global
+    // config: Git takes the first of two equally long insteadOf rules, so a
+    // global rule would win over the chat's own.
+    'git_http_broker_config="$git_session_dir/http-broker.gitconfig"',
     'broker_umask="$(umask)"',
     "umask 077",
     ': > "$git_http_broker_config.tmp.$$"',
@@ -15052,11 +15515,8 @@ function gitHttpBrokerConfigCommandLines(routes: RuntimeGitHttpBrokerRouteDescri
     ),
     'mv -f "$git_http_broker_config.tmp.$$" "$git_http_broker_config"',
     'umask "$broker_umask"',
-    "include_git_http_broker_config() {",
-    '  git_global_config --unset-all include.path "$git_http_broker_config" >/dev/null 2>&1 || true',
-    '  git_global_config --add include.path "$git_http_broker_config"',
-    "}",
-    "with_git_global_config_lock include_git_http_broker_config",
+    // The repository clones below use the chat's routes too.
+    ...GIT_SESSION_CONFIG_LINES,
   ];
 }
 
@@ -15196,6 +15656,10 @@ const GIT_COMMAND_WRAPPER_TAIL_LINES = [
   'OPENGENI_GIT_WRAPPERS_SEEN="$OPENGENI_GIT_WRAPPERS_SEEN:$real_git"',
   "OPENGENI_GIT_WRAPPER_PID=$$",
   "export OPENGENI_GIT_WRAPPERS_SEEN OPENGENI_GIT_WRAPPER_PID",
+  // The broker routes of the chat this command runs for (see git-session.ts);
+  // Opengeni's own commands also carry them in GIT_CONFIG_PARAMETERS.
+  `opengeni_git_routes="${GIT_SESSION_DIR_OR_LATEST}/http-broker.gitconfig"`,
+  '[ ! -r "$opengeni_git_routes" ] || exec "$real_git" -c "include.path=$opengeni_git_routes" "$@"',
   'exec "$real_git" "$@"',
 ];
 
@@ -15403,6 +15867,25 @@ export function repositoryIdentityCommandLines(
   ];
 }
 
+/** Ends a provider CLI wrapper: run the next real tool of the same name on PATH. */
+const CLI_WRAPPER_EXEC_REAL_TOOL_LINES: readonly string[] = [
+  'self_real="$(readlink -f "$0" 2>/dev/null || printf \'%s\\n\' "$0")"',
+  'old_ifs="$IFS"',
+  "IFS=:",
+  "for dir in $PATH; do",
+  '  [ -n "$dir" ] || dir=.',
+  '  candidate="$dir/$tool"',
+  '  [ -x "$candidate" ] || continue',
+  '  candidate_real="$(readlink -f "$candidate" 2>/dev/null || printf \'%s\\n\' "$candidate")"',
+  '  [ "$candidate_real" = "$self_real" ] && continue',
+  '  IFS="$old_ifs"',
+  '  exec "$candidate" "$@"',
+  "done",
+  'IFS="$old_ifs"',
+  "printf '%s\\n' \"$tool: real command not found on PATH\" >&2",
+  "exit 127",
+];
+
 /**
  * `gh` as the person: when the session has a personal GitHub connection and
  * no attached App credential is selected (by OPENGENI_GIT_BINDING or the
@@ -15433,7 +15916,8 @@ const GH_GATEWAY_WRAPPER_LINES = [
   "  elif command -v bun >/dev/null 2>&1; then gw_js=bun",
   "  else printf '%s\\n' 'gh: Node.js or Bun is needed to use gh as you' >&2; return 127",
   "  fi",
-  '  gw_pass="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/$gh_gateway_binding-token"',
+  // The pass of the chat this command runs for (set by the wrapper on PATH).
+  '  gw_pass="$opengeni_git_session_dir/$gh_gateway_binding-token"',
   '  gw_dir="$(mktemp -d "${TMPDIR:-/tmp}/opengeni-gh.XXXXXX")"',
   '  gw_sock="$gw_dir/gateway.sock"',
   "  cat > \"$gw_dir/proxy.cjs\" <<'GH_GATEWAY_PROXY_EOF'",
@@ -15668,9 +16152,21 @@ function gitCredentialHelperCommandLines(
     "ASKPASS_EOF",
     'chmod 0755 "$git_askpass.tmp.$$"',
     'mv -f "$git_askpass.tmp.$$" "$git_askpass"',
-    'git_credential_helper="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/helper"',
+    // The global config names one box-wide helper. It only hands the request
+    // to the helper of the chat the command runs for (see git-session.ts);
+    // that one knows the chat's remotes and reads the chat's own tokens.
+    'git_credential_helper="$git_credentials_root/helper"',
     'mkdir -p "$(dirname "$git_credential_helper")"',
     "cat > \"$git_credential_helper.tmp.$$\" <<'GIT_CREDENTIAL_HELPER_EOF'",
+    "#!/usr/bin/env sh",
+    `session_helper="${GIT_SESSION_DIR_OR_LATEST}/helper"`,
+    '[ -x "$session_helper" ] || exit 0',
+    'exec "$session_helper" "$@"',
+    "GIT_CREDENTIAL_HELPER_EOF",
+    'chmod 0755 "$git_credential_helper.tmp.$$"',
+    'mv -f "$git_credential_helper.tmp.$$" "$git_credential_helper"',
+    'git_session_helper="$git_session_dir/helper"',
+    "cat > \"$git_session_helper.tmp.$$\" <<'GIT_CREDENTIAL_HELPER_EOF'",
     "#!/usr/bin/env sh",
     "set -eu",
     '[ "${1:-get}" = get ] || exit 0',
@@ -15682,7 +16178,8 @@ function gitCredentialHelperCommandLines(
     '    path) path="${value#/}" ;;',
     "  esac",
     "done",
-    'credential_dir="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}"',
+    // This chat's directory: the one holding this helper.
+    'credential_dir="${0%/*}"',
     "username= token_file=",
     'case "$protocol|$host|$path" in',
     ...bindingCases,
@@ -15693,12 +16190,14 @@ function gitCredentialHelperCommandLines(
     '[ -n "$password" ] || exit 0',
     'printf \'username=%s\\npassword=%s\\n\' "$username" "$password"',
     "GIT_CREDENTIAL_HELPER_EOF",
-    'chmod 0755 "$git_credential_helper.tmp.$$"',
-    'mv -f "$git_credential_helper.tmp.$$" "$git_credential_helper"',
+    'chmod 0755 "$git_session_helper.tmp.$$"',
+    'mv -f "$git_session_helper.tmp.$$" "$git_session_helper"',
     // Empty helper resets lower-priority/system helpers; our exact path-aware
     // helper returns no credential for an unbound remote, so multi-binding
     // sessions fail closed instead of falling through to ambient credentials.
     "install_git_credential_helper() {",
+    // Earlier releases included one box-wide copy of the broker routes.
+    '  git_global_config --unset-all include.path "$git_credentials_root/http-broker.gitconfig" >/dev/null 2>&1 || true',
     "  git_global_config --unset-all credential.helper >/dev/null 2>&1 || true",
     "  git_global_config --add credential.helper ''",
     '  git_global_config --add credential.helper "$git_credential_helper"',
@@ -15726,12 +16225,10 @@ function gitCredentialHelperCommandLines(
           "fi",
         ]
       : []),
-    "for opengeni_git_cli_tool in gh glab az; do",
-    '  wrapper="$wrapper_dir/$opengeni_git_cli_tool"',
-    "  cat > \"$wrapper.tmp.$$\" <<'CLI_WRAPPER_EOF'",
-    "#!/usr/bin/env sh",
-    "set -eu",
-    'tool="${0##*/}"',
+    // The chat's own credential selection for gh, glab and az, sourced by
+    // the box-wide wrappers below for commands of this chat.
+    'cli_session_wrapper="$git_session_dir/cli-wrapper.sh"',
+    "cat > \"$cli_session_wrapper.tmp.$$\" <<'CLI_WRAPPER_EOF'",
     'case "$tool" in',
     "  gh) provider=github; token_env=GH_TOKEN ;;",
     "  glab) provider=gitlab; token_env=GITLAB_TOKEN ;;",
@@ -15813,7 +16310,7 @@ function gitCredentialHelperCommandLines(
     "  fi",
     '  [ -n "$binding_hash" ] || binding_hash="$(sole_binding_hash 2>/dev/null || true)"',
     '  if [ -n "$binding_hash" ]; then',
-    '    token_file="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/$binding_hash-token"',
+    '    token_file="$opengeni_git_session_dir/$binding_hash-token"',
     "  else",
     '    case " $broker_only_providers " in',
     '      *" $provider "*) printf \'%s\\n\' "$tool provider API authentication is host-brokered for this session; use the configured provider MCP tools" >&2; exit 2 ;;',
@@ -15852,26 +16349,35 @@ function gitCredentialHelperCommandLines(
     "      esac",
     "    fi",
     "fi",
-    'self_real="$(readlink -f "$0" 2>/dev/null || printf \'%s\\n\' "$0")"',
-    'old_ifs="$IFS"',
-    "IFS=:",
-    "for dir in $PATH; do",
-    '  [ -n "$dir" ] || dir=.',
-    '  candidate="$dir/$tool"',
-    '  [ -x "$candidate" ] || continue',
-    '  candidate_real="$(readlink -f "$candidate" 2>/dev/null || printf \'%s\\n\' "$candidate")"',
-    '  [ "$candidate_real" = "$self_real" ] && continue',
-    '  IFS="$old_ifs"',
-    '  exec "$candidate" "$@"',
-    "done",
-    'IFS="$old_ifs"',
-    "printf '%s\\n' \"$tool: real command not found on PATH\" >&2",
-    "exit 127",
+    "CLI_WRAPPER_EOF",
+    'chmod 0600 "$cli_session_wrapper.tmp.$$"',
+    'mv -f "$cli_session_wrapper.tmp.$$" "$cli_session_wrapper"',
+    "for opengeni_git_cli_tool in gh glab az; do",
+    '  wrapper="$wrapper_dir/$opengeni_git_cli_tool"',
+    "  cat > \"$wrapper.tmp.$$\" <<'CLI_WRAPPER_EOF'",
+    "#!/usr/bin/env sh",
+    "set -eu",
+    `opengeni_git_session_dir="${GIT_SESSION_DIR_OR_LATEST}"`,
+    'tool="${0##*/}"',
+    // Sets the chat's credentials for the tool (or runs gh as the person and
+    // exits), then the real tool runs.
+    '[ ! -r "$opengeni_git_session_dir/cli-wrapper.sh" ] || . "$opengeni_git_session_dir/cli-wrapper.sh"',
+    ...CLI_WRAPPER_EXEC_REAL_TOOL_LINES,
     "CLI_WRAPPER_EOF",
     '  chmod 0755 "$wrapper.tmp.$$"',
     '  mv -f "$wrapper.tmp.$$" "$wrapper"',
     "done",
-    ...gitCommandWrapperCommandLines(personalGateway !== null),
+    // Box-wide, so the same for every chat: the gh gateway part only acts
+    // under a gh that runs as the person.
+    ...gitCommandWrapperCommandLines(true),
+    // Directories of chats idle for a day go: their passes expired long ago,
+    // and a chat's next setup writes its directory again.
+    'find "$git_credentials_root/sessions" -mindepth 1 -maxdepth 1 -type d ! -name "${git_session_dir##*/}" -mmin +1440 -exec rm -rf {} + 2>/dev/null || true',
+    // So do the box-wide binding files of earlier releases, once just as old.
+    'find "$git_credentials_root" -maxdepth 1 -type f \\( -name http-broker.gitconfig -o -name "????????????????????????????????-token" \\) -mmin +1440 -exec rm -f {} + 2>/dev/null || true',
+    // A process outside any chat (a person's terminal) uses the chat whose
+    // setup ran last.
+    'ln -sfn "${git_session_dir##*/}" "$git_credentials_root/sessions/latest" 2>/dev/null || true',
     "if [ -d /etc/profile.d ] && [ -w /etc/profile.d ]; then",
     '  printf \'%s\\n\' \'case ":$PATH:" in *":${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}:"*) ;; *) export PATH="${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}:$PATH" ;; esac\' > /etc/profile.d/opengeni-git-cli.sh',
     "fi",
@@ -15904,6 +16410,10 @@ export function gitProviderTokenRefreshCommand(seeds: GitTokenSeeds): string {
 export function gitCredentialBindingTokenRefreshCommand(
   bindings: GitCredentialBindingSeed[],
   stagedSeeds: StagedGitCredentialBindingSeed[] = [],
+  options: {
+    /** The chat whose tokens these are (gitSessionKey); renews into its directory. */
+    gitSessionKey?: string;
+  } = {},
 ): string {
   const seedPrefix = gitCredentialBindingSeedExportPrefix(bindings);
   if (!seedPrefix && stagedSeeds.length === 0) return "";
@@ -15913,6 +16423,7 @@ export function gitCredentialBindingTokenRefreshCommand(
     "set -eu",
     ...sandboxGitProvisioningGuardLines(),
     'export HOME="${HOME:-/workspace}"',
+    ...(options.gitSessionKey ? [gitSessionDirectoryExport(options.gitSessionKey)] : []),
     ...gitCredentialTokenWriterCommandLines(bindings, stagedSeeds),
   ].join("\n");
 }
@@ -15948,11 +16459,15 @@ export async function refreshGitCredentialBindingTokenFiles(
   options: {
     runAs?: string;
     commandRunner?: SandboxLifecycleCommandRunner;
+    /** The chat whose tokens these are (gitSessionKey). */
+    gitSessionKey?: string;
   } = {},
 ): Promise<void> {
   const { editor, staged } = await stageGitHttpBrokerBindingSeeds(session, bindings, options.runAs);
   try {
-    const command = gitCredentialBindingTokenRefreshCommand(bindings, staged);
+    const command = gitCredentialBindingTokenRefreshCommand(bindings, staged, {
+      ...(options.gitSessionKey ? { gitSessionKey: options.gitSessionKey } : {}),
+    });
     if (!command) return;
     const args = {
       cmd: sandboxGitProvisioningCommand(command),
@@ -16744,7 +17259,10 @@ const RIG_SETUP_INLINE_COMMAND_MAX_BYTES = 4 * 1024;
 // so 12 KiB leaves about 10 KiB under Modal's 64-KiB argv ceiling. Each staged
 // chunk costs one sandbox round trip, so chunks are as large as is safe.
 const RIG_SETUP_PAYLOAD_CHUNK_CHARS = 12 * 1024;
-const REPOSITORY_SETUP_SELF_INSTALL_MAX_BYTES = 12 * 1024;
+// A whole single-command setup program may take 13 KiB: (13 + 5.5) x 3 is
+// 55.5 KiB, still about 8.5 KiB under the ceiling. The usual one-repository
+// program with per-chat Git credentials compresses to about 12.1 KiB.
+const REPOSITORY_SETUP_SELF_INSTALL_MAX_BYTES = 13 * 1024;
 const REPOSITORY_SETUP_ONE_SHOT_PAYLOAD_ROOT = "/tmp/opengeni/repository-setup-payloads";
 const RIG_SETUP_PAYLOAD_ROOT = "/tmp/opengeni/rig-setup-payloads";
 const RIG_SETUP_GZIP_SENTINEL = "__OPENGENI_SETUP_GZIP__";
@@ -17270,7 +17788,11 @@ export async function runRepositoryCloneHook(
   resources: Extract<ResourceRef, { kind: "repository" }>[],
   context: SandboxLifecycleHookContext = { environment: {} },
   /** Test seam: the per-repository optional clone bound, in seconds. */
-  options: { optionalCloneTimeoutSeconds?: number } = {},
+  options: {
+    optionalCloneTimeoutSeconds?: number;
+    /** Test seam: waits before each retry of a failed broker seed write. */
+    brokerSeedRetryDelaysMs?: readonly number[];
+  } = {},
 ): Promise<void> {
   const payload = {
     name: "repository-clone",
@@ -17308,6 +17830,9 @@ export async function runRepositoryCloneHook(
           personalGitHubGatewayDescriptor(
             runtimeGitHttpBrokerRouteDescriptors(resources, gitCredentialBindings),
           ) !== null,
+        ...(options.brokerSeedRetryDelaysMs
+          ? { retryDelaysMs: options.brokerSeedRetryDelaysMs }
+          : {}),
       },
     );
     // Per run, inline with the seeds, so the staged program stays reusable.
@@ -17316,6 +17841,8 @@ export async function runRepositoryCloneHook(
       gitTokenSeedExportPrefix(gitTokenSeeds),
       gitCredentialBindingSeedExportPrefix(gitCredentialBindings),
       `export OPENGENI_REPOSITORY_NOTICE_TOKEN=${noticeToken}`,
+      // The chat's own credential directory; per run, so the program stays shared.
+      ...(context.gitSessionKey ? [gitSessionDirectoryExport(context.gitSessionKey)] : []),
     ]
       .filter(Boolean)
       .join("\n");

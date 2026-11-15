@@ -216,6 +216,172 @@ describe("IntegrationPage sections", () => {
     expect(connect).toHaveBeenCalledTimes(1);
     await view.unmount();
   });
+
+  test("an installation that needs attention names the problem and its one fix", async () => {
+    const reinstall = mock(() => {});
+    const view = await render(
+      <IntegrationPage
+        model={model({
+          id: "github",
+          name: "GitHub",
+          footer: { kind: "actions" },
+          sections: [
+            {
+              id: "github-app",
+              title: "Opengeni app",
+              description: "Work appears as the Opengeni bot, shared with the workspace.",
+              rows: [
+                {
+                  id: "acme",
+                  title: "acme",
+                  meta: "Organization · 60 repositories",
+                  action: { label: "Change repositories", onClick: () => {} },
+                  menu: [{ label: "Remove", onClick: () => {}, destructive: true }],
+                },
+                {
+                  id: "octocat",
+                  title: "octocat",
+                  meta: "Personal account · 3 repositories",
+                  attention: {
+                    label: "Uninstalled on GitHub",
+                    detail: "The Opengeni app was removed from octocat on GitHub.",
+                  },
+                  action: {
+                    label: "Reinstall",
+                    ariaLabel: "Reinstall: octocat",
+                    onClick: reinstall,
+                    primary: true,
+                  },
+                  menu: [{ label: "Remove", onClick: () => {}, destructive: true }],
+                },
+              ],
+            },
+          ],
+        })}
+        onBack={() => {}}
+      />,
+    );
+    const healthy = view.container.querySelector('[data-integration-row="acme"]')!;
+    expect(healthy.hasAttribute("data-attention")).toBe(false);
+    expect(healthy.textContent).toContain("Organization · 60 repositories");
+    const broken = view.container.querySelector('[data-integration-row="octocat"]')!;
+    expect(broken.hasAttribute("data-attention")).toBe(true);
+    expect(broken.textContent).toContain("Uninstalled on GitHub");
+    // The problem replaces the meta line.
+    expect(broken.textContent).toContain("The Opengeni app was removed from octocat on GitHub.");
+    expect(broken.textContent).not.toContain("3 repositories");
+    expect(broken.querySelector('[aria-label="More actions for octocat"]')).not.toBeNull();
+    await act(async () =>
+      broken.querySelector<HTMLButtonElement>('[aria-label="Reinstall: octocat"]')!.click(),
+    );
+    expect(reinstall).toHaveBeenCalledTimes(1);
+    await view.unmount();
+  });
+
+  test("approvals sit before a long repository list, which folds behind its count", async () => {
+    const change = mock((_row: string, _column: string, _value: string) => {});
+    const all = mock((_column: string, _value: string) => {});
+    const repositories = Array.from({ length: 62 }, (_, index) => ({
+      name: index === 61 ? "acme/billing-web" : `acme/repo-${index}`,
+      meta: "private",
+    }));
+    const view = await render(
+      <IntegrationPage
+        model={model({
+          id: "github",
+          name: "GitHub",
+          footer: { kind: "actions" },
+          policies: {
+            title: "Approvals",
+            columns: [
+              { id: "app", label: "Opengeni app" },
+              { id: "personal", label: "Your GitHub" },
+            ],
+            rows: [
+              { id: "routine", label: "Create and update work" },
+              { id: "merge", label: "Merge pull requests" },
+            ],
+            choices: [
+              { value: "allow", label: "Allow" },
+              { value: "ask", label: "Ask first" },
+            ],
+            otherValueLabels: { mixed: "Mixed" },
+            cell: (row, column) =>
+              row === "merge" && column === "personal" ? undefined : { value: "allow" },
+            onChange: change,
+            all: { label: "All actions", cell: () => ({ value: "mixed" }), onChange: all },
+            footnote: "Changes apply to new actions.",
+          },
+          access: {
+            title: "Opengeni app repositories",
+            items: repositories,
+            collapsed: { summary: "62 repositories", searchLabel: "Search repositories" },
+          },
+        })}
+        onBack={() => {}}
+      />,
+    );
+    const text = visibleText(view.container);
+    expect(text.indexOf("Approvals")).toBeLessThan(text.indexOf("Opengeni app repositories"));
+    expect(text).toContain("Changes apply to new actions.");
+    // Folded: the count and the first few names, not every repository.
+    expect(view.container.textContent).toContain("62 repositories");
+    expect(view.container.textContent).toContain(
+      "acme/repo-0, acme/repo-1, acme/repo-2 and 59 more",
+    );
+    const folded = view.container.querySelector('[data-integration-access-item="acme/repo-40"]');
+    expect(folded?.closest('[data-state="closed"]') ? "folded" : "shown").toBe("folded");
+
+    const select = (label: string) =>
+      view.container.querySelector<HTMLSelectElement>(`select[aria-label="${label}"]`);
+    // A missing cell renders nothing; a value outside the choices shows as a disabled option.
+    expect(select("Merge pull requests: Your GitHub")).toBeNull();
+    const allApp = select("All actions: Opengeni app")!;
+    expect(allApp.value).toBe("mixed");
+    expect(allApp.querySelector<HTMLOptionElement>('option[value="mixed"]')!.disabled).toBe(true);
+    expect(allApp.querySelector('option[value="mixed"]')!.textContent).toBe("Mixed");
+    await act(async () => {
+      allApp.value = "ask";
+      allApp.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(all).toHaveBeenCalledWith("app", "ask");
+    const routine = select("Create and update work: Your GitHub")!;
+    await act(async () => {
+      routine.value = "ask";
+      routine.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(change).toHaveBeenCalledWith("routine", "personal", "ask");
+
+    // Opened, the list searches by name.
+    const trigger = [...view.container.querySelectorAll("[aria-expanded]")].find((node) =>
+      node.textContent?.includes("62 repositories"),
+    ) as HTMLElement;
+    await act(async () => trigger.click());
+    const search = view.container.querySelector<HTMLInputElement>(
+      'input[aria-label="Search repositories"]',
+    )!;
+    expect(view.container.querySelectorAll("[data-integration-access-item]").length).toBe(62);
+    await act(async () => {
+      // happy-dom's input event does not reach React's change tracking.
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(
+        search,
+        "billing",
+      );
+      const propsKey = Object.keys(search).find((key) => key.startsWith("__reactProps$"))!;
+      (
+        search as unknown as Record<
+          string,
+          { onChange: (event: { target: HTMLInputElement }) => void }
+        >
+      )[propsKey]!.onChange({ target: search });
+    });
+    expect(
+      [...view.container.querySelectorAll("[data-integration-access-item]")].map((node) =>
+        node.getAttribute("data-integration-access-item"),
+      ),
+    ).toEqual(["acme/billing-web"]);
+    await view.unmount();
+  });
 });
 
 describe("CatalogItemPage", () => {

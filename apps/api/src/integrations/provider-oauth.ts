@@ -1,12 +1,22 @@
 import { integrationAvailable, requireIntegrationAvailable } from "./teams-rollout";
-import { withOrganizationIntegrationAcquisition } from "@opengeni/db/organization-integration-policy";
+import {
+  readOrganizationIntegrationPolicyForServing,
+  withOrganizationIntegrationAcquisition,
+} from "@opengeni/db/organization-integration-policy";
 import { claimOAuthAcquisition, finishOAuthAcquisition } from "./oauth-client";
+import {
+  oauthCallbackBrowserAccepted,
+  oauthStateBrowserBinding,
+  type OAuthCallbackBrowser,
+  type OAuthStateBrowserBinding,
+} from "./oauth-browser-binding";
 import { Buffer } from "node:buffer";
 import { createHash, randomBytes } from "node:crypto";
 
 import {
   integrationDefinitionProviderDomain,
   integrationDefinitionById,
+  CORE_INTEGRATION_DEFINITIONS,
   type IntegrationDefinition,
 } from "@opengeni/capabilities";
 import {
@@ -20,6 +30,7 @@ import {
   OAuthStartResponse,
   type ApiIntegrationOAuthStartRequest,
   type ConnectionOwnership,
+  type OrganizationIntegrationPolicy,
 } from "@opengeni/contracts";
 import {
   integrationKeyForConnectProvider,
@@ -95,6 +106,9 @@ type ProviderOAuthState = {
   subjectId: string;
   ownership: ConnectionOwnership;
   personalOwnerVerified: boolean;
+  /** Absent only on states minted before browser binding. */
+  browserProof?: OAuthStateBrowserBinding["browserProof"];
+  browserBinding?: string;
   definitionId: string;
   definitionFingerprint: string;
   providerDomain: string;
@@ -130,6 +144,7 @@ type ProviderOAuthFailureReason =
   | "state_invalid"
   | "state_expired"
   | "state_replayed"
+  | "browser_mismatch"
   | "provider_denied"
   | "missing_code"
   | "client_unavailable"
@@ -161,6 +176,8 @@ export async function startApiIntegrationProviderOAuth(
      * route from the live authenticated principal, never inferred here.
      */
     personalOwnershipAllowed: boolean;
+    /** How the callback proves it finishes in the starter's browser (oauth-browser-binding.ts). */
+    browserBinding: OAuthStateBrowserBinding;
     externalContinuation?: ExternalActorContinuation;
     connectAttemptId?: string;
     /**
@@ -237,6 +254,7 @@ export async function startApiIntegrationProviderOAuth(
     // principal of its own and enforces exactly this decision.
     ...connectOwnerStateFields(input, input.personalOwnershipAllowed),
     ownership,
+    ...input.browserBinding,
     definitionId: definition.id,
     definitionFingerprint: providerDefinitionFingerprint(definition),
     providerDomain,
@@ -296,6 +314,8 @@ export async function completeApiIntegrationProviderOAuth(
     state?: string | undefined;
     error?: string | undefined;
     errorDescription?: string | undefined;
+    /** What the callback request proves about its browser; see oauth-browser-binding.ts. */
+    browser?: OAuthCallbackBrowser | undefined;
     requestUrl: string;
   },
 ): Promise<{ redirectTo: string; exactReturn?: boolean }> {
@@ -308,6 +328,10 @@ export async function completeApiIntegrationProviderOAuth(
   let curatedAttempt: ConnectAttempt | null = null;
   try {
     state = readProviderOAuthState(input.state, deps.settings);
+    // Before any attempt is claimed or nonce consumed: a consent finished in
+    // someone else's browser leaves the starter's attempt untouched (CASA 3.2.2).
+    if (!oauthCallbackBrowserAccepted(state, input.browser))
+      throw new ProviderOAuthCallbackError("browser_mismatch");
     if (state.connectAttemptId) {
       const stored = await getConnectAttempt(deps.db, state, state.connectAttemptId);
       if (
@@ -349,7 +373,7 @@ export async function completeApiIntegrationProviderOAuth(
     if (!consumed) throw new ProviderOAuthCallbackError("state_replayed");
     if (connectOperation && (input.error || !input.code)) {
       const denial = input.error
-        ? microsoftDenial(deps.settings, state, apiBaseUrl, input.error, input.errorDescription)
+        ? await microsoftDenial(deps, state, apiBaseUrl, input.error, input.errorDescription)
         : null;
       await finishConnectOperation(deps.db, state, {
         ...connectOperation,
@@ -707,31 +731,91 @@ export function isApiIntegrationProviderOAuthState(
   }
 }
 
-/** Microsoft denial with an administrator approval link, or null for other providers. */
-function microsoftDenial(
+function configuredClientId(settings: Settings, definition: IntegrationDefinition): string | null {
+  try {
+    return providerClientForDefinition(settings, definition).clientId;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The link an organization's administrator opens once to approve every
+ * Microsoft service this workspace offers through the same app (Outlook Mail
+ * and Calendar together), so a person adding another later needs no second
+ * approval. Offered means what the workspace's Connect catalog lists: rolled
+ * out to the workspace, signed in through the same app and callback, and
+ * allowed by the organization's integration policy. The requested service is
+ * always included. Services the workspace does not offer are left out, so IT is
+ * not asked for OneDrive or SharePoint access to approve mail. Null for other
+ * providers or without a configured client.
+ */
+export function microsoftOrganizationApprovalUrl(
   settings: Settings,
+  offer: { workspaceId: string; policy: OrganizationIntegrationPolicy },
+  definition: IntegrationDefinition,
+  apiBaseUrl: string,
+): string | null {
+  if (definition.provider.id !== "microsoft") return null;
+  const clientId = configuredClientId(settings, definition);
+  if (!clientId) return null;
+  const redirectPath = providerOAuthCallbackPath(definition);
+  const allowed = (definitionId: string) =>
+    offer.policy.mode === "unrestricted" ||
+    offer.policy.allowedIntegrationKeys.includes(
+      integrationKeyForConnectProvider(definitionId) ?? "",
+    );
+  return microsoftAdminConsentUrl({
+    clientId,
+    redirectUri: `${apiBaseUrl}${redirectPath}`,
+    definitions: CORE_INTEGRATION_DEFINITIONS.filter(
+      (other) =>
+        other.id === definition.id ||
+        (other.provider.id === "microsoft" &&
+          providerOAuthCallbackPath(other) === redirectPath &&
+          integrationAvailable(settings, offer.workspaceId, other.id) &&
+          allowed(other.id) &&
+          configuredClientId(settings, other) === clientId),
+    ),
+  });
+}
+
+/**
+ * `microsoftOrganizationApprovalUrl` for a workspace, reading its
+ * organization's current integration policy. Reads nothing for other providers.
+ */
+export async function microsoftOrganizationApprovalUrlForWorkspace(
+  deps: Pick<ApiRouteDeps, "db" | "settings">,
+  scope: { accountId: string; workspaceId: string },
+  definition: IntegrationDefinition,
+  apiBaseUrl: string,
+): Promise<string | null> {
+  if (definition.provider.id !== "microsoft") return null;
+  const policy = await readOrganizationIntegrationPolicyForServing(deps.db, {
+    accountId: scope.accountId,
+  });
+  return microsoftOrganizationApprovalUrl(
+    deps.settings,
+    { workspaceId: scope.workspaceId, policy },
+    definition,
+    apiBaseUrl,
+  );
+}
+
+/** Microsoft denial with an administrator approval link, or null for other providers. */
+async function microsoftDenial(
+  deps: Pick<ApiRouteDeps, "db" | "settings">,
   state: ProviderOAuthState,
   apiBaseUrl: string,
   error: string,
   description: string | undefined,
-): ReturnType<typeof microsoftAuthorizationNotGranted> | null {
+): Promise<ReturnType<typeof microsoftAuthorizationNotGranted> | null> {
   const definition = integrationDefinitionById(state.definitionId);
-  if (!definition || definition.provider.id !== "microsoft") return null;
-  let clientId: string;
-  try {
-    clientId = providerClientForDefinition(settings, definition).clientId;
-  } catch {
-    return null;
-  }
-  return microsoftAuthorizationNotGranted({
-    error,
-    description,
-    adminConsentUrl: microsoftAdminConsentUrl({
-      clientId,
-      redirectUri: `${apiBaseUrl}${providerOAuthCallbackPath(definition)}`,
-      definition,
-    }),
-  });
+  const adminConsentUrl = definition
+    ? await microsoftOrganizationApprovalUrlForWorkspace(deps, state, definition, apiBaseUrl)
+    : null;
+  if (!adminConsentUrl) return null;
+  return microsoftAuthorizationNotGranted({ error, description, adminConsentUrl });
 }
 
 function providerOAuthCallbackPath(definition: IntegrationDefinition): string {
@@ -834,6 +918,7 @@ function readProviderOAuthState(raw: string | undefined, settings: Settings): Pr
     subjectId: requiredStateString(payload.subjectId),
     ownership,
     personalOwnerVerified: personalOwnerVerifiedInState(payload),
+    ...oauthStateBrowserBinding(payload),
     definitionId: requiredStateString(payload.definitionId),
     definitionFingerprint: requiredStateString(payload.definitionFingerprint),
     providerDomain: requiredStateString(payload.providerDomain),

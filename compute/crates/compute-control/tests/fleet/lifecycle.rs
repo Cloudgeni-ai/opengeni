@@ -159,7 +159,7 @@ async fn a_sandbox_whose_create_says_nothing_of_sleep_is_checkpointed_as_the_fle
     assert_eq!(config.sleep, compute_control::service::DEFAULT_SLEEP);
 
     // One that says how it sleeps is taken at its word.
-    let sleep = json!({ "pause_after_ms": 10_000, "compress": false });
+    let sleep = json!({ "pause_after_ms": 10_000, "compress_paused": true });
     let (status, row) = fleet
         .post(
             "/v1/sandboxes",

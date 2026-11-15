@@ -17,6 +17,8 @@
 // - Optionally (`call.androidSystemCall`), Android system calls: a
 //   self-managed Telecom call with a call notification, and agents' calls
 //   ringing the phone with a full-screen ring screen (with-android-call.cjs).
+//   `call.androidMessagingService: "app"` lets an app that has its own
+//   Firebase messaging service deliver the rings itself.
 // - Optionally (`call.iosAudioDevice`), Opengeni's call audio device for
 //   WebRTC: silence while a call rings, Apple's voice processing once it is
 //   answered, so a call can connect before the person picks up without the
@@ -34,7 +36,10 @@ const {
 const { SWIFT_FILE, intentsSource, pluginFeatures, resolveOptions } = require("./call-intents.cjs");
 const { withRecording } = require("./with-recording.cjs");
 const { withAudioImport } = require("./with-audio-import.cjs");
-const { withAndroidSystemCall } = require("./with-android-call.cjs");
+const {
+  withAndroidSystemCall,
+  resolveAndroidMessagingService,
+} = require("./with-android-call.cjs");
 const {
   CONTROL_TARGET,
   CONTROL_SWIFT_FILE,
@@ -115,6 +120,8 @@ function withNativeCall(config, props) {
   if (features.audioImport) config = withAudioImport(config);
   if (!features.call) return config;
   const options = resolveOptions(props);
+  // Checked up front, so a misspelled mode fails the prebuild on any platform.
+  const androidMessagingService = resolveAndroidMessagingService(options.call);
   config = withCallInfoPlist(config, options);
   config = withCallAudioDevice(config, options.iosAudioDevice);
   if (options.appIntents) config = withCallIntentsSource(config, options);
@@ -127,7 +134,9 @@ function withNativeCall(config, props) {
     }
     config = withCallControl(config, options, control);
   }
-  if (options.call.androidSystemCall === true) config = withAndroidSystemCall(config);
+  if (options.call.androidSystemCall === true) {
+    config = withAndroidSystemCall(config, { messagingService: androidMessagingService });
+  }
   return config;
 }
 

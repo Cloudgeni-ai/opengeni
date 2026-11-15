@@ -10,6 +10,7 @@ import * as schema from "./schema";
 import {
   encodeModelContextSnapshotContent,
   hydrateStoredModelContextSnapshot,
+  lockSessionContentShared,
   writeSessionContentBlobs,
 } from "./session-content-blobs";
 
@@ -119,6 +120,9 @@ export async function getLatestSessionModelContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
+      // The next request replaces this snapshot and the collector may then
+      // delete chunks only it named; hold them until they are read.
+      await lockSessionContentShared(scopedDb, input.sessionId);
       const [row] = await scopedDb
         .select({
           attemptId: schema.sessionAttemptModelContextSnapshots.attemptId,

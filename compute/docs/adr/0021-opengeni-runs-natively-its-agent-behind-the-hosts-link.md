@@ -91,7 +91,10 @@ and 16.1).
   host agent answers each guest's NATS connection itself, knowing from the
   vsock socket which sandbox it is. For each sandbox it keeps one session
   on its link to Opengeni: the guest's subscriptions, opened upstream once,
-  stay open while the sandbox sleeps, and so do the agent's connections.
+  stay open while the sandbox sleeps, and so do the agent's connections,
+  as long as that agent process can come back. (Since ADR 36 a VM may end
+  with no memory kept; its agent is then gone for good and the host ends
+  its session, so nothing is sent to it while the next one boots.)
   The guest's publishes go up the same session. A request (a message with
   a reply subject) that arrives for a sandbox that is not running wakes
   it, and reaches the agent on its connection once it runs; after a

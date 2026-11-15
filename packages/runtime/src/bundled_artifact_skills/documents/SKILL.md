@@ -95,7 +95,8 @@ to check:
    re-inspect and recompute; never force a stale rewrite.
 5. Use real paragraphs, styles, tables, sections, page breaks, comments, and
    tracked changes—not spaces, Unicode bullets, or flattened screenshots.
-6. Share the result as the live artifact's `artifactReference` link. Export
+6. Share the result as the live artifact's `artifactReference` link:
+   `[Title](artifact:<artifactId>)`, using the exact returned ID. Export
    only formats the `opengeni__editable_artifact_export` tool description lists
    (current deployments serve spreadsheet XLSX only, so no document DOCX/PDF/
    image export); never attempt or promise an unlisted format. When a format is

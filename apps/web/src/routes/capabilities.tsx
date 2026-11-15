@@ -90,6 +90,8 @@ import {
 } from "@opengeni/react/ui/line-tabs";
 import { Toolbar, ToolbarSearch } from "@opengeni/react/ui/toolbar";
 import { SkillsPanel } from "./skills-panel";
+import { partitionSimplifiedInterfaceServices } from "@/components/capabilities/simplified-interface-services";
+import { useSimplifiedInterface } from "@opengeni/react/app/lib/simplified-interface";
 import { skillReleaseMessage } from "@/components/capabilities/skill-release-message";
 import { capabilityLogoSource } from "@opengeni/react/app/components/capabilities/capability-logo-source";
 import { type ConnectAction } from "@opengeni/react/app/components/capabilities/capability-detail-sheet";
@@ -335,7 +337,13 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
 
   // now, so it scrolls that section into view instead.
   const [filter] = useState<CapabilityFilter>("all");
-  const [activeTab, setActiveTab] = useState(initialSection === "skills" ? "skills" : "all");
+  const [chosenTab, setActiveTab] = useState(initialSection === "skills" ? "skills" : "all");
+  // The simplified interface shows one thing here: the apps to connect. Skills
+  // opened by their own address still show, with the full page around them.
+  const focused = useSimplifiedInterface().simplified && initialSection !== "skills";
+  const activeTab = focused ? "connections" : chosenTab;
+  // Its own apps come first; the rest of the catalog waits behind one button.
+  const [moreAppsShown, setMoreAppsShown] = useState(false);
   const [query, setQuery] = useState("");
   const hasQuery = query.trim().length > 0;
   const searchingAll = activeTab === "all";
@@ -723,12 +731,19 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
   // Connected first, then about 30 popular providers. The long tail of the
   // public registry is reached only by searching, labelled Community.
   const connectedServices = connectedConnectionServices(connectionServices);
-  const popularServices = featuredServices
-    .filter((service) => !connectedServices.includes(service))
-    .slice(0, POPULAR_LIMIT);
+  const availableFeaturedServices = featuredServices.filter(
+    (service) => !connectedServices.includes(service),
+  );
+  const popularServices = availableFeaturedServices.slice(0, POPULAR_LIMIT);
   const communityServices = remainingServices.filter(
     (service) => !connectedServices.includes(service),
   );
+  // The simplified interface's own apps first, wherever they rank among the popular.
+  const simplifiedPartition = partitionSimplifiedInterfaceServices(availableFeaturedServices);
+  const simplifiedApps = {
+    apps: simplifiedPartition.apps,
+    others: simplifiedPartition.others.slice(0, POPULAR_LIMIT),
+  };
   const openIntegrationModel =
     integrations.find((adapter) => adapter.model.id === openIntegration)?.model ?? null;
   // The item the sheet renders, always from the live catalog. Registry items
@@ -1732,7 +1747,9 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
                 : "Connect your Slack"
               : undefined
           }
-        />
+        >
+          {openIntegrationModel.id === teamsBot.model.id ? teamsBot.sections : null}
+        </IntegrationPage>
       );
   } else if (selectedItem) {
     const back = backFrom(selectedItem.id);
@@ -1908,7 +1925,11 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
               <PageHeader
                 icon={<PlugIcon />}
                 title="Capabilities"
-                description="Tools, skills, and plugins your agents can use"
+                description={
+                  focused
+                    ? "Connect the tools you already use"
+                    : "Tools, skills, and plugins your agents can use"
+                }
                 actions={
                   <div
                     ref={setCatalogActionTarget}
@@ -1916,12 +1937,14 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
                   />
                 }
                 tabs={
-                  <LineTabsList aria-label="Capability types">
-                    <LineTabsTrigger value="all">All</LineTabsTrigger>
-                    <LineTabsTrigger value="connections">Connections</LineTabsTrigger>
-                    <LineTabsTrigger value="skills">Skills</LineTabsTrigger>
-                    <LineTabsTrigger value="plugins">Plugins</LineTabsTrigger>
-                  </LineTabsList>
+                  focused ? undefined : (
+                    <LineTabsList aria-label="Capability types">
+                      <LineTabsTrigger value="all">All</LineTabsTrigger>
+                      <LineTabsTrigger value="connections">Connections</LineTabsTrigger>
+                      <LineTabsTrigger value="skills">Skills</LineTabsTrigger>
+                      <LineTabsTrigger value="plugins">Plugins</LineTabsTrigger>
+                    </LineTabsList>
+                  )
                 }
               />
             </WindowBarTitleBoundary>
@@ -1970,9 +1993,11 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
                 value={query}
                 onValueChange={setQuery}
                 placeholder={
-                  activeTab === "all"
-                    ? "Search connections, skills, and plugins"
-                    : `Search ${activeTab}`
+                  focused
+                    ? "Search apps"
+                    : activeTab === "all"
+                      ? "Search connections, skills, and plugins"
+                      : `Search ${activeTab}`
                 }
               />
             </Toolbar>
@@ -1983,6 +2008,7 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
                     {!searchingAll ? (
                       <CatalogHeader
                         title="Connections"
+                        hidden={focused}
                         action={
                           <Button type="button" onClick={() => setAddOpen(true)}>
                             <PlusIcon />
@@ -2100,12 +2126,46 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
                             <ConnectedServiceList services={connectedServices} />
                           </section>
                         ) : null}
-                        <section aria-label="Popular" className="mt-6">
-                          <h2 className={cn(SECTION_TITLE_CLASS, "mb-2")}>Popular</h2>
+                        {focused && simplifiedApps.apps.length > 0 ? (
+                          <section aria-label="Recommended" className="mt-6">
+                            <h2 className={cn(SECTION_TITLE_CLASS, "mb-2")}>Recommended</h2>
+                            <ConnectionCatalog
+                              grouped={false}
+                              columns={2}
+                              services={simplifiedApps.apps}
+                            />
+                          </section>
+                        ) : null}
+                        {focused &&
+                        simplifiedApps.apps.length > 0 &&
+                        simplifiedApps.others.length > 0 &&
+                        !moreAppsShown ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="mt-6"
+                            onClick={() => setMoreAppsShown(true)}
+                          >
+                            Show more apps
+                          </Button>
+                        ) : null}
+                        <section
+                          aria-label={focused ? "More apps" : "Popular"}
+                          className="mt-6"
+                          hidden={
+                            focused &&
+                            (simplifiedApps.others.length === 0 ||
+                              (simplifiedApps.apps.length > 0 && !moreAppsShown))
+                          }
+                        >
+                          <h2 className={cn(SECTION_TITLE_CLASS, "mb-2")}>
+                            {focused ? "More apps" : "Popular"}
+                          </h2>
                           <ConnectionCatalog
                             grouped={false}
                             columns={2}
-                            services={popularServices}
+                            services={focused ? simplifiedApps.others : popularServices}
                           />
                           {communityServices.length > 0 ? (
                             <p className="mt-4 text-xs leading-4.5 text-fg-muted">

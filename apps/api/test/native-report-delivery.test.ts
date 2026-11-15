@@ -209,9 +209,7 @@ describe("native PostgreSQL report delivery", () => {
     await shared.admin`update sessions set first_party_mcp_permissions = '["artifacts:read"]'::jsonb where id = ${ctx.context.sessionId}`;
     const result = await inspect(ctx);
     expect(result.inspectionReceiptId).toBeString();
-    expect(result.artifact.artifactReference).toContain(
-      `/workspaces/${ctx.context.scope.workspaceId}/artifacts/editable/${ctx.artifact.id}`,
-    );
+    expect(result.artifact.artifactReference).toContain(`artifact:${ctx.artifact.id}`);
     expect(result.projection).toBeDefined();
   }, 30_000);
 

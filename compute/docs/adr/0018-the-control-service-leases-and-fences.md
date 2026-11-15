@@ -515,6 +515,10 @@ can be built and tested.
   sets and every wake from it clears before the guest runs, one more
   store write on each.
 - **Checkpoints.** A sandbox whose sleep rules set `checkpoint_every_ms`
+  (amended by [ADR 34](0034-a-checkpoint-copies-the-disk-alone.md): a
+  checkpoint now copies the disk alone, never pauses the VM and stores
+  no memory image; what follows about pauses, snapshots, merges and the
+  memory base describes the earlier design)
   is copied to object storage while it runs, so losing its host costs
   only what its files took on since, and its running programs (see the
   previous item). The fleet sets it to 10 minutes for every

@@ -4,10 +4,11 @@
  * The path workspace is the agent's home, where its chats run. Reading needs
  * what reading chats needs, and an Only me agent is visible only to its
  * owner. Making and changing agents needs what starting a chat needs; a
- * change also needs the agent's creator or a workspace admin. Making one
- * available in Slack needs a workspace admin; open use in Slack needs the
- * request's organization admin proof. The Slack name rules apply when Slack
- * is turned on, and to a rename while it is on.
+ * change also needs the agent's creator or a workspace admin. A shared agent
+ * is available in every Slack workspace linked to its workspace, with no
+ * separate step (see integrations/agent-slack-availability.ts), so the Slack
+ * name rules apply when a shared agent is created, renamed or shared; open use
+ * in Slack needs the request's organization admin proof.
  */
 
 import {
@@ -35,10 +36,8 @@ import {
 import {
   AgentLimitError,
   AgentPrivateOwnerError,
-  availableSlackBotConnectionMetadata,
   createAgent,
   deleteAgent,
-  deleteAgentSlackInstall,
   getAgent,
   getAgentLearningSettings,
   getSessionForSubject,
@@ -63,6 +62,8 @@ import {
   agentView,
   agentViewerCanMakePrivate,
   agentViewerForGrant,
+  agentVisibilityRecord,
+  agentVisibilityValue,
   agentVisibleTo,
   knowledgeContextForAccess,
   requireAccessGrantAuthorization,
@@ -79,6 +80,14 @@ import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
 import { ApiHttpError } from "../http/api-error";
 import { parseRequestJson } from "../http/request-body";
 import { ensureAgentMemoryCollection } from "../integrations/agent-memory-collection";
+import {
+  agentHomeIsPersonalWorkspace,
+  agentSlackNameRefusal,
+  agentSlackUnavailableReason,
+  ensureAgentInLinkedSlack,
+  linkedSlackInstallations,
+  type AgentSlackNameRefusal,
+} from "../integrations/agent-slack-availability";
 import { slackAgentInstallationFor } from "../integrations/slack-agent-create";
 import { requireUsableSessionAvatar } from "./session-avatar";
 import { postSlackAgentIntro, slackAgentChannelList } from "./slack-agents";
@@ -111,6 +120,16 @@ function privateOwnerError(error: unknown): unknown {
   return error instanceof AgentPrivateOwnerError
     ? new ApiHttpError(422, { code: "validation_failed", message: error.message, retryable: false })
     : error;
+}
+
+/** A name Slack can't use, or one another agent there answers to. */
+function slackNameError(refusal: AgentSlackNameRefusal): ApiHttpError {
+  return refusal.code === "agent_slack_name_taken"
+    ? agentError(409, refusal.code, refusal.message, {
+        connectionId: refusal.connectionId,
+        slackTeamName: refusal.slackTeamName,
+      })
+    : agentError(422, refusal.code, refusal.message, { problem: refusal.problem });
 }
 
 function notFound(): ApiHttpError {
@@ -207,6 +226,15 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
   }
 
+  /**
+   * Letting anyone in the organization use an agent opens it beyond its
+   * workspace, so it takes an organization admin (as Slack's open use did).
+   * Narrowing it back does not.
+   */
+  function requireOrganizationAccessAdmin(context: RequestContext): void {
+    requireAccountAdminAuthorizationStamp(context.access);
+  }
+
   async function memoryReviewFirst(context: RequestContext): Promise<boolean> {
     try {
       return await withAccessGrantSessionRlsContext(deps, context.grant, async () => {
@@ -234,11 +262,7 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     installs: readonly AgentSlackInstallRecord[],
   ): Promise<Map<string, string | null>> {
     const names = new Map<string, string | null>();
-    const homes = new Set(
-      installs.flatMap((install) =>
-        install.installWorkspaceId ? [install.installWorkspaceId] : [],
-      ),
-    );
+    const homes = new Set(installs.map((install) => install.installWorkspaceId));
     for (const workspaceId of homes) {
       const bindings = await listSlackInstallationBindings(db, { accountId, workspaceId }).catch(
         () => [],
@@ -296,7 +320,9 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const context = await requestContext(c, "sessions:create");
     const request = await parseRequestJson(c, CreateAgentRequest);
     const { grant, viewer, home } = context;
-    if (request.visibility === "private" && viewer.subjectId === null) {
+    const access = agentVisibilityRecord(request.visibility);
+    if (access.organizationAccess) requireOrganizationAccessAdmin(context);
+    if (access.visibility === "private" && viewer.subjectId === null) {
       throw new ApiHttpError(422, {
         code: "validation_failed",
         message:
@@ -315,14 +341,22 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     await requireUsableSessionAvatar(deps, grant, request.avatar, {
-      sharedWithWorkspace: request.visibility === "workspace",
+      sharedWithWorkspace: access.visibility === "workspace",
     });
+    if (access.visibility === "workspace") {
+      const refusal = await agentSlackNameRefusal(deps, home, {
+        agentId: null,
+        name: request.name,
+      });
+      if (refusal) throw slackNameError(refusal);
+    }
     let created: AgentRecord;
     try {
       created = (
         await createAgent(db, home, {
-          visibility: request.visibility,
-          ownerSubjectId: request.visibility === "private" ? viewer.subjectId : null,
+          visibility: access.visibility,
+          ownerSubjectId: access.visibility === "private" ? viewer.subjectId : null,
+          organizationAccess: access.organizationAccess,
           name: request.name,
           description: request.description,
           avatar: request.avatar,
@@ -341,7 +375,13 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       throw privateOwnerError(error);
     }
-    const agent = await ensureAgentMemory(deps, context, created);
+    // Read it back with where it is available in Slack.
+    await ensureAgentInLinkedSlack(deps, home, created);
+    const agent = await ensureAgentMemory(
+      deps,
+      context,
+      (await getAgent(db, home, created.id)) ?? created,
+    );
     return c.json(await agentBody(context, agent), 201);
   });
 
@@ -351,17 +391,15 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     requireEditable(context, current);
     const request = await parseRequestJson(c, UpdateAgentRequest);
     const { grant, viewer, home } = context;
-    const visibility = request.visibility ?? current.visibility;
+    const access = agentVisibilityRecord(request.visibility ?? agentVisibilityValue(current));
+    const visibility = access.visibility;
     const changesVisibility = visibility !== current.visibility;
-    const installs = await listAgentSlackInstalls(db, home, [current.id]);
+    const changesOrganizationAccess = access.organizationAccess !== current.organizationAccess;
+    if (access.organizationAccess && changesOrganizationAccess) {
+      requireOrganizationAccessAdmin(context);
+    }
+    // Making it Only me takes it out of Slack (see updateAgent).
     if (changesVisibility && visibility === "private") {
-      if (installs.length > 0) {
-        throw agentError(
-          409,
-          "agent_slack_requires_workspace_visibility",
-          "This agent is available in Slack, so it stays shared with the workspace. Turn Slack off first.",
-        );
-      }
       if (!agentViewerCanMakePrivate(viewer, current)) {
         throw new ApiHttpError(current.createdBySubjectId === null ? 422 : 403, {
           code: current.createdBySubjectId === null ? "validation_failed" : "forbidden",
@@ -373,22 +411,18 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
         });
       }
     }
-    if (
+    // A shared agent's name is how people ask it in Slack: checked when it
+    // changes and when the agent becomes shared. An older name that is kept
+    // is never rechecked, so older agents still save.
+    const renames =
       request.name !== undefined &&
-      installs.length > 0 &&
-      slackAgentNameKey(request.name) !== slackAgentNameKey(current.name)
-    ) {
-      const problem = slackAgentNameProblem(request.name);
-      if (problem) {
-        throw agentError(
-          422,
-          "agent_slack_name_invalid",
-          slackAgentNameProblemText(request.name, problem),
-          {
-            problem,
-          },
-        );
-      }
+      slackAgentNameKey(request.name) !== slackAgentNameKey(current.name);
+    if (visibility === "workspace" && (renames || changesVisibility)) {
+      const refusal = await agentSlackNameRefusal(deps, home, {
+        agentId: current.id,
+        name: request.name ?? current.name,
+      });
+      if (refusal) throw slackNameError(refusal);
     }
     if (request.avatar !== undefined || changesVisibility) {
       const stored = SessionAvatar.safeParse(current.avatar);
@@ -410,6 +444,7 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
         ...(request.instructions !== undefined ? { instructions: request.instructions } : {}),
         ...(request.firstMessage !== undefined ? { firstMessage: request.firstMessage } : {}),
         ...(request.memoryEnabled !== undefined ? { memoryEnabled: request.memoryEnabled } : {}),
+        ...(changesOrganizationAccess ? { organizationAccess: access.organizationAccess } : {}),
         ...(changesVisibility
           ? {
               visibility,
@@ -429,13 +464,6 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw privateOwnerError(error);
     });
     if (outcome.kind === "not_found") throw notFound();
-    if (outcome.kind === "requires_workspace_visibility") {
-      throw agentError(
-        409,
-        "agent_slack_requires_workspace_visibility",
-        "This agent is available in Slack, so it stays shared with the workspace. Turn Slack off first.",
-      );
-    }
     if (outcome.kind === "version_conflict") {
       throw agentError(
         409,
@@ -450,11 +478,13 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw agentError(
         409,
         "agent_slack_name_taken",
-        "Another agent in that Slack workspace already has this name.",
+        "Another agent in that Slack workspace already has this name. Choose another name.",
         { connectionId: outcome.connectionId || null },
       );
     }
-    const agent = await ensureAgentMemory(deps, context, outcome.agent);
+    await ensureAgentInLinkedSlack(deps, home, outcome.agent);
+    const updated = (await getAgent(db, home, outcome.agent.id)) ?? outcome.agent;
+    const agent = await ensureAgentMemory(deps, context, updated);
     return c.json(await agentBody(context, agent));
   });
 
@@ -518,37 +548,37 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const context = await requestContext(c, "sessions:read");
     c.header("cache-control", "private, no-store");
     const agent = await requireVisibleAgent(c, context);
-    const installs = await listAgentSlackInstalls(db, context.home, [agent.id]);
+    // Available in every linked Slack workspace: catch up here too, for an
+    // agent made before that or by a path that couldn't.
+    const installs = await ensureAgentInLinkedSlack(deps, context.home, agent);
     const teamNames = await slackTeamNames(context.home.accountId, installs);
-    const available = (await availableSlackBotConnectionMetadata(db, context.home)).filter(
-      (connection) => connection.status === "active",
-    );
+    const personalWorkspace = await agentHomeIsPersonalWorkspace(deps, context.home);
     const rows = [];
-    for (const connection of available) {
-      const binding = (
-        await listSlackInstallationBindings(db, {
-          accountId: context.home.accountId,
-          workspaceId: connection.workspaceId,
-        }).catch(() => [])
-      ).find(
-        (candidate) => candidate.connectionId === connection.id && candidate.state === "active",
+    for (const installation of await linkedSlackInstallations(deps, context.home)) {
+      const install = installs.find(
+        (candidate) => candidate.connectionId === installation.connectionId,
       );
-      if (!binding) continue;
-      const install = installs.find((candidate) => candidate.connectionId === connection.id);
       rows.push({
-        connectionId: connection.id,
-        slackTeamId: binding.slackTeamId,
-        slackTeamName: binding.slackTeamName ?? null,
+        connectionId: installation.connectionId,
+        slackTeamId: installation.slackTeamId,
+        slackTeamName: installation.slackTeamName,
+        botDisplayName: installation.botDisplayName,
         availability: install
           ? agentSlackAvailabilityView(
               agent,
               install,
-              new Map([...teamNames, [connection.id, binding.slackTeamName ?? null]]),
+              new Map([...teamNames, [installation.connectionId, installation.slackTeamName]]),
             )
           : null,
+        unavailable: await agentSlackUnavailableReason(deps, {
+          agent,
+          installation,
+          installs,
+          personalWorkspace,
+        }),
       });
     }
-    // Availability in an installation no longer offered here still shows.
+    // Availability in an installation no longer linked here still shows.
     for (const install of installs) {
       if (rows.some((row) => row.connectionId === install.connectionId)) continue;
       rows.push({
@@ -556,6 +586,7 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
         slackTeamId: install.slackTeamId,
         slackTeamName: teamNames.get(install.connectionId) ?? null,
         availability: agentSlackAvailabilityView(agent, install, teamNames),
+        unavailable: null,
       });
     }
     return c.json(
@@ -578,6 +609,8 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     return parsed.data;
   }
 
+  // Make a shared agent available in one linked Slack workspace now (it is
+  // anyway, on its own), or change open use, which is the agent's own.
   app.put(`${base}/:agentId/slack/:connectionId`, async (c) => {
     const context = await requestContext(c, "workspace:admin");
     const agent = await requireVisibleAgent(c, context);
@@ -624,15 +657,16 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
         );
       }
     }
-    if (request.open === true && !existing?.open) {
-      requireAccountAdminAuthorizationStamp(context.access);
+    // Open use is the agent's own "Anyone in <organization>" now; this
+    // older field changes that, in every Slack workspace.
+    if (request.open === true && !agent.organizationAccess) {
+      requireOrganizationAccessAdmin(context);
     }
     const outcome = await putAgentSlackInstall(db, home, {
       agentId: agent.id,
       connectionId,
       slackTeamId: installation.binding.slackTeamId,
       installWorkspaceId: installation.home.workspaceId,
-      ...(request.open !== undefined ? { open: request.open } : {}),
       ...(request.expectedVersion !== undefined
         ? { expectedVersion: request.expectedVersion }
         : {}),
@@ -653,42 +687,46 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
         "Another agent in that Slack workspace already has this name. Rename this one first.",
       );
     }
-    if (outcome.kind === "single_install") {
-      throw agentError(
-        409,
-        "agent_slack_single_install",
-        "For now an agent is available in one Slack workspace. Turn it off in the other one first.",
-        { connectionId: outcome.connectionId || null },
-      );
-    }
     if (outcome.kind === "version_conflict") {
       throw agentError(409, "agent_version_conflict", "This changed. Refresh and try again.", {
         currentVersion: outcome.install.version,
       });
     }
-    const view = await viewContext(context, [outcome.agent]);
+    let saved = { agent: outcome.agent, install: outcome.install };
+    if (request.open !== undefined && request.open !== outcome.agent.organizationAccess) {
+      const opened = await updateAgent(db, home, {
+        agentId: agent.id,
+        expectedVersion: null,
+        actorSubjectId: context.viewer.subjectId,
+        patch: { organizationAccess: request.open },
+      });
+      if (opened.kind !== "updated") throw notFound();
+      const install = (await listAgentSlackInstalls(db, home, [agent.id])).find(
+        (candidate) => candidate.connectionId === connectionId,
+      );
+      if (!install) throw notFound();
+      saved = { agent: opened.agent, install };
+    }
+    const view = await viewContext(context, [saved.agent]);
     return c.json(
       AgentSlackAvailabilityResponse.parse({
-        agent: agentView(outcome.agent, view),
-        availability: agentSlackAvailabilityView(
-          outcome.agent,
-          outcome.install,
-          view.slackTeamNames,
-        ),
+        agent: agentView(saved.agent, view),
+        availability: agentSlackAvailabilityView(saved.agent, saved.install, view.slackTeamNames),
       }),
       outcome.created ? 201 : 200,
     );
   });
 
+  // A shared agent is available in every linked Slack workspace, so there is
+  // nothing to turn off; making it Only me takes it out of Slack.
   app.delete(`${base}/:agentId/slack/:connectionId`, async (c) => {
     const context = await requestContext(c, "workspace:admin");
-    const agent = await requireVisibleAgent(c, context);
-    const connectionId = connectionIdParam(c);
-    await deleteAgentSlackInstall(db, context.home, { agentId: agent.id, connectionId });
-    const updated = (await getAgent(db, context.home, agent.id)) ?? agent;
-    const view = await viewContext(context, [updated]);
-    return c.json(
-      AgentSlackAvailabilityResponse.parse({ agent: agentView(updated, view), availability: null }),
+    await requireVisibleAgent(c, context);
+    connectionIdParam(c);
+    throw agentError(
+      409,
+      "agent_slack_always_available",
+      "Agents are available in every Slack workspace linked to their workspace. To keep one out of Slack, make it Only me.",
     );
   });
 
@@ -699,6 +737,7 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const projection = await getSlackAgent(db, {
       accountId: context.home.accountId,
       agentId: agent.id,
+      connectionId,
     });
     if (
       !projection ||

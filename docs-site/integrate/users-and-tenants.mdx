@@ -29,6 +29,8 @@ Chats are private to the user who started them. Set `chats: "shared"` on the pro
 
 Private chats must be enabled for your organization. If they are off, the proxy returns an error that says who can turn them on.
 
+Files people attach in a private chat are theirs alone (Only me), as in the Opengeni web app: they and that chat's agent can read them, other users in the workspace can't. The proxy stores an upload that names no scope this way unless `chats` is `"shared"`, so older or custom browsers get the same result; in shared chats, attachments are workspace files. Read a private chat's files on your server as their owner (`asUser`), not with the organization key alone. Files attached in private chats with earlier SDK versions stay workspace files; their owners can limit them to Only me.
+
 ## Removing a user
 
 Stop resolving them: a user your `resolve` rejects can't reach Opengeni. Delete their sessions too if you also want their data gone. Removing a tenant: delete its workspace (see [Going to production](/integrate/production#clean-up)).

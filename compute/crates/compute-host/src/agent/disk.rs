@@ -40,7 +40,7 @@ use compute_core::{DiskSpace, Input, Level, Outcome, SandboxId, Step};
 use compute_engine::{Engine, VmSpec, Writes};
 use tokio::task::JoinSet;
 
-use crate::disk_growth::{self, Headroom};
+use crate::disk_growth;
 use crate::layout::{Paths, copy_size, vm_spec};
 use crate::protocol::SandboxConfig;
 use crate::state::Record;
@@ -174,55 +174,81 @@ pub(super) enum Room {
 }
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
-    /// Measures a disk only while no step or guest can change it. Callers
-    /// establish that it is local and not running (including a pause that
-    /// just finished). A missing or unreadable file keeps the whole bound.
-    fn resting_disk(&self, id: SandboxId) -> Option<Input> {
+    /// What a disk may still grow by, only while no step or guest can
+    /// change it. Callers establish that it is local and not running
+    /// (including a pause that just finished). It is the latest reading of
+    /// the disk if that still stands for it; for a wake's admission
+    /// (`now`), else the disk read at once, within a bound; else all the
+    /// disk may take (see [`super::disk_meter`]). A missing or unreadable
+    /// file reads as its whole bound.
+    fn resting_disk(&mut self, id: SandboxId, now: bool) -> Option<Input> {
         let slot = self.slots.get(&id)?;
-        if slot.op.is_some() || slot.destroy || self.tearing_down.contains_key(&id) {
+        // The whole bound never books too little, so only a reading waits
+        // for the disk to be left alone.
+        if slot.destroy || (now && (slot.op.is_some() || self.tearing_down.contains_key(&id))) {
             return None;
         }
         let record = self.records.get(Id(id))?;
-        let bytes = self
-            .headroom(id, &slot.paths.disk)
-            .map_or_else(|| self.record_size(&record).disk, |headroom| headroom.left);
+        let whole = self.record_size(&record).disk;
+        let bytes = if now {
+            self.stopped_growth(id, whole)
+        } else {
+            whole
+        };
         Some(Input::DiskGrowth { sandbox: id, bytes })
     }
 
     /// At rest, a disk needs no running-VMM race allowance. Measure before
-    /// admission, and after Add/Pause in the same core batch, so a wake
-    /// arriving before the next sample uses the file, not its whole bound.
-    pub(super) fn disk_inputs(&self, inputs: impl IntoIterator<Item = Input>) -> Vec<Input> {
+    /// admission, so a wake arriving before the next sample uses the file,
+    /// not its whole bound. A disk just added, or left stopped by a step
+    /// that just ended, books its whole bound until it is measured again
+    /// (see [`super::disk_meter`]).
+    pub(super) fn disk_inputs(&mut self, inputs: impl IntoIterator<Item = Input>) -> Vec<Input> {
         let mut batch = Vec::new();
         for input in inputs {
-            let id = match &input {
+            if let Input::Add { sandbox, .. } | Input::Finished { sandbox, .. } = &input {
+                self.disks.changed(*sandbox);
+            }
+            let (id, now) = match &input {
                 Input::Touch { sandbox, .. } | Input::Hold { sandbox, .. }
                     if self.core.sandbox(*sandbox).is_some_and(|view| {
                         view.step.is_none()
                             && !matches!(view.state.level, Level::Running | Level::Remote)
                     }) =>
                 {
-                    Some(*sandbox)
+                    (Some(*sandbox), true)
                 }
                 Input::Add { sandbox, state, .. }
                     if !matches!(state.level, Level::Running | Level::Remote) =>
                 {
-                    Some(*sandbox)
+                    (Some(*sandbox), false)
                 }
                 Input::Finished {
-                    sandbox,
-                    outcome: Outcome::Done,
-                    ..
-                } if self
-                    .core
-                    .sandbox(*sandbox)
-                    .is_some_and(|view| view.step == Some(Step::Pause)) =>
+                    sandbox, outcome, ..
+                } if self.core.sandbox(*sandbox).is_some_and(|view| {
+                    // A pause done, or any step of a stopped disk that
+                    // leaves it with no VM, a wake that failed included; a
+                    // disk a step leaves running is read with the running
+                    // disks.
+                    (*outcome == Outcome::Done && view.step == Some(Step::Pause))
+                        || (matches!(view.state.level, Level::Saved | Level::Archived)
+                            && self
+                                .slots
+                                .get(sandbox)
+                                .is_some_and(|slot| slot.vm.is_none()))
+                }) =>
                 {
-                    Some(*sandbox)
+                    // A wake already waiting is decided with this batch:
+                    // it reads the disk as a wake asked for now does.
+                    let waiting = self
+                        .core
+                        .sandbox(*sandbox)
+                        .is_some_and(|view| view.wants_awake);
+                    (Some(*sandbox), waiting)
                 }
-                _ => None,
+                _ => (None, false),
             };
-            let reading = id.and_then(|id| self.resting_disk(id));
+            let reading = id.and_then(|id| self.resting_disk(id, now));
             if matches!(input, Input::Add { .. } | Input::Finished { .. }) {
                 batch.push(input);
                 batch.extend(reading);
@@ -270,17 +296,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// image is still being filled from object storage. Read just before
     /// the disk reading of the same sample, which then shows what the fill
     /// wrote; the disks themselves are read after it, by
-    /// [`Self::disk_growth_readings`].
+    /// [`Self::disk_growth_readings`]. Disks at rest are measured apart,
+    /// off the loop (see [`super::disk_meter`]).
     pub(super) fn disk_readings(&self) -> BeforeReading {
         let mut before = BeforeReading::default();
         for (id, slot) in &self.slots {
             let Some(live) = slot.vm.as_ref() else {
-                if self.core.sandbox(*id).is_some_and(|view| {
-                    view.step.is_none()
-                        && matches!(view.state.level, Level::Saved | Level::Archived)
-                }) {
-                    before.inputs.extend(self.resting_disk(*id));
-                }
                 continue;
             };
             before.writes.push((*id, self.vm_writes(*id, &live.vm)));
@@ -310,10 +331,19 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// besides what it may grow by: never less than it may grow by as the
     /// disk reading saw it.
     ///
-    /// A disk that cannot be read, or whose VM's writes cannot be counted
-    /// or do not return within [`SETTLE_WITHIN`], books all it may take,
-    /// its whole bound, for this reading.
-    pub(super) async fn disk_growth_readings(&self, before: BeforeReading) -> Vec<Input> {
+    /// The disks are read all together, off the loop (see
+    /// [`HostAgent::read_running_disks`]), and only then are their writes
+    /// settled. A disk that cannot be read, or not in time, or whose VM's
+    /// writes cannot be counted or do not return within
+    /// [`SETTLE_WITHIN`], books all it may take, its whole bound, for this
+    /// reading.
+    pub(super) async fn disk_growth_readings(&mut self, before: BeforeReading) -> Vec<Input> {
+        let disks = before
+            .writes
+            .iter()
+            .filter_map(|(id, _)| Some((*id, self.slots.get(id)?.paths.disk.clone())))
+            .collect();
+        let mut headrooms = self.read_running_disks(disks).await;
         let mut readings = before.inputs;
         let mut read = Vec::new();
         let mut settling = JoinSet::new();
@@ -325,7 +355,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 .records
                 .get(crate::protocol::Id(id))
                 .map(|record| self.record_size(&record).disk);
-            let headroom = self.headroom(id, &slot.paths.disk);
+            let headroom = headrooms.remove(&id);
             if let (Some(first), Some(headroom), Some(live)) = (first, headroom, slot.vm.as_ref()) {
                 // Sent once polled, so after the disk's read.
                 let settled = self.engine.settle_writes(&live.vm);
@@ -395,22 +425,6 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     sandbox = %crate::protocol::Id(id),
                     %error,
                     "could not read what a VM has written"
-                );
-            })
-            .ok()
-    }
-
-    /// What the disk file of sandbox `id` at `path` may still grow by, if
-    /// it can be read; see [`disk_growth::headroom`].
-    fn headroom(&self, id: SandboxId, path: &Path) -> Option<Headroom> {
-        // A save writes one copy of memory only where files share extents.
-        let shares = self.save_copies == 1;
-        disk_growth::headroom(path, self.allocation_unit, shares)
-            .inspect_err(|error| {
-                tracing::debug!(
-                    sandbox = %crate::protocol::Id(id),
-                    %error,
-                    "could not read how much a disk may still grow"
                 );
             })
             .ok()

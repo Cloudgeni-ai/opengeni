@@ -66,8 +66,29 @@ describe("selfhostedOpObserverForMetrics", () => {
       retries: 2,
       durationMs: 800,
       code: ErrorCode.ERROR_CODE_AGENT_OFFLINE,
+      faultClass: "offline",
     });
-    expect(seen[0]).toMatchObject({ outcome: "failed", code: "ERROR_CODE_AGENT_OFFLINE" });
+    expect(seen[0]).toMatchObject({
+      outcome: "failed",
+      code: "ERROR_CODE_AGENT_OFFLINE",
+      infrastructure: true,
+    });
+  });
+
+  test("a missing path, consent gate or fence is a failure but not an infrastructure fault", () => {
+    for (const faultClass of ["not_found", "consent", "fenced", undefined]) {
+      const { seen, hooks } = captureHooks();
+      selfhostedOpObserverForMetrics(hooks)(
+        obs({ op: "fsRead", outcome: "failed", code: ErrorCode.ERROR_CODE_NOT_FOUND, faultClass }),
+      );
+      expect(seen[0]).toMatchObject({ outcome: "failed", infrastructure: false });
+    }
+  });
+
+  test("a success carries no infrastructure flag", () => {
+    const { seen, hooks } = captureHooks();
+    selfhostedOpObserverForMetrics(hooks)(obs({ outcome: "ok" }));
+    expect(seen[0]!.infrastructure).toBeUndefined();
   });
 
   test("a payload-wall fault forwards replyBytes", () => {

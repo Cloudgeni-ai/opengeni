@@ -262,6 +262,7 @@ async fn bad_requests_are_refused() {
                 cpu_request_millis: None,
                 sleep: SleepConfig {
                     save_after_ms: Some(10),
+                    keep_memory: true,
                     ..NEVER
                 },
                 link: None,

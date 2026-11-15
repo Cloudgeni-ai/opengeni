@@ -245,7 +245,7 @@ describe("SuperGrok transcription on the shared core", () => {
     await expect(transcribe()).rejects.toMatchObject({ code: "unavailable", fallbackSafe: false });
   });
 
-  test("core: a subscription out of credit says so and stays on its provider", async () => {
+  test("SUB-FAIL-10: core: a subscription out of credit says so, and the next provider may hear it", async () => {
     upstream = async () =>
       Response.json(
         {
@@ -258,7 +258,7 @@ describe("SuperGrok transcription on the shared core", () => {
     await expect(transcribe()).rejects.toMatchObject({
       code: "unavailable",
       providerCode: "quota_exceeded",
-      fallbackSafe: false,
+      fallbackSafe: true,
     });
     expect(calls.filter((call) => call.startsWith("refresh"))).toEqual([]);
   });

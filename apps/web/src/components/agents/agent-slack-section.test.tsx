@@ -1,6 +1,6 @@
 import { afterAll, afterEach, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { SLACK_AGENT_OPEN_LABEL, SLACK_AGENT_OPEN_NARROWED_NOTICE } from "@opengeni/contracts";
+import { SLACK_AGENT_OPEN_LABEL } from "@opengeni/contracts";
 
 GlobalRegistrator.register();
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
@@ -11,7 +11,7 @@ const { createRoot } = await import("react-dom/client");
 const kit = await import("../../../../../packages/react/test/agents-test-kit");
 const { AgentSlackSection, agentSlackErrorText } = await import("./agent-slack-section");
 
-const { WORKSPACE_ID, makeAgent, appContext, AgentsTestHost } = kit;
+const { makeAgent, appContext, AgentsTestHost } = kit;
 const CONNECTION_ID = "cccccccc-cccc-4ccc-8ccc-000000000001";
 
 afterAll(() => GlobalRegistrator.unregister());
@@ -52,11 +52,7 @@ async function render(
   await act(async () =>
     root.render(
       <AgentsTestHost context={appContext(client)}>
-        <AgentSlackSection
-          agent={agent}
-          onAgentChange={() => undefined}
-          onIntroduce={onIntroduce}
-        />
+        <AgentSlackSection agent={agent} onIntroduce={onIntroduce} />
       </AgentsTestHost>,
     ),
   );
@@ -66,137 +62,108 @@ async function render(
   return container;
 }
 
-const toggle = (container: HTMLElement, label: string) =>
-  container.querySelector<HTMLButtonElement>(`[role='switch'][aria-label='${label}']`)!;
+function installs(rows: Record<string, unknown>[]) {
+  return async () => ({ installs: rows, routingEnabled: true });
+}
 
-test("turning Slack on shows the handle people ask it with", async () => {
-  const agent = makeAgent({ name: "Data team" });
-  const calls: unknown[][] = [];
-  const client = {
-    listAgentSlackInstalls: async () => ({
-      installs: [
-        {
-          connectionId: CONNECTION_ID,
-          slackTeamId: "T1",
-          slackTeamName: "Acme",
-          availability: null,
-        },
-      ],
-      routingEnabled: true,
-    }),
-    putAgentSlackAvailability: async (...args: unknown[]) => {
-      calls.push(args);
-      return { agent: { ...agent, slack: [availability()] }, availability: availability() };
-    },
+function row(patch: Record<string, unknown> = {}) {
+  return {
+    connectionId: CONNECTION_ID,
+    slackTeamId: "T1",
+    slackTeamName: "Acme",
+    availability: availability(),
+    unavailable: null,
+    ...patch,
   };
-  const container = await render(agent, client);
+}
+
+test("a shared agent is in each linked Slack workspace, with how people ask it and no switch", async () => {
+  const agent = makeAgent({
+    name: "Data team",
+    slack: [availability()],
+    viewer: { canEdit: true, canManageSlack: true, canOpenInSlack: true },
+  });
+  const container = await render(agent, { listAgentSlackInstalls: installs([row()]) });
   expect(container.textContent).toContain("Slack · Acme");
-  expect(container.textContent).toContain("Off");
-  await act(async () => toggle(container, "Available in Acme").click());
-  await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
-  expect(calls).toEqual([[WORKSPACE_ID, agent.id, CONNECTION_ID, {}]]);
   expect(container.querySelector("[data-agent-slack-handle]")?.textContent).toBe(
-    "@Opengeni +data-team",
+    "@Opengeni Data team",
   );
-  expect(container.textContent).toContain(SLACK_AGENT_OPEN_LABEL);
+  expect(container.querySelector("[role='switch'][aria-label='Available in Acme']")).toBeNull();
+  // Who can use it, including anyone in the organization, is the agent's own setting.
+  expect(container.querySelector("[role='switch']")).toBeNull();
+  expect(container.textContent).not.toContain(SLACK_AGENT_OPEN_LABEL);
   expect(container.textContent).toContain("Introduce in channels");
 });
 
-test("a name Slack can't take says why, next to the switch", async () => {
-  const agent = makeAgent({ name: "Data team" });
-  const client = {
-    listAgentSlackInstalls: async () => ({
-      installs: [
-        {
-          connectionId: CONNECTION_ID,
-          slackTeamId: "T1",
-          slackTeamName: "Acme",
-          availability: null,
-        },
-      ],
-      routingEnabled: true,
-    }),
-    putAgentSlackAvailability: async () => {
-      throw Object.assign(new Error("Conflict"), { details: { code: "agent_slack_name_taken" } });
-    },
-  };
-  const container = await render(agent, client);
-  await act(async () => toggle(container, "Available in Acme").click());
-  await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
-  expect(container.textContent).toContain(
-    "Another agent in this Slack workspace is called “Data team”. Rename this one first.",
+test("people ask it by the Opengeni app's name in that Slack workspace", async () => {
+  const agent = makeAgent({ name: "Release Scribe", slack: [availability()] });
+  const container = await render(agent, {
+    listAgentSlackInstalls: installs([row({ botDisplayName: "Opengeni Staging" })]),
+  });
+  expect(container.querySelector("[data-agent-slack-handle]")?.textContent).toBe(
+    "@Opengeni Staging Release Scribe",
   );
+});
+
+test("introducing it in channels goes to that Slack workspace", async () => {
+  const agent = makeAgent({
+    slack: [availability()],
+    viewer: { canEdit: true, canManageSlack: true, canOpenInSlack: false },
+  });
+  let introduced = "";
+  const container = await render(
+    agent,
+    { listAgentSlackInstalls: installs([row()]) },
+    (id) => (introduced = id),
+  );
+  const introduce = [...container.querySelectorAll("button")].find(
+    (element) => element.textContent?.trim() === "Introduce",
+  )!;
+  await act(async () => introduce.click());
+  expect(introduced).toBe(CONNECTION_ID);
+});
+
+test("a row says why the agent isn't in that Slack workspace", async () => {
+  const agent = makeAgent({ name: "Data team" });
+  const container = await render(agent, {
+    listAgentSlackInstalls: installs([
+      row({ availability: null, unavailable: "agent_slack_name_taken" }),
+    ]),
+  });
+  expect(container.textContent).toContain(
+    "Another agent here is already called “Data team”. Rename this one to use it in Slack.",
+  );
+  expect(container.textContent).not.toContain(SLACK_AGENT_OPEN_LABEL);
+  await cleanup?.();
+
+  const privateAgent = makeAgent({ visibility: "private" });
+  const privateRow = await render(privateAgent, {
+    listAgentSlackInstalls: installs([
+      row({ availability: null, unavailable: "agent_slack_requires_workspace_visibility" }),
+      row({
+        connectionId: "66666666-6666-4666-8666-666666666666",
+        slackTeamName: "Acme Support",
+        availability: null,
+        unavailable: "agent_slack_requires_workspace_visibility",
+      }),
+    ]),
+  });
+  // Said once, not once per Slack workspace.
+  expect(privateRow.textContent?.split("Only me agents stay in the app.").length).toBe(2);
+  await cleanup?.();
+
+  const invalid = await render(makeAgent({ name: "X" }), {
+    listAgentSlackInstalls: installs([
+      row({ availability: null, unavailable: "agent_slack_name_invalid" }),
+    ]),
+  });
+  expect(invalid.textContent).toContain("Rename it to use it in Slack.");
   expect(
     agentSlackErrorText(
       { details: { code: "agent_slack_name_invalid", problem: "too_short" } },
       "X",
     ),
   ).toBe("Use at least two letters. Rename it first.");
-});
-
-test("open use needs an organization admin; Only me agents can't be turned on", async () => {
-  const onAgent = makeAgent({
-    slack: [availability()],
-    viewer: { canEdit: true, canManageSlack: true, canOpenInSlack: false },
-  });
-  const client = {
-    listAgentSlackInstalls: async () => ({
-      installs: [
-        {
-          connectionId: CONNECTION_ID,
-          slackTeamId: "T1",
-          slackTeamName: "Acme",
-          availability: availability(),
-        },
-      ],
-      routingEnabled: true,
-    }),
-  };
-  let introduced = "";
-  const container = await render(onAgent, client, (id) => (introduced = id));
-  expect(toggle(container, SLACK_AGENT_OPEN_LABEL).getAttribute("aria-disabled")).toBe("true");
-  const introduce = [...container.querySelectorAll("button")].find(
-    (element) => element.textContent?.trim() === "Introduce",
-  )!;
-  await act(async () => introduce.click());
-  expect(introduced).toBe(CONNECTION_ID);
-  expect(container.textContent).not.toContain(SLACK_AGENT_OPEN_NARROWED_NOTICE);
-  await cleanup?.();
-
-  // An agent open now says open use narrowed to linked organization members.
-  const open = availability({ open: true });
-  const openContainer = await render(makeAgent({ slack: [open] }), {
-    listAgentSlackInstalls: async () => ({
-      installs: [
-        {
-          connectionId: CONNECTION_ID,
-          slackTeamId: "T1",
-          slackTeamName: "Acme",
-          availability: open,
-        },
-      ],
-      routingEnabled: true,
-    }),
-  });
-  expect(openContainer.textContent).toContain(SLACK_AGENT_OPEN_NARROWED_NOTICE);
-  await cleanup?.();
-
-  const privateAgent = makeAgent({ visibility: "private" });
-  const offClient = {
-    listAgentSlackInstalls: async () => ({
-      installs: [
-        {
-          connectionId: CONNECTION_ID,
-          slackTeamId: "T1",
-          slackTeamName: "Acme",
-          availability: null,
-        },
-      ],
-      routingEnabled: true,
-    }),
-  };
-  const second = await render(privateAgent, offClient);
-  expect(toggle(second, "Available in Acme").getAttribute("aria-disabled")).toBe("true");
 });
 
 test("without a connected Slack workspace, admins get one way to connect it", async () => {
@@ -207,29 +174,27 @@ test("without a connected Slack workspace, admins get one way to connect it", as
   expect(container.textContent).toContain("Connect Slack");
 });
 
-test("while it is on in one Slack workspace, the other's switch says to turn that off first", async () => {
-  const agent = makeAgent({ name: "Data team", slack: [availability()] });
-  const client = {
-    listAgentSlackInstalls: async () => ({
-      installs: [
-        {
-          connectionId: CONNECTION_ID,
-          slackTeamId: "T1",
-          slackTeamName: "Acme",
-          availability: availability(),
-        },
-        {
-          connectionId: "cccccccc-cccc-4ccc-8ccc-000000000002",
-          slackTeamId: "T2",
-          slackTeamName: "Acme Support",
-          availability: null,
-        },
-      ],
-      routingEnabled: true,
-    }),
-  };
-  const container = await render(agent, client);
-  expect(toggle(container, "Available in Acme").getAttribute("aria-disabled")).not.toBe("true");
-  expect(toggle(container, "Available in Acme Support").getAttribute("aria-disabled")).toBe("true");
-  expect(container.textContent).toContain("It's available in Acme. Turn that off first.");
+test("it is available in every linked Slack workspace at once, with nothing to move", async () => {
+  const other = "cccccccc-cccc-4ccc-8ccc-000000000002";
+  const agent = makeAgent({
+    name: "Data team",
+    slack: [availability(), availability({ connectionId: other, slackTeamName: "Acme Support" })],
+    viewer: { canEdit: true, canManageSlack: true, canOpenInSlack: false },
+  });
+  const container = await render(agent, {
+    listAgentSlackInstalls: installs([
+      row(),
+      row({
+        connectionId: other,
+        slackTeamId: "T2",
+        slackTeamName: "Acme Support",
+        availability: availability({ connectionId: other, slackTeamName: "Acme Support" }),
+      }),
+    ]),
+  });
+  expect(container.textContent).toContain("Slack · Acme");
+  expect(container.textContent).toContain("Slack · Acme Support");
+  expect(container.querySelectorAll("[data-agent-slack-handle]")).toHaveLength(2);
+  expect(container.textContent).not.toContain("Move here");
+  expect(container.textContent).not.toContain("one Slack workspace");
 });

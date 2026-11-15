@@ -174,9 +174,7 @@ describe("editable artifact agent application", () => {
       modality: "document",
       title: "Report",
     });
-    expect(document.artifactReference).toBe(
-      `[Open report](/workspaces/${scope.workspaceId}/artifacts/editable/${document.id})`,
-    );
+    expect(document.artifactReference).toBe(`[Open report](artifact:${document.id})`);
     expect(
       await application.get({
         scope,

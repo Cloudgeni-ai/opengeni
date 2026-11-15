@@ -7,7 +7,7 @@
 // the session list.
 import type { ComponentPropsWithoutRef, ReactNode } from "react";
 
-import { BrandMark, Wordmark } from "../brand-mark";
+import { Wordmark, WordmarkMark } from "../brand-mark";
 import { cn } from "../../lib/utils";
 
 /**
@@ -69,11 +69,11 @@ export function RailBrandRow({ className, children }: { className?: string; chil
 export const RAIL_BRAND_LINK_CLASS =
   "flex h-8 shrink-0 items-center gap-2 rounded-md px-1.5 text-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring";
 
-/** The mark and, unless the rail is collapsed, the "Opengeni" wordmark. */
+/** The mark and, unless the rail is collapsed, the wordmark ("Opengeni", or "Geni"). */
 export function RailBrandMark({ collapsed = false }: { collapsed?: boolean }) {
   return (
     <>
-      <BrandMark className="w-5" />
+      <WordmarkMark className="w-5" tileClassName="size-6" />
       {collapsed ? null : <Wordmark className="text-[18px]" />}
     </>
   );

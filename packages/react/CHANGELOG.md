@@ -1,5 +1,368 @@
 # @opengeni/react
 
+## 6.23.0
+
+### Minor Changes
+
+- f6a7c28: Connect cards can ask for connect-time inputs. An integration whose connections each need a value first (Microsoft Dynamics: the environment's address) declares those inputs in `@opengeni/contracts/capability-connect-inputs`. `capability_authorization_request` and tool discovery now post its Connect card, which asks the person for the value in one field with one Connect action, instead of answering `input_required` with no card. The agent can prefill a value with the tool's new `inputs` argument; it is used only when it follows the entry's rule. Catalog matches list the inputs as `setup.connectInputs`, the card payload carries them as `capability.inputs`, and capability creation takes `connectFor` with `connectInputs`, so the API applies the same rule to what the person entered and returns the connection already in the workspace for the same endpoint.
+
+  A runtime guard stops repeated identical tool calls. Once one exact call has returned the same result 8 times in a row in a turn, an identical call started within 30 seconds of the last one returns a short notice instead of running, and the run continues. Calls whose results change, and polling slower than 30 seconds, are unaffected.
+
+- c0089e1: Linking a Slack account from a Slack link now ends on a page that stays put: "Linked. Go back to Slack and ask again." Before, the app revalidated access right after linking and someone without access to the link's workspace (an organization member, for example) was sent silently to their own workspace. Someone in the workspace sees the same words in a dialog they close. `AppContextValue` gains optional `slackLinkLinkedWorkspaceId` and `completeSlackLinkContinuation`.
+
+### Patch Changes
+
+- c0089e1: The agent editor shows an agent's image icon and keeps it when other fields are saved, instead of clearing it.
+
+  An agent's Slack rows (`GET /agents/:id/slack`) carry the Opengeni app's name in each Slack workspace as optional `botDisplayName`, so the agent page shows how people really ask it there (for example `@Opengeni Staging Release Scribe`); without it, clients use `@Opengeni`.
+
+- f6f8c51: Links in chat replies are easy to see. A new `link` color token (`--og-color-link` on web, `link` in the native theme) colors every text link a calm blue in both themes, readable on every chat surface. The native chat now underlines links like the web chat, announces them as links and shows a soft wash while one is pressed. Web URLs, autolinked URLs, artifact, Site, chat and file links, and links in lists and tables all share the style. Hosts that rebranded links through `--og-color-accent-strong` set `--og-color-link` instead.
+- Updated dependencies [c0089e1]
+- Updated dependencies [9dd96b0]
+- Updated dependencies [adc2409]
+- Updated dependencies [f6a7c28]
+  - @opengeni/contracts@6.23.0
+  - @opengeni/sdk@6.23.0
+  - @opengeni/connect@6.23.0
+
+## 6.22.0
+
+### Patch Changes
+
+- Updated dependencies [d50092b]
+  - @opengeni/contracts@6.22.0
+  - @opengeni/sdk@6.22.0
+  - @opengeni/connect@6.22.0
+
+## 6.21.0
+
+### Minor Changes
+
+- 177e342: Hosts can replace the composer's full model picker with two or three named levels. Pass `modelPickerProps.levels` to `SessionConversation`, `NewConversation` or `OpenGeniChat.conversationProps`: each `ModelLevel` is a label, one catalog model, one reasoning effort and whether it offers Ultrafast. The composer then shows a small inline level control that people tap or swipe; Ultrafast can be offered on any level and takes a deliberate press and hold (or a push past the end of the last level), and shows its usage cost when it turns on. Omitting `levels` keeps the full picker, levels the workspace cannot run are left out, a new chat starts on the first level, and an existing chat on another model keeps it and shows its name until a level is picked. `ModelLevelPicker` and `ComposerModelPicker` are exported from `@opengeni/react` and `@opengeni/react/composer`, the renderer-neutral `modelLevelsView` and `modelLevelChoice` from `@opengeni/react/model-levels`, and React Native hosts get the same control as `ModelLevelControl` from `@opengeni/react-native/timeline`, with `onSelectionFeedback` for haptics and `startOnFirstLevel` for new-chat screens.
+- ef4c334: - My things: each of your own logins has Remove, which removes it from every workspace after you confirm.
+  - Connect cards: when turning an integration on waits for an admin to confirm with a passkey, the card offers that as its action. Hosts set it with `onAdminStepUp` on `SessionApp` (or `adminStepUp` on the app host); by default the Opengeni app's page for it opens, then Try again.
+  - `site.ai.run` and `site.ai.result` take `waitForApproval: true` to wait through approvals and input requests and resolve with the final result once the person answers in Opengeni; `onWait` reports the wait. Without it a wait still resolves as `pending`.
+  - Approval cards show each value of a small argument object (up to four plain values, such as an update's changed fields) on the card instead of a collapsed "1 field"; larger objects still open in Details.
+- a19c047: Turn summary facets now learn when they see only part of a turn. `TurnSummaryContext.unloadedSteps` is true when some of the turn's steps are not loaded: before the turn is opened, until its earlier pages are read, and on a long live turn whose collapsed row keeps only its newest steps. A count over `items` or `toolCalls` is then too low and can go down while the turn runs, so a facet can omit it or show it as a lower bound. The signal reaches every turn row, in both the readable and the classic presentation, on web and React Native. `@opengeni/react/timeline-model` adds the helpers that renderers use for it: `timelineTurnsWithUnloadedSteps`, `activityHasUnloadedSteps` and `turnGroupHasUnloadedSteps`.
+
+### Patch Changes
+
+- 6ac2cd4: A Site that uses a connected account now works for everyone who opens it. Publishing a Site that calls the publisher's own account (as an agent sees it) also declares that connector, so another viewer runs the call on their own account, or gets the Connect card when they have none, instead of `API 404: tool_unavailable`. A Site published before this that still points only at another person's account answers with `details.code` `site_tool_not_available_for_viewer` and a message saying to publish it again; the Site receives that code instead of a bare unavailable tool.
+
+  For an agent, the publisher's accounts are its turn's own account routes, and the publication accepts the connector declared alongside each of them. A retry with the tools as originally declared replays the same publication. A list that pairing would push past the 128-tool limit is refused with a message, instead of being left working only for the publisher.
+
+  When a Site's tool call can't complete, the viewer now sees a clear state in the Opengeni frame instead of a raw error such as `API 404: tool_unavailable`, and the Site receives a typed `code` it can read: Reconnect for an account whose sign-in stopped working (`site_tool_reconnect_required`, signing in to that same account, personal or shared; a call Opengeni refused before sending it then runs again, while a provider's result asking to sign in again is returned for the Site to call again), a plain refusal that names the system for a provider's permission error (`site_tool_permission_denied`, e.g. "Microsoft Dynamics didn't allow this for your account."), a message asking the Site owner to publish again (`site_tool_not_available_for_viewer`), and a readable message for anything else (`site_tool_unavailable`). Try again is offered only when Opengeni confirms the call ran nothing and the refusal isn't definitive, and it reuses the same operation id. A dropped connection, a 5xx or an untyped error on a call may have run, so it says to check before trying again (`site_tool_outcome_unknown`) and is never run again. The original error stays behind Details. Calls that fail the same way at once share one message. `createSiteToolBridge` takes `recoverToolCall` for this host UI and exports `SiteToolCallFailedError`; Site consent accounts carry the viewer's `connectionId`, `capabilityId` and whether it is `shared`; a tool call that needs its connection signed in again carries `structuredContent.error.code` `connection_auth_needed`, and the Dynamics bridge marks Microsoft's permission refusals `provider_permission_denied`.
+
+  For Site authors: a failed `site.tools` call now rejects with one of the `site_tool_*` codes above. The original code (`not_found`, `upstream_unavailable`, `tool_connection_needs_attention`, ...) stays readable on `error.details.code`. A provider's error result is unchanged (its `content` and `structuredContent.error`) and gains `structuredContent.siteToolFailure` with the typed code and the viewer's sentence. `OpenGeniSiteBridgeError` has an optional `details`.
+
+  Microsoft Dynamics connections are personal by default but can now be shared with the workspace: the connect card offers "This workspace" and the API no longer refuses workspace ownership. Everyone then acts with the sharing person's Dynamics security roles.
+
+  The generic Microsoft Dynamics catalog entry now reflects environments already added to the workspace. When one is usable in the chat, `capability_catalog_search` and `capability_authorization_request` report it as ready and name it, instead of asking for an environment address. When the only one still needs the person's sign-in, the request shows that environment's own Connect card.
+
+  A Dynamics 365 (Dataverse), Business Central or Finance and Operations connector's tool permissions now list the tools agents actually run through Opengeni's Web API bridge, instead of asking the environment's hosted MCP server, which failed with "Could not load the connector's tools" when the environment doesn't allow that MCP client.
+
+  The Connect card keeps showing a connection as done after a reload or account switch when the chat already uses it, and setup card results tell the agent the chat continues on its own once the person finishes.
+
+  - A prepared key setup (an agent's proposed MCP server) now lets the agent continue the request once it is connected, as other setup cards do.
+  - A confirmation dialog opened from a form field (such as "Make this person a workspace admin?" in Add people) no longer also submits the form behind it, which added the person with the role chosen before the confirmation.
+  - When a Site conversation starts waiting for the person, such as an approval from the Site's own `ai.run`, the Site's chat panel opens it.
+
+- Updated dependencies [7d0d52b]
+- Updated dependencies [ef4c334]
+- Updated dependencies [ce864c0]
+- Updated dependencies [6ac2cd4]
+  - @opengeni/contracts@6.21.0
+  - @opengeni/sdk@6.21.0
+  - @opengeni/connect@6.21.0
+
+## 6.20.1
+
+### Patch Changes
+
+- @opengeni/connect@6.20.1
+- @opengeni/contracts@6.20.1
+- @opengeni/sdk@6.20.1
+
+## 6.20.0
+
+### Minor Changes
+
+- 60a33cb: A compute sandbox is deleted a day after every chat that works in it is archived.
+
+  - Archived chats no longer keep their sandbox in storage forever. A chat restored within a day of archiving keeps its sandbox. A chat stored automatically after weeks unused loses its sandbox at once. A sandbox shared by several chats stays while any of them is live, and a chat with work under way keeps its sandbox.
+  - A chat restored later continues on a new sandbox. Its timeline says the old one was deleted, and the agent is told on its next turn that the old files are gone.
+  - New message key: `timeline.projection.sandboxDeletedWhileArchived`.
+
+### Patch Changes
+
+- ed6b66c: Connecting an integration in a shared workspace with your own login already added in another workspace now turns the integration on here, instead of saying the authorized account doesn't match. When the integration isn't set up here yet and you already have that login, the card offers to use it here instead of signing in again.
+- ae3972e: The Microsoft Dynamics connection now supports Dynamics 365 Business Central. Paste the Business Central web client address (`https://businesscentral.dynamics.com/<tenant>/<environment>?company=…`) and sign in; one connection covers every company in the environment. Agents list companies and entities, query with OData, create, update and delete records and run actions such as posting, through the Business Central API (v2.0) as the signed-in user. Changes ask first by default.
+- Updated dependencies [c624443]
+- Updated dependencies [ae3972e]
+- Updated dependencies [e37485b]
+- Updated dependencies [9c17a87]
+  - @opengeni/sdk@6.20.0
+  - @opengeni/contracts@6.20.0
+  - @opengeni/connect@6.20.0
+
+## 6.19.0
+
+### Patch Changes
+
+- 1e29039: An admin change refused because a passkey confirmation is still needed now says to confirm with a passkey (or add one) instead of "You don't have permission to do this". This is what shows when the person closes the passkey prompt. The admin passkey step-up now covers only changes to who can access an organization and its data: members, roles and invitations, creating API keys, and shared connections.
+- 973329a: Chats that share one sandbox (a parent and its workers) now each keep their own personal GitHub pass, broker routes and `gh` setup, so Git and `gh` in one chat no longer fail with "authorization is no longer current" after another chat on the box ran. The repository remote stays `https://github.com/<owner>/<repo>`, no token enters the sandbox, renewal updates only its own chat, and chat directories unused for a day are removed.
+
+  A personal repository resource that also carries stray GitHub App fields is accepted with those fields ignored (access is still checked as the person), and a request without a running agent attempt now says so instead of asking to reconnect GitHub.
+
+  Repairing an uninstalled GitHub App installation while GitHub can't be reached now says "GitHub couldn't be reached" with **Check again** (the API answers 503 `provider_unreachable`) instead of opening the account chooser. When a reinstall replaces the old installation, its approval choices move to the new one with their original setter, and the old installation's rows are removed.
+
+- b349ca0: A durable Send refused for good is now kept as the composer draft until it is removed, restored or delivered, so closing the page no longer loses it. It never overwrites a newer draft from another device. A kept send also survives the composer remounting in the same page. The composer no longer re-reads its draft on every host render while a delivered message waits for its turn: it now reads the latest `onSent`/`onSubmitted` through refs, and re-reads only when a new admission arrives.
+- 226fe73: A durable Send that gets no definitive answer (the connection drops, or Opengeni is updating) now keeps its message as the draft, so it survives closing the page and shows on the person's other devices, as it did when every Send saved the draft first. Before, a message typed and sent within the autosave pause was in no draft, and closing the tab before the send went through lost it. The draft is written only while it is still at the revision the Send went ahead from, so it never brings back a message the server already accepted and never writes over another device's newer draft. When the Send lands later, the server clears a draft holding exactly what it sent.
+
+  An accepted Send now always moves the draft past the revision it went ahead from, also when nothing was ever saved: it creates an empty draft at revision 1 instead of leaving none.
+
+- Updated dependencies [a85adef]
+  - @opengeni/sdk@6.19.0
+  - @opengeni/contracts@6.19.0
+  - @opengeni/connect@6.19.0
+
+## 6.18.0
+
+### Minor Changes
+
+- f313a0e: An agent's Who can use it has a third choice, `Anyone in <organization>`: a shared agent that full members of its organization may also use from chat integrations, not only its workspace's members. It replaces Slack's per-Slack-workspace option that let linked organization members use an agent, so the agent decides it once and every chat integration follows it. Slack does today, and Teams will read the same setting through the integration-neutral check in `apps/api/src/integrations/organization-agents.ts`.
+
+  - `visibility` on agents (requests and responses) accepts and returns `"organization"` alongside `"private"` and `"workspace"`. Choosing it needs an organization admin (403 otherwise); narrowing it back doesn't. Only me clears it.
+  - Slack's safety checks for these agents are unchanged: the person must be a full member of the connected Slack team, in a conversation only that team can see, with a linked Slack account, and an active, full member of the organization, read live on every message. They are told once that the agent's workspace can see the chat, and the chat runs as the agent's read-only service principal.
+  - The agent page's Slack section no longer has its own open switch. `AgentSlackAvailability.open` still says whether linked organization members can use the agent there, and `PUT …/slack/:connectionId` with `open` still works: it changes the agent's Who can use it, in every Slack workspace.
+  - Migration 1379 adds `agents.organization_access` (default false; rolling). Every write keeps `agent_slack_installs.open` equal to it, and while an agent is in Slack it is open only if every installation is (the column decides only for an agent in no Slack installation), so the previous release behaves the same during the rollout and a change it makes holds, also after a rollback: closing the agent in one Slack workspace closes it everywhere. The one visible effect: if a server on the previous release adds an organization agent to another Slack workspace during the rollout, the agent closes to the organization until an organization admin chooses Anyone in again (the safe direction). A later contract step backfills the column from `open` and stops reading `open`.
+
+  Agents contract (migrations 1380 to 1399): a shared agent is available in every linked Slack workspace at once. The temporary one-Slack-workspace-per-agent limit is gone, with the agent page's Move here; the `agent_slack_single_install` error code is deprecated and never returned, and `putAgentSlackInstall` no longer takes `moveFromOther`. `listAgentsMissingFromSlack` now takes the installation's `connectionId` and lists the shared agents not yet in that installation.
+
+  - The Slack records that pointed at `slack_agents` (channel routes, interactions, user states, proposals, intro posts, suggestions) now reference the agent's installation in `agent_slack_installs`, with the same delete behaviour, and `agent_slack_installs.install_workspace_id` records the installation's own workspace. Before the new keys are validated, migration 1389 cleans up rows that would fail them the way each key's delete rule would (chats and proposals are unlinked and kept; the rest are deleted) and logs the count per table.
+  - Nothing writes `bot_templates` or `slack_agents` any more (an agent's leftover `slack_agents` row is deleted when the agent is renamed, made Only me or removed) and the legacy sync triggers are dropped.
+  - The legacy Slack agents API shows an agent once per installation with the agent's own `version`. Its item routes take an optional `connectionId` query parameter (SDK: the `SlackAgentInstallationOptions` argument); channels and intros of an agent in several installations need it (`slack_agent_installation_required`) unless exactly one of them belongs to the path workspace. Open use and deleting act on the agent itself, as before.
+  - Breaking for direct `@opengeni/db` users: removed the legacy bot template functions (`listBotTemplates`, `getBotTemplate`, `createBotTemplate`, `updateBotTemplate`, `deleteBotTemplate`, `BotTemplateRecord`, `BotTemplateLimitError`) and `lockAgentLegacySlackVersion`; `legacySlackAgentAvatar` is now `agentSlackAvatar`. Use the agents data layer.
+  - Upgrade requirement for self-hosted and embedded deployments: upgrade from a release that contains the agents API switch (#7274) and apply this release only when no running binary is older. Rolling back past that release afterwards is not safe.
+  - Accepted rollout effects while the previous release still serves (or after a rollback to it), for an agent in a second Slack workspace: a route card's agent pick there answers "That agent no longer exists", the legacy Slack agents item routes answer 404 for it, and the previous release's Move here (if it has one) deletes the other Slack workspace's channel settings, which this release then adds back empty. All fail closed and end when this release serves again.
+
+### Patch Changes
+
+- 3bc721a: A chat waiting for Codex subscription capacity now waits honestly and wakes on real capacity. Before a waiting turn is judged, the waiter re-reads both usage and every account's live model list, so it judges the same pool the resumed turn will be placed on: it no longer resumes a turn only to have it park again a second later, and the expected time it names is the reset of an account that actually offers the turn's model (and latency tier), or no time at all when none is known. A waiting turn no longer fails after ten resumptions with text only an operator could act on; it keeps waiting, with the existing backoff between resumptions. The chat and the inbox notification now say the message will be answered as soon as there is room, and that switching to another model continues sooner.
+- 3b8f7da: A message sent while the agent is working (Send under `busySend: "steer"`, or Steer) now leaves the composer in the same frame it appears in the timeline. Before, the text stayed in the box until the server answered, about one to two request times later. The send also makes one request instead of two: with durable drafts it no longer saves the draft before submitting, because the submit carries the full message and the draft revision it went ahead from, and the server keeps a newer draft from another device on its own. A save still goes first only when this page has a draft write that got no answer, when the message carries a model, effort or speed pick the saved draft does not hold yet (the chat adopts a pick only from the saved draft), or when an older server refuses the send with "draft changed" (then it saves and resubmits once under the same client event ID, and remembers to save first).
+
+  A send refused for good puts its text, files and notes back in the box when nothing new was typed meanwhile; otherwise the new typing stays and the message waits in the timeline with Retry and Restore. An unconfirmed send stays in the timeline and its retry repeats it with the same key. A queued Send that fails no longer lets autosave write its emptied box over another device's newer draft.
+
+- d83e5f2: When an admin must confirm with a passkey before turning on an integration, the connect card now asks them to add or confirm a passkey. It used to say only an admin can turn it on, which was wrong for someone who is already an admin.
+- a16189c: Slack replies no longer show Opengeni links as raw Markdown. An image or link to an artifact (`![Preview](artifact:<id>)`, `[deck](artifact:<id>)`), a chat (`session:<id>`) or a console path now becomes a Slack link to that page in Opengeni, and a `sandbox:` path becomes its label. A clickable thumbnail links with its alt text. Markdown tables become an aligned code block, with each link in a cell numbered and listed under it. Operations an earlier release bound to other bytes keep them on retry. The console's file page opens a Site when an `artifact:<uuid>` link names one, since Sites share the UUID format.
+
+  Native app push registration now says why a deployment can't deliver to the app. `PUT /v1/native-app/push-device` answers 409 with `details.code` `native_push_unavailable` (`NATIVE_PUSH_UNAVAILABLE_DETAIL_CODE`, `isNativePushUnavailableError` in the SDK) when the app ID isn't in `OPENGENI_NATIVE_APP_IDS` or the platform has no push credentials, instead of a bare 400, or of accepting a registration that would never get a push. The iPhone app shows "This server isn't set up to send notifications to this app." instead of "Try again", shows a failed calls change under Calls from agents, and reports its APNs environment from its signing profile, also when it re-registers rotated tokens in the background (it re-registers a stored registration for the wrong environment too).
+
+  The iPhone message field grows with its text again, up to six lines (four with large text on a small screen, and never more than half the room above the keyboard) before it scrolls. On the new architecture iOS reports a field's content size only when its layout changes, so the fixed height the composer set from it never grew past one line and earlier lines scrolled out of view.
+
+- 73c3e82: A message sent as a Steer while no turn was running now stays above the turn it starts. When a later Steer handed that turn over at its next model step, the timeline moved the turn's work and messages above the first message, so the person's question read as if it came after its own answer, both live and after a refresh. Only Steers drawn while a turn is actually running now wait for that turn's handover.
+- 89cf4ba: `FormDialog` takes `aboveOtherDialogs`, which shows the dialog and its overlay above every other open dialog, including the chat's connect dialog.
+- Updated dependencies [f313a0e]
+- Updated dependencies [6813960]
+- Updated dependencies [9188c1d]
+- Updated dependencies [3105a8b]
+- Updated dependencies [a16189c]
+- Updated dependencies [89cf4ba]
+  - @opengeni/contracts@6.18.0
+  - @opengeni/sdk@6.18.0
+  - @opengeni/connect@6.18.0
+
+## 6.17.0
+
+### Minor Changes
+
+- b1b69fc: The console now sends a strict, enforced Content-Security-Policy: `default-src 'self'`, scripts only from the console and the exact hashes of its inline bootstrap scripts, `object-src 'none'`, restricted `base-uri` and `form-action`, `<style>` elements only with a per-response nonce (stamped by a hashed bootstrap script) and inline style attributes only through `style-src-attr`, and exact hosts (never `*` or a bare scheme) for storage, analytics, sign-in avatars, catalog logos, Turnstile and the Sites frame host, read from the deployment's API configuration (`GET /v1/config/content-security`). Office add-in pages get the same policy with Office's framing hosts and script hosts.
+
+  Agent-authored HTML (chat visualizations, HTML artifacts and Sites in the console) now renders in an opaque-origin sandboxed frame of a small frame-host page (`https://og.<sites domain>/_og/html-frame`, served by the Sites gateway, or `/_og/html-frame` on the console without a Sites domain) instead of a `srcdoc` frame, so it keeps running under its own policy with the same sandbox flags. `@opengeni/contracts/html-frame-host` exports the frame-host protocol; `@opengeni/react/artifacts` exports `configureContentHosting`, `ContentHostingConfig`, `displayImageSrc`, `useDisplayImageSrc` and `setImageProxyTicket`. Without configuration, embedders keep the previous `srcdoc` frames and direct image URLs.
+
+  Images from origins the policy does not list load through the new signed-in image proxy (`GET /v1/image-proxy?url=`), which fetches only public HTTPS raster images with SSRF protection on every redirect, a size cap and a deadline, and answers them inert (SVG only under a sandbox policy). The Excel add-in, which signs in with a bearer token, appends a short-lived signed ticket from `GET /v1/image-proxy/ticket`. The GitHub connection pages allow form submissions to redirect to `https://github.com`. The API's own HTML pages (GitHub connection, MCP OAuth consent and admin-consent pages) now allow their inline scripts and styles by hash instead of `'unsafe-inline'`.
+
+### Patch Changes
+
+- 43aa19d: An agent shared with its workspace now works in every Slack workspace linked to that workspace, with no separate step to make it available there. It doesn't matter where it was made: the app, a chat, a chat started in Slack (`bot_template_save` or `slack_agent_propose`) or the API. People call it by name (`@Opengeni <Name> …`), and who can use it is still decided only by Who can use it and, per Slack workspace, the existing option that lets linked organization members use it. Someone who calls an agent they can't use is told why.
+
+  Existing shared agents and bot templates join their linked Slack workspaces the first time Opengeni reads that Slack workspace's agents, or when any agent of the organization is created, renamed or shared, so a new agent never takes an older agent's name. The oldest agent keeps a name when two share it. Agents in personal workspaces stay in the app. There is no schema migration: availability still uses `agent_slack_installs` and the legacy `slack_agents` rows, which older releases read as switched on.
+
+  - Creating or renaming a shared agent whose name another agent already uses in a linked Slack workspace, or that Slack can't use, is refused with `agent_slack_name_taken` (409) or `agent_slack_name_invalid` (422), from the API, the app's form and `bot_template_save`.
+  - `bot_template_save` returns a `slack` field saying how people ask the new agent in each linked Slack workspace, and its description asks the agent to tell the person.
+  - Making an agent Only me is no longer refused: it leaves Slack, along with its channel settings and intros. The form says so.
+  - `AgentSlackInstall.unavailable` says why an agent isn't available in a linked Slack workspace (for example Only me, a name clash, or the current one-Slack-workspace limit). The agent page shows how to call it, or that reason, per Slack workspace; the on/off switch is gone. The open option and Introduce remain.
+  - `DELETE /v1/workspaces/:workspaceId/agents/:agentId/slack/:connectionId` answers 409 `agent_slack_always_available`. Make the agent Only me to take it out of Slack. The Agents API has not been in a production release or a published SDK yet, so no existing integration relied on the old answer.
+  - Any member who can start chats can now make an agent people call by name in Slack, in every linked Slack workspace, including Slack apps the organization shares. Before, turning an agent on in Slack needed a workspace admin. Opening it to linked organization members still needs an organization admin.
+  - While an agent is in one Slack workspace at a time, it goes to its own workspace's Slack app first, then those its organization shares, each by Slack workspace name. `PUT …/slack/:connectionId` on another linked Slack workspace moves it there in one step, so it is never in neither (the page's Move here, which says what it drops): open use turns off and its channel settings and intros there are cleared.
+  - Adding an agent to Slack on its own doesn't change the agent's version, so an open edit form still saves.
+  - The older `POST`/`PATCH /bot-templates` API also makes a shared template available in Slack at once. It keeps accepting names Slack can't use or that clash; such an agent stays out of Slack and its page says why.
+  - Making an agent Only me and then shared again starts it fresh in Slack: open use and channel settings are not kept.
+  - During a rolling deploy, servers on the previous release still refuse Only me for an agent in Slack and still show the old switch, which can turn Slack off. A server on this release adds such an agent back within a minute.
+  - `@opengeni/db` adds `listAgentsMissingFromSlack`; `putAgentSlackInstall` accepts a null actor, `automatic` for availability Opengeni adds on its own, and `moveFromOther` to move an agent between Slack installations in one transaction.
+
+  Compatibility exception: https://github.com/Cloudgeni-ai/opengeni/pull/7395#issuecomment-6741026523
+
+- d189da5: Integration OAuth (MCP connectors such as Gmail, and built-in provider integrations) now finishes only in the browser that started it. A start from a signed-in browser sets a short-lived HttpOnly binding cookie (host-only `__Host-` on https) whose hash is signed into the state. A desktop-app or native-app start finishes only where the same person is signed in. Any other callback is refused as `browser_mismatch` before anything is exchanged or saved, so a consent link sent to someone else can no longer connect their account to the sender's workspace. Connect attempts started by a signed-in person may return only to this deployment's own origins (published Sites are not trusted). Host products using their own keys or delegated tokens are unchanged.
+- a4ef243: A new chat whose creation is refused now says why. When `createSession` rejects with a definite refusal of its input or state (an `OpenGeniApiError` with status 400, 409 or 422 and `outcomeUnknown: false`), the stock new chat shows the refusal's own reason, such as a speed or model that isn't available, instead of the generic "The request could not be accepted" copy. Permission and missing-item refusals (403, 404) keep their neutral copy. Typed refusals keep their worded copy, and a host endpoint's `{ error: "…", code, details }` body is read as well as Opengeni's own `{ code, message }`. The host's `formatError` receives this reason as its default message, so a host formatter that returns `undefined` for errors it has no copy for shows it too. The draft stays and Send stays available, and changing the model, speed or effort clears the stale reason. Failures whose outcome is unknown (network loss, 5xx, `outcomeUnknown: true`) keep the exact-retry state unchanged.
+- e3cb3c1: Your GitHub accepts repository owners whose logins contain an underscore, as enterprise managed users' do (`octocat_acme`). Choosing, searching, attaching and using such repositories now works everywhere personal GitHub checks an owner: the repository chooser and its stored selection (migration 1370 widens the database check, 1371 validates it), a typed repository URL in the chat's repository picker, agent-created workers and schedules, the `gh` gateway, the account repository tools and the repository identity shown to the agent. Owners still need 1 to 39 letters, digits, `-` or `_`, starting with a letter or digit. The documentation also states that a schedule an agent saves with Your GitHub repositories runs as the person only while those repositories stay in their chosen list (or All my repositories) and the account stays connected, and never falls back to the workspace's GitHub app.
+- 389de66: Signing out no longer leaves a person's unsent meeting and dictation recordings on the device. When recordings of theirs are still uploading, the console, the desktop app and the mobile app first ask whether to wait for the upload (they stay signed in) or discard the recordings and sign out; with nothing pending, sign-out is unchanged. Where nobody can be asked, such as a sign-out from another tab, the recordings are discarded. Signing out of one browser account removes only that account's recordings; the last account, or signing out of all, removes every one.
+
+  For apps: stored recordings can carry an `ownerId` (`RecorderOptions`, `UploadRecordingAudioOptions` and `useRecorder`), which `localRecordingsOf` and `discardLocalRecordingsOf` use, and `useRecorder` finishes only its owner's recordings when it mounts. `prepareRecordingsForSignOut` (from `@opengeni/react/recordings` and `@opengeni/react/meetings-recorder`) runs the check before a sign-out, with `setSignOutRecordingsPrompt` for the question. On phones, the `opengeni-recordings` folder is kept off iCloud backups, the recording config plugin keeps it off Android backups and device transfers, and `forgetRecordingStore` deletes an account's folder.
+
+- Updated dependencies [8073ab6]
+- Updated dependencies [43aa19d]
+- Updated dependencies [b1b69fc]
+- Updated dependencies [deccb54]
+- Updated dependencies [668c5ed]
+- Updated dependencies [e3cb3c1]
+- Updated dependencies [389de66]
+- Updated dependencies [42ef2a2]
+- Updated dependencies [241ce71]
+  - @opengeni/contracts@6.17.0
+  - @opengeni/sdk@6.17.0
+  - @opengeni/connect@6.17.0
+
+## 6.16.0
+
+### Minor Changes
+
+- 55058af: The blocked-message notice reads more simply.
+
+  - A paused machine owner gets one line, "Allow it for this chat. Your message starts when the chat is resumed.", instead of "starts right away" next to a separate paused note.
+  - When other people in the workspace can see the chat (workspace visibility, outside a Personal workspace), the owner learns that allowing the machine lets them see what the agent does on it. On web the composer's shared-machine heads-up steps aside while this shows.
+  - "Your message is saved" is gone from every state, since the message is already in the chat. After the chat moves to a machine it can use, the notice shows "Starting on the new machine" and "The message starts by itself." The machine picker's note for a waiting message keeps only "Use a workspace or cloud machine for this message."
+  - Every "starts" line names the message: "Your message…" only in the machine owner's own lines, and "The message…" wherever someone else may be reading. The permission line says who can fix it first, and the machine-access lines drop "right now" and "You can".
+
+  API changes:
+
+  - `SessionAdmissionNotice` takes `sharedChat`. `useSessionStart` returns `sharedChat` while the owner is asked to allow the machine, reading the workspace kind through `getWorkspace` when the client has it; it is false otherwise and while the kind is unknown.
+  - `sessionAdmissionMachineAccessCopy` accepts `paused` and `shared` options.
+  - New message keys: `sessionAdmission.machineAccessOwnerPausedNext`, `sessionAdmission.machineAccessOwnerSettingsPausedNext` and `sessionAdmission.machineAccessSharedNote`. `sessionAdmission.machineChangedBody` is removed; drop it from custom translations.
+  - `sessionAdmissionMachineChangedCopy` now returns an empty `next`. Skip rendering an empty `next`.
+
+### Patch Changes
+
+- fb19875: Approval cards now read in the host's words and language. A saved review carries codes beside its English text: `reasonCode` for why it asks or is blocked, `approveLabelCode` when the button is the plain "Approve action" or "Allow", `toolName` for the action, and per field the argument it stands for (`key`) and a plain yes or no (`booleanValue`). The card, the approval list, the step in the chat (`toolDisplayName`) and the history line after a decision word these through the host's `messages`: `approvalSurface.approveAction` and `approvalSurface.allow` for the button, `toolActionReview.reason.*` for the reason, `toolActionReview.yes` and `.no` for yes or no values, and new host keys to name a connector's actions and fields the same way as `connectService.<id>.name`: `toolAction.<toolName>.title`, `toolAction.<toolName>.field.<argument>` and, for every tool, `toolField.<argument>`. Without host words nothing changes.
+- Updated dependencies [fb19875]
+- Updated dependencies [54dc5da]
+- Updated dependencies [86e5358]
+  - @opengeni/contracts@6.16.0
+  - @opengeni/sdk@6.16.0
+  - @opengeni/connect@6.16.0
+
+## 6.15.0
+
+### Minor Changes
+
+- 3bab763: `ConnectPanel` now keeps the organization approval help up when a sign-in comes back cancelled or denied with an administrator approval link stored on the attempt, for example after someone leaves Microsoft's "Need admin approval" page with Cancel or "Return to the application without granting consent". It used to treat the cancel as finished and quietly go back to the service list. The help offers the message for IT, the approval link, "Try signing in again" (a fresh setup for the same service unless the host passes `onRetry`) and "Back to connections". A plain cancel that stores no approval link still closes quietly.
+
+  `ConnectPanel`, `ConnectChooser`, `ConnectAccounts` and `ConnectionDiscovery` accept `finishInPopup`. Set it when your `onAuthorize` opens the provider's sign-in in a popup: the popup then ends on a small page that closes itself instead of loading your return URL, a second copy of your app, inside it. The closing page now says "Go back to where you started to continue" rather than naming the chat.
+
+  Once a service connects, older unfinished setups by the same person for the same service, owner and destination no longer appear in the pending list (`GET /v1/workspaces/:workspaceId/connect/attempts`), so a host's "continue setup" entry for that service goes away. Custom connections (MCP servers, OpenAPI and GraphQL sources) share one provider ID across different services and are never hidden this way.
+
+  The page a sign-in popup ends on and the page an administrator sees after the Microsoft approval link can now use the deployment's language: set `OPENGENI_CONNECT_RESULT_PAGE_TEXT_JSON` (fields `lang`, `signInFinishedTitle`, `signInFinishedBody`, `adminApprovedTitle`, `adminApprovedBody`, `adminNotApprovedTitle`, `adminNotApprovedBody`, `closeWindow`). Any field left out stays in English. `@opengeni/config` exports `parseConnectResultPageTextJson` and `ConnectResultPageTextSchema`.
+
+- 9b75ec0: The new-chat page now asks "What can I help with?" for everyone, with "Ask anything, or describe what you need…" in the text box. It used to say "What should the agent do?" to everyone who didn't choose everyday help at sign-up. The suggestions under the composer still follow that answer, but only people who chose to build or run agents get the developer suggestions; people who skipped the question or signed up before it existed now get the everyday ones. The project picker and model stay where they were.
+- f92ff08: The GitHub integration page is compact. Each Opengeni app installation is one row: a healthy one shows its account type and repository count with **Change repositories**. One that is not active shows a status in the attention colour ("Uninstalled on GitHub", "Suspended on GitHub", "No repositories", "Not checked", "Account changed" or "Needs authorization"), one sentence on what is wrong, and the one action that fixes it (Reinstall, Unsuspend on GitHub, Choose repositories, Check again, Remove or Authorize). Remove sits in the row's ⋯ menu. Approvals come before the repositories and are one table: rows are the three kinds of action, columns are the Opengeni app and Your GitHub, and an **All actions** row sets a whole column at once. Per-installation choices sit behind **Advanced**, and one footnote replaces the repeated text. A long repository list folds behind its count with a search field. The page opens with a one-line summary naming the installation that needs attention ("The Opengeni app was uninstalled from benyhh on GitHub."); its row keeps the one fix. Repair opens a dialog that names the installation and the fix, and Connect starts at that installation: `reconnectAccountId: "github-installation:<id>"` on a `github-app` attempt goes straight to installing the app again when it was uninstalled, or to the owner's sign-in otherwise, instead of the account chooser. If GitHub can't be asked, it starts at the account chooser. A reinstall replaces the binding it repaired and carries its approval choices over. `NativeConnectSetup` no longer resumes another account's pending reconnect for a new connection, and a resumed reconnect offers **Start over** instead of "Connect a different account".
+
+  GitHub installation bindings carry an optional `issue` (`GitHubInstallationIssue`: `uninstalled`, `suspended`, `no_repositories`, `owner_unconfirmed`, `github_unreachable` or `account_changed`) that says why an installation is not active, in terms of its fix. It is null while active, and older servers omit it. The integration view model adds `IntegrationSection.rows` and `statusTone`, `IntegrationViewModel.policies` (an `IntegrationPolicyTable`) and `IntegrationAccess.collapsed`. `NativeConnectRequest.title` replaces the "Connect …" heading; with a description, the setup leaves out its generic connection summary. `ConnectSetup` takes `explained` to do the same, and a `DetailSection` action now wraps under its title on narrow screens.
+
+- bf804ef: Chats created with an API key are now labelled by the key's name with an "API key" hint in the sidebar's creator groups and hover cards (for example "Codex operator 2026-09-11 · API key") instead of a raw principal id, and other services show a "Service" hint; a key or service without a name shows just "API key" or "Service", never an id. An API key's chats form one group (people and services keep their exact frozen kind) even when older chats recorded the key as a subject and newer ones as a service, keys that share a name are told apart by a number, and an API key never gets a person's initials chip. On the Schedules page, a schedule owned by an API key shows a bot icon instead of initials, and "API key" instead of the raw key id when the key has no name. How people are shown is unchanged.
+
+  The session list API accepts `createdBySubjectId` without `createdByKind`, matching every session that subject created whichever kind it was recorded as; `createdByKind` alone is still rejected. The SDK's `listSessionPage` `createdBy.kind` is now optional to match, and `@opengeni/db` session list filters accept a creator without a kind. Requests that send both keep their exact behaviour.
+
+### Patch Changes
+
+- 7d6e488: Android 14 and later: agents' calls can ask for the full-screen notification permission they need to ring over the lock screen. Play pre-grants `USE_FULL_SCREEN_INTENT` only to calling and alarm apps, so in other apps a ring was only a heads-up notification and nothing told the person why. The Android call module now reports `fullScreenRing` in its capabilities and can open the app's full-screen notification setting (falling back to its notification settings). The call adapter exposes this as `incoming.canRingFullScreen()` and `incoming.openFullScreenRingSettings()`, absent on iOS and older builds, where rings always show full screen. The new `useFullScreenRings(callAdapter)` hook keeps the answer current as the app returns to the foreground and has `ask()`, which explains the setting in an alert and offers to open it, for hosts to call when the person turns agent calls on. `@opengeni/react` adds the default English text for that prompt.
+- 60d067d: Claude subscription usage now matches what Claude reports today. The usage refresh reads the account's limit reset grants (presenting Claude Code's CLI surface, which Claude requires for them) and, while at a limit, the at-limit reset program. `ClaudeSubscriptionUsage` gains optional `limitResets`, `wallReset`, `limits`, `extraUsage`, `surfaceWindows` and `serviceState`, and the SDK exports their types. The account page lists each grant with what it clears, resets left, expiry and whether it can be used now. `@opengeni/db` adds the adapter-level claim and claim-then-refresh helpers (idempotent request ids); Opengeni never claims a grant on its own.
+
+  The weekly limit model responses call `seven_day_overage_included` is treated as the weekly Fable limit: it limits Fable models only and shows as "Fable week". Responses served in the slow tier or grace zone mark a connection constrained (`SubscriptionQuota.constrainedUntil`): it still serves, but placement prefers accounts with plain capacity, and busy slow-tier slots are a short rate limit rather than the weekly limit.
+
+- bf236a6: Replayed Claude thinking no longer breaks a chat. Claude's signed thinking now follows the same replay policy as OpenAI encrypted reasoning: each block records the binding it was issued under (platform, account, model and, for prefix-bound models such as Opus 5.5, the system prompt), and a request under any other binding replays it as readable historical reasoning instead of a signature Claude would refuse. This covers system prompt changes between turns (for example a repository Skill added mid-chat), model, account and transport switches, and works on every Claude transport. History stored before this change stays native until Claude refuses it. A refused replay never fails the turn: the request is sent once more with the refused blocks as readable text (remembered for the provider), and if Claude refuses that too, once more with plain history that carries no opaque provider state. Each fallback is recorded for operators as a thinking-blocks-dropped reason and is never shown to the person.
+- da60317: Source links in answers no longer carry the tracking that OpenAI's hosted web search adds to the pages it finds: `utm_source=openai` (or a ChatGPT value) and `_t_q`, the search query that found the page. Chat timelines (web, desktop and mobile), copied text, the opened-page line of a web search, the notification inbox, phone push text, Slack and Teams now show the clean link; the page's own parameters, the fragment and code stay exactly as written. Only links carrying the provider's `utm_source` value are changed. Stored history and anything sent to the model keep the links as the model wrote them, and a Slack message an earlier release already started keeps that release's bytes on retry. `@opengeni/contracts/citation-urls` exports `withoutProviderTracking` and `withoutProviderTrackingInText` for other surfaces, such as products that render the raw chat stream.
+- 1f2a7d0: Desktop dictation now says when the speech service is out of credit, or the model isn't available in the workspace's region, instead of "Dictation couldn't start".
+- ef25cae: Show a failed turn's error once, in the failed banner next to Retry. The work header says only "Failed", an attempt replaced by Retry becomes a quiet "Attempt failed · retried" row with its text behind the disclosure, and the "failed" and "work resumed" dividers no longer repeat a turn's own failure. The banner keeps the full recorded text behind Details. Without a banner, the turn's row or the failure's own notice shows the text once.
+- 2107e6f: Removing a duplicate login no longer leaves a connector saying "Sign in again" next to a working account. A connector's status now follows the person's accounts that still exist: a working one first, then one that needs signing in again; a removed login no longer counts. When only removed logins are left, the connector offers Connect instead of a Reconnect that could never succeed. The same applies in chat: a connector card no longer refuses with "More than one personal account matches" because of removed duplicates; it reconnects the person's one remaining login, or connects a new one when none is left.
+
+  The OAuth client no longer counts as part of an account's identity. A login made before a deployment replaced its OAuth client (for example its Google client) is still recognised as the same account: connecting again reuses it instead of saving a duplicate, and reconnecting it no longer fails as a different account. Migration 1362 merges the duplicate personal Slack, Gmail, Google Calendar, Google Drive and Atlassian logins that were saved under different clients, using migration 1226's rules (same person, server, authorization server and verified account; the kept login must hold every scope of the merged one; logins that something depends on, now including Slack agents, are left in place). Of two working logins it keeps the one that refreshed most recently, so a login on a retired client is no longer kept over one that has refreshed since.
+
+  Gmail no longer sends `include_granted_scopes`. Gmail, Google Drive and Google Calendar share one Google client, so Google's consent screen listed the person's earlier Drive and Calendar grants, and the Gmail token carried them. Gmail now asks for and holds only Gmail access. Connecting Gmail, Drive or Calendar shows Google's account picker, and reconnecting an account names it to Google, so Google no longer signs in whichever account the browser used last.
+
+- 060c983: A sub-agent failure that its parent agent has already received no longer shows a red dot or an "unread failures" count on the parent's sidebar row, hover card, project totals or Needs you, and nothing the failed session logs afterwards counts as unread there either. Failures nobody took on still show: a top-level chat that fails, a failure whose notice its parent has not consumed, or a sub-agent that fails again after a retry. Sessions carry a new optional `failureHandled` flag.
+- 6a5023d: Videos can be attached from a phone. The Expo photo library offers photos and videos, and the camera records video as well as taking photos (iOS; Android's camera stays a photo camera). Library videos keep their original file, so nothing is re-encoded before sending. The composer shows a video as a tile with its length and the upload's percentage, and a sent video shows in the timeline as a video chip that opens in the system player. The agent receives it in its sandbox like a file uploaded on the web.
+
+  Every picked file now uploads straight from disk through Expo's native upload task, which reports progress and keeps going while the app is in the background, so a long video never has to be read into memory. Files up to 20 MiB are still hashed on the device; larger ones upload without a client digest, as a plain REST upload does. Removing an attachment, or leaving the chat, stops its upload. Hosts with their own adapters can opt in through the new optional `NativeFileAdapter.uploadSource`; without it files are read into memory as before.
+
+  `uploadFile` in the SDK accepts a `FileUploadSource` as `data` (`{ sizeBytes, send(target) }`) for callers that send the bytes themselves, and an optional `signal` that cancels the upload.
+
+- 02ac654: Files attached in a private embedded chat are now the uploader's own (Only me), as in the Opengeni web app, instead of workspace files. The stock conversation hooks (`useSessionConversation`, and `useOpenGeniNativeSession` in React Native) pass the chat's upload scope, and `createSessionProxyHandler` adds `scope: "personal"` to an upload that names no scope unless `chats` is `"shared"`, so older or custom browsers get the same default. An explicit `scope` passes through unchanged, and shared chats keep workspace files. `uploadScopeForSession` is exported for custom layouts that call `useFileAttachments` themselves. `useNativeFileAttachments` takes an optional `scope`. Like any Only me file, these are read as their owner (`asUser`) or by the chat's agent; a server-key-only read no longer lists them. Files uploaded this way before the change stay workspace files.
+- 2405d05: Saving a file from the browser works reliably in Firefox. Downloading a retained artifact, downloading a published file from the chat timeline, exporting an editable spreadsheet, document or presentation, exporting Site data and exporting an agent now share one save step that attaches the download link to the page for the click and keeps the file's object URL alive for 60 seconds. Before, most of these paths revoked the URL right after the click, and Firefox could fail the download even though the file had been fetched in full.
+- 2a7d92d: Send refusals and chat status lines no longer end with "Your message is saved." (or "Your message and attachments are saved."). The message is already visible in the chat or the composer. This covers model, repository, speed, billing, usage-limit and Site-assistant refusals, the provider-retry notice, and the "Unable to start yet" and "No agent turn is running yet" lines. The connector-account refusal now ends "then edit and send your message." `COMPOSER_MODEL_UNAVAILABLE_MESSAGE`, `COMPOSER_ACCOUNT_UNAVAILABLE_MESSAGE` and `COMPOSER_SESSION_USAGE_LIMIT_MESSAGE` carry the shorter text. A refusal restored from storage in the earlier wording is still recognized.
+- 294b9d9: Signing out now leaves nothing of the person's in the tab: unsent messages and answers (in memory and in session storage) and every other per-person Opengeni session-storage entry are cleared, both on sign-out and when the last browser account signs out. Entries that hold nobody's content (reload guards, the "signed in as" notice and an invitation being carried across a change of account) are kept. Successful sign-out responses also send `Clear-Site-Data: "cache"`. Cookies and storage are not cleared that way, so embedding hosts keep their cookies and meeting recordings that have not finished uploading are kept.
+- 850b4d5: When a model refuses encrypted reasoning that another model or account left in the chat, the failed-turn banner now says "This model can’t read earlier reasoning in this chat." and points at the model picker, instead of "The session stopped unexpectedly." Retry stays, and the provider's exact text stays behind Details. The runtime's recovery and the banner share one rule for recognising this refusal (`@opengeni/contracts/encrypted-reasoning-refusal`).
+- Updated dependencies [708848c]
+- Updated dependencies [5525e63]
+- Updated dependencies [60d067d]
+- Updated dependencies [da60317]
+- Updated dependencies [f92ff08]
+- Updated dependencies [060c983]
+- Updated dependencies [bf804ef]
+- Updated dependencies [dfeab20]
+- Updated dependencies [6a5023d]
+- Updated dependencies [02ac654]
+- Updated dependencies [b0fce89]
+- Updated dependencies [9885d37]
+- Updated dependencies [f22647a]
+- Updated dependencies [7a83f9b]
+- Updated dependencies [850b4d5]
+  - @opengeni/contracts@6.15.0
+  - @opengeni/sdk@6.15.0
+  - @opengeni/connect@6.15.0
+
+## 6.14.0
+
+### Minor Changes
+
+- c976c87: Agents have one text, their Instructions: First message is gone from the agent editor, the agent page, export, `bot_template_save` and the docs. The editor is icon, name, what it helps with, Instructions, Remember across chats and who can use it. Starting a chat with an agent (`?agent=`, or an older `?botTemplateId=` link) selects it and leaves the composer as it is.
+
+  Nothing is dropped or migrated. Every read joins an existing First message after the Instructions as its own paragraph, led by "When a chat starts:" so one-time setup stays for the start of a chat (`agentInstructionsWithFirstMessage` in `@opengeni/contracts`, `agentInstructionsSql` in `@opengeni/db`), so the editor, the API, Slack and a chat's agent layer all see the same text, and a chat with such an agent now follows it as part of its Instructions. The next change to the agent stores the joined text with an empty First message, unless the two together pass the 20,000-character limit, when both are kept as they were; the editor then saves other changes and asks to shorten the Instructions only when they are edited. The legacy `bot_templates` and `slack_agents` rows copy what is stored, never a cut text, so an older server writing them back during a rollout loses nothing. `Agent.firstMessage` is always empty and `hasFirstMessage` false; the fields stay for older clients. `firstMessage` on create and update, `bot_template_save`'s `firstMessage` and `setupInstructions`, and `/bot-templates` `setupInstructions` are still accepted and become Instructions. `/bot-templates` lists only agents made as templates, with their Instructions as `setupInstructions`. The `first_message` column stays.
+
+  The agent icon picker opens on the emoji choices and colours, also for a new agent with no icon yet. Browsing the tabs or a colour chooses nothing; picking an emoji, icon or letters makes it the icon, in the colour browsed. Before, it showed only the Emoji, Icon and Letters tabs until one was clicked.
+
+  "Remember across chats" is a switch in the agent form, and new agents start with it on: from the app form (including Make this an agent) and from a chat's `bot_template_save`, which now also creates the agent's Memory collection and reports in its result's `memory.status` whether that collection is `ready`, `pending_review`, `learning_off` or `not_saved`, with a note for the person. Saving the agent in the app sets up a missing collection. Agents made from a Slack proposal already started with Memory on. Existing agents keep their setting, and `CreateAgentRequest.memoryEnabled` still defaults to off when the API caller omits it.
+
+- 904eae7: Dictation from anywhere now has one workspace of its own. Settings → Dictation gains a Workspace row (shown when the person can use more than one workspace), and every shortcut dictation goes to that workspace and is billed to it, whichever workspace the window shows. The recorder runs outside the workspace screens, so switching workspace mid-dictation no longer stops it. When the person has left that workspace, voice input is off there, or it doesn't offer a shortcut's model, the setting says so on the row at fault and the popup offers "Open settings"; a dictation never falls back to another workspace. The desktop bridge's dictation settings carry the chosen workspace (`DesktopDictationWorkspace`).
+- 91320a4: A page whose sign-in is gone now stops instead of polling on. A request refused because its sign-in expired, was revoked or its cookie lapsed answers HTTP 401 `unauthenticated` with `details.code` `session_missing` (no sign-in sent) or `session_expired` (a sign-in cookie or app credential that no longer signs anyone in); another credential that is not accepted, such as an API key, is `credential_invalid`. Route-rejection metrics and logs carry the same reason instead of `unclassified`. The web app hears the first such refusal, confirms with the session read, and leaves the signed-in app at once, so its polling and streams stop and the sign-in page shows; inside the desktop app the window's sign-in is renewed and the page reloads.
+
+  The desktop app also stops its window being signed out while the app stays signed in. Its window shares the device's session, which is renewed at most once a day by whichever request comes first. When that was one of the app's own requests (it polls the inbox, also right after the computer wakes), the renewal never reached the window's cookie, so the cookie lapsed a week after it was last set. The app now sends its own requests with the window's cookies, and a request that renews the session returns the renewed window cookie with it.
+
+  `@opengeni/contracts` adds `AUTHENTICATION_REQUIRED_REASONS`, `AuthenticationRequiredReason` and `isSignInLostRejection`. `@opengeni/core` adds `AuthenticationRequiredRefusal`. The app state's host can pass `subscribeSignInLost`.
+
+- 7c926f8: A meeting recording keeps a track whose source goes away instead of silently ending it. A microphone that is unplugged or turned off is opened again as soon as one is available and records on in the same track; shared tab or computer audio that ends waits for `recorder.reconnect(trackNumber)` (`reconnectTrack` in `useRecorder`), which asks again from a click. Snapshot tracks report `lost: "reconnecting" | "stopped"`, the recorder panel says what is missing and offers the click that brings it back, and `useMeetingRecorderLostTrack` lets a host show it outside the panel.
+- c472500: A meeting transcript now says where a track recorded nothing, such as "Ingrid's microphone wasn't recording from 17:39 to 45:35. Everyone else was still recorded." Before, a microphone that was unplugged or tab sharing that ended left a voice missing with no explanation, so the transcript looked like it had skipped speech. Each track's new `unrecorded` field lists those stretches. The server works them out from the chunks' start times when a recording is finalized (migration 1353 adds the column). Older meetings get them the next time they are transcribed. Stretches under two seconds are ignored. The web and phone transcripts show a quiet line where each one starts, naming the person when the track carries one named voice and saying "Nothing was recorded" where every track was silent at once; no turn runs across one. `@opengeni/react/recordings` exports `transcriptUnrecordedMarks`, `interleaveUnrecordedMarks`, `trackSpeakerName` and `unrecordedMarkText` for embedders that render their own transcript, and `groupTranscriptTurns` takes the times no turn may run across.
+
+### Patch Changes
+
+- 4664732: Dependencies with known vulnerabilities are upgraded to fixed releases: `hono` 4.13.17 (`@opengeni/core`), `zod` 4.6.7 (`@opengeni/runtime`) and `katex` 0.18.11 (`@opengeni/react`). Behavior is unchanged.
+- 618c2b7: An action the agent asked for from Code Mode can be approved in embedded chats again. Such an approval carries no arguments of its own, since they stay in the action's saved review on the server, and `SessionConversation` (and so `OpenGeniChat`) never read that review: a fresh request showed "The details of this older request couldn't be recovered" with only Decline, also when a host's `approvalProps.loadReview` resolved `null` for it. The conversation now reads the saved review (`getToolActionReview`, with `getToolReviewDetails` for its details) for every approval the host's own loader leaves to the standard card. `NativeSessionScreen` does the same when it is given the full `client`. A session client without these two methods keeps the old behaviour.
+- 3b853ca: One IT approval now covers every Microsoft service the app offers in the workspace. The organization admin-consent link requests the combined permissions of all available Microsoft connections that share the same app registration (for example Outlook Mail, Outlook Calendar and OneDrive together), so a company does not need a second approval when someone adds another Microsoft service later. The Microsoft sign-in step now also carries this link as `nextAction.organizationApprovalUrl`, and the connect UI uses it for the approval help, including when a sign-in never came back.
+- dd11dad: Connecting a Microsoft work account (Outlook Mail, Outlook Calendar and other Microsoft Graph connections) no longer ends in a generic failure when the person's organization requires an admin to approve the app. When Microsoft returns a consent error (AADSTS65001, AADSTS90094, `consent_required`, `access_denied`), the connect card and setup dialog explain that their IT must approve the app once, with an organization-wide admin-consent link to copy or open and a ready-made message for IT. A sign-in that never came back (the person stayed on Microsoft's "Need admin approval" page or closed it) is remembered in the browser, and the same help appears the next time they open that connection. All wording comes from `connectSetup.*` messages (`organizationApprovalRequiredTitle`, `itMessageWithLink`, `copyMessageForIt` and others), so host apps can replace it through `messages` on `OpenGeniProvider` or `OpenGeniMessagesProvider`. The admin-consent result page now also works for approvals returning through `/v1/integrations/oauth/callback`.
+- dd11dad: Host apps can name and describe a connectable service in their own words, and that name is used everywhere the connect UI shows the service: discovery and chooser rows (with the description), connected accounts, the "Continue to …" sign-in step, the chat setup card, the setup dialog and the message people send their IT for approval. Pass `connectService.<providerId>.name` and `connectService.<providerId>.description` in `messages` on `OpenGeniProvider` or `OpenGeniMessagesProvider`, for example `"connectService.microsoft-outlook-calendar.name": "Outlook-kalender"`. Without them a service keeps its built-in name. `ConnectPanel` now also passes the service name to its setup step, so the IT approval message names the service instead of "my work account".
+- 55665bc: `connectionOptionNeedsAttention` and `attentionFirst` now treat only connections that report attention (reconnect, failed health check) as needing attention. A connected but unavailable entry, such as one with restricted access, is something the person can't fix there, so it keeps its place instead of moving to the top.
+- 89a1793: Sent user messages now show their attachments the way the composer showed them before sending: images as thumbnails that open in the preview, other files as named chips that open or download. This applies to history, optimistic sends and accepted steers. The composer's attachment chips moved to a shared module and gained a read-only mode, and the console's separate large-preview rendering of message files was replaced by the same chips.
+- Updated dependencies [c976c87]
+- Updated dependencies [6ae0528]
+- Updated dependencies [3b853ca]
+- Updated dependencies [dd11dad]
+- Updated dependencies [904eae7]
+- Updated dependencies [91320a4]
+- Updated dependencies [7c926f8]
+- Updated dependencies [c472500]
+  - @opengeni/contracts@6.14.0
+  - @opengeni/sdk@6.14.0
+  - @opengeni/connect@6.14.0
+
 ## 6.13.0
 
 ### Minor Changes

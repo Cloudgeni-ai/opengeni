@@ -10,6 +10,7 @@ import {
   type ChildTerminalWakeRepairCursor,
   repairMissingQuiescenceReceiptWakes,
   type QuiescenceReceiptWakeRepairCursor,
+  childFailedTurnDedupeKey,
   childRequiresActionDedupeKey,
   getSessionSystemUpdateOutboxByDedupeKey,
   getOrCreateSessionSystemUpdateOutbox,
@@ -160,7 +161,7 @@ export async function deliverFailedChildTurnToParent(
     svc,
     workspaceId,
     childSessionId,
-    `child-completion:${childSessionId}:turn:${turnId}`,
+    childFailedTurnDedupeKey(childSessionId, turnId),
   );
 }
 

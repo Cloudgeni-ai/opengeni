@@ -12,6 +12,8 @@ import {
   createIndexedDbRecordingChunkStore,
   createMemoryRecordingChunkStore,
   desktopSystemAudioSource,
+  discardLocalRecordingsOf,
+  localRecordingsOf,
   RECORDING_AUDIO_UPLOAD_PIECE_BYTES,
   RecorderCaptureError,
   RecordingUploader,
@@ -215,6 +217,32 @@ function uploaderFor(
   });
   return { uploader, store };
 }
+
+describe("local recordings of a person", () => {
+  test("a recording keeps who made it, to find and remove at their sign-out", async () => {
+    const server = fakeServer();
+    const { uploader, store } = uploaderFor(server);
+    await uploader.begin({ workspaceId: WORKSPACE, recordingId: RECORDING, ownerId: "a", create });
+    await uploader.addChunk(await testChunk(0, 0, "mic-0"));
+    const { ownerId: _owner, ...untagged } = (await store.getRecording(RECORDING))!;
+    await store.putRecording({ ...untagged, recordingId: "untagged" });
+    await store.putRecording({
+      ...(await store.getRecording(RECORDING))!,
+      recordingId: "theirs",
+      ownerId: "b",
+    });
+    expect((await store.getRecording(RECORDING))?.ownerId).toBe("a");
+    const of = async (owner: string | null) =>
+      (await localRecordingsOf(store, owner)).map((each) => each.recordingId).sort();
+    expect(await of("a")).toEqual([RECORDING, "untagged"]);
+    expect(await of(null)).toEqual([RECORDING, "theirs", "untagged"]);
+
+    expect((await discardLocalRecordingsOf(store, "a")).sort()).toEqual([RECORDING, "untagged"]);
+    expect(await of(null)).toEqual(["theirs"]);
+    expect(await store.listChunks(RECORDING)).toEqual([]);
+    uploader.dispose();
+  });
+});
 
 describe("RecordingUploader", () => {
   test("stores chunks locally, uploads them straight to storage and finalizes with the counts", async () => {

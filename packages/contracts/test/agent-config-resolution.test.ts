@@ -544,6 +544,90 @@ describe("mid-session update", () => {
       capabilities: current.capabilities,
     });
   });
+
+  test("title instructions are set, kept when omitted, and cleared with null", () => {
+    const current = resolve({
+      request: { titleInstructions: "Write titles in Norwegian." },
+    }).config!;
+    const kept = resolveAgentConfigUpdate({
+      current,
+      legacyCeiling,
+      request: { identity: "B" },
+      deployment,
+      onlyNarrow: false,
+      goal: false,
+    });
+    expect(kept.titleInstructions).toBe("Write titles in Norwegian.");
+    const changed = resolveAgentConfigUpdate({
+      current,
+      legacyCeiling,
+      request: { titleInstructions: "Write titles in Swedish." },
+      deployment,
+      onlyNarrow: false,
+      goal: false,
+    });
+    expect(changed.titleInstructions).toBe("Write titles in Swedish.");
+    const cleared = resolveAgentConfigUpdate({
+      current,
+      legacyCeiling,
+      request: { titleInstructions: null },
+      deployment,
+      onlyNarrow: false,
+      goal: false,
+    });
+    expect("titleInstructions" in cleared).toBe(false);
+  });
+});
+
+describe("title instructions", () => {
+  test("a request sets them; without them the resolved config is unchanged", () => {
+    const plain = resolve({ request: { identity: "Acme" } }).config!;
+    expect("titleInstructions" in plain).toBe(false);
+    const titled = resolve({
+      request: AgentConfigRequest.parse({
+        identity: "Acme",
+        titleInstructions:
+          "  If the messages have no clear language, write the title in Norwegian bokmål.  ",
+      }),
+    }).config!;
+    expect(titled).toEqual({
+      ...plain,
+      titleInstructions:
+        "If the messages have no clear language, write the title in Norwegian bokmål.",
+    });
+    expect(ResolvedAgentConfig.parse(titled)).toEqual(titled);
+    // Otherwise it resolves like any agent request that names no capabilities.
+    const onlyTitles = resolve({ request: { titleInstructions: "Short titles." } }).config!;
+    const { titleInstructions, ...rest } = onlyTitles;
+    expect(titleInstructions).toBe("Short titles.");
+    expect(rest).toEqual(resolve({ request: { renderer: "opengeni" } }).config!);
+  });
+
+  test("children inherit them and may replace or clear them", () => {
+    const parent = {
+      kind: "configured" as const,
+      config: resolve({ request: { titleInstructions: "Parent titles." } }).config!,
+    };
+    expect(resolve({ parent }).config!.titleInstructions).toBe("Parent titles.");
+    expect(resolve({ parent, request: { capabilities: "none" } }).config!.titleInstructions).toBe(
+      "Parent titles.",
+    );
+    expect(
+      resolve({ parent, request: { titleInstructions: "Child titles." } }).config!
+        .titleInstructions,
+    ).toBe("Child titles.");
+    expect(
+      "titleInstructions" in resolve({ parent, request: { titleInstructions: null } }).config!,
+    ).toBe(false);
+  });
+
+  test("the request field is bounded like an identity", () => {
+    expect(AgentConfigRequest.parse({ titleInstructions: "x".repeat(8000) })).toEqual({
+      titleInstructions: "x".repeat(8000),
+    });
+    expect(() => AgentConfigRequest.parse({ titleInstructions: "x".repeat(8001) })).toThrow();
+    expect(() => AgentConfigRequest.parse({ titleInstructions: "  " })).toThrow();
+  });
 });
 
 describe("workspace defaults helpers", () => {

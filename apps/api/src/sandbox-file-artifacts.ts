@@ -16,6 +16,7 @@ import {
   fileAccessFor,
   fileOwnerContextForAccess,
   fileOwnerContextForAgent,
+  hasPermission,
   recordWorkspaceUsage,
   requireLimit,
   resolveNewFileAudience,
@@ -43,6 +44,7 @@ import {
   isConnectedMachineAbsolutePath,
   relativeConnectedMachinePath,
   resolveConnectedMachinePath,
+  type SandboxFilePathScope,
   type SandboxChannelAService,
 } from "@opengeni/runtime/sandbox";
 
@@ -59,6 +61,23 @@ const UPLOAD_INTENT_TTL_MS = 60 * 60_000;
 const SANDBOX_EXPORT_URL_TTL_SECONDS = 4 * 60 * 60;
 const SANDBOX_ARTIFACT_ABSOLUTE_PATH_MAX_CHARS = 4_096;
 const SANDBOX_ARTIFACT_SAFE_FILENAME_MAX_CHARS = 200;
+
+/**
+ * Which paths a publication may read. A caller that can run the session's
+ * shell (the session's own agent, or someone allowed its terminal) publishes
+ * any file that shell can read, so a file the agent wrote to a temp directory
+ * needs no copy into the workspace first. Any other caller keeps the
+ * workspace scope its file reads have.
+ */
+export function sandboxArtifactPathScope(
+  grant: AccessGrant,
+  sessionId: string,
+): SandboxFilePathScope {
+  return exactAgentAttemptClaims(grant)?.sessionId === sessionId ||
+    hasPermission(grant.permissions, "terminal:attach", grant.permissionMode)
+    ? "shell"
+    : "workspace";
+}
 
 /**
  * The machine whose code made this call through Codemode, when it is not the
@@ -176,6 +195,7 @@ export type FileAccessReceipt = {
  * generated image or video, download or upload), on the owner's behalf. An
  * agent acts for the person whose turn it runs and sees only what its chat's
  * own audience lets it see, so it can never reach another chat's private file.
+ * Null when no such file has this id, so the caller can try a Site.
  */
 export async function changeWorkspaceFileVisibility(
   deps: ApiRouteDeps,
@@ -184,7 +204,7 @@ export async function changeWorkspaceFileVisibility(
     artifactId: string;
     visibility: WorkspaceArtifactVisibility;
   },
-): Promise<FileAccessReceipt> {
+): Promise<FileAccessReceipt | null> {
   const actor =
     input.grant.principalKind === "agent_attempt"
       ? await fileOwnerContextForAgent(deps, input.grant, "files:upload")
@@ -195,7 +215,7 @@ export async function changeWorkspaceFileVisibility(
       (await getFile(deps.db, input.grant.workspaceId, input.artifactId))?.id ??
       (await getGeneratedVideoArtifact(deps.db, input.grant.workspaceId, input.artifactId))?.file
         .id;
-    if (!fileId) throw new HTTPException(404, { message: "file not found" });
+    if (!fileId) return null;
     const { file } = await changeFileVisibility({
       db: deps.db,
       settings: deps.settings,
@@ -253,6 +273,7 @@ async function publishSandboxFileArtifactInScope(
     throw new HTTPException(503, { message: "object storage cannot accept artifact files" });
   }
   const readLimit = Math.min(25 * 1024 * 1024, maxReadBytes + FILE_READ_SENTINEL_BYTES);
+  const pathScope = sandboxArtifactPathScope(input.grant, input.session.id);
   const channelServices = {
     db: deps.db,
     settings: deps.settings,
@@ -282,11 +303,11 @@ async function publishSandboxFileArtifactInScope(
   // where it lives and uploaded from there straight to object storage, so its
   // bytes never cross the control plane.
   const { path, sandboxPath, content } = await onSandbox(true, async ({ service }) => {
-    const small = await readSandboxArtifactFile(service, input.path, readLimit);
+    const small = await readSandboxArtifactFile(service, input.path, readLimit, pathScope);
     if (!small.read.truncated && small.read.sizeBytes <= maxReadBytes) {
       return { ...small, content: sandboxArtifactBytes(small.read) };
     }
-    const digest = await service.digestWorkspaceFile(small.path);
+    const digest = await service.digestWorkspaceFile(small.path, { pathScope });
     return {
       path: small.path,
       sandboxPath: small.sandboxPath,
@@ -373,16 +394,19 @@ async function publishSandboxFileArtifactInScope(
         expiresInSeconds: SANDBOX_EXPORT_URL_TTL_SECONDS,
         audience: lease ? "sandbox" : "public",
       });
-      await service.exportWorkspaceFile({
-        path,
-        sizeBytes,
-        sha256,
-        upload: {
-          url: put.url,
-          requiredHeaders: put.requiredHeaders,
-          expiresAt: put.expiresAt.toISOString(),
+      await service.exportWorkspaceFile(
+        {
+          path,
+          sizeBytes,
+          sha256,
+          upload: {
+            url: put.url,
+            requiredHeaders: put.requiredHeaders,
+            expiresAt: put.expiresAt.toISOString(),
+          },
         },
-      });
+        { pathScope },
+      );
     });
     await assertVisibleSandboxArtifact(storage, file);
     file = await completeFileUpload(deps.db, input.grant.workspaceId, identity.uploadId);
@@ -475,20 +499,32 @@ function sandboxArtifactBytes(read: { encoding: string; content: string; sizeByt
 }
 
 /** Use the root captured by the same fenced Channel-A service that reads bytes,
- * not the session's placement-home label or a caller-supplied root. */
+ * not the session's placement-home label or a caller-supplied root. A
+ * shell-scoped read takes any path the session's shell can read. */
 export async function readSandboxArtifactFile(
   service: Pick<SandboxChannelAService, "capabilities" | "fsRead">,
   value: string,
   maxBytes: number,
+  pathScope: SandboxFilePathScope = "workspace",
 ) {
   const root = service.capabilities().FileSystem.root;
-  const path = sandboxArtifactRelativePath(value, root);
+  const path = sandboxArtifactPath(value, root, pathScope);
   const sandboxPath = resolveConnectedMachinePath(root, path);
-  const read = await service.fsRead({ path, encoding: "base64", maxBytes });
+  const read = await service.fsRead({ path, encoding: "base64", maxBytes }, { pathScope });
   return { path, sandboxPath, read };
 }
 
-export function sandboxArtifactRelativePath(value: string, workspaceRoot = "/workspace"): string {
+/**
+ * The path that names a publication: relative to the workspace root for a file
+ * inside it (so its artifact identity is the same whichever way it is named),
+ * else the absolute path, which only a shell-scoped publication may use. The
+ * root is only the base for relative paths.
+ */
+export function sandboxArtifactPath(
+  value: string,
+  workspaceRoot = "/workspace",
+  pathScope: SandboxFilePathScope = "workspace",
+): string {
   let path = value.trim();
   if (path.startsWith("sandbox:")) {
     path = path.slice("sandbox:".length);
@@ -507,7 +543,7 @@ export function sandboxArtifactRelativePath(value: string, workspaceRoot = "/wor
       message: "sandbox artifact path is invalid for this workspace",
     });
   }
-  if (!relative) {
+  if (!relative && pathScope !== "shell") {
     throw new HTTPException(400, {
       // Say which root: on a connected machine the file may exist outside it,
       // and copying it in is the way forward.
@@ -517,7 +553,7 @@ export function sandboxArtifactRelativePath(value: string, workspaceRoot = "/wor
   if (absolute.length > SANDBOX_ARTIFACT_ABSOLUTE_PATH_MAX_CHARS) {
     throw new HTTPException(400, { message: "sandbox artifact path is too long" });
   }
-  return relative;
+  return relative || absolute;
 }
 
 export function sandboxArtifactSafeFilename(filename: string): string {

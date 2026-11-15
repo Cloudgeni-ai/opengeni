@@ -4,6 +4,10 @@ First-party connectors that let workspace agents read live conversations and
 reply on X and Reddit. Tokens are stored encrypted in `social_connections` and
 used only host-side; agents never see credentials, only normalized posts.
 
+When an operator serves `x` through Nango, the native X card and `x_*` tools
+are hidden and the Nango-backed X connector is shown instead (see
+[`nango.md`](nango.md)).
+
 ## Operator setup
 
 1. Create OAuth apps with the providers:

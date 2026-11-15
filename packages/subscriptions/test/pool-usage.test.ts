@@ -705,6 +705,49 @@ describe("capacity usable across both limits", () => {
     pace(data, "held", [0, 0, 0], "weekly");
     expect(result(data, "weekly").forecast.kind).toBe("unused");
   });
+
+  test("weekly-only plans never read as five-hour exhaustion when one is at its weekly limit", () => {
+    const data = input();
+    account(data, "open", "weekly", 30, 5 * 24, 10).absentWindows = ["five_hour"];
+    account(data, "spent", "weekly", 100, 3 * 24, 10).absentWindows = ["five_hour"];
+    const fiveHour = result(data, "five_hour");
+    expect(fiveHour.remainingPercent).toBeNull();
+    expect(fiveHour.forecast).toMatchObject({
+      kind: "insufficient_history",
+      basis: "No account has this limit.",
+      runsOutAt: null,
+    });
+    expect(fiveHour.accounts.map((row) => row.remainingPercent)).toEqual([null, null]);
+    // Without the hint the spent account alone used to read as the whole window.
+    for (const row of data.accounts) delete row.absentWindows;
+    expect(result(data, "five_hour")).toMatchObject({
+      remainingPercent: 0,
+      forecast: { basis: "Observed pool exhaustion." },
+    });
+    for (const row of data.accounts) row.absentWindows = ["five_hour"];
+    expect(result(data, "weekly").remainingPercent).toBe(35);
+  });
+
+  test("a five-hour window covers only the accounts that have one", () => {
+    const data = input();
+    short(account(data, "plus", "weekly", 20, 5 * 24, 1), 40, 2);
+    account(data, "weekly-only", "weekly", 100, 3 * 24, 10).absentWindows = ["five_hour"];
+    expect(result(data, "five_hour").remainingPercent).toBe(60);
+    // The weekly total still counts the spent account as nothing usable.
+    expect(result(data, "weekly").remainingPercent).toBeCloseTo((80 * 1) / 11);
+  });
+
+  test("a refusal of a window outranks a reading that said the account has none", () => {
+    const data = input();
+    const row = account(data, "refused", "weekly", 30, 5 * 24);
+    row.absentWindows = ["five_hour"];
+    row.blocked = { five_hour: NOW + 2 * HOUR };
+    expect(result(data, "five_hour")).toMatchObject({
+      remainingPercent: 0,
+      accounts: [{ remainingPercent: 0, resetsAt: NOW + 2 * HOUR }],
+    });
+    expect(result(data, "weekly").remainingPercent).toBe(0);
+  });
 });
 
 describe("unknown and stale coverage", () => {

@@ -92,6 +92,7 @@ type AgentConfigRequest = {
   identity?: string | null; // who the agent is; null = workspace default, then Opengeni's
   instructions?: string;    // alias of the session `instructions` field
   renderer?: "opengeni" | "markdown";
+  titleInstructions?: string | null; // added after the automatic title request's fixed rules; null clears
 };
 ```
 

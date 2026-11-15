@@ -1,6 +1,7 @@
 import { useCallback, useState, type ReactNode } from "react";
 
 import { cachedLogoFit, measureLogoFit, type LogoFit } from "./logo-fit";
+import { displayImageSrc } from "./lib/content-hosting";
 
 /**
  * Brand identifier; failed/missing assets use the supplied fallback or stable
@@ -46,7 +47,7 @@ export function ConnectionLogo({
         <img
           key={src}
           ref={measureIfLoaded}
-          src={src}
+          src={displayImageSrc(src)}
           alt=""
           loading="lazy"
           decoding="async"

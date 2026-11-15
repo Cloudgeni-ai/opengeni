@@ -56,6 +56,8 @@ describe("session-only entry", () => {
     // Refusal copy and the controller's model labels/order are explicit pure
     // SDK leaves, not permission to import contracts/server/workbench barrels.
     expect([...thirdParty].sort()).toEqual([
+      // Source links shown without hosted-search tracking: a dependency-free leaf.
+      "@opengeni/contracts/citation-urls",
       // Claude citation tags shown as their text: a dependency-free contracts leaf.
       "@opengeni/contracts/claude-cite-tags",
       "@opengeni/contracts/claude-subscription-model-ids",
@@ -227,7 +229,9 @@ describe("session-only entry", () => {
     // The one way every surface shows an attached image from its stored file
     // (a restored draft, a queued message, another device).
     expect(reactSources.some((id) => id.endsWith("/src/stored-file-preview.ts"))).toBe(true);
-    expect(reactSources.length).toBe(65);
+    // Pure host wording for tool actions: history names a decided action the host's way.
+    expect(reactSources.some((id) => id.endsWith("/src/tool-action-wording.ts"))).toBe(true);
+    expect(reactSources.length).toBe(66);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);

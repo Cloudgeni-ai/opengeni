@@ -118,7 +118,8 @@ export function useKnowledgeList(
 
 /**
  * Archive is reversible, so it has no confirmation: a toast with Undo that
- * restores the version that was published before.
+ * restores the version that was published before. A collection takes what is
+ * only inside it along, and Undo brings that back too.
  */
 export function useArchiveKnowledge(workspaceId: string, onChanged: () => void) {
   const { client } = useAppContext();
@@ -128,6 +129,7 @@ export function useArchiveKnowledge(workspaceId: string, onChanged: () => void) 
       title: string;
       version: number;
       publishedRevisionId: string | null;
+      collection?: boolean;
     }) => {
       try {
         const receipt = await client.archiveKnowledgeEntry(workspaceId, entry.id, {
@@ -145,7 +147,9 @@ export function useArchiveKnowledge(workspaceId: string, onChanged: () => void) 
         }
         showUndoToast({
           title: `Archived ${entry.title}`,
-          description: "Agents stop using it. Find it under Filter › Archived.",
+          description: entry.collection
+            ? "Agents stop using it and what's only inside it. Find it under Filter › Archived."
+            : "Agents stop using it. Find it under Filter › Archived.",
           onUndo: () => {
             if (!restoreTo) return;
             void client

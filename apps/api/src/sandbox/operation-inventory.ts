@@ -15,6 +15,7 @@ import {
   type ConnectedCommandCollectionDeps,
 } from "./command-completion";
 import { errorMessage } from "@opengeni/contracts/values";
+import { connectedCommandFailureReason } from "@opengeni/runtime/sandbox";
 
 /** One reported operation, as the runner described it. */
 export type ReportedOperation = {
@@ -165,6 +166,7 @@ export async function answerOperationInventory(
       observability?.warn?.("Failed to ask again about commands a runner did not answer for", {
         workspaceId: ids.workspaceId,
         enrollmentId: ids.agentId,
+        reason: connectedCommandFailureReason(error),
         error: errorMessage(error),
       });
       return 0;
@@ -196,6 +198,7 @@ export async function answerOperationInventory(
       workspaceId: ids.workspaceId,
       enrollmentId: ids.agentId,
       opId,
+      reason: connectedCommandFailureReason(error),
       error: errorMessage(error),
     });
   // Record each release before answering, so an output is never dropped with

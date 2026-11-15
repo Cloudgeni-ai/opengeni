@@ -5,6 +5,7 @@ import type {
   ConnectionOwnership,
   ProviderId,
   QuotaBlockClaim,
+  QuotaProviderDetail,
   SubscriptionConnection,
   SubscriptionQuota,
   SubscriptionSettingValues,
@@ -374,6 +375,21 @@ export function decodeSubscriptionQuota(row: {
   }
   const exhaustedClaim = exhaustedUntil === null ? null : decodeQuotaBlockClaim(raw.exhaustedClaim);
   if (exhaustedClaim) quota.exhaustedClaim = exhaustedClaim;
+  // Reduced service and provider details are optional too: a malformed
+  // value is dropped, never the quota.
+  if (typeof raw.constrainedUntil === "number" && Number.isFinite(raw.constrainedUntil))
+    quota.constrainedUntil = raw.constrainedUntil;
+  const details = raw.providerDetails;
+  if (details !== null && typeof details === "object" && !Array.isArray(details)) {
+    const parsed: Record<string, QuotaProviderDetail> = {};
+    for (const [key, part] of Object.entries(details)) {
+      if (part === null || typeof part !== "object" || Array.isArray(part)) continue;
+      const { observedAt, value } = part as Record<string, unknown>;
+      if (typeof observedAt === "number" && Number.isFinite(observedAt) && value !== undefined)
+        parsed[key] = { observedAt, value: value as QuotaProviderDetail["value"] };
+    }
+    if (Object.keys(parsed).length > 0) quota.providerDetails = parsed;
+  }
   return quota;
 }
 
@@ -690,10 +706,32 @@ export type SubscriptionTurnLease = SubscriptionTurnLeaseIdentity & {
 };
 
 /**
+ * Whether a turn lease row still holds its turn: unexpired, and its holder
+ * generation's attempt has not written its quiescence receipt. A quiesced
+ * attempt has lost inference authority for good, so a crashed or force-stopped
+ * worker that never ran its own release must not keep a newer generation of
+ * the same turn waiting for the TTL. Renew, assert and usage finalization keep
+ * the plain expiry fence: the holder may still finish usage accounting after
+ * its receipt, but a newer generation can take the turn over meanwhile.
+ */
+export function subscriptionTurnLeaseHeldSql(table = "subscription_leases"): SQL {
+  const lease = sql.identifier(table);
+  return sql`(${lease}.leased_until > clock_timestamp() and not exists (
+    select 1 from session_turn_attempts holder
+    where holder.account_id = ${lease}.account_id
+      and holder.workspace_id = ${lease}.workspace_id
+      and holder.session_id = ${lease}.session_id
+      and holder.turn_id = ${lease}.turn_id
+      and holder.execution_generation = ${lease}.generation
+      and holder.quiesced_at is not null))`;
+}
+
+/**
  * Acquire the chat-turn lease after core placement and immediately rechecking
  * current eligibility. Replays by the same holder/connection/generation are
- * idempotent. A stale holder can be replaced only after expiry and only by a
- * strictly newer generation for the same turn and session.
+ * idempotent. A stale holder can be replaced only by a strictly newer
+ * generation for the same turn and session, and only after the lease expired
+ * or the holder generation's attempt wrote its quiescence receipt.
  */
 export async function acquireSubscriptionTurnLease(
   db: Database,
@@ -728,7 +766,7 @@ export async function acquireSubscriptionTurnLease(
               and subscription_leases.holder_id = excluded.holder_id
               and subscription_leases.leased_until > clock_timestamp())
           or (subscription_leases.generation < excluded.generation
-              and subscription_leases.leased_until <= clock_timestamp()))
+              and not ${subscriptionTurnLeaseHeldSql()}))
     returning leased_until`,
   );
   return row ? { ...turnLeaseIdentity(input), leasedUntil: new Date(row.leased_until) } : null;
@@ -779,13 +817,28 @@ export async function persistSubscriptionCoreRefresh(
  * (M3 PR 2a). Same one-shot authorization, advisory lock and
  * refresh-generation compare-and-swap; a NULL plan keeps the recorded plan,
  * and a changed plan clears the connection's model cooldowns.
+ *
+ * Every refresh path persists through it (migration 1367): a chat turn's
+ * refresh names its session and turn and consumes the authorization
+ * begin_subscription_core_refresh minted; a refresh outside a turn
+ * (operations, usage reads, administered connections) passes null for both
+ * and consumes the one begin_subscription_core_connection_refresh or
+ * begin_subscription_core_owned_connection_refresh minted.
  */
 export async function persistSubscriptionCoreRefreshWithPlan(
   db: Database,
-  input: Parameters<typeof persistSubscriptionCoreRefresh>[1] & { planType: string | null },
+  input: Omit<Parameters<typeof persistSubscriptionCoreRefresh>[1], "sessionId" | "turnId"> & {
+    /** The chat turn's session and turn; both null for a refresh outside a turn. */
+    sessionId: string | null;
+    turnId: string | null;
+    planType: string | null;
+  },
 ): Promise<boolean> {
   subscriptionCoreProvider(input.provider);
   assertPositiveGeneration(input.expectedRefreshGeneration);
+  if ((input.sessionId === null) !== (input.turnId === null)) {
+    throw new Error("A subscription refresh names both its session and turn, or neither");
+  }
   const trimmed = input.planType?.trim() ?? "";
   const planType = /^[A-Za-z0-9_.-]{1,64}$/.test(trimmed) ? trimmed : null;
   const [row] = await rawRows<{ persisted: boolean }>(

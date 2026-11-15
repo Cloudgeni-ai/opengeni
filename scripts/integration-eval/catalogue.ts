@@ -17,7 +17,9 @@ import type { EvalCase, IntegrationId } from "./types";
  *
  * Kinds: not_connected (run in a workspace with no connections; expects the
  * connect card), read, write (expects an approval; the harness approves and
- * verifies), identity, routing. `core` rows form the model × effort grid.
+ * verifies), identity, routing, clarify (a request naming no system; run with
+ * nothing connected, expects the agent to ask which system or offer several).
+ * `core` rows form the model × effort grid.
  */
 
 const i = (pattern: string) => new RegExp(pattern, "i");
@@ -639,11 +641,90 @@ export const CASES: readonly EvalCase[] = [
     core: true,
     prompt:
       'Create an Outlook draft to ravi.tern@example.com with subject "Halcyon eval {RUN}" and body "Drill notes received." Don\'t send it.',
-    verify: "receipts_only",
+    verify: "outlook_draft_correct",
+  },
+  {
+    id: "outlook_mail.read.search-invoice",
+    integration: "outlook_mail",
+    kind: "read",
+    prompt:
+      "Search my Outlook mail for the Copperleaf Dental invoice. What's the invoice number and amount?",
+    expectAnswer: [i("INV-?58213"), i("7[ ,.\u00a0]?450")],
+  },
+  {
+    id: "outlook_mail.write.send",
+    integration: "outlook_mail",
+    kind: "write",
+    prompt:
+      'Send an email from my Outlook to it-inbox@opengenitest2026.onmicrosoft.com with subject "Halcyon eval {RUN}" and body "Send test from the integration eval."',
+    verify: "outlook_mail_sent_correct",
+    note: "The recipient is a synthetic mailbox in the test tenant. Needs the connection's change tools set to Ask first.",
+  },
+  {
+    id: "outlook_mail.write.send-denied",
+    integration: "outlook_mail",
+    kind: "write",
+    decision: "reject",
+    prompt:
+      'Send an email from my Outlook to it-inbox@opengenitest2026.onmicrosoft.com with subject "Halcyon eval {RUN} denied" and body "This send should be denied."',
+    verify: "outlook_mail_sent_exists",
+  },
+  {
+    id: "outlook_mail.read.account",
+    integration: "outlook_mail",
+    kind: "read",
+    prompt: "Which email address is my connected Outlook mailbox?",
+    expectAnswer: [i("iris\\.tenley@opengenitest2026")],
+    note: "Account identity: the connected test mailbox is Iris Tenley's.",
   },
   ...notConnected("outlook_calendar", [
     { slug: "meetings", prompt: "What meetings do I have in Outlook Calendar this week?" },
   ]),
+  {
+    id: "outlook_calendar.read.review",
+    integration: "outlook_calendar",
+    kind: "read",
+    prompt: "When is the Halcyon launch review on my Outlook Calendar?",
+    expectAnswer: [i("wed|18"), i("\\b(10|0?9)[:.]00\\b|\\b(10|9) ?(a\\.?m|am)\\b")],
+  },
+  {
+    id: "outlook_calendar.write.event",
+    integration: "outlook_calendar",
+    kind: "write",
+    prompt:
+      'Add an event to my Outlook Calendar called "Halcyon eval {RUN}" on Friday 20 November 2026 from 15:00 to 15:30 Oslo time, and invite it-inbox@opengenitest2026.onmicrosoft.com.',
+    verify: "outlook_event_correct",
+    note: "Run only when no demo user's calendar is shared into the connected workspace.",
+  },
+  {
+    id: "outlook_calendar.read.account",
+    integration: "outlook_calendar",
+    kind: "read",
+    prompt:
+      "Whose Microsoft account is my own Outlook Calendar connection signed in as? Give the email address.",
+    expectAnswer: [i("iris\\.tenley@opengenitest2026")],
+  },
+
+  // ── Outlook Contacts ─────────────────────────────────────────────────────
+  ...notConnected("outlook_contacts", [
+    { slug: "lookup", prompt: "What's Ada Quill's phone number in my Outlook contacts?" },
+  ]),
+  {
+    id: "outlook_contacts.read.phone",
+    integration: "outlook_contacts",
+    kind: "read",
+    prompt:
+      "What's Ada Quill's mobile number in my Outlook contacts, and which company is she with?",
+    expectAnswer: [i("400 ?12 ?345"), i("bluefin")],
+  },
+  {
+    id: "outlook_contacts.write.create",
+    integration: "outlook_contacts",
+    kind: "write",
+    prompt:
+      'Add an Outlook contact named "Halcyon eval {RUN}" with email halcyon.eval@bluefin.example and company "Bluefin Logistics".',
+    verify: "outlook_contact_correct",
+  },
   ...notConnected("onedrive", [
     { slug: "files", prompt: "Find the Kestrel runbook in my OneDrive.", core: true },
   ]),
@@ -654,6 +735,15 @@ export const CASES: readonly EvalCase[] = [
     core: true,
     prompt: "Open the Kestrel runbook in my OneDrive. What recovery time objective does it set?",
     expectAnswer: [i("15 ?min")],
+    servedBy: ["sharepoint"],
+  },
+  {
+    id: "onedrive.write.file",
+    integration: "onedrive",
+    kind: "write",
+    prompt:
+      'In my OneDrive, create a text file named "Halcyon eval {RUN}.txt" in the Runbooks folder containing the text "Eval file content."',
+    verify: "onedrive_file_correct",
     servedBy: ["sharepoint"],
   },
   ...notConnected("sharepoint", [
@@ -667,6 +757,111 @@ export const CASES: readonly EvalCase[] = [
     prompt: "On our SharePoint, which vendor is listed in the Kestrel vendor contacts list?",
     expectAnswer: [i("marlow")],
     servedBy: ["onedrive"],
+  },
+  {
+    id: "sharepoint.write.file",
+    integration: "sharepoint",
+    kind: "write",
+    prompt:
+      'On our SharePoint site Halcyon Ops, create a text file named "Halcyon eval {RUN}.txt" in the "Eval uploads" folder of the Documents library, containing the text "Eval upload content."',
+    verify: "sharepoint_file_correct",
+    servedBy: ["onedrive"],
+  },
+
+  // ── Microsoft Dynamics (Dataverse / Dynamics 365 Sales, Finance and Operations) ──
+  ...notConnected("microsoft_dynamics", [
+    {
+      slug: "opportunities",
+      prompt: "What open opportunities do we have in Dynamics 365?",
+      forbid: [i("bluefin logistics renewal")],
+    },
+  ]),
+  {
+    id: "microsoft_dynamics.read.opportunity",
+    integration: "microsoft_dynamics",
+    kind: "read",
+    prompt:
+      "In Dynamics 365, what's the estimated revenue of the Bluefin Logistics renewal opportunity, and who is the account's primary contact?",
+    expectAnswer: [i("18,?000|18k"), i("ada")],
+  },
+  {
+    id: "microsoft_dynamics.read.account-city",
+    integration: "microsoft_dynamics",
+    kind: "read",
+    prompt: "Which city is Copperleaf Dental's account in, according to Dynamics 365?",
+    expectAnswer: [i("bergen")],
+  },
+  {
+    id: "microsoft_dynamics.write.account",
+    integration: "microsoft_dynamics",
+    kind: "write",
+    prompt: 'Create an account in Dynamics 365 named "Halcyon eval {RUN}".',
+    verify: "receipts_only",
+  },
+  {
+    id: "microsoft_dynamics.write.denied",
+    integration: "microsoft_dynamics",
+    kind: "write",
+    decision: "reject",
+    prompt: 'Create an account in Dynamics 365 named "Halcyon eval {RUN} denied".',
+    verify: "receipts_only",
+  },
+  // Business Central: the same connection, a Business Central environment.
+  {
+    id: "microsoft_dynamics.read.bc-customer-balance",
+    integration: "microsoft_dynamics",
+    kind: "read",
+    prompt: "In Business Central, what's the balance due for the customer Trey Research?",
+    expectAnswer: [i("22[ ,.\u00a0]?856")],
+  },
+  {
+    id: "microsoft_dynamics.read.bc-customer-city",
+    integration: "microsoft_dynamics",
+    kind: "read",
+    prompt: "Which city is the customer Relecloud in, according to Business Central?",
+    expectAnswer: [i("[åa]lesund")],
+  },
+  {
+    id: "microsoft_dynamics.write.bc-customer",
+    integration: "microsoft_dynamics",
+    kind: "write",
+    prompt: 'Create a customer in Business Central named "Halcyon eval {RUN}".',
+    verify: "receipts_only",
+  },
+  {
+    id: "microsoft_dynamics.read.fno-customer",
+    integration: "microsoft_dynamics",
+    kind: "read",
+    prompt:
+      "In Dynamics 365 Finance and Operations, what is the credit limit of customer US-001 in company USMF, and what is the customer's name?",
+    expectAnswer: [i("500,?000|500k"), i("contoso retail san diego")],
+  },
+  {
+    id: "microsoft_dynamics.write.fno-customer-group",
+    integration: "microsoft_dynamics",
+    kind: "write",
+    prompt:
+      'In Dynamics 365 Finance and Operations, create a customer group "HE{RUN}" in company USMF with the description "Halcyon eval {RUN}".',
+    verify: "receipts_only",
+  },
+  {
+    id: "microsoft_dynamics.clarify.unnamed-crm",
+    integration: "microsoft_dynamics",
+    kind: "clarify",
+    prompt: "Which of my opportunities close this month?",
+    expectAnswer: [
+      i("which (crm|system|tool|app|platform)|what (crm|system|tool)|hubspot|salesforce|pipedrive"),
+    ],
+    // Close dates or deal amounts would be invented: nothing is connected. Narrow
+    // enough that a clarifying question ("close in 30 days?"), a range restating
+    // the request ("closing November 1–30, 2026") or a plan's price passes.
+    forbidAnswer: [
+      i(
+        "\\b(closes?|closing) (on )?((jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]* \\d{1,2}|(the )?\\d{1,2}(st|nd|rd|th)|20\\d\\d-\\d\\d-\\d\\d)\\b(?!\\s*(?:[-–—]|to\\b|through\\b|until\\b|and\\b)\\s*(?:[a-z]+\\.? )?\\d)",
+      ),
+      i("[$€£]\\s?(\\d{1,3}(,\\d{3})+|\\d+(\\.\\d+)?\\s?[km]\\b)"),
+    ],
+    note: "No system is named: the agent must not pick Dynamics (or any one CRM) by itself.",
   },
 
   // ── Choosing between integrations ─────────────────────────────────────────

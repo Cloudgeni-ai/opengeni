@@ -152,6 +152,10 @@ export { OpStreamExecClient, type OpStreamOutputFrame } from "./selfhosted/op-st
 export {
   replayConnectedCommandOutput,
   connectedCommandExitProof,
+  connectedCommandFailureReason,
+  connectedCommandReplayDeadline,
+  ConnectedCommandCollectionError,
+  type ConnectedCommandCollectionFailure,
 } from "./selfhosted/terminal-replay";
 
 // The provider registry surface — the descriptor table self-test, the per-
@@ -453,6 +457,18 @@ export {
   type SecretStdinCarry,
 } from "./secret-delivery";
 
+// Secret leak guard: no git commit or push of a value Opengeni delivered.
+export {
+  SecretLeakGuard,
+  SecretLedgerKey,
+  gitLeakPlan,
+  secretLedgerKeyFor,
+  secretLeakMessage,
+  type SecretLeak,
+  type SecretLeakGuardRunner,
+  type SecretLedgerWriter,
+} from "./secret-leak-guard";
+
 // Credential profiles: per-command environment variables resolved from secret
 // references at the same exec boundary (docs/secrets.md).
 export {
@@ -478,6 +494,18 @@ export {
   withCodemodeTokenSession,
   withCodemodeTokenClient,
 } from "./codemode-token";
+
+// Per-chat Git credential directories on a shared box: every chat's commands
+// select their own broker pass, routes, helper and provider CLI selection.
+export {
+  GIT_SESSION_CONFIG_LINES,
+  gitSessionDirectoryExport,
+  gitSessionEnvironmentLines,
+  gitSessionKey,
+  withGitSessionClient,
+  withGitSessionEnvironment,
+  withGitSessionSession,
+} from "./git-session";
 
 // Exact-attempt Codemode authority. Shared by ordinary turn execution and
 // one-off Connected Machine execution so neither surface can drift into a
@@ -565,6 +593,8 @@ export {
   type ChannelAExecResult,
   type ChannelAEmitter,
   type SandboxChannelAServiceOptions,
+  type SandboxFilePathOptions,
+  type SandboxFilePathScope,
   type FsWriteFilesRequest,
   type FsWriteFilesResponse,
   type RepositoryDiscoveryDegradedReason,
@@ -1315,7 +1345,8 @@ export function readWorkspaceArchiveFromEnvelopeSessionState(
     return undefined;
   }
   try {
-    return Uint8Array.from(Buffer.from(b64, "base64"));
+    const decoded = Buffer.from(b64, "base64");
+    return new Uint8Array(decoded.buffer, decoded.byteOffset, decoded.byteLength);
   } catch {
     return undefined;
   }
@@ -2123,6 +2154,18 @@ function settingsForWorkspaceArchiveRestore(
       modalImageId: archive.nativeSnapshot!.snapshotId,
     };
   }
+  if (
+    workspacePersistence === "snapshot_directory" &&
+    settings.modalWorkspacePersistence === "tar"
+  ) {
+    // An operator who configures tar keeps every save in their own object
+    // storage. A directory snapshot only has to be mounted over the fresh
+    // workspace, which the Modal session does whatever mode it saves in, so
+    // the destination is created in tar mode and never writes another native
+    // snapshot. A filesystem snapshot holds the whole machine, which a tar of
+    // the workspace would not, so those sessions stay as they are.
+    return settings;
+  }
   return workspacePersistence && settings.modalWorkspacePersistence !== workspacePersistence
     ? { ...settings, modalWorkspacePersistence: workspacePersistence }
     : settings;
@@ -2306,8 +2349,10 @@ export async function establishSandboxSessionFromEnvelope(
         }
       }
       // The selected native artifact is the durable authority for its restore
-      // protocol. The process setting governs new sandboxes only: a mode rollout
-      // must not make an older, verified Modal snapshot impossible to hydrate.
+      // protocol: a mode rollout must not make an older, verified Modal
+      // snapshot impossible to hydrate. The process setting governs what the
+      // destination saves from then on only where that is safe (tar after a
+      // directory snapshot); otherwise the destination keeps the artifact's mode.
       const restoreSettings = settingsForWorkspaceArchiveRestore(
         backend,
         settings,

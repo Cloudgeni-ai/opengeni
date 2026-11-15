@@ -1,6 +1,7 @@
 import { createSign, randomUUID } from "node:crypto";
 import { connect, type ClientHttp2Session } from "node:http2";
 import type { Settings } from "@opengeni/config";
+import { withoutProviderTrackingInText } from "@opengeni/contracts/citation-urls";
 import {
   claimNativePushDeliveries,
   listSessionHumanInputRequests,
@@ -93,10 +94,11 @@ export type NativePushDispatchDeps = {
 
 /**
  * A notification message as plain text for the lock screen: links keep their
- * text, emphasis and code marks go, and "- " bullets become "•".
+ * text, emphasis and code marks go, "- " bullets become "•", and bare source
+ * links lose the tracking a hosted web search tagged onto them.
  */
 export function plainNotificationText(markdown: string): string {
-  return markdown
+  return withoutProviderTrackingInText(markdown)
     .replace(/\[([^\]]+)\]\((?:[^)]+)\)/gu, "$1")
     .replace(/(\*\*|__)(.+?)\1/gu, "$2")
     .replace(/`([^`]+)`/gu, "$1")
@@ -511,20 +513,30 @@ export function createFcmSender(input: {
   };
 }
 
+/** Whether this deployment has the credentials that push to a platform. */
+export function nativePushConfigured(
+  settings: Pick<Settings, "apnsKeyId" | "apnsTeamId" | "apnsPrivateKey" | "fcmServiceAccountJson">,
+  platform: "ios" | "android",
+): boolean {
+  return platform === "ios"
+    ? Boolean(settings.apnsKeyId && settings.apnsTeamId && settings.apnsPrivateKey)
+    : Boolean(settings.fcmServiceAccountJson);
+}
+
 /** The senders this deployment has credentials for. */
 export function configuredNativePushSenders(
   settings: Settings,
 ): Partial<Record<"ios" | "android", NativePushSender>> {
   const senders: Partial<Record<"ios" | "android", NativePushSender>> = {};
-  if (settings.apnsKeyId && settings.apnsTeamId && settings.apnsPrivateKey) {
+  if (nativePushConfigured(settings, "ios")) {
     senders.ios = createApnsSender({
-      keyId: settings.apnsKeyId,
-      teamId: settings.apnsTeamId,
-      privateKey: settings.apnsPrivateKey,
+      keyId: settings.apnsKeyId!,
+      teamId: settings.apnsTeamId!,
+      privateKey: settings.apnsPrivateKey!,
     });
   }
-  if (settings.fcmServiceAccountJson) {
-    senders.android = createFcmSender({ serviceAccountJson: settings.fcmServiceAccountJson });
+  if (nativePushConfigured(settings, "android")) {
+    senders.android = createFcmSender({ serviceAccountJson: settings.fcmServiceAccountJson! });
   }
   return senders;
 }

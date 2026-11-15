@@ -20,7 +20,8 @@ const PREVIEW_WIDTH = 200;
 /**
  * Files sent with a user message, above its bubble as on web: images as
  * signed previews (tap opens them full screen in the app, swiping between the
- * message's images), other files as named chips.
+ * message's images), other files as named chips (a video's opens it in the
+ * system player).
  */
 export function NativeMessageAttachments(props: {
   client: AttachmentClient;
@@ -170,7 +171,11 @@ function Attachment(props: {
         backgroundColor: pressed ? c.hover : c["surface-1"],
       })}
     >
-      <Icon name="file-text" size={14} color={c["fg-muted"]} />
+      <Icon
+        name={asset?.contentType.toLowerCase().startsWith("video/") ? "video" : "file-text"}
+        size={14}
+        color={c["fg-muted"]}
+      />
       <Text
         numberOfLines={1}
         style={{ ...fontStyle(theme, 500), fontSize: 13, color: c.fg, flexShrink: 1 }}

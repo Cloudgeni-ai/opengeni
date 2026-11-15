@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { CancelledFailure } from "@temporalio/activity";
 import {
+  AnthropicProviderRejection,
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
   compactionProviderFailureDiagnostics,
@@ -46,6 +47,26 @@ describe("compactionTrimFallbackReason", () => {
     expect(compactionTrimFallbackReason(new EmptyCompactionSummaryError({ reason: "empty" }))).toBe(
       "summary_unusable",
     );
+  });
+
+  test("a safety refusal of the summary request falls back whatever status carried it", () => {
+    // Claude refuses with HTTP 200 and stop_reason "refusal".
+    expect(
+      compactionTrimFallbackReason(
+        wrapped(new AnthropicProviderRejection("content_policy_violation", 200, "req_1")),
+      ),
+    ).toBe("provider_rejected");
+    expect(
+      compactionTrimFallbackReason(
+        failedResponse({ status: "failed", error: { code: "content_filter", message: "no" } }),
+      ),
+    ).toBe("provider_rejected");
+    // An account refusal is not about this request: the next one fails too.
+    expect(
+      compactionTrimFallbackReason(
+        wrapped(new AnthropicProviderRejection("anthropic_permission_denied", 403)),
+      ),
+    ).toBeNull();
   });
 
   test("temporary, account and transport failures keep history and their existing handling", () => {

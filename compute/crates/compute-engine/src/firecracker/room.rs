@@ -109,16 +109,19 @@ impl Room {
 }
 
 /// What `group` should drop for `reserve` to be free under its high, and
-/// what it holds now; `None` when it cannot be read.
+/// what it holds now; `None` when it cannot be read. Cache its VMs keep
+/// under their `memory.min` is not the group's to drop.
 fn wanted(group: &Cgroup, reserve: u64) -> Option<(u64, u64)> {
     match (
         group.memory_high(),
         group.memory_current(),
         group.droppable_cache(),
+        group.kept_cache_of_children(),
     ) {
-        (Ok(high), Ok(current), Ok(droppable)) => {
-            Some((to_drop(high, current, droppable, reserve), current))
-        }
+        (Ok(high), Ok(current), Ok(droppable), Ok(kept)) => Some((
+            to_drop(high, current, droppable.saturating_sub(kept), reserve),
+            current,
+        )),
         _ => None,
     }
 }

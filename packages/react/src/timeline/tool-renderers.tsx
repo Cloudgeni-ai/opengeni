@@ -88,7 +88,9 @@ import {
 } from "./tool-presentation";
 import { isPatchFilename, PatchApplyCommand } from "./patch-apply-command";
 import { mcpToolLeaf, toolDisplayName } from "./tool-display-name";
+import { toolActionTitle } from "../tool-action-wording";
 import { useOpenGeniLinkResolver } from "../components/open-geni-links";
+import { clickDownloadLink, saveBlob } from "../app/lib/save-blob";
 import { LazyPart } from "../components/lazy-part";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
@@ -1040,29 +1042,18 @@ function SandboxFilePublishRenderer({ item, loadRetainedArtifact }: ToolRenderer
       return;
     }
     setDownloadState("loading");
-    let objectUrl: string | null = null;
     try {
       const source = await loadRetainedArtifact(receipt.artifact, new AbortController().signal);
       if (!source) throw new Error("artifact unavailable");
-      const url =
-        source instanceof Uint8Array
-          ? (objectUrl = URL.createObjectURL(
-              new Blob([source as unknown as BlobPart], {
-                type: receipt.artifact.contentType,
-              }),
-            ))
-          : source.url;
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = receipt.filename;
-      anchor.rel = "noopener";
-      anchor.click();
+      if (source instanceof Uint8Array)
+        saveBlob(
+          new Blob([source as unknown as BlobPart], { type: receipt.artifact.contentType }),
+          receipt.filename,
+        );
+      else clickDownloadLink(source.url, receipt.filename);
       setDownloadState("idle");
     } catch {
       setDownloadState("error");
-    } finally {
-      const urlToRevoke = objectUrl;
-      if (urlToRevoke) setTimeout(() => URL.revokeObjectURL(urlToRevoke), 0);
     }
   };
 
@@ -2024,7 +2015,7 @@ function ReviewedGenericRenderer(props: ToolRendererProps) {
     <ActivityDisclosure
       icon={icon}
       iconTone={chip?.tone === "bad" ? "failed" : waiting ? "accent" : "muted"}
-      title={review.title}
+      title={toolActionTitle(msg, review.toolName) ?? review.title}
       running={running}
       chip={chip}
       preview={

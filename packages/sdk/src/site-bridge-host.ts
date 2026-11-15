@@ -483,6 +483,8 @@ export function siteBridgeError(
   message: string;
   retryable: boolean;
   outcomeUnknown: boolean;
+  /** The original error's code, when the bridge typed the failure (`SiteToolCallFailedError`). */
+  details?: { code: string };
 } {
   const candidate = error as {
     code?: unknown;
@@ -490,6 +492,7 @@ export function siteBridgeError(
     retryable?: unknown;
     outcomeUnknown?: unknown;
     details?: { code?: unknown };
+    name?: unknown;
   };
   const nestedCode = candidate?.details?.code;
   const knownPreexecution = candidate?.retryable === true && candidate?.outcomeUnknown === false;
@@ -514,5 +517,8 @@ export function siteBridgeError(
     message: unsafeControl ? `[${candidate.code}] ${message}` : message,
     retryable: candidate?.retryable === true,
     outcomeUnknown: candidate?.outcomeUnknown === true,
+    ...(candidate?.name === "SiteToolCallFailedError" && typeof nestedCode === "string"
+      ? { details: { code: nestedCode } }
+      : {}),
   };
 }

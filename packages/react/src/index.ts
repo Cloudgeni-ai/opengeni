@@ -183,7 +183,7 @@ export type {
   UseTranscriptionOptions,
   UseTranscriptionResult,
 } from "./hooks/use-transcription";
-export { useFileAttachments } from "./hooks/use-file-attachments";
+export { uploadScopeForSession, useFileAttachments } from "./hooks/use-file-attachments";
 export type {
   FileAttachment,
   UseFileAttachmentsOptions,
@@ -681,6 +681,7 @@ export type {
 export type {
   SessionConversationLabels,
   SessionConversationProps,
+  SessionModelPickerProps,
   SessionConversationViewProps,
 } from "./components/session-conversation";
 export type { AgentSignalOptions, AgentSignals } from "./session-agents-model";
@@ -704,6 +705,8 @@ export {
   defaultModelPolicyPickerMessages,
 } from "./components/model-policy-picker";
 export { ModelPolicyPickerMenu } from "./components/model-policy-picker-menu";
+export { ComposerModelPicker, ModelLevelPicker } from "./components/model-level-picker";
+export type { ModelLevel, ModelLevelPickerProps } from "./components/model-level-picker";
 export type {
   ModelPolicyPickerMessages,
   ModelPolicyPickerProps,

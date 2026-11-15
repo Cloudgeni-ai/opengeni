@@ -3,11 +3,22 @@ import type {
   SiteToolConnectPrompt,
   SiteToolConsentDecision,
   SiteToolConsentPrompt,
+  SiteToolFailurePrompt,
 } from "@opengeni/sdk/site";
 import { useEffect, useRef, useState } from "react";
 import { toolReviewAction } from "@opengeni/contracts";
 import { McpConnectionCard } from "../../components/session-mcp-capability-card";
+import { useOpenGeniText } from "../../messages/runtime";
+import { Button } from "../../ui/button";
 import { ConfirmDialog } from "../../ui/confirm-dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "../../ui/dialog";
 import { CheckboxField } from "../../ui/field";
 import { SelectMenu } from "../../ui/select-menu";
 import { useAppContext } from "../app-context";
@@ -222,6 +233,106 @@ export function SiteToolConnect({
       name={request.connect.name}
       returnUrl={window.location.href}
       personalOnly
+      dialogOnly
+      onConfigured={() => {
+        connected.current = true;
+        onDone(true);
+      }}
+      onClose={() => onDone(connected.current)}
+    />
+  );
+}
+
+export type RecoverRequest = SiteToolFailurePrompt & { workspaceId: string };
+
+/**
+ * A Site tool call that didn't complete, in plain words with one action:
+ * Reconnect that same account, Try again, or Close. The original error is
+ * behind Details only.
+ */
+export function SiteToolRecover({
+  request,
+  onDone,
+}: {
+  request: RecoverRequest;
+  onDone: (again: boolean) => void;
+}) {
+  const { failure } = request;
+  const t = useOpenGeniText();
+  const answered = useRef(false);
+  const answer = (again: boolean) => {
+    if (answered.current) return;
+    answered.current = true;
+    onDone(again);
+  };
+  if (failure.reconnect)
+    return (
+      <SiteToolReconnect
+        workspaceId={request.workspaceId}
+        reconnect={failure.reconnect}
+        onDone={answer}
+      />
+    );
+  const retry = failure.retryable;
+  const hint =
+    failure.code === "site_tool_permission_denied" && failure.system
+      ? t("siteToolRecover.askWhoeverManages", { system: failure.system })
+      : failure.code === "site_tool_not_available_for_viewer"
+        ? t("siteToolRecover.askSiteOwner")
+        : null;
+  return (
+    <Dialog open onOpenChange={(open) => (open ? undefined : answer(false))}>
+      <DialogContent showCloseButton={false} className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle className="text-base">{failure.message}</DialogTitle>
+          {hint ? <DialogDescription>{hint}</DialogDescription> : null}
+        </DialogHeader>
+        {failure.detail ? (
+          <details className="text-sm text-fg-muted">
+            <summary className="cursor-pointer select-none">{t("siteToolRecover.details")}</summary>
+            <p className="mt-2 break-words">{failure.detail}</p>
+          </details>
+        ) : null}
+        <DialogFooter>
+          <Button
+            type="button"
+            variant={retry ? "default" : "ghost"}
+            className="min-h-11"
+            autoFocus
+            onClick={() => answer(retry)}
+          >
+            {retry ? t("siteToolRecover.tryAgain") : t("siteToolRecover.close")}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
+ * The existing connect card, signing in to the same connection again: the
+ * viewer's own, or the workspace's shared one.
+ */
+function SiteToolReconnect({
+  workspaceId,
+  reconnect,
+  onDone,
+}: {
+  workspaceId: string;
+  reconnect: NonNullable<RecoverRequest["failure"]["reconnect"]>;
+  onDone: (connected: boolean) => void;
+}) {
+  const { client } = useAppContext();
+  const connected = useRef(false);
+  return (
+    <McpConnectionCard
+      client={client}
+      workspaceId={workspaceId}
+      capabilityId={reconnect.capabilityId}
+      name={reconnect.name}
+      returnUrl={window.location.href}
+      reconnectConnectionId={reconnect.connectionId}
+      personalOnly={!reconnect.shared}
       dialogOnly
       onConfigured={() => {
         connected.current = true;

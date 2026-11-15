@@ -109,7 +109,11 @@ export async function createSlackAgent(
   if (!installation) return { kind: "slack_bot_unavailable" };
 
   const existing = input.agentId
-    ? await getSlackAgent(deps.db, { accountId: grant.accountId, agentId: input.agentId })
+    ? await getSlackAgent(deps.db, {
+        accountId: grant.accountId,
+        agentId: input.agentId,
+        connectionId: request.connectionId,
+      })
     : null;
   let created: SlackAgentRecord;
   if (
@@ -141,7 +145,11 @@ export async function createSlackAgent(
       // A second, concurrent create of the same agent id (two clicks on one
       // card) collides on the id, not the name: that agent is this one.
       const raced = input.agentId
-        ? await getSlackAgent(deps.db, { accountId: grant.accountId, agentId: input.agentId })
+        ? await getSlackAgent(deps.db, {
+            accountId: grant.accountId,
+            agentId: input.agentId,
+            connectionId: request.connectionId,
+          })
         : null;
       if (
         !raced ||
@@ -179,6 +187,7 @@ export async function createSlackAgent(
         agent =
           (await setSlackAgentKnowledgeCollection(deps.db, installation.home, {
             agentId: created.id,
+            connectionId: created.connectionId,
             knowledgeCollectionId: entryId.data.entryId,
           })) ?? created;
       }

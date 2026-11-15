@@ -6,6 +6,12 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+    ignore:
+      # changesets/action v2 needs @changesets/cli v3 and renames its inputs, so it
+      # moves together with the CLI upgrade rather than in the weekly bump.
+      - dependency-name: changesets/action
+        update-types:
+          - version-update:semver-major
     groups:
       github-actions:
         patterns:

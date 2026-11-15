@@ -463,11 +463,18 @@ function fingerprint(value: unknown): string {
  * Recognize only demonstrated SDK round-trip equivalences. Unknown item types
  * and fields compare exactly; a missed optimization is preferable to changing
  * model context. In particular phase and hosted-call status remain significant.
+ * A replayed tool_search_call loses its provider id and its "completed" status
+ * (the Codex normalizer strips both), exactly like a function call.
  */
 function modelVisibleItem(item: unknown): string {
   if (!item || typeof item !== "object" || Array.isArray(item)) return fingerprint(item);
   const type = (item as Record<string, unknown>).type;
-  if (type !== "message" && type !== "function_call" && type !== "reasoning")
+  if (
+    type !== "message" &&
+    type !== "function_call" &&
+    type !== "reasoning" &&
+    type !== "tool_search_call"
+  )
     return fingerprint(item);
   const visible: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(item as Record<string, unknown>)) {

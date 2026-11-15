@@ -5,7 +5,6 @@ import { toast } from "sonner";
 
 import { RowButton } from "@opengeni/react/ui/page-actions";
 import { OrganizationCreditBalance } from "@/components/organization-credit-balance";
-import { ErrorMessage } from "@opengeni/react/ui/error-message";
 import { Section, SectionStack } from "@opengeni/react/ui/section";
 import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
 import { CouponRedeem } from "@opengeni/react/app/components/credits/coupon-redeem";
@@ -15,12 +14,7 @@ import {
   CREDIT_BALANCE_CHANGED,
   notifyCreditBalanceChanged,
 } from "@opengeni/react/app/lib/credit-balance-events";
-import {
-  apiErrorAdvice,
-  apiErrorDetails,
-  isPermissionDenied,
-  userErrorText,
-} from "@opengeni/react/ui/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { entitlementEntries } from "@opengeni/react/app/lib/format";
 import { CreditTopupRow } from "@/components/credits/credit-topup-row";
 import {
@@ -35,6 +29,9 @@ import {
 } from "@opengeni/react/app/lib/organization-admin";
 import type { BillingEntitlementsResponse, BillingSummary } from "@opengeni/react/app/types";
 import type { BillingCheckoutStatus } from "@opengeni/sdk";
+import { BillingLoadFailure } from "./billing-load-failure";
+import { useOrganizationRoutes } from "./organization-nav";
+import { BillingReceiptsSection } from "./billing-receipts";
 import { SubscriptionPlans } from "./subscription-plans";
 import { useSubscriptionCatalog } from "./use-subscription-catalog";
 
@@ -83,15 +80,18 @@ export function OrganizationBillingPage({
   budgetWorkspaceId?: string | undefined;
 }) {
   const navigate = useNavigate();
+  const routes = useOrganizationRoutes();
   const anchorWorkspaceId = props.identity.workspaceId;
   const openBudget = useCallback(
     (workspace: string | undefined) =>
-      void navigate({
-        to: "/workspaces/$workspaceId/organization",
-        params: { workspaceId: anchorWorkspaceId },
-        search: workspace ? { section: "billing", workspace } : { section: "billing" },
-      }),
-    [anchorWorkspaceId, navigate],
+      routes
+        ? routes.openBudget(workspace)
+        : void navigate({
+            to: "/workspaces/$workspaceId/organization",
+            params: { workspaceId: anchorWorkspaceId },
+            search: workspace ? { section: "billing", workspace } : { section: "billing" },
+          }),
+    [anchorWorkspaceId, navigate, routes],
   );
   if (budgetWorkspaceId) {
     return (
@@ -122,8 +122,12 @@ function BillingOverview({
 }) {
   const { client, clientConfig } = useAppContext();
   const navigate = useNavigate();
+  const routes = useOrganizationRoutes();
   const accountId = identity.organizationId;
   const workspaceId = identity.workspaceId;
+  const returnUrl = routes
+    ? routes.billingPortalReturnUrl
+    : `${window.location.origin}/workspaces/${encodeURIComponent(workspaceId)}/organization?section=billing`;
   const identityKey = organizationAdminIdentityKey(identity);
   const [billing, setBilling] = useState<BillingSummary | null>(null);
   const [billingOwnerKey, setBillingOwnerKey] = useState("");
@@ -252,8 +256,12 @@ function BillingOverview({
       const session = await client.createBillingCheckout({
         amountUsd,
         ...(accountId ? { accountId } : {}),
-        successUrl: billingCheckoutReturnUrl(window.location.origin, workspaceId, "success"),
-        cancelUrl: billingCheckoutReturnUrl(window.location.origin, workspaceId, "cancelled"),
+        successUrl: routes
+          ? routes.billingReturnUrl("success")
+          : billingCheckoutReturnUrl(window.location.origin, workspaceId, "success"),
+        cancelUrl: routes
+          ? routes.billingReturnUrl("cancelled")
+          : billingCheckoutReturnUrl(window.location.origin, workspaceId, "cancelled"),
       });
       if (!ownsBillingOperation(operation)) return;
       window.location.assign(session.url);
@@ -317,7 +325,7 @@ function BillingOverview({
           key={identityKey}
           client={client}
           accountId={accountId}
-          returnUrl={`${window.location.origin}/workspaces/${encodeURIComponent(workspaceId)}/organization?section=billing`}
+          returnUrl={returnUrl}
           catalog={subscriptions.catalog}
           plan={visibleBilling.balance.plan}
           canManage={canManageBilling}
@@ -385,18 +393,17 @@ function BillingOverview({
                     }
                   />
                 ) : null}
-                {!showPlans ? (
-                  <SettingRow
-                    label="Invoices and payment details"
-                    controlWidth="auto"
-                    control={
-                      <RowButton disabled={visibleBusy} onClick={() => void openBillingPortal()}>
-                        Open Stripe billing
-                        <ArrowUpRightIcon aria-hidden="true" />
-                      </RowButton>
-                    }
-                  />
-                ) : null}
+                <SettingRow
+                  label="Payment details"
+                  description="Your card and billing details, in Stripe."
+                  controlWidth="auto"
+                  control={
+                    <RowButton disabled={visibleBusy} onClick={() => void openBillingPortal()}>
+                      Open Stripe
+                      <ArrowUpRightIcon aria-hidden="true" />
+                    </RowButton>
+                  }
+                />
               </SettingRowGroup>
             ) : stripe ? (
               <p className="text-xs leading-[18px] text-fg-muted">
@@ -419,9 +426,13 @@ function BillingOverview({
             accountId={accountId}
             canManageAlerts={canManageBilling}
             canManageAutoTopUp={canManageAutomaticTopUp}
-            returnUrl={`${window.location.origin}/workspaces/${encodeURIComponent(workspaceId)}/organization?section=billing`}
+            returnUrl={returnUrl}
           />
         </Suspense>
+      ) : null}
+
+      {stripe && canReadBilling && accountId ? (
+        <BillingReceiptsSection key={identityKey} client={client} accountId={accountId} />
       ) : null}
 
       <EntitlementsSection
@@ -441,7 +452,7 @@ function BillingOverview({
         </Suspense>
       ) : null}
 
-      {canReadBilling && accountId ? (
+      {canReadBilling && accountId && (!routes || routes.openInsights) ? (
         <Section title="Usage">
           <SettingRowGroup>
             <SettingRow
@@ -451,11 +462,13 @@ function BillingOverview({
               control={
                 <RowButton
                   onClick={() =>
-                    void navigate({
-                      to: "/workspaces/$workspaceId/organization",
-                      params: { workspaceId },
-                      search: { section: "insights" },
-                    })
+                    routes?.openInsights
+                      ? routes.openInsights()
+                      : void navigate({
+                          to: "/workspaces/$workspaceId/organization",
+                          params: { workspaceId },
+                          search: { section: "insights" },
+                        })
                   }
                 >
                   Open Insights
@@ -466,32 +479,6 @@ function BillingOverview({
         </Section>
       ) : null}
     </SectionStack>
-  );
-}
-
-/**
- * A billing read that failed: a calm line without Try again when the viewer
- * lacks the permission, otherwise what happened and what to do.
- */
-function BillingLoadFailure(props: {
-  title: string;
-  denied: string;
-  error: Error;
-  onRetry: () => void;
-}) {
-  if (isPermissionDenied(props.error)) {
-    return <p className="text-xs leading-[18px] text-fg-muted">{props.denied}</p>;
-  }
-  return (
-    <ErrorMessage
-      variant="inline"
-      title={props.title}
-      announce
-      action={<RowButton onClick={props.onRetry}>Try again</RowButton>}
-      {...apiErrorDetails(props.error)}
-    >
-      {apiErrorAdvice(props.error)}
-    </ErrorMessage>
   );
 }
 

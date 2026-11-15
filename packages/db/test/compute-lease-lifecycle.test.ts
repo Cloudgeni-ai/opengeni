@@ -1,10 +1,16 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { createHash } from "node:crypto";
+import {
+  acquireSharedTestDatabase,
+  grantDeferredRuntimeAccess,
+  type SharedTestDatabase,
+} from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import {
   accrueWarmSeconds,
   acquireLease,
   bootstrapWorkspace,
+  coldSandboxesOfArchivedChatsAvailable,
   commitWarmingToWarm,
   computeSandboxNamed,
   computeSandboxOfEnrollment,
@@ -12,7 +18,10 @@ import {
   createSandboxEnrollment,
   createSession,
   deleteSessionTreeIfQuiescent,
+  endComputeGroupOfArchivedChats,
+  forgetColdSandboxOfArchivedChats,
   forceDrainOverLimitViewerOnlyBoxes,
+  listColdSandboxesOfArchivedChats,
   MANAGED_BROWSER_SESSION_CAPABILITIES,
   openSandboxAgentLink,
   releaseLeaseHolder,
@@ -467,12 +476,358 @@ describe("compute leases and idle drain", () => {
   }, 60_000);
 });
 
+// A compute sandbox is kept for the chats that work in it. Once every one of
+// them is archived, its group ends as it does when they are deleted; a chat
+// restored later starts on a new sandbox.
+describe("the compute sandbox of archived chats", () => {
+  /** A second chat working in the first one's sandbox. */
+  async function sharing(
+    grant: { accountId: string; subjectId: string },
+    ids: { workspaceId: string; sandboxGroupId: string },
+    parent?: { id: string },
+  ) {
+    return await createSession(db, {
+      accountId: grant.accountId,
+      workspaceId: ids.workspaceId,
+      initialMessage: "",
+      createdBy: { kind: "subject", subjectId: grant.subjectId },
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "compute",
+      sandboxGroupId: ids.sandboxGroupId,
+      ...(parent ? { parentSessionId: parent.id } : {}),
+    });
+  }
+
+  /** Archived 25 hours ago: past the day its sandbox is kept for. */
+  async function archive(workspaceId: string, sessionId: string) {
+    await admin`update sessions set archived_at = now() - interval '25 hours'
+      where workspace_id = ${workspaceId} and id = ${sessionId}`;
+  }
+
+  test("a chat archived less than a day ago keeps its sandbox", async () => {
+    if (!available) return;
+    const { session, ids } = await fixture("compute");
+    await releaseLastHolder(ids);
+    // Within Undo, just past it, and an hour short of a day.
+    for (const ago of ["0 seconds", "14 seconds", "23 hours"]) {
+      await admin`update sessions set archived_at = now() - ${ago}::interval
+        where workspace_id = ${ids.workspaceId} and id = ${session.id}`;
+      expect(await endComputeGroupOfArchivedChats(db, ids)).toBe(false);
+      expect((await readRow(ids.workspaceId, ids.sandboxGroupId))?.liveness).toBe("warm");
+    }
+    await admin`update sessions set archived_at = now() - interval '24 hours 1 minute'
+      where workspace_id = ${ids.workspaceId} and id = ${session.id}`;
+    expect(await endComputeGroupOfArchivedChats(db, ids)).toBe(true);
+  }, 60_000);
+
+  test("ends once its only chat is archived, and not before", async () => {
+    if (!available) return;
+    const { session, ids } = await fixture("compute");
+    await releaseLastHolder(ids);
+    expect(await endComputeGroupOfArchivedChats(db, ids)).toBe(false);
+    expect((await readRow(ids.workspaceId, ids.sandboxGroupId))?.liveness).toBe("warm");
+    await archive(ids.workspaceId, session.id);
+    expect(await endComputeGroupOfArchivedChats(db, ids)).toBe(true);
+    const row = await readRow(ids.workspaceId, ids.sandboxGroupId);
+    expect(row?.liveness).toBe("draining");
+    expect(row!.expires_at.getTime()).toBeLessThan(Date.now());
+    // Marked as a group end, so the reaper deletes without a capture.
+    expect(await groupEndRequestedAt(ids)).not.toBeNull();
+    // Asked once: the drain owns it from here.
+    expect(await endComputeGroupOfArchivedChats(db, ids)).toBe(false);
+  }, 60_000);
+
+  test("a chat stored by the idle archiver counts as archived", async () => {
+    if (!available) return;
+    const { session, ids } = await fixture("compute");
+    await releaseLastHolder(ids);
+    await admin`update sessions
+      set content_archive_state = 'archiving', content_archive_started_at = now()
+      where workspace_id = ${ids.workspaceId} and id = ${session.id}`;
+    expect(await endComputeGroupOfArchivedChats(db, ids)).toBe(true);
+  }, 60_000);
+
+  test("a shared sandbox stays while any chat that works in it is live", async () => {
+    if (!available) return;
+    const { grant, session, ids } = await fixture("compute");
+    const other = await sharing(grant, ids);
+    await releaseLastHolder(ids);
+    await archive(ids.workspaceId, session.id);
+    expect(await endComputeGroupOfArchivedChats(db, ids)).toBe(false);
+    expect((await readRow(ids.workspaceId, ids.sandboxGroupId))?.liveness).toBe("warm");
+    await archive(ids.workspaceId, other.id);
+    expect(await endComputeGroupOfArchivedChats(db, ids)).toBe(true);
+  }, 60_000);
+
+  test("a sub-chat is archived with its root chat", async () => {
+    if (!available) return;
+    const { grant, session, ids } = await fixture("compute");
+    // The sub-chat carries no archive mark of its own.
+    await sharing(grant, ids, session);
+    await releaseLastHolder(ids);
+    await archive(ids.workspaceId, session.id);
+    expect(await endComputeGroupOfArchivedChats(db, ids)).toBe(true);
+  }, 60_000);
+
+  test("an archived chat with work under way, or a held lease, keeps its sandbox", async () => {
+    if (!available) return;
+    const held = await fixture("compute");
+    await archive(held.ids.workspaceId, held.session.id);
+    // Its turn still holds the lease.
+    expect(await endComputeGroupOfArchivedChats(db, held.ids)).toBe(false);
+    expect((await readRow(held.ids.workspaceId, held.ids.sandboxGroupId))?.liveness).toBe("warm");
+
+    const working = await fixture("compute");
+    await releaseLastHolder(working.ids);
+    await admin`update sessions set archived_at = now() - interval '25 hours', status = 'queued'
+      where workspace_id = ${working.ids.workspaceId} and id = ${working.session.id}`;
+    expect(await endComputeGroupOfArchivedChats(db, working.ids)).toBe(false);
+  }, 60_000);
+
+  test("a sandbox no chat names, or of another backend, is left alone", async () => {
+    if (!available) return;
+    const { ids } = await fixture("compute");
+    await releaseLastHolder(ids);
+    expect(
+      await endComputeGroupOfArchivedChats(db, {
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: crypto.randomUUID(),
+      }),
+    ).toBe(false);
+    const modal = await fixture("modal");
+    await archive(modal.ids.workspaceId, modal.session.id);
+    expect(await endComputeGroupOfArchivedChats(db, modal.ids)).toBe(false);
+  }, 60_000);
+
+  test("a chat restored before the sandbox is deleted keeps it", async () => {
+    if (!available) return;
+    const { session, ids } = await fixture("compute");
+    await releaseLastHolder(ids);
+    await archive(ids.workspaceId, session.id);
+    expect(await endComputeGroupOfArchivedChats(db, ids)).toBe(true);
+    await admin`update sessions set archived_at = null
+      where workspace_id = ${ids.workspaceId} and id = ${session.id}`;
+    // A verified live box (as the turn that warmed it records).
+    await admin`
+      update sandbox_leases set resume_state = jsonb_set(
+        jsonb_set(resume_state, '{opengeniRecovery,workspace,status}', '"ready"'),
+        '{opengeniRecovery,provider}',
+        jsonb_build_object('status', 'exists', 'instanceId', instance_id, 'observedAt', now()::text))
+        || jsonb_build_object('opengeniProviderInstanceId', instance_id)
+      where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.sandboxGroupId}`;
+    const arrival = await acquireLease(db, {
+      ...ids,
+      kind: "turn",
+      holderId: "turn-2",
+      backend: "compute",
+      leaseTtlMs: 45_000,
+    });
+    expect(arrival.role).toBe("rearmed");
+    expect(await groupEndRequestedAt(ids)).toBeNull();
+    expect(await endComputeGroupOfArchivedChats(db, ids)).toBe(false);
+  }, 60_000);
+});
+
 async function groupEndRequestedAt(ids: { workspaceId: string; sandboxGroupId: string }) {
   const [row] = await admin<{ group_end_requested_at: Date | null }[]>`
     select group_end_requested_at from sandbox_leases
     where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.sandboxGroupId}`;
   return row?.group_end_requested_at ?? null;
 }
+
+// 1404: a stopped sandbox of another backend (a Modal box kept as its saved
+// workspace) is forgotten under the same rule, as deleting its chats does, so
+// the checkpoint ledger deletes the snapshot it named.
+describe("the stopped sandbox of archived chats on other backends", () => {
+  beforeAll(async () => {
+    if (available) await grantDeferredRuntimeAccess(admin);
+  });
+
+  type Ids = { accountId: string; workspaceId: string; sandboxGroupId: string };
+
+  /** A Modal sandbox stopped after its turn, saved as a current snapshot. */
+  async function stopped() {
+    const made = await fixture("modal");
+    await releaseLastHolder(made.ids);
+    const artifactId = crypto.randomUUID();
+    const objectId = `im-${artifactId}`;
+    const bytes = Buffer.from(
+      `MODAL_SANDBOX_FS_SNAPSHOT_V1\n${JSON.stringify({ snapshot_id: objectId, workspace_persistence: "snapshot_filesystem" })}`,
+    );
+    const hash = createHash("sha256").update(bytes).digest("hex");
+    const descriptor = {
+      version: 2,
+      kind: "provider_snapshot",
+      revision: `wa2:1:${hash}`,
+      archiveSha256: hash,
+      archiveBytes: bytes.length,
+      snapshotId: objectId,
+      provider: "modal_snapshot_filesystem",
+      workspacePersistence: "snapshot_filesystem",
+    };
+    const binding =
+      '{"version":1,"serverUrl":"https://api.modal.com","workspaceName":"fixture","environment":"test"}';
+    await admin.begin(async (tx) => {
+      await tx`select set_config('opengeni.sandbox_recovery_protocol_v2', '1', true)`;
+      const [lease] = await tx<{ id: string; lease_epoch: number }[]>`
+        select id, lease_epoch from sandbox_leases
+        where workspace_id = ${made.ids.workspaceId}
+          and sandbox_group_id = ${made.ids.sandboxGroupId}`;
+      await tx`insert into sandbox_checkpoint_artifacts
+        (account_id, workspace_id, sandbox_group_id, id, source_lease_id, source_lease_epoch,
+         provenance, provider_backend, provider_binding_key, provider_binding, object_kind,
+         object_id, archive_base64, archive_sha256, archive_bytes, descriptor,
+         descriptor_revision, state, created_at)
+        values (${made.ids.accountId}, ${made.ids.workspaceId}, ${made.ids.sandboxGroupId},
+          ${artifactId}, ${lease!.id}, ${lease!.lease_epoch}, 'legacy_provider_adopted', 'modal',
+          ${binding}, ${binding}::text::jsonb, 'modal_filesystem_snapshot', ${objectId},
+          ${bytes.toString("base64")}, ${hash}, ${bytes.length},
+          ${JSON.stringify(descriptor)}::text::jsonb, ${descriptor.revision}, 'current',
+          now() - interval '2 days')`;
+      // The lease names the snapshot as its saved workspace, as a drain's save does.
+      await tx`update sandbox_leases set liveness = 'cold', instance_id = null,
+          workspace_generation = greatest(workspace_generation, 1),
+          archive_generation = coalesce(archive_generation, greatest(workspace_generation, 1)),
+          resume_state = coalesce(resume_state, '{}'::jsonb) || jsonb_build_object(
+            'sessionState', coalesce(resume_state -> 'sessionState', '{}'::jsonb)
+              || jsonb_build_object(
+                'workspaceArchive', ${bytes.toString("base64")}::text,
+                'workspaceArchiveMeta', ${JSON.stringify(descriptor)}::text::jsonb)),
+          current_checkpoint_artifact_id = ${artifactId}
+        where id = ${lease!.id}`;
+    });
+    return { ...made, artifactId };
+  }
+
+  async function archive(workspaceId: string, sessionId: string, ago = "25 hours") {
+    await admin`update sessions set archived_at = now() - ${ago}::interval
+      where workspace_id = ${workspaceId} and id = ${sessionId}`;
+  }
+
+  async function listed(ids: Ids) {
+    // Start just before this group, so other tests' candidates don't page it out.
+    const page = await listColdSandboxesOfArchivedChats(db, {
+      after: {
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: "00000000-0000-0000-0000-000000000000",
+      },
+      limit: 1000,
+    });
+    return page.some(
+      (entry) =>
+        entry.workspaceId === ids.workspaceId && entry.sandboxGroupId === ids.sandboxGroupId,
+    );
+  }
+
+  async function leaseCount(ids: Ids) {
+    const [row] = await admin<{ count: number }[]>`
+      select count(*)::int as count from sandbox_leases
+      where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.sandboxGroupId}`;
+    return row!.count;
+  }
+
+  /** The checkpoint GC's claim, as the runtime role runs it. */
+  async function collectable(artifactId: string) {
+    const rows = await admin.begin(async (tx) => {
+      await tx.unsafe("SET LOCAL ROLE opengeni_app");
+      return await tx<{ id: string }[]>`
+        select id from opengeni_private.claim_sandbox_checkpoint_artifacts(
+          ${crypto.randomUUID()}::uuid, 500, 60000)`;
+    });
+    return rows.some((row) => row.id === artifactId);
+  }
+
+  test("the inventory is granted to the runtime", async () => {
+    if (!available) return;
+    expect(await coldSandboxesOfArchivedChatsAvailable(db)).toBe(true);
+  }, 60_000);
+
+  test("is forgotten a day after its only chat is archived, and its snapshot collected", async () => {
+    if (!available) return;
+    const { session, ids, artifactId } = await stopped();
+    expect(await listed(ids)).toBe(false);
+    expect(await forgetColdSandboxOfArchivedChats(db, ids)).toBe(false);
+    await archive(ids.workspaceId, session.id, "23 hours");
+    expect(await listed(ids)).toBe(false);
+    expect(await forgetColdSandboxOfArchivedChats(db, ids)).toBe(false);
+    expect(await collectable(artifactId)).toBe(false);
+
+    await archive(ids.workspaceId, session.id);
+    expect(await listed(ids)).toBe(true);
+    expect(await forgetColdSandboxOfArchivedChats(db, ids)).toBe(true);
+    expect(await leaseCount(ids)).toBe(0);
+    expect(await listed(ids)).toBe(false);
+    expect(await collectable(artifactId)).toBe(true);
+
+    // Restored later, the chat starts on a new sandbox.
+    await admin`update sessions set archived_at = null
+      where workspace_id = ${ids.workspaceId} and id = ${session.id}`;
+    const arrival = await acquireLease(db, {
+      ...ids,
+      kind: "turn",
+      holderId: "turn-2",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(arrival.role).toBe("spawner");
+    expect(arrival.lease.currentCheckpointArtifactId).toBeNull();
+  }, 60_000);
+
+  test("a chat stored by the idle archiver counts as archived", async () => {
+    if (!available) return;
+    const { session, ids } = await stopped();
+    await admin`update sessions
+      set content_archive_state = 'archiving', content_archive_started_at = now()
+      where workspace_id = ${ids.workspaceId} and id = ${session.id}`;
+    expect(await listed(ids)).toBe(true);
+    expect(await forgetColdSandboxOfArchivedChats(db, ids)).toBe(true);
+  }, 60_000);
+
+  test("stays while any chat that works in it is live, or while it runs", async () => {
+    if (!available) return;
+    const { grant, session, ids } = await stopped();
+    const other = await createSession(db, {
+      accountId: grant.accountId,
+      workspaceId: ids.workspaceId,
+      initialMessage: "",
+      createdBy: { kind: "subject", subjectId: grant.subjectId },
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "modal",
+      sandboxGroupId: ids.sandboxGroupId,
+    });
+    await archive(ids.workspaceId, session.id);
+    expect(await listed(ids)).toBe(false);
+    expect(await forgetColdSandboxOfArchivedChats(db, ids)).toBe(false);
+    await admin`update sessions set archived_at = now() - interval '25 hours', status = 'queued'
+      where workspace_id = ${ids.workspaceId} and id = ${other.id}`;
+    expect(await forgetColdSandboxOfArchivedChats(db, ids)).toBe(false);
+    expect(await leaseCount(ids)).toBe(1);
+
+    // A box that is up (not cold) is the drain's to stop first.
+    const warm = await fixture("modal");
+    await archive(warm.ids.workspaceId, warm.session.id);
+    expect(await listed(warm.ids)).toBe(false);
+    expect(await forgetColdSandboxOfArchivedChats(db, warm.ids)).toBe(false);
+    expect(await leaseCount(warm.ids)).toBe(1);
+  }, 60_000);
+
+  test("the inventory pages in key order after the given group", async () => {
+    if (!available) return;
+    const { session, ids } = await stopped();
+    await archive(ids.workspaceId, session.id);
+    expect(await listed(ids)).toBe(true);
+    const after = await listColdSandboxesOfArchivedChats(db, { after: ids, limit: 1000 });
+    expect(after.some((entry) => entry.sandboxGroupId === ids.sandboxGroupId)).toBe(false);
+  }, 60_000);
+});
 
 describe("compute warm time follows the sandbox's sleep", () => {
   async function sleepingFixture() {

@@ -330,6 +330,42 @@ describe("durable working-runtime launch receipts", () => {
     });
   });
 
+  test("a shutdown suspension cut short is completed only for the browser its launch recorded", async () => {
+    await withJournal(async ({ journal, receipt }) => {
+      const suspending = journal.suspend(receipt);
+      expect(journal.latest()?.state).toBe("dispatched");
+      expect(() =>
+        assertWorkingRuntimeReceipt(journal.latest(), authority, launchDigest, receipt.profile),
+      ).toThrow("preserved");
+      const recovery = journal.interruptedRecovery(journal.latest());
+      expect(recovery).toEqual({ kind: "suspending", receipt: journal.latest()! });
+      const suspended = journal.reinstate(recovery!);
+      expect(suspended).toMatchObject({
+        operationId: suspending.operationId,
+        intent: "suspend",
+        state: "completed",
+        process: receipt.process,
+        directoryLaunchAllowed: true,
+      });
+      expect(journal.latest()).toEqual(suspended);
+      expect(() =>
+        assertWorkingRuntimeReceipt(journal.latest(), authority, launchDigest, receipt.profile),
+      ).not.toThrow();
+      expect(journal.interruptedRecovery(suspended)).toBeNull();
+    });
+  });
+
+  test("an unsettled suspension that does not match its launch is not recovered", async () => {
+    await withJournal(async ({ journal, receipt }) => {
+      journal.begin({
+        ...receipt,
+        intent: "suspend",
+        process: { ...receipt.process!, pid: receipt.process!.pid + 1 },
+      });
+      expect(journal.interruptedRecovery(journal.latest())).toBeNull();
+    });
+  });
+
   test("one recovery of a completed receipt can claim dispatch; a competing or unknown claim cannot launch again", async () => {
     await withJournal(async ({ journal, receipt }) => {
       const claim = journal.begin({ ...receipt, process: null }, receipt.operationId);

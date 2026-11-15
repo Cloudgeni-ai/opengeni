@@ -10,11 +10,13 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useSyncExternalStore,
   type ReactNode,
 } from "react";
 import type { SessionEvent, SessionStatus } from "@opengeni/sdk";
 
+import { openAdminStepUpPage, type AdminStepUpHandler } from "../../admin-step-up";
 import type { SessionStarter } from "../components/new-session-starters";
 import type { AppApiHost } from "./app-api";
 import type { AppSurfaces } from "./app-surfaces";
@@ -58,6 +60,11 @@ export type AppHost = Readonly<{
    * page's own event stream (no second connection).
    */
   onSessionState?: ((state: SessionViewState) => void) | undefined;
+  /**
+   * Lets the person confirm it's them with a passkey when an admin change asks
+   * for it. Without one, the Opengeni app's page for it opens.
+   */
+  adminStepUp?: AdminStepUpHandler | undefined;
 }>;
 
 const AppHostContext = createContext<AppHost | null>(null);
@@ -88,6 +95,21 @@ export function useAppHost(): Partial<AppHost> {
 /** Whether this app is embedded in a page it does not own. */
 export function useEmbedded(): boolean {
   return useContext(AppHostContext) !== null;
+}
+
+/**
+ * How this app lets the person confirm an admin change with a passkey: the
+ * host's own handler, or else opening the Opengeni app's page for it.
+ * Undefined only when the host has no way to open a page.
+ */
+export function useAdminStepUp(): AdminStepUpHandler | undefined {
+  const host = useAppHost();
+  const own = host.adminStepUp;
+  const page = host.navigation?.page;
+  return useMemo(
+    () => own ?? (page ? openAdminStepUpPage((path) => page.open(path)) : undefined),
+    [own, page],
+  );
 }
 
 /** Tells the host the open chat's state each time it changes. */

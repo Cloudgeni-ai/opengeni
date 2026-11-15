@@ -6,6 +6,7 @@ import { latestQuestionClient } from "../test/fixtures/latest-question-client";
 import { SESSION_ID, WORKSPACE_ID } from "../test/fake-client";
 import type { SessionEvent } from "@opengeni/sdk";
 import recordedAnswerExchange from "../test/fixtures/exchange-answer-before-machine-turns.json";
+import recordedSteerIntoNewTurn from "../test/fixtures/steer-into-new-turn.json";
 import "./styles.css";
 import { enablePierreDiffs } from "@opengeni/react/diffs";
 
@@ -16,12 +17,15 @@ enablePierreDiffs();
  * Readable timeline studio: scripted turns replayed through the production
  * MessageTimeline. Compare the readable per-turn presentation with classic grouping,
  * in both themes, at any viewport width. `?scenario=` picks the script:
- * `delegated` (default), `follow-up`, `notes`, `history`, or
- * `machine-follow-up`. `follow-up`, `notes`, and `history` stream messages the
- * way the runtime records them today: identified deltas without a phase, and a
- * phase-less final output receipt at turn end. `machine-follow-up` replays an
- * anonymized recorded exchange whose answer is followed by one more
- * machine-triggered turn.
+ * `delegated` (default), `follow-up`, `notes`, `history`, `machine-follow-up`,
+ * or `steer-into-new-turn`, and `&show=` how many of its events to show.
+ * `follow-up`, `notes`, and `history` stream messages the way the runtime
+ * records them today: identified deltas without a phase, and a phase-less
+ * final output receipt at turn end. `machine-follow-up` replays an anonymized
+ * recorded exchange whose answer is followed by one more machine-triggered
+ * turn. `steer-into-new-turn` replays an anonymized chat whose Steer arrived
+ * after the previous turn had ended, started its own turn, and was then
+ * handed over to a second Steer.
  */
 
 type Draft = { type: string; payload: unknown; turnId: string | null; at: number };
@@ -459,6 +463,29 @@ function machineFollowUpScenario(): Draft[] {
   }));
 }
 
+/**
+ * The recorded chat whose Steer started its own turn. The studio numbers
+ * events itself, so each turn's trigger follows the same numbering.
+ */
+function steerIntoNewTurnScenario(): Draft[] {
+  const recorded = recordedSteerIntoNewTurn as SessionEvent[];
+  const start = Date.parse(recorded[0]!.occurredAt);
+  const studioIds = new Map(recorded.map((event, index) => [event.id, `exchange-${index + 1}`]));
+  const renumber = (payload: unknown) => {
+    const record = payload as Record<string, unknown>;
+    const trigger = typeof record?.triggerEventId === "string" ? record.triggerEventId : null;
+    return trigger && studioIds.has(trigger)
+      ? { ...record, triggerEventId: studioIds.get(trigger) }
+      : payload;
+  };
+  return recorded.map((event) => ({
+    type: event.type,
+    payload: renumber(event.payload),
+    turnId: event.turnId ?? null,
+    at: (Date.parse(event.occurredAt) - start) / 1000,
+  }));
+}
+
 const SCENARIOS: Record<string, () => Draft[]> = {
   // A long live turn from a model that writes a whitespace-only message
   // ("\n\n") around every tool call, as some models do. Those messages have
@@ -566,6 +593,7 @@ const SCENARIOS: Record<string, () => Draft[]> = {
     return drafts;
   },
   "machine-follow-up": machineFollowUpScenario,
+  "steer-into-new-turn": steerIntoNewTurnScenario,
   "legacy-attention": () => {
     const { drafts, add } = script();
     add("user.message", { text: "Check the archived signup totals." }, null);
@@ -626,7 +654,9 @@ function App() {
     [questionMode],
   );
   const drafts = useMemo(() => (SCENARIOS[scenarioName] ?? delegatedScenario)(), [scenarioName]);
-  const [count, setCount] = useState(0);
+  const [count, setCount] = useState(
+    () => Number(new URLSearchParams(window.location.search).get("show")) || 0,
+  );
   const [session, setSession] = useState(0);
   const [windowStart, setWindowStart] = useState(0);
   const [historyMode, setHistoryMode] = useState(false);

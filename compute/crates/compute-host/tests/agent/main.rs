@@ -35,6 +35,7 @@ mod disk_reading;
 mod disk_relief;
 mod fleet;
 mod images;
+mod kernel;
 mod link;
 mod memory;
 mod observe;
@@ -50,6 +51,7 @@ mod restart_in_place;
 mod roots;
 mod sleep;
 mod stopped;
+mod stuck_disk;
 
 /// Bytes of fake guest memory that hold its value. A memory image is as long
 /// as the sandbox's memory, so the rest of it is a hole.
@@ -207,6 +209,9 @@ struct World {
     /// While set, a guest asked to write its disks out answers only once
     /// it is cleared, as one still trimming its disk.
     syncs_held: AtomicBool,
+    /// While set, a guest asked to write its disks out does not say it
+    /// did, as one that cannot.
+    syncs_refused: AtomicBool,
     /// While set, a paused VM's guest takes no connection, as with a real
     /// VMM, whose guest's processors do not run while it is paused.
     paused_take_nothing: AtomicBool,
@@ -550,6 +555,12 @@ async fn guest(listener: UnixListener, state: GuestState) {
                     state.world.syncs.fetch_add(1, Ordering::SeqCst);
                     while state.world.syncs_held.load(Ordering::SeqCst) {
                         sleep(Duration::from_millis(5)).await;
+                    }
+                    if state.world.syncs_refused.load(Ordering::SeqCst) {
+                        if write.write_all(b"cannot\n").await.is_err() {
+                            break;
+                        }
+                        continue;
                     }
                 }
                 let Some(reply) = state.answer(&line, &mut flood) else {
@@ -1568,11 +1579,13 @@ fn vm_name(id: Id) -> String {
 const NEVER: SleepConfig = SleepConfig {
     pause_after_ms: None,
     save_after_ms: None,
+    keep_memory: false,
     archive_after_ms: None,
     drop_after_ms: None,
     evict_after_ms: None,
     forget_after_ms: None,
     compress: false,
+    earlier_compress: compute_host::protocol::Dropped,
     checkpoint_every_ms: None,
 };
 
@@ -1580,6 +1593,7 @@ const NEVER: SleepConfig = SleepConfig {
 const SAVE_IN_PLACE: SleepConfig = SleepConfig {
     pause_after_ms: Some(30),
     save_after_ms: Some(60),
+    keep_memory: true,
     ..NEVER
 };
 
@@ -1587,6 +1601,15 @@ const SAVE_IN_PLACE: SleepConfig = SleepConfig {
 const SAVE_QUICKLY: SleepConfig = SleepConfig {
     drop_after_ms: Some(90),
     ..SAVE_IN_PLACE
+};
+
+/// Pauses quickly and, as the rules of a sandbox whose memory is not kept
+/// do, ends its VM process soon after with no memory of it saved.
+const END_QUICKLY: SleepConfig = SleepConfig {
+    pause_after_ms: Some(30),
+    save_after_ms: Some(60),
+    drop_after_ms: Some(90),
+    ..NEVER
 };
 
 /// Pauses soon after the last activity.

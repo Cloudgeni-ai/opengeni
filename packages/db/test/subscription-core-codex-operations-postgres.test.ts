@@ -382,6 +382,14 @@ const rotate = async () => ({
   idToken: "id-rotated",
 });
 
+/** An id_token whose claims report `planType` (unsigned: only its payload is read). */
+function idTokenWithPlan(planType: string): string {
+  const payload = Buffer.from(
+    JSON.stringify({ "https://api.openai.com/auth": { chatgpt_plan_type: planType } }),
+  ).toString("base64url");
+  return `header.${payload}.signature`;
+}
+
 describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () => {
   test("runs as the non-superuser, non-bypass application role", async () => {
     const [role] = await rawRows<{ currentUser: string; superuser: boolean; bypassRls: boolean }>(
@@ -846,6 +854,64 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
       where operation_id = ${reserved.operationId}::uuid`;
     expect(settled).toEqual({ request_outcome: "response_received" });
     expect(await releaseSubscriptionCoreCodexOperationLease(client!.db, scope, lease)).toBe(true);
+  });
+
+  test("a refresh outside a chat turn records the plan the new token reports, and a changed plan clears model cooldowns", async () => {
+    const org = await organization();
+    // Recorded as pro; the provider now reports another plan.
+    const connectionId = await sharedConnection(org, "ops-plan");
+    await shared!.admin`
+      insert into subscription_connection_quota (
+        account_id, connection_id, quota, observed_refresh_generation, revision, updated_at
+      ) values (
+        ${org.accountId}::uuid, ${connectionId}::uuid,
+        ${shared!.admin.json({ modelCooldowns: { [MODEL]: { until: Date.now() + 86_400_000 } } })}::jsonb,
+        1, 1, now()
+      )`;
+    const stored = async () =>
+      (
+        await shared!.admin<{ plan_type: string | null; generation: number; cooldowns: unknown }[]>`
+          select connection.plan_type, connection.refresh_generation::int as generation,
+            quota.quota->'modelCooldowns' as cooldowns
+          from subscription_connections connection
+          join subscription_connection_quota quota on quota.connection_id = connection.id
+          where connection.id = ${connectionId}::uuid`
+      )[0];
+    const rotateTo = (label: string, idToken: string) => ({
+      refresh: async () => ({
+        accessToken: `access-${label}`,
+        refreshToken: `refresh-${label}`,
+        idToken,
+      }),
+    });
+    const scope = workspaceScope(org);
+
+    expect(
+      await refreshSubscriptionCoreCodexConnectionCredential(
+        client!.db,
+        settings,
+        scope,
+        connectionId,
+        null,
+        1,
+        rotateTo("free", idTokenWithPlan("free")),
+      ),
+    ).toEqual({ kind: "refreshed", accessToken: "access-free", refreshGeneration: 2 });
+    expect(await stored()).toEqual({ plan_type: "free", generation: 2, cooldowns: {} });
+
+    // A token that reports no plan keeps the recorded one.
+    expect(
+      await refreshSubscriptionCoreCodexConnectionCredential(
+        client!.db,
+        settings,
+        scope,
+        connectionId,
+        null,
+        2,
+        rotateTo("no-plan", "id-without-claims"),
+      ),
+    ).toEqual({ kind: "refreshed", accessToken: "access-no-plan", refreshGeneration: 3 });
+    expect(await stored()).toEqual({ plan_type: "free", generation: 3, cooldowns: {} });
   });
 
   // No refresher at all (an API key), or a refresher the credential's format

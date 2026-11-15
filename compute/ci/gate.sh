@@ -34,8 +34,9 @@
 # Every step's status counts: the gate ends with GATE_PASSED, or with
 # GATE_FAILED and the failed steps and exits 1. KVM steps set
 # COMPUTE_TEST_REQUIRE, so a test that would skip for want of the lab, the
-# store or the guest fails instead of passing silently. The last line is
-# GATE_DONE.
+# store or the guest fails instead of passing silently. A KVM step that
+# leaves a Firecracker process running fails as STEP-left-vms, and the
+# gate ends those VMs before the next step. The last line is GATE_DONE.
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 SRC=${SRC:-$(cd "$HERE/.." && pwd)}
@@ -80,12 +81,45 @@ not_run() {
   FAILED+=("$1")
   echo "!! $1 not run: $2"
 }
+# left_vms NAME: a step ends every VM it started. A Firecracker process
+# still running after NAME is NAME's failure, never a later step's: later
+# steps count the VMMs on the machine, and one left over fails tests that
+# have nothing to do with it (a VM that "never ended", one VMM too many).
+# It is listed, then ended, so that the next step starts with none.
+left_vms() {
+  local left
+  left=$(pgrep -a -x firecracker) || return 0
+  FAILED+=("$1-left-vms")
+  echo "!! $1 left VMs running; ending them:"
+  echo "$left"
+  sudo pkill -KILL -x firecracker
+  for _ in $(seq 100); do
+    pgrep -x firecracker >/dev/null || return 0
+    sleep 0.1
+  done
+  echo "!! VMs still running after $1:"
+  pgrep -a -x firecracker
+}
 TESTS='^test result|FAILED|panicked|^error|skipped:'
 
 for name in $STEPS; do
   case " $ALL " in *" $name "*) ;; *) echo "unknown step $name" >&2; exit 2 ;; esac
 done
 echo "gate of $SRC on $(hostname), $(uname -r), steps: $STEPS"
+
+# The guest build needs musl-gcc. It is installed before any step runs,
+# while the runner's network is known to work: CI runs have failed to
+# resolve the package mirror by the time the guest build starts. A failed
+# install refreshes a possibly stale package index and tries once more,
+# showing why if that fails too.
+if { wants guest || wants conformance; } && ! command -v musl-gcc >/dev/null; then
+  apt_log=$(mktemp)
+  sudo apt-get install -y -qq -o DPkg::Lock::Timeout=60 musl-tools >/dev/null 2>&1 ||
+    { sudo apt-get update -qq && sudo apt-get install -y -qq -o DPkg::Lock::Timeout=60 musl-tools; } \
+      >/dev/null 2>"$apt_log" ||
+    tail -n 5 "$apt_log" >&2
+  rm -f "$apt_log"
+fi
 
 if wants fmt; then
   step fmt
@@ -129,16 +163,19 @@ fi
 if wants pager; then
   step pager kernel tests
   check pager "$TESTS" root cargo test --locked -p compute-pager -- --ignored
+  left_vms pager
 fi
 if wants networking; then
   step networking
   check networking "$TESTS" root env COMPUTE_TEST_LAB="$LAB" COMPUTE_TEST_REQUIRE=lab \
     cargo test --locked -p compute-host --lib net:: -- --test-threads 1
+  left_vms networking
 fi
 if wants engine; then
   step engine
   check engine "$TESTS" root env COMPUTE_TEST_LAB="$LAB" COMPUTE_TEST_REQUIRE=lab \
     cargo test --locked --release -p compute-engine --test firecracker -- --test-threads 1
+  left_vms engine
 fi
 if wants save_wake; then
   step "save_wake (store $STORE)"
@@ -148,6 +185,7 @@ if wants save_wake; then
     $(profile) COMPUTE_TEST_STORE="$STORE" \
     cargo test --locked --release -p compute-host --test save_wake -- --test-threads 1
   case $STORE in gs://* | az://* | s3://*) ;; *) sudo rm -rf "$STORE" ;; esac
+  left_vms save_wake
 fi
 if wants lab; then
   step "lab ($SANDBOXES sandboxes)"
@@ -155,12 +193,10 @@ if wants lab; then
   check lab "$TESTS" root env COMPUTE_TEST_LAB="$LAB" COMPUTE_TEST_REQUIRE=lab \
     $(profile) COMPUTE_TEST_SANDBOXES="$SANDBOXES" COMPUTE_TEST_RESULTS="$RESULTS" \
     cargo test --locked --release -p compute-host --test lab -- --test-threads 1
+  left_vms lab
 fi
 guest_built=true
 if wants guest || wants conformance; then
-  if ! command -v musl-gcc >/dev/null; then
-    sudo apt-get install -y -qq musl-tools >/dev/null 2>&1
-  fi
   step "guest build ($GUEST)"
   # Without a guest the guest and conformance tests fail for that reason
   # alone; the build's failure is the one the gate reports.
@@ -174,6 +210,7 @@ elif wants guest; then
   check guest "$TESTS" root env COMPUTE_TEST_LAB="$LAB" COMPUTE_TEST_REQUIRE=lab,guest \
     $(profile) COMPUTE_TEST_GUEST="$GUEST" COMPUTE_TEST_RESULTS="$RESULTS" \
     cargo test --locked --release -p compute-host --test guest -- --test-threads 1
+  left_vms guest
 fi
 if wants smoke; then
   step smoke
@@ -188,6 +225,7 @@ if wants smoke; then
     tail -60 "$smoke_log"
   fi
   rm -f "$smoke_log"
+  left_vms smoke
 fi
 if wants conformance && ! "$guest_built"; then
   not_run conformance "the guest build failed"
@@ -198,6 +236,7 @@ elif wants conformance; then
     CONTROL_BIN="$CARGO_TARGET_DIR/release/compute-control" \
     HOST_BIN="$CARGO_TARGET_DIR/release/compute-host" GUEST="$GUEST" ${PROFILE:+PROFILE=$PROFILE} \
     bash conformance/e2b/run.sh
+  left_vms conformance
 fi
 
 if [ ${#FAILED[@]} -eq 0 ]; then

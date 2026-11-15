@@ -140,6 +140,11 @@ test.each([
     let profileChecks = 0;
     let previewRequests = 0;
     let profileResponse: "valid" | "malformed" | "rejected" | "unavailable" = "valid";
+    // Google's account ID and the account's current address: the ID stays when
+    // the address changes (a renamed Workspace account).
+    let mailboxEmail = "mailbox@example.test";
+    let googleAccountId = "google-account-1001";
+    let tokenInfoAvailable = true;
     let hasRefreshToken = true;
     let reportedScopes: unknown = OFFICIAL_GMAIL_MCP_SCOPES.join(" ");
     let tokenRejected = false;
@@ -173,11 +178,19 @@ test.each([
             profileResponse === "malformed"
               ? {}
               : {
-                  emailAddress: "mailbox@example.test",
+                  emailAddress: mailboxEmail,
                   messagesTotal: 99,
                   historyId: "private-history",
                 },
           );
+        }
+        if (url === "https://oauth2.googleapis.com/tokeninfo") {
+          expect(init?.method).toBe("POST");
+          expect(new URLSearchParams(String(init?.body)).get("access_token")).toBe(
+            "synthetic-access",
+          );
+          if (!tokenInfoAvailable) return new Response(null, { status: 503 });
+          return Response.json({ sub: googleAccountId, aud: "fixture-client" });
         }
         if (url === "https://oauth2.googleapis.com/token") {
           exchanges++;
@@ -192,7 +205,15 @@ test.each([
             ...(hasRefreshToken ? { refresh_token: "synthetic-refresh" } : {}),
             token_type: "Bearer",
             expires_in: 3600,
-            ...(reportedScopes !== undefined ? { scope: reportedScopes } : {}),
+            // Google lists the "openid" it was asked for among the scopes.
+            ...(reportedScopes !== undefined
+              ? {
+                  scope:
+                    typeof reportedScopes === "string" && reportedScopes
+                      ? `openid ${reportedScopes}`
+                      : reportedScopes,
+                }
+              : {}),
           });
         }
         throw new Error(`Unexpected synthetic OAuth destination: ${url}`);
@@ -239,8 +260,12 @@ test.each([
       expect(ready.state).toBe("requires_user_action");
       return { attempt: ready, state: new URL(ready.nextAction.url).searchParams.get("state")! };
     };
-    const askedScopes = (attempt: { nextAction: { url: string } }) =>
+    const askedAll = (attempt: { nextAction: { url: string } }) =>
       new URL(attempt.nextAction.url).searchParams.get("scope")!.split(" ").sort();
+    // Every Google sign-in also asks for "openid", so Google reports the
+    // account ID; the Gmail access asked for is the rest.
+    const askedScopes = (attempt: { nextAction: { url: string } }) =>
+      askedAll(attempt).filter((scope) => scope !== "openid");
     const [readonlyScope, composeScope, modifyScope] = OFFICIAL_GMAIL_MCP_SCOPES;
     // A reconnect that may add access keeps the base read grant mandatory, so
     // only a missing read grant (or none reported) fails it.
@@ -307,6 +332,7 @@ test.each([
       const { attempt, state } = await begin();
       // A first connection asks Google only to read mail.
       expect(askedScopes(attempt)).toEqual([readonlyScope]);
+      expect(askedAll(attempt)).toContain("openid");
       // The provider only sees a short signed reference; the full signed
       // context waits encrypted at rest and is what the fixtures alter below.
       const reference = readSignedState(state, secret) as Record<string, unknown>;
@@ -394,6 +420,7 @@ test.each([
       expect(saved?.subjectId).toBe(ownership === "personal" ? identity.subjectId : null);
       expect(saved?.metadata).toMatchObject({
         gmailEmail: "mailbox@example.test",
+        googleSubject: "google-account-1001",
         // watch_mailbox is omitted: these settings configure no Pub/Sub topic.
         mcpToolsVerification: { status: "ok", toolCount: 36 },
       });
@@ -505,6 +532,81 @@ test.each([
         account: { id: completed.account.id, version: saved!.version + 1, ownership },
       });
       expect(profileChecks).toBeGreaterThan(1);
+
+      // The account's address changed but Google's account ID didn't: it is
+      // the same login, so reconnecting it works and records the new address.
+      const savedLogin = () =>
+        getConnectionMetadata(
+          client.db,
+          identity.personalWorkspaceId,
+          completed.account.id,
+          identity.subjectId,
+        );
+      mailboxEmail = "renamed@example.test";
+      const renamed = await begin("gmail", completed.account.id);
+      await callback(renamed.state);
+      expect(await read(renamed.attempt.id)).toMatchObject({
+        state: "complete",
+        account: { id: completed.account.id },
+      });
+      expect((await savedLogin())?.metadata).toMatchObject({
+        gmailEmail: "renamed@example.test",
+        googleSubject: "google-account-1001",
+      });
+      // The same address on another Google account is a different account.
+      googleAccountId = "google-account-2002";
+      const otherAccount = await begin("gmail", completed.account.id);
+      await callback(otherAccount.state);
+      expect(await read(otherAccount.attempt.id)).toMatchObject({
+        state: "failed",
+        credentialsCommitted: false,
+        error: { code: "account_mismatch" },
+      });
+      // A failed account-ID read proves nothing: the login keeps its account
+      // and asks for another try instead of trusting the email alone.
+      googleAccountId = "google-account-1001";
+      tokenInfoAvailable = false;
+      const beforeUnread = await savedLogin();
+      const unread = await begin("gmail", completed.account.id);
+      await callback(unread.state);
+      expect(await read(unread.attempt.id)).toMatchObject({
+        state: "failed",
+        credentialsCommitted: false,
+        error: { code: "account_identity_unavailable" },
+      });
+      expect(await savedLogin()).toEqual(beforeUnread);
+      tokenInfoAvailable = true;
+      // A login saved before the account ID was recorded adopts it when its
+      // email matches; one whose email has changed since can't be told apart
+      // from another account.
+      const { googleSubject: _recorded, ...withoutAccountId } = (await savedLogin())!.metadata;
+      await fixture.admin`update connections set metadata = ${fixture.admin.json({
+        ...withoutAccountId,
+        gmailEmail: "mailbox@example.test",
+      } as Parameters<typeof fixture.admin.json>[0])} where id = ${completed.account.id}::uuid`;
+      const changedSince = await begin("gmail", completed.account.id);
+      await callback(changedSince.state);
+      expect(await read(changedSince.attempt.id)).toMatchObject({
+        state: "failed",
+        error: { code: "account_mismatch" },
+      });
+      mailboxEmail = "mailbox@example.test";
+      const adopted = await begin("gmail", completed.account.id);
+      await callback(adopted.state);
+      expect(await read(adopted.attempt.id)).toMatchObject({ state: "complete" });
+      expect((await savedLogin())?.metadata).toMatchObject({
+        gmailEmail: "mailbox@example.test",
+        googleSubject: "google-account-1001",
+      });
+      // Connecting the same account again reuses its login: the "openid"
+      // Google now reports is not access, so the saved grant still covers it.
+      const again = await begin();
+      await callback(again.state);
+      expect(await read(again.attempt.id)).toMatchObject({
+        state: "complete",
+        account: { id: completed.account.id },
+      });
+      expect((await savedLogin())?.grantedScopes).not.toContain("openid");
 
       // Incremental consent. A plain reconnect keeps exactly what the account
       // holds; here Google grants only read access this time.

@@ -1,5 +1,133 @@
 # @opengeni/browserd
 
+## 0.4.36
+
+### Patch Changes
+
+- cd56d63: On macOS, typing into a window whose fields are not in its accessibility tree (a Simulator device, an Android emulator) goes to the point of the click just before it. That click now counts only for two minutes. Before, a click from hours earlier still counted when no other action had been sent to the window since, so typing after the field was focused by other means (the person, the device's own tools) clicked again at the old point, which could press whatever is there now. Such typing is now refused before anything is sent, with the existing message to click the field and then type.
+- Updated dependencies [c0089e1]
+- Updated dependencies [9dd96b0]
+- Updated dependencies [adc2409]
+- Updated dependencies [f6a7c28]
+  - @opengeni/contracts@6.23.0
+  - @opengeni/interaction@6.23.0
+
+## 0.4.35
+
+### Patch Changes
+
+- Updated dependencies [d50092b]
+  - @opengeni/contracts@6.22.0
+  - @opengeni/interaction@6.22.0
+
+## 0.4.34
+
+### Patch Changes
+
+- 7a9593d: Pausing a managed browser no longer saves the sites' installed service workers and their Cache Storage copies of site assets. Web apps such as cloud consoles keep hundreds of MB there, which made a checkpoint many times larger than the sign-ins and site storage it is for, so pausing and resuming over a slow connection took minutes. Cookies, local storage and IndexedDB are still saved; a site installs its service worker again on the next visit.
+- Updated dependencies [7d0d52b]
+- Updated dependencies [ef4c334]
+- Updated dependencies [ce864c0]
+- Updated dependencies [6ac2cd4]
+  - @opengeni/contracts@6.21.0
+  - @opengeni/interaction@6.21.0
+
+## 0.4.33
+
+### Patch Changes
+
+- @opengeni/contracts@6.20.1
+- @opengeni/interaction@6.20.1
+
+## 0.4.32
+
+### Patch Changes
+
+- Updated dependencies [ae3972e]
+- Updated dependencies [e37485b]
+- Updated dependencies [9c17a87]
+  - @opengeni/contracts@6.20.0
+  - @opengeni/interaction@6.20.0
+
+## 0.4.31
+
+### Patch Changes
+
+- Updated dependencies [a85adef]
+  - @opengeni/contracts@6.19.0
+  - @opengeni/interaction@6.19.0
+
+## 0.4.30
+
+### Patch Changes
+
+- b5a86db: A fill into a phone field that formats the number as it is typed (country code put in front, brackets around the area code) now completes instead of reporting an unknown outcome. A field that changed the number itself still reports it.
+- 7717823: A managed browser whose browser process was killed while its controller was stopping relaunches on the same profile on next use instead of staying refused. The unfinished shutdown suspension is completed once the recorded process has provably exited and no process uses the profile; a browser that may still be live stays refused.
+- 4e3158f: An element reference still acts on its element after the page redraws it in the same document (an inbox or list re-rendering its rows), when exactly one element with the same role, name and frame existed when the reference was read and exists now, and no input was sent in between. Repeated or renamed elements, and pages that changed after the caller's own input, still report the reference as stale.
+- Updated dependencies [f313a0e]
+- Updated dependencies [6813960]
+- Updated dependencies [9188c1d]
+- Updated dependencies [3105a8b]
+- Updated dependencies [a16189c]
+- Updated dependencies [89cf4ba]
+  - @opengeni/contracts@6.18.0
+  - @opengeni/interaction@6.18.0
+
+## 0.4.29
+
+### Patch Changes
+
+- Updated dependencies [8073ab6]
+- Updated dependencies [43aa19d]
+- Updated dependencies [b1b69fc]
+- Updated dependencies [deccb54]
+- Updated dependencies [668c5ed]
+- Updated dependencies [e3cb3c1]
+  - @opengeni/contracts@6.17.0
+  - @opengeni/interaction@6.17.0
+
+## 0.4.28
+
+### Patch Changes
+
+- Updated dependencies [fb19875]
+- Updated dependencies [54dc5da]
+  - @opengeni/contracts@6.16.0
+  - @opengeni/interaction@6.16.0
+
+## 0.4.27
+
+### Patch Changes
+
+- 07c5521: A computer session on macOS, Windows or Linux whose CUA worker process stopped (it crashed, was killed, or the machine reclaimed it) now starts a fresh worker on its next call, so the session keeps working. Before, every call to that session failed with an internal error until a new ComputerSession was opened. Reads and pre-action checks are answered by the fresh worker. An action that was not sent fails plainly and retryably, saying nothing was done and to observe the screen again. An action already in progress when the worker stopped stays outcome-unknown and is never repeated. Closing a session whose worker is already gone no longer fails.
+- ac7ee5c: A macOS menu-bar item ("File", "View") is no longer pressed open by a computer action. A menu opened that way in an app in the background stayed open out of sight and held every click and key in that app until it closed. set_value on the menu-bar item with an item's name ("Zoom In", or "Submenu > Item") now chooses the item straight from the menu bar without opening a menu; invoke and show_menu on it open nothing and say how to choose an item.
+- 9885d37: Keep large browser download exports running across bounded request windows and join the same transfer on retry. The SDK polls the same save operation until the file reaches its workspace destination; existing final-only HTTP callers remain compatible.
+- Updated dependencies [708848c]
+- Updated dependencies [5525e63]
+- Updated dependencies [60d067d]
+- Updated dependencies [da60317]
+- Updated dependencies [f92ff08]
+- Updated dependencies [060c983]
+- Updated dependencies [dfeab20]
+- Updated dependencies [9885d37]
+- Updated dependencies [f22647a]
+- Updated dependencies [850b4d5]
+  - @opengeni/contracts@6.15.0
+  - @opengeni/interaction@6.15.0
+
+## 0.4.26
+
+### Patch Changes
+
+- Updated dependencies [c976c87]
+- Updated dependencies [6ae0528]
+- Updated dependencies [3b853ca]
+- Updated dependencies [dd11dad]
+- Updated dependencies [91320a4]
+- Updated dependencies [c472500]
+  - @opengeni/contracts@6.14.0
+  - @opengeni/interaction@6.14.0
+
 ## 0.4.25
 
 ### Patch Changes

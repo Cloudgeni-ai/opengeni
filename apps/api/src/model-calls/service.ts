@@ -263,7 +263,9 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
                 : admission.subscriptionPlanRequired
                   ? SUBSCRIPTION_PLAN_REQUIRED_CODE
                   : admission.denial,
-            message: admission.message,
+            message: admission.apiCreditsRequired
+              ? `${admission.message} Add credits to use the API.`
+              : admission.message,
           });
         }
         const settings = await settingsWithModelProviderCredentials(deps.db, {

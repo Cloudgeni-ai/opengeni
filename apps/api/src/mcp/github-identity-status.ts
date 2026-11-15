@@ -14,13 +14,31 @@ export type PersonalGitHubIdentityStatus = {
   connected: boolean | null;
   status: "disabled" | "not_connected" | "connected" | "needs_reconnect" | "unknown";
   login: string | null;
-  /** Repositories the person allowed Opengeni to use as them. */
+  /** Repositories the person chose in their list (kept while All my repositories is on). */
   repositoryCount: number | null;
+  /**
+   * All my repositories: when enabled, work may use any repository the person
+   * can reach on GitHub, up to `access`, not only the chosen list. Null when
+   * this person's choice cannot be read here.
+   */
+  allRepositories: PersonalGitHubAllRepositoriesStatus | null;
   /** Opens the console on the "Your GitHub" Connect action. */
   connectUrl: string | null;
   /** Opens the console on the repository chooser for a connected identity. */
   manageUrl: string | null;
   note?: string;
+};
+
+export type PersonalGitHubAllRepositoriesStatus = {
+  enabled: boolean;
+  /** `read`, or `write` for read and write; null when not enabled. */
+  access: "read" | "write" | null;
+};
+
+/** The person's repository choice: the chosen list's size and the All my repositories mode. */
+export type PersonalGitHubRepositoryChoice = {
+  repositoryCount: number;
+  allRepositoriesAccess: "read" | "write" | null;
 };
 
 export type PersonalGitHubConnectionSummary = {
@@ -88,14 +106,15 @@ export async function personalGitHubIdentityStatus(input: {
   /** The human this agent acts for; null when no person started this work. */
   person: PersonalGitHubPerson | null;
   loadConnection: (subjectId: string) => Promise<PersonalGitHubConnectionSummary | null>;
-  loadRepositoryCount: (
+  loadRepositoryChoice: (
     subjectId: string,
     connection: PersonalGitHubConnectionSummary,
-  ) => Promise<number | null>;
+  ) => Promise<PersonalGitHubRepositoryChoice | null>;
 }): Promise<PersonalGitHubIdentityStatus> {
   const empty = {
     login: null,
     repositoryCount: null,
+    allRepositories: null,
     connectUrl: null,
     manageUrl: null,
   };
@@ -159,26 +178,38 @@ export async function personalGitHubIdentityStatus(input: {
       note: "The person must reconnect their GitHub account before the agent can act as them.",
     };
   }
-  const repositoryCount = await input
-    .loadRepositoryCount(person.subjectId, connection)
-    .catch(() => null);
+  const choice = await input.loadRepositoryChoice(person.subjectId, connection).catch(() => null);
+  const repositoryCount = choice?.repositoryCount ?? null;
+  const allRepositories: PersonalGitHubAllRepositoriesStatus | null = choice
+    ? choice.allRepositoriesAccess
+      ? { enabled: true, access: choice.allRepositoriesAccess }
+      : { enabled: false, access: null }
+    : null;
   return {
     enabled: true,
     connected: true,
     status: "connected",
     login,
     repositoryCount,
+    allRepositories,
     connectUrl: null,
     manageUrl: canConnect ? link : null,
-    ...(repositoryCount === 0
+    ...(repositoryCount === 0 && !allRepositories?.enabled
       ? { note: "No repositories are allowed yet; the person chooses them with manageUrl." }
       : {}),
   };
 }
 
-/** Agent guidance shared by the GitHub status tool and its setup cards. */
-export const GITHUB_IDENTITIES_GUIDANCE =
-  "Two GitHub identities exist. Your GitHub (personal): the person's own account; commits, branches, pull requests and reviews appear under their name, only in chats they start, on repositories they choose. GitHub app: work appears as the app's bot, shared with the workspace, installed per organization or account. 'Connect my GitHub', 'use my account' or 'do it as me' means personal; 'install the GitHub app' or 'give the app access to the org/repos' means the app.";
+/**
+ * Agent guidance shared by the GitHub status tool and its setup cards.
+ * `allRepositories` adds that the person may allow all their repositories,
+ * only where this deployment offers that mode.
+ */
+export function githubIdentitiesGuidance(allRepositories: boolean): string {
+  return `Two GitHub identities exist. Your GitHub (personal): the person's own account; commits, branches, pull requests and reviews appear under their name, only in chats they start, on repositories they choose${allRepositories ? " or all of theirs" : ""}. GitHub app: work appears as the app's bot, shared with the workspace, installed per organization or account. 'Connect my GitHub', 'use my account' or 'do it as me' means personal; 'install the GitHub app' or 'give the app access to the org/repos' means the app.`;
+}
+
+export const GITHUB_IDENTITIES_GUIDANCE = githubIdentitiesGuidance(false);
 
 /** Console origin for the person's links: the web console, never the API's own origin. */
 export function personalGitHubConsoleBaseUrl(input: {
@@ -222,8 +253,9 @@ export function personalGitHubSetupProjection(
   switch (personal.status) {
     case "connected": {
       const as = personal.login ? ` as @${personal.login}` : "";
-      const count =
-        personal.repositoryCount === null
+      const count = personal.allRepositories?.enabled
+        ? ` with all their repositories (${personal.allRepositories.access === "write" ? "read and write" : "read only"})`
+        : personal.repositoryCount === null
           ? ""
           : ` with ${personal.repositoryCount} allowed ${personal.repositoryCount === 1 ? "repository" : "repositories"}`;
       return { status: "ready", action: null, detail: `Your GitHub is connected${as}${count}.` };

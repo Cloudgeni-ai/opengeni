@@ -15,35 +15,236 @@ import {
   clearTeamsFragment,
   clearPendingTeamsSetup,
   clearTeamsMicrosoftReturn,
+  clearPendingTeamsLink,
+  readPendingTeamsLink,
   readPendingTeamsSetup,
+  savePendingTeamsLink,
   savePendingTeamsSetup,
+  teamsFragmentWorkspace,
+  teamsLinkRetryPath,
+  teamsMicrosoftSignInPurpose,
   teamsMicrosoftFailureText,
   teamsErrorText,
+  teamsLinkSignInRefused,
   teamsMicrosoftReturn,
   teamsOwnAccountLinkedElsewhere,
   teamsRouteMissing,
   type TeamsMicrosoftReturn,
+  type TeamsPendingLink,
   type TeamsPendingSetup,
 } from "@/lib/teams-connect";
 
-type Arrival = { pending: TeamsPendingSetup | null; microsoft: TeamsMicrosoftReturn | null };
+type Arrival =
+  | { kind: "setup"; pending: TeamsPendingSetup | null; microsoft: TeamsMicrosoftReturn | null }
+  | { kind: "link"; pending: TeamsPendingLink | null; microsoft: TeamsMicrosoftReturn }
+  | { kind: "link_offer"; offer: TeamsPendingLink };
 
-/** A return from Microsoft sign-in restores this tab's pending setup. Reads only. */
+/**
+ * A return from Microsoft sign-in restores this tab's pending setup, or its
+ * pending account link when the sign-in was for one. Without one, an account
+ * link from Teams (its token and connected workspace) is offered. Reads only.
+ */
 function readArrival(): Arrival {
   const microsoft = teamsMicrosoftReturn(window.location.search);
-  return microsoft
-    ? { pending: readPendingTeamsSetup(), microsoft }
-    : { pending: null, microsoft: null };
+  if (!microsoft) {
+    const linkToken = teamsFragmentToken(window.location.hash, "teams_link");
+    const workspaceId = teamsFragmentWorkspace(window.location.hash);
+    return linkToken && workspaceId
+      ? { kind: "link_offer", offer: { linkToken, workspaceId } }
+      : { kind: "setup", pending: null, microsoft: null };
+  }
+  const purpose = teamsMicrosoftSignInPurpose(microsoft.state);
+  const setup = purpose === "link" ? null : readPendingTeamsSetup();
+  const link = purpose === "setup" ? null : readPendingTeamsLink();
+  return purpose === "link" || (link && !setup)
+    ? { kind: "link", pending: link, microsoft }
+    : { kind: "setup", pending: setup, microsoft };
+}
+
+export function TeamsConnectRoute() {
+  const [arrival] = useState(readArrival);
+  return arrival.kind === "link" ? (
+    <TeamsLinkReturn pending={arrival.pending} microsoft={arrival.microsoft} />
+  ) : arrival.kind === "link_offer" ? (
+    <TeamsLinkOffer offer={arrival.offer} />
+  ) : (
+    <TeamsSetupPage arrival={arrival} />
+  );
+}
+
+/**
+ * Offers an account link from Teams to any signed-in member of the
+ * organization that connected it, with or without access to the connected
+ * workspace. Linking starts with the Microsoft sign-in that proves the Teams
+ * account is theirs; Microsoft returns here to finish.
+ */
+function TeamsLinkOffer({ offer }: { offer: TeamsPendingLink }) {
+  const { client } = useAppContext();
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <ConsentFrame>
+      <FormPage
+        leading={<LogoTile icon={<BotIcon />} />}
+        title="Link your Teams account?"
+        description="To confirm the Teams account is yours, sign in to Microsoft with the account you use in Teams. It's then linked to your signed-in Opengeni account, and the bot uses your access when you ask it to work."
+        submitLabel="Sign in with Microsoft"
+        pendingLabel="Opening Microsoft…"
+        cancelLabel={null}
+        onSubmit={async () => {
+          setError(null);
+          try {
+            const { authorizationUrl } = await teamsApi(client, offer.workspaceId).startLinkSignIn(
+              offer.linkToken,
+            );
+            savePendingTeamsLink(offer);
+            window.location.assign(authorizationUrl);
+          } catch (caught) {
+            setError(
+              teamsErrorText(
+                caught,
+                "Get a new account link from Opengeni in Teams, then try again.",
+              ),
+            );
+          }
+          return false;
+        }}
+      >
+        {error ? (
+          <p role="alert" className="text-sm text-danger">
+            {error}
+          </p>
+        ) : null}
+      </FormPage>
+    </ConsentFrame>
+  );
+}
+
+/**
+ * Finishes an account link after the Microsoft sign-in that proves the person
+ * is the Teams user the link names. The API refuses a different account.
+ */
+function TeamsLinkReturn({
+  pending,
+  microsoft,
+}: {
+  pending: TeamsPendingLink | null;
+  microsoft: TeamsMicrosoftReturn;
+}) {
+  const { client, workspaces } = useAppContext();
+  const [result, setResult] = useState<
+    { kind: "linking" } | { kind: "linked" } | { kind: "failed"; message: string; retry: boolean }
+  >(() =>
+    microsoft.kind === "failed"
+      ? { kind: "failed", message: teamsMicrosoftFailureText(microsoft, "link"), retry: true }
+      : pending
+        ? { kind: "linking" }
+        : {
+            kind: "failed",
+            message: "This link expired. Message Opengeni in Teams to get a new link.",
+            retry: false,
+          },
+  );
+  const finished = useRef(false);
+
+  useEffect(() => {
+    // The code and pending link are single-use; neither survives a reload.
+    clearTeamsMicrosoftReturn();
+    clearPendingTeamsLink();
+    if (microsoft.kind !== "signed_in" || !pending || finished.current) return;
+    finished.current = true;
+    void teamsApi(client, pending.workspaceId)
+      .linkAccount(pending.linkToken, { code: microsoft.code, state: microsoft.state })
+      .then(() => setResult({ kind: "linked" }))
+      .catch((caught) =>
+        setResult({
+          kind: "failed",
+          message: teamsErrorText(
+            caught,
+            "Microsoft sign-in couldn't be verified. Open the link from Teams again.",
+          ),
+          retry: teamsLinkSignInRefused(caught),
+        }),
+      );
+  }, [client, microsoft, pending]);
+
+  // Only someone with access to the connected workspace can manage it there.
+  const plugins =
+    pending && workspaces.some((workspace) => workspace.id === pending.workspaceId)
+      ? `/workspaces/${encodeURIComponent(pending.workspaceId)}/plugins`
+      : null;
+  if (result.kind === "linking")
+    return (
+      <ConsentFrame>
+        <EmptyState
+          variant="page"
+          icon={<BotIcon />}
+          title="Linking your Teams account…"
+          description="Checking your Microsoft sign-in."
+        />
+      </ConsentFrame>
+    );
+  if (result.kind === "linked")
+    return (
+      <ConsentFrame>
+        <EmptyState
+          variant="page"
+          icon={<BotIcon />}
+          title="Teams account linked"
+          description="Return to Teams to continue."
+          action={
+            <div className="flex flex-col items-center gap-3">
+              <Button onClick={() => window.location.assign("https://teams.microsoft.com")}>
+                Return to Teams
+              </Button>
+              {plugins ? (
+                <a className="text-sm text-fg-muted underline underline-offset-4" href={plugins}>
+                  Manage connection
+                </a>
+              ) : null}
+            </div>
+          }
+        />
+      </ConsentFrame>
+    );
+  return (
+    <ConsentFrame>
+      <EmptyState
+        variant="page"
+        icon={<BotIcon />}
+        title="Couldn't link your Teams account"
+        description={result.message}
+        action={
+          pending && result.retry ? (
+            <Button
+              onClick={() =>
+                window.location.assign(
+                  plugins
+                    ? `${plugins}#${new URLSearchParams({ teams_link: pending.linkToken })}`
+                    : teamsLinkRetryPath(pending),
+                )
+              }
+            >
+              Try again
+            </Button>
+          ) : (
+            <Button onClick={() => window.location.assign("https://teams.microsoft.com")}>
+              Open Teams
+            </Button>
+          )
+        }
+      />
+    </ConsentFrame>
+  );
 }
 
 /**
  * The signed Teams challenge is submitted only after the human chooses a
- * workspace. Unless the operator approved this Teams identity, the person then
- * signs in with Microsoft as a tenant administrator before the bot connects.
+ * workspace. The person then signs in with Microsoft before the bot connects:
+ * as a tenant administrator, or, when the operator approved this Teams
+ * identity, as that Teams user.
  */
-export function TeamsConnectRoute() {
+function TeamsSetupPage({ arrival }: { arrival: Extract<Arrival, { kind: "setup" }> }) {
   const { client, workspaces, accessContext } = useAppContext();
-  const [arrival] = useState(readArrival);
   const [token, setToken] = useState(
     () => arrival.pending?.setupToken ?? teamsFragmentToken(window.location.hash, "teams_setup"),
   );
@@ -246,8 +447,9 @@ export function TeamsConnectRoute() {
             </p>
           ) : null}
           <p className="text-sm text-fg-muted">
-            You may be asked to sign in to Microsoft as a Global Administrator or Teams
-            Administrator. This also links your Teams account so you can start work right away.
+            Next, you'll sign in to Microsoft with the account you use in Teams, usually as a Global
+            Administrator or Teams Administrator. This also links your Teams account so you can
+            start work right away.
           </p>
         </FieldStack>
       </FormPage>

@@ -26,7 +26,7 @@ import type { CapacityPhaseDeps, CapacityPhaseOutcome } from "./codex-capacity";
 import type { ClaudeTurnLease } from "./credential-leases";
 import { classifyClaudeProviderError } from "./errors";
 import {
-  assertCoreSourceConnected,
+  admitCoreRequest,
   coreLeaseRef,
   guardCoreTokenResolver,
   parkCoreSubscriptionTurn,
@@ -156,8 +156,11 @@ export type ClaudeCoreRequestAuthorization = {
   renewAfterUnauthorized: (
     generation: number,
   ) => Promise<SubscriptionCoreClaudeTokenSnapshot | null>;
-  /** The dispatch fence every physical request passes before its reservation. */
-  assertDispatch: () => Promise<void>;
+  /**
+   * Admit one physical request: its reservation is the dispatch fence (the
+   * accepted turn, the source and the live lease, in one transaction).
+   */
+  admit: (reserve: () => Promise<unknown>) => Promise<void>;
   /**
    * A main-lane request with a bearer of `generation` was admitted: the
    * refusal settlement fences its health write on that generation. Main-lane
@@ -193,13 +196,14 @@ export function buildClaudeCoreRequestAuthorization(input: {
   const ref = coreLeaseRef(lease, core, DISPLAY_NAME);
   core.requests = createCoreClaudeRequests(db, core, ref, input.execution, "main");
   core.titleRequests = createCoreClaudeRequests(db, core, ref, input.execution, "title");
+  const isLeaseLost = (error: unknown) => hasCoreCode(error, "subscription_core_lease_lost");
   const resolver = guardCoreTokenResolver(
     db,
     CLAUDE_CORE_TURN_PROVIDER,
     core,
     lease,
     buildSubscriptionCoreClaudeTokenResolver(db, input.settings, core.identity, ref),
-    (error) => hasCoreCode(error, "subscription_core_lease_lost"),
+    isLeaseLost,
   );
   let forced: Promise<SubscriptionCoreClaudeTokenSnapshot> | null = null;
   let observed: Promise<boolean> = Promise.resolve(false);
@@ -213,9 +217,8 @@ export function buildClaudeCoreRequestAuthorization(input: {
       const token = await forced;
       return token.credentialVersion > generation ? token : null;
     },
-    assertDispatch: async () => {
-      await assertCoreSourceConnected(db, CLAUDE_CORE_TURN_PROVIDER, core);
-      await lease.assertCurrentForDispatch();
+    admit: async (reserve) => {
+      await admitCoreRequest(lease, reserve, isLeaseLost);
     },
     mainLaneAdmitted: (generation) => {
       core.credentialVersion = generation;
@@ -449,8 +452,7 @@ export function claudeCoreRequestPreparer(input: {
           input.observe?.(response, token.credentialVersion, upstreamModelId),
         custody: {
           admit: async () => {
-            await input.authorization.assertDispatch();
-            await input.lane.reserve(request);
+            await input.authorization.admit(() => input.lane.reserve(request));
             if (input.mainLane) input.authorization.mainLaneAdmitted(token.credentialVersion);
           },
           responded: (response) =>

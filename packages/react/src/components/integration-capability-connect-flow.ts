@@ -447,7 +447,9 @@ export function useIntegrationCapabilityConnect({
           // Stopping while the provider's page is still open is how a person
           // gives up on a "needs admin approval" page.
           if (next.nextAction.type === "authorize")
-            setLeftSignIn(organizationAppApproval(next.nextAction.url));
+            setLeftSignIn(
+              organizationAppApproval(next.nextAction.url, next.nextAction.organizationApprovalUrl),
+            );
           // End the attempt itself, so finishing in a window left open can't
           // still connect. If it finished just before, show what really
           // happened instead.
@@ -482,7 +484,9 @@ export function useIntegrationCapabilityConnect({
       setSignInClosed(true);
       const left = controller.getSnapshot().attempt;
       if (left?.nextAction.type === "authorize")
-        setLeftSignIn(organizationAppApproval(left.nextAction.url));
+        setLeftSignIn(
+          organizationAppApproval(left.nextAction.url, left.nextAction.organizationApprovalUrl),
+        );
     } else if (failure instanceof SignInBlocked) setError(t("connectWindowHost.allowPopups"));
     else setError(t("sessionIntegrationCapabilityCard.signInFailed"));
     pin();
@@ -554,7 +558,10 @@ export function useIntegrationCapabilityConnect({
     !leftBehind || waiting || busy || availability.kind !== "ready" || attempt?.error
       ? null
       : attempt?.nextAction.type === "authorize"
-        ? (organizationAppApproval(attempt.nextAction.url) ?? leftBehind)
+        ? (organizationAppApproval(
+            attempt.nextAction.url,
+            attempt.nextAction.organizationApprovalUrl,
+          ) ?? leftBehind)
         : leftBehind;
   return {
     controller,

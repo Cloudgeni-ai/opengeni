@@ -39,6 +39,9 @@ function harness(
     hangingRemovals?: number;
     // Runs before Chrome handles each command.
     beforeCommand?: (method: string) => Promise<void>;
+    // The page holds a frame that never finishes loading, so Chrome holds a
+    // script back until it does unless it is to run at once.
+    loadingFrame?: boolean;
     // The frame is created blank and then loaded with the extension's page,
     // so its address does not show it. The page also holds a cross-origin
     // frame the extension scripts (frame 3), and with `pageFrameUnscripted`
@@ -149,7 +152,9 @@ function harness(
       },
     },
     scripting: {
-      executeScript: async (injection: { func: { name: string } }) => {
+      executeScript: async (injection: { func: { name: string }; injectImmediately?: boolean }) => {
+        if (options.loadingFrame && injection.injectImmediately !== true)
+          return await new Promise<never>(() => {});
         const blank = options.blank;
         switch (injection.func.name) {
           case "listenForFrameAnnouncements":
@@ -326,6 +331,22 @@ describe("another extension's frame in an attached tab", () => {
     expect(h.sent).toEqual([]);
   });
 
+  test("a frame on the page that never finishes loading does not hold the removal up", async () => {
+    const h = harness({ loadingFrame: true });
+    const command = await h.ready();
+    const attached = await command({ type: "debugger.attach", tabId: "7" });
+    h.addFrame();
+    const result = await command({
+      type: "debugger.command",
+      tabId: "7",
+      attachment: attached.payload.attachment,
+      method: "Page.getFrameTree",
+      params: {},
+    });
+    expect(result).toMatchObject({ ok: true, payload: { result: { ran: "Page.getFrameTree" } } });
+    expect(h.removals()).toBe(1);
+  });
+
   test("commands refused together for one frame share a single removal", async () => {
     // browserd sends several commands at once (the enables of a new
     // attachment), and Chrome refuses each of them for the same frame.
@@ -457,6 +478,16 @@ describe("another extension's frame created blank in an attached tab", () => {
 
   test("is removed when Chrome accounts for every other frame of its page", async () => {
     const h = harness({ blank: {} });
+    const send = await refused(h);
+    expect(await send()).toMatchObject({
+      ok: true,
+      payload: { result: { ran: "Page.getFrameTree" } },
+    });
+    expect(h.blankRemovals()).toBe(1);
+  });
+
+  test("is removed while a frame on the page never finishes loading", async () => {
+    const h = harness({ blank: {}, loadingFrame: true });
     const send = await refused(h);
     expect(await send()).toMatchObject({
       ok: true,

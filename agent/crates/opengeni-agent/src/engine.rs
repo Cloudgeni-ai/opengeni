@@ -584,7 +584,7 @@ impl Engine {
         deadline: Option<tokio::time::Instant>,
         generation: u64,
         spawn: impl FnOnce() -> Result<ContainedExec, E>,
-        emit: impl Fn(Frame) + Send + 'static,
+        emit: impl Fn(Frame) -> crate::job::Delivery + Send + 'static,
         encode_exit: impl Fn(&JobExit) -> Vec<u8> + Send + 'static,
         on_exit: impl FnOnce(Option<u64>, &JobExit) + Send + 'static,
     ) -> StartOutcome<E> {
@@ -790,7 +790,7 @@ impl Engine {
         self: &Arc<Self>,
         handed: HandedOverOp,
         child: Result<Option<ContainedExec>, String>,
-        emit: impl Fn(Frame) + Send + 'static,
+        emit: impl Fn(Frame) -> crate::job::Delivery + Send + 'static,
         encode_exit: impl Fn(&JobExit) -> Vec<u8> + Send + 'static,
         on_exit: impl FnOnce(Option<u64>, &JobExit) + Send + 'static,
     ) {
@@ -1483,6 +1483,7 @@ mod tests {
                 if let Some(sender) = emit_lane.read().expect("lane lock").as_ref() {
                     let _ = sender.send(frame);
                 }
+                crate::job::Delivery::Taken
             },
             |_| Vec::new(),
             |_, _| {},
@@ -1658,7 +1659,7 @@ mod tests {
                 None,
                 0,
                 || Ok::<_, std::io::Error>(sh(script)),
-                |_frame| {},
+                |_frame| crate::job::Delivery::Taken,
                 |exit| format!("{exit:?}").into_bytes(),
                 move |_, _: &JobExit| {
                     let _ = exit_tx.send(());
@@ -1712,7 +1713,7 @@ mod tests {
             None,
             0,
             || Ok::<_, std::io::Error>(sh("printf out; exit 4")),
-            |_frame| {},
+            |_frame| crate::job::Delivery::Taken,
             |exit| format!("{exit:?}").into_bytes(),
             move |seq, exit: &JobExit| {
                 let _ = exit_tx.send((seq, exit.clone()));
@@ -1754,7 +1755,7 @@ mod tests {
             None,
             0,
             || -> Result<ContainedExec, std::io::Error> { panic!("a known op id must not spawn") },
-            |_| {},
+            |_| crate::job::Delivery::Taken,
             |_| Vec::new(),
             |_, _| {},
         );
@@ -1821,7 +1822,7 @@ mod tests {
             None,
             0,
             || Err(std::io::Error::other("no such program")),
-            |_| {},
+            |_| crate::job::Delivery::Taken,
             |_| Vec::new(),
             |_, _| {},
         );
@@ -1862,7 +1863,7 @@ mod tests {
             || -> Result<ContainedExec, std::io::Error> {
                 panic!("a tombstoned op must not spawn")
             },
-            |_| {},
+            |_| crate::job::Delivery::Taken,
             |_| Vec::new(),
             |_, _| {},
         );
@@ -1935,7 +1936,7 @@ mod tests {
             None,
             0,
             || Ok::<_, std::io::Error>(sh("printf done")),
-            |_frame| {},
+            |_frame| crate::job::Delivery::Taken,
             |_| Vec::new(),
             move |seq, exit: &JobExit| {
                 let _ = exit_tx.send((seq, exit.clone()));

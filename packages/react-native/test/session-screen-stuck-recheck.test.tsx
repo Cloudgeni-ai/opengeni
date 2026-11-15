@@ -367,7 +367,9 @@ test("without machine access the same refusal reads as a permission check that s
   await flush();
   expect(view.container.textContent).toContain("Permission needed");
   expect(view.container.textContent).toContain("A permission check stopped your next message.");
-  expect(view.container.textContent).toContain("It starts by itself once access");
+  expect(view.container.textContent).toContain(
+    "or a workspace admin, can fix this. The message starts by itself once they do.",
+  );
   expect(view.container.querySelector("button")).toBeNull();
   await view.unmount();
 });
@@ -439,6 +441,69 @@ test("the machine's owner gets Machine access needed and Allow for this chat, wh
     delete (client as Record<string, unknown>).issueUserResourceGrant;
   }
 });
+
+for (const [kind, sharedLine] of [
+  ["shared", true],
+  // A Personal workspace has nobody else in it, whatever the chat's visibility.
+  ["personal", false],
+] as const) {
+  test(`in a ${kind} workspace's shared chat the owner ${sharedLine ? "learns" : "is not told"} that Allow lets the workspace see what runs on the machine`, async () => {
+    // Machine reads are cached per session, so this chat is a fresh one. A paused
+    // chat shows the pause banner here instead of this card.
+    session = {
+      ...ownerOnlySession,
+      id: `session-shared-${kind}`,
+      tenancy: { visibility: "workspace", authorityEpoch: 2 },
+    } as never;
+    (client as Record<string, unknown>).getWorkspace = async () => ({ id: "workspace-1", kind });
+    (client as Record<string, unknown>).listUserResourceAuthorities = async () => ({
+      authorities: [
+        {
+          authorityId: "laptop-authority",
+          resourceKind: "connected_machine",
+          resourceId: "laptop-enrollment",
+          status: "active",
+        },
+      ],
+      nextCursor: null,
+    });
+    machinesResponse = {
+      activeSandboxId: "owner-laptop",
+      activeEpoch: 1,
+      machines: [
+        {
+          sandboxId: "owner-laptop",
+          enrollmentId: "laptop-enrollment",
+          name: "Kari's laptop",
+          scope: "user",
+          state: "online",
+          active: true,
+        },
+      ],
+      sessionMachineAccess: {
+        sandboxId: "owner-laptop",
+        machineName: "Kari's laptop",
+        ownerName: "Kari",
+        isOwner: true,
+        queuedTurnBlocked: false,
+      },
+    };
+    try {
+      const view = await renderComponent(createElement(Screen));
+      await flush();
+      await flush();
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("Machine access needed");
+      const line = "People in this workspace will see what the agent does on the machine.";
+      if (sharedLine) expect(text).toContain(line);
+      else expect(text).not.toContain("People in this workspace will see");
+      await view.unmount();
+    } finally {
+      delete (client as Record<string, unknown>).listUserResourceAuthorities;
+      delete (client as Record<string, unknown>).getWorkspace;
+    }
+  });
+}
 
 test("a message refused on someone else's personal machine says only its owner can start work there", async () => {
   session = ownerOnlySession;

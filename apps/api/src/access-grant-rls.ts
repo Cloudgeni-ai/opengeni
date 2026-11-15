@@ -3,15 +3,20 @@ import {
   agentPrivateFileOwnerSubjectId,
   billingOriginForGrant,
   fundedBillingOrigin,
+  requestAuthenticatedAsAgentAttempt,
   requireLiveAgentAttemptAuthorization,
   SessionAuthorizationDeniedError,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
   ambientBillingOrigin,
+  billingOriginOverride,
   freezeAgentLearningPolicy,
   getSlackPrivateSessionOwnerSubjectId,
+  isAgentAttemptLivenessFence,
+  nestedAuthorityRefusalMessage,
   readTurnBillingOrigin,
+  withBillingOriginOverride,
   withSessionRlsActorContext,
   withCreditDebitAttribution,
   type CreditDebitAttribution,
@@ -20,6 +25,8 @@ import {
 import { ApiHttpError } from "./http/api-error";
 
 const AGENT_ATTEMPT_AUTHORITY_INVALID = "agent attempt authority is invalid";
+const AGENT_ATTEMPT_CALLER_STALE =
+  "This process's tool access belongs to a turn attempt that is no longer active. Stop retrying this process; start a fresh command from the current live turn. If a tool call may already have run, check its existing receipt or actual state before submitting it again.";
 
 /**
  * A refused agent-attempt credential. The detail code names why, so request
@@ -32,13 +39,52 @@ function agentAttemptAuthorityError(
 ): ApiHttpError {
   const error = new ApiHttpError(403, {
     code: "forbidden",
-    message: AGENT_ATTEMPT_AUTHORITY_INVALID,
+    message:
+      reason === "caller_stale" ? AGENT_ATTEMPT_CALLER_STALE : AGENT_ATTEMPT_AUTHORITY_INVALID,
     retryable: false,
     outcomeUnknown: false,
     details: { code: `agent_attempt_${reason}` },
   });
   if (cause !== undefined) error.cause = cause;
   return error;
+}
+
+/**
+ * The learning-policy read goes through the database's own attempt fence,
+ * which locks the session, turn and attempt. When the turn moves on after the
+ * live-attempt check passed (the attempt finished, was superseded or
+ * interrupted while the request was in flight), that fence refuses instead.
+ * It is the same stale attempt, so it gets the same refusal, not a 500.
+ */
+function staleAttemptFenceAsRefusal(error: unknown): never {
+  const message = nestedAuthorityRefusalMessage(error);
+  if (message !== null && isAgentAttemptLivenessFence(message)) {
+    throw agentAttemptAuthorityError("caller_stale", error);
+  }
+  throw error;
+}
+
+/**
+ * The central answer for an agent attempt found stale after its request
+ * context was entered: by a later handler or middleware's own liveness check
+ * (Hono hands their errors straight to `onError`, past the request context's
+ * own mapping), or by the database's attempt fence on a later read. Both are
+ * the same stale attempt the request context refuses up front, so they get its
+ * refusal, never a 500. Only a request that authenticated as an agent attempt
+ * is answered this way; every other caller and every other session refusal
+ * keeps its existing handling.
+ */
+export function agentAttemptStaleHttpError(error: unknown, request: Request): ApiHttpError | null {
+  if (!requestAuthenticatedAsAgentAttempt(request)) return null;
+  if (error instanceof SessionAuthorizationDeniedError) {
+    return error.reason === "caller_stale"
+      ? agentAttemptAuthorityError("caller_stale", error)
+      : null;
+  }
+  const message = nestedAuthorityRefusalMessage(error);
+  return message !== null && isAgentAttemptLivenessFence(message)
+    ? agentAttemptAuthorityError("caller_stale", error)
+    : null;
 }
 
 /**
@@ -117,6 +163,20 @@ export async function billingOriginForAccessGrant(
     grant.accountId,
     ambientBillingOrigin() ?? billingOriginForGrant(grant),
   );
+}
+
+/**
+ * Run a direct model API call (the OpenAI-compatible endpoint) as API use,
+ * whatever credential signed it: a person's own sign-in (browser session or
+ * native app credential) pays from credits only, like an API key. Two callers
+ * keep the origin they already have: an agent attempt (its chat's origin)
+ * and a trusted in-process dispatcher's stamp (an agent's app action keeps
+ * its chat's origin). Internal (legacy) accounts stay app
+ * (`fundedBillingOrigin`).
+ */
+export function asDirectModelApiUse<T>(grant: AccessGrant, work: () => Promise<T>): Promise<T> {
+  if (grant.principalKind === "agent_attempt" || billingOriginOverride()) return work();
+  return withBillingOriginOverride("api", work);
 }
 
 /**
@@ -268,6 +328,7 @@ export async function withAccessGrantSessionRlsContext<T>(
         learning,
         slackPrivateOwnerSubjectId,
       }),
+      staleAttemptFenceAsRefusal,
     );
   try {
     // The learning policy is keyed by the exact attempt, which a live actor

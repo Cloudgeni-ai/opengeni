@@ -38,9 +38,19 @@ saying why the agent called, and the conversation lands in that chat.
      the ring as a self-managed Telecom call (androidx core-telecom) and shows
      the incoming-call notification (`CallStyle`) with a full-screen ring
      screen over the lock screen; answering opens the app and hands the call
-     to the same `incoming` adapter as on iOS. An older app, or one without
+     to the same `incoming` adapter as on iOS. The message reaches the
+     package's own Firebase messaging service (declared when the app uses
+     expo-notifications) or, with `call.androidMessagingService: "app"`, the
+     app's own service, which hands it to `OpenGeniCallPush.handle` first.
+     An older app, or one without
      system calls, shows the plain notification instead. The setting shows on
-     Android only in an app with system calls and push. While the app runs it
+     Android only in an app with system calls and push. From Android 14 the
+     ring screen needs the person's "full-screen notifications" permission
+     unless the app is a calling or alarm app on Play; without it the ring is
+     a heads-up notification. Turning the setting on therefore checks it
+     (`useFullScreenRings`), explains and offers to open the system setting,
+     and the settings section keeps a link there, re-checked whenever the app
+     returns to the foreground. While the app runs it
      follows the call's state, as on iOS. When the call is answered or
      declined on another phone, or the agent cancels it, each Android phone
      that rang gets one more data message, `opengeniCall` with

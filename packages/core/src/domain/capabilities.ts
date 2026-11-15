@@ -22,6 +22,7 @@ import {
   environmentsEncryptionKeyBytes,
   findIntegrationsOauthClient,
   parseIntegrationsOauthClientsJson,
+  parseSocialOauthClientsJson,
   type Settings,
 } from "@opengeni/config";
 import { pinnedFetch } from "@opengeni/network";
@@ -30,6 +31,8 @@ import { storeMcpServerLogo, type McpServerLogoStorage } from "./mcp-server-logo
 import {
   CapabilityCatalogItem,
   capabilityCatalogItemIsTrustedForExposure,
+  nangoToolsMcpUrl,
+  type EffectiveNangoIntegration,
   FIKEN_PROVIDER_DOMAIN,
   FIRST_PARTY_MCP_TOOL_NAMES,
   OPENGENI_BROWSER_EXTENSION_URL,
@@ -101,6 +104,17 @@ import { HTTPException } from "hono/http-exception";
 import { isPersonalIntegrationSetupCandidate } from "@opengeni/contracts/personal-integration-setup";
 import { PERSONAL_GITHUB_CAPABILITY_ID } from "@opengeni/contracts/personal-github";
 import {
+  canonicalMcpEndpointUrl,
+  microsoftDynamicsAddressProblem,
+  microsoftDynamicsProductForMcpUrl,
+  MICROSOFT_DYNAMICS_CAPABILITY_ID,
+  MICROSOFT_DYNAMICS_CONNECTION_NAME,
+} from "@opengeni/contracts/microsoft-dynamics";
+import {
+  capabilityConnectEndpoint,
+  capabilityConnectInputs,
+} from "@opengeni/contracts/capability-connect-inputs";
+import {
   withOrganizationIntegrationAcquisition,
   withOrganizationIntegrationPolicyFence,
 } from "@opengeni/db/organization-integration-policy";
@@ -111,6 +125,13 @@ import { isOnePasswordConnection, onePasswordConnectionMetadata } from "./vaults
 import { listSkillLibraryEntries, type SkillLibraryEntry } from "@opengeni/runtime/skill-library";
 import { assertNativeMcpConnectionRef } from "./native-mcp-connection-admission";
 import { errorMessage } from "@opengeni/contracts/values";
+import {
+  applyNangoBackendsToSettings,
+  catalogProviderDomain,
+  nangoBackendsFor,
+  nangoReplacedSocialProviders,
+  type NangoBackends,
+} from "./nango-integrations";
 
 const officialMcpRegistryUrl = "https://registry.modelcontextprotocol.io";
 const firstPartyMcpServerIds = new Set(["opengeni", "files", "docs"]);
@@ -130,6 +151,11 @@ export async function buildCapabilityCatalog(input: {
   /** The workspace's organization, when the caller knows it (skips a lookup). */
   accountId?: string;
 }): Promise<CapabilityCatalogResponse> {
+  // The integration backend switch: config-only Nango integrations become
+  // deployment connectors, and a Nango-served social provider's native card
+  // is hidden, so one service is never listed twice.
+  const nangoBackends = await nangoBackendsFor(input.db, input.settings);
+  input = { ...input, settings: applyNangoBackendsToSettings(input.settings, nangoBackends) };
   // Scoped readers use savepoints and transaction-local actor settings. They
   // must not overlap on a caller's transaction: one reader can otherwise
   // restore another reader's subject instead of the enclosing caller's.
@@ -200,12 +226,15 @@ export async function buildCapabilityCatalog(input: {
       .map((skill) => [skill.capabilityId, skill]),
   );
   const builtIns = [
-    ...configuredMcpCatalogItems(input.settings),
-    ...builtInConnectorCatalogItems({
-      settings: input.settings,
-      socialConnections,
-      workspaceConnections,
-    }),
+    ...configuredMcpCatalogItems(input.settings, nangoBackends),
+    ...withoutNangoReplacedSocialItems(
+      builtInConnectorCatalogItems({
+        settings: input.settings,
+        socialConnections,
+        workspaceConnections,
+      }),
+      nangoBackends,
+    ),
     ...curatedLibrarySkills.filter((item) => installedSkillById.has(item.id)),
     ...installedSkills
       .filter(
@@ -500,6 +529,49 @@ export async function createCatalogItem(input: {
    */
   memberCreate?: { settings: Settings } | undefined;
 }): Promise<CapabilityCatalogItem> {
+  // A connection a Connect card asked inputs for must follow the rule of the
+  // entry that asked: its endpoint is the one those inputs name, never another.
+  if (input.payload.connectFor !== undefined) {
+    const declaring = connectInputsDeclaringEntry(input.payload.connectFor);
+    const endpoint = declaring
+      ? capabilityConnectEndpoint(
+          declaring.surfaceType,
+          input.payload.connectInputs ?? { endpointUrl: input.payload.endpointUrl ?? "" },
+        )
+      : null;
+    if (!endpoint)
+      throw new HTTPException(422, { message: "That entry doesn't take connection inputs." });
+    if ("problem" in endpoint) throw new HTTPException(422, { message: endpoint.problem });
+    // A member's add needs their organization's permission, even when the
+    // connection is already here.
+    if (input.memberCreate)
+      await requireMemberIntegrationSetupAllowed(input.db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+      });
+    // The connection is already here (added before, or by someone else): it
+    // is the result, so a repeated Connect never adds a second one.
+    const existing = (await listCapabilityCatalogItems(input.db, input.workspaceId)).find(
+      (candidate) =>
+        candidate.workspaceId === input.workspaceId &&
+        candidate.kind === "mcp" &&
+        !candidate.stale &&
+        candidate.endpointUrl === endpoint.endpointUrl,
+    );
+    if (existing) return existing;
+    const { connectFor: _connectFor, connectInputs: _connectInputs, ...payload } = input.payload;
+    input = { ...input, payload: { ...payload, endpointUrl: endpoint.endpointUrl } };
+  }
+  // A Dynamics environment address is stored as its MCP endpoint, so a pasted
+  // browser address reaches the reviewed Microsoft Dynamics sign-in.
+  if (input.payload.endpointUrl) {
+    // An unreadable Dynamics address is refused, never stored as a server.
+    const addressProblem = microsoftDynamicsAddressProblem(input.payload.endpointUrl);
+    if (addressProblem) throw new HTTPException(422, { message: addressProblem });
+    const endpointUrl = canonicalMcpEndpointUrl(input.payload.endpointUrl);
+    if (endpointUrl !== input.payload.endpointUrl)
+      input = { ...input, payload: { ...input.payload, endpointUrl } };
+  }
   const id = input.payload.id?.trim() || generatedCapabilityId(input.payload);
 
   if (id.startsWith("skill:")) {
@@ -572,8 +644,16 @@ export async function createCatalogItem(input: {
         message: "A connection with this ID already exists. Only an admin can change it.",
       });
   }
+  // A Dynamics environment signs in through its reviewed Microsoft profile,
+  // as the person: record that with the entry so every card shows its sign-in
+  // (not a server review) and connects the person's own account.
+  const dynamicsEndpoint =
+    input.payload.endpointUrl && microsoftDynamicsProductForMcpUrl(input.payload.endpointUrl)
+      ? input.payload.endpointUrl
+      : null;
   const metadata = {
     ...input.payload.metadata,
+    ...(dynamicsEndpoint ? { defaultConnectionOwnership: "personal" } : {}),
     ...(input.payload.kind === "mcp" &&
     input.payload.endpointUrl &&
     !input.payload.metadata.mcpServerId
@@ -594,6 +674,15 @@ export async function createCatalogItem(input: {
     endpointUrl: input.payload.endpointUrl ?? null,
     installUrl: input.payload.installUrl ?? null,
     authModel: input.payload.authModel?.trim() || null,
+    // Not `mcpUrl`: that column is unique by (source, provider domain, MCP URL)
+    // across workspaces, so a second workspace adding the same environment
+    // would collide. Reads derive it from `endpointUrl`.
+    ...(dynamicsEndpoint
+      ? {
+          authKind: "oauth2" as const,
+          providerDomain: new URL(dynamicsEndpoint).hostname,
+        }
+      : {}),
     metadata,
     ...(input.memberCreate ? { createOnly: true } : {}),
   });
@@ -1302,7 +1391,7 @@ async function validateMcpCapabilityConnectionRef(
       return {
         ...normalized,
         kind: "oauth2",
-        providerDomain: canonicalDomain(normalized.providerDomain),
+        providerDomain: catalogProviderDomain(canonicalDomain(normalized.providerDomain)),
       };
     throw new HTTPException(422, {
       message: "connectionRef does not reference a visible active connection",
@@ -1332,7 +1421,13 @@ async function validateMcpCapabilityConnectionRef(
     });
   }
   if (subjectScope === "subject") {
-    const genericSubjectRef = { ...normalized, kind: connection.kind };
+    // A Nango connection of a native Google connector enables the same
+    // catalog identity; the runtime picks the backend (docs/nango.md).
+    const genericSubjectRef = {
+      ...normalized,
+      providerDomain: catalogProviderDomain(normalized.providerDomain),
+      kind: connection.kind,
+    };
     delete genericSubjectRef.connectionId;
     return genericSubjectRef;
   }
@@ -1744,6 +1839,8 @@ export async function settingsWithEnabledCapabilityMcpServers(
     connectionAccountReads?: ConnectionAccountReads;
   },
 ): Promise<Settings> {
+  const nangoBackends = await nangoBackendsFor(db, settings);
+  settings = applyNangoBackendsToSettings(settings, nangoBackends);
   const readApiIntegrations = () =>
     options?.subjectId
       ? listInstalledApiIntegrations(db, workspaceId, options.subjectId)
@@ -1833,13 +1930,16 @@ export async function settingsWithEnabledCapabilityMcpServers(
   );
   options?.onResolvedApiIntegrations?.(apiIntegrations);
   options?.onResolvedCapabilityServers?.(enabled);
-  return settingsWithCodexAppsMcpServer(
-    settingsWithApiIntegrationServers(
-      settingsWithMcpCapabilityServers(settings, enabled),
-      apiIntegrations,
-      workspaceId,
+  return applyNangoBackendsToSettings(
+    settingsWithCodexAppsMcpServer(
+      settingsWithApiIntegrationServers(
+        settingsWithMcpCapabilityServers(settings, enabled),
+        apiIntegrations,
+        workspaceId,
+      ),
+      codexAppsDesignation !== null,
     ),
-    codexAppsDesignation !== null,
+    nangoBackends,
   );
 }
 
@@ -1883,6 +1983,8 @@ export async function settingsWithEnabledCapabilityMcpServersForTargets(
     signal?: AbortSignal;
   },
 ): Promise<Settings> {
+  const nangoBackends = await nangoBackendsFor(db, settings);
+  settings = applyNangoBackendsToSettings(settings, nangoBackends);
   const serverIds = new Set(options.serverIds);
   // One RLS scope at a time: `db` may be a single bounded transaction.
   const enabled = (
@@ -1957,13 +2059,16 @@ export async function settingsWithEnabledCapabilityMcpServersForTargets(
       ? await resolveCodexAppsDesignationForRun(db, workspaceId, { accountId: options.accountId })
       : null;
   options.onResolvedApiIntegrations?.(apiIntegrations);
-  return settingsWithCodexAppsMcpServer(
-    settingsWithApiIntegrationServers(
-      settingsWithMcpCapabilityServers(settings, enabled),
-      apiIntegrations,
-      workspaceId,
+  return applyNangoBackendsToSettings(
+    settingsWithCodexAppsMcpServer(
+      settingsWithApiIntegrationServers(
+        settingsWithMcpCapabilityServers(settings, enabled),
+        apiIntegrations,
+        workspaceId,
+      ),
+      codexAppsDesignation !== null,
     ),
-    codexAppsDesignation !== null,
+    nangoBackends,
   );
 }
 
@@ -2325,7 +2430,15 @@ async function requireCatalogItem(
   return item;
 }
 
-function configuredMcpCatalogItems(settings: Settings): CapabilityCatalogItem[] {
+export function configuredMcpCatalogItems(
+  settings: Settings,
+  nangoBackends: NangoBackends = new Map(),
+): CapabilityCatalogItem[] {
+  const nangoByServerUrl = new Map(
+    [...nangoBackends.values()]
+      .filter((integration) => !integration.native)
+      .map((integration) => [nangoToolsMcpUrl(integration.integrationKey), integration] as const),
+  );
   return (
     settings.mcpServers
       // Opengeni, Files, and Document Search are native runtime surfaces. They
@@ -2336,40 +2449,92 @@ function configuredMcpCatalogItems(settings: Settings): CapabilityCatalogItem[] 
           server.id !== CODEX_APPS_MCP_SERVER_ID && !firstPartyMcpServerIds.has(server.id),
       )
       .map((server) =>
-        CapabilityCatalogItem.parse({
-          id: `mcp:${server.id}`,
-          kind: "mcp",
-          source: "configured",
-          name: server.name ?? server.id,
-          description: null,
-          category: "configured",
-          tags: ["mcp", ...(server.allowedTools?.length ? ["limited-tools"] : [])],
-          endpointUrl: server.url,
-          authKind:
-            server.connectionRef?.authoritySource !== "host" &&
-            server.connectionRef?.kind === "oauth2"
-              ? "oauth2"
-              : null,
-          // Deployment-managed personal selectors need the same account picker
-          // as installed connectors. Fixed bindings remain server-resolved.
-          connectionRef:
-            server.connectionRef?.subjectScope === "subject" && !server.connectionRef.connectionId
-              ? installationConnectionRef({ connectionRef: server.connectionRef })
-              : null,
-          tools: [{ kind: "mcp", id: server.id }],
-          runtime: {
-            available: true,
-            mcpServerId: server.id,
-            transport: "streamable-http",
-            notes: "Managed by this Opengeni deployment through OPENGENI_MCP_SERVERS.",
-          },
-          metadata: {
-            mcpServerId: server.id,
-            allowedTools: server.allowedTools ?? [],
-            cacheToolsList: server.cacheToolsList,
-          },
-        }),
+        nangoConfiguredCatalogItem(
+          CapabilityCatalogItem.parse({
+            id: `mcp:${server.id}`,
+            kind: "mcp",
+            source: "configured",
+            name: server.name ?? server.id,
+            description: null,
+            category: "configured",
+            tags: ["mcp", ...(server.allowedTools?.length ? ["limited-tools"] : [])],
+            endpointUrl: server.url,
+            authKind:
+              server.connectionRef?.authoritySource !== "host" &&
+              server.connectionRef?.kind === "oauth2"
+                ? "oauth2"
+                : null,
+            // Deployment-managed personal selectors need the same account picker
+            // as installed connectors. Fixed bindings remain server-resolved.
+            connectionRef:
+              server.connectionRef?.subjectScope === "subject" && !server.connectionRef.connectionId
+                ? installationConnectionRef({ connectionRef: server.connectionRef })
+                : null,
+            tools: [{ kind: "mcp", id: server.id }],
+            runtime: {
+              available: true,
+              mcpServerId: server.id,
+              transport: "streamable-http",
+              notes: "Managed by this Opengeni deployment through OPENGENI_MCP_SERVERS.",
+            },
+            metadata: {
+              mcpServerId: server.id,
+              allowedTools: server.allowedTools ?? [],
+              cacheToolsList: server.cacheToolsList,
+            },
+          }),
+          nangoByServerUrl.get(server.url),
+        ),
       )
+  );
+}
+
+/**
+ * A config-only Nango integration's catalog entry: its operator definition
+ * names it, and its sign-in is the Nango Connect card of the ordinary flow.
+ */
+function nangoConfiguredCatalogItem(
+  item: CapabilityCatalogItem,
+  integration: EffectiveNangoIntegration | undefined,
+): CapabilityCatalogItem {
+  if (!integration) return item;
+  const definition = integration.definition;
+  return CapabilityCatalogItem.parse({
+    ...item,
+    name: definition.displayName ?? item.name,
+    description: definition.description ?? null,
+    category: "integrations",
+    tags: uniqueTags(["mcp", "nango", integration.integrationKey]),
+    mcpUrl: item.endpointUrl,
+    providerDomain: integration.providerDomain,
+    authKind: "oauth2",
+    runtime: {
+      ...item.runtime,
+      notes: "Signs in through Nango; tools run through this deployment's Nango integration.",
+    },
+    metadata: {
+      ...item.metadata,
+      integrationBackend: "nango",
+      nangoIntegrationKey: integration.integrationKey,
+      personalOnly: true,
+      ...(definition.logoUrl ? { logoUrl: definition.logoUrl } : {}),
+    },
+  });
+}
+
+export function withoutNangoReplacedSocialItems(
+  items: CapabilityCatalogItem[],
+  nangoBackends: NangoBackends,
+): CapabilityCatalogItem[] {
+  const hidden = nangoReplacedSocialProviders(nangoBackends);
+  if (hidden.size === 0) return items;
+  return items.filter(
+    (item) =>
+      !(
+        item.metadata.providerAdapter === "social" &&
+        typeof item.metadata.provider === "string" &&
+        hidden.has(item.metadata.provider)
+      ),
   );
 }
 
@@ -2478,12 +2643,15 @@ const SOCIAL_PROVIDER_TOOL_NAMES = {
  * operator's own and carry no known brand.
  */
 export function builtInConnectorCatalogItems(input: {
-  settings: Parameters<typeof excelAddin>[0];
+  settings: Parameters<typeof excelAddin>[0] & { socialOauthClientsJson?: string | undefined };
   socialConnections: SocialConnection[];
   workspaceConnections: ConnectionMetadata[];
 }): CapabilityCatalogItem[] {
   return [
-    ...providerIntegrationCatalogItems(input.socialConnections),
+    ...providerIntegrationCatalogItems(
+      input.socialConnections,
+      socialOAuthClientConfigured(input.settings),
+    ),
     fikenCatalogItem(input.workspaceConnections.filter(isFikenConnection)),
     onePasswordCatalogItem(input.workspaceConnections.filter(isOnePasswordConnection)),
     excelAddinCatalogItem(excelAddin(input.settings)),
@@ -2669,12 +2837,31 @@ export function excelAddinCatalogItem(addin: ExcelAddin): CapabilityCatalogItem 
   });
 }
 
+/**
+ * X and Reddit connect through Opengeni's own OAuth client, which the operator
+ * registers in `OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON`. Without it the OAuth
+ * start fails with 503, so the catalog says so instead of offering a Connect.
+ */
+function socialOAuthClientConfigured(settings: {
+  socialOauthClientsJson?: string | undefined;
+}): (provider: SocialProviderIntegrationDefinition["provider"]) => boolean {
+  let configured: ReturnType<typeof parseSocialOauthClientsJson> = {};
+  try {
+    configured = parseSocialOauthClientsJson(settings.socialOauthClientsJson);
+  } catch {
+    // Startup validates this setting; a malformed value can configure nothing.
+  }
+  return (provider) => configured[provider] !== undefined;
+}
+
 function providerIntegrationCatalogItems(
   socialConnections: SocialConnection[],
+  oauthClientConfigured: (provider: SocialProviderIntegrationDefinition["provider"]) => boolean,
 ): CapabilityCatalogItem[] {
   return SOCIAL_PROVIDER_INTEGRATIONS.map((definition) => {
     const counts = socialConnectionCounts(socialConnections, definition.provider);
     const enabled = counts.connected + counts.needsReauth > 0;
+    const clientConfigured = oauthClientConfigured(definition.provider);
     return CapabilityCatalogItem.parse({
       id: `api:${definition.provider}`,
       kind: "api",
@@ -2692,8 +2879,13 @@ function providerIntegrationCatalogItems(
       runtime: {
         available: true,
         mcpServerId: "opengeni",
+        operatorOAuthClient: { configured: clientConfigured },
+        // Existing accounts keep their status note; the setup note is for a
+        // provider nobody here has connected yet.
         notes:
-          "Opengeni's social provider adapter routes every call through an exact visible account Connection.",
+          clientConfigured || counts.total > 0
+            ? "Opengeni's social provider adapter routes every call through an exact visible account Connection."
+            : "New connections are unavailable until this deployment registers an OAuth client with the provider.",
       },
       enabled,
       enabledReason: socialConnectionSummary(counts),
@@ -2847,9 +3039,13 @@ export function nativeConnectionCapabilityRecommendations(
     connectedMachines?: boolean;
     /** Personal GitHub OAuth is enabled: offer the person's own GitHub identity. */
     personalGitHub?: boolean;
+    /** All my repositories is offered: the person may allow all their repositories. */
+    personalGitHubAllRepositories?: boolean;
     browserExtension?: BrowserExtension;
     /** Reviewed API integration definitions this deployment can connect here. */
     integrationDefinitions?: readonly IntegrationDefinition[];
+    /** This deployment has its Microsoft Dynamics sign-in app configured. */
+    microsoftDynamics?: boolean;
   } = {},
 ): CapabilityCatalogItem[] {
   const extensionUrl = options.browserExtension?.installUrl ?? OPENGENI_BROWSER_EXTENSION_URL;
@@ -2899,8 +3095,7 @@ export function nativeConnectionCapabilityRecommendations(
         kind: "api",
         source: "built_in",
         name: "Your GitHub",
-        description:
-          "The person's own GitHub account: commits, branches, pull requests and reviews appear under their name, only in chats they start, on repositories they choose. Use for 'connect my GitHub', 'use my account' or 'do it as me'.",
+        description: `The person's own GitHub account: commits, branches, pull requests and reviews appear under their name, only in chats they start, on repositories they choose${options.personalGitHubAllRepositories ? " or all of theirs" : ""}. Use for 'connect my GitHub', 'use my account' or 'do it as me'.`,
         category: "source-control",
         tags: [
           "github",
@@ -2993,6 +3188,49 @@ export function nativeConnectionCapabilityRecommendations(
           browserExtensionUrl: extensionUrl,
           recommendationOnly: true,
         },
+      }),
+    );
+  }
+  if (options.microsoftDynamics) {
+    items.push(
+      CapabilityCatalogItem.parse({
+        id: MICROSOFT_DYNAMICS_CAPABILITY_ID,
+        kind: "api",
+        source: "built_in",
+        name: MICROSOFT_DYNAMICS_CONNECTION_NAME,
+        description:
+          "Read and update the person's Dynamics 365 Sales, Customer Service and other Dataverse apps, Business Central, or Finance and Operations data (accounts, contacts, opportunities, customers, invoices and any other table) as them, with their Microsoft work account.",
+        // Product names only: a question that names no system must not rank
+        // Dynamics above other CRMs.
+        category: "sales",
+        tags: [
+          "dynamics",
+          "dynamics 365",
+          "microsoft dynamics",
+          "d365",
+          "dataverse",
+          "power apps",
+          "business central",
+        ],
+        homepageUrl: "https://dynamics.microsoft.com",
+        providerDomain: "dynamics.com",
+        authModel: "oauth2_authorization_code",
+        authKind: "oauth2",
+        surfaceType: "microsoft_dynamics",
+        tools: [],
+        runtime: {
+          available: true,
+          notes:
+            "Each connection is one Dynamics environment, identified by the web address the person opens Dynamics at.",
+        },
+        lifecycle: {
+          status: "available",
+          readiness: "setup_required",
+          detail: "Connect an environment from the chat card.",
+          managedBy: "platform",
+        },
+        actions: ["connect", "inspect"],
+        metadata: { recommendationOnly: true },
       }),
     );
   }
@@ -3735,6 +3973,24 @@ function normalizeCapabilitySearchText(value: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
+}
+
+/**
+ * The native catalog entry with this id, when its Connect card asks for
+ * connect-time inputs. Every native entry is considered, whatever this
+ * deployment offers, because only the entry's own rule is applied here.
+ */
+function connectInputsDeclaringEntry(capabilityId: string): CapabilityCatalogItem | null {
+  return (
+    nativeConnectionCapabilityRecommendations({
+      connectedMachines: true,
+      personalGitHub: true,
+      microsoftDynamics: true,
+    }).find(
+      (candidate) =>
+        candidate.id === capabilityId && capabilityConnectInputs(candidate.surfaceType) !== null,
+    ) ?? null
+  );
 }
 
 function generatedCapabilityId(payload: CreateCapabilityCatalogItemRequest): string {

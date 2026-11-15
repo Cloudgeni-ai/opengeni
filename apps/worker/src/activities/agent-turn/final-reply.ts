@@ -36,6 +36,11 @@ export function needsFinalReply(input: {
   completedGoal: boolean;
   /** The model's final text was a copied web-search record that was hidden. */
   suppressedEcho?: boolean;
+  /**
+   * The run ended because a model response had no text and no tool call. The
+   * turn has not answered anyone yet, whatever started it.
+   */
+  contentlessResponse?: boolean;
 }): boolean {
   return (
     typeof input.output === "string" &&
@@ -43,6 +48,9 @@ export function needsFinalReply(input: {
     !input.inputWaitYielded &&
     !input.interrupted &&
     !input.maintenance &&
-    (input.toolsExecuted || input.completedGoal || input.suppressedEcho === true)
+    (input.toolsExecuted ||
+      input.completedGoal ||
+      input.suppressedEcho === true ||
+      input.contentlessResponse === true)
   );
 }

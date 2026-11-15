@@ -1485,6 +1485,7 @@ export const englishMessages = {
   "connectionTypePicker.connectionType": "Connection type",
   "connectionTypePicker.mcpServer": "MCP server",
   "connectPanel.authorizeConnection": "Authorize connection",
+  "connectPanel.backToConnections": "Back to connections",
   "connectPanel.connections": "Connections",
   "connectPanel.continueToServicename": "Continue to {serviceName}",
   "connectPanel.customConnection": "Custom connection",
@@ -1549,7 +1550,7 @@ export const englishMessages = {
   "connectSetup.organizationApprovalPossibleTitle": "Microsoft didn't give access",
   "connectSetup.organizationApprovalRequiredTitle": "Your IT needs to approve {product} first",
   "connectSetup.organizationApprovalUnfinished":
-    "If the sign-in page said an admin has to approve {product}, send your IT the message with the approval details. After they approve, sign in again.",
+    "If the sign-in page said an admin has to approve {product}, send your IT the message with the approval details. If you sent a request from that page instead, wait for IT to approve it. Then sign in again.",
   "connectSetup.organizationApprovalUnfinishedTitle": "Didn't get to finish signing in?",
   "connectSetup.personalConnection": "Personal connection",
   "connectSetup.readyToConnect": "Ready to connect",
@@ -1621,7 +1622,11 @@ export const englishMessages = {
     "{workspace} doesn't offer this shortcut's model.",
   "desktopDictation.host.needsCredits": "Voice input needs credits. Your speech is saved.",
   "desktopDictation.host.notAllowed": "Voice input isn't allowed in this workspace.",
+  "desktopDictation.host.notInRegion":
+    "This model isn't available in your workspace's region. Your speech is saved.",
   "desktopDictation.host.notSaved": "The audio couldn't be saved. Try again.",
+  "desktopDictation.host.serviceOutOfCredit":
+    "The speech service is out of credit. Your speech is saved.",
   "desktopDictation.host.stopped": "Dictation stopped. Try again.",
   "desktopDictation.host.tooLong": "Too long to transcribe. Try a shorter one.",
   "desktopDictation.host.transcriptionFailed": "Transcription failed. Your speech is saved.",
@@ -2142,44 +2147,40 @@ export const englishMessages = {
   "lib.format.capacityRecoveryExhausted":
     "The connected subscription kept running out of capacity, so automatic retries stopped. Retry, or send a message to continue, once it has capacity again.",
   "lib.format.composerApiCreditsRequired":
-    "API usage uses credits, not your plan credit. Add credits to continue. Your message and attachments are saved.",
+    "API usage uses credits, not your plan credit. Add credits to continue.",
   "lib.format.composerApiCreditsRequiredAskOwner":
-    "API usage uses credits, not your plan credit. Ask an organization owner to add credits. Your message and attachments are saved.",
-  "lib.format.composerByokPaidCreditRequired":
-    "Add credits to use your own key. Your message and attachments are saved.",
+    "API usage uses credits, not your plan credit. Ask an organization owner to add credits.",
+  "lib.format.composerByokPaidCreditRequired": "Add credits to use your own key.",
   "lib.format.composerByokPaidCreditRequiredAskOwner":
-    "Ask an organization owner to add credits to use your own key. Your message and attachments are saved.",
-  "lib.format.composerByokUpgradeRequired":
-    "Upgrade to Pro to use your own key. Your message and attachments are saved.",
+    "Ask an organization owner to add credits to use your own key.",
+  "lib.format.composerByokUpgradeRequired": "Upgrade to Pro to use your own key.",
   "lib.format.composerByokUpgradeRequiredAskOwner":
-    "Ask an organization owner to upgrade to Pro to use your own key. Your message and attachments are saved.",
-  "lib.format.composerSubscriptionUpgradeRequired":
-    "Upgrade to Pro to use your own subscription. Your message and attachments are saved.",
+    "Ask an organization owner to upgrade to Pro to use your own key.",
+  "lib.format.composerSubscriptionUpgradeRequired": "Upgrade to Pro to use your own subscription.",
   "lib.format.composerSubscriptionUpgradeRequiredAskOwner":
-    "Ask an organization owner to upgrade to Pro to use your own subscription. Your message and attachments are saved.",
+    "Ask an organization owner to upgrade to Pro to use your own subscription.",
   "lib.format.days": "{count}d",
   "lib.format.hours": "{count}h",
   "lib.format.messageReferenceCorrelationid": "{message} Reference: {correlationId}.",
   "lib.format.minutes": "{count}m",
   "lib.format.accountUnavailable":
-    "A selected connector account is unavailable. Review accounts in + → Connectors, then edit and send your saved message.",
+    "A selected connector account is unavailable. Review accounts in + → Connectors, then edit and send your message.",
   "lib.format.modelUnavailable":
-    "This chat's model is no longer available. Choose another model to continue. Your message is saved.",
-  "lib.format.newChatModelUnavailable":
-    "This model isn't available to you. Choose another model. Your message is saved.",
+    "This chat's model is no longer available. Choose another model to continue.",
+  "lib.format.newChatModelUnavailable": "This model isn't available to you. Choose another model.",
   "lib.format.modelPolicyCredits":
-    "This model uses credits, which are off in this workspace. Choose a model paid by a subscription or API key. Your message is saved.",
+    "This model uses credits, which are off in this workspace. Choose a model paid by a subscription or API key.",
   "lib.format.modelPolicyRefused":
-    "This workspace's model policy doesn't allow this model. Choose another model. Your message is saved.",
+    "This workspace's model policy doesn't allow this model. Choose another model.",
   "lib.format.repositoryUnavailable":
-    "{repository} is no longer available to this workspace. Remove the repository from this chat, or restore its GitHub access, then retry. Your message is saved.",
+    "{repository} is no longer available to this workspace. Remove the repository from this chat, or restore its GitHub access, then retry.",
   "lib.format.repositoriesUnavailable":
-    "These repositories are no longer available to this workspace: {repositories}. Remove them from this chat, or restore their GitHub access, then retry. Your message is saved.",
+    "These repositories are no longer available to this workspace: {repositories}. Remove them from this chat, or restore their GitHub access, then retry.",
   "lib.format.someRepositoryUnavailable":
-    "A repository in this chat is no longer available to this workspace. Remove it from this chat, or restore its GitHub access, then retry. Your message is saved.",
+    "A repository in this chat is no longer available to this workspace. Remove it from this chat, or restore its GitHub access, then retry.",
   "lib.format.now": "now",
   "lib.format.speedUnavailable":
-    "This model can't run at the selected speed. Choose another speed. Your message is saved.",
+    "This model can't run at the selected speed. Choose another speed.",
   "lib.format.outOfCreditsThisWorkspace":
     "There aren't enough credits for this model. Add credits, or choose another model. The conversation is preserved.",
   "lib.format.providerBlockedRequest": "The model provider blocked this request.",
@@ -2187,8 +2188,7 @@ export const englishMessages = {
   "lib.format.reconcileBeforeRetry":
     "This client cannot safely retry this uncertain request after remount; reconcile the session before sending again.",
   "lib.format.seconds": "{count}s",
-  "lib.format.sessionUsageLimitReached":
-    "This task's usage limit is reached. Your message is saved.",
+  "lib.format.sessionUsageLimitReached": "This task's usage limit is reached.",
   "lib.format.subscriptionUpgradeRequired":
     "Upgrade to Pro to use your own subscription. The conversation is preserved.",
   "lib.format.subscriptionUpgradeRequiredAskOwner":
@@ -2201,20 +2201,16 @@ export const englishMessages = {
   "lib.format.theServiceEncounteredADatabase": "The service encountered a database error.",
   "lib.format.thisClientCannotResumeThe":
     "This client cannot resume the workspace. Ask your administrator for a control-capable client.",
-  "lib.format.thisSiteSAssistantCan":
-    "This Site's assistant can't do that for you. Your message is saved.",
-  "lib.format.thisSiteSAssistantHas":
-    "This Site's assistant has reached its usage limit for now. Your message is saved.",
-  "lib.format.thisSiteSAssistantIs":
-    "This Site's assistant is busy. Try again in a moment. Your message is saved.",
-  "lib.format.thisSiteSAssistantIs2":
-    "This Site's assistant is paused for visitors right now. Your message is saved.",
+  "lib.format.thisSiteSAssistantCan": "This Site's assistant can't do that for you.",
+  "lib.format.thisSiteSAssistantHas": "This Site's assistant has reached its usage limit for now.",
+  "lib.format.thisSiteSAssistantIs": "This Site's assistant is busy. Try again in a moment.",
+  "lib.format.thisSiteSAssistantIs2": "This Site's assistant is paused for visitors right now.",
   "lib.format.usageLimitReachedAWorkspace":
     "Usage limit reached. A workspace admin can raise this limit. Your draft is preserved.",
   "lib.format.workspaceUsageLimitReachedAn":
     "Workspace usage limit reached. An organization admin can raise the workspace budget. Your draft is preserved.",
   "lib.format.yourOrganizationDoesnTHave":
-    "There aren't enough credits for this model. Add credits, or choose another model. Your message and attachments are saved.",
+    "There aren't enough credits for this model. Add credits, or choose another model.",
   "lib.providerRecovery.anImageFromEarlierIn":
     "An image from earlier in this conversation can't be read from storage",
   "lib.providerRecovery.opengeniToolServiceUnavailable":
@@ -3401,8 +3397,22 @@ export const englishMessages = {
   "messageTimeline.workerPaused": "Worker paused",
   "messageTimeline.workerReportedBack": "Worker reported back",
   "messageTimeline.workResumed": "work resumed",
+  "messageTimeline.attemptFailedRetried": "Attempt failed · retried",
   "messageTimeline.youAnswered": "You answered",
   "messageTimeline.youLetTheAgentDecide": "You let the agent decide",
+  /** How to turn on Ultrafast on a level that offers it: press and hold (on the last level, pushing past the end also works). */
+  "modelLevelPicker.holdForUltrafast": "Hold for Ultrafast",
+  /** The composer's level control (host-defined levels such as Standard and Thorough). */
+  "modelLevelPicker.label": "Thinking level",
+  /** Screen-reader value while the chat runs Ultrafast on that level. */
+  "modelLevelPicker.levelWithUltrafast": "{label}, Ultrafast",
+  "modelLevelPicker.loading": "Loading levels",
+  /** Screen-reader value while the chat runs a model that is none of the levels. */
+  "modelLevelPicker.outsideLevels": "{label}, not one of the levels",
+  /** Screen-reader action that turns Ultrafast off and keeps the level. */
+  "modelLevelPicker.turnOffUltrafast": "Turn off Ultrafast",
+  /** Screen-reader action standing in for the hold and push gestures. */
+  "modelLevelPicker.turnOnUltrafast": "Turn on Ultrafast",
   "modelPicker.codexOnlySession": "Codex-only session",
   "modelPicker.model": "Model",
   "modelPickerModel.billedToTheConnectedProvider": "Billed to the connected provider account",
@@ -3726,6 +3736,12 @@ export const englishMessages = {
   "native.realtime.callView.reconnecting": "Reconnecting…",
   "native.realtime.callView.speaker": "Speaker",
   "native.realtime.callView.unmute": "Unmute",
+  /** Android 14+: asking the person to let agents' calls ring over the lock screen. */
+  "native.realtime.fullScreenRings.message":
+    "Android shows agents' calls only as a notification until you allow full-screen notifications for this app. Allow them so a call rings over the lock screen like a phone call.",
+  "native.realtime.fullScreenRings.notNow": "Not now",
+  "native.realtime.fullScreenRings.openSettings": "Open settings",
+  "native.realtime.fullScreenRings.title": "Let calls ring full screen",
   "native.realtime.nativeCall.couldNotStartTheCall": "Could not start the call.",
   "native.realtime.nativeCall.noInputAudio":
     "Your microphone isn't picking up any sound. Check that no other app is using it.",
@@ -3986,6 +4002,7 @@ export const englishMessages = {
   "native.timeline.sessionScreen.removeName": "Remove {name}",
   "native.timeline.sessionScreen.retryName": "Retry {name}",
   "native.timeline.sessionScreen.tapToRetrySuffix": " · tap to retry",
+  "native.timeline.sessionScreen.uploadingNamePercent": "{name}, uploading, {percent}%",
   "native.timeline.sessionSignals.doneWhen": "DONE WHEN",
   "native.timeline.sessionSignals.evidence": "EVIDENCE",
   "native.timeline.sessionSignals.noCommandsAreRunning": "No commands are running.",
@@ -4148,7 +4165,7 @@ export const englishMessages = {
   "providerRecoveryNotice.theTurnContinuesAutomaticallyOnceItsBack":
     "The turn continues automatically as soon as it's back.",
   "providerRecoveryNotice.yourMessageIsSavedOpengeni":
-    "Your message is saved. {product} keeps retrying automatically for a few minutes.",
+    "{product} keeps retrying automatically for a few minutes.",
   "queueItemContent.contentUnavailable": "Content unavailable",
   "queuePresentationModel.contentOmittedAtSafeBoundary":
     "Content omitted at safe boundary · ref {reference}",
@@ -4503,7 +4520,7 @@ export const englishMessages = {
   "sessionAdmission.allowing": "Allowing…",
   "sessionAdmission.aMember": "another member",
   "sessionAdmission.approvedElsewhereBody":
-    "You sent it for “{approved}”, but this chat now runs on “{machine}”. A saved message only runs on the machine it was sent for.",
+    "You sent it for “{approved}”, but this chat now runs on “{machine}”. It only runs on the machine it was sent for.",
   "sessionAdmission.approvedElsewhereNext":
     "Run it on “{approved}”, or remove it from the queue and send it again to use “{machine}”.",
   "sessionAdmission.approvedElsewhereOfflineNext":
@@ -4522,36 +4539,39 @@ export const englishMessages = {
     "Send a message in this chat first. The agent can then continue with them under your access.",
   "sessionAdmission.continuingWaitingWork": "Continuing…",
   "sessionAdmission.copyRequestTo": "Copy request to {owner}",
-  "sessionAdmission.genericBody":
-    "{product} couldn’t start your next message. Your message is saved.",
+  "sessionAdmission.genericBody": "{product} couldn’t start your next message.",
   "sessionAdmission.genericNext":
     "Try again. If it still doesn’t start, ask a workspace admin to look into it.",
   "sessionAdmission.genericTitle": "Couldn't start",
   "sessionAdmission.grantBody":
-    "Your next message needs a machine or other personal resource that isn’t allowed for this chat. Your message is saved.",
+    "Your next message needs a machine or other personal resource that isn’t allowed for this chat.",
   "sessionAdmission.grantNext":
-    "The person it belongs to can allow it for this chat. It starts by itself once they do.",
+    "The resource’s owner can allow it for this chat. The message starts by itself once they do.",
   "sessionAdmission.grantTitle": "Not allowed for this chat",
-  "sessionAdmission.machineAccessBody":
-    "This chat isn’t allowed to use “{machine}” right now. Your message is saved.",
+  "sessionAdmission.machineAccessBody": "This chat isn’t allowed to use “{machine}”.",
   "sessionAdmission.machineAccessOthersBody":
-    "This chat isn’t allowed to use {owner}’s machine “{machine}” right now. The message is saved.",
+    "This chat isn’t allowed to use {owner}’s machine “{machine}”.",
   "sessionAdmission.machineAccessOthersNext":
-    "Only {owner} can allow it. It starts by itself once they do.",
+    "Only {owner} can allow it. The message starts by itself once they do.",
   "sessionAdmission.machineAccessOwnerNext":
     "Allow it for this chat and your message starts right away.",
+  "sessionAdmission.machineAccessOwnerPausedNext":
+    "Allow it for this chat. Your message starts when the chat is resumed.",
   "sessionAdmission.machineAccessOwnerSettingsNext":
-    "You can allow it in the machine’s settings. Your message starts by itself once you do.",
+    "Allow it in the machine’s settings. Your message starts by itself once you do.",
+  "sessionAdmission.machineAccessOwnerSettingsPausedNext":
+    "Allow it in the machine’s settings. Your message starts when the chat is resumed.",
+  "sessionAdmission.machineAccessSharedNote":
+    "People in this workspace will see what the agent does on the machine.",
   "sessionAdmission.machineAccessTitle": "Machine access needed",
   "sessionAdmission.machineChangeFailed":
     "The machine change could not be confirmed. Refresh and try again.",
-  "sessionAdmission.machineChangedBody": "Your message is saved.",
-  "sessionAdmission.machineChangedNext": "It starts by itself on the new machine.",
+  "sessionAdmission.machineChangedNext": "The message starts by itself.",
   "sessionAdmission.machineChangedTitle": "Starting on the new machine",
   "sessionAdmission.membershipBody":
-    "The person who sent this message no longer has access to this workspace. Their message is saved.",
+    "The person who sent this message no longer has access to this workspace.",
   "sessionAdmission.membershipNext":
-    "A workspace admin can restore their access. It starts by itself once they do.",
+    "A workspace admin can restore their access. The message starts by itself once they do.",
   "sessionAdmission.membershipTitle": "Workspace access needed",
   "sessionAdmission.messagesWaitingExplanation":
     "This chat runs on {owner}’s personal machine “{machine}”. Only {owner} can start work there, so messages from other people wait for {owner}.",
@@ -4578,7 +4598,7 @@ export const englishMessages = {
   "sessionAdmission.otherMachineExplanation":
     "This chat runs on {owner}’s personal machine “{machine}”. Only {owner} can start new work there.",
   "sessionAdmission.otherMachineQueuedNext":
-    "The message is saved. Choose a workspace or cloud machine, or ask {owner} about sharing this machine with the workspace. It starts by itself once the chat is on a machine you can use.",
+    "Choose a workspace or cloud machine, or ask {owner} about sharing this machine with the workspace. The message starts by itself once the chat is on a machine its sender can use.",
   "sessionAdmission.otherMachineWorkNote":
     "Updates from agents you start here also wait for {owner}.",
   "sessionAdmission.othersApprovedElsewhereBody":
@@ -4604,16 +4624,15 @@ export const englishMessages = {
   "sessionAdmission.ownMachineExplanation":
     "This chat runs on your personal machine “{machine}”. Messages from other people cannot start work on it.",
   "sessionAdmission.ownMachineQueuedNext":
-    "The message is saved. Choose a workspace or cloud machine, or ask a workspace admin to share this machine. It starts by itself once the chat is on a machine its sender can use.",
+    "Choose a workspace or cloud machine, or ask a workspace admin to share this machine. The message starts by itself once the chat is on a machine its sender can use.",
   "sessionAdmission.ownMachineSharedHeadsUp":
     "This chat runs on your personal machine “{machine}”. People in this workspace see what the agent does on it.",
   "sessionAdmission.ownerRequest":
     "This chat runs on your personal machine “{machine}”, so my message can't start there. Could you make the machine available to the workspace, or help me choose a shared machine?",
-  "sessionAdmission.pausedNote": "This chat is also paused. Your message starts when it’s resumed.",
-  "sessionAdmission.permissionBody":
-    "A permission check stopped your next message. Your message is saved.",
+  "sessionAdmission.pausedNote": "This chat is also paused. The message starts when it’s resumed.",
+  "sessionAdmission.permissionBody": "A permission check stopped your next message.",
   "sessionAdmission.permissionNext":
-    "It starts by itself once access to this chat’s machine or resources is fixed. Their owner or a workspace admin can fix it.",
+    "The owner of this chat’s machine or resources, or a workspace admin, can fix this. The message starts by itself once they do.",
   "sessionAdmission.permissionTitle": "Permission needed",
   "sessionAdmission.preSendTitle": "Choose a machine before sending",
   "sessionAdmission.refreshFailed": "Session status could not be refreshed. Try refreshing again.",
@@ -4625,8 +4644,7 @@ export const englishMessages = {
   "sessionAdmission.retryFailed":
     "That couldn’t be confirmed. Check the chat’s status before trying again.",
   "sessionAdmission.runOnApprovedMachine": "Run it on {approved}",
-  "sessionAdmission.savedMessageMachineNote":
-    "Use a workspace or cloud machine for the saved message. It starts by itself once the chat moves.",
+  "sessionAdmission.savedMessageMachineNote": "Use a workspace or cloud machine for this message.",
   "sessionAdmission.starting": "Starting…",
   "sessionAdmission.theMachineOwner": "the machine owner",
   "sessionAdmission.tryAgain": "Try again",
@@ -4979,6 +4997,17 @@ export const englishMessages = {
   "sessionMcpCapabilityCard.moreThanOnePersonalAccount":
     "More than one personal account matches. Choose the account in connection settings before reconnecting.",
   "sessionMcpCapabilityCard.onceConnectedTheAgentCan": "Once connected, the agent can:",
+  "sessionMcpCapabilityCard.addAPasskeyToTurnOn":
+    "Add a passkey to your account to turn on {name}, then connect again.",
+  "sessionMcpCapabilityCard.confirmWithPasskeyToTurnOn":
+    "Confirm it's you with your passkey to turn on {name}, then connect again.",
+  "sessionMcpCapabilityCard.addAPasskeyToTurnOnHere":
+    "Add a passkey to your account to turn on {name}.",
+  "sessionMcpCapabilityCard.confirmWithPasskeyToTurnOnHere":
+    "Confirm it's you with your passkey to turn on {name}.",
+  "sessionMcpCapabilityCard.addAPasskey": "Add a passkey",
+  "sessionMcpCapabilityCard.confirmItSYou": "Confirm it's you",
+  "sessionMcpCapabilityCard.tryAgain": "Try again",
   "sessionMcpCapabilityCard.onlyAnAdminCanTurnOn":
     "Only an admin can turn on {name}. Ask an admin to turn it on, then connect your account.",
   "sessionMcpCapabilityCard.onlyMe": "Only me",
@@ -5041,6 +5070,11 @@ export const englishMessages = {
   "sessionStatusModel.running": "Running",
   "sessionStatusModel.stuck": "Stuck",
   "sessionStatusModel.waitingOnYou": "Waiting on you",
+  "siteToolRecover.askSiteOwner": "Ask the Site owner to publish it again.",
+  "siteToolRecover.askWhoeverManages": "Ask whoever manages your {system} access.",
+  "siteToolRecover.close": "Close",
+  "siteToolRecover.details": "Details",
+  "siteToolRecover.tryAgain": "Try again",
   "sitesUi.archiveSite": "Archive Site",
   "sitesUi.archiveThisSiteForWorkspace": "Archive this Site for workspace users?",
   "sitesUi.chooseAVersion": "Choose a version",
@@ -5294,7 +5328,7 @@ export const englishMessages = {
   "timeline.activityRail.preference": "Preference",
   "timeline.activityRail.procedure": "Procedure",
   "timeline.activityRail.savedToMemory": "Saved to memory",
-  "timeline.activityRail.unableToStartYetYour": "Unable to start yet. Your messages are saved.",
+  "timeline.activityRail.unableToStartYetYour": "Unable to start yet.",
   "timeline.activityRail.updatedInPlace": "Updated in place.",
   "timeline.activityRail.updatedMemory": "Updated memory",
   "timeline.activityRail.viewInMemory": "View in memory",
@@ -5754,10 +5788,14 @@ export const englishMessages = {
   "timeline.projection.filesCouldNotBeSaved":
     "This chat's files couldn't be saved before its workspace machine shut down.",
   "timeline.projection.interrupted": "Interrupted.",
+  "timeline.projection.messageAnsweredWhenThereIsRoom":
+    "Your message will be answered as soon as there is room. To continue sooner, switch to another model.",
   "timeline.projection.needsYou": "Needs you",
   "timeline.projection.restoredFromOlderSave":
     "This chat's workspace machine was lost, so its files were restored from a save made at {time}. Changes made after that may be missing.",
   "timeline.projection.returnedToYourPreferredModel": "Returned to your preferred model.",
+  "timeline.projection.sandboxDeletedWhileArchived":
+    "This chat's workspace machine was deleted while the chat was archived. The chat continues on a new one, without the old one's files.",
   "timeline.projection.savedWithoutRebuildableFolders":
     "This chat's files were saved without folders that can be rebuilt: {folders}.",
   "timeline.projection.switchedToAFallbackModel": "Switched to a fallback model.",
@@ -5768,13 +5806,12 @@ export const englishMessages = {
   "timeline.projection.theTurnStoppedUnexpectedly": "The turn stopped unexpectedly",
   "timeline.projection.thisTaskSUsageLimit":
     "This task's usage limit is reached. A person can raise or remove the limit to continue.",
-  "timeline.projection.tryAgainAfterYourQuota":
-    "Try again after your quota resets, or switch to another model or provider.",
   "timeline.projection.usageLimitReached": "Usage limit reached",
   "timeline.projection.voiceSessionEnded":
     "Voice session ended. Remaining conversation context was sent to the agent.",
   "timeline.projection.waiting": "Waiting",
   "timeline.projection.waitingForAnAccount": "Waiting for an account.",
+  "timeline.projection.waitingForCapacity": "Waiting for capacity",
   "timeline.projection.waitingForYou": "Waiting for you",
   "timeline.projection.waitingReason": "Waiting: {reason}",
   "timeline.projection.yourPreviouslyApprovedWorkspaceInstruction":
@@ -5823,8 +5860,7 @@ export const englishMessages = {
     "Start confirmation is unavailable.",
   "timeline.startupDispatchDetails.theStartRequestWasAccepted":
     "The start request was accepted; a worker has not started the turn yet.",
-  "timeline.startupDispatchDetails.yourMessagesAreSavedNo":
-    "Your messages are saved. No agent turn is running yet.",
+  "timeline.startupDispatchDetails.yourMessagesAreSavedNo": "No agent turn is running yet.",
   "timeline.startupTimings.conversationHistory": "Conversation history",
   "timeline.startupTimings.duration": "Duration",
   "timeline.startupTimings.eachTurnHasItsOwn":
@@ -6310,6 +6346,7 @@ export const englishMessages = {
   "timeline.turnSummary.contextCompactedExpandForDetails": "Context compacted; expand for details",
   "timeline.turnSummary.copyTurn": "Copy turn",
   "timeline.turnSummary.interrupted": "· interrupted",
+  "timeline.turnSummary.failed": "Failed",
   "timeline.turnSummary.paused": "Paused",
   "timeline.turnSummary.preparation": "Preparation",
   "timeline.turnSummary.steps": "Steps",
@@ -6387,11 +6424,17 @@ export const englishMessages = {
   "toolActionReview.more": "more",
   "toolActionReview.n1MoreValue": "1 more value",
   "toolActionReview.next": "Next",
+  "toolActionReview.no": "No",
   "toolActionReview.noItems": "No items",
   "toolActionReview.noLongerValid": "No longer valid",
   "toolActionReview.openLabel": "Open {label}",
   "toolActionReview.outcomeUnknown": "Outcome unknown",
   "toolActionReview.partlyDone": "Partly done",
+  "toolActionReview.reason.asksByDefault": "This action asks first by default.",
+  "toolActionReview.reason.asksBySetting": "This action is set to Ask first.",
+  "toolActionReview.reason.blockedByConflict":
+    "Two permission settings conflict, so this action is blocked.",
+  "toolActionReview.reason.blockedByDefault": "This action is blocked by default.",
   "toolActionReview.previous": "Previous",
   "toolActionReview.reasonItDidNotRun": "{reason} It did not run.",
   "toolActionReview.someOfItRanCheck": "Some of it ran. Check the result before continuing.",
@@ -6417,6 +6460,7 @@ export const englishMessages = {
   "toolActionReview.viewAllLocalestringNoun": "View all {localeString} {noun}",
   "toolActionReview.viewLabelPreview": "View {label}: {preview}",
   "toolActionReview.viewTheNoun": "View the {noun}",
+  "toolActionReview.yes": "Yes",
   "toolActionReview.yourPermissionSettingsBlockThis": "Your permission settings block this action.",
   "usage.allowanceCopy.anOrganizationAdminCanRaise":
     "An organization admin can raise the workspace budget.",

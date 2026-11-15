@@ -83,6 +83,11 @@ signal-hook = { workspace = true }
 [target.'cfg(windows)'.dependencies]
 opengeni-agent-windows-ffi = { path = "../opengeni-agent-windows-ffi" }
 
+# build.rs digests an embedded interaction runtime, so the agent never reads
+# its own embedded copy only to name or check the helpers it wrote out.
+[build-dependencies]
+blake3 = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "rt-multi-thread", "macros"] }
 tempfile = { workspace = true }

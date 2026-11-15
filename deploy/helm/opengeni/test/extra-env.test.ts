@@ -103,6 +103,7 @@ describe("workload-local environment configuration", () => {
           resource.metadata.labels?.["app.kubernetes.io/component"] === "api",
       );
       expect(api?.spec?.template?.spec.containers[0]?.env).toEqual([
+        { name: "OPENGENI_API_SHUTDOWN_GRACE_MS", value: "20000" },
         { name: "CUSTOM_SETTING", value: "selected" },
       ]);
     },

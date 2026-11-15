@@ -10,7 +10,26 @@ import {
 } from "./sessions-group";
 import type { RailSession as Session } from "./session-list-entry";
 
-type CreatorIdentity = Pick<Session["createdBy"], "kind" | "subjectId">;
+/**
+ * A creator to page by. Without `kind`, every session the subject created is
+ * included, so an API key's subject- and service-frozen sessions page as one.
+ */
+type CreatorIdentity = Pick<Session["createdBy"], "subjectId"> &
+  Partial<Pick<Session["createdBy"], "kind">>;
+
+/**
+ * Whether a session belongs to a creator to page by. Without `kind`, both
+ * frozen kinds match (an API key's subject- and service-frozen sessions).
+ */
+export function sessionCreatedByMatches(
+  createdBy: Pick<Session["createdBy"], "kind" | "subjectId">,
+  creator: CreatorIdentity,
+): boolean {
+  return (
+    (creator.kind === undefined || createdBy.kind === creator.kind) &&
+    createdBy.subjectId === creator.subjectId
+  );
+}
 
 export type SessionPaginationGroup =
   | {
@@ -223,19 +242,11 @@ export function sessionMatchesPaginationGroup(
       );
     }
     case "creator":
-      return (
-        !active &&
-        session.createdBy.kind === group.creator.kind &&
-        session.createdBy.subjectId === group.creator.subjectId
-      );
+      return !active && sessionCreatedByMatches(session.createdBy, group.creator);
     case "creatorDiscovery":
       return (
         !active &&
-        !group.knownCreators.some(
-          (creator) =>
-            creator.kind === session.createdBy.kind &&
-            creator.subjectId === session.createdBy.subjectId,
-        )
+        !group.knownCreators.some((creator) => sessionCreatedByMatches(session.createdBy, creator))
       );
     case "results":
     case "archived":

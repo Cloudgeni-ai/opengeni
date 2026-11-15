@@ -1,5 +1,134 @@
 # @opengeni/storage
 
+## 6.23.0
+
+### Patch Changes
+
+- Updated dependencies [c0089e1]
+- Updated dependencies [9dd96b0]
+- Updated dependencies [adc2409]
+- Updated dependencies [f6a7c28]
+  - @opengeni/contracts@6.23.0
+  - @opengeni/config@6.23.0
+
+## 6.22.0
+
+### Patch Changes
+
+- Updated dependencies [d50092b]
+  - @opengeni/contracts@6.22.0
+  - @opengeni/config@6.22.0
+
+## 6.21.0
+
+### Patch Changes
+
+- Updated dependencies [7d0d52b]
+- Updated dependencies [ef4c334]
+- Updated dependencies [ce864c0]
+- Updated dependencies [6ac2cd4]
+- Updated dependencies [6acbb24]
+  - @opengeni/config@6.21.0
+  - @opengeni/contracts@6.21.0
+
+## 6.20.1
+
+### Patch Changes
+
+- @opengeni/config@6.20.1
+- @opengeni/contracts@6.20.1
+
+## 6.20.0
+
+### Patch Changes
+
+- Updated dependencies [ae3972e]
+- Updated dependencies [0e273b0]
+- Updated dependencies [52ef65b]
+- Updated dependencies [e37485b]
+- Updated dependencies [9c17a87]
+  - @opengeni/contracts@6.20.0
+  - @opengeni/config@6.20.0
+
+## 6.19.0
+
+### Patch Changes
+
+- Updated dependencies [a85adef]
+  - @opengeni/contracts@6.19.0
+  - @opengeni/config@6.19.0
+
+## 6.18.0
+
+### Patch Changes
+
+- Updated dependencies [f313a0e]
+- Updated dependencies [6813960]
+- Updated dependencies [9188c1d]
+- Updated dependencies [3105a8b]
+- Updated dependencies [a16189c]
+- Updated dependencies [89cf4ba]
+  - @opengeni/contracts@6.18.0
+  - @opengeni/config@6.18.0
+
+## 6.17.0
+
+### Patch Changes
+
+- Updated dependencies [8073ab6]
+- Updated dependencies [43aa19d]
+- Updated dependencies [b1b69fc]
+- Updated dependencies [deccb54]
+- Updated dependencies [668c5ed]
+- Updated dependencies [e3cb3c1]
+- Updated dependencies [241ce71]
+  - @opengeni/config@6.17.0
+  - @opengeni/contracts@6.17.0
+
+## 6.16.0
+
+### Patch Changes
+
+- Updated dependencies [fb19875]
+- Updated dependencies [54dc5da]
+  - @opengeni/contracts@6.16.0
+  - @opengeni/config@6.16.0
+
+## 6.15.0
+
+### Patch Changes
+
+- Updated dependencies [708848c]
+- Updated dependencies [b110015]
+- Updated dependencies [5525e63]
+- Updated dependencies [60d067d]
+- Updated dependencies [da60317]
+- Updated dependencies [3bab763]
+- Updated dependencies [f92ff08]
+- Updated dependencies [060c983]
+- Updated dependencies [dfeab20]
+- Updated dependencies [9885d37]
+- Updated dependencies [f22647a]
+- Updated dependencies [850b4d5]
+  - @opengeni/contracts@6.15.0
+  - @opengeni/config@6.15.0
+
+## 6.14.0
+
+### Patch Changes
+
+- 936423e: Archiving a session now writes its readable transcript from the event rows the bundle export already read, instead of reading every kept event from the database a second time. The transcript reads exactly as before. A compressed JSON lines file that fails while its producer is busy elsewhere now fails the producer's next write instead of waiting forever, and no longer leaves an unhandled rejection behind.
+- Updated dependencies [c976c87]
+- Updated dependencies [6ae0528]
+- Updated dependencies [e33947d]
+- Updated dependencies [3b853ca]
+- Updated dependencies [dd11dad]
+- Updated dependencies [91320a4]
+- Updated dependencies [5628a56]
+- Updated dependencies [c472500]
+  - @opengeni/contracts@6.14.0
+  - @opengeni/config@6.14.0
+
 ## 6.13.0
 
 ### Patch Changes

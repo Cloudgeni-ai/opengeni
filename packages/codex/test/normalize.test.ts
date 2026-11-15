@@ -31,6 +31,26 @@ describe("normalizeCodexRequestBody", () => {
     expect(body.input).toEqual([{ type: "web_search_call" }]);
   });
 
+  test("retains the required status of apply_patch, computer, local shell and program items", () => {
+    // Production regression: a session that used native apply_patch on one
+    // billing route 400'd on Codex with `missing_required_parameter:
+    // input[N].status` because this normalizer stripped the required field.
+    for (const [type, status] of [
+      ["apply_patch_call", "completed"],
+      ["apply_patch_call", "in_progress"],
+      ["apply_patch_call_output", "completed"],
+      ["apply_patch_call_output", "failed"],
+      ["computer_call", "completed"],
+      ["local_shell_call", "completed"],
+      ["program_output", "completed"],
+    ] as const) {
+      const item = Object.freeze({ type, id: "provider-item", call_id: "call_1", status });
+      const body = normalizedCodexRequestBody({ input: [item] }, identity);
+      expect(body.input).toEqual([{ type, call_id: "call_1", status }]);
+      expect(item.status).toBe(status);
+    }
+  });
+
   test("copy-on-write form preserves a retained source graph", () => {
     const changedItem = Object.freeze({
       type: "tool_search_call",

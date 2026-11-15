@@ -9,6 +9,7 @@ import {
   createOrganizationModelProviderCustomModel,
   listOrganizationModelProviderCustomModels,
   OrganizationModelProviderConflictError,
+  setOrganizationModelProviderCustomModelListPrice,
   upsertOrganizationModelProviderConnection,
   type DbClient,
 } from "../src";
@@ -147,4 +148,56 @@ test("other providers can't save models with their key", async () => {
       operationId: crypto.randomUUID(),
     }),
   ).rejects.toThrow("only an organization OpenAI or Azure OpenAI connection saves its models");
+});
+
+test("a deployment's price is versioned: a repeat is a no-op and a stale edit conflicts", async () => {
+  if (!available) return;
+  const created = await createOrganizationModelProviderCustomModel(client.db, {
+    ...actor,
+    providerKind: "azure_openai",
+    upstreamModelId: `priced-${crypto.randomUUID().slice(0, 8)}`,
+    operationId: crypto.randomUUID(),
+    listPrice: { basis: "model", modelId: "gpt-6-astra" },
+  });
+  expect(created).toMatchObject({ listPricingModelId: "gpt-6-astra", listPricing: null });
+  const pricing = {
+    inputMicrosPerMillionTokens: 2_000_000,
+    // jsonb stores keys in its own order: a repeat must still match it.
+    cachedInputMicrosPerMillionTokens: 200_000,
+    outputMicrosPerMillionTokens: 8_000_000,
+  };
+  const set = (
+    expectedVersion: number,
+    price: Parameters<typeof setOrganizationModelProviderCustomModelListPrice>[1]["price"],
+  ) =>
+    setOrganizationModelProviderCustomModelListPrice(client.db, {
+      ...actor,
+      providerKind: "azure_openai",
+      customModelId: created.id,
+      expectedVersion,
+      price,
+    });
+  const custom = await set(created.version, { basis: "custom", pricing });
+  expect(custom).toMatchObject({
+    listPricingModelId: null,
+    listPricing: pricing,
+    version: created.version + 1,
+  });
+  // The same change again (a lost response retried) returns it unchanged.
+  expect((await set(created.version, { basis: "custom", pricing })).version).toBe(custom.version);
+  // Another change from the old version is a conflict.
+  await expect(set(created.version, null)).rejects.toBeInstanceOf(
+    OrganizationModelProviderConflictError,
+  );
+  const cleared = await set(custom.version, null);
+  expect(cleared).toMatchObject({ listPricingModelId: null, listPricing: null });
+  // Only models whose provider reports no cost can carry a price.
+  await expect(
+    shared!.admin`
+      insert into organization_model_provider_custom_models
+        (account_id, provider_kind, upstream_model_id, price_basis_model_id,
+         create_operation_id, create_request_hash, created_by_subject_id)
+      values (${actor.organizationId}, 'openrouter', 'vendor/priced', 'gpt-6-astra',
+        ${crypto.randomUUID()}, ${"a".repeat(64)}, ${actor.actorSubjectId})`,
+  ).rejects.toThrow("organization_model_provider_custom_models_list_price_chk");
 });

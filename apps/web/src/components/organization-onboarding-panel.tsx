@@ -15,6 +15,7 @@ import type { ClientModel } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 import {
+  AuthApiError,
   changeSignupUseCase,
   completeSelfServiceOrganizationSetup,
   getSelfServiceOrganizationOnboardingStatus,
@@ -61,6 +62,22 @@ import {
 } from "@/lib/pending-developer-setup";
 import { rememberSignupUseCase } from "@opengeni/react/app/lib/signup-starter-set";
 import { personalOrganizationName } from "@/lib/personal-organization-name";
+
+/**
+ * The per-network limit on new organizations explains what to do instead
+ * (try later or ask for an invitation), so show the server's sentence.
+ * Every other failure becomes the usual advice.
+ */
+export function organizationSetupErrorText(error: unknown): string {
+  if (
+    error instanceof AuthApiError &&
+    error.code === "organization_setup_rate_limited" &&
+    error.message
+  ) {
+    return error.message;
+  }
+  return userErrorText(error);
+}
 
 export function OrganizationOnboardingPanel({
   onComplete,
@@ -371,7 +388,7 @@ export function OrganizationOnboardingPanel({
       return true;
     } catch (error) {
       toast.error("Couldn't set up the organization", {
-        description: userErrorText(error),
+        description: organizationSetupErrorText(error),
       });
       return false;
     } finally {

@@ -78,7 +78,184 @@ test("an activity failure becomes one JSON line without task token, identifiers 
     workflowType: "sandboxDrainWorkflow",
     attempt: 4890,
     durationMs: 12,
+    failureMessageHash: expect.stringMatching(/^m_[0-9a-f]{12}$/),
   });
+});
+
+test("a code-authored invariant failure logs its message template without identifiers", () => {
+  class SessionControlInvariantError extends Error {
+    override name = "SessionControlInvariantError";
+  }
+  const id = "3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
+  sdkLogger().warn("Activity failed", {
+    sdkComponent: "activity",
+    activityType: "peekSessionWork",
+    error: new SessionControlInvariantError(`Session ${id} does not exist in its workspace`),
+  });
+  // A workflow failure wraps the activity failure; the innermost cause explains it.
+  const wrapped = new Error("Activity task failed", {
+    cause: new SessionControlInvariantError(`Session ${id} does not exist in its workspace`),
+  });
+  sdkLogger().warn("Workflow failed", { sdkComponent: "workflow", error: wrapped });
+
+  expect(lines).toHaveLength(2);
+  for (const line of lines) expect(line.text).not.toContain(id);
+  const [activity, workflow] = lines.map((line) => JSON.parse(line.text));
+  expect(activity).toMatchObject({
+    failureName: "SessionControlInvariantError",
+    failureMessage: "Session <id> does not exist in its workspace",
+  });
+  expect(workflow.failureMessage).toBe("Session <id> does not exist in its workspace");
+  expect(workflow.failureMessageHash).toBe(activity.failureMessageHash);
+});
+
+test("a code-authored wrapper explains a failure instead of the driver error it wraps", () => {
+  class DatabaseTransactionError extends Error {
+    override name = "DatabaseTransactionError";
+  }
+  const postgres = Object.assign(new Error(`duplicate key value ${SENTINEL}`), {
+    name: "PostgresError",
+    severity: "ERROR",
+    code: "23505",
+  });
+  sdkLogger().warn("Activity failed", {
+    sdkComponent: "activity",
+    error: new DatabaseTransactionError("Database transaction settlement failed", {
+      cause: postgres,
+    }),
+  });
+  expect(lines[0]!.text).not.toContain(SENTINEL);
+  expect(JSON.parse(lines[0]!.text)).toMatchObject({
+    failureName: "DatabaseTransactionError",
+    failureMessage: "Database transaction settlement failed",
+    sqlState: "23505",
+  });
+});
+
+test("other failure messages are reduced to a stable hash of their template", () => {
+  sdkLogger().warn("Activity failed", {
+    sdkComponent: "activity",
+    error: new Error(`provider said ${SENTINEL} for 7 "quoted ${SENTINEL}"`),
+  });
+  sdkLogger().warn("Activity failed", {
+    sdkComponent: "activity",
+    error: new Error(`provider said ${SENTINEL} for 9 "other"`),
+  });
+  for (const line of lines) expect(line.text).not.toContain(SENTINEL);
+  const [first, second] = lines.map((line) => JSON.parse(line.text));
+  expect(first).not.toHaveProperty("failureMessage");
+  expect(first.failureMessageHash).toMatch(/^m_[0-9a-f]{12}$/);
+  expect(second.failureMessageHash).toBe(first.failureMessageHash);
+});
+
+/** The shape a refused database write reaches the SDK in: the persistence
+ * error, the query builder's error quoting SQL and parameters, and the
+ * PostgreSQL error our trigger raised. */
+function refusedPersistence(pg: Record<string, unknown>): Error {
+  const postgres = Object.assign(new Error(), { name: "PostgresError", ...pg });
+  const query = Object.assign(new Error(`Failed query: update ${SENTINEL}`, { cause: postgres }), {
+    name: "DrizzleQueryError",
+    query: `update "session_turn_attempts" set ${SENTINEL}`,
+    params: [SENTINEL],
+  });
+  return Object.assign(
+    new Error("Database failure while persisting session.queue.changed", { cause: query }),
+    {
+      name: "SessionEventPersistenceError",
+      details: { code: "db_failure", stage: "session_attempts.mark_quiesced", sqlState: "OG002" },
+    },
+  );
+}
+
+test("an activity failing on a database refusal logs what the database refused", () => {
+  sdkLogger().warn("Activity failed", {
+    sdkComponent: "worker",
+    workflowType: "sessionWorkflow",
+    activityType: "persistSessionAttemptQuiescence",
+    workflowId: `session-${SENTINEL}`,
+    attempt: 18275,
+    durationMs: 26,
+    error: refusedPersistence({
+      severity: "ERROR",
+      code: "OG002",
+      message: "SESSION_ARCHIVED_READ_ONLY",
+      where: "PL/pgSQL function refuse_imported_archive_execution() line 37 at RAISE",
+      detail: SENTINEL,
+    }),
+  });
+
+  expect(lines).toHaveLength(1);
+  expect(lines[0]!.text).not.toContain(SENTINEL);
+  expect(JSON.parse(lines[0]!.text)).toMatchObject({
+    message: "Activity failed",
+    errorClass: "TemporalSdkOperationError",
+    errorCode: "temporal_sdk_failure_logged",
+    activity: "persistSessionAttemptQuiescence",
+    workflowType: "sessionWorkflow",
+    attempt: 18275,
+    failureName: "SessionEventPersistenceError",
+    persistenceStage: "session_attempts.mark_quiesced",
+    sqlState: "OG002",
+    dbReason: "SESSION_ARCHIVED_READ_ONLY",
+    dbFunctions: "refuse_imported_archive_execution:37",
+  });
+});
+
+test("PostgreSQL's own messages and transport codes are never logged as reasons", () => {
+  sdkLogger().warn("Activity failed", {
+    sdkComponent: "worker",
+    error: refusedPersistence({
+      severity: "ERROR",
+      code: "23505",
+      message: `duplicate key value violates unique constraint ${SENTINEL}`,
+    }),
+  });
+  sdkLogger().warn("Activity failed", {
+    sdkComponent: "worker",
+    error: Object.assign(new Error(SENTINEL), { code: "EPIPE" }),
+  });
+
+  expect(lines).toHaveLength(2);
+  for (const line of lines) expect(line.text).not.toContain(SENTINEL);
+  const [refused, transport] = lines.map((line) => JSON.parse(line.text));
+  expect(refused).toMatchObject({ failureName: "SessionEventPersistenceError", sqlState: "23505" });
+  expect(refused).not.toHaveProperty("dbReason");
+  expect(refused).not.toHaveProperty("dbFunctions");
+  expect(transport).toMatchObject({ failureName: "Error" });
+  expect(transport).not.toHaveProperty("sqlState");
+});
+
+test("an ApplicationFailure logs its type and whether it retries", () => {
+  class TemporalFailure extends Error {}
+  class ApplicationFailure extends TemporalFailure {
+    constructor(
+      message: string,
+      readonly type: string,
+      readonly nonRetryable: boolean,
+    ) {
+      super(message);
+    }
+  }
+  // Temporal defines `name` on the failure class prototype, not the instance.
+  Object.defineProperty(ApplicationFailure.prototype, "name", { value: "ApplicationFailure" });
+  sdkLogger().warn("Activity failed", {
+    sdkComponent: "worker",
+    error: new ApplicationFailure(SENTINEL, "SessionReadOnlyFailure", true),
+  });
+  sdkLogger().warn("Activity failed", {
+    sdkComponent: "worker",
+    error: new ApplicationFailure(SENTINEL, `bad type ${SENTINEL}`, false),
+  });
+
+  for (const line of lines) expect(line.text).not.toContain(SENTINEL);
+  const [typed, untyped] = lines.map((line) => JSON.parse(line.text));
+  expect(typed).toMatchObject({
+    failureName: "ApplicationFailure",
+    failureType: "SessionReadOnlyFailure",
+    nonRetryable: true,
+  });
+  expect(untyped).toMatchObject({ failureName: "ApplicationFailure", nonRetryable: false });
+  expect(untyped).not.toHaveProperty("failureType");
 });
 
 test("SDK messages that interpolate exception text publish a fixed message", () => {

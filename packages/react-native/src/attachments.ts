@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { FileAsset, ResourceRef, SendMessageInput } from "@opengeni/sdk";
+import type { FileAsset, ResourceRef, SendMessageInput, UploadFileInput } from "@opengeni/sdk";
 import type { FileAttachmentClientLike, StoredFileSource } from "@opengeni/react/session";
 import type { NativeCryptoAdapter, NativeFileAdapter, NativePickedFile } from "./adapters";
 import { useOpenGeniText, type OpenGeniText } from "@opengeni/react/messages";
@@ -9,6 +9,22 @@ export type NativeAttachmentStatus = "preparing" | "uploading" | "ready" | "fail
 
 export const NATIVE_ATTACHMENT_PREPARATION_TIMEOUT_MS = 30_000;
 
+/**
+ * The largest streamed file the device hashes before uploading. It matches the
+ * server's limit for files shown to the model inline, the only ones that need a
+ * digest pinned at upload; larger files (long videos) upload unhashed, as a
+ * plain REST upload does, so they never have to be read into memory.
+ */
+export const NATIVE_ATTACHMENT_DIGEST_MAX_BYTES = 20 * 1024 * 1024;
+
+/** How a file shows in the composer: a photo, a video or a named document. */
+export function nativeAttachmentKind(contentType: string): NativePickedFile["kind"] {
+  const type = contentType.toLowerCase();
+  if (type.startsWith("image/")) return "image";
+  if (type.startsWith("video/")) return "video";
+  return "document";
+}
+
 export interface NativeAttachment {
   id: string;
   name: string;
@@ -16,7 +32,11 @@ export interface NativeAttachment {
   sizeBytes: number | null;
   kind: NativePickedFile["kind"];
   previewUri?: string | undefined;
+  /** Length of a video, when known. */
+  durationSeconds?: number | undefined;
   status: NativeAttachmentStatus;
+  /** Fraction of the bytes sent (0 to 1) while a streamed upload is in flight. */
+  progress?: number | undefined;
   file?: FileAsset | undefined;
   error?: string | undefined;
 }
@@ -150,7 +170,8 @@ export async function addNativeFilesForGeneration(input: {
   }, Promise.resolve());
 }
 
-export async function prepareNativeAttachmentUpload(
+/** Read a picked file and hash it, each step bounded so a stuck read fails retryably. */
+async function digestNativeAttachment(
   t: OpenGeniText,
   input: {
     source: NativePickedFile;
@@ -158,7 +179,7 @@ export async function prepareNativeAttachmentUpload(
     crypto: NativeCryptoAdapter;
     timeoutMs?: number | undefined;
   },
-): Promise<{ bytes: Uint8Array; data: ArrayBuffer; sha256: string }> {
+): Promise<{ bytes: Uint8Array; sha256: string }> {
   const timeoutMs = input.timeoutMs ?? NATIVE_ATTACHMENT_PREPARATION_TIMEOUT_MS;
   const bytes = await withTimeout(
     input.files.readBytes(input.source),
@@ -170,12 +191,62 @@ export async function prepareNativeAttachmentUpload(
     timeoutMs,
     t("native.attachments.fileVerificationTimedOutRetry"),
   );
+  return { bytes, sha256 };
+}
+
+export async function prepareNativeAttachmentUpload(
+  t: OpenGeniText,
+  input: {
+    source: NativePickedFile;
+    files: NativeFileAdapter;
+    crypto: NativeCryptoAdapter;
+    timeoutMs?: number | undefined;
+  },
+): Promise<{ bytes: Uint8Array; data: ArrayBuffer; sha256: string }> {
+  const { bytes, sha256 } = await digestNativeAttachment(t, input);
   // The Opengeni SDK accepts either Uint8Array or ArrayBuffer, but its
   // Uint8Array snapshot uses `new Blob([view])`. React Native's Blob rejects
   // ArrayBufferView inputs, so pass an exact ArrayBuffer and avoid that branch.
   const uploadBytes = Uint8Array.from(bytes);
   const data = uploadBytes.buffer;
   return { bytes, data, sha256 };
+}
+
+/**
+ * The upload input for a picked file. With a streaming adapter the device
+ * sends the file from disk (reporting progress) and hashes only files up to
+ * {@link NATIVE_ATTACHMENT_DIGEST_MAX_BYTES}; without one the file is read
+ * into memory and hashed, as before.
+ */
+export async function prepareNativeAttachmentData(
+  t: OpenGeniText,
+  input: {
+    source: NativePickedFile;
+    files: NativeFileAdapter;
+    crypto: NativeCryptoAdapter;
+    onProgress: (fraction: number) => void;
+    timeoutMs?: number | undefined;
+  },
+): Promise<{ data: UploadFileInput["data"]; sha256?: string | undefined; streamed: boolean }> {
+  const streamed = input.files.uploadSource?.(input.source, input.onProgress);
+  if (!streamed) {
+    const { data, sha256 } = await prepareNativeAttachmentUpload(t, input);
+    return { data, sha256, streamed: false };
+  }
+  if (streamed.sizeBytes > NATIVE_ATTACHMENT_DIGEST_MAX_BYTES) {
+    return { data: streamed, streamed: true };
+  }
+  const { sha256 } = await digestNativeAttachment(t, input);
+  return { data: streamed, sha256, streamed: true };
+}
+
+/** Stop one upload in flight, or all of them. */
+function cancelTransfers(transfers: Map<string, AbortController>, id?: string): void {
+  for (const [key, controller] of transfers) {
+    if (id !== undefined && key !== id) continue;
+    controller.abort();
+    transfers.delete(key);
+  }
 }
 
 async function withTimeout<T>(
@@ -201,6 +272,8 @@ export function useNativeFileAttachments(input: {
   client: FileAttachmentClientLike;
   workspaceId: string;
   sessionId: string;
+  /** `personal` keeps uploads Only me; omitted, the server (or a session proxy) decides. */
+  scope?: "workspace" | "personal" | undefined;
   files: NativeFileAdapter;
   crypto: NativeCryptoAdapter;
 }): NativeFileAttachmentsResult {
@@ -209,6 +282,9 @@ export function useNativeFileAttachments(input: {
   const [error, setError] = useState<Error | null>(null);
   const sources = useRef(new Map<string, NativePickedFile>());
   const attempts = useRef(new Map<string, number>());
+  // One per upload in flight: removing a file (or leaving the chat) stops its
+  // transfer, so a long video does not keep sending in the background.
+  const transfers = useRef(new Map<string, AbortController>());
   const scopeGeneration = useRef(0);
   const currentScope = {
     client: input.client,
@@ -227,6 +303,7 @@ export function useNativeFileAttachments(input: {
     if (sameNativeAttachmentScope(previousScope.current, nextScope)) return;
     previousScope.current = nextScope;
     scopeGeneration.current += 1;
+    cancelTransfers(transfers.current);
     sources.current.clear();
     attempts.current.clear();
     setAttachments([]);
@@ -236,6 +313,7 @@ export function useNativeFileAttachments(input: {
   useEffect(
     () => () => {
       scopeGeneration.current += 1;
+      cancelTransfers(transfers.current);
       sources.current.clear();
       attempts.current.clear();
     },
@@ -247,71 +325,84 @@ export function useNativeFileAttachments(input: {
       if (scopeGeneration.current !== generation) return;
       const attempt = (attempts.current.get(source.id) ?? 0) + 1;
       attempts.current.set(source.id, attempt);
-      setAttachments((current) =>
-        current.map((entry) =>
+      cancelTransfers(transfers.current, source.id);
+      const transfer = new AbortController();
+      transfers.current.set(source.id, transfer);
+      setAttachments((entries) =>
+        entries.map((entry) =>
           entry.id === source.id ? { ...entry, status: "preparing", error: undefined } : entry,
         ),
       );
+      const current = () =>
+        scopeGeneration.current === generation &&
+        attempts.current.get(source.id) === attempt &&
+        sources.current.has(source.id);
+      let shownPercent = -1;
+      const onProgress = (fraction: number) => {
+        // Native progress arrives about ten times a second; redraw per whole percent.
+        const percent = Math.floor(Math.min(1, Math.max(0, fraction)) * 100);
+        if (percent === shownPercent || !current()) return;
+        shownPercent = percent;
+        setAttachments((entries) =>
+          entries.map((entry) =>
+            entry.id === source.id && entry.status === "uploading"
+              ? { ...entry, progress: percent / 100 }
+              : entry,
+          ),
+        );
+      };
       try {
-        const { data, sha256 } = await prepareNativeAttachmentUpload(t, {
+        const { data, sha256, streamed } = await prepareNativeAttachmentData(t, {
           source,
           files: input.files,
           crypto: input.crypto,
+          onProgress,
         });
-        if (
-          scopeGeneration.current !== generation ||
-          attempts.current.get(source.id) !== attempt ||
-          !sources.current.has(source.id)
-        ) {
-          return;
-        }
-        setAttachments((current) =>
-          current.map((entry) =>
-            entry.id === source.id ? { ...entry, status: "uploading" } : entry,
+        if (!current()) return;
+        setAttachments((entries) =>
+          entries.map((entry) =>
+            entry.id === source.id
+              ? { ...entry, status: "uploading", progress: streamed ? 0 : undefined }
+              : entry,
           ),
         );
         const file = await input.client.uploadFile(input.workspaceId, {
           filename: source.name,
           contentType: source.contentType,
           data,
-          sha256,
+          ...(sha256 ? { sha256 } : {}),
+          ...(input.scope ? { scope: input.scope } : {}),
+          signal: transfer.signal,
         });
-        if (
-          scopeGeneration.current !== generation ||
-          attempts.current.get(source.id) !== attempt ||
-          !sources.current.has(source.id)
-        ) {
-          return;
-        }
+        if (!current()) return;
+        transfers.current.delete(source.id);
         sources.current.delete(source.id);
         attempts.current.delete(source.id);
-        setAttachments((current) =>
-          current.map((entry) =>
-            entry.id === source.id ? { ...entry, status: "ready", file, error: undefined } : entry,
+        setAttachments((entries) =>
+          entries.map((entry) =>
+            entry.id === source.id
+              ? { ...entry, status: "ready", file, error: undefined, progress: undefined }
+              : entry,
           ),
         );
       } catch (cause) {
-        if (
-          scopeGeneration.current !== generation ||
-          attempts.current.get(source.id) !== attempt ||
-          !sources.current.has(source.id)
-        ) {
-          return;
-        }
-        setAttachments((current) =>
-          current.map((entry) =>
+        if (!current()) return;
+        transfers.current.delete(source.id);
+        setAttachments((entries) =>
+          entries.map((entry) =>
             entry.id === source.id
               ? {
                   ...entry,
                   status: "failed",
                   error: errorMessage(cause),
+                  progress: undefined,
                 }
               : entry,
           ),
         );
       }
     },
-    [input.client, input.crypto, input.files, input.workspaceId, t],
+    [input.client, input.crypto, input.files, input.scope, input.workspaceId, t],
   );
 
   const addFilesForGeneration = useCallback(
@@ -333,6 +424,9 @@ export function useNativeFileAttachments(input: {
                 sizeBytes: file.sizeBytes,
                 kind: file.kind,
                 ...(file.previewUri ? { previewUri: file.previewUri } : {}),
+                ...(file.durationSeconds !== undefined
+                  ? { durationSeconds: file.durationSeconds }
+                  : {}),
                 status: "preparing",
               }),
             ),
@@ -388,12 +482,14 @@ export function useNativeFileAttachments(input: {
   );
 
   const remove = useCallback((id: string) => {
+    cancelTransfers(transfers.current, id);
     sources.current.delete(id);
     attempts.current.delete(id);
     setAttachments((current) => current.filter((entry) => entry.id !== id));
   }, []);
 
   const clear = useCallback(() => {
+    cancelTransfers(transfers.current);
     sources.current.clear();
     attempts.current.clear();
     setAttachments([]);
@@ -416,7 +512,7 @@ export function useNativeFileAttachments(input: {
             name: file.filename,
             contentType: file.contentType,
             sizeBytes: file.sizeBytes,
-            kind: file.contentType.startsWith("image/") ? "image" : "document",
+            kind: nativeAttachmentKind(file.contentType),
             status: "ready",
             file,
           }),

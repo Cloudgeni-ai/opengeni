@@ -1,0 +1,92 @@
+# Code owners. GitHub requests a review from the owners of the files a pull
+# request changes. The last line that matches a path decides its owner.
+
+# BEGIN model request review
+# What Opengeni sends to model providers: provider request construction and
+# adapters (request bodies, headers, betas, model options, reasoning replay,
+# signatures, cache-control placement), history projection and replay into
+# model input, compaction requests, system prompt and context assembly, and the
+# central model-facing tool schema and tool result shaping. Tests are not
+# guarded.
+#
+# A pull request that changes any of these paths (or renames a file away from
+# one) lands only with an approving review by @jorgensandhaug on its current
+# head commit. The "Model request review" status and the merge batcher enforce
+# it; see scripts/ci/model-request-review.ts and docs/merge-batcher.md.
+# Keep this section last and every line owned by @jorgensandhaug alone.
+
+# Claude Messages: request body, betas and identity headers, thinking replay,
+# cache-control placement, server-side tools and compaction.
+/packages/runtime/src/anthropic-messages.ts @jorgensandhaug
+/packages/runtime/src/anthropic-compaction.ts @jorgensandhaug
+/packages/runtime/src/anthropic-web-search.ts @jorgensandhaug
+/packages/runtime/src/claude-code-identity.ts @jorgensandhaug
+
+# Provider routing, clients, request policy and wire serialization.
+/packages/runtime/src/model-provider.ts @jorgensandhaug
+/packages/runtime/src/model-provider-client.ts @jorgensandhaug
+/packages/runtime/src/model-provider-request-policy.ts @jorgensandhaug
+/packages/runtime/src/model-provider-routing.ts @jorgensandhaug
+/packages/runtime/src/model-provider-transport.ts @jorgensandhaug
+/packages/runtime/src/replayable-json-body.ts @jorgensandhaug
+/packages/runtime/src/append-only-responses-model.ts @jorgensandhaug
+/packages/runtime/src/chat-reasoning.ts @jorgensandhaug
+/packages/runtime/src/gemini-function-response.ts @jorgensandhaug
+/packages/runtime/src/single-model-call.ts @jorgensandhaug
+/packages/runtime/src/model-image-sizing.ts @jorgensandhaug
+/packages/network/src/responses-websocket.ts @jorgensandhaug
+/packages/subscriptions/src/reasoning.ts @jorgensandhaug
+# Whether a request carries the prompt cache key.
+/apps/worker/src/activities/agent-turn/codex.ts @jorgensandhaug
+
+# Codex and SuperGrok subscription request bodies, reasoning settings and
+# model-facing tool output shaping.
+/packages/codex/src/fetch.ts @jorgensandhaug
+/packages/codex/src/normalize.ts @jorgensandhaug
+/packages/codex/src/reasoning-configuration.ts @jorgensandhaug
+/packages/codex/src/model-output-truncation.ts @jorgensandhaug
+/packages/codex/src/mcp-sanitize.ts @jorgensandhaug
+/packages/xai-subscription/src/fetch.ts @jorgensandhaug
+/packages/xai-subscription/src/normalize.ts @jorgensandhaug
+
+# Patches to the Agents SDK, which builds the provider requests.
+/patches/@openai%2Fagents-*.patch @jorgensandhaug
+
+# History projection and replay into model input.
+/packages/runtime/src/model-input.ts @jorgensandhaug
+/packages/runtime/src/provider-history-adapter.ts @jorgensandhaug
+/packages/runtime/src/opaque-reasoning-replay.ts @jorgensandhaug
+/packages/runtime/src/history-sanitizer.ts @jorgensandhaug
+/packages/runtime/src/provider-tool-names.ts @jorgensandhaug
+/packages/runtime/src/mcp-model-tool-name.ts @jorgensandhaug
+/apps/worker/src/activities/agent-turn/history-prefix.ts @jorgensandhaug
+
+# Compaction requests.
+/packages/runtime/src/context-compaction.ts @jorgensandhaug
+/packages/runtime/src/prepared-compaction-request.ts @jorgensandhaug
+/apps/worker/src/activities/context-compaction.ts @jorgensandhaug
+/apps/worker/src/activities/agent-turn/compaction-prep.ts @jorgensandhaug
+/apps/worker/src/activities/agent-turn/compaction-trim-fallback.ts @jorgensandhaug
+
+# System prompt and context assembly.
+/packages/runtime/src/agent-instructions/ @jorgensandhaug
+/packages/runtime/src/operational-instructions.ts @jorgensandhaug
+/packages/runtime/src/sandbox-base-instructions.ts @jorgensandhaug
+/packages/runtime/src/system-prompt-cache-prefix.ts @jorgensandhaug
+/packages/runtime/src/workspace-governance.ts @jorgensandhaug
+/packages/runtime/src/repository-skills-context.ts @jorgensandhaug
+/packages/contracts/src/skill-catalog-context.ts @jorgensandhaug
+/packages/contracts/src/workspace-governance-context.ts @jorgensandhaug
+/apps/worker/src/activities/agent-turn/agent-build.ts @jorgensandhaug
+/apps/worker/src/activities/run-input.ts @jorgensandhaug
+
+# Central model-facing tool schema and tool result shaping.
+/packages/runtime/src/interaction-tool-json-schema.ts @jorgensandhaug
+/packages/runtime/src/tool-result-spill.ts @jorgensandhaug
+
+# This gate itself.
+/.github/CODEOWNERS @jorgensandhaug
+/.github/workflows/model-request-review.yml @jorgensandhaug
+/.github/workflows/model-request-review-signal.yml @jorgensandhaug
+/scripts/ci/model-request-review.ts @jorgensandhaug
+# END model request review

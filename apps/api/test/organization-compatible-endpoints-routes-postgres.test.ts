@@ -434,4 +434,57 @@ describe.skipIf(!realDb)("organization OpenAI-compatible endpoint routes", () =>
       "acme/chosen": ["low", "high"],
     });
   });
+  test("an endpoint model has no price until an administrator gives it one", async () => {
+    const created = await call(owner, "POST", endpointsPath(owner.accountId), {
+      operationId: crypto.randomUUID(),
+      baseUrl: "https://priced.example.com/v1",
+      apiKey: "sk-priced",
+      model: "acme/proxy-astra",
+    });
+    expect(created.status).toBe(201);
+    const [model] = created.json.models as Record<string, any>[];
+    // Unknown, never free: its usage is unpriced until it has a price.
+    expect(model).toMatchObject({ listPrice: null, listPriceKnown: false });
+    const listed = await call(owner, "GET", endpointsPath(owner.accountId));
+    expect(listed.json.priceBasisModelIds).toContain("gpt-6-astra");
+
+    const pricePath = `${endpointsPath(owner.accountId)}/${created.json.id}/models/${model!.id}/list-price`;
+    const unknownBase = await call(owner, "PUT", pricePath, {
+      expectedVersion: model!.version,
+      listPrice: { basis: "model", modelId: "not-a-catalogue-model" },
+    });
+    expect(unknownBase.status).toBe(422);
+    const memberSet = await call(member, "PUT", pricePath, {
+      expectedVersion: model!.version,
+      listPrice: { basis: "model", modelId: "gpt-6-astra" },
+    });
+    expect(memberSet.status).toBe(403);
+    const priced = await call(owner, "PUT", pricePath, {
+      expectedVersion: model!.version,
+      listPrice: { basis: "model", modelId: "gpt-6-astra" },
+    });
+    expect(priced.status).toBe(200);
+    expect(priced.json).toMatchObject({
+      version: model!.version + 1,
+      listPrice: { basis: "model", modelId: "gpt-6-astra" },
+      listPriceKnown: true,
+    });
+    const pricing = {
+      inputMicrosPerMillionTokens: 1_000_000,
+      outputMicrosPerMillionTokens: 4_000_000,
+    };
+    const custom = await call(owner, "PUT", pricePath, {
+      expectedVersion: priced.json.version,
+      listPrice: { basis: "custom", pricing },
+    });
+    expect(custom.json).toMatchObject({
+      listPrice: { basis: "custom", pricing },
+      listPriceKnown: true,
+    });
+    const stale = await call(owner, "PUT", pricePath, {
+      expectedVersion: priced.json.version,
+      listPrice: null,
+    });
+    expect(stale.status).toBe(409);
+  });
 });

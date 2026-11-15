@@ -21,7 +21,7 @@
 
 import { MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL } from "./oversized-image-card";
 import { RetainedArtifactMetadataSchema } from "@opengeni/contracts";
-import { preservesHostedCallStatus, type HostedCallStatusItemType } from "./hosted-call-status";
+import { preservesReplayStatus, type ReplayStatusItemType } from "./replay-status";
 
 export { MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL } from "./oversized-image-card";
 
@@ -44,7 +44,7 @@ type WithoutOutputOnlyProviderDataField<T extends ModelHistoryItem> = "providerD
   : object;
 
 type WithoutOutputOnlyHistoryItemFields<T extends ModelHistoryItem> = T extends unknown
-  ? T extends { type: HostedCallStatusItemType }
+  ? T extends { type: ReplayStatusItemType }
     ? T
     : Omit<T, "status" | "providerData"> & WithoutOutputOnlyProviderDataField<T>
   : never;
@@ -56,8 +56,10 @@ type WithoutOutputOnlyHistoryItemFields<T extends ModelHistoryItem> = T extends 
  * SuperGrok accepts items with or without it. The SDK also nests `status` on
  * `providerData` (reasoning items) and flattens it back onto the request.
  * Canonical history omits both for those items so portable sessions can cross
- * Responses providers. Hosted tool calls are different: the provider requires
- * their status on replay, and the SDK reads it to reconstruct the wire item.
+ * Responses providers. Items in `REPLAY_STATUS_ITEM_TYPES` (hosted calls,
+ * apply_patch, computer, local shell, program output) are different: the
+ * Responses input schema requires their status on replay, and the SDK reads it
+ * to reconstruct the wire item.
  */
 export function omitOutputOnlyHistoryItemFields<T extends ModelHistoryItem>(
   item: T,
@@ -65,7 +67,13 @@ export function omitOutputOnlyHistoryItemFields<T extends ModelHistoryItem>(
   if (!item || typeof item !== "object") {
     return item as unknown as WithoutOutputOnlyHistoryItemFields<T>;
   }
-  if (preservesHostedCallStatus(item.type)) {
+  // The Agents SDK carries item types it has no protocol shape for (such as
+  // `local_shell_call`) as `{ type: "unknown", providerData: <wire item> }`.
+  const wireType =
+    item.type === "unknown" && item.providerData && typeof item.providerData === "object"
+      ? (item.providerData as Record<string, unknown>).type
+      : item.type;
+  if (preservesReplayStatus(wireType)) {
     return item as unknown as WithoutOutputOnlyHistoryItemFields<T>;
   }
   const providerData =

@@ -18,7 +18,8 @@ import {
 } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/browser";
 import { useEffect, useRef, useState } from "react";
-import { ConnectCardMessage } from "../connect-card-message";
+import type { AdminStepUpHandler } from "../admin-step-up";
+import { ConnectCardMessage, type CardStepUp } from "../connect-card-message";
 import { attemptHint, type ConnectWindowHost } from "../connect-window-host";
 import { useConnect, type ConnectView } from "../hooks/use-connect";
 import { matchingActiveMcpConnections } from "../mcp-connection-status";
@@ -30,9 +31,12 @@ import { useOpenGeniText } from "../messages/runtime";
 import {
   attachSessionCapability,
   continueAfterCapabilitySetup,
-  sessionCapabilityTools,
+  sessionUsesCapability,
 } from "../session-capability-policy";
 import { workspaceHasNobodyToShareWith } from "../workspace-sharing";
+import { ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE } from "@opengeni/contracts/managed-sign-in-methods";
+import { organizationAppApproval, type OrganizationAppApproval } from "@opengeni/contracts/connect";
+import { organizationApprovalFor, type OrganizationApproval } from "../connect-setup-model";
 
 const GOOGLE_DRIVE_MCP_URL = "https://drivemcp.googleapis.com/mcp/v1";
 /** Google's connectors only ever connect a person's own account; the API refuses sharing. */
@@ -42,6 +46,50 @@ const PERSONAL_ONLY_MCP_URLS = new Set([
   "https://calendarmcp.googleapis.com/mcp/v1",
 ]);
 const RESTART_STATES = ["failed", "expired", "cancelled"];
+
+/**
+ * The person's own login a subject-scoped connector's card reconnects: their
+ * one login for this endpoint, or none to connect a new one. A removed
+ * (revoked) login is no account at all, as on the Connected accounts list, so
+ * a removed duplicate never makes the choice ambiguous; only two logins that
+ * still exist do.
+ */
+export function personalReconnectTarget(
+  connections: readonly ConnectionMetadata[],
+  mcpUrl: string,
+): { ambiguous: true } | { ambiguous: false; connectionId: string | undefined } {
+  const logins = connections.filter(
+    (entry) =>
+      entry.subjectId !== null &&
+      entry.kind === "oauth2" &&
+      entry.status !== "revoked" &&
+      entry.metadata.mcpUrl === mcpUrl,
+  );
+  return logins.length > 1
+    ? { ambiguous: true }
+    : { ambiguous: false, connectionId: logins[0]?.id };
+}
+
+/**
+ * The person's one own login for this endpoint, added in another workspace
+ * and not turned on in this one, for a capability not yet set up here: the
+ * card offers to use it here instead of signing in again. None when they have
+ * no such login, or more than one (a sign-in then says which account).
+ */
+export function ownLoginToUseHere(
+  accounts: readonly ConnectionMetadata[],
+  mcpUrl: string | null | undefined,
+): ConnectionMetadata | null {
+  if (!mcpUrl) return null;
+  const logins = accounts.filter(
+    (entry) =>
+      entry.subjectId !== null &&
+      entry.kind === "oauth2" &&
+      entry.status === "active" &&
+      entry.metadata.mcpUrl === mcpUrl,
+  );
+  return logins.length === 1 && ownLoginOffHere(logins[0]!) ? logins[0]! : null;
+}
 
 function personalOnlyService(item: Pick<CapabilityCatalogItem, "mcpUrl" | "endpointUrl"> | null) {
   const url = item?.mcpUrl ?? item?.endpointUrl;
@@ -75,6 +123,20 @@ export type McpCapabilityConnect = {
   setOwnership: (ownership: ConnectOwnership) => void;
   /** The sign-in button says "Try signing in again" rather than continuing. */
   retrySignIn: boolean;
+  /**
+   * The person's organization must, or may have to, approve the app first:
+   * the provider said so, declined (how leaving its "needs admin approval"
+   * page comes back), or the person gave up on its sign-in page.
+   */
+  approval: OrganizationApproval | null;
+  /**
+   * Turning it on waits for the person to confirm it's them with a passkey.
+   * `opened`: the host's step-up went elsewhere (a page it opened) without
+   * confirming here, so the next action is Try again.
+   */
+  stepUp: (CardStepUp & { opened: boolean }) | null;
+  /** Confirm with the host's step-up, then turn it on again; or Try again. */
+  confirmStepUp: () => void;
   open: () => void;
   signIn: () => void;
   addHere: () => void;
@@ -109,6 +171,11 @@ export type McpCapabilityConnectInput = {
    * in again to that same connection instead of adding a new one.
    */
   reconnectConnectionId?: string | undefined;
+  /**
+   * How the host lets the person confirm it's them with a passkey when turning
+   * the capability on asks for it. Without one, the card says what to do.
+   */
+  adminStepUp?: AdminStepUpHandler | undefined;
 };
 
 /**
@@ -128,6 +195,7 @@ export function useMcpCapabilityConnect({
   onClose,
   personalOnly: configuredPersonalOnly = false,
   reconnectConnectionId,
+  adminStepUp,
 }: McpCapabilityConnectInput): McpCapabilityConnect {
   const t = useOpenGeniText();
   const [controller] = useState(
@@ -148,7 +216,11 @@ export function useMcpCapabilityConnect({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [stepUp, setStepUp] = useState<(CardStepUp & { opened: boolean }) | null>(null);
   const [retryFresh, setRetryFresh] = useState(false);
+  // A sign-in the person left (closed its window or stopped waiting): its
+  // page may have said an administrator has to approve the app.
+  const [leftSignIn, setLeftSignIn] = useState<OrganizationAppApproval | null>(null);
   const [ownership, setOwnership] = useState<ConnectOwnership>(
     personalOnly ? "personal" : "workspace",
   );
@@ -156,6 +228,11 @@ export function useMcpCapabilityConnect({
   const authorization = useRef<AbortController | null>(null);
   const operation = useRef<AbortController | null>(null);
   const reservedPopup = useRef<(() => void) | null>(null);
+  const steppingUp = useRef(false);
+  // The host's step-up already ran once. If turning on is still refused (its
+  // confirmation didn't reach this session), the card says so plainly and
+  // offers Try again instead of opening the step-up again and again.
+  const steppedUp = useRef(false);
   const startKey = useRef(crypto.randomUUID());
   const advanceKey = useRef(crypto.randomUUID());
   const startInput = useRef<string | null>(null);
@@ -232,19 +309,33 @@ export function useMcpCapabilityConnect({
         ? usableHere.some((entry) => entry.id === reconnectConnectionId)
         : usableHere.length === 1;
       if (usableHere.length === 0) ownLoginElsewhere = matches.find(ownLoginOffHere) ?? null;
+    } else if (
+      !resolved.enabled &&
+      !reconnectConnectionId &&
+      (resolved.connectionRef
+        ? resolved.connectionRef.subjectScope === "subject"
+        : // Only where the card would connect the person's own account anyway;
+          // otherwise they first choose who can use the connection.
+          personalOnly ||
+          nobodyToShareWith ||
+          personalOnlyService(resolved) ||
+          resolved.metadata?.defaultConnectionOwnership === "personal")
+    ) {
+      // Not set up here yet, but the person may already have their own login
+      // for it from another workspace. Only an offer: if this read fails the
+      // card still signs in as usual.
+      const accounts = await Promise.resolve()
+        .then(() => client.listOwnConnectionAccounts(workspaceId))
+        .catch((): ConnectionMetadata[] => []);
+      if (invocation.signal.aborted || lifetime.current !== invocation || !active()) return null;
+      ownLoginElsewhere = ownLoginToUseHere(accounts, resolved.mcpUrl ?? resolved.endpointUrl);
     }
     if (invocation.signal.aborted || lifetime.current !== invocation || !active()) return null;
-    const selected =
-      session?.toolPolicy.mode === "workspace_default"
-        ? session.effectiveToolPolicy?.selectedIds
-        : session?.tools.filter((tool) => tool.kind === "mcp").map((tool) => tool.id);
     setConnected(accountReady);
     setOffHere(ownLoginElsewhere);
-    setComplete(
-      accountReady &&
-        !!selected &&
-        sessionCapabilityTools(resolved).every((tool) => selected.includes(tool.id)),
-    );
+    // Already used in this chat: read from the session the way adding it
+    // does, so a reload shows the same finished card.
+    setComplete(accountReady && !!session && sessionUsesCapability(session, resolved));
     return resolved;
   }
 
@@ -288,14 +379,21 @@ export function useMcpCapabilityConnect({
     setBusy(true);
     setError(null);
     setNotice(null);
+    setStepUp(null);
     setRetryFresh(false);
+    setLeftSignIn(null);
     try {
       await action(active);
     } catch (failure) {
       if (active()) {
-        if (failure instanceof ConnectPopupClosedError)
+        if (failure instanceof ConnectPopupClosedError) {
           setNotice(t("connectSetup.signInWindowClosed"));
-        else
+          const left = controller.getSnapshot().attempt;
+          if (left?.nextAction.type === "authorize")
+            setLeftSignIn(
+              organizationAppApproval(left.nextAction.url, left.nextAction.organizationApprovalUrl),
+            );
+        } else {
           setError(
             // This flow's own steps explain themselves; a server or network
             // failure gets the card's plain line instead of its raw text.
@@ -303,6 +401,13 @@ export function useMcpCapabilityConnect({
               ? failure.message
               : t("sessionMcpCapabilityCard.connectionSetupCouldNotFinish"),
           );
+          if (failure instanceof ConnectCardMessage && failure.stepUp)
+            setStepUp({
+              ...failure.stepUp,
+              hostAction: failure.stepUp.hostAction ?? false,
+              opened: false,
+            });
+        }
       }
     } finally {
       if (operation.current === pending) {
@@ -317,10 +422,19 @@ export function useMcpCapabilityConnect({
     if (attempt.state !== "complete" || !attempt.account || !attempt.credentialsCommitted) return;
     const resolved = await load(active);
     if (!resolved || !active()) return;
-    const connection = (await client.listConnections(workspaceId)).find(
+    let connection = (await client.listConnections(workspaceId)).find(
       (entry) => entry.id === attempt.account!.id,
     );
     if (!active()) return;
+    // Signing in with your own login already added in another workspace
+    // reuses that login (D-54): it is listed with your accounts, not with
+    // this workspace's connections.
+    if (!connection && attempt.ownership === "personal") {
+      connection = (await client.listOwnConnectionAccounts(workspaceId)).find(
+        (entry) => entry.id === attempt.account!.id,
+      );
+      if (!active()) return;
+    }
     if (
       !connection ||
       connection.status !== "active" ||
@@ -337,6 +451,12 @@ export function useMcpCapabilityConnect({
       previous.connectionId !== connection.id
     )
       throw new ConnectCardMessage(t("sessionMcpCapabilityCard.thisIntegrationSSelectedAccount"));
+    // The server turns a reused login on where it was connected, best
+    // effort; signing in here is the person's choice to use it here.
+    if (ownLoginOffHere(connection)) {
+      await turnOnOwnLoginHere(client, workspaceId, connection);
+      if (!active()) return;
+    }
     // Enabling is a workspace installation change. When the capability is
     // already enabled with exactly this binding (each person's own account,
     // or this shared account), connecting an account needs no installation
@@ -348,31 +468,7 @@ export function useMcpCapabilityConnect({
         ? previous.subjectScope === "subject"
         : previous.subjectScope !== "subject" && previous.connectionId === connection.id);
     if (!alreadyBound) {
-      try {
-        await client.enableCapability(workspaceId, capabilityId, {
-          connectionRef:
-            attempt.ownership === "personal"
-              ? {
-                  providerDomain: connection.providerDomain,
-                  kind: "oauth2",
-                  subjectScope: "subject",
-                }
-              : {
-                  providerDomain: connection.providerDomain,
-                  kind: "oauth2",
-                  subjectScope: "workspace",
-                  connectionId: connection.id,
-                },
-        });
-      } catch (failure) {
-        // The account is connected, but turning the integration on here is an
-        // admin's step. Say so: the account is used once an admin turns it on.
-        if (failure instanceof OpenGeniApiError && failure.status === 403)
-          throw new ConnectCardMessage(
-            t("sessionMcpCapabilityCard.onlyAnAdminCanTurnOn", { name: resolved.name }),
-          );
-        throw failure;
-      }
+      await enableWith(resolved, connection, attempt.ownership);
       if (!active()) return;
     }
     const enabled = await load(active);
@@ -381,6 +477,99 @@ export function useMcpCapabilityConnect({
     }
     if (!active()) return;
     hints.forget(storageKey);
+  }
+
+  /** Turn the capability on here with this account: each person's own, or this shared one. */
+  async function enableWith(
+    resolved: CapabilityCatalogItem,
+    connection: ConnectionMetadata,
+    accountOwnership: ConnectOwnership,
+  ) {
+    try {
+      await client.enableCapability(workspaceId, capabilityId, {
+        connectionRef:
+          accountOwnership === "personal"
+            ? {
+                providerDomain: connection.providerDomain,
+                kind: "oauth2",
+                subjectScope: "subject",
+              }
+            : {
+                providerDomain: connection.providerDomain,
+                kind: "oauth2",
+                subjectScope: "workspace",
+                connectionId: connection.id,
+              },
+      });
+    } catch (failure) {
+      // An admin who hasn't confirmed it's them with a passkey is asked to;
+      // the account is connected and turning it on works once they do.
+      if (
+        failure instanceof OpenGeniApiError &&
+        failure.status === 403 &&
+        failure.details?.code === ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE
+      ) {
+        const registered = failure.details.passkeyRegistered !== false;
+        // With a host step-up the card offers it as the next action.
+        const hostAction = Boolean(adminStepUp) && !steppedUp.current;
+        throw new ConnectCardMessage(
+          t(
+            hostAction
+              ? registered
+                ? "sessionMcpCapabilityCard.confirmWithPasskeyToTurnOnHere"
+                : "sessionMcpCapabilityCard.addAPasskeyToTurnOnHere"
+              : registered
+                ? "sessionMcpCapabilityCard.confirmWithPasskeyToTurnOn"
+                : "sessionMcpCapabilityCard.addAPasskeyToTurnOn",
+            { name: resolved.name },
+          ),
+          { stepUp: { passkeyRegistered: registered, hostAction } },
+        );
+      }
+      // The account is connected, but turning the integration on here is an
+      // admin's step. Say so: the account is used once an admin turns it on.
+      if (failure instanceof OpenGeniApiError && failure.status === 403)
+        throw new ConnectCardMessage(
+          t("sessionMcpCapabilityCard.onlyAnAdminCanTurnOn", { name: resolved.name }),
+        );
+      throw failure;
+    }
+  }
+
+  /** Turn it on again with the connected account: after a step-up, or Try again. */
+  function retryTurnOn() {
+    // Using your own login here retries that, not a sign-in.
+    if (offHere) {
+      void useHere();
+      return;
+    }
+    void run(async (active) => {
+      const attempt = controller.getSnapshot().attempt;
+      if (attempt?.state === "complete") await reconcile(attempt, active);
+      else await recoverSavedAttempt(active);
+    });
+  }
+
+  async function confirmStepUp() {
+    const asked = stepUp;
+    if (!asked || operation.current || steppingUp.current) return;
+    if (asked.opened || !asked.hostAction || !adminStepUp) {
+      retryTurnOn();
+      return;
+    }
+    let confirmed = false;
+    steppingUp.current = true;
+    steppedUp.current = true;
+    try {
+      confirmed = await adminStepUp({ passkeyRegistered: asked.passkeyRegistered });
+    } catch {
+      confirmed = false;
+    } finally {
+      steppingUp.current = false;
+    }
+    if (!current()) return;
+    if (confirmed) retryTurnOn();
+    else setStepUp({ ...asked, opened: true });
   }
 
   async function open() {
@@ -460,16 +649,11 @@ export function useMcpCapabilityConnect({
         // stays on its exact native connection ID.
         let reconnectAccountId = lapsed?.id ?? resolved.connectionRef?.connectionId ?? undefined;
         if (!lapsed && resolved.connectionRef?.subjectScope === "subject") {
-          const connections = (await client.listConnections(workspaceId)).filter(
-            (entry) =>
-              entry.subjectId !== null &&
-              entry.kind === "oauth2" &&
-              entry.metadata.mcpUrl === mcpUrl,
-          );
+          const target = personalReconnectTarget(await client.listConnections(workspaceId), mcpUrl);
           if (!active()) return;
-          if (connections.length > 1)
+          if (target.ambiguous)
             throw new ConnectCardMessage(t("sessionMcpCapabilityCard.moreThanOnePersonalAccount"));
-          reconnectAccountId = connections[0]?.id;
+          reconnectAccountId = target.connectionId;
         }
         // A closed request can still have reached the server. Keep its key for
         // an exact replay, but never reuse it when ownership or another input
@@ -533,10 +717,19 @@ export function useMcpCapabilityConnect({
         signal: pending.signal,
       });
       if (!active() || !result) return;
+      // The controller's view only learns the finished attempt (and the
+      // provider's error, which carries any admin approval link) through recover.
+      const finished = (await controller.recover(result.id).catch(() => null)) ?? result;
+      if (!active()) return;
       setWaiting(false);
       setReconciling(true);
       await reconcile(result, active);
       if (!active()) return;
+      if (finished.state !== "complete" && organizationApprovalFor(finished)) {
+        // The approval panel explains what happened and offers the retry.
+        setRetryFresh(true);
+        return;
+      }
       if (result.state === "cancelled") {
         setNotice(t("sessionMcpCapabilityCard.signInWasCancelledYou"));
         setRetryFresh(true);
@@ -617,11 +810,24 @@ export function useMcpCapabilityConnect({
     await run(async (active) => {
       const login = offHere;
       if (!item || !login) return;
+      // Not set up here yet: turn it on for each person's own account first,
+      // so a refusal (only an admin can) leaves the login as it was.
+      const enabling = !item.enabled || !item.connectionRef;
+      if (enabling) {
+        await enableWith(item, login, "personal");
+        if (!active()) return;
+      }
       await turnOnOwnLoginHere(client, workspaceId, login);
       if (!active()) return;
       setOffHere(null);
+      let capability = item;
+      if (enabling) {
+        const enabled = await load(active);
+        if (!enabled || !active()) return;
+        capability = enabled;
+      }
       setConnected(true);
-      await finishConnection(item, active);
+      await finishConnection(capability, active);
       finished = true;
     });
     // Started from the closed card: open it so a failure is shown, not lost.
@@ -652,6 +858,15 @@ export function useMcpCapabilityConnect({
     else void begin();
   }
 
+  const attempt = view.attempt;
+  const approval = busy
+    ? null
+    : attempt && (attempt.error || !leftSignIn)
+      ? organizationApprovalFor(attempt)
+      : leftSignIn
+        ? { reason: "unfinished" as const, url: leftSignIn.approvalUrl, appId: leftSignIn.appId }
+        : null;
+
   return {
     controller,
     view,
@@ -664,13 +879,22 @@ export function useMcpCapabilityConnect({
     waiting,
     reconciling,
     busy,
+    // A refused sign-in with an approval link sets no error (see
+    // performAuthorization), so any error here is newer and stays visible.
     error,
     notice,
     ownership,
     setOwnership,
     /** The sign-in button says "Try signing in again" rather than continuing. */
     retrySignIn:
-      retryFresh || (Boolean(error || notice) && view.attempt?.nextAction.type === "authorize"),
+      retryFresh ||
+      // The card already knows the last sign-in ended (it recovers the
+      // finished attempt), so the next one starts afresh.
+      (!!attemptState && RESTART_STATES.includes(attemptState)) ||
+      (Boolean(error || notice) && view.attempt?.nextAction.type === "authorize"),
+    approval,
+    stepUp,
+    confirmStepUp: () => void confirmStepUp(),
     open: () => void open(),
     signIn,
     addHere: () => void addHere(),

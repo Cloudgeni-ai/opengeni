@@ -1,5 +1,107 @@
 # @opengeni/agent-host
 
+## 6.23.0
+
+### Patch Changes
+
+- Updated dependencies [f6a7c28]
+  - @opengeni/sdk@6.23.0
+
+## 6.22.0
+
+### Patch Changes
+
+- aff49c5: The agent ships the embedded browser controller whose browser checkpoints leave sites' service worker caches behind, so pausing and resuming a managed browser for a large web app moves a few MB instead of hundreds.
+- 3bf1c71: A Connected Machine command's completion no longer reaches its session minutes late on a slow uplink. The agent sent the few-byte completion notice, its retries and its operation inventory through the same first-in-first-out connection as command output, so the notice waited behind every output frame already queued (or was dropped from a full queue) until the next reconnect. The agent now sends them on its control connection, repeating an unacknowledged completion with every heartbeat. Opengeni's collector also used to give up on a completed command's output after five seconds without it, attach again (queuing the same frames once more) and back off for up to five minutes; it now follows one attachment until the exit arrives or its claim budget ends. `replayConnectedCommandOutput` requires a deadline for terminal replays. Failed completion, inventory collection, probe, settlement and output release warnings now carry a closed `reason` code (`claim_deadline`, `exit_frontier_not_reached`, `exit_frontier_mismatch`, `output_transport_unavailable`, `control_<code>`, `database_<sqlstate>` or `unclassified`), exported by the new `connectedCommandFailureReason`, since telemetry does not export error text.
+- Updated dependencies [d50092b]
+  - @opengeni/sdk@6.22.0
+
+## 6.21.0
+
+### Patch Changes
+
+- Updated dependencies [ef4c334]
+- Updated dependencies [6ac2cd4]
+  - @opengeni/sdk@6.21.0
+
+## 6.20.1
+
+### Patch Changes
+
+- @opengeni/sdk@6.20.1
+
+## 6.20.0
+
+### Patch Changes
+
+- Updated dependencies [c624443]
+- Updated dependencies [e37485b]
+  - @opengeni/sdk@6.20.0
+
+## 6.19.0
+
+### Patch Changes
+
+- 65cb26f: Agent 0.1.161 ships the embedded browser controller that relaunches a managed browser whose process was killed while the controller was stopping, instead of refusing it permanently.
+- 227650c: A Connected Machine update the server stops hearing about no longer stays stuck. An update outlives the connection its request arrived on, since each connection lasts only as long as its five-minute broker credential, but the agent sent its progress through that connection, so progress after it closed could be lost: a failed or still-waiting update could read as `waiting_for_idle` with no blockers for good, on the release promoted back then, and the server never asked again because an accepted update was the agent's to finish. The agent now reports update progress through its current connection. The server treats an unfinished update it has not heard about for 30 minutes (an unanswered request after 10) as lost, and the next heartbeat, or Update now, replaces it with a request for the release promoted now. An agent still carrying the old update refuses it as busy updating and is asked again later. `beginEnrollmentAgentUpdate` takes an optional `replaceUnfinishedBefore` for this.
+- Updated dependencies [a85adef]
+  - @opengeni/sdk@6.19.0
+
+## 6.18.0
+
+### Patch Changes
+
+- bd21ead: A finished command no longer keeps a file descriptor open while the agent holds its output. When a command's output spills to disk, the agent kept the spool segment's append handle open until the output was released or evicted, so every completed command waiting for its final acknowledgement held one descriptor. Retained results can number in the thousands, which a 1024 soft limit can't cover. A busy sandbox then hit `EMFILE` and couldn't start `/bin/sh` for new commands. Writing the command's exit record now closes the handle, and reads open their own as before. Running commands are unchanged.
+- Updated dependencies [f313a0e]
+- Updated dependencies [6813960]
+- Updated dependencies [9188c1d]
+- Updated dependencies [3105a8b]
+- Updated dependencies [a16189c]
+  - @opengeni/sdk@6.18.0
+
+## 6.17.0
+
+### Patch Changes
+
+- Updated dependencies [43aa19d]
+- Updated dependencies [deccb54]
+- Updated dependencies [389de66]
+- Updated dependencies [42ef2a2]
+- Updated dependencies [241ce71]
+  - @opengeni/sdk@6.17.0
+
+## 6.16.0
+
+### Patch Changes
+
+- Updated dependencies [86e5358]
+  - @opengeni/sdk@6.16.0
+
+## 6.15.0
+
+### Patch Changes
+
+- Updated dependencies [708848c]
+- Updated dependencies [60d067d]
+- Updated dependencies [f92ff08]
+- Updated dependencies [060c983]
+- Updated dependencies [bf804ef]
+- Updated dependencies [6a5023d]
+- Updated dependencies [02ac654]
+- Updated dependencies [b0fce89]
+- Updated dependencies [9885d37]
+- Updated dependencies [7a83f9b]
+  - @opengeni/sdk@6.15.0
+
+## 6.14.0
+
+### Patch Changes
+
+- Updated dependencies [c976c87]
+- Updated dependencies [904eae7]
+- Updated dependencies [7c926f8]
+  - @opengeni/sdk@6.14.0
+
 ## 6.13.0
 
 ### Patch Changes

@@ -17,10 +17,24 @@ export const BUILT_IN_TURN_SUMMARY_FACET_IDS = [
 export type BuiltInTurnSummaryFacetId = (typeof BUILT_IN_TURN_SUMMARY_FACET_IDS)[number];
 
 export type TurnSummaryContext = Readonly<{
-  /** Every normalized activity item folded into this summary. */
+  /**
+   * Every normalized activity item folded into this summary. Only the loaded
+   * ones: see `unloadedSteps`.
+   */
   items: readonly ActivityItem[];
   /** Tool calls from `items`, retained in timeline order for convenient aggregation. */
   toolCalls: readonly ToolCallItem[];
+  /**
+   * True when some of this turn's steps (tool calls, their outputs, reasoning,
+   * command output) are not in the browser, so `items` and `toolCalls` hold
+   * only part of the turn. This happens before a turn's steps are read
+   * (history loads a turn's steps when it is opened), until its earlier pages
+   * are read, and on a long live turn whose collapsed row keeps only its
+   * newest steps. A count over `items` or `toolCalls` is then a lower bound
+   * that can go down as older steps leave the browser: omit it, or show it as
+   * a lower bound. The number of unloaded steps is not known.
+   */
+  unloadedSteps: boolean;
   /** The settled turn verdict, or absent for a neutral/incomplete cluster. */
   outcome: TurnOutcome | undefined;
   /** The bounded failure reason rendered by the enclosing summary, when present. */
@@ -189,6 +203,7 @@ export function createTurnSummaryContext(
   failureText: string | undefined,
   durationMs: number | undefined,
   contextCompactionCount: number,
+  unloadedSteps = false,
 ): TurnSummaryContext {
   const itemSnapshot = Object.freeze([...items]);
   const toolCalls = Object.freeze(
@@ -212,6 +227,7 @@ export function createTurnSummaryContext(
     t,
     items: itemSnapshot,
     toolCalls,
+    unloadedSteps,
     outcome,
     failureText,
     durationMs,
@@ -221,8 +237,10 @@ export function createTurnSummaryContext(
 }
 
 // Step, file, command and screenshot counts are not shown: conversation-first
-// history does not load a turn's steps until the turn is opened, so a count
-// would cost a read on every open. Their ids remain accepted by `remove`.
+// history does not load a turn's steps until the turn is opened, and a long
+// live turn keeps only its newest steps, so a count over loaded steps would be
+// wrong. Their ids remain accepted by `remove`. Memories and compactions are
+// conversation events, loaded whether or not the turn's steps are.
 export const BUILT_IN_TURN_SUMMARY_FACETS: readonly TurnSummaryFacet[] = Object.freeze([
   {
     id: "memories",

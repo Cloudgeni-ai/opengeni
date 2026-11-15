@@ -1,12 +1,18 @@
 import { collapseRepeatedSessionGoalContexts } from "@opengeni/contracts";
 import { isAnthropicWebSearchItem } from "./anthropic-web-search";
-import { chatReasoning, chatReasoningDetails, chatReasoningDetailsText } from "./chat-reasoning";
 import {
+  claudeSignedThinkingBlock,
+  claudeThinkingSecret,
+  isClaudeThinkingContentPart,
+} from "./opaque-reasoning-replay";
+import {
+  isHostedSearchEvidenceRecord,
   projectHostedSearchEvidence,
   withSearchRecordForm,
   withSearchRecordsAfterOpenCalls,
   type SearchRecordForm,
 } from "./hosted-search-evidence";
+import { withItemsAfterOpenCalls } from "./items-after-open-calls";
 
 export type HistoryProviderApi = "responses" | "chat" | "anthropic-messages";
 
@@ -33,15 +39,22 @@ export type ProviderHistoryOptions = {
    */
   searchRecordForm?: SearchRecordForm;
   /**
-   * The provider that receives this Responses request. Opaque reasoning (its
-   * `encrypted_content`) that another provider issued, or that
-   * `isRejectedArtifact` reports, reaches it only as readable historical text:
-   * only the issuing provider can decrypt it. The origin record
+   * The provider that receives this Responses request (see
+   * opaque-reasoning-replay). Opaque reasoning (its `encrypted_content`, or
+   * raw reasoning `content`) that another provider issued, or that
+   * `isRejectedArtifact` reports, is left out of the request: only the issuing
+   * provider accepts it, and it is never resent as text. The origin record
    * ({@link ARTIFACT_ORIGIN_KEY}) is removed from every item, so the issuing
-   * provider receives exactly the item it returned.
+   * provider receives exactly the item it returned. Claude checks its finer
+   * binding on the wire, where it knows Claude's turn boundaries
+   * (`buildAnthropicRequest`).
+   *
+   * On Responses and Chat requests, a Chat tool call's provider fields (see
+   * `withToolCallArtifactOrigin`) likewise reach only the provider that
+   * returned them.
    */
   artifactScope?: string;
-  /** True for an opaque item this provider already refused to decrypt. */
+  /** True for an opaque item (ciphertext or a Claude signature) this provider refused. */
   isRejectedArtifact?: (item: Record<string, unknown>) => boolean;
 };
 
@@ -52,13 +65,20 @@ const HISTORICAL_FACT_MAX_CHARS = 32_000;
 /** Marks a request-local item that declares tools newly available to the model. */
 export const TOOL_DISCLOSURE_KEY = "opengeni.tool_disclosure.v1";
 /**
- * Records, on an opaque reasoning item, the provider that issued it. It is
- * stored with the item and never sent to a provider.
+ * Records, on an opaque reasoning item, the binding it was issued under (the
+ * provider, and for Claude its account, model and prefix). It is stored with
+ * the item and never sent to a provider.
  */
 export const ARTIFACT_ORIGIN_KEY = "opengeni.artifact_origin.v1";
 const TOOL_DISCLOSURE_TEXT_WITH_INVOKE =
   "These tools are now available. Call one by its name, or through tool_invoke with its name and a nested arguments object. Definitions:";
 const MACHINE_ORIGIN_PREFIX = "Opengeni tool update (machine-origin input; no new human message).";
+/**
+ * The request-local user turn placed before a system message that follows
+ * the model's own reply with nothing to answer (see withContinuationAnchors).
+ */
+export const MACHINE_CONTINUATION_TEXT =
+  "Opengeni continuation (machine-origin input; no new human message).";
 
 /**
  * Responses routes verified live to accept `additional_tools`, call a declared
@@ -161,7 +181,7 @@ function historicalFact(item: Record<string, unknown>): Record<string, unknown> 
 }
 
 /** Chat reasoning has plaintext rawContent, not a portable Responses reasoning
- * artifact. Keep it as historical evidence when switching wire protocols.
+ * artifact. Another wire protocol leaves it out.
  * Native Responses/Claude reasoning continues through its existing path.
  */
 function isChatReasoning(item: Record<string, unknown>): boolean {
@@ -184,41 +204,19 @@ function isChatReasoning(item: Record<string, unknown>): boolean {
   );
 }
 
-function chatReasoningText(item: Record<string, unknown>): string {
-  const parts = item.rawContent as Array<{ type?: string; text?: string }>;
-  return parts
-    .filter((part) => part?.type === "reasoning_text" && typeof part.text === "string")
-    .map((part) => part.text)
-    .join("");
-}
+/**
+ * Marks a reasoning item that the target request cannot carry natively. It is
+ * left out of that request. Reasoning is never converted into readable
+ * user/assistant text for another provider, route or binding: shown back as
+ * text, a model's own (or another model's) reasoning can trip the provider's
+ * safety systems, which then refuse the whole request and every retry.
+ * Canonical history keeps the item for a later switch back to its issuer.
+ */
+const OMITTED_REASONING = Symbol("omitted reasoning");
+type Projected = Record<string, unknown> | typeof OMITTED_REASONING;
 
-function historicalReasoningContent(text: string) {
-  return { type: "output_text", text: `[Historical reasoning from another model]\n${text}` };
-}
-
-function historicalReasoningMessage(text: string): Record<string, unknown> {
-  return {
-    type: "message",
-    role: "assistant",
-    status: "completed",
-    content: [
-      text
-        ? historicalReasoningContent(text)
-        : {
-            type: "output_text",
-            text: "[Historical reasoning from another model is unavailable.]",
-          },
-    ],
-  };
-}
-
-function reasoningSummaryText(item: Record<string, unknown>): string {
-  return Array.isArray(item.content)
-    ? item.content
-        .filter((part) => typeof part?.text === "string")
-        .map((part) => part.text)
-        .join("")
-    : "";
+function withoutOmittedReasoning(projected: Projected[]): Array<Record<string, unknown>> {
+  return projected.filter((item): item is Record<string, unknown> => item !== OMITTED_REASONING);
 }
 
 function providerDataOf(item: Record<string, unknown>): Record<string, unknown> | undefined {
@@ -227,9 +225,28 @@ function providerDataOf(item: Record<string, unknown>): Record<string, unknown> 
     : undefined;
 }
 
-/** The provider-issued ciphertext of a Responses reasoning item, if any. */
+/**
+ * Plain reasoning a Responses provider returned in the reasoning item's own
+ * `content` (for example an open-weight model behind a compatible endpoint).
+ * The SDK keeps it in providerData and spreads it back onto the wire item.
+ * OpenAI and Azure OpenAI accept no reasoning `content` at all, so it is as
+ * provider-specific as ciphertext.
+ */
+function rawResponsesReasoning(item: Record<string, unknown>): unknown[] | undefined {
+  if (item.type !== "reasoning") return undefined;
+  const raw = providerDataOf(item)?.content;
+  return Array.isArray(raw) && raw.length > 0 ? raw : undefined;
+}
+
+/**
+ * The provider-issued state of a reasoning item that only its issuer can
+ * verify, if any: Responses ciphertext, or Claude's thinking signature (or
+ * redacted thinking data).
+ */
 function opaqueReasoningCiphertext(item: Record<string, unknown>): string | undefined {
   if (item.type !== "reasoning") return undefined;
+  const block = claudeSignedThinkingBlock(item);
+  if (block) return claudeThinkingSecret(block);
   const metadata = providerDataOf(item);
   for (const value of [
     item.encrypted_content,
@@ -248,13 +265,18 @@ export function artifactOrigin(item: Record<string, unknown>): string | undefine
 }
 
 /**
- * Record the issuing provider on a reasoning item that carries ciphertext.
- * Every other item, and one already recorded, is returned by reference.
+ * Record the issuing provider on a reasoning item that carries ciphertext or
+ * raw provider reasoning. Every other item, and one already recorded, is
+ * returned by reference.
  */
 export function withArtifactOrigin<T>(item: T, origin: string): T {
   if (!item || typeof item !== "object") return item;
   const record = item as Record<string, unknown>;
-  if (!opaqueReasoningCiphertext(record) || artifactOrigin(record) !== undefined) return item;
+  if (
+    (!opaqueReasoningCiphertext(record) && !rawResponsesReasoning(record)) ||
+    artifactOrigin(record) !== undefined
+  )
+    return item;
   return {
     ...record,
     providerData: { ...providerDataOf(record), [ARTIFACT_ORIGIN_KEY]: origin },
@@ -285,39 +307,114 @@ function withoutArtifactOrigin(item: Record<string, unknown>): Record<string, un
   return Object.keys(providerData).length ? { ...rest, providerData } : rest;
 }
 
+/** Opengeni's own records on an item (`opengeni.*` keys); never provider wire fields. */
+function isOpengeniRecordKey(key: string): boolean {
+  return key.startsWith("opengeni.");
+}
+
 /**
- * Opaque reasoning goes back natively only to the provider that issued it.
- * Another provider cannot decrypt it and rejects the whole request, so it gets
- * the readable summary instead, exactly as Claude and Chat routes already do.
- * Untagged items (stored before origins were recorded) stay native until the
- * provider refuses them.
+ * The fields a Chat Completions provider returned on a tool call beyond the
+ * call itself (for example Gemini's `extra_content` thought signature). The
+ * SDK spreads them back onto the replayed call, and the SDK's own `type` and
+ * `function` envelope from a non-streamed reply is not one of them.
+ */
+function chatToolCallProviderFields(item: Record<string, unknown>): string[] {
+  return Object.keys(providerDataOf(item) ?? {}).filter(
+    (key) => key !== "type" && key !== "function" && !isOpengeniRecordKey(key),
+  );
+}
+
+/**
+ * Record the issuing provider on a Chat Completions tool call that carries
+ * provider fields (see {@link chatToolCallProviderFields}). Only that provider
+ * understands them: Gemini requires its thought signature back on the call,
+ * and another provider may reject the unknown field. Every other item, and
+ * one already recorded, is returned by reference.
+ */
+export function withToolCallArtifactOrigin<T>(item: T, origin: string): T {
+  if (!item || typeof item !== "object") return item;
+  const record = item as Record<string, unknown>;
+  if (
+    record.type !== "function_call" ||
+    chatToolCallProviderFields(record).length === 0 ||
+    artifactOrigin(record) !== undefined
+  )
+    return item;
+  return {
+    ...record,
+    providerData: { ...providerDataOf(record), [ARTIFACT_ORIGIN_KEY]: origin },
+  } as T;
+}
+
+/**
+ * A tool call's provider fields go back only to the provider that returned
+ * them; every other provider gets the plain call. The origin record itself
+ * never reaches the wire. Without a scope (or an origin) the item is kept, so
+ * a provider-neutral pass leaves the decision to the request's own route.
+ */
+function scopedToolCallArtifact(
+  item: Record<string, unknown>,
+  options: ProviderHistoryOptions,
+): Record<string, unknown> | undefined {
+  if (item.type !== "function_call") return undefined;
+  const scope = options.artifactScope;
+  const origin = artifactOrigin(item);
+  if (scope === undefined || origin === undefined) return undefined;
+  if (origin === scope)
+    return memoized(nativeArtifactProjections, item, () => withoutArtifactOrigin(item));
+  return memoized(foreignArtifactProjections, item, () => {
+    const providerData = Object.fromEntries(
+      Object.entries(providerDataOf(item) ?? {}).filter(
+        ([key]) => key !== ARTIFACT_ORIGIN_KEY && isOpengeniRecordKey(key),
+      ),
+    );
+    const { providerData: _metadata, ...rest } = item;
+    return Object.keys(providerData).length ? { ...rest, providerData } : rest;
+  });
+}
+
+/**
+ * Opaque reasoning goes back natively only under the binding that issued it.
+ * Any other request cannot verify it and the provider rejects the whole
+ * request, so it is left out ({@link OMITTED_REASONING}). Untagged items
+ * (stored before origins were recorded) stay native until the provider
+ * refuses them. Raw reasoning `content` follows the same rule, except that an
+ * untagged item carrying it is always left out on a scoped route, with or
+ * without ciphertext: no refusal names it (providers reject its shape, not a
+ * ciphertext), so it could otherwise fail every retry on a provider that did
+ * not issue it.
  */
 function scopedOpaqueArtifact(
   item: Record<string, unknown>,
   options: ProviderHistoryOptions,
-): Record<string, unknown> | undefined {
+): Projected | undefined {
   const scope = options.artifactScope;
-  if (scope === undefined || item.type !== "reasoning") return undefined;
+  if (item.type !== "reasoning" || (scope === undefined && !options.isRejectedArtifact))
+    return undefined;
   const origin = artifactOrigin(item);
+  const ciphertext = opaqueReasoningCiphertext(item);
+  const raw = rawResponsesReasoning(item) !== undefined;
   if (
-    opaqueReasoningCiphertext(item) &&
-    ((origin !== undefined && origin !== scope) || options.isRejectedArtifact?.(item) === true)
+    (ciphertext || raw) &&
+    ((scope !== undefined && origin !== undefined && origin !== scope) ||
+      (scope !== undefined && origin === undefined && raw) ||
+      options.isRejectedArtifact?.(item) === true)
   )
-    return memoized(foreignArtifactProjections, item, () =>
-      historicalReasoningMessage(reasoningSummaryText(item)),
-    );
-  if (origin === undefined) return undefined;
+    return OMITTED_REASONING;
+  // Without a scope the item keeps its own projection (for Claude, the
+  // native block; another provider's reasoning is left out).
+  if (origin === undefined || scope === undefined) return undefined;
   return memoized(nativeArtifactProjections, item, () => withoutArtifactOrigin(item));
 }
 
-/** Opaque reasoning belongs to its native API. Foreign APIs receive only its
- * readable text (or an explicit unavailable marker), never signatures/ciphertext.
+/** Reasoning belongs to its native API. A foreign API receives none of it:
+ * no signatures or ciphertext, and no readable text in their place.
  * The canonical artifact stays intact for a later switch back to its native API.
  */
-function foreignReasoningFact(
+function foreignReasoning(
   item: Record<string, unknown>,
   providerApi: HistoryProviderApi,
-): Record<string, unknown> | undefined {
+): typeof OMITTED_REASONING | undefined {
   if (item.type !== "reasoning") return undefined;
   const metadata = item.providerData as Record<string, any> | undefined;
   const nativeApi: HistoryProviderApi = metadata?.anthropic?.block
@@ -326,9 +423,7 @@ function foreignReasoningFact(
       ? "chat"
       : "responses";
   if (nativeApi === providerApi) return undefined;
-  return historicalReasoningMessage(
-    nativeApi === "chat" ? chatReasoningText(item) : reasoningSummaryText(item),
-  );
+  return OMITTED_REASONING;
 }
 
 /** The Chat SDK stores a complete reply message (including its role) in an
@@ -337,10 +432,7 @@ function foreignReasoningFact(
  * output_text block. Only this identifiable Chat shape is removed; canonical
  * history and native Responses annotations/provider extensions remain intact.
  */
-function portableChatMetadata(
-  item: Record<string, unknown>,
-  previous: Record<string, unknown> | undefined,
-): Record<string, unknown> {
+function portableChatMetadata(item: Record<string, unknown>): Record<string, unknown> {
   const metadata = item.providerData as Record<string, unknown> | undefined;
   if (item.type === "function_call" && metadata?.type === "function" && metadata.function) {
     // Non-streamed Chat calls also retain their nested wire function envelope.
@@ -352,32 +444,20 @@ function portableChatMetadata(
   }
   if (item.role !== "assistant" || !Array.isArray(item.content)) return item;
   let changed = false;
-  const precedingReason =
-    previous && isChatReasoning(previous) ? chatReasoningText(previous) : undefined;
-  const legacyReasons = new Set<string>();
+  // Before the shared Chat adapter, reasoning_content survived only inside
+  // reply metadata. Removing that foreign envelope also leaves that reasoning
+  // out: it is never inlined as reply text.
   const content = item.content.map((part) => {
     if (
       (part?.type !== "output_text" && part?.type !== "refusal") ||
       part.providerData?.role !== "assistant"
     )
       return part;
-    // Before the shared Chat adapter, reasoning_content survived only inside
-    // reply metadata. Retain it before removing that foreign envelope. Newer
-    // histories already have the same text in their preceding reasoning item.
-    const reason =
-      chatReasoning(part.providerData)?.text ??
-      chatReasoningDetailsText(chatReasoningDetails(part.providerData));
-    if (reason && reason !== precedingReason) legacyReasons.add(reason);
     const { providerData: _replyMetadata, ...projected } = part;
     changed = true;
     return projected;
   });
-  return changed
-    ? {
-        ...item,
-        content: [...Array.from(legacyReasons, historicalReasoningContent), ...content],
-      }
-    : item;
+  return changed ? { ...item, content } : item;
 }
 
 function isChatIncompatibleCall(item: Record<string, unknown>): boolean {
@@ -437,40 +517,52 @@ export function projectHistoryForProvider(
   const goalOnce = collapseRepeatedSessionGoalContexts(items);
   // A search record never separates a tool call from its result on any API.
   const projected = withSearchRecordsAfterOpenCalls(
-    goalOnce.map((item) => {
-      const form = options.searchRecordForm;
-      const evidence = projectHostedSearchEvidence(item, {
-        preserveAnthropicNative: nativeClaude,
-        ...(form ? { form } : {}),
-      });
-      if (nativeClaude && form && isAnthropicWebSearchItem(evidence))
-        return withSearchRecordForm(evidence, form);
-      return nativeClaude ? evidence : withoutClaudeCitationMetadata(evidence);
-    }),
+    withoutOmittedReasoning(
+      goalOnce.map((item): Projected => {
+        const form = options.searchRecordForm;
+        const evidence = projectHostedSearchEvidence(item, {
+          preserveAnthropicNative: nativeClaude,
+          ...(form ? { form } : {}),
+        });
+        if (nativeClaude && form && isAnthropicWebSearchItem(evidence))
+          return withSearchRecordForm(evidence, form);
+        return nativeClaude ? evidence : withoutClaudeMessageMetadata(evidence);
+      }),
+    ),
   );
-  const input = projected.every((item, index) => item === items[index]) ? items : projected;
+  const input =
+    projected.length === items.length && projected.every((item, index) => item === items[index])
+      ? items
+      : projected;
   return projectWireHistory(withWireValidFunctionCallArguments(input), providerApi, options);
 }
 
 /**
  * Claude citations ride on assistant text parts as `providerData.anthropic`.
  * The Responses and Chat converters would serialize that metadata onto the
- * wire, so other providers get the plain text. Canonical history keeps it for
- * a later switch back to Claude, which must replay it exactly.
+ * wire, so other providers get the plain text. A part holding Claude's
+ * thinking (`isClaudeThinkingContentPart`) is left out instead, and a message
+ * left with nothing is left out too. Canonical history keeps both for a later
+ * switch back to Claude, which must replay them exactly.
  */
-function withoutClaudeCitationMetadata(item: Record<string, unknown>): Record<string, unknown> {
+function withoutClaudeMessageMetadata(item: Record<string, unknown>): Projected {
   if (item.type !== "message" || item.role !== "assistant" || !Array.isArray(item.content))
     return item;
   let changed = false;
-  const content = item.content.map((part) => {
+  const content = item.content.flatMap((part) => {
+    if (isClaudeThinkingContentPart(part)) {
+      changed = true;
+      return [];
+    }
     const metadata = part?.providerData;
-    if (!metadata || typeof metadata !== "object" || !("anthropic" in metadata)) return part;
+    if (!metadata || typeof metadata !== "object" || !("anthropic" in metadata)) return [part];
     changed = true;
     const { anthropic: _anthropic, ...rest } = metadata as Record<string, unknown>;
     const { providerData: _providerData, ...plain } = part;
-    return Object.keys(rest).length ? { ...plain, providerData: rest } : plain;
+    return [Object.keys(rest).length ? { ...plain, providerData: rest } : plain];
   });
-  return changed ? { ...item, content } : item;
+  if (!changed) return item;
+  return content.length ? { ...item, content } : OMITTED_REASONING;
 }
 
 /** Bound on the raw text carried by a request-local invalid-arguments wrapper. */
@@ -523,7 +615,7 @@ function projectWireHistory(
     // agents-js 0.14's message converter supports system/user/assistant only.
     // The Responses API itself supports developer; use the SDK's raw-item adapter.
     let changed = false;
-    const projected = items.map((item, index) => {
+    const projected = items.map((item): Projected => {
       const tools = disclosedTools(item);
       const next = tools
         ? options.declaresAdditionalTools
@@ -538,29 +630,45 @@ function projectWireHistory(
         : item.type === "message" && item.role === "developer"
           ? { type: "unknown", providerData: item }
           : (scopedOpaqueArtifact(item, options) ??
-            foreignReasoningFact(item, providerApi) ??
-            portableChatMetadata(item, items[index - 1]));
+            scopedToolCallArtifact(item, options) ??
+            foreignReasoning(item, providerApi) ??
+            portableChatMetadata(item));
       changed ||= next !== item;
       return next;
     });
-    return changed ? projected : items;
+    return withContinuationAnchors(changed ? withoutOmittedReasoning(projected) : items);
   }
 
   if (providerApi === "anthropic-messages") {
     if (items.some((item) => item.type === "compaction"))
       throw new ProviderHistoryIncompatibleError(providerApi, "compaction");
     let changed = false;
-    const projected = items.map((item, index) => {
+    const projected = items.map((item): Projected => {
       const next = disclosedTools(item)
         ? { type: "message", role: "system", content: item.content }
         : item.type === "message" && item.role === "developer"
           ? { ...item, role: "system" }
-          : (foreignReasoningFact(item, providerApi) ??
-            portableChatMetadata(item, items[index - 1]));
+          : (scopedOpaqueArtifact(item, options) ??
+            foreignReasoning(item, providerApi) ??
+            portableChatMetadata(item));
       changed ||= next !== item;
       return next;
     });
-    return changed ? projected : items;
+    // Claude accepts other assistant content inside its reply, after its tool
+    // calls, and a system notice right before the results, but nothing
+    // between two results of one step. Such an item that falls there (another
+    // provider's records become readable facts) moves back to just before the
+    // step's first result; after the results it would open the next reply,
+    // ahead of its thinking. The Claude adapter places system notices.
+    return withItemsAfterOpenCalls(
+      changed ? withoutOmittedReasoning(projected) : items,
+      (item) => isClaudeAssistantContent(item) || isSystemMessage(item),
+      {
+        resultTypeByCallType: FUNCTION_RESULT_TYPE_BY_CALL_TYPE,
+        placement: "before-results",
+        endsStep: isPersonMessage,
+      },
+    );
   }
   const incompatibleCallIds = new Set<string>();
   for (const item of items) {
@@ -574,14 +682,27 @@ function projectWireHistory(
   }
 
   let changed = false;
-  const projected = items.map((item) => {
+  // Request-local tool disclosures that Chat receives as user messages.
+  const machineOrigin = new Set<Record<string, unknown>>();
+  const isRuntimeNotice = (item: Record<string, unknown>) =>
+    isSystemMessage(item) || machineOrigin.has(item) || isHostedSearchEvidenceRecord(item);
+  const projected = items.map((canonical): Projected => {
+    const scoped = scopedToolCallArtifact(canonical, options);
+    if (scoped) changed = true;
+    const item = scoped ?? canonical;
     if (disclosedTools(item)) {
       changed = true;
-      return options.hoistsSystemMessages
-        ? { type: "message", role: "user", content: `${MACHINE_ORIGIN_PREFIX}\n${item.content}` }
-        : { type: "message", role: "system", content: item.content };
+      if (!options.hoistsSystemMessages)
+        return { type: "message", role: "system", content: item.content };
+      const notice = {
+        type: "message",
+        role: "user",
+        content: `${MACHINE_ORIGIN_PREFIX}\n${item.content}`,
+      };
+      machineOrigin.add(notice);
+      return notice;
     }
-    const reasoning = foreignReasoningFact(item, providerApi);
+    const reasoning = foreignReasoning(item, providerApi);
     if (reasoning) {
       changed = true;
       return reasoning;
@@ -605,5 +726,101 @@ function projectWireHistory(
     }
     return item;
   });
-  return changed ? projected : items;
+  // Chat Completions ends an assistant tool_calls message at any other
+  // message, and a tool result must answer the message right before it.
+  // Historical facts, any other assistant message and runtime notices inside
+  // an unfinished step wait for its last result. Only a person's message ends
+  // a step early.
+  return withContinuationAnchors(
+    withItemsAfterOpenCalls(
+      changed ? withoutOmittedReasoning(projected) : items,
+      (item) => isAssistantMessage(item) || isRuntimeNotice(item),
+      {
+        resultTypeByCallType: FUNCTION_RESULT_TYPE_BY_CALL_TYPE,
+        endsStep: (item) => isPersonMessage(item) && !machineOrigin.has(item),
+      },
+    ),
+  );
+}
+
+/**
+ * A system or developer message that follows the model's own reply, with no
+ * user message after it before the model speaks again, answers nothing. A
+ * route that moves system messages out of the conversation (Claude behind a
+ * Responses or Chat gateway, Gemini on Chat) then ends the request on that
+ * reply, which the model reads as its own unfinished message: it continues
+ * the old reply or returns nothing at all. This is the shape of every
+ * machine-started turn (a delivered update, a reply reminder) after an
+ * answered turn. A request-local machine-origin user message goes before each
+ * such run of system messages, as the Claude adapter does
+ * (placeConversationSystems). The decision depends only on the items, so the
+ * next request of the turn reproduces the same prefix.
+ *
+ * It applies to every Responses and Chat route, including native OpenAI and
+ * Codex Responses, which keep system messages in place and do not need it:
+ * the route cannot tell which model sits behind a gateway. A session whose
+ * history already has such a run gets the anchor in its earlier prefix once,
+ * so its first request after the change misses the prompt cache once.
+ */
+function withContinuationAnchors(
+  items: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+  let result: Array<Record<string, unknown>> | undefined;
+  for (let index = 0; index < items.length; index++) {
+    const item = items[index]!;
+    const previous = index > 0 ? items[index - 1]! : undefined;
+    if (previous && isSystemLikeItem(item) && endsModelReply(previous)) {
+      let next = index + 1;
+      while (next < items.length && isSystemLikeItem(items[next]!)) next++;
+      const following = items[next];
+      if (!following || !isUserRoleMessage(following)) {
+        result ??= items.slice(0, index);
+        result.push({ type: "message", role: "user", content: MACHINE_CONTINUATION_TEXT });
+      }
+    }
+    result?.push(item);
+  }
+  return result ?? items;
+}
+
+/** A system/developer message, including the Responses pass-through forms. */
+function isSystemLikeItem(item: Record<string, unknown>): boolean {
+  if (isSystemMessage(item)) return true;
+  if (item.type !== "unknown") return false;
+  const role = (item.providerData as Record<string, unknown> | undefined)?.role;
+  return role === "developer" || role === "system";
+}
+
+function endsModelReply(item: Record<string, unknown>): boolean {
+  return isAssistantMessage(item) || item.type === "reasoning";
+}
+
+function isUserRoleMessage(item: Record<string, unknown>): boolean {
+  return isMessage(item) && item.role === "user";
+}
+
+/** After wire projection, only function calls are executable on Chat and Claude. */
+const FUNCTION_RESULT_TYPE_BY_CALL_TYPE = { function_call: "function_call_result" } as const;
+
+function isMessage(item: Record<string, unknown>): boolean {
+  return item.type === undefined || item.type === "message";
+}
+
+function isAssistantMessage(item: Record<string, unknown>): boolean {
+  return isMessage(item) && item.role === "assistant";
+}
+
+function isSystemMessage(item: Record<string, unknown>): boolean {
+  return isMessage(item) && (item.role === "system" || item.role === "developer");
+}
+
+/** A user-role message other than a runtime search record. */
+function isPersonMessage(item: Record<string, unknown>): boolean {
+  return isMessage(item) && item.role === "user" && !isHostedSearchEvidenceRecord(item);
+}
+
+/** An item `anthropicMessages` sends as Claude's own content, other than a tool call. */
+function isClaudeAssistantContent(item: Record<string, unknown>): boolean {
+  if (isMessage(item)) return item.role === "assistant";
+  return item.type !== "function_call" && item.type !== "function_call_result";
 }

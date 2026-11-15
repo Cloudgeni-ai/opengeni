@@ -189,6 +189,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "addOrganizationAnthropicApiKey",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/model-providers/anthropic/api-keys",
+    "request": [
+      "AddOrganizationAnthropicApiKeyRequest"
+    ],
+    "response": [
+      "OrganizationAnthropicApiKey"
+    ],
+    "secretFields": [
+      "request.apiKey"
+    ]
+  },
+  {
     "id": "addWorkspaceMember",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/members",
@@ -2526,6 +2540,44 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "GET /v1/billing/integration-usage",
+    "method": "GET",
+    "path": "/v1/billing/integration-usage",
+    "request": [],
+    "query": [
+      "accountId",
+      "since",
+      "until"
+    ],
+    "response": [],
+    "permission": "billing:read"
+  },
+  {
+    "id": "GET /v1/config/content-security",
+    "method": "GET",
+    "path": "/v1/config/content-security",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/image-proxy",
+    "method": "GET",
+    "path": "/v1/image-proxy",
+    "request": [],
+    "query": [
+      "ticket",
+      "url"
+    ],
+    "response": []
+  },
+  {
+    "id": "GET /v1/image-proxy/ticket",
+    "method": "GET",
+    "path": "/v1/image-proxy/ticket",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "GET /v1/organizations/:accountId/insights/calls",
     "method": "GET",
     "path": "/v1/organizations/:accountId/insights/calls",
@@ -2810,6 +2862,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "connections:read"
   },
   {
+    "id": "GET /v1/workspaces/:workspaceId/integrations/teams/reach",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/integrations/teams/reach",
+    "request": [],
+    "response": [],
+    "permission": "connections:read"
+  },
+  {
     "id": "GET /v1/workspaces/:workspaceId/knowledge/entries",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/knowledge/entries",
@@ -2951,15 +3011,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/tools/catalog",
     "request": [],
     "response": [
-      "ToolGatewayApprovalResponse",
-      "ToolGatewayCallResponse",
-      "ToolGatewayCatalog",
-      "ToolGatewayDeclarationsResponse"
+      "ToolGatewayCatalog"
     ],
-    "permission": "workspace:read",
-    "secretFields": [
-      "response.approvalToken"
-    ]
+    "permission": "workspace:read"
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/tools/declarations",
@@ -2967,15 +3021,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/tools/declarations",
     "request": [],
     "response": [
-      "ToolGatewayApprovalResponse",
-      "ToolGatewayCallResponse",
-      "ToolGatewayCatalog",
       "ToolGatewayDeclarationsResponse"
     ],
-    "permission": "workspace:read",
-    "secretFields": [
-      "response.approvalToken"
-    ]
+    "permission": "workspace:read"
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/vault-providers/connections",
@@ -3522,6 +3570,52 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ConnectorToolPermissionsResponse"
     ],
     "permission": "workspace:read"
+  },
+  {
+    "id": "getConsoleApiKeyUsage",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/console/api-keys",
+    "request": [
+      "ConsoleRangeQuery"
+    ],
+    "query": [
+      "range"
+    ],
+    "response": [
+      "ConsoleApiKeyUsageResponse"
+    ]
+  },
+  {
+    "id": "getConsoleSession",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/console/workspaces/:workspaceId/sessions/:sessionId",
+    "request": [],
+    "response": [
+      "ConsoleSessionDetail"
+    ]
+  },
+  {
+    "id": "getConsoleSettings",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/console/settings",
+    "request": [],
+    "response": [
+      "ConsoleSettings"
+    ]
+  },
+  {
+    "id": "getConsoleSummary",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/console/summary",
+    "request": [
+      "ConsoleRangeQuery"
+    ],
+    "query": [
+      "range"
+    ],
+    "response": [
+      "ConsoleSummary"
+    ]
   },
   {
     "id": "getDocumentBase",
@@ -5231,6 +5325,22 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "listBillingReceipts",
+    "method": "GET",
+    "path": "/v1/billing/receipts",
+    "request": [
+      "ListBillingReceiptsQuery"
+    ],
+    "query": [
+      "accountId",
+      "cursor",
+      "limit"
+    ],
+    "response": [
+      "ListBillingReceiptsResponse"
+    ]
+  },
+  {
     "id": "listBotTemplates",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/bot-templates",
@@ -5406,6 +5516,69 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ConnectProvider"
     ],
     "permission": "workspace:read"
+  },
+  {
+    "id": "listConsoleAuditLog",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/console/audit-log",
+    "request": [
+      "ListConsoleAuditEventsQuery"
+    ],
+    "query": [
+      "cursor",
+      "limit",
+      "sessionId"
+    ],
+    "response": [
+      "ConsoleAuditEventListResponse"
+    ]
+  },
+  {
+    "id": "listConsoleSessionEvents",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/console/workspaces/:workspaceId/sessions/:sessionId/events",
+    "request": [
+      "ConsoleSessionEventsQuery"
+    ],
+    "query": [
+      "after",
+      "limit"
+    ],
+    "response": [
+      "SessionEvent"
+    ]
+  },
+  {
+    "id": "listConsoleSessions",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/console/sessions",
+    "request": [
+      "ListConsoleSessionsQuery"
+    ],
+    "query": [
+      "cursor",
+      "limit",
+      "q",
+      "workspaceId"
+    ],
+    "response": [
+      "ConsoleSessionListResponse"
+    ]
+  },
+  {
+    "id": "listConsoleWorkspaces",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/console/workspaces",
+    "request": [
+      "ListConsoleWorkspacesQuery"
+    ],
+    "query": [
+      "kind",
+      "range"
+    ],
+    "response": [
+      "ConsoleWorkspaceListResponse"
+    ]
   },
   {
     "id": "listDocumentAuthorityReclassifications",
@@ -5771,6 +5944,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "workspace:read"
   },
   {
+    "id": "listModelPriceBasisModels",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/model-price-basis-models",
+    "request": [],
+    "response": [
+      "ModelPriceBasisModelsResponse"
+    ],
+    "permission": "connections:read"
+  },
+  {
     "id": "listNetworkRoutes",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/network-routes",
@@ -5845,6 +6028,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ListOrganizationAdministrationMembersResponse"
+    ]
+  },
+  {
+    "id": "listOrganizationAnthropicApiKeys",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/model-providers/anthropic/api-keys",
+    "request": [],
+    "response": [
+      "OrganizationAnthropicApiKeysResponse"
     ]
   },
   {
@@ -7177,8 +7369,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/integrations/teams/link",
     "request": [],
     "response": [],
-    "browserOnly": "connecting or disconnecting Teams and linking an account requires the person's own signed-in Opengeni browser",
-    "permission": "sessions:create"
+    "browserOnly": "connecting or disconnecting Teams and linking an account requires the person's own signed-in Opengeni browser"
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/integrations/teams/link/microsoft-sign-in",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/integrations/teams/link/microsoft-sign-in",
+    "request": [],
+    "response": [],
+    "browserOnly": "connecting or disconnecting Teams and linking an account requires the person's own signed-in Opengeni browser"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/learning/revisions",
@@ -7368,16 +7567,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/tools/manifest",
     "request": [],
     "response": [
-      "ToolGatewayInvokeResponse",
-      "ToolGatewayManifestResponse",
-      "ToolGatewayResolvedTool",
-      "ToolGatewaySiteConsentResponse",
-      "ToolGatewayTargetApprovalResponse"
+      "ToolGatewayManifestResponse"
     ],
-    "permission": "workspace:read",
-    "secretFields": [
-      "response.approvalToken"
-    ]
+    "permission": "workspace:read"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/tools/resolve",
@@ -7385,16 +7577,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/tools/resolve",
     "request": [],
     "response": [
-      "ToolGatewayInvokeResponse",
-      "ToolGatewayManifestResponse",
-      "ToolGatewayResolvedTool",
-      "ToolGatewaySiteConsentResponse",
-      "ToolGatewayTargetApprovalResponse"
+      "ToolGatewayResolvedTool"
     ],
-    "permission": "workspace:read",
-    "secretFields": [
-      "response.approvalToken"
-    ]
+    "permission": "workspace:read"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/tools/site-consent",
@@ -7404,13 +7589,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ToolGatewaySiteConsentRequest"
     ],
     "response": [
-      "ToolGatewaySiteConsentResponse",
-      "ToolGatewayTargetApprovalResponse"
+      "ToolGatewaySiteConsentResponse"
     ],
-    "permission": "workspace:read",
-    "secretFields": [
-      "response.approvalToken"
-    ]
+    "permission": "workspace:read"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/tools/target-approvals",
@@ -7906,6 +8087,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "workspace:admin"
   },
   {
+    "id": "PUT /v1/workspaces/:workspaceId/integrations/teams/reach",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/integrations/teams/reach",
+    "request": [],
+    "response": [],
+    "permission": "connections:write"
+  },
+  {
     "id": "PUT /v1/workspaces/:workspaceId/members/external/:memberSource/:memberExternalId/allowance",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/members/external/:memberSource/:memberExternalId/allowance",
@@ -8369,6 +8558,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "removeModelConnectionFromWorkspace",
     "method": "DELETE",
     "path": "/v1/workspaces/:scopeId/model-connections/:kind/:connectionId/access",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "removeOrganizationAnthropicApiKey",
+    "method": "DELETE",
+    "path": "/v1/organizations/:organizationId/model-providers/anthropic/api-keys/:keyId",
     "request": [],
     "response": []
   },
@@ -8919,7 +9115,11 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "BrowserDownloadSaveRequest"
     ],
+    "query": [
+      "respondAsync"
+    ],
     "response": [
+      "BrowserDownloadSaveProgress",
       "BrowserDownloadSaveResponse"
     ],
     "permission": "sessions:control"
@@ -9061,6 +9261,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SendTestEventResponse"
+    ]
+  },
+  {
+    "id": "serveOrganizationAnthropicApiKeyAgain",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/model-providers/anthropic/api-keys/:keyId/serve-again",
+    "request": [],
+    "response": [
+      "OrganizationAnthropicApiKey"
     ]
   },
   {
@@ -9206,6 +9415,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "setOrganizationCompatibleEndpointModelListPrice",
+    "method": "PUT",
+    "path": "/v1/organizations/:organizationId/model-providers/openai_compatible/endpoints/:connectionId/models/:customModelId/list-price",
+    "request": [
+      "SetOrganizationCustomModelListPriceRequest"
+    ],
+    "response": [
+      "OrganizationCompatibleEndpointModel"
+    ]
+  },
+  {
     "id": "setOrganizationCompatibleEndpointModelReasoning",
     "method": "PUT",
     "path": "/v1/organizations/:organizationId/model-providers/openai_compatible/endpoints/:connectionId/models/:customModelId/reasoning",
@@ -9214,6 +9434,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "OrganizationCompatibleEndpointModel"
+    ]
+  },
+  {
+    "id": "setOrganizationProviderCustomModelListPrice",
+    "method": "PUT",
+    "path": "/v1/organizations/:organizationId/model-providers/:providerKind/custom-models/:customModelId/list-price",
+    "request": [
+      "SetOrganizationCustomModelListPriceRequest"
+    ],
+    "response": [
+      "OrganizationProviderCustomModel"
     ]
   },
   {
@@ -9346,6 +9577,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "WorkspaceInferenceControlResponse"
     ],
     "permission": "workspace:admin"
+  },
+  {
+    "id": "setWorkspaceModelKeyListPrice",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/connections/:connectionId/list-price",
+    "request": [
+      "SetWorkspaceModelKeyListPriceRequest"
+    ],
+    "response": [
+      "ConnectionMetadata",
+      "ConnectionResponse"
+    ]
   },
   {
     "id": "setWorkspacePauseTimer",
@@ -9935,6 +10178,28 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "capabilities:manage"
   },
   {
+    "id": "updateConsoleSettings",
+    "method": "PUT",
+    "path": "/v1/organizations/:organizationId/console/settings",
+    "request": [
+      "UpdateConsoleSettingsRequest"
+    ],
+    "response": [
+      "ConsoleSettings"
+    ]
+  },
+  {
+    "id": "updateConsoleWorkspace",
+    "method": "PUT",
+    "path": "/v1/organizations/:organizationId/console/workspaces/:workspaceId",
+    "request": [
+      "UpdateConsoleWorkspaceRequest"
+    ],
+    "response": [
+      "ConsoleWorkspaceKind"
+    ]
+  },
+  {
     "id": "updateEditableArtifactVisibility",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/editable-artifacts/:artifactId/visibility",
@@ -10180,6 +10445,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "OrganizationAgentAdminAccess"
+    ]
+  },
+  {
+    "id": "updateOrganizationAnthropicApiKey",
+    "method": "PATCH",
+    "path": "/v1/organizations/:organizationId/model-providers/anthropic/api-keys/:keyId",
+    "request": [
+      "UpdateOrganizationAnthropicApiKeyRequest"
+    ],
+    "response": [
+      "OrganizationAnthropicApiKey"
     ]
   },
   {

@@ -481,6 +481,8 @@ export type NoticeItem = {
   approvalActions?: Array<{
     id: string;
     title: string | null;
+    /** The tool's name without its server prefix, so the host's title for it can name it. */
+    toolName?: string;
     /**
      * Server-read facts about what it changes (the approval's `targetFacts`), in card
      * order; history uses them only to tell two alike lines apart.
@@ -500,6 +502,12 @@ export type NoticeItem = {
   capacityWait?: { turnId: string | null; label: string; detail: string };
   /** A preserved turn-end outcome, not a claim about current session state. */
   recordedOutcome?: true;
+  /**
+   * A failed attempt that a Retry reopened. The turn's final outcome carries
+   * the failure that still matters, so this attempt reads as one quiet step
+   * ("Attempt failed · retried") with its recorded text behind a disclosure.
+   */
+  retriedAttempt?: true;
   /**
    * Recorded agent wait only: delegated worker sessions that had not reported
    * back when the wait began. Best effort from the loaded history; absent when
@@ -710,6 +718,12 @@ export type TurnEndItem = {
   failureText: string | null;
   /** The recorded diagnostic text `failureText` replaced, for a Details disclosure. */
   failureDetail?: string;
+  /**
+   * The failure has its own row: its notice, a compaction landmark or a
+   * usage-limit row. That row stands for the attempt once a Retry replaces it,
+   * so no "retried" step repeats it.
+   */
+  ownRow?: "notice" | "landmark" | "usage-limit";
   occurredAt: string;
 };
 

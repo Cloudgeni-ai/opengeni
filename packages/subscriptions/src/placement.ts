@@ -2,6 +2,7 @@ import { isCacheWarm } from "./cache";
 import {
   automaticallyUsable,
   canServe,
+  connectionConstrained,
   connectionUsesExtraCredits,
   connectionIneligibility,
   isPermanentIneligibility,
@@ -129,7 +130,9 @@ export function modelPermitted(
 
 /**
  * Order servable connections for one model (design 4 step 5, D-53). Included
- * allowance comes before extra credits (SUB-CREDITS-01). Within that: the turn
+ * allowance comes before extra credits (SUB-CREDITS-01), and plain capacity
+ * before reduced service past a limit (a slow tier or grace zone,
+ * `connectionConstrained`). Within that: the turn
  * person's own subscription turned on here, then the primary an administrator
  * pinned, whether or not its quota is known (D-13, D-15), then this
  * workspace's own accounts, then the organization's and other workspaces',
@@ -145,6 +148,7 @@ export function rankConnections(
     return {
       connection,
       credits: connectionUsesExtraCredits(input, connection),
+      constrained: connectionConstrained(input, connection),
       own: ownSubscriptionTurnedOn(input, connection),
       primary: rotation.mode === "primary_first" && rotation.primaryConnectionId === connection.id,
       workspaces:
@@ -156,6 +160,7 @@ export function rankConnections(
   keyed.sort(
     (left, right) =>
       Number(left.credits) - Number(right.credits) ||
+      Number(left.constrained) - Number(right.constrained) ||
       Number(right.own) - Number(left.own) ||
       Number(right.primary) - Number(left.primary) ||
       Number(right.workspaces) - Number(left.workspaces) ||
@@ -193,6 +198,11 @@ export type ReselectionReason =
   | "account_ineligible"
   /** The bound account would spend paid credits while another has included allowance (SUB-CREDITS-01). */
   | "extra_credits"
+  /**
+   * The bound account serves at reduced service past a limit (slow tier or
+   * grace zone) while another can serve with plain capacity.
+   */
+  | "constrained_capacity"
   /** A compaction or model change replaced the cached prefix (SUB-STICK-05). */
   | "reselection_point"
   /** Idle longer than the provider's declared cache lifetime (SUB-STICK-04). */
@@ -251,6 +261,19 @@ export function bindingStickiness(input: PlacementInput): BindingStickiness {
     )
   ) {
     return reselect("extra_credits");
+  }
+  if (
+    connectionConstrained(input, bound) &&
+    connections.some(
+      (candidate) =>
+        candidate.id !== bound.id &&
+        automaticallyUsable(input, candidate) &&
+        !connectionUsesExtraCredits(input, candidate) &&
+        !connectionConstrained(input, candidate) &&
+        canServe(input, candidate, binding.modelId),
+    )
+  ) {
+    return reselect("constrained_capacity");
   }
   if (session.reselectionPoints.length > 0)
     return reselect("reselection_point", [], session.reselectionPoints);

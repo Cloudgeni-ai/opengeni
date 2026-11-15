@@ -10,6 +10,7 @@ import {
 export * from "./workspace-control-event";
 export * from "./billing-auto-top-up";
 export * from "./secret-value";
+export * from "./citation-urls";
 export * from "./claude-cite-tags";
 export * from "./machine-access";
 export * from "./no-reply";
@@ -184,6 +185,7 @@ export * from "./slack-bot-scopes";
 export * from "./slack-task-policy";
 export * from "./atlassian";
 export * from "./connector-destinations";
+export * from "./nango";
 export * from "./connector-attachments";
 export * from "./memory-slack-delivery";
 export * from "./image-generation";
@@ -968,6 +970,14 @@ export const ErrorEnvelope = /* @__PURE__ */ defineSchema(() =>
   }),
 );
 export type ErrorEnvelope = z.infer<typeof ErrorEnvelope>;
+
+/**
+ * `details.code` when a native app's push registration can never be
+ * delivered on this deployment: it doesn't list the app's bundle identifier
+ * or package name, or it has no push credentials for the platform. Retrying
+ * won't help; the deployment's push setup has to change.
+ */
+export const NATIVE_PUSH_UNAVAILABLE_DETAIL_CODE = "native_push_unavailable";
 
 /**
  * Why a request was refused as `unauthenticated` (HTTP 401) for want of a
@@ -3892,16 +3902,102 @@ export const DeleteOrganizationProviderCustomModelRequest =
 export type DeleteOrganizationProviderCustomModelRequest = z.infer<
   typeof DeleteOrganizationProviderCustomModelRequest
 >;
-export const OrganizationProviderCustomModel = WorkspaceGatewayCustomModel;
+/**
+ * An administrator's own list rate for a connected model, in USD micros
+ * (1 USD = 1,000,000) per 1M tokens. Without a cached-input rate, cached
+ * input is priced as input.
+ */
+export const ConnectedModelListPricing = /* @__PURE__ */ defineSchema(() => {
+  const rate = z.number().int().min(0).max(1_000_000_000_000);
+  return z
+    .object({
+      inputMicrosPerMillionTokens: rate,
+      cachedInputMicrosPerMillionTokens: rate.optional(),
+      cacheWriteMicrosPerMillionTokens: rate.optional(),
+      outputMicrosPerMillionTokens: rate,
+    })
+    .strict();
+});
+export type ConnectedModelListPricing = z.infer<typeof ConnectedModelListPricing>;
+
+/**
+ * What a connected model's usage costs, for usage estimates, spend limits
+ * and Insights (never a charge): the catalogue model whose list rate it
+ * shares, such as an Azure deployment's base model, or the administrator's
+ * own rate.
+ */
+export const ConnectedModelListPrice = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("basis", [
+    z
+      .object({
+        basis: z.literal("model"),
+        modelId: primitives.string
+          .min(1)
+          .max(256)
+          .regex(/^[!-~]+$/),
+      })
+      .strict(),
+    z.object({ basis: z.literal("custom"), pricing: ConnectedModelListPricing }).strict(),
+  ]),
+);
+export type ConnectedModelListPrice = z.infer<typeof ConnectedModelListPrice>;
+
+export const OrganizationProviderCustomModel = /* @__PURE__ */ defineSchema(() =>
+  WorkspaceGatewayCustomModel.extend({
+    /**
+     * OpenAI, Azure OpenAI and OpenAI-compatible models only (their providers
+     * report no cost): the price the model was given, or null.
+     */
+    listPrice: ConnectedModelListPrice.nullable().optional(),
+    /**
+     * OpenAI, Azure OpenAI and OpenAI-compatible models only: whether its
+     * usage gets a cost estimate. False means its calls are recorded as
+     * unpriced and spend limits can't count them.
+     */
+    listPriceKnown: z.boolean().optional(),
+  }),
+);
 export type OrganizationProviderCustomModel = z.infer<typeof OrganizationProviderCustomModel>;
 export const OrganizationProviderCustomModelsResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     models: z.array(OrganizationProviderCustomModel),
+    /**
+     * OpenAI and Azure OpenAI only: catalogue models with a known list rate
+     * that a model can be priced from.
+     */
+    priceBasisModelIds: z.array(primitives.string).optional(),
   }),
 );
 export type OrganizationProviderCustomModelsResponse = z.infer<
   typeof OrganizationProviderCustomModelsResponse
 >;
+/** Set or clear (null) what an organization model's usage costs. */
+export const SetOrganizationCustomModelListPriceRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      expectedVersion: primitives.positiveInteger,
+      listPrice: ConnectedModelListPrice.nullable(),
+    })
+    .strict(),
+);
+export type SetOrganizationCustomModelListPriceRequest = z.infer<
+  typeof SetOrganizationCustomModelListPriceRequest
+>;
+/**
+ * Set or clear (null) what a workspace model key's model costs. Its price is
+ * not part of the key's version, so no version is expected.
+ */
+export const SetWorkspaceModelKeyListPriceRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({ listPrice: ConnectedModelListPrice.nullable() }).strict(),
+);
+export type SetWorkspaceModelKeyListPriceRequest = z.infer<
+  typeof SetWorkspaceModelKeyListPriceRequest
+>;
+/** Catalogue models with a known list rate that a connected model can be priced like. */
+export const ModelPriceBasisModelsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ priceBasisModelIds: z.array(primitives.string) }),
+);
+export type ModelPriceBasisModelsResponse = z.infer<typeof ModelPriceBasisModelsResponse>;
 
 export const OrganizationModelProviderKind = /* @__PURE__ */ defineSchema(() =>
   z.enum([
@@ -4034,6 +4130,72 @@ export type RevokeOrganizationModelProviderConnectionRequest = z.infer<
 >;
 
 /**
+ * One API key of an organization's Anthropic API connection, which can hold
+ * several. The connection's own key is the first; each session keeps one key
+ * while it serves. Never includes the key itself.
+ */
+export const OrganizationAnthropicApiKey = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: primitives.string.min(1).max(64),
+    /** Null for the connection's own key. */
+    label: primitives.string.max(128).nullable(),
+    /** Whether this is the connection's own key (replaced or disconnected with the connection). */
+    connectionKey: z.boolean(),
+    /** The Anthropic organization the key belongs to, when known. */
+    anthropicOrganizationId: primitives.string.max(128).nullable(),
+    /**
+     * When Anthropic refused the key because its organization is out of
+     * credits. Null while it serves. A refused key stays out until it is let
+     * serve again.
+     */
+    creditRefusedAt: primitives.dateTime.nullable(),
+    createdAt: primitives.dateTime,
+  }),
+);
+export type OrganizationAnthropicApiKey = z.infer<typeof OrganizationAnthropicApiKey>;
+export const OrganizationAnthropicApiKeysResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    /** The connection's version; its own key's id changes when the key is replaced. */
+    connectionVersion: primitives.positiveInteger,
+    keys: z.array(OrganizationAnthropicApiKey).max(64),
+  }),
+);
+export type OrganizationAnthropicApiKeysResponse = z.infer<
+  typeof OrganizationAnthropicApiKeysResponse
+>;
+export const AddOrganizationAnthropicApiKeyRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      /** An Anthropic API key (`sk-ant-api…`), checked with Anthropic before it is saved. */
+      apiKey: primitives.string.trim().min(1).max(8192),
+      /** A name to tell the key apart, such as the Anthropic account it belongs to. */
+      label: primitives.string
+        .trim()
+        .min(1)
+        .max(128)
+        .regex(/^[^\r\n|]+$/),
+    })
+    .strict(),
+);
+export type AddOrganizationAnthropicApiKeyRequest = z.infer<
+  typeof AddOrganizationAnthropicApiKeyRequest
+>;
+export const UpdateOrganizationAnthropicApiKeyRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      label: primitives.string
+        .trim()
+        .min(1)
+        .max(128)
+        .regex(/^[^\r\n|]+$/),
+    })
+    .strict(),
+);
+export type UpdateOrganizationAnthropicApiKeyRequest = z.infer<
+  typeof UpdateOrganizationAnthropicApiKeyRequest
+>;
+
+/**
  * One model of an organization's OpenAI-compatible endpoint, with the
  * reasoning levels it accepts (null when it declares none, so chats get no
  * reasoning choice for it).
@@ -4067,7 +4229,11 @@ export const OrganizationCompatibleEndpoint = /* @__PURE__ */ defineSchema(() =>
 );
 export type OrganizationCompatibleEndpoint = z.infer<typeof OrganizationCompatibleEndpoint>;
 export const OrganizationCompatibleEndpointsResponse = /* @__PURE__ */ defineSchema(() =>
-  z.object({ endpoints: z.array(OrganizationCompatibleEndpoint) }),
+  z.object({
+    endpoints: z.array(OrganizationCompatibleEndpoint),
+    /** Catalogue models with a known list rate that a model can be priced like. */
+    priceBasisModelIds: z.array(primitives.string).optional(),
+  }),
 );
 export type OrganizationCompatibleEndpointsResponse = z.infer<
   typeof OrganizationCompatibleEndpointsResponse
@@ -6540,7 +6706,7 @@ export const McpPersonalConnectionDelegation = /* @__PURE__ */ defineSchema(() =
       repositories.forEach((repository, index) => {
         const canonicalUrl = repository.canonicalUrl.toLowerCase();
         if (
-          !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9_.-]{1,100}$/u.test(
+          !/^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,38})\/[A-Za-z0-9_.-]{1,100}$/u.test(
             repository.fullName,
           ) ||
           repository.canonicalUrl !== `https://github.com/${repository.fullName}`
@@ -7103,6 +7269,53 @@ export const CreateBillingPortalResponse = /* @__PURE__ */ defineSchema(() =>
   }),
 );
 export type CreateBillingPortalResponse = z.infer<typeof CreateBillingPortalResponse>;
+
+/** Query for one page of an organization's payments, newest first. */
+export const ListBillingReceiptsQuery = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    accountId: primitives.optionalUuid,
+    /** The nextCursor of the previous page. */
+    cursor: z
+      .string()
+      .regex(/^ch_[A-Za-z0-9]{1,250}$/)
+      .optional(),
+    limit: z.coerce.number().int().min(1).max(50).default(10),
+  }),
+);
+export type ListBillingReceiptsQuery = z.input<typeof ListBillingReceiptsQuery>;
+
+/**
+ * One successful payment and where to download its receipt: plan invoices,
+ * credit purchases and automatic top-ups alike. Amounts are in the currency's
+ * smallest unit (cents for USD).
+ */
+export const BillingReceipt = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: primitives.string,
+    createdAt: primitives.dateTime,
+    kind: z.enum(["plan", "credits", "auto_top_up", "other"]),
+    /** What the payment was for, in a few words. */
+    description: primitives.string,
+    amount: primitives.nonnegativeInteger,
+    currency: primitives.string,
+    amountRefunded: primitives.nonnegativeInteger,
+    refunded: primitives.boolean,
+    /** Stripe's receipt for the payment. */
+    receiptUrl: z.string().url().nullable(),
+    /** The invoice page and PDF when the payment paid an invoice. */
+    invoiceUrl: z.string().url().nullable(),
+    invoicePdfUrl: z.string().url().nullable(),
+  }),
+);
+export type BillingReceipt = z.infer<typeof BillingReceipt>;
+
+export const ListBillingReceiptsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    receipts: z.array(BillingReceipt),
+    nextCursor: primitives.nullableString,
+  }),
+);
+export type ListBillingReceiptsResponse = z.infer<typeof ListBillingReceiptsResponse>;
 
 export const RepositoryResourceRef = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -11298,8 +11511,13 @@ export const CHILD_PROGRESS_NOTE_MAX_BYTES = 4 * 1024;
  * 3: `child_waiting_capacity` is produced only for a long wait (reset far
  * away, unknown, or needing a person), carries `resetsAt`, and wakes the
  * parent immediately instead of riding its next claim.
+ *
+ * 4: a waiting child produces a further `child_waiting_capacity` for the same
+ * waiter when a later check finds its reset later than the parent was told
+ * (the time passed without capacity, or a longer limit binds) or unknown; its
+ * dedupe key adds that reset (`…:<waiterId>:<resetsAt|unknown>`).
  */
-export const CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION = 3;
+export const CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION = 4;
 
 /**
  * The byte limit of each `boundedUtf8String` check, keyed by the check, so the
@@ -15039,6 +15257,18 @@ export const ConnectionMetadata = /* @__PURE__ */ defineSchema(() =>
      * one). Absent for other connections and from older servers.
      */
     accountIdentity: z.enum(["verified", "reconnect", "single"]).optional(),
+    /**
+     * A workspace's own OpenAI, Azure OpenAI or OpenAI-compatible model key
+     * only (those providers report no cost): the price its model was given,
+     * or null. Absent for other connections and from older servers.
+     */
+    listPrice: ConnectedModelListPrice.nullable().optional(),
+    /**
+     * A workspace's own model key only, in workspace connection lists:
+     * whether its model's usage gets a cost estimate. False means its calls
+     * are recorded as unpriced and spend limits can't count them.
+     */
+    listPriceKnown: z.boolean().optional(),
     createdBySubjectId: primitives.nullableString,
     updatedBySubjectId: primitives.nullableString,
     createdAt: primitives.string,
@@ -15572,6 +15802,21 @@ export const CreateCapabilityCatalogItemRequest = /* @__PURE__ */ defineSchema((
     installUrl: z.string().url().optional(),
     authModel: z.string().min(1).optional(),
     metadata: z.record(primitives.string, z.unknown()).default({}),
+    /**
+     * The catalog entry whose Connect card asked for this connection's
+     * inputs. The endpoint must then follow that entry's rule (see
+     * `@opengeni/contracts/capability-connect-inputs`), or the request is refused.
+     */
+    connectFor: z.string().min(1).max(512).optional(),
+    /**
+     * With `connectFor`: the values the person entered on that card, by
+     * input id. The API turns them into the endpoint by the entry's rule.
+     * Ignored without `connectFor`.
+     */
+    connectInputs: z
+      .record(z.string().min(1).max(64), z.string().max(2048))
+      .refine((values) => Object.keys(values).length <= 8, "At most 8 inputs.")
+      .optional(),
   }),
 );
 export type CreateCapabilityCatalogItemRequest = z.infer<typeof CreateCapabilityCatalogItemRequest>;
@@ -17017,6 +17262,12 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     pinVersion: primitives.nonnegativeInteger.default(0),
     /** Personal explicit acknowledgment state; opening the session never clears it. */
     unread: primitives.boolean.default(false),
+    /**
+     * True when this failed session's failure was consumed by its parent agent,
+     * which owns the follow-up, so the rail does not ask a person to review it.
+     * Absent when false and on older servers; treat absence as unhandled.
+     */
+    failureHandled: primitives.optionalBoolean,
     /** Personal power-user label for work the member intends to continue. */
     activelyWorking: primitives.boolean.default(false),
     /** Optimistic revision for unread/actively-working state. */
@@ -17062,7 +17313,11 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
         /** Historical failed lifecycle states, including already-reviewed failures. */
         failedDescendants: primitives.nonnegativeInteger,
         unreadDescendants: z.number().int().nonnegative().optional(),
-        /** Failed descendants whose latest durable event this viewer has not acknowledged. */
+        /**
+         * Failed descendants that still need a person: this viewer has not
+         * acknowledged the latest durable event and no parent agent consumed the
+         * failure (see `failureHandled`).
+         */
         unreadFailedDescendants: z.number().int().nonnegative().optional(),
         activelyWorkingDescendants: z.number().int().nonnegative().optional(),
         /**
@@ -17246,6 +17501,7 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     pinnedAt: true,
     pinVersion: true,
     unread: true,
+    failureHandled: true,
     activelyWorking: true,
     attentionVersion: true,
     archived: true,
@@ -17419,6 +17675,11 @@ export const SessionEventType = /* @__PURE__ */ defineSchema(() =>
     "agent.model.request",
     "agent.model.usage",
     "tool.auth_needed",
+    // Tool discovery (tool_search, tool_list) showed no new Connect card for
+    // an integration a request may name: skipped (and why), already in the
+    // chat, not shown by the card tool, or a failed card call. Payload:
+    // source, outcome, reason, the bounded query, and capability ids and names.
+    "tool.discovery_card",
     "credential.auth_needed",
     "agent.updated",
     "rig.setup.started",
@@ -18401,6 +18662,24 @@ export const ToolAuthNeededPayload = /* @__PURE__ */ defineSchema(() =>
           action: z.enum(["connect", "add_credentials", "enable"]),
           rationale: z.string().min(1).max(2000),
           requiredVariables: z.array(EnvironmentVariableName).max(64).default([]),
+          /**
+           * Values the person enters on the card before connecting (see
+           * `@opengeni/contracts/capability-connect-inputs`). `value` is what
+           * the agent filled in; the person can change it.
+           */
+          inputs: z
+            .array(
+              z
+                .object({
+                  id: z.string().min(1).max(64),
+                  label: z.string().min(1).max(128),
+                  placeholder: z.string().min(1).max(256).optional(),
+                  value: z.string().max(2048).optional(),
+                })
+                .strict(),
+            )
+            .max(8)
+            .optional(),
         })
         .optional(),
       /** An agent suggestion, not a catalog entry or authority to contact this URL. */
@@ -21598,6 +21877,23 @@ export const GitHubInstallationLifecycle = /* @__PURE__ */ defineSchema(() =>
 );
 export type GitHubInstallationLifecycle = z.infer<typeof GitHubInstallationLifecycle>;
 
+/**
+ * Why an installation is not active, in terms of the fix: removed or
+ * suspended on GitHub, no repositories shared, no owner proof for the link,
+ * GitHub could not be checked, or the installation's account changed.
+ */
+export const GitHubInstallationIssue = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "uninstalled",
+    "suspended",
+    "no_repositories",
+    "owner_unconfirmed",
+    "github_unreachable",
+    "account_changed",
+  ]),
+);
+export type GitHubInstallationIssue = z.infer<typeof GitHubInstallationIssue>;
+
 export const GitHubInstallationBinding = /* @__PURE__ */ defineSchema(() =>
   z.object({
     installationId: primitives.positiveInteger,
@@ -21605,6 +21901,8 @@ export const GitHubInstallationBinding = /* @__PURE__ */ defineSchema(() =>
     accountLogin: primitives.nullableString,
     accountType: primitives.nullableString,
     lifecycle: GitHubInstallationLifecycle,
+    /** Null while active. Older servers omit it. */
+    issue: GitHubInstallationIssue.nullable().optional(),
     repositoryScope: GitHubRepositoryScope,
     repositoryCount: primitives.nonnegativeInteger,
     configureUrl: z.string().url().nullable(),
@@ -21654,6 +21952,18 @@ export const GitHubActionPolicyGroup = /* @__PURE__ */ defineSchema(() =>
 );
 export type GitHubActionPolicyGroup = z.infer<typeof GitHubActionPolicyGroup>;
 
+/**
+ * The groups of a personal actor. `sensitive` (Settings and deletions) covers
+ * what Your GitHub does through `gh` and Git that is hard to undo: repository
+ * settings, secrets, variables and environments, deletions, tag and
+ * default-branch rewrites, and requests the gateway does not recognise. It
+ * defaults to Ask.
+ */
+export const PersonalGitHubActionPolicyGroup = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["routine", "review", "merge", "sensitive"]),
+);
+export type PersonalGitHubActionPolicyGroup = z.infer<typeof PersonalGitHubActionPolicyGroup>;
+
 export const GitHubActionPolicyActor = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("kind", [
     z.object({
@@ -21676,6 +21986,12 @@ const GitHubActionPolicyGroups = /* @__PURE__ */ defineSchema(() =>
   }),
 );
 
+const PersonalGitHubActionPolicyGroups = /* @__PURE__ */ defineSchema(() =>
+  GitHubActionPolicyGroups.extend({
+    sensitive: GitHubActionPolicyEffectiveDecision,
+  }),
+);
+
 export const GitHubActionPolicyActorState = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("kind", [
     z.object({
@@ -21688,7 +22004,7 @@ export const GitHubActionPolicyActorState = /* @__PURE__ */ defineSchema(() =>
       kind: z.literal("personal"),
       connectionId: primitives.string.trim().min(1).max(512),
       label: z.string().min(1).max(256),
-      groups: GitHubActionPolicyGroups,
+      groups: PersonalGitHubActionPolicyGroups,
     }),
   ]),
 );
@@ -21705,7 +22021,8 @@ export type GitHubActionPoliciesResponse = z.infer<typeof GitHubActionPoliciesRe
 export const UpdateGitHubActionPolicyRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     actor: GitHubActionPolicyActor,
-    group: GitHubActionPolicyGroup,
+    /** `sensitive` applies only to personal actors. */
+    group: PersonalGitHubActionPolicyGroup,
     decision: GitHubActionPolicyDecision,
   }),
 );
@@ -23922,6 +24239,7 @@ export * from "./remember";
 export * from "./agent-authored-durable-text";
 
 export * from "./feedback";
+export * from "./console";
 
 export type { PluginDiscoveryItem, PluginDiscoveryPage } from "./plugin-discovery";
 export { mcpEndpointIdentity } from "./mcp-endpoint";
@@ -23933,6 +24251,7 @@ export * from "./slack-rest-mcp";
 export * from "./skill-catalog-context";
 export * from "./workspace-governance-context";
 export * from "./agent-instructions-context";
+export * from "./repository-skills-context";
 export * from "./prompt-cache-diagnostics";
 export * from "./sandbox-recovery";
 export * from "./modal-native-proof-v2";

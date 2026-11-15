@@ -1710,6 +1710,25 @@ describe("BrowserSession route discipline", () => {
     expect(route).not.toContain("secretValues: request");
   });
 
+  test("counts the controller's failure reason but never returns it", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const start = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/actions"',
+    );
+    const end = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/clipboard"',
+      start,
+    );
+    const route = source.slice(start, end);
+    const stripped = route.indexOf("const { failureReason, ...result } = controllerResult;");
+    expect(stripped).toBeGreaterThan(0);
+    expect(route).toContain(
+      "observeBrowserActionResult(deps.observability, startedAtMs, request, result, failureReason);",
+    );
+    expect(route.indexOf("return context.json(result);")).toBeGreaterThan(stripped);
+    expect(route).not.toContain("context.json(controllerResult");
+  });
+
   test("binds agent uploads to the frozen initiating human, not the worker subject", () => {
     const grant = {
       accountId: "11111111-1111-4111-8111-111111111111",

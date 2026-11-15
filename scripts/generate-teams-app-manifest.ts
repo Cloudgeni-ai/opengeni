@@ -131,10 +131,10 @@ export function buildTeamsAppManifest(options: TeamsManifestOptions) {
       shared
         ? `${appName} replies in the same conversation when a task is done. Send "help" (in ${shared}, mention ${appName} with it) to see its commands.`
         : `${appName} replies in the same conversation when a task is done. Send "help" at any time to see its commands.`,
-      `Requirements: an administrator must first connect your organization's Microsoft Teams to an Opengeni workspace, and you need an Opengeni account with access to that workspace. Visit ${websiteUrl.replace(/\/$/, "")} to sign up or get access. The first time you message ${appName}, it asks you to link your Teams account to your Opengeni account.`,
+      `Requirements: an administrator must first connect your organization's Microsoft Teams to Opengeni, and you need an Opengeni account in that organization. Visit ${websiteUrl.replace(/\/$/, "")} to sign up or get access. The first time you message ${appName}, it asks you to link your Teams account to your Opengeni account.`,
       ...(options.groupChats
         ? [
-            "In a group chat, every participant must have linked an Opengeni account with access to that workspace.",
+            "In a group chat, every participant must have linked an Opengeni account in that organization.",
           ]
         : []),
       ...(contextPermissions.length

@@ -17,6 +17,12 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import PostalMime, { addressParser, decodeWords } from "postal-mime";
 import { isRoutingMutationOutcomeUnknownError } from "./sandbox/routing/routing-session";
 import { connectorAttachmentFileName } from "./connector-attachments";
+import { nangoProviderDomain, type NangoProxyTransport } from "@opengeni/contracts/nango";
+import {
+  NANGO_PROXY_TRANSPORTS,
+  sendWithCredential,
+  type NangoUsageRecorder,
+} from "./nango-transport";
 import { projectGmailToolResultForModel } from "./gmail-model-projection";
 import {
   GMAIL_EXTRA_TOOLS,
@@ -61,6 +67,8 @@ const MUTATION_TOOLS = new Set([
  */
 const GMAIL_MORE_ACCESS_NEEDED =
   "Gmail has not been given access for this action yet. The person is asked in the chat to allow it; try again after they do.";
+const GMAIL_NOT_AVAILABLE_FOR_CONNECTION =
+  "This Gmail action is not available for the connected account.";
 
 type ResolveCredentialResult =
   | {
@@ -72,6 +80,8 @@ type ResolveCredentialResult =
       authoritySource?: "host";
       authorizeProviderRequest?: () => Promise<boolean>;
       expiresAt?: Date | null;
+      /** Present for a Nango-backed connection: send through the Nango proxy. */
+      proxy?: NangoProxyTransport;
     }
   | {
       status: "auth_needed";
@@ -99,10 +109,13 @@ export type GmailRestMcpServerOptions = {
     connectionRef: McpServerConnectionRef;
     destinationUrl: string;
     forceRefresh?: boolean;
+    acceptedTransports?: readonly "nango_proxy"[];
   }) => Promise<ResolveCredentialResult>;
   onAuthNeeded?: (payload: ToolAuthNeededPayload) => void | Promise<void>;
   onResolvedConnectionId?: (connectionId: string) => void;
   fetchImpl?: FetchLike;
+  /** Best-effort accounting for requests sent through the Nango proxy. */
+  recordNangoUsage?: NangoUsageRecorder;
   /** Private host callbacks; bytes and transfer URLs never enter model results. */
   materializeGmailFile?: (request: GmailFileMaterializationRequest) => Promise<unknown>;
   readGmailFile?: (request: {
@@ -464,10 +477,13 @@ export function isOfficialGmailMcpConfig(
   url: string,
   connectionRef: McpServerConnectionRef | undefined,
 ): boolean {
+  const domain = connectionRef?.providerDomain.toLowerCase();
   return (
     canonicalUrl(url) === canonicalUrl(OFFICIAL_GMAIL_MCP_URL) &&
-    connectionRef?.providerDomain.toLowerCase() === "gmailmcp.googleapis.com" &&
-    connectionRef.kind === "oauth2"
+    // The same reviewed bridge serves the native grant and, when the operator
+    // routes Gmail through Nango, the Nango connection (docs/nango.md).
+    (domain === "gmailmcp.googleapis.com" || domain === nangoProviderDomain("gmail")) &&
+    connectionRef?.kind === "oauth2"
   );
 }
 
@@ -494,6 +510,7 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
       connectionRef: this.options.connectionRef,
       destinationUrl: `${GMAIL_REST_API_BASE}/labels`,
       forceRefresh: false,
+      acceptedTransports: NANGO_PROXY_TRANSPORTS,
       ...(this.options.subjectId ? { subjectId: this.options.subjectId } : {}),
     });
     if (result.status === "auth_needed") {
@@ -1493,6 +1510,7 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
             toolName: tool,
             connectionRef: this.options.connectionRef,
             destinationUrl,
+            acceptedTransports: NANGO_PROXY_TRANSPORTS,
           });
           return (
             current.status === "ok" &&
@@ -1747,6 +1765,7 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
       destinationUrl,
       toolName,
       forceRefresh,
+      acceptedTransports: NANGO_PROXY_TRANSPORTS,
       ...(this.options.subjectId ? { subjectId: this.options.subjectId } : {}),
     });
     if (result.status === "auth_needed") {
@@ -1760,6 +1779,9 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
     this.pinnedConnectionId = result.connectionId;
     // A host-supplied credential may not report grants; Google then decides.
     if (result.grantedScopes && !gmailToolSupportsScopes(toolName, result.grantedScopes)) {
+      // A Nango-managed app has fixed scopes: asking for more access would
+      // only reopen the same consent, so the tool is simply not available.
+      if (result.proxy) throw new GmailRestProviderError(GMAIL_NOT_AVAILABLE_FOR_CONNECTION, 403);
       await this.reportAuthNeeded(
         {
           status: "auth_needed",
@@ -1799,11 +1821,11 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
     }
     const resolve = async (forceRefresh: boolean) =>
       await this.resolveForTool(toolName, url.toString(), forceRefresh);
-    const send = async (headers: Record<string, string>) => {
+    const send = async (credential: Extract<ResolveCredentialResult, { status: "ok" }>) => {
       const context = this.requestContext.getStore();
-      const request: RequestInit = {
+      const request: RequestInit & { headers: Record<string, string> } = {
         ...init,
-        headers: { ...headers, ...headersRecord(init.headers) },
+        headers: headersRecord(init.headers),
         redirect: "error",
         signal: AbortSignal.any([
           ...(init.signal || context?.signal ? [init.signal || context!.signal!] : []),
@@ -1811,14 +1833,17 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
         ]),
       };
       if (!replaySafe && context) context.mutationSubmitted = true;
-      return await this.fetchImpl(url, request);
+      return await sendWithCredential(this.fetchImpl, url, request, credential, {
+        ...(this.options.recordNangoUsage ? { recorder: this.options.recordNangoUsage } : {}),
+        toolName,
+      });
     };
     const sendBounded = async (credential: Extract<ResolveCredentialResult, { status: "ok" }>) => {
       if (credential.authorizeProviderRequest && !(await credential.authorizeProviderRequest())) {
         throw new GmailRestAuthError("Authentication required for Gmail");
       }
       try {
-        return await send(credential.headers);
+        return await send(credential);
       } catch (error) {
         if (error instanceof GmailRestAuthError) throw error;
         if (!replaySafe)

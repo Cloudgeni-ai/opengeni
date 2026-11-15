@@ -4,17 +4,13 @@
 //! A window starts afresh whenever the sandbox is not simply running, and
 //! whenever a step starts for it, so the work of waking, pausing or saving
 //! never counts, even when a whole pause and resume falls between two
-//! readings. A checkpoint is the exception: its guest runs on while it
-//! waits to capture, which can take as long as a lazy wake's hydration, and
-//! again from its resume, so the step reads the VM throughout and lends the
-//! agent those readings (see [`crate::step::Meter`]). The window open as it
-//! began goes on; its last reading before the capture pauses the VM is
-//! judged at once and ends the window, and the next window starts from the
-//! first reading lent after the resume, without waiting for the agent's
-//! next tick, so the capture's own work never counts as the guest's. As the
-//! checkpoint ends, the window is judged at once again, so the core knows a
-//! guest is busy before it picks the next step, even when the checkpoint
-//! ends before the agent's next tick.
+//! readings. A checkpoint is the exception: its guest runs on throughout,
+//! and the copy's own work happens outside the VM, so the step reads the VM
+//! throughout and lends the agent those readings (see
+//! [`crate::step::Meter`]), and the window open as it began goes on. As the
+//! checkpoint ends, the window is judged at once, so the core knows a guest
+//! is busy before it picks the next step, even when the checkpoint ends
+//! before the agent's next tick.
 //!
 //! Each signal counts only when it was read at both ends of a window, so
 //! one that cannot be read leaves the other to decide alone. A sandbox none
@@ -116,22 +112,14 @@ impl Usage {
     }
 
     /// Takes a reading the step holding the VM lent. One lent while no
-    /// window is open, as the first after a checkpoint's resume is, starts
-    /// the window at once. The last before it pauses the VM is judged at
-    /// once and ends the window. Returns whether either judged the guest
-    /// busy.
+    /// window is open starts the window at once. Returns whether that
+    /// alone judged the guest busy.
     pub fn lend(&mut self, reading: Reading, rule: Option<BusyRule>) -> bool {
-        if !reading.last_before_pause {
-            let busy = match rule {
-                Some(rule) if self.window.is_none() => self.open(&reading, rule),
-                _ => false,
-            };
-            self.lent = Some(reading);
-            return busy;
-        }
-        let busy = rule.is_some_and(|rule| self.judge_now(&reading, rule));
-        self.window = None;
-        self.lent = None;
+        let busy = match rule {
+            Some(rule) if self.window.is_none() => self.open(&reading, rule),
+            _ => false,
+        };
+        self.lent = Some(reading);
         busy
     }
 

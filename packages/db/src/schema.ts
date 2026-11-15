@@ -85,7 +85,6 @@ import {
 
 export * from "./agents-schema";
 export * from "./automation-templates-schema";
-export * from "./bot-templates-schema";
 export * from "./editable-artifacts-schema";
 export * from "./event-triggers-schema";
 export * from "./managed-auth-session-set-schema";
@@ -2005,6 +2004,13 @@ export const connections = pgTable(
     verifiedInstallAt: timestamp("verified_install_at", { withTimezone: true }),
     verifiedInstallVersion: integer("verified_install_version"),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    // A workspace's own OpenAI, Azure OpenAI or OpenAI-compatible model key
+    // only: what its model's usage costs, for usage estimates and spend limits
+    // (see organizationModelProviderCustomModels). The catalogue model whose
+    // list rate it shares, or the administrator's own rate; both null when
+    // unknown. Never part of `version`, so the model's id is unaffected.
+    priceBasisModelId: text("price_basis_model_id"),
+    listPricing: jsonb("list_pricing").$type<ConnectedModelListPricing>(),
     createdBySubjectId: text("created_by_subject_id"),
     updatedBySubjectId: text("updated_by_subject_id"),
     // Explicit execution authority. Workspace rows have no member authority;
@@ -2091,6 +2097,10 @@ export const connections = pgTable(
     authorityGenerationValid: check(
       "connections_authority_generation_check",
       sql`${table.authorityGeneration} > 0`,
+    ),
+    listPriceValid: check(
+      "connections_list_price_chk",
+      sql`(${table.priceBasisModelId} is null or ${table.listPricing} is null) and ((${table.priceBasisModelId} is null and ${table.listPricing} is null) or (${table.subjectId} is null and ${table.kind} = 'api_key' and ${table.metadata} ? 'directModelProvider')) and (${table.priceBasisModelId} is null or (octet_length(${table.priceBasisModelId}) between 1 and 256 and ${table.priceBasisModelId} ~ '^[!-~]+$')) and (${table.listPricing} is null or jsonb_typeof(${table.listPricing}) = 'object')`,
     ),
     authority: foreignKey({
       name: "connections_authority_fk",
@@ -2234,7 +2244,7 @@ export const personalGitHubRepositorySelections = pgTable(
             or ${table.permissions}->'maintain' = 'true'::jsonb)
         ))
         and octet_length(${table.ownerSubjectId}) between 1 and 512
-        and ${table.canonicalFullName} ~ '^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}$'
+        and ${table.canonicalFullName} ~ '^[A-Za-z0-9][A-Za-z0-9_-]{0,38}/[A-Za-z0-9_.-]{1,100}$'
         and octet_length(${table.canonicalFullName}) between 3 and 140
         and octet_length(${table.defaultBranch}) between 1 and 255`,
     ),
@@ -2387,79 +2397,6 @@ export const slackInstallationBindings = pgTable(
   }),
 );
 
-/**
- * A named Slack agent of one Slack installation.
- *
- * HOME (`accountId`/`workspaceId`/`connectionId`) is the installation binding,
- * exactly like {@link slackChannelRoutes}. TARGET is the one fixed workspace the
- * agent's chats run in; it never changes after creation. Everyone in the
- * organization can read the directory; only the HOME tenancy writes.
- */
-export const slackAgents = pgTable(
-  "slack_agents",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    accountId: uuid("account_id")
-      .notNull()
-      .references(() => managedAccounts.id, { onDelete: "cascade" }),
-    workspaceId: uuid("workspace_id")
-      .notNull()
-      .references(() => workspaces.id, { onDelete: "cascade" }),
-    connectionId: uuid("connection_id")
-      .notNull()
-      .references(() => connections.id, { onDelete: "cascade" }),
-    slackTeamId: text("slack_team_id").notNull(),
-    targetAccountId: uuid("target_account_id")
-      .notNull()
-      .references(() => managedAccounts.id, { onDelete: "cascade" }),
-    targetWorkspaceId: uuid("target_workspace_id")
-      .notNull()
-      .references(() => workspaces.id, { onDelete: "cascade" }),
-    name: text("name").notNull(),
-    nameKey: text("name_key").notNull(),
-    description: text("description").notNull(),
-    avatar: jsonb("avatar").$type<SessionAvatar>().notNull(),
-    instructions: text("instructions").notNull().default(""),
-    knowledgeCollectionId: uuid("knowledge_collection_id"),
-    open: boolean("open").notNull().default(false),
-    createdBySubjectId: text("created_by_subject_id").notNull(),
-    version: integer("version").notNull().default(1),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => ({
-    nameKey: unique("slack_agents_name_key_uq").on(table.connectionId, table.nameKey),
-    workspaceAccount: foreignKey({
-      name: "slack_agents_workspace_account_fk",
-      columns: [table.workspaceId, table.accountId],
-      foreignColumns: [workspaces.id, workspaces.accountId],
-    }).onDelete("cascade"),
-    targetWorkspaceAccount: foreignKey({
-      name: "slack_agents_target_workspace_account_fk",
-      columns: [table.targetWorkspaceId, table.targetAccountId],
-      foreignColumns: [workspaces.id, workspaces.accountId],
-    }).onDelete("cascade"),
-    target: index("slack_agents_target_idx").on(table.targetWorkspaceId),
-    account: index("slack_agents_account_idx").on(table.accountId),
-    sameAccount: check(
-      "slack_agents_same_account_check",
-      sql`${table.targetAccountId} = ${table.accountId}`,
-    ),
-    bounded: check(
-      "slack_agents_bounds_check",
-      sql`octet_length(${table.slackTeamId}) between 1 and 64
-        and char_length(btrim(${table.name})) between 1 and 80
-        and ${table.nameKey} ~ '^[^[:space:]-]{1,80}$'
-        and char_length(btrim(${table.description})) between 1 and 200
-        and jsonb_typeof(${table.avatar}) = 'object'
-        and pg_column_size(${table.avatar}) <= 4096
-        and char_length(${table.instructions}) <= 8000
-        and octet_length(${table.createdBySubjectId}) between 1 and 1024
-        and ${table.version} > 0`,
-    ),
-  }),
-);
-
 /** Per Slack person and agent: the one-time "next time" hint and first use. */
 export const slackAgentUserStates = pgTable(
   "slack_agent_user_states",
@@ -2474,9 +2411,9 @@ export const slackAgentUserStates = pgTable(
     connectionId: uuid("connection_id")
       .notNull()
       .references(() => connections.id, { onDelete: "cascade" }),
-    slackAgentId: uuid("slack_agent_id")
-      .notNull()
-      .references(() => slackAgents.id, { onDelete: "cascade" }),
+    // With connection_id, a foreign key to agent_slack_installs (agent_id,
+    // connection_id) ON DELETE CASCADE (migration 1385).
+    slackAgentId: uuid("slack_agent_id").notNull(),
     slackUserId: text("slack_user_id").notNull(),
     hintInteractionId: uuid("hint_interaction_id"),
     /** The open-agent chat that showed this person the visibility notice. */
@@ -2486,7 +2423,9 @@ export const slackAgentUserStates = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    agentUser: unique("slack_agent_user_states_agent_user_uq").on(
+    // 1398: per installation (1440 dropped the per-agent key).
+    installUser: uniqueIndex("slack_agent_user_states_install_user_uq").on(
+      table.connectionId,
       table.slackAgentId,
       table.slackUserId,
     ),
@@ -2539,9 +2478,9 @@ export const slackAgentProposals = pgTable(
       .$type<"pending" | "creating" | "created" | "cancelled">()
       .notNull()
       .default("pending"),
-    createdSlackAgentId: uuid("created_slack_agent_id").references(() => slackAgents.id, {
-      onDelete: "set null",
-    }),
+    // With connection_id, a foreign key to agent_slack_installs (agent_id,
+    // connection_id) ON DELETE SET NULL (created_slack_agent_id) (migration 1386).
+    createdSlackAgentId: uuid("created_slack_agent_id"),
     decidedBySubjectId: text("decided_by_subject_id"),
     decidedBySlackUserId: text("decided_by_slack_user_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -2690,16 +2629,18 @@ export const slackAgentIntroPosts = pgTable(
     connectionId: uuid("connection_id")
       .notNull()
       .references(() => connections.id, { onDelete: "cascade" }),
-    slackAgentId: uuid("slack_agent_id")
-      .notNull()
-      .references(() => slackAgents.id, { onDelete: "cascade" }),
+    // With connection_id, a foreign key to agent_slack_installs (agent_id,
+    // connection_id) ON DELETE CASCADE (migration 1387).
+    slackAgentId: uuid("slack_agent_id").notNull(),
     slackChannelId: text("slack_channel_id").notNull(),
     postedBySubjectId: text("posted_by_subject_id").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    agentChannel: unique("slack_agent_intro_posts_agent_channel_uq").on(
+    // 1399: per installation (1441 dropped the per-agent key).
+    installChannel: uniqueIndex("slack_agent_intro_posts_install_channel_uq").on(
+      table.connectionId,
       table.slackAgentId,
       table.slackChannelId,
     ),
@@ -2736,9 +2677,9 @@ export const slackAgentSuggestions = pgTable(
     connectionId: uuid("connection_id")
       .notNull()
       .references(() => connections.id, { onDelete: "cascade" }),
-    slackAgentId: uuid("slack_agent_id")
-      .notNull()
-      .references(() => slackAgents.id, { onDelete: "cascade" }),
+    // With connection_id, a foreign key to agent_slack_installs (agent_id,
+    // connection_id) ON DELETE CASCADE (migration 1388).
+    slackAgentId: uuid("slack_agent_id").notNull(),
     interactionId: uuid("interaction_id").notNull(),
     turnId: uuid("turn_id").notNull(),
     providerEventId: text("provider_event_id").notNull(),
@@ -2898,9 +2839,9 @@ export const slackChannelRoutes = pgTable(
     source: text("source").$type<"picker" | "admin">().notNull(),
     // Set when the channel's answer is a Slack agent rather than plain Opengeni
     // in the target workspace. The target then equals the agent's own target.
-    slackAgentId: uuid("slack_agent_id").references(() => slackAgents.id, {
-      onDelete: "cascade",
-    }),
+    // With connection_id, a foreign key to agent_slack_installs (agent_id,
+    // connection_id) ON DELETE CASCADE (migration 1383).
+    slackAgentId: uuid("slack_agent_id"),
     version: integer("version").notNull().default(1),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -3720,9 +3661,9 @@ export const slackInteractions = pgTable(
     // this column existed, or by an older image).
     startMessageLine: text("start_message_line"),
     // The Slack agent this chat was started for, frozen when the thread binds.
-    slackAgentId: uuid("slack_agent_id").references(() => slackAgents.id, {
-      onDelete: "set null",
-    }),
+    // With connection_id, a foreign key to agent_slack_installs (agent_id,
+    // connection_id) ON DELETE SET NULL (slack_agent_id) (migration 1384).
+    slackAgentId: uuid("slack_agent_id"),
     // The agent whose chat passed this thread on, so it is never handed back.
     handoffFromSlackAgentId: uuid("handoff_from_slack_agent_id"),
     // The latest Slack message this chat was given and who sent it. A message
@@ -5375,7 +5316,8 @@ export const sessions = pgTable(
       .$type<SessionRemovedRepository[]>()
       .notNull()
       .default([]),
-    skills: jsonb("skills").$type<unknown[]>().notNull().default([]),
+    // `skills` (the Skill folders the session carries itself) is deliberately
+    // not part of this row model; see `sessionSkillSets` below.
     tools: jsonb("tools").$type<unknown[]>().notNull().default([]),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     // Frozen creator fact. This is used for creation attribution and for the
@@ -5803,6 +5745,24 @@ export const sessions = pgTable(
     ),
   }),
 );
+
+/**
+ * The `sessions.skills` column: the complete Skill folders a session carries
+ * itself (every file's content), often hundreds of kilobytes per session and
+ * copied to every child. It lives in the sessions table but is not part of the
+ * `sessions` row model above, so ordinary row reads, `RETURNING` clauses and
+ * the per-event session row locks never select it: selecting it makes
+ * PostgreSQL fetch and decompress the whole TOASTed value and ship it to the
+ * process on every hot path. Read it only where the Skill content is actually
+ * used (see `sessionRowWithSkillsColumns` and `readSessionSkills`), and write
+ * it only through this table.
+ */
+export const sessionSkillSets = pgTable("sessions", {
+  id: uuid("id").primaryKey(),
+  accountId: uuid("account_id").notNull(),
+  workspaceId: uuid("workspace_id").notNull(),
+  skills: jsonb("skills").$type<unknown[]>().notNull().default([]),
+});
 
 export const organizationUserResourceGrants = pgTable(
   "organization_user_resource_grants",
@@ -6571,6 +6531,44 @@ export const files = pgTable(
   },
   (table) => ({
     workspaceCreated: index("files_workspace_created_idx").on(table.workspaceId, table.createdAt),
+    // File lists read one page newest first from each of these (migrations
+    // 1409-1412): a workspace's shared files, a person's own files in one
+    // workspace, and a person's own files that may reach other workspaces or
+    // stay in their own. A private file has one owner (1431).
+    sharedCreated: index("files_shared_created_idx")
+      .on(table.workspaceId, table.status, table.createdAt, table.id)
+      .where(sql`private_owner_subject_ids IS NULL`),
+    privateWorkspaceCreated: index("files_private_workspace_created_idx")
+      .on(
+        table.workspaceId,
+        sql`(private_owner_subject_ids[1])`,
+        table.status,
+        table.createdAt,
+        table.id,
+      )
+      .where(sql`private_owner_subject_ids IS NOT NULL`),
+    privateRoamingCreated: index("files_private_roaming_created_idx")
+      .on(
+        table.accountId,
+        sql`(private_owner_subject_ids[1])`,
+        table.status,
+        table.createdAt,
+        table.id,
+      )
+      .where(
+        sql`private_owner_subject_ids IS NOT NULL AND (reach_workspace_ids IS NULL OR cardinality(reach_workspace_ids) > 0)`,
+      ),
+    privateLocalCreated: index("files_private_local_created_idx")
+      .on(
+        table.accountId,
+        sql`(private_owner_subject_ids[1])`,
+        table.status,
+        table.createdAt,
+        table.id,
+      )
+      .where(
+        sql`private_owner_subject_ids IS NOT NULL AND reach_workspace_ids IS NOT NULL AND cardinality(reach_workspace_ids) = 0`,
+      ),
     objectKey: uniqueIndex("files_object_key_idx").on(table.objectKey),
     scopeIdentity: uniqueIndex("files_scope_id_uq").on(
       table.accountId,
@@ -8002,6 +8000,13 @@ export const sessionTurns = pgTable(
       table.status,
       table.position,
     ),
+    // Next turn position, max(position) + 1, as one backward probe instead of
+    // a row-security check of every earlier turn (migration 1355).
+    sessionPosition: index("session_turns_session_position_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.position,
+    ),
     oneCurrentInference: uniqueIndex("session_turns_one_current_inference_uq")
       .on(table.workspaceId, table.sessionId)
       .where(sql`${table.status} in ('running','requires_action','recovering','waiting_capacity')`),
@@ -9229,6 +9234,13 @@ export const sessionCommandReceipts = pgTable(
       table.targetSessionId,
       table.createdAt,
     ),
+    // Attempt-claim recovery-warning guards probe one action of one session
+    // (migration 1356).
+    targetAction: index("session_command_receipts_target_action_idx").on(
+      table.workspaceId,
+      table.targetSessionId,
+      table.action,
+    ),
     promptActorOperation: index("session_command_receipts_prompt_actor_operation_idx")
       .on(
         table.workspaceId,
@@ -9686,6 +9698,17 @@ export const sessionSystemUpdateOutbox = pgTable(
       table.dedupeKey,
     ),
     pending: index("session_system_update_outbox_pending_idx").on(table.status, table.createdAt),
+    // The newest terminal notice a child wrote for its parent, which decides
+    // whether that child's failure is already the parent agent's (migration 1360).
+    childTerminalSource: index("session_system_update_outbox_child_terminal_source_idx")
+      .on(
+        table.workspaceId,
+        table.sourceSessionId,
+        table.targetSessionId,
+        table.createdAt,
+        table.id,
+      )
+      .where(sql`${table.kind} = 'child_terminal_result'`),
   }),
 );
 
@@ -10223,6 +10246,7 @@ export const turnTimingProfiles = pgTable(
     modelNetworkMs: bigint("model_network_ms", { mode: "number" }).notNull(),
     modelUnsplitMs: bigint("model_unsplit_ms", { mode: "number" }).notNull(),
     modelStalledMs: bigint("model_stalled_ms", { mode: "number" }).notNull(),
+    compactionMs: bigint("compaction_ms", { mode: "number" }).notNull().default(0),
     webSearchMs: bigint("web_search_ms", { mode: "number" }).notNull(),
     mcpToolMs: bigint("mcp_tool_ms", { mode: "number" }).notNull(),
     sandboxToolMs: bigint("sandbox_tool_ms", { mode: "number" }).notNull(),
@@ -15543,6 +15567,17 @@ export const organizationModelProviderConnections = pgTable(
     compatibleApi: text("compatible_api").$type<"chat" | "responses">(),
     /** OpenAI-compatible endpoints only: an optional display name. */
     label: text("label"),
+    /**
+     * Anthropic API connections only: the organization's further API keys.
+     * The connection's own key is the first member.
+     */
+    apiKeyMembers: jsonb("api_key_members").$type<StoredAnthropicApiKeyMember[]>(),
+    /**
+     * Anthropic API connections only: member id to the time Anthropic refused
+     * that key for lack of credits (the connection's own key is
+     * `primary-v<version>`).
+     */
+    apiKeyCreditRefusals: jsonb("api_key_credit_refusals").$type<Record<string, string>>(),
     /** How the connection signs in; Microsoft Entra ID methods are Azure OpenAI only. */
     authMethod: text("auth_method")
       .$type<OrganizationModelProviderAuthMethod>()
@@ -15605,8 +15640,27 @@ export const organizationModelProviderConnections = pgTable(
       "organization_model_provider_connections_auth_method_chk",
       sql`${table.authMethod} in ('api_key', 'entra_client_secret', 'entra_deployment_identity') and (${table.authMethod} = 'api_key' or ${table.providerKind} = 'azure_openai')`,
     ),
+    apiKeyMembersCheck: check(
+      "organization_model_provider_connections_api_key_members_chk",
+      sql`${table.apiKeyMembers} is null or (${table.providerKind} = 'anthropic' and jsonb_typeof(${table.apiKeyMembers}) = 'array' and jsonb_array_length(${table.apiKeyMembers}) <= 63)`,
+    ),
+    apiKeyRefusalsCheck: check(
+      "organization_model_provider_connections_api_key_refusals_chk",
+      sql`${table.apiKeyCreditRefusals} is null or (${table.providerKind} = 'anthropic' and jsonb_typeof(${table.apiKeyCreditRefusals}) = 'object')`,
+    ),
   }),
 );
+
+/** One further API key of an organization's Anthropic API connection. */
+export type StoredAnthropicApiKeyMember = {
+  id: string;
+  label: string;
+  credentialEncrypted: string;
+  credentialDigest: string;
+  anthropicOrganizationId: string | null;
+  createdAt: string;
+  createdBySubjectId: string;
+};
 
 export const organizationModelProviderConnectionOperations = pgTable(
   "organization_model_provider_connection_operations",
@@ -15714,6 +15768,14 @@ export const organizationModelProviderCustomModels = pgTable(
     defaultReasoningEffort: text("default_reasoning_effort").$type<
       "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
     >(),
+    /**
+     * OpenAI, Azure OpenAI and OpenAI-compatible models only: the catalogue
+     * model whose list rate prices this model's usage estimates (an Azure
+     * deployment's base model). Null when unknown or `list_pricing` is set.
+     */
+    priceBasisModelId: text("price_basis_model_id"),
+    /** The administrator's own list rate for the model, in USD micros per 1M tokens. */
+    listPricing: jsonb("list_pricing").$type<ConnectedModelListPricing>(),
     version: integer("version").notNull().default(1),
     createOperationId: uuid("create_operation_id").notNull(),
     createRequestHash: text("create_request_hash").notNull(),
@@ -15786,8 +15848,20 @@ export const organizationModelProviderCustomModels = pgTable(
       "organization_model_provider_custom_models_delete_receipt_chk",
       sql`(${table.deleteOperationId} is null and ${table.deleteRequestHash} is null) or (${table.deleteOperationId} is not null and ${table.deleteRequestHash} ~ '^[a-f0-9]{64}$' and ${table.retiredAt} is not null)`,
     ),
+    listPriceCheck: check(
+      "organization_model_provider_custom_models_list_price_chk",
+      sql`(${table.priceBasisModelId} is null or ${table.listPricing} is null) and ((${table.priceBasisModelId} is null and ${table.listPricing} is null) or ${table.providerKind} in ('openai', 'azure_openai', 'openai_compatible')) and (${table.priceBasisModelId} is null or (octet_length(${table.priceBasisModelId}) between 1 and 256 and ${table.priceBasisModelId} ~ '^[!-~]+$')) and (${table.listPricing} is null or jsonb_typeof(${table.listPricing}) = 'object')`,
+    ),
   }),
 );
+
+/** An administrator's own list rate for a connected model, in USD micros per 1M tokens. */
+export type ConnectedModelListPricing = {
+  inputMicrosPerMillionTokens: number;
+  cachedInputMicrosPerMillionTokens?: number | undefined;
+  cacheWriteMicrosPerMillionTokens?: number | undefined;
+  outputMicrosPerMillionTokens: number;
+};
 
 export * from "./workspace-instruction-policies-schema";
 export * from "./company-profile-schema";

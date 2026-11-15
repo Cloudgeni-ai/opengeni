@@ -750,7 +750,7 @@ describe("update messages with PostgreSQL", () => {
     });
     const used = await f.person("used");
     const [opsDesk] = await shared!.admin<{ id: string }[]>`
-      select id from slack_agents where connection_id = ${f.connectionId}`;
+      select agent_id as id from agent_slack_installs where connection_id = ${f.connectionId}`;
     await touchSlackAgentUserState(client.db, f.home, {
       connectionId: f.connectionId,
       slackAgentId: opsDesk!.id,

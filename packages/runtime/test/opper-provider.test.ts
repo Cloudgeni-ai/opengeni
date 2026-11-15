@@ -68,7 +68,7 @@ describe("Opper request policy", () => {
   });
 
   for (const kind of ["opper-managed", "opper-workspace", "opper-organization"] as const) {
-    test(`moves unsigned reasoning into labeled text for Claude targets (${kind})`, () => {
+    test(`leaves unsigned reasoning out for Claude targets, never as text (${kind})`, () => {
       const policy = modelRequestPolicyForProvider(opperProvider(kind));
       const result = policy({
         path: "/chat/completions",
@@ -76,8 +76,8 @@ describe("Opper request policy", () => {
       });
       const serialized = JSON.stringify(result?.body.messages);
       expect(serialized).not.toContain('"reasoning"');
-      expect(serialized).toContain("Unsigned fixture thought.");
-      expect(serialized).toContain("Historical reasoning without a provider signature");
+      expect(serialized).not.toContain("Unsigned fixture thought.");
+      expect(serialized).not.toContain("Historical reasoning");
     });
   }
 

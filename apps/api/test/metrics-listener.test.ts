@@ -38,6 +38,7 @@ describe("API metrics listener", () => {
     const metrics = await app.request("http://10.0.0.1:9464/metrics");
     expect(metrics.status).toBe(200);
     expect(metrics.headers.get("content-type")).toBe("text/plain; version=0.0.4; charset=utf-8");
+    expect(metrics.headers.get("x-content-type-options")).toBe("nosniff");
     expect(await metrics.text()).toBe(exposition);
     for (const path of ["/", "/healthz", "/v1/config/client", "/metrics/extra"]) {
       expect((await app.request(`http://10.0.0.1:9464${path}`)).status).toBe(404);

@@ -82,7 +82,15 @@ describe("Google Calendar REST OAuth profile", () => {
       "https://www.googleapis.com/auth/calendar.freebusy",
     ]);
     expect(profile.requestedScopes).toEqual(OFFICIAL_GOOGLE_CALENDAR_MCP_SCOPES);
-    expect(profile.extraAuthorizeParams).toEqual({ access_type: "offline", prompt: "consent" });
+    expect(profile.extraAuthorizeParams).toEqual({
+      access_type: "offline",
+      prompt: "consent select_account",
+    });
+    expect(profile.reconnectLoginHint).toEqual({
+      metadataKey: "googleCalendarEmail",
+      prompt: "consent",
+      accountIdKey: "googleSubject",
+    });
   });
 
   test("account verification keeps only the primary calendar's email", () => {

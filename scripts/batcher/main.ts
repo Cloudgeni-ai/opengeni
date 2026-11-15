@@ -16,10 +16,16 @@ function settings(env: Record<string, string | undefined>): Settings {
   };
   const maxBatch = Number(env.BATCHER_MAX_BATCH || DEFAULT_SETTINGS.maxBatch);
   if (!Number.isSafeInteger(maxBatch) || maxBatch < 1) throw new Error("BATCHER_MAX_BATCH");
+  const concurrentBatches = Number(
+    env.BATCHER_CONCURRENT_BATCHES || DEFAULT_SETTINGS.concurrentBatches,
+  );
+  if (concurrentBatches !== 1 && concurrentBatches !== 2)
+    throw new Error("BATCHER_CONCURRENT_BATCHES must be 1 or 2");
   return {
     windowMs: milliseconds("BATCHER_WINDOW_SECONDS", DEFAULT_SETTINGS.windowMs),
     maxBatch,
     startTimeoutMs: milliseconds("BATCHER_START_TIMEOUT_SECONDS", DEFAULT_SETTINGS.startTimeoutMs),
+    concurrentBatches,
   };
 }
 

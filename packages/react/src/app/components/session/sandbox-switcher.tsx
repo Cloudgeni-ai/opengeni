@@ -144,8 +144,8 @@ export function SessionMachinePickerAction(props: {
           />
           {props.queuedWork ? (
             <p className={MENU_NOTE_CLASS}>
-              Use a workspace or cloud machine for the saved message. A new personal-machine
-              permission only applies to new messages.
+              Use a workspace or cloud machine for this message. A new personal-machine permission
+              only applies to new messages.
             </p>
           ) : null}
         </Popover.Content>

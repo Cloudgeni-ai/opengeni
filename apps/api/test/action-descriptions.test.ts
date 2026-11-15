@@ -87,7 +87,7 @@ describe("action descriptions", () => {
 
   // Actions that change something but take no body: the path says it all.
   const BODYLESS =
-    /\/(activate|usage\/refresh|refresh|verify|connect\/start|reset-credits\/(prepare|redeem))$|\/organizations\/:organizationId\/(codex|supergrok)\/connect\/start$/;
+    /\/(activate|usage\/refresh|refresh|verify|serve-again|connect\/start|reset-credits\/(prepare|redeem))$|\/organizations\/:organizationId\/(codex|supergrok)\/connect\/start$/;
 
   test("every subscription, model and vault connection change shows the body to send", () => {
     const missing = ACTION_CATALOG.filter(

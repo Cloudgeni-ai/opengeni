@@ -695,6 +695,68 @@ describe("latest started session policy", () => {
   });
 });
 
+describe("an accepted Send moves the draft past the revision it went ahead from", () => {
+  // A client keeps a Send that got no answer as the draft, naming the
+  // revision the Send went ahead from. That write must fail once the Send
+  // was accepted, or the sent text would come back as the draft.
+  const setup = async () => {
+    const value = await fixture(0);
+    const workspaceId = value.grant.workspaceId!;
+    const scope = {
+      accountId: value.grant.accountId,
+      workspaceId,
+      sessionId: value.session.id,
+      subjectId: value.grant.subjectId,
+    };
+    type ScopedDb = Parameters<typeof submitHumanPromptInTransaction>[0];
+    const inRls = <T>(run: (db: ScopedDb) => Promise<T>) =>
+      withWorkspaceSubjectRls(client.db, workspaceId, value.grant.subjectId, (db) =>
+        db.transaction((tx) => run(tx as unknown as ScopedDb)),
+      );
+    return {
+      save: (expectedRevision: number, text: string) =>
+        inRls((db) =>
+          saveComposerDraftInTransaction(db, { ...scope, expectedRevision, text, resources: [] }),
+        ),
+      submit: (expectedDraftRevision: number, text: string) =>
+        inRls((db) =>
+          submitHumanPromptInTransaction(db, {
+            ...scope,
+            actor: value.actor,
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            expectedDraftRevision,
+            text,
+            resources: [],
+            reasoningEffortFallback: "medium",
+            source: "user",
+          }),
+        ),
+      read: () => inRls((db) => getComposerDraftInTransaction(db, scope)),
+    };
+  };
+
+  test("also when nothing was ever saved", async () => {
+    const chat = await setup();
+    expect(await chat.read()).toBeNull();
+    const sent = await chat.submit(0, "sent before any save");
+    expect(sent.draft).toMatchObject({ revision: 1, text: "" });
+    await expect(chat.save(0, "sent before any save")).rejects.toMatchObject({
+      code: "DRAFT_CHANGED",
+    });
+    expect(await chat.read()).toMatchObject({ revision: 1, text: "" });
+  });
+
+  test("a Send kept as the draft before it lands is cleared when it lands", async () => {
+    const chat = await setup();
+    expect(await chat.save(0, "kept while unconfirmed")).toMatchObject({ revision: 1 });
+    // The Send itself went ahead from revision 0 and lands now.
+    const sent = await chat.submit(0, "kept while unconfirmed");
+    expect(sent.draft).toMatchObject({ revision: 2, text: "" });
+    expect(await chat.read()).toMatchObject({ revision: 2, text: "" });
+  });
+});
+
 describe("compact list model policy", () => {
   test("names the latest started turn's model unless a settings write is newer", async () => {
     const value = await fixture(0);

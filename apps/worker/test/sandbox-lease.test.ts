@@ -7488,6 +7488,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       actor: "reaper",
       instanceId: "box-terminated-reason",
       drainReason: "provider_deadline",
+      providerStopped: true,
     });
   }, 60_000);
 

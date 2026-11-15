@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { ComputeControlError } from "@opengeni/runtime/sandbox";
 import {
   recoverUnresponsiveComputeAgent,
   type SandboxProcessStartRecovery,
@@ -7,13 +8,20 @@ import {
 type Published = Parameters<SandboxProcessStartRecovery["publish"]>[0][number];
 
 /** A compute box whose agent stopped answering, and a turn's event log. */
-function turn(options: { answers?: boolean; restartFails?: boolean; publishFails?: boolean } = {}) {
+function turn(
+  options: {
+    answers?: boolean;
+    restartFails?: boolean | Error;
+    publishFails?: boolean;
+  } = {},
+) {
   const events: Published[] = [];
   let restarts = 0;
   const machine = {
     agentAnswers: async () => options.answers ?? false,
     restartMachine: async () => {
       restarts += 1;
+      if (options.restartFails instanceof Error) throw options.restartFails;
       if (options.restartFails) throw new Error("control service unavailable");
     },
   };
@@ -89,6 +97,30 @@ describe("a compute box whose agent stopped answering a command", () => {
       "sandbox.operation.started",
       "sandbox.operation.failed",
     ]);
+  });
+
+  test("a restart its host cannot serve now is reported as the host's, not the box's", async () => {
+    // As on 10 Nov 2026: the host's agent was restarting, and compute control
+    // answered the restart with 503 unavailable.
+    const refused = new ComputeControlError({
+      kind: "unavailable",
+      status: 503,
+      message:
+        "compute control service POST /v1/sandboxes/x/restart: unavailable for now: this host's agent is starting: it is taking back the sandboxes an earlier run left",
+    });
+    const { machine, recovery, events } = turn({ restartFails: refused });
+    expect(await recoverUnresponsiveComputeAgent(machine, recovery)).toBe("host_unavailable");
+    expect(events.map((event) => event.type)).toEqual([
+      "sandbox.operation.started",
+      "sandbox.operation.failed",
+    ]);
+    // Any other refusal is still a failed restart.
+    const other = turn({
+      restartFails: new ComputeControlError({ kind: "host", status: 502, message: "refused" }),
+    });
+    expect(await recoverUnresponsiveComputeAgent(other.machine, other.recovery)).toBe(
+      "restart_failed",
+    );
   });
 
   test("a restart that cannot be recorded is not made, and says so", async () => {

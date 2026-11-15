@@ -6,7 +6,12 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HTTPException } from "hono/http-exception";
-import { alongsideAuthorization, withAccessGrantSessionRlsContext } from "../src/access-grant-rls";
+import {
+  agentAttemptStaleHttpError,
+  alongsideAuthorization,
+  requireLiveAgentAttemptGrant,
+  withAccessGrantSessionRlsContext,
+} from "../src/access-grant-rls";
 import { ApiHttpError } from "../src/http/api-error";
 import { httpRejectionFactsFromEnvelope } from "../src/http/rejection-telemetry";
 
@@ -179,7 +184,12 @@ describe("access-grant session RLS context", () => {
     expect(caught).toBeInstanceOf(ApiHttpError);
     const error = caught as ApiHttpError;
     expect(error.status).toBe(403);
-    expect(error.message).toBe("agent attempt authority is invalid");
+    expect(error.message).toContain("turn attempt that is no longer active");
+    expect(error.message).toContain("Stop retrying this process");
+    expect(error.message).toContain("start a fresh command from the current live turn");
+    expect(error.message).toContain("check its existing receipt or actual state");
+    expect(error.retryable).toBe(false);
+    expect(error.outcomeUnknown).toBe(false);
     expect(error.details).toEqual({ code: "agent_attempt_caller_stale" });
     expect(
       httpRejectionFactsFromEnvelope(
@@ -189,6 +199,33 @@ describe("access-grant session RLS context", () => {
     ).toBe("agent_attempt_caller_stale");
     expect(context).not.toHaveBeenCalled();
   });
+
+  test.each(["caller_stale", "revoked", "forbidden", "not_found"] as const)(
+    "the lightweight attempt gate preserves the typed %s refusal and only explains stale attempts",
+    async (reason) => {
+      spyOn(core, "requireLiveAgentAttemptAuthorization").mockRejectedValue(
+        new core.SessionAuthorizationDeniedError(reason),
+      );
+      const error = await requireLiveAgentAttemptGrant(
+        { db: {} } as never,
+        grant({ principalKind: "agent_attempt", metadata: { sessionId } }),
+      ).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(ApiHttpError);
+      expect(error).toMatchObject({
+        status: 403,
+        code: "forbidden",
+        retryable: false,
+        outcomeUnknown: false,
+        details: { code: `agent_attempt_${reason}` },
+      });
+      if (reason === "caller_stale") {
+        expect((error as Error).message).toContain("turn attempt that is no longer active");
+        expect((error as Error).message).toContain("start a fresh command");
+      } else {
+        expect((error as Error).message).toBe("agent attempt authority is invalid");
+      }
+    },
+  );
   test("reads the claimed attempt's learning policy while the liveness check runs", async () => {
     spyOn(db, "withSessionRlsActorContext").mockImplementation(async (_actor, fn) => fn());
     const attemptId = "55555555-5555-4555-8555-555555555555";
@@ -247,6 +284,108 @@ describe("access-grant session RLS context", () => {
     }
     expect((caught as ApiHttpError).details).toEqual({ code: "agent_attempt_caller_stale" });
     expect(context).not.toHaveBeenCalled();
+  });
+
+  test("an attempt that goes stale after its liveness check passed is refused as stale, not a fault", async () => {
+    const context = spyOn(db, "withSessionRlsActorContext");
+    const attemptId = "88888888-8888-4888-8888-888888888888";
+    spyOn(core, "requireLiveAgentAttemptAuthorization").mockResolvedValue({
+      subjectId: "worker:first-party-mcp",
+      callerSessionId: sessionId,
+      turnId,
+      attemptId,
+      executionGeneration: 1,
+      initiatingHumanSubjectId: null,
+    } as never);
+    // The database's own attempt fence saw the turn after it moved on.
+    const fenced = Object.assign(new Error("Failed query: SELECT knowledge_entry_read(...)"), {
+      cause: { code: "42501", message: "Knowledge turn attempt is stale" },
+    });
+    spyOn(db, "freezeAgentLearningPolicy").mockRejectedValue(fenced);
+    const caught = await withAccessGrantSessionRlsContext(
+      { db: {} } as never,
+      grant({
+        principalKind: "agent_attempt",
+        metadata: { sessionId, turnId, attemptId, executionGeneration: 1 },
+      }),
+      async () => "unreachable",
+    ).catch((error: unknown) => error);
+    expect(caught).toBeInstanceOf(ApiHttpError);
+    expect(caught).toMatchObject({
+      status: 403,
+      code: "forbidden",
+      retryable: false,
+      outcomeUnknown: false,
+      details: { code: "agent_attempt_caller_stale" },
+      cause: fenced,
+    });
+    expect(context).not.toHaveBeenCalled();
+  });
+
+  test("a policy refusal that is not about the attempt's liveness is not relabelled", async () => {
+    const attemptId = "99999999-9999-4999-8999-999999999999";
+    spyOn(core, "requireLiveAgentAttemptAuthorization").mockResolvedValue({
+      subjectId: "worker:first-party-mcp",
+      callerSessionId: sessionId,
+      turnId,
+      attemptId,
+      executionGeneration: 1,
+      initiatingHumanSubjectId: null,
+    } as never);
+    const refused = Object.assign(new Error("Failed query"), {
+      cause: { code: "42501", message: "Knowledge workspace unavailable" },
+    });
+    spyOn(db, "freezeAgentLearningPolicy").mockRejectedValue(refused);
+    await expect(
+      withAccessGrantSessionRlsContext(
+        { db: {} } as never,
+        grant({
+          principalKind: "agent_attempt",
+          metadata: { sessionId, turnId, attemptId, executionGeneration: 1 },
+        }),
+        async () => "unreachable",
+      ),
+    ).rejects.toBe(refused);
+  });
+
+  test("a stale attempt found after the request context is answered centrally as stale", () => {
+    const request = new Request("http://127.0.0.1:8000/v1/workspaces/x/files/y");
+    const agent = spyOn(core, "requestAuthenticatedAsAgentAttempt").mockReturnValue(true);
+    const denied = new core.SessionAuthorizationDeniedError("caller_stale");
+    expect(agentAttemptStaleHttpError(denied, request)).toMatchObject({
+      status: 403,
+      code: "forbidden",
+      details: { code: "agent_attempt_caller_stale" },
+      cause: denied,
+    });
+    expect(agent).toHaveBeenCalledWith(request);
+    const fenced = Object.assign(new Error("Failed query"), {
+      cause: { code: "42501", message: "Knowledge attempt is interrupted" },
+    });
+    expect(agentAttemptStaleHttpError(fenced, request)).toMatchObject({
+      status: 403,
+      details: { code: "agent_attempt_caller_stale" },
+      cause: fenced,
+    });
+    // Other session refusals keep their route's own meaning.
+    for (const reason of ["not_found", "forbidden", "revoked"] as const) {
+      expect(
+        agentAttemptStaleHttpError(new core.SessionAuthorizationDeniedError(reason), request),
+      ).toBe(null);
+    }
+    expect(
+      agentAttemptStaleHttpError(
+        Object.assign(new Error("Failed query"), {
+          cause: { code: "42501", message: "Knowledge workspace unavailable" },
+        }),
+        request,
+      ),
+    ).toBe(null);
+    expect(agentAttemptStaleHttpError(new Error("boom"), request)).toBe(null);
+    // A request that did not authenticate as an agent attempt is never relabelled.
+    agent.mockReturnValue(false);
+    expect(agentAttemptStaleHttpError(denied, request)).toBe(null);
+    expect(agentAttemptStaleHttpError(fenced, request)).toBe(null);
   });
 
   test("work started alongside a gate is dropped when the gate refuses", async () => {

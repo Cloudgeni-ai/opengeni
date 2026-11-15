@@ -54,6 +54,14 @@ describe("Teams actor and transport boundary", () => {
     expect(JSON.stringify(diagnostics)).not.toContain("private-");
     expect(JSON.stringify(diagnostics)).not.toContain(tenant);
   });
+  test("keeps the sender's display name only for display and never drops a message over it", () => {
+    const named = (name: unknown) =>
+      normalizeTeamsMessage({ ...activity(), from: { ...activity().from, name } });
+    expect(named("  Ada   Lovelace ")?.actorName).toBe("Ada Lovelace");
+    expect(named("x".repeat(600))?.actorName).toBe("x".repeat(256));
+    expect(named(42)).not.toBeNull();
+    expect(named(42)?.actorName ?? null).toBeNull();
+  });
   test("accepts documented inline HTML representations using canonical text only", () => {
     for (const contentUrl of [undefined, null]) {
       const diagnostics: unknown[] = [];
@@ -253,6 +261,14 @@ describe("Teams actor and transport boundary", () => {
     expect(teamsReplyParts(`The news: ${tag}.`)).toEqual([
       'The news: "FrontierCode v1.1 replaces DeepSWE v1.1".',
     ]);
+  });
+  test("a reply shows source links without hosted-search tracking", () => {
+    const parts = teamsReplyParts(
+      "Rule 4-1 applies ([example.com](https://example.com/rules/4-1?_t_q=which+rule&utm_source=openai)) and [the video](https://example.com/watch?v=abc&utm_source=openai).",
+    );
+    expect(parts.join("")).toContain("(https://example.com/rules/4-1)");
+    expect(parts.join("")).toContain("(https://example.com/watch?v=abc)");
+    expect(parts.join("")).not.toContain("utm_source");
   });
 });
 

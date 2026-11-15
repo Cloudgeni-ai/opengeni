@@ -33,7 +33,7 @@ import { scheduledTaskViewerSubjectForGrant } from "./scheduled-task-audience";
  * `/bot-templates` endpoints and the `bot_template_save` tool. Every agent the
  * reader can use is a template; its setup instructions are the agent's First
  * message. Saving one makes an agent with that First message and no
- * Instructions, and keeps a legacy `bot_templates` row for older releases.
+ * Instructions.
  *
  * Who may change one follows the agents rule: whoever made it, an admin, or a
  * workspace-level caller. An Only me one exists only for its owner. The server
@@ -181,12 +181,10 @@ export async function createBotTemplateForViewer(input: {
         avatar: request.avatar,
         // A template's setup text is its Instructions.
         instructions: request.setupInstructions,
-        firstMessage: "",
         memoryEnabled: false,
         origin: "bot_template",
         sourceSessionId: request.sourceSessionId,
         createdBySubjectId: viewer.subjectId,
-        legacyBotTemplate: true,
         maxPerWorkspace: AGENTS_PER_WORKSPACE_MAX,
       },
     );
@@ -225,13 +223,9 @@ export async function updateBotTemplateForViewer(input: {
     request.visibility !== undefined && request.visibility !== agent.visibility;
   const renamesSlackHandle =
     request.name !== undefined && slackAgentNameKey(request.name) !== slackAgentNameKey(agent.name);
-  if (makesPrivate || renamesSlackHandle) {
+  // Making it Only me takes it out of Slack (see updateAgent).
+  if (renamesSlackHandle) {
     const inSlack = (await listAgentSlackInstalls(db, home, [agent.id])).length > 0;
-    if (inSlack && makesPrivate) {
-      throw new HTTPException(409, {
-        message: "This agent is available in Slack, so it stays shared with the workspace.",
-      });
-    }
     const problem =
       inSlack && request.name !== undefined ? slackAgentNameProblem(request.name) : null;
     if (problem && request.name !== undefined) {
@@ -270,11 +264,6 @@ export async function updateBotTemplateForViewer(input: {
   if (outcome.kind === "slack_name_taken") {
     throw new HTTPException(409, {
       message: "Another agent in Slack already has this name.",
-    });
-  }
-  if (outcome.kind === "requires_workspace_visibility") {
-    throw new HTTPException(409, {
-      message: "This agent is available in Slack, so it stays shared with the workspace.",
     });
   }
   if (outcome.kind !== "updated") {

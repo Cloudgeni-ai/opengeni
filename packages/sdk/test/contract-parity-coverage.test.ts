@@ -38,6 +38,7 @@ import {
   GitHubActionPoliciesResponse as ContractGitHubActionPoliciesResponse,
   GitHubActionPolicyDecision as ContractGitHubActionPolicyDecision,
   GitHubActionPolicyGroup as ContractGitHubActionPolicyGroup,
+  PersonalGitHubActionPolicyGroup as ContractPersonalGitHubActionPolicyGroup,
   GitHubAppInfo as ContractGitHubAppInfo,
   GitHubBindingStatus as ContractGitHubBindingStatus,
   GitHubInstallationBinding as ContractGitHubInstallationBinding,
@@ -109,6 +110,7 @@ import type {
   GitHubActionPoliciesResponse,
   GitHubActionPolicyDecision,
   GitHubActionPolicyGroup,
+  PersonalGitHubActionPolicyGroup,
   GitHubAppInfo,
   GitHubBindingStatus,
   GitHubInstallationBinding,
@@ -177,6 +179,9 @@ describe("SDK / contracts parity (full coverage)", () => {
     const groups: readonly GitHubActionPolicyGroup[] = ContractGitHubActionPolicyGroup.options;
     expect(decisions).toEqual(ContractGitHubActionPolicyDecision.options);
     expect(groups).toEqual(ContractGitHubActionPolicyGroup.options);
+    const personalGroups: readonly PersonalGitHubActionPolicyGroup[] =
+      ContractPersonalGitHubActionPolicyGroup.options;
+    expect(personalGroups).toEqual(ContractPersonalGitHubActionPolicyGroup.options);
     const acceptResponse = (
       value: z.infer<typeof ContractGitHubActionPoliciesResponse>,
     ): GitHubActionPoliciesResponse => value;

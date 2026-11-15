@@ -475,6 +475,8 @@ try {
     "package/dist/personal-integration-setup.d.ts",
     "package/dist/machine-access.js",
     "package/dist/machine-access.d.ts",
+    "package/dist/encrypted-reasoning-refusal.js",
+    "package/dist/encrypted-reasoning-refusal.d.ts",
   ]) {
     if (!contractsTarballContents.split("\n").includes(artifact)) {
       throw new Error(`contracts tarball is missing ${artifact}`);

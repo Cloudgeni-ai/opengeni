@@ -366,7 +366,7 @@ describe("BrowserSession SDK", () => {
       fetch: async (input) => {
         const url = String(input);
         calls.push(url);
-        return url.endsWith(`/${BROWSER_DOWNLOAD_ID}/save`)
+        return url.endsWith(`/${BROWSER_DOWNLOAD_ID}/save?respondAsync=true`)
           ? json(
               {
                 download,
@@ -405,7 +405,7 @@ describe("BrowserSession SDK", () => {
     expect(calls).toEqual([
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/browser-sessions/${BROWSER_SESSION_ID}/downloads`,
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/browser-sessions/${BROWSER_SESSION_ID}/downloads/${BROWSER_DOWNLOAD_ID}`,
-      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/browser-sessions/${BROWSER_SESSION_ID}/downloads/${BROWSER_DOWNLOAD_ID}/save`,
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/browser-sessions/${BROWSER_SESSION_ID}/downloads/${BROWSER_DOWNLOAD_ID}/save?respondAsync=true`,
     ]);
   });
 

@@ -89,6 +89,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 step,
                 stays,
             } => self.asked(id, op, step, stays),
+            Event::ImageKept { image, before } => self.image_kept(image, before),
             Event::TemplateChecked { shape, result } => {
                 self.template_checked(shape, *result);
                 self.refill();
@@ -109,6 +110,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             Event::ImageSized { image, length } => self.image_sized(image, length),
             Event::ImageFetched { image, result } => self.fetch_ended(image, &result),
             Event::ReliefMeasured(measured) => self.relief_measured(*measured),
+            Event::DisksMeasured(measured) => self.disks_measured(*measured),
             Event::CacheGone { cache, removed } => self.cache_gone(cache, removed),
             Event::Claimed {
                 id,
@@ -671,6 +673,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 | Step::Compress
                 | Step::Save
                 | Step::Drop
+                | Step::End
                 | Step::Archive
                 | Step::Checkpoint
         );
@@ -864,8 +867,19 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             && self.records.get(id).is_some_and(|record| record.handed_off);
         let remove = dropped.then_some(Input::Remove { sandbox: id.0 });
         let step = finished_step.as_ref().map(|running| running.step);
+        // A pause whose guest did not say it wrote its files out: the core
+        // hears of it with the pause, before it picks the next step.
+        let unsynced = step == Some(Step::Pause)
+            && outcome == Outcome::Done
+            && self.records.get(id).is_some_and(|record| record.unsynced);
+        let unsynced = unsynced.then_some(Input::Unsynced { sandbox: id.0 });
         let gave_up = self.gave_up_copy(id.0, step, outcome);
-        self.inputs(std::iter::once(finished).chain(activity).chain(remove));
+        self.inputs(
+            std::iter::once(finished)
+                .chain(unsynced)
+                .chain(activity)
+                .chain(remove),
+        );
         if let Some(relieved) = gave_up {
             self.copy_freed(id.0, relieved);
         }

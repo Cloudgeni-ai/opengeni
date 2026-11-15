@@ -15,12 +15,16 @@ import {
   parseChatCompletionRequest,
 } from "../model-calls/chat-completions";
 import { isModelCallAbort } from "../model-calls/service";
+import { asDirectModelApiUse } from "../access-grant-rls";
 
 /**
  * OpenAI-compatible stateless model calls. A stock OpenAI SDK works with its
  * base URL set to `/v1/workspaces/{workspaceId}` and an Opengeni API key.
  * Running one costs what the same model call costs inside a session, and
  * requires the same `sessions:create` authority.
+ *
+ * Every call here is API use, paid from credits only, whichever credential
+ * signs it, including a person's own sign-in (`asDirectModelApiUse`).
  */
 export function registerChatCompletionRoutes(
   app: Hono,
@@ -47,12 +51,15 @@ export function registerChatCompletionRoutes(
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");
     if (!deps.modelCalls) return errorResponse(c, unavailable());
     try {
-      const models = await deps.modelCalls.listModels({
-        grant,
-        accountId: grant.accountId,
-        workspaceId,
-        subjectId: grant.subjectId,
-      });
+      const service = deps.modelCalls;
+      const models = await asDirectModelApiUse(grant, () =>
+        service.listModels({
+          grant,
+          accountId: grant.accountId,
+          workspaceId,
+          subjectId: grant.subjectId,
+        }),
+      );
       return c.json({
         object: "list",
         data: models.map((model) => ({
@@ -101,7 +108,7 @@ export function registerChatCompletionRoutes(
 
     if (!parsed.stream) {
       try {
-        const output = await service.call(caller);
+        const output = await asDirectModelApiUse(grant, () => service.call(caller));
         return c.json(
           chatCompletionResponse({
             requestId,
@@ -165,13 +172,15 @@ export function registerChatCompletionRoutes(
       send(chunk({ role: "assistant", content: "" }, null));
       signalOpened();
     };
-    const completion = service.call({
-      ...caller,
-      onTextDelta: (delta) => {
-        open();
-        send(chunk({ content: delta }, null));
-      },
-    });
+    const completion = asDirectModelApiUse(grant, () =>
+      service.call({
+        ...caller,
+        onTextDelta: (delta) => {
+          open();
+          send(chunk({ content: delta }, null));
+        },
+      }),
+    );
     const first = await Promise.race([
       firstOutput.then(() => ({ kind: "output" as const })),
       completion.then(

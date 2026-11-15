@@ -11,6 +11,7 @@ import { conversationTimeline } from "../src/conversation-timeline";
 import type { ComposerOptimisticMessage } from "../src/hooks/use-composer";
 import type { TimelineItem } from "../src/timeline/types";
 import { fakeClient, fakeTurn, SESSION_ID, WORKSPACE_ID } from "./fake-client";
+import { LEVEL_MODELS, LEVELS } from "./fixtures/level-models";
 import { actRun, flush, registerDom, renderComponent } from "./render-hook";
 import { latestQuestionClient } from "./fixtures/latest-question-client";
 import { archivedTranscriptEvents } from "./fixtures/archived-transcript";
@@ -972,6 +973,49 @@ test("the complete conversation forwards only picker appearance without replacin
         ),
       ).not.toBeNull();
       expect(modelMutations).toBe(0);
+    } finally {
+      await view.unmount();
+    }
+  }
+});
+
+test("host levels replace the full picker, and no levels keep it", async () => {
+  const client = fakeClient({
+    getSession: async () => ({ id: SESSION_ID, status: "idle" }) as never,
+    getQueue: async () =>
+      ({ version: 1, effectiveControl: null, items: [], pendingInputs: [] }) as never,
+    getWorkspaceModelCatalog: async () => ({ models: LEVEL_MODELS }) as never,
+    listHumanInputRequests: async () => [],
+    streamEvents: async function* (_workspace, _session, options) {
+      await new Promise<void>((resolve) =>
+        options?.signal?.addEventListener("abort", () => resolve(), { once: true }),
+      );
+      yield* [];
+    },
+  });
+  for (const levels of [LEVELS, [], undefined]) {
+    const view = await renderComponent(
+      <SessionConversation
+        sessionId={SESSION_ID}
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        modelPicker
+        modelPickerProps={{ messages: { label: "Model and effort" }, levels }}
+      />,
+    );
+    try {
+      await flush(150);
+      const slider = view.container.querySelector("[role='slider'][aria-label='Thinking level']");
+      const full = view.container.querySelector("button[aria-label='Model and effort']");
+      if (levels?.length) {
+        expect(slider).not.toBeNull();
+        expect(full).toBeNull();
+        // The chat runs a model outside the levels: it keeps it and says so.
+        expect(slider!.getAttribute("aria-valuetext")).toContain("Model X");
+      } else {
+        expect(slider).toBeNull();
+        expect(full).not.toBeNull();
+      }
     } finally {
       await view.unmount();
     }

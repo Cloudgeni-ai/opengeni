@@ -344,6 +344,7 @@ export const CLIENT_PAGES = [
   "account-auth",
   "site-auth",
   "personal-security",
+  "console",
   "other",
 ] as const;
 export type ClientPage = (typeof CLIENT_PAGES)[number];

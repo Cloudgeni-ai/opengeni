@@ -65,6 +65,10 @@ described in [SECURITY.md](SECURITY.md).
 - Main merges go through the [merge batcher](docs/merge-batcher.md): run the
   relevant local suites, get review, then add `queue-ready` or turn on
   auto-merge. Batch green is not release green; main's cadence CI is.
+- Changes to what Opengeni sends to model providers (the model request section
+  of [`.github/CODEOWNERS`](.github/CODEOWNERS)) land only after the maintainer
+  approves the PR's current head; open them as drafts with a plain risk note.
+  See AGENTS.md, "Model request changes".
 - Include tests for behavior changes.
 - Update README or docs when setup, public API, configuration, or user-facing behavior changes.
 - Do not commit secrets, local `.env` files, generated credentials, or private infrastructure details.

@@ -10,6 +10,8 @@ A session can pause mid-turn and wait for a person: to approve a tool call, or t
 
 Set the initial recommendation with `requireApproval` on a per-session MCP server: `true` for every tool, or a list of tool names. Explicit account choices take precedence:
 
+{/* doc-snippets: excerpt CreateSessionRequest from "@opengeni/sdk" */}
+
 ```ts
 mcpServers: [
   {

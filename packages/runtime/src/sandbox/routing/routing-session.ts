@@ -93,6 +93,7 @@ import {
   withoutNativeSynchronousCommandCollection,
   releaseNativeSynchronousCommandOutput,
   isNativeSynchronousCommandHandle,
+  shareNativeSynchronousCollection,
 } from "../native-synchronous-collection";
 import { observeSynchronousCommand, synchronousCommandPage } from "../synchronous-command";
 import { parseExecBannerExitCode, parseExecBannerSessionId } from "../exec-banner";
@@ -2799,6 +2800,19 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     });
   }
 
+  /**
+   * Write one file of the secret leak guard's ledger (docs/secrets.md,
+   * "Keeping values out of commits"). Like a secret file it is private, but
+   * it belongs to no attempt scope, so attempt-end cleanup keeps it.
+   */
+  async writeSecretLedger(file: { path: string; content: Uint8Array }): Promise<void> {
+    await this.dispatch("writeSecretLedger", false, async (session, backend) => {
+      await withoutProviderCommandHandle(() =>
+        writeSecretFileOnBackend(session, file, backend.kind),
+      );
+    });
+  }
+
   private noteSecretScope(session: RoutableBackendSession, scope: string): void {
     let scopes = this.secretScopes.get(session);
     if (!scopes) this.secretScopes.set(session, (scopes = new Set()));
@@ -3297,7 +3311,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   ): ChannelASession {
     const privateSession = withPlacementPrivateControl(session, backend.kind);
     const admittedCompositeMutation = admittedProviderCommandHandle() !== undefined;
-    return new Proxy(privateSession, {
+    const composite = new Proxy(privateSession, {
       get: (target, property) => {
         if (property === "execReadOnly")
           return (
@@ -3313,6 +3327,9 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         return typeof value === "function" ? value.bind(target) : value;
       },
     });
+    // Runners receive this view, but provider output is collected on the
+    // physical backend session it forwards to.
+    return shareNativeSynchronousCollection(composite, session);
   }
 
   /** Inspect an exact-file envelope on one resolved backend without entering
@@ -3644,7 +3661,7 @@ function withPlacementPrivateControl(
   session: RoutableBackendSession,
   backendKind: string,
 ): ChannelASession {
-  return new Proxy(session, {
+  const view = new Proxy(session, {
     get(target, property) {
       if (property === "writePlacementPrivate") {
         return async (args: unknown) =>
@@ -3662,6 +3679,7 @@ function withPlacementPrivateControl(
       return typeof value === "function" ? value.bind(target) : value;
     },
   }) as ChannelASession;
+  return shareNativeSynchronousCollection(view, session);
 }
 
 async function writePlacementPrivateOnBackend(
@@ -3792,8 +3810,7 @@ async function streamPlacementPrivateFile(
   input: ReturnType<typeof placementPrivateWrite>,
   backendKind: string,
 ): Promise<void> {
-  const exec = session.exec?.bind(session) ?? session.execCommand?.bind(session);
-  if (!exec || !session.writeStdin) {
+  if ((!session.exec && !session.execCommand) || !session.writeStdin) {
     throw new RoutingUnsupportedError("writePlacementPrivate", backendKind);
   }
   const bytes = typeof input.content === "string" ? Buffer.from(input.content) : input.content;
@@ -3832,35 +3849,48 @@ async function streamPlacementPrivateFile(
     `chmod 0600 -- ${shellSingleQuote(input.path)}`,
     `printf %s ${shellSingleQuote(marker)}`,
   ].join("; ");
-  const started = await exec({
-    cmd: command,
-    ...(input.runAs ? { runAs: input.runAs } : {}),
-    yieldTimeMs: 250,
-    maxOutputTokens: 1_000,
-  });
-  const sessionId = providerSessionIdFromResult(started);
-  if (sessionId === null) {
-    throw new Error("placement-private transfer did not yield an input session");
-  }
-  const first = await session.writeStdin({
-    sessionId,
-    chars: payload,
-    yieldTimeMs: 30_000,
-    maxOutputTokens: 1_000,
-  });
-  const settled = await observeSynchronousCommand(
-    synchronousCommandPage(session as ChannelASession, first, sessionId),
-    async () =>
-      synchronousCommandPage(
-        session as ChannelASession,
-        await session.writeStdin!({
-          sessionId,
-          chars: "",
-          yieldTimeMs: 1_000,
-          maxOutputTokens: 1_000,
-        }),
+  // The transfer is one synchronous command whose completion is proved from
+  // its separate output streams. Like executeSynchronousCommand, it must opt
+  // into the provider's native collection before its one Start; otherwise a
+  // provider whose receipts are presentation banners (Modal's SDK) can never
+  // prove the exit, and every staging write reports an unknown outcome.
+  const settled = await withNativeSynchronousCommandCollection(
+    session as ChannelASession,
+    async () => {
+      // Resolve the Start method inside the scope: some providers install
+      // their collection adapter (which wraps it) on first use.
+      const exec = session.exec?.bind(session) ?? session.execCommand!.bind(session);
+      const started = await exec({
+        cmd: command,
+        ...(input.runAs ? { runAs: input.runAs } : {}),
+        yieldTimeMs: 250,
+        maxOutputTokens: 1_000,
+      });
+      const sessionId = providerSessionIdFromResult(started);
+      if (sessionId === null) {
+        throw new Error("placement-private transfer did not yield an input session");
+      }
+      const first = await session.writeStdin!({
         sessionId,
-      ),
+        chars: payload,
+        yieldTimeMs: 30_000,
+        maxOutputTokens: 1_000,
+      });
+      return await observeSynchronousCommand(
+        synchronousCommandPage(session as ChannelASession, first, sessionId),
+        async () =>
+          synchronousCommandPage(
+            session as ChannelASession,
+            await session.writeStdin!({
+              sessionId,
+              chars: "",
+              yieldTimeMs: 1_000,
+              maxOutputTokens: 1_000,
+            }),
+            sessionId,
+          ),
+      );
+    },
   );
   if (settled.exitCode !== 0 || !settled.stdout.includes(marker)) {
     throw new Error("placement-private transfer exited unsuccessfully");

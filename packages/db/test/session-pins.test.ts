@@ -3167,6 +3167,72 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     expect(unfiledPage.sessions.map((row) => row.id)).toEqual([unfiled.id]);
   }, 60_000);
 
+  test("a creator filter without a kind pages every session that subject created", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:creator-any-kind";
+    await grantMember(workspace, subjectId);
+    // Older API-key sessions froze the key as a subject, newer ones as a service.
+    const keySubjectId = `api_key:${crypto.randomUUID()}`;
+    const label = "Codex operator";
+    const legacy = await session({
+      ...workspace,
+      message: "legacy key session",
+      createdBy: { kind: "subject", subjectId: keySubjectId, label },
+    });
+    const current = await session({
+      ...workspace,
+      message: "current key session",
+      createdBy: { kind: "service", subjectId: keySubjectId, label },
+    });
+    await session({
+      ...workspace,
+      message: "someone else",
+      createdBy: { kind: "subject", subjectId: "user:ada" },
+    });
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`
+        update sessions
+        set updated_at = case id
+              when ${current.id} then '2026-09-04T10:00:00.000Z'::timestamptz
+              else '2026-09-03T10:00:00.000Z'::timestamptz
+            end
+        where id in (${legacy.id}, ${current.id})
+      `,
+    );
+
+    const firstPage = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      createdBy: { subjectId: keySubjectId },
+      limit: 1,
+    });
+    expect(firstPage.sessions.map((row) => row.id)).toEqual([current.id]);
+    const cursor = decodeSessionListCursor(firstPage.nextCursor!);
+    const secondPage = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      createdBy: { subjectId: keySubjectId },
+      cursor: cursor!,
+      limit: 1,
+    });
+    expect(secondPage.sessions.map((row) => row.id)).toEqual([legacy.id]);
+    // A kindless cursor is its own filter domain.
+    await expect(
+      listSessionsForSubject(db, workspace.workspaceId, {
+        subjectId,
+        createdBy: { kind: "service", subjectId: keySubjectId },
+        cursor: cursor!,
+        limit: 1,
+      }),
+    ).rejects.toBeInstanceOf(SessionListCursorError);
+
+    const serviceOnly = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      createdBy: { kind: "service", subjectId: keySubjectId },
+    });
+    expect(serviceOnly.sessions.map((row) => row.id)).toEqual([current.id]);
+  }, 60_000);
+
   test("lists for non-member api_key subjects — workspace-scoped keys have no membership row", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();

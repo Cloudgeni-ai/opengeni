@@ -874,6 +874,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             // It still runs and wakes, but is never saved.
             inputs.push(Input::Unsavable { sandbox: id.0 });
         }
+        if adopted && record.unsynced {
+            // Paused by an agent before this one, its guest unanswering:
+            // the core ignores it for a VM that runs again since.
+            inputs.push(Input::Unsynced { sandbox: id.0 });
+        }
         inputs.extend(self.restore_holds(id));
         self.inputs(inputs);
         Ok(adopted)
@@ -976,8 +981,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// Where a sandbox whose VM was found still running stands. A paused
     /// VM keeps the saved copy its record vouches for: every step that lets
     /// a guest run withdraws the record's word first. A running VM has
-    /// moved past any copy, and a paused one without a memory image has no
-    /// copy of its current state.
+    /// moved past any copy. A paused one without a memory image has no
+    /// copy of its memory: a copy of its files in the store, taken while
+    /// it was paused, still holds them as they are.
     pub(super) async fn adopted_state(
         &self,
         record: &Record,
@@ -986,7 +992,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         // The image itself is checked when a step relies on it, and set
         // aside if it proves bad.
         let keeps_copy = found == Found::Paused && record.image;
-        if !keeps_copy && (record.image || record.archived) {
+        let keeps_files = found == Found::Paused && !record.image && record.archived;
+        if !keeps_copy && !keeps_files && (record.image || record.archived) {
             let stale = Change::new().image(false).archived(false);
             self.records
                 .commit(record.id, record.fence(), stale)
@@ -1002,6 +1009,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 };
                 State::new(Level::Paused, durability, true)
             }
+            Found::Paused if keeps_files => State::new(Level::Paused, Durability::Remote, false),
             Found::Paused => State::new(Level::Paused, Durability::Volatile, false),
         })
     }

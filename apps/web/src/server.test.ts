@@ -92,9 +92,17 @@ describe("production web handler", () => {
     for (const response of responses) {
       expect(response.headers.get("x-content-type-options")).toBe("nosniff");
       expect(response.headers.get("referrer-policy")).toBe("strict-origin-when-cross-origin");
-      // Only the console itself may frame its pages; no script policy is set.
+      // Only the console itself may frame its pages.
       expect(response.headers.get("x-frame-options")).toBe("SAMEORIGIN");
-      expect(response.headers.get("content-security-policy")).toBe("frame-ancestors 'self'");
+      const policy = response.headers.get("content-security-policy") ?? "";
+      expect(policy).toContain("frame-ancestors 'self'");
+      // Pages get the full policy; other responses only the framing rule.
+      if (response.headers.get("content-type")?.startsWith("text/html")) {
+        expect(policy).toContain("default-src 'self'");
+        expect(policy).toContain("object-src 'none'");
+      } else {
+        expect(policy).toBe("frame-ancestors 'self'");
+      }
     }
 
     // The setup page keeps its stricter policy so the bearer never leaks.
@@ -130,14 +138,19 @@ describe("production web handler", () => {
       const response = await handler(new Request(`https://example.test${path}`));
       expect(response.status).toBe(200);
       const policy = response.headers.get("content-security-policy") ?? "";
-      expect(policy.startsWith("frame-ancestors 'self' ")).toBe(true);
+      const ancestors =
+        policy
+          .split("; ")
+          .find((directive) => directive.startsWith("frame-ancestors "))
+          ?.split(" ") ?? [];
+      expect(ancestors[1]).toBe("'self'");
       for (const host of [
         "https://*.officeapps.live.com",
         "https://*.office.com",
         "https://*.cloud.microsoft",
         "https://*.sharepoint.com",
       ]) {
-        expect(policy.split(" ")).toContain(host);
+        expect(ancestors).toContain(host);
       }
       // X-Frame-Options cannot allow Microsoft's hosts, so it is not sent here.
       expect(response.headers.get("x-frame-options")).toBeNull();
@@ -145,7 +158,9 @@ describe("production web handler", () => {
     }
     // A console route that merely starts with "office" keeps the strict policy.
     const lookalike = await handler(new Request("https://example.test/officers"));
-    expect(lookalike.headers.get("content-security-policy")).toBe("frame-ancestors 'self'");
+    expect(lookalike.headers.get("content-security-policy")?.split("; ")).toContain(
+      "frame-ancestors 'self'",
+    );
     expect(lookalike.headers.get("x-frame-options")).toBe("SAMEORIGIN");
   });
 
@@ -293,12 +308,16 @@ describe("production web handler", () => {
     );
     expect(compressed.headers.get("content-encoding")).toBe("gzip");
     expect(compressed.headers.get("vary")).toBe("Accept-Encoding");
+    // Pages differ only in their per-response style nonce.
+    const sameNonce = (html: string) => html.replace(/nonce="[^"]+"/gu, 'nonce="n"');
     expect(
-      await new Response(compressed.body!.pipeThrough(new DecompressionStream("gzip"))).text(),
-    ).toBe(plainHtml);
+      sameNonce(
+        await new Response(compressed.body!.pipeThrough(new DecompressionStream("gzip"))).text(),
+      ),
+    ).toBe(sameNonce(plainHtml));
 
     const direct = await handler(new Request("https://internal:3000/index.html"));
-    expect(await direct.text()).toBe(plainHtml);
+    expect(sameNonce(await direct.text())).toBe(sameNonce(plainHtml));
 
     const head = await handler(new Request("https://internal:3000/", { method: "HEAD" }));
     expect(head.headers.get("content-length")).toBe(

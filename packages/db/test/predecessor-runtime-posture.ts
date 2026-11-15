@@ -7,6 +7,9 @@ const createTablePattern =
   /\bcreate\s+(?:unlogged\s+)?table\s+(?:if\s+not\s+exists\s+)?((?:"[^"]+"|[a-z_][a-z0-9_$]*)(?:\s*\.\s*(?:"[^"]+"|[a-z_][a-z0-9_$]*))?)/gi;
 const createPrivateFunctionPattern =
   /\bcreate\s+(?:or\s+replace\s+)?function\s+"?opengeni_private"?\s*\.\s*("[^"]+"|[a-z_][a-z0-9_$]*)\s*\(/gi;
+// Unqualified or public-qualified: the target schema's owner-internal helpers.
+const createTargetFunctionPattern =
+  /\bcreate\s+(?:or\s+replace\s+)?function\s+(?:"?public"?\s*\.\s*)?("[^"]+"|[a-z_][a-z0-9_$]*)\s*\(/gi;
 
 function unquote(identifier: string): string {
   return identifier.startsWith('"') ? identifier.slice(1, -1) : identifier.toLowerCase();
@@ -30,6 +33,12 @@ function privateFunctionsCreatedBy(sql: string): string[] {
   return [...withoutComments(sql).matchAll(createPrivateFunctionPattern)].map((match) =>
     unquote(match[1]!),
   );
+}
+
+function targetFunctionsCreatedBy(sql: string): string[] {
+  return [...withoutComments(sql).matchAll(createTargetFunctionPattern)]
+    .map((match) => unquote(match[1]!))
+    .filter((name) => name !== "opengeni_private");
 }
 
 function migrationFiles(): string[] {
@@ -78,6 +87,14 @@ export function privateRoutinesCreatedAfter(boundary: string, inclusive: boolean
 }
 
 /**
+ * Target-schema functions (names without arguments) first created by migration files after
+ * `boundary` (or at it, when `inclusive`).
+ */
+export function targetRoutinesCreatedAfter(boundary: string, inclusive: boolean): string[] {
+  return createdAfter(boundary, inclusive, targetFunctionsCreatedBy);
+}
+
+/**
  * Current runtime contract for a database migrated up to, but not including, `migration`.
  * Only contract tables and runtime definers that `migration` or a later file creates may be
  * absent; every one that exists at that point is still checked.
@@ -90,6 +107,7 @@ export function postureBeforeMigration(
     ...options,
     tablesCreatedByLaterMigrations: publicTablesCreatedAfter(migration, true),
     routinesCreatedByLaterMigrations: privateRoutinesCreatedAfter(migration, true),
+    targetRoutinesCreatedByLaterMigrations: targetRoutinesCreatedAfter(migration, true),
   };
 }
 
@@ -102,5 +120,6 @@ export function postureThroughMigration(
     ...options,
     tablesCreatedByLaterMigrations: publicTablesCreatedAfter(migration, false),
     routinesCreatedByLaterMigrations: privateRoutinesCreatedAfter(migration, false),
+    targetRoutinesCreatedByLaterMigrations: targetRoutinesCreatedAfter(migration, false),
   };
 }

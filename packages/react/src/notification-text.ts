@@ -2,9 +2,12 @@
  * The small text format of an agent's notification, shared by every surface
  * that shows one (the web inbox, the native inbox): short paragraphs and "- "
  * bullets, with **bold**, `code` and [links](https://…) inside a line.
- * Anything else is shown as written. The phone's lock screen gets plain text
- * from the server instead.
+ * Anything else is shown as written. Source links lose the tracking a hosted
+ * web search tagged onto them. The phone's lock screen gets plain text from
+ * the server instead.
  */
+
+import { withoutProviderTrackingInText } from "@opengeni/contracts/citation-urls";
 
 export type NotificationSpan =
   | { kind: "text"; text: string }
@@ -50,7 +53,8 @@ export function parseNotificationText(text: string): NotificationBlock[] {
     blocks.push({ kind: "bullets", items: bullets });
     bullets = [];
   };
-  for (const raw of text.replace(/\r\n?/gu, "\n").split("\n")) {
+  const lines = withoutProviderTrackingInText(text).replace(/\r\n?/gu, "\n").split("\n");
+  for (const raw of lines) {
     const line = raw.trimEnd();
     const bullet = /^\s*[-*•]\s+(.*)$/u.exec(line);
     if (bullet) {

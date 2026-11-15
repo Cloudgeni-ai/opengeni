@@ -29,6 +29,7 @@ import {
 } from "./tool-action-review";
 import { DecisionActions } from "./decision-card";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { toolActionTitle, wordedToolActionReview } from "../tool-action-wording";
 import { McpElicitationRequest } from "./mcp-elicitation-request";
 import type {
   McpElicitationAnswer,
@@ -404,12 +405,14 @@ export function ApprovalSurface({
   }
   const titleOf = (approval: PendingApproval) => {
     const read = outcomes[approval.id];
-    return read?.outcome.kind === "review" && dequal(read.approval, approval)
-      ? read.outcome.review.title
-      : pendingApprovalReview(approval, {
-          formatToolName: messages.formatToolName,
-          approveLabel: messages.approve,
-        }).title;
+    const review =
+      read?.outcome.kind === "review" && dequal(read.approval, approval)
+        ? read.outcome.review
+        : pendingApprovalReview(approval, {
+            formatToolName: messages.formatToolName,
+            approveLabel: messages.approve,
+          });
+    return toolActionTitle(t, review.toolName) ?? review.title;
   };
   const decideAll = async (decision: "approve" | "reject") => {
     if (responding || pendingRef.current || bulkRef.current) return;
@@ -752,8 +755,12 @@ function ApprovalRequest({
   const toolName = approvalToolName(stableApproval);
   const answer = approvalAnswerLabels(t, toolName);
   const fallback = useMemo<ToolActionReview>(
-    () => pendingApprovalReview(stableApproval, { formatToolName, approveLabel }),
-    [stableApproval, formatToolName, approveLabel],
+    () =>
+      wordedToolActionReview(
+        pendingApprovalReview(stableApproval, { formatToolName, approveLabel }),
+        t,
+      ),
+    [stableApproval, formatToolName, approveLabel, t],
   );
   const loadLegacyDetails = useCallback<ToolReviewDetailsLoader>(
     async (value, path, offset) => ({

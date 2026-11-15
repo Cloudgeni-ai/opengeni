@@ -945,6 +945,55 @@ describe("createSessionProxyHandler", () => {
     expect((await setup().browser.getClientConfig()).fileUploads?.enabled).not.toBe(false);
   });
 
+  test("uploads that name no scope follow the relay's chats: Only me unless chats are shared", async () => {
+    const begin = (
+      handler: (request: Request) => Promise<Response>,
+      body: Record<string, unknown>,
+    ) =>
+      handler(
+        new Request(`${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/files/uploads`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            filename: "a.txt",
+            contentType: "text/plain",
+            sizeBytes: 1,
+            ...body,
+          }),
+        }),
+      );
+    const scopeSent = async (
+      options: Partial<SessionProxyHandlerOptions>,
+      body: Record<string, unknown> = {},
+    ) => {
+      const { upstream, handler } = setup(options);
+      expect((await begin(handler, body)).status).toBe(200);
+      const forwarded = upstream.requests.at(-1)!;
+      expect(forwarded.url.pathname).toBe(`/v1/workspaces/${WORKSPACE_ID}/files/uploads`);
+      expect(forwarded.body).toMatchObject({ filename: "a.txt", sizeBytes: 1 });
+      return (forwarded.body as { scope?: unknown }).scope;
+    };
+    // Private chats (the default, and what isolated chats use): an unscoped
+    // upload, as older or custom browsers send, stays with its uploader.
+    expect(await scopeSent({})).toBe("personal");
+    expect(await scopeSent({ chats: "private" })).toBe("personal");
+    // A server-owned create keeps the same default.
+    expect(await scopeSent({ createSession: (input) => input })).toBe("personal");
+    // Shared chats keep Opengeni's own default (the workspace).
+    expect(await scopeSent({ chats: "shared" })).toBeUndefined();
+    // An explicit choice is the uploader's and passes through unchanged.
+    expect(await scopeSent({}, { scope: "workspace" })).toBe("workspace");
+    expect(await scopeSent({ chats: "shared" }, { scope: "personal" })).toBe("personal");
+    // The SDK browser client's own upload call gets the same default.
+    const { upstream, browser } = setup();
+    await browser.beginFileUpload(WORKSPACE_ID, {
+      filename: "b.txt",
+      contentType: "text/plain",
+      sizeBytes: 1,
+    });
+    expect(upstream.requests.at(-1)!.body).toMatchObject({ filename: "b.txt", scope: "personal" });
+  });
+
   test("beforeForwardMessage gates voice start and adds context to spoken messages", async () => {
     const inputs: unknown[] = [];
     let refuse = false;

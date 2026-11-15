@@ -587,7 +587,19 @@ describe("managed-human session surface inside their own personal workspace", ()
         ownership: ["workspace", "personal"],
       }),
     );
-    const returnUrl = "https://HOST.example:443/settings?x=%2f#Exact";
+    // A signed-in person returns only to this deployment's own origins (CASA 5.1.2).
+    const external = await human.app.request(`${base}/attempts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        providerId: "mcp-bearer",
+        ownership: "personal",
+        returnUrl: "https://HOST.example:443/settings",
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(external.status).toBe(400);
+    const returnUrl = "http://127.0.0.1:3000/settings?x=%2f#Exact";
     const input = {
       providerId: "mcp-bearer",
       ownership: "personal",
@@ -2265,6 +2277,24 @@ describe("managed personal-resource grant HTTP lifecycle", () => {
       { workspaceId: human.personalWorkspaceId, current: false, on: true },
       { workspaceId: human.legacyWorkspaceId, current: true, on: true },
     ]);
+
+    // A removed login isn't listed anymore.
+    await shared!.admin.begin(async (tx) => {
+      await tx`select set_config('opengeni.account_id', ${human.accountId}, true),
+        set_config('opengeni.workspace_id', ${human.legacyWorkspaceId}, true),
+        set_config('opengeni.subject_id', ${human.subjectId}, true)`;
+      await tx`update connections set status = 'revoked' where id = ${notion}`;
+    });
+    const afterRemove = await app.request(
+      `http://x/v1/workspaces/${human.legacyWorkspaceId}/own-resources`,
+      { headers: { cookie: human.cookie } },
+    );
+    expect(afterRemove.status).toBe(200);
+    expect(
+      ((await afterRemove.json()) as { resources: Array<{ resourceId: string }> }).resources.map(
+        (resource) => resource.resourceId,
+      ),
+    ).toEqual([linear]);
 
     // Someone else's list never shows yours.
     const theirs = await app.request(

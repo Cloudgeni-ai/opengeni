@@ -1630,6 +1630,53 @@
       }
     },
     {
+      "id": 39,
+      "type": "timeseries",
+      "title": "Bytes moved by step",
+      "description": "Bytes each kind of step moves, by why it ran: uploaded to and copied within object storage, fetched from it, and disk space given back. Scheduled checkpoints here are the disk backups of running sandboxes.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["mean", "max"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (compute_step, compute_cause, compute_bytes_kind) (rate(compute_step_moved_bytes_total{host_name=~\"$host\"}[$__rate_interval]))",
+          "legendFormat": "{{compute_step}} {{compute_cause}} {{compute_bytes_kind}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": {
+        "x": 0,
+        "y": 91,
+        "w": 24,
+        "h": 8
+      }
+    },
+    {
       "id": 33,
       "type": "row",
       "title": "Sandbox memory",
@@ -1637,7 +1684,7 @@
       "panels": [],
       "gridPos": {
         "x": 0,
-        "y": 91,
+        "y": 99,
         "w": 24,
         "h": 1
       }
@@ -1705,7 +1752,7 @@
       ],
       "gridPos": {
         "x": 0,
-        "y": 92,
+        "y": 100,
         "w": 12,
         "h": 8
       }
@@ -1752,7 +1799,7 @@
       ],
       "gridPos": {
         "x": 12,
-        "y": 92,
+        "y": 100,
         "w": 12,
         "h": 8
       }
@@ -1813,7 +1860,7 @@
       ],
       "gridPos": {
         "x": 0,
-        "y": 100,
+        "y": 108,
         "w": 8,
         "h": 8
       }
@@ -1889,7 +1936,7 @@
       ],
       "gridPos": {
         "x": 8,
-        "y": 100,
+        "y": 108,
         "w": 8,
         "h": 8
       }
@@ -1943,7 +1990,7 @@
       ],
       "gridPos": {
         "x": 16,
-        "y": 100,
+        "y": 108,
         "w": 8,
         "h": 8
       }

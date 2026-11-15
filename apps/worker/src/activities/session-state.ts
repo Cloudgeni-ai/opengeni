@@ -12,6 +12,10 @@ import {
   reconcileCompletedSandboxSetup,
   peekSessionWork as peekSessionWorkDb,
   isSessionDefinitivelyDeleted,
+  isSessionExecutionReadOnly,
+  nestedPostgresMessage,
+  nestedPostgresSqlState,
+  safeDatabaseErrorFacts,
   settleSessionInputWait as settleSessionInputWaitDb,
   countQueuedTurns,
   getSessionAttemptActivityRef,
@@ -27,7 +31,7 @@ import {
   SANDBOX_SETUP_RECOVERY_LIMIT,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
-import { CancelledFailure } from "@temporalio/activity";
+import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import { currentActivityContext } from "./streaming";
 import { deliverFailedChildTurnToParent, notifyParentOfChildIdle } from "./parent-wake";
 import { interactionInterventionMetricObserver } from "@opengeni/observability";
@@ -68,6 +72,7 @@ import type {
   SettleSessionInputWaitInput,
   SettleSessionInputWaitResult,
 } from "./types";
+import { SESSION_READ_ONLY_FAILURE_MESSAGE, SESSION_READ_ONLY_FAILURE_TYPE } from "./types";
 
 export type SessionStateActivityOverrides = Partial<{
   settleSessionAttemptInterruptions: typeof settleSessionAttemptInterruptions;
@@ -82,6 +87,7 @@ export type SessionStateActivityOverrides = Partial<{
   reconcileCompletedSandboxSetup: typeof reconcileCompletedSandboxSetup;
   peekSessionWork: typeof peekSessionWorkDb;
   isSessionDefinitivelyDeleted: typeof isSessionDefinitivelyDeleted;
+  isSessionExecutionReadOnly: typeof isSessionExecutionReadOnly;
   settleSessionInputWait: typeof settleSessionInputWaitDb;
   countQueuedTurns: typeof countQueuedTurns;
   getSessionAttemptActivityRef: typeof getSessionAttemptActivityRef;
@@ -131,6 +137,8 @@ export function createSessionStateActivities(
   const peekSessionWorkFn = overrides.peekSessionWork ?? peekSessionWorkDb;
   const isSessionDefinitivelyDeletedFn =
     overrides.isSessionDefinitivelyDeleted ?? isSessionDefinitivelyDeleted;
+  const isSessionExecutionReadOnlyFn =
+    overrides.isSessionExecutionReadOnly ?? isSessionExecutionReadOnly;
   const reconcileCompletedSandboxSetupFn =
     overrides.reconcileCompletedSandboxSetup ?? reconcileCompletedSandboxSetup;
   const settleSessionInputWaitFn = overrides.settleSessionInputWait ?? settleSessionInputWaitDb;
@@ -903,6 +911,43 @@ export function createSessionStateActivities(
     }
   }
 
+  /**
+   * An archived (or archiving) or imported session refuses every turn,
+   * attempt and wake write in the database, so a control write that failed
+   * against one fails identically on every Temporal retry. Re-prove that state
+   * in worker scope (never from error text), log what the database refused,
+   * and end the activity with a non-retryable failure the session workflow
+   * handles by closing. Any other failure is rethrown unchanged and retries.
+   */
+  async function failNonRetryableIfReadOnly<T>(
+    input: { accountId: string; workspaceId: string; sessionId: string },
+    activityName: string,
+    settle: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await settle();
+    } catch (error) {
+      if (error instanceof CancelledFailure) throw error;
+      const { db, observability } = await services();
+      // A failed proof read is no proof: keep the original failure (and its
+      // ordinary retry) rather than replacing it with the probe's error.
+      const readOnly = await isSessionExecutionReadOnlyFn(db, input).catch(() => false);
+      if (!readOnly) throw error;
+      try {
+        observability.warn(sessionReadOnlyRefusalLog(activityName, error), {
+          "opengeni.session_id": input.sessionId,
+        });
+      } catch {
+        // Logging must not turn a terminal outcome back into a retry.
+      }
+      throw ApplicationFailure.create({
+        message: SESSION_READ_ONLY_FAILURE_MESSAGE,
+        type: SESSION_READ_ONLY_FAILURE_TYPE,
+        nonRetryable: true,
+      });
+    }
+  }
+
   return {
     failSessionAttempt,
     // These can already be scheduled when quiescent deletion commits. In
@@ -911,9 +956,16 @@ export function createSessionStateActivities(
       settleUnlessDeleted(input, { action: "stale" as const }, () =>
         settleSessionInterruptions(input),
       ),
+    // A late proof can also reach a session archived after its turn was
+    // cancelled; its receipt can then never commit (see above).
     persistSessionAttemptQuiescence: (input: PersistSessionAttemptQuiescenceInput) =>
-      settleUnlessDeleted(input, undefined, () => persistSessionAttemptQuiescence(input)),
-    reconcileSessionAttemptQuiescence: reconcileSessionAttemptQuiescenceActivity,
+      failNonRetryableIfReadOnly(input, "persistSessionAttemptQuiescence", () =>
+        settleUnlessDeleted(input, undefined, () => persistSessionAttemptQuiescence(input)),
+      ),
+    reconcileSessionAttemptQuiescence: (input: ReconcileSessionAttemptQuiescenceInput) =>
+      failNonRetryableIfReadOnly(input, "reconcileSessionAttemptQuiescence", () =>
+        reconcileSessionAttemptQuiescenceActivity(input),
+      ),
     reconcileSettledSessionAttempt: reconcileSettledSessionAttemptActivity,
     recoverDispatch: (input: RecoverDispatchInput) =>
       settleUnlessDeleted(input, { action: "stale" as const }, () => recoverDispatch(input)),
@@ -926,6 +978,29 @@ export function createSessionStateActivities(
     expireScheduledRunHumanWait,
     markSessionIdle,
   };
+}
+
+/** A constant reason our own PL/pgSQL raised (for example
+ * `SESSION_ARCHIVED_READ_ONLY`), never driver prose that can quote data. */
+const DATABASE_REASON_CODE = /^[A-Z][A-Z0-9_]{2,63}$/;
+
+/** One operator-readable line naming what the database refused: the error
+ * class, SQLSTATE, the fixed reason and the database functions that raised
+ * it. Never SQL text, parameters or free-form messages. */
+export function sessionReadOnlyRefusalLog(activityName: string, error: unknown): string {
+  const sqlState = nestedPostgresSqlState(error);
+  const reason = nestedPostgresMessage(error);
+  const functions = safeDatabaseErrorFacts(error).plpgsql?.join(",");
+  const name =
+    error instanceof Error && /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(error.name)
+      ? error.name
+      : "unknown";
+  return (
+    `Session control activity refused, session is read-only: activity=${activityName} error=${name}` +
+    ` sqlState=${sqlState ?? "none"}` +
+    (reason && DATABASE_REASON_CODE.test(reason) ? ` reason=${reason}` : "") +
+    (functions ? ` functions=${functions}` : "")
+  );
 }
 
 async function refreshQueuedTurnsGauge(

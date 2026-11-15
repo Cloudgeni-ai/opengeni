@@ -271,7 +271,7 @@ for (const posture of ["production", "restricted"] as const) {
     const site = await personalWorkspaceSite({ funded: false });
     const guest = await startGuestSession(site);
     const model = new ScriptedModel([{ inputTokens: 10, output: [assistantMessage("unused")] }]);
-    const refused = await inPosture(posture, () =>
+    const outcome = await inPosture(posture, () =>
       harness(model).runAgentTurn({
         accountId: site.accountId,
         workspaceId: site.workspaceId,
@@ -282,16 +282,21 @@ for (const posture of ["production", "restricted"] as const) {
         trigger: { kind: "next" },
       }),
     ).then(
-      () => null,
-      (error: unknown) => error,
+      (result) => ({ result, error: null }),
+      (error: unknown) => ({ result: null, error }),
     );
-    expect(refused).toBeInstanceOf(Error);
-    expect((refused as Error).message).toBe("insufficient workspace credits");
-    expect(nestedPostgresSqlState(refused) ?? null).toBeNull();
+    // A credit refusal stops the turn cleanly; an RLS error (42501) on the
+    // credit read would still be thrown and fail the turn.
+    expect(nestedPostgresSqlState(outcome.error) ?? null).toBeNull();
+    expect(outcome.error).toBeNull();
+    expect(outcome.result).toMatchObject({ status: "idle" });
     expect(model.calls).toBe(0);
-    expect(
-      (await turnEvents(site.workspaceId, guest.sessionId)).map((event) => event.type),
-    ).not.toContain("turn.failed");
+    const events = await turnEvents(site.workspaceId, guest.sessionId);
+    expect(events.map((event) => event.type)).not.toContain("turn.failed");
+    expect(events.find((event) => event.type === "turn.completed")?.payload).toMatchObject({
+      segmentLimit: "budget_exhausted",
+      detail: "insufficient workspace credits",
+    });
   }, 120_000);
 }
 

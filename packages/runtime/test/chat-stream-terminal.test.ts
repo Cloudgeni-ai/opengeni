@@ -3,6 +3,7 @@ import { Agent, Runner, tool, type ModelRequest } from "@openai/agents";
 import OpenAI from "openai";
 import { z } from "zod";
 import { OpenGeniChatCompletionsModel } from "../src/model-provider-routing";
+import { stoppedAtOutputLimit } from "../src/contentless-model-response";
 import {
   isPreemptedModelResponse,
   preemptedResponseCutOffText,
@@ -81,6 +82,25 @@ async function collect(model: OpenGeniChatCompletionsModel) {
 }
 
 describe("Chat stream completion evidence", () => {
+  test("an output-limit stop carries the incomplete shape; a finished one does not", async () => {
+    for (const [finish, limited] of [
+      ["length", true],
+      ["stop", false],
+    ] as const) {
+      const { events, error } = await collect(
+        modelFor([chunk({ content: "partial" }), chunk({}, finish)], true),
+      );
+      expect(error).toBeUndefined();
+      const done = events.find((event) => event.type === "response_done")!;
+      expect(stoppedAtOutputLimit(done)).toBe(limited);
+      if (limited)
+        expect(done.type === "response_done" && done.response.providerData).toMatchObject({
+          status: "incomplete",
+          incomplete_details: { reason: "max_output_tokens" },
+        });
+    }
+  });
+
   test("a caller abort retains its exact reason rather than becoming provider failure", async () => {
     const caller = new AbortController();
     const reason = new DOMException("fixture cancellation", "AbortError");

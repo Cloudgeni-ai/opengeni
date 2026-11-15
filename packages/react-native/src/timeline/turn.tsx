@@ -22,9 +22,10 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { ActivityIndicator, Platform, Pressable, Text, View, type TextStyle } from "react-native";
+import { Platform, Pressable, Text, View, type TextStyle } from "react-native";
 import Animated, { FadeIn, FadeInDown, FadeOut, FadeOutUp } from "react-native-reanimated";
 import { ActivityRow } from "./activity";
+import { ThinkingOrb } from "./thinking-orb";
 import { Icon } from "./icon";
 import { PulseDot, ShimmerText, ROW_MIN_HEIGHT, useLiveNow, useReleaseFollow } from "./primitives";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
@@ -185,8 +186,9 @@ export function TurnSummary({
         failureText,
         durationMs,
         contextCompactionCount ?? 0,
+        unloadedSteps ?? false,
       ),
-    [t, items, outcome, failureText, durationMs, contextCompactionCount],
+    [t, items, outcome, failureText, durationMs, contextCompactionCount, unloadedSteps],
   );
   const definitions = useMemo(
     () => resolveTurnSummaryFacets(facetConfiguration),
@@ -517,7 +519,10 @@ export interface PreparingProps {
   slow: boolean;
 }
 
-/** Quiet startup feedback, replaced by useful output rather than competing with it. */
+/**
+ * The web GenieLoading: a visual (orb by default; hosts supply their own through
+ * `render`) and a stable status, replaced by useful output rather than competing with it.
+ */
 export function PreparingState({
   startedAt,
   phase,
@@ -562,13 +567,15 @@ export function PreparingState({
       style={{
         flexDirection: "row",
         alignItems: "center",
-        gap: 8,
-        minHeight: 44,
+        gap: 14,
+        minHeight: 88,
         paddingVertical: 12,
       }}
     >
-      <ActivityIndicator size="small" color={theme.colors["fg-muted"]} />
-      <Text
+      <ThinkingOrb />
+      <Animated.Text
+        key={phrase}
+        entering={FadeIn.duration(650)}
         style={{
           ...fontStyle(theme),
           fontSize: theme.size.sm,
@@ -577,7 +584,7 @@ export function PreparingState({
         }}
       >
         {phrase}
-      </Text>
+      </Animated.Text>
     </View>
   );
 }

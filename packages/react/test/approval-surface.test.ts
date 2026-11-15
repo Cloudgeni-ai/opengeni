@@ -407,7 +407,14 @@ describe("ApprovalSurface", () => {
             ...approval,
             arguments: {
               projectId: "project-1",
-              patch: { name: "Renamed", apiKey: "secret-canary" },
+              // More values than the card lists inline, so they open in Details.
+              patch: {
+                name: "Renamed",
+                description: "Q4 plan",
+                owner: "kim",
+                status: "active",
+                apiKey: "secret-canary",
+              },
             },
           },
         ],
@@ -417,7 +424,7 @@ describe("ApprovalSurface", () => {
     );
     expect(mounted.container.textContent).not.toContain("secret-canary");
     const field = [...mounted.container.querySelectorAll("button")].find((button) =>
-      button.textContent?.includes("2 fields"),
+      button.textContent?.includes("5 fields"),
     );
     await act(async () => {
       field!.click();

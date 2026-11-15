@@ -673,30 +673,47 @@ export function connectionHealth(
   if (ref.authoritySource === "host") return { state: "none" };
   if (!loaded) return { state: "unverified" };
   if (ref.accountSelection === "all_eligible" && !ref.connectionId) {
-    const matching = connections.filter(
-      (candidate) =>
-        candidate.kind === ref.kind &&
-        normalizeProviderDomain(candidate.providerDomain) ===
-          normalizeProviderDomain(ref.providerDomain),
+    const connection = healthiestConnection(
+      connections.filter(
+        (candidate) =>
+          candidate.kind === ref.kind &&
+          normalizeProviderDomain(candidate.providerDomain) ===
+            normalizeProviderDomain(ref.providerDomain),
+      ),
     );
-    const connection =
-      matching.find((candidate) => candidate.status === "active") ?? matching[0] ?? null;
     return connection?.status === "active"
       ? { state: "connected", connection }
       : { state: "attention", connection };
   }
   const connection =
     ref.subjectScope === "subject"
-      ? (connections.find(
-          (candidate) =>
-            candidate.subjectId !== null &&
-            normalizeProviderDomain(candidate.providerDomain) ===
-              normalizeProviderDomain(ref.providerDomain) &&
-            candidate.kind === ref.kind,
-        ) ?? null)
+      ? healthiestConnection(
+          connections.filter(
+            (candidate) =>
+              candidate.subjectId !== null &&
+              normalizeProviderDomain(candidate.providerDomain) ===
+                normalizeProviderDomain(ref.providerDomain) &&
+              candidate.kind === ref.kind,
+          ),
+        )
       : (connections.find((candidate) => candidate.id === ref.connectionId) ?? null);
   if (!connection || connection.status !== "active") return { state: "attention", connection };
   return { state: "connected", connection };
+}
+
+/**
+ * The account an enabled item's health follows when several match: a working
+ * one, else one that needs signing in again or failed. A removed (revoked)
+ * account is gone, as on the Connected accounts list; when only removed ones
+ * remain there is no account, so the repair is a fresh connect rather than a
+ * reconnect of the removed one.
+ */
+function healthiestConnection(matching: readonly ConnectionMetadata[]): ConnectionMetadata | null {
+  return (
+    matching.find((candidate) => candidate.status === "active") ??
+    matching.find((candidate) => candidate.status !== "revoked") ??
+    null
+  );
 }
 
 /**

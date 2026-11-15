@@ -1,5 +1,7 @@
 import { describe, expect, mock, test } from "bun:test";
+import { ApplicationFailure } from "@temporalio/activity";
 import { createSessionStateActivities } from "../src/activities/session-state";
+import { SESSION_READ_ONLY_FAILURE_TYPE } from "../src/activities/types";
 
 const input = { workspaceId: "workspace", sessionId: "session", observerAccountId: "account" };
 const services = async () => ({ db: {}, bus: {}, settings: {}, observability: {} }) as any;
@@ -60,6 +62,7 @@ describe("deleted session control activities", () => {
         settleSessionAttemptInterruptions: failed,
         markSessionAttemptQuiesced: failed,
         isSessionDefinitivelyDeleted: mock(async () => deleted),
+        isSessionExecutionReadOnly: mock(async () => false),
       });
       const proof = {
         ...input,
@@ -82,6 +85,81 @@ describe("deleted session control activities", () => {
           "Session not found",
         );
       }
+    },
+  );
+  test.each(["read-only", "live", "unprovable"] as const)(
+    "quiescence receipts fail non-retryably only on a proven read-only session (%s)",
+    async (state) => {
+      const refusal = Object.assign(new Error("SESSION_ARCHIVED_READ_ONLY"), {
+        severity: "ERROR",
+        code: "OG002",
+        where: "PL/pgSQL function refuse_imported_archive_execution() line 37 at RAISE",
+      });
+      const failed = async () => {
+        throw Object.assign(new Error("Database failure while persisting session.queue.changed"), {
+          name: "SessionEventPersistenceError",
+          cause: refusal,
+        });
+      };
+      const warnings: string[] = [];
+      const activities = createSessionStateActivities(
+        async () =>
+          ({
+            db: {},
+            bus: {},
+            settings: {},
+            observability: { warn: (message: string) => warnings.push(message) },
+          }) as any,
+        {
+          markSessionAttemptQuiesced: failed,
+          reconcileSessionAttemptQuiescence: failed,
+          getSessionAttemptActivityRef: mock(async () => ({
+            workflowId: "workflow",
+            workflowRunId: "run",
+            activityId: "activity",
+            quiesced: true,
+          })),
+          isSessionDefinitivelyDeleted: mock(async () => false),
+          isSessionExecutionReadOnly: mock(async () => {
+            if (state === "unprovable") throw new Error("read-only proof unavailable");
+            return state === "read-only";
+          }),
+        },
+      );
+      const proof = {
+        accountId: "account",
+        workspaceId: "workspace",
+        sessionId: "session",
+        attemptId: "attempt",
+        workflowId: "workflow",
+        workflowRunId: "run",
+        activityId: "activity",
+      };
+      for (const run of [
+        () => activities.persistSessionAttemptQuiescence(proof),
+        () => activities.reconcileSessionAttemptQuiescence(proof),
+      ]) {
+        const failure = await run().then(
+          () => null,
+          (error: unknown) => error,
+        );
+        if (state === "read-only") {
+          expect(failure).toBeInstanceOf(ApplicationFailure);
+          expect(failure).toMatchObject({
+            type: SESSION_READ_ONLY_FAILURE_TYPE,
+            nonRetryable: true,
+          });
+        } else {
+          expect(failure).not.toBeInstanceOf(ApplicationFailure);
+          expect((failure as Error).name).toBe("SessionEventPersistenceError");
+        }
+      }
+      if (state === "read-only") {
+        expect(warnings).toEqual([
+          "Session control activity refused, session is read-only: activity=persistSessionAttemptQuiescence error=SessionEventPersistenceError sqlState=OG002 reason=SESSION_ARCHIVED_READ_ONLY functions=refuse_imported_archive_execution:37",
+          "Session control activity refused, session is read-only: activity=reconcileSessionAttemptQuiescence error=SessionEventPersistenceError sqlState=OG002 reason=SESSION_ARCHIVED_READ_ONLY functions=refuse_imported_archive_execution:37",
+        ]);
+      } else expect(warnings).toEqual([]);
     },
   );
   test.each([true, false])(

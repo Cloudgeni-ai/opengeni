@@ -167,6 +167,42 @@ export async function publishStartupProgress(
   await eventing.publish!(events);
 }
 
+/**
+ * Model request phases that only describe a stream already under way: headers,
+ * the first byte or event, and progress. Nothing reads them back while the
+ * request runs, and the provider is already answering, so the dispatch custody
+ * they could witness is held by the awaited "started" audit before it. The
+ * terminal phase stays awaited: it resets provider recovery and, through the
+ * lane, still commits after every receipt issued before it.
+ */
+const STREAMING_MODEL_REQUEST_PHASES: ReadonlySet<string> = new Set([
+  "headers",
+  "first_byte",
+  "first_event",
+  "progress",
+]);
+
+/** Publish one model request audit. A streaming phase goes out in the
+ * background, stamped with the moment it was observed, so the provider's bytes
+ * never wait on a database round trip; every other phase is awaited. */
+export async function publishModelRequestAudit(
+  eventing: {
+    publish: TurnEventPublisher | null;
+    publishInBackground: TurnBackgroundEventPublisher | null;
+  },
+  phase: string,
+  events: Parameters<TurnEventPublisher>[0],
+): Promise<void> {
+  if (STREAMING_MODEL_REQUEST_PHASES.has(phase) && eventing.publishInBackground) {
+    const observedAt = new Date();
+    eventing.publishInBackground(
+      events.map((event) => ({ ...event, occurredAt: event.occurredAt ?? observedAt })),
+    );
+    return;
+  }
+  await eventing.publish!(events);
+}
+
 export type ModelResponseEventState = {
   responseCount: number;
   contextSignal: { revision: number; totalTokens: number } | null;

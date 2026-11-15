@@ -530,6 +530,12 @@ export function dictationErrorMessage(code: string | null, t: OpenGeniText): str
       return t("desktopDictation.host.voiceInputOff");
     case "insufficient_credits":
       return t("desktopDictation.host.needsCredits");
+    // The provider's own account is empty: trying again won't help until
+    // someone tops it up, and nothing about starting failed.
+    case "provider_quota_exceeded":
+      return t("desktopDictation.host.serviceOutOfCredit");
+    case "region_restricted":
+      return t("desktopDictation.host.notInRegion");
     case "allowance_exhausted":
     case "monthly_model_cost_limit":
       return t("desktopDictation.host.usageLimit");

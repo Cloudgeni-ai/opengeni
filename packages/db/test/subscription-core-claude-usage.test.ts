@@ -112,15 +112,18 @@ describe("fetchUsage", () => {
     expect(typeof SUBSCRIPTION_CORE_CLAUDE.adapter.decodeQuota).toBe("function");
   });
 
-  test("an available reading: the legacy request through the custody fetch", async () => {
+  test("an available reading: the reset status read through the custody fetch, as the CLI surface", async () => {
     const { read, calls } = connectionRead(oauth, () => Response.json(usageBody));
     const reading = await SUBSCRIPTION_CORE_CLAUDE.adapter.fetchUsage!(read as never);
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.url).toBe(SUBSCRIPTION_CORE_CLAUDE_USAGE_URL);
+    expect(calls[0]!.url).toBe(`${SUBSCRIPTION_CORE_CLAUDE_USAGE_URL}?cedar_ember=1&skip_spend=1`);
     expect(calls[0]!.init?.redirect).toBe("error");
     expect(calls[0]!.init?.signal).toBeInstanceOf(AbortSignal);
     expect(new Headers(calls[0]!.init?.headers).get("authorization")).toBe(`Bearer ${oauth.token}`);
     expect(new Headers(calls[0]!.init?.headers).get("cache-control")).toBe("no-cache");
+    expect(new Headers(calls[0]!.init?.headers).get("user-agent")).toBe(
+      "claude-cli/2.1.322 (external, cli)",
+    );
     const value = reading as SubscriptionCoreClaudeUsageReading;
     expect(value.status).toBe("available");
     expect(value.observation?.source).toBe("provider");

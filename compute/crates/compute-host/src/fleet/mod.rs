@@ -34,6 +34,7 @@ mod listen;
 mod lossy;
 mod pointers;
 mod record;
+pub mod stopped;
 mod tls;
 
 use std::net::SocketAddr;

@@ -56,8 +56,10 @@ import {
   SessionTitleResponse,
   SessionTitleRouteUnavailableError,
   sessionTitleApiConnectionId,
+  sessionTitleFailureDiagnostic,
   sessionTitleRouteIdentity,
   titlePricingJson,
+  type SessionTitleFailureStage,
 } from "./session-title-route";
 import {
   SESSION_TITLE_LEASE_MS,
@@ -88,6 +90,7 @@ export async function admitIndependentSessionTitle(input: {
   route: SessionTitleRoute;
   policy: TurnExecutionPolicyV1;
   prompt: string;
+  titleInstructions?: string | undefined;
   subscriptionConnectionId: string | null;
   subscriptionProvider: string | null;
   expectedTitle: SessionTitleRequest["expectedTitle"];
@@ -111,6 +114,7 @@ export async function admitIndependentSessionTitle(input: {
     prompt: Array.from(input.prompt.trim())
       .slice(0, SESSION_TITLE_GENERATION_INPUT_MAX_CHARACTERS)
       .join(""),
+    ...(input.titleInstructions ? { titleInstructions: input.titleInstructions } : {}),
     apiConnectionId: input.subscriptionConnectionId
       ? null
       : await sessionTitleApiConnectionId({
@@ -183,6 +187,8 @@ export async function reconcileSessionTitleOperation(
     (await finishSessionTitleOperation(db, { ...claim, state }))
       ? { action: "terminal" }
       : { action: "retry", delayMs: 5_000 };
+  // Where the attempt failed, for the content-free failure diagnostic.
+  let stage: SessionTitleFailureStage = "admission";
   try {
     const key = environmentsEncryptionKeyBytes(service.settings);
     if (!key) throw new Error("Session title encryption key is unavailable");
@@ -196,6 +202,7 @@ export async function reconcileSessionTitleOperation(
       return await finish(refused ? "failed" : "unknown");
     }
     if (operation.state === "responded") {
+      stage = "settlement";
       const recoveredSettings = await settingsWithModelProviderCredentials(db, {
         ...input,
         settings: service.settings,
@@ -297,12 +304,14 @@ export async function reconcileSessionTitleOperation(
               resolvedModel: route.resolvedModel,
               modelName: route.modelName,
               serviceTier: request.serviceTier,
+              titleInstructions: request.titleInstructions,
               signal: AbortSignal.timeout(PARALLEL_SESSION_TITLE_TIMEOUT_MS),
             }),
           );
         // SDK retries within this live invocation reuse one reservation. A new
         // activity still sees dispatching and never replays an uncertain call.
         let reservation: Promise<void> | undefined;
+        stage = "provider_request";
         const result = operation.connectionId
           ? await generate()
           : await withModelTransportStartedObserver(
@@ -316,6 +325,7 @@ export async function reconcileSessionTitleOperation(
         // Paid usage is accounting truth even if the metadata holder expired
         // while the provider was answering. The same stable key is replay-safe
         // when the retained-response transaction later records its event/fact.
+        stage = "response";
         let billingFailure: { error: unknown } | null = null;
         try {
           if (result.usage)
@@ -359,7 +369,9 @@ export async function reconcileSessionTitleOperation(
             errorClass: error instanceof Error ? error.name : "UnknownError",
           });
         });
+        stage = "billing";
         if (billingFailure) throw billingFailure.error;
+        stage = "settlement";
         const retained = await getSessionTitleOperation(db, input);
         if (!retained) throw new Error("Title operation disappeared");
         if (
@@ -373,6 +385,15 @@ export async function reconcileSessionTitleOperation(
     );
   } catch (error) {
     const current = await getSessionTitleOperation(db, input);
+    // Deleting a chat deletes its title operation; there is nothing left to
+    // name or settle, so this is the expected end rather than a failure.
+    if (!current) {
+      service.observability.debug("Session title operation ended with its chat", {
+        operationId: operation.id,
+        errorClass: error instanceof Error ? error.name : "UnknownError",
+      });
+      return { action: "terminal" };
+    }
     if (
       (current?.state === "pending" || current?.state === "responded") &&
       isRetryableTitleAdmissionError(error)
@@ -387,7 +408,7 @@ export async function reconcileSessionTitleOperation(
     service.observability.warn("Independent session title failed", {
       operationId: operation.id,
       terminalStateCommitted: outcome.action === "terminal",
-      errorClass: error instanceof Error ? error.name : "UnknownError",
+      ...sessionTitleFailureDiagnostic(error, stage),
     });
     return outcome;
   }

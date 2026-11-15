@@ -19,6 +19,7 @@ import { storeOrganizationInvitationContinuation } from "@/lib/organization-invi
 import { setupAccountTokenFromUrl, takeBootstrappedSetupAccountToken } from "@/setup-account-token";
 import type { AuthSession, OrganizationInvitation } from "@opengeni/react/app/types";
 import { errorMessage } from "@opengeni/contracts/values";
+import { onConsoleHost } from "@/lib/console-route";
 
 export { setupAccountTokenFromUrl } from "@/setup-account-token";
 
@@ -212,7 +213,11 @@ export function SetupAccountRoute({ token }: { token?: string | undefined }) {
             <Button asChild className="mt-4 w-full">
               <Link to="/">
                 <CheckIcon className="size-4" />
-                {completion === "joined" ? "Open Opengeni" : "Sign in"}
+                {completion === "joined"
+                  ? onConsoleHost()
+                    ? "Open Console"
+                    : "Open Opengeni"
+                  : "Sign in"}
               </Link>
             </Button>
           </>

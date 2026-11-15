@@ -58,7 +58,7 @@ impl Rig {
         self.send(Input::Add {
             sandbox: SandboxId(id),
             state,
-            policy: SleepPolicy::new(SleepRules::RECOMMENDED).unwrap(),
+            policy: SleepPolicy::new(SleepRules::RECOMMENDED.keeping_memory()).unwrap(),
             size,
             last_activity: self.now,
         })

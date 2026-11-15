@@ -2,6 +2,7 @@ import type { EditableArtifactSession } from "@opengeni/sdk/editable-artifacts";
 import { DownloadIcon, LoaderCircleIcon } from "lucide-react";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 
+import { saveBlob } from "../../app/lib/save-blob";
 import { ArtifactButton } from "./artifact-chrome";
 import { useArtifactSubmissions } from "./artifact-submissions";
 import { useEditableArtifactView } from "./editable-artifact-ui";
@@ -98,16 +99,7 @@ export function EditableArtifactDownloadButton({
     try {
       const blob = await download(controller.signal);
       if (controller.signal.aborted) return;
-      const url = URL.createObjectURL(blob);
-      try {
-        const anchor = document.createElement("a");
-        anchor.href = url;
-        anchor.download = downloadFileName(title, format, t(labels.fallbackName));
-        anchor.rel = "noopener";
-        anchor.click();
-      } finally {
-        setTimeout(() => URL.revokeObjectURL(url), 0);
-      }
+      saveBlob(blob, downloadFileName(title, format, t(labels.fallbackName)));
     } catch {
       if (!controller.signal.aborted) setError(true);
     } finally {

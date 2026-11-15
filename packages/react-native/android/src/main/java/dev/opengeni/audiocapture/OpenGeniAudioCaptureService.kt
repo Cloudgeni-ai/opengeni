@@ -9,11 +9,14 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import dev.opengeni.foreground.goForeground
 
 /**
  * Keeps the app in the foreground, with the microphone type, while it records,
  * so capture goes on with the screen off or another app open. Its ongoing
- * notification returns to the app.
+ * notification returns to the app. [AudioCapture] starts and stops it through
+ * a [dev.opengeni.foreground.ForegroundService], so no timing or failure
+ * crashes the app.
  */
 class OpenGeniAudioCaptureService : Service() {
   companion object {
@@ -23,9 +26,16 @@ class OpenGeniAudioCaptureService : Service() {
     private const val NOTIFICATION_ID = 0x0A0D10
   }
 
+  private var inForeground = false
+
   override fun onBind(intent: Intent?): IBinder? = null
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+    AudioCapture.service.handle(this, intent, startId) { enterForeground(intent) }
+    return START_NOT_STICKY
+  }
+
+  private fun enterForeground(intent: Intent?): Boolean {
     val title = intent?.getStringExtra(EXTRA_TITLE)?.takeIf { it.isNotBlank() } ?: "Recording audio"
     val text = intent?.getStringExtra(EXTRA_TEXT)?.takeIf { it.isNotBlank() } ?: ""
     val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
@@ -54,20 +64,16 @@ class OpenGeniAudioCaptureService : Service() {
         .setCategory(Notification.CATEGORY_SERVICE)
         .apply { if (open != null) setContentIntent(open) }
         .build()
-    try {
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-        startForeground(
-          NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
-      } else {
-        startForeground(NOTIFICATION_ID, notification)
-      }
-    } catch (error: Exception) {
+    val error =
+      goForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+    if (error == null) {
+      inForeground = true
+    } else if (!inForeground) {
       // Not allowed now (the app went to the background first, or the host app does not
       // declare the microphone service type): recording goes on while the app is open.
       AudioCapture.reportForegroundUnavailable(error.message ?: "")
-      stopSelf()
     }
-    return START_NOT_STICKY
+    return inForeground
   }
 
   override fun onDestroy() {

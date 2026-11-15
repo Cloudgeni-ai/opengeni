@@ -46,7 +46,11 @@ The new-chat and follow-up composers follow the web composer:
   workspace's transcription API (`POST /v1/workspaces/:id/transcriptions`); the
   text is appended to the draft. It shows only where the deployment offers
   voice input for that workspace (`voiceInput` in the client config).
-- **Attachments** from the photo library or files, through the **+** menu.
+- **Attachments** through the **+** menu: photos and videos from the library
+  or the camera, and files. Each file streams from disk to storage with
+  Expo's native upload task, showing its progress, so a long video never has
+  to fit in memory; library videos keep their original file (often HEVC in a
+  `.MOV`). The agent gets them in its sandbox like files uploaded on the web.
 - **New-chat options** in the same menu: visibility, a GitHub repository and a
   self-hosted machine when the workspace has them, with the rest on the web.
 - **Model and reasoning** from the workspace's model catalog.
@@ -107,6 +111,12 @@ Server configuration:
 | `OPENGENI_NATIVE_APP_IDS` | Bundle IDs / package names that may register for push (default `ai.opengeni.app`). |
 | `OPENGENI_APNS_KEY_ID`, `OPENGENI_APNS_TEAM_ID`, `OPENGENI_APNS_PRIVATE_KEY` | APNs token auth (.p8). The bundle ID must be an App ID with Push Notifications in that team. Development builds use the APNs sandbox. |
 | `OPENGENI_FCM_SERVICE_ACCOUNT_JSON` | Firebase service account with the Cloud Messaging role. Android builds also need that project's `google-services.json`: set `OPENGENI_GOOGLE_SERVICES_FILE` to its path when building. |
+
+A deployment refuses a push registration it could never deliver: an app ID not in
+`OPENGENI_NATIVE_APP_IDS`, or a platform without credentials. Settings then says
+the server isn't set up to send notifications to this app; the API's error
+message names the refused app ID. The app reports its APNs environment from the build's signing
+profile, so a release build installed from Xcode registers for the sandbox.
 
 ## Message rendering limits
 

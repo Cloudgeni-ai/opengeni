@@ -316,7 +316,7 @@ export function InviteForm({
       submitLabel={count > 1 ? `Send ${count} invitations` : "Send invitation"}
       pendingLabel="Sending…"
       onSubmit={submit}
-      footerStart="Invitations expire in 7 days."
+      footerStart="Invitations expire in 48 hours."
       back={{ label: vocab.peopleTitle, onClick: onClose }}
       onCancel={onClose}
       onSubmitted={onClose}

@@ -79,7 +79,8 @@ struct Serve {
     /// while it refreshes.
     #[arg(long, default_value_t = 10)]
     max: u32,
-    /// The longest a runner's sandbox lives, in seconds (the longest job).
+    /// The longest a runner's sandbox lives idle, and then from its job's
+    /// start, in seconds (the longest job).
     #[arg(long, default_value_t = 6 * 3600)]
     timeout_s: u64,
     /// More environment for every runner, `NAME=value`.

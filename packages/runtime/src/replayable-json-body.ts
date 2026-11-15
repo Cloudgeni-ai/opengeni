@@ -11,6 +11,7 @@ import {
   rethrowModelTransportAdmissionRefusal,
   sdkModelTransportAdmissionFetch,
 } from "./model-preparation-diagnostics";
+import { unwrappedErrorBody } from "./provider-quota";
 
 const TARGET_CHUNK_CHARS = 64 * 1024;
 const LARGE_STRING_SOURCE_CHARS = 32 * 1024;
@@ -139,7 +140,7 @@ export class ReplayableJsonOpenAI extends OpenAI {
     headers: Headers,
   ): APIError {
     rethrowModelTransportAdmissionRefusal(headers);
-    return super.makeStatusError(status, error, message, headers);
+    return super.makeStatusError(status, unwrappedErrorBody(error), message, headers);
   }
 
   override post<Rsp>(path: string, opts?: OpenAIPostOptions): APIPromise<Rsp> {

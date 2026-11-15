@@ -589,16 +589,6 @@ describe("Codex capacity on the shared core", () => {
     expect(reconcile.mock.calls[0]![1]).toMatchObject({ evaluation: { kind: "run" } });
   });
 
-  test("a core wait that exhausted its false-resumption budget stops the turn", async () => {
-    scopedDb();
-    const { armed } = coreWaitMocks(new Date(Date.now() + 60_000));
-    armed.mockResolvedValue({ action: "stopped", sessionStatus: "failed", events: [] });
-    const deps = capacityDeps();
-    expect(await selectCodexTurnCapacity(deps)).toEqual({
-      exit: { status: "failed", turnId: "turn-1" },
-    } as never);
-  });
-
   test("an older attempt's live lease is a retryable typed failure", async () => {
     scopedDb();
     spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(identity);

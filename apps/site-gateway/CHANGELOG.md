@@ -1,5 +1,137 @@
 # @opengeni/site-gateway
 
+## 0.1.48
+
+### Patch Changes
+
+- Updated dependencies [c0089e1]
+- Updated dependencies [9dd96b0]
+- Updated dependencies [adc2409]
+- Updated dependencies [f6a7c28]
+  - @opengeni/contracts@6.23.0
+  - @opengeni/sdk@6.23.0
+
+## 0.1.47
+
+### Patch Changes
+
+- Updated dependencies [d50092b]
+  - @opengeni/contracts@6.22.0
+  - @opengeni/sdk@6.22.0
+
+## 0.1.46
+
+### Patch Changes
+
+- Updated dependencies [7d0d52b]
+- Updated dependencies [ef4c334]
+- Updated dependencies [ce864c0]
+- Updated dependencies [6ac2cd4]
+  - @opengeni/contracts@6.21.0
+  - @opengeni/sdk@6.21.0
+
+## 0.1.45
+
+### Patch Changes
+
+- @opengeni/contracts@6.20.1
+- @opengeni/sdk@6.20.1
+
+## 0.1.44
+
+### Patch Changes
+
+- Updated dependencies [c624443]
+- Updated dependencies [ae3972e]
+- Updated dependencies [e37485b]
+- Updated dependencies [9c17a87]
+  - @opengeni/sdk@6.20.0
+  - @opengeni/contracts@6.20.0
+
+## 0.1.43
+
+### Patch Changes
+
+- Updated dependencies [a85adef]
+  - @opengeni/sdk@6.19.0
+  - @opengeni/contracts@6.19.0
+
+## 0.1.42
+
+### Patch Changes
+
+- Updated dependencies [f313a0e]
+- Updated dependencies [6813960]
+- Updated dependencies [9188c1d]
+- Updated dependencies [3105a8b]
+- Updated dependencies [a16189c]
+- Updated dependencies [89cf4ba]
+  - @opengeni/contracts@6.18.0
+  - @opengeni/sdk@6.18.0
+
+## 0.1.41
+
+### Patch Changes
+
+- Updated dependencies [8073ab6]
+- Updated dependencies [43aa19d]
+- Updated dependencies [b1b69fc]
+- Updated dependencies [deccb54]
+- Updated dependencies [668c5ed]
+- Updated dependencies [e3cb3c1]
+- Updated dependencies [389de66]
+- Updated dependencies [42ef2a2]
+- Updated dependencies [241ce71]
+  - @opengeni/contracts@6.17.0
+  - @opengeni/sdk@6.17.0
+
+## 0.1.40
+
+### Patch Changes
+
+- Updated dependencies [fb19875]
+- Updated dependencies [54dc5da]
+- Updated dependencies [86e5358]
+  - @opengeni/contracts@6.16.0
+  - @opengeni/sdk@6.16.0
+
+## 0.1.39
+
+### Patch Changes
+
+- Updated dependencies [708848c]
+- Updated dependencies [5525e63]
+- Updated dependencies [60d067d]
+- Updated dependencies [da60317]
+- Updated dependencies [f92ff08]
+- Updated dependencies [060c983]
+- Updated dependencies [bf804ef]
+- Updated dependencies [dfeab20]
+- Updated dependencies [6a5023d]
+- Updated dependencies [02ac654]
+- Updated dependencies [b0fce89]
+- Updated dependencies [9885d37]
+- Updated dependencies [f22647a]
+- Updated dependencies [7a83f9b]
+- Updated dependencies [850b4d5]
+  - @opengeni/contracts@6.15.0
+  - @opengeni/sdk@6.15.0
+
+## 0.1.38
+
+### Patch Changes
+
+- Updated dependencies [c976c87]
+- Updated dependencies [6ae0528]
+- Updated dependencies [3b853ca]
+- Updated dependencies [dd11dad]
+- Updated dependencies [904eae7]
+- Updated dependencies [91320a4]
+- Updated dependencies [7c926f8]
+- Updated dependencies [c472500]
+  - @opengeni/contracts@6.14.0
+  - @opengeni/sdk@6.14.0
+
 ## 0.1.37
 
 ### Patch Changes

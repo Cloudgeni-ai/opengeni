@@ -30,6 +30,9 @@ Classify are merely possible examples, never required buttons or templates.
 Use `onText` for incremental text and `onSession` to retain a native handle before
 waiting. A result has `text`, `sessionId`, `turnId`, `after` and `status`:
 `completed`, `pending` (approval/input needed), or `cancelled`; failures reject.
+Pass `waitForApproval: true` to wait through an approval or input request instead:
+the person answers in Opengeni and the call resolves with the final result, while
+`onWait` lets the app say it is waiting.
 Validate any app-defined structured output before using it.
 
 This is ordinary native execution with the same model access, subscriptions,

@@ -19,7 +19,7 @@ import type { CapacityPhaseDeps, CapacityPhaseOutcome } from "./codex-capacity";
 import type { XaiTurnLease } from "./credential-leases";
 import { classifyXaiProviderError } from "./errors";
 import {
-  assertCoreSourceConnected,
+  admitCoreRequest,
   coreLeaseRef,
   guardCoreTokenResolver,
   parkCoreSubscriptionTurn,
@@ -130,8 +130,11 @@ export type XaiCoreRequestAuthorization = {
    */
   titleGetToken: XaiSubscriptionRequestContext["getToken"];
   titleRefresh: XaiSubscriptionRequestContext["refresh"];
-  /** The dispatch fence every physical request passes before its reservation. */
-  assertDispatch: () => Promise<void>;
+  /**
+   * Admit one physical request: its reservation is the dispatch fence (the
+   * accepted turn, the source and the live lease, in one transaction).
+   */
+  admit: (reserve: () => Promise<unknown>) => Promise<void>;
   beforeProviderDispatch: NonNullable<XaiSubscriptionRequestContext["beforeProviderDispatch"]>;
   onProviderRequestSettled: NonNullable<XaiSubscriptionRequestContext["onProviderRequestSettled"]>;
 };
@@ -154,17 +157,17 @@ export function buildXaiCoreRequestAuthorization(input: {
   const ref = coreLeaseRef(lease, core, DISPLAY_NAME);
   core.requests = createCoreXaiRequests(db, core, ref, input.execution);
   core.titleRequests = createCoreXaiRequests(db, core, ref, input.execution);
+  const isLeaseLost = (error: unknown) => hasCoreCode(error, "subscription_core_lease_lost");
   const resolver = guardCoreTokenResolver(
     db,
     XAI_CORE_TURN_PROVIDER,
     core,
     lease,
     buildSubscriptionCoreXaiTokenResolver(db, input.settings, core.identity, ref),
-    (error) => hasCoreCode(error, "subscription_core_lease_lost"),
+    isLeaseLost,
   );
-  const assertDispatch = async () => {
-    await assertCoreSourceConnected(db, XAI_CORE_TURN_PROVIDER, core);
-    await lease.assertCurrentForDispatch();
+  const admit = async (reserve: () => Promise<unknown>) => {
+    await admitCoreRequest(lease, reserve, isLeaseLost);
   };
   const requests = core.requests;
   // The refusal settlement fences its health write on the generation the
@@ -187,10 +190,9 @@ export function buildXaiCoreRequestAuthorization(input: {
     refresh: async () => mainLane(await resolver.refresh()),
     titleGetToken: async () => bearer(await resolver.getToken()),
     titleRefresh: async () => bearer(await resolver.refresh()),
-    assertDispatch,
+    admit,
     beforeProviderDispatch: async (request) => {
-      await assertDispatch();
-      await requests.reserve(request);
+      await admit(() => requests.reserve(request));
       if (mainLaneGeneration !== null) core.credentialVersion = mainLaneGeneration;
     },
     onProviderRequestSettled: requests.observe,
@@ -206,11 +208,11 @@ export function xaiCoreTitleCustody(
   core: Pick<SubscriptionCoreTurn, "titleRequests"> | null,
   authorization: Pick<
     XaiCoreRequestAuthorization,
-    "assertDispatch" | "titleGetToken" | "titleRefresh"
+    "admit" | "titleGetToken" | "titleRefresh"
   > | null,
 ):
   | {
-      assertDispatch: () => Promise<void>;
+      admit: (reserve: () => Promise<unknown>) => Promise<void>;
       requests: CoreSubscriptionRequests;
       getToken: XaiSubscriptionRequestContext["getToken"];
       refresh: XaiSubscriptionRequestContext["refresh"];
@@ -220,7 +222,7 @@ export function xaiCoreTitleCustody(
   if (!authorization || !core.titleRequests)
     throw new Error("A SuperGrok turn on the shared core has no session-title request custody");
   return {
-    assertDispatch: authorization.assertDispatch,
+    admit: authorization.admit,
     requests: core.titleRequests,
     getToken: authorization.titleGetToken,
     refresh: authorization.titleRefresh,

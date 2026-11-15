@@ -33,7 +33,9 @@ export async function assertSubscriptionTranscriptionAllowed(input: {
 
 /**
  * Once a shared-core provider is selected, its failures are final for that
- * audio: provider ordering chose the initial provider only (design 6.5).
+ * audio: provider ordering chose the initial provider only (design 6.5). The
+ * one exception is a subscription out of credit, which heard nothing and
+ * charged nothing (see `coreTranscriptionResult`).
  */
 export function coreTranscriptionUnavailable(): TranscriptionServiceError {
   return new TranscriptionServiceError({
@@ -61,7 +63,11 @@ export async function coreTranscriptionResult(
 ): Promise<{ text: string; languages: string[] }> {
   if (!response.ok) {
     // The body says why: a subscription out of credit is not a broken service.
-    throw withoutFallback(responseError(response.status, await response.json().catch(() => null)));
+    const error = responseError(response.status, await response.json().catch(() => null));
+    // Out of credit, the provider refused before hearing anything, so the
+    // workspace's "try another provider" setting may send the audio on.
+    // Any other refusal stays final for this audio.
+    throw error.providerCode === "quota_exceeded" ? error : withoutFallback(error);
   }
   const body = await response.json().catch(() => null);
   if (!body || typeof body.text !== "string") throw withoutFallback(responseError(502));
@@ -78,7 +84,8 @@ export async function coreTranscriptionResult(
  * organization- or workspace-scoped connection only, under its own operation
  * lease and the per-connection refresh lock. One forced refresh and one
  * retry when the provider refuses the bearer; nothing is retried through
- * another provider once a connection was selected.
+ * another provider once a connection was selected, unless the subscription
+ * is out of credit.
  */
 export async function transcribeOnSubscriptionCore(input: {
   db: Database;

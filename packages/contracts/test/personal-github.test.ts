@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  GITHUB_OWNER_LOGIN_PATTERN,
   ListPersonalGitHubRepositoriesResponse,
   PersonalGitHubRepository,
   personalGitHubAccessCovers,
@@ -37,6 +38,30 @@ describe("personal GitHub repository contracts", () => {
         canonicalUrl: "https://attacker.example/repository",
       }).success,
     ).toBe(false);
+  });
+
+  test("owners may be enterprise managed users, whose logins carry an underscore", () => {
+    const managed = {
+      ...repository,
+      fullName: "octocat_acme/tools",
+      canonicalUrl: "https://github.com/octocat_acme/tools",
+    };
+    expect(PersonalGitHubRepository.parse(managed).fullName).toBe("octocat_acme/tools");
+    for (const login of ["octocat_acme", "Octo-Cat_acme", "a", "a".repeat(39)]) {
+      expect(GITHUB_OWNER_LOGIN_PATTERN.test(login)).toBe(true);
+    }
+    for (const login of ["_octocat", "-octocat", "a".repeat(40), "octo.cat", "octo/cat", ""]) {
+      expect(GITHUB_OWNER_LOGIN_PATTERN.test(login)).toBe(false);
+    }
+    for (const fullName of ["_octocat/tools", `${"a".repeat(40)}/tools`]) {
+      expect(
+        PersonalGitHubRepository.safeParse({
+          ...repository,
+          fullName,
+          canonicalUrl: `https://github.com/${fullName}`,
+        }).success,
+      ).toBe(false);
+    }
   });
 
   test("bounds and deduplicates full replacement selections", () => {
@@ -170,6 +195,21 @@ describe("personal GitHub repository contracts", () => {
       },
     };
     expect(McpPersonalConnectionDelegation.parse(allMode)).toEqual(allMode);
+    // An enterprise managed user's own repository.
+    const managedOwner = {
+      ...delegation,
+      personalGitHubRepositorySelection: {
+        ...delegation.personalGitHubRepositorySelection,
+        repositories: [
+          {
+            ...delegation.personalGitHubRepositorySelection.repositories[0]!,
+            fullName: "octocat_acme/tools",
+            canonicalUrl: "https://github.com/octocat_acme/tools",
+          },
+        ],
+      },
+    };
+    expect(McpPersonalConnectionDelegation.parse(managedOwner)).toEqual(managedOwner);
     expect(
       McpPersonalConnectionDelegation.safeParse({
         ...delegation,

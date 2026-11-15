@@ -1,8 +1,8 @@
 import { t } from "./console-text";
 import { expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
-import { buildTimeline } from "../../timeline";
-import { timelineShowsFailure } from "./timeline-failure-owner";
+import { buildTimeline, groupTimeline } from "../../timeline";
+import { bannerFailureEventIds, timelineShowsFailure } from "./timeline-failure-owner";
 
 const recorded =
   "compaction summarization failed: 400 Missing required parameter: 'input[116].status'.";
@@ -49,10 +49,49 @@ test("the failed turn's own compaction landmark owns the failure", () => {
   expect(timelineShowsFailure(plain, { failureEventId: "evt-2", turnId: "turn-1" })).toBe(true);
 });
 
-test("the failure event's own notice owns it when there is no landmark", () => {
+test("without a landmark the banner owns a compaction failure, and the timeline leaves it out", () => {
   const items = buildTimeline(t, [failed(1, "turn-1")]);
   expect(items.some((item) => item.kind === "notice")).toBe(true);
-  expect(timelineShowsFailure(items, { failureEventId: "evt-1", turnId: "turn-1" })).toBe(true);
+  // The notice is no proof: while the banner presents this failure the
+  // timeline drops it, so the banner keeps its headline and Details.
+  expect(timelineShowsFailure(items, { failureEventId: "evt-1", turnId: "turn-1" })).toBe(false);
+  const shown = JSON.stringify(
+    groupTimeline(t, items, { readableTurns: true, presentedFailureEventIds: ["evt-1"] }),
+  );
+  expect(shown).not.toContain("compaction summarization failed");
+});
+
+test("a usage-limit failure is shown by its own row, so the banner keeps only its actions", () => {
+  const items = buildTimeline(t, [
+    event(1, "user.message", { text: "Continue" }, "turn-1"),
+    event(
+      2,
+      "turn.failed",
+      {
+        error: "Usage allowance exhausted",
+        code: "allowance_exhausted",
+        message: "Usage allowance exhausted",
+        scope: "workspace",
+        resetsAt: "2026-11-11T00:00:00.000Z",
+      },
+      "turn-1",
+    ),
+  ]);
+  const allowance = items.find((item) => item.kind === "notice" && item.allowance);
+  expect(allowance?.id).toBe("evt-2-allowance");
+  expect(timelineShowsFailure(items, { failureEventId: "evt-2", turnId: "turn-1" })).toBe(true);
+  // The presented ids never remove the usage-limit row.
+  const groups = groupTimeline(t, items, { presentedFailureEventIds: ["evt-2"] });
+  expect(JSON.stringify(groups)).toContain("evt-2-allowance");
+});
+
+test("a credit stop presents only its own turn end, never an older failure", () => {
+  const events = [
+    event(1, "turn.failed", { error: "OLD FAILURE TEXT" }, "turn-1"),
+    event(2, "turn.completed", { reason: "budget_exhausted" }, "turn-2"),
+  ];
+  expect(bannerFailureEventIds(events, { failureEventId: "evt-1" }, true)).toEqual(["evt-2"]);
+  expect(bannerFailureEventIds(events, { failureEventId: "evt-1" }, false)).toEqual(["evt-1"]);
 });
 
 test("an older, unrelated or hidden failure never suppresses the banner", () => {

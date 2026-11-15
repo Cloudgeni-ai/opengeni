@@ -1,5 +1,165 @@
+diff --git a/dist/openaiChatCompletionsStreaming.js b/dist/openaiChatCompletionsStreaming.js
+index cec565f3cc5a04aa58f4c988e1acb400ceb619a1..4116a1a31ab39af067ce6f05b1caa677bddbf64a 100644
+--- a/dist/openaiChatCompletionsStreaming.js
++++ b/dist/openaiChatCompletionsStreaming.js
+@@ -111,7 +111,12 @@ async function* convertChatCompletionsStreamToResponses(response, stream, option
+         }
+         // Handle tool calls
+         if (delta.tool_calls) {
+-            for (const tc_delta of delta.tool_calls) {
++            for (const raw_tc_delta of delta.tool_calls) {
++                // Some providers (Gemini's OpenAI-compatible API) stream each
++                // tool call whole without an `index`; give each its own.
++                const tc_delta = typeof raw_tc_delta.index === 'number'
++                    ? raw_tc_delta
++                    : { ...raw_tc_delta, index: unindexedToolCallIndex(state, raw_tc_delta) };
+                 if (state.ignored_tool_call_indexes.has(tc_delta.index)) {
+                     continue;
+                 }
+@@ -138,6 +143,19 @@ async function* convertChatCompletionsStreamToResponses(response, stream, option
+                 if (tc_delta.id && !state.function_calls[tc_delta.index].callId) {
+                     state.function_calls[tc_delta.index].callId = tc_delta.id;
+                 }
++                // Keep the provider's own fields on the call (for example
++                // Gemini's `extra_content` thought signature), as the
++                // non-streamed path does, so a replayed call carries them.
++                for (const [key, value] of Object.entries(tc_delta)) {
++                    if (STREAMED_TOOL_CALL_SDK_FIELDS.has(key) || value === undefined || value === null) {
++                        continue;
++                    }
++                    const functionCall = state.function_calls[tc_delta.index];
++                    functionCall.providerData = {
++                        ...functionCall.providerData,
++                        [key]: mergeToolCallProviderField(functionCall.providerData?.[key], value),
++                    };
++                }
+             }
+         }
+     }
+@@ -219,6 +237,41 @@ async function* convertChatCompletionsStreamToResponses(response, stream, option
+     };
+     yield finalEvent;
+ }
++const STREAMED_TOOL_CALL_SDK_FIELDS = new Set(['index', 'id', 'type', 'function']);
++function isPlainRecord(value) {
++    return typeof value === 'object' && value !== null && !Array.isArray(value);
++}
++function mergeToolCallProviderField(previous, next) {
++    if (!isPlainRecord(previous) || !isPlainRecord(next)) {
++        return next;
++    }
++    const merged = { ...previous };
++    for (const [key, value] of Object.entries(next)) {
++        merged[key] = mergeToolCallProviderField(previous[key], value);
++    }
++    return merged;
++}
++function unindexedToolCallIndex(state, toolCall) {
++    const last = state.last_unindexed_tool_call;
++    // A delta that names a function while the last call already has a name
++    // is the next call, even when the provider sends no (or an empty) id.
++    const startsNamedCall = Boolean(toolCall.function?.name) &&
++        Boolean(last && state.function_calls[last.index]?.name);
++    if (last &&
++        ((toolCall.id && toolCall.id === last.callId) ||
++            (!startsNamedCall && (!toolCall.id || !last.callId)))) {
++        if (toolCall.id && !last.callId) {
++            last.callId = toolCall.id;
++        }
++        return last.index;
++    }
++    const used = [...Object.keys(state.function_calls), ...state.ignored_tool_call_indexes]
++        .map(Number)
++        .filter(Number.isFinite);
++    const index = used.length > 0 ? Math.max(...used) + 1 : 0;
++    state.last_unindexed_tool_call = { index, callId: toolCall.id || undefined };
++    return index;
++}
+ function buildTraceChoice(state) {
+     const toolCalls = Object.entries(state.function_calls)
+         .sort(([left], [right]) => Number(left) - Number(right))
+diff --git a/dist/openaiChatCompletionsStreaming.mjs b/dist/openaiChatCompletionsStreaming.mjs
+index a09ff7c37dae74f2a50ba577269a36942ac900df..587c5b9f5beedaf0d8a0df50fcb7332992cd754d 100644
+--- a/dist/openaiChatCompletionsStreaming.mjs
++++ b/dist/openaiChatCompletionsStreaming.mjs
+@@ -105,7 +105,12 @@ export async function* convertChatCompletionsStreamToResponses(response, stream,
+         }
+         // Handle tool calls
+         if (delta.tool_calls) {
+-            for (const tc_delta of delta.tool_calls) {
++            for (const raw_tc_delta of delta.tool_calls) {
++                // Some providers (Gemini's OpenAI-compatible API) stream each
++                // tool call whole without an `index`; give each its own.
++                const tc_delta = typeof raw_tc_delta.index === 'number'
++                    ? raw_tc_delta
++                    : { ...raw_tc_delta, index: unindexedToolCallIndex(state, raw_tc_delta) };
+                 if (state.ignored_tool_call_indexes.has(tc_delta.index)) {
+                     continue;
+                 }
+@@ -132,6 +137,19 @@ export async function* convertChatCompletionsStreamToResponses(response, stream,
+                 if (tc_delta.id && !state.function_calls[tc_delta.index].callId) {
+                     state.function_calls[tc_delta.index].callId = tc_delta.id;
+                 }
++                // Keep the provider's own fields on the call (for example
++                // Gemini's `extra_content` thought signature), as the
++                // non-streamed path does, so a replayed call carries them.
++                for (const [key, value] of Object.entries(tc_delta)) {
++                    if (STREAMED_TOOL_CALL_SDK_FIELDS.has(key) || value === undefined || value === null) {
++                        continue;
++                    }
++                    const functionCall = state.function_calls[tc_delta.index];
++                    functionCall.providerData = {
++                        ...functionCall.providerData,
++                        [key]: mergeToolCallProviderField(functionCall.providerData?.[key], value),
++                    };
++                }
+             }
+         }
+     }
+@@ -213,6 +231,41 @@ export async function* convertChatCompletionsStreamToResponses(response, stream,
+     };
+     yield finalEvent;
+ }
++const STREAMED_TOOL_CALL_SDK_FIELDS = new Set(['index', 'id', 'type', 'function']);
++function isPlainRecord(value) {
++    return typeof value === 'object' && value !== null && !Array.isArray(value);
++}
++function mergeToolCallProviderField(previous, next) {
++    if (!isPlainRecord(previous) || !isPlainRecord(next)) {
++        return next;
++    }
++    const merged = { ...previous };
++    for (const [key, value] of Object.entries(next)) {
++        merged[key] = mergeToolCallProviderField(previous[key], value);
++    }
++    return merged;
++}
++function unindexedToolCallIndex(state, toolCall) {
++    const last = state.last_unindexed_tool_call;
++    // A delta that names a function while the last call already has a name
++    // is the next call, even when the provider sends no (or an empty) id.
++    const startsNamedCall = Boolean(toolCall.function?.name) &&
++        Boolean(last && state.function_calls[last.index]?.name);
++    if (last &&
++        ((toolCall.id && toolCall.id === last.callId) ||
++            (!startsNamedCall && (!toolCall.id || !last.callId)))) {
++        if (toolCall.id && !last.callId) {
++            last.callId = toolCall.id;
++        }
++        return last.index;
++    }
++    const used = [...Object.keys(state.function_calls), ...state.ignored_tool_call_indexes]
++        .map(Number)
++        .filter(Number.isFinite);
++    const index = used.length > 0 ? Math.max(...used) + 1 : 0;
++    state.last_unindexed_tool_call = { index, callId: toolCall.id || undefined };
++    return index;
++}
+ function buildTraceChoice(state) {
+     const toolCalls = Object.entries(state.function_calls)
+         .sort(([left], [right]) => Number(left) - Number(right))
 diff --git a/dist/openaiResponsesModel.d.ts b/dist/openaiResponsesModel.d.ts
-index 8b7a52373fc2c7347ae695677110618559735aa3..4409b137299f15ddb459a5201eb1ec879894d31c 100644
+index 8b7a523..4409b13 100644
 --- a/dist/openaiResponsesModel.d.ts
 +++ b/dist/openaiResponsesModel.d.ts
 @@ -49,6 +49,7 @@ export declare class OpenAIResponsesModel implements Model {
@@ -11,7 +171,7 @@ index 8b7a52373fc2c7347ae695677110618559735aa3..4409b137299f15ddb459a5201eb1ec87
      /**
       * Get a response from the OpenAI model using the Responses API.
 diff --git a/dist/openaiResponsesModel.js b/dist/openaiResponsesModel.js
-index 07012f1f42b1e29b0daf915ac965e7e79142ffb7..67b49b785b52de3e982b9e27f21bc2463568b684 100644
+index 07012f1..b629b19 100644
 --- a/dist/openaiResponsesModel.js
 +++ b/dist/openaiResponsesModel.js
 @@ -2262,14 +2262,52 @@ function convertToOutputItem(items) {
@@ -84,6 +244,28 @@ index 07012f1f42b1e29b0daf915ac965e7e79142ffb7..67b49b785b52de3e982b9e27f21bc246
      /**
       * @internal
       */
+@@ -2359,8 +2407,8 @@ class OpenAIResponsesModel {
+             inputTokens: response.usage?.input_tokens ?? 0,
+             outputTokens: response.usage?.output_tokens ?? 0,
+             totalTokens: response.usage?.total_tokens ?? 0,
+-            inputTokensDetails: { ...response.usage?.input_tokens_details },
+-            outputTokensDetails: { ...response.usage?.output_tokens_details },
++            inputTokensDetails: (0, responsesUtils_1.numericUsageDetails)(response.usage?.input_tokens_details),
++            outputTokensDetails: (0, responsesUtils_1.numericUsageDetails)(response.usage?.output_tokens_details),
+             requestUsageEntries: [
+                 (0, responsesUtils_1.toRequestUsageEntry)(response.usage, 'responses.create'),
+             ],
+@@ -2374,8 +2422,8 @@ class OpenAIResponsesModel {
+             inputTokens: response.usage?.input_tokens ?? 0,
+             outputTokens: response.usage?.output_tokens ?? 0,
+             totalTokens: response.usage?.total_tokens ?? 0,
+-            inputTokensDetails: { ...response.usage?.input_tokens_details },
+-            outputTokensDetails: { ...response.usage?.output_tokens_details },
++            inputTokensDetails: (0, responsesUtils_1.numericUsageDetails)(response.usage?.input_tokens_details),
++            outputTokensDetails: (0, responsesUtils_1.numericUsageDetails)(response.usage?.output_tokens_details),
+             requestUsageEntries: [
+                 (0, responsesUtils_1.toRequestUsageEntry)(response.usage, 'responses.create'),
+             ],
 @@ -2419,7 +2467,7 @@ class OpenAIResponsesModel {
          return response;
      }
@@ -196,7 +378,7 @@ index 07012f1f42b1e29b0daf915ac965e7e79142ffb7..67b49b785b52de3e982b9e27f21bc246
                  span.spanData.response_id = finalResponse.id;
                  span.spanData._response = finalResponse;
 diff --git a/dist/openaiResponsesModel.mjs b/dist/openaiResponsesModel.mjs
-index 3bc6e0a9335690a97120570c4d6355ac4447caf3..57889914542217a8ad595631d32b7eda062281dc 100644
+index 3bc6e0a..58bd669 100644
 --- a/dist/openaiResponsesModel.mjs
 +++ b/dist/openaiResponsesModel.mjs
 @@ -1,4 +1,4 @@
@@ -205,6 +387,15 @@ index 3bc6e0a9335690a97120570c4d6355ac4447caf3..57889914542217a8ad595631d32b7eda
  import OpenAI from 'openai';
  import logger from "./logger.mjs";
  import { OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE } from "./rawModelEvents.mjs";
+@@ -10,7 +10,7 @@ import { applyHeadersToAccumulator, createHeaderAccumulator, ensureResponsesWebS
+ import { CodeInterpreterStatus, FileSearchStatus, ImageGenerationStatus, WebSearchStatus, } from "./tools.mjs";
+ import { camelOrSnakeToSnakeCase, getSnakeCasedProviderDataWithoutReservedKeys, } from "./utils/providerData.mjs";
+ import { normalizePromptCacheRetention } from "./utils/modelSettings.mjs";
+-import { normalizeInstructions, searchParamsToAuthHeaderQuery, toRequestUsageEntry, } from "./responsesUtils.mjs";
++import { normalizeInstructions, numericUsageDetails, searchParamsToAuthHeaderQuery, toRequestUsageEntry, } from "./responsesUtils.mjs";
+ import { encodeUint8ArrayToBase64, getToolSearchExecution, getToolSearchProviderCallId, normalizeHostedMcpRequireApproval, } from '@openai/agents-core/utils';
+ import { assertValidCompactionItems, formatInlineData, getInlineMediaType, } from '@openai/agents-core/utils/internal';
+ function getModelTracingParent(request) {
 @@ -2253,14 +2253,52 @@ function convertToOutputItem(items) {
  export { getToolChoice, convertTool, getInputItems, convertToOutputItem };
  const TERMINAL_RESPONSES_STREAM_EVENT_TYPES = new Set([
@@ -275,6 +466,28 @@ index 3bc6e0a9335690a97120570c4d6355ac4447caf3..57889914542217a8ad595631d32b7eda
      /**
       * @internal
       */
+@@ -2350,8 +2398,8 @@ export class OpenAIResponsesModel {
+             inputTokens: response.usage?.input_tokens ?? 0,
+             outputTokens: response.usage?.output_tokens ?? 0,
+             totalTokens: response.usage?.total_tokens ?? 0,
+-            inputTokensDetails: { ...response.usage?.input_tokens_details },
+-            outputTokensDetails: { ...response.usage?.output_tokens_details },
++            inputTokensDetails: numericUsageDetails(response.usage?.input_tokens_details),
++            outputTokensDetails: numericUsageDetails(response.usage?.output_tokens_details),
+             requestUsageEntries: [
+                 toRequestUsageEntry(response.usage, 'responses.create'),
+             ],
+@@ -2365,8 +2413,8 @@ export class OpenAIResponsesModel {
+             inputTokens: response.usage?.input_tokens ?? 0,
+             outputTokens: response.usage?.output_tokens ?? 0,
+             totalTokens: response.usage?.total_tokens ?? 0,
+-            inputTokensDetails: { ...response.usage?.input_tokens_details },
+-            outputTokensDetails: { ...response.usage?.output_tokens_details },
++            inputTokensDetails: numericUsageDetails(response.usage?.input_tokens_details),
++            outputTokensDetails: numericUsageDetails(response.usage?.output_tokens_details),
+             requestUsageEntries: [
+                 toRequestUsageEntry(response.usage, 'responses.create'),
+             ],
 @@ -2410,7 +2458,7 @@ export class OpenAIResponsesModel {
          return response;
      }
@@ -386,3 +599,106 @@ index 3bc6e0a9335690a97120570c4d6355ac4447caf3..57889914542217a8ad595631d32b7eda
              if (request.tracing && span && finalResponse) {
                  span.spanData.response_id = finalResponse.id;
                  span.spanData._response = finalResponse;
+diff --git a/dist/responsesUtils.d.ts b/dist/responsesUtils.d.ts
+index e8da005..ba9dd07 100644
+--- a/dist/responsesUtils.d.ts
++++ b/dist/responsesUtils.d.ts
+@@ -3,3 +3,4 @@ import OpenAI from 'openai';
+ export declare function normalizeInstructions(instructions: string | undefined): string | undefined;
+ export declare function searchParamsToAuthHeaderQuery(searchParams: URLSearchParams): Record<string, string | string[]> | undefined;
+ export declare function toRequestUsageEntry(usage: OpenAI.Responses.ResponseUsage | undefined, endpoint: string): RequestUsage;
++export declare function numericUsageDetails(details: unknown): Record<string, number>;
+diff --git a/dist/responsesUtils.js b/dist/responsesUtils.js
+index df713d4..9a4d24d 100644
+--- a/dist/responsesUtils.js
++++ b/dist/responsesUtils.js
+@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
+ exports.normalizeInstructions = normalizeInstructions;
+ exports.searchParamsToAuthHeaderQuery = searchParamsToAuthHeaderQuery;
+ exports.toRequestUsageEntry = toRequestUsageEntry;
++exports.numericUsageDetails = numericUsageDetails;
+ const agents_core_1 = require("@openai/agents-core");
+ function normalizeInstructions(instructions) {
+     if (typeof instructions === 'string') {
+@@ -33,9 +34,35 @@ function toRequestUsageEntry(usage, endpoint) {
+         inputTokens: usage?.input_tokens ?? 0,
+         outputTokens: usage?.output_tokens ?? 0,
+         totalTokens: usage?.total_tokens ?? 0,
+-        inputTokensDetails: { ...usage?.input_tokens_details },
+-        outputTokensDetails: { ...usage?.output_tokens_details },
++        inputTokensDetails: numericUsageDetails(usage?.input_tokens_details),
++        outputTokensDetails: numericUsageDetails(usage?.output_tokens_details),
+         endpoint,
+     });
+ }
++/**
++ * Opengeni: usage details are validated as `Record<string, number>`. Providers
++ * add new fields without notice (for example an object-valued
++ * `cache_write_tokens_details`), and one unexpected shape must never fail a
++ * turn. Keep finite numeric counters as-is, flatten numeric leaves of nested
++ * objects as `<parent>.<child>`, and drop everything else.
++ */
++function numericUsageDetails(details) {
++    const result = {};
++    const visit = (value, prefix, depth) => {
++        if (!value || typeof value !== 'object' || Array.isArray(value) || depth > 4)
++            return;
++        for (const [key, child] of Object.entries(value)) {
++            const name = prefix ? `${prefix}.${key}` : key;
++            if (typeof child === 'number') {
++                if (Number.isFinite(child))
++                    result[name] = child;
++            }
++            else {
++                visit(child, name, depth + 1);
++            }
++        }
++    };
++    visit(details, '', 0);
++    return result;
++}
+ //# sourceMappingURL=responsesUtils.js.map
+\ No newline at end of file
+diff --git a/dist/responsesUtils.mjs b/dist/responsesUtils.mjs
+index be1ab5d..d11dfb8 100644
+--- a/dist/responsesUtils.mjs
++++ b/dist/responsesUtils.mjs
+@@ -28,9 +28,35 @@ export function toRequestUsageEntry(usage, endpoint) {
+         inputTokens: usage?.input_tokens ?? 0,
+         outputTokens: usage?.output_tokens ?? 0,
+         totalTokens: usage?.total_tokens ?? 0,
+-        inputTokensDetails: { ...usage?.input_tokens_details },
+-        outputTokensDetails: { ...usage?.output_tokens_details },
++        inputTokensDetails: numericUsageDetails(usage?.input_tokens_details),
++        outputTokensDetails: numericUsageDetails(usage?.output_tokens_details),
+         endpoint,
+     });
+ }
++/**
++ * Opengeni: usage details are validated as `Record<string, number>`. Providers
++ * add new fields without notice (for example an object-valued
++ * `cache_write_tokens_details`), and one unexpected shape must never fail a
++ * turn. Keep finite numeric counters as-is, flatten numeric leaves of nested
++ * objects as `<parent>.<child>`, and drop everything else.
++ */
++export function numericUsageDetails(details) {
++    const result = {};
++    const visit = (value, prefix, depth) => {
++        if (!value || typeof value !== 'object' || Array.isArray(value) || depth > 4)
++            return;
++        for (const [key, child] of Object.entries(value)) {
++            const name = prefix ? `${prefix}.${key}` : key;
++            if (typeof child === 'number') {
++                if (Number.isFinite(child))
++                    result[name] = child;
++            }
++            else {
++                visit(child, name, depth + 1);
++            }
++        }
++    };
++    visit(details, '', 0);
++    return result;
++}
+ //# sourceMappingURL=responsesUtils.mjs.map
+\ No newline at end of file

@@ -45,6 +45,7 @@ import {
   type BrowserActionNote as BrowserActionNoteValue,
   type BrowserActionResolvedTarget as BrowserActionResolvedTargetValue,
   type InteractionSemanticNodeValue,
+  type InteractionDestinationFailureReason,
   INTERACTION_MAX_RESOLVED_TARGET_TEXT,
   redactInteractionDriverMessage,
 } from "@opengeni/contracts";
@@ -749,6 +750,9 @@ type TargetState = {
    * LOCATOR_WAIT_MS after they start: a re-find keeps the action's deadline. */
   locatorDeadline?: number | null;
   accessibility: CdpAccessibilitySnapshot | null;
+  /** actionEffectCount when `accessibility` was read; unset for a snapshot
+   * carried over from an earlier attachment. */
+  accessibilityReadAtEffect?: number;
   /** When Chromium's accessibility tree for this tab was last rebuilt, how
    * many nodes its last read had, and whether the next read is the first of a
    * call or batch action (see accessibilityRebuildWanted). */
@@ -3019,28 +3023,37 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             action.type === "wait" &&
             onlyCommittedNavigation &&
             committedNavigations > 0
-          )
+          ) {
+            const waitFailure = new InteractionDefiniteDriverError(
+              error.code,
+              `browser action #${actionIndex} (wait) failed after the preceding navigation committed (${error.code}: ${error.message}); the tab shows the committed page`,
+              error.retryable,
+            );
+            waitFailure.failureReason = error.failureReason;
             throw await this.withFailureObservation(
               state,
               info.targetId,
               command,
-              new InteractionDefiniteDriverError(
-                error.code,
-                `browser action #${actionIndex} (wait) failed after the preceding navigation committed (${error.code}: ${error.message}); the tab shows the committed page`,
-                error.retryable,
-              ),
+              waitFailure,
               null,
             );
+          }
+          let thrownAfterEffects = error;
+          if (error instanceof InteractionDefiniteDriverError) {
+            const unknown = new InteractionOutcomeUnknownDriverError(
+              "outcome_unknown",
+              `browser action ${actions.length > 1 ? `#${actionIndex} (${action.type}) ` : ""}failed after it sent input or completed ${completedActions} action(s) (${error.code}: ${error.message}); check the current page before continuing and do not replay the completed actions automatically`,
+            );
+            // Operators still see what actually failed (a website that did
+            // not answer, a timeout) behind the generic outcome_unknown.
+            unknown.failureReason = error.failureReason ?? error.code;
+            thrownAfterEffects = unknown;
+          }
           throw await this.withFailureObservation(
             state,
             info.targetId,
             command,
-            error instanceof InteractionDefiniteDriverError
-              ? new InteractionOutcomeUnknownDriverError(
-                  "outcome_unknown",
-                  `browser action ${actions.length > 1 ? `#${actionIndex} (${action.type}) ` : ""}failed after it sent input or completed ${completedActions} action(s) (${error.code}: ${error.message}); check the current page before continuing and do not replay the completed actions automatically`,
-                )
-              : error,
+            thrownAfterEffects,
             requestsBeforeActions,
           );
         }
@@ -6057,6 +6070,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       this.assertCurrentTargetState(state);
       if (budget) state.accessibilityBounded = budget.unread > 0;
       state.accessibility = accessibility;
+      state.accessibilityReadAtEffect = state.actionEffectCount;
       state.accessibilityNodeCount = nodes.length;
       if (rebuilding) state.accessibilityRebuiltAt = Date.now();
       return accessibility;
@@ -8586,6 +8600,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // A reference already identifies one concrete node. Revalidate that node
     // against Chromium instead of reading every unrelated node before input.
     // Frame/engine cases without this exact proof retain full-tree resolution.
+    // The snapshot the ref came from, while no input was sent since it was
+    // read: a page that redraws after the caller's own input is a page the
+    // caller has not seen.
+    const previous =
+      locator.kind === "ref" && state.accessibilityReadAtEffect === state.actionEffectCount
+        ? state.accessibility
+        : null;
+    const previousDocument = state.documentGeneration;
     if (locator.kind === "ref" && this.engine === "chromium") {
       const cached = state.accessibility?.entriesByRef.get(locator.ref);
       if (cached?.backendDOMNodeId != null && cached.frameId === state.frame.id) {
@@ -8595,7 +8617,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     const accessibility = await this.refreshAccessibility(state, read);
     if (locator.kind === "ref") {
-      const entry = accessibility.entriesByRef.get(locator.ref);
+      const entry =
+        accessibility.entriesByRef.get(locator.ref) ??
+        (previous && state.documentGeneration === previousDocument
+          ? redrawnReference(previous, accessibility, locator.ref)
+          : undefined);
       if (!entry || entry.backendDOMNodeId === null) {
         throw new InteractionDefiniteDriverError(
           "locator_not_found",
@@ -10809,11 +10835,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     // A failed load is reported whichever page the tab shows.
     if (errorText !== null && options.keepTabOnLoadError !== true) {
-      throw new InteractionDefiniteDriverError(
+      const failure = new InteractionDefiniteDriverError(
         "resource_unavailable",
         `browser could not navigate to the requested URL (${errorText})`,
         true,
       );
+      failure.failureReason = destinationLoadFailureReason(errorText);
+      throw failure;
     }
     await this.waitForDocumentReady(state, DEFAULT_ACTION_TIMEOUT_MS);
     await this.refreshFrame(state);
@@ -12359,6 +12387,40 @@ function uniqueEntries(entries: CdpAccessibilityEntry[]): CdpAccessibilityEntry 
 function sameAccessibleName(name: string | null, requested: string): boolean {
   const normalize = (value: string) => value.replace(/\s+/gu, " ").trim().toLocaleLowerCase();
   return name !== null && normalize(name) === normalize(requested);
+}
+
+/**
+ * The element a ref named, when the page redrew it in the same document (a
+ * list or inbox that re-renders its rows): the one element whose role, name
+ * and frame are the ref's, when exactly one had them in the snapshot the ref
+ * came from and exactly one has them now. Anything less certain leaves the
+ * ref stale.
+ */
+function redrawnReference(
+  previous: CdpAccessibilitySnapshot,
+  current: CdpAccessibilitySnapshot,
+  ref: string,
+): CdpAccessibilityEntry | undefined {
+  const named = previous.entriesByRef.get(ref);
+  if (
+    !named ||
+    named.backendDOMNodeId === null ||
+    !named.name?.trim() ||
+    named.nameWithheld === true ||
+    named.role === "generic" ||
+    named.role === "text" ||
+    previous.incomplete ||
+    current.incomplete
+  )
+    return undefined;
+  const same = (entry: CdpAccessibilityEntry) =>
+    entry.backendDOMNodeId !== null &&
+    entry.role === named.role &&
+    entry.frameId === named.frameId &&
+    entry.name === named.name;
+  if (previous.entries.filter(same).length !== 1) return undefined;
+  const now = current.entries.filter(same);
+  return now.length === 1 ? now[0] : undefined;
 }
 
 const AMBIGUOUS_LOCATOR_LISTED_MATCHES = 5;
@@ -15081,12 +15143,29 @@ const CONFIRM_EDITABLE_VALUE_FUNCTION = `async function(expected) {
   const tag = String(this.tagName || "").toLowerCase();
   if (tag === "input" || tag === "textarea") {
     const actual = String(this.value);
-    if (actual === String(expected)) return true;
+    const wanted = String(expected);
+    if (actual === wanted) return true;
     // A field that groups digits as they are typed (card, phone and account
     // numbers) holds the same digits. No stripping of digits, letters,
     // decimal points, slashes or other meaningful changes.
-    return /^[0-9\\s-]+$/.test(actual) && /^[0-9\\s-]+$/.test(String(expected)) &&
-      actual.replace(/[\\s-]/g, "") === String(expected).replace(/[\\s-]/g, "");
+    if (/^[0-9\\s-]+$/.test(actual) && /^[0-9\\s-]+$/.test(wanted) &&
+      actual.replace(/[\\s-]/g, "") === wanted.replace(/[\\s-]/g, "")) return true;
+    // A phone field formats the number as it is typed: brackets around the
+    // area code, or the country code put in front ("+47 412 34 567" for
+    // "41234567", "+44 7700 900123" for "07700 900123"). Only phone-length
+    // numbers, and a "+" the requested value had is never dropped.
+    const phone = /^\\+?[0-9\\s()-]+$/;
+    if (!phone.test(actual.trim()) || !phone.test(wanted.trim())) return false;
+    const actualDigits = actual.replace(/[^0-9]/g, "");
+    const wantedDigits = wanted.replace(/[^0-9]/g, "");
+    if (wantedDigits.length < 6) return false;
+    const actualInternational = actual.trim().startsWith("+");
+    const wantedInternational = wanted.trim().startsWith("+");
+    if (actualInternational === wantedInternational) return actualDigits === wantedDigits;
+    if (!actualInternational) return false;
+    return [wantedDigits, wantedDigits.replace(/^0/, "")].some((national) =>
+      actualDigits.length - national.length >= 1 && actualDigits.length - national.length <= 3 &&
+      actualDigits.endsWith(national));
   }
   if (this.isContentEditable === true) return String(this.textContent || "") === String(expected);
   return false;
@@ -15636,6 +15715,7 @@ class NavigationNotAnsweredError extends InteractionDefiniteDriverError {
       true,
     );
     this.name = "NavigationNotAnsweredError";
+    this.failureReason = "destination_not_answered";
   }
 }
 
@@ -15644,4 +15724,52 @@ class NavigationNotAnsweredError extends InteractionDefiniteDriverError {
  * navigation errors, such as an invalid URL, leave no page for the URL. */
 function isPageLoadError(errorText: string): boolean {
   return /^net::ERR_[A-Z0-9_]+$/u.test(errorText);
+}
+
+const DESTINATION_CONNECTION_LOAD_ERRORS = new Set([
+  "net::ERR_CONNECTION_REFUSED",
+  "net::ERR_CONNECTION_RESET",
+  "net::ERR_CONNECTION_CLOSED",
+  "net::ERR_CONNECTION_ABORTED",
+  "net::ERR_CONNECTION_FAILED",
+  "net::ERR_CONNECTION_TIMED_OUT",
+  "net::ERR_ADDRESS_UNREACHABLE",
+  "net::ERR_TIMED_OUT",
+]);
+
+const DESTINATION_RESPONSE_LOAD_ERRORS = new Set([
+  "net::ERR_EMPTY_RESPONSE",
+  "net::ERR_INVALID_RESPONSE",
+  "net::ERR_INVALID_HTTP_RESPONSE",
+  "net::ERR_TOO_MANY_REDIRECTS",
+  "net::ERR_INVALID_REDIRECT",
+  "net::ERR_RESPONSE_HEADERS_TOO_BIG",
+  "net::ERR_RESPONSE_HEADERS_TRUNCATED",
+  "net::ERR_RESPONSE_HEADERS_MULTIPLE_CONTENT_LENGTH",
+  "net::ERR_RESPONSE_HEADERS_MULTIPLE_CONTENT_DISPOSITION",
+  "net::ERR_RESPONSE_HEADERS_MULTIPLE_LOCATION",
+  "net::ERR_CONTENT_DECODING_FAILED",
+  "net::ERR_CONTENT_LENGTH_MISMATCH",
+  "net::ERR_INCOMPLETE_CHUNKED_ENCODING",
+  "net::ERR_INVALID_CHUNKED_ENCODING",
+  "net::ERR_HTTP2_PROTOCOL_ERROR",
+]);
+
+/**
+ * The operator-only reason for a page load error that is the website's own:
+ * its name does not exist, it refused or dropped the connection, its TLS
+ * failed, or it sent a response the browser cannot use. Errors that can be the
+ * browser's or its network's (a proxy or tunnel, no network, a network
+ * change, a blocked or aborted load, a failing resolver) have none, so they
+ * keep counting as the browser's failures.
+ */
+export function destinationLoadFailureReason(
+  errorText: string,
+): InteractionDestinationFailureReason | undefined {
+  if (errorText === "net::ERR_NAME_NOT_RESOLVED") return "destination_name_not_resolved";
+  if (DESTINATION_CONNECTION_LOAD_ERRORS.has(errorText)) return "destination_connection_failed";
+  if (/^net::ERR_(?:CERT_|CERTIFICATE_|SSL_|BAD_SSL_)[A-Z0-9_]+$/u.test(errorText))
+    return "destination_tls_failed";
+  if (DESTINATION_RESPONSE_LOAD_ERRORS.has(errorText)) return "destination_response_invalid";
+  return undefined;
 }

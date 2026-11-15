@@ -59,6 +59,12 @@ export type PasskeysView = {
   available: boolean;
   /** This browser can create a passkey. */
   supported: boolean;
+  /**
+   * Passkeys are added in the person's own browser, not here (the desktop
+   * app, which can't show passkey prompts). Adding doesn't need this page's
+   * recent sign-in: the browser asks for its own.
+   */
+  inBrowser?: boolean;
   /** False while removing any one passkey would leave no way to sign in. */
   canRemove: boolean;
   /** Passkeys are this account's only way to sign in (it has no email address). */
@@ -278,11 +284,11 @@ export function SignInMethodsView(props: SignInMethodsViewProps) {
                     variant="ghost"
                     size="sm"
                     className="pointer-coarse:h-11"
-                    disabled={locked || !passkeys.supported}
+                    disabled={passkeys.inBrowser ? props.busy : locked || !passkeys.supported}
                     onClick={() => props.onAddPasskey?.()}
                   >
                     <KeyRoundIcon aria-hidden="true" />
-                    Add passkey
+                    {passkeys.inBrowser ? "Add in browser" : "Add passkey"}
                   </Button>
                 ) : undefined
               }
@@ -291,9 +297,11 @@ export function SignInMethodsView(props: SignInMethodsViewProps) {
                 <SettingRow
                   label="No passkeys yet"
                   description={
-                    passkeys.supported
-                      ? "Add one to sign in without typing a password. Your password manager or device keeps it."
-                      : "This browser can't create passkeys. Open Opengeni in a current browser to add one."
+                    passkeys.inBrowser
+                      ? "Passkey prompts open in your browser. Add one there; it works here too."
+                      : passkeys.supported
+                        ? "Add one to sign in without typing a password. Your password manager or device keeps it."
+                        : "This browser can't create passkeys. Open Opengeni in a current browser to add one."
                   }
                 />
               ) : (

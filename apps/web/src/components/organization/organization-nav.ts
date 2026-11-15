@@ -1,5 +1,5 @@
 import { useNavigate } from "@tanstack/react-router";
-import { useMemo } from "react";
+import { createContext, useContext, useMemo } from "react";
 
 import type { OrganizationAdminSection } from "@opengeni/react/app/lib/organization-admin";
 import type { OrganizationView } from "@/lib/organization-route";
@@ -14,9 +14,33 @@ export interface OrganizationNavigation {
   openNewWorkspace: () => void;
 }
 
+/**
+ * Where organization pages lead when they are embedded outside the app's
+ * organization settings (Opengeni Console): people, billing and workspace
+ * links then stay on the embedding surface.
+ */
+export interface OrganizationRoutes extends OrganizationNavigation {
+  /** Billing: the budgets list, or one workspace's budget page. */
+  openBudget: (workspaceId: string | undefined) => void;
+  /** Billing: Insights, or null when the surface has no Insights page. */
+  openInsights: (() => void) | null;
+  /** Billing: the page Stripe returns to, with `checkout` (and `checkoutSession`) appended. */
+  billingReturnUrl: (outcome: "success" | "cancelled") => string;
+  /** Billing: the page a customer-portal visit returns to. */
+  billingPortalReturnUrl: string;
+}
+
+export const OrganizationRoutesContext = createContext<OrganizationRoutes | null>(null);
+
+/** The embedding surface's routes, or null inside the app's organization settings. */
+export function useOrganizationRoutes(): OrganizationRoutes | null {
+  return useContext(OrganizationRoutesContext);
+}
+
 export function useOrganizationNavigation(workspaceId: string): OrganizationNavigation {
   const navigate = useNavigate();
-  return useMemo(() => {
+  const routes = useOrganizationRoutes();
+  const app = useMemo<OrganizationNavigation>(() => {
     const go = (search: {
       section: OrganizationAdminSection;
       view?: OrganizationView;
@@ -38,4 +62,5 @@ export function useOrganizationNavigation(workspaceId: string): OrganizationNavi
       openNewWorkspace: () => go({ section: "workspaces", view: "new-workspace" }),
     };
   }, [navigate, workspaceId]);
+  return routes ?? app;
 }

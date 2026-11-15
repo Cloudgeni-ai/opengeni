@@ -191,7 +191,7 @@ async function connectionVersion(connectionId: string): Promise<number> {
 const scriptedUsage = Object.assign(
   async (input: string | URL | Request) => {
     const url = String(input instanceof Request ? input.url : input);
-    if (url !== USAGE_URL) throw new Error(`unexpected request ${url}`);
+    if (url.split("?")[0] !== USAGE_URL) throw new Error(`unexpected request ${url}`);
     usageCalls.push(url);
     return new Response(
       JSON.stringify({

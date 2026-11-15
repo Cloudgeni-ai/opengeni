@@ -379,6 +379,44 @@ async fn a_guest_launched_anew_keeps_its_streams_until_it_takes_one_up() {
     );
 }
 
+/// A guest booted afresh has none of the streams an earlier one had, so
+/// they end as it is launched, before it connects or takes any up, and
+/// whether or not a connection still carries one: the hub must not hand
+/// the agent's requests to a connection no agent holds while the new one
+/// starts. The new guest's own streams begin as usual.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_guest_booted_afresh_ends_every_stream_at_once() {
+    let take_up = Duration::from_secs(60);
+    let mut rig = rig(4, take_up);
+    let mut connections = Vec::new();
+    let mut ends = Vec::new();
+    for id in [1, 2] {
+        let (connection, answer) = raw_hello(&rig, id, 0, 0).await;
+        assert_eq!(answer, "ok 0\n");
+        connections.push(connection);
+        ends.push(rig.next_stream().await);
+    }
+    // One no longer carried, as after the VM ended; one still carried.
+    drop(connections.remove(0));
+    rig.until_uncarried(1).await;
+    rig.clock.booted().unwrap();
+    assert_eq!(rig.clock.launches(), 1);
+    for end in &mut ends {
+        assert!(
+            ends_within(end, Duration::from_secs(5)).await,
+            "a stream outlived the boot"
+        );
+    }
+    // The new guest's first stream begins anew.
+    let (_fresh, answer) = raw_hello(&rig, 3, 0, 0).await;
+    assert_eq!(answer, "ok 0\n");
+    let mut fresh = rig.next_stream().await;
+    assert!(
+        !ends_within(&mut fresh, Duration::from_millis(300)).await,
+        "the new guest's stream goes on"
+    );
+}
+
 /// A connection the VM process before made, let in but its hello not yet
 /// read when the next is launched, is closed unanswered: it says nothing
 /// of the new guest, which has yet to prove it runs, so it begins no

@@ -46,7 +46,9 @@ import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/brow
 import { composerSubmissionErrorMessage } from "../lib/format";
 import { isTransientServiceFailure } from "../lib/transient-retry";
 import { createQuietRetry } from "./lib/quiet-retry";
-import { claimHumanInputDraftOwner, forgetAllHumanInputDrafts } from "../human-input-draft-store";
+import { claimHumanInputDraftOwner } from "../human-input-draft-store";
+import { forgetSignedOutBrowserData } from "../sign-out-browser-data";
+import { prepareRecordingsForSignOut, recordingOwnerKey } from "../meetings/sign-out-recordings";
 import type { SessionEventsConnectionState } from "../hooks/use-session-events";
 import type { BrowserAccountTransition } from "../accounts";
 import {
@@ -124,6 +126,8 @@ import {
   type RepoDraft,
 } from "./lib/session-tools";
 import { useCapabilityToolDefaults } from "./lib/use-capability-tool-defaults";
+import { useSimplifiedInterface } from "./lib/simplified-interface";
+import { simplifiedInterfaceModelPolicy } from "./lib/simplified-interface-model";
 import { useManualRepositoryCatalogReconciliation } from "./lib/use-manual-repository-catalog-reconciliation";
 import { upsertWorkspace } from "./lib/workspaces";
 import { deleteWorkspaceWithReconciliation } from "./lib/workspace-deletion";
@@ -441,15 +445,29 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   const [slackLinkContinuationWorkspaceId, setSlackLinkContinuationWorkspaceId] = useState<
     string | null
   >(slackLink.workspaceId);
+  // The workspace whose Slack link just completed. It outlives the access
+  // revalidation and route remounts that follow, so the person keeps seeing
+  // that it worked.
+  const [slackLinkLinkedWorkspaceId, setSlackLinkLinkedWorkspaceId] = useState<string | null>(null);
   const [invalidSlackLinkQueryWorkspaceId, setInvalidSlackLinkQueryWorkspaceId] = useState<
     string | null
   >(host.initialInvalidSlackLinkQueryWorkspaceId);
   const [accessLoading, setAccessLoading] = useState(false);
   const [accessError, setAccessError] = useState<BootstrapErrorPresentation | null>(null);
   const [creditRequired, setCreditRequired] = useState<CreditRequired | null>(null);
-  const [model, setModel] = useState("gpt-6-astra");
-  const [reasoningEffort, setReasoningEffort] = useState<IntelligenceEffort>("low");
-  const [latencyMode, setLatencyMode] = useState<LatencyMode>("standard");
+  const [chosenModel, setModel] = useState("gpt-6-astra");
+  const [chosenReasoningEffort, setReasoningEffort] = useState<IntelligenceEffort>("low");
+  const [chosenLatencyMode, setLatencyMode] = useState<LatencyMode>("standard");
+  // The simplified interface has no model choice: whatever a default, a
+  // restored draft or a fallback sets, new chats carry its one policy.
+  const { simplified } = useSimplifiedInterface();
+  const simplifiedPolicy = useMemo(
+    () => (simplified && clientConfig ? simplifiedInterfaceModelPolicy(clientConfig) : null),
+    [clientConfig, simplified],
+  );
+  const model = simplifiedPolicy?.model ?? chosenModel;
+  const reasoningEffort = simplifiedPolicy?.reasoningEffort ?? chosenReasoningEffort;
+  const latencyMode = simplifiedPolicy ? "standard" : chosenLatencyMode;
   // Changes/Files dock starts collapsed; user opens via the session-panel toggle.
   // No localStorage — only an in-memory default (toggle still works for the session).
   const [inspectorOpen, setInspectorOpen] = useState(false);
@@ -784,6 +802,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       if (options?.preservePendingSlackLink !== true) {
         slackLink.clear();
         setSlackLinkContinuationWorkspaceId(null);
+        setSlackLinkLinkedWorkspaceId(null);
       }
       resetWorkspaceState(null, true);
     },
@@ -2585,6 +2604,10 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   }
 
   async function handleManagedSignOut() {
+    // Recordings still uploading from this device: the person waits for
+    // them (and stays signed in) or discards them first.
+    const owner = recordingOwnerKey(authSession?.user.email);
+    if (!(await prepareRecordingsForSignOut(owner))) return;
     // Unmount authenticated readers before sign-out can invalidate their
     // cookie. Keep the neutral surface until an ambiguous response is
     // reconciled against the authoritative session.
@@ -2595,8 +2618,9 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       setWorkspaces([]);
       setAccessError(null);
     });
-    // The next person in this tab never sees this person's unsent answers.
-    forgetAllHumanInputDrafts();
+    // The next person in this tab never sees this person's unsent answers,
+    // messages or other per-person session storage.
+    forgetSignedOutBrowserData();
     const acceptedPrincipal = principalTransitionIdentity.current;
     const ownsInvocation = () =>
       ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal);
@@ -2652,6 +2676,10 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       // Remove the revoked workspace/session deep link from browser history;
       // the earlier null transition is only a precommit hold and must not
       // navigate because its initiating mutation can still fail.
+      // Nobody is signed in any more, so forget what this tab kept for them.
+      forgetSignedOutBrowserData();
+      // Nobody here could be asked about recordings still on this device.
+      void prepareRecordingsForSignOut(null, { ask: false });
       authPrincipalIdRef.current = null;
       setAuthSession(null);
       setSession(null);
@@ -2802,7 +2830,16 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   const clearSlackLinkContinuation = useCallback(() => {
     slackLink.clear();
     setSlackLinkContinuationWorkspaceId(null);
+    setSlackLinkLinkedWorkspaceId(null);
   }, [slackLink]);
+  const completeSlackLinkContinuation = useCallback(
+    (workspaceId: string) => {
+      slackLink.clear();
+      setSlackLinkContinuationWorkspaceId(null);
+      setSlackLinkLinkedWorkspaceId(workspaceId);
+    },
+    [slackLink],
+  );
 
   const appContext = useMemo<AppContextValue | null>(() => {
     return clientConfig && accessContext
@@ -2815,9 +2852,11 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           workspaces,
           managedSelfContext,
           slackLinkContinuationWorkspaceId,
+          slackLinkLinkedWorkspaceId,
           invalidSlackLinkQueryWorkspaceId,
           preparePendingSlackLink,
           clearSlackLinkContinuation,
+          completeSlackLinkContinuation,
           accessKeyVersion,
           keyAuthRequired: keyAuthRequired === true,
           model,
@@ -2917,6 +2956,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     busy,
     captureWorkspaceInvocation,
     clearSlackLinkContinuation,
+    completeSlackLinkContinuation,
     client,
     clientConfig,
     workspaceConfig,
@@ -2972,6 +3012,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     preparePendingSlackLink,
     prepareWorkspaceTransition,
     slackLinkContinuationWorkspaceId,
+    slackLinkLinkedWorkspaceId,
     latencyMode,
     reasoningEffort,
     revalidatePrincipalAccess,
@@ -3041,6 +3082,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     revalidatePrincipalAccess,
     defaultWorkspaceId,
     slackLinkContinuationWorkspaceId,
+    slackLinkLinkedWorkspaceId,
     routedWorkspace,
     creditRequired,
     setCreditRequired,

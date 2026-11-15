@@ -1,4 +1,7 @@
-import { subscriptionCapacityWaitNeedsAction } from "@opengeni/subscriptions";
+import {
+  subscriptionCapacityWaitNeedsAction,
+  subscriptionCapacityWaitReasonText,
+} from "@opengeni/subscriptions";
 
 /**
  * When a subscription capacity wait needs a person's (or a parent agent's)
@@ -19,6 +22,12 @@ export const CAPACITY_WAIT_ATTENTION_AFTER_MS = 15 * 60_000;
 
 /** Turn metadata recording the person's open capacity-wait notification. */
 export const CAPACITY_WAIT_NOTICE_KEY = "capacityWaitNoticeV1";
+/**
+ * Turn metadata recording the reset a worker's parent was last told in a
+ * `child_waiting_capacity` notice (the same marker shape, keyed by the
+ * notice's dedupe key). Nothing is withdrawn for it when the wait ends.
+ */
+export const CAPACITY_WAIT_PARENT_NOTICE_KEY = "capacityWaitParentNoticeV1";
 
 export type CapacityWaitAttention = {
   /** When capacity is expected back, when anything says so. */
@@ -59,22 +68,36 @@ export function capacityWaitNotificationKey(turnId: string): string {
   return `capacity-wait:${turnId}`;
 }
 
-/** The person's inbox notification for a top-level chat's long capacity wait. */
+/**
+ * The person's inbox notification for a top-level chat's long capacity wait.
+ * A busy pool says plainly that the message will be answered as soon as an
+ * account has room, and names a time only when placement knows the earliest
+ * reset of an account that can serve the turn. Any other reason keeps its
+ * own explanation.
+ */
 export function capacityWaitNotificationPayload(input: {
   turnId: string;
   provider: string;
   resetsAt: Date | null;
+  waitReason?: string;
 }) {
   const name = capacityWaitProviderName(input.provider);
   const reset = capacityWaitResetText(input.resetsAt);
+  const reason = input.waitReason ?? "no_eligible_capacity";
+  const explained =
+    reason === "no_eligible_capacity" ? null : subscriptionCapacityWaitReasonText(reason, name);
+  const status = explained
+    ? `${explained}${reset ? ` Expected around ${reset}.` : ""}`
+    : `All ${name} subscriptions are busy. Your message will be answered as soon as one has room${
+        reset ? `, expected around ${reset}` : ""
+      }.`;
+  const sooner = subscriptionCapacityWaitNeedsAction(reason)
+    ? ""
+    : " To continue sooner, switch the chat to another model; its waiting turn continues on that model.";
   return {
     key: capacityWaitNotificationKey(input.turnId),
     title: `Chat waiting for ${name} capacity`,
-    body: `${
-      reset
-        ? `No ${name} subscription has capacity until about ${reset}.`
-        : `No ${name} subscription has capacity, and no reset time is known.`
-    } The chat continues by itself then. To continue sooner, switch the chat to another model; its waiting turn continues on that model.`,
+    body: `${status}${sooner}`,
     urgency: "normal" as const,
     replaced: false,
   };
@@ -89,8 +112,9 @@ export type CapacityWaitNoticeMarker = { key: string; resetsAt?: string | null }
 
 export function readCapacityWaitNotice(
   metadata: Record<string, unknown> | null | undefined,
+  metadataKey: string = CAPACITY_WAIT_NOTICE_KEY,
 ): CapacityWaitNoticeMarker | null {
-  const value = metadata?.[CAPACITY_WAIT_NOTICE_KEY];
+  const value = metadata?.[metadataKey];
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const { key, resetsAt } = value as { key?: unknown; resetsAt?: unknown };
   if (typeof key !== "string" || key.length === 0) return null;

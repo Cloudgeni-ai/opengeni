@@ -142,9 +142,9 @@ test("a sign-in popup ends on the closing page, never on a copy of the host page
       state: new URL(ready.nextAction.url).searchParams.get("state")!,
     };
   };
-  const callback = (state: string, code = true) =>
+  const callback = (state: string, code = true, error?: string) =>
     app.request(
-      `/v1/integrations/oauth/callback?${new URLSearchParams({ state, ...(code ? { code: "synthetic-code" } : {}) })}`,
+      `/v1/integrations/oauth/callback?${new URLSearchParams({ state, ...(code ? { code: "synthetic-code" } : {}), ...(error ? { error } : {}) })}`,
     );
   const finished = "https://runtime.example.test/v1/integrations/connect/finished";
   try {
@@ -159,6 +159,15 @@ test("a sign-in popup ends on the closing page, never on a copy of the host page
     });
     const declined = await begin(true);
     expect((await callback(declined.state, false)).headers.get("location")).toBe(finished);
+    // A plain Cancel on Google's consent screen ends there too, and stores no
+    // organization approval: the panel that started it just closes the setup.
+    const cancelled = await begin(true);
+    expect((await callback(cancelled.state, false, "access_denied")).headers.get("location")).toBe(
+      finished,
+    );
+    const stored = await (await app.request(`${base}/${cancelled.id}`, { headers })).json();
+    expect(stored).toMatchObject({ state: "cancelled", error: { code: "provider_denied" } });
+    expect(stored.error.message).not.toContain("https://");
     // Without the flag the exact host return is unchanged.
     const host = await begin(false);
     expect((await callback(host.state)).headers.get("location")).toBe(hostPage);

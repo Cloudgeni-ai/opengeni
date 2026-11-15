@@ -17,6 +17,15 @@ export function withBillingOriginOverride<T>(origin: BillingOrigin, fn: () => Pr
   return billingOriginOverrideContext.run(origin, fn);
 }
 
+/**
+ * The origin a trusted in-process dispatcher fixed with
+ * `withBillingOriginOverride`, if any. Unlike `ambientBillingOrigin`, this
+ * ignores the origin a request's own credential installs.
+ */
+export function billingOriginOverride(): BillingOrigin | null {
+  return billingOriginOverrideContext.getStore() ?? null;
+}
+
 /** The funding origin a trusted outer scope fixed for this work, if any. */
 export function ambientBillingOrigin(): BillingOrigin | null {
   const attribution = creditDebitAttributionContext.getStore();

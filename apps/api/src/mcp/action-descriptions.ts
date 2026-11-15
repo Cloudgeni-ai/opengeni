@@ -192,6 +192,18 @@ const RULES: Rule[] = [
   },
   {
     method: "PUT",
+    pattern: /\/workspaces\/:workspaceId\/connections\/:connectionId\/list-price$/,
+    text: () =>
+      "Set what a workspace's own OpenAI, Azure OpenAI or OpenAI-compatible model key's model costs, for usage estimates and spend limits: the catalogue model it is priced like (an Azure deployment's base model), an explicit rate in USD micros per 1M tokens, or null for unknown. Workspace admins.",
+  },
+  {
+    method: "GET",
+    pattern: /\/workspaces\/:workspaceId\/model-price-basis-models$/,
+    text: () =>
+      "List the catalogue models with a known list rate that a workspace model key can be priced like.",
+  },
+  {
+    method: "PUT",
     pattern: /\/model-connections\/:kind\/:connectionId\/access$/,
     text: () =>
       "Change which workspaces and which models a model connection can serve. Workspaces: all (optionally including Personal workspaces), selected ones, or none. Models: all including new ones, or only chosen ones. A workspace's own subscription account stays its workspace's when shared with selected workspaces; serving all workspaces, Personal workspaces or people needs moveToOrganization: true on the organization route, after which only organization admins manage it. Applies to new chats and schedules; running work keeps going.",
@@ -282,10 +294,45 @@ const RULES: Rule[] = [
     text: () => "Remove a custom model id.",
   },
   {
+    method: "PUT",
+    pattern: /\/model-providers\/:providerKind\/custom-models\/:customModelId\/list-price$/,
+    text: () =>
+      "Set what an organization OpenAI model's or Azure OpenAI deployment's usage costs, for usage estimates and spend limits: the catalogue model it is priced like (an Azure deployment's base model), an explicit rate in USD micros per 1M tokens, or null for unknown. Organization admins.",
+  },
+  {
     method: "GET",
     pattern: /\/model-providers\/openai_compatible\/endpoints$/,
     text: () =>
       "List the organization's OpenAI-compatible endpoints (base URL, API style and model ids), without their keys.",
+  },
+  {
+    method: "GET",
+    pattern: /\/model-providers\/anthropic\/api-keys$/,
+    text: () =>
+      "List the API keys of the organization's Anthropic API connection, without their values: the connection's own key first, each key's name, its Anthropic organization and whether Anthropic refused it for lack of credits. Organization admins.",
+  },
+  {
+    method: "POST",
+    pattern: /\/model-providers\/anthropic\/api-keys$/,
+    text: () =>
+      "Add another Anthropic API key to the organization's Anthropic API connection, with a name. Its Anthropic API models then run on several keys: each chat keeps one key, and moves to another only when Anthropic refuses its key for lack of credits. Never used for Claude subscription models. The key is checked with Anthropic's free model listing, stored encrypted and never shown again. Connect the first key on the connection itself. Organization admins.",
+  },
+  {
+    method: "PATCH",
+    pattern: /\/model-providers\/anthropic\/api-keys\/:keyId$/,
+    text: () => "Rename an added Anthropic API key of the organization.",
+  },
+  {
+    method: "DELETE",
+    pattern: /\/model-providers\/anthropic\/api-keys\/:keyId$/,
+    text: () =>
+      "Remove an added Anthropic API key from the organization's Anthropic API connection. The connection's own key is replaced or disconnected on the connection instead.",
+  },
+  {
+    method: "POST",
+    pattern: /\/model-providers\/anthropic\/api-keys\/:keyId\/serve-again$/,
+    text: () =>
+      "Let an organization Anthropic API key that ran out of credits serve again, after credits were added to its Anthropic organization. If it is still out of credits, the next refused request marks it again.",
   },
   {
     method: "POST",
@@ -322,6 +369,13 @@ const RULES: Rule[] = [
       /\/model-providers\/openai_compatible\/endpoints\/:connectionId\/models\/:customModelId\/reasoning$/,
     text: () =>
       "Set the reasoning levels a model on an organization OpenAI-compatible endpoint accepts and its default (null: none), or omit `reasoning` to read them again from the endpoint's /models listing.",
+  },
+  {
+    method: "PUT",
+    pattern:
+      /\/model-providers\/openai_compatible\/endpoints\/:connectionId\/models\/:customModelId\/list-price$/,
+    text: () =>
+      "Set what a model on an organization OpenAI-compatible endpoint costs, for usage estimates and spend limits: the catalogue model it is priced like, an explicit rate in USD micros per 1M tokens, or null for unknown. Organization admins.",
   },
   {
     method: "GET",

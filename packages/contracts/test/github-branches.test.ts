@@ -61,6 +61,10 @@ describe("GitHub repository branch contracts", () => {
       canonicalUrl: "https://github.com/Cloudgeni-ai/opengeni",
       cloneUrl: "https://github.com/Cloudgeni-ai/opengeni.git",
     });
+    // An enterprise managed user's own repository.
+    expect(parseCanonicalGitHubRepositoryUrl("https://github.com/octocat_acme/tools").owner).toBe(
+      "octocat_acme",
+    );
     for (const value of [
       "http://github.com/acme/repo",
       "https://www.github.com/acme/repo",
@@ -70,6 +74,8 @@ describe("GitHub repository branch contracts", () => {
       "https://github.com/acme/repo?tab=readme",
       "https://github.com/acme/repo#readme",
       "https://github.com/acme%2frepo/other",
+      "https://github.com/_acme/repo",
+      "https://github.com/acme_/repo",
     ]) {
       expect(() => parseCanonicalGitHubRepositoryUrl(value)).toThrow();
     }

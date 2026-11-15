@@ -32,9 +32,15 @@ import {
   organizationSettingsLabel,
 } from "./organization-settings-pages";
 import { settingsHomeLink, type SettingsRailSection } from "./settings-sidebar";
+import {
+  interfaceListsDestination,
+  interfaceListsOrganizationSection,
+  interfaceListsSettingsSection,
+} from "@/components/rail/workspace-nav-data";
 import { WorkspaceSwitcherMenu } from "@/components/rail/workspace-switcher";
 import { thisComputerSettingsAvailable } from "@/lib/this-computer-page";
 import { useAppContext } from "@opengeni/react/app/app-context";
+import { useSimplifiedInterface } from "@opengeni/react/app/lib/simplified-interface";
 import { isPersonalWorkspace } from "@opengeni/react/app/lib/managed-self-context";
 import {
   lastSessionMemoryId,
@@ -248,6 +254,7 @@ export function useSettingsRail(input: {
 }): SettingsRail {
   const context = useAppContext();
   const navigate = useNavigate();
+  const { simplified, productName } = useSimplifiedInterface();
   const { location, managedWorkspace } = input;
   const workspace = input.workspaceId
     ? (context.workspaces.find((candidate) => candidate.id === input.workspaceId) ?? null)
@@ -374,7 +381,10 @@ export function useSettingsRail(input: {
       workspace,
       context.managedSelfContext,
     );
-    const activityPages = ACTIVITY_PAGES.filter((page) => !page.requiresAdmin || canReadInsights);
+    const activityPages = ACTIVITY_PAGES.filter(
+      (page) =>
+        (!page.requiresAdmin || canReadInsights) && interfaceListsDestination(simplified, page.to),
+    );
     sections.push({
       id: "workspace",
       // The picker names the workspace; the header only names the scope.
@@ -390,8 +400,9 @@ export function useSettingsRail(input: {
             // has no Usage page either.
             ...SECTION_ORDER.filter(
               (section) =>
-                !personal ||
-                (section !== "api-keys" && section !== "developer" && section !== "usage"),
+                interfaceListsSettingsSection(simplified, section) &&
+                (!personal ||
+                  (section !== "api-keys" && section !== "developer" && section !== "usage")),
             ).map((section) => ({
               id: `workspace:${section}`,
               label: WORKSPACE_SETTINGS_COPY[section].title,
@@ -413,12 +424,14 @@ export function useSettingsRail(input: {
           ],
         },
         {
-          items: runtimePages(thisComputerSettingsAvailable()).map((page) => ({
-            id: `workspace:${page.to}`,
-            label: page.label,
-            icon: page.icon,
-            link: <Link to={page.to} params={{ workspaceId }} />,
-          })),
+          items: runtimePages(thisComputerSettingsAvailable())
+            .filter((page) => interfaceListsDestination(simplified, page.to))
+            .map((page) => ({
+              id: `workspace:${page.to}`,
+              label: page.label,
+              icon: page.icon,
+              link: <Link to={page.to} params={{ workspaceId }} />,
+            })),
         },
       ],
     });
@@ -439,7 +452,10 @@ export function useSettingsRail(input: {
         ? splitIntoGroups(
             ORGANIZATION_SETTINGS_GROUPS.map((group) =>
               ORGANIZATION_SETTINGS_ITEMS.filter(
-                (item) => group.includes(item.id) && access.visibleSections.has(item.id),
+                (item) =>
+                  group.includes(item.id) &&
+                  access.visibleSections.has(item.id) &&
+                  interfaceListsOrganizationSection(simplified, item.id),
               ).map((item) => ({
                 id: `organization:${item.id}`,
                 label: item.label,
@@ -470,7 +486,7 @@ export function useSettingsRail(input: {
       groups: [
         {
           items: [
-            ...(myThingsWorkspaceId
+            ...(myThingsWorkspaceId && interfaceListsSettingsSection(simplified, "mine")
               ? [
                   {
                     id: "account:mine",
@@ -522,7 +538,7 @@ export function useSettingsRail(input: {
           />
         ),
       }
-    : { label: "Back to Opengeni", link: <Link to="/" /> };
+    : { label: `Back to ${productName}`, link: <Link to="/" /> };
 
   return {
     picker,

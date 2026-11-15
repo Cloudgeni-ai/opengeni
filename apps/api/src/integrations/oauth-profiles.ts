@@ -18,6 +18,10 @@ import {
   OFFICIAL_GOOGLE_CALENDAR_MCP_URL as RUNTIME_GOOGLE_CALENDAR_MCP_URL,
   googleCalendarToolSupportsScopes,
 } from "@opengeni/runtime/google-calendar-rest-mcp";
+import {
+  microsoftDynamicsDefaultScope,
+  microsoftDynamicsProductForMcpUrl,
+} from "@opengeni/contracts/microsoft-dynamics";
 import { canonicalProviderDomain } from "./provider-domain";
 
 /**
@@ -71,11 +75,32 @@ export const OFFICIAL_GOOGLE_CALENDAR_MCP_SCOPES: readonly string[] =
   GOOGLE_CALENDAR_REQUESTED_SCOPES;
 
 const GOOGLE_OAUTH_ONLY_FOR = `Google OAuth is allowed only for ${OFFICIAL_GMAIL_MCP_URL}, ${OFFICIAL_DRIVE_MCP_URL} or ${OFFICIAL_GOOGLE_CALENDAR_MCP_URL}`;
+/**
+ * Google connector sign-in: offline consent for a refresh token, and the
+ * account picker, so a person with several Google accounts chooses which one
+ * to connect instead of Google using whichever the browser used last.
+ * Reconnecting names the account instead (`reconnectLoginHint`).
+ */
+const GOOGLE_CONNECTOR_AUTHORIZE_PARAMS = {
+  access_type: "offline",
+  prompt: "consent select_account",
+} as const;
 
 const SLACK_OAUTH_ORIGIN = "https://slack.com";
+const MICROSOFT_LOGIN_ORIGIN = "https://login.microsoftonline.com";
 const SLACK_MCP_ORIGIN = "https://mcp.slack.com";
 const GOOGLE_OAUTH_ISSUER_ORIGIN = "https://accounts.google.com";
 const GOOGLE_TOKEN_ORIGIN = "https://oauth2.googleapis.com";
+/**
+ * Google's account ID (the OpenID `sub`), recorded beside the email the
+ * Gmail, Calendar and Drive checks read. Google never changes or reuses it,
+ * while an account's email can change (a renamed Workspace user or domain), so
+ * once two logins both have it, it alone decides whether they are the same
+ * account. These sign-ins ask for `openid` so that Google reports it: in the
+ * signed ID token from the code exchange, or else in its token info for the
+ * new access token.
+ */
+export const GOOGLE_SUBJECT_KEY = "googleSubject";
 
 /** The slice of discovered authorization-server metadata the pins constrain. */
 export type PinnableAuthorizationServer = {
@@ -105,6 +130,8 @@ export type OAuthProviderProfile = {
   match: {
     mcpUrls?: readonly string[];
     providerDomains?: readonly string[];
+    /** Per-customer endpoints (one host per environment) recognized by shape. */
+    mcpUrl?: (mcpUrl: string) => boolean;
   };
   /**
    * Canonical provider identity forced when the profile matches by URL, so a
@@ -117,7 +144,12 @@ export type OAuthProviderProfile = {
   requireProviderDomain?: { domain: string; message: string };
   /** Outside a local test environment, the start URL must be exactly this. */
   requireExactMcpUrl?: { url: string; message: string };
-  /** Deployment-managed client credentials must be configured (503 otherwise). */
+  /**
+   * Deployment-managed client credentials must be configured (503 otherwise).
+   * The profile, not the authorization server, selects this client, so a
+   * shared authorization server (Microsoft Entra ID) never lends it to other
+   * resources.
+   */
   requireDeploymentClient?: { key: DeploymentManagedClientKey; message: string };
   /** Suggested ownership; explicit choices remain subject to requiredOwnership. */
   defaultOwnership?: ConnectionOwnership;
@@ -143,6 +175,15 @@ export type OAuthProviderProfile = {
   sendResourceParameter: boolean;
   /** Extra authorize-URL query parameters (e.g. offline-consent opts). */
   extraAuthorizeParams?: Readonly<Record<string, string>>;
+  /**
+   * Reconnecting an existing account names it to the provider: `login_hint`
+   * set from this verified metadata key (an email address), with `prompt`
+   * replacing the profile's own, so the provider signs in that account rather
+   * than whichever one the browser used last.
+   * `accountIdKey` names a stable account ID the provider also accepts as the
+   * hint; it is preferred when recorded, so a renamed account is still named.
+   */
+  reconnectLoginHint?: { metadataKey: string; prompt: string; accountIdKey?: string };
   /** Exact scope override; the caller can never widen past it. */
   requestedScopes?: readonly string[];
   /**
@@ -164,6 +205,23 @@ export type OAuthProviderProfile = {
   confidentialClientRequired?: boolean;
   /** Built-in API bridge discovery; catalog metadata cannot redirect this seam. */
   providerOAuthDiscovery?: { issuer: string; metadataUrl: string };
+  /**
+   * One fixed authorization server for many per-customer resources. Its
+   * metadata is read from the pinned URL and `defaultScopes` names the
+   * delegated scopes for each resource. `pkceS256` records PKCE support the
+   * server documents but does not advertise (Microsoft Entra ID).
+   */
+  fixedAuthorizationServer?: {
+    issuer: string;
+    metadataUrl: string;
+    pkceS256: "documented";
+    defaultScopes: (mcpUrl: string) => readonly string[];
+  };
+  /**
+   * Send the authorized scopes again when refreshing. Microsoft Entra ID
+   * refresh tokens span resources, so a refresh names the resource scope.
+   */
+  sendScopeOnRefresh?: boolean;
   /** Built-in read-only remote proof; discovery alone may be publicly accessible. */
   remoteToolVerification?: { toolName: string; arguments: Record<string, unknown> };
   localToolVerification?: {
@@ -277,10 +335,15 @@ const OFFICIAL_GMAIL_PROFILE: OAuthProviderProfile = {
   // Explicit offline consent is required to obtain the refresh token used by
   // the durable connection broker. These are Gmail profile data, not behavior
   // implied by suppressing the resource parameter.
-  extraAuthorizeParams: {
-    access_type: "offline",
-    include_granted_scopes: "true",
+  // `include_granted_scopes` is not sent: Gmail, Drive and Calendar share one
+  // Google client, so it would show and grant the Drive and Calendar access
+  // the person gave that client earlier. Reconnecting already asks for the
+  // Gmail scopes the account holds (chooseProfileAuthorizeScopes).
+  extraAuthorizeParams: GOOGLE_CONNECTOR_AUTHORIZE_PARAMS,
+  reconnectLoginHint: {
+    metadataKey: "gmailEmail",
     prompt: "consent",
+    accountIdKey: GOOGLE_SUBJECT_KEY,
   },
   // The Gmail PRM advertises broader grants, including full-mail access. The
   // reviewed connector never lets a caller widen the capability contract: a
@@ -347,7 +410,12 @@ const OFFICIAL_DRIVE_PROFILE: OAuthProviderProfile = {
     message: `Google Drive OAuth must use ${OFFICIAL_DRIVE_MCP_URL}`,
   },
   sendResourceParameter: false,
-  extraAuthorizeParams: { access_type: "offline", prompt: "consent" },
+  extraAuthorizeParams: GOOGLE_CONNECTOR_AUTHORIZE_PARAMS,
+  reconnectLoginHint: {
+    metadataKey: "googleDriveEmail",
+    prompt: "consent",
+    accountIdKey: GOOGLE_SUBJECT_KEY,
+  },
   requestedScopes: OFFICIAL_DRIVE_MCP_SCOPES,
   reportedScopesRequired: true,
   freshRefreshTokenRequired: true,
@@ -396,7 +464,12 @@ const OFFICIAL_GOOGLE_CALENDAR_PROFILE: OAuthProviderProfile = {
     message: GOOGLE_OAUTH_ONLY_FOR,
   },
   sendResourceParameter: false,
-  extraAuthorizeParams: { access_type: "offline", prompt: "consent" },
+  extraAuthorizeParams: GOOGLE_CONNECTOR_AUTHORIZE_PARAMS,
+  reconnectLoginHint: {
+    metadataKey: "googleCalendarEmail",
+    prompt: "consent",
+    accountIdKey: GOOGLE_SUBJECT_KEY,
+  },
   requestedScopes: OFFICIAL_GOOGLE_CALENDAR_MCP_SCOPES,
   reportedScopesRequired: true,
   freshRefreshTokenRequired: true,
@@ -424,11 +497,55 @@ const OFFICIAL_GOOGLE_CALENDAR_PROFILE: OAuthProviderProfile = {
   },
 };
 
+/**
+ * Microsoft Dynamics MCP servers (Dataverse for Dynamics 365 Sales and
+ * Customer Service, and Finance and Operations). Every customer environment
+ * has its own host; all sign in through Microsoft Entra ID with one
+ * deployment-registered multi-tenant app, since Microsoft offers no dynamic
+ * client registration. Entra's v2 endpoints take the resource in the scope,
+ * not RFC 8707's `resource` parameter.
+ */
+const MICROSOFT_DYNAMICS_PROFILE: OAuthProviderProfile = {
+  key: "microsoft-dynamics",
+  match: { mcpUrl: (mcpUrl) => microsoftDynamicsProductForMcpUrl(mcpUrl) !== null },
+  rejectCallerOAuthClient: {
+    message: "Microsoft Dynamics OAuth client credentials are deployment-managed",
+  },
+  requireDeploymentClient: {
+    key: "microsoft-dynamics",
+    message:
+      "Microsoft Dynamics requires OPENGENI_MICROSOFT_DYNAMICS_CLIENT_ID and OPENGENI_MICROSOFT_DYNAMICS_CLIENT_SECRET",
+  },
+  authorizationServer: {
+    issuerOrigins: [MICROSOFT_LOGIN_ORIGIN],
+    authorizationEndpointOrigins: [MICROSOFT_LOGIN_ORIGIN],
+    tokenEndpointOrigins: [MICROSOFT_LOGIN_ORIGIN],
+    message: "Microsoft Dynamics authorization metadata did not remain bound to Microsoft Entra ID",
+    skipInLocalTest: true,
+  },
+  fixedAuthorizationServer: {
+    issuer: `${MICROSOFT_LOGIN_ORIGIN}/{tenantid}/v2.0`,
+    metadataUrl: `${MICROSOFT_LOGIN_ORIGIN}/organizations/v2.0/.well-known/openid-configuration`,
+    pkceS256: "documented",
+    defaultScopes: (mcpUrl) => {
+      const scope = microsoftDynamicsDefaultScope(mcpUrl);
+      return scope ? [scope] : [];
+    },
+  },
+  sendResourceParameter: false,
+  sendScopeOnRefresh: true,
+  // Each call runs with the signed-in person's Dynamics security roles, so a
+  // connection is personal by default; whoever may add workspace connections
+  // can still share one account, and everyone then acts with its roles.
+  defaultOwnership: "personal",
+};
+
 const BUILT_IN_OAUTH_PROFILES: readonly OAuthProviderProfile[] = [
   HOSTED_SLACK_PROFILE,
   OFFICIAL_GMAIL_PROFILE,
   OFFICIAL_DRIVE_PROFILE,
   OFFICIAL_GOOGLE_CALENDAR_PROFILE,
+  MICROSOFT_DYNAMICS_PROFILE,
 ];
 
 /** What a verifier may read besides its own calls: the token endpoint's response,
@@ -662,6 +779,42 @@ export function accountIdentityVerifierFor(mcpUrl: string): AccountIdentityVerif
  * neither a profile nor a reviewed verifier identifies the account. */
 export const OIDC_IDENTITY_KEYS: readonly string[] = ["oidcSubject"];
 
+export const GOOGLE_TOKENINFO_URL = "https://oauth2.googleapis.com/tokeninfo";
+/** Google's published ID-token signing keys, and the issuers its ID tokens name. */
+export const GOOGLE_JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs";
+export const GOOGLE_ID_TOKEN_ISSUERS: string[] = [
+  "https://accounts.google.com",
+  "accounts.google.com",
+];
+const GOOGLE_SUBJECT_MCP_URLS: ReadonlySet<string> = new Set([
+  OFFICIAL_GMAIL_MCP_URL,
+  OFFICIAL_DRIVE_MCP_URL,
+  OFFICIAL_GOOGLE_CALENDAR_MCP_URL,
+]);
+
+/** The stable account-ID key recorded for an exact MCP URL, when it has one. */
+export function stableAccountSubjectKeyFor(mcpUrl: string): string | undefined {
+  return GOOGLE_SUBJECT_MCP_URLS.has(mcpUrl) ? GOOGLE_SUBJECT_KEY : undefined;
+}
+
+/** The account ID from verified ID-token claims or a tokeninfo answer, only for
+ * a token issued to our own client; anything else proves nothing and throws. */
+export function googleSubjectFromClaims(
+  payload: Record<string, unknown>,
+  clientId: string,
+): string {
+  const sub = payload.sub;
+  if (
+    typeof sub !== "string" ||
+    !sub.trim() ||
+    sub.length > 255 ||
+    !clientId ||
+    (payload.aud !== clientId && payload.azp !== clientId)
+  )
+    throw new Error("Google account verification failed");
+  return sub;
+}
+
 /** Identity keys for a connection: the profile's own, else the reviewed verifier's,
  * else OpenID Connect when this connection's sign-in can use it. */
 export function accountIdentityKeysFor(
@@ -728,7 +881,7 @@ const RESERVED_AUTHORIZATION_SERVERS: readonly {
   },
 ];
 
-export type DeploymentManagedClientKey = "slack";
+export type DeploymentManagedClientKey = "slack" | "microsoft-dynamics";
 
 /**
  * Pre-registered deployment clients resolved from dedicated settings, keyed by
@@ -756,6 +909,20 @@ export const DEPLOYMENT_MANAGED_CLIENTS: readonly {
           }
         : null,
   },
+  {
+    // Selected only by the Microsoft Dynamics profile: Microsoft Entra ID
+    // serves countless other resources, which must never receive this client.
+    key: "microsoft-dynamics",
+    issuerOrigins: [],
+    resolve: (settings) =>
+      settings.microsoftDynamicsClientId?.trim() && settings.microsoftDynamicsClientSecret?.trim()
+        ? {
+            clientId: settings.microsoftDynamicsClientId.trim(),
+            clientSecret: settings.microsoftDynamicsClientSecret.trim(),
+            tokenEndpointAuthMethod: "client_secret_post",
+          }
+        : null,
+  },
 ];
 
 export function deploymentManagedClientFor(
@@ -772,7 +939,7 @@ export function builtInOAuthProfileFor(input: {
   providerDomain?: string | undefined;
 }): OAuthProviderProfile | null {
   for (const profile of BUILT_IN_OAUTH_PROFILES) {
-    if (profile.match.mcpUrls?.includes(input.mcpUrl)) {
+    if (profile.match.mcpUrls?.includes(input.mcpUrl) || profile.match.mcpUrl?.(input.mcpUrl)) {
       return profile;
     }
     if (

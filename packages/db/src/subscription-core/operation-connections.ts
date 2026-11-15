@@ -91,6 +91,16 @@ export type SubscriptionCoreConnectionResolverDeps = SubscriptionCoreConnectionR
   unavailable?: () => Error;
 };
 
+/** One adapter call made with a connection's read (`runSubscriptionCoreConnectionRead`). */
+export type SubscriptionCoreConnectionReadRun<T> =
+  /** Not readable in this context. */
+  | { kind: "not_visible" }
+  | { kind: "relogin" }
+  | { kind: "token_error"; error: unknown }
+  /** The call threw. */
+  | { kind: "fetch_error"; error: unknown }
+  | { kind: "read"; value: T };
+
 /** What a probe reports; provider and refresh failures never throw. */
 export type SubscriptionCoreUsageProbe =
   /** The adapter has no usage probe. */
@@ -517,6 +527,29 @@ export const subscriptionCoreOperationConnections = memoByProvider(
     }
 
     /**
+     * One provider call of the adapter's own (a limit reset claim, for
+     * example) made with a shared connection's read in the caller's
+     * workspace scope: the same refreshing bearer and request custody as a
+     * usage read. Records nothing; failures are reported, never thrown.
+     */
+    async function runSubscriptionCoreConnectionRead<T>(
+      db: Database,
+      settings: Settings,
+      scope: Extract<SubscriptionCoreOperationScope, { kind: "workspace" }>,
+      connectionId: string,
+      run: (read: SubscriptionCoreConnectionRead<unknown>) => Promise<T>,
+      deps: SubscriptionCoreConnectionProbeDeps = {},
+    ): Promise<SubscriptionCoreConnectionReadRun<T>> {
+      const prepared = await connectionRead(db, settings, scope, connectionId, deps);
+      if (prepared.kind !== "ready") return prepared;
+      try {
+        return { kind: "read", value: await run(prepared.read) };
+      } catch (error) {
+        return { kind: "fetch_error", error };
+      }
+    }
+
+    /**
      * Re-read live usage before a stored exhaustion is treated as current
      * (design 5.3, EP-N22): each shared connection of the workspace's pool
      * whose stored quota blocks now (exhausted, or a model cooldown runs that
@@ -618,6 +651,7 @@ export const subscriptionCoreOperationConnections = memoByProvider(
       runSubscriptionCoreOperation,
       probeSubscriptionCoreConnectionUsage,
       probeSubscriptionCoreConnectionLiveModels,
+      runSubscriptionCoreConnectionRead,
       refreshExhaustedSubscriptionCoreQuota,
     };
   },

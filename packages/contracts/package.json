@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/contracts",
-  "version": "6.13.0",
+  "version": "6.23.0",
   "description": "Shared zod schemas and wire-contract types for the Opengeni API.",
   "license": "Apache-2.0",
   "repository": {
@@ -22,9 +22,17 @@
       "types": "./src/machine-access.ts",
       "default": "./src/machine-access.ts"
     },
+    "./encrypted-reasoning-refusal": {
+      "types": "./src/encrypted-reasoning-refusal.ts",
+      "default": "./src/encrypted-reasoning-refusal.ts"
+    },
     "./browser-response-headers": {
       "types": "./src/browser-response-headers.ts",
       "default": "./src/browser-response-headers.ts"
+    },
+    "./html-frame-host": {
+      "types": "./src/html-frame-host.ts",
+      "default": "./src/html-frame-host.ts"
     },
     "./billing-credit-notifications": {
       "types": "./src/billing-credit-notifications.ts",
@@ -89,6 +97,10 @@
     "./json-safe": {
       "types": "./src/json-safe.ts",
       "default": "./src/json-safe.ts"
+    },
+    "./citation-urls": {
+      "types": "./src/citation-urls.ts",
+      "default": "./src/citation-urls.ts"
     },
     "./claude-cite-tags": {
       "types": "./src/claude-cite-tags.ts",
@@ -174,6 +186,10 @@
       "types": "./src/insights-usage.ts",
       "default": "./src/insights-usage.ts"
     },
+    "./console": {
+      "types": "./src/console.ts",
+      "default": "./src/console.ts"
+    },
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
@@ -213,6 +229,10 @@
     "./connector-destinations": {
       "types": "./src/connector-destinations.ts",
       "default": "./src/connector-destinations.ts"
+    },
+    "./nango": {
+      "types": "./src/nango.ts",
+      "default": "./src/nango.ts"
     },
     "./connector-attachments": {
       "types": "./src/connector-attachments.ts",
@@ -361,6 +381,14 @@
     "./workspace-control-event": {
       "types": "./src/workspace-control-event.ts",
       "default": "./src/workspace-control-event.ts"
+    },
+    "./microsoft-dynamics": {
+      "types": "./src/microsoft-dynamics.ts",
+      "default": "./src/microsoft-dynamics.ts"
+    },
+    "./capability-connect-inputs": {
+      "types": "./src/capability-connect-inputs.ts",
+      "default": "./src/capability-connect-inputs.ts"
     }
   },
   "publishConfig": {

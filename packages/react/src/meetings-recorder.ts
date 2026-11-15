@@ -21,3 +21,12 @@ export type {
   MeetingRecorderStore,
   MeetingStartRequest,
 } from "./meetings/recorder-context";
+export {
+  prepareRecordingsForSignOut,
+  recordingOwnerKey,
+  setSignOutRecordingsPrompt,
+} from "./meetings/sign-out-recordings";
+export type {
+  SignOutRecordingsChoice,
+  SignOutRecordingsPrompt,
+} from "./meetings/sign-out-recordings";

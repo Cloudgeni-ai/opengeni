@@ -1,3 +1,5 @@
+import { requireConnectReturnUrl } from "../integrations/connect-return-url";
+import { oauthBrowserBindingForStart } from "../integrations/oauth-browser-binding";
 import { integrationAvailable } from "../integrations/teams-rollout";
 import { GOOGLE_CONNECTOR_SETUP_UNAVAILABLE } from "../integrations/google-connector-availability";
 import { createHash, createHmac, randomUUID } from "node:crypto";
@@ -70,6 +72,7 @@ import { startPersonalGitHubOAuth } from "../integrations/personal-github";
 import { socialOAuthClientFor, startSocialOAuth } from "../integrations/social-oauth";
 import {
   githubAppConnectNavigation,
+  githubAppRepairNavigation,
   prepareGitHubAppConnectAction,
 } from "../integrations/github-app-connect";
 import { githubAppMissingSettings } from "@opengeni/github";
@@ -78,6 +81,7 @@ import { GOOGLE_DRIVE_CREDENTIAL_ROLE } from "@opengeni/contracts/google-drive";
 import { KNOWLEDGE_SOURCE_SYNC_RETIRED_MESSAGE } from "@opengeni/contracts/knowledge-source-sync-retirement";
 import {
   curatedOAuthReadiness,
+  microsoftOrganizationApprovalUrlForWorkspace,
   startApiIntegrationProviderOAuth,
 } from "../integrations/provider-oauth";
 import { resolveForRoute, validatedIntegrationInstallInput } from "./api-integrations";
@@ -107,6 +111,7 @@ import {
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
   WORKSPACE_OPPER_CONNECTION_DOMAIN,
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
+  parseConnectResultPageTextJson,
 } from "@opengeni/config";
 import { parseRequestJson } from "../http/request-body";
 import { connectRequestActor, assertAgentPreparedConnect } from "../prepared-mcp-actor";
@@ -823,6 +828,8 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           expectedRevision: input.expectedRevision,
           operationId: input.idempotencyKey,
           inputDigest: createHash("sha256").update(stableJson(input)).digest("hex"),
+          // Resolving the source only reads it; the preview is saved in commit.
+          releaseClaimOnFailure: true,
           authorize: (tx, _attempt, origin) =>
             requireConnectOwnerAuthority(tx, scope, "connections:write", origin),
           execute: async (attempt) => {
@@ -1210,6 +1217,9 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               ...(continuation ? { externalContinuation: continuation } : {}),
               connectAttemptId: attempt.id,
               personalOwnershipAllowed: isPersonalConnectionOwnerPrincipal(authorization),
+              browserBinding: oauthBrowserBindingForStart(c, deps.settings, authorization, {
+                externalContinuation: continuation,
+              }),
               requestUrl: c.req.url,
               payload: {
                 requestedScopes: attempt.requestedScopes ? [...attempt.requestedScopes] : [],
@@ -1271,6 +1281,12 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         expectedRevision: input.expectedRevision,
         operationId: input.idempotencyKey,
         inputDigest: createHash("sha256").update(stableJson(input)).digest("hex"),
+        // Preview and install have no non-repeatable remote effects (they read
+        // the source and may refresh the saved account's token); the install
+        // is written in commit's one transaction. A failure (for example the
+        // install refused by the database) leaves the attempt ready to advance
+        // again rather than refused as in flight.
+        releaseClaimOnFailure: true,
         authorize: (tx, _attempt, origin) =>
           requireConnectOwnerAuthority(tx, scope, advancePermission, origin),
         execute: async (attempt) => {
@@ -1442,7 +1458,9 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
   });
   // Public and content-free: the sign-in popup's last page (finishInPopup).
-  app.get(CONNECT_FINISHED_PATH, () => connectFinishedPage());
+  app.get(CONNECT_FINISHED_PATH, () =>
+    connectFinishedPage(parseConnectResultPageTextJson(deps.settings.connectResultPageTextJson)),
+  );
   app.post("/v1/workspaces/:workspaceId/connect/attempts", async (c) => {
     if (!deps.settings.integrationsEnabled)
       throw new HTTPException(403, { message: "integrations disabled" });
@@ -1515,6 +1533,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       /[\u0000-\u0020\u007f]/.test(input.returnUrl)
     )
       throw new HTTPException(400, { message: "invalid return URL" });
+    requireConnectReturnUrl(c, deps.settings, authorization, target);
     const actor = await connectRequestActor(deps, authorization);
     const scope = actor.scope;
     assertAgentPreparedConnect(actor, input);
@@ -1718,16 +1737,18 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           });
         }
         if (input.providerId === "github-app") {
-          if (
-            input.ownership !== "workspace" ||
-            input.installationTarget ||
-            input.reconnectAccountId
-          )
+          if (input.ownership !== "workspace" || input.installationTarget)
             throw new HTTPException(422, {
               message:
                 "GitHub App setup requires workspace ownership and explicit installation selection",
             });
-          const navigation = githubAppConnectNavigation(deps, scope, id, c.req.url, "discover");
+          // Repairing a linked installation goes straight to its fix.
+          const navigation = input.reconnectAccountId
+            ? await githubAppRepairNavigation(deps, scope, id, c.req.url, input.reconnectAccountId)
+            : {
+                ...githubAppConnectNavigation(deps, scope, id, c.req.url, "discover"),
+                account: undefined,
+              };
           return beginConnectAttempt(tx, scope, {
             ...(continuation ? { externalContinuation: continuation } : {}),
             idempotencyKey: input.idempotencyKey,
@@ -1743,6 +1764,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               credentialsCommitted: false,
               integrationInstalled: false,
               completionRequirement: "provider_setup",
+              ...(navigation.account ? { account: navigation.account } : {}),
               nextAction: { type: "authorize", url: navigation.authorizationUrl },
               expiresAt: navigation.expiresAt,
             },
@@ -2031,6 +2053,9 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                     {
                       ...scope,
                       personalOwnershipAllowed: isPersonalConnectionOwnerPrincipal(authorization),
+                      browserBinding: oauthBrowserBindingForStart(c, deps.settings, authorization, {
+                        externalContinuation: continuation,
+                      }),
                       ...(continuation ? { externalContinuation: continuation } : {}),
                       connectAttemptId: id,
                       // Lets the callback finish setup with exactly this request's rights.
@@ -2058,6 +2083,18 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         const reconnect = input.reconnectAccountId
           ? await getConnectionMetadata(tx, workspaceId, input.reconnectAccountId, scope.subjectId)
           : null;
+        // One organization approval for every Microsoft service this workspace offers.
+        const definition = CORE_INTEGRATION_DEFINITIONS.find(
+          (candidate) => candidate.id === input.providerId,
+        );
+        const organizationApprovalUrl = definition
+          ? await microsoftOrganizationApprovalUrlForWorkspace(
+              deps,
+              { accountId: scope.accountId, workspaceId },
+              definition,
+              integrationBaseUrl(deps.settings.publicBaseUrl, c.req.url),
+            )
+          : null;
         return beginConnectAttempt(tx, scope, {
           ...(continuation ? { externalContinuation: continuation } : {}),
           idempotencyKey: input.idempotencyKey,
@@ -2082,10 +2119,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               : {
                   installationTarget: input.installationTarget ?? {
                     instanceKey: `account-${id}`,
-                    displayName:
-                      CORE_INTEGRATION_DEFINITIONS.find(
-                        (definition) => definition.id === input.providerId,
-                      )?.name ?? input.providerId,
+                    displayName: definition?.name ?? input.providerId,
                   },
                 }),
             ...(reconnect
@@ -2100,7 +2134,11 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                   },
                 }
               : {}),
-            nextAction: { type: "authorize", url: started.authorizationUrl },
+            nextAction: {
+              type: "authorize",
+              url: started.authorizationUrl,
+              ...(organizationApprovalUrl ? { organizationApprovalUrl } : {}),
+            },
             expiresAt: started.expiresAt,
           },
         });

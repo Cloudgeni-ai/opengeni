@@ -62,6 +62,19 @@ export function cameFromAfterShowing(
   return from && from.id !== target.id && !from.signedOut ? from.id : cameFromId;
 }
 
+/**
+ * The server the sign-in page signs in to: the signed-out account it stands in
+ * for (it says "Sign in again to <server>"), else the app's own server. Adding
+ * another account starts from the app's own server.
+ */
+export function welcomeServer(
+  active: StoredAccount | null,
+  addingAccount: boolean,
+  appServer: string,
+): string {
+  return !addingAccount && active?.signedOut ? active.baseUrl : appServer;
+}
+
 /** The operating system's secret storage (Electron `safeStorage`). */
 export interface SecretCipher {
   available(): boolean;

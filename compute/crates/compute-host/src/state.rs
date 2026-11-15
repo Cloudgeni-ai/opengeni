@@ -192,6 +192,13 @@ pub(crate) struct Record {
     /// room.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_wake_by_ms: Option<u64>,
+    /// Its guest did not say it wrote its files out as its VM was last
+    /// paused, so writes may live in the VM's memory alone: written by
+    /// each pause, and read only while that VM is still paused. The core
+    /// then saves its memory before its VM ends, whatever its rules say
+    /// (see [`compute_core::Input::Unsynced`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unsynced: bool,
 }
 
 /// Whether a sandbox's guest knows which sandbox it is.
@@ -235,6 +242,7 @@ impl Record {
             handed_off: false,
             set_aside: false,
             first_wake_by_ms: None,
+            unsynced: false,
         }
     }
 
@@ -323,6 +331,7 @@ pub(crate) struct Change {
     handed_off: bool,
     set_aside: bool,
     woke: bool,
+    unsynced: Option<bool>,
     owner: Option<OwnerEpoch>,
     /// The agent link the control service sent last, `None` inside for none;
     /// boxed, as most writes leave it.
@@ -400,6 +409,13 @@ impl Change {
         self
     }
 
+    /// Whether its guest left the pause that begins without saying it
+    /// wrote its files out (see [`Record::unsynced`]).
+    pub fn unsynced(mut self, unsynced: bool) -> Self {
+        self.unsynced = Some(unsynced);
+        self
+    }
+
     /// This host holds the sandbox under owner epoch `owner` from now on.
     /// Its save numbers go on from where they were.
     pub fn owner(mut self, owner: OwnerEpoch) -> Self {
@@ -462,6 +478,9 @@ impl Change {
         record.set_aside |= self.set_aside;
         if self.woke {
             record.first_wake_by_ms = None;
+        }
+        if let Some(unsynced) = self.unsynced {
+            record.unsynced = unsynced;
         }
         if let Some(owner) = self.owner {
             record.owner_epoch = owner.0;

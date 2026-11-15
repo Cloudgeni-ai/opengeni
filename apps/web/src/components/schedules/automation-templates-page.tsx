@@ -27,6 +27,7 @@ import { LogoTile } from "@opengeni/react/ui/logo-tile";
 import { Notice } from "@opengeni/react/ui/notice";
 import { useMinuteNow } from "@opengeni/react/ui/relative-time";
 import { useAppContext } from "@opengeni/react/app/app-context";
+import { useSimplifiedInterface } from "@opengeni/react/app/lib/simplified-interface";
 import type { WorkspaceAutomationTemplate } from "@opengeni/sdk";
 
 import { scheduleTemplates } from "./schedule-model";
@@ -45,7 +46,8 @@ export function AutomationTemplatesPage({ workspaceId }: { workspaceId: string }
   const [renaming, setRenaming] = useState<WorkspaceAutomationTemplate | null>(null);
   const [deleting, setDeleting] = useState<WorkspaceAutomationTemplate | null>(null);
 
-  const builtIn = scheduleTemplates(eventTriggers);
+  const { simplified } = useSimplifiedInterface();
+  const builtIn = scheduleTemplates(eventTriggers, simplified);
   const savedTemplates = automationTemplatesFor(
     (saved.templates ?? []).map(automationTemplateOfSaved),
     {

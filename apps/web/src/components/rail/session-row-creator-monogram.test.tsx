@@ -24,6 +24,12 @@ const active = { kind: "active", count: 1, total: 1, label: "Running" } as const
 const human = { kind: "subject", subjectId: "user:bendik", label: "Bendik Nyheim" } as const;
 const service = { kind: "service", subjectId: "scheduled-task", label: "Scheduled task" } as const;
 const legacy = { kind: "subject", subjectId: "unattributed-legacy" } as const;
+// Older API-key sessions froze the key as a subject; it is still not a person.
+const subjectFrozenApiKey = {
+  kind: "subject",
+  subjectId: "api_key:7dbccefa-3591-437a-81d2-6319352f124d",
+  label: "Codex operator 2026-09-11",
+} as const;
 
 function parse(markup: string): HTMLElement {
   const host = document.createElement("div");
@@ -89,6 +95,7 @@ describe("rail creator monogram", () => {
     ["a child row", null],
     ["a service creator", service],
     ["an unattributed legacy creator", legacy],
+    ["a subject-frozen API key", subjectFrozenApiKey],
   ])("reserves no monogram slot for %s", (_name, creator) => {
     const host = parse(
       renderToStaticMarkup(
@@ -171,6 +178,7 @@ describe("sessionRowAccessibleName", () => {
   test.each([
     ["a service creator", service],
     ["an unattributed legacy creator", legacy],
+    ["a subject-frozen API key", subjectFrozenApiKey],
   ])("announces no creator for %s, matching the chip it does not show", (_name, creator) => {
     expect(sessionRowAccessibleName({ ...base, creator })).not.toContain("Created by");
   });

@@ -65,6 +65,11 @@ import {
   TranscriptionBillingRefusedError,
 } from "@opengeni/core";
 import type { CreditDebitAttribution, SessionForkPointRefusal } from "@opengeni/db";
+import type {
+  LineageNodeWithoutSkills,
+  SessionListWithoutSkillsResponse,
+  SessionWithoutSkills,
+} from "@opengeni/db";
 import { requireUsableSessionAvatar } from "./session-avatar";
 import { creditDebitAttributionForGrant } from "../access-grant-rls";
 import { transcriptionBillingRefusal } from "../transcription/billing-refusal";
@@ -462,6 +467,7 @@ import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discov
 import { recordAcceptedApiAdmission } from "../admission-trace";
 import { parseRequestBody, parseRequestJson, parseRequestQuery } from "../http/request-body";
 import { allSettledInOrder } from "../http/settled-in-order";
+import { liveStreamSignal } from "../http/server-drain";
 import { measureSessionCreatePhase } from "../session-create-observability";
 import { errorMessage } from "@opengeni/contracts/values";
 
@@ -1206,49 +1212,52 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (projection && !pageView)
       throw new HTTPException(400, { message: 'summary projection requires view="page"' });
     const summary = projection === "summary";
-    let page: Awaited<
-      ReturnType<typeof listSessionsForSubject | typeof listSessionEntriesForSubject>
-    >;
+    let page:
+      | SessionListWithoutSkillsResponse
+      | Awaited<ReturnType<typeof listSessionEntriesForSubject>>;
     try {
-      page = await (summary ? listSessionEntriesForSubject : listSessionsForSubject)(
-        db,
-        workspaceId,
-        {
-          subjectId: grant.subjectId,
-          limit: boundedLimit(query.limit),
-          materializeSnapshot: pageView,
-          ...(query.cursor ? { cursor: query.cursor } : {}),
-          ...(query.search ? { search: query.search } : {}),
-          ...(query.pinsOnly ? { pinsOnly: true } : {}),
-          ...(query.includeTotals ? { includeTotals: true } : {}),
-          ...(query.needsYouOnly ? { needsYouOnly: true } : {}),
-          ...(query.contentArchivedOnly ? { contentArchivedOnly: true } : {}),
-          ...(query.mineOnly ? { mineOnly: true } : {}),
-          ...(query.includePinned === false ? { includePinned: false } : {}),
-          ...(query.archivedOnly ? { archivedOnly: true } : {}),
-          ...(query.sortBy ? { sortBy: query.sortBy } : {}),
-          ...(query.archiveStatus ? { archiveStatus: query.archiveStatus } : {}),
-          ...(query.parentSessionId !== undefined
-            ? { parentSessionId: query.parentSessionId }
-            : {}),
-          ...(query.channelId !== undefined ? { channelId: query.channelId } : {}),
-          ...(query.originSiteId ? { originSiteId: query.originSiteId } : {}),
-          ...(query.siteAccessId ? { siteAccessId: query.siteAccessId } : {}),
-          ...(query.siteConversations ? { siteConversations: query.siteConversations } : {}),
-          ...(query.createdBy ? { createdBy: query.createdBy } : {}),
-          ...(query.updatedFrom ? { updatedFrom: query.updatedFrom } : {}),
-          ...(query.updatedBefore ? { updatedBefore: query.updatedBefore } : {}),
-          ...(query.createdFrom ? { createdFrom: query.createdFrom } : {}),
-          ...(query.createdBefore ? { createdBefore: query.createdBefore } : {}),
-          ...(query.scopeSubjectId ? { scopeSubjectId: query.scopeSubjectId } : {}),
-          ...(query.sessionIds ? { sessionIds: query.sessionIds } : {}),
-          ...(authorizationScope ? { authorizationScope } : {}),
-          // A managed human's own personal workspace has no membership row, so
-          // the list's removal fence must fall back to the organization-membership
-          // pointer, only with verified native or external owning-user provenance.
-          personalWorkspaceOwnerException: hasVerifiedOwningUserAuthorization(authorization),
-        },
-      );
+      const listOptions: Parameters<typeof listSessionsForSubject>[2] = {
+        subjectId: grant.subjectId,
+        limit: boundedLimit(query.limit),
+        materializeSnapshot: pageView,
+        ...(query.cursor ? { cursor: query.cursor } : {}),
+        ...(query.search ? { search: query.search } : {}),
+        ...(query.pinsOnly ? { pinsOnly: true } : {}),
+        ...(query.includeTotals ? { includeTotals: true } : {}),
+        ...(query.needsYouOnly ? { needsYouOnly: true } : {}),
+        ...(query.contentArchivedOnly ? { contentArchivedOnly: true } : {}),
+        ...(query.mineOnly ? { mineOnly: true } : {}),
+        ...(query.includePinned === false ? { includePinned: false } : {}),
+        ...(query.archivedOnly ? { archivedOnly: true } : {}),
+        ...(query.sortBy ? { sortBy: query.sortBy } : {}),
+        ...(query.archiveStatus ? { archiveStatus: query.archiveStatus } : {}),
+        ...(query.parentSessionId !== undefined ? { parentSessionId: query.parentSessionId } : {}),
+        ...(query.channelId !== undefined ? { channelId: query.channelId } : {}),
+        ...(query.originSiteId ? { originSiteId: query.originSiteId } : {}),
+        ...(query.siteAccessId ? { siteAccessId: query.siteAccessId } : {}),
+        ...(query.siteConversations ? { siteConversations: query.siteConversations } : {}),
+        ...(query.createdBy ? { createdBy: query.createdBy } : {}),
+        ...(query.updatedFrom ? { updatedFrom: query.updatedFrom } : {}),
+        ...(query.updatedBefore ? { updatedBefore: query.updatedBefore } : {}),
+        ...(query.createdFrom ? { createdFrom: query.createdFrom } : {}),
+        ...(query.createdBefore ? { createdBefore: query.createdBefore } : {}),
+        ...(query.scopeSubjectId ? { scopeSubjectId: query.scopeSubjectId } : {}),
+        ...(query.sessionIds ? { sessionIds: query.sessionIds } : {}),
+        ...(authorizationScope ? { authorizationScope } : {}),
+        // A managed human's own personal workspace has no membership row, so
+        // the list's removal fence must fall back to the organization-membership
+        // pointer, only with verified native or external owning-user provenance.
+        personalWorkspaceOwnerException: hasVerifiedOwningUserAuthorization(authorization),
+      };
+      // A compact response never carries Skill folders, so its read leaves them unread.
+      page = summary
+        ? await listSessionEntriesForSubject(db, workspaceId, listOptions)
+        : await listSessionsForSubject(
+            db,
+            workspaceId,
+            listOptions,
+            acceptsCompactSessionResponse(c) ? "omit" : "read",
+          );
     } catch (error) {
       if (error instanceof SessionListAccessError) {
         throw new HTTPException(403, { message: error.message });
@@ -1314,7 +1323,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     compactSessionResponse(c);
     const policy = await policyRead;
     if (!policy) throw new Error("Session list policy context was not loaded");
-    const decorate = (session: Session): SessionChatResponse => {
+    const decorate = (session: SessionWithoutSkills): SessionChatResponse => {
       const activity = commandActivity.get(session.id);
       const decorated = {
         ...session,
@@ -1541,12 +1550,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (!z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(404, { message: "session not found" });
     }
+    // A compact response never carries Skill folders, so its read leaves them unread.
     const session = await getSessionForSubject(
       db,
       workspaceId,
       sessionId,
       grant.subjectId,
       relatedSessionAccessFor(c),
+      acceptsCompactSessionResponse(c) ? "omit" : "read",
     );
     if (!session) {
       throw new HTTPException(404, { message: "session not found" });
@@ -2700,16 +2711,22 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       workspaceId,
       c.req.param("sessionId"),
     );
-    const lineage = await readSessionLineage(deps, grant, c.req.param("sessionId"));
+    // A compact response never carries Skill folders, so its read leaves them unread.
+    const lineage = await readSessionLineage(
+      deps,
+      grant,
+      c.req.param("sessionId"),
+      acceptsCompactSessionResponse(c) ? "omit" : "read",
+    );
     const sessionIds = [
       c.req.param("sessionId"),
       ...lineage.ancestors.map((session) => session.id),
     ];
-    const lineageSessions = [...lineage.ancestors];
-    const collect = (nodes: LineageNode[]) => {
+    const lineageSessions: SessionWithoutSkills[] = [...lineage.ancestors];
+    const collect = (nodes: LineageNodeWithoutSkills[]) => {
       for (const node of nodes) {
         sessionIds.push(node.session.id);
-        lineageSessions.push(node.session as Session);
+        lineageSessions.push(node.session);
         collect(node.children);
       }
     };
@@ -3294,6 +3311,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         capabilityName: string;
         toolsVerified: boolean;
         connectionId?: string;
+        endpointUrl?: string;
       };
       if ("connectionId" in payload) {
         // A connected account's own card: the person reconnected it or gave it
@@ -3363,6 +3381,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           capabilityId: item.id,
           capabilityName: item.name,
           toolsVerified: readiness === "ready",
+          // A server the agent asked to add was carded before it existed.
+          ...("endpointUrl" in item && item.kind === "mcp" && item.endpointUrl
+            ? { endpointUrl: item.endpointUrl }
+            : {}),
         };
       }
       const result = await enqueueCapabilitySetupContinuation(db, {
@@ -4233,7 +4255,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       workspaceId,
       sessionId,
       Number.isFinite(after) ? after : 0,
-      c.req.raw.signal,
+      liveStreamSignal(c),
       {
         ...browserSseDeliveryOptions(c.req.query("transport")),
         observability: deps.observability,
@@ -6541,7 +6563,7 @@ export function sessionListQuery(
   sortBy: "updatedAt" | "createdAt" | "name" | "archivedAt" | undefined;
   archiveStatus: "active" | "archived" | "all" | undefined;
   channelId: string | null | undefined;
-  createdBy: { kind: "subject" | "service"; subjectId: string } | undefined;
+  createdBy: { kind?: "subject" | "service"; subjectId: string } | undefined;
   updatedFrom: Date | undefined;
   updatedBefore: Date | undefined;
   createdFrom: Date | undefined;
@@ -6678,9 +6700,11 @@ export function sessionListQuery(
   }
   const createdByKind = query.createdByKind;
   const createdBySubjectId = query.createdBySubjectId;
-  if ((createdByKind === undefined) !== (createdBySubjectId === undefined)) {
+  // A kind alone names no creator. A subject id alone matches every session
+  // that subject created, whichever kind it was frozen as.
+  if (createdByKind !== undefined && createdBySubjectId === undefined) {
     throw new HTTPException(400, {
-      message: "createdByKind and createdBySubjectId must be supplied together",
+      message: "createdByKind requires createdBySubjectId",
     });
   }
   if (createdByKind !== undefined && createdByKind !== "subject" && createdByKind !== "service") {
@@ -6759,7 +6783,7 @@ export function sessionListQuery(
     originSiteId !== undefined ||
     siteAccessId !== undefined ||
     channelId !== undefined ||
-    createdByKind !== undefined ||
+    createdBySubjectId !== undefined ||
     updatedFrom !== undefined ||
     updatedBefore !== undefined ||
     createdFrom !== undefined ||
@@ -6799,10 +6823,12 @@ export function sessionListQuery(
     sortBy: sortBy.data,
     archiveStatus: archiveStatus.data,
     channelId: channelId === undefined ? undefined : channelId === "null" ? null : channelId,
-    createdBy:
-      createdByKind && createdBySubjectId
-        ? { kind: createdByKind, subjectId: createdBySubjectId }
-        : undefined,
+    createdBy: createdBySubjectId
+      ? {
+          ...(createdByKind ? { kind: createdByKind } : {}),
+          subjectId: createdBySubjectId,
+        }
+      : undefined,
     updatedFrom,
     updatedBefore,
     createdFrom,
@@ -7472,7 +7498,7 @@ async function loadEffectivePolicyContext(
   deps: ApiRouteDeps,
   workspaceId: string,
   subjectId: string,
-  sessions: readonly Session[],
+  sessions: readonly SessionWithoutSkills[],
   compact: boolean,
 ): Promise<EffectivePolicyContext> {
   // Both projections read the same workspace row; hydrate it once.
@@ -7493,20 +7519,30 @@ async function loadEffectivePolicyContext(
           deps,
           workspaceId,
           subjectId,
-          sessions,
+          sessions.map(sessionWithSkills),
           workspaceRead,
         ),
   ]);
   return { ...policy, codexPointers, toolsContext };
 }
 
+/** Only compact responses read a Session without its Skill folders. */
+function sessionWithSkills(session: Session | SessionWithoutSkills): Session {
+  if (!("skills" in session))
+    throw new Error("A complete Session response requires the Session's Skill folders");
+  return session;
+}
+
 /** The response projection of one Session: Codex pointers and effective tool policy. */
-function sessionResponse(session: Session, policy: EffectivePolicyContext): SessionChatResponse {
+function sessionResponse(
+  session: Session | SessionWithoutSkills,
+  policy: EffectivePolicyContext,
+): SessionChatResponse {
   // Preserve the public response for previously shipped clients. Current SDKs
   // explicitly request the compact projection on every request.
   if (policy.toolsContext) {
     return sessionWithEffectiveToolPolicy(
-      policy.codexPointers(session),
+      policy.codexPointers(sessionWithSkills(session)),
       policy.workspaceServerIds,
       policy.workspaceDefaultServerIds,
       policy.toolsContext,
@@ -7545,10 +7581,13 @@ type ChatLineageNode = Omit<LineageNode, "session" | "children"> & {
   children: ChatLineageNode[];
 };
 
-function mapLineageNodes(nodes: LineageNode[], policy: EffectivePolicyContext): ChatLineageNode[] {
+function mapLineageNodes(
+  nodes: LineageNodeWithoutSkills[],
+  policy: EffectivePolicyContext,
+): ChatLineageNode[] {
   return nodes.map((node) => ({
     ...node,
-    session: sessionResponse(node.session as Session, policy),
+    session: sessionResponse(node.session, policy),
     children: mapLineageNodes(node.children, policy),
   }));
 }

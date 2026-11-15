@@ -11,6 +11,7 @@ import {
   type CadenceValue,
 } from "@opengeni/react/ui/cadence-picker";
 import { t } from "@opengeni/react/app/lib/console-text";
+import { creatorType } from "@opengeni/react/app/lib/creator-initials";
 import {
   AUTOMATION_FREQUENCIES,
   AUTOMATION_NAME_MAX_LENGTH,
@@ -212,6 +213,8 @@ export function ownerName(task: ScheduledTask): string {
     return created.label.trim();
   }
   const subject = task.ownerSubjectId ?? "";
+  // An unnamed API key is just "API key", never its raw id.
+  if (creatorType({ kind: "subject", subjectId: subject }) === "api_key") return "API key";
   const bare = subject.includes(":") ? subject.slice(subject.indexOf(":") + 1) : subject;
   return bare.trim() || "Someone else";
 }
@@ -288,23 +291,72 @@ export function newScheduleDraft(defaults: DraftDefaults, timeZone?: string): Sc
   };
 }
 
+const WEEKDAYS = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY"] as const;
+
+/**
+ * The simplified interface's built-in templates, in place of the shared ones:
+ * the work of a small business on the apps it connects (mail, calendar,
+ * files, Slack) rather than repositories, pull requests and cloud spend. They
+ * run on a schedule only, so every deployment can offer them, and like every
+ * template they fill the ordinary form and nothing is sent without asking.
+ */
+export const SIMPLIFIED_INTERFACE_AUTOMATION_TEMPLATES: readonly AutomationTemplate[] = [
+  {
+    id: "day-brief",
+    name: "Morning brief",
+    description: "Today's meetings and the emails that need you, before you start.",
+    instructions:
+      "Look at my calendar for today and my inbox since yesterday morning. Write a short brief: each meeting with who it is with and what I should prepare, then the emails that still need a reply or a decision from me, most urgent first, with a link to each. Don't reply to or change anything.",
+    schedule: { type: "calendar", hour: 7, minute: 30, daysOfWeek: [...WEEKDAYS] },
+    triggers: [],
+  },
+  {
+    id: "client-update",
+    name: "Weekly client update",
+    description: "A drafted update for each client, ready for you to send.",
+    instructions:
+      "For each client I emailed or met last week, go through those emails, meetings and shared files and draft a short update for them: what we did, what comes next, and anything we need from them. Save each one as a draft reply in my email so I can check it. Don't send anything.",
+    schedule: { type: "calendar", hour: 8, minute: 0, daysOfWeek: ["MONDAY"] },
+    triggers: [],
+  },
+  {
+    id: "friday-report",
+    name: "Friday report",
+    description: "What got done this week, what is still open, and next week.",
+    instructions:
+      "Look through my email, calendar, Slack and shared files from this week. Write a one-page report: what got done, what is still open and who it is waiting on, and what is coming up next week. Link to the emails and files it mentions.",
+    schedule: { type: "calendar", hour: 15, minute: 0, daysOfWeek: ["FRIDAY"] },
+    triggers: [],
+  },
+];
+
 /**
  * The built-in templates this deployment can offer: the ones on events only
  * where events run. They are the shared ones from @opengeni/react, so these
- * pages and the embeddable panel offer the same.
+ * pages and the embeddable panel offer the same; the simplified interface
+ * offers its own (`SIMPLIFIED_INTERFACE_AUTOMATION_TEMPLATES`).
  */
-export function scheduleTemplates(eventTriggers: boolean): AutomationTemplate[] {
-  return automationTemplatesFor(builtinAutomationTemplates(t), {
-    eventTriggers,
-    workspaceEvents: true,
-  });
+export function scheduleTemplates(
+  eventTriggers: boolean,
+  simplified = false,
+): AutomationTemplate[] {
+  return automationTemplatesFor(
+    simplified ? SIMPLIFIED_INTERFACE_AUTOMATION_TEMPLATES : builtinAutomationTemplates(t),
+    { eventTriggers, workspaceEvents: true },
+  );
 }
 
+/**
+ * The built-in template a `?template=` link names. Either interface's
+ * templates open in both, so a shared link never lands on a blank form.
+ */
 export function templateById(
   id: string | undefined,
   eventTriggers = true,
 ): AutomationTemplate | undefined {
-  return scheduleTemplates(eventTriggers).find((template) => template.id === id);
+  return [...scheduleTemplates(eventTriggers), ...scheduleTemplates(eventTriggers, true)].find(
+    (template) => template.id === id,
+  );
 }
 
 /**

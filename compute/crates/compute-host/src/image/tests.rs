@@ -627,3 +627,57 @@ fn a_shared_image_is_the_same_file_and_survives_its_source() {
     modified.verify(saved.generation(), Depth::Deep).unwrap();
     fs::remove_dir_all(&dir).unwrap();
 }
+
+/// How many bytes of `path` are allocated on disk, by the file system's
+/// own count of 512-byte blocks.
+fn allocated(path: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    fs::metadata(path).unwrap().blocks() * 512
+}
+
+/// A full snapshot is written out whole, zeros and all. Published, its
+/// chunks of zeros are holes: the image takes on disk only what is not
+/// zero, and reads, hashes and verifies as before.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_whole_image_keeps_no_chunk_of_zeros_on_disk() {
+    let dir = scratch("sparse-whole");
+    let images = Images::new(dir.join("images"));
+    let (state, memory) = (dir.join("state"), dir.join("memory"));
+    write_state(&state, b"whole");
+    let mut model = vec![0_u8; usize::try_from(LEN).unwrap()];
+    // One page of data in the second chunk; zeros written out everywhere
+    // else.
+    let page = usize::try_from(CHUNK_BYTES + PAGE).unwrap();
+    model[page..page + PAGE_BYTES].fill(7);
+    fs::write(&memory, &model).unwrap();
+    assert_eq!(allocated(&memory), LEN, "written out whole");
+
+    let image = images
+        .publish(Parts::Whole {
+            state: &state,
+            memory: &memory,
+            len: LEN,
+        })
+        .unwrap();
+    let published = images.memory(image.generation());
+    let file = File::open(&published).unwrap();
+    let data = data_ranges(&file, LEN).unwrap();
+    for index in [0, 2, 3] {
+        assert!(!overlaps(&data, &chunk_range(index, LEN)), "{data:?}");
+    }
+    assert!(overlaps(&data, &chunk_range(1, LEN)), "{data:?}");
+    assert!(
+        allocated(&published) <= CHUNK_BYTES,
+        "{}",
+        allocated(&published)
+    );
+    assert_eq!(content(&images, image.generation()), model);
+    let chunks = images.chunk_map(&image).unwrap().0;
+    assert_eq!(
+        chunks.iter().map(|hash| *hash == ZERO).collect::<Vec<_>>(),
+        [true, false, true, true]
+    );
+    images.verify(image.generation(), Depth::Deep).unwrap();
+    fs::remove_dir_all(&dir).unwrap();
+}

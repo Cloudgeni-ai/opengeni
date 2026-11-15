@@ -49,6 +49,21 @@ const AUTH_ERROR =
   /\b(?:401 unauthorized|403 forbidden|invalid[_ ]token|token (?:has )?expired)\b/i;
 
 /**
+ * The text block the runtime puts first in an MCP tool result the server
+ * flagged `isError` (see packages/runtime/src/mcp-result-custom-data.ts),
+ * whose own error text follows in later blocks.
+ */
+const MCP_ERROR_LEAD = "The tool reported an error.";
+
+/** Whether an output is content blocks led by the runtime's MCP error block. */
+function mcpErrorBlocks(output: string): boolean {
+  const parsed = parseJson(output);
+  if (!Array.isArray(parsed)) return false;
+  const first = record(parsed[0]);
+  return first.type === "text" && first.text === MCP_ERROR_LEAD;
+}
+
+/**
  * Auth failures count only in an error-shaped output: plain text, or a
  * top-level `error`/`message`/`detail` field. A ticket or message body that
  * quotes "403 forbidden" doesn't turn a successful read into an error.
@@ -94,6 +109,7 @@ export function outputErrored(payload: Record<string, unknown>, output: string |
   const head = output.slice(0, 4000);
   return (
     ERROR_TEXT.some((pattern) => pattern.test(head)) ||
+    mcpErrorBlocks(output) ||
     authErrorShaped(output) ||
     rateLimitShaped(output)
   );

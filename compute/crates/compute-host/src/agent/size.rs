@@ -16,10 +16,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         config.validate()?;
         let mut rules = config.sleep.rules();
         rules.compress_under_pressure &= self.can_compress;
-        // A checkpoint clones the disk while its VM is paused. Where files
-        // cannot share extents that would copy the whole disk with the VM
-        // paused, so such a host takes none (its status says so), and its
-        // sandboxes reach the store only as they sleep.
+        // A checkpoint clones the disk, which must happen at one instant.
+        // Where files cannot share extents that would mean copying the
+        // whole disk with the VM stopped, so such a host takes none (its
+        // status says so), and its sandboxes reach the store only as they
+        // sleep.
         if !self.shares_extents() {
             rules.checkpoint_every = None;
         }

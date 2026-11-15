@@ -22,6 +22,7 @@ import {
 import { CreditAmountPicker } from "./credit-amount-picker";
 import { Notice } from "../../ui/notice";
 import { useAppContext } from "../app-context";
+import { useSimplifiedInterface } from "../lib/simplified-interface";
 import { useCreditBalance } from "./credits/use-credit-balance";
 import { userErrorText } from "../../ui/api-error";
 import { validTopupAmount } from "../lib/format";
@@ -65,6 +66,7 @@ export function CreditRequiredPromptView({
   beforeLeave,
 }: CreditRequiredPromptProps & { client: ChatClient<OpenGeniBrowserClient> }) {
   const page = usePage();
+  const { simplified, productName } = useSimplifiedInterface();
   const [topupAmount, setTopupAmount] = useState(DEFAULT_TOPUP);
   const [busy, setBusy] = useState(false);
   // A redeemed coupon, celebrated in this dialog with its real amount.
@@ -183,12 +185,12 @@ export function CreditRequiredPromptView({
         <DialogHeader>
           <DialogTitle>
             {purpose === "topup"
-              ? "Add Opengeni credits"
+              ? `Add ${productName} credits`
               : refusalCode === "byok_paid_credit_required"
                 ? "Add credits to use your own key"
                 : refusalCode === "api_credits_required"
                   ? "API usage uses credits, not your plan credit"
-                  : "Add Opengeni credits to continue"}
+                  : `Add ${productName} credits to continue`}
           </DialogTitle>
           {/* A refusal's title names its fix; the line below it says how. With
               only the Billing link to show, the link says it. */}
@@ -264,7 +266,7 @@ export function CreditRequiredPromptView({
           </DialogFooter>
         ) : null}
         {/* Own-key and API refusals have one fix: credits. */}
-        {purpose === "required" && !refusalCode ? (
+        {purpose === "required" && !refusalCode && (canUpgrade || !simplified) ? (
           <DialogFooter>
             {/* Credits are the main action when they can be bought here. */}
             <Button
@@ -320,6 +322,7 @@ export function EmptyCreditsNotice({
   onAddCredits?: (() => void) | undefined;
 }) {
   const client = useAppContext().client;
+  const { simplified, productName } = useSimplifiedInterface();
   // The balance is positive but this model can't use it (for example free
   // credit for other models), so "you don't have any" would be untrue. Only
   // that much is known, so the words claim no more. The chat's refusal
@@ -336,11 +339,11 @@ export function EmptyCreditsNotice({
   const canAdd = canBuyCredits && stripeEnabled;
   const body = someCredit
     ? canAdd
-      ? "This model can't use the Opengeni credits you have right now. Add credits, or choose another model."
-      : "This model can't use your organization's Opengeni credits right now. Choose another model, or ask an organization owner to add credits."
+      ? `This model can't use the ${productName} credits you have right now. Add credits, or choose another model.`
+      : `This model can't use your organization's ${productName} credits right now. Choose another model, or ask an organization owner to add credits.`
     : canAdd
-      ? "Chats here are paid with Opengeni credits, and you don't have any right now."
-      : "Chats here are paid with Opengeni credits, and there are none left. Ask an organization owner to add some.";
+      ? `Chats here are paid with ${productName} credits, and you don't have any right now.`
+      : `Chats here are paid with ${productName} credits, and there are none left. Ask an organization owner to add some.`;
   return (
     <Notice
       tone="waiting"
@@ -381,23 +384,26 @@ export function EmptyCreditsNotice({
             </Button>
           )
         ) : null}
-        {/* Beside Add credits it is a quiet link, flush with the text when it wraps. */}
-        <Button
-          asChild
-          type="button"
-          size="sm"
-          variant={canAdd ? "link" : "outline"}
-          className={canAdd ? "px-0" : undefined}
-        >
-          <Link
-            to="/workspaces/$workspaceId/organization"
-            params={{ workspaceId }}
-            search={{ section: "models", workspace: workspaceId }}
-            {...analyticsAction("connect_model")}
+        {/* Beside Add credits it is a quiet link, flush with the text when it wraps.
+            Geni chats run on credits only, so it has no provider account to offer. */}
+        {simplified ? null : (
+          <Button
+            asChild
+            type="button"
+            size="sm"
+            variant={canAdd ? "link" : "outline"}
+            className={canAdd ? "px-0" : undefined}
           >
-            Use your own provider account
-          </Link>
-        </Button>
+            <Link
+              to="/workspaces/$workspaceId/organization"
+              params={{ workspaceId }}
+              search={{ section: "models", workspace: workspaceId }}
+              {...analyticsAction("connect_model")}
+            >
+              Use your own provider account
+            </Link>
+          </Button>
+        )}
       </div>
     </Notice>
   );

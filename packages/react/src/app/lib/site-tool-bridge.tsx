@@ -10,7 +10,12 @@ import type { SiteToolConsentHost } from "./site-tool-consent";
 type NativeOptions<T = CreateSiteToolBridgeOptions> = T extends CreateSiteToolBridgeOptions
   ? Omit<
       T,
-      "callTool" | "isCatalogStale" | "fetchResponse" | "confirmToolCall" | "connectForToolCall"
+      | "callTool"
+      | "isCatalogStale"
+      | "fetchResponse"
+      | "confirmToolCall"
+      | "connectForToolCall"
+      | "recoverToolCall"
     > & {
       callTool?: CreateSiteToolBridgeOptions["callTool"] | undefined;
       /** The Opengeni frame's confirmation; without it, calls needing the viewer fail. */
@@ -31,6 +36,8 @@ export function createSiteToolBridge(
           confirmToolCall: consent.confirmToolCall,
           connectForToolCall: (prompt) =>
             consent.connectForToolCall({ ...prompt, workspaceId: input.workspaceId }),
+          recoverToolCall: (prompt) =>
+            consent.recoverToolCall({ ...prompt, workspaceId: input.workspaceId }),
         }
       : {}),
     isCatalogStale: isCatalogStaleApiError,

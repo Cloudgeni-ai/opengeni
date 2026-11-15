@@ -106,7 +106,13 @@ and `capability_catalog_search` offers `api:github-personal` (**Your GitHub**)
 next to `api:github-app`. Its in-chat card connects the person's account and
 then links to the repository chooser. Requests such as "connect my GitHub" or
 "do it as me" map to the personal identity; "install the GitHub app" or "give
-Opengeni access to the org" map to the App. The repositories prompt lists each
+Opengeni access to the org" map to the App. Its `personal.repositoryCount` is
+the person's chosen list, and
+`personal.allRepositories` (`{ enabled, access }`, null when unknown) reports
+the All my repositories mode, so the agent knows any repository the person can
+reach is usable up to that access without choosing it first. The mode reads as
+off while `OPENGENI_GITHUB_PERSONAL_ALL_REPOSITORIES_ENABLED` is off. The
+repositories prompt lists each
 mounted GitHub repository's identity (as the person, with their login when
 known, or as the workspace's GitHub app). In a managed sandbox it says that git and `gh`
 act as the person on personal repositories, through the
@@ -275,6 +281,44 @@ generation, canonical URI, ref, and access into the accepted turn or task.
 Credential bindings remain selectors, never grants. Missing, stale, mixed-
 account, or widened authority fails closed.
 
+A session or scheduled task that an agent creates from its own turn
+(`session_create`, `scheduled_tasks_create`, `scheduled_tasks_update`) may name
+a personal repository with only `uri`, `ref` and
+`connectionType: "github_personal"`. The server resolves the rest from the
+calling turn's frozen Your GitHub delegation
+(`resolveAgentPersonalGitHubRepositoryResources` in
+`packages/core/src/domain/agent-personal-github-resources.ts`): the same owner,
+connection and credential binding, the repository ID looked up as the person,
+and access capped by `checkPersonalGitHubRepositoryAccess`, so the chosen list
+and All my repositories mode both work. Without `access` it takes the most the
+turn holds (write only when the same check allows write now). A partly
+specified resource is completed the same way; a `credentialBindingId` or
+`repositoryId` it carries must match the turn's binding and the repository, and
+GitHub App fields are dropped. The GitHub lookup in All my repositories is the
+calling attempt's own accepted use of the person's connection, fenced like the
+Git broker; GitHub refusing the token asks the person to reconnect. A repository outside the delegation, more access than the turn
+holds, a repository a person removed from the calling chat, or a turn without
+Your GitHub access is refused with a message naming the cause. The child then
+inherits the connection use through durable propagation; it never receives
+another person's connection or more than the parent turn holds.
+
+No Your GitHub use is limited to one message or one chat. A turn's personal
+repositories always come from the person's lasting choice on the connection,
+their chosen list or All my repositories (Your GitHub is not turned on per
+workspace; D-54 covers other logins), and a chat's attachments only narrow
+which of them it holds. So a schedule an agent saves can name only repositories
+the creating turn held, and those were already usable as the person beyond that
+turn. Each run re-resolves the owner's connection, chosen list and All my
+repositories: disconnecting, removing the repository from the list or turning
+All my repositories off stops later runs, and a run never falls back to the
+workspace's GitHub app.
+
+Repository owners follow GitHub's login rules, including enterprise managed
+users, whose logins carry an underscore suffix (`octocat_acme`): 1 to 39
+letters, digits, `-` or `_`, starting with a letter or digit
+(`GITHUB_OWNER_LOGIN_PATTERN` in `packages/contracts/src/personal-github.ts`;
+migration 1370 widens the stored selection check the same way).
+
 Managed sandboxes consume this authority through Opengeni's dedicated personal
 GitHub smart-HTTP broker. The worker mints a five-minute encrypted bearer bound
 to the exact account, workspace, session/root, turn, active attempt and
@@ -293,6 +337,28 @@ the bearer through a private sandbox editor/file ingress; the token-free
 lifecycle command only atomically moves those bytes into the stable binding
 file, so the bearer never enters command text or process arguments.
 
+Several chats can share one sandbox (a parent and the workers it starts, for
+example), and each has its own bearer. The binding file, the broker
+`insteadOf` routes, the credential helper and the `gh` wrapper logic therefore
+live in one directory per chat,
+`~/.opengeni/git-credentials/sessions/<key>` (`key` is a hash of the chat id).
+Every command the runtime and worker run for a chat (agent commands, setup
+including rig setup, credential renewal and the chat's terminal) exports that directory as
+`OPENGENI_GIT_SESSION_DIR` and adds the chat's routes to Git through
+`GIT_CONFIG_PARAMETERS`, which Git passes on to the Git processes it starts
+(`packages/runtime/src/sandbox/git-session.ts`). The routes are never in the
+box's global Git config: Git takes the first of two equally long `insteadOf`
+rules, so a global rule would beat the chat's own. The box-wide credential
+helper and the `git`, `gh`, `glab` and `az` wrappers only dispatch to the
+selected directory; a process outside any chat (a terminal on the box) uses
+`sessions/latest`, the chat whose setup ran last. Renewal writes only into its
+own chat's directory, and each setup removes chat directories unused for a
+day (each use touches its directory), along with the box-wide binding files of
+earlier releases once they are as old. Paths are not an authorization
+boundary: the server checks every bearer's own chat and attempt. While a
+release rolls out, a box shared by chats on the old and the new worker can
+still see the old collision until the old worker's turns end.
+
 The broker permits only smart-HTTP discovery, upload-pack, and receive-pack.
 Before every upstream request it revalidates the exact accepted attempt,
 connection/grant generations, current repository selection, live GitHub user
@@ -302,7 +368,7 @@ no redirects, bounded deadlines, stripped ambient headers, and streaming bodies.
 A receive-pack transport failure is outcome-unknown and is never automatically
 replayed. A push that deletes or force-updates a branch other than the default
 branch follows the person's policy; one that deletes or force-updates the
-default branch or a tag asks the person first (see [Git pushes](#git-pushes)).
+default branch or a tag follows their Settings and deletions policy (Ask unless they chose otherwise; see [Git pushes](#git-pushes)).
 Ordinary pushes are unchanged.
 The standalone consumer remains default-off with personal GitHub OAuth; GitHub
 App and Connected Machine credential paths are unchanged.
@@ -362,7 +428,7 @@ person, `gh` behaves as before. In gateway mode the wrapper starts a small
 local proxy for that one command and points `gh` at it with a private,
 temporary config (`http_unix_socket`). The proxy sends `api.github.com` and
 `uploads.github.com` requests to the API's gateway with the bearer read fresh
-from the binding file; requests to other hosts (for example redirects to
+from the chat's own binding file; requests to other hosts (for example redirects to
 download logs or archives) go direct, without credentials. Because the
 checkout's remote stays `https://github.com/<owner>/<repo>`, `gh` resolves the
 repository as usual. `gh repo clone` and the Git commands `gh` runs clone and
@@ -383,8 +449,18 @@ user`, `gh repo list <org>`) and search pass as the person. GraphQL
 `repository(...)` reads are checked like REST ones, also under
 `organization`, `user`, `repositoryOwner` and `viewer`; `node(id:)` reads are
 not. GraphQL mutations are checked against the repositories their input names
-(node IDs, `repositoryNameWithOwner`, github.com URLs); when those can't be
-found, the request asks. The gateway replaces
+(node IDs, `repositoryNameWithOwner`, github.com URLs). When those can't be
+found, or a write names no repository (account and organization writes, or a
+request the gateway can't read), the allowlist can't apply, so the request
+asks whatever the person's policies say (Block still wins). This is decided
+per mutation: one on an allowed repository doesn't vouch for an organization
+or project write sent in the same request, only ID inputs (`subjectId`,
+`repositoryId`, …) and repository fields (`repositoryNameWithOwner`,
+`subIssueUrl`) count as its target, and an unrecognised mutation that also
+touches a node outside any repository, or one GitHub won't show, asks too.
+A request nested too deeply to read is treated as unrecognised, strings GitHub might read differently (escaped quotes, tabs, form feeds or carriage returns in a block string, unknown escapes) make it unrecognised, and a value under an ID input or repository field the gateway can't read as a node ID leaves the mutation unconfirmed. With All my
+repositories at write access and no repository removed from the chat there is
+no allowlist to step around, so the person's policies decide as usual. The gateway replaces
 `Authorization` with the person's token, never forwards the bearer, does not
 follow redirects, forwards only the request headers GitHub needs, buffers
 API bodies up to 32 MiB (larger ones get 413), streams uploads and responses,
@@ -402,21 +478,31 @@ tools use, so one setting covers both:
   group when no single action matches. Reviews and merges follow their own
   groups.
 - Deleting or force-updating a branch other than the repository's default
-  branch (REST `git/refs`, GraphQL `deleteRef`, `updateRef` and `updateRefs`)
-  follows the person's `Create and update work` policy, so agents can rebase
-  their own pull request branches and delete merged ones. The gateway reads
+  branch (REST `git/refs`, also with the ref's slashes encoded as `gh` sends
+  them, e.g. `git/refs/heads%2Fmy%2Fbranch`; GraphQL `deleteRef`, `updateRef`
+  and `updateRefs`) follows the person's `Create and update work` policy, so
+  agents can rebase their own pull request branches and delete merged ones
+  (`gh pr merge --delete-branch`). The gateway reads
   the default branch with the person's token (REST `default_branch`, kept for
   a minute per connection and repository, so a just-changed default branch
   can take that long to apply; or the GraphQL Ref and Repository nodes, which
   must belong to a repository the request was checked against); when it
-  can't confirm every ref is such a branch, the request asks.
-- Destructive or hard-to-undo requests always ask: deleting or force-updating
-  the default branch, deleting or force-moving tags, deleting repositories,
+  can't confirm every ref is such a branch, the request is treated as a
+  settings-and-deletions request (below).
+- Destructive or hard-to-undo requests follow the person's `Settings and
+  deletions` policy (`sensitive` in the API; policy action
+  `github_sensitive_request`), together with the policy of any matching
+  action, and the strictest decision applies: deleting or force-updating the
+  default branch, deleting or force-moving tags, deleting repositories,
   releases, comments or other data; repository settings, collaborators and
-  teams, secrets and variables, webhooks and deploy keys, branch protection,
-  transfer, archive and visibility, approving deployments or fork workflow
-  runs. So do REST writes and GraphQL mutations the gateway doesn't
-  recognise.
+  teams, secrets, variables and environments, webhooks and deploy keys,
+  branch protection, transfer, archive and visibility, approving deployments
+  or fork workflow runs. So do REST writes and GraphQL mutations the gateway
+  doesn't recognise. The policy asks until the person chooses otherwise; a
+  connection-wide Allow for every GitHub tool does not cover it, and a
+  connection-wide Block covers it only while Settings and deletions has no
+  choice of its own. Only Your GitHub has it: the workspace app has no `gh`
+  gateway.
 - Block always wins. Unattended sessions refuse instead of asking.
 
 A request that needs approval is not sent. `gh` prints `Waiting for approval:
@@ -424,7 +510,13 @@ A request that needs approval is not sent. `gh` prints `Waiting for approval:
 the response carries `x-opengeni-approval: pending`, and the turn ends with
 the normal approval card. The approval is
 bound to a digest of the exact request (method, path, query and body bytes); after
-approval, running the same command again sends it once. A declined request
+approval, running the same command again sends it once. A secret write
+(`PUT …/secrets/{name}`, as `gh secret set` sends) is bound to everything but
+`encrypted_value` and `key_id`: `gh` seals the value with fresh randomness on
+every run, so the retry differs only in ciphertext. The repository,
+environment, secret name and any other fields (such as an organization
+secret's visibility) still have to match, and the approval card shows the
+value as `[sealed]`. A declined request
 answers `Declined by the person`. Outcomes are recorded in the same connector
 action ledger as tool calls: a 5xx or transport failure is outcome-unknown and
 is not replayed.
@@ -438,7 +530,9 @@ when every such ref is a branch other than the repository's default branch
 (the `default_branch` of the live repository check the broker makes on every
 request), it follows the person's `Create and update work` policy; when one
 is the default branch, a tag or another ref, or the default branch is
-unknown, it asks the person. An approval is bound to the exact ref updates.
+unknown, it also follows their `Settings and deletions` policy (Ask unless
+they chose otherwise), as does a push the gateway can't read. An approval is
+bound to the exact ref updates.
 Git reports a waiting push as a rejected ref with the same message. Pushes
 from shallow clones (how managed sandboxes clone) are read like any other.
 When the gateway can't tell whether an update is a fast-forward, it treats it
@@ -454,6 +548,8 @@ and agent-created child sessions keep the already-approved personal identity
 without asking the user to reconnect on every turn. It does not broaden access:
 the child must request an exact subset of the parent's personal GitHub
 repositories and may narrow write access to read, never widen read to write.
+The ref is only the branch to check out, not authority, so a child may check
+out another ref of a repository the parent holds.
 `once` grants stop at their accepted work; `session` grants remain within the
 same session; `always` grants may cross to causally linked child/goal work. The
 frozen connection and selection generations travel with the work, and every

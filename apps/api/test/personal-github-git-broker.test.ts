@@ -672,7 +672,7 @@ describe("personal GitHub Git broker", () => {
       execFileSync("git", ["init", "--bare", "--initial-branch=main", bareRepository]);
       execFileSync("git", ["-C", bareRepository, "config", "http.receivepack", "true"]);
       const decisions: string[] = [];
-      const alwaysAsks: boolean[] = [];
+      const sensitives: boolean[] = [];
       let answer: "wait" | "allow" = "wait";
       const completed: string[] = [];
       const providerFetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -722,7 +722,7 @@ describe("personal GitHub Git broker", () => {
             },
             decide: async (_identity, input) => {
               decisions.push(input.title);
-              alwaysAsks.push(input.action.alwaysAsk);
+              sensitives.push(input.action.sensitive);
               return answer === "allow"
                 ? { kind: "run", requestId: `request-${decisions.length}` }
                 : {
@@ -823,7 +823,7 @@ describe("personal GitHub Git broker", () => {
       ]);
       // GitHub's default branch: rewriting main always asks; deleting another
       // branch follows the person's policy.
-      expect(alwaysAsks).toEqual([true, false]);
+      expect(sensitives).toEqual([true, false]);
 
       answer = "allow";
       expect((await push(["--force", "main"])).exitCode).toBe(0);

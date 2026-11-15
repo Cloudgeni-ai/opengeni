@@ -1061,6 +1061,7 @@ describe("deployment contract", () => {
     expect(artifacts.runtimeEnv).toContain("OPENGENI_MICROSOFT_TEAMS_TOOLS_ENABLED=false");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_TEAMS_BOT_ENABLED=false");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_TEAMS_BOT_SELF_SERVE_SETUP_ENABLED=false");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_TEAMS_WORKSPACE_ROUTING_ENABLED=false");
     expect(artifacts.runtimeEnv).toContain(
       "OPENGENI_TEAMS_BOT_ALLOWED_CHANNEL_IDS=00000000-0000-4000-8000-000000000001:19:pilot@thread.tacv2",
     );

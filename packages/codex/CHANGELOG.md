@@ -1,5 +1,133 @@
 # @opengeni/codex
 
+## 6.23.0
+
+### Patch Changes
+
+- Updated dependencies [c0089e1]
+- Updated dependencies [9dd96b0]
+- Updated dependencies [adc2409]
+- Updated dependencies [f6a7c28]
+  - @opengeni/contracts@6.23.0
+  - @opengeni/network@6.23.0
+
+## 6.22.0
+
+### Patch Changes
+
+- Updated dependencies [d50092b]
+  - @opengeni/contracts@6.22.0
+  - @opengeni/network@6.22.0
+
+## 6.21.0
+
+### Patch Changes
+
+- Updated dependencies [7d0d52b]
+- Updated dependencies [ef4c334]
+- Updated dependencies [ce864c0]
+- Updated dependencies [6ac2cd4]
+  - @opengeni/contracts@6.21.0
+  - @opengeni/network@6.21.0
+
+## 6.20.1
+
+### Patch Changes
+
+- @opengeni/contracts@6.20.1
+- @opengeni/network@6.20.1
+
+## 6.20.0
+
+### Patch Changes
+
+- 6c10a4d: Switching a chat to a Codex subscription after the model edited files with native apply_patch no longer fails with `400 missing_required_parameter: input[N].status`. The Responses input schema requires `status` on apply_patch, computer, local shell and program-output items, as well as on hosted search, code interpreter and image-generation calls, but history and the Codex request normalizer kept it only for hosted calls. All of these item types now keep their status in stored history and in every request, and a type check against the OpenAI SDK fails when that list goes stale. Chats that already failed this way after apply_patch work again on Retry, without changes to stored history.
+
+  Reasoning is also never resent as text after a model, provider or billing switch. Reasoning that the new route can't accept natively (another provider's encrypted reasoning, Claude thinking on another API, including Claude progress updates stored as assistant messages, Chat reasoning, or unsigned reasoning on Claude Chat routes) is left out of the request. Before, it was sent as "[Historical reasoning from another model]" or "[Historical reasoning without a provider signature]" assistant text, which could trip a provider's safety systems. Stored history is unchanged, so switching back to the issuing provider still replays it natively.
+
+- Updated dependencies [ae3972e]
+- Updated dependencies [e37485b]
+- Updated dependencies [9c17a87]
+  - @opengeni/contracts@6.20.0
+  - @opengeni/network@6.20.0
+
+## 6.19.0
+
+### Patch Changes
+
+- Updated dependencies [a85adef]
+  - @opengeni/contracts@6.19.0
+  - @opengeni/network@6.19.0
+
+## 6.18.0
+
+### Patch Changes
+
+- Updated dependencies [f313a0e]
+- Updated dependencies [6813960]
+- Updated dependencies [9188c1d]
+- Updated dependencies [3105a8b]
+- Updated dependencies [a16189c]
+- Updated dependencies [89cf4ba]
+- Updated dependencies [917393e]
+  - @opengeni/contracts@6.18.0
+  - @opengeni/network@6.18.0
+
+## 6.17.0
+
+### Patch Changes
+
+- Updated dependencies [8073ab6]
+- Updated dependencies [43aa19d]
+- Updated dependencies [b1b69fc]
+- Updated dependencies [deccb54]
+- Updated dependencies [668c5ed]
+- Updated dependencies [e3cb3c1]
+  - @opengeni/contracts@6.17.0
+  - @opengeni/network@6.17.0
+
+## 6.16.0
+
+### Patch Changes
+
+- Updated dependencies [fb19875]
+- Updated dependencies [54dc5da]
+  - @opengeni/contracts@6.16.0
+  - @opengeni/network@6.16.0
+
+## 6.15.0
+
+### Patch Changes
+
+- 19ab8c3: Update the Codex client identity to 0.167.1: the backend now refuses GPT-6.1 Sol turns from older clients.
+- cd033ae: A Codex model gated above the client version Opengeni presents no longer strands turns. The version refusal ("requires a newer version of Codex") now fails the turn with `codex_client_version_rejected` and is never treated as a plan refusal, even when it carries an upgrade code. When the backend hides a model from every connected account's live model list, home-provider placement no longer waits behind another account's unrelated quota reset: it runs on capacity, and the provider's answer decides. Nothing is written against the account, so service returns as soon as the presented version is new enough.
+- 850b4d5: When a model refuses encrypted reasoning that another model or account left in the chat, the failed-turn banner now says "This model can’t read earlier reasoning in this chat." and points at the model picker, instead of "The session stopped unexpectedly." Retry stays, and the provider's exact text stays behind Details. The runtime's recovery and the banner share one rule for recognising this refusal (`@opengeni/contracts/encrypted-reasoning-refusal`).
+- Updated dependencies [708848c]
+- Updated dependencies [5525e63]
+- Updated dependencies [60d067d]
+- Updated dependencies [da60317]
+- Updated dependencies [f92ff08]
+- Updated dependencies [060c983]
+- Updated dependencies [dfeab20]
+- Updated dependencies [9885d37]
+- Updated dependencies [f22647a]
+- Updated dependencies [850b4d5]
+  - @opengeni/contracts@6.15.0
+  - @opengeni/network@6.15.0
+
+## 6.14.0
+
+### Patch Changes
+
+- Updated dependencies [c976c87]
+- Updated dependencies [6ae0528]
+- Updated dependencies [3b853ca]
+- Updated dependencies [dd11dad]
+- Updated dependencies [91320a4]
+- Updated dependencies [c472500]
+  - @opengeni/contracts@6.14.0
+  - @opengeni/network@6.14.0
+
 ## 6.13.0
 
 ### Patch Changes

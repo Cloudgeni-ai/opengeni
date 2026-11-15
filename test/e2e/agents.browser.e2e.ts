@@ -72,25 +72,22 @@ describe("agents in the browser", () => {
     await page.close();
   }, 60_000);
 
-  test("an agent's page shows its Slack handle per Slack workspace", async () => {
+  test("an agent's page shows how to call it in each linked Slack workspace", async () => {
     const page = await open("agent");
-    await page.getByText("@Opengeni +releases").waitFor();
-    const acme = page.getByRole("switch", { name: "Available in Acme", exact: true });
-    expect(await acme.isChecked()).toBe(true);
-    const support = page.getByRole("switch", { name: "Available in Acme Support" });
-    expect(await support.isChecked()).toBe(false);
-    // On in one Slack workspace at a time: the other says why it's off.
-    expect(await support.getAttribute("aria-disabled")).toBe("true");
-    await page.getByText("It's available in Acme. Turn that off first.").first().waitFor();
-    await page.getByRole("button", { name: "Introduce" }).waitFor();
+    // One handle per linked Slack workspace, so wait on the first.
+    await page.getByText("@Opengeni Release manager").first().waitFor();
+    // There is no switch to make it available: it is, wherever it can be.
+    expect(await page.getByRole("switch", { name: /^Available in/u }).count()).toBe(0);
+    // It is in every linked Slack workspace at once, each with its own intros.
+    expect(await page.getByText("@Opengeni Release manager").count()).toBe(2);
+    expect(await page.getByText("one Slack workspace").count()).toBe(0);
+    expect(await page.getByRole("button", { name: "Introduce" }).count()).toBe(2);
     await page.close();
   }, 60_000);
 
   test("an Only me agent says why it can't be in Slack", async () => {
     const page = await open("agent-private");
-    await page.getByText("Needs People in Platform under Who can use it.").first().waitFor();
-    const acme = page.getByRole("switch", { name: "Available in Acme", exact: true });
-    expect(await acme.getAttribute("aria-disabled")).toBe("true");
+    await page.getByText("Only me agents stay in the app.", { exact: false }).first().waitFor();
     await page.close();
   }, 60_000);
 

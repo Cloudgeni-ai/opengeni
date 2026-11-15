@@ -4,7 +4,8 @@
  *
  * An installation without agents never reaches anything here that changes a
  * message, an instruction or a query result, which is what keeps it exactly as
- * it was before agents existed.
+ * it was before agents existed. Every shared agent of a linked workspace is
+ * one of its agents, without a separate step.
  */
 import {
   slackAgentCallText as slackAgentCallFor,
@@ -13,6 +14,7 @@ import {
 import { getWorkspace, listSlackAgentsForConnection, type SlackAgentRecord } from "@opengeni/db";
 import { agentMemoryAccess, agentMemoryGuidance, type ApiRouteDeps } from "@opengeni/core";
 
+import { ensureSlackInstallationAgents } from "./agent-slack-availability";
 import type { SlackRoutingAgent } from "./slack-agent-address";
 import { escapeSlackMrkdwn } from "./slack-app-home";
 import type { SlackMessageBlock } from "./slack-bot";
@@ -29,12 +31,17 @@ export const NO_SLACK_AGENTS: LoadedSlackAgents = {
   labels: new Map(),
 };
 
-/** One installation's agents with their workspace names. One query when there are none. */
+/**
+ * One installation's agents with their workspace names. Every shared agent of
+ * the workspaces it is linked to is made available here first (see
+ * agent-slack-availability.ts); that is one read when nothing is missing.
+ */
 export async function loadSlackAgentsForConnection(
   deps: Pick<ApiRouteDeps, "db">,
   home: { accountId: string; workspaceId: string },
   connectionId: string,
 ): Promise<LoadedSlackAgents> {
+  await ensureSlackInstallationAgents(deps, home, connectionId);
   const records = await listSlackAgentsForConnection(deps.db, home, { connectionId });
   if (records.length === 0) return NO_SLACK_AGENTS;
   const labels = new Map<string, string | null>();

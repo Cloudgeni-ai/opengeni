@@ -164,6 +164,9 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
     }
     choiceRef.current = next;
     setChoice(choiceRef.current);
+    // A refusal names what to change; once the person changes it, the stale
+    // reason goes. An unconfirmed create keeps its status until it settles.
+    if (!pendingRef.current) setError(null);
   };
   const effectivePolicy = () => {
     const model = choiceRef.current.model ?? catalog.defaultModel;

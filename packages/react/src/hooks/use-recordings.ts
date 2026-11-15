@@ -203,6 +203,12 @@ export type UseRecorderOptions = RecordingsClientOverride & {
   store?: RecordingChunkStore;
   /** Finish recordings an earlier page left behind when the hook mounts. Default: on. */
   resumePending?: boolean;
+  /**
+   * Who records, such as the signed-in person's email: their recordings are
+   * tagged with it, so signing them out can find and remove what this device
+   * still holds for them, and only theirs are finished when the hook mounts.
+   */
+  ownerId?: string;
   /** Called once the server has every chunk of a recording and transcription has started. */
   onFinished?: (recordingId: string) => void;
 };
@@ -409,8 +415,12 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
       // Save what a capture cut short left half-written, then finish everything.
       await platformRef.current.recover?.(store()).catch(() => undefined);
       // Dictations are the composer's to finish; this hook finishes the rest.
+      // Another person's recordings wait for them to sign in here again.
+      const ownerId = optionsRef.current.ownerId;
       return await uploader().resume({
-        only: (recording) => recording.create.purpose !== "dictation",
+        only: (recording) =>
+          recording.create.purpose !== "dictation" &&
+          (!ownerId || !recording.ownerId || recording.ownerId === ownerId),
       });
     })()
       .then((ids) => {
@@ -476,6 +486,7 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
       recorder = platformRef.current.createRecorder({
         client: transport,
         workspaceId,
+        ...(optionsRef.current.ownerId ? { ownerId: optionsRef.current.ownerId } : {}),
         store: store(),
         uploader: uploader(),
         ...(merged.title ? { title: merged.title } : {}),

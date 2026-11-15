@@ -50,6 +50,10 @@ import {
 } from "@opengeni/config";
 import type { SlackAgentRecord } from "@opengeni/db";
 
+import {
+  organizationAgentPersonRefusal,
+  type OrganizationAgentPersonRefusal,
+} from "./organization-agents";
 import { escapeSlackMrkdwn } from "./slack-app-home";
 
 const OPEN_SLACK_AGENT_SUBJECT_PREFIX = "slack-agent:";
@@ -242,22 +246,12 @@ export function openSlackAgentRefusal(
   return null;
 }
 
-/** Why a person Slack lets ask cannot ask as far as Opengeni knows them, or null. */
-export type OpenSlackAgentPersonRefusal = "not_linked" | "not_organization_member";
-
 /**
- * The Opengeni half of who may ask an open agent: the Slack account is linked
- * to someone who is an active, full member of the installation's organization
- * (both read live by the caller on every message).
+ * Why a person Slack lets ask cannot ask as far as Opengeni knows them, or
+ * null: the integration-neutral check in organization-agents.ts.
  */
-export function openSlackAgentPersonRefusal(input: {
-  linkedSubjectId: string | null;
-  organizationMember: boolean;
-}): OpenSlackAgentPersonRefusal | null {
-  if (!input.linkedSubjectId) return "not_linked";
-  if (!input.organizationMember) return "not_organization_member";
-  return null;
-}
+export type OpenSlackAgentPersonRefusal = OrganizationAgentPersonRefusal;
+export const openSlackAgentPersonRefusal = organizationAgentPersonRefusal;
 
 /** Slack trigger kinds that can start or continue an open agent's chat. */
 export const OPEN_SLACK_AGENT_TRIGGER_KINDS: ReadonlySet<string> = new Set([

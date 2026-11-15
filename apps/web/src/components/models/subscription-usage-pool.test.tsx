@@ -326,3 +326,50 @@ test("an unreported account is named as left out of a total the others still giv
   // The same inset as list rows, so the bar lines up with their dividers.
   expect(container.querySelector("section")!.className).toContain("px-3");
 });
+
+test("usage credits: the card names accounts with them on and those that haven't said", async () => {
+  const now = Date.parse("2026-11-11T08:20:00Z");
+  await act(async () => root.render(<ExhaustedClaudePreview now={now} mixed />));
+  expect(container.textContent).toContain(
+    "Usage credits are on for max-a@example.com: Claude can bill usage past the plan limits to it.",
+  );
+  expect(container.textContent).toContain(
+    "Claude subscription hasn't reported whether usage credits are on.",
+  );
+  // Only that account's row carries the chip.
+  const rows = [...container.querySelectorAll("li")].slice(1);
+  expect(rows.map((row) => row.textContent!.includes("Usage credits on"))).toEqual([
+    false,
+    true,
+    false,
+    false,
+    false,
+    false,
+  ]);
+  // Every account off (or another provider, which reports none): nothing is said.
+  await act(async () => root.render(<ExhaustedClaudePreview now={now} />));
+  expect(container.textContent).not.toContain("Usage credits");
+  expect(container.textContent).not.toContain("usage credits");
+});
+
+test("usage credits: the provider heading counts accounts with them on", async () => {
+  const pool = pooledLimitsFixture("organization");
+  const accounts = pool.windows[0]!.accounts;
+  pool.usageCredits = accounts.map((account, index) => ({
+    id: account.id,
+    label: account.label,
+    state: index === 2 ? "unknown" : "on",
+  }));
+  await act(async () =>
+    root.render(
+      <ul>
+        <ProviderGroupHeading
+          title="Claude"
+          facts={["3 accounts", null]}
+          pool={{ pool, loading: false }}
+        />
+      </ul>,
+    ),
+  );
+  expect(container.textContent).toContain("3 accounts · 2 with usage credits on");
+});

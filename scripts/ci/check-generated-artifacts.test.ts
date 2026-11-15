@@ -61,6 +61,12 @@ test("the merge batcher regenerates existing artifacts with plain commands", () 
   const snapshot = REGENERATED_ON_CONFLICT.find((entry) => entry.name === "Public API snapshot")!;
   expect(regenerates(snapshot, "scripts/public-api/surface.gen.json")).toBe(true);
   expect(regenerates(snapshot, "scripts/public-api/surface.gen.json.bak")).toBe(false);
+  // Two PRs that each change a different workflow conflict only in its hashes.
+  expect(
+    REGENERATED_ON_CONFLICT.some((entry) =>
+      regenerates(entry, "scripts/workflow-execution-graph-manifest.json"),
+    ),
+  ).toBe(true);
 });
 
 test("the merge batcher regenerates the public API snapshot before what reads it", () => {

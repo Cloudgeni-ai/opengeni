@@ -28,6 +28,8 @@ import {
 import { noteClientRequestFailure } from "@opengeni/react/app/lib/client-signals";
 import { signupAttribution, signupReturnPath } from "./lib/signup-attribution";
 import { askForPasskey, createPasskey, type PasskeyCeremony } from "./lib/passkeys";
+import { PASSKEY_STEP_UP_HANDOFF_PATH } from "@opengeni/contracts/managed-sign-in-methods";
+import { withAdminStepUp } from "./lib/admin-step-up";
 import { browserAccountBridgeBlockersSnapshot } from "@opengeni/react/app/lib/browser-account-bridge";
 import {
   decideVoiceDeployment,
@@ -164,25 +166,30 @@ export function createOpenGeniClient(
     baseUrl: apiBaseUrl,
     beginSharedRead,
     headers: () => ({ ...authHeaders(), ...userActivityHeaders(), ...desktopAppHeaders() }),
-    fetch: async (input, init) => {
-      const actorBound = activeAuthConfig?.mode === "managedSession" || managedActorEpoch !== null;
-      if (actorBound) {
-        if (createdAtActorRevision !== managedActorRevision) {
-          throw new DOMException("The browser account changed", "AbortError");
-        }
-      }
-      const response = await managedActorFetch(input, {
-        ...init,
-        // API requests need managed-session cookies. The SDK explicitly marks
-        // signed object-storage requests as credential-free; preserve that
-        // narrower policy instead of overriding it at the console boundary.
-        credentials: init?.credentials ?? "include",
-        signal: init?.signal,
-      });
-      handleApiContractResponse(response);
-      noteSignInLost(response);
-      return response;
-    },
+    fetch: (input, init) =>
+      withAdminStepUp(
+        async () => {
+          const actorBound =
+            activeAuthConfig?.mode === "managedSession" || managedActorEpoch !== null;
+          if (actorBound) {
+            if (createdAtActorRevision !== managedActorRevision) {
+              throw new DOMException("The browser account changed", "AbortError");
+            }
+          }
+          const response = await managedActorFetch(input, {
+            ...init,
+            // API requests need managed-session cookies. The SDK explicitly marks
+            // signed object-storage requests as credential-free; preserve that
+            // narrower policy instead of overriding it at the console boundary.
+            credentials: init?.credentials ?? "include",
+            signal: init?.signal,
+          });
+          handleApiContractResponse(response);
+          noteSignInLost(response);
+          return response;
+        },
+        { input, init },
+      ),
   }).withSessionResponse("chat");
 }
 
@@ -859,20 +866,25 @@ function authHeaders(): Record<string, string> {
 }
 
 export async function requestResponse(path: string, init?: RequestInit): Promise<Response> {
-  const response = await managedActorFetch(`${apiBaseUrl}${path}`, {
-    ...init,
-    credentials: "include",
-    headers: {
-      "content-type": "application/json",
-      [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
-      ...authHeaders(),
-      ...userActivityHeaders(),
-      ...desktopAppHeaders(),
-      ...init?.headers,
+  return await withAdminStepUp(
+    async () => {
+      const response = await managedActorFetch(`${apiBaseUrl}${path}`, {
+        ...init,
+        credentials: "include",
+        headers: {
+          "content-type": "application/json",
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+          ...authHeaders(),
+          ...userActivityHeaders(),
+          ...desktopAppHeaders(),
+          ...init?.headers,
+        },
+      });
+      handleApiContractResponse(response);
+      return response;
     },
-  });
-  handleApiContractResponse(response);
-  return response;
+    { input: path, init },
+  );
 }
 
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -1066,6 +1078,70 @@ export async function signInPasskey(): Promise<unknown> {
   });
 }
 
+/** How long a step-up request may take before the dialog says so, apart from the passkey prompt. */
+const STEP_UP_REQUEST_TIMEOUT_MS = 30_000;
+
+function stepUpRequestDeadline(): { signal?: AbortSignal } {
+  return typeof AbortSignal.timeout === "function"
+    ? { signal: AbortSignal.timeout(STEP_UP_REQUEST_TIMEOUT_MS) }
+    : {};
+}
+
+/**
+ * Confirms it's this signed-in person with one of their passkeys. With a
+ * handoff, the answer carries the one-time code for the app that handed it
+ * over.
+ */
+async function stepUpWithPasskey(handoffId?: string): Promise<{ code?: string }> {
+  const ceremony = await authRequest<PasskeyCeremony>("/passkey/step-up/options", {
+    method: "POST",
+    body: JSON.stringify(handoffId ? { handoffId } : {}),
+    ...stepUpRequestDeadline(),
+  });
+  const response = await askForPasskey(ceremony);
+  return await authRequest<{ code?: string }>("/passkey/step-up", {
+    method: "POST",
+    body: JSON.stringify({ challengeId: ceremony.challengeId, response }),
+    ...stepUpRequestDeadline(),
+  });
+}
+
+/** Confirms it's this signed-in person with one of their passkeys, for admin changes. */
+export async function confirmAdminWithPasskey(): Promise<void> {
+  await stepUpWithPasskey();
+}
+
+/** Confirms an app's handoff in this browser; returns the code to type into the app. */
+export async function confirmPasskeyHandoff(handoffId: string): Promise<string> {
+  const { code } = await stepUpWithPasskey(handoffId);
+  if (!code) throw new Error("The server didn't return a code");
+  return code;
+}
+
+/** A step-up for this session, confirmed in the person's own browser (see `PASSKEY_STEP_UP_HANDOFF_PATH`). */
+export type PasskeyStepUpHandoff = {
+  handoffId: string;
+  expiresAt: string;
+  expiresInSeconds: number;
+};
+
+export async function startPasskeyStepUpHandoff(): Promise<PasskeyStepUpHandoff> {
+  return await authRequest<PasskeyStepUpHandoff>("/passkey/step-up/handoff", {
+    method: "POST",
+    body: "{}",
+    ...stepUpRequestDeadline(),
+  });
+}
+
+/** This session claims its handoff with the code the browser showed, which confirms it. */
+export async function claimPasskeyStepUpHandoff(handoffId: string, code: string): Promise<void> {
+  await authRequest<unknown>(`/passkey/step-up/handoff/${encodeURIComponent(handoffId)}/claim`, {
+    method: "POST",
+    body: JSON.stringify({ code }),
+    ...stepUpRequestDeadline(),
+  });
+}
+
 /** Creates an account with only a name and a new passkey, and signs in to it. */
 export async function signUpPasskey(input: {
   name: string;
@@ -1098,6 +1174,7 @@ function authReturnBase(): string {
   if (organizationSecurity) return organizationSecurity;
   return window.location.pathname === "/connect-agent" ||
     window.location.pathname === "/native-sign-in" ||
+    window.location.pathname === PASSKEY_STEP_UP_HANDOFF_PATH ||
     window.location.pathname === "/site-auth/authorize"
     ? `${window.location.pathname}${window.location.search}`
     : "/";

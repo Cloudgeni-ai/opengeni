@@ -6368,6 +6368,23 @@ describe("runtime event normalization", () => {
     expect(staticInstructions(off.instructions)).not.toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);
   });
 
+  test("Codemode guidance keeps delayed polling inside its credential lifetime", () => {
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("intermediate data within the live attempt");
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "Background commands keep the launching attempt's credentials; a new turn does not renew those processes.",
+    );
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "Do not leave a sleeping script or polling loop to make Codemode calls after ending your turn.",
+    );
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "For a later recheck, let the session wake, then launch a fresh command.",
+    );
+    // It does not advise replaying a possibly committed operation.
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "Observation failure or outcome_unknown does not prove execution failed",
+    );
+  });
+
   test("no token minted for the turn omits the directive", () => {
     const agent = buildOpenGeniAgent(testSettings(codemodeOn), []);
     expect(staticInstructions(agent.instructions)).not.toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);
@@ -6606,6 +6623,37 @@ describe("runtime event normalization", () => {
     expect(new TextDecoder().decode(entry.children["source.txt"].content)).toBe("hello");
     expect(sandboxFileDownloadsForAgent(agent)).toEqual([]);
     expect((agent as any).defaultManifest.entries[`.opengeni/files/${fileId}`].type).toBe("dir");
+  });
+
+  test("accepts file names that merely contain two dots and still refuses path segments", () => {
+    const settings = testSettings();
+    const download = (filename: string) => ({
+      fileId: "file-1",
+      mountPath: ".opengeni/files/file-1",
+      filename,
+      content: new TextEncoder().encode("hello"),
+      sizeBytes: 5,
+    });
+    const baseClient = { backendId: "docker", create: async () => ({}) } as any;
+    for (const filename of [
+      "notes..txt",
+      "Quarterly report..pdf",
+      "v1..2.csv",
+      "..hidden",
+      "end..",
+    ]) {
+      expect(() => withSandboxFileDownloads(baseClient, [download(filename)])).not.toThrow();
+      const manifest = buildManifest(settings, [{ kind: "file", fileId: "file-1" }], undefined, [
+        download(filename),
+      ]);
+      const entry = manifest.entries[".opengeni/files/file-1"] as any;
+      expect(entry.children[filename].type).toBe("file");
+    }
+    for (const filename of ["", ".", "..", "../escape.txt", "a/b.txt", "a\\b.txt", "nul\0.txt"]) {
+      expect(() => withSandboxFileDownloads(baseClient, [download(filename)])).toThrow(
+        "Invalid sandbox file name for file-1",
+      );
+    }
   });
 
   test("downloads signed file resources before sandbox use without emitting URLs in events", async () => {
@@ -7884,7 +7932,8 @@ describe("runtime event normalization", () => {
       ),
     ).rejects.toThrow("Sandbox could not receive the Git broker credential");
 
-    expect(created).toHaveLength(2);
+    // Three seed attempts (an unknown outcome is retried) plus the gh kit.
+    expect(created).toHaveLength(4);
     expect(deleted.toSorted()).toEqual(created.toSorted());
   });
 
@@ -9551,6 +9600,18 @@ describe("runtime event normalization", () => {
         structuralResults.push(await structural.executeCatalogTool("inspect", {}));
       }
 
+      // A call that needs its connection signed in again says so in a typed
+      // code, beside the same text.
+      expect(structuralResults[1]).toMatchObject({
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: "Authentication required - a connection link was posted to the session.",
+          },
+        ],
+        structuredContent: { error: { code: "connection_auth_needed", outcomeUnknown: false } },
+      });
       expect(structuralResults[2]).toMatchObject({
         isError: true,
         structuredContent: {

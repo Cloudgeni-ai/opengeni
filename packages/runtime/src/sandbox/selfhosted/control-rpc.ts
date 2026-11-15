@@ -519,7 +519,11 @@ export const AGENT_UNRESPONSIVE_RECOVERY_DETAIL_KEY = "_agent_unresponsive_recov
  *    recorded, so none was made);
  *  - `answering`: its agent answered again before a restart, so none was made;
  *  - `host_busy`: its host is busy with it, as handing it off to another host,
- *    and refuses to wake it for a short while, so no restart was made. */
+ *    and refuses to wake it for a short while, so no restart was made;
+ *  - `host_unavailable`: a restart was asked for, but the control service
+ *    answered that it cannot carry it out now (`503 unavailable`: the box's
+ *    host restarting its own agent, unreachable, or not answering once asked),
+ *    so it was probably, though not certainly, not restarted. */
 export type UnresponsiveAgentRecovery =
   | "restarted"
   | "restarting"
@@ -527,7 +531,8 @@ export type UnresponsiveAgentRecovery =
   | "restart_failed"
   | "restart_unavailable"
   | "answering"
-  | "host_busy";
+  | "host_busy"
+  | "host_unavailable";
 
 /** The reserved `detail` key the transport sets to "1" when a no-responder fault
  *  comes after it already waited out its reconnect window for that exact process.

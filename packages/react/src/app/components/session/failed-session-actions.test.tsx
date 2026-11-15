@@ -842,14 +842,20 @@ test("unsupported model directs to existing picker; a changed model permits reco
   const container = await render(
     <FailedSessionBanner failure={unavailable} actions={actions} canChooseModel />,
   );
-  expect(container.textContent).toBe("This model isn’t available. Choose another below.");
+  // The headline replaced the recorded text, which stays behind Details.
+  expect(container.querySelector('[data-testid="failed-session-banner"] span')!.textContent).toBe(
+    "This model isn’t available. Choose another below.",
+  );
+  expect(container.querySelector("details")!.textContent).toBe(`Details${unavailable.reason}`);
   expect(container.querySelector("button")).toBeNull();
   await act(async () =>
     root!.render(
       <FailedSessionBanner failure={unavailable} actions={actions} canChooseModel={false} />,
     ),
   );
-  expect(container.textContent).toBe("This model isn’t available.");
+  expect(container.querySelector('[data-testid="failed-session-banner"] span')!.textContent).toBe(
+    "This model isn’t available.",
+  );
   expect(container.querySelector("button")).toBeNull();
   await act(async () =>
     root!.render(<FailedSessionBanner failure={unavailable} actions={actions} modelChanged />),
@@ -1015,6 +1021,18 @@ test("a compaction failure the timeline already shows keeps only its recovery ac
 });
 
 test("the timeline flag never hides a failure the timeline cannot own", async () => {
+  // A usage-limit row in the timeline owns its failure: the banner keeps only Retry.
+  const limited = await render(
+    <FailedSessionBanner
+      failure={{ ...failure, failureCode: "allowance_exhausted" }}
+      actions={actions}
+      shownInTimeline
+    />,
+  );
+  expect(limited.querySelector('[data-testid="failed-session-banner"]')).toBeNull();
+  expect(limited.querySelector("button")!.textContent).toBe("Retry");
+  await act(async () => root?.unmount());
+  document.body.replaceChildren();
   // Another failure kind keeps its banner even if the caller claims ownership.
   const container = await render(
     <FailedSessionBanner failure={failure} actions={actions} shownInTimeline />,
@@ -1058,6 +1076,8 @@ test("a Codex usage limit shows when it resets and a Continue at reset switch in
   );
   const banner = container.querySelector('[data-testid="failed-session-banner"]');
   expect(banner?.textContent).toContain("Codex usage limit reached. Resets Sat 14:05.");
+  // The headline replaced the recorded sentence, which stays behind Details.
+  expect(banner?.querySelector("details")?.textContent).toBe(`Details${limited.reason}`);
   expect(banner?.textContent).not.toContain("Retry");
   expect(banner?.textContent).not.toContain("Continue with");
   const toggle = container.querySelector<HTMLButtonElement>(

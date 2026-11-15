@@ -15,9 +15,9 @@ import {
   setAudioModeAsync,
   useAudioRecorder,
 } from "expo-audio";
-import { Directory, File, Paths } from "expo-file-system";
+import { Directory, File, Paths, UploadType } from "expo-file-system";
 import * as ImagePicker from "expo-image-picker";
-import type { FetchLike, OpenGeniClient } from "@opengeni/sdk";
+import type { FetchLike, FileUploadSource, OpenGeniClient } from "@opengeni/sdk";
 import type {
   NativeLifecycleState,
   NativePersistenceAdapter,
@@ -58,7 +58,49 @@ function fallbackFilename(uri: string, contentType: string): string {
       return raw;
     }
   }
-  return contentType.startsWith("image/") ? "image" : "document";
+  if (contentType.startsWith("image/")) return "image";
+  return contentType.startsWith("video/") ? "video" : "document";
+}
+
+// The picker names the type it knows; these cover a video it could not type.
+const VIDEO_TYPES_BY_EXTENSION: Record<string, string> = {
+  mov: "video/quicktime",
+  mp4: "video/mp4",
+  m4v: "video/x-m4v",
+  "3gp": "video/3gpp",
+  webm: "video/webm",
+};
+
+/** A photo or video from the library or camera, as the composer attaches it. */
+export function pickedMediaFile(
+  asset: Pick<
+    ImagePicker.ImagePickerAsset,
+    "uri" | "type" | "mimeType" | "fileName" | "fileSize" | "duration"
+  >,
+  id: string,
+): NativePickedFile {
+  const video = asset.type === "video";
+  const extension = (asset.fileName ?? asset.uri).split("?")[0]?.split(".").at(-1)?.toLowerCase();
+  const contentType =
+    asset.mimeType ??
+    (video
+      ? ((extension && VIDEO_TYPES_BY_EXTENSION[extension]) ?? "video/quicktime")
+      : "image/jpeg");
+  return {
+    id,
+    uri: asset.uri,
+    name: asset.fileName ?? fallbackFilename(asset.uri, contentType),
+    contentType,
+    sizeBytes: asset.fileSize ?? null,
+    ...(video
+      ? {
+          kind: "video" as const,
+          ...(typeof asset.duration === "number" && asset.duration > 0
+            ? { durationSeconds: asset.duration / 1000 }
+            : {}),
+        }
+      : { kind: "image" as const, previewUri: asset.uri }),
+  };
 }
 
 function isRuntimeFetchResponse(value: unknown): value is Response {
@@ -131,54 +173,71 @@ export const expoFileAdapter: OpenGeniReactNativeAdapters["files"] = {
       }),
     );
   },
+  // Photos and videos, as the system library shows them. Videos keep their
+  // original file (passthrough, often HEVC in a .MOV): no slow re-encode before
+  // sending, and the agent gets exactly what the person filmed.
   pickImages: async () => {
     const result = await ImagePicker.launchImageLibraryAsync({
       allowsMultipleSelection: true,
-      mediaTypes: ["images"],
+      mediaTypes: ["images", "videos"],
       quality: 1,
     });
     if (result.canceled) return [];
-    return result.assets.map((asset): NativePickedFile => {
-      const contentType = asset.mimeType ?? "image/jpeg";
-      return {
-        id: Crypto.randomUUID(),
-        uri: asset.uri,
-        name: asset.fileName ?? fallbackFilename(asset.uri, contentType),
-        contentType,
-        sizeBytes: asset.fileSize ?? null,
-        kind: "image",
-        previewUri: asset.uri,
-      };
-    });
+    return result.assets.map((asset) => pickedMediaFile(asset, Crypto.randomUUID()));
   },
+  // The system camera with its Photo and Video modes.
   takePhoto: async () => {
     const permission = await ImagePicker.requestCameraPermissionsAsync();
     if (!permission.granted) {
       throw new Error(
         permission.canAskAgain
-          ? "Camera access is needed to take a photo."
-          : "Camera access is off for this app. Turn it on in Settings to take photos.",
+          ? "Camera access is needed to take photos and videos."
+          : "Camera access is off for this app. Turn it on in Settings to take photos and videos.",
       );
     }
-    const result = await ImagePicker.launchCameraAsync({ mediaTypes: ["images"], quality: 0.9 });
-    if (result.canceled) return [];
-    return result.assets.map((asset): NativePickedFile => {
-      const contentType = asset.mimeType ?? "image/jpeg";
-      return {
-        id: Crypto.randomUUID(),
-        uri: asset.uri,
-        name: asset.fileName ?? fallbackFilename(asset.uri, contentType),
-        contentType,
-        sizeBytes: asset.fileSize ?? null,
-        kind: "image",
-        previewUri: asset.uri,
-      };
+    const result = await ImagePicker.launchCameraAsync({
+      mediaTypes: ["images", "videos"],
+      quality: 0.9,
     });
+    if (result.canceled) return [];
+    return result.assets.map((asset) => pickedMediaFile(asset, Crypto.randomUUID()));
   },
   // Expo FileSystem's iOS `bytes()` requests write authority that read-only photo-picker
   // exports do not grant; `base64()` uses read authority, so decode once here.
   readBytes: async (source) => base64ToBytes(await new File(source.uri).base64()),
+  uploadSource: (source, onProgress) => expoFileUploadSource(new File(source.uri), onProgress),
 };
+
+/**
+ * A file on disk as an upload the system sends itself: a native PUT streamed
+ * from the file with progress, which on iOS keeps going while the app is in
+ * the background. Nothing is read into JavaScript memory, so a long video
+ * uploads like a photo.
+ */
+export function expoFileUploadSource(
+  file: Pick<File, "exists" | "size" | "upload">,
+  onProgress: (fraction: number) => void,
+): FileUploadSource {
+  if (!file.exists) {
+    throw new Error("This file is no longer on the device. Attach it again.");
+  }
+  return {
+    sizeBytes: file.size,
+    send: async ({ url, headers, signal }) => {
+      const result = await file.upload(url, {
+        httpMethod: "PUT",
+        uploadType: UploadType.BINARY_CONTENT,
+        // Exactly the signed headers (content type included); the signed URL is the authority.
+        headers,
+        signal,
+        onProgress: ({ bytesSent, totalBytes }) => {
+          if (totalBytes > 0) onProgress(bytesSent / totalBytes);
+        },
+      });
+      return { status: result.status };
+    },
+  };
+}
 
 /** Standard Expo adapters; the host supplies persistence. */
 export function createExpoOpenGeniAdapters(input: {

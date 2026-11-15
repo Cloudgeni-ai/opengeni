@@ -251,6 +251,7 @@ describe("fail-closed change impact", () => {
     expect(plan.guards).toEqual([
       "format",
       "docs-refs",
+      "doc-snippets",
       "generated-fonts",
       "public-hygiene",
       "subscription-contract",
@@ -279,6 +280,7 @@ describe("fail-closed change impact", () => {
     expect(plan.guards).toContain("migration-deployment-mode");
     expect(plan.guards).toContain("migration-online-safety");
     expect(plan.guards).toContain("migration-immutability");
+    expect(plan.guards).toContain("migration-previous-release");
     expect(plan.guards).toContain("migration-test-budgets");
     expect(plan.guards).toContain("subscription-contract");
     expect(plan.guards).toContain("public-api");
@@ -369,6 +371,7 @@ describe("fail-closed change impact", () => {
     expect(sdk.unitTests).toContain("packages/sdk/test/client.test.ts");
     expect(sdk.e2eTests).toEqual([
       "packages/react/test/timeline-search.browser.e2e.ts",
+      "test/e2e/admin-step-up-page-load.browser.e2e.ts",
       "test/e2e/agents.browser.e2e.ts",
       AI_GATEWAY_CONNECTION_E2E,
       "test/e2e/annotation-scroll.browser.e2e.ts",
@@ -985,6 +988,7 @@ describe("fail-closed change impact", () => {
     expect(tests.integration.length).toBeGreaterThan(0);
     expect(tests.e2e).toEqual([
       "packages/react/test/timeline-search.browser.e2e.ts",
+      "test/e2e/admin-step-up-page-load.browser.e2e.ts",
       "test/e2e/agents.browser.e2e.ts",
       AI_GATEWAY_CONNECTION_E2E,
       "test/e2e/annotation-scroll.browser.e2e.ts",
@@ -1604,7 +1608,8 @@ describe("workflow fail-closed contracts", () => {
   });
 
   test("CI runs the compact session-search header regression with real database evidence", () => {
-    const ci = readFileSync(".github/workflows/ci.yml", "utf8");
+    // ci.yml and pr-ci.yml both call this reusable browser acceptance job.
+    const ci = readFileSync(".github/workflows/ci-browser-acceptance.yml", "utf8");
     const step = ci.slice(
       ci.indexOf("      - name: Compact session-search header browser acceptance"),
       ci.indexOf("      - name: Queue surface browser acceptance"),
@@ -1626,7 +1631,10 @@ describe("workflow fail-closed contracts", () => {
     expect(ci).toContain("name: Admit automation Version PR");
     expect(ci).toContain("name: Report exact-head automation CI");
     expect(ci).toContain("name: Deployment artifacts");
-    expect(ci).toContain("name: Browser and visual acceptance");
+    expect(ci).toContain("uses: ./.github/workflows/ci-browser-acceptance.yml");
+    expect(readFileSync(".github/workflows/ci-browser-acceptance.yml", "utf8")).toContain(
+      "name: Browser and visual acceptance",
+    );
     expect(ci).toContain("name: Real-service and recovery tests");
     expect(ci).toContain("name: Package and bundle contracts");
     expect(ci).toContain("name: React Native Metro to Hermes session bundle");

@@ -59,7 +59,7 @@ pub struct SandboxView {
 
 impl SandboxView {
     /// Whether its VM runs with nothing stopping it: no step in flight, or
-    /// a checkpoint, which pauses it only while its state is captured.
+    /// a checkpoint, which never pauses it.
     #[must_use]
     pub fn runs(&self) -> bool {
         self.state.level == Level::Running && self.step.is_none_or(|step| step == Step::Checkpoint)

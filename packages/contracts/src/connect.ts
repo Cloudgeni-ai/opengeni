@@ -71,7 +71,18 @@ export const ConnectResource = /* @__PURE__ */ defineSchema(() =>
 export type ConnectResource = z.infer<typeof ConnectResource>;
 export const ConnectNextAction = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("type", [
-    z.object({ type: z.literal("authorize"), url: z.string().url().max(16_384) }).strict(),
+    z
+      .object({
+        type: z.literal("authorize"),
+        url: z.string().url().max(16_384),
+        /**
+         * Where the person's organization approves the app once for everyone,
+         * covering every service this workspace connects through it (Microsoft
+         * work accounts). Absent when the provider has no organization approval.
+         */
+        organizationApprovalUrl: z.string().url().max(16_384).optional(),
+      })
+      .strict(),
     z
       .object({
         type: z.literal("credentials"),
@@ -332,9 +343,14 @@ export function microsoftAdminConsentUrl(input: {
 /**
  * What an organization's administrator needs to approve the app a sign-in URL
  * asks for, or null when the provider has no organization approval (or the URL
- * is not a provider sign-in it recognizes).
+ * is not a provider sign-in it recognizes). `organizationApprovalUrl` is the
+ * server's link covering every service of the app (the sign-in step's
+ * `organizationApprovalUrl`); without it the link covers this sign-in's scopes.
  */
-export function organizationAppApproval(authorizeUrl: string): OrganizationAppApproval | null {
+export function organizationAppApproval(
+  authorizeUrl: string,
+  organizationApprovalUrl?: string | undefined,
+): OrganizationAppApproval | null {
   let url: URL;
   try {
     url = new URL(authorizeUrl);
@@ -350,16 +366,33 @@ export function organizationAppApproval(authorizeUrl: string): OrganizationAppAp
     // Personal Microsoft accounts have no organization to approve anything.
     if (!tenant || tenant === "consumers" || !redirectUri) return null;
     return {
-      approvalUrl: microsoftAdminConsentUrl({
-        clientId: appId,
-        redirectUri,
-        scopes: (url.searchParams.get("scope") ?? "").split(/\s+/).filter(Boolean),
-        tenant: tenant === "common" ? "organizations" : tenant,
-      }),
+      approvalUrl:
+        microsoftApprovalLinkFor(organizationApprovalUrl, appId) ??
+        microsoftAdminConsentUrl({
+          clientId: appId,
+          redirectUri,
+          scopes: (url.searchParams.get("scope") ?? "").split(/\s+/).filter(Boolean),
+          tenant: tenant === "common" ? "organizations" : tenant,
+        }),
       appId,
     };
   }
   // Google Workspace administrators allow an app by its client ID.
   if (url.origin === "https://accounts.google.com") return { approvalUrl: null, appId };
   return null;
+}
+
+/** The given link when it is Microsoft's admin consent for this same app. */
+function microsoftApprovalLinkFor(link: string | undefined, appId: string): string | null {
+  if (!link) return null;
+  try {
+    const url = new URL(link);
+    return url.origin === MICROSOFT_LOGIN_ORIGIN &&
+      /^\/[^/]+\/v2\.0\/adminconsent$/.test(url.pathname) &&
+      url.searchParams.get("client_id") === appId
+      ? url.toString()
+      : null;
+  } catch {
+    return null;
+  }
 }

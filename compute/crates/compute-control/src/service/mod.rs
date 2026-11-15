@@ -37,7 +37,8 @@ pub use requests::request_digest;
 pub use templates::{COLLECT_EVERY, TEMPLATE_PREFIX, UNUSED_FOR};
 
 /// How a fleet sandbox sleeps when its create says nothing: the
-/// recommended ladder, with a checkpoint after every ten minutes it runs,
+/// recommended ladder, which keeps its memory in host RAM alone (ADR 36),
+/// with a checkpoint after every ten minutes it runs,
 /// counted from when the last one reached the store. That is a scheduling
 /// target, not a bound on loss: losing its host costs a sandbox what it did
 /// since the capture of its newest published copy, which its status reports

@@ -45,10 +45,13 @@ an operator must set up and watch is in [docs/operations.md](docs/operations.md)
 ## What we optimize for
 
 1. **Nothing saved is lost.** Copies are deleted only after a newer one has
-   passed verification. A sandbox with a valid saved memory image wakes with
-   its programs intact. One without (it was running, or paused but not yet
-   saved, when its VM process died) boots fresh from its disk: programs are
-   lost, data the guest had written to its disk is kept.
+   passed verification. A sandbox is a computer: its files are what lasts,
+   and its programs last while its VM process does. One whose VM process
+   ended (the host needed its memory, or it died) boots fresh from its disk:
+   programs are lost, data the guest had written to its disk is kept. A
+   sandbox asked to keep its memory has it saved, and wakes from a valid
+   memory image with its programs intact
+   ([ADR 36](docs/adr/0036-idle-memory-stays-in-ram.md)).
    [ADR 10](docs/adr/0010-crash-safety-bar.md) states the exact fault model.
 2. **Idle is nearly free, use is fast.** Idle means no work is happening, not
    that a timer ran out. Memory goes to whoever needs it.
@@ -88,7 +91,11 @@ access and previews all ride on it.
 
 A sandbox has two separate properties: where its memory is (its level) and
 which saved copies exist (local disk, object storage). A sandbox can still be
-Paused in RAM while already having both copies, so ending it later is instant.
+Paused in RAM while its files are already in object storage. By default its
+memory is saved nowhere: the Saved, Archived and Remote levels then hold its
+files alone, ending its VM process writes nothing, and a wake from them is a
+boot (about 1.1 to 1.2 s observed). The wake times below for those levels
+are for a sandbox that keeps its memory (`keep_memory`).
 
 | Level | Where memory is | Host RAM | Wake, one sandbox (observed) |
 | --- | --- | --- | --- |
@@ -106,13 +113,17 @@ started as fire-and-forget), a stream into it carries traffic (one silent
 both ways for 10 minutes stops counting until its next byte, which wakes the
 sandbox), or one of its ports saw recent traffic. Idle means none of them. Holds should carry a lease the caller renews.
 
-Recommended rules (per sandbox, all optional): pause after 10 s idle; save to
-local disk after 30 s while staying paused in RAM; archive after 2 minutes;
-compress, then end the VM process, **only under memory pressure**, least
-recently used first ([ADR 4](docs/adr/0004-memory-pressure-evicts.md));
-delete the local copy after 3 idle days and the memory image after 30 (the
-files stay; the next wake boots fresh). Any use wakes the sandbox. `sleep`
-asks for a minimum depth once holds allow it; a later wake cancels it.
+Recommended rules (per sandbox, all optional): pause after 10 s idle and stay
+paused in RAM; archive the files after 2 minutes; end the VM process **only
+under memory pressure**, at once, least recently used first
+([ADR 4](docs/adr/0004-memory-pressure-evicts.md),
+[ADR 37](docs/adr/0037-compressing-idle-memory-is-asked-for.md); with
+`compress_paused` it is compressed in RAM first); delete the local copy
+after 3 idle days. Memory is not saved: a sandbox whose VM process ended
+boots fresh from its files. With `keep_memory` it is saved to local disk
+after 30 s and archived with the files, and the memory image is deleted
+after 30 days. Any use wakes the sandbox. `sleep` asks for a minimum depth
+with the sandbox's programs once holds allow it; a later wake cancels it.
 
 ## Saving and waking
 
@@ -255,7 +266,8 @@ what is free. A booking stays until a reading after its save shows what
 the save used, and nothing needing disk is admitted before the first
 reading. Everything else that writes is booked the same way, before it can
 write: an awake VM books what its disk may still grow by (its length in
-whole allocation units, less what it holds alone, measured every sample;
+whole allocation units, less what it holds alone, measured every sample
+off the agent's loop, which never waits long for it;
 on XFS and btrfs only blocks no template or base image shares count); a
 wake from object storage books its local disk, the memory image its pager
 fills and its device state until the image is whole; a new sandbox's
@@ -274,7 +286,10 @@ error while a step such as a save keeps failing.
 The request also sets the VM's guarantees in its cgroup: `memory.low` while
 it runs (zero while paused, so the kernel takes from idle VMs first; not
 `memory.min`, which would have the kernel kill processes rather than slow a
-VM down if the host ever runs short beyond everything unprotected), and
+VM down if the host ever runs short beyond everything unprotected), or
+`memory.min` on a host that compresses running VMs, where the kernel
+would otherwise compress memory a sandbox was promised
+([ADR 44](docs/adr/0044-a-request-the-kernel-may-compress-is-kept-by-memory-min.md)), and
 `cpu.weight` from `cpu_request_millis` (a tenth of each of its processors
 unless set, rounded up to 10 millicores), so contended processors are shared by
 request and never below it while what is booked fits the host's capacity,
@@ -320,7 +335,7 @@ disk and shares its memory image, so creating one is a restore, not a boot. A
 ready pool keeps clones already restored and paused, so a create is a resume
 ([ADR 12](docs/adr/0012-templates-and-ready-pool.md)). Any create of a clone's
 processors and memory takes it, whatever it requests: the clone's VM is given
-the request's `memory.low` and `cpu.weight` before the claim is recorded. A
+the request's memory guarantee and `cpu.weight` before the claim is recorded. A
 clone is used only once its guest has taken its own id, random seed, machine
 id and hostname. A fill books its template's memory footprint and its disk
 copy until it is ready and measured. A shape unused for a week gives up its
@@ -355,8 +370,10 @@ A team may also save a sandbox as a template
 the disk (sharing its blocks, so in milliseconds) and store the copy as an
 image in the background, and records a template naming it; a create names
 it with `template`, by id or name, and boots afresh on that disk. Only the
-filesystem is kept. Images no template, sandbox or built image has used
-for an hour are forgotten.
+filesystem is kept. Images no template or sandbox names, and no name
+starts new sandboxes from, are forgotten after an hour, built ones too
+([ADR 35](docs/adr/0035-built-images-nothing-uses-are-forgotten.md)): an
+earlier release's image is built again if a rollback needs it.
 
 ## The fleet
 
@@ -506,8 +523,8 @@ all VMs together then compete with `system.slice` as one group however
 busy they are (the agent weighs that group, at start, against the groups
 beside it, so the VMs together get the processor capacity they were
 promised), and a VM's memory protection reaches only as far as its
-ancestors' (the agent keeps the parent's `memory.low` at the sum of its
-VMs'). The agent lowers its `oom_score_adj` to -999 at start, below its
+ancestors' (the agent keeps the parent's `memory.low` and `memory.min` at
+the sums of its VMs'). The agent lowers its `oom_score_adj` to -999 at start, below its
 VMs' -900, so the host's out-of-memory killer takes VMs before the agent
 that would bring them back, yet the agent stays killable inside its own
 unit. A host that compresses paused VMs needs zswap on; the agent refuses

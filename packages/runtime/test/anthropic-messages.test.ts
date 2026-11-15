@@ -1512,3 +1512,45 @@ test("provider diagnostics are UTF-8 bounded and malformed/non-JSON bodies retai
     } else expect(failure.detail).toBeUndefined();
   }
 });
+
+test.each([
+  ["Console API key", "sk-ant-api03-synthetic"],
+  ["personal key", "sk-ant-usr-synthetic"],
+  ["service-account key", "sk-ant-svc-synthetic"],
+  ["future key kind", "sk-ant-new07-synthetic"],
+])(
+  "an Anthropic API connection sends a %s as x-api-key and reports its rejection cleanly",
+  async (_label, apiKey) => {
+    let sent: Headers | undefined;
+    const model = new AnthropicMessagesModel(
+      {
+        ...provider,
+        apiKey,
+        anthropic: {
+          auth: "api-key",
+          cacheTtl: "5m",
+          maxOutputTokens: 1000,
+          streamIdleTimeoutMs: 600000,
+        },
+      },
+      "claude",
+      (async (_url, init) => {
+        sent = new Headers(init?.headers);
+        return Response.json(
+          { type: "error", error: { type: "authentication_error", message: "invalid x-api-key" } },
+          { status: 401 },
+        );
+      }) as typeof fetch,
+    );
+    const failure = await model.getResponse(request()).catch((error: unknown) => error);
+    expect(sent?.get("x-api-key")).toBe(apiKey);
+    expect(sent?.has("authorization")).toBe(false);
+    expect(sent?.get("anthropic-beta") ?? "").not.toContain("oauth");
+    expect(failure).toMatchObject({
+      status: 401,
+      subscription: false,
+      message:
+        "Claude credentials expired or were revoked. Replace the key or setup token in Models.",
+    });
+  },
+);

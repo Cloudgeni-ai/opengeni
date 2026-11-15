@@ -13,7 +13,8 @@ import {
   modelResponseHasProgressUpdate,
   modelResponseHasVisibleText,
 } from "../src/input-wait-yield";
-import { projectHistoryForProvider } from "../src/provider-history-adapter";
+import { ARTIFACT_ORIGIN_KEY, projectHistoryForProvider } from "../src/provider-history-adapter";
+import { renderCompactionPromptInputForChat } from "../src/context-compaction";
 import { AssistantMessagePhaseTracker, normalizeSdkEvent } from "../src/run-events";
 
 // Claude Opus 5.5 and Sonnet 5.5 can write a progress update before a tool
@@ -173,6 +174,15 @@ const expectedOutput = [
   },
 ];
 
+/** Output with its recorded replay binding removed (see opaque-reasoning-replay-matrix.test.ts). */
+function withoutReplayOrigin(output: readonly unknown[]): unknown[] {
+  return output.map((item: any) => {
+    if (!item?.providerData?.[ARTIFACT_ORIGIN_KEY]) return item;
+    const { [ARTIFACT_ORIGIN_KEY]: _origin, ...providerData } = item.providerData;
+    return { ...item, providerData };
+  });
+}
+
 describe("Claude progress updates before a tool call", () => {
   test("every model asks for reasoning summaries, so thinking stays readable", async () => {
     expect(anthropicWritesProgressUpdates("claude-fable-5-2")).toBe(true);
@@ -193,7 +203,7 @@ describe("Claude progress updates before a tool call", () => {
       await claude.getResponse(request());
     }
     for (const { body, betas } of sent) {
-      expect(body.thinking).toEqual({ type: "adaptive", display: "summarized" });
+      expect(body.thinking).toMatchObject({ type: "adaptive", display: "summarized" });
       expect(betas).not.toContain("thinking-display-updates-2026-08-18");
     }
   });
@@ -202,7 +212,7 @@ describe("Claude progress updates before a tool call", () => {
     const claude = new AnthropicMessagesModel(provider, "claude-opus-5-5", (async () =>
       Response.json(response(updatesContent))) as typeof fetch);
     const result = await claude.getResponse(request());
-    expect(result.output).toEqual(expectedOutput as never);
+    expect(withoutReplayOrigin(result.output)).toEqual(expectedOutput as never);
     // The wait_for_input guard and every other visible-reply check read
     // messages: a summary must not satisfy them, so the model is asked again.
     expect(modelResponseHasVisibleText(result)).toBe(false);
@@ -220,7 +230,7 @@ describe("Claude progress updates before a tool call", () => {
         .filter((event) => event.event?.type === "anthropic.thinking.delta")
         .map((event) => event.event.delta),
     ).toEqual([UPDATE.slice(0, 40), UPDATE.slice(40)]);
-    expect(events.at(-1).response.output).toEqual(expectedOutput);
+    expect(withoutReplayOrigin(events.at(-1).response.output)).toEqual(expectedOutput);
   });
 
   test("text the model wrote is kept verbatim, and a summarized update beside it never replaces it", async () => {
@@ -454,16 +464,54 @@ describe("Claude progress updates before a tool call", () => {
     expect(JSON.stringify(assistant.content)).toBe(JSON.stringify(updatesContent));
   });
 
-  test("other providers see the update only as labelled historical reasoning, never the signed block", () => {
-    const projected = projectHistoryForProvider(expectedOutput as never[], "responses");
-    expect(projected[1]).toEqual({
+  test("history stored while updates were assistant messages never reaches another API as text", () => {
+    const legacyUpdate = {
       type: "message",
       role: "assistant",
+      id: "msg_progress:1",
       status: "completed",
       content: [
-        { type: "output_text", text: `[Historical reasoning from another model]\n${UPDATE}` },
+        { type: "output_text", text: UPDATE, providerData: { anthropic: { block: progress } } },
       ],
-    });
+    };
+    const mixed = {
+      type: "message",
+      role: "assistant",
+      id: "msg_mixed",
+      status: "completed",
+      content: [
+        { type: "output_text", text: UPDATE, providerData: { anthropic: { block: progress } } },
+        { type: "output_text", text: "Visible answer." },
+      ],
+    };
+    const stored = [
+      { role: "user", content: "Plan the migration" },
+      legacyUpdate,
+      mixed,
+    ] as never[];
+    for (const api of ["responses", "chat"] as const) {
+      const projected = projectHistoryForProvider(stored, api);
+      const wire = JSON.stringify(projected);
+      expect(wire).not.toContain(UPDATE);
+      expect(wire).not.toContain(progress.signature);
+      expect(wire).toContain("Visible answer.");
+      expect(projected.some((item: any) => item.id === "msg_progress:1")).toBe(false);
+    }
+    const transcript = renderCompactionPromptInputForChat(stored as never);
+    expect(transcript).not.toContain(UPDATE);
+    expect(transcript).toContain("Visible answer.");
+    // Canonical history is untouched for a later switch back to Claude.
+    expect(legacyUpdate.content[0]!.text).toBe(UPDATE);
+  });
+
+  test("other providers never see the update: no signed block and no text in its place", () => {
+    const projected = projectHistoryForProvider(expectedOutput as never[], "responses");
+    expect(projected).toEqual(
+      (expectedOutput as Array<Record<string, unknown>>).filter(
+        (item) => item.type !== "reasoning",
+      ) as never,
+    );
+    expect(JSON.stringify(projected)).not.toContain(UPDATE);
     expect(JSON.stringify(projected)).not.toContain(progress.signature);
   });
 

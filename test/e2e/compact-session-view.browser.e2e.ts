@@ -488,7 +488,13 @@ describe("compact session view on the live local workspace route (API fixture)",
       if (path.endsWith("/realtime-model-catalog")) return json({ models: [] });
       if (path.endsWith("/knowledge/entries/search")) return json({ items: [], nextCursor: null });
       if (path.endsWith("/github/app"))
-        return json({ configured: false, missing: [], installUrl: null });
+        return json({
+          configured: false,
+          status: "disabled",
+          missing: [],
+          installUrl: null,
+          installations: [],
+        });
       if (path.endsWith("/connections/github")) return json({ enabled: false, connection: null });
       if (path.endsWith("/live-events/stream"))
         return route.fulfill({ contentType: "text/event-stream", body: ": fixture\n\n" });
@@ -500,7 +506,7 @@ describe("compact session view on the live local workspace route (API fixture)",
     await page.goto(`${baseUrl}/workspaces/${workspaceId}/sessions`, { waitUntil: "networkidle" });
     // The rail renders before draft hydration finishes the composer's initial autofocus.
     await page
-      .getByRole("textbox", { name: "Message the agent", exact: true })
+      .getByRole("textbox", { name: "Ask anything", exact: true })
       .and(page.locator(":focus"))
       .waitFor();
   }, 60_000);
@@ -569,7 +575,7 @@ describe("compact session view on the live local workspace route (API fixture)",
     expect(titles.at(-1)).toContain("Session 64");
     await page.reload({ waitUntil: "networkidle" });
     await page
-      .getByRole("textbox", { name: "Message the agent", exact: true })
+      .getByRole("textbox", { name: "Ask anything", exact: true })
       .and(page.locator(":focus"))
       .waitFor();
     await page.getByRole("button", { name: /^Session view/ }).click();
@@ -865,7 +871,7 @@ describe("compact session view on the live local workspace route (API fixture)",
         waitUntil: "networkidle",
       });
       await page
-        .getByRole("textbox", { name: "Message the agent", exact: true })
+        .getByRole("textbox", { name: "Ask anything", exact: true })
         .and(page.locator(":focus"))
         .waitFor()
         .catch(async (error) => {
@@ -1263,7 +1269,7 @@ describe("compact session view on the live local workspace route (API fixture)",
       await page.waitForURL(`**/workspaces/${workspaceId}/sessions`);
       // Wait for the new workspace composer before reopening global search.
       await page
-        .getByRole("textbox", { name: "Message the agent", exact: true })
+        .getByRole("textbox", { name: "Ask anything", exact: true })
         .and(page.locator(":focus"))
         .waitFor();
       await settleRead();

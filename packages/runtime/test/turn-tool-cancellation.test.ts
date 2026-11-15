@@ -22,6 +22,7 @@ import {
   TURN_SCOPED_STEER_GRACE_MS,
 } from "../src/sandbox/turn-tool-cancellation";
 import {
+  nextDurableOpId,
   notifyDurableOpOwnershipTransferStarted,
   notifyDurableOpOwnershipTransferred,
 } from "../src/sandbox/op-correlation";
@@ -1801,6 +1802,8 @@ describe("turn sandbox-tool physical cancellation fence", () => {
       },
       exec: async () => {
         starts++;
+        // A remote operation provider mints its op id before it sends anything.
+        nextDurableOpId();
         return output.record(
           running(220, "presentation prefix"),
           "initial\n",

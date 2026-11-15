@@ -94,6 +94,18 @@ describe("API contract admission", () => {
     }
   });
 
+  test("the signed Nango webhook is outside the browser fence; the Nango connect completion is not", () => {
+    const nango = (pathname: string) =>
+      apiContractAdmission({
+        method: "POST",
+        pathname,
+        authorization: undefined,
+        claimedRevision: undefined,
+      });
+    expect(nango("/v1/integrations/nango/webhook")).toBe("admit");
+    expect(nango("/v1/integrations/nango/connect/complete")).toBe("reject");
+  });
+
   test("in production a stale browser mutation is 409 while a stale bearer proceeds", async () => {
     const app = appFor(testSettings({ environment: "production" }));
     const path = `/v1/workspaces/${WORKSPACE}/sessions/${SESSION}/control`;

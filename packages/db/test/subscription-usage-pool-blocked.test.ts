@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { blockedSubscriptionWindows } from "../src/subscription-usage-pool";
+import {
+  absentSubscriptionWindows,
+  blockedSubscriptionWindows,
+} from "../src/subscription-usage-pool";
 
 const HOUR = 3_600_000;
 const NOW = Date.UTC(2026, 9, 21, 6);
@@ -65,5 +68,39 @@ describe("windows the account list shows as Limit reached", () => {
         NOW,
       ),
     ).toEqual({ five_hour: null });
+  });
+
+  test("an unmatched deadline is placed in a window the account has", () => {
+    // A weekly-only plan refused for two hours: the account has no five-hour window.
+    expect(
+      blockedSubscriptionWindows("codex", usage([], at(2 * HOUR)), NOW, ["five_hour"]),
+    ).toEqual({ weekly: NOW + 2 * HOUR });
+    expect(
+      blockedSubscriptionWindows("codex", usage([], at(2 * HOUR)), NOW, ["five_hour", "weekly"]),
+    ).toEqual({ five_hour: NOW + 2 * HOUR });
+  });
+});
+
+describe("windows the account does not have", () => {
+  test("a complete Codex usage reading with only the weekly window has no five-hour window", () => {
+    const weeklyOnly = usage([{ id: "secondary", resetsAt: at(48 * HOUR) }]);
+    expect(absentSubscriptionWindows("codex", weeklyOnly, true)).toEqual(["five_hour"]);
+    const both = usage([
+      { id: "primary", resetsAt: at(2 * HOUR) },
+      { id: "secondary", resetsAt: at(48 * HOUR) },
+    ]);
+    expect(absentSubscriptionWindows("codex", both, true)).toEqual([]);
+  });
+
+  test("refusals, headers and incomplete providers never prove a window absent", () => {
+    const weeklyOnly = usage([{ id: "secondary", resetsAt: at(48 * HOUR) }]);
+    expect(absentSubscriptionWindows("codex", weeklyOnly, false)).toEqual([]);
+    expect(absentSubscriptionWindows("codex", { ...weeklyOnly, source: "refusal" }, true)).toEqual(
+      [],
+    );
+    expect(
+      absentSubscriptionWindows("codex", { ...weeklyOnly, source: "response_headers" }, true),
+    ).toEqual([]);
+    expect(absentSubscriptionWindows("codex", null, true)).toEqual([]);
   });
 });

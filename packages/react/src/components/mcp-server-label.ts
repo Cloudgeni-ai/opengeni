@@ -2,6 +2,10 @@ import {
   capabilityCatalogItemIsTrustedForExposure,
   type CapabilityCatalogItem,
 } from "@opengeni/contracts";
+import {
+  microsoftDynamicsEnvironmentAddress,
+  microsoftDynamicsProductForMcpUrl,
+} from "@opengeni/contracts/microsoft-dynamics";
 import { capabilityPresentation } from "../integration-presentation";
 
 /**
@@ -13,11 +17,15 @@ import { capabilityPresentation } from "../integration-presentation";
  */
 export function showsMcpServerLabel(
   item:
-    | Pick<CapabilityCatalogItem, "source" | "stale" | "authKind" | "metadata">
+    | (Pick<CapabilityCatalogItem, "source" | "stale" | "authKind" | "metadata"> &
+        Partial<Pick<CapabilityCatalogItem, "endpointUrl">>)
     | null
     | undefined,
 ): boolean {
   if (!item) return false;
+  // A Microsoft Dynamics environment is Microsoft's own service, signed in to
+  // through a reviewed Opengeni profile, wherever its address was entered.
+  if (item.endpointUrl && microsoftDynamicsProductForMcpUrl(item.endpointUrl)) return false;
   switch (item.source) {
     case "built_in":
     case "library":
@@ -39,11 +47,18 @@ export function showsMcpServerLabel(
  */
 export function connectionCardSubtitle(
   item:
-    | Pick<CapabilityCatalogItem, "source" | "stale" | "authKind" | "metadata" | "providerDomain">
+    | (Pick<
+        CapabilityCatalogItem,
+        "source" | "stale" | "authKind" | "metadata" | "providerDomain"
+      > &
+        Partial<Pick<CapabilityCatalogItem, "endpointUrl">>)
     | null
     | undefined,
 ): string {
   if (!item) return "";
+  // Each Dynamics connection is one environment; its address tells them apart.
+  const environment = item.endpointUrl && microsoftDynamicsEnvironmentAddress(item.endpointUrl);
+  if (environment) return environment;
   if (showsMcpServerLabel(item)) return item.providerDomain ?? "";
   return capabilityPresentation(item.metadata)?.providerName ?? "";
 }

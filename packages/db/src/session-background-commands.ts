@@ -1602,6 +1602,53 @@ export type SessionCommandIdentity = {
   commandId: string;
 };
 
+/** The immutable machine locator of one of this session's RUNNING connected
+ * commands, copied at adoption: what any attempt of the session reads its
+ * output from, whichever machine the session uses now. Null for any other
+ * command. */
+export async function runningConnectedCommandLocator(
+  db: Database,
+  input: SessionCommandIdentity,
+): Promise<{
+  controlWorkspaceId: string;
+  enrollmentId: string;
+  connectionInstanceId: string;
+  opId: string;
+} | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [row] = await scopedDb
+        .select({
+          controlWorkspaceId: schema.sessionBackgroundCommands.controlWorkspaceId,
+          enrollmentId: schema.sessionBackgroundCommands.enrollmentId,
+          connectionInstanceId: schema.sessionBackgroundCommands.connectionInstanceId,
+          opId: schema.sessionBackgroundCommands.opId,
+        })
+        .from(schema.sessionBackgroundCommands)
+        .where(
+          and(
+            eq(schema.sessionBackgroundCommands.workspaceId, input.workspaceId),
+            eq(schema.sessionBackgroundCommands.sessionId, input.sessionId),
+            eq(schema.sessionBackgroundCommands.id, input.commandId),
+            eq(schema.sessionBackgroundCommands.provider, "connected_machine"),
+            eq(schema.sessionBackgroundCommands.state, "running"),
+          ),
+        )
+        .limit(1);
+      if (!row?.controlWorkspaceId || !row.enrollmentId || !row.connectionInstanceId || !row.opId)
+        return null;
+      return {
+        controlWorkspaceId: row.controlWorkspaceId,
+        enrollmentId: row.enrollmentId,
+        connectionInstanceId: row.connectionInstanceId,
+        opId: row.opId,
+      };
+    },
+  );
+}
+
 /** Internal exact-identity discovery for an authenticated machine event. This
  * returns only a locator; settlement must revalidate it under the session fence. */
 export async function locateConnectedCommandCompletion(

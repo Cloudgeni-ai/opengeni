@@ -1,5 +1,139 @@
 # @opengeni/observability
 
+## 6.23.0
+
+### Patch Changes
+
+- Updated dependencies [c0089e1]
+- Updated dependencies [9dd96b0]
+- Updated dependencies [adc2409]
+- Updated dependencies [f6a7c28]
+  - @opengeni/contracts@6.23.0
+
+## 6.22.0
+
+### Patch Changes
+
+- 07ecbcc: Skills whose SKILL.md description is a multi-line YAML block install again: the installed Skill's summary folds line breaks into spaces, and any remaining invalid Skill metadata returns a 422 instead of a server error. Chat titles now work on chat-API routes that report unset usage counters as null, and a failed title logs a content-free reason (the failing stage, error name and provider status or code).
+- Updated dependencies [d50092b]
+  - @opengeni/contracts@6.22.0
+
+## 6.21.0
+
+### Patch Changes
+
+- Updated dependencies [7d0d52b]
+- Updated dependencies [ef4c334]
+- Updated dependencies [ce864c0]
+- Updated dependencies [6ac2cd4]
+  - @opengeni/contracts@6.21.0
+
+## 6.20.1
+
+### Patch Changes
+
+- @opengeni/contracts@6.20.1
+
+## 6.20.0
+
+### Patch Changes
+
+- cf65a72: Fix several failures seen in production:
+
+  - An attached file whose name merely contains two dots (such as `notes..txt`) no longer fails the turn. Sandbox file names still refuse empty, `.`, `..`, path separators and NUL, and uploads name a bare `.` or `..` `file`.
+  - A completed video from an Only-me chat is delivered to the chat. The reconciliation service read the result as a service actor that could not see the private chat, so the operation retried forever with "Completed video generation lost its retained artifact".
+  - Checking a session's work while the session is being deleted reports it idle instead of failing the activity with `SessionControlInvariantError`.
+  - A chat deleted while its title is generated ends the title operation quietly instead of warning "Independent session title failed".
+  - A caller that disconnects from `POST /v1/workspaces/:workspaceId/tools/{resolve,invoke,target-approvals,manifest}` gets the client-gone 499 (empty body) instead of a 500, counted as `aborted` in `opengeni_tool_target_operations_total`.
+  - A request that reads a session deleted while it runs no longer fails with a 500 "Session … does not exist in its workspace". A request that names that session (for example `GET /v1/workspaces/:workspaceId/machines?sessionId=…`) answers 404 "session not found"; any other request, such as a list whose page included it, answers 409 (retryable only for reads). The missing-session case of `SessionControlInvariantError` is now the `SessionMissingFromWorkspaceError` subclass.
+  - The web app picks its root providers from the rendered route rather than the pending location, so navigating to Security settings or phone sign-in no longer shows "Opengeni app context is not ready".
+  - Temporal "Activity failed" / "Workflow failed" logs add `failureMessageHash` (a hash of the explaining cause's message with identifiers, numbers and quoted values removed) and, for code-authored invariant errors, that template as `failureMessage`.
+
+- Updated dependencies [ae3972e]
+- Updated dependencies [e37485b]
+- Updated dependencies [9c17a87]
+  - @opengeni/contracts@6.20.0
+
+## 6.19.0
+
+### Patch Changes
+
+- Updated dependencies [a85adef]
+  - @opengeni/contracts@6.19.0
+
+## 6.18.0
+
+### Patch Changes
+
+- ea2f259: `opengeni_http_request_duration_seconds` has a 2-second bucket, so the core read latency alert's "p95 above 2 seconds" is exact. Before, the nearest bounds were 1 and 2.5 seconds, and the alert's p95 was interpolated inside that bucket: it paged when about a third of workspace and session reads took 1 to 2 seconds even when none took 2, and stayed quiet when a tenth took 2.2 seconds. Each HTTP route series gains one bucket series.
+- Updated dependencies [f313a0e]
+- Updated dependencies [6813960]
+- Updated dependencies [9188c1d]
+- Updated dependencies [3105a8b]
+- Updated dependencies [a16189c]
+- Updated dependencies [89cf4ba]
+  - @opengeni/contracts@6.18.0
+
+## 6.17.0
+
+### Patch Changes
+
+- 1fcdfaa: A session workflow no longer retries a quiescence receipt forever when the session was archived after its turn was cancelled. The database refuses every write for an archived or imported session, so the receipt activity now proves the session is read-only, logs what the database refused, and fails non-retryably; the workflow drops the moot receipt and closes, and the session peek reports read-only sessions so nothing else is attempted. Temporal "Activity failed" log lines now also carry reviewed failure facts (error class, ApplicationFailure type and retryability, SQLSTATE, the constant reason and function our own database code raised, and the persistence stage) instead of only "temporal sdk failure logged".
+- f2b4d85: A dictation or recording whose speech-to-text request hangs no longer sits in "Transcribing" until the connection ends and Temporal's 30-second retry comes round. A provider can now declare the request timing it documents (`requestTiming` on a speech-to-text provider): Azure Speech's fast transcription answers faster than real time and recommends retrying transient failures after 2, 4, 8, 16 and 32 seconds. A request unanswered after its audio's length, or one that fails with a transient error, is sent again on that schedule; a late request keeps running beside its retry and whichever answers first is used, and the others are stopped. Rate limits and permanent failures still end the request at once, and after the provider's recommended retries the activity's own retry takes over as before. Providers that declare nothing are sent once, as before.
+
+  Each failed provider request is now logged ("Transcription provider request failed") with the provider, which request it was, how long it ran, our error code and what the provider said: its HTTP status, error code, scrubbed message and request id (Azure's `apim-request-id`), or the transport's code and message when the connection dropped. The observability boundary admits `providerRequestId`, `providerErrorMessage` (scrubbed and bounded like a client error message) and `recordingPurpose` under their own grammars. "recording processed" and "recording transcript failed" now give their code as `reason` instead of `errorCode`, which the boundary read as an operational error and reduced to a bare `OperationError`.
+
+- Updated dependencies [8073ab6]
+- Updated dependencies [43aa19d]
+- Updated dependencies [b1b69fc]
+- Updated dependencies [deccb54]
+- Updated dependencies [668c5ed]
+- Updated dependencies [e3cb3c1]
+  - @opengeni/contracts@6.17.0
+
+## 6.16.0
+
+### Patch Changes
+
+- Updated dependencies [fb19875]
+- Updated dependencies [54dc5da]
+  - @opengeni/contracts@6.16.0
+
+## 6.15.0
+
+### Patch Changes
+
+- dfeab20: Browser operation metrics now tell a website that failed apart from a failure of the browser or its controller. When a page's server does not answer, its name does not resolve, the connection or TLS handshake fails, or it sends an unusable response, browserd sends an operator-only failure reason (`destination_not_answered`, `destination_name_not_resolved`, `destination_connection_failed`, `destination_tls_failed`, `destination_response_invalid`) beside the receipt or error, never inside it, so what callers and models are shown does not change. A generic `outcome_unknown` after input was sent now carries the specific failure behind it (such as `timeout`), and `outcome_unknown` operations are counted with their reason instead of `none`. `OpenGeniInteractionOperationFailureRatio` leaves website failures out of its ratio, so an agent retrying a site that is down no longer pages while browser, controller and authorization failures still do. New contracts exports: `INTERACTION_DESTINATION_FAILURE_REASONS`, `InteractionFailureReason`, `parseInteractionFailureReason` and `BROWSER_ACTION_RECEIPT_FAILURE_REASON_PARAMETER`; driver errors in `@opengeni/interaction` gain an optional `failureReason`.
+- e3df016: Publishing a sandbox file larger than about 25 MB works on Modal sandboxes again, as does the same private staging on any SDK sandbox without a native private-file write (local, Docker, E2B and others). Such a file is uploaded from the box, and the upload's signed URL is first staged there as a private file. Without a native private-file write, the staging streams the file over the command's input, but that transfer did not opt into the provider's native output collection. Its exit could never be proved, so every large publish failed in under a second as "completion is pending or unknown" before the upload began. The transfer now collects its output like every other internal command, also when it is the first command on a session. This fixes the same staging for workspace file imports. An unexpected Channel-A failure now logs the class of the sandbox error underneath it (for example `SynchronousCommandOutcomeUnknownError`) as `causeName`.
+- Updated dependencies [708848c]
+- Updated dependencies [5525e63]
+- Updated dependencies [60d067d]
+- Updated dependencies [da60317]
+- Updated dependencies [f92ff08]
+- Updated dependencies [060c983]
+- Updated dependencies [dfeab20]
+- Updated dependencies [9885d37]
+- Updated dependencies [f22647a]
+- Updated dependencies [850b4d5]
+  - @opengeni/contracts@6.15.0
+
+## 6.14.0
+
+### Minor Changes
+
+- ec9cfe4: Distinguish proven customer-provider failures from platform failures in operational metrics, including an OpenRouter account restricted to its own provider keys (on turns, compaction requests and model calls), an OpenRouter key refused at the credit or budget limit the customer set on it, model calls on the workspace's direct and organization compatible connections, Vercel AI Gateway credit, budget and payment-verification refusals, and compaction requests refused for exhausted provider quota. Preserve unknown, generic 404 and malformed-request failures in platform reliability signals.
+
+### Patch Changes
+
+- c7ba98b: On Modal sandboxes, `view_image` now reads any file the agent's own shell can read, such as a page `pdftoppm` just rendered to `/tmp`, the same as on Connected Machine and compute sandboxes. Paths resolve the way the shell resolves them (absolute as given, relative from the workspace root) and are read with the box's own file read, which also removes one validation round trip per image. A path the SDK refuses on a caller-addressed file operation is now counted as `outcome="rejected"` in `opengeni_sandbox_operations_total` instead of `failed`, so it no longer trips the sandbox operation failure-ratio alert.
+- Updated dependencies [c976c87]
+- Updated dependencies [6ae0528]
+- Updated dependencies [3b853ca]
+- Updated dependencies [dd11dad]
+- Updated dependencies [91320a4]
+- Updated dependencies [c472500]
+  - @opengeni/contracts@6.14.0
+
 ## 6.13.0
 
 ### Patch Changes

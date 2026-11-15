@@ -12,6 +12,10 @@
 
 import { randomUUID } from "node:crypto";
 import {
+  ENCRYPTED_CONTENT_REJECTION_CODE,
+  isEncryptedReasoningRefusalText,
+} from "@opengeni/contracts/encrypted-reasoning-refusal";
+import {
   withResponsesContinuationAdmission,
   withModelTransportObservation,
   markModelSocketFailure,
@@ -113,7 +117,7 @@ export type CodexEncryptedArtifactRejection = {
 };
 
 /** Exact Codex `error.code` for an opaque artifact the backend can no longer use. */
-export const CODEX_ENCRYPTED_CONTENT_REJECTION_CODE = "invalid_encrypted_content";
+export const CODEX_ENCRYPTED_CONTENT_REJECTION_CODE = ENCRYPTED_CONTENT_REJECTION_CODE;
 
 /**
  * Classify only the provider's definitive request rejection for an opaque
@@ -161,19 +165,8 @@ export function classifyEncryptedArtifactRejection(
       typeof body?.code === "string" ? body.code : "",
       typeof value.type === "string" ? value.type : "",
       typeof body?.type === "string" ? body.type : "",
-    ]
-      .join(" ")
-      .toLowerCase();
-    const unsupportedFieldShape =
-      /(?:invalid value|supported values?|unsupported|unknown (?:field|parameter|value))/.test(
-        message,
-      );
-    if (
-      status === 400 &&
-      !unsupportedFieldShape &&
-      /(?:encrypted[_ ]content|encrypted reasoning|reasoning artifact)/.test(message) &&
-      /(?:decrypt(?:ed|ion)?|could not be parsed|cannot be parsed|failed to parse)/.test(message)
-    ) {
+    ].join(" ");
+    if (status === 400 && isEncryptedReasoningRefusalText(message)) {
       return { status: 400, kind: "encrypted_content_rejected" };
     }
     current = value.cause;

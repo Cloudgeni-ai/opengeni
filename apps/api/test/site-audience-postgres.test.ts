@@ -1,11 +1,13 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { AccessGrant } from "@opengeni/contracts";
 import {
   resolveNewArtifactAudience,
   resolveNewSiteAudience,
-  resolveSiteAudienceChange,
   siteViewerForGrant,
+  type ApiRouteDeps,
   type ObjectStorageDependency,
   type SessionWorkflowClient,
 } from "@opengeni/core";
@@ -22,6 +24,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp, type AppDependencies } from "../src/app";
+import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { resolveSiteSessionOrigin } from "../src/site-session-origin";
 
 // A Site's audience is the same model as a chat's and a schedule's: the whole
@@ -115,7 +118,7 @@ async function fixture() {
     ],
   });
   const settings = testSettings({ productAccessMode: "configured", sandboxBackend: "none" });
-  const app = createApp({
+  const deps = {
     db: db.db,
     bus: new MemoryEventBus(),
     settings,
@@ -128,7 +131,8 @@ async function fixture() {
       signalSessionControl: noop,
     } as unknown as SessionWorkflowClient,
     managedAuth: null,
-  } as unknown as AppDependencies);
+  };
+  const app = createApp(deps as unknown as AppDependencies);
   const source = "example:instance";
   const service = { authorization: `Bearer ${token}`, "content-type": "application/json" };
   const person = async (permissions: readonly string[]) => {
@@ -214,6 +218,7 @@ async function fixture() {
     ).items;
   return {
     app,
+    deps,
     settings,
     accountId,
     workspace,
@@ -480,18 +485,165 @@ test("a Site made in an Only me chat starts Only me without exposing the chat", 
   expect(JSON.stringify(await f.catalog(f.other))).not.toContain(chat.id);
 });
 
+type Fixture = Awaited<ReturnType<typeof fixture>>;
+
+/**
+ * sandbox_file_publish for a running agent turn in a chat shared with the
+ * workspace, acting for `initiator` (null: a run without a person).
+ */
+async function agentFilePublish(
+  f: Fixture,
+  initiator: string | null,
+  permissions: AccessGrant["permissions"] = [
+    "files:read",
+    "files:upload",
+    "artifacts:read",
+    "artifacts:publish",
+  ],
+) {
+  const session = await createSession(db.db, {
+    accountId: f.accountId,
+    workspaceId: f.workspace.id,
+    initialMessage: "Share the Site",
+    resources: [],
+    tools: [],
+    metadata: {},
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: "none",
+  });
+  const [turn] = await shared.admin<{ id: string }[]>`
+    INSERT INTO session_turns (
+      account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+      status, position, prompt, model, reasoning_effort, sandbox_backend,
+      execution_generation, initiator_kind, initiator_subject_id, initiator_context
+    ) VALUES (
+      ${f.accountId}, ${f.workspace.id}, ${session.id}, gen_random_uuid(),
+      ${`site-audience-wf-${crypto.randomUUID()}`}, 'running', 0, 'Share the Site',
+      'gpt-5.6-sol', 'medium', 'none', 1, ${initiator === null ? "service" : "subject"},
+      ${initiator ?? "service:site-audience-test"}, '{"accepted":true}'::jsonb
+    ) RETURNING id`;
+  const attemptId = crypto.randomUUID();
+  await shared.admin.begin(async (tx) => {
+    await tx`UPDATE sessions SET active_turn_id = ${turn!.id} WHERE id = ${session.id}`;
+    await tx`UPDATE session_turns SET active_attempt_id = ${attemptId} WHERE id = ${turn!.id}`;
+    await tx`
+      INSERT INTO session_turn_attempts (
+        id, account_id, workspace_id, session_id, turn_id, execution_generation,
+        state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
+        verified_control_revision, mcp_approval_policies
+      ) VALUES (
+        ${attemptId}, ${f.accountId}, ${f.workspace.id}, ${session.id}, ${turn!.id}, 1,
+        'running', 'site-audience-wf', ${`run-${attemptId}`}, ${`activity-${attemptId}`}, 0, '{}'::jsonb
+      )`;
+  });
+  const grant: AccessGrant = {
+    accountId: f.accountId,
+    workspaceId: f.workspace.id,
+    subjectId: "worker:first-party-mcp",
+    permissions,
+    principalKind: "agent_attempt",
+    metadata: {
+      sessionId: session.id,
+      turnId: turn!.id,
+      attemptId,
+      executionGeneration: 1,
+      firstPartyMcpTools: ["sandbox_file_publish"],
+    },
+  };
+  const server = buildOpenGeniMcpServer(f.deps as unknown as ApiRouteDeps, grant);
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const mcp = new Client({ name: "site-audience-test", version: "1" });
+  await server.connect(serverTransport);
+  await mcp.connect(clientTransport);
+  const description = (await mcp.listTools()).tools.find(
+    (tool) => tool.name === "sandbox_file_publish",
+  )?.description;
+  const share = async (artifactId: string, visibility: "private" | "workspace") => {
+    const result = await mcp.callTool({
+      name: "sandbox_file_publish",
+      arguments: { artifactId, visibility },
+    });
+    const text =
+      (result.content as Array<{ type: string; text?: string }>).find(
+        (item) => item.type === "text",
+      )?.text ?? "";
+    return { isError: result.isError === true, text };
+  };
+  return { description, share, close: () => mcp.close() };
+}
+
+test("an agent changes who can see its person's Site, as they can from the Site page", async () => {
+  const f = await fixture();
+  const site = await f.publish("Mockup", "private");
+  const id = site.artifact.id;
+  const agent = await agentFilePublish(f, f.owner.subjectId);
+  try {
+    expect(agent.description).toContain("an existing file or Site");
+    // Shared at the same link: no second Site.
+    const opened = await agent.share(id, "workspace");
+    expect(opened.isError, opened.text).toBe(false);
+    expect(JSON.parse(opened.text)).toEqual({
+      type: "site_access",
+      artifactId: id,
+      title: "Mockup",
+      access: {
+        visibility: "workspace",
+        whoCanOpen: "Everyone in the workspace “Team workspace” can open this Site.",
+      },
+    });
+    expect(await f.listIds(f.other)).toEqual([id]);
+    expect((await f.listIds(f.owner)).length).toBe(1);
+    // And limited again.
+    const limited = await agent.share(id, "private");
+    expect(limited.isError, limited.text).toBe(false);
+    expect(JSON.parse(limited.text).access.visibility).toBe("private");
+    expect(await f.listIds(f.other)).toEqual([]);
+  } finally {
+    await agent.close();
+  }
+
+  // Without permission to publish Sites the tool offers files only, as before.
+  const filesOnly = await agentFilePublish(f, f.owner.subjectId, [
+    "files:read",
+    "files:upload",
+    "artifacts:read",
+  ]);
+  try {
+    expect(filesOnly.description).toContain("an existing file, such as");
+    expect(await filesOnly.share(id, "workspace")).toEqual({
+      isError: true,
+      text: "file not found",
+    });
+  } finally {
+    await filesOnly.close();
+  }
+
+  // Someone else's agent gets what that person gets: a private Site reads as
+  // missing, and a shared one needs its owner.
+  const others = await agentFilePublish(f, f.other.subjectId);
+  const personless = await agentFilePublish(f, null);
+  try {
+    const hidden = await others.share(id, "workspace");
+    expect(hidden).toEqual({
+      isError: true,
+      text: "No file or Site you can open has this artifactId.",
+    });
+    const team = await f.publish("Team page");
+    const notOwner = await others.share(team.artifact.id, "private");
+    expect(notOwner.isError).toBe(true);
+    expect(notOwner.text).toContain("Only the person who owns this Site");
+    expect((await personless.share(team.artifact.id, "private")).isError).toBe(true);
+    expect(await f.listIds(f.other)).toEqual([team.artifact.id]);
+  } finally {
+    await others.close();
+    await personless.close();
+  }
+});
+
 test("only a person can make or keep a Site Only me", async () => {
   const f = await fixture();
-  // An agent cannot change a Site's audience; its person does, from Opengeni.
-  await expect(
-    resolveSiteAudienceChange({
-      db: db.db,
-      settings: f.settings,
-      grant: { ...f.owner.grant, principalKind: "agent_attempt" },
-      viewer: { subjectId: f.owner.subjectId },
-      requested: "workspace",
-    }),
-  ).rejects.toMatchObject({ status: 403 });
   // A key or service has no person to own an Only me Site.
   const service = f.owner.headers.authorization;
   const keyed = await f.app.request(`/v1/workspaces/${f.workspace.id}/published-artifacts`, {

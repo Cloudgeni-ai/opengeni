@@ -265,7 +265,10 @@ export class SqliteBrowserWorkingRuntimeJournal {
    * earlier receipt recorded) that a driver failure or controller restart cut
    * short leaves its launch receipt unsettled with no process recorded; its
    * `base` is that earlier receipt. A reinstatement of such a base that was
-   * itself cut short is returned as `reinstating`. Anything else is null. */
+   * itself cut short is returned as `reinstating`. A shutdown suspension cut
+   * short (its browser or controller was killed while the controller was
+   * stopping) is returned as `suspending` when it was begun from the latest
+   * completed launch of the same browser. Anything else is null. */
   interruptedRecovery(latest: BrowserWorkingRuntimeReceipt | null): InterruptedRecovery | null {
     if (!latest || (latest.state !== "prepared" && latest.state !== "dispatched")) return null;
     const pending: BrowserWorkingRuntimeReceipt = latest;
@@ -280,6 +283,13 @@ export class SqliteBrowserWorkingRuntimeJournal {
         : null;
     }
     if (pending.process === null) return null;
+    if (pending.intent === "suspend") {
+      if (!pending.directoryLaunchAllowed) return null;
+      const launch = this.journal.findLatest((receipt) => receipt.state === "completed")?.receipt;
+      return launch && suspensionOf(launch, pending)
+        ? { kind: "suspending", receipt: pending }
+        : null;
+    }
     const interrupted = this.journal.findLatest(
       (receipt) =>
         isInterruptedLaunchReceipt(receipt) &&
@@ -291,10 +301,10 @@ export class SqliteBrowserWorkingRuntimeJournal {
   /** Make the exact receipt an interrupted recovery started from the latest
    * again, so the browser it records can be recovered once more. The caller
    * must first prove that browser is still that live process, or that it
-   * exited and no process uses the profile. The interrupted launch stays as
-   * history and is never settled failed: a failed launch reads as abandoned.
-   * Each step is idempotent, so a crash between writes is finished by the
-   * next recovery. */
+   * exited and no process uses the profile (for a `suspending` recovery, only
+   * the latter). The interrupted launch stays as history and is never settled
+   * failed: a failed launch reads as abandoned. Each step is idempotent, so a
+   * crash between writes is finished by the next recovery. */
   reinstate(recovery: InterruptedRecovery): BrowserWorkingRuntimeReceipt {
     let receipt: BrowserWorkingRuntimeReceipt;
     if (recovery.kind === "interrupted") {
@@ -474,7 +484,28 @@ export type InterruptedRecovery =
       base: RecordedProcessReceipt;
       interrupted: BrowserWorkingRuntimeReceipt;
     }
-  | { kind: "reinstating"; receipt: BrowserWorkingRuntimeReceipt };
+  | { kind: "reinstating" | "suspending"; receipt: BrowserWorkingRuntimeReceipt };
+
+/** True when `suspend` is the shutdown suspension of exactly the browser the
+ * completed launch `launch` recorded: same process, profile, authority and
+ * launch configuration. */
+function suspensionOf(
+  launch: BrowserWorkingRuntimeReceipt,
+  suspend: BrowserWorkingRuntimeReceipt,
+): boolean {
+  return (
+    launch.intent === "launch" &&
+    recordedProcessReceipt(launch) &&
+    launch.directoryLaunchAllowed &&
+    suspend.process !== null &&
+    JSON.stringify(launch.process) === JSON.stringify(suspend.process) &&
+    launch.profile.device === suspend.profile.device &&
+    launch.profile.inode === suspend.profile.inode &&
+    JSON.stringify(launch.authority) === JSON.stringify(suspend.authority) &&
+    launch.launchDigest === suspend.launchDigest &&
+    launch.restoreAuthorityDigest === suspend.restoreAuthorityDigest
+  );
+}
 
 export function recordedProcessReceipt(
   receipt: BrowserWorkingRuntimeReceipt,

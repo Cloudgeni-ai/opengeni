@@ -23,6 +23,7 @@ import { useLightboxOptional } from "./screenshot-lightbox";
 import type { ToolCallTruncation, ToolOutputPreview } from "./types";
 import { useOpenGeniText } from "../messages/runtime";
 import { ShimmerText } from "./shimmer-text";
+import { displayImageSrc } from "../lib/content-hosting";
 
 /* ----------------------------------------------------------------------------
    Shared timeline primitives
@@ -829,7 +830,7 @@ export function Thumbnail({
   // the host's image component is unavailable and unwanted here.
   const img = (
     <img
-      src={src}
+      src={displayImageSrc(src)}
       alt={alt}
       onError={() => setFailed(true)}
       className="h-full w-full object-cover transition-opacity group-hover/thumb:opacity-80"
@@ -901,7 +902,7 @@ export function ScreenshotFigure({
   // Image component to defer to.
   const img = (
     <img
-      src={src}
+      src={displayImageSrc(src)}
       alt={alt}
       onError={() => setFailed(true)}
       className="max-h-80 w-full object-contain"

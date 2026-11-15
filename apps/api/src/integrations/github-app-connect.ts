@@ -1,11 +1,15 @@
 import { createHash } from "node:crypto";
+import { htmlPageResponse } from "../http/html-page-security";
 import { z } from "zod";
 import { HTTPException } from "hono/http-exception";
+import { ApiHttpError } from "../http/api-error";
 import type { ConnectAdvance, ConnectAttempt } from "@opengeni/contracts/connect";
 import {
   bindAuthorizedGitHubInstallationRepositories,
+  deleteGitHubInstallationBinding,
   finishConnectOperation,
   getConnectAttempt,
+  listGitHubInstallationAccessForWorkspace,
   type ConnectActorScope,
   type ConnectOperationAuthorization,
 } from "@opengeni/db";
@@ -27,6 +31,7 @@ import {
 import { githubConnectFailureHtml } from "../routes/github-browser-pages";
 import { connectOwnerStateFields } from "../connection-ownership";
 import { requestGitHubInstallationRepositorySync } from "../github-installation-sync";
+import { readGitHubInstallationForRepair } from "../github-access";
 
 const stateSchema = z.object({
   kind: z.literal("github_app_connect"),
@@ -85,6 +90,66 @@ export function githubAppConnectNavigation(
           redirectUri: `${integrationBaseUrl(deps.settings.publicBaseUrl, requestUrl)}/v1/github/oauth/callback`,
         });
   return { authorizationUrl: url, expiresAt: new Date(Date.now() + lifetimeMs).toISOString() };
+}
+
+/** The Connect account id of a linked installation, as a completed attempt names it. */
+const repairAccountIdPattern = /^github-installation:([1-9][0-9]{0,15})$/u;
+
+/**
+ * Repair of one linked installation starts at its own fix instead of the
+ * account chooser: one uninstalled on GitHub goes straight to installing the
+ * app again; any other goes straight to its owner's sign-in for that
+ * installation. When GitHub was asked and didn't answer, no attempt starts: a
+ * retryable 503 `upstream_unavailable` with `details.code:
+ * "provider_unreachable"`. When the installation can't be checked for another
+ * reason (a host without `getInstallation`, an App configuration or auth
+ * error), the account chooser opens as before.
+ */
+export async function githubAppRepairNavigation(
+  deps: ApiRouteDeps,
+  scope: GitHubConnectScope,
+  attemptId: string,
+  requestUrl: string,
+  reconnectAccountId: string,
+) {
+  const installationId = Number(repairAccountIdPattern.exec(reconnectAccountId)?.[1]);
+  if (!Number.isSafeInteger(installationId))
+    throw new HTTPException(422, { message: "Repair names a linked GitHub installation" });
+  const repair = await readGitHubInstallationForRepair(deps, scope.workspaceId, installationId);
+  if (!repair)
+    throw new HTTPException(409, {
+      message: "This GitHub installation is no longer linked to the workspace",
+    });
+  // GitHub didn't answer: the fix is unknown, so nothing starts. The person
+  // checks again rather than landing in a generic account chooser.
+  if (repair.live === undefined && repair.unreachable)
+    throw new ApiHttpError(503, {
+      code: "upstream_unavailable",
+      message: "GitHub couldn't be reached. Check again.",
+      retryable: true,
+      outcomeUnknown: false,
+      details: { code: "provider_unreachable", provider: "github" },
+    });
+  // Gone on GitHub: install the app again. Unknown without an outage (the
+  // host can't ask, or the App's own configuration failed): the account
+  // chooser covers both a reinstall and an owner sign-in. Otherwise: that
+  // installation's owner sign-in.
+  const navigation =
+    repair.live === null
+      ? githubAppConnectNavigation(deps, scope, attemptId, requestUrl, "install")
+      : repair.live === undefined
+        ? githubAppConnectNavigation(deps, scope, attemptId, requestUrl, "discover")
+        : githubAppConnectNavigation(deps, scope, attemptId, requestUrl, "bind", installationId);
+  return {
+    ...navigation,
+    account: {
+      id: reconnectAccountId,
+      providerId: "github-app",
+      label: repair.stored.accountLogin ?? `GitHub installation ${installationId}`,
+      ownership: "workspace" as const,
+      status: "auth_needed" as const,
+    },
+  };
 }
 
 export function prepareGitHubAppConnectAction(
@@ -336,6 +401,26 @@ export async function completeGitHubAppConnect(
               eventRouteSecret: eventRouteSecret(deps.settings),
             });
             if (!bound) throw new Error("GitHub binding proof already consumed");
+            // A repair that installed the app again replaces the binding it
+            // repaired: GitHub keeps one installation of an App per account.
+            const repaired = Number(repairAccountIdPattern.exec(current.account?.id ?? "")?.[1]);
+            if (Number.isSafeInteger(repaired) && repaired !== installationId) {
+              const previous = (
+                await listGitHubInstallationAccessForWorkspace(tx, state.workspaceId)
+              ).find((binding) => binding.installationId === repaired);
+              if (previous && previous.githubAccountId === proof.installation.accountId) {
+                // The approvals chosen for it move to the new installation,
+                // never over a choice already made there, keeping who set them.
+                await deleteGitHubInstallationBinding(tx, {
+                  accountId: state.accountId,
+                  workspaceId: state.workspaceId,
+                  installationId: repaired,
+                  replacedByInstallationId: installationId,
+                  eventRouteSecret: eventRouteSecret(deps.settings),
+                  audit: { subjectId: state.subjectId, source: "app", principalKind: null },
+                });
+              }
+            }
             boundInstallationId = installationId;
             return {
               ...current,
@@ -379,10 +464,12 @@ export async function completeGitHubAppConnect(
       const home =
         deps.settings.webBaseUrl ??
         integrationBaseUrl(deps.settings.publicBaseUrl, input.requestUrl);
-      return new Response(githubConnectFailureHtml("expired", `${home.replace(/\/+$/u, "")}/`), {
-        status: 400,
-        headers: { "content-type": "text/html; charset=UTF-8" },
-      });
+      return htmlPageResponse(
+        githubConnectFailureHtml("expired", `${home.replace(/\/+$/u, "")}/`),
+        {
+          status: 400,
+        },
+      );
     }
   }
   return new Response(null, { status: 302, headers: { Location: destination! } });

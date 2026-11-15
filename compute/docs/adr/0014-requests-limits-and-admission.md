@@ -5,7 +5,13 @@ booked and guaranteed like memory. Amended 2026-10-29 by
 [24](0024-busy-sandboxes-are-slowed-never-frozen.md): a sandbox in use is
 never paused for memory (step 3 of the relief is gone), running VMs are
 compressed where the host allows it, and the VMMs' out-of-memory score
-follows their request.
+follows their request. Amended 2026-11-14 by
+[44](0044-a-request-the-kernel-may-compress-is-kept-by-memory-min.md):
+where running VMs may be compressed, their requests are kept by
+`memory.min`. Amended 2026-11-14 by
+[44](0044-a-request-the-kernel-may-compress-is-kept-by-memory-min.md):
+where running VMs may be compressed, their requests are kept by
+`memory.min`.
 
 ## Context
 
@@ -339,7 +345,8 @@ pick a VM.
 - Local disk is booked the same way, because a full disk blocks the very
   saves that relieve memory. Every VM whose state is not saved yet, and
   that the host may save without being asked (its sleep settings save it
-  after some idle time or checkpoint it), books its worst-case next save:
+  after some idle time; since [ADR 34](0034-a-checkpoint-copies-the-disk-alone.md)
+  a checkpoint saves no memory), books its worst-case next save:
   its memory size once where files share extents (XFS), twice where they
   do not (the merge writes a whole new image), plus 64 MiB and a few
   inodes. A VM the host never saves on its own, such as a CI runner's,

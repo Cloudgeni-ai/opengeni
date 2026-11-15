@@ -39,6 +39,12 @@ export const agents = pgTable(
     avatar: jsonb("avatar").$type<SessionAvatar>(),
     memoryEnabled: boolean("memory_enabled").notNull().default(false),
     memoryCollectionId: uuid("memory_collection_id"),
+    /**
+     * Who can use it: anyone in the organization (from chat integrations),
+     * not only the workspace. Only meaningful on a shared agent. Read
+     * together with `agent_slack_installs.open` until the contract step.
+     */
+    organizationAccess: boolean("organization_access").notNull().default(false),
     currentRevision: integer("current_revision").notNull().default(1),
     origin: text("origin").$type<"slack_agent" | "bot_template" | "app" | "slack">().notNull(),
     sourceSessionId: uuid("source_session_id"),
@@ -64,8 +70,9 @@ export const agents = pgTable(
 );
 
 /**
- * Immutable agent content: Instructions (up to 20,000 characters), First
- * message, and the name and description as of the revision. Home workspace
+ * Immutable agent content: Instructions (up to 20,000 characters from a person,
+ * longer with an older First message joined), and the name and description as of
+ * the revision. `first_message` is empty since 1452. Home workspace
  * only, never organization readable; the runtime may only read and insert.
  */
 export const agentRevisions = pgTable(
@@ -108,6 +115,8 @@ export const agentSlackInstalls = pgTable(
     accountId: uuid("account_id").notNull(),
     workspaceId: uuid("workspace_id").notNull(),
     connectionId: uuid("connection_id").notNull(),
+    /** The Slack installation's own workspace (migrations 1380 and 1439). */
+    installWorkspaceId: uuid("install_workspace_id").notNull(),
     slackTeamId: text("slack_team_id").notNull(),
     nameKey: text("name_key").notNull(),
     open: boolean("open").notNull().default(false),

@@ -4,25 +4,19 @@
  * An agent row belongs to its HOME workspace, where its chats run. Its
  * Instructions and First message are immutable revisions in the same
  * workspace; where it answers in Slack is one `agent_slack_installs` row per
- * Slack installation, also home-owned.
+ * Slack installation, also home-owned, recording the installation's own
+ * workspace (`install_workspace_id`). An agent may be in any number of Slack
+ * installations; the Slack tables (channel routes, interactions, user states,
+ * proposals, intro records, suggestions) point at its installation row.
  *
- * Until the contract step every write here also keeps the legacy rows in
- * step, in the same transaction, for older binaries and for rollback: a
- * `bot_templates` row for an agent that came from a bot template, and a
- * `slack_agents` row (owned by the Slack installation's own workspace, and
- * the target of `slack_channel_routes`) for every Slack availability. The
- * transaction sets `opengeni.agents_dual_write` so the legacy sync triggers of
- * the agents migration stay out of the way. Because `slack_agents.id` is the agent
- * id, an agent is available in at most one Slack installation until the
- * contract step.
+ * The legacy `bot_templates` and `slack_agents` tables are gone (the contract,
+ * migrations 1380 to 1399, and the legacy drop, 1437 to 1447).
  *
  * Authorization (who may read, change or enable what) is decided by callers
  * from live grants. Reads filter Only me agents explicitly; nothing here
  * grants anything.
  */
 import {
-  AGENT_FIRST_MESSAGE_LEAD,
-  AGENT_INSTRUCTIONS_MAX_LENGTH,
   agentInitialsAvatar,
   agentInstructionsWithFirstMessage,
   slackAgentNameKey,
@@ -39,52 +33,20 @@ export type AgentOriginValue = "slack_agent" | "bot_template" | "app" | "slack";
 
 /** The current revision's content, read from the agent's home workspace. */
 export type AgentContent = {
-  /** With any older First message joined (`agentInstructionsWithFirstMessage`). */
   instructions: string;
-  /** Always empty: agents have one text, their Instructions. Kept for older readers. */
-  firstMessage: string;
-  /** The revision as stored, for writes. */
-  stored: { instructions: string; firstMessage: string };
   createdBySubjectId: string | null;
   createdAt: Date;
 };
 
 /**
- * Agents have one text, their Instructions; a First message an older client,
- * an older release or the legacy template API sends joins them
- * (`agentInstructionsWithFirstMessage`). Stored that way, so the First message
- * column ends up empty, unless together they pass the Instructions limit: then
- * the revision keeps both as sent, and readers still see them joined.
+ * Agents have one text, their Instructions. A First message an older client
+ * or the previous release sends joins them as its own paragraph
+ * (`agentInstructionsWithFirstMessage`); since migration 1452 every stored
+ * revision is that way, and nothing here reads `first_message` (kept, empty,
+ * for the previous release until a later step drops it).
  */
-function storedAgentContent(
-  instructions: string,
-  firstMessage: string,
-): { instructions: string; firstMessage: string } {
-  const joined = agentInstructionsWithFirstMessage(instructions, firstMessage);
-  return joined.length <= AGENT_INSTRUCTIONS_MAX_LENGTH
-    ? { instructions: joined, firstMessage: "" }
-    : { instructions, firstMessage };
-}
-
-const SQL_TRIMMED = sql.raw(`E' \\t\\n\\r\\f\\v'`);
-/** `AGENT_FIRST_MESSAGE_LEAD` and its line break, as SQL. */
-const FIRST_MESSAGE_LEAD_SQL = sql`${`${AGENT_FIRST_MESSAGE_LEAD}\n`}::text`;
-
-/**
- * A stored revision's Instructions as readers see them, with any First
- * message joined: the SQL form of `agentInstructionsWithFirstMessage`, for
- * reads that never map a whole agent (Slack routing, a chat's agent prompt).
- * `revision` is the `agent_revisions` alias.
- */
-export function agentInstructionsSql(revision: string): SQL {
-  const r = sql.raw(revision);
-  return sql`case
-      when ${r}.instructions is null then null
-      when btrim(${r}.first_message, ${SQL_TRIMMED}) = '' then ${r}.instructions
-      when strpos(${r}.instructions, btrim(${r}.first_message, ${SQL_TRIMMED})) > 0 then ${r}.instructions
-      when btrim(${r}.instructions, ${SQL_TRIMMED}) = '' then ${FIRST_MESSAGE_LEAD_SQL} || btrim(${r}.first_message, ${SQL_TRIMMED})
-      else btrim(${r}.instructions, ${SQL_TRIMMED}) || E'\\n\\n' || ${FIRST_MESSAGE_LEAD_SQL} || btrim(${r}.first_message, ${SQL_TRIMMED})
-    end`;
+function joinedInstructions(instructions: string, firstMessage: string | undefined): string {
+  return agentInstructionsWithFirstMessage(instructions, firstMessage ?? "");
 }
 
 export type AgentRecord = {
@@ -99,6 +61,13 @@ export type AgentRecord = {
   avatar: unknown;
   memoryEnabled: boolean;
   memoryCollectionId: string | null;
+  /**
+   * Who can use it: anyone in the organization from chat integrations, not
+   * only the workspace. Always false for an Only me agent. The only source
+   * since migration 1448; each Slack installation's `open` is kept equal to
+   * it for the previous release, which still reads that.
+   */
+  organizationAccess: boolean;
   currentRevision: number;
   origin: AgentOriginValue;
   sourceSessionId: string | null;
@@ -106,7 +75,6 @@ export type AgentRecord = {
   version: number;
   createdAt: Date;
   updatedAt: Date;
-  hasFirstMessage: boolean;
   /** Null in lists and where the revision is not readable. */
   content: AgentContent | null;
 };
@@ -126,11 +94,10 @@ export type AgentSlackInstallRecord = {
   createdAt: Date;
   updatedAt: Date;
   /**
-   * The Slack installation's own workspace (where the installation binding,
-   * routes and the legacy row live). Read from the legacy row until the
-   * contract step; null if it is missing.
+   * The Slack installation's own workspace (where the installation binding
+   * and its routes live).
    */
-  installWorkspaceId: string | null;
+  installWorkspaceId: string;
 };
 
 export type AgentRevisionRecord = {
@@ -138,7 +105,6 @@ export type AgentRevisionRecord = {
   name: string;
   description: string;
   instructions: string;
-  firstMessage: string;
   createdBySubjectId: string | null;
   createdAt: Date;
 };
@@ -154,6 +120,7 @@ type AgentRow = {
   avatar: unknown;
   memory_enabled: boolean;
   memory_collection_id: string | null;
+  organization_access?: boolean | null;
   current_revision: number;
   origin: string;
   source_session_id: string | null;
@@ -162,7 +129,6 @@ type AgentRow = {
   created_at: Date | string;
   updated_at: Date | string;
   instructions?: string | null;
-  first_message?: string | null;
   revision_created_by_subject_id?: string | null;
   revision_created_at?: Date | string | null;
 };
@@ -173,14 +139,9 @@ function date(value: Date | string): Date {
 
 function mapAgent(row: AgentRow, withContent: boolean): AgentRecord {
   const content =
-    withContent &&
-    typeof row.instructions === "string" &&
-    typeof row.first_message === "string" &&
-    row.revision_created_at
+    withContent && typeof row.instructions === "string" && row.revision_created_at
       ? {
-          instructions: agentInstructionsWithFirstMessage(row.instructions, row.first_message),
-          firstMessage: "",
-          stored: { instructions: row.instructions, firstMessage: row.first_message },
+          instructions: row.instructions,
           createdBySubjectId: row.revision_created_by_subject_id ?? null,
           createdAt: date(row.revision_created_at),
         }
@@ -196,6 +157,7 @@ function mapAgent(row: AgentRow, withContent: boolean): AgentRecord {
     avatar: row.avatar ?? null,
     memoryEnabled: row.memory_enabled,
     memoryCollectionId: row.memory_collection_id,
+    organizationAccess: row.visibility !== "private" && row.organization_access === true,
     currentRevision: Number(row.current_revision),
     origin: row.origin as AgentOriginValue,
     sourceSessionId: row.source_session_id,
@@ -203,7 +165,6 @@ function mapAgent(row: AgentRow, withContent: boolean): AgentRecord {
     version: Number(row.version),
     createdAt: date(row.created_at),
     updatedAt: date(row.updated_at),
-    hasFirstMessage: false,
     content,
   };
 }
@@ -221,7 +182,7 @@ type InstallRow = {
   version: number;
   created_at: Date | string;
   updated_at: Date | string;
-  install_workspace_id: string | null;
+  install_workspace_id: string;
 };
 
 function mapInstall(row: InstallRow): AgentSlackInstallRecord {
@@ -245,6 +206,7 @@ function mapInstall(row: InstallRow): AgentSlackInstallRecord {
 const AGENT_COLUMNS = sql.raw(`a.id::text as id, a.account_id::text as account_id,
   a.workspace_id::text as workspace_id, a.visibility, a.owner_subject_id, a.name, a.description,
   a.avatar, a.memory_enabled, a.memory_collection_id::text as memory_collection_id,
+  a.organization_access,
   a.current_revision, a.origin, a.source_session_id::text as source_session_id,
   a.created_by_subject_id, a.version, a.created_at, a.updated_at`);
 
@@ -252,12 +214,7 @@ const INSTALL_COLUMNS = sql.raw(`i.id::text as id, i.agent_id::text as agent_id,
   i.account_id::text as account_id, i.workspace_id::text as workspace_id,
   i.connection_id::text as connection_id, i.slack_team_id, i.name_key, i.open,
   i.enabled_by_subject_id, i.version, i.created_at, i.updated_at,
-  s.workspace_id::text as install_workspace_id`);
-
-/** The legacy row joined for the installation's own workspace. */
-const INSTALL_LEGACY_JOIN = sql.raw(
-  `left join slack_agents s on s.id = i.agent_id and s.connection_id = i.connection_id`,
-);
+  i.install_workspace_id::text as install_workspace_id`);
 
 /** A unique violation's constraint name, or null for any other error. */
 function uniqueViolation(error: unknown): string | null {
@@ -270,21 +227,14 @@ function uniqueViolation(error: unknown): string | null {
 }
 
 function isSlackNameClash(constraint: string | null): boolean {
-  return (
-    constraint === "agent_slack_installs_name_key_uq" || constraint === "slack_agents_name_key_uq"
-  );
-}
-
-/** The legacy sync triggers stand aside for the rest of this transaction. */
-async function markDualWrite(tx: Database): Promise<void> {
-  await tx.execute(sql`select set_config('opengeni.agents_dual_write', '1', true)`);
+  return constraint === "agent_slack_installs_name_key_uq";
 }
 
 /**
- * The avatar a legacy Slack agent row needs (it cannot be empty): the
- * agent's own, or its initials.
+ * The avatar an agent posts with in Slack (it cannot be empty): the agent's
+ * own, or its initials.
  */
-export function legacySlackAgentAvatar(agent: {
+export function agentSlackAvatar(agent: {
   id: string;
   name: string;
   avatar: unknown;
@@ -326,7 +276,7 @@ export async function listAgents(
       sql`select ${AGENT_COLUMNS}
           ${
             input.withContent
-              ? sql`, r.instructions, r.first_message,
+              ? sql`, r.instructions,
                   r.created_by_subject_id as revision_created_by_subject_id,
                   r.created_at as revision_created_at`
               : sql``
@@ -360,7 +310,7 @@ export async function getAgent(
   return await withRlsContext(db, home, async (tx) => {
     const [row] = await rawRows<AgentRow>(
       tx,
-      sql`select ${AGENT_COLUMNS}, r.instructions, r.first_message,
+      sql`select ${AGENT_COLUMNS}, r.instructions,
           r.created_by_subject_id as revision_created_by_subject_id,
           r.created_at as revision_created_at
         from agents a
@@ -385,7 +335,6 @@ export async function listAgentSlackInstalls(
       tx,
       sql`select ${INSTALL_COLUMNS}
         from agent_slack_installs i
-        ${INSTALL_LEGACY_JOIN}
         where i.account_id = ${home.accountId}::uuid
           and i.workspace_id = ${home.workspaceId}::uuid
           and i.agent_id = any(${sql`ARRAY[${sql.join(
@@ -411,12 +360,11 @@ export async function listAgentRevisions(
       name: string;
       description: string;
       instructions: string;
-      first_message: string;
       created_by_subject_id: string | null;
       created_at: Date | string;
     }>(
       tx,
-      sql`select r.revision, r.name, r.description, r.instructions, r.first_message,
+      sql`select r.revision, r.name, r.description, r.instructions,
           r.created_by_subject_id, r.created_at
         from agent_revisions r
         where r.account_id = ${home.accountId}::uuid
@@ -431,7 +379,6 @@ export async function listAgentRevisions(
       name: row.name,
       description: row.description,
       instructions: row.instructions,
-      firstMessage: row.first_message,
       createdBySubjectId: row.created_by_subject_id,
       createdAt: date(row.created_at),
     }));
@@ -449,13 +396,14 @@ export type CreateAgentInput = {
   description: string;
   avatar: SessionAvatar | null;
   instructions: string;
-  firstMessage: string;
+  /** Older field: joins the Instructions as its own paragraph. */
+  firstMessage?: string;
   memoryEnabled: boolean;
+  /** Anyone in the organization can use it (shared agents only). */
+  organizationAccess?: boolean;
   origin: AgentOriginValue;
   sourceSessionId: string | null;
   createdBySubjectId: string | null;
-  /** Also write the legacy `bot_templates` row (agents that came from one). */
-  legacyBotTemplate?: boolean;
   /** Refuse past this many agents in the home workspace. */
   maxPerWorkspace: number;
 };
@@ -487,72 +435,41 @@ function privateOwnerRefusal(error: unknown, visibility: AgentVisibilityValue | 
   throw error;
 }
 
-/**
- * A legacy template's setup text, copied from the stored revision so an older
- * release writing the row back loses nothing: the stored Instructions (the
- * joined text) when the First message joined them, else the stored First
- * message as it is, which an older release reads as the setup text.
- */
-function legacyTemplateText(stored: { instructions: string; firstMessage: string }): string {
-  return stored.firstMessage ? stored.firstMessage : stored.instructions;
-}
-
-/**
- * A legacy Slack agent row's Instructions: the joined text when it fits, else
- * the stored Instructions as they are. An older release writing the row back
- * keeps the stored First message, which the joined text already contains, so
- * neither way loses or repeats text.
- */
-function legacySlackInstructions(agent: Pick<AgentRecord, "content">): string {
-  const joined = agent.content?.instructions ?? "";
-  return joined.length <= AGENT_INSTRUCTIONS_MAX_LENGTH
-    ? joined
-    : (agent.content?.stored.instructions ?? "");
-}
-
 async function insertAgentRows(tx: Database, home: AgentHome, input: CreateAgentInput) {
-  const stored = storedAgentContent(input.instructions, input.firstMessage);
+  const instructions = joinedInstructions(input.instructions, input.firstMessage);
   const [row] = await rawRows<AgentRow>(
     tx,
     sql`insert into agents (${sql.raw(input.id ? "id, " : "")}account_id, workspace_id, visibility,
-        owner_subject_id, name, name_key, description, avatar, memory_enabled, current_revision,
-        origin, source_session_id, created_by_subject_id)
+        owner_subject_id, name, name_key, description, avatar, memory_enabled, organization_access,
+        current_revision, origin, source_session_id, created_by_subject_id)
       values (${input.id ? sql`${input.id}::uuid, ` : sql``}${home.accountId}::uuid,
         ${home.workspaceId}::uuid, ${input.visibility}, ${input.ownerSubjectId}, ${input.name},
         lower(btrim(${input.name})), ${input.description},
         ${input.avatar === null ? sql`null` : sql`${JSON.stringify(input.avatar)}::jsonb`},
-        ${input.memoryEnabled}, 1, ${input.origin}, ${input.sourceSessionId}::uuid,
+        ${input.memoryEnabled},
+        ${input.visibility === "workspace" && input.organizationAccess === true}, 1,
+        ${input.origin}, ${input.sourceSessionId}::uuid,
         ${input.createdBySubjectId})
       returning ${sql.raw(`id::text as id, account_id::text as account_id,
         workspace_id::text as workspace_id, visibility, owner_subject_id, name, description, avatar,
-        memory_enabled, memory_collection_id::text as memory_collection_id, current_revision,
-        origin, source_session_id::text as source_session_id, created_by_subject_id, version,
+        memory_enabled, memory_collection_id::text as memory_collection_id, organization_access,
+        current_revision, origin, source_session_id::text as source_session_id, created_by_subject_id, version,
         created_at, updated_at`)}`,
   );
   if (!row) throw new Error("Agent insert returned no row");
   const [revision] = await rawRows<{ created_at: Date | string }>(
     tx,
     sql`insert into agent_revisions (agent_id, account_id, workspace_id, revision, name,
-        description, instructions, first_message, created_by_subject_id)
+        description, instructions, created_by_subject_id)
       values (${row.id}::uuid, ${home.accountId}::uuid, ${home.workspaceId}::uuid, 1,
-        ${input.name}, ${input.description}, ${stored.instructions}, ${stored.firstMessage},
+        ${input.name}, ${input.description}, ${instructions},
         ${input.createdBySubjectId})
       returning created_at`,
   );
-  if (input.legacyBotTemplate) {
-    await tx.execute(sql`insert into bot_templates (id, account_id, workspace_id, name, description,
-        avatar, setup_instructions, visibility, source_session_id, created_by_subject_id)
-      values (${row.id}::uuid, ${home.accountId}::uuid, ${home.workspaceId}::uuid, ${input.name},
-        ${input.description},
-        ${input.avatar === null ? sql`null` : sql`${JSON.stringify(input.avatar)}::jsonb`},
-        ${legacyTemplateText(stored)}, ${input.visibility}, ${input.sourceSessionId}::uuid,
-        ${input.visibility === "private" ? input.ownerSubjectId : input.createdBySubjectId})`);
-  }
   return mapAgent(
     {
       ...row,
-      instructions: stored.instructions,
-      first_message: stored.firstMessage,
+      instructions,
       revision_created_by_subject_id: input.createdBySubjectId,
       revision_created_at: revision?.created_at ?? new Date(),
     },
@@ -593,7 +510,6 @@ export async function createAgent(
     if ((await countAgents(tx, home)) >= input.maxPerWorkspace) {
       throw new AgentLimitError(input.maxPerWorkspace);
     }
-    await markDualWrite(tx);
     return { agent: await insertAgentRows(tx, home, input), created: true };
   }).catch((error: unknown) => privateOwnerRefusal(error, input.visibility));
 }
@@ -606,8 +522,15 @@ export type AgentPatch = {
   /** Required with `visibility`: the owner of an Only me agent, null otherwise. */
   ownerSubjectId?: string | null;
   instructions?: string;
+  /** Older field: joins the Instructions as its own paragraph. */
   firstMessage?: string;
   memoryEnabled?: boolean;
+  /**
+   * Anyone in the organization can use it. Written to the agent and, for the
+   * previous release during the rollout, as `open` on every Slack
+   * installation it is in. Making the agent Only me turns it off.
+   */
+  organizationAccess?: boolean;
   /** Forget the current Memory collection (for example after a visibility change). */
   clearMemoryCollection?: boolean;
 };
@@ -617,11 +540,13 @@ export type UpdateAgentOutcome =
   | { kind: "not_found" }
   | { kind: "version_conflict"; current: AgentRecord }
   /** The new name clashes with another agent in a Slack installation it is in. */
-  | { kind: "slack_name_taken"; connectionId: string }
-  /** The change would make an agent that is in Slack Only me. */
-  | { kind: "requires_workspace_visibility" };
+  | { kind: "slack_name_taken"; connectionId: string };
 
-async function lockAgent(
+/**
+ * Lock an agent of the home workspace for the rest of the caller's
+ * transaction and read it, or null when it does not exist.
+ */
+export async function lockAgent(
   tx: Database,
   home: AgentHome,
   agentId: string,
@@ -643,41 +568,6 @@ async function installsOf(
   agentId: string,
 ): Promise<AgentSlackInstallRecord[]> {
   return await listAgentSlackInstalls(tx, home, [agentId]);
-}
-
-/** Write the legacy Slack agent row of every installation the agent is in. */
-async function syncLegacySlackRows(
-  tx: Database,
-  agent: AgentRecord,
-  installs: readonly AgentSlackInstallRecord[],
-  options: { bump?: boolean } = {},
-): Promise<void> {
-  const bump = options.bump ?? true;
-  for (const install of installs) {
-    if (!install.installWorkspaceId) continue;
-    await withRlsContext(
-      tx,
-      { accountId: agent.accountId, workspaceId: install.installWorkspaceId },
-      async (scoped) => {
-        await scoped.execute(sql`update slack_agents set
-            name = ${agent.name},
-            name_key = ${install.nameKey},
-            description = ${agent.description},
-            avatar = ${JSON.stringify(legacySlackAgentAvatar(agent))}::jsonb,
-            instructions = ${legacySlackInstructions(agent)},
-            knowledge_collection_id = ${agent.memoryEnabled ? agent.memoryCollectionId : null}::uuid,
-            open = ${install.open},
-            -- Never backwards: the legacy API shows the greater of the two
-            -- versions (lockAgentLegacySlackVersion), so a version read from
-            -- either API is accepted by the other during the rollout.
-            version = greatest(${bump ? sql`version + 1` : sql`version`}, ${agent.version}::integer),
-            updated_at = now()
-          where id = ${agent.id}::uuid
-            and workspace_id = ${install.installWorkspaceId}::uuid
-            and connection_id = ${install.connectionId}::uuid`);
-      },
-    );
-  }
 }
 
 /**
@@ -704,28 +594,26 @@ export async function updateAgent(
         return { kind: "version_conflict" as const, current };
       }
       const { patch } = input;
-      const installs = await installsOf(tx, home, current.id);
-      // Checked under the row lock: an agent in Slack is always shared.
+      let installs = await installsOf(tx, home, current.id);
+      // Checked under the row lock: an agent in Slack is always shared, so
+      // making it Only me takes it out of every Slack workspace, the same way
+      // turning Slack off does (its channel settings there go with it).
       if (patch.visibility === "private" && installs.length > 0) {
-        return { kind: "requires_workspace_visibility" as const };
+        for (const install of installs) {
+          await tx.execute(sql`delete from agent_slack_installs where id = ${install.id}::uuid`);
+        }
+        installs = [];
       }
-      await markDualWrite(tx);
       const name = patch.name ?? current.name;
-      const was = current.content?.stored ?? { instructions: "", firstMessage: "" };
-      // New Instructions were written over the joined text the person saw, so
-      // they replace a stored First message; otherwise it joins now.
-      const { instructions, firstMessage } = storedAgentContent(
-        patch.instructions ?? was.instructions,
-        patch.firstMessage ?? (patch.instructions !== undefined ? "" : was.firstMessage),
-      );
-      const revised =
-        current.content === null ||
-        instructions !== was.instructions ||
-        firstMessage !== was.firstMessage;
+      const was = current.content?.instructions ?? "";
+      const instructions = joinedInstructions(patch.instructions ?? was, patch.firstMessage);
+      const revised = current.content === null || instructions !== was;
       const nextRevision = revised ? current.currentRevision + 1 : current.currentRevision;
       const visibility = patch.visibility ?? current.visibility;
       const ownerSubjectId =
         patch.visibility !== undefined ? (patch.ownerSubjectId ?? null) : current.ownerSubjectId;
+      const organizationAccess =
+        visibility === "workspace" && (patch.organizationAccess ?? current.organizationAccess);
       const avatar = patch.avatar !== undefined ? patch.avatar : current.avatar;
       await tx.execute(sql`update agents set
           name = ${name},
@@ -736,16 +624,27 @@ export async function updateAgent(
           owner_subject_id = ${ownerSubjectId},
           memory_enabled = ${patch.memoryEnabled ?? current.memoryEnabled},
           memory_collection_id = ${patch.clearMemoryCollection ? null : current.memoryCollectionId}::uuid,
+          organization_access = ${organizationAccess},
           current_revision = ${nextRevision}::integer,
           version = version + 1,
           updated_at = now()
         where id = ${current.id}::uuid and workspace_id = ${home.workspaceId}::uuid`);
+      // Only the previous release reads who can use it from each Slack
+      // installation's `open` (nothing here does since 1448): keep them the
+      // same until a later step drops the column.
+      for (const install of installs) {
+        if (install.open === organizationAccess) continue;
+        await tx.execute(sql`update agent_slack_installs set open = ${organizationAccess},
+            version = version + 1, updated_at = now()
+          where id = ${install.id}::uuid`);
+        install.open = organizationAccess;
+      }
       if (revised) {
         await tx.execute(sql`insert into agent_revisions (agent_id, account_id, workspace_id,
-            revision, name, description, instructions, first_message, created_by_subject_id)
+            revision, name, description, instructions, created_by_subject_id)
           values (${current.id}::uuid, ${home.accountId}::uuid, ${home.workspaceId}::uuid,
             ${nextRevision}::integer, ${name}, ${patch.description ?? current.description},
-            ${instructions}, ${firstMessage}, ${input.actorSubjectId})`);
+            ${instructions}, ${input.actorSubjectId})`);
       }
       if (
         patch.name !== undefined &&
@@ -767,22 +666,6 @@ export async function updateAgent(
       }
       const updated = await getAgent(tx, home, current.id);
       if (!updated) throw new Error("Agent update lost its row");
-      if (current.origin === "bot_template") {
-        // The legacy template: its setup text is now the Instructions, and an
-        // Only me template belongs to whoever saved it.
-        await tx.execute(sql`update bot_templates set
-            name = ${updated.name},
-            description = ${updated.description},
-            avatar = ${updated.avatar === null ? sql`null` : sql`${JSON.stringify(updated.avatar)}::jsonb`},
-            setup_instructions = ${legacyTemplateText({ instructions, firstMessage })},
-            visibility = ${updated.visibility},
-            created_by_subject_id = ${
-              updated.visibility === "private" ? updated.ownerSubjectId : sql`created_by_subject_id`
-            },
-            updated_at = now()
-          where id = ${updated.id}::uuid and workspace_id = ${home.workspaceId}::uuid`);
-      }
-      await syncLegacySlackRows(tx, updated, installs);
       return { kind: "updated" as const, agent: updated, revised };
     });
   } catch (error) {
@@ -802,44 +685,6 @@ class SlackNameClash extends Error {
   }
 }
 
-/**
- * For the legacy Slack agents API during the rollout: lock the agent and
- * return the version that API shows, the greater of the agent's and its
- * legacy row's (the backfill did not copy legacy versions), raising the
- * agent's to match so versions only move forward. Null when not found.
- * Call inside the caller's transaction.
- */
-export async function lockAgentLegacySlackVersion(
-  tx: Database,
-  home: AgentHome,
-  input: { agentId: string; connectionId: string; installWorkspaceId: string },
-): Promise<{ agentVersion: number; version: number } | null> {
-  const agent = await lockAgent(tx, home, input.agentId);
-  if (!agent) return null;
-  const legacy = await withRlsContext(
-    tx,
-    { accountId: home.accountId, workspaceId: input.installWorkspaceId },
-    async (scoped) =>
-      (
-        await rawRows<{ version: number }>(
-          scoped,
-          sql`select version from slack_agents
-            where id = ${input.agentId}::uuid
-              and workspace_id = ${input.installWorkspaceId}::uuid
-              and connection_id = ${input.connectionId}::uuid
-            for update`,
-        )
-      )[0]?.version ?? null,
-  );
-  const version = Math.max(agent.version, Number(legacy ?? 0));
-  if (version > agent.version) {
-    await markDualWrite(tx);
-    await tx.execute(sql`update agents set version = ${version}::integer
-      where id = ${agent.id}::uuid and workspace_id = ${home.workspaceId}::uuid`);
-  }
-  return { agentVersion: agent.version, version };
-}
-
 /** Remember the agent's Memory collection once it exists. Version-free and idempotent. */
 export async function setAgentMemoryCollection(
   db: Database,
@@ -849,22 +694,17 @@ export async function setAgentMemoryCollection(
   return await withRlsContext(db, home, async (tx) => {
     const current = await lockAgent(tx, home, input.agentId);
     if (!current) return null;
-    await markDualWrite(tx);
     await tx.execute(sql`update agents set memory_collection_id = ${input.collectionId}::uuid,
         updated_at = now()
       where id = ${current.id}::uuid and workspace_id = ${home.workspaceId}::uuid`);
-    const updated = await getAgent(tx, home, current.id);
-    if (!updated) return null;
-    await syncLegacySlackRows(tx, updated, await installsOf(tx, home, current.id), {
-      bump: false,
-    });
-    return updated;
+    return await getAgent(tx, home, current.id);
   });
 }
 
 /**
- * Delete an agent, its revisions and Slack availability, and its legacy rows
- * (a Slack agent's channel settings go with it). Its chats stay.
+ * Delete an agent, its revisions and Slack availability (its channel
+ * settings and other Slack records go with its installation rows). Its chats
+ * stay.
  */
 export async function deleteAgent(
   db: Database,
@@ -874,34 +714,10 @@ export async function deleteAgent(
   return await withRlsContext(db, home, async (tx) => {
     const current = await lockAgent(tx, home, agentId);
     if (!current) return false;
-    await markDualWrite(tx);
-    for (const install of await installsOf(tx, home, agentId)) {
-      await deleteLegacySlackRow(tx, current.accountId, install);
-    }
-    await tx.execute(sql`delete from bot_templates
-      where id = ${agentId}::uuid and workspace_id = ${home.workspaceId}::uuid`);
     await tx.execute(sql`delete from agents
       where id = ${agentId}::uuid and workspace_id = ${home.workspaceId}::uuid`);
     return true;
   });
-}
-
-async function deleteLegacySlackRow(
-  tx: Database,
-  accountId: string,
-  install: AgentSlackInstallRecord,
-): Promise<void> {
-  if (!install.installWorkspaceId) return;
-  await withRlsContext(
-    tx,
-    { accountId, workspaceId: install.installWorkspaceId },
-    async (scoped) => {
-      await scoped.execute(sql`delete from slack_agents
-        where id = ${install.agentId}::uuid
-          and workspace_id = ${install.installWorkspaceId}::uuid
-          and connection_id = ${install.connectionId}::uuid`);
-    },
-  );
 }
 
 export type PutAgentSlackInstallOutcome =
@@ -909,16 +725,14 @@ export type PutAgentSlackInstallOutcome =
   | { kind: "not_found" }
   | { kind: "version_conflict"; install: AgentSlackInstallRecord }
   | { kind: "name_taken" }
-  /** The agent is already available in another Slack installation. */
-  | { kind: "single_install"; connectionId: string }
   /** An Only me agent cannot be in Slack. */
   | { kind: "requires_workspace_visibility" };
 
 /**
- * Make an agent available in one Slack installation, or change its open
- * setting there. Also writes the legacy Slack agent row under the
- * installation's own workspace. Callers check the name rules, visibility and
- * permissions first.
+ * Make an agent available in one Slack installation. An agent may be in
+ * several installations. Its `open` there is the agent's own "Anyone in the
+ * organization" (change that with `updateAgent`). Callers check the name
+ * rules, visibility and permissions first.
  */
 export async function putAgentSlackInstall(
   db: Database,
@@ -929,9 +743,15 @@ export async function putAgentSlackInstall(
     slackTeamId: string;
     /** The installation's own workspace (its binding's workspace). */
     installWorkspaceId: string;
-    open?: boolean;
     expectedVersion?: number;
-    actorSubjectId: string;
+    /** Null when Opengeni made it available on its own (every linked Slack workspace). */
+    actorSubjectId: string | null;
+    /**
+     * Opengeni adds it on its own (a shared agent is in every linked Slack
+     * workspace): the agent's version stays, so nobody's open edit of it
+     * conflicts. A person turning it on bumps it.
+     */
+    automatic?: boolean;
   },
 ): Promise<PutAgentSlackInstallOutcome> {
   try {
@@ -943,61 +763,31 @@ export async function putAgentSlackInstall(
       if (agent.visibility !== "workspace") {
         return { kind: "requires_workspace_visibility" as const };
       }
-      await markDualWrite(tx);
-      const installs = await installsOf(tx, home, agent.id);
-      const existing = installs.find((install) => install.connectionId === input.connectionId);
-      const other = installs.find((install) => install.connectionId !== input.connectionId);
-      if (!existing && other) {
-        return { kind: "single_install" as const, connectionId: other.connectionId };
-      }
+      const existing = (await installsOf(tx, home, agent.id)).find(
+        (install) => install.connectionId === input.connectionId,
+      );
       if (existing) {
         if (input.expectedVersion !== undefined && existing.version !== input.expectedVersion) {
           return { kind: "version_conflict" as const, install: existing };
         }
-        if (input.open === undefined || input.open === existing.open) {
-          return { kind: "saved" as const, install: existing, agent, created: false };
-        }
-        await tx.execute(sql`update agent_slack_installs set open = ${input.open},
-            version = version + 1, updated_at = now()
-          where id = ${existing.id}::uuid`);
-        // The legacy API's version is the agent's.
-        await tx.execute(sql`update agents set version = version + 1, updated_at = now()
-          where id = ${agent.id}::uuid and workspace_id = ${home.workspaceId}::uuid`);
-        const updated = (await getAgent(tx, home, agent.id)) ?? agent;
-        const saved = (await installsOf(tx, home, agent.id)).find(
-          (install) => install.id === existing.id,
-        )!;
-        await syncLegacySlackRows(tx, updated, [saved]);
-        return { kind: "saved" as const, install: saved, agent: updated, created: false };
+        return { kind: "saved" as const, install: existing, agent, created: false };
       }
+      // Only the previous release reads who can use it here from `open`.
+      const open = agent.organizationAccess;
       const nameKey = slackAgentNameKey(agent.name);
       await tx.execute(sql`insert into agent_slack_installs (agent_id, account_id, workspace_id,
-          connection_id, slack_team_id, name_key, open, enabled_by_subject_id)
+          connection_id, install_workspace_id, slack_team_id, name_key, open,
+          enabled_by_subject_id)
         values (${agent.id}::uuid, ${home.accountId}::uuid, ${home.workspaceId}::uuid,
-          ${input.connectionId}::uuid, ${input.slackTeamId}, ${nameKey}, ${input.open ?? false},
-          ${input.actorSubjectId})`);
-      // Turning Slack on changes the agent, so a stale edit of it conflicts.
-      await tx.execute(sql`update agents set version = version + 1, updated_at = now()
-        where id = ${agent.id}::uuid and workspace_id = ${home.workspaceId}::uuid`);
+          ${input.connectionId}::uuid, ${input.installWorkspaceId}::uuid, ${input.slackTeamId},
+          ${nameKey}, ${open}, ${input.actorSubjectId})`);
+      // A person turning Slack on changes the agent, so a stale edit of it
+      // conflicts; Opengeni adding it on its own changes nothing they edit.
+      if (!input.automatic) {
+        await tx.execute(sql`update agents set version = version + 1, updated_at = now()
+          where id = ${agent.id}::uuid and workspace_id = ${home.workspaceId}::uuid`);
+      }
       const enabled = (await getAgent(tx, home, agent.id)) ?? agent;
-      await withRlsContext(
-        tx,
-        { accountId: home.accountId, workspaceId: input.installWorkspaceId },
-        async (scoped) => {
-          await scoped.execute(sql`insert into slack_agents (id, account_id, workspace_id,
-              connection_id, slack_team_id, target_account_id, target_workspace_id, name, name_key,
-              description, avatar, instructions, knowledge_collection_id, open,
-              created_by_subject_id, version)
-            values (${agent.id}::uuid, ${home.accountId}::uuid, ${input.installWorkspaceId}::uuid,
-              ${input.connectionId}::uuid, ${input.slackTeamId}, ${home.accountId}::uuid,
-              ${home.workspaceId}::uuid, ${agent.name}, ${nameKey}, ${agent.description},
-              ${JSON.stringify(legacySlackAgentAvatar(agent))}::jsonb,
-              ${legacySlackInstructions(agent)},
-              ${agent.memoryEnabled ? agent.memoryCollectionId : null}::uuid,
-              ${input.open ?? false},
-              ${agent.createdBySubjectId ?? input.actorSubjectId}, ${enabled.version}::integer)`);
-        },
-      );
       const saved = (await installsOf(tx, home, agent.id)).find(
         (install) => install.connectionId === input.connectionId,
       );
@@ -1005,18 +795,17 @@ export async function putAgentSlackInstall(
       return { kind: "saved" as const, install: saved, agent: enabled, created: true };
     });
   } catch (error) {
-    const constraint = uniqueViolation(error);
-    if (isSlackNameClash(constraint)) return { kind: "name_taken" };
-    if (constraint === "slack_agents_pkey") {
-      // A legacy row with this id already exists elsewhere: treat it as the
-      // one installation the agent may be in.
-      return { kind: "single_install", connectionId: "" };
-    }
+    if (isSlackNameClash(uniqueViolation(error))) return { kind: "name_taken" };
     throw error;
   }
 }
 
-/** Stop an agent answering in one Slack installation. The agent and its chats stay. */
+/**
+ * Stop an agent answering in one Slack installation. Its channel routes, user
+ * states, intro records and suggestions there go with it, and that
+ * installation's threads and proposals lose their link to it. The agent, its
+ * chats and its other installations stay.
+ */
 export async function deleteAgentSlackInstall(
   db: Database,
   home: AgentHome,
@@ -1029,8 +818,6 @@ export async function deleteAgentSlackInstall(
       (candidate) => candidate.connectionId === input.connectionId,
     );
     if (!install) return false;
-    await markDualWrite(tx);
-    await deleteLegacySlackRow(tx, home.accountId, install);
     await tx.execute(sql`delete from agent_slack_installs where id = ${install.id}::uuid`);
     await tx.execute(sql`update agents set version = version + 1, updated_at = now()
       where id = ${agent.id}::uuid and workspace_id = ${home.workspaceId}::uuid`);
@@ -1298,6 +1085,7 @@ export type SlackAgentProjection = {
 type ProjectionRow = InstallRow & {
   agent_account_id: string;
   agent_workspace_id: string;
+  agent_organization_access: boolean;
   name: string;
   description: string;
   avatar: unknown;
@@ -1310,11 +1098,11 @@ type ProjectionRow = InstallRow & {
   instructions: string | null;
 };
 
-function mapProjection(row: ProjectionRow, fallbackHome: string | null): SlackAgentProjection {
+function mapProjection(row: ProjectionRow): SlackAgentProjection {
   return {
     id: row.agent_id,
     accountId: row.account_id,
-    workspaceId: row.install_workspace_id ?? fallbackHome ?? row.agent_workspace_id,
+    workspaceId: row.install_workspace_id,
     connectionId: row.connection_id,
     slackTeamId: row.slack_team_id,
     targetAccountId: row.agent_account_id,
@@ -1322,11 +1110,12 @@ function mapProjection(row: ProjectionRow, fallbackHome: string | null): SlackAg
     name: row.name,
     nameKey: row.name_key,
     description: row.description,
-    avatar: legacySlackAgentAvatar({ id: row.agent_id, name: row.name, avatar: row.avatar }),
+    avatar: agentSlackAvatar({ id: row.agent_id, name: row.name, avatar: row.avatar }),
     instructions: row.instructions ?? "",
     knowledgeCollectionId: row.memory_enabled ? row.memory_collection_id : null,
     memoryEnabled: row.memory_enabled,
-    open: row.open,
+    // Anyone in the organization: the agent's own setting.
+    open: row.agent_organization_access,
     createdBySubjectId: row.agent_created_by_subject_id ?? row.enabled_by_subject_id ?? "",
     version: Number(row.agent_version),
     createdAt: date(row.agent_created_at),
@@ -1355,7 +1144,7 @@ async function withProjectionInstructions(
     const instructions = await withRlsContext(db, { accountId, workspaceId }, async (tx) => {
       const rows = await rawRows<{ agent_id: string; instructions: string }>(
         tx,
-        sql`select a.id::text as agent_id, ${agentInstructionsSql("r")} as instructions
+        sql`select a.id::text as agent_id, r.instructions
           from agents a
           join agent_revisions r on r.agent_id = a.id and r.revision = a.current_revision
           where a.workspace_id = ${workspaceId}::uuid
@@ -1380,24 +1169,25 @@ function readableIds(rows: readonly ProjectionRow[]): Set<string> {
 function projectionQuery(where: SQL): SQL {
   return sql`select ${INSTALL_COLUMNS},
       a.account_id::text as agent_account_id, a.workspace_id::text as agent_workspace_id,
+      a.organization_access as agent_organization_access,
       a.name, a.description, a.avatar, a.memory_enabled,
       a.memory_collection_id::text as memory_collection_id,
       a.created_by_subject_id as agent_created_by_subject_id,
-      -- The legacy API's version during the rollout (see lockAgentLegacySlackVersion).
-      greatest(a.version, coalesce(s.version, 0)) as agent_version,
+      a.version as agent_version,
       a.created_at as agent_created_at, a.updated_at as agent_updated_at,
-      ${agentInstructionsSql("r")} as instructions
+      r.instructions
     from agent_slack_installs i
     join agents a on a.id = i.agent_id and a.account_id = i.account_id
     left join agent_revisions r on r.agent_id = a.id and r.revision = a.current_revision
-    ${INSTALL_LEGACY_JOIN}
     where a.visibility = 'workspace' and ${where}`;
 }
 
 function compareProjections(left: SlackAgentProjection, right: SlackAgentProjection): number {
   if (left.nameKey !== right.nameKey) return left.nameKey < right.nameKey ? -1 : 1;
-  if (left.id === right.id) return 0;
-  return left.id < right.id ? -1 : 1;
+  if (left.id !== right.id) return left.id < right.id ? -1 : 1;
+  // One agent in several installations: a stable order.
+  if (left.connectionId === right.connectionId) return 0;
+  return left.connectionId < right.connectionId ? -1 : 1;
 }
 
 /**
@@ -1418,11 +1208,60 @@ export async function listSlackAgentProjectionsForConnection(
     );
     if (rows.length === 0) return [];
     const projections = rows
-      .map((row) => mapProjection(row, installHome.workspaceId))
+      .map((row) => mapProjection(row))
       .filter((agent) => agent.workspaceId === installHome.workspaceId);
     return (
       await withProjectionInstructions(tx, installHome.accountId, projections, readableIds(rows))
     ).sort(compareProjections);
+  });
+}
+
+/** A shared agent of the organization that one Slack installation doesn't answer to yet. */
+export type AgentMissingFromSlack = {
+  id: string;
+  /** Its home workspace. */
+  workspaceId: string;
+  name: string;
+  createdBySubjectId: string | null;
+};
+
+/**
+ * Shared agents in the installation's organization that are not available
+ * in this Slack installation (`connectionId`) yet, oldest first, so that when
+ * two share a name the older one keeps it. Read from the installation's own
+ * workspace through the organization read. The caller decides which of them
+ * belong here (never a personal workspace's, only agents whose workspace is
+ * linked to this Slack workspace).
+ */
+export async function listAgentsMissingFromSlack(
+  db: Database,
+  installHome: AgentHome,
+  input: { connectionId: string },
+): Promise<AgentMissingFromSlack[]> {
+  return await withRlsContext(db, installHome, async (tx) => {
+    const rows = await rawRows<{
+      id: string;
+      workspace_id: string;
+      name: string;
+      created_by_subject_id: string | null;
+    }>(
+      tx,
+      sql`select a.id::text as id, a.workspace_id::text as workspace_id, a.name,
+          a.created_by_subject_id
+        from agents a
+        where a.account_id = ${installHome.accountId}::uuid
+          and a.visibility = 'workspace'
+          and not exists (select 1 from agent_slack_installs i
+            where i.agent_id = a.id and i.account_id = a.account_id
+              and i.connection_id = ${input.connectionId}::uuid)
+        order by a.created_at, a.id`,
+    );
+    return rows.map((row) => ({
+      id: row.id,
+      workspaceId: row.workspace_id,
+      name: row.name,
+      createdBySubjectId: row.created_by_subject_id,
+    }));
   });
 }
 
@@ -1436,30 +1275,46 @@ export async function listOrganizationSlackAgentProjections(
       tx,
       projectionQuery(sql`i.account_id = ${input.accountId}::uuid`),
     );
-    const projections = rows.map((row) => mapProjection(row, null));
+    const projections = rows.map((row) => mapProjection(row));
     return (
       await withProjectionInstructions(tx, input.accountId, projections, readableIds(rows))
     ).sort(compareProjections);
   });
 }
 
-/** One Slack-available agent of an organization by id, or null. */
+/**
+ * One Slack-available agent of an organization by id, as one installation
+ * sees it, or null. An agent may be in several installations: `connectionId`
+ * picks that installation, `installWorkspaceId` the one whose own workspace
+ * it is; with neither, the installation it joined first.
+ */
 export async function getSlackAgentProjection(
   db: Database,
-  input: { accountId: string; agentId: string },
+  input: {
+    accountId: string;
+    agentId: string;
+    connectionId?: string | null;
+    installWorkspaceId?: string | null;
+  },
 ): Promise<SlackAgentProjection | null> {
   return await withRlsContext(db, { accountId: input.accountId }, async (tx) => {
     const rows = await rawRows<ProjectionRow>(
       tx,
       projectionQuery(
         sql`i.account_id = ${input.accountId}::uuid and i.agent_id = ${input.agentId}::uuid
-          order by i.created_at limit 1`,
+          ${input.connectionId ? sql`and i.connection_id = ${input.connectionId}::uuid` : sql``}
+          ${
+            input.installWorkspaceId
+              ? sql`and i.install_workspace_id = ${input.installWorkspaceId}::uuid`
+              : sql``
+          }
+          order by i.created_at, i.id limit 1`,
       ),
     );
     const [projection] = await withProjectionInstructions(
       tx,
       input.accountId,
-      rows.map((row) => mapProjection(row, null)),
+      rows.map((row) => mapProjection(row)),
       readableIds(rows),
     );
     return projection ?? null;

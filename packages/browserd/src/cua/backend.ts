@@ -16,6 +16,7 @@ import type {
 } from "@opengeni/contracts";
 import {
   ComputerBackendError,
+  ComputerHelperStoppedError,
   type ComputerBackend,
   type ComputerBackendTarget,
   type ComputerBackendObservation,
@@ -88,7 +89,8 @@ type Operation = {
     | "type_text"
     | "press_key"
     | "hotkey"
-    | "bring_to_front";
+    | "bring_to_front"
+    | "invoke_menu";
   args: Record<string, unknown>;
   /** The value a date field must read once this step's input has run. */
   expectDate?: { ref: string; value: string; segments: readonly DateSegment[] };
@@ -127,6 +129,11 @@ const UNTITLED_STRIP_MAX_SIDE = 100;
 /** How long a field check waits before reading a window again, when the
  * reading straight after the input does not show it yet. */
 const INPUT_REREAD_MS = 150;
+/** How long a click stays the point typing goes to (see typeAtClick). The
+ * window can change meanwhile by means this process never sees (the
+ * person, a device's own tools), and a click sent again at an old point
+ * could press whatever is there now. */
+const CLICKED_POINT_MS = 120_000;
 /** CUA's refusal of background typing when the window's focused element is
  * not a text input (see typeAtClick). */
 const NO_FOCUSED_TEXT_INPUT = "no_focused_text_input";
@@ -196,10 +203,11 @@ export class CuaComputerBackend implements ComputerBackend {
   /** Per window, the point of a click that was its latest action, in the
    * screenshot pixels of the frame the click used (with that frame's size):
    * where typing goes next when the window's content is not in its
-   * accessibility tree (see typeAtClick). Any other action forgets it. */
+   * accessibility tree (see typeAtClick). Any other action forgets it, and
+   * it lapses after CLICKED_POINT_MS. */
   private readonly clickedPoints = new Map<
     string,
-    { x: number; y: number; width: number; height: number }
+    { x: number; y: number; width: number; height: number; at: number }
   >();
   private tail: Promise<unknown> = Promise.resolve();
   private closing = false;
@@ -457,9 +465,12 @@ export class CuaComputerBackend implements ComputerBackend {
     if (command.action.type === "launch")
       return this.dispatchLaunch(command, command.action.applicationId);
     return this.run(async () => {
-      // Only a click that is the window's latest action says where typing goes.
-      const clickedAt = this.clickedPoints.get(command.targetId);
+      // Only a recent click that is the window's latest action says where
+      // typing goes.
+      const clicked = this.clickedPoints.get(command.targetId);
       this.clickedPoints.delete(command.targetId);
+      const clickedAt =
+        clicked && Date.now() - clicked.at <= CLICKED_POINT_MS ? clicked : undefined;
       if (command.action.type === "batch")
         return await this.dispatchBatch(command, false, standIn, unconfirmed);
       if (command.action.type === "focus") return await this.dispatchFocus(command);
@@ -570,6 +581,7 @@ export class CuaComputerBackend implements ComputerBackend {
               );
             if (error instanceof CuaFailure && !error.dispatched)
               throw (
+                (operation.name === "invoke_menu" ? menuRefusal(error) : null) ??
                 (command.action.type === "keyboard"
                   ? this.keyboardRefusal(command.targetId, error.cuaCode, error.code, observed)
                   : null) ??
@@ -611,6 +623,7 @@ export class CuaComputerBackend implements ComputerBackend {
           y: Number(click.args.y),
           width: clickFrame.width,
           height: clickFrame.height,
+          at: Date.now(),
         });
       if (after?.target.id !== command.targetId) return after;
       const confirmed = await this.confirmInput(after, operations);
@@ -639,7 +652,7 @@ export class CuaComputerBackend implements ComputerBackend {
    * clicks the field again to focus it and makes this window its app's key
    * window before sending any key, so the keys reach this window only. The
    * refused attempt sent nothing. Only a click that was this window's latest
-   * action counts.
+   * action, within the last two minutes, counts.
    */
   private typeAtClick(
     command: ComputerBackendActionCommand,
@@ -818,7 +831,11 @@ export class CuaComputerBackend implements ComputerBackend {
     try {
       await callDesktop(this.runtime, operation!.name, operation!.args, "caller-settles");
     } catch (error) {
-      if (error instanceof ComputerBackendError && !error.dispatched) throw error;
+      if (
+        (error instanceof ComputerBackendError && !error.dispatched) ||
+        error instanceof ComputerHelperStoppedError
+      )
+        throw error;
       throw new ComputerBackendError(
         "outcome_unknown",
         "macOS was asked to bring this window to the front, but it was not confirmed as the front app's focused window: observe it before acting on it",
@@ -847,6 +864,11 @@ export class CuaComputerBackend implements ComputerBackend {
           steps.some((step) => step.stepOptions !== undefined),
           true,
         );
+        // CUA's batch runs input steps only; a menu item is chosen alone.
+        if (operations.some((operation) => operation.name === "invoke_menu"))
+          throw unsupported(
+            "A menu-bar item is chosen in a call of its own, not inside a batch: send this set_value as its own action",
+          );
         for (const operation of operations) {
           steps.push(operation);
           actionOf.push(index);
@@ -1030,9 +1052,14 @@ export class CuaComputerBackend implements ComputerBackend {
     this.closing = true;
     this.closePromise = this.tail.then(async () => {
       try {
-        if (this.nativeSessionStarted)
-          await callDesktop(this.runtime, "end_session", { session: this.nativeSession });
-        await callDesktop(this.runtime, "end_session", { session: this.session });
+        try {
+          if (this.nativeSessionStarted)
+            await callDesktop(this.runtime, "end_session", { session: this.nativeSession });
+          await callDesktop(this.runtime, "end_session", { session: this.session });
+        } catch (error) {
+          // A worker that is gone took its sessions with it.
+          if (!(error instanceof ComputerHelperStoppedError)) throw error;
+        }
       } finally {
         this.observations.clear();
         this.frames.clear();
@@ -2365,6 +2392,12 @@ export class CuaComputerBackend implements ComputerBackend {
         if (!named) throw error;
         return [named];
       }
+      // A macOS menu-bar menu opened through accessibility in an app the
+      // person is not using stays open out of sight, and the app then takes
+      // no click or key until it closes. Its item is chosen straight from the
+      // menu bar instead, without opening any menu.
+      const menuStep = menuBarStep(this.identity.platform, args, node, action);
+      if (menuStep) return [menuStep];
       // A date field's picker button opens a menu that would bring the
       // browser in front; the field itself takes the whole value.
       const picker = this.dateFieldOf(command.targetId, node.ref);
@@ -3429,6 +3462,52 @@ function inputFailures(
 
 function unsupported(message: string): ComputerBackendError {
   return new ComputerBackendError("unsupported", message, false, false);
+}
+
+/** The step for an action on a macOS menu-bar item ("File", "View"), or null
+ * for any other element. Pressing the item would open its menu, which in an
+ * app in the background stays open out of sight and holds every click and
+ * key the person sends that app until it closes. set_value with an item's
+ * name ("Zoom In", or "Developer > JavaScript Console" in a submenu) chooses
+ * that item from the menu bar without opening a menu; invoke and show_menu
+ * open nothing and say so. */
+export function menuBarStep(
+  platform: "macos" | "windows" | "linux",
+  args: Record<string, unknown>,
+  node: InteractionSemanticNodeValue,
+  action: SemanticAction,
+): Operation | null {
+  if (platform !== "macos" || node.role !== "AXMenuBarItem" || !node.name) return null;
+  if (action.action === "set_value" && action.value !== undefined) {
+    const items = String(action.value)
+      .split(">")
+      .map((segment) => segment.trim())
+      .filter((segment) => segment !== "");
+    if (items.length === 0 || items.length > 15)
+      throw unsupported(
+        `Name the item of the "${node.name}" menu to choose, such as "Zoom In", or "Submenu > Item" for an item in a submenu`,
+      );
+    return {
+      name: "invoke_menu",
+      args: { pid: args.pid, window_id: args.window_id, path: [node.name, ...items] },
+    };
+  }
+  if (action.action === "invoke" || action.action === "show_menu")
+    throw unsupported(
+      `A menu opened from the menu bar stays open, out of sight when its app is in the background, and holds every click and key in that app until it closes, so the "${node.name}" menu was not opened: choose its item with set_value on ${node.ref} and the item's name as value, such as "Zoom In", or "Submenu > Item" for an item in a submenu. A name it does not have lists the items it has`,
+    );
+  return null;
+}
+
+/** CUA's refusal of a menu path, worded for set_value on a menu-bar item:
+ * CUA names its own tool and counts path segments. Null when it is not one. */
+export function menuRefusal(error: CuaFailure): ComputerBackendError | null {
+  if (!error.message.includes("invoke_menu:")) return null;
+  const message = error.message
+    .replace(/^.*?invoke_menu:\s*/s, "")
+    .replace(/^path segment \d+ /, "The item ")
+    .replace(/path segment \d+ is/, "that item is");
+  return new ComputerBackendError(error.code, `${message}; nothing was chosen`, false, false);
 }
 
 /** What a person must do before this login session's windows can be read or

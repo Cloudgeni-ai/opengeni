@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { FileAsset, RetainedArtifactReference } from "@opengeni/sdk";
+import type { FileAsset, OpenGeniClient, RetainedArtifactReference } from "@opengeni/sdk";
 import { LightboxProvider, createWorkspaceRetainedArtifactLoader } from "../../timeline";
 import { PatchApplyCommand, isPatchFilename } from "../../artifacts";
 import {
@@ -10,6 +10,7 @@ import {
   RefreshCwIcon,
 } from "lucide-react";
 import { useAppContext } from "../app-context";
+import { useNavigate } from "../lib/navigation";
 import { ArtifactSessionPage } from "../components/session/artifact-session-page";
 import { ArtifactFullView } from "../components/artifacts/artifact-full-view";
 import {
@@ -91,6 +92,9 @@ function RetainedArtifactDetail({
 }) {
   const context = useAppContext();
   const { client, accessKeyVersion } = context;
+  const navigate = useNavigate();
+  const navigateRef = useRef(navigate);
+  navigateRef.current = navigate;
   const back = useArtifactsBackLink(workspaceId, fromSession);
   const [fullView, setFullView] = useArtifactFullView();
   const copyLink = useCopyArtifactLink(workspaceId);
@@ -131,7 +135,20 @@ function RetainedArtifactDetail({
           ...(own ? { file: own } : {}),
         });
       })
-      .catch((error: unknown) => {
+      .catch(async (error: unknown) => {
+        if (!current) return;
+        // Sites share the UUID format, so an `artifact:<uuid>` link written
+        // outside the console (a Slack reply, an email) can name a Site.
+        // Open the Site instead of failing on it.
+        if (!embedded && (await isSite(client, workspaceId, artifactId))) {
+          if (current)
+            void navigateRef.current({
+              to: "/workspaces/$workspaceId/sites/$siteId",
+              params: { workspaceId, siteId: artifactId },
+              replace: true,
+            });
+          return;
+        }
         if (current)
           setState({
             key,
@@ -143,7 +160,7 @@ function RetainedArtifactDetail({
       current = false;
       downloads.generation++;
     };
-  }, [key, client, workspaceId, artifactId, retry, downloads]);
+  }, [key, client, workspaceId, artifactId, retry, downloads, embedded]);
   const loaded = state?.key === key && state.client === client ? state : null;
   const artifact = loaded?.artifact;
   const filename =
@@ -411,4 +428,21 @@ function RetainedArtifactLoadError({ error, onRetry }: { error: Error; onRetry: 
       ) : null}
     </Notice>
   );
+}
+
+/** Whether this UUID names a Site the viewer can open, rather than a file. */
+async function isSite(
+  client: Partial<Pick<OpenGeniClient, "resolveArtifactLink">>,
+  workspaceId: string,
+  artifactId: string,
+): Promise<boolean> {
+  if (typeof client.resolveArtifactLink !== "function") return false;
+  try {
+    const resolution = await client.resolveArtifactLink(workspaceId, artifactId);
+    return (
+      resolution.kind === "site" && resolution.artifactId.toLowerCase() === artifactId.toLowerCase()
+    );
+  } catch {
+    return false;
+  }
 }

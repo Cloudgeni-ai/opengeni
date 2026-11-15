@@ -10,7 +10,9 @@ afterAll(() => GlobalRegistrator.unregister());
 const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
 const { CatalogItemPage } = await import("./catalog-item-page");
+const { connectionHealth } = await import("@opengeni/react/app/lib/capabilities");
 type CapabilityCatalogItem = import("@opengeni/react/app/types").CapabilityCatalogItem;
+type ConnectionMetadata = import("@opengeni/react/app/types").ConnectionMetadata;
 
 async function render(node: import("react").ReactNode) {
   const container = document.createElement("div");
@@ -72,6 +74,95 @@ const common = {
 };
 
 describe("connector page account management", () => {
+  describe("after removing a duplicate of the same account", () => {
+    const enabled = item({
+      enabled: true,
+      actions: ["connect", "disconnect"],
+      connectionRef: {
+        providerDomain: "gmailmcp.googleapis.com",
+        kind: "oauth2",
+        subjectScope: "subject",
+      },
+    } as Partial<CapabilityCatalogItem>);
+    const login = (id: string, status: ConnectionMetadata["status"], createdAt: string) =>
+      ({
+        id,
+        accountId: "acct",
+        workspaceId: "personal-ws",
+        authorityId: `authority-${id}`,
+        subjectId: "me",
+        providerDomain: "gmailmcp.googleapis.com",
+        kind: "oauth2",
+        status,
+        metadata: { gmailEmail: "me@example.test", mcpUrl: enabled.mcpUrl },
+        grantedScopes: [],
+        expiresAt: null,
+        lastRefreshAt: null,
+        lastUsedAt: null,
+        lastError: null,
+        version: 3,
+        createdBySubjectId: "me",
+        updatedBySubjectId: "me",
+        createdAt,
+        updatedAt: createdAt,
+      }) as unknown as ConnectionMetadata;
+    const page = (connections: ConnectionMetadata[], onAction = mock(() => {})) => (
+      <CatalogItemPage
+        {...common}
+        // The tool-permission section of a connected account reads the app
+        // context; it is not what these tests are about.
+        workspaceId=""
+        item={enabled}
+        health={connectionHealth(enabled, connections, true)}
+        onAction={onAction}
+        connectionAccounts={{ connections }}
+        accountManagement={{ viewerSubjectId: "me", canWrite: true, onRemove: async () => true }}
+        personalOnly
+      />
+    );
+
+    test("the remaining working account reads Connected, with no sign-in banner", async () => {
+      // Newest first, as the connections list returns them.
+      const view = await render(
+        page([
+          login("removed-duplicate", "revoked", "2026-10-21T00:00:00Z"),
+          login("working", "active", "2026-10-08T00:00:00Z"),
+        ]),
+      );
+      try {
+        const text = view.container.textContent ?? "";
+        expect(text).not.toContain("Sign in again");
+        expect(text).not.toContain("Needs attention");
+        expect(buttons(view.container, "Reconnect")).toHaveLength(0);
+        expect(text).toContain("me@example.test");
+      } finally {
+        await view.unmount();
+      }
+    });
+
+    test("with only removed logins left, the one action connects a new account", async () => {
+      const onAction = mock(() => {});
+      const view = await render(
+        page([login("removed", "revoked", "2026-10-21T00:00:00Z")], onAction),
+      );
+      try {
+        expect(view.container.textContent).not.toContain("Sign in again");
+        expect(buttons(view.container, "Reconnect")).toHaveLength(0);
+        const connect = buttons(view.container, "Connect Gmail");
+        expect(connect).toHaveLength(1);
+        await act(async () => connect[0]!.click());
+        expect(onAction).toHaveBeenLastCalledWith({
+          type: "reconnect_oauth",
+          item: enabled,
+          connectionId: null,
+          ownership: "personal",
+        });
+      } finally {
+        await view.unmount();
+      }
+    });
+  });
+
   test("1Password opens its protected setup and management pages instead of generic MCP setup", async () => {
     for (const enabled of [false, true]) {
       const action = mock(() => {});

@@ -273,18 +273,41 @@ export class ComposerWorkspaceControlUnavailableError extends Error {
  * another model, and the typed message stays recoverable via Edit message.
  */
 export const COMPOSER_MODEL_UNAVAILABLE_MESSAGE =
+  "This chat's model is no longer available. Choose another model to continue.";
+
+/** The earlier wording, still recognized in refusals restored from storage. */
+const LEGACY_COMPOSER_MODEL_UNAVAILABLE_MESSAGE =
   "This chat's model is no longer available. Choose another model to continue. Your message is saved.";
 
 /** A rejected account is never silently replaced or retried with new authority. */
 export const COMPOSER_ACCOUNT_UNAVAILABLE_MESSAGE =
+  "A selected connector account is unavailable. Review accounts in + → Connectors, then edit and send your message.";
+
+/** The earlier wording, still recognized in refusals restored from storage. */
+const LEGACY_COMPOSER_ACCOUNT_UNAVAILABLE_MESSAGE =
   "A selected connector account is unavailable. Review accounts in + → Connectors, then edit and send your saved message.";
+
+/**
+ * A model- or account-unavailable refusal in any wording it has had: its own
+ * next step, so a restored copy gets no support reference appended.
+ */
+export function isComposerSelectionRefusalMessage(message: string): boolean {
+  return (
+    message === COMPOSER_MODEL_UNAVAILABLE_MESSAGE ||
+    message === LEGACY_COMPOSER_MODEL_UNAVAILABLE_MESSAGE ||
+    message === COMPOSER_ACCOUNT_UNAVAILABLE_MESSAGE ||
+    message === LEGACY_COMPOSER_ACCOUNT_UNAVAILABLE_MESSAGE
+  );
+}
 
 export function isConnectionAccountSubmissionError(error: unknown): boolean {
   return (
     (error instanceof OpenGeniApiError &&
       !error.outcomeUnknown &&
       error.details?.code === "connection_account_selection_unavailable") ||
-    (error instanceof Error && error.message === COMPOSER_ACCOUNT_UNAVAILABLE_MESSAGE)
+    (error instanceof Error &&
+      (error.message === COMPOSER_ACCOUNT_UNAVAILABLE_MESSAGE ||
+        error.message === LEGACY_COMPOSER_ACCOUNT_UNAVAILABLE_MESSAGE))
   );
 }
 
@@ -327,8 +350,10 @@ export function repositoryUnavailableRefusalMessage(t: OpenGeniText, error: Erro
 
 /**
  * The server's own reason for a refused request, as a sentence, or null when
- * the response carries none. Reads both the API envelope (`error.message`)
- * and a route's own top-level `{ code, message }` body.
+ * the response carries none. Reads the API envelope (`error.message`), a
+ * route's own top-level `{ code, message }` body, and a host endpoint's
+ * `{ error: "sentence", code, details }` body. A bare `error` word such as
+ * `"maintenance"` or `"invalid_request"` is a marker, not a reason.
  */
 function serverRefusalReason(error: OpenGeniApiError): string | null {
   let body: unknown;
@@ -342,7 +367,9 @@ function serverRefusalReason(error: OpenGeniApiError): string | null {
     record?.error && typeof record.error === "object"
       ? (record.error as Record<string, unknown>)
       : record;
-  const message = envelope?.message;
+  const hostReason =
+    typeof record?.error === "string" && /\s/u.test(record.error.trim()) ? record.error : undefined;
+  const message = typeof envelope?.message === "string" ? envelope.message : hostReason;
   if (typeof message !== "string") return null;
   const text = message.trim().slice(0, 300);
   if (!text) return null;
@@ -381,12 +408,13 @@ export function sessionCreateRefusalMessage(t: OpenGeniText, error: Error): stri
  * recovery action (raise or remove the limit, resume a goal) belongs to the
  * composer's `SessionUsageLimitNotice`, so this line only says what happened.
  */
-export const COMPOSER_SESSION_USAGE_LIMIT_MESSAGE =
-  "This task's usage limit is reached. Your message is saved.";
+export const COMPOSER_SESSION_USAGE_LIMIT_MESSAGE = "This task's usage limit is reached.";
 
-/** The earlier wording, still recognized in refusals restored from storage. */
-const LEGACY_COMPOSER_SESSION_USAGE_LIMIT_MESSAGE =
-  "This task's usage limit is reached. Raise or remove the limit to continue. Your message is saved.";
+/** Earlier wordings, still recognized in refusals restored from storage. */
+const LEGACY_COMPOSER_SESSION_USAGE_LIMIT_MESSAGES: readonly string[] = [
+  "This task's usage limit is reached. Your message is saved.",
+  "This task's usage limit is reached. Raise or remove the limit to continue. Your message is saved.",
+];
 
 /**
  * Is this send refusal the task's usage limit? Reads the typed SDK error code
@@ -397,7 +425,7 @@ export function isSessionUsageLimitSubmissionError(error: Error): boolean {
   return (
     (error instanceof OpenGeniApiError && error.code === "session_usage_limit_reached") ||
     error.message === COMPOSER_SESSION_USAGE_LIMIT_MESSAGE ||
-    error.message === LEGACY_COMPOSER_SESSION_USAGE_LIMIT_MESSAGE
+    LEGACY_COMPOSER_SESSION_USAGE_LIMIT_MESSAGES.includes(error.message)
   );
 }
 
@@ -412,6 +440,7 @@ export function isModelUnavailableSubmissionError(error: Error): boolean {
   }
   return (
     error.message === COMPOSER_MODEL_UNAVAILABLE_MESSAGE ||
+    error.message === LEGACY_COMPOSER_MODEL_UNAVAILABLE_MESSAGE ||
     /^(?:Opengeni|OpenGeni) API 422: model is not available: /.test(error.message)
   );
 }
@@ -503,6 +532,37 @@ function composerErrorReference(t: OpenGeniText, error: Error, message: string):
   return error instanceof OpenGeniApiError && error.correlationId
     ? t("lib.format.messageReferenceCorrelationid", { message, correlationId: error.correlationId })
     : message;
+}
+
+/**
+ * Definite refusals of what was asked (input or state) whose own reason tells
+ * the person what to change. Permission and missing-item refusals (403, 404)
+ * keep the neutral copy: their text can name internal permissions or brands.
+ */
+const EXPLAINED_CREATE_REFUSAL_STATUSES: ReadonlySet<number> = new Set([400, 409, 422]);
+
+/**
+ * What a refused or failed new chat says. Typed refusals (a speed or model
+ * that isn't available, credits, usage limits) keep their worded copy. Any
+ * other definite refusal says the server's or host's own reason instead of the
+ * SDK's generic copy for its status, so the person can change the model, speed
+ * or effort and send again. Uncertain outcomes keep the neutral copy, because
+ * the stock new chat then offers the exact retry.
+ */
+export function newConversationErrorMessage(t: OpenGeniText, error: Error): string {
+  const message = composerSubmissionErrorMessage(t, error);
+  if (
+    !(error instanceof OpenGeniApiError) ||
+    error.outcomeUnknown ||
+    !EXPLAINED_CREATE_REFUSAL_STATUSES.has(error.status)
+  )
+    return message;
+  // Only the SDK's bare copy for this status is generic; typed copy (setup,
+  // seats, Site refusals, worded create refusals) already says what to do.
+  const generic = formatErrorMessage(
+    new OpenGeniApiError(error.status, "", { outcomeUnknown: false }),
+  );
+  return message === generic ? (serverRefusalReason(error) ?? message) : message;
 }
 
 /** These definitive refusals need a payment, allowance or model change, not an unchanged retry. */
@@ -729,6 +789,8 @@ const AUTHORED_ONLY_FAILURE_CODES: ReadonlySet<string> = new Set([
   "sandbox_service_refused",
   // The detail is the machine agent's own text (the program, the OS error).
   "sandbox_process_start_failed",
+  // The detail is Claude's own wording about thinking signatures (operator-only).
+  "anthropic_reasoning_replay_rejected",
 ]);
 
 /** Server failure codes whose recorded text is operator English, not end-user copy. */

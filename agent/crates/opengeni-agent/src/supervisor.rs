@@ -46,7 +46,6 @@ use opengeni_agent_proto::v1::{
 };
 use opengeni_agent_stream::RelayCredential;
 use prost::Message as _;
-use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
@@ -74,14 +73,57 @@ const CAPACITY_RESAMPLE: Duration = Duration::from_secs(60);
 const UPDATE_IDLE_RECHECK: Duration = Duration::from_secs(10);
 #[cfg(test)]
 const UPDATE_IDLE_RECHECK: Duration = Duration::from_millis(20);
-/// Op frames queued toward the bulk publisher. A pipe diameter for the
-/// fire-and-forget lane: a full channel DROPS the frame (allowed — op frames
-/// are healed by gap-detection + OpAttach replay), it never blocks a pump.
+/// Op frames queued toward the bulk publisher. A pipe diameter, not a limit:
+/// a full channel refuses the frame without blocking the pump, which keeps it
+/// and sends it once the channel drains. Frames are never dropped for want of
+/// room: a replay of a retained backlog is far wider than the channel, and a
+/// frame dropped from its tail is one the consumer cannot notice is missing.
 const BULK_CHANNEL_DEPTH: usize = 1024;
 
 /// The current generation's bulk frame channel: (subject, encoded OpFrame)
 /// pairs toward the bulk publisher task. `None` between generations.
 type BulkLane = Arc<std::sync::RwLock<Option<tokio::sync::mpsc::Sender<(String, Vec<u8>)>>>>;
+
+/// The current generation's control connection. `None` between generations.
+///
+/// Work that outlives the generation that started it reports through this,
+/// not through the connection it was started on: a generation lasts only as
+/// long as its broker credential (minutes), and its connection is closed when
+/// it ends, so anything published on it later is lost.
+type ControlLane = Arc<std::sync::RwLock<Option<async_nats::Client>>>;
+
+/// Binds a generation's control connection to its link's lane while it serves.
+struct ServingControl<'a>(&'a ControlLane);
+
+impl<'a> ServingControl<'a> {
+    fn bind(lane: &'a ControlLane, client: &async_nats::Client) -> Self {
+        *lane.write().expect("control lane lock") = Some(client.clone());
+        Self(lane)
+    }
+}
+
+impl Drop for ServingControl<'_> {
+    fn drop(&mut self) {
+        *self.0.write().expect("control lane lock") = None;
+    }
+}
+
+/// Where a self-update reports its progress: the link's current control
+/// connection, or the one its request arrived on while there is none yet.
+struct UpdateReporter {
+    lane: ControlLane,
+    requested_on: async_nats::Client,
+}
+
+impl UpdateReporter {
+    fn client(&self) -> async_nats::Client {
+        self.lane
+            .read()
+            .expect("control lane lock")
+            .clone()
+            .unwrap_or_else(|| self.requested_on.clone())
+    }
+}
 
 /// Keeps a compute link's relay credential current with what its host sends
 /// on [`crate::compute::RELAY_SUBJECT`], for as long as the generation lasts.
@@ -123,48 +165,20 @@ async fn follow_compute_relay(
     )))))
 }
 
+/// Publishes op frames, in order, on a generation's bulk connection.
+///
+/// Only output frames ride this lane. A command's completion notice and the
+/// connection's operation inventory are a few bytes each and go on the
+/// control connection (see [`report_retained_events`] and
+/// [`control_event_sink`]): behind this FIFO they would wait for every frame
+/// already queued, which on a slow uplink is minutes of output.
 async fn publish_bulk_lane(
     engine: Arc<Engine>,
     client: async_nats::Client,
     mut receiver: tokio::sync::mpsc::Receiver<(String, Vec<u8>)>,
     transport_lost: TransportLossSignal,
-    scope: String,
-    completion_subject: String,
 ) {
-    let mut retries = tokio::time::interval(DEFAULT_HEARTBEAT);
-    retries.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        let next = tokio::select! {
-            // First tick is immediate on reconnect. Retained truth survives a
-            // full send queue; bulk backpressure cannot block control liveness.
-            _ = retries.tick() => {
-                for (op_id, exit) in engine.retained_completions(&scope) {
-                    let event = crate::ops::completion_event(op_id, &exit);
-                    if let Err(error) = client.publish(completion_subject.clone(), event.encode_to_vec().into()).await {
-                        warn!(%error, "completion replay failed; retained proof retries after reconnect");
-                        transport_lost.request(TransportLossKind::Disconnected);
-                        return;
-                    }
-                }
-                // This connection's inventory, until every page is answered,
-                // and again while completed output goes unreleased: Opengeni
-                // names the ops to end and collects what it has not stored
-                // (inventory.rs). The runner starts every such exchange.
-                for page in engine.inventory_pages(&scope) {
-                    let event = crate::ops::inventory_event(page);
-                    if let Err(error) = client.publish(completion_subject.clone(), event.encode_to_vec().into()).await {
-                        warn!(%error, "inventory report failed; it retries after reconnect");
-                        transport_lost.request(TransportLossKind::Disconnected);
-                        return;
-                    }
-                }
-                continue;
-            }
-            next = receiver.recv() => next,
-        };
-        let Some((subject, bytes)) = next else {
-            return;
-        };
+    while let Some((subject, bytes)) = receiver.recv().await {
         if let Err(error) = client.publish(subject, bytes.into()).await {
             engine.note_frame_dropped();
             warn!(%error, "op frame publish failed (replay heals)");
@@ -172,6 +186,61 @@ async fn publish_bulk_lane(
             return;
         }
     }
+}
+
+/// Reports what this connection still owes Opengeni, on `client`: every
+/// completion Opengeni has not acknowledged, and the connection's inventory
+/// until every page is answered (and again while completed output goes
+/// unreleased: Opengeni names the ops to end and collects what it has not
+/// stored, inventory.rs). The runner starts every such exchange.
+///
+/// Called on the control connection at each heartbeat, the first one right
+/// after a connection is established, so a lost or unacknowledged notice is
+/// repeated within one heartbeat whatever the bulk lane carries.
+async fn report_retained_events(
+    engine: &Engine,
+    client: &async_nats::Client,
+    scope: &str,
+    subject: &str,
+) -> Result<(), async_nats::PublishError> {
+    for (op_id, exit) in engine.retained_completions(scope) {
+        let event = crate::ops::completion_event(op_id, &exit);
+        client
+            .publish(subject.to_string(), event.encode_to_vec().into())
+            .await?;
+    }
+    for page in engine.inventory_pages(scope) {
+        let event = crate::ops::inventory_event(page);
+        client
+            .publish(subject.to_string(), event.encode_to_vec().into())
+            .await?;
+    }
+    Ok(())
+}
+
+/// Builds a sink that publishes an agent event on a link's current control
+/// connection: the immediate completion notice of an op. Between generations
+/// there is none and the notice is not sent; the retained completion is
+/// reported by the next generation's first heartbeat
+/// ([`report_retained_events`]).
+fn control_event_sink(lane: ControlLane, subject: String) -> crate::ops::FrameSink {
+    Arc::new(move |bytes: Vec<u8>| {
+        let Some(client) = lane.read().expect("control lane lock").clone() else {
+            debug!("no control connection; the completion is reported on the next heartbeat");
+            return crate::job::Delivery::Taken;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            debug!("no runtime for the completion notice; it is reported on the next heartbeat");
+            return crate::job::Delivery::Taken;
+        };
+        let subject = subject.clone();
+        runtime.spawn(async move {
+            if let Err(error) = client.publish(subject, bytes.into()).await {
+                debug!(%error, "completion notice not sent; it is reported on the next heartbeat");
+            }
+        });
+        crate::job::Delivery::Taken
+    })
 }
 
 /// A link's frame scope: its connection and process subject prefix.
@@ -203,16 +272,27 @@ impl FrameLanes {
 /// Builds the frame sink of one op on a link's bulk lane.
 fn bulk_frame_sink(lane: BulkLane, subject: String, engine: Arc<Engine>) -> crate::ops::FrameSink {
     Arc::new(move |bytes: Vec<u8>| {
-        let delivered = match lane.read().expect("bulk lock").as_ref() {
-            Some(tx) => tx.try_send((subject.clone(), bytes)).is_ok(),
-            None => false,
-        };
-        if !delivered {
-            // Protocol-healed (gap-detect + OpAttach replay), but RECORDED:
-            // a rising counter means the bulk lane is down or undersized.
-            engine.note_frame_dropped();
-            debug!("bulk lane full/closed; op frame dropped (replay heals)");
+        use tokio::sync::mpsc::error::TrySendError;
+        if let Some(tx) = lane.read().expect("bulk lock").as_ref() {
+            match tx.try_send((subject.clone(), bytes)) {
+                Ok(()) => return crate::job::Delivery::Taken,
+                // Full: the pump keeps the frame and sends it once this
+                // generation's channel has room (or has closed).
+                Err(TrySendError::Full(_)) => {
+                    let tx = tx.clone();
+                    return crate::job::Delivery::Full(Box::pin(async move {
+                        let _ = tx.reserve().await;
+                    }));
+                }
+                Err(TrySendError::Closed(_)) => {}
+            }
         }
+        // No connection: the frame is gone with it. The consumer re-attaches
+        // after the reconnect and its replay carries it. RECORDED: a rising
+        // counter means the bulk lane is down.
+        engine.note_frame_dropped();
+        debug!("bulk lane closed; op frame dropped (replay heals)");
+        crate::job::Delivery::Taken
     })
 }
 
@@ -272,10 +352,9 @@ fn adopt_ops<P: Platform>(
             .lock()
             .expect("frame lanes")
             .lane_for((op.tag.scope.clone(), prefix.clone()));
-        let completion_sink =
-            bulk_frame_sink(lane.clone(), format!("{prefix}.events"), engine.clone());
-        let on_exit =
-            crate::ops::completion_publisher(Some(completion_sink), op.tag.request_id.clone());
+        // Its link's heartbeat reports the completion on the control
+        // connection (report_retained_events); the link may not exist yet.
+        let on_exit = crate::ops::completion_publisher(None, op.tag.request_id.clone());
         let sink = bulk_frame_sink(lane, op.tag.subject.clone(), engine.clone());
         let emit = crate::ops::frame_publisher(sink, op.tag.request_id.clone());
         let reservation = update_drain.reserve_adopted_work();
@@ -743,6 +822,9 @@ struct WorkspaceLink<P: Platform> {
     /// `None` between generations (frames drop; replay heals — fire-and-forget
     /// by protocol design).
     bulk_tx: BulkLane,
+    /// The CURRENT generation's control connection, for work that outlives
+    /// the generation it started on (see [`ControlLane`]).
+    control: ControlLane,
     /// Upload identity is local to this exact connection/process instance.
     uploads: Arc<std::sync::Mutex<crate::uploads::Uploads>>,
     replies: Arc<std::sync::Mutex<crate::rpc_replay::Registry>>,
@@ -766,6 +848,7 @@ impl<P: Platform> WorkspaceLink<P> {
             epoch: Arc::new(EpochCell::default()),
             shutdown: ShutdownSignal::default(),
             bulk_tx: Arc::new(std::sync::RwLock::new(None)),
+            control: Arc::new(std::sync::RwLock::new(None)),
             uploads: Arc::new(std::sync::Mutex::new(crate::uploads::Uploads::default())),
             replies: Arc::new(std::sync::Mutex::new(crate::rpc_replay::Registry::default())),
             desktop_status: std::sync::RwLock::new(None),
@@ -799,6 +882,7 @@ impl<P: Platform> WorkspaceLink<P> {
             // Rebinding this same Arc lets retained pumps replay through the
             // successor's authenticated bulk connection.
             replacement.bulk_tx = previous.bulk_tx.clone();
+            replacement.control = previous.control.clone();
             replacement.replies = previous.replies.clone();
         }
         replacement
@@ -993,7 +1077,43 @@ impl<P: Platform + 'static> Supervisor<P> {
     /// Links share the operation engine, capacity sampling, and global shutdown;
     /// each retains independent transport, relay, reconnect, and credential state.
     #[must_use]
+    #[cfg(test)]
     pub fn new_links(links: &[SupervisorLink<P>], agent_version: impl Into<String>) -> Self {
+        Self::with_identity(
+            links,
+            agent_version,
+            crate::build_identity::running_binary_sha256(None),
+        )
+    }
+
+    /// Builds one process-wide supervisor over every configured connection of
+    /// an agent keeping its state in `config_dir`. The engine spools to that
+    /// disk (a real filesystem, unlike a tmpfs temp dir, which would spool
+    /// "to disk" in RAM and defeat the budgets), and the running executable's
+    /// digest is remembered there, so a start does not read the whole binary
+    /// again ([`crate::build_identity`]).
+    #[must_use]
+    pub fn in_config_dir(
+        links: &[SupervisorLink<P>],
+        agent_version: impl Into<String>,
+        config_dir: Option<&std::path::Path>,
+    ) -> Self {
+        let supervisor = Self::with_identity(
+            links,
+            agent_version,
+            crate::build_identity::running_binary_sha256(config_dir),
+        );
+        match config_dir {
+            Some(dir) => supervisor.with_spool_root(dir.join("spool")),
+            None => supervisor,
+        }
+    }
+
+    fn with_identity(
+        links: &[SupervisorLink<P>],
+        agent_version: impl Into<String>,
+        binary_sha256: String,
+    ) -> Self {
         let spool_key = links
             .first()
             .map_or("multi".to_string(), |link| link.connection_id.clone());
@@ -1006,7 +1126,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             links: links.to_vec(),
             platform_type: std::marker::PhantomData,
             agent_version: agent_version.into(),
-            binary_sha256: running_binary_sha256(),
+            binary_sha256,
             started: Instant::now(),
             metrics: Arc::new(std::sync::RwLock::new(v1::MetricsSample::default())),
             browser_bridge: None,
@@ -1601,8 +1721,6 @@ impl<P: Platform + 'static> Supervisor<P> {
             bulk_client,
             bulk_rx,
             bulk_transport_lost.clone(),
-            link.connection_id.clone(),
-            link.events_subject(),
         ));
         *link.bulk_tx.write().expect("bulk lock") = Some(bulk_tx);
 
@@ -1657,6 +1775,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             bulk_lost: bulk_transport_lost,
             reconnect,
         } = ends;
+        let _serving = ServingControl::bind(&link.control, client);
         let mut heartbeat = tokio::time::interval(DEFAULT_HEARTBEAT);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut hb_seq: u64 = 0;
@@ -1696,8 +1815,8 @@ impl<P: Platform + 'static> Supervisor<P> {
                 _ = heartbeat.tick() => {
                     link.replies.lock().expect("control receipts").collect();
                     hb_seq = hb_seq.wrapping_add(1);
-                    if let Err(e) = self.send_heartbeat(link, client, hb_seq).await {
-                        break ConnectionOutcome::Disconnected(format!("heartbeat failed: {e}"));
+                    if let Err(reason) = self.beat(link, client, hb_seq).await {
+                        break ConnectionOutcome::Disconnected(reason);
                     }
                 }
                 // Reap completed host work so panics are visible and the JoinSet
@@ -2161,7 +2280,10 @@ impl<P: Platform + 'static> Supervisor<P> {
             return;
         }
 
-        let client = client.clone();
+        let reporter = UpdateReporter {
+            lane: link.control.clone(),
+            requested_on: client.clone(),
+        };
         let events_subject = link.events_subject();
         let agent_id = link.creds.agent_id.clone();
         let engine = self.engine.clone();
@@ -2185,7 +2307,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         // transport generation ending must not cancel a verified binary swap.
         tokio::spawn(async move {
             publish_agent_update_progress(
-                &client,
+                &reporter.client(),
                 &events_subject,
                 &agent_id,
                 &update,
@@ -2198,7 +2320,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             )
             .await;
             publish_agent_update_progress(
-                &client,
+                &reporter.client(),
                 &events_subject,
                 &agent_id,
                 &update,
@@ -2299,7 +2421,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                         }
                     };
                     publish_agent_update_progress(
-                        &client,
+                        &reporter.client(),
                         &events_subject,
                         &agent_id,
                         &update,
@@ -2343,7 +2465,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                     warn!(reason = ?update_drain.unavailable_reason(), "self-update could not confirm producer cleanup");
                     update_drain.finish_update(&update.operation_id);
                     publish_agent_update_progress(
-                        &client,
+                        &reporter.client(),
                         &events_subject,
                         &agent_id,
                         &update,
@@ -2380,7 +2502,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                     );
                     // Say what the update is waiting for, once per reason.
                     publish_agent_update_progress(
-                        &client,
+                        &reporter.client(),
                         &events_subject,
                         &agent_id,
                         &update,
@@ -2422,7 +2544,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                             crate::update::ManagedUpdatePhase::Applying => v1::AgentUpdateStage::Applying,
                         };
                         publish_agent_update_progress(
-                            &client, &events_subject, &agent_id, &update, stage, "", "", false, false, &[],
+                            &reporter.client(), &events_subject, &agent_id, &update, stage, "", "", false, false, &[],
                         ).await;
                     }
                     joined = &mut apply => break joined,
@@ -2453,6 +2575,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             };
             match result {
                 Ok(Ok(applied)) => {
+                    let client = reporter.client();
                     publish_agent_update_progress(
                         &client,
                         &events_subject,
@@ -2482,7 +2605,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                             | "signed_app_update_failed_rolled_back"
                     );
                     publish_agent_update_progress(
-                        &client,
+                        &reporter.client(),
                         &events_subject,
                         &agent_id,
                         &update,
@@ -2504,7 +2627,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                     }
                     warn!(%error, "self-update worker failed");
                     publish_agent_update_progress(
-                        &client,
+                        &reporter.client(),
                         &events_subject,
                         &agent_id,
                         &update,
@@ -2559,11 +2682,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         // Only a link that can continue jobs across an update tags them.
         let frame_subject = self.handover_enabled().then(|| subject.clone());
         let sink = bulk_frame_sink(link.bulk_tx.clone(), subject, self.engine.clone());
-        let completion_sink = bulk_frame_sink(
-            link.bulk_tx.clone(),
-            link.events_subject(),
-            self.engine.clone(),
-        );
+        let completion_sink = control_event_sink(link.control.clone(), link.events_subject());
         spawn_admitted_rpc(rpc_tasks, reservation, async move {
             let response = if request_epoch != 0 && request_epoch < held_epoch {
                 dispatch::fenced_reply(request_id, request_epoch, held_epoch)
@@ -2882,6 +3001,28 @@ impl<P: Platform + 'static> Supervisor<P> {
                 && !self.screen_control_off,
             max_reply_bytes,
         }
+    }
+
+    /// One heartbeat on the control connection, with the completions and
+    /// inventory the connection still owes: a few bytes each, never queued
+    /// behind output frames on the bulk lane.
+    async fn beat(
+        &self,
+        link: &WorkspaceLink<P>,
+        client: &async_nats::Client,
+        seq: u64,
+    ) -> Result<(), String> {
+        self.send_heartbeat(link, client, seq)
+            .await
+            .map_err(|e| format!("heartbeat failed: {e}"))?;
+        report_retained_events(
+            &self.engine,
+            client,
+            &link.connection_id,
+            &link.events_subject(),
+        )
+        .await
+        .map_err(|e| format!("completion report failed: {e}"))
     }
 
     /// Publishes a heartbeat AgentEvent carrying a metrics sample (§10.7).
@@ -3390,35 +3531,6 @@ pub(crate) fn hostname_or_default() -> String {
     )
 }
 
-/// Hash the exact executable mapped for this process once at startup. A failure
-/// is loud in logs and leaves an empty digest (older/unknown truth), never a
-/// fabricated value that could falsely complete an update.
-fn running_binary_sha256() -> String {
-    use std::io::Read as _;
-
-    let Ok(path) = std::env::current_exe() else {
-        warn!("could not resolve running executable for build identity");
-        return String::new();
-    };
-    let Ok(mut file) = std::fs::File::open(&path) else {
-        warn!(path = %path.display(), "could not open running executable for build identity");
-        return String::new();
-    };
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0_u8; 128 * 1024].into_boxed_slice();
-    loop {
-        match file.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(read) => hasher.update(&buffer[..read]),
-            Err(error) => {
-                warn!(path = %path.display(), %error, "could not hash running executable");
-                return String::new();
-            }
-        }
-    }
-    format!("{:x}", hasher.finalize())
-}
-
 /// Hands every running job to the successor image of a verified update and
 /// records the manifest it will read. Refusals are retried for a while; on
 /// failure every job continues in this process and nothing is written.
@@ -3729,7 +3841,7 @@ mod tests {
                 command.arg("-c").arg("printf listening; sleep 30");
                 opengeni_agent_platform::spawn_contained(command, None)
             },
-            |_| {},
+            |_| crate::job::Delivery::Taken,
             |exit| format!("{exit:?}").into_bytes(),
             |_, _| {},
         );
@@ -4027,7 +4139,7 @@ mod tests {
                 command.arg("-c").arg("printf synthetic-result");
                 opengeni_agent_platform::spawn_contained(command, None)
             },
-            |_| {},
+            |_| crate::job::Delivery::Taken,
             |exit| format!("{exit:?}").into_bytes(),
             move |sequence, exit: &JobExit| {
                 drop(reservation);
@@ -4054,7 +4166,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn completion_retry_heals_a_full_queue_and_reconnect_until_delivery_ack() {
+    async fn completion_reports_repeat_on_the_control_connection_until_delivery_ack() {
         let Some(bin) = it::find_nats_server() else {
             eprintln!("SKIP completion retry: no nats-server");
             return;
@@ -4074,78 +4186,218 @@ mod tests {
         let subject = "test.completion.retry";
         let mut events = client.subscribe(subject).await.unwrap();
         client.flush().await.unwrap();
-        for generation in 0..3 {
-            let (tx, rx) = tokio::sync::mpsc::channel(1);
-            tx.try_send(("unused.frame".into(), vec![])).unwrap();
+        // Each heartbeat (the first right after a connection is established)
+        // repeats the completion until Opengeni acknowledges its delivery.
+        for _heartbeat in 0..2 {
+            report_retained_events(&engine, &client, "scope-a", subject)
+                .await
+                .unwrap();
+            let message = tokio::time::timeout(Duration::from_secs(2), events.next())
+                .await
+                .expect("unacknowledged completion is reported again")
+                .unwrap();
+            let event = AgentEvent::decode(message.payload).unwrap();
             assert!(
-                tx.try_send((subject.into(), vec![])).is_err(),
-                "original notification was dropped"
+                matches!(event.event, Some(Event::OperationCompleted(ref completed))
+                if completed.op_id == "synthetic-command" && completed.exit.as_ref().unwrap().exit_code == 0)
             );
-            let publisher = tokio::spawn(publish_bulk_lane(
-                engine.clone(),
-                client.clone(),
-                rx,
-                TransportLossSignal::default(),
-                "scope-a".into(),
-                subject.into(),
-            ));
-            if generation < 2 {
-                let message = tokio::time::timeout(Duration::from_secs(2), events.next())
-                    .await
-                    .expect("immediate replay after connect")
-                    .unwrap();
-                let event = AgentEvent::decode(message.payload).unwrap();
-                assert!(
-                    matches!(event.event, Some(Event::OperationCompleted(ref completed))
-                    if completed.op_id == "synthetic-command" && completed.exit.as_ref().unwrap().exit_code == 0)
-                );
-                if generation == 0 {
-                    tokio::time::timeout(DEFAULT_HEARTBEAT + Duration::from_secs(2), events.next())
-                        .await
-                        .expect("unacknowledged completion retries on an intact connection")
-                        .unwrap();
-                }
-            } else {
-                assert!(
-                    tokio::time::timeout(Duration::from_millis(100), events.next())
-                        .await
-                        .is_err(),
-                    "acknowledged completions are no longer republished"
-                );
-            }
-            publisher.abort();
-            let _ = publisher.await;
-            if generation == 1 {
-                let ack = v1::AgentEventAck {
-                    ack: Some(v1::agent_event_ack::Ack::OperationCompleted(
-                        v1::OperationCompletedAck {
-                            op_id: "synthetic-command".into(),
-                        },
-                    )),
-                }
-                .encode_to_vec();
-                assert!(crate::ops::handle_completion_ack_scoped(
-                    &engine,
-                    "other-scope",
-                    &ack
-                ));
-                assert_eq!(engine.retained_completions("scope-a").len(), 1);
-                assert!(crate::ops::handle_completion_ack_scoped(
-                    &engine, "scope-a", &ack
-                ));
-                assert!(
-                    matches!(
-                        engine.query(&operation),
-                        opengeni_agent_engine::registry::QueryAnswer::Complete {
-                            final_acked: false,
-                            ..
-                        }
-                    ),
-                    "delivery receipt never releases output"
-                );
-            }
         }
+        let ack = v1::AgentEventAck {
+            ack: Some(v1::agent_event_ack::Ack::OperationCompleted(
+                v1::OperationCompletedAck {
+                    op_id: "synthetic-command".into(),
+                },
+            )),
+        }
+        .encode_to_vec();
+        assert!(crate::ops::handle_completion_ack_scoped(
+            &engine,
+            "other-scope",
+            &ack
+        ));
+        assert_eq!(engine.retained_completions("scope-a").len(), 1);
+        assert!(crate::ops::handle_completion_ack_scoped(
+            &engine, "scope-a", &ack
+        ));
+        assert!(
+            matches!(
+                engine.query(&operation),
+                opengeni_agent_engine::registry::QueryAnswer::Complete {
+                    final_acked: false,
+                    ..
+                }
+            ),
+            "delivery receipt never releases output"
+        );
+        report_retained_events(&engine, &client, "scope-a", subject)
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), events.next())
+                .await
+                .is_err(),
+            "acknowledged completions are no longer reported"
+        );
         acknowledge_update_result(&engine, &operation, &started, sequence).await;
+    }
+
+    /// Regression: a command's completion notice rode the bulk lane behind
+    /// every queued output frame, so on a slow uplink it arrived minutes late
+    /// (or was dropped from a full lane until the next reconnect). It now goes
+    /// on the control connection, whatever the bulk lane holds.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn completion_notice_is_delivered_while_the_bulk_lane_is_saturated() {
+        let Some(bin) = it::find_nats_server() else {
+            eprintln!("SKIP completion notice: no nats-server");
+            return;
+        };
+        let port = it::free_local_port();
+        let _server = it::NatsServerGuard::spawn(&bin, port);
+        let client =
+            it::connect_with_retry(&format!("nats://127.0.0.1:{port}"), Duration::from_secs(5))
+                .await;
+        let directory = tempfile::tempdir().unwrap();
+        let engine = Engine::new(
+            directory.path().join("spool"),
+            opengeni_agent_engine::HostCapacity::default(),
+        );
+        let (operation, started, sequence) =
+            retained_update_result(&engine, &Arc::new(UpdateDrain::default()), "scope-a").await;
+        let (op_id, exit) = engine.retained_completions("scope-a").pop().unwrap();
+        let subject = "test.completion.notice";
+        let mut events = client.subscribe(subject).await.unwrap();
+        client.flush().await.unwrap();
+
+        // A saturated bulk lane: full, and nothing drains it.
+        let (tx, _undrained) = tokio::sync::mpsc::channel(1);
+        tx.try_send(("queued.output".into(), vec![0; 1024]))
+            .unwrap();
+        let bulk: BulkLane = Arc::new(std::sync::RwLock::new(Some(tx)));
+        assert!(
+            matches!(
+                bulk_frame_sink(bulk, subject.into(), engine.clone())(vec![1]),
+                crate::job::Delivery::Full(_)
+            ),
+            "a notice on the saturated bulk lane never leaves"
+        );
+
+        let control: ControlLane = Arc::new(std::sync::RwLock::new(None));
+        let serving = ServingControl::bind(&control, &client);
+        crate::ops::completion_publisher(
+            Some(control_event_sink(control.clone(), subject.into())),
+            op_id.clone(),
+        )(None, &exit);
+        let message = tokio::time::timeout(Duration::from_secs(2), events.next())
+            .await
+            .expect("the completion notice arrives at once")
+            .unwrap();
+        let event = AgentEvent::decode(message.payload).unwrap();
+        assert!(
+            matches!(event.event, Some(Event::OperationCompleted(ref completed)) if completed.op_id == op_id)
+        );
+
+        // Between generations there is no control connection: nothing is
+        // sent, and the next generation's first heartbeat reports it.
+        drop(serving);
+        control_event_sink(control, subject.into())(vec![2]);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), events.next())
+                .await
+                .is_err()
+        );
+        acknowledge_update_result(&engine, &operation, &started, sequence).await;
+    }
+
+    /// A collector that attaches after the command produced its output (the
+    /// session moved to another machine meanwhile) receives the whole retained
+    /// backlog at once. The bulk lane is far narrower than that backlog; a
+    /// full lane must hold the replay back until it drains, never drop the
+    /// frames past its depth (nothing would ever send them again: the reader
+    /// has no later frame to notice the gap by).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_backlog_replay_wider_than_the_bulk_lane_loses_no_frame() {
+        use opengeni_agent_platform::NativePlatform;
+
+        let directory = tempfile::tempdir().unwrap();
+        let engine = Engine::new(
+            directory.path().join("spool"),
+            opengeni_agent_engine::HostCapacity::default(),
+        );
+        let platform = Arc::new(NativePlatform::with_root(std::env::temp_dir()));
+        // No live lane while the command runs: nobody reads it.
+        let lane: BulkLane = Arc::new(std::sync::RwLock::new(None));
+        let started = crate::ops::serve_op_start(
+            &engine,
+            &platform,
+            bulk_frame_sink(lane.clone(), "test.op.backlog".into(), engine.clone()),
+            "op-backlog".into(),
+            v1::OpStart {
+                op: Some(v1::op_start::Op::Exec(v1::ExecRequest {
+                    command: vec![
+                        "for i in 1 2 3 4 5 6 7 8 9 10 11 12; do echo line$i; sleep 0.02; done"
+                            .into(),
+                    ],
+                    shell: true,
+                    ..Default::default()
+                })),
+                window_bytes: 1 << 20,
+                deadline_ms: 0,
+                origin_id: "session-1".into(),
+                connection_generation: 0,
+            },
+        )
+        .await;
+        assert!(started.error.is_none(), "{started:?}");
+        let op = crate::engine::scoped_op_id("default", "op-backlog");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !matches!(
+                engine.query(&op),
+                opengeni_agent_engine::registry::QueryAnswer::Complete { .. }
+            ) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the command completes");
+
+        // A collector attaches from the start through a lane four frames deep.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        *lane.write().unwrap() = Some(tx);
+        let attach = crate::ops::serve_op_attach(
+            &engine,
+            "attach-1".into(),
+            &v1::OpAttach {
+                op_id: "op-backlog".into(),
+                from_seq: 0,
+                attach_generation: 2,
+                window_bytes: 1 << 20,
+            },
+        );
+        assert!(attach.error.is_none(), "{attach:?}");
+
+        // The lane drains at its own pace; no second attach is ever sent.
+        let mut seqs = Vec::new();
+        let exit_seq = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let (_, bytes) = rx.recv().await.expect("lane open");
+                tokio::time::sleep(Duration::from_millis(2)).await;
+                let frame = v1::OpFrame::decode(bytes.as_slice()).unwrap();
+                seqs.push(frame.seq);
+                if matches!(frame.body, Some(v1::op_frame::Body::Exit(_))) {
+                    return frame.seq;
+                }
+            }
+        })
+        .await
+        .expect("the exit frame arrives after the whole backlog");
+        assert!(exit_seq > 4, "the backlog is wider than the lane");
+        assert_eq!(
+            seqs,
+            (1..=exit_seq).collect::<Vec<_>>(),
+            "every frame, in order"
+        );
     }
 
     #[cfg(unix)]
@@ -4245,7 +4497,7 @@ mod tests {
                                 command.arg("-c").arg("sleep 30");
                                 opengeni_agent_platform::spawn_contained(command, None)
                             },
-                            |_| {},
+                            |_| crate::job::Delivery::Taken,
                             |exit| format!("{exit:?}").into_bytes(),
                             |_, _| {},
                         )
@@ -4464,7 +4716,7 @@ mod tests {
             None,
             0,
             || Err(std::io::Error::other("synthetic spawn failure")),
-            |_| {},
+            |_| crate::job::Delivery::Taken,
             |_| Vec::new(),
             |_, _| {},
         );
@@ -4722,6 +4974,124 @@ mod tests {
             UpdateReservation::Started
         );
         assert!(supervisor.update_drain.reserve_work(None).is_none());
+    }
+
+    /// A generation lasts only as long as its broker credential, and its
+    /// connection is closed when it ends. An update waiting for idle outlives
+    /// it, and keeps reporting through the link's next connection.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::too_many_lines)] // one linear request, generation change and receipt
+    async fn update_progress_follows_the_current_connection() {
+        use opengeni_agent_platform::NativePlatform;
+        let Some(bin) = it::find_nats_server() else {
+            eprintln!("SKIP update progress transport regression: no nats-server");
+            return;
+        };
+        let port = it::free_local_port();
+        let _server = it::NatsServerGuard::spawn(&bin, port);
+        let url = format!("nats://127.0.0.1:{port}");
+        let observer = it::connect_with_retry(&url, Duration::from_secs(5)).await;
+        let first_generation = it::connect_with_retry(&url, Duration::from_secs(5)).await;
+        let next_generation = it::connect_with_retry(&url, Duration::from_secs(5)).await;
+        let dir = tempfile::tempdir_in("/dev/shm").unwrap();
+        let definition = SupervisorLink::new(
+            "update-progress-generations",
+            Arc::new(NativePlatform::with_root(dir.path())),
+            it::test_credentials(&url),
+        );
+        let link = WorkspaceLink::from_definition(definition.clone());
+        let supervisor = Supervisor::new_links(&[definition], "0.0.0");
+        let mut inbound = first_generation.subscribe("progress.in").await.unwrap();
+        let mut replies = observer.subscribe("progress.out").await.unwrap();
+        let mut events = observer.subscribe(link.events_subject()).await.unwrap();
+        observer.flush().await.unwrap();
+        first_generation.flush().await.unwrap();
+        *link.control.write().unwrap() = Some(first_generation.clone());
+
+        // Routed work keeps the update waiting for idle.
+        let routed = supervisor.update_drain.reserve_work(None).unwrap();
+        let operation = uuid::Uuid::new_v4().to_string();
+        let request = ControlRequest {
+            request_id: "update-progress".into(),
+            epoch: 0,
+            resource_policy: None,
+            op: Some(v1::control_request::Op::AgentUpdateApply(
+                v1::AgentUpdateApplyRequest {
+                    operation_id: operation.clone(),
+                    target_version: "0.1.0".into(),
+                    channel: "stable".into(),
+                    expected_current_version: "0.0.0".into(),
+                    expected_current_sha256: String::new(),
+                    release_base_url: "http://127.0.0.1:1".into(),
+                },
+            )),
+        };
+        observer
+            .publish_with_reply(
+                "progress.in",
+                "progress.out",
+                request.encode_to_vec().into(),
+            )
+            .await
+            .unwrap();
+        let message = tokio::time::timeout(Duration::from_secs(5), inbound.next())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut tasks = JoinSet::new();
+        supervisor
+            .route_message(&link, &first_generation, message, &mut tasks)
+            .await;
+        tokio::time::timeout(Duration::from_secs(5), replies.next())
+            .await
+            .unwrap()
+            .unwrap();
+        let waiting_on = |kinds: &'static [&'static str]| {
+            let operation = operation.clone();
+            move |event: &AgentEvent| {
+                matches!(&event.event, Some(Event::AgentUpdateProgress(p))
+                    if p.operation_id == operation
+                        && p.stage == v1::AgentUpdateStage::WaitingForIdle as i32
+                        && p.error_code == "update_busy_work"
+                        && p.blockers.iter().map(|b| b.kind.as_str()).eq(kinds.iter().copied()))
+            }
+        };
+        assert!(
+            it::wait_for_event(
+                &mut events,
+                Duration::from_secs(5),
+                waiting_on(&["native_request"])
+            )
+            .await
+        );
+
+        // The generation the request arrived on ends and the link reconnects.
+        *link.control.write().unwrap() = None;
+        first_generation.close();
+        *link.control.write().unwrap() = Some(next_generation.clone());
+
+        // What holds the update changes; the update says so on the new connection.
+        let light = supervisor
+            .engine
+            .admit(&"light-job".into(), JobClass::Light, "fixture")
+            .await
+            .unwrap();
+        assert!(
+            it::wait_for_event(
+                &mut events,
+                Duration::from_secs(5),
+                waiting_on(&["native_light_running", "native_request"])
+            )
+            .await,
+            "progress after the request's generation ended must reach the control plane"
+        );
+        assert!(supervisor.update_drain.is_accepted(&operation));
+
+        // Cancel before the work settles: tests must never reach a real apply.
+        supervisor.update_drain.finish_update(&operation);
+        drop(light);
+        drop(routed);
     }
 
     #[cfg(target_os = "linux")]

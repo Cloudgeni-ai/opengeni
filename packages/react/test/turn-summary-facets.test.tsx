@@ -8,7 +8,7 @@ import {
   type TurnSummaryFacet,
   type TurnSummaryFacetConfiguration,
 } from "../src";
-import type { MemoryItem } from "../src/timeline";
+import type { MemoryItem, TurnStepsItem } from "../src/timeline";
 import { formatElapsed } from "../src/timeline/turn-summary";
 import { flush, registerDom, renderComponent } from "./render-hook";
 import { createOpenGeniText } from "../src/messages/runtime";
@@ -313,6 +313,54 @@ describe("TurnSummary facets", () => {
     expect(await rowFor({ goal: false, agents: false, commands: false })).toBe("2 records updated");
     expect(await rowFor({ turnDetail: false })).not.toContain("2 records updated");
     expect(await rowFor(false)).not.toContain("2 records updated");
+  });
+
+  test("a settled turn's facets learn whether its steps are all loaded", async () => {
+    const turnEnd: TimelineItem = {
+      kind: "turn-end",
+      id: "end-1",
+      turnId: "turn-1",
+      outcome: "complete",
+      failureText: null,
+      occurredAt: new Date(9_000).toISOString(),
+    };
+    const steps = (state: TurnStepsItem["state"]): TurnStepsItem => ({
+      kind: "turn-steps",
+      id: "steps-1",
+      turnId: "turn-1",
+      occurredAt: new Date(0).toISOString(),
+      state,
+      load: () => {},
+      retain: () => () => {},
+    });
+    // Counts the loaded calls, and says when they are only part of the turn.
+    const fetched: TurnSummaryFacet = {
+      id: "fetched",
+      summarize: ({ toolCalls, unloadedSteps }) => ({
+        content: `${toolCalls.length}${unloadedSteps ? "+" : ""} fetched`,
+      }),
+    };
+    const rowFor = async (state: TurnStepsItem["state"] | null, rolling: boolean) => {
+      const items: TimelineItem[] = [
+        ...(state ? [steps(state)] : []),
+        toolCall("1", "fetch"),
+        toolCall("2", "fetch"),
+        turnEnd,
+      ];
+      const rendered = await renderComponent(
+        <MessageTimeline items={items} turnSummary={{ rolling, facets: { add: [fetched] } }} />,
+      );
+      await flush();
+      const text = rendered.container.textContent ?? "";
+      await rendered.unmount();
+      return text;
+    };
+    for (const rolling of [true, false]) {
+      expect(await rowFor("partial", rolling)).toContain("2+ fetched");
+      expect(await rowFor("idle", rolling)).toContain("2+ fetched");
+      expect(await rowFor("complete", rolling)).toContain("2 fetched");
+      expect(await rowFor(null, rolling)).toContain("2 fetched");
+    }
   });
 });
 

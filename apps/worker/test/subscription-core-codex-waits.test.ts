@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import * as db from "@opengeni/db";
+import * as coreApi from "@opengeni/core";
 import * as events from "@opengeni/events";
 import { createCodexCapacityActivities } from "../src/activities/codex-capacity";
 import {
@@ -608,14 +609,32 @@ describe("capacity activities accept both waiter shapes", () => {
     expect(CODEX_CORE_WAIT_BINDING.refreshBeforeReconcile).toBeFunction();
   });
 
-  test("a Codex core waiter re-reads usage under the parked turn's identity before its reconcile evaluates, at the woken revision", async () => {
+  test("SUB-WAIT-02: a Codex core waiter re-reads usage and then the live model lists under the parked turn's identity before its reconcile evaluates, at the woken revision", async () => {
     const read = spy(db, "getSubscriptionCoreCodexCapacityWaitById")
       .mockResolvedValueOnce(waiter)
       .mockResolvedValueOnce({ ...waiter, wakeRevision: 6 });
     outbox([]);
-    const refresh = spy(codexQuota, "refreshExhaustedCodexCoreQuota").mockResolvedValue(undefined);
+    const order: string[] = [];
+    const refresh = spy(codexQuota, "refreshExhaustedCodexCoreQuota").mockImplementation(
+      async () => {
+        order.push("usage");
+      },
+    );
+    // The resumed turn reads the model lists before it places
+    // (`beforePlacement`); the reconcile must judge the same pool, or it
+    // resumes the turn onto an account whose expired list hid that it lacks
+    // the model, and the turn parks again at once.
+    const catalogs = spy(coreApi, "refreshCoreCodexModelEntitlements").mockImplementation(
+      async () => {
+        order.push("catalogs");
+        return 0;
+      },
+    );
     spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(parkedTurn);
-    spy(db, "readSubscriptionCoreTurnModel").mockResolvedValue(null);
+    spy(db, "readSubscriptionCoreTurnModel").mockImplementation(async () => {
+      order.push("evaluate");
+      return null;
+    });
     const reconcile = spy(db, "reconcileSubscriptionCoreCodexCapacityWait").mockResolvedValue({
       action: "superseded",
       events: [],
@@ -631,19 +650,33 @@ describe("capacity activities accept both waiter shapes", () => {
       workspaceId: "workspace-1",
       personalTurn: parkedTurn,
     });
+    expect(catalogs).toHaveBeenCalledWith(
+      {},
+      {},
+      { accountId: "account-1", workspaceId: "workspace-1", subjectId: "user:owner" },
+    );
+    expect(order).toEqual(["usage", "catalogs", "evaluate"]);
     expect(read).toHaveBeenCalledTimes(2);
     expect(reconcile).toHaveBeenCalledWith(
       {},
       expect.objectContaining({ evaluatedWakeRevision: 6, evaluation: { kind: "revoked" } }),
     );
 
-    // A failed usage read never blocks the reconcile.
+    // A failed usage read never blocks the reconcile or the model-list read.
     read.mockResolvedValue(waiter);
     refresh.mockRejectedValue(new Error("usage unavailable"));
     expect(
       await activities().reconcileCodexCapacityWait({ ...xaiReconcile, provider: "codex" }),
     ).toEqual({ action: "superseded" });
     expect(refresh).toHaveBeenCalledTimes(2);
+    expect(catalogs).toHaveBeenCalledTimes(2);
+
+    // Nor does a failed model-list read: placement then decides on what is stored.
+    catalogs.mockRejectedValue(new Error("models unavailable"));
+    expect(
+      await activities().reconcileCodexCapacityWait({ ...xaiReconcile, provider: "codex" }),
+    ).toEqual({ action: "superseded" });
+    expect(catalogs).toHaveBeenCalledTimes(3);
   });
 
   test("a core waiter of another provider never reconciles through the Claude binding", async () => {

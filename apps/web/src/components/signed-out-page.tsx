@@ -1,17 +1,24 @@
 import {
-  ActivityIcon,
-  BoxesIcon,
   CloudIcon,
+  CreditCardIcon,
   EraserIcon,
+  GitPullRequestIcon,
+  KeyRoundIcon,
+  MailIcon,
   MessageSquareTextIcon,
+  MessagesSquareIcon,
+  MonitorIcon,
   PaletteIcon,
+  PlugIcon,
+  ShieldCheckIcon,
   Table2Icon,
   type LucideIcon,
 } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { AppearanceMenu } from "@/components/appearance-menu";
-import { BrandMark, Wordmark } from "@opengeni/react/app/components/brand-mark";
+import { Wordmark, WordmarkMark } from "@opengeni/react/app/components/brand-mark";
+import { useSimplifiedInterface } from "@opengeni/react/app/lib/simplified-interface";
 import { Button } from "@opengeni/react/ui/button";
 import {
   DropdownMenu,
@@ -24,26 +31,28 @@ type Pitch = {
   emphasis: string;
   lead: string;
   highlights: { icon: LucideIcon; text: string }[];
+  /** The product name beside the wordmark, when it isn't the app. */
+  product?: string;
+  tagline: string;
 };
 
 /** Which audience the panel beside the sign-in form speaks to. */
-export type SignedOutPitch = "product" | "excel";
+export type SignedOutPitch = "general" | "excel" | "console";
 
 const pitches: Record<SignedOutPitch, Pitch> = {
-  // Copy follows the public landing page (opengeni.ai): its headline, its lead
-  // sentence and the platform features it names.
-  product: {
-    headline: "Agents in your product.",
-    emphasis: "Infrastructure out of the box.",
-    lead: "Build AI products without building the infrastructure from scratch.",
+  // Everyone who signs in on the web sees this: agents that do real work in
+  // the person's own apps, matching the public landing page, with concrete
+  // jobs instead of generic examples.
+  general: {
+    headline: "Hand off real work.",
+    emphasis: "Get it back done.",
+    lead: "Agents that work in the background in GitHub, Gmail, Calendar, Slack and more, and check with you before anything goes out.",
     highlights: [
-      {
-        icon: CloudIcon,
-        text: "Durable sessions that keep working, even when you close your laptop",
-      },
-      { icon: BoxesIcon, text: "Tools and sandboxes, with approvals and permissions" },
-      { icon: ActivityIcon, text: "Observability out of the box" },
+      { icon: GitPullRequestIcon, text: "Reviews pull requests and fixes failing builds" },
+      { icon: MailIcon, text: "Answers your inbox and preps tomorrow's meetings" },
+      { icon: MonitorIcon, text: "Uses its own computer and browser, day and night" },
     ],
+    tagline: "Your conversations. Your projects. One workspace.",
   },
   // The sign-in window the Excel add-in opens: the person is working in a
   // workbook, so the panel says what the add-in does there, in plain words.
@@ -56,7 +65,39 @@ const pitches: Record<SignedOutPitch, Pitch> = {
       { icon: EraserIcon, text: "Cleans up messy data and formats sheets" },
       { icon: MessageSquareTextIcon, text: "Explains what is in a workbook" },
     ],
+    tagline: "Your conversations. Your projects. One workspace.",
   },
+  // Opengeni Console's own host: owners and admins of a product that embeds
+  // Opengeni, there to review their users' sessions, cost and keys.
+  console: {
+    headline: "Your product's agents,",
+    emphasis: "in one place.",
+    lead: "Review the sessions your users have with your agents, see what they cost, and manage API keys and members.",
+    highlights: [
+      { icon: MessagesSquareIcon, text: "Your users' questions and answers" },
+      { icon: CreditCardIcon, text: "Billed cost by session and workspace" },
+      { icon: KeyRoundIcon, text: "API keys, members and billing" },
+    ],
+    product: "Console",
+    tagline: "For teams that build with Opengeni.",
+  },
+};
+
+// What someone arriving from gogeni.ai reads in place of the general pitch:
+// the promise that site makes, with nothing about building on the platform.
+const simplifiedPitch: Pitch = {
+  headline: "Your AI teammate",
+  emphasis: "that gets work done.",
+  lead: "Geni has a computer of its own. It works in your tools, in Slack and Teams, and asks before anything goes out.",
+  highlights: [
+    { icon: PlugIcon, text: "Works in the tools your team already uses" },
+    {
+      icon: CloudIcon,
+      text: "Keeps working on long tasks, even when you close your laptop",
+    },
+    { icon: ShieldCheckIcon, text: "Asks you before anything leaves the company" },
+  ],
+  tagline: "Your conversations. Your projects. One workspace.",
 };
 
 /** Operator-configured legal documents; absent unless the deployment publishes them. */
@@ -69,17 +110,22 @@ export type SignedOutLegalLinks = {
 export function SignedOutPage({
   children,
   legalLinks,
-  pitch = "product",
+  pitch = "general",
   supportEmail,
 }: {
   children: ReactNode;
   legalLinks?: SignedOutLegalLinks | undefined;
-  /** Defaults to the product pitch; "excel" when the Excel add-in opened sign-in. */
+  /**
+   * Defaults to the general pitch; "excel" when the Excel add-in opened
+   * sign-in; "console" on Opengeni Console's own host.
+   */
   pitch?: SignedOutPitch | undefined;
   /** Operator support address, offered as a mailto link when configured. */
   supportEmail?: string | undefined;
 }) {
-  const { headline, emphasis, lead, highlights } = pitches[pitch];
+  const { simplified } = useSimplifiedInterface();
+  const { headline, emphasis, lead, highlights, product, tagline } =
+    simplified && pitch === "general" ? simplifiedPitch : pitches[pitch];
   const legal = [
     { href: legalLinks?.privacyPolicyUrl, label: "Privacy", external: true },
     { href: legalLinks?.termsOfServiceUrl, label: "Terms", external: true },
@@ -96,8 +142,11 @@ export function SignedOutPage({
           className="mx-auto flex w-full max-w-[1040px] items-center justify-between gap-4 px-4 py-6 min-[721px]:px-10"
         >
           <div className="flex items-center gap-2.5 text-fg">
-            <BrandMark className="w-[31px]" />
+            <WordmarkMark className="w-[31px]" tileClassName="size-8" />
             <Wordmark className="text-[23px]" />
+            {product ? (
+              <span className="text-[23px] leading-none font-medium text-fg-muted">{product}</span>
+            ) : null}
           </div>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -124,7 +173,7 @@ export function SignedOutPage({
                 {headline}{" "}
                 <em className="font-serif text-[1.18em] leading-none font-normal">{emphasis}</em>
               </h1>
-              <p className="mt-5 max-w-[330px] text-[15px] leading-[1.6] text-fg-muted">{lead}</p>
+              <p className="mt-5 max-w-[400px] text-[15px] leading-[1.6] text-fg-muted">{lead}</p>
               <ul className="mt-8 space-y-4">
                 {highlights.map(({ icon: Icon, text }) => (
                   <li key={text} className="flex items-start gap-3 text-sm text-fg">
@@ -163,7 +212,7 @@ export function SignedOutPage({
                 </nav>
               ) : null}
             </div>
-            <span>Your conversations. Your projects. One workspace.</span>
+            <span>{tagline}</span>
           </div>
         </footer>
       </div>

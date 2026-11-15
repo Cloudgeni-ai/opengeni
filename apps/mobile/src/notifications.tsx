@@ -6,6 +6,7 @@ import type {
   OpenGeniClient,
 } from "@opengeni/sdk";
 import type { ChatClient } from "@opengeni/sdk";
+import * as Application from "expo-application";
 import Constants from "expo-constants";
 import * as Notifications from "expo-notifications";
 import { router, usePathname } from "expo-router";
@@ -14,8 +15,17 @@ import { AppState, Linking, Platform } from "react-native";
 import { useAccount } from "@/account";
 import { appSessionPath } from "@/app-links";
 import type { SettingsSection } from "@/settings-model";
-import { useNativeVoipToken } from "@opengeni/react-native";
+import {
+  useFullScreenRings,
+  useNativeVoipToken,
+  type FullScreenRings,
+} from "@opengeni/react-native";
 import { sharedCallAdapter } from "@/call";
+import {
+  apnsEnvironment,
+  pushRegistrationIsStale,
+  pushRegistrationProblem,
+} from "@/push-registration";
 
 /** The rules a person can turn on, in the order Settings shows them. */
 export const NOTIFICATION_RULES: Array<{ rule: NativePushRule; title: string; subtitle: string }> =
@@ -205,6 +215,13 @@ async function devicePushToken(): Promise<string> {
   return typeof token.data === "string" ? token.data : JSON.stringify(token.data);
 }
 
+/** The APNs environment of this build's tokens; FCM ignores it. */
+function pushEnvironment(): Promise<"development" | "production"> {
+  return Platform.OS === "ios"
+    ? apnsEnvironment(Application.getIosPushNotificationServiceEnvironmentAsync, __DEV__)
+    : Promise.resolve(__DEV__ ? "development" : "production");
+}
+
 /**
  * The Notifications section of Settings for the active account: whether this
  * device gets pushes for it, and for which events; and whether agents may call
@@ -217,12 +234,14 @@ export function useNotificationSettingsSections(inbox: InboxSettingsState): {
 } {
   const { account, client, status } = useAccount();
   const voipToken = useNativeVoipToken(sharedCallAdapter());
+  const fullScreenRings = useFullScreenRings(sharedCallAdapter());
   const [device, setDevice] = useState<NativePushDevice | null | undefined>(undefined);
   const [permission, setPermission] = useState<Notifications.PermissionStatus | null>(null);
   // Android 13+ reports "denied" before the first prompt; only a refusal the
   // system won't ask again for sends the person to system settings.
   const [canAskAgain, setCanAskAgain] = useState(true);
-  const [problem, setProblem] = useState<string | null>(null);
+  // Why the last change couldn't be saved, shown under the section it came from.
+  const [problem, setProblem] = useState<{ text: string; calls: boolean } | null>(null);
 
   useEffect(() => {
     if (status !== "ready") return;
@@ -270,22 +289,26 @@ export function useNotificationSettingsSections(inbox: InboxSettingsState): {
           await client.registerNativePushDevice({
             platform: Platform.OS === "android" ? "android" : "ios",
             appId: appId(),
-            environment: __DEV__ ? "development" : "production",
+            environment: await pushEnvironment(),
             token,
             rules,
             voipToken: Platform.OS === "ios" ? voipToken : null,
           }),
         );
       } catch (caught) {
-        const message = caught instanceof Error ? caught.message : "";
-        setProblem(
-          /firebase|googleServicesFile|aps-environment|entitlement/iu.test(message)
-            ? "This build of the app isn't set up for push notifications."
-            : "Notifications couldn't be turned on. Try again.",
-        );
+        // A change that only touched calls reports under Calls from agents.
+        const before = device?.rules ?? [];
+        const changed = [
+          ...rules.filter((rule) => !before.includes(rule)),
+          ...before.filter((rule) => !rules.includes(rule)),
+        ];
+        setProblem({
+          text: pushRegistrationProblem(caught),
+          calls: changed.length > 0 && changed.every(isCallRule),
+        });
       }
     },
-    [client, permission, voipToken],
+    [client, device, permission, voipToken],
   );
 
   if (status !== "ready" || device === undefined) return { notifications: null, agentCalls: null };
@@ -293,7 +316,8 @@ export function useNotificationSettingsSections(inbox: InboxSettingsState): {
   const agentCalls = agentCallSection({
     rules,
     voipToken,
-    problem,
+    problem: problem?.calls ? problem.text : null,
+    fullScreenRings,
     save: (next) => void save(next),
   });
   if (permission === "denied" && !canAskAgain) {
@@ -323,7 +347,7 @@ export function useNotificationSettingsSections(inbox: InboxSettingsState): {
       id: "notifications",
       title: "Notifications",
       footer:
-        problem ??
+        (problem && !problem.calls ? problem.text : null) ??
         inbox.problem ??
         (notificationRules.length > 0
           ? "Sent to this device for sessions you start. Tap one to open the session."
@@ -374,30 +398,39 @@ export function useNotificationSettingsSections(inbox: InboxSettingsState): {
 
 /**
  * Calls from agents: whether agents may ring this phone with the system's
- * incoming-call screen. Off unless the person turns it on, per phone.
+ * incoming-call screen. Off unless the person turns it on, per phone. On
+ * Android 14 and later the ring shows full screen only once the person allows
+ * it in system settings: turning calls on asks for that, and while it is
+ * missing the section says so and links to the setting.
  */
 function agentCallSection(input: {
   rules: NativePushRule[];
   voipToken: string | null;
   problem: string | null;
+  fullScreenRings: FullScreenRings;
   save: (rules: NativePushRule[]) => void;
 }): SettingsSection | null {
   if (!agentCallsSupported()) return null;
-  const { rules, voipToken, save } = input;
+  const { rules, voipToken, problem, save, fullScreenRings } = input;
   const own = rules.includes("call");
   const members = rules.includes("call_members");
   const without = rules.filter((rule) => !isCallRule(rule));
   // Android rings through the ordinary push token.
   const notReady = Platform.OS === "ios" && !voipToken;
   const phone = Platform.OS === "ios" ? "iPhone" : "phone";
+  const notFullScreen = own && !fullScreenRings.allowed;
   return {
     id: "agent-calls",
     title: "Calls from agents",
-    footer: notReady
-      ? "This iPhone isn't ready to take calls yet. Open the app again in a moment."
-      : own
-        ? "Agents call only when something can't wait: it rings like a phone call, follows Focus, and answering opens a voice call in that chat. If you miss it, you get a notification."
-        : "Let an agent phone you when something can't wait, such as an outage or a decision blocking urgent work. Off until you turn it on.",
+    footer:
+      problem ??
+      (notReady
+        ? "This iPhone isn't ready to take calls yet. Open the app again in a moment."
+        : notFullScreen
+          ? fullScreenRings.messages.message
+          : own
+            ? "Agents call only when something can't wait: it rings like a phone call, follows Focus, and answering opens a voice call in that chat. If you miss it, you get a notification."
+            : "Let an agent phone you when something can't wait, such as an outage or a decision blocking urgent work. Off until you turn it on."),
     rows: [
       {
         kind: "toggle",
@@ -406,8 +439,23 @@ function agentCallSection(input: {
         subtitle: "Agents working for you",
         value: own,
         disabled: notReady && !own,
-        onChange: (on: boolean) => save(on ? [...without, "call"] : without),
+        onChange: (on: boolean) => {
+          save(on ? [...without, "call"] : without);
+          if (on) fullScreenRings.ask();
+        },
       },
+      ...(notFullScreen
+        ? [
+            {
+              kind: "action" as const,
+              id: "agent-calls-full-screen",
+              title: fullScreenRings.messages.title,
+              subtitle: "Opens system settings",
+              symbol: "gear" as const,
+              onPress: () => void fullScreenRings.openSettings(),
+            },
+          ]
+        : []),
       ...(own
         ? [
             {
@@ -571,17 +619,26 @@ export function NotificationRouting() {
       const { status: granted } = await Notifications.getPermissionsAsync();
       if (granted !== "granted" && !device.rules.every(isCallRule)) return;
       const token = await devicePushToken().catch(() => null);
-      const callsNeedToken =
-        Platform.OS === "ios" &&
-        device.rules.some(isCallRule) &&
-        voipToken !== null &&
-        voipToken !== (device.voipToken ?? null);
-      if (!token || (token === device.token && !callsNeedToken)) return;
+      if (!token || !live) return;
+      const environment = await pushEnvironment();
+      const callsVoipToken =
+        Platform.OS === "ios" && device.rules.some(isCallRule) ? voipToken : null;
+      if (
+        !live ||
+        !pushRegistrationIsStale(device, {
+          token,
+          voipToken: callsVoipToken,
+          environment,
+          appId: appId(),
+        })
+      ) {
+        return;
+      }
       await client
         .registerNativePushDevice({
           platform: Platform.OS === "android" ? "android" : "ios",
           appId: appId(),
-          environment: __DEV__ ? "development" : "production",
+          environment,
           token,
           rules: device.rules,
           voipToken: Platform.OS === "ios" ? (voipToken ?? device.voipToken ?? null) : null,

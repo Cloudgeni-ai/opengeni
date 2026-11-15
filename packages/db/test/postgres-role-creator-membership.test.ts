@@ -7,7 +7,8 @@ import { provisionRoles } from "../src/provision-roles";
 
 const PORT = 61442;
 const CONTAINER = `ogverify-pg-role-creator-${PORT}`;
-const IMAGE = "pgvector/pgvector:pg17";
+const IMAGE =
+  "pgvector/pgvector:0.8.6-pg17@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f";
 const ROOT_PASSWORD = "opengeni-role-root";
 const ADMIN_ROLE = "opengeni_managed_admin";
 const ADMIN_PASSWORD = "opengeni-managed-admin";

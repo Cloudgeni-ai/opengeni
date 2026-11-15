@@ -144,6 +144,9 @@ impl<S: Store> Service<S> {
             match archive.get_pointer(&image.pointer()).await {
                 Ok(Some(_)) => {
                     tracing::info!(sandbox = %id, template = %template.id, %image, length, "captured a sandbox as a template");
+                    // Every live host fetches it now, over the image the
+                    // sandbox started from (ADR 41).
+                    self.settings.images.spread(image, row.spec.config.image);
                     return Ok(template);
                 }
                 Ok(None) => {
@@ -299,12 +302,12 @@ impl<S: Store> Service<S> {
         Err(Failure::Invalid(format!("no such image: {}", spec.image)))
     }
 
-    /// Forgets the captured images nothing has used for [`UNUSED_FOR`]:
-    /// claims each, after which no use of it is recorded, empties its
-    /// pointer in object storage, which a sweep then frees the chunks of,
-    /// and deletes its record. One whose collector's claim lapsed, as it
-    /// stopped, is taken over and finished. Answers how many were
-    /// forgotten.
+    /// Forgets the captured and built images nothing has used for
+    /// [`UNUSED_FOR`]: claims each, after which no use of it is recorded,
+    /// empties its pointer in object storage, which a sweep then frees the
+    /// chunks of, and deletes its record, with the record of the builds
+    /// that made it. One whose collector's claim lapsed, as it stopped, is
+    /// taken over and finished. Answers how many were forgotten.
     ///
     /// # Errors
     ///
@@ -338,13 +341,13 @@ impl<S: Store> Service<S> {
                 continue;
             }
             self.store.collected(image, &collector.id).await?;
-            tracing::info!(%image, "forgot a captured image nothing uses");
+            tracing::info!(%image, "forgot a stored image nothing uses");
             forgotten += 1;
         }
         Ok(forgotten)
     }
 
-    /// Empties captured image `image`'s pointer for the collector
+    /// Empties stored image `image`'s pointer for the collector
     /// `collector` (its id), on the version it read after checking that it
     /// still holds its claim: a later store of the image, as for a capture
     /// recorded after another collector took over and finished, changes

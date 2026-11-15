@@ -207,7 +207,15 @@ describe("managed auth OAuth transaction state", () => {
       transactionSecretHash: "b".repeat(64),
       expectedGeneration: "4",
       expectedActorEpoch: "2",
+      returnOrigin: "https://app.opengeni.test",
     });
+    // Sign-in may start on any public origin (the app or Opengeni Console).
+    await expect(
+      resolveManagedAuthOAuthAttempt(auth as never, request, "google", [
+        "https://console.opengeni.test",
+        "https://app.opengeni.test",
+      ]),
+    ).resolves.toMatchObject({ returnOrigin: "https://app.opengeni.test" });
     await expect(
       resolveManagedAuthOAuthAttempt(auth as never, request, "github", "https://app.opengeni.test"),
     ).resolves.toBeNull();

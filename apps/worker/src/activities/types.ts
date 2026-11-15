@@ -411,6 +411,15 @@ export const ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_TYPE = "EscapedMcpTimeoutRecov
 export const ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_MESSAGE =
   "MCP request timeout recovery checkpoint failed before model request";
 
+/**
+ * A session control activity failed against a session whose execution is
+ * closed (archived, being archived, or an imported read-only copy). The
+ * database refuses the write on every retry, so the activity ends with this
+ * non-retryable failure and the session workflow closes instead of retrying.
+ */
+export const SESSION_READ_ONLY_FAILURE_TYPE = "SessionReadOnlyFailure";
+export const SESSION_READ_ONLY_FAILURE_MESSAGE = "Session is read-only";
+
 export type EscapedMcpTimeoutRecoveryDetail = {
   turnId: string;
   triggerEventId: string;

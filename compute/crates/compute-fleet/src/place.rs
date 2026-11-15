@@ -354,23 +354,7 @@ impl Fleet {
         exclude: &HashSet<HostId>,
         rng: &mut Rng,
     ) -> Option<Placement> {
-        let fits = |slot: u32, now: bool| {
-            self.slots[slot as usize].as_ref().is_some_and(|entry| {
-                let capacity = &entry.capacity;
-                let memory = demand.memory_on(entry.info);
-                entry.state == HostState::Live
-                    && !exclude.contains(&entry.id)
-                    && entry.info.offers.cover(demand.reach)
-                    && capacity.memory_mib >= memory
-                    && (!now
-                        || (capacity
-                            .free_memory_mib
-                            .saturating_add(capacity.reclaimable_memory_mib)
-                            >= memory
-                            && capacity.free_cpu_millis >= demand.cpu_millis
-                            && capacity.free_disk_mib >= demand.disk_mib))
-            })
-        };
+        let fits = |slot: u32, now: bool| self.fits(slot, demand, exclude, now);
         let class = demand.class().and_then(|class| self.by_class.get(&class));
         let chosen = [
             demand.shape().and_then(|shape| self.ready.get(&shape)),
@@ -393,6 +377,38 @@ impl Fleet {
             same_class: demand
                 .class()
                 .is_some_and(|class| class == entry.info.class),
+        })
+    }
+
+    /// Whether a live host other than those in `exclude` fits `demand` by
+    /// the view now, as [`Self::place`] prefers: one it could take at once,
+    /// not one that might make room for it later.
+    #[must_use]
+    pub fn fits_now(&self, demand: &Demand, exclude: &HashSet<HostId>) -> bool {
+        self.live
+            .items
+            .iter()
+            .any(|&slot| self.fits(slot, demand, exclude, true))
+    }
+
+    /// Whether the host in `slot` is live, outside `exclude`, offers all
+    /// `demand` reaches and could hold it at all; with `now`, whether it
+    /// could take it at once by the view.
+    fn fits(&self, slot: u32, demand: &Demand, exclude: &HashSet<HostId>, now: bool) -> bool {
+        self.slots[slot as usize].as_ref().is_some_and(|entry| {
+            let capacity = &entry.capacity;
+            let memory = demand.memory_on(entry.info);
+            entry.state == HostState::Live
+                && !exclude.contains(&entry.id)
+                && entry.info.offers.cover(demand.reach)
+                && capacity.memory_mib >= memory
+                && (!now
+                    || (capacity
+                        .free_memory_mib
+                        .saturating_add(capacity.reclaimable_memory_mib)
+                        >= memory
+                        && capacity.free_cpu_millis >= demand.cpu_millis
+                        && capacity.free_disk_mib >= demand.disk_mib))
         })
     }
 

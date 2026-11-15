@@ -674,10 +674,13 @@ export async function purgeArchivedSessionContent(
   scope: SessionArchiveScope,
   input: { batchSize: number; fromTable?: number },
 ): Promise<{ deleted: number; complete: boolean; nextTable: number }> {
-  const fromTable = Math.min(
-    Math.max(Math.trunc(input.fromTable ?? 0), 0),
-    SESSION_ARCHIVE_PURGE_TABLES.length,
-  );
+  // Anything but a valid table index starts at the first table, so a bad
+  // value can never skip tables and still record the purge complete.
+  const requested = input.fromTable ?? 0;
+  const fromTable =
+    Number.isInteger(requested) && requested >= 0 && requested < SESSION_ARCHIVE_PURGE_TABLES.length
+      ? requested
+      : 0;
   let deleted = 0;
   for (let index = fromTable; index < SESSION_ARCHIVE_PURGE_TABLES.length; index += 1) {
     const table = SESSION_ARCHIVE_PURGE_TABLES[index]!;
@@ -755,6 +758,43 @@ export async function completeSessionArchiveObjectDeletion(
 
 export { SessionArchivedError } from "./session-archive-errors";
 
+/**
+ * A control-worker proof that the session's execution is closed: its content
+ * is archived (or being archived) or it is an imported read-only copy. The
+ * database refuses every turn, attempt, history and wake write for such a
+ * session, so a control activity that failed against it can never succeed by
+ * retrying. Read in the session's own worker scope; a hidden or missing row is
+ * not read-only (deletion has its own proof), and read errors propagate.
+ */
+export async function isSessionExecutionReadOnly(
+  db: Database,
+  scope: SessionArchiveScope,
+): Promise<boolean> {
+  return await withSessionActivityRlsContext(
+    db,
+    { accountId: scope.accountId, workspaceId: scope.workspaceId },
+    async (scoped) => {
+      const [row] = await scoped
+        .select({
+          contentArchiveState: schema.sessions.contentArchiveState,
+          importedArchiveImportId: schema.sessions.importedArchiveImportId,
+        })
+        .from(schema.sessions)
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, scope.workspaceId),
+            eq(schema.sessions.id, scope.sessionId),
+          ),
+        )
+        .limit(1);
+      return (
+        row !== undefined &&
+        (row.contentArchiveState !== null || row.importedArchiveImportId !== null)
+      );
+    },
+  );
+}
+
 export type SetSessionKeepLiveResult =
   | { status: "updated"; retention: SessionRetention }
   | { status: "not_found" }
@@ -825,6 +865,15 @@ const SESSION_ARCHIVE_UNDO_GRACE_SECONDS = 3;
  */
 export const SESSION_ARCHIVE_STORE_AFTER_SECONDS =
   SESSION_ARCHIVE_UNDO_SECONDS + SESSION_ARCHIVE_UNDO_GRACE_SECONDS;
+
+/**
+ * Seconds a chat's sandbox is kept after the Archive action, so a chat
+ * restored within a day still has its files. Well past the Undo window
+ * ({@link SESSION_ARCHIVE_STORE_AFTER_SECONDS}), so an Undo never races the
+ * sandbox's end. A chat stored by the idle archiver was already unused for
+ * weeks and waits no longer.
+ */
+export const ARCHIVED_CHAT_SANDBOX_KEPT_SECONDS = 24 * 60 * 60;
 
 /**
  * Days a person's own message keeps a sub-chat "in use": a sub-chat someone

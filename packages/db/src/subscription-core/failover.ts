@@ -19,6 +19,7 @@ import {
   isSubscriptionSessionBindingRollingConflict,
   readSubscriptionSessionBinding,
   releaseSubscriptionTurnLease,
+  subscriptionTurnLeaseHeldSql,
   writeSubscriptionSessionBinding,
 } from "../subscription-core-repository";
 import {
@@ -117,7 +118,7 @@ async function readTurnLease(tx: Database, identity: SubscriptionCoreTurnIdentit
   }>(
     tx,
     sql`select connection_id::text, provider, holder_id, generation, leased_until,
-    leased_until > clock_timestamp() as live from subscription_leases
+    ${subscriptionTurnLeaseHeldSql()} as live from subscription_leases
     where account_id = ${identity.accountId}::uuid and workspace_id = ${identity.workspaceId}::uuid
       and session_id = ${identity.sessionId}::uuid and turn_id = ${identity.turnId}::uuid`,
   );

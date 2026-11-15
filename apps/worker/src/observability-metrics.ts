@@ -63,13 +63,16 @@ import { errorMessage } from "@opengeni/contracts/values";
 export type TurnOutcome = "completed" | "failed" | "cancelled" | "recovering";
 /**
  * Why a turn attempt ended recovering. A closed set chosen at each recovery
- * site: `provider` (the model provider or its subscription lease), `sandbox`,
+ * site: `provider` (the model provider or its subscription lease), `route_change`
+ * (the session's active sandbox was deliberately moved mid-turn, so the turn
+ * continues on its new machine in a fresh attempt), `sandbox`,
  * `tool` (MCP and first-party tool setup), `worker` (shutdown or death),
  * `database` (settlement could not be written), `control` (admission holds)
  * and `other`.
  */
 export type TurnRecoveryCause =
   | "provider"
+  | "route_change"
   | "sandbox"
   | "tool"
   | "worker"
@@ -134,6 +137,7 @@ const MAX_MODEL_CACHE_COUNTER_TOTAL = 1_000_000_000_000;
 const TURN_OUTCOMES: readonly TurnOutcome[] = ["completed", "failed", "cancelled", "recovering"];
 const TURN_RECOVERY_CAUSES: readonly TurnRecoveryCause[] = [
   "provider",
+  "route_change",
   "sandbox",
   "tool",
   "worker",
@@ -395,11 +399,26 @@ export function runtimeMetricsHooksForObservability(
         value: durationSeconds,
       });
     },
-    onSandboxOp: ({ backend, op, outcome, code, healed, durationSeconds, replyBytes }) => {
+    onSandboxOp: ({
+      backend,
+      op,
+      outcome,
+      code,
+      infrastructure,
+      healed,
+      durationSeconds,
+      replyBytes,
+    }) => {
       observability.incrementCounter({
         name: "opengeni_machine_op_total",
-        help: "Total Connected Machine control ops by op, outcome, and typed fault code.",
-        labels: { backend, op, outcome, code: code ?? "" },
+        help: "Total Connected Machine control ops by op, outcome, typed fault code, and whether a failure was an infrastructure fault.",
+        labels: {
+          backend,
+          op,
+          outcome,
+          code: code ?? "",
+          infrastructure: outcome === "failed" ? String(infrastructure === true) : "",
+        },
       });
       observability.observeHistogram({
         name: "opengeni_machine_op_duration_seconds",
@@ -447,9 +466,22 @@ export function selfhostedOpObserverForMetrics(hooks: RuntimeMetricsHooks): Self
       retries: o.retries,
       durationSeconds: o.durationMs / 1000,
       ...(o.code !== undefined ? { code: errorCodeToJSON(o.code) } : {}),
+      ...(o.outcome === "failed" ? { infrastructure: isInfrastructureFailure(o) } : {}),
       ...(o.replyBytes !== undefined ? { replyBytes: o.replyBytes } : {}),
     });
   };
+}
+
+/** Whether a failed op's fault class is an infrastructure fault. A semantic miss
+ *  the caller asked about (`not_found`, `consent`, `fenced`, …) is not. The same
+ *  set decides the `machine.op.failed` event and the metric's `infrastructure`
+ *  label, so the alert and the session events agree. */
+function isInfrastructureFailure(o: SelfhostedOpObservation): boolean {
+  return (
+    o.outcome === "failed" &&
+    o.faultClass !== undefined &&
+    SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES.has(o.faultClass)
+  );
 }
 
 /** A session-scoped `machine.op.*` event mapped from a completed-op observation. */
@@ -468,11 +500,7 @@ export type MachineOpSessionEvent = {
  *  semantic miss the model asked about is an outcome, not an infra fault);
  *  `machine.op.recovered` fires for a healed op (success after ≥1 retry). */
 export function machineOpSessionEventFor(o: SelfhostedOpObservation): MachineOpSessionEvent | null {
-  if (
-    o.outcome === "failed" &&
-    o.faultClass &&
-    SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES.has(o.faultClass)
-  ) {
+  if (isInfrastructureFailure(o) && o.faultClass) {
     return {
       type: "machine.op.failed",
       payload: {

@@ -4,6 +4,7 @@ import {
   claudeProviderId,
   withClaudeConnectionCatalog,
   withClaudeConnectionCredential,
+  withOrganizationAnthropicApiKeys,
   withDirectModelProviders,
   type Settings,
   WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
@@ -46,6 +47,7 @@ import {
   listOrganizationModelProviderCustomModelsForWorkspace,
   getOrganizationModelProviderCustomModelForExecution,
   loadOrganizationModelProviderApiKey,
+  loadOrganizationAnthropicApiKeysForExecution,
   loadOrganizationModelProviderCredential,
   getOrganizationModelProviderCatalogForWorkspace,
   listWorkspaceProviderCustomModels,
@@ -413,8 +415,21 @@ export async function settingsWithOrganizationProviderCredentials(
             },
             prepared,
           );
-    if (credential)
+    if (credential) {
       result = withClaudeConnectionCredential(result, kind, credential, "organization", undefined);
+      // An Anthropic API connection with several keys: each session keeps
+      // one of them. Claude subscription providers never get these keys.
+      const apiKeys =
+        kind === "anthropic"
+          ? await loadOrganizationAnthropicApiKeysForExecution(
+              db,
+              settings,
+              { accountId, workspaceId },
+              prepared,
+            )
+          : null;
+      if (apiKeys) result = withOrganizationAnthropicApiKeys(result, apiKeys);
+    }
     const workspaceModels = prepared
       ? [...prepared.workspaceModels[kind]]
       : await listWorkspaceProviderCustomModels(db, {

@@ -65,7 +65,10 @@ import {
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
 import type { SessionWorkflowClient } from "@opengeni/core";
-import { normalizeConnectedMachineWorkspaceRoot } from "@opengeni/runtime/sandbox";
+import {
+  connectedCommandFailureReason,
+  normalizeConnectedMachineWorkspaceRoot,
+} from "@opengeni/runtime/sandbox";
 import type { AutomaticAgentUpdater } from "./agent-update";
 import {
   AgentEvent,
@@ -593,6 +596,7 @@ export async function handleAgentEventPayload(
     } catch (error) {
       observability?.warn?.("Failed to settle a Connected Machine completion event", {
         subject,
+        reason: connectedCommandFailureReason(error),
         error: errorMessage(error),
       });
     }

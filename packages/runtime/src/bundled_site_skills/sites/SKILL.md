@@ -158,11 +158,11 @@ If an idempotent create or publish reports an uncertain outcome, inspect the
 artifact list/source and rerun that same persistent script with the exact same
 idempotency key. Never mint a replacement key for the same intended version.
 
-After a successful create or publish, use the returned `artifact.workspaceId`
-and `artifact.id` to give the user a standard Markdown link to the durable Site:
+After create or publish, share the returned `artifactReference`. All artifacts
+use this link form, with the exact returned ID and a descriptive title:
 
 ```md
-[Open <Site title>](/workspaces/<workspaceId>/artifacts/<artifactId>)
+[Open <Site title>](artifact:<artifactId>)
 ```
 
 Include that link in the completion reply instead of making the user search for

@@ -1,0 +1,66 @@
+name: Model request review
+# Reports the "Model request review" status on a PR: whether it changes what
+# Opengeni sends to model providers (the model request section of
+# .github/CODEOWNERS) and, if so, whether jorgensandhaug approved its current
+# head commit. It re-requests his review on every unapproved head and keeps
+# one PR comment listing the guarded files. The merge batcher enforces the same
+# verdict itself; see docs/merge-batcher.md, "Model request review".
+#
+# It never runs PR code. pull_request_target and workflow_run both run this
+# file from main and check out only main's CODEOWNERS and gate script. Review
+# events reach it through the Model request review signal workflow, because a
+# pull_request_review workflow runs from the PR's own merge ref.
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review, edited]
+  workflow_run:
+    workflows: [Model request review signal]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  evaluate:
+    name: Evaluate model request review
+    if: >-
+      ${{ (github.event_name == 'pull_request_target' &&
+        (github.event.action != 'edited' || github.event.changes.base != null)) ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request_review') }}
+    # One evaluation per PR branch at a time; each reads the PR's current state.
+    concurrency:
+      group: model-request-review-${{ github.event.pull_request.head.repo.full_name || github.event.workflow_run.head_repository.full_name }}-${{ github.event.pull_request.head.ref || github.event.workflow_run.head_branch }}
+      cancel-in-progress: false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+      statuses: write
+    steps:
+      - name: Check out the gate from main
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          sparse-checkout: |
+            /*
+            !/*/
+            /.github/CODEOWNERS
+            /scripts/ci/model-request-review.ts
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: .bun-version
+      - name: Report the gate for a pushed or opened PR
+        if: github.event_name == 'pull_request_target'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PULL: ${{ github.event.pull_request.number }}
+        run: bun scripts/ci/model-request-review.ts --pull "$PULL"
+      - name: Report the gate after a review
+        if: github.event_name == 'workflow_run'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          HEAD_OWNER: ${{ github.event.workflow_run.head_repository.owner.login }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: bun scripts/ci/model-request-review.ts --head-owner "$HEAD_OWNER" --head-branch "$HEAD_BRANCH"

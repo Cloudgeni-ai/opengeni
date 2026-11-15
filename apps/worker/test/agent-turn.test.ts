@@ -3763,8 +3763,8 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(buildCallAt).toBeGreaterThan(-1);
     expect(decisionAt).toBeGreaterThan(buildCallAt);
     expect(runSource.indexOf("});", buildCallAt)).toBeGreaterThan(decisionAt);
-    expect(buildSource).toContain(
-      "...(deps.deferRepositorySkillIndex ? { deferRepositorySkillIndex: true } : {}),",
+    expect(buildSource.replace(/\s+/g, " ")).toContain(
+      '...(deps.deferRepositorySkillIndex || turn.source === "compaction" ? { deferRepositorySkillIndex: true }',
     );
   });
 
@@ -4820,6 +4820,40 @@ describe("worker shutdown preemption", () => {
     await Promise.all([boundary, gitRefresh]);
     expect(steps.at(-1)).toBe("receipt");
     expect(receipts).toBe(1);
+  });
+
+  test("a worker shutdown hands remote operations to the command ledger before the drain", async () => {
+    for (const handOffRemoteOperations of [true, false]) {
+      const steps: string[] = [];
+      await drainAttemptOwnedSandboxWriters({
+        toolCancellationFence: {
+          handOffRemoteOperations: () => steps.push("hand-off"),
+          cancel: () => steps.push("cancel"),
+          waitForQuiescence: async () => {
+            steps.push("drain");
+          },
+        },
+        handOffRemoteOperations,
+        gitCredentialRenewals: [],
+        codemodeTokenRenewal: null,
+        runCredentialRenewal: null,
+      });
+      expect(steps).toEqual(
+        handOffRemoteOperations ? ["hand-off", "cancel", "drain"] : ["cancel", "drain"],
+      );
+    }
+    // The finalizer asks for it exactly when Temporal cancelled the attempt
+    // because its worker is shutting down (Pause and Steer keep exit proof).
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn/finalization.ts", import.meta.url),
+    ).text();
+    const drainAt = source.indexOf("await drainAttemptOwnedSandboxWriters({");
+    expect(
+      source.indexOf(
+        "handOffRemoteOperations: isWorkerShutdownCancellation(cancellationSignal?.reason),",
+        drainAt,
+      ),
+    ).toBeGreaterThan(drainAt);
   });
 
   test("retries the proof-bearing turn release outside Temporal cancellation", async () => {

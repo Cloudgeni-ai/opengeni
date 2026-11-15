@@ -10,6 +10,7 @@ import {
 import { bootstrapWorkspace, createDb, createSession, type DbClient } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import { seedPrefixLedgerSession } from "./helpers/prefix-ledger-session";
 
 const FIRST = "1302_ultrafast_latency_mode_sessions.sql";
 const MIGRATIONS = [
@@ -87,7 +88,11 @@ beforeAll(async () => {
   });
   const grant = access.workspaceGrants[0]!;
   scope = { accountId: grant.accountId, workspaceId: grant.workspaceId! };
-  existingSessionId = (await session("fast")).id;
+  ({ sessionId: existingSessionId } = await seedPrefixLedgerSession(owned.admin, {
+    ...scope,
+    initialMessage: "a fast chat",
+    latencyMode: "fast",
+  }));
 }, 900_000);
 
 afterAll(async () => {
@@ -116,7 +121,13 @@ describe.skipIf(!realDatabase)("1302-1310 Ultrafast latency mode", () => {
     const before = await constraints();
     expect(before).toHaveLength(CONSTRAINTS.length);
     for (const { definition } of before) expect(definition).not.toContain("ultrafast");
-    await expect(session("ultrafast")).rejects.toThrow();
+    await expect(
+      seedPrefixLedgerSession(owned!.admin, {
+        ...scope,
+        initialMessage: "an ultrafast chat",
+        latencyMode: "ultrafast",
+      }),
+    ).rejects.toThrow("sessions_latency_mode_check");
 
     await migrate(owned!.ownerUrl);
 

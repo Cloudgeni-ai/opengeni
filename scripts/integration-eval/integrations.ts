@@ -153,6 +153,13 @@ export const INTEGRATIONS: readonly IntegrationSpec[] = [
     toolNamePatterns: [/^outlook_calendar/, /^microsoft_outlook_calendar/],
   },
   {
+    id: "outlook_contacts",
+    label: "Outlook Contacts",
+    families: [],
+    labelWords: ["outlook contacts"],
+    toolNamePatterns: [/^outlook_contacts/, /^microsoft_outlook_contacts/],
+  },
+  {
     id: "onedrive",
     label: "OneDrive",
     families: [],
@@ -165,6 +172,15 @@ export const INTEGRATIONS: readonly IntegrationSpec[] = [
     families: [],
     labelWords: ["sharepoint"],
     toolNamePatterns: [/sharepoint/],
+  },
+  {
+    // Per-customer hosts (`<org>.crm4.dynamics.com`, `<env>.operations.dynamics.com`,
+    // `api.businesscentral.dynamics.com` for every Business Central environment)
+    // resolve through the shared `dynamics.com` parent.
+    id: "microsoft_dynamics",
+    label: "Microsoft Dynamics",
+    families: ["integration:dynamics.com"],
+    labelWords: ["microsoft dynamics", "dynamics 365", "dynamics", "dataverse", "business central"],
   },
   {
     // Never connected in either test workspace: only the strong-match card row uses it.

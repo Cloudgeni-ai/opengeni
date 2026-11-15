@@ -4,7 +4,8 @@ The readiness inspector expands each routine's ACL to determine whether PUBLIC
 has EXECUTE. Many routines have identical ACLs and owners. A lateral join with
 `LIMIT 1` keeps the existing boolean and snapshot semantics while allowing
 PostgreSQL to memoize identical `(proacl, proowner)` inputs within the statement.
-No result survives the query; each readiness call still performs all live checks.
+No result survives the query. Readiness probes re-run these queries only when the
+catalogs changed; see [the catalog fingerprint](readiness-catalog-fingerprint.md).
 
 The main routine inventory and subscription-owner inventory use the same shape.
 The query returns one row per routine even when no PUBLIC grant exists. Default

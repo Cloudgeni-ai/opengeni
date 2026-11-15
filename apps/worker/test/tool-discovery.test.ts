@@ -4,6 +4,8 @@ import { DecisionError, type DecisionUsage } from "@opengeni/decisions";
 import type { DocumentEmbedder } from "@opengeni/documents";
 import { createToolSelector } from "@opengeni/runtime";
 import {
+  TOOL_DECISION_DURATION_METRIC,
+  TOOL_DECISION_SPAN,
   configuredToolDecisionModel,
   configuredToolMeaningRanker,
   toolSelectionFallbackReason,
@@ -251,5 +253,119 @@ describe("shared deployment decision category", () => {
       inputTokens: 100,
       costSource: "provider-reported",
     });
+  });
+  test("each decision request is a span and a duration sample, a hedge loser included", async () => {
+    const spans: Array<{ name: string; attributes: Record<string, unknown>; error?: unknown }> = [];
+    const samples: Array<{ name: string; labels?: Record<string, unknown>; value: number }> = [];
+    const observability = {
+      startSpan: (name: string, attributes: Record<string, unknown> = {}) => ({
+        traceId: "0".repeat(32),
+        spanId: "0".repeat(16),
+        end: (end: { attributes?: Record<string, unknown>; error?: unknown } = {}) => {
+          spans.push({
+            name,
+            attributes: { ...attributes, ...end.attributes },
+            ...("error" in end ? { error: end.error } : {}),
+          });
+        },
+      }),
+      observeHistogram: (sample: {
+        name: string;
+        labels?: Record<string, unknown>;
+        value: number;
+      }) => {
+        samples.push(sample);
+      },
+    };
+    let requests = 0;
+    const choose = configuredToolDecisionModel({
+      settings: testSettings({
+        decisionModelProvider: "openrouter",
+        decisionModelId: "openai/gpt-6-luna-decisions",
+        decisionModelApiKey: "test-key-configured",
+      }),
+      observability: observability as never,
+      // The first request never answers; the hedged second one does.
+      fetch: (async (_url, init) => {
+        if (++requests === 1)
+          return await new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(init.signal!.reason), {
+              once: true,
+            });
+          });
+        return Response.json({
+          id: "decision-response",
+          model: "actual-model-version",
+          answers: { 0: { type: "noul", noul: 0.9 } },
+          usage: { input_tokens: 1234, output_tokens: 0 },
+        });
+      }) as typeof fetch,
+      recordUsage: async () => {},
+      onUnavailable: () => {
+        throw new Error("available");
+      },
+    })!;
+    expect(
+      await createToolSelector(choose)({
+        query: "read task",
+        candidates: [{ name: "tasks__read", description: "Read task", inputFields: ["id"] }],
+      }),
+    ).toEqual([{ name: "tasks__read", probability: 0.9 }]);
+    expect(requests).toBe(2);
+    // The losing request is cancelled as the winner returns and settles after it.
+    for (let tick = 0; spans.length < 2 && tick < 100; tick++) await Bun.sleep(1);
+    expect(spans.map((span) => [span.name, span.attributes])).toEqual([
+      [
+        TOOL_DECISION_SPAN,
+        {
+          provider: "openrouter/openai/gpt-6-luna-decisions",
+          questions: 1,
+          outcome: "completed",
+          input_tokens: 1234,
+        },
+      ],
+      [
+        TOOL_DECISION_SPAN,
+        { provider: "openrouter/openai/gpt-6-luna-decisions", questions: 1, outcome: "cancelled" },
+      ],
+    ]);
+    expect(spans.every((span) => !("error" in span))).toBe(true);
+    expect(samples.map((sample) => [sample.name, sample.labels])).toEqual([
+      [TOOL_DECISION_DURATION_METRIC.name, { outcome: "completed" }],
+      [TOOL_DECISION_DURATION_METRIC.name, { outcome: "cancelled" }],
+    ]);
+    // The winner waited for the hedge, so its sample covers that wait.
+    expect(samples[0]!.value).toBeGreaterThan(0);
+  });
+  test("a refused decision request is a failed span carrying its error", async () => {
+    const ended: Array<{ attributes?: Record<string, unknown>; error?: unknown }> = [];
+    const choose = configuredToolDecisionModel({
+      settings: testSettings({
+        decisionModelProvider: "openrouter",
+        decisionModelId: "openai/gpt-6-luna-decisions",
+        decisionModelApiKey: "test-key-configured",
+      }),
+      observability: {
+        startSpan: () => ({
+          traceId: "0".repeat(32),
+          spanId: "0".repeat(16),
+          end: (end = {}) => {
+            ended.push(end);
+          },
+        }),
+        observeHistogram: () => {},
+      } as never,
+      fetch: (async () => new Response("bad request", { status: 400 })) as typeof fetch,
+      recordUsage: async () => {},
+      onUnavailable: () => {
+        throw new Error("available");
+      },
+    })!;
+    await expect(
+      choose.decide("state", { 0: { type: "predicate", instructions: "q" } } as never),
+    ).rejects.toThrow("HTTP 400");
+    expect(ended).toHaveLength(1);
+    expect(ended[0]!.attributes).toEqual({ outcome: "failed" });
+    expect(ended[0]!.error).toBeInstanceOf(DecisionError);
   });
 });

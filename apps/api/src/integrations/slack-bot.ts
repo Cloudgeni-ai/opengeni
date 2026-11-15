@@ -1041,6 +1041,8 @@ export async function verifyScheduledTaskSlackChannel(
 
 /** Slack's limit on a post's custom display name. */
 const SLACK_BOT_USERNAME_MAX = 80;
+/** Slack refuses a post (`invalid_arguments`) whose `icon_url` is longer. */
+const SLACK_BOT_ICON_URL_MAX = 255;
 
 export type SlackBotPostIdentity = { username: string; iconUrl?: string };
 
@@ -2013,7 +2015,7 @@ export class OpenGeniSlackBotClient {
         throw new Error("Slack post operation lost its durable claim before provider call");
       }
       providerCallStarted = true;
-      const posted = await this.call(headers, "chat.postMessage", {
+      const message = {
         channel: channelId,
         text: input.text,
         ...(wireBlocks ? { blocks: JSON.stringify(wireBlocks) } : {}),
@@ -2021,13 +2023,34 @@ export class OpenGeniSlackBotClient {
         unfurl_links: "false",
         unfurl_media: "false",
         ...(input.threadTimestamp ? { thread_ts: input.threadTimestamp } : {}),
-        ...(input.identity && hasOpenGeniSlackBotIdentityScope(this.connection.grantedScopes)
+      };
+      // A bot chat's name and picture; a picture link Slack would refuse is
+      // left off. The identity isn't part of the request digest.
+      const identity =
+        input.identity && hasOpenGeniSlackBotIdentityScope(this.connection.grantedScopes)
           ? {
               username: input.identity.username,
-              ...(input.identity.iconUrl ? { icon_url: input.identity.iconUrl } : {}),
+              ...(input.identity.iconUrl && input.identity.iconUrl.length <= SLACK_BOT_ICON_URL_MAX
+                ? { icon_url: input.identity.iconUrl }
+                : {}),
             }
-          : {}),
-      });
+          : null;
+      let posted: SlackPayload;
+      try {
+        posted = await this.call(headers, "chat.postMessage", { ...message, ...identity });
+      } catch (error) {
+        // Slack refused the post outright, so nothing was posted: when the
+        // name or picture may be why, post once more as the app itself, so
+        // the message still arrives.
+        if (
+          !identity ||
+          !(error instanceof SlackBotProviderError) ||
+          error.code !== "invalid_arguments"
+        ) {
+          throw error;
+        }
+        posted = await this.call(headers, "chat.postMessage", message);
+      }
       const slackChannelId = requiredSlackString(posted.channel, "channel");
       const slackMessageTimestamp = requiredSlackString(posted.ts, "ts");
       const completed = await completeSlackBotPostOperation(this.db, {

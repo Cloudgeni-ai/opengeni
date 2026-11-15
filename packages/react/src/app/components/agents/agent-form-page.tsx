@@ -9,6 +9,7 @@ import {
   AGENT_INSTRUCTIONS_MAX_LENGTH,
   AGENT_INSTRUCTIONS_SOFT_LIMIT,
   AGENT_NAME_MAX_LENGTH,
+  slackAgentOpenDisclosure,
   type Agent,
   type AgentVisibility,
   type UpdateAgentRequest,
@@ -36,7 +37,13 @@ import {
   sessionAvatarFromDraft,
   sessionAvatarSeedHue,
 } from "../session/session-avatar-picker";
-import { AGENT_VERSION_CONFLICT, workspacePeopleLabel } from "./agent-page";
+import { orgName } from "../../lib/org";
+import { hasAccountPermission } from "../../lib/permissions";
+import {
+  AGENT_VERSION_CONFLICT,
+  organizationPeopleLabel,
+  workspacePeopleLabel,
+} from "./agent-page";
 
 export const INSTRUCTIONS_HINT =
   "What it does and how. Applies in every chat. Put long reference material in Memory.";
@@ -65,6 +72,7 @@ const EMPTY: AgentFormValues = {
 };
 
 export const ONLY_ME_UNAVAILABLE = "Only me chats aren't available here.";
+export const ORGANIZATION_ACCESS_ADMIN_ONLY = "Only an organization admin can choose this.";
 
 /** The count beside a field once it is near its limit. */
 export function lengthCount(value: string, max: number): string | undefined {
@@ -98,8 +106,6 @@ export function agentSaveErrorText(error: unknown): string | null {
       return AGENT_VERSION_CONFLICT;
     case "agent_limit_reached":
       return "This workspace has as many agents as it can keep. Delete one, then try again.";
-    case "agent_slack_requires_workspace_visibility":
-      return "It's available in Slack, so everyone in the workspace must be able to use it. Turn Slack off first.";
     default:
       return null;
   }
@@ -173,7 +179,7 @@ function AgentForm({
   onClose: () => void;
   onSaved: (agent: Agent) => void;
 }) {
-  const { client, workspaces } = useAppContext();
+  const { client, workspaces, accessContext } = useAppContext();
   const privateChats = usePrivateChatsAvailable(workspaceId);
   const seedKey = agent?.id ?? sourceSessionId ?? "new-agent";
   const [name, setName] = useState(initial.name);
@@ -181,17 +187,28 @@ function AgentForm({
   const [instructions, setInstructions] = useState(initial.instructions);
   const [memoryEnabled, setMemoryEnabled] = useState(initial.memoryEnabled);
   const [visibility, setVisibility] = useState<AgentVisibility>(initial.visibility);
+  // An agent's own image (one made for it, in its workspace) stays its icon
+  // until another is picked. A new agent starts from a chat's emoji, icon or
+  // letters only: a chat's image is that chat's file.
+  const image = agent && initial.avatar?.kind === "image" ? initial.avatar : null;
   const [draft, setDraft] = useState(() =>
     sessionAvatarDraft(
-      // Image avatars are a chat's own files, which an agent doesn't have.
-      initial.avatar?.kind === "image" ? null : initial.avatar,
+      initial.avatar?.kind === "image" && !image ? null : initial.avatar,
       sessionAvatarSeedHue(sessionAvatarFallbackHue(seedKey)),
     ),
   );
   const [pickerOpen, setPickerOpen] = useState(false);
   const [errors, setErrors] = useState<FormErrors>({});
-  const workspaceName =
-    workspaces.find((row) => row.id === (agent?.workspaceId ?? workspaceId))?.name ?? null;
+  const workspace = workspaces.find((row) => row.id === (agent?.workspaceId ?? workspaceId));
+  const workspaceName = workspace?.name ?? null;
+  // Only shared agents of an organization's workspaces reach its people.
+  const organizationOption = workspace !== undefined && workspace.kind !== "personal";
+  const organizationName = workspace
+    ? orgName(workspace.accountId, accessContext.accountGrants)
+    : null;
+  const organizationAdmin =
+    workspace !== undefined &&
+    hasAccountPermission(accessContext, workspace.accountId, "account:admin");
   const inSlack = (agent?.slack.length ?? 0) > 0;
   const long = instructions.length > AGENT_INSTRUCTIONS_SOFT_LIMIT;
   // Unchanged Instructions are never sent, so only changed ones must fit.
@@ -202,7 +219,7 @@ function AgentForm({
   const values = (): AgentFormValues => ({
     name,
     description,
-    avatar: sessionAvatarFromDraft(draft, name, null),
+    avatar: sessionAvatarFromDraft(draft, name, image),
     instructions,
     memoryEnabled,
     visibility,
@@ -216,7 +233,7 @@ function AgentForm({
       ...(instructionsChanged
         ? optionalError("instructions", lengthError(instructions, AGENT_INSTRUCTIONS_MAX_LENGTH))
         : {}),
-      ...sessionAvatarDraftErrors(draft, name, null),
+      ...sessionAvatarDraftErrors(draft, name, image),
     };
     setErrors(next);
     if (!next.name && (next.emoji || next.letters)) setPickerOpen(true);
@@ -248,6 +265,12 @@ function AgentForm({
       );
       return true;
     } catch (error) {
+      // Its name is how people ask it in Slack: say so at the name.
+      const code = agentErrorCode(error);
+      if (code === "agent_slack_name_taken" || code === "agent_slack_name_invalid") {
+        setErrors((previous) => ({ ...previous, name: userErrorText(error) }));
+        return false;
+      }
       const text = agentSaveErrorText(error);
       if (text) throw new Error(text, { cause: error });
       throw error;
@@ -286,7 +309,7 @@ function AgentForm({
               setErrors(({ emoji: _emoji, letters: _letters, ...rest }) => rest);
             }}
             name={name}
-            image={null}
+            image={image}
             errors={errors}
             workspaceId={workspaceId}
             seed={seedKey}
@@ -372,7 +395,17 @@ function AgentForm({
             />
           }
         />
-        <Field label="Who can use it" group>
+        <Field
+          label="Who can use it"
+          group
+          hint={
+            inSlack && visibility === "private"
+              ? "Only me agents stay in the app, so it stops answering in Slack."
+              : visibility === "organization"
+                ? slackAgentOpenDisclosure(name, workspaceName ?? "")
+                : undefined
+          }
+        >
           <SegmentedControl
             size="sm"
             aria-label="Who can use it"
@@ -380,12 +413,20 @@ function AgentForm({
               {
                 value: "private",
                 label: "Only me",
-                disabled: visibility !== "private" && (inSlack || privateChats === false),
-                disabledReason: inSlack
-                  ? "It's available in Slack. Turn Slack off first."
-                  : ONLY_ME_UNAVAILABLE,
+                disabled: visibility !== "private" && privateChats === false,
+                disabledReason: ONLY_ME_UNAVAILABLE,
               },
               { value: "workspace", label: workspacePeopleLabel(workspaceName) },
+              ...(organizationOption || visibility === "organization"
+                ? [
+                    {
+                      value: "organization",
+                      label: organizationPeopleLabel(organizationName),
+                      disabled: visibility !== "organization" && !organizationAdmin,
+                      disabledReason: ORGANIZATION_ACCESS_ADMIN_ONLY,
+                    },
+                  ]
+                : []),
             ]}
             value={visibility}
             onValueChange={(next) => setVisibility(next as AgentVisibility)}

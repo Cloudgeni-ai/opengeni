@@ -7,6 +7,7 @@ import {
   DEFAULT_TURN_WORKER_SHUTDOWN_GRACE_MS,
   DEFAULT_TURN_WORKER_SHUTDOWN_FORCE_MS,
   DEFAULT_BILLING_LEGACY_ACCOUNT_IDS,
+  DEFAULT_REASONING_SUMMARIES,
 } from "./defaults";
 export {
   DEFAULT_OPENROUTER_MODEL_ID,
@@ -18,6 +19,7 @@ export {
   DEFAULT_TURN_WORKER_SHUTDOWN_GRACE_MS,
   DEFAULT_TURN_WORKER_SHUTDOWN_FORCE_MS,
   DEFAULT_BILLING_LEGACY_ACCOUNT_IDS,
+  DEFAULT_REASONING_SUMMARIES,
 } from "./defaults";
 export { managedUserEmailAllowed } from "./managed-user-admission";
 export * from "./realtime-voice-pricing";
@@ -263,6 +265,62 @@ export function retainedImageWorkspaceQuotaBytes(
     settings.retainedImageWorkspaceQuotaBytes
   );
 }
+
+/**
+ * The Responses `reasoning.summary` Opengeni requests on a route it has
+ * verified. `none` omits the field, so the provider writes no summary.
+ */
+export const ReasoningSummaryRequest = z.enum(["auto", "detailed", "none"]);
+export type ReasoningSummaryRequest = z.infer<typeof ReasoningSummaryRequest>;
+
+/**
+ * Routes whose summary Opengeni chooses: the Codex subscription for every model,
+ * and direct OpenAI and the Azure OpenAI wire for GPT-5 and later reasoning models.
+ * Every other route and model keeps the runtime default (`detailed`).
+ */
+export type ReasoningSummaryRoute = "codex" | "openai" | "azure";
+export type ReasoningSummaries = Record<
+  ReasoningSummaryRoute,
+  Record<LatencyMode, ReasoningSummaryRequest>
+>;
+
+function reasoningSummaryTiers(defaults: Record<LatencyMode, ReasoningSummaryRequest>) {
+  return z
+    .object({
+      standard: ReasoningSummaryRequest.default(defaults.standard),
+      priority: ReasoningSummaryRequest.default(defaults.priority),
+      fast: ReasoningSummaryRequest.default(defaults.fast),
+      ultrafast: ReasoningSummaryRequest.default(defaults.ultrafast),
+    })
+    .strict()
+    .prefault({});
+}
+
+/**
+ * OPENGENI_REASONING_SUMMARY_JSON: `{"<route>": {"<latency mode>": "auto" |
+ * "detailed" | "none"}}`. Each given cell replaces its default; unknown routes
+ * or modes are rejected.
+ */
+const EnvReasoningSummaries = z.preprocess(
+  (value) => {
+    if (typeof value !== "string") return value;
+    const source = value.trim();
+    if (!source) return undefined;
+    try {
+      return JSON.parse(source);
+    } catch {
+      return value;
+    }
+  },
+  z
+    .object({
+      codex: reasoningSummaryTiers(DEFAULT_REASONING_SUMMARIES.codex),
+      openai: reasoningSummaryTiers(DEFAULT_REASONING_SUMMARIES.openai),
+      azure: reasoningSummaryTiers(DEFAULT_REASONING_SUMMARIES.azure),
+    })
+    .strict()
+    .prefault({}),
+);
 
 const EnvFirstPartyMcpTools = z.preprocess(
   (value) => {
@@ -696,6 +754,11 @@ const SettingsSchema = z.object({
   // Google Calendar shares the Gmail OAuth client; enable once its consent screen lists the Calendar scopes.
   googleCalendarEnabled: EnvBoolean.default(false),
   microsoftTeamsToolsEnabled: EnvBoolean.default(false),
+  // Pre-registered multi-tenant Microsoft Entra app for Microsoft Dynamics MCP
+  // environments (Dataverse/Dynamics 365 Sales, and Finance & Operations).
+  // Microsoft offers no dynamic client registration for these servers.
+  microsoftDynamicsClientId: z.string().optional(),
+  microsoftDynamicsClientSecret: z.string().optional(),
   microsoftTeamsAllowedWorkspaceIds: z.preprocess(
     (value) =>
       typeof value === "string"
@@ -783,6 +846,14 @@ const SettingsSchema = z.object({
   // Lets a Microsoft 365 Global or Teams Administrator of an admitted tenant
   // connect it from Teams without an operator allowlist entry.
   teamsBotSelfServeSetupEnabled: EnvBoolean.default(false),
+  // Teams 1:1 chats reach every workspace of the connected organization the
+  // linked person can start work in (switch, "in <Workspace>: …", agents by
+  // name), as Slack routing does, within the organization admin's "Available
+  // in Opengeni" setting, and any active full member of that organization may
+  // link. Off keeps the installation's workspace and the person's Personal
+  // workspace. Turn on only once no previous-release replica serves traffic.
+  // Env: OPENGENI_TEAMS_WORKSPACE_ROUTING_ENABLED.
+  teamsWorkspaceRoutingEnabled: EnvBoolean.default(false),
   teamsBotClientId: z.string().uuid().optional(),
   teamsBotClientSecret: z.string().min(1).optional(),
   teamsBotTenantId: z.string().uuid().optional(),
@@ -832,6 +903,11 @@ const SettingsSchema = z.object({
   // one and existing links stop opening.
   privacyChatShareLinksAllowed: EnvBoolean.default(true),
   integrationsOauthClientsJson: z.string().default("{}"),
+  // The deployment's own words, in its own language, for the small pages the
+  // API shows outside any app: where a sign-in popup ends, and where an
+  // administrator lands after approving the app. See
+  // parseConnectResultPageTextJson.
+  connectResultPageTextJson: z.string().optional(),
   gmailWatchTopicName: z
     .string()
     .regex(/^projects\/[^/]+\/topics\/[^/]+$/u)
@@ -856,6 +932,13 @@ const SettingsSchema = z.object({
   // Operator OAuth apps for first-party social connectors, keyed by provider
   // id ("x", "reddit"): {"x":{"clientId":"...","clientSecret":"..."}}.
   socialOauthClientsJson: z.string().default("{}"),
+  // Nango-backed integrations (docs/nango.md). Nango stays completely off
+  // unless the environment secret key is configured; the per-integration
+  // backend switch in the database is the allowlist below this ceiling.
+  nangoSecretKey: z.string().trim().min(1).optional(),
+  nangoApiBaseUrl: z.string().url().default("https://api.nango.dev"),
+  // Environment Settings > Webhooks > Signing key; required to accept webhooks.
+  nangoWebhookSigningKey: z.string().trim().min(1).optional(),
   // Session goal guard rails. Goals are designed for runs that legitimately
   // span days, so length is bounded by explicit completion/pause and budget
   // exhaustion, never by count. goalMaxAutoContinuations is therefore UNSET
@@ -976,6 +1059,11 @@ const SettingsSchema = z.object({
   // When set, GET /metrics is served only on this dedicated internal listener
   // and never on the public API port that an ingress forwards to.
   apiMetricsPort: z.coerce.number().int().positive().optional(),
+  // Time the API process has between SIGTERM and being killed: the pod's
+  // termination grace minus its preStop drain (the Helm chart renders it).
+  // In-flight requests drain for this less a ten-second exit margin, then the
+  // process closes its clients and exits within it.
+  apiShutdownGraceMs: z.coerce.number().int().min(0).max(3_600_000).default(30_000),
   workerHttpPort: z.coerce.number().int().positive().default(8001),
   // Worker-side first-party MCP traffic stays on the deployment's internal
   // network. OPENGENI_MCP_URL remains the sandbox/external route used by
@@ -1414,6 +1502,10 @@ const SettingsSchema = z.object({
   codexRotationNearExhaustionPct: z.coerce.number().int().min(1).max(100).default(90),
   reasoningConfigurationUpdatesEnabled: EnvBoolean.default(false),
   openaiReasoningEffort: ReasoningEffort.default("low"),
+  // Responses reasoning summary per route and latency mode
+  // (OPENGENI_REASONING_SUMMARY_JSON, see EnvReasoningSummaries). Like
+  // reasoning effort it is fixed for a turn.
+  reasoningSummaries: EnvReasoningSummaries,
   openaiAllowedReasoningEfforts: z.string().default("low,medium,high,xhigh,max"),
   // Default for new chats and scheduled tasks when the workspace has an
   // Opengeni credit balance, no saved workspace default, and no usable
@@ -2339,6 +2431,12 @@ const SettingsSchema = z.object({
   betterAuthSecret: z.string().optional(),
   betterAuthAllowedHosts: z.string().default(""),
   betterAuthCookieDomain: z.string().optional(),
+  /** Better Auth cookie name prefix; unset keeps Better Auth's default ("better-auth"). */
+  betterAuthCookiePrefix: z
+    .string()
+    .trim()
+    .regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u, "letters, digits, - and _ only")
+    .optional(),
   betterAuthTrustedOrigins: z.string().default(""),
   managedAuthGoogleClientId: z.string().optional(),
   managedAuthGoogleClientSecret: z.string().optional(),
@@ -2351,6 +2449,10 @@ const SettingsSchema = z.object({
     .min(1)
     .optional(),
   managedAuthSessionSetMode: z.enum(["legacy", "dual", "broker"]).default("legacy"),
+  // Owners and admins confirm admin changes in a browser session confirmed
+  // with a passkey (CASA 3.3.1). Off by default; production sets required.
+  // Applies only where passkey sign-in is offered.
+  adminPasskeyStepUp: z.enum(["off", "required"]).default("off"),
   // URL schemes the native app may receive its sign-in code on
   // (`<scheme>://auth/callback`). A host shipping its own build of the app
   // adds its scheme here.
@@ -3724,6 +3826,14 @@ const RegistryModelSchema = z
     hostedWebSearchContextSize: z.enum(["low", "medium", "high"]).optional(),
     capabilities: ModelCapabilitiesV1Schema.optional(),
     pricing: z.union([ModelPricingSchema, ModelPricingScheduleSchema]).optional(),
+    // Reference price of a model whose provider reports no cost (an Azure
+    // deployment, an OpenAI-compatible endpoint): the catalogue model whose
+    // list rate it shares, such as a deployment's base model, or its own
+    // explicit rate, which wins. Usage estimates, spend limits and Insights
+    // only: never debit authority or executable identity, so it is outside
+    // the definition digest and changing it never strands an accepted turn.
+    listPricingModelId: z.string().min(1).max(256).optional(),
+    listPricing: ModelPricingSchema.optional(),
     // Where this route processes data, overriding the provider's declaration.
     // Only operator registry providers may declare it; see docs/eu-only-inference.md.
     residency: ModelResidencyDeclaration.optional(),
@@ -3795,6 +3905,17 @@ const AnthropicProviderOptions = z.object({
   cacheTtl: z.enum(["5m", "1h", "off"]).default("5m"),
   maxOutputTokens: z.number().int().positive().default(32000),
   streamIdleTimeoutMs: z.number().int().positive().default(600000),
+  /**
+   * An organization's several Anthropic API keys, for its Anthropic API
+   * connection only: the keys that still have credits, the connection's own
+   * key first. Each session keeps one of them (`anthropicApiKeyOrder`).
+   * Absent when the organization has one key, which is then `apiKey` alone.
+   * The ids are non-secret member ids.
+   */
+  apiKeys: z
+    .array(z.object({ id: z.string().min(1).max(64), apiKey: z.string().min(1) }).strict())
+    .max(64)
+    .optional(),
 });
 
 /**
@@ -4167,6 +4288,8 @@ const DeploymentRegistryProviderKind = z.enum(["api-key", "anonymous"]);
 
 const DeploymentRegistryModelSchema = RegistryModelSchema.safeExtend({
   pricing: z.never().optional(),
+  listPricingModelId: z.never().optional(),
+  listPricing: z.never().optional(),
 }).strict();
 
 const DeploymentRegistryProviderSchema = RegistryProviderSchema.safeExtend({
@@ -4643,6 +4766,49 @@ export const IntegrationOAuthClientConfigSchema = z.object({
     .default("none"),
 });
 export type IntegrationOAuthClientConfig = z.infer<typeof IntegrationOAuthClientConfigSchema>;
+
+const resultPageLine = z.string().trim().min(1).max(500);
+/**
+ * Wording for the API's own result pages, which no app renders and so no
+ * app's message catalog reaches: the page a sign-in popup ends on and the
+ * page an administrator sees after the organization approval link. Every
+ * field is optional; what is left out stays in English. `lang` names the
+ * language of the given words (a BCP 47 tag such as `nb`).
+ */
+export const ConnectResultPageTextSchema = z
+  .object({
+    lang: z
+      .string()
+      .regex(/^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/u)
+      .optional(),
+    signInFinishedTitle: resultPageLine.optional(),
+    signInFinishedBody: resultPageLine.optional(),
+    adminApprovedTitle: resultPageLine.optional(),
+    adminApprovedBody: resultPageLine.optional(),
+    adminNotApprovedTitle: resultPageLine.optional(),
+    adminNotApprovedBody: resultPageLine.optional(),
+    closeWindow: resultPageLine.optional(),
+  })
+  .strict();
+export type ConnectResultPageText = z.infer<typeof ConnectResultPageTextSchema>;
+
+/** The deployment's wording for the API's result pages (empty: English). */
+export function parseConnectResultPageTextJson(raw: string | undefined): ConnectResultPageText {
+  if (!raw?.trim()) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(
+      `OPENGENI_CONNECT_RESULT_PAGE_TEXT_JSON must be valid JSON: ${errorMessage(error)}`,
+      { cause: error },
+    );
+  }
+  const result = ConnectResultPageTextSchema.safeParse(parsed);
+  if (!result.success)
+    throw new Error(`OPENGENI_CONNECT_RESULT_PAGE_TEXT_JSON is invalid: ${result.error.message}`);
+  return result.data;
+}
 
 /**
  * Runtime-resolved provider (built-in or registry), client-construction-ready.
@@ -6002,6 +6168,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     googleDriveMcpEnabled: optional("OPENGENI_GOOGLE_DRIVE_MCP_ENABLED"),
     googleCalendarEnabled: optional("OPENGENI_GOOGLE_CALENDAR_ENABLED"),
     microsoftTeamsToolsEnabled: optional("OPENGENI_MICROSOFT_TEAMS_TOOLS_ENABLED"),
+    microsoftDynamicsClientId: optional("OPENGENI_MICROSOFT_DYNAMICS_CLIENT_ID"),
+    microsoftDynamicsClientSecret: optional("OPENGENI_MICROSOFT_DYNAMICS_CLIENT_SECRET"),
     microsoftTeamsAllowedWorkspaceIds: optional("OPENGENI_MICROSOFT_TEAMS_ALLOWED_WORKSPACE_IDS"),
     teamsBotEnabled: optional("OPENGENI_TEAMS_BOT_ENABLED"),
     teamsBotAllowedTenantIds: optional("OPENGENI_TEAMS_BOT_ALLOWED_TENANT_IDS"),
@@ -6009,6 +6177,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     teamsBotAllowedGroupChatIds: optional("OPENGENI_TEAMS_BOT_ALLOWED_GROUP_CHAT_IDS"),
     teamsBotSetupAdminIds: optional("OPENGENI_TEAMS_BOT_SETUP_ADMIN_IDS"),
     teamsBotSelfServeSetupEnabled: optional("OPENGENI_TEAMS_BOT_SELF_SERVE_SETUP_ENABLED"),
+    teamsWorkspaceRoutingEnabled: optional("OPENGENI_TEAMS_WORKSPACE_ROUTING_ENABLED"),
     teamsBotClientId: optional("OPENGENI_TEAMS_BOT_CLIENT_ID"),
     teamsBotClientSecret: optional("OPENGENI_TEAMS_BOT_CLIENT_SECRET"),
     teamsBotTenantId: optional("OPENGENI_TEAMS_BOT_TENANT_ID"),
@@ -6027,6 +6196,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     ),
     privacyChatShareLinksAllowed: optional("OPENGENI_PRIVACY_CHAT_SHARE_LINKS_ALLOWED"),
     integrationsOauthClientsJson: optional("OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON"),
+    connectResultPageTextJson: optional("OPENGENI_CONNECT_RESULT_PAGE_TEXT_JSON"),
     gmailWatchTopicName: optional("OPENGENI_GMAIL_WATCH_TOPIC_NAME"),
     slackClientId: optional("OPENGENI_SLACK_CLIENT_ID"),
     slackClientSecret: optional("OPENGENI_SLACK_CLIENT_SECRET"),
@@ -6039,6 +6209,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     googleDriveWorkspaceEventsEnabled: optional("OPENGENI_GOOGLE_DRIVE_WORKSPACE_EVENTS_ENABLED"),
     maxNestedAgentDepth: optional("OPENGENI_MAX_NESTED_AGENT_DEPTH"),
     socialOauthClientsJson: optional("OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON"),
+    nangoSecretKey: optional("OPENGENI_NANGO_SECRET_KEY"),
+    nangoApiBaseUrl: optional("OPENGENI_NANGO_API_BASE_URL"),
+    nangoWebhookSigningKey: optional("OPENGENI_NANGO_WEBHOOK_SIGNING_KEY"),
     goalMaxAutoContinuations: optional("OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS"),
     goalIdleBackoffMs: optional("OPENGENI_GOAL_IDLE_BACKOFF_MS"),
     goalIdleBackoffMaxMs: optional("OPENGENI_GOAL_IDLE_BACKOFF_MAX_MS"),
@@ -6062,6 +6235,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     apiHost: optional("OPENGENI_API_HOST"),
     apiPort: optional("OPENGENI_API_PORT"),
     apiMetricsPort: optional("OPENGENI_API_METRICS_PORT"),
+    apiShutdownGraceMs: optional("OPENGENI_API_SHUTDOWN_GRACE_MS"),
     workerHttpPort: optional("OPENGENI_WORKER_HTTP_PORT"),
     opengeniMcpInternalUrl: optional("OPENGENI_MCP_INTERNAL_URL"),
     opengeniMcpUrl: optional("OPENGENI_MCP_URL"),
@@ -6198,6 +6372,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
       "OPENGENI_REASONING_CONFIGURATION_UPDATES_ENABLED",
     ),
     openaiReasoningEffort: optional("OPENGENI_OPENAI_REASONING_EFFORT"),
+    reasoningSummaries: optional("OPENGENI_REASONING_SUMMARY_JSON"),
     openaiAllowedReasoningEfforts: optional("OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS"),
     creditsDefaultModel: optional("OPENGENI_CREDITS_DEFAULT_MODEL"),
     creditsDefaultReasoningEffort: optional("OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT"),
@@ -6564,6 +6739,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     betterAuthSecret: optional("OPENGENI_BETTER_AUTH_SECRET"),
     betterAuthAllowedHosts: optional("OPENGENI_BETTER_AUTH_ALLOWED_HOSTS"),
     betterAuthCookieDomain: optional("OPENGENI_BETTER_AUTH_COOKIE_DOMAIN"),
+    betterAuthCookiePrefix: optional("OPENGENI_BETTER_AUTH_COOKIE_PREFIX"),
     betterAuthTrustedOrigins: optional("OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS"),
     managedAuthGoogleClientId: optional("OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_ID"),
     managedAuthGoogleClientSecret: optional("OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_SECRET"),
@@ -6574,6 +6750,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
         ? undefined
         : source.OPENGENI_ALLOWED_USER_EMAILS.split(",").map((email) => email.trim()),
     managedAuthSessionSetMode: optional("OPENGENI_MANAGED_AUTH_SESSION_SET_MODE"),
+    adminPasskeyStepUp: optional("OPENGENI_ADMIN_PASSKEY_STEP_UP"),
     nativeAppSchemes:
       source.OPENGENI_NATIVE_APP_SCHEMES === undefined
         ? undefined
@@ -7755,6 +7932,8 @@ export function withDirectModelProviders(
     status: string;
     providerDomain: string;
     metadata: Record<string, unknown>;
+    /** What the key's model costs (see `ConnectedModelListPrice`); null when unknown. */
+    listPrice?: WorkspaceModelKeyListPrice | null | undefined;
     apiKey?: string;
   }[],
 ): Settings {
@@ -7783,6 +7962,9 @@ export function withDirectModelProviders(
             label: spec.model,
             capabilities: compatibleModelCapabilities(settings, spec.reasoning),
             toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
+            ...connectedModelListPriceFields(
+              workspaceModelKeyListPriceFields(connection.listPrice),
+            ),
           },
         ],
       });
@@ -7806,6 +7988,7 @@ export function withDirectModelProviders(
             hostedWebSearch: false,
           }),
           toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
+          ...connectedModelListPriceFields(workspaceModelKeyListPriceFields(connection.listPrice)),
         },
       ],
     });
@@ -8023,7 +8206,10 @@ function organizationDirectRegistryProvider(
   provider: OrganizationDirectModelProvider,
   input: {
     endpoint?: string | null | undefined;
-    models: readonly { upstreamModelId: string; label?: string | null }[];
+    models: readonly ({
+      upstreamModelId: string;
+      label?: string | null;
+    } & ConnectedModelListPrice)[];
     apiKey?: string;
     azureEntra?: AzureEntraProviderCredential;
   },
@@ -8051,6 +8237,7 @@ function organizationDirectRegistryProvider(
         hostedWebSearch: false,
       }),
       toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
+      ...connectedModelListPriceFields(model),
     });
   }
   if (models.length === 0) return null;
@@ -8219,11 +8406,11 @@ export type OrganizationCompatibleEndpointOverlay = {
   baseUrl: string;
   api: "chat" | "responses";
   label?: string | null;
-  models: readonly {
+  models: readonly ({
     upstreamModelId: string;
     label?: string | null;
     reasoning?: CompatibleModelReasoning | null;
-  }[];
+  } & ConnectedModelListPrice)[];
   /** Present only at execution, after the worker decrypts the endpoint's key. */
   apiKey?: string;
 };
@@ -8256,6 +8443,7 @@ export function withOrganizationCompatibleProviders(
         label: model.label?.trim() || model.upstreamModelId,
         capabilities: compatibleModelCapabilities(settings, model.reasoning),
         toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
+        ...connectedModelListPriceFields(model),
       });
     }
     if (models.length === 0) continue;
@@ -9155,8 +9343,15 @@ function staticRequestMetadataForDigest(provider: ResolvedModelProvider): {
   return {
     ...(provider.anthropic
       ? {
-          anthropic: (({ identity: _identity, credentialBinding: _binding, ...options }) =>
-            options)(provider.anthropic),
+          // An organization's several API keys are credential material like
+          // its single key: which keys it holds, and which still have
+          // credits, change while its turns run.
+          anthropic: (({
+            identity: _identity,
+            credentialBinding: _binding,
+            apiKeys: _apiKeys,
+            ...options
+          }) => options)(provider.anthropic),
         }
       : {}),
     headers: Object.entries(provider.defaultHeaders ?? {})
@@ -10635,6 +10830,136 @@ export function configuredModelListPricingSchedules(
 }
 
 /**
+ * A connected model's stored reference price (see the registry model's
+ * `listPricing`): an explicit rate, or the catalogue model it is priced
+ * from, such as an Azure deployment's base model.
+ */
+export type ConnectedModelListPrice = {
+  listPricingModelId?: string | null | undefined;
+  listPricing?: ModelPricing | null | undefined;
+};
+
+function connectedModelListPriceFields(model: ConnectedModelListPrice): {
+  listPricingModelId?: string;
+  listPricing?: ModelPricing;
+} {
+  if (model.listPricing) return { listPricing: model.listPricing };
+  if (model.listPricingModelId) return { listPricingModelId: model.listPricingModelId };
+  return {};
+}
+
+/** A workspace model key's stored price, in the shape its connection carries. */
+export type WorkspaceModelKeyListPrice =
+  | { basis: "model"; modelId: string }
+  | { basis: "custom"; pricing: ModelPricing };
+
+function workspaceModelKeyListPriceFields(
+  price: WorkspaceModelKeyListPrice | null | undefined,
+): ConnectedModelListPrice {
+  if (price?.basis === "custom") return { listPricing: price.pricing };
+  if (price?.basis === "model") return { listPricingModelId: price.modelId };
+  return {};
+}
+
+/**
+ * Whether a workspace's own model key's usage gets a list-price estimate,
+ * under the same rules as its calls; undefined for any other connection.
+ */
+export function workspaceModelKeyListPriceKnown(
+  settings: Settings,
+  connection: Parameters<typeof withDirectModelProviders>[1][number],
+): boolean | undefined {
+  const spec = directModelConnectionSpec(connection);
+  if (!spec) return undefined;
+  return modelListPriceKnown(withDirectModelProviders(settings, [connection]), spec.modelId);
+}
+
+function connectedModelBasePricing(
+  modelId: string,
+  configured: Record<string, ModelPricingScheduleV1>,
+): ModelPricingScheduleV1 | undefined {
+  return configured[modelId] ?? reviewedModelListPricing[modelId] ?? defaultModelPricing[modelId];
+}
+
+/**
+ * Catalogue models with a known list rate that a connected model can be
+ * priced from: the reviewed and built-in rates plus the operator's explicit
+ * `OPENGENI_MODEL_PRICING_JSON` entries.
+ */
+export function connectedModelPriceBasisModelIds(settings: Settings): string[] {
+  return [
+    ...new Set([
+      ...Object.keys(reviewedModelListPricing),
+      ...Object.keys(defaultModelPricing),
+      ...Object.keys(parseModelPricingJson(settings.modelPricingJson)),
+    ]),
+  ].sort();
+}
+
+/**
+ * The priceable catalogue model a provider reported serving, or null. Azure
+ * OpenAI answers with a deployment's base model, often with its
+ * `-YYYY-MM-DD` snapshot suffix; only that exact form or the exact id
+ * matches, never a prefix, label or fuzzy match.
+ */
+export function connectedModelPriceBasisFromReportedModel(
+  settings: Settings,
+  reportedModel: unknown,
+): string | null {
+  if (typeof reportedModel !== "string") return null;
+  const ids = new Set(connectedModelPriceBasisModelIds(settings));
+  if (ids.has(reportedModel)) return reportedModel;
+  const snapshot = /^(.+)-\d{4}-\d{2}-\d{2}$/u.exec(reportedModel);
+  return snapshot?.[1] && ids.has(snapshot[1]) ? snapshot[1] : null;
+}
+
+/** Whether usage of this configured product model gets a list-price estimate. */
+export function modelListPriceKnown(settings: Settings, productModelId: string): boolean {
+  return configuredModelListPricingSchedules(settings)[productModelId] !== undefined;
+}
+
+/**
+ * How an organization's OpenAI model, Azure deployment or OpenAI-compatible
+ * endpoint model is priced, for its administrators: the stored price and
+ * whether its usage gets an estimate under the same rules as its calls.
+ * The route's endpoint does not affect pricing, so a fixed one stands in.
+ */
+export function organizationConnectedModelListPrice(
+  settings: Settings,
+  kind: "openai" | "azure_openai" | "openai_compatible",
+  model: { upstreamModelId: string } & ConnectedModelListPrice,
+): {
+  listPrice:
+    | { basis: "model"; modelId: string }
+    | { basis: "custom"; pricing: ModelPricing }
+    | null;
+  listPriceKnown: boolean;
+} {
+  const stored = connectedModelListPriceFields(model);
+  const listPrice = stored.listPricing
+    ? { basis: "custom" as const, pricing: stored.listPricing }
+    : stored.listPricingModelId
+      ? { basis: "model" as const, modelId: stored.listPricingModelId }
+      : null;
+  const entry = { upstreamModelId: model.upstreamModelId, ...stored };
+  const endpointId = "00000000-0000-4000-8000-000000000000";
+  const overlay =
+    kind === "openai_compatible"
+      ? withOrganizationCompatibleProviders(settings, [
+          { id: endpointId, baseUrl: "https://endpoint.invalid/v1", api: "chat", models: [entry] },
+        ])
+      : withOrganizationDirectCatalogProvider(settings, kind, {
+          endpoint: "https://resource.openai.azure.com/openai/v1",
+          models: [entry],
+        });
+  const productModelId =
+    kind === "openai_compatible"
+      ? organizationCompatibleModelId(endpointId, model.upstreamModelId)
+      : `${organizationDirectModelIdPrefix(kind)}${model.upstreamModelId}`;
+  return { listPrice, listPriceKnown: modelListPriceKnown(overlay, productModelId) };
+}
+
+/**
  * A reviewed upstream list rate may also describe a namespaced product route.
  * Never infer a rate by stripping arbitrary prefixes, matching labels, or
  * treating every OpenAI-compatible endpoint as the original provider.
@@ -10647,6 +10972,14 @@ function reviewedProviderModelPricing(
   model: RegistryProvider["models"][number],
   configured: Record<string, ModelPricingScheduleV1>,
 ): ModelPricingScheduleV1 | undefined {
+  // A connected model's own declared price comes first: its explicit rate,
+  // else its base model's catalogue rate. Without either it stays unknown
+  // unless a reviewed route rule below applies.
+  if (model.listPricing) return normalizeModelPricingSchedule(model.listPricing);
+  const based = model.listPricingModelId
+    ? connectedModelBasePricing(model.listPricingModelId, configured)
+    : undefined;
+  if (based) return based;
   const upstream = model.upstreamModelId ?? model.id;
   let priceId: string | undefined;
   let nativeClaude = false;
@@ -12697,6 +13030,14 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
       );
     }
   }
+  if (
+    Boolean(settings.microsoftDynamicsClientId?.trim()) !==
+    Boolean(settings.microsoftDynamicsClientSecret?.trim())
+  ) {
+    throw new Error(
+      "OPENGENI_MICROSOFT_DYNAMICS_CLIENT_ID and OPENGENI_MICROSOFT_DYNAMICS_CLIENT_SECRET must be configured together",
+    );
+  }
   if (Boolean(settings.slackClientId) !== Boolean(settings.slackClientSecret)) {
     throw new Error(
       "OPENGENI_SLACK_CLIENT_ID and OPENGENI_SLACK_CLIENT_SECRET must be configured together",
@@ -12796,7 +13137,17 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
     }
   }
   parseIntegrationsOauthClientsJson(settings.integrationsOauthClientsJson);
+  parseConnectResultPageTextJson(settings.connectResultPageTextJson);
   parseSocialOauthClientsJson(settings.socialOauthClientsJson);
+  if (settings.nangoSecretKey) {
+    const nangoBase = new URL(settings.nangoApiBaseUrl);
+    if (nangoBase.protocol !== "https:" && !["local", "test"].includes(settings.environment)) {
+      throw new Error("OPENGENI_NANGO_API_BASE_URL must use https outside local/test");
+    }
+    if (nangoBase.search || nangoBase.hash || nangoBase.username || nangoBase.password) {
+      throw new Error("OPENGENI_NANGO_API_BASE_URL must be a plain base URL");
+    }
+  }
   // Only the operator's own environment is strict here. Settings resolved
   // from a stored catalog document re-parse providers without this check;
   // a contradicted claim there is unknown (registryModelResidency).
@@ -14000,5 +14351,34 @@ export function withClaudeConnectionCredential(
 }
 export * from "./claude-subscription-usage";
 export * from "./claude-subscription-oauth";
+/**
+ * Give the organization's Anthropic API provider (`organization-anthropic`)
+ * its several API keys: the keys that still have credits, its own key
+ * first. Only that provider ever gets them, never a Claude subscription
+ * provider. An empty list means every key is out of credits, and its
+ * requests then fail without sending.
+ */
+export function withOrganizationAnthropicApiKeys(
+  settings: Settings,
+  keys: readonly { id: string; apiKey: string }[],
+): Settings {
+  const providerId = claudeProviderId("anthropic", "organization");
+  return {
+    ...settings,
+    modelProvidersJson: JSON.stringify(
+      parseModelProvidersJson(settings.modelProvidersJson).map((provider) =>
+        provider.id === providerId && provider.anthropic
+          ? {
+              ...provider,
+              anthropic: {
+                ...provider.anthropic,
+                apiKeys: keys.map((key) => ({ id: key.id, apiKey: key.apiKey })),
+              },
+            }
+          : provider,
+      ),
+    ),
+  };
+}
 export * from "./subscription-account-selection";
 export * from "./claude-subscription-capacity";

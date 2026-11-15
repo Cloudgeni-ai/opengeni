@@ -58,6 +58,10 @@ pub(crate) struct QueueKey {
 }
 
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent facts about one sandbox, each set and read on its own"
+)]
 pub(crate) struct Sandbox {
     pub state: State,
     pub policy: SleepPolicy,
@@ -72,6 +76,13 @@ pub(crate) struct Sandbox {
     /// Minimum depth asked for by [`crate::Input::Sleep`]. [`Level::Running`]
     /// means none.
     pub requested: Level,
+    /// Whether that depth was asked for with its programs; see
+    /// [`crate::Input::Sleep`].
+    pub requested_keeps: bool,
+    /// Its guest did not say it wrote its files out as its VM was last
+    /// paused (see [`crate::Input::Unsynced`]): writes may live in its
+    /// memory alone, so until it runs again its VM never ends unsaved.
+    pub unsynced: bool,
     /// Latest reported resident memory in bytes of the current VM process;
     /// `None` until one is reported, except for a VM found running, which
     /// counts at its full size until then.
@@ -178,6 +189,8 @@ impl Sandbox {
             floor: Level::Running,
             floor_relief: 0,
             requested: Level::Running,
+            requested_keeps: false,
+            unsynced: false,
             // Until it is measured, a VM found running may hold all of it.
             resident: state.level.has_process().then_some(size.limit),
             paging: crate::host::outgrowth::Paging::default(),
@@ -257,6 +270,8 @@ impl Sandbox {
                 if step.wakes() && self.state.level == Level::Running {
                     self.touch(now);
                     self.running_since = now;
+                    // Its guest runs: its next pause asks it again.
+                    self.unsynced = false;
                 }
                 if matches!(step, Step::Archive | Step::Checkpoint) {
                     self.copied = Some(now);
@@ -339,7 +354,9 @@ impl Sandbox {
     /// Whether the sandbox needs a copy of its VM process to sleep deeper
     /// but none can be made.
     pub fn cannot_save(&self) -> bool {
-        self.health == Health::Unsavable && self.state.durability == Durability::Volatile
+        self.health == Health::Unsavable
+            && self.state.level.has_process()
+            && !self.state.memory_saved
     }
 
     /// The policy as it applies now: one that never saves while no copy of
@@ -357,6 +374,7 @@ impl Sandbox {
         if self.health == Health::Unsavable {
             self.health = Health::Sound;
         }
+        self.unsynced = false;
         self.resident = None;
         self.paging = crate::host::outgrowth::Paging::default();
         self.shrink = crate::host::outgrowth::Shrink::Open;
@@ -385,10 +403,11 @@ impl Sandbox {
         self.wants_awake() || self.in_flight.is_some_and(|flight| flight.step.wakes())
     }
 
-    /// Asks for at least `level` of depth; [`Level::Running`] or a level
-    /// already reached withdraws the request. A sandbox on its way up counts
-    /// as running, so the request applies once the wake it serves is done.
-    pub fn request_sleep(&mut self, level: Level) {
+    /// Asks for at least `level` of depth, with its programs if `keep`;
+    /// [`Level::Running`] or a level already reached withdraws the request.
+    /// A sandbox on its way up counts as running, so the request applies
+    /// once the wake it serves is done.
+    pub fn request_sleep(&mut self, level: Level, keep: bool) {
         // A process that cannot be saved sleeps no deeper than compressed.
         let level = if self.cannot_save() {
             level.min(Level::Compressed)
@@ -405,14 +424,36 @@ impl Sandbox {
         } else {
             Level::Running
         };
+        self.requested_keeps = keep && self.requested != Level::Running;
+    }
+
+    /// Whether its programs are to be kept on the way to the depth asked
+    /// of it, whatever its rules say.
+    pub fn keeps_asked(&self) -> bool {
+        self.requested >= Level::Saved && self.requested_keeps
+    }
+
+    /// Whether its memory is saved before its VM process ends, whatever
+    /// its rules say: its programs were asked for, or its memory may hold
+    /// writes its guest never wrote out (see [`crate::Input::Unsynced`]).
+    pub fn keeps(&self) -> bool {
+        self.keeps_asked() || self.unsynced
+    }
+
+    /// Whether its VM process, once it must end, ends with no memory of it
+    /// saved: its rules give its programs up, nothing asked for them, and
+    /// its files are all on its disk.
+    pub fn ends_unsaved(&self) -> bool {
+        self.policy().ends_unsaved() && !self.keeps()
     }
 
     /// Whether ending the VM process right now would free its memory without
-    /// losing anything or keeping anyone waiting.
+    /// keeping anyone waiting, and without losing anything its rules keep:
+    /// a copy holds its memory, or its rules end it unsaved.
     pub fn reclaimable(&self) -> bool {
         self.state.level.has_process()
             && self.state.level != Level::Running
-            && self.state.durability != Durability::Volatile
+            && (self.state.memory_saved || self.ends_unsaved())
             && !self.wants_awake()
             && !self.is_broken()
     }
@@ -460,7 +501,7 @@ impl Sandbox {
         let idle = now.saturating_since(self.last_activity);
         let floor = self.floor.max(self.requested);
         self.policy()
-            .next_step(self.state, idle, floor)
+            .next_step(self.state, idle, floor, self.keeps())
             .or_else(|| self.first_copy(floor))
             .or_else(|| self.checkpoint_due(now).then_some(Step::Checkpoint))
     }

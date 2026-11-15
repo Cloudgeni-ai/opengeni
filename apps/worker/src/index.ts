@@ -8,16 +8,18 @@ import {
   type Settings,
 } from "@opengeni/config";
 import {
-  assertRuntimeDatabasePosture,
+  assertRuntimeDatabaseReadiness,
   isRetryableRuntimeDatabaseStartupError,
   createDb,
   databasePasswordFileOptions,
   databasePoolOptions,
   observeDatabaseCredentialEvents,
+  reportRuntimeDatabaseDegraded,
   getContextCompactionPendingSummary,
   markSessionWorkflowWakeDelivered,
   summarizeSessionRecoveryBacklog,
   type Database,
+  type RuntimeDatabaseDegradedListener,
   type RuntimeDatabasePostureOptions,
 } from "@opengeni/db";
 import {
@@ -813,6 +815,12 @@ export type OpenGeniWorkerServiceOptions = Omit<WorkerOptions, "activityDependen
    */
   databasePosture?: RuntimeDatabasePostureOptions;
   /**
+   * Receives the degraded findings (missing required EXECUTE grants) of each
+   * `databasePosture` readiness inspection. Defaults to a reporter that logs
+   * them and sets `opengeni_runtime_database_degraded_findings`.
+   */
+  onDegradedDatabasePosture?: RuntimeDatabaseDegradedListener;
+  /**
    * `role-default` registers Opengeni's internal maintenance schedules on a
    * control worker only. These are engine maintenance schedules, not a host's
    * product-level scheduled-agent jobs. Use `none` when another control worker
@@ -1026,9 +1034,14 @@ export async function createOpenGeniWorkerService(
 
     if (options.http !== false) {
       const readinessDb = options.http?.readinessDb ?? options.activityDependencies.db;
-      const databaseReady = dbReadyCheck(readinessDb, options.databasePosture, async () => {
-        await resolveCatalogSettings(readinessDb, settings);
-      });
+      const databaseReady = dbReadyCheck(
+        readinessDb,
+        options.databasePosture,
+        async () => {
+          await resolveCatalogSettings(readinessDb, settings);
+        },
+        options.onDegradedDatabasePosture ?? reportRuntimeDatabaseDegraded(observability, "worker"),
+      );
       httpServer = startWorkerHttpServer({
         settings,
         observability,
@@ -1286,12 +1299,14 @@ export async function startWorker() {
     expectedRole: settings.runtimeDatabaseRole,
     targetSchema: settings.dbSchema.trim() || "public",
   } as const;
+  // One reporter for startup and readiness, so a degraded posture logs once.
+  const reportDegradedPosture = reportRuntimeDatabaseDegraded(observability, "worker");
   const controlPlaneAuth = resolveNatsControlPlaneAuth(settings);
   let bus: Awaited<ReturnType<typeof createNatsEventBus>> | undefined;
   try {
     await retryStartupDependency(
       "PostgreSQL runtime posture",
-      () => assertRuntimeDatabasePosture(dbClient.db, databasePosture),
+      () => assertRuntimeDatabaseReadiness(dbClient.db, databasePosture, reportDegradedPosture),
       { ...retryOptions, onRetry, shouldRetry: isRetryableRuntimeDatabaseStartupError },
     );
     bus = await retryStartupDependency(
@@ -1312,6 +1327,7 @@ export async function startWorker() {
       onDrainStarted: armExitDeadline,
       settings,
       databasePosture,
+      onDegradedDatabasePosture: reportDegradedPosture,
       http: { readinessDb: readinessDbClient.db },
       activityDependencies: {
         observability,

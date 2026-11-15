@@ -11,6 +11,9 @@ import {
 import type { OpenGeniSiteSignInResult, OpenGeniSiteViewer } from "@opengeni/sdk/site";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { resolveSiteClientScript } from "@opengeni/sdk/site-document";
+import { HTML_FRAME_HOST_SANDBOX } from "@opengeni/contracts/html-frame-host";
+import { useContentHosting } from "../../lib/content-hosting";
+import { htmlFrameHostSrc, useHtmlFrameHost } from "./html-frame-host";
 
 export {
   SiteBridgeDocumentLease,
@@ -21,17 +24,7 @@ export {
   siteBridgeReadyMessage,
 } from "@opengeni/sdk/site-bridge-host";
 
-export const PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX = [
-  "allow-downloads",
-  "allow-forms",
-  "allow-modals",
-  "allow-orientation-lock",
-  "allow-pointer-lock",
-  "allow-popups",
-  "allow-popups-to-escape-sandbox",
-  "allow-presentation",
-  "allow-scripts",
-].join(" ");
+export const PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX = HTML_FRAME_HOST_SANDBOX;
 
 export type PublishedHtmlArtifactFrameProps = {
   html: string;
@@ -92,9 +85,15 @@ export function siteFrameLocation(href: string | undefined): OpenGeniSiteLocatio
  * external resources, forms, popups, downloads, and the host-filtered tool
  * bridge work without granting parent-origin authority, shared cookies/storage,
  * or top-level navigation.
+ *
+ * When the page configures an HTML frame host (`configureContentHosting`),
+ * the HTML is rendered there rather than in a `srcdoc` frame, so the page's
+ * own Content-Security-Policy does not apply to it.
  */
 export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProps) {
   const frameRef = useRef<HTMLIFrameElement | null>(null);
+  const themeRef = useRef(props.theme);
+  themeRef.current = props.theme;
   const [reportedHeight, setHeight] = useState<number>();
   const height =
     reportedHeight === undefined
@@ -130,6 +129,23 @@ export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProp
   // The bridge (and its bootstrap script) exists only when the host offers
   // something over it: tools/Site HTTP, or the viewer.
   const toolBridgeEnabled = props.toolBridge !== undefined || props.viewer !== undefined;
+  const frameHostSrc = htmlFrameHostSrc(useContentHosting().htmlFrameHost);
+  const documentHtml = publishedHtmlArtifactDocument(props.html, toolBridgeEnabled);
+  const documentLoaded = () => {
+    frameRef.current?.contentWindow?.postMessage(
+      { type: "opengeni.preview.theme", theme: themeRef.current },
+      "*",
+    );
+    frameLoadPendingRef.current = true;
+    onFrameLoadRef.current();
+  };
+  const frameHost = useHtmlFrameHost({
+    frameRef,
+    enabled: frameHostSrc !== null,
+    html: documentHtml,
+    mode: "interactive",
+    onLoaded: documentLoaded,
+  });
   useEffect(() => {
     bridgeRef.current = props.toolBridge;
   }, [props.toolBridge]);
@@ -180,23 +196,37 @@ export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProp
       host.close();
     };
   }, [props.html, toolBridgeEnabled, locationHandlers]);
+  const style = { ...props.style, ...(props.autoHeight && height ? { height } : {}) };
+  if (frameHostSrc) {
+    return (
+      <iframe
+        // New HTML loads the frame host again.
+        key={documentHtml}
+        ref={frameRef}
+        title={props.title}
+        sandbox={PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX}
+        referrerPolicy="no-referrer"
+        src={frameHostSrc}
+        onLoad={() => {
+          // Loads before the HTML's own document are the frame host's; a
+          // later one is the HTML navigating, as with srcdoc.
+          if (frameHost.onFrameLoad()) documentLoaded();
+        }}
+        className={props.className}
+        style={style}
+      />
+    );
+  }
   return (
     <iframe
       ref={frameRef}
       title={props.title}
       sandbox={PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX}
       referrerPolicy="no-referrer"
-      srcDoc={publishedHtmlArtifactDocument(props.html, toolBridgeEnabled)}
-      onLoad={() => {
-        frameRef.current?.contentWindow?.postMessage(
-          { type: "opengeni.preview.theme", theme: props.theme },
-          "*",
-        );
-        frameLoadPendingRef.current = true;
-        onFrameLoadRef.current();
-      }}
+      srcDoc={documentHtml}
+      onLoad={documentLoaded}
       className={props.className}
-      style={{ ...props.style, ...(props.autoHeight && height ? { height } : {}) }}
+      style={style}
     />
   );
 }

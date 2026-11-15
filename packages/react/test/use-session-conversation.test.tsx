@@ -375,3 +375,35 @@ test("unresolved uploads block direct send and removal unblocks without replacin
     await hook.unmount();
   }
 });
+
+test("a private chat's uploads are its owner's alone, as in the web app; a shared chat's are the workspace's", async () => {
+  for (const [session, expected] of [
+    [{ tenancy: { visibility: "private" } }, "personal"],
+    [{ memoryScope: "user" }, "personal"],
+    [{ tenancy: { visibility: "workspace" }, memoryScope: "workspace" }, "workspace"],
+  ] as const) {
+    const f = fixture();
+    const getConfig = f.client.getClientConfig;
+    f.client.getClientConfig = async () =>
+      ({ ...(await getConfig()), fileUploads: { enabled: true, maxSizeBytes: 1000 } }) as never;
+    f.client.getSession = async () => ({ id: f.sessionId, status: "idle", ...session }) as never;
+    const scopes: unknown[] = [];
+    f.client.uploadFile = async (_workspace, input) => {
+      scopes.push(input.scope);
+      return new Promise(() => undefined);
+    };
+    const hook = await renderHook(
+      () => useSessionConversation(f.sessionId, { client: f.client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await flush(30);
+      await actRun(() => {
+        hook.result.current.files.addFiles([new File(["test"], "notes.txt")]);
+      });
+      expect(scopes).toEqual([expected]);
+    } finally {
+      await hook.unmount();
+    }
+  }
+});

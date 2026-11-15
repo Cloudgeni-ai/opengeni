@@ -3,6 +3,7 @@
 // type so the always-loaded rail can import it without pulling more code into
 // the startup bundle.
 import type { RailSession as Session } from "./session-list-entry";
+import { failureHandledByAgent } from "./session-failure";
 
 /**
  * `requires_action` that a person can act on. A session the runtime could not
@@ -45,6 +46,8 @@ export function filterNeedsYou<T extends Session>(sessions: readonly T[]): T[] {
   return sessions.filter(
     (session) =>
       roots.has(session.rootSessionId) ||
-      (session.parentSessionId !== null && (awaitsPerson(session) || session.status === "failed")),
+      (session.parentSessionId !== null &&
+        (awaitsPerson(session) ||
+          (session.status === "failed" && !failureHandledByAgent(session)))),
   );
 }

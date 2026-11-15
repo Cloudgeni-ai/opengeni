@@ -126,6 +126,26 @@ export type QuotaBlockClaim = {
   windowIds: readonly string[];
 };
 
+/**
+ * One provider-specific part of what a usage observation reported beyond
+ * the shared windows (reset grants or service state, for example).
+ * Opaque here: the provider's adapter writes and reads it. Parts merge one
+ * by one, newest first, and a part no observation carries is kept.
+ */
+export type QuotaProviderDetail = {
+  observedAt: number;
+  value: QuotaJsonValue;
+};
+
+/** Plain JSON data, as a stored quota document holds it. */
+export type QuotaJsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | readonly QuotaJsonValue[]
+  | { readonly [key: string]: QuotaJsonValue };
+
 export type SubscriptionQuota = {
   windows: readonly QuotaWindow[];
   /** Per-model cooldowns (model-specific limits some providers report). */
@@ -140,6 +160,15 @@ export type SubscriptionQuota = {
   observedAt: number | null;
   observedRefreshGeneration: number | null;
   source: QuotaSource | null;
+  /**
+   * Until when the connection serves at reduced service past a plan limit
+   * (a provider's slow tier or grace zone): it can still serve, so this is
+   * not exhaustion, but placement prefers a connection with plain capacity.
+   * Set only by the newest observation; absent or past: not constrained.
+   */
+  constrainedUntil?: number | null;
+  /** Provider-specific parts of the observations (see `QuotaProviderDetail`). */
+  providerDetails?: Readonly<Record<string, QuotaProviderDetail>>;
 };
 
 // Settings (design 3.3)

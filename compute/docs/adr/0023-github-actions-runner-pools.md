@@ -92,7 +92,9 @@ delivery can be late or missed.
   stopped between registering it and starting its sandbox), once the
   actions service says it is in the pool's scale set: a pool of the same
   name in another runner group has its own. Every sandbox has a timeout,
-  the pool's longest job, in case all else fails.
+  the pool's longest job, in case all else fails. It is set when the
+  runner starts, idle, and set again from now when its job starts, so a
+  runner that waited hours for its job still gives the job all of it.
 - **No state of its own.** What runs is read back from the sandboxes'
   metadata and GitHub every 30 s and at start, so a restart or a standby
   taking over loses nothing and never leaks a sandbox or a registration. A
@@ -112,6 +114,17 @@ delivery can be late or missed.
   failed refresh leaves the last good template in use. The clone's token
   is given to that one command, never written to the disk the template
   keeps.
+  A refresh outlives restarts of the control service, which come with
+  every release and cut every stream through it while sandboxes run on.
+  Each command runs under a tag and records in the guest's `/dev/shm`
+  (memory, never on the template's disk) that it started and then its
+  exit code. A cut stream is followed again by the tag, a command that
+  ended meanwhile ends as its record says, and only one that never
+  started is started again. A save cut short is found by its name or
+  asked again (a name is made once), and a create cut short is asked
+  again, any builder it made after all ended. So a restart costs the
+  refresh nothing; only what its commands did, or compute staying away
+  past the time they were given, fails it.
   The builder takes one of the pool's places, so the pool and its builder
   never hold more sandboxes than `--max` and a host sized for the pool is
   never asked for one more. It takes a place only while GitHub has

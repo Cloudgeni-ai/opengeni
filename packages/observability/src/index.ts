@@ -8,7 +8,7 @@ export {
 } from "./failure-attribution";
 import { createHash, randomUUID } from "node:crypto";
 import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from "prom-client";
-import { SandboxBackend } from "@opengeni/contracts";
+import { INTERACTION_DESTINATION_FAILURE_REASONS, SandboxBackend } from "@opengeni/contracts";
 import {
   CLIENT_DESKTOP_APP_VERSION_PATTERN,
   CLIENT_ERROR_REVISION_PATTERN,
@@ -49,7 +49,11 @@ export {
 } from "./agent-tool-metrics";
 export { failureDiagnostic } from "./failure-diagnostic";
 export { createLogThrottle, type LogThrottle } from "./log-throttle";
-import { TEMPORAL_SDK_COMPONENT_PATTERN, TEMPORAL_TYPE_NAME_PATTERN } from "./temporal-sdk-logger";
+import {
+  projectTemporalFailureFacts,
+  TEMPORAL_SDK_COMPONENT_PATTERN,
+  TEMPORAL_TYPE_NAME_PATTERN,
+} from "./temporal-sdk-logger";
 export {
   createTemporalSdkLogger,
   projectTemporalSdkLogRecord,
@@ -179,7 +183,12 @@ export const OPENGENI_OBSERVABILITY_DISTRIBUTION = {
   grafanaDashboardLabelValue: "1",
 } as const;
 
-const httpHistogramBuckets = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10];
+// Every latency threshold an alert compares a quantile of this histogram
+// against must be a bucket bound: histogram_quantile interpolates linearly
+// inside a bucket, so a threshold between bounds measures where in the bucket
+// the quantile lands, not how many requests exceed it. 2s is the core read
+// alert's threshold (OpenGeniCoreReadLatencyHigh).
+const httpHistogramBuckets = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 2.5, 5, 10];
 const durationHistogramBuckets = [
   0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 900, 1800, 3600,
 ];
@@ -320,8 +329,12 @@ const INTERACTION_OPERATION_REASONS = new Set([
   "outcome_unknown",
   "invalid_action",
   "timeout",
+  "tab_not_responding",
+  "tab_crashed",
   "controller_lost",
   "driver_failed",
+  // The website the browser was asked to load failed, not the browser.
+  ...INTERACTION_DESTINATION_FAILURE_REASONS,
   "action_failed",
   "stale",
   "unauthenticated",
@@ -549,7 +562,22 @@ const PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
   ["realtimeAdvertisedVersion", REALTIME_PROVIDER_VALUE_PATTERN],
   ["realtimeProviderModel", REALTIME_PROVIDER_VALUE_PATTERN],
   ["realtimeProviderArchitecture", REALTIME_PROVIDER_VALUE_PATTERN],
+  // Failed speech-to-text provider requests (core recording-transcription-request.ts,
+  // which also sets providerErrorCode): the provider's id for the request,
+  // and whether the audio was a meeting or a dictation.
+  ["providerRequestId", /^[A-Za-z0-9._:-]{1,128}$/],
+  ["recordingPurpose", /^(?:meeting|dictation)$/],
 ]);
+
+/**
+ * A failed provider request's own error message, the one other free-text
+ * field, reviewed as a deliberate exception so a failed speech-to-text call
+ * says why. It is the provider's error text about the request (never the
+ * audio's words), admitted only when it is already exactly what the client
+ * error projection produces: scrubbed of credentials and URL query strings
+ * and within the message byte bound.
+ */
+const PUBLIC_TELEMETRY_PROVIDER_ERROR_TEXT_ATTRIBUTES = new Set(["providerErrorMessage"]);
 
 /**
  * Web client error diagnostics: the only free-text fields allowed across the
@@ -650,6 +678,7 @@ const PUBLIC_TELEMETRY_ERROR_CLASSES = new Set([
   "GitCredentialRenewalOperationError",
   "HostExportOperationError",
   "HttpOperationError",
+  "IndependentSessionTitleError",
   "KnowledgeIndexOperationError",
   "McpLifecycleError",
   "McpOperationError",
@@ -705,6 +734,11 @@ const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
   "host_export_retention_prune_failed",
   "idempotency_conflict",
   "incompatible_exposed_ports",
+  "independent_session_title_admission_failed",
+  "independent_session_title_billing_failed",
+  "independent_session_title_provider_request_failed",
+  "independent_session_title_response_failed",
+  "independent_session_title_settlement_failed",
   "internal_error",
   "knowledge_index_defer_failed",
   "knowledge_index_embedding_failed",
@@ -1956,6 +1990,7 @@ function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
       ...projectHttpDiagnosticAttributes(attributes),
       ...projectSnapshotDiagnosticAttributes(attributes),
       ...projectKnowledgeIndexDiagnosticAttributes(attributes),
+      ...projectIndependentSessionTitleDiagnosticAttributes(attributes),
       ...projectTemporalSdkDiagnosticAttributes(attributes),
       ...projectContextCompactionAttributes(attributes),
       ...projectPublicDiagnosticAttributes(attributes),
@@ -1970,6 +2005,13 @@ function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
         const clientErrorField = PUBLIC_TELEMETRY_CLIENT_ERROR_TEXT_ATTRIBUTES.get(key);
         if (clientErrorField) {
           return typeof value === "string" && isProjectedClientErrorText(value, clientErrorField);
+        }
+        if (PUBLIC_TELEMETRY_PROVIDER_ERROR_TEXT_ATTRIBUTES.has(key)) {
+          return (
+            typeof value === "string" &&
+            value.trim() === value &&
+            isProjectedClientErrorText(value, "message")
+          );
         }
         const pattern = PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS.get(key);
         return typeof value === "string" && pattern?.test(value) === true;
@@ -2172,6 +2214,29 @@ function projectKnowledgeIndexDiagnosticAttributes(attributes: Attributes): Attr
   return typeof sqlState === "string" && /^[0-9A-Z]{5}$/.test(sqlState) ? { sqlState } : {};
 }
 
+const SESSION_TITLE_ERROR_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+
+function projectIndependentSessionTitleDiagnosticAttributes(attributes: Attributes): Attributes {
+  if (attributes.errorClass !== "IndependentSessionTitleError") return {};
+  // The failing error's class name and the provider's identifier-shaped error
+  // code and type (worker independent-session-title.ts). Never message text.
+  const { sessionTitleErrorName, providerErrorCode, providerErrorType } = attributes;
+  return {
+    ...(typeof sessionTitleErrorName === "string" &&
+    SESSION_TITLE_ERROR_NAME_PATTERN.test(sessionTitleErrorName)
+      ? { sessionTitleErrorName }
+      : {}),
+    ...(typeof providerErrorCode === "string" &&
+    REALTIME_PROVIDER_ERROR_TOKEN_PATTERN.test(providerErrorCode)
+      ? { providerErrorCode }
+      : {}),
+    ...(typeof providerErrorType === "string" &&
+    REALTIME_PROVIDER_ERROR_TOKEN_PATTERN.test(providerErrorType)
+      ? { providerErrorType }
+      : {}),
+  };
+}
+
 function projectTemporalSdkDiagnosticAttributes(attributes: Attributes): Attributes {
   if (attributes.errorClass !== "TemporalSdkOperationError") return {};
   const { sdkComponent, activity, workflowType, attempt, durationMs } = attributes;
@@ -2191,6 +2256,7 @@ function projectTemporalSdkDiagnosticAttributes(attributes: Attributes): Attribu
     ...(typeof durationMs === "number" && Number.isFinite(durationMs) && durationMs >= 0
       ? { durationMs }
       : {}),
+    ...projectTemporalFailureFacts(attributes),
   };
 }
 

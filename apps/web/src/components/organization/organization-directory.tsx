@@ -179,6 +179,9 @@ function failure(error: unknown, conflict: string): DirectoryActionError {
   return new DirectoryActionError(userErrorText(error), { cause: error });
 }
 
+/** Invitations and their account setup links last 48 hours (CASA 1.1.2). */
+export const INVITATION_LIFETIME_MS = 48 * 60 * 60 * 1000;
+
 const EMPTY_INVITATIONS = { invitations: [] as OrganizationInvitation[], nextCursor: null };
 const NO_MEMBER_NAMES: OrganizationMemberNames = { available: false, members: [] };
 
@@ -599,9 +602,12 @@ export function OrganizationDirectoryProvider({
   const slackAgentNames = useCallback(
     async (workspaceId: string) => {
       const result = await client.listOpenGeniSlackAgents(identity.workspaceId);
-      return result.agents
-        .filter((agent) => agent.targetWorkspaceId === workspaceId)
-        .map((agent) => agent.name);
+      // An agent in several Slack installations is listed once per installation.
+      const names = new Map<string, string>();
+      for (const agent of result.agents) {
+        if (agent.targetWorkspaceId === workspaceId) names.set(agent.id, agent.name);
+      }
+      return [...names.values()];
     },
     [client, identity.workspaceId],
   );
@@ -769,7 +775,8 @@ export function OrganizationDirectoryProvider({
       workspaceIds: string[];
     }): Promise<InviteResult> => {
       const operation = claim("admin-invitations", "mutation");
-      const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+      // Invitations and their setup links last 48 hours (the server caps them there).
+      const expiresAt = new Date(Date.now() + INVITATION_LIFETIME_MS).toISOString();
       const sent: OrganizationInvitation[] = [];
       const failed: InviteResult["failed"] = [];
       for (const email of emails) {

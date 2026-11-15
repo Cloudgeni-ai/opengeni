@@ -22,6 +22,9 @@ import { managedAuthSessionCookieHeaders } from "../auth/managed-auth-session-ad
 import { managedAuthRefusal } from "../auth/managed-passkeys";
 import { admitManagedSignInMutation } from "./managed-sign-in-methods";
 import { parseRequestBody } from "../http/request-body";
+import { ApiHttpError } from "../http/api-error";
+import { nativePushConfigured } from "../native-push-dispatch";
+import { NATIVE_PUSH_UNAVAILABLE_DETAIL_CODE } from "@opengeni/contracts";
 
 // Native app sign-in (RFC 8252 shape: authorization code + PKCE over a custom
 // scheme). The app opens `/native-sign-in` in the system auth browser; the
@@ -358,8 +361,22 @@ export function registerNativeAppAuthRoutes(app: Hono, deps: ApiRouteDeps): void
       status: 400,
       message: "Invalid push registration",
     });
-    if (!deps.settings.nativeAppIds.includes(parsed.appId)) {
-      throw new HTTPException(400, { message: "Unregistered native app" });
+    // A registration this deployment could never deliver to is refused with a
+    // stable reason, so the app can say so instead of offering "Try again":
+    // an app build the deployment doesn't list, or a platform it has no push
+    // credentials for (its pushes would only ever fail in the dispatcher).
+    const unavailable = !deps.settings.nativeAppIds.includes(parsed.appId)
+      ? `This server doesn't send notifications to the app "${parsed.appId}".`
+      : !nativePushConfigured(deps.settings, parsed.platform)
+        ? `This server isn't set up to send ${parsed.platform === "ios" ? "iOS" : "Android"} notifications.`
+        : null;
+    if (unavailable) {
+      throw new ApiHttpError(409, {
+        code: "conflict",
+        message: unavailable,
+        retryable: false,
+        details: { code: NATIVE_PUSH_UNAVAILABLE_DETAIL_CODE },
+      });
     }
     return context.json({
       device: await registerNativePushDevice(deps.db, { authSessionId: id, ...parsed }),

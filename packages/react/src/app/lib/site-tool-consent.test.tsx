@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import type { SiteToolConsentDecision, SiteToolConsentPrompt } from "@opengeni/sdk/site";
+import type {
+  SiteToolConsentDecision,
+  SiteToolConsentPrompt,
+  SiteToolFailure,
+} from "@opengeni/sdk/site";
 import { actRun, flush, registerDom, renderComponent } from "../../../test/render-hook";
 import type { SiteToolConsentHost } from "./site-tool-consent";
 
@@ -268,6 +272,127 @@ describe("Site tool consent dialog", () => {
       await actRun(() => controller.abort());
       await closed();
       expect(withdrawn).toBeNull();
+    } finally {
+      await view.unmount();
+    }
+  });
+});
+
+describe("Site tool failures in the Opengeni frame", () => {
+  const failure = (overrides: Partial<SiteToolFailure> = {}): SiteToolFailure => ({
+    code: "site_tool_unavailable",
+    system: "Microsoft Dynamics",
+    message: "Couldn't get this from Microsoft Dynamics.",
+    reconnect: null,
+    retryable: true,
+    detail: "API 404: tool_unavailable Reference: req_1.",
+    sourceCode: "not_found",
+    ...overrides,
+  });
+  const recover = (host: SiteToolConsentHost, value: SiteToolFailure, signal?: AbortSignal) =>
+    host.recoverToolCall({
+      failure: value,
+      signal: signal ?? new AbortController().signal,
+      workspaceId: "workspace",
+    });
+
+  test("one Try again answers every call that stopped the same way", async () => {
+    const { view, host } = await mount();
+    try {
+      const answers: boolean[] = [];
+      await actRun(() => {
+        // A Site's widgets all fail at once: one message, not one per widget.
+        for (let index = 0; index < 3; index += 1)
+          void recover(host(), failure()).then((value) => answers.push(value));
+      });
+      await opened();
+      const text = dialog()?.textContent ?? "";
+      expect(text).toContain("Couldn't get this from Microsoft Dynamics.");
+      // The raw error only behind Details.
+      const details = dialog()!.querySelector("details")!;
+      expect(details.open).toBe(false);
+      expect(details.textContent).toContain("tool_unavailable");
+      await actRun(() => button("Try again").click());
+      await closed();
+      expect(answers).toEqual([true, true, true]);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a provider's refusal names the system with one Close", async () => {
+    const { view, host } = await mount();
+    try {
+      let answer: boolean | undefined;
+      await actRun(() => {
+        void recover(
+          host(),
+          failure({
+            code: "site_tool_permission_denied",
+            message: "Microsoft Dynamics didn't allow this for your account.",
+            retryable: false,
+          }),
+        ).then((value) => {
+          answer = value;
+        });
+      });
+      await opened();
+      expect(dialog()?.textContent).toContain(
+        "Microsoft Dynamics didn't allow this for your account.",
+      );
+      expect(dialog()?.textContent).toContain(
+        "Ask whoever manages your Microsoft Dynamics access.",
+      );
+      expect([...dialog()!.querySelectorAll("button")].map((item) => item.textContent)).toEqual([
+        "Close",
+      ]);
+      await actRun(() => button("Close").click());
+      await closed();
+      expect(answer).toBe(false);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a tool the Site can't offer this viewer asks for a republish, with one Close", async () => {
+    const { view, host } = await mount();
+    try {
+      await actRun(() => {
+        void recover(
+          host(),
+          failure({
+            code: "site_tool_not_available_for_viewer",
+            message: "This isn't available to you on this Site.",
+            retryable: false,
+          }),
+        );
+      });
+      await opened();
+      expect(dialog()?.textContent).toContain("Ask the Site owner to publish it again.");
+      expect([...dialog()!.querySelectorAll("button")].map((item) => item.textContent)).toEqual([
+        "Close",
+      ]);
+      await actRun(() => button("Close").click());
+      await closed();
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a Site that stops waiting withdraws the message", async () => {
+    const { view, host } = await mount();
+    try {
+      const controller = new AbortController();
+      let answer: boolean | undefined;
+      await actRun(() => {
+        void recover(host(), failure(), controller.signal).then((value) => {
+          answer = value;
+        });
+      });
+      await opened();
+      await actRun(() => controller.abort());
+      await closed();
+      expect(answer).toBe(false);
     } finally {
       await view.unmount();
     }

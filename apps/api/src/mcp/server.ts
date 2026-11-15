@@ -23,6 +23,7 @@ import {
   integrationDefinitionCardPostedMessage,
   integrationDefinitionSetupContext,
   integrationDefinitionSetup,
+  chatToolSelectionIncludes,
 } from "./integration-definition-capabilities";
 import { capabilityAccountReadiness } from "./capability-account-readiness";
 import { sessionChatUrl, withUserSetupCard, type UserSetupCardPost } from "./user-setup-card";
@@ -106,6 +107,7 @@ import {
   type SessionStatus,
   SubmitHumanInputResponseRequest,
   FIRST_PARTY_MCP_CALLER_META_KEY,
+  TOOL_DISCOVERY_CARD_META_KEY,
 } from "@opengeni/contracts";
 import {
   SessionCreateConnectionSelectionUnavailableError,
@@ -164,6 +166,7 @@ import {
   createTaskNote,
   listTaskNotes,
   replaceTaskNote,
+  TaskNoteRefusedError,
   releaseWorkClaim,
   upsertWorkClaim,
   acceptSessionHumanInputResponse,
@@ -263,6 +266,8 @@ import {
   connectionReconnectDay,
   connectionsNeedingReconnectFor,
   listConnectionsNeedingReconnect,
+  nangoBackendsFor,
+  nangoReplacedSocialProviders,
   type ConnectionNeedingReconnect,
   type ResolvedSessionAuthorization,
 } from "@opengeni/core";
@@ -289,7 +294,7 @@ import {
   listPersonalGitHubConnections,
 } from "../integrations/personal-github";
 import {
-  GITHUB_IDENTITIES_GUIDANCE,
+  githubIdentitiesGuidance,
   GITHUB_APP_SETTINGS_GUIDANCE,
   githubSettingsUrl,
   personalGitHubConsoleBaseUrl,
@@ -301,10 +306,151 @@ import {
 } from "./github-identity-status";
 import { PERSONAL_GITHUB_CAPABILITY_ID } from "@opengeni/contracts/personal-github";
 import {
+  canonicalMcpEndpointUrl,
+  MICROSOFT_DYNAMICS_CAPABILITY_ID,
+  MICROSOFT_DYNAMICS_CONNECTION_NAME,
+  microsoftDynamicsEnvironmentAddress,
+  microsoftDynamicsAddressProblem,
+  microsoftDynamicsMcpEndpoint,
+  microsoftDynamicsProductForMcpUrl,
+  type MicrosoftDynamicsProduct,
+} from "@opengeni/contracts/microsoft-dynamics";
+import {
+  capabilityConnectEndpoint,
+  capabilityConnectInputs,
+  type CapabilityConnectInput,
+} from "@opengeni/contracts/capability-connect-inputs";
+
+/**
+ * How to show a card that asks the person for its connect-time inputs: the
+ * card tool posts it, and the agent may fill in values the person already gave.
+ */
+function connectInputsCardDetail(
+  capabilityId: string,
+  inputs: readonly CapabilityConnectInput[],
+): string {
+  const asks = inputs.map((input) => input.label.toLowerCase()).join(" and ");
+  const keys = inputs.map((input) => input.id).join(", ");
+  return `Call capability_authorization_request with capabilityId ${capabilityId}: its card asks the person for the ${asks}, then signs them in. If they already gave it, also pass it in inputs (${keys}) to fill it in.`;
+}
+
+/** A catalog match's connect-time inputs, which its card asks the person for. */
+function connectInputsOf(
+  item: CapabilityCatalogItem,
+  setup: CapabilitySetupProjection,
+): { connectInputs?: { id: string; label: string }[] } {
+  const inputs =
+    setup.status === "authorization_required" && capabilityConnectInputs(item.surfaceType);
+  return inputs ? { connectInputs: inputs.map(({ id, label }) => ({ id, label })) } : {};
+}
+
+/** How a Microsoft Dynamics environment is connected. */
+const MICROSOFT_DYNAMICS_SETUP_DETAIL = `Each connection is one Dynamics environment. ${connectInputsCardDetail(MICROSOFT_DYNAMICS_CAPABILITY_ID, capabilityConnectInputs("microsoft_dynamics") ?? [])}`;
+
+/** The workspace's own Dynamics environments: catalog entries for an exact environment endpoint. */
+function microsoftDynamicsEnvironments(
+  items: readonly CapabilityCatalogItem[],
+): CapabilityCatalogItem[] {
+  return items.filter((item) => {
+    const url = item.mcpUrl ?? item.endpointUrl;
+    return (
+      item.kind === "mcp" &&
+      !!url &&
+      microsoftDynamicsProductForMcpUrl(url) !== null &&
+      capabilityCatalogItemIsTrustedForExposure(item)
+    );
+  });
+}
+
+/**
+ * The generic Microsoft Dynamics entry's setup once the workspace already has
+ * environments: one this caller can use is ready, and one they can still
+ * connect is offered by its own card, which needs no address. Null when there
+ * are none, so the entry asks for the environment's address as before.
+ */
+function microsoftDynamicsSetupFromEnvironments(
+  environments: readonly { item: CapabilityCatalogItem; setup: CapabilitySetupProjection }[],
+): CapabilitySetupProjection | null {
+  const describe = (list: typeof environments) =>
+    list
+      .map(({ item }) => {
+        const address = microsoftDynamicsEnvironmentAddress(item.mcpUrl ?? item.endpointUrl ?? "");
+        return `${item.name}${address ? ` (${address})` : ""}, capabilityId ${item.id}`;
+      })
+      .join("; ");
+  const ready = environments.filter(({ setup }) => setup.status === "ready");
+  if (ready.length > 0)
+    return {
+      status: "ready",
+      action: null,
+      detail: `Already connected and usable in this chat: ${describe(ready)}. Use its tools. Only for a different environment: ${MICROSOFT_DYNAMICS_SETUP_DETAIL}`,
+    };
+  const connectable = environments.filter(({ setup }) => setup.status === "authorization_required");
+  if (connectable.length > 0)
+    return {
+      status: "authorization_required",
+      action: "connect",
+      detail: `This workspace already has ${describe(connectable)}. Call capability_authorization_request with ${connectable.length === 1 ? "this capabilityId" : "the capabilityId of the one the person means"}; its card signs them in without asking for the address. Only for a different environment: ${MICROSOFT_DYNAMICS_SETUP_DETAIL}`,
+    };
+  if (environments.length > 0)
+    return {
+      status: "authorization_required",
+      action: "connect",
+      detail: `This workspace already has ${describe(environments)}, but it is not usable in this chat: ${environments[0]!.setup.detail} Only for a different environment: ${MICROSOFT_DYNAMICS_SETUP_DETAIL}`,
+    };
+  return null;
+}
+
+/**
+ * What a posted setup card means for the turn: the chat continues the request
+ * once the person finishes it, so the agent doesn't ask them to report back.
+ */
+const SETUP_CARD_CONTINUES =
+  "When the person who asked finishes it, you get an update and continue then, so don't ask them to tell you when they're done.";
+
+/**
+ * Why a Microsoft Dynamics address can't be connected here, in words the
+ * agent can pass on, or null when it can. `product` is null when the address
+ * is not a recognized Dynamics environment.
+ */
+function microsoftDynamicsSetupProblem(
+  settings: ApiRouteDeps["settings"],
+  product: MicrosoftDynamicsProduct | null,
+  addressProblem: string | null = null,
+): string | null {
+  if (
+    !settings.microsoftDynamicsClientId?.trim() ||
+    !settings.microsoftDynamicsClientSecret?.trim()
+  )
+    return "Microsoft Dynamics isn't available on this Opengeni deployment yet. Nothing was posted; tell the person.";
+  if (!product && addressProblem)
+    return `${addressProblem} Nothing was posted; ask the person for that address, then call custom_mcp_setup_request again.`;
+  if (!product)
+    return "That isn't a Dynamics environment address. Ask the person to open Dynamics and copy the address bar (it looks like https://contoso.crm4.dynamics.com), or find Environment URL in the Power Platform admin center, then call custom_mcp_setup_request again.";
+  return null;
+}
+
+/**
+ * A Microsoft-hosted Dynamics or Power Platform page that is not itself an
+ * environment address (for example apps.powerapps.com or home.dynamics.com).
+ * Third-party Dynamics MCP servers live elsewhere and stay ordinary servers.
+ */
+function looksLikeMicrosoftDynamicsPage(address: string): boolean {
+  try {
+    const host = new URL(address).hostname.toLowerCase();
+    return /(^|\.)(dynamics\.com|powerapps\.com|microsoftdynamics\.us|microsoftdynamics\.de|dynamics\.cn|appsplatform\.us)$/.test(
+      host,
+    );
+  } catch {
+    return false;
+  }
+}
+import {
   changeWorkspaceFileVisibility,
   codemodeCallExecutionMachine,
   publishSandboxFileArtifact,
 } from "../sandbox-file-artifacts";
+import { changeSiteAudienceForAgent } from "../site-audience-change";
 import {
   projectWorkspaceArtifactDetailProvenance,
   projectWorkspaceArtifactMutationProvenance,
@@ -398,6 +544,14 @@ import {
   COMMAND_WAIT_DEFAULT_SECONDS,
   COMMAND_WAIT_MAX_COMMANDS,
 } from "./command-read";
+import {
+  ToolArgumentError,
+  isSdkToolArgumentRejectionMessage,
+  isToolArgumentRejection,
+  markToolArgumentRejection,
+  toolArgumentRejectionResult,
+} from "./tool-argument-error";
+import { databaseToolFailureResult, taskNoteRefusalResult } from "./database-tool-failure";
 import {
   boundSessionEventCompactResult,
   boundSessionEventMcpPage,
@@ -536,6 +690,12 @@ export type McpServerOptions = {
    * `slack_bot_*` tool unlisted; omitted keeps them listed.
    */
   slackBotAvailable?: boolean | undefined;
+  /**
+   * Native social providers a Nango-backed integration currently serves
+   * (docs/nango.md). Their provider tools are not listed; calls are refused
+   * either way.
+   */
+  nangoReplacedSocialProviders?: ReadonlySet<string> | undefined;
 };
 
 /**
@@ -660,11 +820,11 @@ function sessionCreateValidationFailureResult(error: z4.ZodError) {
       ),
     },
   };
-  return {
+  return markToolArgumentRejection({
     content: [{ type: "text" as const, text: JSON.stringify(envelope, null, 2) }],
     structuredContent: envelope,
     isError: true as const,
-  };
+  });
 }
 
 export function orchestrationFailureEnvelope(
@@ -811,11 +971,12 @@ function orchestrationFailureResult(
       // Diagnostic construction must never replace the original tool outcome.
     }
   }
-  return {
+  const failure = {
     content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
     structuredContent: result,
     isError: true as const,
   };
+  return isToolArgumentRejection(error) ? markToolArgumentRejection(failure) : failure;
 }
 
 const FIRST_PARTY_MCP_TOOL_NAME_SET = new Set<string>(FIRST_PARTY_MCP_TOOL_NAMES);
@@ -884,12 +1045,13 @@ const sessionCreateToolInputs = new Map<string, ReturnType<typeof buildSessionCr
 function sessionCreateToolInput(
   allowedTools: readonly FirstPartyMcpToolName[],
   servedBackends: readonly SandboxBackend[],
+  personalGitHub = false,
 ) {
-  const key = `${allowedTools.join(",")}|${servedBackends.join(",")}`;
+  const key = `${allowedTools.join(",")}|${servedBackends.join(",")}|${personalGitHub}`;
   let input = sessionCreateToolInputs.get(key);
   if (!input) {
     if (sessionCreateToolInputs.size >= 256) sessionCreateToolInputs.clear();
-    input = buildSessionCreateToolInput(allowedTools, servedBackends);
+    input = buildSessionCreateToolInput(allowedTools, servedBackends, personalGitHub);
     sessionCreateToolInputs.set(key, input);
   }
   return input;
@@ -898,6 +1060,7 @@ function sessionCreateToolInput(
 function buildSessionCreateToolInput(
   allowedTools: readonly FirstPartyMcpToolName[],
   servedBackends: readonly SandboxBackend[],
+  personalGitHub = false,
 ) {
   const capabilityToggle = z4.boolean().optional();
   const sessionCreateAgentInput = z4
@@ -961,7 +1124,11 @@ function buildSessionCreateToolInput(
         .array(ResourceRef)
         .optional()
         .describe(
-          "Omit to inherit parent repositories only. Files are never inherited automatically; explicitly include file resources to attach them. An empty array inherits no resources.",
+          `Omit to inherit parent repositories only. Files are never inherited automatically; explicitly include file resources to attach them. An empty array inherits no resources.${
+            personalGitHub
+              ? ' For a repository as the person, give uri, ref and connectionType "github_personal"; the rest comes from this turn\'s Your GitHub access.'
+              : ""
+          }`,
         ),
       tools: z4.array(ToolRef).optional(),
       mcpServers: z4.array(SessionMcpServerInput).optional(),
@@ -1032,7 +1199,7 @@ function buildSessionCreateToolInput(
   });
 }
 
-class PolicyMcpServer extends McpServer {
+export class PolicyMcpServer extends McpServer {
   private registeredToolCount = 0;
 
   constructor(
@@ -1042,6 +1209,34 @@ class PolicyMcpServer extends McpServer {
     private readonly appActions: { startedByPerson: boolean; fullAccess: boolean } | null = null,
   ) {
     super({ name: "opengeni", version: "1.0.0" });
+    const sdk = this as unknown as {
+      createToolError(message: string): { _meta?: Record<string, unknown> };
+      executeToolHandler(tool: unknown, args: unknown, extra: unknown): Promise<unknown>;
+    };
+    // The SDK refuses arguments that do not match a tool's schema before the
+    // tool runs, and builds that error result from the message alone. Mark it
+    // as an argument rejection like the ones tools throw themselves.
+    const createToolError = sdk.createToolError.bind(this);
+    sdk.createToolError = (message) => {
+      const result = createToolError(message);
+      return isSdkToolArgumentRejectionMessage(message)
+        ? markToolArgumentRejection(result)
+        : result;
+    };
+    // A tool that refuses the caller's arguments throws; return the same error
+    // result the SDK would make from it, marked so it is not counted as a tool
+    // failure. Tool handlers themselves keep throwing.
+    const executeToolHandler = sdk.executeToolHandler.bind(this);
+    sdk.executeToolHandler = async (tool, args, extra) => {
+      try {
+        return await executeToolHandler(tool, args, extra);
+      } catch (error) {
+        if (error instanceof Error && isToolArgumentRejection(error)) {
+          return toolArgumentRejectionResult(error);
+        }
+        throw error;
+      }
+    };
   }
 
   /**
@@ -1122,8 +1317,16 @@ class PolicyMcpServer extends McpServer {
     }
     this.registeredToolCount += 1;
     const handler = cb as (...args: unknown[]) => unknown;
-    return super.registerTool(name, config, ((...args: unknown[]) => {
-      return dispatchWithSessionAuthorizationReadReuse(() => handler(...args));
+    return super.registerTool(name, config, (async (...args: unknown[]) => {
+      try {
+        return await dispatchWithSessionAuthorizationReadReuse(() => handler(...args));
+      } catch (error) {
+        // The SDK would return the thrown message verbatim; a raw database
+        // error's message is its query and every parameter.
+        const databaseFailure = databaseToolFailureResult(name, error);
+        if (databaseFailure) return databaseFailure;
+        throw error;
+      }
     }) as ToolCallback<InputArgs>);
   }
 
@@ -1279,9 +1482,20 @@ export function buildOpenGeniMcpServer(
     const authority = (await authorizedSocialConnections()).find(
       ({ connection }) => connection.id === connectionId,
     );
-    if (!authority) throw new Error(`Unknown or unavailable social connection: ${connectionId}`);
+    if (!authority)
+      throw new ToolArgumentError(`Unknown or unavailable social connection: ${connectionId}`);
+    // While Nango serves a provider, its native accounts are not used here.
+    if (
+      nangoReplacedSocialProviders(await nangoBackendsFor(deps.db, deps.settings)).has(
+        authority.connection.provider,
+      )
+    )
+      throw new ToolArgumentError(`Unknown or unavailable social connection: ${connectionId}`);
     return authority;
   };
+  const nativeSocialProviders = (["x", "reddit"] as const).filter(
+    (provider) => !options.nangoReplacedSocialProviders?.has(provider),
+  );
   const requireAuthorizedSocialConnectionForProvider = async (
     provider: "x" | "reddit",
     connectionId: string,
@@ -1726,7 +1940,8 @@ export function buildOpenGeniMcpServer(
         const selected = connectionIds?.length
           ? connectionIds.map((id) => {
               const match = authorized.find(({ connection }) => connection.id === id);
-              if (!match) throw new Error(`Unknown or unavailable social connection: ${id}`);
+              if (!match)
+                throw new ToolArgumentError(`Unknown or unavailable social connection: ${id}`);
               return match;
             })
           : authorized;
@@ -1772,7 +1987,7 @@ export function buildOpenGeniMcpServer(
           const foundIds = new Set(connections.map((connection) => connection.id));
           const missing = [...selectedIds].filter((id) => !foundIds.has(id));
           if (missing.length > 0) {
-            throw new Error(`Unknown social connection IDs: ${missing.join(", ")}`);
+            throw new ToolArgumentError(`Unknown social connection IDs: ${missing.join(", ")}`);
           }
         }
         const sinceDate = since
@@ -1904,7 +2119,7 @@ export function buildOpenGeniMcpServer(
     // Reddit Integration cards. The legacy social_* names remain available to
 
     // identity and reject a near-identical Connection from the other adapter.
-    for (const provider of ["x", "reddit"] as const) {
+    for (const provider of nativeSocialProviders) {
       const providerName = provider === "x" ? "X" : "Reddit";
       server.registerTool(
         `${provider}_accounts_list`,
@@ -2120,7 +2335,7 @@ export function buildOpenGeniMcpServer(
       },
     );
 
-    for (const provider of ["x", "reddit"] as const) {
+    for (const provider of nativeSocialProviders) {
       const providerName = provider === "x" ? "X" : "Reddit";
       server.registerTool(
         `${provider}_posts_sync`,
@@ -2231,7 +2446,7 @@ export function buildOpenGeniMcpServer(
         return await requireVisibleScheduledTask(deps.db, grant, id);
       } catch (error) {
         if (error instanceof HTTPException && error.status === 404)
-          throw new Error(`Scheduled task not found: ${id}`, { cause: error });
+          throw new ToolArgumentError(`Scheduled task not found: ${id}`, { cause: error });
         throw error;
       }
     };
@@ -2329,6 +2544,7 @@ export function buildOpenGeniMcpServer(
           sessionAuthorization: deps.sessionAuthorization,
           authorizationSurface: "first_party_mcp",
           eventSourceFetch: deps.eventSourceFetch,
+          githubPersonalFetch: deps.githubPersonalFetch,
         });
         try {
           await syncCreatedScheduledTask({
@@ -2387,6 +2603,7 @@ export function buildOpenGeniMcpServer(
               ]
             : [];
         const updateOrError = await validatedScheduledTaskUpdate({
+          githubPersonalFetch: deps.githubPersonalFetch,
           settings: deps.settings,
           db: deps.db,
           objectStorage: deps.objectStorage,
@@ -2454,7 +2671,7 @@ export function buildOpenGeniMcpServer(
           pausable = await requirePausableScheduledTask(deps.db, grant, id, viewer);
         } catch (error) {
           if (error instanceof HTTPException && error.status === 404)
-            throw new Error(`Scheduled task not found: ${id}`, { cause: error });
+            throw new ToolArgumentError(`Scheduled task not found: ${id}`, { cause: error });
           throw error;
         }
         if (pausable.access === "summary") {
@@ -2496,6 +2713,7 @@ export function buildOpenGeniMcpServer(
         }
         const previous: ScheduledTaskRestoreState = { task: existing };
         const update = await validatedScheduledTaskUpdate({
+          githubPersonalFetch: deps.githubPersonalFetch,
           settings: deps.settings,
           db: deps.db,
           objectStorage: deps.objectStorage,
@@ -2647,7 +2865,7 @@ export function buildOpenGeniMcpServer(
             target,
           ) !== "full"
         )
-          throw new Error(`Scheduled task not found: ${id}`);
+          throw new ToolArgumentError(`Scheduled task not found: ${id}`);
         const { task, changed } = await deleteScheduledTaskWithDurableCleanup(deps, {
           grant,
           taskId: id,
@@ -2722,8 +2940,9 @@ function registerSandboxFileArtifactTool(
   server.registerTool(
     "sandbox_file_publish",
     {
-      description:
-        "Publish one file from this session's workspace so the person can open it. Use it for every file you hand over: document, spreadsheet, PDF, image, video, archive or data. Link the result as [Descriptive label](artifact:<artifactId>), or ![Descriptive label](artifact:<artifactId>) to preview an image, video, audio or PDF inline; never give a sandbox: link instead. The artifactId is also the file's workspace file ID, which tools such as a browser upload accept. A new file gets this chat's visibility unless you pass visibility. To change who can open an existing file, such as a generated image, pass its artifactId and visibility instead of path. Check access.whoCanOpen in the result before sharing the link with anyone else.",
+      // Sites take the same artifactId path, so they are named only where the
+      // grant may change one.
+      description: `Publish one file from this session's workspace so the person can open it. Use it for every file you hand over: document, spreadsheet, PDF, image, video, archive or data. Link the result as [Descriptive label](artifact:<artifactId>), or ![Descriptive label](artifact:<artifactId>) to preview an image, video, audio or PDF inline; never give a sandbox: link instead. The artifactId is also the file's workspace file ID, which tools such as a browser upload accept. A new file gets this chat's visibility unless you pass visibility. To change who can open an existing file${hasPermission(grant.permissions, "artifacts:publish") ? " or Site" : ""}, such as a generated image, pass its artifactId and visibility instead of path. Check access.whoCanOpen in the result before sharing the link with anyone else.`,
       inputSchema: {
         path: z4.string().min(1).max(4_096).optional(),
         artifactId: z4.string().uuid().optional(),
@@ -2738,11 +2957,20 @@ function registerSandboxFileArtifactTool(
     async ({ path, artifactId, visibility }, extra) => {
       await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       if ((path === undefined) === (artifactId === undefined))
-        throw new Error("Pass exactly one of path or artifactId.");
+        throw new ToolArgumentError("Pass exactly one of path or artifactId.");
       if (artifactId !== undefined) {
         if (!visibility)
-          throw new Error("Pass visibility with artifactId to change who can open that file.");
-        return json(await changeWorkspaceFileVisibility(deps, { grant, artifactId, visibility }));
+          throw new ToolArgumentError(
+            "Pass visibility with artifactId to change who can open that file.",
+          );
+        const change = { grant, artifactId, visibility };
+        const fileAccess = await changeWorkspaceFileVisibility(deps, change);
+        if (fileAccess)
+          return json({
+            ...fileAccess,
+            artifactReference: `[Open file](artifact:${artifactId})`,
+          });
+        return json(await changeSiteAudienceForAgent(deps, change));
       }
       const session = await requireSession(deps.db, grant.workspaceId, sessionId);
       // A Codemode call names its operation in the worker's trusted call
@@ -2759,15 +2987,17 @@ function registerSandboxFileArtifactTool(
             ? operationId
             : null,
       });
-      return json(
-        await publishSandboxFileArtifact(deps, {
-          grant,
-          session,
-          path: path!,
-          visibility,
-          executionMachine,
-        }),
-      );
+      const receipt = await publishSandboxFileArtifact(deps, {
+        grant,
+        session,
+        path: path!,
+        visibility,
+        executionMachine,
+      });
+      return json({
+        ...receipt,
+        artifactReference: `[Open file](artifact:${receipt.artifact.artifactId})`,
+      });
     },
   );
 }
@@ -3076,7 +3306,7 @@ function registerSlackBotTools(
       if (!sessionId) throw new Error("Proposing an agent requires a chat started from Slack");
       await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       const exactAvatar = avatarFromToolInput(avatar);
-      if (!exactAvatar) throw new Error("An icon is required");
+      if (!exactAvatar) throw new ToolArgumentError("An icon is required");
       return json(
         await proposeSlackAgentFromChat(deps, {
           grant,
@@ -3612,7 +3842,7 @@ function registerGoalTools(
     }) => {
       await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
       if (text === undefined && successCriteria === undefined) {
-        throw new Error("goal_update requires text or successCriteria");
+        throw new ToolArgumentError("goal_update requires text or successCriteria");
       }
       const context = exactAgentCommandContext(grant, sessionId);
       const command = {
@@ -3827,7 +4057,7 @@ function registerGoalTools(
           goal.metadata.reportDeliveriesV1 ?? [],
         ).map((delivery) => ({
           ...delivery,
-          artifactReference: `[Open report](/workspaces/${grant.workspaceId}/artifacts/editable/${delivery.artifactId})`,
+          artifactReference: `[Open report](artifact:${delivery.artifactId})`,
         })),
         handoff: reply?.trim()
           ? "Your reply is this turn's final answer and ends the turn after this tool batch; if this turn still continues, give that answer as your final reply."
@@ -3987,8 +4217,10 @@ function registerWorkspaceArtifactTools(
         if (error instanceof SessionAuthorizationDeniedError) return false;
         throw error;
       });
-  const mutation = async (response: WorkspaceArtifactMutationResponse) =>
-    await projectWorkspaceArtifactMutationProvenance(response, canReadProvenanceSession);
+  const mutation = async (response: WorkspaceArtifactMutationResponse) => ({
+    ...(await projectWorkspaceArtifactMutationProvenance(response, canReadProvenanceSession)),
+    artifactReference: `[Open Site](artifact:${response.artifact.id})`,
+  });
   // A published Site follows its Site here exactly as through the API routes:
   // the same hook resyncs the edge and scans a version that became current.
   const siteMutation = async (response: WorkspaceArtifactMutationResponse, scan: boolean) =>
@@ -4084,6 +4316,7 @@ function registerWorkspaceArtifactTools(
         detail,
         version: projectedVersion,
         downloads,
+        artifactReference: `[Open Site](artifact:${artifactId})`,
       });
     },
   );
@@ -4366,6 +4599,15 @@ function registerTaskNoteTools(
   const authorize = async () => {
     await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
   };
+  // A refusal the task-note routines raise becomes a typed, actionable result.
+  const result = async (run: () => Promise<unknown>) => {
+    try {
+      return json(await run());
+    } catch (error) {
+      if (error instanceof TaskNoteRefusedError) return taskNoteRefusalResult(error);
+      throw error;
+    }
+  };
   const boundedUtf8 = (maxBytes: number, label: string) =>
     z4
       .string()
@@ -4395,12 +4637,13 @@ function registerTaskNoteTools(
     },
     async ({ includeArchived, limit }) => {
       await authorize();
-      return json(
-        await listTaskNotes(deps.db, {
-          ...attemptClaims(),
-          includeArchived,
-          limit,
-        }),
+      return await result(
+        async () =>
+          await listTaskNotes(deps.db, {
+            ...attemptClaims(),
+            includeArchived,
+            limit,
+          }),
       );
     },
   );
@@ -4419,14 +4662,15 @@ function registerTaskNoteTools(
     },
     async ({ operationId, kind, text, expiresInDays }) => {
       await authorize();
-      return json(
-        await createTaskNote(deps.db, {
-          ...attemptClaims(),
-          operationId,
-          kind,
-          text,
-          expiresInDays,
-        }),
+      return await result(
+        async () =>
+          await createTaskNote(deps.db, {
+            ...attemptClaims(),
+            operationId,
+            kind,
+            text,
+            expiresInDays,
+          }),
       );
     },
   );
@@ -4445,14 +4689,15 @@ function registerTaskNoteTools(
     },
     async ({ operationId, noteId, expectedVersion, reason }) => {
       await authorize();
-      return json(
-        await archiveTaskNote(deps.db, {
-          ...attemptClaims(),
-          operationId,
-          noteId,
-          expectedVersion,
-          reason,
-        }),
+      return await result(
+        async () =>
+          await archiveTaskNote(deps.db, {
+            ...attemptClaims(),
+            operationId,
+            noteId,
+            expectedVersion,
+            reason,
+          }),
       );
     },
   );
@@ -4489,17 +4734,18 @@ function registerTaskNoteTools(
       reason,
     }) => {
       await authorize();
-      return json(
-        await replaceTaskNote(deps.db, {
-          ...attemptClaims(),
-          operationId,
-          replacedNoteId,
-          expectedReplacedVersion,
-          replacementKind,
-          replacementText,
-          replacementExpiresInDays,
-          reason,
-        }),
+      return await result(
+        async () =>
+          await replaceTaskNote(deps.db, {
+            ...attemptClaims(),
+            operationId,
+            replacedNoteId,
+            expectedReplacedVersion,
+            replacementKind,
+            replacementText,
+            replacementExpiresInDays,
+            reason,
+          }),
       );
     },
   );
@@ -4576,7 +4822,9 @@ function registerWorkClaimTools(
     }) => {
       await authorize();
       if ((versionKind === undefined) !== (versionValue === undefined)) {
-        throw new Error("work_claim_upsert versionKind and versionValue must be supplied together");
+        throw new ToolArgumentError(
+          "work_claim_upsert versionKind and versionValue must be supplied together",
+        );
       }
       return json(
         await upsertWorkClaim(deps.db, {
@@ -5009,7 +5257,7 @@ function registerFleetTools(
         if (setup.status === "unavailable") {
           return json({ kind: "selfhosted", status: "unavailable", message: setup.detail });
         }
-        const eventId = await appendCapabilityCardEvent(deps, grant, sessionId, {
+        const { eventId } = await appendCapabilityCardEvent(deps, grant, sessionId, {
           item,
           action: "connect",
           rationale: "Connect your computer so this chat can run on it.",
@@ -5116,7 +5364,9 @@ function registerConnectedMachineTools(
         enrollment = enrollments.find((candidate) => candidate.id === sandbox?.enrollmentId);
       }
       if (!enrollment) {
-        throw new Error("machine not found in this access scope; use a sandboxes_list id");
+        throw new ToolArgumentError(
+          "machine not found in this access scope; use a sandboxes_list id",
+        );
       }
       if (enrollment.scope === "organization" && !grant.permissions.includes("account:admin")) {
         throw new MissingPermissionRefusal("account:admin");
@@ -5985,17 +6235,17 @@ function registerWorkspaceOrchestrationTools(
             decodedCursor?.orderBy ??
             (relevanceRequested ? "relevance" : "createdAt");
           if (decodedCursor && decodedCursor.orderBy !== orderBy) {
-            throw new Error("sessions_list cursor order does not match orderBy");
+            throw new ToolArgumentError("sessions_list cursor order does not match orderBy");
           }
           const normalizedUpdatedAfter =
             updatedAfter !== undefined
               ? normalizeSessionDiscoveryRevision(updatedAfter, "updatedAfter")
               : (decodedCursor?.updatedAfter ?? undefined);
           if (normalizedUpdatedAfter !== undefined && orderBy !== "updatedAt") {
-            throw new Error("sessions_list updatedAfter requires orderBy=updatedAt");
+            throw new ToolArgumentError("sessions_list updatedAfter requires orderBy=updatedAt");
           }
           if (decodedCursor && decodedCursor.updatedAfter !== (normalizedUpdatedAfter ?? null)) {
-            throw new Error("sessions_list cursor does not match updatedAfter");
+            throw new ToolArgumentError("sessions_list cursor does not match updatedAfter");
           }
           const page = await listSessionDiscoverySummaries(deps.db, grant.workspaceId, {
             limit: boundedSessionDiscoveryLimit(limit),
@@ -6074,7 +6324,7 @@ function registerWorkspaceOrchestrationTools(
       inThisWorkspaceOr("session_get", async ({ sessionId: requestedSessionId, detail }) => {
         const sessionId = requestedSessionId ?? exactAgentAttemptClaims(grant)?.sessionId;
         if (sessionId === undefined) {
-          throw new Error(
+          throw new ToolArgumentError(
             "session_get requires an explicit sessionId without authenticated current agent session context",
           );
         }
@@ -6086,7 +6336,7 @@ function registerWorkspaceOrchestrationTools(
         );
         const session = await getSession(deps.db, grant.workspaceId, sessionId);
         if (!session) {
-          throw new Error("session not found");
+          throw new ToolArgumentError("session not found");
         }
         const queue = await (
           detail === "full" ? getSessionQueueSnapshot : getSessionQueueMonitoringSummary
@@ -6232,7 +6482,7 @@ function registerWorkspaceOrchestrationTools(
           // or direct adapter calls: the canonical registry owns accepted types.
           const canonicalType = (type: string) => {
             const parsed = SessionEventType.safeParse(type);
-            if (!parsed.success) throw new Error(unknownSessionEventTypeMessage(type));
+            if (!parsed.success) throw new ToolArgumentError(unknownSessionEventTypeMessage(type));
             return parsed.data;
           };
           const includeTypes = requestedIncludeTypes?.map(canonicalType);
@@ -6240,7 +6490,7 @@ function registerWorkspaceOrchestrationTools(
           const latestClass =
             latest === undefined ? undefined : sessionEventLatestClassToSemanticClass(latest);
           if (requestedResultMode === "compact" && latestClass === undefined) {
-            throw new Error("resultMode=compact requires latest");
+            throw new ToolArgumentError("resultMode=compact requires latest");
           }
           await requireSession(deps.db, grant.workspaceId, sessionId);
           const auditRequested = [
@@ -6257,7 +6507,7 @@ function registerWorkspaceOrchestrationTools(
             ((view !== undefined && view !== "debug") || cursor !== undefined) &&
             auditRequested
           ) {
-            throw new Error(
+            throw new ToolArgumentError(
               sessionEventAuditSelectorMessage({
                 sessionId,
                 view,
@@ -6315,7 +6565,7 @@ function registerWorkspaceOrchestrationTools(
             includeArguments !== undefined ||
             includeOutput !== undefined
           ) {
-            throw new Error(
+            throw new ToolArgumentError(
               `cursor/callId/toolName/includeArguments/includeOutput require a non-debug view; view=debug pages with after/before. Use ${JSON.stringify(
                 callId === undefined &&
                   toolName === undefined &&
@@ -6339,7 +6589,7 @@ function registerWorkspaceOrchestrationTools(
               (filter) => filter !== undefined,
             )
           ) {
-            throw new Error("latest cannot be combined with event filters");
+            throw new ToolArgumentError("latest cannot be combined with event filters");
           }
           const mode = requestedMode ?? "monitoring";
           const direction = latestClass
@@ -6463,7 +6713,7 @@ function registerWorkspaceOrchestrationTools(
         async ({ targets, includeOwnPendingUpdates, waitFor, maxWaitSeconds }, extra) => {
           const distinct = new Set(targets.map((target) => target.sessionId));
           if (distinct.size !== targets.length) {
-            throw new Error("session_wait targets must name distinct sessions");
+            throw new ToolArgumentError("session_wait targets must name distinct sessions");
           }
           // Authorize and resolve every target exactly as session_events does,
           // before any live-fanout subscription exists for it.
@@ -6629,7 +6879,8 @@ function registerWorkspaceOrchestrationTools(
                 ...identity,
                 commandId: id,
               });
-              if (!command) throw new Error("Background command not found in this session");
+              if (!command)
+                throw new ToolArgumentError("Background command not found in this session");
               return command.state === "exited" || command.state === "lost";
             };
             const readOutput = async (
@@ -6658,7 +6909,8 @@ function registerWorkspaceOrchestrationTools(
               yieldTo: async () => await callerTurnSteerPending(callerSessionId),
             };
             if (commandIds === undefined && cursors === undefined) {
-              if (commandId === undefined) throw new Error("Pass commandId or commandIds");
+              if (commandId === undefined)
+                throw new ToolArgumentError("Pass commandId or commandIds");
               // A malformed cursor fails before any wait.
               parseCommandOutputCursor(cursor, commandId);
               return json(
@@ -6676,13 +6928,15 @@ function registerWorkspaceOrchestrationTools(
             const ids = [
               ...new Set([...(commandId === undefined ? [] : [commandId]), ...(commandIds ?? [])]),
             ];
-            if (ids.length === 0) throw new Error("Pass commandId or commandIds");
+            if (ids.length === 0) throw new ToolArgumentError("Pass commandId or commandIds");
             // Each cursor names its own command; match them up by that prefix.
             const cursorById = new Map<string, string>();
             for (const value of [...(cursor === undefined ? [] : [cursor]), ...(cursors ?? [])]) {
               const owner = ids.find((id) => value.startsWith(`${id}:`));
               if (owner === undefined)
-                throw new Error("Each cursor must belong to one of the listed commands");
+                throw new ToolArgumentError(
+                  "Each cursor must belong to one of the listed commands",
+                );
               parseCommandOutputCursor(value, owner);
               cursorById.set(owner, value);
             }
@@ -6715,6 +6969,7 @@ function registerWorkspaceOrchestrationTools(
         inputSchema: sessionCreateToolInput(
           childSelectableTools,
           servedSandboxBackends(deps.settings).filter((backend) => backend !== "selfhosted"),
+          deps.settings.githubPersonalOauthEnabled,
         ),
       },
       async (args) => {
@@ -7170,7 +7425,7 @@ function registerWorkspaceOrchestrationTools(
             throw error;
           }
           if (accepted.action === "not_found") {
-            throw new Error("human-input request not found");
+            throw new ToolArgumentError("human-input request not found");
           }
           await publishDurableSessionEvents(
             deps.bus,
@@ -7378,7 +7633,7 @@ function registerProjectTools(
       },
       async ({ projectId }) => {
         const project = await getChannel(deps.db, grant.workspaceId, projectId);
-        if (!project) throw new Error("Project not found");
+        if (!project) throw new ToolArgumentError("Project not found");
         return json({ project });
       },
     );
@@ -7435,7 +7690,7 @@ function registerProjectTools(
           ...update,
           ...(exactAvatar !== undefined ? { avatar: exactAvatar } : {}),
         });
-        if (!project) throw new Error("Project not found");
+        if (!project) throw new ToolArgumentError("Project not found");
         return json({ project });
       },
     );
@@ -7462,7 +7717,7 @@ function registerProjectTools(
       },
       async ({ projectId }) => {
         if (!(await deleteChannel(deps.db, grant.workspaceId, projectId)))
-          throw new Error("Project not found");
+          throw new ToolArgumentError("Project not found");
         return json({ ok: true, projectId });
       },
     );
@@ -7485,7 +7740,7 @@ function registerProjectTools(
             channelId: projectId,
           }))
         )
-          throw new Error("Session not found");
+          throw new ToolArgumentError("Session not found");
         return json({ ok: true, sessionId, projectId });
       },
     );
@@ -7602,8 +7857,13 @@ function registerCapabilityDiscoveryTools(
     nativeConnectionCapabilityRecommendations({
       connectedMachines: deps.settings.sandboxSelfhostedEnabled,
       personalGitHub: deps.settings.githubPersonalOauthEnabled,
+      personalGitHubAllRepositories: deps.settings.githubPersonalAllRepositoriesEnabled,
       browserExtension: browserExtension(deps.settings),
       integrationDefinitions: connectableIntegrationDefinitions(deps.settings, grant.workspaceId),
+      ...(deps.settings.microsoftDynamicsClientId?.trim() &&
+      deps.settings.microsoftDynamicsClientSecret?.trim()
+        ? { microsoftDynamics: true }
+        : {}),
     });
   // Indexed marketplace plugins: a person installs one from its card.
   const plugins = () => marketplacePluginCapabilityItems(deps.db, grant.workspaceId);
@@ -7625,6 +7885,7 @@ function registerCapabilityDiscoveryTools(
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         subjectId: subjectId ?? null,
+        integrationBackends: await nangoBackendsFor(deps.db, deps.settings),
       });
     } catch {
       return [];
@@ -7634,11 +7895,14 @@ function registerCapabilityDiscoveryTools(
   // Installation is workspace metadata; an enabled personal MCP is usable only
   // when its tools actually made it into this caller's immutable attempt catalog.
   // This is a readiness projection, never credential resolution or a new grant.
-  const setupProjections = async (items: CapabilityCatalogItem[]) => {
+  const projectSetups = async (
+    items: CapabilityCatalogItem[],
+  ): Promise<CapabilitySetupProjection[]> => {
     const availableServerIds = new Set<string>();
     const availableFirstPartyTools = new Set<string>();
     const acceptedServerIds = new Set<string>();
     let accountSelectionKnown = false;
+    let chatIncludes = (_serverId: string) => true;
     if (
       items.some(
         (item) =>
@@ -7647,6 +7911,9 @@ function registerCapabilityDiscoveryTools(
       )
     ) {
       const claims = exactAgentCommandContext(grant, sessionId);
+      chatIncludes = chatToolSelectionIncludes(
+        await getSession(deps.db, grant.workspaceId, sessionId),
+      );
       const attemptCatalog = await getAttemptToolCatalog(deps.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
@@ -7698,9 +7965,33 @@ function registerCapabilityDiscoveryTools(
                     accountSelectionKnown,
                     availableFirstPartyTools,
                     new Set((grant.metadata?.firstPartyMcpTools as string[] | undefined) ?? []),
+                    chatIncludes,
                   ),
       ),
     );
+  };
+  // The workspace's Dynamics environments with this caller's setup for each.
+  const dynamicsEnvironmentSetups = async (items?: readonly CapabilityCatalogItem[]) => {
+    const environments = microsoftDynamicsEnvironments(items ?? (await catalog()).items);
+    if (environments.length === 0) return [];
+    const setups = await projectSetups(environments);
+    return environments.map((item, index) => ({ item, setup: setups[index]! }));
+  };
+  // The generic Dynamics entry reflects environments already here, so an agent
+  // is not told to ask for an address of an environment that is connected.
+  // `catalogItems`: the workspace catalog when the caller already read it.
+  const setupProjections = async (
+    items: CapabilityCatalogItem[],
+    catalogItems?: readonly CapabilityCatalogItem[],
+  ) => {
+    const setups = await projectSetups(items);
+    const index = items.findIndex((item) => item.id === MICROSOFT_DYNAMICS_CAPABILITY_ID);
+    if (index === -1 || setups[index]!.status === "unavailable") return setups;
+    const fromEnvironments = microsoftDynamicsSetupFromEnvironments(
+      await dynamicsEnvironmentSetups(catalogItems),
+    );
+    if (fromEnvironments) setups[index] = fromEnvironments;
+    return setups;
   };
 
   server.registerTool(
@@ -7743,7 +8034,7 @@ function registerCapabilityDiscoveryTools(
               ).values(),
             ];
       const [projected, inventory] = await Promise.all([
-        setupProjections([...ranked.map(({ item }) => item), ...connections]),
+        setupProjections([...ranked.map(({ item }) => item), ...connections], current.items),
         reconnectInventory(ranked.map(({ item }) => item)),
       ]);
       const setups = projected.slice(0, ranked.length);
@@ -7784,6 +8075,7 @@ function registerCapabilityDiscoveryTools(
           setup: {
             ...setup,
             requiredVariables: capabilityRequiredVariables(item),
+            ...connectInputsOf(item, setup),
             nextAction:
               setup.status === "authorization_required" ||
               setup.reconnect?.some((account) => account.reconnectHere)
@@ -7843,23 +8135,96 @@ function registerCapabilityDiscoveryTools(
           .describe(
             "When setup.reconnect lists accounts that stopped working: the connectionId of the one to reconnect. The card then reconnects that same account.",
           ),
+        inputs: z4
+          .record(z4.string().min(1).max(64), z4.string().max(2048))
+          .optional()
+          .describe(
+            "When setup.connectInputs lists values the card asks for: those the person already gave, by id. The card shows them filled in.",
+          ),
       },
     },
-    async ({ capabilityId, rationale, connectionId }) => {
+    async ({ capabilityId, rationale, connectionId, inputs }, extra) => {
+      // No values is the same as no inputs.
+      const suppliedInputs = inputs && Object.keys(inputs).length > 0 ? inputs : undefined;
       await authorize();
+      // Tool discovery shows a card for a search that clearly names one
+      // integration; it shows that card at most once per chat.
+      const fromDiscovery = extra?._meta?.[TOOL_DISCOVERY_CARD_META_KEY] === true;
       const current = await catalog();
-      const item =
+      // What the card's message adds about connections already here.
+      let alsoHere = "";
+      // The agent's inputs chose an existing connection instead of a card field.
+      let inputsConsumed = false;
+      // The agent's inputs name a connection not here yet: the card asks for
+      // it even when another connection of the entry is ready.
+      let anotherConnection = false;
+      let item =
         [...current.items, ...recommendations()].find(
           (candidate) => candidate.id === capabilityId,
         ) ?? (await marketplacePluginCapabilityItem(deps.db, grant.workspaceId, capabilityId));
       if (!item || !capabilityCatalogItemIsTrustedForExposure(item)) {
-        throw new Error("Unknown or untrusted capability; search the catalog again.");
+        throw new ToolArgumentError("Unknown or untrusted capability; search the catalog again.");
       }
-      const [[setup], inventory] = await Promise.all([
+      // Each Dynamics connection is one customer environment. An environment
+      // already here answers for the generic entry: ready when this caller can
+      // use it, else its own card (which needs no address) when it is the only
+      // one. Otherwise the card needs the environment's address, which only
+      // the person knows.
+      if (item.id === MICROSOFT_DYNAMICS_CAPABILITY_ID) {
+        const [own] = await projectSetups([item]);
+        if (own?.status === "unavailable")
+          return json({
+            capabilityId: item.id,
+            status: "unavailable",
+            cardShown: false,
+            message: own.detail,
+          });
+        const environments = await dynamicsEnvironmentSetups(current.items);
+        const fromEnvironments = microsoftDynamicsSetupFromEnvironments(environments);
+        // Inputs that name an environment already here answer with that
+        // environment. Inputs that name another one, or can't be used, get
+        // the card that asks for it.
+        const named = suppliedInputs
+          ? capabilityConnectEndpoint(item.surfaceType, suppliedInputs)
+          : null;
+        const namedHere =
+          named && "endpointUrl" in named
+            ? environments.find(
+                ({ item: environment }) =>
+                  (environment.mcpUrl ?? environment.endpointUrl) === named.endpointUrl,
+              )
+            : undefined;
+        if (namedHere) {
+          item = namedHere.item;
+          inputsConsumed = true;
+        } else if (suppliedInputs) {
+          anotherConnection = true;
+        } else {
+          if (fromEnvironments?.status === "ready")
+            return json({
+              capabilityId: item.id,
+              status: "ready",
+              cardShown: false,
+              message: fromEnvironments.detail,
+            });
+          // The only environment this person can still connect needs no
+          // address.
+          const connectable = environments.filter(
+            ({ setup }) => setup.status === "authorization_required",
+          );
+          if (connectable.length === 1) item = connectable[0]!.item;
+          else if (fromEnvironments) alsoHere = ` ${fromEnvironments.detail}`;
+        }
+      }
+      const [[projected], inventory] = await Promise.all([
         setupProjections([item]),
         reconnectInventory([item]),
       ]);
-      if (!setup) throw new Error("Capability setup projection is unavailable.");
+      if (!projected) throw new Error("Capability setup projection is unavailable.");
+      const setup: CapabilitySetupProjection =
+        anotherConnection && projected.status === "ready"
+          ? { status: "authorization_required", action: "connect", detail: projected.detail }
+          : projected;
       // An account of this entry that stopped working is reconnected in place:
       // a first-time Connect cannot replace it. The agent names the one the
       // task needs; without a name, the only one here is used while no
@@ -7869,13 +8234,13 @@ function registerCapabilityDiscoveryTools(
       if (connectionId !== undefined) {
         reconnect = candidates.find((candidate) => candidate.connectionId === connectionId);
         if (!reconnect)
-          throw new Error(
+          throw new ToolArgumentError(
             `That connectionId is not an account of ${item.name} that stopped working. Search the catalog again for its setup.reconnect.`,
           );
       } else if (setup.status !== "ready") {
         const here = candidates.filter((candidate) => candidate.addedHere);
         if (here.length > 1)
-          throw new Error(
+          throw new ToolArgumentError(
             `Several ${item.name} accounts stopped working. Pass the connectionId of the one to reconnect, from setup.reconnect in capability_catalog_search.`,
           );
         reconnect = here[0];
@@ -7898,6 +8263,7 @@ function registerCapabilityDiscoveryTools(
         return json({
           capabilityId: item.id,
           status: "ready",
+          cardShown: false,
           message: setup.detail,
         });
       }
@@ -7905,6 +8271,7 @@ function registerCapabilityDiscoveryTools(
         return json({
           capabilityId: item.id,
           status: "unavailable",
+          cardShown: false,
           message: setup.detail,
         });
       }
@@ -7928,48 +8295,88 @@ function registerCapabilityDiscoveryTools(
       const personCannotConnect =
         person !== null &&
         inChatCapabilitySetup(person, item.id, item, memberIntegrationSetup).kind === "unavailable";
-      const eventId = await appendCapabilityCardEvent(deps, grant, sessionId, {
+      // A card for a new connection asks for the entry's connect-time inputs,
+      // filled in with what the agent passed when that is usable.
+      const declaredInputs = reconnect ? null : capabilityConnectInputs(item.surfaceType);
+      const supplied = declaredInputs && suppliedInputs ? suppliedInputs : null;
+      const suppliedEndpoint = supplied
+        ? capabilityConnectEndpoint(item.surfaceType, supplied)
+        : null;
+      const cardInputs = declaredInputs?.map((input) => {
+        const value = supplied?.[input.id]?.trim();
+        return {
+          ...input,
+          ...(value && suppliedEndpoint && "endpointUrl" in suppliedEndpoint ? { value } : {}),
+        };
+      });
+      const { eventId, alreadyShown } = await appendCapabilityCardEvent(deps, grant, sessionId, {
         item,
         action: reconnect ? "connect" : (setup.action ?? "connect"),
         rationale,
         ...(reconnect ? { reconnect } : {}),
+        ...(cardInputs ? { inputs: cardInputs } : {}),
+        // Tool discovery's card is not posted again until the person writes.
+        // A model call always posts: a card whose state changed (a machine
+        // just connected) is worth showing again.
+        ...(fromDiscovery ? { once: "since_latest_message" as const } : {}),
       });
+      // Every result says whether a card is in the chat, so a caller can
+      // never report one that was not shown. A card already there keeps the
+      // status and guidance it would have had, and says it was not reposted.
+      const shown = { cardShown: eventId !== null, ...(alreadyShown ? { alreadyShown } : {}) };
+      const inputsUnused =
+        suppliedInputs && !declaredInputs && !inputsConsumed
+          ? " The inputs you passed were not used: this card asks for none."
+          : "";
+      const posted = (body: { message: string } & Record<string, unknown>) =>
+        json({
+          ...body,
+          message: `${
+            alreadyShown
+              ? `${body.message.replace(" was posted", " is already in this chat")} It was not posted again.`
+              : body.message
+          }${inputsUnused}`,
+        });
       if (reconnect) {
-        return json({
+        return posted({
           capabilityId: item.id,
           status: "authorization_requested",
           action: "connect",
           connectionId: reconnect.connectionId,
           eventId,
+          ...shown,
           message: personCannotConnect
             ? `The card was posted, but this person can't reconnect ${item.name} from here: their access doesn't allow it, and the card tells them so. Tell them ${reconnect.account} stopped working on ${connectionReconnectDay(reconnect.since)} and that whoever manages this app has to reconnect it. Nothing is reconnected.`
             : `The card to reconnect ${capabilityReconnectAccountLabel(item, reconnect)} was posted. It signs in again to that same account, which stopped working on ${connectionReconnectDay(reconnect.since)}; nothing is reconnected yet. Tell the person plainly that it stopped working and that the card reconnects it. It works from their next message after reconnecting.`,
         });
       }
       if (machineCardWhenReady) {
-        return json({
+        return posted({
           capabilityId: item.id,
           status: "ready",
           eventId,
+          ...shown,
           message: `${setup.detail} The Connected Machine card is in this chat: the person can choose a machine for this chat or connect another. Chrome needs the browser extension (${browserExtension(deps.settings).installUrl}) on a connected machine.`,
         });
       }
       if (githubCardWhenReady) {
-        return json({
+        return posted({
           capabilityId: item.id,
           status: "ready",
           eventId,
+          ...shown,
           message:
             item.id === PERSONAL_GITHUB_CAPABILITY_ID
               ? `${setup.detail} The Your GitHub card is in this chat: the person can choose which repositories the agent may use as them.`
               : `${setup.detail} The GitHub card is in this chat: the person picks a repository with its "Use" button, which attaches it to this chat.`,
         });
       }
-      return json({
+      return posted({
         capabilityId: item.id,
         status: "authorization_requested",
         action: setup.action,
         eventId,
+        ...shown,
         message: personCannotConnect
           ? item.kind === "plugin"
             ? `The card was posted, but this person can't install the ${item.name} plugin: installing plugins needs permission to manage this workspace's plugins, and the card tells them so. Don't ask them to use the card. Tell them a workspace admin has to install it. Nothing is installed.`
@@ -7978,11 +8385,13 @@ function registerCapabilityDiscoveryTools(
             ? "The Connected Machine card was posted. It shows the person what to do, so do not describe its buttons or steps; nothing is connected yet. Do not paste an enroll token into the chat."
             : item.id === EXCEL_ADDIN_CAPABILITY_ID
               ? "The Excel add-in card was posted with its install link and steps, so do not repeat them; no workbook is connected yet. excel_run works once the person opens the add-in in their workbook."
-              : item.surfaceType === "integration_definition"
-                ? integrationDefinitionCardPostedMessage(item)
-                : item.kind === "plugin"
-                  ? `The ${item.name} plugin card was posted. The person reviews what it adds and installs it for the workspace; nothing is installed yet. Once they do, its Skills are yours from your next turn, and its MCP servers may still need connecting: search the catalog for them then.`
-                  : "The recommendation was posted for human confirmation. No access has been granted yet.",
+              : declaredInputs
+                ? `The card was posted. It asks the person for the ${declaredInputs.map((input) => input.label.toLowerCase()).join(" and ")}, then signs them in; nothing is connected yet.${suppliedEndpoint && "problem" in suppliedEndpoint ? ` What you passed was not filled in: ${suppliedEndpoint.problem}` : ""} ${SETUP_CARD_CONTINUES}${alsoHere}`
+                : item.surfaceType === "integration_definition"
+                  ? integrationDefinitionCardPostedMessage(item)
+                  : item.kind === "plugin"
+                    ? `The ${item.name} plugin card was posted. The person reviews what it adds and installs it for the workspace; nothing is installed yet. Once they do, its Skills are yours from your next turn, and its MCP servers may still need connecting: search the catalog for them then.`
+                    : `The recommendation was posted for human confirmation. No access has been granted yet. ${SETUP_CARD_CONTINUES}`,
       });
     },
   );
@@ -7999,6 +8408,9 @@ function registerCapabilityDiscoveryTools(
           .url()
           .max(2048)
           .refine((url) => {
+            // An unreadable Dynamics address is answered with what to paste instead.
+            if (microsoftDynamicsMcpEndpoint(url) || microsoftDynamicsAddressProblem(url))
+              return true;
             const parsed = new URL(url);
             return (
               parsed.protocol === "https:" &&
@@ -8050,8 +8462,31 @@ function registerCapabilityDiscoveryTools(
           .optional(),
       },
     },
-    async ({ name, endpointUrl, rationale, ownership, mcpSetup }) => {
+    async ({ name, endpointUrl: suppliedEndpointUrl, rationale, ownership, mcpSetup }) => {
       await authorize();
+      // A Dynamics environment address becomes its connection endpoint and
+      // signs in through Microsoft; say plainly when this deployment can't.
+      const dynamics = microsoftDynamicsMcpEndpoint(suppliedEndpointUrl);
+      const addressProblem = dynamics ? null : microsoftDynamicsAddressProblem(suppliedEndpointUrl);
+      if (
+        dynamics ||
+        addressProblem ||
+        (name.trim().toLowerCase() === MICROSOFT_DYNAMICS_CONNECTION_NAME.toLowerCase() &&
+          looksLikeMicrosoftDynamicsPage(suppliedEndpointUrl))
+      ) {
+        const unavailable = microsoftDynamicsSetupProblem(
+          deps.settings,
+          dynamics?.product ?? null,
+          addressProblem,
+        );
+        if (unavailable) return json({ status: "unavailable", message: unavailable });
+      }
+      const endpointUrl = dynamics
+        ? dynamics.mcpUrl
+        : mcpSetup
+          ? suppliedEndpointUrl
+          : canonicalMcpEndpointUrl(suppliedEndpointUrl);
+      if (dynamics) mcpSetup = undefined;
       const payload = ToolAuthNeededPayload.parse({
         serverId: "opengeni",
         toolName: "custom_mcp_setup_request",
@@ -8111,8 +8546,8 @@ function registerCapabilityDiscoveryTools(
         status: "setup_requested",
         eventId: appended.events[0]?.id ?? null,
         message: mcpSetup
-          ? "The prepared connection card was posted. The person enters only the missing key in its protected fields. No server was added or contacted."
-          : "The human review card was posted. No server was added or contacted.",
+          ? `The prepared connection card was posted. The person enters only the missing key in its protected fields. No server was added or contacted. ${SETUP_CARD_CONTINUES}`
+          : `The human review card was posted. No server was added or contacted. ${SETUP_CARD_CONTINUES}`,
       });
     },
   );
@@ -8142,6 +8577,7 @@ async function capabilitySetupProjection(
   accountSelectionKnown: boolean,
   availableFirstPartyTools: ReadonlySet<string>,
   selectedFirstPartyTools: ReadonlySet<string>,
+  chatIncludes: (serverId: string) => boolean = () => true,
 ): Promise<CapabilitySetupProjection> {
   // The rule the Capabilities page uses to hide such entries: no card could
   // finish a connection this deployment cannot start.
@@ -8152,6 +8588,13 @@ async function capabilitySetupProjection(
       detail:
         item.runtime.notes ??
         "New connections to this integration are not available on this deployment.",
+    };
+  }
+  if (item.id === MICROSOFT_DYNAMICS_CAPABILITY_ID) {
+    return {
+      status: "authorization_required",
+      action: "connect",
+      detail: MICROSOFT_DYNAMICS_SETUP_DETAIL,
     };
   }
   if (item.surfaceType === "first_party_onepassword") {
@@ -8277,6 +8720,14 @@ async function capabilitySetupProjection(
         detail: "This capability has tools available in this turn.",
       };
     }
+    if (item.runtime.mcpServerId && !chatIncludes(item.runtime.mcpServerId)) {
+      return {
+        status: "unavailable",
+        action: null,
+        detail:
+          "This integration is enabled, but this chat's tool selection leaves it out. Include it in the chat's tools, then send a new message. This does not mean the account is disconnected; do not request reconnection based on missing tools alone.",
+      };
+    }
     if (
       !accountSelectionKnown ||
       (item.runtime.mcpServerId && acceptedServerIds.has(item.runtime.mcpServerId))
@@ -8345,11 +8796,41 @@ async function appendCapabilityCardEvent(
     toolName?: string;
     /** The account that stopped working which this card reconnects. */
     reconnect?: ConnectionNeedingReconnect;
+    /** The connect-time inputs the card asks for, with the agent's values. */
+    inputs?: NonNullable<ToolAuthNeededPayload["capability"]>["inputs"];
+    /**
+     * Post the card only when no current card of the same kind for the
+     * capability is already shown in this turn, or (`since_latest_message`)
+     * since the person's latest message; `alreadyShown` then names that card.
+     */
+    once?: "turn" | "since_latest_message";
   },
-): Promise<string | null> {
+): Promise<{ eventId: string | null; alreadyShown: boolean }> {
   const { item } = input;
   const claims = exactAgentCommandContext(grant, sessionId);
   const payload = capabilityCardPayload(item, input);
+  if (input.once) {
+    const once = await appendTurnCapabilityCardOnce(
+      deps.db,
+      grant.workspaceId,
+      sessionId,
+      claims.callerTurnId,
+      claims.callerExecutionGeneration,
+      claims.callerAttemptId,
+      item.id,
+      { type: "tool.auth_needed", payload },
+      null,
+      { sinceLatestMessage: input.once === "since_latest_message" },
+    );
+    await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, once.events);
+    if (!once.accepted) {
+      throw new Error("The calling turn was replaced before the authorization request committed.");
+    }
+    return {
+      eventId: once.existingEventId ?? once.events[0]?.id ?? null,
+      alreadyShown: once.existingEventId !== null,
+    };
+  }
   const appended = await appendAndPublishTurnEventsFenced(
     deps.db,
     deps.bus,
@@ -8363,7 +8844,7 @@ async function appendCapabilityCardEvent(
   if (!appended.accepted) {
     throw new Error("The calling turn was replaced before the authorization request committed.");
   }
-  return appended.events[0]?.id ?? null;
+  return { eventId: appended.events[0]?.id ?? null, alreadyShown: false };
 }
 
 /** The `tool.auth_needed` payload that renders a capability card in the chat. */
@@ -8374,6 +8855,7 @@ function capabilityCardPayload(
     rationale: string;
     toolName?: string;
     reconnect?: Pick<ConnectionNeedingReconnect, "connectionId" | "ownership">;
+    inputs?: NonNullable<ToolAuthNeededPayload["capability"]>["inputs"];
   },
 ): ToolAuthNeededPayload {
   return ToolAuthNeededPayload.parse({
@@ -8398,6 +8880,7 @@ function capabilityCardPayload(
       action: input.action,
       rationale: input.rationale,
       requiredVariables: capabilityRequiredVariables(item),
+      ...(input.inputs?.length ? { inputs: input.inputs } : {}),
     },
   });
 }
@@ -8471,14 +8954,21 @@ async function personalGitHubStatusForGrant(
           subjectId,
         }),
       ),
-    loadRepositoryCount: async (subjectId, connection) => {
+    loadRepositoryChoice: async (subjectId, connection) => {
       const state = await getPersonalGitHubRepositorySelectionState(deps.db, {
         accountId: grant.accountId,
         originWorkspaceId: connection.workspaceId,
         subjectId,
         connectionId: connection.id,
       });
-      return state ? state.repositories.length : null;
+      if (!state) return null;
+      return {
+        repositoryCount: state.repositories.length,
+        // A mode saved while the deployment allowed it is not used once it no longer does.
+        allRepositoriesAccess: deps.settings.githubPersonalAllRepositoriesEnabled
+          ? (state.allRepositoriesAccess ?? null)
+          : null,
+      };
     },
   });
 }
@@ -8495,7 +8985,7 @@ function registerGitHubConnectTool(
     "github_connect_link",
     {
       description: deps.settings.githubPersonalOauthEnabled
-        ? `Report both GitHub identities and their setup links. ${GITHUB_IDENTITIES_GUIDANCE} The personal field covers the person's own account: connected, login and repositoryCount, or connectUrl to give them when it is not connected (manageUrl opens their repository chooser). The other fields are the workspace's GitHub app: truthful workspace binding status, installations, and for a caller with github:manage a fresh installUrl (also linkUrl) to install it on another organization or account. ${GITHUB_APP_SETTINGS_GUIDANCE} When unclear, explain the difference in one or two sentences. On personal repositories mounted in a managed sandbox, git and gh act as the person; elsewhere use github_personal__* tools. Never returns tokens.`
+        ? `Report both GitHub identities and their setup links. ${githubIdentitiesGuidance(deps.settings.githubPersonalAllRepositoriesEnabled)} The personal field covers the person's own account: connected, login${deps.settings.githubPersonalAllRepositoriesEnabled ? ", repositoryCount (their chosen list) and allRepositories" : " and repositoryCount"}, or connectUrl to give them when it is not connected (manageUrl opens their repository chooser).${deps.settings.githubPersonalAllRepositoriesEnabled ? " When allRepositories.enabled, any repository the person can reach on GitHub is usable as them up to allRepositories.access, without choosing it first." : ""} The other fields are the workspace's GitHub app: truthful workspace binding status, installations, and for a caller with github:manage a fresh installUrl (also linkUrl) to install it on another organization or account. ${GITHUB_APP_SETTINGS_GUIDANCE} When unclear, explain the difference in one or two sentences. On personal repositories mounted in a managed sandbox, git and gh act as the person; elsewhere use github_personal__* tools. Never returns tokens.`
         : `Report truthful GitHub App workspace binding status and, for a human grant with github:manage, return the fresh GitHub owner-consent link. ${GITHUB_APP_SETTINGS_GUIDANCE} Server App configuration alone is never reported as a usable binding. Personal GitHub sign-in is not enabled on this deployment (personal.status is disabled).`,
       inputSchema: {},
     },
@@ -8514,6 +9004,7 @@ function registerGitHubConnectTool(
           status: "unknown",
           login: null,
           repositoryCount: null,
+          allRepositories: null,
           connectUrl: null,
           manageUrl: null,
           note: "Your GitHub status could not be read right now; try again.",
@@ -8688,7 +9179,7 @@ const SESSION_DISCOVERY_UUID =
 
 function normalizeSessionDiscoveryTimestamp(value: string, label: string): string {
   if (!SESSION_DISCOVERY_TIMESTAMP.test(value) || Number.isNaN(new Date(value).getTime())) {
-    throw new Error(`sessions_list ${label} must be an ISO UTC date-time`);
+    throw new ToolArgumentError(`sessions_list ${label} must be an ISO UTC date-time`);
   }
   // Preserve up to six fractional digits. Converting through JS Date would
   // discard PostgreSQL microseconds and can skip equal-millisecond rows.
@@ -8697,11 +9188,13 @@ function normalizeSessionDiscoveryTimestamp(value: string, label: string): strin
 
 function normalizeSessionDiscoveryRevision(value: string, label: string): string {
   if (!SESSION_DISCOVERY_REVISION.test(value)) {
-    throw new Error(`sessions_list ${label} must be a decimal activity revision`);
+    throw new ToolArgumentError(`sessions_list ${label} must be a decimal activity revision`);
   }
   const revision = BigInt(value);
   if (revision > SESSION_DISCOVERY_REVISION_MAX) {
-    throw new Error(`sessions_list ${label} exceeds the database activity revision range`);
+    throw new ToolArgumentError(
+      `sessions_list ${label} exceeds the database activity revision range`,
+    );
   }
   return revision.toString();
 }
@@ -8728,7 +9221,7 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
         (originSiteId !== null &&
           (typeof originSiteId !== "string" || !SESSION_DISCOVERY_UUID.test(originSiteId)))
       ) {
-        throw new Error("invalid cursor fields");
+        throw new ToolArgumentError("invalid cursor fields");
       }
       decoded = {
         v: originSiteId ? 4 : orderBy === "relevance" ? 3 : 2,
@@ -8823,7 +9316,7 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
       typeof parsed.id !== "string" ||
       !SESSION_DISCOVERY_UUID.test(parsed.id)
     ) {
-      throw new Error("invalid cursor fields");
+      throw new ToolArgumentError("invalid cursor fields");
     }
     if (
       relevance &&
@@ -8832,10 +9325,10 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
         typeof parsed.filterHash !== "string" ||
         !/^[0-9a-f]{64}$/.test(parsed.filterHash))
     ) {
-      throw new Error("invalid relevance cursor fields");
+      throw new ToolArgumentError("invalid relevance cursor fields");
     }
     if (!relevance && (parsed.sortRank !== undefined || parsed.filterHash !== undefined)) {
-      throw new Error("chronological cursor cannot carry relevance fields");
+      throw new ToolArgumentError("chronological cursor cannot carry relevance fields");
     }
     const sortAt = normalizeSessionDiscoveryTimestamp(parsed.sortAt, "cursor sortAt");
     const snapshotAt = normalizeSessionDiscoveryTimestamp(parsed.snapshotAt, "cursor snapshotAt");
@@ -8844,7 +9337,9 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
       "cursor sortRevision",
     );
     if (BigInt(sortRevision) >= 1n << 64n) {
-      throw new Error("cursor sortRevision exceeds the database activity revision range");
+      throw new ToolArgumentError(
+        "cursor sortRevision exceeds the database activity revision range",
+      );
     }
     const snapshotRevision = normalizeSessionDiscoveryRevision(
       parsed.snapshotRevision,
@@ -8855,10 +9350,10 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
         ? null
         : normalizeSessionDiscoveryRevision(parsed.updatedAfter, "cursor updatedAfter");
     if (normalizedUpdatedAfter !== null && parsed.orderBy !== "updatedAt") {
-      throw new Error("incremental cursor requires updatedAt order");
+      throw new ToolArgumentError("incremental cursor requires updatedAt order");
     }
     if (parsed.orderBy === "createdAt" && (sortRevision !== "0" || snapshotRevision !== "0")) {
-      throw new Error("creation cursor cannot carry activity revisions");
+      throw new ToolArgumentError("creation cursor cannot carry activity revisions");
     }
     const orderBy: SessionDiscoveryOrderBy = relevance
       ? "relevance"
@@ -8876,7 +9371,7 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
       ...(isV4 ? { originSiteId: parsed.originSiteId as string } : {}),
     };
   } catch {
-    throw new Error("sessions_list cursor is invalid");
+    throw new ToolArgumentError("sessions_list cursor is invalid");
   }
 }
 
@@ -9183,7 +9678,7 @@ export function capSessionDiscoveryPage(
 function parseMcpDate(raw: string, label: string): Date {
   const date = new Date(raw);
   if (Number.isNaN(date.getTime())) {
-    throw new Error(`${label} must be an ISO date-time`);
+    throw new ToolArgumentError(`${label} must be an ISO date-time`);
   }
   return date;
 }

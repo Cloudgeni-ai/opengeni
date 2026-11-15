@@ -30,7 +30,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use compute_core::{Durability, Host, Input, Level, SandboxId};
+use compute_core::{Host, Input, Level, SandboxId};
 use compute_engine::Engine;
 use compute_protocol::fleet::{Ruling, Verdict};
 use tokio::sync::oneshot;
@@ -117,6 +117,7 @@ impl Command {
             Self::Traced(_, command) => command.sandbox(),
             Self::Release { .. }
             | Self::Status { .. }
+            | Self::Keep { .. }
             | Self::Inventory { .. }
             | Self::Adopt { .. }
             | Self::HandOff { .. }
@@ -137,6 +138,7 @@ impl Command {
             | Self::Check { reply, .. }
             | Self::Adopt { reply, .. }
             | Self::HandOff { reply, .. }
+            | Self::Keep { reply, .. }
             | Self::Reconcile { reply, .. } => {
                 let _ = reply.send(Err(error));
             }
@@ -576,7 +578,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// Handed off awake, every hold on it ends at once: from then on the
     /// hand-off refuses new ones, as it refuses wakes, so the streams that
     /// held it end at their next write, and nothing keeps it from being
-    /// paused, saved and archived with its memory. Holds named in its
+    /// paused, saved and archived with its memory. An idle one goes as its
+    /// rules say: with a memory image if a copy holds one or its memory
+    /// is kept, and otherwise with its files alone. Holds named in its
     /// record stay recorded: one renewed after a hand-off that did not
     /// finish holds it again.
     pub(super) fn hand_off(&mut self, id: Id, owner: OwnerEpoch, awake: bool, reply: Reply<()>) {
@@ -658,7 +662,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             let _ = reply.send(Err(HostError::Awake(id)));
             return;
         }
-        match self.request_sleep(id, Level::Archived) {
+        // One in use goes with its programs, which wake on the host it
+        // goes to. An idle one goes as its rules say: one whose memory is
+        // not kept has its VM ended, and its files alone go.
+        match self.request_sleep(id, Level::Archived, wanted || view.runs()) {
             Ok(Room::Now) => {}
             Ok(Room::AfterReading) => {
                 // Only the next disk reading can tell whether its save
@@ -736,8 +743,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             self.fail_hand_off(id, &HostError::Broken(id));
             return;
         }
-        if view.is_some_and(|view| view.unsavable && view.state.durability == Durability::Volatile)
-        {
+        if view.is_some_and(|view| view.unsavable && !view.state.memory_saved) {
             self.fail_hand_off(id, &super::requests::cannot_save(id));
             return;
         }
@@ -998,11 +1004,11 @@ impl FilesOnly {
     /// Why `claimed`, adopted for a sandbox of `config`, is taken up from
     /// its files alone, with `from_files` as the adopt asked.
     fn of(claimed: &Claimed, config: &SandboxConfig, from_files: bool) -> Self {
-        if !claimed.memory {
-            Self::No
-        } else if claimed.made_at.differs(config) {
+        if claimed.memory && claimed.made_at.differs(config) {
             Self::Reshaped
         } else if from_files {
+            // Also when the copy names no memory image, as a checkpoint's
+            // does: whatever ran in the sandbox on its lost owner is gone.
             Self::Stale
         } else {
             Self::No
@@ -1017,7 +1023,9 @@ impl FilesOnly {
 /// copy without the image and leaves it be. The sandbox boots fresh from
 /// its disk, and whatever ran in it is gone: for a stale image that raises
 /// [`Alarm::ProgramsLost`], as a VM that died does, while a resize, which
-/// asked for it, is only logged.
+/// asked for it, is only logged. A stale copy that names no memory image,
+/// such as a checkpoint's, needs no change in the store, but raises the
+/// alarm all the same.
 async fn files_only<S: Store>(
     store: &S,
     observer: &Observer,
@@ -1027,6 +1035,15 @@ async fn files_only<S: Store>(
     why: FilesOnly,
 ) -> Result<Claimed, HostError> {
     if why == FilesOnly::No {
+        return Ok(claimed);
+    }
+    if !claimed.memory {
+        tracing::info!(%id, "adopted from its files: its last owner was lost, and the copy holds no memory");
+        let what = "running programs lost: adopted from its files after its last owner was lost";
+        observer.alarm(
+            Alarm::ProgramsLost,
+            alarm_event(what).with("compute.sandbox.id", id.to_string()),
+        );
         return Ok(claimed);
     }
     let change = Stamp {

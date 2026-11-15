@@ -2499,7 +2499,9 @@ describe("OpenGeniClient", () => {
             pinned: [],
             sessions: [],
             nextCursor: null,
-            ...(request.url.includes("channelId=") ? { filtersApplied: true } : {}),
+            ...(request.url.includes("channelId=") || request.url.includes("createdBySubjectId=")
+              ? { filtersApplied: true }
+              : {}),
           })
         : jsonResponse([]),
     );
@@ -2518,6 +2520,9 @@ describe("OpenGeniClient", () => {
       updatedBefore: "2026-09-05T00:00:00.000Z",
     });
     await client.getSessionLineage(WORKSPACE_ID, SESSION_ID);
+    await client.listSessionPage(WORKSPACE_ID, {
+      createdBy: { subjectId: "api_key:key-1" },
+    });
     expect(requests[0]!.url).toBe(
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?limit=5&parentSessionId=null`,
     );
@@ -2535,6 +2540,10 @@ describe("OpenGeniClient", () => {
     );
     expect(requests[5]!.url).toBe(
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/lineage`,
+    );
+    // Without a kind, every session the subject created, whichever kind it was frozen as.
+    expect(requests[6]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?view=page&createdBySubjectId=api_key%3Akey-1`,
     );
   });
 

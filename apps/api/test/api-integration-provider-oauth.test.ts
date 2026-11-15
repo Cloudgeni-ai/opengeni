@@ -5,7 +5,10 @@ import {
   MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION,
   MICROSOFT_TEAMS_INTEGRATION_DEFINITION,
   MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION,
+  MICROSOFT_OUTLOOK_CONTACTS_INTEGRATION_DEFINITION,
   MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
+  MICROSOFT_SHAREPOINT_INTEGRATION_DEFINITION,
+  integrationDefinitionById,
 } from "@opengeni/capabilities";
 import type { Settings } from "@opengeni/config";
 import {
@@ -180,17 +183,18 @@ function providerFixture() {
         info: { title: sourceTitle, version: "1" },
         servers: [{ url: "https://graph.microsoft.com/v1.0" }],
         paths: {
-          "/me/drive/root/children": {
+          "/drives/{drive-id}/items/{driveItem-id}/children": {
             get: { operationId: "listFiles", responses: { "200": { description: "Files" } } },
           },
           "/me/joinedTeams": {
             get: { operationId: "listJoinedTeams", responses: { "200": { description: "Teams" } } },
           },
-          "/me/drive/items/{itemId}": {
+          "/drives/{drive-id}/items/{driveItem-id}": {
             get: {
               operationId: "getFile",
               parameters: [
-                { name: "itemId", in: "path", required: true, schema: { type: "string" } },
+                { name: "drive-id", in: "path", required: true, schema: { type: "string" } },
+                { name: "driveItem-id", in: "path", required: true, schema: { type: "string" } },
               ],
               responses: { "200": { description: "File" } },
             },
@@ -269,6 +273,13 @@ function testApp(fixture: ReturnType<typeof providerFixture>) {
     managedAuth: null,
     apiIntegrationOAuthFetch: fixture.fetch,
     apiIntegrationSourceFetch: fixture.fetch,
+    // The fixture serves a changing document at each definition's own source URL.
+    apiIntegrationDefinitionLookup: (definitionId: string) => {
+      const definition = integrationDefinitionById(definitionId);
+      if (definition?.source.kind !== "openapi") return definition;
+      const { pinned: _pinned, ...source } = definition.source;
+      return { ...definition, source };
+    },
   } as never);
 }
 
@@ -676,7 +687,9 @@ describe("API Integration provider OAuth", () => {
     expect(previewResponse.status).toBe(200);
     const preview = await previewResponse.json();
     expect(preview.state).toBe("preview");
-    expect(preview.nextAction.operations).toHaveLength(2);
+    // The fixture backs three reviewed tools (its item read also backs the read
+    // by path), and the definition adds its three generic path tools.
+    expect(preview.nextAction.operations).toHaveLength(6);
     const installInput = {
       expectedRevision: 3,
       idempotencyKey: crypto.randomUUID(),
@@ -1428,6 +1441,159 @@ describe("API Integration provider OAuth", () => {
     expect(await otherInstall.text()).toContain("connections:write");
   }, 60_000);
 
+  // Regression: installing a newer revision moves every instance of the
+  // integration, including other people's personal ones whose Connections the
+  // installer cannot see. That once failed the install step with a 500 and
+  // left the attempt refusing further advances as in flight.
+  test("a person's install of a newer revision through the preview step moves another person's personal instance", async () => {
+    if (!available) return;
+    // Two people in one workspace.
+    const ids = { account: crypto.randomUUID(), workspace: crypto.randomUUID() };
+    const join = async (subjectId: string) => {
+      const access = await bootstrapWorkspace(client.db, {
+        accountExternalSource: "test",
+        accountExternalId: `provider-oauth-account-${ids.account}`,
+        accountName: "Provider OAuth account",
+        workspaceExternalSource: "test",
+        workspaceExternalId: `provider-oauth-workspace-${ids.workspace}`,
+        workspaceName: "Provider OAuth workspace",
+        subjectId,
+      });
+      const grant = access.workspaceGrants[0]!;
+      return { accountId: grant.accountId, workspaceId: grant.workspaceId, subjectId };
+    };
+    const workspace = await join(`user:provider-oauth-${crypto.randomUUID()}`);
+    workspaceIds.push(workspace.workspaceId);
+    const laterSubjectId = `user:provider-oauth-later-${crypto.randomUUID()}`;
+    expect((await join(laterSubjectId)).workspaceId).toBe(workspace.workspaceId);
+    const fixture = providerFixture();
+    const app = testApp(fixture);
+    const base = `/v1/workspaces/${workspace.workspaceId}/connect/attempts`;
+    const headersFor = async (subjectId: string) => ({
+      authorization: await bearer({ ...workspace, subjectId }),
+      "content-type": "application/json",
+      "x-opengeni-access-key": EDGE_ACCESS_KEY,
+      [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+    });
+    const connect = async (headers: Record<string, string>) => {
+      fixture.microsoftPlans.push({
+        scopes: [...MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+        refreshToken: "microsoft-refresh-token",
+      });
+      const begun = await app.request(base, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          providerId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
+          ownership: "personal",
+          returnUrl: "https://host.example/chat",
+          idempotencyKey: crypto.randomUUID(),
+        }),
+      });
+      if (begun.status !== 200) throw new Error(`begin failed: ${await begun.text()}`);
+      const attempt = await begun.json();
+      await callback(fixture, new URL(attempt.nextAction.url).searchParams.get("state")!);
+      return attempt as { id: string };
+    };
+
+    // The first person connects their own account; the callback installs it.
+    const earlierHeaders = await headersFor(workspace.subjectId);
+    await connect(earlierHeaders);
+    const [earlier] = await listInstalledApiIntegrations(
+      client.db,
+      workspace.workspaceId,
+      workspace.subjectId,
+    );
+    expect(earlier).toBeDefined();
+
+    // The provider's description changes, so the next install is a newer
+    // revision. The second person's callback cannot read it, so the app
+    // takes the preview step.
+    fixture.setSourceTitle("Updated OneDrive fixture");
+    fixture.setMicrosoftPrincipalId("microsoft-principal-2");
+    const laterHeaders = await headersFor(laterSubjectId);
+    fixture.setSourceAvailable(false);
+    const attempt = await connect(laterHeaders);
+    const advance = (body: unknown) =>
+      app.request(`${base}/${attempt.id}/advance`, {
+        method: "POST",
+        headers: laterHeaders,
+        body: JSON.stringify(body),
+      });
+    // While the description is unreadable the preview fails; the attempt
+    // stays ready to advance again rather than refused as in flight.
+    const failed = await advance({
+      expectedRevision: 2,
+      idempotencyKey: crypto.randomUUID(),
+      action: { type: "retry" },
+    });
+    const afterFailure = await (
+      await app.request(`${base}/${attempt.id}`, { headers: laterHeaders })
+    ).json();
+    expect(failed.status).toBe(422);
+    expect(afterFailure).toMatchObject({
+      revision: 2,
+      state: "connected_but_incomplete",
+      credentialsCommitted: true,
+      integrationInstalled: false,
+    });
+    fixture.setSourceAvailable(true);
+    const preview = await (
+      await advance({
+        expectedRevision: afterFailure.revision,
+        idempotencyKey: crypto.randomUUID(),
+        action: { type: "retry" },
+      })
+    ).json();
+    if (preview.state !== "preview")
+      throw new Error(
+        `preview failed after ${failed.status}: ${JSON.stringify(preview)} ${JSON.stringify(afterFailure)}`,
+      );
+    const installed = await advance({
+      expectedRevision: preview.revision,
+      idempotencyKey: crypto.randomUUID(),
+      action: {
+        type: "install",
+        previewId: preview.nextAction.previewId,
+        contentHash: preview.nextAction.contentHash,
+        operationIds: preview.nextAction.operations.map(
+          (operation: { id: string }) => operation.id,
+        ),
+      },
+    });
+    expect(installed.status).toBe(200);
+    expect(await installed.json()).toMatchObject({
+      state: "complete",
+      credentialsCommitted: true,
+      integrationInstalled: true,
+    });
+
+    // Both people's instances now run the newer revision, each still bound to
+    // its own person's Connection.
+    const [laterInstance] = await listInstalledApiIntegrations(
+      client.db,
+      workspace.workspaceId,
+      laterSubjectId,
+    );
+    const [earlierInstance] = await listInstalledApiIntegrations(
+      client.db,
+      workspace.workspaceId,
+      workspace.subjectId,
+    );
+    expect(laterInstance!.revision.id).not.toBe(earlier!.revision.id);
+    expect(earlierInstance).toMatchObject({
+      instanceId: earlier!.instanceId,
+      revision: expect.objectContaining({ id: laterInstance!.revision.id }),
+      connectionRef: expect.objectContaining({
+        connectionId: earlier!.connectionRef!.connectionId,
+      }),
+      connectionStatus: "active",
+    });
+    expect(laterInstance!.connectionRef!.connectionId).not.toBe(
+      earlier!.connectionRef!.connectionId,
+    );
+  }, 60_000);
+
   test("a built-in integration finishes setup in its callback, with no step left for the app", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -1482,7 +1648,7 @@ describe("API Integration provider OAuth", () => {
       connectionRef: { connectionId: current.account.id },
     });
     // Every reviewed tool, exactly as the app's automatic install chose.
-    expect(installed!.allowedTools).toHaveLength(2);
+    expect(installed!.allowedTools).toHaveLength(6);
     // Nothing is pending for the app to resume.
     const pending = await (await app.request(base, { headers })).json();
     expect(JSON.stringify(pending)).not.toContain(attempt.id);
@@ -1668,7 +1834,7 @@ describe("API Integration provider OAuth", () => {
       definitionId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
       connectionRef: { connectionId: completed[0].account.id },
     });
-    expect(installed!.allowedTools).toHaveLength(2);
+    expect(installed!.allowedTools).toHaveLength(6);
     // Opening it again finds nothing left to do.
     expect(await (await finish()).json()).toEqual([]);
   }, 60_000);
@@ -1905,6 +2071,24 @@ describe("API Integration provider OAuth", () => {
       code: "provider_denied",
     },
     {
+      // "Approval required" / "Need admin approval", then Cancel or "Return to
+      // the application without granting consent".
+      name: "cancelled on the admin approval page (error_subcode=cancel)",
+      error: "access_denied",
+      subcode: "cancel",
+      description: "AADSTS65004: User declined to consent to access the app.",
+      state: "cancelled",
+      code: "provider_denied",
+    },
+    {
+      name: "cancelled without a description (error_subcode=cancel)",
+      error: "access_denied",
+      subcode: "cancel",
+      description: undefined,
+      state: "cancelled",
+      code: "provider_denied",
+    },
+    {
       name: "access_denied without a description",
       error: "access_denied",
       description: undefined,
@@ -1950,11 +2134,15 @@ describe("API Integration provider OAuth", () => {
         expect(begun.status).toBe(200);
         const attempt = await begun.json();
         const signIn = new URL(attempt.nextAction.url);
+        // The sign-in step already carries the organization's approval link,
+        // for a person who never comes back from Microsoft's approval page.
+        const offered = new URL(attempt.nextAction.organizationApprovalUrl);
         const query = new URLSearchParams({
           error: returned.error,
           state: signIn.searchParams.get("state")!,
         });
         if (returned.description) query.set("error_description", returned.description);
+        if ("subcode" in returned) query.set("error_subcode", returned.subcode);
         const response = await app.request(`/v1/integrations/provider-oauth/callback?${query}`);
         expect(response.status, returned.name).toBe(302);
         expect(response.headers.get("location"), returned.name).toBe(
@@ -1976,6 +2164,32 @@ describe("API Integration provider OAuth", () => {
         expect(link.searchParams.get("redirect_uri")).toBe(signIn.searchParams.get("redirect_uri"));
         expect(link.searchParams.get("state")).toBe("microsoft_admin_consent");
         expect(link.searchParams.get("scope")).not.toContain("offline_access");
+        // One approval covers every Microsoft service of the app in this
+        // workspace, so adding Calendar after Mail needs no second approval.
+        const approved = link.searchParams.get("scope")!.split(" ");
+        for (const service of [
+          MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
+          MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION,
+          MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION,
+        ])
+          for (const scope of service.authentication.scopes)
+            if (scope !== "offline_access")
+              expect(approved, returned.name).toContain(`https://graph.microsoft.com/${scope}`);
+        // Teams is not offered in this workspace, so IT isn't asked for it.
+        const offeredServices = [
+          MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
+          MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION,
+          MICROSOFT_OUTLOOK_CONTACTS_INTEGRATION_DEFINITION,
+          MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION,
+          MICROSOFT_SHAREPOINT_INTEGRATION_DEFINITION,
+        ].flatMap((service) => service.authentication.scopes);
+        const teamsOnly = MICROSOFT_TEAMS_INTEGRATION_DEFINITION.authentication.scopes.filter(
+          (scope) => !offeredServices.includes(scope),
+        );
+        expect(teamsOnly.length).toBeGreaterThan(0);
+        for (const scope of teamsOnly)
+          expect(approved).not.toContain(`https://graph.microsoft.com/${scope}`);
+        expect(link.toString(), returned.name).toBe(offered.toString());
         // The approval link never carries the sign-in's signed state.
         expect(current.error.message).not.toContain(signIn.searchParams.get("state")!);
       }
@@ -1985,6 +2199,138 @@ describe("API Integration provider OAuth", () => {
       ).toEqual([]);
     }, 60_000);
   }
+
+  // The organization's integration policy decides which services the
+  // workspace offers; the approval link asks IT only for those.
+  for (const offer of [
+    {
+      name: "only Outlook Mail and Calendar",
+      services: [
+        MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
+        MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION,
+      ],
+    },
+    {
+      name: "Outlook Mail and Calendar, OneDrive and SharePoint",
+      services: [
+        MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
+        MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION,
+        MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION,
+        MICROSOFT_SHAREPOINT_INTEGRATION_DEFINITION,
+      ],
+    },
+  ]) {
+    test(`a workspace offering ${offer.name} gets an approval link for exactly those services`, async () => {
+      if (!available) return;
+      const workspace = await freshWorkspace();
+      await shared!
+        .admin`insert into organization_integration_policies (account_id, mode, allowed_integration_keys, revision)
+        values (${workspace.accountId}, 'restricted', ${shared!.admin.json(offer.services.map((service) => service.id))}, 1)`;
+      const app = testApp(providerFixture());
+      const headers = {
+        authorization: await bearer(workspace),
+        "content-type": "application/json",
+        "x-opengeni-access-key": EDGE_ACCESS_KEY,
+        [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+      };
+      const base = `/v1/workspaces/${workspace.workspaceId}/connect/attempts`;
+      const expected = [
+        ...new Set(
+          offer.services
+            .flatMap((service) => service.authentication.scopes)
+            .filter((scope) => scope !== "offline_access")
+            .map((scope) => `https://graph.microsoft.com/${scope}`),
+        ),
+      ].sort();
+      for (const requested of [
+        MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
+        MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION,
+      ]) {
+        const begun = await app.request(base, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            providerId: requested.id,
+            ownership: "personal",
+            returnUrl: "https://host.example/capabilities",
+            idempotencyKey: crypto.randomUUID(),
+          }),
+        });
+        expect(begun.status, await begun.clone().text()).toBe(200);
+        const attempt = await begun.json();
+        const offered = new URL(attempt.nextAction.organizationApprovalUrl);
+        expect(offered.searchParams.get("scope")!.split(" ").sort(), requested.id).toEqual(
+          expected,
+        );
+        // The help shown after Microsoft's "Need admin approval" page is the same link.
+        const signIn = new URL(attempt.nextAction.url);
+        const query = new URLSearchParams({
+          error: "access_denied",
+          error_subcode: "cancel",
+          error_description: "AADSTS65004: User declined to consent to access the app.",
+          state: signIn.searchParams.get("state")!,
+        });
+        const response = await app.request(`/v1/integrations/provider-oauth/callback?${query}`);
+        expect(response.status).toBe(302);
+        const current = await (await app.request(`${base}/${attempt.id}`, { headers })).json();
+        const link = /https:\/\/login\.microsoftonline\.com\/\S+?(?=\s|$)/.exec(
+          current.error.message,
+        );
+        expect(new URL(link![0]).toString(), requested.id).toBe(offered.toString());
+      }
+    }, 60_000);
+  }
+
+  test("a sign-in popup left on Microsoft's approval page ends on the closing page with the approval link", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const app = testApp(providerFixture());
+    const headers = {
+      authorization: await bearer(workspace),
+      "content-type": "application/json",
+      "x-opengeni-access-key": EDGE_ACCESS_KEY,
+      [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+    };
+    const base = `/v1/workspaces/${workspace.workspaceId}/connect/attempts`;
+    const begun = await app.request(base, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        providerId: MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION.id,
+        ownership: "personal",
+        returnUrl: "https://host.example/capabilities",
+        finishInPopup: true,
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(begun.status).toBe(200);
+    const attempt = await begun.json();
+    const signIn = new URL(attempt.nextAction.url);
+    const query = new URLSearchParams({
+      error: "access_denied",
+      error_subcode: "cancel",
+      error_description: "AADSTS65004: User declined to consent to access the app.",
+      state: signIn.searchParams.get("state")!,
+    });
+    const response = await app.request(`/v1/integrations/provider-oauth/callback?${query}`);
+    // The popup never loads a second copy of the host page.
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe(
+      "http://127.0.0.1:8000/v1/integrations/connect/finished",
+    );
+    // The panel that started it reads the outcome: cancelled, with the
+    // organization's approval link to show instead of closing quietly.
+    const current = await (await app.request(`${base}/${attempt.id}`, { headers })).json();
+    expect(current).toMatchObject({
+      state: "cancelled",
+      nextAction: { type: "none" },
+      error: { code: "provider_denied", retryable: true },
+    });
+    const link = /https:\/\/login\.microsoftonline\.com\/\S+?(?=\s|$)/.exec(current.error.message);
+    expect(new URL(link![0]).toString()).toBe(
+      new URL(attempt.nextAction.organizationApprovalUrl).toString(),
+    );
+  }, 60_000);
 
   test("an administrator returning from the approval link sees whether it was approved", async () => {
     if (!available) return;
@@ -2003,6 +2349,10 @@ describe("API Integration provider OAuth", () => {
       );
       expect(refused.status, path).toBe(400);
       expect(await refused.text()).toContain("Not approved");
+      // A plain approval link without state (as in a setup guide).
+      const plain = await app.request(`${path}?admin_consent=True&tenant=tenant-1`);
+      expect(plain.status, path).toBe(200);
+      expect(await plain.text()).toContain("Approved");
     }
   });
 });

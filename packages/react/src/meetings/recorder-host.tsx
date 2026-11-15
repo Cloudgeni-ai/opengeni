@@ -7,18 +7,22 @@ import { getDesktopMeetingDetection } from "@opengeni/sdk/desktop-bridge";
 import { useRecorder } from "../recordings";
 
 import type { MeetingRecorderStore } from "./recorder-context";
+import { registerLiveRecordingCapture } from "./sign-out-recordings";
 
 export default function RecorderHost({
   store,
   workspaceId,
+  ownerId = null,
   client,
 }: {
   store: MeetingRecorderStore;
   workspaceId: string;
+  ownerId?: string | null;
   client?: object | undefined;
 }) {
   const recorder = useRecorder({
     workspaceId,
+    ...(ownerId ? { ownerId } : {}),
     ...(client ? { client } : {}),
     onFinished: (recordingId) => store.markFinished(recordingId),
   });
@@ -38,6 +42,14 @@ export default function RecorderHost({
   // Closing the tab ends a recording in progress. Chunks already cut are safe
   // on this device and upload next time, so only live capture asks first.
   const capturing = recorder.state === "recording" || recorder.state === "paused";
+  // Signing this person out while they record stops and discards the capture
+  // when they choose to discard, so no audio is written after it is gone.
+  const discardCapture = useRef(recorder.discard);
+  discardCapture.current = recorder.discard;
+  useEffect(() => {
+    if (!capturing) return;
+    return registerLiveRecordingCapture({ ownerId, discard: () => discardCapture.current() });
+  }, [capturing, ownerId]);
   useEffect(() => {
     if (!capturing) return;
     const warn = (event: BeforeUnloadEvent) => {

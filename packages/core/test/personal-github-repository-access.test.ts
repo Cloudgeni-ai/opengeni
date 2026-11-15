@@ -286,6 +286,28 @@ describe("livePersonalGitHubRepository", () => {
     expect(calls).toBe(2);
   });
 
+  test("an enterprise managed user's owner is looked up; an invalid owner never asks", async () => {
+    const asked: string[] = [];
+    const githubGet = async (url: URL) => {
+      asked.push(url.pathname);
+      return new Response(JSON.stringify({ ...payload, id: 88, full_name: "octocat_acme/tools" }));
+    };
+    const found = await livePersonalGitHubRepository({
+      cacheScope: "emu",
+      repository: { fullName: "octocat_acme/tools" },
+      githubGet,
+    });
+    expect(found?.fullName).toBe("octocat_acme/tools");
+    expect(
+      await livePersonalGitHubRepository({
+        cacheScope: "emu",
+        repository: { fullName: "_octocat/tools" },
+        githubGet,
+      }),
+    ).toBeNull();
+    expect(asked).toEqual(["/repos/octocat_acme/tools"]);
+  });
+
   test("follows a renamed repository's redirect on the API origin only", async () => {
     const asked: string[] = [];
     const githubGet = async (url: URL) => {

@@ -3317,6 +3317,12 @@ describe("API component integration", () => {
       headers: { "content-type": "application/json" },
     });
     const session = (await created.json()) as { id: string };
+    // Create also answers before its fanout and wake; deliver them so the
+    // prompt below starts from a settled session.
+    expect(postCommitTasks).toHaveLength(1);
+    expect(workflowClient.wakeups).toHaveLength(0);
+    await Promise.all(postCommitTasks.splice(0).map(async (task) => await task()));
+    expect(workflowClient.wakeups).toHaveLength(1);
     await setSessionStatus(dbClient.db, workspaceId, session.id, "idle", null);
     const publishedBefore = bus.published.length;
     const wakeupsBefore = workflowClient.wakeups.length;

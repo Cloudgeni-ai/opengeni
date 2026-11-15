@@ -67,6 +67,8 @@ export async function deriveOrganizationUserSetupToken(
     invitationId: string;
     deliveryId: string;
     transport?: OrganizationUserSetupEmailTokenTransport;
+    /** Where the link opens; defaults to OPENGENI_PUBLIC_BASE_URL. */
+    baseUrl?: string;
   },
 ): Promise<{ token: string; digest: string; url: string }> {
   const secret = requiredSetupSecret(settings);
@@ -86,7 +88,7 @@ export async function deriveOrganizationUserSetupToken(
   );
   const token = base64Url(new Uint8Array(signature));
   const digest = await sha256Hex(token);
-  const url = new URL("/setup-account", requiredPublicBaseUrl(settings));
+  const url = new URL("/setup-account", input.baseUrl ?? requiredPublicBaseUrl(settings));
   if ((input.transport ?? settings.organizationUserSetupEmailTokenTransport) === "query") {
     // Email security gateways routinely wrap links and may discard URL
     // fragments. Enable this only after the compatibility web rollout; the
@@ -181,6 +183,12 @@ export async function resolveOrganizationUserSetupDeliveryEmail(
     providerIdempotencyScope: string;
     frozenTransport: OrganizationUserSetupEmailTokenTransport | null;
     frozenPayloadDigest: string | null;
+    /**
+     * Public base URLs the link may open on, preferred first: the host the
+     * invitation was sent from (the app, or Opengeni Console), then the others.
+     * A retry finds the one its frozen payload used.
+     */
+    setupBaseUrls?: readonly string[];
   },
 ): Promise<{
   transport: OrganizationUserSetupEmailTokenTransport;
@@ -194,11 +202,18 @@ export async function resolveOrganizationUserSetupDeliveryEmail(
     : input.frozenPayloadDigest
       ? ["fragment", "query"]
       : [settings.organizationUserSetupEmailTokenTransport];
-  for (const transport of candidates) {
+  const bases = input.setupBaseUrls?.length
+    ? input.setupBaseUrls
+    : [requiredPublicBaseUrl(settings)];
+  const baseCandidates = input.frozenPayloadDigest ? bases : bases.slice(0, 1);
+  for (const [transport, baseUrl] of candidates.flatMap((candidate) =>
+    baseCandidates.map((base) => [candidate, base] as const),
+  )) {
     const setup = await deriveOrganizationUserSetupToken(settings, {
       invitationId: input.invitationId,
       deliveryId: input.deliveryId,
       transport,
+      baseUrl,
     });
     const message = renderOrganizationUserSetupEmail({
       senderEmail: input.senderEmail,

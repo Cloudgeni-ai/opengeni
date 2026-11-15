@@ -14,6 +14,14 @@
 //! than its bound, more than its guest's file cache, with the neighbour
 //! still clear of every limit.
 //!
+//! A share is the host's only as far as the rest of the machine keeps to
+//! its own memory, as VMs beside it do: the kernel's free memory is the
+//! machine's, and once the machine's own page cache fills it, a sandbox
+//! growing within its request waits while the kernel reclaims that cache
+//! for it, however much room its share has. The gate leaves gigabytes of
+//! it behind (images, disks and builds of the tests before), so each host
+//! starts on a machine whose clean page cache is dropped.
+//!
 //! The hosts run on ordinary pages whatever profile the gate picked for
 //! the other tests: on huge pages nothing compresses and every sandbox is
 //! booked whole, so none borrows and there is nothing here to test.
@@ -40,6 +48,15 @@ const SHARE: &[&str] = &[
 ];
 
 const TOKEN: &str = "token-memory";
+
+/// Starts a host named `name` with the [`SHARE`], on a machine whose clean
+/// page cache is dropped first (see the module).
+async fn start_sharing(lab: &Path, name: &str, image: &Path) -> Host {
+    let synced = std::process::Command::new("sync").status().unwrap();
+    assert!(synced.success(), "sync: {synced}");
+    std::fs::write("/proc/sys/vm/drop_caches", "1").unwrap();
+    Host::start(lab, name, image, SHARE).await
+}
 
 fn find(status: &HostStatus, sandbox: Id) -> &SandboxStatus {
     status
@@ -179,7 +196,7 @@ async fn a_borrower_is_compressed_and_its_neighbour_within_its_request_never_wai
         return;
     };
     let image = image(&lab, &guest, SANDBOX);
-    let host = Host::start(&lab, "borrower", &image, SHARE).await;
+    let host = start_sharing(&lab, "borrower", &image).await;
     let (borrower, neighbour) = (id(0), id(1));
     let borrower_shell = start_held(&host, borrower, 4096, 1024).await;
     let neighbour_shell = start_held(&host, neighbour, 3072, 2048).await;
@@ -264,7 +281,7 @@ async fn a_borrower_whose_memory_does_not_compress_loses_only_the_program_that_t
         return;
     };
     let image = image(&lab, &guest, SANDBOX);
-    let host = Host::start(&lab, "random", &image, SHARE).await;
+    let host = start_sharing(&lab, "random", &image).await;
     let (borrower, neighbour) = (id(0), id(1));
     let borrower_shell = start_held(&host, borrower, 4096, 1024).await;
     let neighbour_shell = start_held(&host, neighbour, 3072, 2048).await;

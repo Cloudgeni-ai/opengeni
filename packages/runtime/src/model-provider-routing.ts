@@ -28,10 +28,16 @@ import OpenAI, { APIError } from "openai";
 import { AnthropicMessagesModel } from "./anthropic-messages";
 import { projectChatToolImages } from "./chat-tool-images";
 import {
+  opaqueReasoningFingerprint,
+  rejectedOpaqueReasoningFilter,
+  rememberRefusedOpaqueReasoning,
+} from "./opaque-reasoning-replay";
+import {
   chatRouteHoistsSystemMessages,
   projectHistoryForProvider,
   responsesRouteDeclaresAdditionalTools,
   withArtifactOrigin,
+  withToolCallArtifactOrigin,
 } from "./provider-history-adapter";
 import {
   appendChatReasoningDetails,
@@ -43,11 +49,7 @@ import {
   type ChatReasoning,
 } from "./chat-reasoning";
 import { instrumentedModelFetch } from "./model-provider-client";
-import {
-  CODEX_MODEL_ID_PREFIX,
-  classifyEncryptedArtifactRejection,
-  opaqueProviderArtifactFingerprint,
-} from "@opengeni/codex";
+import { CODEX_MODEL_ID_PREFIX, classifyEncryptedArtifactRejection } from "@opengeni/codex";
 import { XAI_SUBSCRIPTION_MODEL_ID_PREFIX } from "@opengeni/xai-subscription";
 
 import { AppendOnlyOpenAIResponsesModel } from "./append-only-responses-model";
@@ -143,6 +145,7 @@ function chatRequest(
   request: ModelRequest,
   modelId: string,
   declaredReasoning?: DeclaredModelReasoning,
+  artifactScope?: string,
 ): ModelRequest {
   request = withDeclaredReasoning(request, declaredReasoning);
   const input =
@@ -150,6 +153,7 @@ function chatRequest(
       ? request.input
       : (projectHistoryForProvider(request.input, "chat", {
           hoistsSystemMessages: chatRouteHoistsSystemMessages(modelId),
+          ...(artifactScope !== undefined ? { artifactScope } : {}),
         }) as ModelRequest["input"]);
   return projectChatReasoning(
     projectChatToolImages(input === request.input ? request : { ...request, input }),
@@ -212,21 +216,42 @@ function sdkChatInputTokenDetails(details: Record<string, unknown>): Record<stri
 export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
   private readonly modelId: string;
   private readonly declaredReasoning: DeclaredModelReasoning | undefined;
+  /**
+   * The serving provider's id. Tool calls carrying that provider's own fields
+   * record it, so only this provider receives those fields again.
+   */
+  private readonly artifactScope: string | undefined;
 
   constructor(
     client: ConstructorParameters<typeof OpenAIChatCompletionsModel>[0],
     model: ConstructorParameters<typeof OpenAIChatCompletionsModel>[1],
     declaredReasoning?: DeclaredModelReasoning,
+    artifactScope?: string,
   ) {
     super(client, model);
     this.modelId = model;
     this.declaredReasoning = declaredReasoning;
+    this.artifactScope = artifactScope;
+  }
+
+  private request(request: ModelRequest): ModelRequest {
+    return chatRequest(request, this.modelId, this.declaredReasoning, this.artifactScope);
+  }
+
+  private withToolCallOrigins<T>(output: T[]): T[] {
+    const scope = this.artifactScope;
+    if (scope === undefined) return output;
+    let changed = false;
+    const tagged = output.map((item) => {
+      const next = withToolCallArtifactOrigin(item, scope);
+      changed ||= next !== item;
+      return next;
+    });
+    return changed ? tagged : output;
   }
 
   override async getResponse(request: ModelRequest): Promise<ModelResponse> {
-    const response = await super.getResponse(
-      chatRequest(request, this.modelId, this.declaredReasoning),
-    );
+    const response = await super.getResponse(this.request(request));
     if (isUnknownFinishReason(chatCompletionFinishReason(response.providerData))) {
       throw new UnknownModelFinishReasonError();
     }
@@ -237,7 +262,7 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
       {
         ...response,
         output: withChatReasoning(
-          response.output,
+          this.withToolCallOrigins(response.output),
           chatReasoning(primaryChatChoice(response.providerData)?.message),
           chatReasoningDetails(primaryChatChoice(response.providerData)?.message),
         ),
@@ -252,9 +277,7 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
     let reasoningDetails: Record<string, unknown>[] | undefined;
     let reportedCostUsd: string | undefined;
     let inputTokensDetails: Record<string, unknown> | undefined;
-    for await (const event of super.getStreamedResponse(
-      chatRequest(request, this.modelId, this.declaredReasoning),
-    )) {
+    for await (const event of super.getStreamedResponse(this.request(request))) {
       if (event.type === "model") {
         const rawUsage = (event.event as { usage?: unknown } | undefined)?.usage;
         // Mirror the SDK's last non-null usage snapshot, not a sum of chunks.
@@ -288,6 +311,9 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
         }
         if (isUnknownFinishReason(finishReason)) throw new UnknownModelFinishReasonError();
       }
+      // An output-limit stop carries the Responses `incomplete` shape, as the
+      // Claude adapter's does, so the run can tell it from a finished response.
+      const outputLimited = finishReason === "length";
       yield event.type === "response_done"
         ? {
             ...event,
@@ -300,48 +326,38 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
                         ...event.response.usage,
                         inputTokensDetails: sdkChatInputTokenDetails(inputTokensDetails),
                       },
-                      // Match non-streaming Chat's providerData.usage evidence so
-                      // telemetry retains invalid-field diagnostics and unknowns
-                      // rather than mistaking SDK sanitization for provider zero.
+                    }
+                  : {}),
+                ...(inputTokensDetails || outputLimited
+                  ? {
                       providerData: {
                         ...event.response.providerData,
-                        usage: { prompt_tokens_details: inputTokensDetails },
+                        // Match non-streaming Chat's providerData.usage evidence so
+                        // telemetry retains invalid-field diagnostics and unknowns
+                        // rather than mistaking SDK sanitization for provider zero.
+                        ...(inputTokensDetails
+                          ? { usage: { prompt_tokens_details: inputTokensDetails } }
+                          : {}),
+                        ...(outputLimited
+                          ? {
+                              status: "incomplete",
+                              incomplete_details: { reason: "max_output_tokens" },
+                            }
+                          : {}),
                       },
                     }
                   : {}),
-                output: withChatReasoning(event.response.output, reasoning, reasoningDetails),
+                output: withChatReasoning(
+                  this.withToolCallOrigins(event.response.output),
+                  reasoning,
+                  reasoningDetails,
+                ),
               },
               reportedCostUsd,
             ),
           }
         : event;
     }
-  }
-}
-
-/** Bound on remembered refused artifacts per provider (process-local). */
-const REFUSED_ARTIFACTS_PER_PROVIDER = 4_096;
-const refusedArtifacts = new Map<string, Set<string>>();
-const artifactFingerprints = new WeakMap<object, string | null>();
-
-function artifactFingerprint(item: Record<string, unknown>): string | null {
-  let fingerprint = artifactFingerprints.get(item);
-  if (fingerprint === undefined) {
-    fingerprint = opaqueProviderArtifactFingerprint(item);
-    artifactFingerprints.set(item, fingerprint);
-  }
-  return fingerprint;
-}
-
-function rememberRefusedArtifacts(scope: string, items: readonly Record<string, unknown>[]) {
-  let refused = refusedArtifacts.get(scope);
-  if (!refused) refusedArtifacts.set(scope, (refused = new Set()));
-  for (const item of items) {
-    const fingerprint = artifactFingerprint(item);
-    if (!fingerprint) continue;
-    refused.add(fingerprint);
-    if (refused.size > REFUSED_ARTIFACTS_PER_PROVIDER)
-      refused.delete(refused.values().next().value as string);
   }
 }
 
@@ -401,7 +417,7 @@ export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
     if (!classifyEncryptedArtifactRejection(error)) return false;
     const sent = this.lastNativeOpaqueArtifacts;
     if (sent.length === 0) return false;
-    rememberRefusedArtifacts(this.provider.id, sent);
+    rememberRefusedOpaqueReasoning(this.provider.id, sent.map(opaqueReasoningFingerprint));
     this.lastNativeOpaqueArtifacts = [];
     return true;
   }
@@ -565,21 +581,14 @@ export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
     try {
       request = withDeclaredReasoning(request, this.declaredReasoning);
       const scope = this.provider.id;
-      const refused = refusedArtifacts.get(scope);
+      const isRejectedArtifact = rejectedOpaqueReasoningFilter(scope);
       const input =
         typeof request.input === "string"
           ? request.input
           : (projectHistoryForProvider(request.input, "responses", {
               declaresAdditionalTools: responsesRouteDeclaresAdditionalTools(this.provider.kind),
               artifactScope: scope,
-              ...(refused?.size
-                ? {
-                    isRejectedArtifact: (item: Record<string, unknown>) => {
-                      const fingerprint = artifactFingerprint(item);
-                      return fingerprint !== null && refused.has(fingerprint);
-                    },
-                  }
-                : {}),
+              ...(isRejectedArtifact ? { isRejectedArtifact } : {}),
             }) as ModelRequest["input"]);
       this.lastNativeOpaqueArtifacts =
         typeof input === "string" ? [] : (input as unknown[]).filter(hasNativeOpaqueReasoning);
@@ -616,7 +625,7 @@ export function buildModelInstance(
       instrumentedModelFetch(provider.id, globalThis.fetch, false, residency),
     );
   return provider.api === "chat"
-    ? new OpenGeniChatCompletionsModel(client, modelId, declaredReasoning)
+    ? new OpenGeniChatCompletionsModel(client, modelId, declaredReasoning, provider.id)
     : new OpenGeniResponsesModel(client, modelId, provider, declaredReasoning);
 }
 

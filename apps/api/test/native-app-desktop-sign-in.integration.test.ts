@@ -34,7 +34,11 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-function runtime(mode: "legacy" | "dual" | "broker" = "legacy", allowedUserEmails?: string[]) {
+function runtime(
+  mode: "legacy" | "dual" | "broker" = "legacy",
+  allowedUserEmails?: string[],
+  push: Partial<Parameters<typeof testSettings>[0]> = {},
+) {
   const settings = testSettings({
     databaseUrl: shared!.appUrl,
     productAccessMode: "managed",
@@ -42,6 +46,7 @@ function runtime(mode: "legacy" | "dual" | "broker" = "legacy", allowedUserEmail
     publicBaseUrl: ORIGIN,
     betterAuthSecret: "native-desktop-sign-in-test-secret-at-least-32-bytes",
     ...(allowedUserEmails ? { allowedUserEmails } : {}),
+    ...push,
   });
   const auth = createManagedAuth(settings, client.db, {
     sender: "auth@example.test",
@@ -209,6 +214,63 @@ describe("desktop app sign-in", () => {
     expect(nativeAppSessionUserAgent("linux", "Box")).toBe("Opengeni app (Linux; Box)");
     expect(nativeAppSessionUserAgent("ios", null)).toBe("Opengeni app (iOS)");
   });
+
+  test("push registration a deployment can't deliver says why, and a deliverable one is kept", async () => {
+    const apns = {
+      apnsKeyId: "ABCDE12345",
+      apnsTeamId: "TEAM123456",
+      apnsPrivateKey: "-----BEGIN PRIVATE KEY-----\\nkey\\n-----END PRIVATE KEY-----",
+    };
+    const register = (rt: ReturnType<typeof runtime>, credential: string, appId: string) =>
+      rt.app.request("/v1/native-app/push-device", {
+        method: "PUT",
+        headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          platform: "ios",
+          appId,
+          environment: "production",
+          token: "a1".repeat(32),
+          rules: ["needs_input", "failed", "agent"],
+          voipToken: "b2".repeat(32),
+        }),
+      });
+    const refusal = async (response: Response) => {
+      expect(response.status).toBe(409);
+      const { error } = (await response.json()) as {
+        error: { code: string; message: string; retryable: boolean; details?: { code?: string } };
+      };
+      expect(error.code).toBe("conflict");
+      expect(error.retryable).toBe(false);
+      expect(error.details?.code).toBe("native_push_unavailable");
+      return error.message;
+    };
+
+    // A build whose bundle ID the deployment doesn't list (iPhone, 12 Nov 2026).
+    const listed = runtime("legacy", undefined, { nativeAppIds: ["ai.opengeni.app"], ...apns });
+    const browser = await signedInBrowser(listed);
+    const credential = await desktopCredential(listed, browser.cookie);
+    expect(await refusal(await register(listed, credential, "com.example.opengeni"))).toBe(
+      'This server doesn\'t send notifications to the app "com.example.opengeni".',
+    );
+
+    // A listed app on a deployment without APNs credentials would never get a push.
+    const noApns = runtime("legacy", undefined, { nativeAppIds: ["ai.opengeni.app"] });
+    expect(await refusal(await register(noApns, credential, "ai.opengeni.app"))).toBe(
+      "This server isn't set up to send iOS notifications.",
+    );
+    const none = await noApns.app.request("/v1/native-app/push-device", {
+      headers: { authorization: `Bearer ${credential}` },
+    });
+    expect(((await none.json()) as { device: unknown }).device).toBeNull();
+
+    const kept = await register(listed, credential, "ai.opengeni.app");
+    expect(kept.status).toBe(200);
+    const { device } = (await kept.json()) as {
+      device: { appId: string; rules: string[] };
+    };
+    expect(device.appId).toBe("ai.opengeni.app");
+    expect([...device.rules].sort()).toEqual(["agent", "failed", "needs_input"]);
+  }, 120_000);
 
   test("the app's own requests renew its window's sign-in cookie with the device session", async () => {
     const rt = runtime();

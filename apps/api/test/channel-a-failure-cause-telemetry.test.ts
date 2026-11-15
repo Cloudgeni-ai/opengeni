@@ -4,7 +4,10 @@
 import { describe, expect, test } from "bun:test";
 import { HTTPException } from "hono/http-exception";
 import { createObservability } from "@opengeni/observability";
-import { BrowserControlRequestError } from "@opengeni/runtime/sandbox";
+import {
+  BrowserControlRequestError,
+  SynchronousCommandOutcomeUnknownError,
+} from "@opengeni/runtime/sandbox";
 import { observeChannelAOperationFailure, type ChannelAServices } from "../src/sandbox/channel-a";
 
 function observedLines(
@@ -90,6 +93,22 @@ describe("Channel-A failure cause telemetry", () => {
     const [line] = observedWarnings(new TypeError("cannot read secret of undefined"));
     expect(line).toMatchObject({ reason: "unexpected", causeName: "TypeError" });
     expect(JSON.stringify(line)).not.toContain("secret");
+  });
+
+  test("a sandbox file publish whose internal command outcome is unknown names that cause", () => {
+    const unknown = new SynchronousCommandOutcomeUnknownError(
+      null,
+      { stdout: "/workspace/private/output", stderr: "" },
+      new Error("Command adapter cannot prove lossless separate output collection"),
+    );
+    const [line] = observedWarnings(unknown, "artifact.publish");
+    expect(line).toMatchObject({
+      message: "Channel-A operation failed",
+      op: "artifact.publish",
+      reason: "unexpected",
+      causeName: "SynchronousCommandOutcomeUnknownError",
+    });
+    expect(JSON.stringify(line)).not.toContain("/workspace/private");
   });
 
   test("a wrapping 500 is looked through to its cause", () => {

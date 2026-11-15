@@ -1,5 +1,231 @@
 # @opengeni/react-native
 
+## 6.23.0
+
+### Patch Changes
+
+- f6f8c51: Links in chat replies are easy to see. A new `link` color token (`--og-color-link` on web, `link` in the native theme) colors every text link a calm blue in both themes, readable on every chat surface. The native chat now underlines links like the web chat, announces them as links and shows a soft wash while one is pressed. Web URLs, autolinked URLs, artifact, Site, chat and file links, and links in lists and tables all share the style. Hosts that rebranded links through `--og-color-accent-strong` set `--og-color-link` instead.
+- bce18b7: The native chat shows the animated thinking orb again while a reply is being prepared, next to the status text, as the web chat does. It had been replaced by a small spinner. The orb still disappears on the first useful output, the status stays stable and says when a start takes longer than usual, a failed preparation stays visible, and a host's `renderPreparing` still replaces the default visual.
+- Updated dependencies [c0089e1]
+- Updated dependencies [9dd96b0]
+- Updated dependencies [adc2409]
+- Updated dependencies [f6f8c51]
+- Updated dependencies [f6a7c28]
+- Updated dependencies [c0089e1]
+  - @opengeni/contracts@6.23.0
+  - @opengeni/react@6.23.0
+  - @opengeni/sdk@6.23.0
+
+## 6.22.0
+
+### Patch Changes
+
+- Updated dependencies [d50092b]
+  - @opengeni/contracts@6.22.0
+  - @opengeni/sdk@6.22.0
+  - @opengeni/react@6.22.0
+
+## 6.21.0
+
+### Minor Changes
+
+- 177e342: Hosts can replace the composer's full model picker with two or three named levels. Pass `modelPickerProps.levels` to `SessionConversation`, `NewConversation` or `OpenGeniChat.conversationProps`: each `ModelLevel` is a label, one catalog model, one reasoning effort and whether it offers Ultrafast. The composer then shows a small inline level control that people tap or swipe; Ultrafast can be offered on any level and takes a deliberate press and hold (or a push past the end of the last level), and shows its usage cost when it turns on. Omitting `levels` keeps the full picker, levels the workspace cannot run are left out, a new chat starts on the first level, and an existing chat on another model keeps it and shows its name until a level is picked. `ModelLevelPicker` and `ComposerModelPicker` are exported from `@opengeni/react` and `@opengeni/react/composer`, the renderer-neutral `modelLevelsView` and `modelLevelChoice` from `@opengeni/react/model-levels`, and React Native hosts get the same control as `ModelLevelControl` from `@opengeni/react-native/timeline`, with `onSelectionFeedback` for haptics and `startOnFirstLevel` for new-chat screens.
+
+### Patch Changes
+
+- a19c047: Turn summary facets now learn when they see only part of a turn. `TurnSummaryContext.unloadedSteps` is true when some of the turn's steps are not loaded: before the turn is opened, until its earlier pages are read, and on a long live turn whose collapsed row keeps only its newest steps. A count over `items` or `toolCalls` is then too low and can go down while the turn runs, so a facet can omit it or show it as a lower bound. The signal reaches every turn row, in both the readable and the classic presentation, on web and React Native. `@opengeni/react/timeline-model` adds the helpers that renderers use for it: `timelineTurnsWithUnloadedSteps`, `activityHasUnloadedSteps` and `turnGroupHasUnloadedSteps`.
+- Updated dependencies [177e342]
+- Updated dependencies [7d0d52b]
+- Updated dependencies [ef4c334]
+- Updated dependencies [ce864c0]
+- Updated dependencies [6ac2cd4]
+- Updated dependencies [a19c047]
+  - @opengeni/react@6.21.0
+  - @opengeni/contracts@6.21.0
+  - @opengeni/sdk@6.21.0
+
+## 6.20.1
+
+### Patch Changes
+
+- @opengeni/contracts@6.20.1
+- @opengeni/react@6.20.1
+- @opengeni/sdk@6.20.1
+
+## 6.20.0
+
+### Patch Changes
+
+- Updated dependencies [60a33cb]
+- Updated dependencies [c624443]
+- Updated dependencies [ed6b66c]
+- Updated dependencies [ae3972e]
+- Updated dependencies [e37485b]
+- Updated dependencies [9c17a87]
+  - @opengeni/react@6.20.0
+  - @opengeni/sdk@6.20.0
+  - @opengeni/contracts@6.20.0
+
+## 6.19.0
+
+### Patch Changes
+
+- Updated dependencies [1e29039]
+- Updated dependencies [a85adef]
+- Updated dependencies [973329a]
+- Updated dependencies [b349ca0]
+- Updated dependencies [226fe73]
+  - @opengeni/react@6.19.0
+  - @opengeni/sdk@6.19.0
+  - @opengeni/contracts@6.19.0
+
+## 6.18.0
+
+### Patch Changes
+
+- a16189c: Slack replies no longer show Opengeni links as raw Markdown. An image or link to an artifact (`![Preview](artifact:<id>)`, `[deck](artifact:<id>)`), a chat (`session:<id>`) or a console path now becomes a Slack link to that page in Opengeni, and a `sandbox:` path becomes its label. A clickable thumbnail links with its alt text. Markdown tables become an aligned code block, with each link in a cell numbered and listed under it. Operations an earlier release bound to other bytes keep them on retry. The console's file page opens a Site when an `artifact:<uuid>` link names one, since Sites share the UUID format.
+
+  Native app push registration now says why a deployment can't deliver to the app. `PUT /v1/native-app/push-device` answers 409 with `details.code` `native_push_unavailable` (`NATIVE_PUSH_UNAVAILABLE_DETAIL_CODE`, `isNativePushUnavailableError` in the SDK) when the app ID isn't in `OPENGENI_NATIVE_APP_IDS` or the platform has no push credentials, instead of a bare 400, or of accepting a registration that would never get a push. The iPhone app shows "This server isn't set up to send notifications to this app." instead of "Try again", shows a failed calls change under Calls from agents, and reports its APNs environment from its signing profile, also when it re-registers rotated tokens in the background (it re-registers a stored registration for the wrong environment too).
+
+  The iPhone message field grows with its text again, up to six lines (four with large text on a small screen, and never more than half the room above the keyboard) before it scrolls. On the new architecture iOS reports a field's content size only when its layout changes, so the fixed height the composer set from it never grew past one line and earlier lines scrolled out of view.
+
+- Updated dependencies [f313a0e]
+- Updated dependencies [6813960]
+- Updated dependencies [9188c1d]
+- Updated dependencies [3bc721a]
+- Updated dependencies [3b8f7da]
+- Updated dependencies [d83e5f2]
+- Updated dependencies [3105a8b]
+- Updated dependencies [a16189c]
+- Updated dependencies [73c3e82]
+- Updated dependencies [89cf4ba]
+- Updated dependencies [89cf4ba]
+  - @opengeni/contracts@6.18.0
+  - @opengeni/react@6.18.0
+  - @opengeni/sdk@6.18.0
+
+## 6.17.0
+
+### Patch Changes
+
+- c054f23: Android: starting or stopping a recording or a call can no longer crash the app with `RemoteServiceException: Context.startForegroundService() did not then call Service.startForeground()`. The recording and call services now start with `startService()` while the app is in the foreground, which leaves Android no `startForeground()` deadline to enforce, and use `startForegroundService()` only when Android refuses that from the background. A stop while such a start still owes `startForeground()` is deferred until the service has gone to the foreground, and the service stops itself then. A recording that fails to start at any step now releases the microphone, encoder, chunk file and service and rejects `start` with a recording error, `stop` always lets them go even when finishing the last chunk fails, and an unexpected error on the capture thread arrives as a `capture_failed` error instead of ending the app.
+- 389de66: Signing out no longer leaves a person's unsent meeting and dictation recordings on the device. When recordings of theirs are still uploading, the console, the desktop app and the mobile app first ask whether to wait for the upload (they stay signed in) or discard the recordings and sign out; with nothing pending, sign-out is unchanged. Where nobody can be asked, such as a sign-out from another tab, the recordings are discarded. Signing out of one browser account removes only that account's recordings; the last account, or signing out of all, removes every one.
+
+  For apps: stored recordings can carry an `ownerId` (`RecorderOptions`, `UploadRecordingAudioOptions` and `useRecorder`), which `localRecordingsOf` and `discardLocalRecordingsOf` use, and `useRecorder` finishes only its owner's recordings when it mounts. `prepareRecordingsForSignOut` (from `@opengeni/react/recordings` and `@opengeni/react/meetings-recorder`) runs the check before a sign-out, with `setSignOutRecordingsPrompt` for the question. On phones, the `opengeni-recordings` folder is kept off iCloud backups, the recording config plugin keeps it off Android backups and device transfers, and `forgetRecordingStore` deletes an account's folder.
+
+- Updated dependencies [8073ab6]
+- Updated dependencies [43aa19d]
+- Updated dependencies [d189da5]
+- Updated dependencies [b1b69fc]
+- Updated dependencies [deccb54]
+- Updated dependencies [668c5ed]
+- Updated dependencies [a4ef243]
+- Updated dependencies [e3cb3c1]
+- Updated dependencies [389de66]
+- Updated dependencies [42ef2a2]
+- Updated dependencies [241ce71]
+  - @opengeni/contracts@6.17.0
+  - @opengeni/react@6.17.0
+  - @opengeni/sdk@6.17.0
+
+## 6.16.0
+
+### Minor Changes
+
+- 494d300: Voice commands: a person can call a chosen chat by name. `adapter.setCallCommands([{ id, workspaceId, sessionId, name }])` stores the chats they picked natively. On iOS the generated start-call App Intent gains an optional chat parameter whose entities are exactly those commands, with new parameterized App Shortcut phrases (`call.chatPhrases`, default `"Call {chat} in {app}"` and `"Talk to {chat} in {app}"`), and the app's App Shortcuts are refreshed whenever the commands change and at launch. On Android each command becomes a dynamic launcher shortcut, and `adapter.pinCallCommand(command)` pins one to the home screen. Start requests now carry an optional `workspaceId` (and a `requestId`), and `callFromOutside(sessionId, workspaceId)` calls a session in another workspace of the signed-in account. Pending start requests are kept until JavaScript takes them (up to a minute), so a request that launched the app is no longer lost to an early listener. The start-call intent now requires an unlocked device (`.requiresAuthentication`), and `INStartCallIntent` requests from a locked phone (Phone recents, "call … using") wait for an unlock for up to 30 seconds and are otherwise dropped (iOS reports a passcode-protected phone as locked about 10 seconds after its screen locks). CallKit handles for a named session are now `"<workspaceId>/<sessionId>"`; bare session handles from older recents still work.
+
+### Patch Changes
+
+- 55058af: The blocked-message notice reads more simply.
+
+  - A paused machine owner gets one line, "Allow it for this chat. Your message starts when the chat is resumed.", instead of "starts right away" next to a separate paused note.
+  - When other people in the workspace can see the chat (workspace visibility, outside a Personal workspace), the owner learns that allowing the machine lets them see what the agent does on it. On web the composer's shared-machine heads-up steps aside while this shows.
+  - "Your message is saved" is gone from every state, since the message is already in the chat. After the chat moves to a machine it can use, the notice shows "Starting on the new machine" and "The message starts by itself." The machine picker's note for a waiting message keeps only "Use a workspace or cloud machine for this message."
+  - Every "starts" line names the message: "Your message…" only in the machine owner's own lines, and "The message…" wherever someone else may be reading. The permission line says who can fix it first, and the machine-access lines drop "right now" and "You can".
+
+  API changes:
+
+  - `SessionAdmissionNotice` takes `sharedChat`. `useSessionStart` returns `sharedChat` while the owner is asked to allow the machine, reading the workspace kind through `getWorkspace` when the client has it; it is false otherwise and while the kind is unknown.
+  - `sessionAdmissionMachineAccessCopy` accepts `paused` and `shared` options.
+  - New message keys: `sessionAdmission.machineAccessOwnerPausedNext`, `sessionAdmission.machineAccessOwnerSettingsPausedNext` and `sessionAdmission.machineAccessSharedNote`. `sessionAdmission.machineChangedBody` is removed; drop it from custom translations.
+  - `sessionAdmissionMachineChangedCopy` now returns an empty `next`. Skip rendering an empty `next`.
+
+- Updated dependencies [55058af]
+- Updated dependencies [fb19875]
+- Updated dependencies [54dc5da]
+- Updated dependencies [86e5358]
+  - @opengeni/react@6.16.0
+  - @opengeni/contracts@6.16.0
+  - @opengeni/sdk@6.16.0
+
+## 6.15.0
+
+### Minor Changes
+
+- e2a985d: Android apps that already have their own Firebase messaging service can now receive agents' call rings. Set `call.androidMessagingService: "app"` next to `call.androidSystemCall: true` in the config plugin: the plugin then declares no Opengeni messaging service (so the app's service stays the only `MESSAGING_EVENT` receiver) and sets the `dev.opengeni.call.APP_MESSAGING_SERVICE` meta-data flag, so `capabilities().incoming` is true and the shared call provider takes rings. The permissions, call service and ring screen are unchanged. The app's service calls `OpenGeniCallPush.handle(context, message.data)` first; it returns true when it consumed a ring or the end of a ring, and is now documented and callable from Java as a static method. The README documents the FCM payload (`data.opengeniCall` JSON with `type` `ring` or `ended`, high priority). The default, `"opengeni"`, behaves as before; an unknown mode, or `"app"` without `androidSystemCall`, fails the prebuild.
+- 7d6e488: Android 14 and later: agents' calls can ask for the full-screen notification permission they need to ring over the lock screen. Play pre-grants `USE_FULL_SCREEN_INTENT` only to calling and alarm apps, so in other apps a ring was only a heads-up notification and nothing told the person why. The Android call module now reports `fullScreenRing` in its capabilities and can open the app's full-screen notification setting (falling back to its notification settings). The call adapter exposes this as `incoming.canRingFullScreen()` and `incoming.openFullScreenRingSettings()`, absent on iOS and older builds, where rings always show full screen. The new `useFullScreenRings(callAdapter)` hook keeps the answer current as the app returns to the foreground and has `ask()`, which explains the setting in an alert and offers to open it, for hosts to call when the person turns agent calls on. `@opengeni/react` adds the default English text for that prompt.
+- 6a5023d: Videos can be attached from a phone. The Expo photo library offers photos and videos, and the camera records video as well as taking photos (iOS; Android's camera stays a photo camera). Library videos keep their original file, so nothing is re-encoded before sending. The composer shows a video as a tile with its length and the upload's percentage, and a sent video shows in the timeline as a video chip that opens in the system player. The agent receives it in its sandbox like a file uploaded on the web.
+
+  Every picked file now uploads straight from disk through Expo's native upload task, which reports progress and keeps going while the app is in the background, so a long video never has to be read into memory. Files up to 20 MiB are still hashed on the device; larger ones upload without a client digest, as a plain REST upload does. Removing an attachment, or leaving the chat, stops its upload. Hosts with their own adapters can opt in through the new optional `NativeFileAdapter.uploadSource`; without it files are read into memory as before.
+
+  `uploadFile` in the SDK accepts a `FileUploadSource` as `data` (`{ sizeBytes, send(target) }`) for callers that send the bytes themselves, and an optional `signal` that cancels the upload.
+
+### Patch Changes
+
+- ef25cae: Show a failed turn's error once, in the failed banner next to Retry. The work header says only "Failed", an attempt replaced by Retry becomes a quiet "Attempt failed · retried" row with its text behind the disclosure, and the "failed" and "work resumed" dividers no longer repeat a turn's own failure. The banner keeps the full recorded text behind Details. Without a banner, the turn's row or the failure's own notice shows the text once.
+- 02ac654: Files attached in a private embedded chat are now the uploader's own (Only me), as in the Opengeni web app, instead of workspace files. The stock conversation hooks (`useSessionConversation`, and `useOpenGeniNativeSession` in React Native) pass the chat's upload scope, and `createSessionProxyHandler` adds `scope: "personal"` to an upload that names no scope unless `chats` is `"shared"`, so older or custom browsers get the same default. An explicit `scope` passes through unchanged, and shared chats keep workspace files. `uploadScopeForSession` is exported for custom layouts that call `useFileAttachments` themselves. `useNativeFileAttachments` takes an optional `scope`. Like any Only me file, these are read as their owner (`asUser`) or by the chat's agent; a server-key-only read no longer lists them. Files uploaded this way before the change stay workspace files.
+- Updated dependencies [708848c]
+- Updated dependencies [7d6e488]
+- Updated dependencies [5525e63]
+- Updated dependencies [60d067d]
+- Updated dependencies [bf236a6]
+- Updated dependencies [da60317]
+- Updated dependencies [3bab763]
+- Updated dependencies [1f2a7d0]
+- Updated dependencies [9b75ec0]
+- Updated dependencies [ef25cae]
+- Updated dependencies [f92ff08]
+- Updated dependencies [2107e6f]
+- Updated dependencies [060c983]
+- Updated dependencies [bf804ef]
+- Updated dependencies [dfeab20]
+- Updated dependencies [6a5023d]
+- Updated dependencies [02ac654]
+- Updated dependencies [b0fce89]
+- Updated dependencies [2405d05]
+- Updated dependencies [9885d37]
+- Updated dependencies [2a7d92d]
+- Updated dependencies [294b9d9]
+- Updated dependencies [f22647a]
+- Updated dependencies [7a83f9b]
+- Updated dependencies [850b4d5]
+  - @opengeni/contracts@6.15.0
+  - @opengeni/sdk@6.15.0
+  - @opengeni/react@6.15.0
+
+## 6.14.0
+
+### Patch Changes
+
+- 618c2b7: An action the agent asked for from Code Mode can be approved in embedded chats again. Such an approval carries no arguments of its own, since they stay in the action's saved review on the server, and `SessionConversation` (and so `OpenGeniChat`) never read that review: a fresh request showed "The details of this older request couldn't be recovered" with only Decline, also when a host's `approvalProps.loadReview` resolved `null` for it. The conversation now reads the saved review (`getToolActionReview`, with `getToolReviewDetails` for its details) for every approval the host's own loader leaves to the standard card. `NativeSessionScreen` does the same when it is given the full `client`. A session client without these two methods keeps the old behaviour.
+- c472500: A meeting transcript now says where a track recorded nothing, such as "Ingrid's microphone wasn't recording from 17:39 to 45:35. Everyone else was still recorded." Before, a microphone that was unplugged or tab sharing that ended left a voice missing with no explanation, so the transcript looked like it had skipped speech. Each track's new `unrecorded` field lists those stretches. The server works them out from the chunks' start times when a recording is finalized (migration 1353 adds the column). Older meetings get them the next time they are transcribed. Stretches under two seconds are ignored. The web and phone transcripts show a quiet line where each one starts, naming the person when the track carries one named voice and saying "Nothing was recorded" where every track was silent at once; no turn runs across one. `@opengeni/react/recordings` exports `transcriptUnrecordedMarks`, `interleaveUnrecordedMarks`, `trackSpeakerName` and `unrecordedMarkText` for embedders that render their own transcript, and `groupTranscriptTurns` takes the times no turn may run across.
+- Updated dependencies [c976c87]
+- Updated dependencies [6ae0528]
+- Updated dependencies [4664732]
+- Updated dependencies [618c2b7]
+- Updated dependencies [3b853ca]
+- Updated dependencies [dd11dad]
+- Updated dependencies [dd11dad]
+- Updated dependencies [55665bc]
+- Updated dependencies [904eae7]
+- Updated dependencies [91320a4]
+- Updated dependencies [7c926f8]
+- Updated dependencies [89a1793]
+- Updated dependencies [c472500]
+  - @opengeni/contracts@6.14.0
+  - @opengeni/react@6.14.0
+  - @opengeni/sdk@6.14.0
+
 ## 6.13.0
 
 ### Minor Changes

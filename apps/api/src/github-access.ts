@@ -3,6 +3,7 @@ import {
   type GitHubAppRepositoryBranchPage,
   type GitHubBindingStatus,
   type GitHubInstallationBinding,
+  type GitHubInstallationIssue,
   type GitHubRepository,
   type RepositoryResourceRef,
 } from "@opengeni/contracts";
@@ -136,6 +137,12 @@ export async function listWorkspaceGitHubInstallationBindings(
       installation.installationId,
       lifecycleVerified,
     ),
+    issue: githubInstallationBindingIssue(
+      installation,
+      liveById,
+      installation.installationId,
+      lifecycleVerified,
+    ),
     repositoryScope: installation.repositoryScope,
     repositoryCount: installation.repositoryIds.length,
     configureUrl: null,
@@ -201,6 +208,91 @@ async function readWorkspaceGitHubInstallations(
   return { installations, liveById, lifecycleVerified };
 }
 
+/**
+ * One linked installation, for its repair: the stored binding and GitHub's
+ * live view of it. `live` is null when GitHub no longer has the installation
+ * and undefined when it is unknown. `unreachable` says GitHub was asked and
+ * didn't answer (network failure, timeout, rate limit or a GitHub 5xx), as
+ * opposed to a host that can't ask, an App configuration or auth error, or
+ * any other failure.
+ * Null when it is not linked.
+ */
+export async function readGitHubInstallationForRepair(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  installationId: number,
+): Promise<{
+  stored: GitHubInstallationAccess;
+  live: LiveGitHubInstallation | null | undefined;
+  unreachable: boolean;
+} | null> {
+  const stored = (await listGitHubInstallationAccessForWorkspace(deps.db, workspaceId)).find(
+    (installation) => installation.installationId === installationId,
+  );
+  if (!stored) {
+    return null;
+  }
+  let live: LiveGitHubInstallation | null | undefined;
+  let unreachable = false;
+  try {
+    live = deps.githubAppApi?.getInstallation
+      ? await deps.githubAppApi.getInstallation({ installationId })
+      : deps.githubAppApi
+        ? undefined
+        : await getGitHubAppInstallationSummary(deps.settings, installationId);
+  } catch (error) {
+    live = undefined;
+    unreachable = isGitHubOutage(error);
+  }
+  return { stored, live, unreachable };
+}
+
+const networkErrorCodes = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ENETUNREACH",
+  "EHOSTUNREACH",
+  "EPIPE",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_SOCKET",
+  "ConnectionRefused",
+  "ConnectionClosed",
+  "FailedToOpenSocket",
+]);
+
+/**
+ * Only a known outage shape: GitHub answered 408, 429, 5xx or a rate-limited
+ * 403, or the request failed in the network or timed out. Anything else
+ * (configuration, authentication, a host's own error, a bug) is not one, so a
+ * repair doesn't ask the person to check again forever.
+ */
+function isGitHubOutage(error: unknown): boolean {
+  if (error instanceof GitHubAppConfigurationError) return false;
+  const candidate = error as {
+    status?: unknown;
+    name?: unknown;
+    code?: unknown;
+    message?: unknown;
+    cause?: { code?: unknown } | null;
+  } | null;
+  if (!candidate || typeof candidate !== "object") return false;
+  if (typeof candidate.status === "number") {
+    if (candidate.status === 403) {
+      return typeof candidate.message === "string" && /rate limit/i.test(candidate.message);
+    }
+    return candidate.status === 408 || candidate.status === 429 || candidate.status >= 500;
+  }
+  if (candidate.name === "AbortError" || candidate.name === "TimeoutError") return true;
+  if (error instanceof TypeError) return true;
+  return [candidate.code, candidate.cause?.code].some(
+    (code) => typeof code === "string" && networkErrorCodes.has(code),
+  );
+}
+
 export function githubBindingStatus(
   configured: boolean,
   installations: GitHubInstallationBinding[],
@@ -233,6 +325,55 @@ export function githubInstallationBindingLifecycle(
     liveById,
     lifecycleVerified,
   );
+}
+
+/**
+ * Why a binding is not active, named by its fix, so the integration page can
+ * say what is wrong instead of a generic "Needs attention". Null exactly when
+ * the lifecycle is active. GitHub's own view wins: an installation removed,
+ * suspended or moved on GitHub reports that, even when its owner proof or
+ * repositories are also missing (an uninstall clears both).
+ */
+export function githubInstallationBindingIssue(
+  stored: Awaited<ReturnType<typeof listGitHubInstallationAccessForWorkspace>>[number],
+  liveById: Map<number, LiveGitHubInstallation | null>,
+  installationId: number,
+  lifecycleVerified: boolean,
+): GitHubInstallationIssue | null {
+  if (
+    githubInstallationBindingLifecycle(stored, liveById, installationId, lifecycleVerified) ===
+    "active"
+  ) {
+    return null;
+  }
+  // What GitHub says comes first: an app removed or suspended there needs that
+  // fixed whatever the stored owner proof holds.
+  if (lifecycleVerified) {
+    const live = liveById.get(installationId);
+    if (!live) {
+      return "uninstalled";
+    }
+    if (live.suspended) {
+      return "suspended";
+    }
+    // A binding stored without an account id (no owner proof yet) is
+    // unconfirmed, not moved.
+    if (
+      live.installationId !== installationId ||
+      (stored.githubAccountId !== null && stored.githubAccountId !== live.accountId)
+    ) {
+      return "account_changed";
+    }
+  }
+  if (!hasGitHubInstallationOwnerAuthority(stored)) {
+    return "owner_unconfirmed";
+  }
+  if (!lifecycleVerified) {
+    return "github_unreachable";
+  }
+  // Owner proof and GitHub agree; the only gap left is the auditable
+  // repository allowlist (hasAuditableGitHubInstallationAuthority).
+  return stored.repositoryIds.length === 0 ? "no_repositories" : "owner_unconfirmed";
 }
 
 /**

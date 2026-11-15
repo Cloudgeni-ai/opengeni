@@ -5,6 +5,7 @@ import { rawRows, withRlsContext, withSessionActivityRlsContext, type Database }
 import {
   encodeModelContextSnapshotContent,
   hydrateStoredModelContextSnapshot,
+  lockSessionContentShared,
   writeSessionContentBlobs,
 } from "./session-content-blobs";
 import { fromPostgresLosslessJson, LOSSLESS_CONTENT_CODEC_VERSION } from "./lossless-json";
@@ -894,6 +895,8 @@ async function scrubSnapshots(context: Context, sessionId: string) {
     const pageReplaced = new Set<string>();
     try {
       await withRlsContext(context.db, scope, async (tx) => {
+        // Keep the blobs these rows name until they are hydrated.
+        await lockSessionContentShared(tx, sessionId);
         const rows = await rawRows<{
           key: string;
           snapshot: unknown;

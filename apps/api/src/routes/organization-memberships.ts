@@ -1,3 +1,4 @@
+import { managedAuthPublicBaseUrls } from "../auth/managed-auth";
 import { signupCreditModelIds } from "@opengeni/config";
 import { ApiHttpError } from "../http/api-error";
 import {
@@ -1103,6 +1104,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         invitationId: invitation.id,
         invitationOperationId: payload.operationId,
         operationId: payload.operationId,
+        request: context.req.raw,
       });
       return context.json(
         OrganizationInvitation.parse(
@@ -1177,6 +1179,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
               actorSubjectId: subjectId,
               invitationId,
               operationId: payload.operationId,
+              request: context.req.raw,
             }),
           ),
         );
@@ -1402,6 +1405,8 @@ async function deliverOrganizationUserSetup(
     invitationId: string;
     invitationOperationId?: string;
     operationId: string;
+    /** The browser request that sent it: its link opens on that public host. */
+    request: Request;
   },
 ) {
   const claim = await claimOrganizationUserSetupDelivery(deps.db, input);
@@ -1418,6 +1423,7 @@ async function deliverOrganizationUserSetup(
     providerIdempotencyScope: deps.managedEmailTransport.idempotency.scope,
     frozenTransport: claim.setupTokenTransport,
     frozenPayloadDigest: claim.payloadDigest,
+    setupBaseUrls: managedAuthPublicBaseUrls(deps.settings, input.request),
   });
   await prepareOrganizationUserSetupDelivery(deps.db, {
     organizationId: input.organizationId,

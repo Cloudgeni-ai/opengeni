@@ -100,4 +100,13 @@ describe("CUA physical seat runtime", () => {
     await second.shutdown();
     expect(workers[1]!.state.stopped).toBe(true);
   });
+
+  test("a worker whose process is already gone stops without failing", async () => {
+    const worker = fakeWorker();
+    worker.sdk.shutdown = async () => {
+      throw Object.assign(new Error("DriverError.Shutdown"), { tag: "Shutdown" });
+    };
+    const runtime = await openSeatRuntime(async () => worker.sdk);
+    await runtime.shutdown();
+  });
 });

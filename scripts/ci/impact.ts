@@ -472,6 +472,16 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
   "test/e2e/desktop-rail.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/desktop-corner.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/agents.browser.e2e.ts": ["opengeni-web", "@opengeni/react", "@opengeni/testing"],
+  "test/e2e/admin-step-up-page-load.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/sdk",
+    "@opengeni/api-router",
+    "@opengeni/contracts",
+    "@opengeni/core",
+    "@opengeni/db",
+    "@opengeni/testing",
+  ],
   "test/e2e/error-branding.browser.e2e.ts": [
     "@opengeni/react",
     "@opengeni/sdk",
@@ -586,6 +596,9 @@ const BROWSER_ACCEPTANCE_TESTS: Readonly<Record<BrowserAcceptanceLane, readonly 
     "test/e2e/workbench.browser.e2e.ts",
   ],
 };
+
+/** The curated browser acceptance lanes and the tests each runs. */
+export { BROWSER_ACCEPTANCE_TESTS };
 
 for (const path of TEMPORAL_WORKFLOW_INTEGRATION_TESTS) {
   ROOT_TEST_DEPENDENCIES[path] = [...TEMPORAL_WORKFLOW_DEPENDENCIES];
@@ -711,6 +724,19 @@ function rootTestDependencies(graph: WorkspaceGraph, path: string): string[] | n
   return [...new Set([...declared, ...importedWorkspaceDependencies(graph, path)])].sort();
 }
 
+/**
+ * The workspaces a test depends on directly: its own workspace, or for a root
+ * test its declared and imported workspaces. Null for an unmapped root test.
+ */
+export function directTestWorkspaces(
+  path: string,
+  graph: WorkspaceGraph = createWorkspaceGraph(),
+): string[] | null {
+  const pkg = workspaceForPath(graph, path);
+  if (pkg) return [pkg.name];
+  return rootTestDependencies(graph, path);
+}
+
 function selectedBrowserAcceptanceLanes(
   graph: WorkspaceGraph,
   affected: ReadonlySet<string>,
@@ -791,6 +817,7 @@ function fullPlan(
       "format",
       "workspace-billing",
       "docs-refs",
+      "doc-snippets",
       "generated-fonts",
       "public-hygiene",
       // A migration ordinal that protected main has meanwhile assigned to
@@ -808,6 +835,9 @@ function fullPlan(
       "migration-online-safety",
       // Shipped migrations are applied once by name: a head may only add them.
       "migration-immutability",
+      // A rolling migration runs while the previous release serves: it must not
+      // revoke, drop or rename what that release's runtime posture requires.
+      "migration-previous-release",
       // A ledger-replaying test without an explicit budget is one shard repack
       // away from being killed at the shard default.
       "migration-test-budgets",
@@ -892,7 +922,15 @@ export function createImpactPlan(
       exampleBuildProjects: [],
       // The subscription contract is a document, so a docs-only change to it
       // must still be checked against the tests that claim its requirements.
-      guards: ["format", "docs-refs", "generated-fonts", "public-hygiene", "subscription-contract"],
+      guards: [
+        "format",
+        "docs-refs",
+        // Docs samples are typechecked against the SDK they describe.
+        "doc-snippets",
+        "generated-fonts",
+        "public-hygiene",
+        "subscription-contract",
+      ],
       reasons: changedFiles.map((path) => ({
         path,
         reason: "documentation-only change",
@@ -1020,6 +1058,8 @@ export function createImpactPlan(
     "format",
     "workspace-billing",
     "docs-refs",
+    // Any SDK or React change can break a docs sample; the check takes seconds.
+    "doc-snippets",
     "generated-fonts",
     "public-hygiene",
     // Not gated on `packages/db/drizzle/`: the case this exists for is a NEW
@@ -1038,6 +1078,7 @@ export function createImpactPlan(
       "migration-deployment-mode",
       "migration-online-safety",
       "migration-immutability",
+      "migration-previous-release",
     );
   }
   if (

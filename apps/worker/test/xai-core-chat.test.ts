@@ -311,8 +311,10 @@ describe("SuperGrok capacity on the shared core", () => {
 });
 
 /** A placed core turn with a held core lease and scripted request custody. */
-function placedCore(options: { fence?: () => Promise<void> } = {}) {
+function placedCore(options: { reserveError?: Error } = {}) {
   const order: string[] = [];
+  // Separate source or lease reads before a request's reservation.
+  const reads: string[] = [];
   let operation = 0;
   const runtime = {
     reserveSubscriptionCoreRequest: async (
@@ -322,6 +324,7 @@ function placedCore(options: { fence?: () => Promise<void> } = {}) {
       request: { requestId: string; transportAttempt: number },
     ) => {
       order.push(`reserve:${request.requestId}:${request.transportAttempt}`);
+      if (options.reserveError) throw options.reserveError;
       return { operationId: `operation-${++operation}` };
     },
     settleSubscriptionCoreRequest: async (
@@ -332,7 +335,10 @@ function placedCore(options: { fence?: () => Promise<void> } = {}) {
     ) => {
       order.push(`settle:${request.operationId}:${request.outcome}`);
     },
-    isSubscriptionCoreSourceDisconnected: async () => false,
+    isSubscriptionCoreSourceDisconnected: async () => {
+      reads.push("source");
+      return false;
+    },
   };
   spy(db, "subscriptionCoreRequests").mockReturnValue(runtime as never);
   let refreshes = 0;
@@ -359,8 +365,7 @@ function placedCore(options: { fence?: () => Promise<void> } = {}) {
   lease.held = true;
   lease.confirmedUntilMs = performance.now() + 60_000;
   spyOn(lease, "assertCurrentForDispatch").mockImplementation(async () => {
-    order.push("fence");
-    await options.fence?.();
+    reads.push("lease");
   });
   const core: SubscriptionCoreTurn = {
     identity,
@@ -375,7 +380,7 @@ function placedCore(options: { fence?: () => Promise<void> } = {}) {
     lease,
     execution: { attemptId: "attempt-1", executionGeneration: 3 },
   });
-  return { order, core, lease, authorization, refreshes: () => refreshes, resolverInputs };
+  return { order, reads, core, lease, authorization, refreshes: () => refreshes, resolverInputs };
 }
 
 function sse(...items: unknown[]): Response {
@@ -455,7 +460,7 @@ describe("SuperGrok request custody on the core", () => {
     const { order, core, authorization } = placedCore();
     const first = send(authorization, [completed]);
     await (await first.response).text();
-    expect(order).toEqual(["fence", "reserve:attempt-1:1:1:xai:1:1"]);
+    expect(order).toEqual(["reserve:attempt-1:1:1:xai:1:1"]);
     // A completed response is settled only after the history checkpoint.
     await core.requests!.checkpoint();
     expect(order.at(-1)).toBe("settle:operation-1:response_received");
@@ -475,10 +480,8 @@ describe("SuperGrok request custody on the core", () => {
     // The refreshed retry was dispatched with the refreshed bearer's generation.
     expect(core.credentialVersion).toBe(5);
     expect(order).toEqual([
-      "fence",
       "reserve:attempt-1:1:1:xai:1:1",
       "settle:operation-1:refused",
-      "fence",
       "reserve:attempt-1:1:1:xai:1:2",
     ]);
     await core.requests!.checkpoint();
@@ -498,7 +501,7 @@ describe("SuperGrok request custody on the core", () => {
         ),
     ]);
     await (await sent.response).text().catch(() => undefined);
-    expect(order).toEqual(["fence", "reserve:attempt-1:1:1:xai:1:1", "settle:operation-1:refused"]);
+    expect(order).toEqual(["reserve:attempt-1:1:1:xai:1:1", "settle:operation-1:refused"]);
   });
 
   test("a title-lane refresh after a main-lane refusal keeps the refused bearer's generation", async () => {
@@ -521,7 +524,7 @@ describe("SuperGrok request custody on the core", () => {
       () => new Response("upstream gateway timeout", { status: 504 }),
     ]);
     await dropped.response.catch(() => undefined);
-    expect(order).toEqual(["fence", "reserve:attempt-1:1:1:xai:1:1", "settle:operation-1:unknown"]);
+    expect(order).toEqual(["reserve:attempt-1:1:1:xai:1:1", "settle:operation-1:unknown"]);
     expect(core.requests!.hasUnknownOutcome()).toBe(true);
     expect(core.requests!.canRecover()).toBe(false);
     expect(xaiCoreRequestOutcomeUnknown(new Error("plain"), core)).toMatchObject({
@@ -535,17 +538,31 @@ describe("SuperGrok request custody on the core", () => {
     expect(replay.calls()).toBe(0);
   });
 
-  test("a lost core lease stops dispatch before any reservation", async () => {
-    const lost = Object.assign(new Error("lease lost"), { code: "xai_credential_lease_lost" });
-    const { order, authorization } = placedCore({
-      fence: async () => {
-        throw lost;
-      },
+  test("a request is fenced by its reservation alone, with no separate source or lease read", async () => {
+    const { order, reads, authorization } = placedCore();
+    await (await send(authorization, [completed]).response).text();
+    expect(order).toEqual(["reserve:attempt-1:1:1:xai:1:1"]);
+    expect(reads).toEqual([]);
+  });
+
+  test("a locally lost core lease stops dispatch before any reservation", async () => {
+    const { order, lease, authorization } = placedCore();
+    lease.markLost("not_found");
+    const sent = send(authorization, [completed]);
+    await expect(sent.response).rejects.toMatchObject({ code: "xai_credential_lease_lost" });
+    expect(sent.calls()).toBe(0);
+    expect(order).toEqual([]);
+  });
+
+  test("a lease the reservation finds lost marks the holder lost and stops before network I/O", async () => {
+    const { order, lease, authorization } = placedCore({
+      reserveError: db.SUBSCRIPTION_CORE_XAI.errors.leaseLost(),
     });
     const sent = send(authorization, [completed]);
-    await expect(sent.response).rejects.toBe(lost);
+    await expect(sent.response).rejects.toMatchObject({ code: "xai_credential_lease_lost" });
     expect(sent.calls()).toBe(0);
-    expect(order).toEqual(["fence"]);
+    expect(order).toEqual(["reserve:attempt-1:1:1:xai:1:1"]);
+    expect(() => lease.assertUsable()).toThrow();
   });
 
   test("session-title requests use their own custody lane under the same fence", async () => {
@@ -578,7 +595,7 @@ describe("SuperGrok request custody on the core", () => {
       }),
     );
     await response.text();
-    expect(order).toEqual(["fence", "reserve:attempt-1:1:1:xai:title:1:1"]);
+    expect(order).toEqual(["reserve:attempt-1:1:1:xai:title:1:1"]);
     expect(core.requests!.canRecover()).toBe(true);
     await core.titleRequests!.checkpoint();
     expect(order.at(-1)).toBe("settle:operation-1:response_received");
@@ -607,7 +624,7 @@ describe("SuperGrok request custody on the core", () => {
       }),
     ).toBe(false);
     // The completed response stays unsettled without its history.
-    expect(uncommitted.order).toEqual(["fence", "reserve:attempt-1:1:1:xai:1:1"]);
+    expect(uncommitted.order).toEqual(["reserve:attempt-1:1:1:xai:1:1"]);
 
     const unknown = placedCore();
     await send(unknown.authorization, [

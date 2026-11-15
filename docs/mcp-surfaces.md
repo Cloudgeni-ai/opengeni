@@ -395,8 +395,15 @@ Site calls that need approval are confirmed by the viewer in the Opengeni frame:
 `POST tools/site-consent` for the viewer's own accounts and the provider's own
 review of the exact arguments (for Gmail, the message as it would be sent), then mints
 `tools/target-approvals` (optionally `rememberForSite`) and retries the same
-operation. See "Host-native consent" in
-`docs/design/workspace-html-sites-2026-09-01.md`.
+operation. A declared Site tool the viewer can neither use nor connect answers
+404 with `details.code` `site_tool_not_available_for_viewer`; publishing pairs
+the publisher's own account routes with their connector so other viewers get
+their own account or the connect card instead. Every other way a Site call
+stops reaches the viewer as a plain state and the Site as a typed `code`
+(`site_tool_reconnect_required`, `site_tool_permission_denied`,
+`site_tool_not_available_for_viewer`, `site_tool_outcome_unknown`,
+`site_tool_unavailable`); see "Failures" in the same design. See
+"Host-native consent" in `docs/design/workspace-html-sites-2026-09-01.md`.
 
 `POST tools/target-approvals` issues a version-2 binding over the existing
 executable effect digest and Site tuple. Exact caller, identity, arguments and
@@ -573,6 +580,54 @@ card requires no integration-management permission and creates no connection,
 installation, credential, or grant; the authenticated human completes setup.
 Provider-specific status tools remain read-only and do not synthesize cards.
 
+Tool search shows the card itself when a search clearly names one integration
+the person can connect: exactly one catalog entry is named, by a distinctive
+mention (`isDistinctiveIntegrationMention` in `@opengeni/capabilities`), and no
+strongly matching installed tool belongs to it. When the search call is
+accepted (never from an early decision a dropped response may discard), the
+worker calls `capability_authorization_request` through the attempt's own tool
+gateway with request `_meta` `TOOL_DISCOVERY_CARD_META_KEY`, so the card,
+authorization, tool selection and policy are exactly those of a model call. That
+marker makes the call reuse the same kind of card (a first connection, or a
+reconnect of the same connection) already shown since the person's latest
+message (`appendTurnCapabilityCardOnce` with `sinceLatestMessage`) instead of
+posting another; the result keeps the status and guidance of a posted card,
+adds `alreadyShown`, names the existing `eventId`, and says it was not posted
+again. Once the person writes, an earlier card may be stale and a search may
+post a fresh one; in a chat no person has written in (a scheduled run), only
+the current turn's card is reused. Model calls are unchanged: they always post, so a card whose
+state changed (a machine just connected) can be shown again. Searches naming
+several integrations, or a name only as an ordinary word ("linear regression",
+"airtable" in lower case), and a card call that answers without a card (ready,
+unavailable, input required) keep the plain `notConnected` notice, which then
+says no card is shown. A card call that fails or times out (not in this chat's
+tools, approval required, no answer) keeps the notice without saying whether a
+card was shown. Otherwise every search result that names a connectable
+integration carries `connectCard: { shown, capabilityId?, eventId?,
+alreadyShown? }`, and every `capability_authorization_request` result carries
+`cardShown`, so neither the agent nor a client has to infer whether a card was
+shown.
+
+A request that opens with a one-word integration name, capitalised, as the
+label of an operation word that follows, with or without a colon ("Airtable
+list records…", "Linear: create an issue")
+names it distinctively; a sentence-opening capital before an ordinary word
+("Linear regression") still does not. `tool_list` browsing gets the same card:
+a first page that a `namePrefix` or `group` filter left empty, whose filter
+words (digests, `mcp_` and `connection/` keys and separators removed, at most
+six words) name exactly one connectable integration nobody installed, adds the
+same `notConnected` notice and `connectCard` field through the same lookup
+(bounded at 1.5 s), card tool, dedupe and policy. Browsing without such a
+filter, a listing with tools and later pages are unchanged. Whenever discovery
+shows no new card for an integration a request may name, the run records a
+`tool.discovery_card` session event with the `source` (`tool_search` or
+`tool_list`), the `outcome` (`skipped`, `already_shown`, `not_shown` or
+`failed`), a `reason` (`several_named`, `not_distinctive`, `lookup_timed_out`,
+`lookup_failed`, `no_card_tool`, `timeout` or `error`), the query bounded to
+500 characters, and the capability ids and names concerned. A catalog lookup
+that failed or timed out is recorded once per run and source. Recording is best
+effort, stops when the run ends, and never delays or fails discovery.
+
 ### Recovery from tool-search misses
 
 Progressive discovery uses the same authorized deferred pool on every transport.
@@ -605,6 +660,10 @@ part after the server separator (`projects.` or `projects_`). Digest aliases sor
 that readable part. An invalid cursor requires restarting
 the listing against the current pool. Names and prefixes are display/routing
 keys, never authorization identities.
+Each digest-aliased tool has its own digest, so one tool's `mcp_<digest>` is no
+connection prefix; a `namePrefix` that is such a digest (or a start of one of
+at least four hex digits) and matches only MCP tools lists every tool of those
+tools' connections, within any `group`, and says so in `message`.
 
 Use `tool_search` with `query: ""` and `names: ["exact_name"]` to disclose the
 listed tool's full schema without keyword ranking. Exact lookup cannot admit

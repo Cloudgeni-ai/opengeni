@@ -173,6 +173,7 @@ export function KnowledgePage({
           title: entry.revision.title,
           version: entry.version,
           publishedRevisionId: entry.revision.id,
+          collection: entry.revision.kind === "group",
         }),
       onRestore: (entry: KnowledgeEntrySummary) => {
         void context.client
@@ -380,6 +381,7 @@ export function KnowledgePage({
               title: record.revision.entry.title,
               version: record.version,
               publishedRevisionId: record.publishedRevisionId,
+              collection: record.revision.entry.kind === "group",
             });
           }}
           entryLink={entryLink}

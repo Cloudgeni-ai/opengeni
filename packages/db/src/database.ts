@@ -891,6 +891,28 @@ export async function withDatabaseMaintenanceLifetime<T>(
 }
 
 /**
+ * Cancel the server-side statements of `run` when `signal` aborts, for
+ * example when the HTTP client that asked for a read has gone away. Each
+ * statement on a transaction connection that is still executing gets a
+ * protocol cancel, so PostgreSQL stops working for nobody and the transaction
+ * rolls back. Queries outside a transaction are not cancelled. A surrounding
+ * cancellation scope still applies: either signal cancels.
+ *
+ * Use it for reads, or for writes that may safely roll back when the caller
+ * leaves. Injected drivers without joined cancellation run `run` unchanged.
+ */
+export async function withDatabaseQueryCancellation<T>(
+  db: Database,
+  signal: AbortSignal | undefined,
+  run: () => Promise<T>,
+): Promise<T> {
+  if (!signal || !dbBindingFor(db)?.cancellableTransactions) return await run();
+  signal.throwIfAborted();
+  const outer = databaseQuerySignal.getStore();
+  return await databaseQuerySignal.run(outer ? AbortSignal.any([outer, signal]) : signal, run);
+}
+
+/**
  * Register a host's `rlsStrategy`/`userLookup` against an externally-constructed
  * `Database` handle (e.g. one the embedded host built from its own driver and
  * injected, rather than via `createDb`). Lets the same WeakMap-backed lookups

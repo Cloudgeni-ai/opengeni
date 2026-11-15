@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
-import { buildSessionRealtimeDelegationTerminalProjection } from "../src/session-realtime-terminal";
+import {
+  buildSessionRealtimeDelegationTerminalProjection,
+  REALTIME_DELEGATION_NO_ANSWER_TEXT,
+} from "../src/session-realtime-terminal";
 
 const accountId = "00000000-0000-4000-8000-000000000001";
 const workspaceId = "00000000-0000-4000-8000-000000000002";
@@ -25,6 +28,42 @@ function input(output: string, retainedOutputEvidence?: unknown) {
 }
 
 describe("realtime terminal projection", () => {
+  function withPayload(payload: Record<string, unknown>) {
+    return { ...input(""), terminalEvent: { ...input("").terminalEvent, payload } };
+  }
+
+  test("relays the reply of a turn that ended waiting for input", () => {
+    // wait_for_input settles with an empty output and the answer as `reply`.
+    const reply = "I've switched to paying by card instead. Please approve it in the bank app.";
+    const projected = buildSessionRealtimeDelegationTerminalProjection(
+      withPayload({ reply, output: "" }),
+    );
+
+    expect(projected.kind).toBe("delegation_result");
+    expect(projected.text).toBe(reply);
+    expect(projected.payload).toMatchObject({ terminal: { reply, output: "" } });
+  });
+
+  test("prefers the turn output over a reply", () => {
+    const projected = buildSessionRealtimeDelegationTerminalProjection(
+      withPayload({ output: "final answer", reply: "earlier note" }),
+    );
+
+    expect(projected.text).toBe("final answer");
+  });
+
+  test("never relays an empty result", () => {
+    for (const payload of [
+      { output: "" },
+      { output: " \n", reply: "" },
+      { output: "NO_REPLY" },
+      {},
+    ]) {
+      const projected = buildSessionRealtimeDelegationTerminalProjection(withPayload(payload));
+      expect(projected.text).toBe(REALTIME_DELEGATION_NO_ANSWER_TEXT);
+    }
+  });
+
   test("preserves ordinary terminal output exactly", () => {
     const output = "ordinary source\u0000\ud800|\udc00";
     const projected = buildSessionRealtimeDelegationTerminalProjection(input(output));

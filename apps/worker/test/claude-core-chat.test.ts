@@ -346,8 +346,10 @@ function credential(token: string) {
 }
 
 /** A placed core turn with a held core lease and scripted request custody. */
-function placedCore(options: { fence?: () => Promise<void>; refreshAdvances?: boolean } = {}) {
+function placedCore(options: { reserveError?: Error; refreshAdvances?: boolean } = {}) {
   const order: string[] = [];
+  // Separate source or lease reads before a request's reservation.
+  const reads: string[] = [];
   let operation = 0;
   const runtime = {
     reserveSubscriptionCoreRequest: async (
@@ -357,6 +359,7 @@ function placedCore(options: { fence?: () => Promise<void>; refreshAdvances?: bo
       request: { requestId: string; transportAttempt: number },
     ) => {
       order.push(`reserve:${request.requestId}:${request.transportAttempt}`);
+      if (options.reserveError) throw options.reserveError;
       return { operationId: `operation-${++operation}` };
     },
     settleSubscriptionCoreRequest: async (
@@ -367,7 +370,10 @@ function placedCore(options: { fence?: () => Promise<void>; refreshAdvances?: bo
     ) => {
       order.push(`settle:${request.operationId}:${request.outcome}`);
     },
-    isSubscriptionCoreSourceDisconnected: async () => false,
+    isSubscriptionCoreSourceDisconnected: async () => {
+      reads.push("source");
+      return false;
+    },
   };
   spy(db, "subscriptionCoreRequests").mockReturnValue(runtime as never);
   let refreshes = 0;
@@ -393,8 +399,7 @@ function placedCore(options: { fence?: () => Promise<void>; refreshAdvances?: bo
   lease.held = true;
   lease.confirmedUntilMs = performance.now() + 60_000;
   spyOn(lease, "assertCurrentForDispatch").mockImplementation(async () => {
-    order.push("fence");
-    await options.fence?.();
+    reads.push("lease");
   });
   const core: SubscriptionCoreTurn = {
     identity,
@@ -410,7 +415,7 @@ function placedCore(options: { fence?: () => Promise<void>; refreshAdvances?: bo
     execution: { attemptId: "attempt-1", executionGeneration: 3 },
     upstreamModelIds: ["claude-sonnet-5", "claude-opus-5-5"],
   });
-  return { order, core, lease, authorization, refreshes: () => refreshes, resolverInputs };
+  return { order, reads, core, lease, authorization, refreshes: () => refreshes, resolverInputs };
 }
 
 function sse(...items: Array<[string, unknown]>): Response {
@@ -502,7 +507,7 @@ describe("Claude request custody on the core", () => {
         body: JSON.stringify({ model: "claude-sonnet-5", messages: [] }),
       },
     ]);
-    expect(placed.order).toEqual(["fence", "reserve:attempt-1:1:1:claude:1:1"]);
+    expect(placed.order).toEqual(["reserve:attempt-1:1:1:claude:1:1"]);
     // The refusal settlement fences on the generation the admitted main-lane bearer carried.
     expect(placed.core.credentialVersion).toBe(4);
     // A completed response is settled only after the history checkpoint.
@@ -526,10 +531,8 @@ describe("Claude request custody on the core", () => {
     ]);
     expect(sent.sent[1]!.body).toBe(sent.sent[0]!.body);
     expect(placed.order).toEqual([
-      "fence",
       "reserve:attempt-1:1:1:claude:1:1",
       "settle:operation-1:refused",
-      "fence",
       "reserve:attempt-1:1:1:claude:1:2",
     ]);
     expect(placed.core.credentialVersion).toBe(5);
@@ -544,7 +547,6 @@ describe("Claude request custody on the core", () => {
     expect(sent.calls()).toBe(1);
     expect(placed.refreshes()).toBe(1);
     expect(placed.order).toEqual([
-      "fence",
       "reserve:attempt-1:1:1:claude:1:1",
       "settle:operation-1:refused",
     ]);
@@ -579,7 +581,6 @@ describe("Claude request custody on the core", () => {
     expect((await sent.response).status).toBe(529);
     expect(placed.refreshes()).toBe(0);
     expect(placed.order).toEqual([
-      "fence",
       "reserve:attempt-1:1:1:claude:1:1",
       "settle:operation-1:refused",
     ]);
@@ -597,7 +598,6 @@ describe("Claude request custody on the core", () => {
     ]);
     await (await sent.response).text();
     expect(placed.order).toEqual([
-      "fence",
       "reserve:attempt-1:1:1:claude:1:1",
       "settle:operation-1:refused",
     ]);
@@ -608,7 +608,6 @@ describe("Claude request custody on the core", () => {
     const dropped = send(placed, [() => new Response("gateway timeout", { status: 504 })]);
     expect((await dropped.response).status).toBe(504);
     expect(placed.order).toEqual([
-      "fence",
       "reserve:attempt-1:1:1:claude:1:1",
       "settle:operation-1:unknown",
     ]);
@@ -640,17 +639,40 @@ describe("Claude request custody on the core", () => {
     expect(claudeCoreRequestOutcomeUnknown(new Error("plain"), placed.core)).not.toBeNull();
   });
 
-  test("a lost core lease stops dispatch before any reservation", async () => {
-    const lost = Object.assign(new Error("lease lost"), { code: "claude_credential_lease_lost" });
-    const placed = placedCore({
-      fence: async () => {
-        throw lost;
-      },
-    });
+  test("a request is fenced by its reservation alone, with no separate source or lease read", async () => {
+    const placed = placedCore();
+    await (await send(placed, [answered]).response).text();
+    expect(placed.order).toEqual(["reserve:attempt-1:1:1:claude:1:1"]);
+    expect(placed.reads).toEqual([]);
+  });
+
+  test("a locally lost core lease stops dispatch before any reservation", async () => {
+    const placed = placedCore();
+    placed.lease.markLost("not_found");
     const sent = send(placed, [answered]);
-    await expect(sent.response).rejects.toBe(lost);
+    await expect(sent.response).rejects.toMatchObject({ code: "claude_credential_lease_lost" });
     expect(sent.calls()).toBe(0);
-    expect(placed.order).toEqual(["fence"]);
+    expect(placed.order).toEqual([]);
+  });
+
+  test("a lease the reservation finds lost marks the holder lost and stops before network I/O", async () => {
+    const placed = placedCore({ reserveError: db.SUBSCRIPTION_CORE_CLAUDE.errors.leaseLost() });
+    const sent = send(placed, [answered]);
+    await expect(sent.response).rejects.toMatchObject({ code: "claude_credential_lease_lost" });
+    expect(sent.calls()).toBe(0);
+    expect(placed.order).toEqual(["reserve:attempt-1:1:1:claude:1:1"]);
+    expect(() => placed.lease.assertUsable()).toThrow();
+  });
+
+  test("a disconnected source the reservation finds is surfaced as is", async () => {
+    const disconnected = Object.assign(new Error("source disconnected"), {
+      code: "subscription_core_source_disconnected",
+    });
+    const placed = placedCore({ reserveError: disconnected });
+    const sent = send(placed, [answered]);
+    await expect(sent.response).rejects.toBe(disconnected);
+    expect(sent.calls()).toBe(0);
+    expect(() => placed.lease.assertUsable()).not.toThrow();
   });
 
   test("session-title requests use their own custody lane under the same fence", async () => {
@@ -663,7 +685,6 @@ describe("Claude request custody on the core", () => {
     });
     await dropped.response;
     expect(placed.order).toEqual([
-      "fence",
       "reserve:attempt-1:1:1:claude:title:1:1",
       "settle:operation-1:unknown",
     ]);
@@ -1218,14 +1239,12 @@ describe("Claude custody edge paths on the core", () => {
     await custody(() => claude.getResponse(modelRequest));
     expect(calls()).toBe(2);
     expect(placed.order).toEqual([
-      "fence",
       "reserve:attempt-1:1:1:claude:1:1",
-      "fence",
       "reserve:attempt-1:1:1:claude:2:1",
     ]);
     expect(placed.core.requests!.canRecover()).toBe(false);
     await placed.core.requests!.checkpoint();
-    expect(placed.order.slice(4)).toEqual([
+    expect(placed.order.slice(2)).toEqual([
       "settle:operation-1:response_received",
       "settle:operation-2:response_received",
     ]);
@@ -1394,7 +1413,6 @@ describe("Claude custody edge paths on the core", () => {
     expect(cancelled).toBe(true);
     expect(sent.calls()).toBe(1);
     expect(placed.order).toEqual([
-      "fence",
       "reserve:attempt-1:1:1:claude:1:1",
       "settle:operation-1:refused",
     ]);

@@ -1,6 +1,7 @@
 import { ChevronRightIcon, CloudIcon, CodeXmlIcon, MessageCircleIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
+import { useSimplifiedInterface } from "@opengeni/react/app/lib/simplified-interface";
 import { LogoTile } from "@opengeni/react/ui/logo-tile";
 import type { OnboardingUseCase } from "@opengeni/react/app/lib/onboarding-use-case";
 
@@ -39,15 +40,21 @@ export function OnboardingUseCaseStep({
 }: {
   onChoose: (useCase: OnboardingUseCase) => void;
 }) {
+  const { simplified, productName } = useSimplifiedInterface();
+  // The simplified interface is for people using the product, not building
+  // on it, so it leaves out the developer path (still there without it).
+  const useCases = simplified ? USE_CASES.filter((useCase) => useCase.id !== "embed") : USE_CASES;
   return (
     <section className="og-page-glow flex flex-1 items-center justify-center px-4 py-8">
       <div className="w-full max-w-lg rounded-xl border border-border bg-surface p-6 shadow-sm sm:p-8">
-        <h1 className="text-xl font-semibold tracking-tight">How do you want to use Opengeni?</h1>
+        <h1 className="text-xl font-semibold tracking-tight">
+          How do you want to use {productName}?
+        </h1>
         <p className="mt-2 text-sm leading-relaxed text-fg-muted">
           Pick one to get started. You can do the others later.
         </p>
-        <ul className="mt-6 grid gap-2" aria-label="Ways to use Opengeni">
-          {USE_CASES.map((useCase) => (
+        <ul className="mt-6 grid gap-2" aria-label={`Ways to use ${productName}`}>
+          {useCases.map((useCase) => (
             <li key={useCase.id}>
               <button
                 type="button"

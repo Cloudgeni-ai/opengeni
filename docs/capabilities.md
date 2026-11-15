@@ -365,6 +365,23 @@ and returns the exact revision id and SHA-256. Install re-fetches the source and
 returns `409` if either immutable fact changed, so unreviewed tools are never
 installed from a stale preview.
 
+The Microsoft Graph definitions read one commit-pinned copy of Graph's OpenAPI
+document (`MICROSOFT_GRAPH_OPENAPI_PIN`, a msgraph-metadata commit URL plus its
+SHA-256), never the moving upstream branch, so their tools change only when the
+pin is reviewed and moved; a document whose digest differs is refused. `bun
+scripts/graph-openapi-pin.ts` checks the pin, and `--diff <commit>` prints, per
+definition, the reviewed operations a candidate lacks and the operations
+entering or leaving each generic path scope. Each definition offers a reviewed
+operation allowlist with hand-written names and descriptions (an allowlist entry
+may name its own `operationId` and `requestPath`; path parameters follow the
+request path). A definition may also opt in to `genericPathScope`: three more
+tools find operations under its path prefixes in the pinned document and call
+one by its concrete path, one tool for GET (read) and one for other methods
+(change, Ask by default). The path must match an in-scope operation segment by
+segment, each value is encoded into its segment, and the call takes the same
+credential, redirect and response handling as any reviewed tool. Outlook Mail,
+Calendar, Contacts and OneDrive opt in with their earlier prefix scopes.
+
 Authenticated Integrations require an existing active Connection for the exact
 provider domain. The selected Connection's Personal/workspace ownership and
 required scopes are checked during install; caller-supplied ownership cannot
@@ -835,7 +852,12 @@ GitHub's Options block includes the attempt-frozen action approval policy for
 each available acting identity. `Create and update work`, `Submit reviews`, and
 `Merge pull requests` each select Ask every time, Allow, or Block. They are
 separate so autonomous pull-request creation never implies autonomous review or
-merge. The stock UI reads and writes the public GitHub action-policy endpoints;
+merge. Your GitHub also has `Settings and deletions` (API group `sensitive`,
+default Ask): what agents do with `gh` and Git that is hard to undo, such as
+repository settings, secrets, environments, deletions and tag or
+default-branch changes (see [`personal-github.md`](personal-github.md)). The
+workspace app has no such group, and setting it for the app is a 400. The
+stock UI reads and writes the public GitHub action-policy endpoints;
 it does not mutate connector-policy rows directly.
 
 - Connections, Skills, and Plugins share `CapabilityCatalogRow` from
@@ -989,6 +1011,16 @@ Ordinary new sessions include two first-party Opengeni tools:
   the current session for an exact catalog result. Calling it does not install,
   enable, connect, or grant anything. The exact turn attempt fences the event,
   and the signed-in human must confirm the provider domain and complete setup.
+  Every result says whether a card is in the chat (`cardShown`, with its
+  `eventId`). `tool_search` posts the same card itself, through this tool,
+  when a search clearly names one integration the person can connect (see
+  `docs/mcp-surfaces.md`, "Human integration setup in chat").
+- An integration whose connections each need a value first (for example one
+  environment's address) declares those connect-time inputs in
+  `@opengeni/contracts/capability-connect-inputs`. Its catalog match lists
+  them as `setup.connectInputs`, and its card asks the person for them, filled
+  in with any `inputs` the agent passed that follow the entry's rule. The card
+  adds the connection with `connectFor`, and the API applies the same rule.
 - `custom_mcp_setup_request` posts a human review card for a remote HTTPS MCP
   endpoint not yet in the workspace catalog. The agent may propose a name and
   exact URL, but cannot register or contact the server. The signed-in human
@@ -1042,6 +1074,20 @@ a shared chat a teammate connects their own account, and the agent continues
 only for the person whose request it was. When Microsoft reports that an
 administrator must approve the app, the card shows the administrator approval
 link with a copy button and a **Try again** action.
+`ConnectPanel` shows the same help, including when the person left Microsoft's
+"Need admin approval" page with Cancel: the attempt then ends `cancelled` with
+the approval link stored in its error. A plain cancel that stores no link
+closes quietly.
+
+A sign-in popup started with `finishInPopup` ends on
+`/v1/integrations/connect/finished`, a small page that closes itself, and an
+administrator who opens the approval link lands on a short result page. The
+API renders both outside any app, so set their wording in the deployment's
+language with `OPENGENI_CONNECT_RESULT_PAGE_TEXT_JSON`, for example
+`{"lang":"nb","signInFinishedTitle":"Du kan lukke dette vinduet","adminApprovedTitle":"Godkjent"}`.
+The fields are `lang`, `signInFinishedTitle`, `signInFinishedBody`,
+`adminApprovedTitle`, `adminApprovedBody`, `adminNotApprovedTitle`,
+`adminNotApprovedBody` and `closeWindow`. Any field left out stays in English.
 
 Installing a reviewed definition's tools for your own personal account counts
 as connecting your own account, so it needs only `connections:personal`
@@ -1082,6 +1128,10 @@ host-owned GitHub authority.
 
 ## Google Drive MCP connection
 
+An operator can serve Drive through Nango instead; reads then come from Drive
+REST through the Nango proxy and `create_file`/`copy_file` are not offered (see
+[`nango.md`](nango.md)).
+
 Google Drive appears as one personal catalog MCP connection. Its reads, search,
 downloads, copies and uploads use Google's official
 `https://drivemcp.googleapis.com/mcp/v1` server. The same selected connection
@@ -1110,6 +1160,9 @@ are retained. See [Google Drive](google-drive.md) for operator setup, supported
 tools, limits and explicit replacement of old source schedules.
 
 ## Gmail MCP bridge
+
+An operator can serve Gmail through Nango's managed app; the tool surface stays
+the same and requests go through the Nango proxy (see [`nango.md`](nango.md)).
 
 The reviewed Gmail connector uses Opengeni's REST-backed MCP bridge. Its
 historical `https://gmailmcp.googleapis.com/mcp/v1` connection identity remains
@@ -1141,6 +1194,12 @@ authorization/token origins are pinned, and the RFC 8707 `resource` parameter
 is omitted from Google's authorization, token, and refresh requests. The MCP
 resource remains stored in the encrypted bundle and bound to the runtime
 connection.
+Gmail, Drive and Calendar share one Google client per deployment, so none of
+them sends `include_granted_scopes`: a Gmail token holds only Gmail scopes, and
+the consent screen lists only what that connector asks for. A first connection
+shows Google's account picker (`prompt=consent select_account`); reconnecting
+an account sends its verified email as `login_hint` with `prompt=consent`, so
+Google signs in that account rather than the one the browser used last.
 
 Gmail connections are personal-only; every member connects their own mailbox.
 Personal account selection is frozen for the initiating user's accepted work,
@@ -1216,6 +1275,10 @@ See Google's [OAuth web-server guide](https://developers.google.com/identity/pro
 and [restricted-scope verification requirements](https://developers.google.com/identity/protocols/oauth2/production-readiness/restricted-scope-verification).
 
 ## Google Calendar bridge
+
+An operator can serve Calendar through Nango's managed app; the tool surface
+stays the same and requests go through the Nango proxy (see
+[`nango.md`](nango.md)).
 
 Google Calendar uses the same reviewed REST-bridge design as Gmail. The catalog
 row's `https://calendarmcp.googleapis.com/mcp/v1` resource (Google's hosted

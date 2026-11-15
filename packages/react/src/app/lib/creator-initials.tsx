@@ -13,6 +13,83 @@ export type CreatorRef = {
 /** Rows migrated before creation attribution carry this reserved subject id. */
 const UNATTRIBUTED_LEGACY_SUBJECT_ID = "unattributed-legacy";
 
+const API_KEY_SUBJECT_PREFIX = "api_key:";
+const SERVICE_SUBJECT_PREFIX = "service:";
+
+/**
+ * Whether a frozen subject id has a prefix. Tolerates a missing or non-string
+ * id (malformed or older payloads) so a creator label can never break the rail.
+ */
+function subjectIdHasPrefix(subjectId: unknown, prefix: string): boolean {
+  return typeof subjectId === "string" && subjectId.startsWith(prefix);
+}
+
+/** What kind of thing created a chat. Display-only. */
+export type CreatorType = "person" | "api_key" | "service" | "unattributed";
+
+/**
+ * API keys are one creator whichever kind their sessions were frozen with:
+ * older sessions recorded the key as a subject, newer ones as a service.
+ */
+export function creatorType(createdBy: Pick<CreatorRef, "kind" | "subjectId">): CreatorType {
+  if (createdBy.subjectId === UNATTRIBUTED_LEGACY_SUBJECT_ID) return "unattributed";
+  if (subjectIdHasPrefix(createdBy.subjectId, API_KEY_SUBJECT_PREFIX)) return "api_key";
+  if (
+    createdBy.kind === "service" ||
+    subjectIdHasPrefix(createdBy.subjectId, SERVICE_SUBJECT_PREFIX)
+  ) {
+    return "service";
+  }
+  return "person";
+}
+
+/**
+ * The one creator a session belongs to. An API key is keyed by its subject id
+ * alone, so its subject- and service-frozen sessions share a group; every other
+ * creator keeps its exact frozen kind, so a service can never join a person.
+ */
+export function creatorIdentityKey(createdBy: Pick<CreatorRef, "kind" | "subjectId">): string {
+  return subjectIdHasPrefix(createdBy.subjectId, API_KEY_SUBJECT_PREFIX)
+    ? createdBy.subjectId
+    : `${createdBy.kind}:${createdBy.subjectId}`;
+}
+
+/**
+ * The creator to page a group by: an API key without a kind (both frozen
+ * kinds), everyone else by their exact frozen kind.
+ */
+export function creatorPageIdentity(createdBy: Pick<CreatorRef, "kind" | "subjectId">): {
+  kind?: CreatorRef["kind"];
+  subjectId: string;
+} {
+  return subjectIdHasPrefix(createdBy.subjectId, API_KEY_SUBJECT_PREFIX)
+    ? { subjectId: createdBy.subjectId }
+    : { kind: createdBy.kind, subjectId: createdBy.subjectId };
+}
+
+/**
+ * How a non-person creator is named: the friendly name its owner gave it and a
+ * short kind hint. Without a friendly name it is just its kind, never an id.
+ * Null for people, whose labels are shown as frozen.
+ */
+export function machineCreatorDisplay(
+  createdBy: CreatorRef,
+): { name: string | null; hint: "API key" | "Service" } | null {
+  const type = creatorType(createdBy);
+  if (type !== "api_key" && type !== "service") return null;
+  return {
+    name: createdBy.label?.trim() || null,
+    hint: type === "api_key" ? "API key" : "Service",
+  };
+}
+
+/** A non-person creator's label ("Codex operator · API key", or just "API key"); null for people. */
+export function machineCreatorLabel(createdBy: CreatorRef): string | null {
+  const machine = machineCreatorDisplay(createdBy);
+  if (!machine) return null;
+  return machine.name ? `${machine.name} · ${machine.hint}` : machine.hint;
+}
+
 function humanizeSubjectId(subjectId: string): string {
   const withoutPrefix = subjectId.includes(":")
     ? subjectId.slice(subjectId.indexOf(":") + 1)
@@ -25,7 +102,8 @@ function humanizeSubjectId(subjectId: string): string {
  * and unattributed legacy rows (the rail shows people, not machinery).
  */
 export function creatorInitials(createdBy: CreatorRef): string | null {
-  if (createdBy.kind !== "subject" || createdBy.subjectId === UNATTRIBUTED_LEGACY_SUBJECT_ID) {
+  // An API key is not a person, even on older rows that froze it as a subject.
+  if (createdBy.kind !== "subject" || creatorType(createdBy) !== "person") {
     return null;
   }
   const label = createdBy.label?.trim();
@@ -60,6 +138,8 @@ export function railRowCreator(session: {
 
 /** Human-readable creator name for a tooltip or screen-reader announcement. */
 export function creatorLabel(createdBy: CreatorRef): string {
+  const machine = machineCreatorLabel(createdBy);
+  if (machine) return machine;
   return createdBy.label?.trim() || createdBy.subjectId;
 }
 

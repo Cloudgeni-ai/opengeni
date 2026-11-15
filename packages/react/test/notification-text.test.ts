@@ -38,6 +38,25 @@ describe("notification text", () => {
     expect(notificationPlainText("**Done**\n- a\n- b")).toBe("Done\n• a\n• b");
     expect(parseNotificationText("  \n\n")).toEqual([]);
   });
+
+  test("source links lose hosted-search tracking and keep page parameters", () => {
+    expect(
+      parseNotificationText(
+        "See [the rule](https://example.com/rules/4-1?_t_q=which+rule&utm_source=openai)",
+      ),
+    ).toEqual([
+      {
+        kind: "paragraph",
+        spans: [
+          { kind: "text", text: "See " },
+          { kind: "link", text: "the rule", href: "https://example.com/rules/4-1" },
+        ],
+      },
+    ]);
+    expect(notificationPlainText("- https://example.com/watch?v=abc&utm_source=openai")).toBe(
+      "• https://example.com/watch?v=abc",
+    );
+  });
 });
 
 describe("landing on a moment", () => {

@@ -9,6 +9,7 @@ import {
   clearRunCredentials,
   clearRunCredentialsForAttempt,
   refreshGitCredentialBindingTokenFiles,
+  gitSessionKey,
   refreshCodemodeTokenFile,
   codemodeTokenFileFromEnvironment,
   type GitCredentialTokenWriterSession,
@@ -558,6 +559,9 @@ async function prepareRunCredentialsObserved(
             "gitCredentialRenewal",
             async () =>
               await refreshGitCredentialBindingTokenFiles(tokenSession, [pendingBinding!], {
+                // Renew into this chat's own directory; other chats on the
+                // box keep their own passes.
+                gitSessionKey: gitSessionKey(input.sessionId),
                 ...(eventing.toolCancellationFenceRef.current
                   ? {
                       commandRunner:

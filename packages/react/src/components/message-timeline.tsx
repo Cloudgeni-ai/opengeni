@@ -8,6 +8,9 @@ import {
   flattenActivityItems,
   isPreparingWork,
   timelineTurnsWithOutput,
+  timelineTurnsWithUnloadedSteps,
+  activityHasUnloadedSteps,
+  turnGroupHasUnloadedSteps,
   readableWorkDefaultOpen,
   readableWorkHasDetails,
   readableWorkIsEmpty,
@@ -421,6 +424,12 @@ export type MessageTimelineProps = {
   onJumpToLatestQuestion?: (() => Promise<number | null>) | undefined;
   /** Host-owned content appended after timeline groups, such as startup progress. */
   trailingState?: ReactNode | undefined;
+  /**
+   * Session-failure event ids the host shows itself with their actions, such
+   * as a failed-session banner with Retry. Each failure is shown once: their
+   * turns keep a quiet "Failed" and the timeline does not repeat their text.
+   */
+  presentedFailureEventIds?: readonly string[] | undefined;
   emptyState?: ReactNode | undefined;
   className?: string | undefined;
 };
@@ -503,6 +512,8 @@ const LIVE_NOTE_RESERVE_MS = 700;
 const LiveNoteFoldContext = createContext<((workId: string, open: boolean) => void) | null>(null);
 /** False when the host hides agent signals: turn rows then show only their status. */
 const AgentSignalsContext = createContext(true);
+/** Turns whose steps are not all loaded, for `TurnSummaryContext.unloadedSteps`. */
+const UnloadedStepTurnsContext = createContext<ReadonlySet<string>>(new Set());
 const STATUS_ONLY_FACETS = { replace: [] } as const satisfies TurnSummaryFacetConfiguration;
 
 // State: 0 underfill retry, 1 prefetch pending, 2 compatibility-settled,
@@ -731,6 +742,7 @@ export function MessageTimeline({
   onLoadNewer,
   onJumpToLatest,
   trailingState,
+  presentedFailureEventIds,
   emptyState,
   className,
 }: MessageTimelineProps) {
@@ -871,9 +883,16 @@ export function MessageTimeline({
   const [olderDemand, setOlderDemand] = useState(0);
   const readableTurns = turnSummary?.rolling === true;
   const pauses = useTimelinePauses(events, pause, readableTurns);
+  // By value: hosts may pass a fresh array on every render.
+  const presentedFailureKey = presentedFailureEventIds?.join("\n") ?? "";
   const projectedGroups = useMemo(
-    () => groupTimeline(t, resolvedItems, { readableTurns, pauses }),
-    [resolvedItems, readableTurns, pauses, t],
+    () =>
+      groupTimeline(t, resolvedItems, {
+        readableTurns,
+        pauses,
+        presentedFailureEventIds: presentedFailureKey ? presentedFailureKey.split("\n") : undefined,
+      }),
+    [resolvedItems, readableTurns, pauses, presentedFailureKey, t],
   );
   // A new timeline revision (including session/turn replacement) owns layout.
   // Never leave an old decorative transform running on its retained rows.
@@ -1234,6 +1253,15 @@ export function MessageTimeline({
     liveNoteIdsByWorkRef.current = liveNoteIdsByWork;
   }, [liveNoteIdsByWork]);
   const turnsWithOutput = useMemo(() => timelineTurnsWithOutput(resolvedItems), [resolvedItems]);
+  // By value, so a new timeline with the same unloaded turns re-renders no rows.
+  const unloadedStepTurnsKey = useMemo(
+    () => [...timelineTurnsWithUnloadedSteps(resolvedItems)].join("\n"),
+    [resolvedItems],
+  );
+  const unloadedStepTurns = useMemo(
+    () => new Set(unloadedStepTurnsKey ? unloadedStepTurnsKey.split("\n") : []),
+    [unloadedStepTurnsKey],
+  );
 
   const applyCanSkipTipCatchup = useCallback((value: boolean) => {
     if (canSkipTipCatchupRef.current !== value) {
@@ -3188,7 +3216,9 @@ export function MessageTimeline({
         >
           <ProviderLogoProvider value={resolveProviderLogo}>
             <AgentSignalsContext.Provider value={agentSignals}>
-              {timeline}
+              <UnloadedStepTurnsContext.Provider value={unloadedStepTurns}>
+                {timeline}
+              </UnloadedStepTurnsContext.Provider>
             </AgentSignalsContext.Provider>
           </ProviderLogoProvider>
         </AgentIdentityProvider>
@@ -3596,6 +3626,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
   const settleChrome = useTurnSettleOpen();
   // Without agent signals a turn row is only its status ("Working · 8s").
   const agentSignals = useContext(AgentSignalsContext);
+  const unloadedStepTurns = useContext(UnloadedStepTurnsContext);
   const rowFacets = agentSignals ? turnSummary?.facets : STATUS_ONLY_FACETS;
   const previousSingleActivity = useRef<ActivityItem | undefined>(undefined);
   useLayoutEffect(() => {
@@ -3855,6 +3886,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
             defaultOpen={settleChrome ? true : undefined}
             foldKey={group.id}
             facets={rowFacets}
+            unloadedSteps={activityHasUnloadedSteps(group.items, unloadedStepTurns)}
             contextCompactionCount={contextCompactionCount}
           >
             <ActivityRail
@@ -3903,6 +3935,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
           foldKey={group.id}
           facets={rowFacets}
           settleFold={settleFold}
+          unloadedSteps={activityHasUnloadedSteps(group.items, unloadedStepTurns)}
           contextCompactionCount={contextCompactionCount}
         >
           <FoldBody>
@@ -3963,6 +3996,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
           facets={rowFacets}
           settleFold={settleFold}
           copyText={insideTurn ? undefined : turnCopyText}
+          unloadedSteps={turnGroupHasUnloadedSteps(group, unloadedStepTurns)}
           contextCompactionCount={contextCompactionCount ?? group.contextCompactionCount}
         >
           <FoldBody>
@@ -5500,6 +5534,32 @@ function NoticeRow({ item }: { item: NoticeItem }) {
   if (item.allowance) return <AllowanceExhaustedRow refusal={item.allowance} />;
   if (item.sessionUsageLimit) return <SessionUsageLimitRow stop={item.sessionUsageLimit} />;
   if (item.learningRefusal) return <LearningRefusalRow refusal={item.learningRefusal} />;
+  if (item.retriedAttempt) {
+    // The turn's final outcome carries the failure that still matters; this
+    // retried attempt stays one quiet step, its recorded text a click away.
+    return (
+      <details className="group text-og-sm text-og-fg-muted" role="note" data-og-retried-attempt="">
+        <summary className="flex cursor-pointer list-none items-center gap-2 py-1 [&::-webkit-details-marker]:hidden">
+          <ChevronRightIcon
+            aria-hidden
+            className="size-3.5 transition-transform group-open:rotate-90"
+          />
+          <StatusDot status="failed" className="size-1" />
+          <span title={new Date(item.occurredAt).toLocaleString(t.locale)}>
+            {t("messageTimeline.attemptFailedRetried")}
+          </span>
+        </summary>
+        <div className="mt-1 pl-5">
+          <p className="whitespace-pre-wrap break-words">{noticeDisplayText(t, item)}</p>
+          {typeof item.details?.value === "string" ? (
+            <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-og-sm bg-og-fg/5 p-2 font-mono text-og-control">
+              {item.details.value}
+            </pre>
+          ) : null}
+        </div>
+      </details>
+    );
+  }
   if (item.recordedOutcome) {
     return (
       <details

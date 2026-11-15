@@ -5,6 +5,7 @@ import { describe, expect, test } from "bun:test";
 import type { Session } from "@opengeni/sdk";
 import { OpenGeniChat } from "../src/components/open-geni-chat";
 import { fakeClient, WORKSPACE_ID } from "./fake-client";
+import { LEVEL_MODELS, LEVELS } from "./fixtures/level-models";
 import { actRun, flush, registerDom, renderComponent } from "./render-hook";
 
 registerDom();
@@ -25,7 +26,7 @@ function session(id: string): Session {
   } as unknown as Session;
 }
 
-function chatClient(config: Record<string, unknown> = {}) {
+function chatClient(config: Record<string, unknown> = {}, catalog: unknown[] = []) {
   const requests: unknown[] = [];
   const client = fakeClient({
     getClientConfig: async () =>
@@ -41,7 +42,7 @@ function chatClient(config: Record<string, unknown> = {}) {
     getSession: async (_workspace, id) => session(id) as never,
     getQueue: async () =>
       ({ version: 1, effectiveControl: null, items: [], pendingInputs: [] }) as never,
-    getWorkspaceModelCatalog: async () => ({ models: [] }) as never,
+    getWorkspaceModelCatalog: async () => ({ models: catalog }) as never,
     listHumanInputRequests: async () => [],
     streamEvents: async function* (_workspace, _session, options) {
       await new Promise<void>((resolve) =>
@@ -168,6 +169,39 @@ describe("OpenGeniChat new-chat composer", () => {
           options: { resources: [{ kind: "file", fileId: "file-1" }] },
         },
       ]);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("host levels pick the first message's model and effort", async () => {
+    const { client, requests } = chatClient(
+      { defaultModel: "codex/everyday", defaultReasoningEffort: "high" },
+      LEVEL_MODELS,
+    );
+    const view = await renderComponent(
+      <OpenGeniChat
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        conversationProps={{ modelPicker: true, modelPickerProps: { levels: LEVELS } }}
+      />,
+    );
+    try {
+      await flush(80);
+      const form = view.container.querySelector<HTMLFormElement>("[data-og-new-chat-composer]")!;
+      const slider = form.querySelector<HTMLElement>("[role='slider']")!;
+      expect(slider.getAttribute("aria-valuetext")).toBe("Standard");
+      await actRun(() =>
+        slider.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true })),
+      );
+      await flush(20);
+      expect(slider.getAttribute("aria-valuetext")).toBe("Thorough");
+      await actRun(() => typeInto(form.querySelector("textarea")!, "Plan the release"));
+      await actRun(() => form.requestSubmit());
+      await flush(80);
+      expect(requests).toHaveLength(1);
+      expect(JSON.stringify(requests[0])).toContain('"codex/deep"');
+      expect(JSON.stringify(requests[0])).not.toContain("ultrafast");
     } finally {
       await view.unmount();
     }

@@ -6,6 +6,8 @@ icon: "sliders"
 
 Every session takes one `agent` object:
 
+{/* doc-snippets: excerpt CreateSessionRequest from "@opengeni/sdk" */}
+
 ```ts
 agent: {
   identity: "You are Acme Analytics' assistant. You help customers read their dashboards.",
@@ -71,12 +73,26 @@ Switch any item back on with its capability, for example `{ from: "none", privac
 
 Put facts about the current page in the message's `modelContext`, not in instructions.
 
+## Title instructions
+
+Opengeni titles each new chat automatically, in the language the person writes in. `titleInstructions` tells that title request how your product wants titles written. It is added after the request's fixed rules, for example:
+
+```ts
+agent: {
+  titleInstructions: "If the messages have no clear language, write the title in Norwegian bokmål.",
+}
+```
+
+Use it for what the messages alone cannot tell the title request, such as the language to use when someone sends only a link, a file or code. It does not change the agent's instructions. Child sessions inherit it, a running session can change it, and `null` removes it. Up to 8,000 characters. It is not part of the workspace default.
+
 ## Renderer
 
 - `"opengeni"` for `OpenGeniChat` and `SessionConversation`: files, artifacts, and visuals render inline.
 - `"markdown"` for your own chat UI, Slack, or email. The chat facade uses it by default.
 
 ## Where it goes
+
+{/* doc-snippets: excerpt SessionProxyHandlerOptions from "@opengeni/sdk" */}
 
 <CodeGroup>
 ```ts Proxy

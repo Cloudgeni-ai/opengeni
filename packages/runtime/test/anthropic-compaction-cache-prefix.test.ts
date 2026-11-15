@@ -155,8 +155,9 @@ test("a Claude checkpoint request keeps the ordinary request's cached prefix", a
   expect(compaction.system).toEqual(ordinary.system);
   expect(compaction.tool_choice).toEqual(ordinary.tool_choice);
   expect(compaction.output_config).toEqual(ordinary.output_config);
-  const { block_binding: _binding, ...thinking } = compaction.thinking ?? {};
-  expect(thinking).toEqual(ordinary.thinking);
+  // Both requests carry the same thinking settings, including the binding reset.
+  expect(compaction.thinking).toEqual(ordinary.thinking);
+  expect(ordinary.thinking?.block_binding).toEqual({ prefix_mismatch_behavior: "drop_block" });
 
   // Every earlier message is byte-identical; the checkpoint prompt is appended
   // to the final user turn after the content the ordinary request sent.

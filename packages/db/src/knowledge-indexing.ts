@@ -12,6 +12,7 @@ export {
   currentCreditDebitAttribution,
   withCreditDebitAttribution,
   ambientBillingOrigin,
+  billingOriginOverride,
   manualScheduledTaskRunBillingOrigin,
   markScheduledTaskApiBilled,
   readScheduledTaskBillingOrigin,

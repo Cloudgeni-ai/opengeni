@@ -9,6 +9,7 @@ import {
   getWorkspaceCredentialProvider,
   markSessionTurnModelTransportHttpOnly,
   readSessionAgentPrompt,
+  markOrganizationAnthropicApiKeyCreditRefused,
 } from "@opengeni/db";
 import { lazyProvisionEnabled, routingEnabled } from "../../sandbox-routing";
 import { gitTokensMintedByOpengeni } from "../../standalone-git-credentials";
@@ -34,6 +35,7 @@ import {
   REMOTE_COMPACTION_V2_BETA_FEATURE,
   REMOTE_COMPACTION_V2_IMPLEMENTATION,
   awaitModelCallAdmission,
+  bindAgentGitCredentialSession,
   materializeSandboxFileDownloads,
   sandboxFileDownloadFailureNote,
   type SandboxFileDownload,
@@ -52,7 +54,11 @@ import {
   type CodexRequestContext,
 } from "@opengeni/codex";
 import { codexUpstreamModelSlugs } from "@opengeni/config";
-import { withClaudeUsageObserver, withInferenceResidency } from "@opengeni/runtime";
+import {
+  withAnthropicApiKeyRefusals,
+  withClaudeUsageObserver,
+  withInferenceResidency,
+} from "@opengeni/runtime";
 import { settingsWithTurnInferenceResidency } from "./inference-residency-gate";
 import { sessionTitlePromptFor } from "./session-title";
 import { createCodexCreditGuard } from "./codex-credit-policy";
@@ -109,7 +115,7 @@ import {
   sandboxFileDownloadsForRun,
   objectStorageForSandboxDownloads,
 } from "./file-resources";
-import { TurnEventPublisher } from "./model-usage";
+import { publishModelRequestAudit, TurnEventPublisher } from "./model-usage";
 import { waitForTurnOperation } from "./sandbox-provision";
 import { createTurnContext, type EventingState } from "./turn-context";
 import { finalizeTurnAttempt } from "./finalization";
@@ -227,11 +233,11 @@ export function sessionTitleXaiRequestContext(
   context: XaiSubscriptionRequestContext,
   nextRequestId: () => string,
   /**
-   * On the shared core: the turn's dispatch fence, the title custody lane and
-   * the title lane's bearer (which never moves the main lane's refusal fence).
+   * On the shared core: the turn's request admission (its reservation is the
+   * dispatch fence), the title custody lane and the title lane's bearer (which never moves the main lane's refusal fence).
    */
   core?: {
-    assertDispatch: () => Promise<void>;
+    admit: (reserve: () => Promise<unknown>) => Promise<void>;
     requests: CoreSubscriptionRequests;
     getToken: XaiSubscriptionRequestContext["getToken"];
     refresh: XaiSubscriptionRequestContext["refresh"];
@@ -253,8 +259,7 @@ export function sessionTitleXaiRequestContext(
     ...(core
       ? {
           beforeProviderDispatch: async (request) => {
-            await core.assertDispatch();
-            await core.requests.reserve(request);
+            await core.admit(() => core.requests.reserve(request));
           },
           onProviderRequestSettled: core.requests.observe,
         }
@@ -1054,7 +1059,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                       const auditStartedAt = shouldRecordStartedAudit ? performance.now() : null;
                       let auditOutcome: "completed" | "failed" = "completed";
                       try {
-                        await eventing.publish([
+                        await publishModelRequestAudit(eventing, event.phase, [
                           ...(shouldRecordStartedAudit &&
                           eventing.firstModelRequestPreparationStartedAt !== null
                             ? [
@@ -1240,7 +1245,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 const auditStartedAt = shouldRecordStartedAudit ? performance.now() : null;
                 let auditOutcome: "completed" | "failed" = "completed";
                 try {
-                  await eventing.publish([
+                  await publishModelRequestAudit(eventing, event.phase, [
                     ...(shouldRecordStartedAudit &&
                     eventing.firstModelRequestPreparationStartedAt !== null
                       ? [
@@ -1335,10 +1340,29 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 }),
               );
             };
+          // The organization's pooled Anthropic API keys: one Anthropic
+          // refuses for lack of credits is recorded, so later turns skip it.
+          // Recording never holds up or fails the turn.
+          const recordAnthropicApiKeyRefusal = (providerId: string, keyId: string) => {
+            if (providerId !== "organization-anthropic") return;
+            void markOrganizationAnthropicApiKeyCreditRefused(db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              keyId,
+            }).catch((error: unknown) =>
+              observability.warn("Could not record an Anthropic API key out of credits", {
+                error: error instanceof Error ? error.message : String(error),
+              }),
+            );
+          };
           const withClaudeUsage = <T>(fn: () => Promise<T>): Promise<T> =>
-            claudeCore ? withClaudeCoreLane("requests")(fn) : fn();
+            withAnthropicApiKeyRefusals(recordAnthropicApiKeyRefusal, () =>
+              claudeCore ? withClaudeCoreLane("requests")(fn) : fn(),
+            );
           const withClaudeTitleUsage = <T>(fn: () => Promise<T>): Promise<T> =>
-            claudeCore ? withClaudeCoreLane("titleRequests")(fn) : fn();
+            withAnthropicApiKeyRefusals(recordAnthropicApiKeyRefusal, () =>
+              claudeCore ? withClaudeCoreLane("titleRequests")(fn) : fn(),
+            );
           const withCodex = <T>(fn: () => Promise<T>): Promise<T> =>
             codexContext ? codexRequestStorage.run(codexContext, fn) : fn();
           // The turn's model requests belong to this session's conversation,
@@ -1924,6 +1948,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             codexContext,
           });
           const { agent, modelVisibleSkillCatalogText, postAgentPreparationStartedAt } = builtAgent;
+          // Each chat sharing a managed box uses its own Git credential files.
+          if (activeSandboxBackend !== "selfhosted") {
+            bindAgentGitCredentialSession(agent, input.sessionId);
+          }
 
           await bindLazySandboxProvisioner({
             ...sandboxRoute,
@@ -2289,6 +2317,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               turnTools,
               generateSessionTitleInParallel,
               sessionTitlePrompt: sessionTitlePromptFor(session.initialMessage, turn.prompt),
+              sessionTitleInstructions: session.agent?.titleInstructions,
               compactSummarizer,
               settleDeferredSteerAfterCompaction,
               compactionModelHistoryProjector,

@@ -210,7 +210,8 @@ for (const stream of [false, true])
         expect(foreign).not.toContain("opaque-fixture");
         expect(foreign).not.toContain("signature-fixture");
         expect(foreign).not.toContain("reasoning_details");
-        if (hasReadable) expect(foreign.split("Compare the images.")).toHaveLength(2);
+        // Readable Chat reasoning is left out of another API, never resent as text.
+        expect(foreign).not.toContain("Compare the images.");
       }
       expect(JSON.stringify(persisted)).toBe(before);
     });

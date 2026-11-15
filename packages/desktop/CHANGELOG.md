@@ -1,5 +1,129 @@
 # @opengeni/desktop
 
+## 6.23.0
+
+### Patch Changes
+
+- Updated dependencies [f6a7c28]
+  - @opengeni/sdk@6.23.0
+  - @opengeni/agent-host@6.23.0
+
+## 6.22.0
+
+### Patch Changes
+
+- Updated dependencies [aff49c5]
+- Updated dependencies [3bf1c71]
+- Updated dependencies [d50092b]
+  - @opengeni/agent-host@6.22.0
+  - @opengeni/sdk@6.22.0
+
+## 6.21.0
+
+### Patch Changes
+
+- Updated dependencies [ef4c334]
+- Updated dependencies [6ac2cd4]
+  - @opengeni/sdk@6.21.0
+  - @opengeni/agent-host@6.21.0
+
+## 6.20.1
+
+### Patch Changes
+
+- @opengeni/agent-host@6.20.1
+- @opengeni/sdk@6.20.1
+
+## 6.20.0
+
+### Patch Changes
+
+- Updated dependencies [c624443]
+- Updated dependencies [e37485b]
+  - @opengeni/sdk@6.20.0
+  - @opengeni/agent-host@6.20.0
+
+## 6.19.0
+
+### Patch Changes
+
+- Updated dependencies [65cb26f]
+- Updated dependencies [227650c]
+- Updated dependencies [a85adef]
+  - @opengeni/agent-host@6.19.0
+  - @opengeni/sdk@6.19.0
+
+## 6.18.0
+
+### Patch Changes
+
+- 3105a8b: Admin changes that need a passkey now work from the desktop app. The app can't show passkey prompts (Electron has no passkey UI on macOS or Linux, so the prompt never opened and the dialog spun forever), so confirming now opens the person's own browser on the same server. There they use their passkey, with their password manager or device, and the browser then shows a one-time code to type into the app. Only the app session that started the confirmation can use that code, a few wrong codes void it, and it expires after ten minutes, so a forwarded link can't confirm anyone else's session. In the app, Add passkey opens the browser's security page, and passkey sign-in is hidden there. Signing a signed-out account in again from the app's sign-in page now uses that account's own server instead of the app's default one. Passkey prompts and step-up requests that never answer now end with a clear message instead of waiting forever.
+- Updated dependencies [f313a0e]
+- Updated dependencies [6813960]
+- Updated dependencies [9188c1d]
+- Updated dependencies [bd21ead]
+- Updated dependencies [3105a8b]
+- Updated dependencies [a16189c]
+  - @opengeni/sdk@6.18.0
+  - @opengeni/agent-host@6.18.0
+
+## 6.17.0
+
+### Patch Changes
+
+- Updated dependencies [43aa19d]
+- Updated dependencies [deccb54]
+- Updated dependencies [389de66]
+- Updated dependencies [42ef2a2]
+- Updated dependencies [241ce71]
+  - @opengeni/sdk@6.17.0
+  - @opengeni/agent-host@6.17.0
+
+## 6.16.0
+
+### Patch Changes
+
+- Updated dependencies [86e5358]
+  - @opengeni/sdk@6.16.0
+  - @opengeni/agent-host@6.16.0
+
+## 6.15.0
+
+### Patch Changes
+
+- Updated dependencies [708848c]
+- Updated dependencies [60d067d]
+- Updated dependencies [f92ff08]
+- Updated dependencies [060c983]
+- Updated dependencies [bf804ef]
+- Updated dependencies [6a5023d]
+- Updated dependencies [02ac654]
+- Updated dependencies [b0fce89]
+- Updated dependencies [9885d37]
+- Updated dependencies [7a83f9b]
+  - @opengeni/sdk@6.15.0
+  - @opengeni/agent-host@6.15.0
+
+## 6.14.0
+
+### Minor Changes
+
+- 904eae7: Dictation from anywhere now has one workspace of its own. Settings → Dictation gains a Workspace row (shown when the person can use more than one workspace), and every shortcut dictation goes to that workspace and is billed to it, whichever workspace the window shows. The recorder runs outside the workspace screens, so switching workspace mid-dictation no longer stops it. When the person has left that workspace, voice input is off there, or it doesn't offer a shortcut's model, the setting says so on the row at fault and the popup offers "Open settings"; a dictation never falls back to another workspace. The desktop bridge's dictation settings carry the chosen workspace (`DesktopDictationWorkspace`).
+
+### Patch Changes
+
+- 91320a4: A page whose sign-in is gone now stops instead of polling on. A request refused because its sign-in expired, was revoked or its cookie lapsed answers HTTP 401 `unauthenticated` with `details.code` `session_missing` (no sign-in sent) or `session_expired` (a sign-in cookie or app credential that no longer signs anyone in); another credential that is not accepted, such as an API key, is `credential_invalid`. Route-rejection metrics and logs carry the same reason instead of `unclassified`. The web app hears the first such refusal, confirms with the session read, and leaves the signed-in app at once, so its polling and streams stop and the sign-in page shows; inside the desktop app the window's sign-in is renewed and the page reloads.
+
+  The desktop app also stops its window being signed out while the app stays signed in. Its window shares the device's session, which is renewed at most once a day by whichever request comes first. When that was one of the app's own requests (it polls the inbox, also right after the computer wakes), the renewal never reached the window's cookie, so the cookie lapsed a week after it was last set. The app now sends its own requests with the window's cookies, and a request that renews the session returns the renewed window cookie with it.
+
+  `@opengeni/contracts` adds `AUTHENTICATION_REQUIRED_REASONS`, `AuthenticationRequiredReason` and `isSignInLostRejection`. `@opengeni/core` adds `AuthenticationRequiredRefusal`. The app state's host can pass `subscribeSignInLost`.
+
+- Updated dependencies [c976c87]
+- Updated dependencies [904eae7]
+- Updated dependencies [7c926f8]
+  - @opengeni/sdk@6.14.0
+  - @opengeni/agent-host@6.14.0
+
 ## 6.13.0
 
 ### Patch Changes

@@ -13,7 +13,17 @@ import {
   readIntegrationResponse,
 } from "./http";
 import { canonicalJson, immutableRevisionId, sha256Hex, stableToolId } from "./revision";
-import { displayTitleMeta } from "./operation-titles";
+import { DISPLAY_TITLE_META_KEY, displayTitleMeta } from "./operation-titles";
+import type { GenericPathOperation } from "./integration-definitions";
+import {
+  GENERIC_PATH_OPERATION_KEYS,
+  findGenericPathOperations,
+  genericPathChangeMethod,
+  genericPathHeaders,
+  genericPathTools,
+  resolveGenericPath,
+  type GenericPathBinding,
+} from "./openapi-generic-path";
 import type {
   IntegrationCredentialResolver,
   IntegrationInvocationAuthority,
@@ -64,6 +74,8 @@ export interface OpenApiOperationBinding {
    * other request is rejected before credentials are resolved.
    */
   readonly searchEntityTypes?: readonly string[];
+  /** One of the generic tools for a definition's opted-in path scope. */
+  readonly genericPath?: GenericPathBinding;
 }
 
 export type OpenApiRevision = IntegrationRevision<OpenApiOperationBinding, "openapi">;
@@ -80,6 +92,11 @@ export interface CompileOpenApiOptions {
    * Supplied by reviewed definitions only.
    */
   readonly readOnlyOperations?: ReadonlyMap<string, OpenApiReadOnlyOperationRule>;
+  /**
+   * Operations a reviewed definition opted in to reach through the generic
+   * find and call tools. Supplied by reviewed definitions only.
+   */
+  readonly genericPathOperations?: readonly GenericPathOperation[];
 }
 
 export interface OpenApiReadOnlyOperationRule {
@@ -252,6 +269,37 @@ export function compileOpenApiRevision(
   if (tools.length === 0) {
     throw new IntegrationProtocolError("openapi_empty", "OpenAPI document exposes no operations");
   }
+  const genericPathOperations = options.genericPathOperations ?? [];
+  if (genericPathOperations.length > 0) {
+    const serverUrl = Object.values(bindings)[0]!.serverUrl;
+    const ids = {
+      find: stableToolId(GENERIC_PATH_OPERATION_KEYS.find, seen),
+      read: stableToolId(GENERIC_PATH_OPERATION_KEYS.read, seen),
+      change: stableToolId(GENERIC_PATH_OPERATION_KEYS.change, seen),
+    };
+    tools.push(...genericPathTools(ids));
+    bindings[ids.find] = {
+      method: "get",
+      pathTemplate: "/",
+      serverUrl,
+      parameters: [],
+      genericPath: { role: "find", operations: genericPathOperations },
+    };
+    bindings[ids.read] = {
+      method: "get",
+      pathTemplate: "/",
+      serverUrl,
+      parameters: [],
+      genericPath: { role: "read" },
+    };
+    bindings[ids.change] = {
+      method: "post",
+      pathTemplate: "/",
+      serverUrl,
+      parameters: [],
+      genericPath: { role: "change" },
+    };
+  }
   // A document alone does not identify its executable revision: an explicit
   // base URL or relative-server resolution can change destinations without
   // changing any document bytes. Hash the normalized, effective operation
@@ -275,6 +323,8 @@ export function compileOpenApiRevision(
         ? { reservedPathExpansionVersion: 1 }
         : {}),
       ...(options.schemaMode ? { schemaMode: options.schemaMode } : {}),
+      // The generic tools' scope is executable identity; absent, digests are unchanged.
+      ...(genericPathOperations.length > 0 ? { genericPathOperations } : {}),
       // Reviewed read-only overrides change tool safety, so they are part of the
       // executable identity. Absent overrides keep existing digests unchanged.
       ...(options.readOnlyOperations && options.readOnlyOperations.size > 0
@@ -370,10 +420,13 @@ export class OpenApiMcpServer implements MCPServer {
           _meta: {
             "opengeni/approvalMode": tool.approvalMode,
             "opengeni/operationKey": tool.operationKey,
-            ...displayTitleMeta(tool.operationKey, {
-              method: this.options.revision.bindings[tool.id]?.method,
-              serverUrl: this.options.revision.bindings[tool.id]?.serverUrl,
-            }),
+            // The generic tools aren't provider operations; their own name is the title.
+            ...(this.options.revision.bindings[tool.id]?.genericPath
+              ? { [DISPLAY_TITLE_META_KEY]: tool.name }
+              : displayTitleMeta(tool.operationKey, {
+                  method: this.options.revision.bindings[tool.id]?.method,
+                  serverUrl: this.options.revision.bindings[tool.id]?.serverUrl,
+                })),
             "opengeni/revisionId": this.options.revision.id,
           },
         }) as LocalMcpTool,
@@ -411,11 +464,11 @@ export function createOpenApiMcpServer(options: OpenApiServerOptions): MCPServer
 export async function invokeOpenApiOperation(
   options: OpenApiServerOptions,
   toolId: string,
-  args: Record<string, unknown>,
+  toolArgs: Record<string, unknown>,
   signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
-  const binding = options.revision.bindings[toolId];
-  if (!binding) {
+  const toolBinding = options.revision.bindings[toolId];
+  if (!toolBinding) {
     throw new IntegrationInvocationError(
       "operation_not_found",
       "Integration operation is not present in the frozen revision",
@@ -423,6 +476,21 @@ export async function invokeOpenApiOperation(
       false,
     );
   }
+  if (toolBinding.genericPath?.role === "find") {
+    return {
+      ok: true,
+      status: 200,
+      contentType: "application/json",
+      data: findGenericPathOperations(
+        toolBinding.genericPath.operations ?? [],
+        toolArgs,
+        reviewedToolsByOperation(options.revision),
+      ),
+    };
+  }
+  const { binding, args } = toolBinding.genericPath
+    ? genericPathCall(options.revision, toolBinding, toolArgs)
+    : { binding: toolBinding, args: toolArgs };
   assertSearchEntityTypes(binding, args);
   const firstCredential = await resolveOpenApiCredential(options, binding, toolId, args, false);
   let credential = firstCredential;
@@ -501,6 +569,79 @@ export async function invokeOpenApiOperation(
  * the approval their own tools require.
  */
 function assertSearchEntityTypes(
+  binding: OpenApiOperationBinding,
+  args: Record<string, unknown>,
+): void {
+  assertReviewedSearchEntityTypes(binding, args);
+}
+
+/** `"<method> <path template>"` of each reviewed tool, to point a find result at it. */
+function reviewedToolsByOperation(revision: OpenApiRevision): ReadonlyMap<string, string> {
+  return new Map(
+    Object.entries(revision.bindings)
+      .filter(([, binding]) => !binding.genericPath)
+      .map(([id, binding]) => [`${binding.method} ${binding.pathTemplate}`, id]),
+  );
+}
+
+/**
+ * A generic call as an ordinary operation: the concrete path must match an
+ * operation in the definition's scope, and its values are encoded into a
+ * fixed path, so the request takes the same credential, redirect and
+ * response handling as any reviewed tool.
+ */
+function genericPathCall(
+  revision: OpenApiRevision,
+  binding: OpenApiOperationBinding,
+  args: Record<string, unknown>,
+): { binding: OpenApiOperationBinding; args: Record<string, unknown> } {
+  const operations =
+    Object.values(revision.bindings).find((entry) => entry.genericPath?.role === "find")
+      ?.genericPath?.operations ?? [];
+  const method =
+    binding.genericPath?.role === "change" ? genericPathChangeMethod(args.method) : "get";
+  const resolved = resolveGenericPath(operations, method, args.path);
+  const header = genericPathHeaders(args.header);
+  const query = args.query;
+  if (
+    query !== undefined &&
+    query !== null &&
+    (typeof query !== "object" || Array.isArray(query))
+  ) {
+    throw new IntegrationInvocationError(
+      "parameter_invalid",
+      "query must be an object",
+      "not_started",
+      false,
+    );
+  }
+  const contentType =
+    typeof args.contentType === "string" && /^[\w.+-]+\/[\w.+-]+$/.test(args.contentType)
+      ? args.contentType.toLowerCase()
+      : "application/json";
+  const hasBody = method !== "get" && args.body !== undefined;
+  return {
+    binding: {
+      method,
+      pathTemplate: resolved.path,
+      serverUrl: binding.serverUrl,
+      parameters: [],
+      ...(hasBody
+        ? { requestBody: { required: false, contentTypes: [contentType], schemas: {} } }
+        : {}),
+      ...(resolved.operation.scopes
+        ? { requiredScopeAlternatives: resolved.operation.scopes }
+        : {}),
+    },
+    args: {
+      ...(query ? { query } : {}),
+      header,
+      ...(hasBody ? { body: args.body, contentType } : {}),
+    },
+  };
+}
+
+function assertReviewedSearchEntityTypes(
   binding: OpenApiOperationBinding,
   args: Record<string, unknown>,
 ): void {

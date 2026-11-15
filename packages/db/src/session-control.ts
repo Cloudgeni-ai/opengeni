@@ -230,6 +230,18 @@ export class SessionControlInvariantError extends Error {
   }
 }
 
+/**
+ * The session is not in its workspace: it never was, or a concurrent deletion
+ * committed while the caller waited on the workspace-control lock. Callers
+ * that only catch the invariant error still see one; an HTTP surface answers
+ * 404 instead of a server error.
+ */
+export class SessionMissingFromWorkspaceError extends SessionControlInvariantError {
+  constructor(readonly sessionId: string) {
+    super(`Session ${sessionId} does not exist in its workspace`);
+  }
+}
+
 export class SessionControlConflictError extends Error {
   readonly code = "CONTROL_CHANGED";
 
@@ -1463,7 +1475,7 @@ function ancestryRowsForTarget(targetId: string, nodes: Map<string, AncestryNode
 
 function assertCompleteAncestry(sessionId: string, rows: AncestryRow[]): void {
   if (rows.length === 0) {
-    throw new SessionControlInvariantError(`Session ${sessionId} does not exist in its workspace`);
+    throw new SessionMissingFromWorkspaceError(sessionId);
   }
   if (rows.some((row) => row.cycle)) {
     throw new SessionControlInvariantError(`Session ${sessionId} has cyclic ancestry`);
@@ -1888,9 +1900,7 @@ export async function evaluateSessionControls(
     const sessionId = uniqueIds[0]!;
     const target = await loadSingleTargetControlRow(db, workspaceId, sessionId);
     if (!target) {
-      throw new SessionControlInvariantError(
-        `Session ${sessionId} does not exist in its workspace`,
-      );
+      throw new SessionMissingFromWorkspaceError(sessionId);
     }
     const stopping = target.hasChildren
       ? ((await settlementAttemptCounts(db, workspaceId, uniqueIds)).get(sessionId) ??
@@ -2252,9 +2262,7 @@ export async function evaluateSessionDiscoveryControls(
     const ancestryCount = Number(row.ancestryCount);
     const maxDepth = row.maxDepth === null ? null : Number(row.maxDepth);
     if (ancestryCount === 0) {
-      throw new SessionControlInvariantError(
-        `Session ${row.targetId} does not exist in its workspace`,
-      );
+      throw new SessionMissingFromWorkspaceError(row.targetId);
     }
     if (!row.reachedRoot) {
       throw new SessionControlInvariantError(

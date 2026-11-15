@@ -46,15 +46,20 @@ const shots: Shot[] = [
     height: 1100,
     ready: text("Bot templates are now agents"),
   },
-  { name: "agent-slack", view: "agent", height: 1750, ready: text("@Opengeni +releases") },
+  { name: "agent-slack", view: "agent", height: 1750, ready: text("@Opengeni Release manager") },
   {
     name: "agent-slack-mobile",
     view: "agent",
     width: 390,
     height: 2300,
-    ready: text("@Opengeni +releases"),
+    ready: text("@Opengeni Release manager"),
   },
-  { name: "agent-only-me", view: "agent-private", height: 1400, ready: text("Available in") },
+  {
+    name: "agent-only-me",
+    view: "agent-private",
+    height: 1400,
+    ready: text("Only me agents stay in the app"),
+  },
   {
     name: "make-this-an-agent",
     view: "make-agent",

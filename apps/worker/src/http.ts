@@ -1,8 +1,10 @@
 import type { Settings } from "@opengeni/config";
 import {
-  assertRuntimeDatabasePosture,
+  assertRuntimeDatabaseReadiness,
+  createRuntimeDatabaseCatalogPostureCache,
   dbSql,
   type Database,
+  type RuntimeDatabaseDegradedListener,
   type RuntimeDatabasePostureOptions,
 } from "@opengeni/db";
 import { requireSessionEventDurableFanoutCapability, type EventBus } from "@opengeni/events";
@@ -121,8 +123,12 @@ export function dbReadyCheck(
   db: Database,
   posture?: RuntimeDatabasePostureOptions,
   afterDatabaseReady?: () => Promise<void>,
+  onDegraded?: RuntimeDatabaseDegradedListener,
 ): () => Promise<void> {
   let inFlight: Promise<void> | undefined;
+  // Every probe evaluates the full posture; the catalogs are re-read only
+  // when they changed since the previous probe.
+  const catalogCache = createRuntimeDatabaseCatalogPostureCache();
   return () => {
     // The HTTP timeout cannot cancel a driver query. Reuse an outstanding
     // attempt so repeated kubelet probes cannot queue an unbounded tail behind
@@ -130,7 +136,7 @@ export function dbReadyCheck(
     if (inFlight) return inFlight;
     inFlight = (async () => {
       if (posture) {
-        await assertRuntimeDatabasePosture(db, posture);
+        await assertRuntimeDatabaseReadiness(db, posture, onDegraded, catalogCache);
       } else {
         await db.execute(dbSql`select 1`);
       }

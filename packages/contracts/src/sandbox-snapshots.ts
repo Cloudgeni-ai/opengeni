@@ -324,6 +324,11 @@ export function parseWorkspaceArchiveDescriptor(value: unknown): WorkspaceArchiv
 }
 
 export function decodeNativeSnapshotRef(bytes: Uint8Array): NativeSnapshotRef | null {
+  // Tar archives reach hundreds of MB; only a receipt that starts with a known
+  // (ASCII) prefix is worth decoding as text.
+  if (!NATIVE_SNAPSHOT_PREFIXES.some((entry) => startsWithAscii(bytes, entry.prefix))) {
+    return null;
+  }
   let text: string;
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
@@ -358,6 +363,14 @@ export function decodeNativeSnapshotRef(bytes: Uint8Array): NativeSnapshotRef | 
     }
   }
   return null;
+}
+
+function startsWithAscii(bytes: Uint8Array, prefix: string): boolean {
+  if (bytes.length < prefix.length) return false;
+  for (let index = 0; index < prefix.length; index += 1) {
+    if (bytes[index] !== prefix.charCodeAt(index)) return false;
+  }
+  return true;
 }
 
 export function encodeNativeSnapshotRef(ref: NativeSnapshotRef): Uint8Array {

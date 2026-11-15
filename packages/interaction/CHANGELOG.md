@@ -1,5 +1,118 @@
 # @opengeni/interaction
 
+## 6.23.0
+
+### Patch Changes
+
+- Updated dependencies [c0089e1]
+- Updated dependencies [9dd96b0]
+- Updated dependencies [adc2409]
+- Updated dependencies [f6a7c28]
+  - @opengeni/contracts@6.23.0
+
+## 6.22.0
+
+### Patch Changes
+
+- Updated dependencies [d50092b]
+  - @opengeni/contracts@6.22.0
+
+## 6.21.0
+
+### Patch Changes
+
+- Updated dependencies [7d0d52b]
+- Updated dependencies [ef4c334]
+- Updated dependencies [ce864c0]
+- Updated dependencies [6ac2cd4]
+  - @opengeni/contracts@6.21.0
+
+## 6.20.1
+
+### Patch Changes
+
+- @opengeni/contracts@6.20.1
+
+## 6.20.0
+
+### Patch Changes
+
+- Updated dependencies [ae3972e]
+- Updated dependencies [e37485b]
+- Updated dependencies [9c17a87]
+  - @opengeni/contracts@6.20.0
+
+## 6.19.0
+
+### Patch Changes
+
+- Updated dependencies [a85adef]
+  - @opengeni/contracts@6.19.0
+
+## 6.18.0
+
+### Patch Changes
+
+- Updated dependencies [f313a0e]
+- Updated dependencies [6813960]
+- Updated dependencies [9188c1d]
+- Updated dependencies [3105a8b]
+- Updated dependencies [a16189c]
+- Updated dependencies [89cf4ba]
+  - @opengeni/contracts@6.18.0
+
+## 6.17.0
+
+### Patch Changes
+
+- Updated dependencies [8073ab6]
+- Updated dependencies [43aa19d]
+- Updated dependencies [b1b69fc]
+- Updated dependencies [deccb54]
+- Updated dependencies [668c5ed]
+- Updated dependencies [e3cb3c1]
+  - @opengeni/contracts@6.17.0
+
+## 6.16.0
+
+### Patch Changes
+
+- Updated dependencies [fb19875]
+- Updated dependencies [54dc5da]
+  - @opengeni/contracts@6.16.0
+
+## 6.15.0
+
+### Minor Changes
+
+- dfeab20: Browser operation metrics now tell a website that failed apart from a failure of the browser or its controller. When a page's server does not answer, its name does not resolve, the connection or TLS handshake fails, or it sends an unusable response, browserd sends an operator-only failure reason (`destination_not_answered`, `destination_name_not_resolved`, `destination_connection_failed`, `destination_tls_failed`, `destination_response_invalid`) beside the receipt or error, never inside it, so what callers and models are shown does not change. A generic `outcome_unknown` after input was sent now carries the specific failure behind it (such as `timeout`), and `outcome_unknown` operations are counted with their reason instead of `none`. `OpenGeniInteractionOperationFailureRatio` leaves website failures out of its ratio, so an agent retrying a site that is down no longer pages while browser, controller and authorization failures still do. New contracts exports: `INTERACTION_DESTINATION_FAILURE_REASONS`, `InteractionFailureReason`, `parseInteractionFailureReason` and `BROWSER_ACTION_RECEIPT_FAILURE_REASON_PARAMETER`; driver errors in `@opengeni/interaction` gain an optional `failureReason`.
+
+### Patch Changes
+
+- Updated dependencies [708848c]
+- Updated dependencies [5525e63]
+- Updated dependencies [60d067d]
+- Updated dependencies [da60317]
+- Updated dependencies [f92ff08]
+- Updated dependencies [060c983]
+- Updated dependencies [dfeab20]
+- Updated dependencies [9885d37]
+- Updated dependencies [f22647a]
+- Updated dependencies [850b4d5]
+  - @opengeni/contracts@6.15.0
+
+## 6.14.0
+
+### Patch Changes
+
+- Updated dependencies [c976c87]
+- Updated dependencies [6ae0528]
+- Updated dependencies [3b853ca]
+- Updated dependencies [dd11dad]
+- Updated dependencies [91320a4]
+- Updated dependencies [c472500]
+  - @opengeni/contracts@6.14.0
+
 ## 6.13.0
 
 ### Patch Changes

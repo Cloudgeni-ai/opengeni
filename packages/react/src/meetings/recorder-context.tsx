@@ -152,6 +152,7 @@ async function hasLocalRecordings(): Promise<boolean> {
 export function MeetingRecorderProvider({
   workspaceId,
   scope,
+  ownerId,
   client,
   onOpenMeetings,
   onOpenMeeting,
@@ -166,6 +167,12 @@ export function MeetingRecorderProvider({
    * Omit it when the host remounts the provider when the person changes.
    */
   scope?: string | null | undefined;
+  /**
+   * The recording person's key for their recordings on this device, such as
+   * their sign-in email (see `recordingOwnerKey`), so signing them out finds
+   * and removes what is still here. Absent: recordings carry no owner.
+   */
+  ownerId?: string | null | undefined;
   /**
    * The SDK client the recorder uploads with, for a host that mounts this
    * above its routes without an <OpenGeniProvider> there. The provider's
@@ -242,6 +249,7 @@ export function MeetingRecorderProvider({
             key={`${scope ?? ""}:${hostWorkspaceId}`}
             store={store}
             workspaceId={hostWorkspaceId}
+            ownerId={ownerId ?? null}
             client={client}
           />
         </Suspense>

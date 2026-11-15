@@ -53,6 +53,7 @@ describe("turn recovery causes", () => {
     // A completed attempt never counts as a recovery, and every cause is published at zero.
     expect(metrics).toMatch(/opengeni_turn_recoveries_total\{[^}]*cause="sandbox"[^}]*\} 0\b/);
     expect(metrics).toMatch(/opengeni_turn_recoveries_total\{[^}]*cause="database"[^}]*\} 0\b/);
+    expect(metrics).toMatch(/opengeni_turn_recoveries_total\{[^}]*cause="route_change"[^}]*\} 0\b/);
     expect(metrics).toMatch(/opengeni_turns_total\{[^}]*outcome="recovering"[^}]*\} 3\b/);
   });
 });

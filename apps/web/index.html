@@ -39,9 +39,27 @@
       })();
     </script>
     <script id="opengeni-appearance-bootstrap">
-      // Apply before styles paint; keep in sync with src/lib/appearance.tsx.
+      // Apply before styles paint; keep in sync with src/lib/appearance.tsx
+      // and the flag rules in src/lib/simplified-interface-landing.ts.
       (() => {
         let preference = "system";
+        try {
+          // Someone arriving from gogeni.ai (?simplified_interface=1) keeps
+          // the simplified interface in this browser, in the light look its
+          // site has unless they already chose an appearance here.
+          const named = new URLSearchParams(location.search).get("simplified_interface");
+          const flag =
+            named === "1" || named === "on" ? "on" : named === "0" || named === "off" ? "off" : "";
+          if (flag) {
+            localStorage.setItem("opengeni.simplifiedInterface", flag);
+            if (flag === "on" && !localStorage.getItem("opengeni.appearance")) {
+              localStorage.setItem("opengeni.appearance", "light");
+            }
+          }
+          if (localStorage.getItem("opengeni.simplifiedInterface") === "on") {
+            document.documentElement.dataset.ogSimplifiedInterface = "";
+          }
+        } catch {}
         try {
           preference = localStorage.getItem("opengeni.appearance") || "system";
         } catch {}
@@ -82,6 +100,15 @@
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="manifest" href="/site.webmanifest" />
     <title>Opengeni</title>
+    <script id="opengeni-zod-jitless">
+      // The page's Content-Security-Policy has no 'unsafe-eval'. Zod decides
+      // whether to compile object parsers with `new Function` when each
+      // schema is created, which happens while the app's modules load, so
+      // turn that off before any module runs (Zod reads this shared object).
+      globalThis.__zod_globalConfig = Object.assign(globalThis.__zod_globalConfig || {}, {
+        jitless: true,
+      });
+    </script>
   </head>
   <body>
     <div id="root"></div>

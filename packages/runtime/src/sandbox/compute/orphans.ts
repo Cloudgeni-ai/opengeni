@@ -7,6 +7,11 @@
 // create and commit, a workspace deleted with everything in it) has its
 // enrollment revoked and is deleted here. Nothing on this path messages its agent,
 // so the sweep never wakes or keeps awake a sleeping sandbox.
+//
+// A sandbox Opengeni's records still name can have no use left either: every
+// chat that works in it is archived. The sweep asks for the end of such a
+// sandbox's group, and the lease's own drain then deletes it as it does when
+// its chats are deleted.
 
 import type { ComputeControlClient, ComputeSandboxView } from "./control";
 
@@ -39,6 +44,8 @@ export const COMPUTE_ORPHAN_SWEEP_LIMIT = 50;
 export type ComputeOrphanSweepResult = {
   examined: number;
   deleted: ComputeSandboxIdentity[];
+  /** Named sandboxes whose group's end was asked for (see `endIfUnused`). */
+  ended: ComputeSandboxIdentity[];
   failed: number;
 };
 
@@ -145,6 +152,13 @@ export async function sweepComputeOrphans(input: {
   /** This deployment's gateway URL, stamped on every sandbox it creates. */
   gateway: string;
   named(identity: ComputeSandboxIdentity): Promise<boolean>;
+  /**
+   * Asked of every sandbox the records still name: end its group when nothing
+   * uses the sandbox any more (every chat of it is archived). True when the
+   * end was asked for now; the lease's drain then deletes the sandbox and
+   * revokes its enrollment, so the sweep itself deletes nothing here.
+   */
+  endIfUnused?(identity: ComputeSandboxIdentity): Promise<boolean>;
   revokeEnrollment(input: { workspaceId: string; enrollmentId: string }): Promise<void>;
   nowMs?: number;
   maxDeletions?: number;
@@ -160,7 +174,7 @@ export async function sweepComputeOrphans(input: {
   const concurrency = Math.max(1, input.concurrency ?? COMPUTE_ORPHAN_SWEEP_CONCURRENCY);
   const signal = input.signal;
   const progress = input.progress;
-  const result: ComputeOrphanSweepResult = { examined: 0, deleted: [], failed: 0 };
+  const result: ComputeOrphanSweepResult = { examined: 0, deleted: [], ended: [], failed: 0 };
   if (signal?.aborted) return result;
   const views = await untilStopped(
     input.control.list({ [COMPUTE_METADATA.gateway]: input.gateway }),
@@ -200,6 +214,13 @@ export async function sweepComputeOrphans(input: {
       if (progress) progress.cursor = key;
       try {
         if (await untilStopped(input.named(identity), signal)) {
+          if (
+            input.endIfUnused &&
+            !signal?.aborted &&
+            (await untilStopped(input.endIfUnused(identity), signal))
+          ) {
+            result.ended.push(identity);
+          }
           progress?.failures.delete(identity.sandboxId);
           continue;
         }

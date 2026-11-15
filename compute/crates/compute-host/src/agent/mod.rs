@@ -41,10 +41,12 @@ use crate::step::{After, Live, Reading, Report};
 use crate::store::{Claimed, OwnerEpoch, Store};
 use compute_protocol::fleet::Ruling;
 
+mod busy;
 mod capture;
 mod check;
 mod config;
 mod disk;
+mod disk_meter;
 mod fetch;
 mod handle;
 mod holds;
@@ -340,6 +342,12 @@ enum Command {
         into: std::path::PathBuf,
         reply: Reply<u64>,
     },
+    /// See [`crate::protocol::Request::Keep`].
+    Keep {
+        image: ImageId,
+        before: Option<ImageId>,
+        reply: Reply<()>,
+    },
     /// A named hold from the API, with an optional expiry.
     Hold {
         id: Id,
@@ -389,6 +397,12 @@ enum Command {
 
 #[derive(Debug)]
 enum Event<V> {
+    /// The image a [`Command::Keep`] asked for is on this host: the
+    /// templates of `before`'s shapes are built on it.
+    ImageKept {
+        image: ImageId,
+        before: Option<ImageId>,
+    },
     /// A change of owner of `id` landed or failed; `reply` waits for it.
     OwnerTaken {
         id: Id,
@@ -518,6 +532,8 @@ enum Event<V> {
     },
     /// A measurement of what disk relief may free ended (see [`relief`]).
     ReliefMeasured(Box<relief::Measured>),
+    /// A measurement of disks at rest ended (see [`disk_meter`]).
+    DisksMeasured(Box<disk_meter::Measured>),
     /// The removal disk relief asked for of `cache` ended, having
     /// `removed` it or not.
     CacheGone {
@@ -775,6 +791,9 @@ pub struct HostAgent<E: Engine, S: Store> {
     after_reading: Vec<disk::AfterReading>,
     /// What disk relief may free besides local copies (see [`relief`]).
     relief: relief::Relief,
+    /// What each disk may still grow by, read off the loop (see
+    /// [`disk_meter`]).
+    disks: disk_meter::DiskMeter,
     images: Images,
     warm: Option<Warm>,
     core: Host,
@@ -1016,6 +1035,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             preparing: HashSet::new(),
             after_reading: Vec::new(),
             relief: relief::Relief::default(),
+            disks: disk_meter::DiskMeter::default(),
             owning: HashMap::new(),
             ordinals: BTreeSet::new(),
             blocked: BTreeMap::new(),
@@ -1240,22 +1260,38 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 biased;
                 // First, so a steady stream of events and requests cannot
                 // starve it: it is ready at most once per interval.
-                _ = sample.tick(), if acting => self.sample().await,
-                Some(event) = self.events.recv() => self.on_event(event),
+                _ = sample.tick(), if acting => {
+                    let _turn = busy::Turn::of("a sample");
+                    self.sample().await;
+                }
+                Some(event) = self.events.recv() => {
+                    let _turn = busy::Turn::of("an event");
+                    self.on_event(event);
+                }
                 command = self.commands.recv() => match command {
-                    Some(command) => self.on_command(command),
+                    Some(command) => {
+                        let _turn = busy::Turn::of("a request");
+                        self.on_command(command);
+                    }
                     None => break,
                 },
-                () = sleep_until_some(deadline), if acting => self.input(Input::Tick),
+                () = sleep_until_some(deadline), if acting => {
+                    let _turn = busy::Turn::of("a timer");
+                    self.input(Input::Tick);
+                }
                 // Also while the lease has run out, as at start: a VM the
                 // guard froze then fails again, but one it killed is found
                 // gone. The host registers again listing the frozen ones
                 // (see `frozen_owner`), and no other blocked sandbox.
-                () = sleep_until_some(retry_at) => self.retry_recovery().await,
+                () = sleep_until_some(retry_at) => {
+                    let _turn = busy::Turn::of("a recovery retry");
+                    self.retry_recovery().await;
+                }
                 // Renewed, the core reconsiders every sandbox, and the
                 // frozen ones the service kept are taken back as the guard
                 // thaws them.
                 () = lease_changed(lease.as_ref()) => {
+                    let _turn = busy::Turn::of("a lease change");
                     self.thawing();
                     self.input(Input::Tick);
                 }
@@ -1315,21 +1351,23 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
         let now = self.now();
         let mut actions = std::mem::take(&mut self.actions);
-        // The inputs after which a sandbox may be at another level.
+        let inputs: Vec<Input> = self.disk_inputs(inputs).into_iter().collect();
+        // The sandboxes that may be at another level after these inputs,
+        // with the state each was in before.
         let mut moved = Vec::new();
-        let inputs = self
-            .disk_inputs(inputs)
-            .into_iter()
-            .inspect(|input| match input {
-                Input::Add { sandbox, .. }
-                | Input::Finished { sandbox, .. }
-                | Input::Lost { sandbox } => {
-                    moved.push(*sandbox);
-                }
-                _ => {}
-            });
+        for input in &inputs {
+            if let Input::Add { sandbox, .. }
+            | Input::Finished { sandbox, .. }
+            | Input::Lost { sandbox } = input
+                && !moved.iter().any(|(seen, _)| seen == sandbox)
+            {
+                let before = self.core.sandbox(*sandbox).map(|view| view.state);
+                moved.push((*sandbox, before));
+            }
+        }
         self.core.handle_all(now, inputs, &mut actions);
-        for sandbox in moved {
+        for (sandbox, before) in moved {
+            self.forget_a_gone_agent(Id(sandbox), before);
             self.tell_link(Id(sandbox));
             self.continue_restart(Id(sandbox));
         }

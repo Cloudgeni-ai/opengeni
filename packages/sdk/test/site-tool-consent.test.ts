@@ -39,6 +39,7 @@ function harness(
   options: {
     decide?: (prompt: SiteToolConsentPrompt) => SiteToolConsentDecision;
     firstError?: string;
+    firstFailure?: OpenGeniApiError;
     approval?: "token" | "not_required";
     confirm?: false;
     connect?: boolean;
@@ -66,7 +67,9 @@ function harness(
       $invoke: async (request) => {
         invokes.push(request as ToolGatewayInvokeRequest & Record<string, unknown>);
         if (invokes.length === 1)
-          throw conflict(options.firstError ?? "tool_gateway_approval_required");
+          throw (
+            options.firstFailure ?? conflict(options.firstError ?? "tool_gateway_approval_required")
+          );
         return {
           operationId: request.operationId,
           tool: tool(declared),
@@ -258,6 +261,37 @@ describe("Site tool consent in the host bridge", () => {
     expect(error).toBeInstanceOf(SiteToolConnectionRequiredError);
     expect((error as Error).message).toBe("Connect Gmail in Opengeni, then try again.");
     expect(h.connectPrompts()).toBe(0);
+    expect(h.invokes).toHaveLength(1);
+  });
+
+  test("a tool the viewer cannot use or connect reaches the Site as a typed refusal", async () => {
+    const message =
+      "This Site uses an account that isn't yours, so it can't run this for you. Ask the Site's owner to publish it again so it can use your own account.";
+    const h = harness({
+      firstFailure: new OpenGeniApiError(
+        404,
+        JSON.stringify({
+          error: {
+            code: "not_found",
+            message,
+            details: { code: "site_tool_not_available_for_viewer" },
+          },
+        }),
+      ),
+    });
+    const error = await h.invoke().catch((reason: unknown) => reason);
+    expect(error).toMatchObject({
+      code: "site_tool_not_available_for_viewer",
+      message,
+      outcomeUnknown: false,
+    });
+    // Nothing to confirm or connect, and nothing retried without the viewer;
+    // the frame only looked up which system it was.
+    expect(h.prompts).toHaveLength(0);
+    expect(h.connectPrompts()).toBe(0);
+    expect(h.host.map((request) => request.path)).toEqual([
+      "/v1/workspaces/workspace/tools/site-consent",
+    ]);
     expect(h.invokes).toHaveLength(1);
   });
 

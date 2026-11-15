@@ -8,9 +8,15 @@ import {
   ReplaceOrganizationCompatibleEndpointKeyRequest,
   RevokeOrganizationModelProviderConnectionRequest,
   SetOrganizationCompatibleEndpointModelReasoningRequest,
+  SetOrganizationCustomModelListPriceRequest,
   type CompatibleModelApi,
   type CompatibleModelReasoning,
 } from "@opengeni/contracts";
+import {
+  connectedModelPriceBasisModelIds,
+  organizationConnectedModelListPrice,
+  type Settings,
+} from "@opengeni/config";
 import {
   discoverCompatibleModelReasoning,
   requireEnvironmentEncryption,
@@ -30,6 +36,7 @@ import {
   replaceOrganizationCompatibleEndpointKey,
   retireOrganizationCompatibleEndpointModel,
   revokeOrganizationCompatibleEndpoint,
+  setOrganizationCompatibleEndpointModelListPrice,
   setOrganizationCompatibleEndpointModelReasoning,
   type OrganizationCompatibleEndpoint as StoredEndpoint,
   type OrganizationCompatibleEndpointModel as StoredModel,
@@ -40,6 +47,7 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 
 import { requireOrganizationCodexHuman } from "./codex";
+import { acceptedListPrice } from "./organization-model-providers";
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 import { parseRequestBody } from "../http/request-body";
 
@@ -64,19 +72,24 @@ async function jsonBody<T>(c: Context, schema: z.ZodType<T>, message: string): P
   return parseRequestBody(schema, await c.req.json().catch(() => null), { status: 422, message });
 }
 
-function modelJson(model: StoredModel) {
+function modelJson(settings: Settings, model: StoredModel) {
   return OrganizationCompatibleEndpointModel.parse({
     id: model.id,
     upstreamModelId: model.upstreamModelId,
     label: model.label,
     reasoning: model.reasoning,
+    ...organizationConnectedModelListPrice(settings, "openai_compatible", model),
     version: model.version,
     createdAt: model.createdAt.toISOString(),
     updatedAt: model.updatedAt.toISOString(),
   });
 }
 
-function endpointJson(endpoint: StoredEndpoint, models: readonly StoredModel[]) {
+function endpointJson(
+  settings: Settings,
+  endpoint: StoredEndpoint,
+  models: readonly StoredModel[],
+) {
   return OrganizationCompatibleEndpoint.parse({
     id: endpoint.id,
     status: endpoint.status,
@@ -84,7 +97,7 @@ function endpointJson(endpoint: StoredEndpoint, models: readonly StoredModel[]) 
     baseUrl: endpoint.baseUrl,
     api: endpoint.api,
     label: endpoint.label,
-    models: models.map(modelJson),
+    models: models.map((model) => modelJson(settings, model)),
     createdAt: endpoint.createdAt.toISOString(),
     updatedAt: endpoint.updatedAt.toISOString(),
   });
@@ -167,7 +180,10 @@ export function registerOrganizationCompatibleModelEndpointRoutes(
     const endpoints = await listOrganizationCompatibleEndpoints(deps.db, actor);
     return c.json(
       OrganizationCompatibleEndpointsResponse.parse({
-        endpoints: endpoints.map(({ endpoint, models }) => endpointJson(endpoint, models)),
+        endpoints: endpoints.map(({ endpoint, models }) =>
+          endpointJson(deps.settings, endpoint, models),
+        ),
+        priceBasisModelIds: connectedModelPriceBasisModelIds(deps.settings),
       }),
     );
   });
@@ -194,7 +210,7 @@ export function registerOrganizationCompatibleModelEndpointRoutes(
         reasoning,
         operationId: payload.operationId,
       });
-      return c.json(endpointJson(endpoint, [model]), 201);
+      return c.json(endpointJson(deps.settings, endpoint, [model]), 201);
     } catch (error) {
       conflict(error, "This organization has connected the most endpoints it can.");
     }
@@ -229,7 +245,7 @@ export function registerOrganizationCompatibleModelEndpointRoutes(
         ...actor,
         connectionId,
       });
-      return c.json(endpointJson(updated, models));
+      return c.json(endpointJson(deps.settings, updated, models));
     } catch (error) {
       conflict(error, "This endpoint can’t take another change right now.");
     }
@@ -249,7 +265,7 @@ export function registerOrganizationCompatibleModelEndpointRoutes(
         connectionId,
         ...payload,
       });
-      return c.json(endpointJson(revoked, []));
+      return c.json(endpointJson(deps.settings, revoked, []));
     } catch (error) {
       conflict(error, "This endpoint can’t take another change right now.");
     }
@@ -279,7 +295,7 @@ export function registerOrganizationCompatibleModelEndpointRoutes(
         reasoning,
         operationId: payload.operationId,
       });
-      return c.json(modelJson(model), 201);
+      return c.json(modelJson(deps.settings, model), 201);
     } catch (error) {
       conflict(error, "This endpoint has the most models it can have.");
     }
@@ -317,7 +333,33 @@ export function registerOrganizationCompatibleModelEndpointRoutes(
         expectedVersion: payload.expectedVersion,
         reasoning,
       });
-      return c.json(modelJson(model));
+      return c.json(modelJson(deps.settings, model));
+    } catch (error) {
+      conflict(error, "This endpoint can’t take another change right now.");
+    }
+  });
+
+  // Set what a model's usage costs: a catalogue model's list rate, the
+  // administrator's own rate, or null for unknown.
+  app.put(`${BASE}/:connectionId/models/:customModelId/list-price`, async (c) => {
+    const actor = await administrator(c, true);
+    const connectionId = uuidParam(c, "connectionId", "Endpoint not found");
+    const customModelId = uuidParam(c, "customModelId", "Model not found");
+    const payload = await jsonBody(
+      c,
+      SetOrganizationCustomModelListPriceRequest,
+      "Choose a model to price it like, or enter a price",
+    );
+    const price = acceptedListPrice(deps.settings, payload.listPrice);
+    try {
+      const model = await setOrganizationCompatibleEndpointModelListPrice(deps.db, {
+        ...actor,
+        connectionId,
+        customModelId,
+        expectedVersion: payload.expectedVersion,
+        price,
+      });
+      return c.json(modelJson(deps.settings, model));
     } catch (error) {
       conflict(error, "This endpoint can’t take another change right now.");
     }
@@ -339,7 +381,7 @@ export function registerOrganizationCompatibleModelEndpointRoutes(
         customModelId,
         ...payload,
       });
-      return c.json(modelJson(model));
+      return c.json(modelJson(deps.settings, model));
     } catch (error) {
       conflict(error, "This endpoint can’t take another change right now.");
     }

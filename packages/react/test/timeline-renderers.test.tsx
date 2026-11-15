@@ -3568,6 +3568,33 @@ describe("WebSearchRenderer — null/undefined entries in results array", () => 
     await r.unmount();
   });
 
+  test("shows an opened page without the tracking the hosted search tagged on", async () => {
+    const item = toolItem({
+      name: "web_search_call",
+      raw: {
+        type: "hosted_tool_call",
+        status: "completed",
+        providerData: {
+          action: {
+            type: "open_page",
+            url: "https://example.com/rules/4-1?page=2&_t_q=which+rule&utm_source=openai",
+          },
+        },
+      },
+      status: "complete",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("https://example.com/rules/4-1?page=2");
+    expect(text).not.toContain("utm_source");
+    expect(text).not.toContain("_t_q");
+
+    await r.unmount();
+  });
+
   test("renders modern queries[] when deprecated singular query is absent", async () => {
     const item = toolItem({
       name: "web_search_call",

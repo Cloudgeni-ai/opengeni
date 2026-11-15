@@ -8,16 +8,19 @@ export function sitePublicationRequest(input: {
   description?: string | null;
   requestedSlug?: string | null;
   requestedTools?: ToolGatewayIdentity[];
+  /** The tools as the caller declared them, before the server paired any; a retry repeats these. */
+  declaredRequestedTools?: ToolGatewayIdentity[];
 }) {
+  const requestedTools = input.declaredRequestedTools ?? input.requestedTools;
   return {
     uploadId: input.uploadId ?? null,
     title: input.title ?? null,
     description: input.description === undefined ? { omitted: true } : input.description,
     requestedSlug: input.requestedSlug ?? null,
     requestedTools:
-      input.requestedTools === undefined
+      requestedTools === undefined
         ? null
-        : input.requestedTools
+        : requestedTools
             .map(({ serverId, toolName }) => [serverId, toolName])
             .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
   };

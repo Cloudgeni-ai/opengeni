@@ -55,6 +55,7 @@ import {
   streamPreemptibleModelRequest,
 } from "./model-request-capture";
 import { isRecord } from "@opengeni/contracts/values";
+import { TOOL_DISCOVERY_CARD_META_KEY } from "@opengeni/contracts";
 import {
   integrationMentionsIn,
   integrationNameWords,
@@ -73,6 +74,12 @@ const TOOL_LIST_NAME = "tool_list";
 const TOOL_INVOKE_NAME = "tool_invoke";
 /** How deep each keyword ranking reaches when it is fused with a meaning ranking. */
 const FUSION_DEPTH = 300;
+/**
+ * The most tools a search loads for one request without a decision model. One
+ * search then usually brings what a task needs next, instead of one model
+ * round trip per tool.
+ */
+const STRONGEST_PER_REQUEST = 3;
 
 /** A search's independent requests: semicolon- or line-separated clauses with search words. */
 function searchClauses(query: string): string[] {
@@ -167,7 +174,7 @@ export function isOpeningToolLoadResponse(value: unknown): boolean {
 const INTERNAL_DISPATCH_REGISTRATION_CALL_PREFIX = "opengeni:lazy-dispatch:register:";
 
 const SEARCH_DESCRIPTION =
-  "Find currently authorized tools by capability. Describe the action and resource you need; separate independent tasks with semicolons and include useful context. Loads the strongest match and returns compact alternatives; ranking is not certainty, so check the match. If a decision model is configured, it can select tools for ambiguous searches. With schemasLoaded:true, only tools have loaded schemas; suggestions are unloaded alternatives. With schemasLoaded:false, load chosen exact names with query:'' before invoking. Known exact names bypass ranking and inference. Call loaded tools by name or through tool_invoke. Search is not exhaustive: tool_list view:'groups' shows available groups. Discovery never grants access.";
+  "Find currently authorized tools by capability. Describe the action and resource you need; separate independent tasks with semicolons and include useful context. Loads the strongest few matches and returns compact alternatives; ranking is not certainty, so check the match. If a decision model is configured, it can select tools for ambiguous searches. With schemasLoaded:true, only tools have loaded schemas; suggestions are unloaded alternatives. With schemasLoaded:false, load chosen exact names with query:'' before invoking. Known exact names bypass ranking and inference. Call loaded tools by name or through tool_invoke. Search is not exhaustive: tool_list view:'groups' shows available groups. Discovery never grants access.";
 const NATIVE_SEARCH_DESCRIPTION =
   "Find currently authorized tools by capability. Describe the action and resource you need; separate independent tasks with semicolons and include useful context. Loads complete schemas for the strongest matches; ranking is not certainty, so check the match. If a decision model is configured, it can select tools for ambiguous searches. Call loaded functions directly. For compact alternatives or an empty result, use tool_list view:'groups' and browse a group, then load chosen exact names with query:''. Known exact names bypass ranking and inference. Discovery never grants access.";
 const INVOKE_DESCRIPTION =
@@ -240,6 +247,88 @@ type GenericSearchMarker = {
   notice?: string;
 };
 
+/** A search decided but not yet recorded in the turn's search state. */
+type SearchDecision = {
+  result: GenericSearchMarker;
+  query: string;
+  names: readonly string[] | undefined;
+  /**
+   * Integrations the search names that the person can connect. Their notice
+   * is added once the call is accepted, after any Connect card is shown.
+   */
+  connectable?: ConnectableIntegrations;
+};
+
+/**
+ * The integrations a search names that the person can connect, and the one it
+ * clearly names when it names exactly one distinctively (see
+ * isDistinctiveIntegrationMention): only that one gets its Connect card from
+ * the search itself.
+ */
+type ConnectableIntegrations = {
+  named: ConnectableIntegration[];
+  clearlyNamed?: ConnectableIntegration;
+  /**
+   * Why no card is shown for an integration the request may name: several
+   * named, a name read as an ordinary word, or a catalog read that did not
+   * finish. `considered` names the integrations it concerns.
+   */
+  skipped?: DiscoveryCardSkipReason;
+  considered?: ConnectableIntegration[];
+};
+
+/** Why tool discovery showed no Connect card for an integration a request may name. */
+export type DiscoveryCardSkipReason =
+  | "several_named"
+  | "not_distinctive"
+  | "lookup_timed_out"
+  | "lookup_failed"
+  | "no_card_tool";
+
+/**
+ * What became of a Connect card tool discovery could have shown, when none
+ * was newly shown: skipped (and why), already in the chat, not shown by the
+ * card tool (setup not permitted or unavailable), or a failed card call.
+ * Recorded as a `tool.discovery_card` session event.
+ */
+export type DiscoveryCardEvent = {
+  source: "tool_search" | "tool_list";
+  outcome: "skipped" | "already_shown" | "not_shown" | "failed";
+  reason?: DiscoveryCardSkipReason | "timeout" | "error";
+  query: string;
+  integrations: { capabilityId: string; name: string }[];
+};
+
+export type DiscoveryCardSink = (event: DiscoveryCardEvent) => void | Promise<void>;
+
+/**
+ * A Connect card in the chat after a search showed it: shown now, or already
+ * shown since the person's latest message.
+ */
+export type ConnectCardReceipt = {
+  eventId: string;
+  alreadyShown: boolean;
+  /** What the card tool said about it, for the model. */
+  message?: string;
+};
+
+/**
+ * Whether a search's Connect card is in the chat: a receipt, null when the
+ * card tool answered without one, or "unknown" when the call failed or timed
+ * out and the card may or may not have been posted.
+ */
+export type ConnectCardOutcome = ConnectCardReceipt | null | "unknown";
+
+/**
+ * Shows an integration's Connect card in this chat, as a call of the card tool
+ * would, not again until the person writes. Null when the tool answered that
+ * no card is in the chat.
+ */
+export type ConnectCardRequest = (
+  integration: ConnectableIntegration,
+  signal?: AbortSignal,
+) => Promise<ConnectCardReceipt | null>;
+
 /**
  * A catalog integration the person can connect from a card in this chat, and
  * its vendor domain when the catalog names one.
@@ -274,11 +363,35 @@ function integrationNamedIn(
 ): boolean {
   if (isOperationWord(integration.name)) return false;
   const vendorWord = integrationVendorWord(integration.providerDomain);
-  return integrationMentionsIn(query, integration, sharedDomains ? { sharedDomains } : {}).some(
-    (mention) =>
-      !(mention.kind === "domain" && vendorWord && isOperationWord(vendorWord)) &&
-      (!distinctive || isDistinctiveIntegrationMention(mention, integration.name)),
+  const mentions = integrationMentionsIn(
+    query,
+    integration,
+    sharedDomains ? { sharedDomains } : {},
+  ).filter((mention) => !(mention.kind === "domain" && vendorWord && isOperationWord(vendorWord)));
+  return (
+    mentions.length > 0 &&
+    (!distinctive ||
+      mentions.some((mention) => isDistinctiveIntegrationMention(mention, integration.name)) ||
+      opensRequestAsLabel(query, integration.name))
   );
+}
+
+/**
+ * Whether a request opens with the integration's one-word name, capitalised,
+ * as the label of what follows: directly before an operation word, with or
+ * without a colon ("Airtable list records", "Linear: create an issue"). A sentence-opening
+ * capital alone is no evidence ("Linear regression"), but a name read as the
+ * subject of an operation is.
+ */
+function opensRequestAsLabel(query: string, name: string): boolean {
+  const nameWords = integrationNameWords(name);
+  if (nameWords.length !== 1) return false;
+  for (const request of query.normalize("NFKC").split(/[.!?;\n]+/)) {
+    const opening = /^\s*(\p{Lu}[\p{L}\p{N}]*)\s*:?\s+(\p{L}+)/u.exec(request);
+    if (!opening || integrationNameWords(opening[1]!).join("") !== nameWords[0]) continue;
+    if (isOperationWord(opening[2]!)) return true;
+  }
+  return false;
 }
 
 /**
@@ -344,9 +457,13 @@ export function connectableIntegrationsNamedIn(
   return named;
 }
 
-/** The plain sentence a search result carries for connectable integrations. */
+/**
+ * The plain sentence a search result carries for connectable integrations,
+ * saying whether the search itself already put a Connect card in the chat.
+ */
 export function connectableIntegrationNotice(
   integrations: readonly ConnectableIntegration[],
+  card?: ConnectCardOutcome,
 ): string {
   const listed = integrations
     .map(
@@ -354,9 +471,40 @@ export function connectableIntegrationNotice(
         `${integration.name} (capabilityId ${JSON.stringify(integration.capabilityId)})`,
     )
     .join(", ");
+  if (card && card !== "unknown") {
+    // The card tool's own message says what the card does, and for a card
+    // already in the chat that it was not posted again.
+    const said = card.alreadyShown
+      ? (card.message ?? "Its Connect card is already in this chat.")
+      : `Its Connect card is now shown in this chat.${card.message ? ` ${card.message}` : ""}`;
+    return `Not connected yet: ${listed}. ${said}`;
+  }
+  // Whether a card was posted is unknown after a failed call, so the notice
+  // then says nothing about it.
+  const none = card === "unknown" ? "" : " No card is shown until you do.";
   return integrations.length === 1
-    ? `Not connected yet: ${listed}. If the task needs it, call capability_authorization_request with that capabilityId and a short rationale to show the person its Connect card.`
-    : `Not connected yet: ${listed}. If the task needs one, call capability_authorization_request with its capabilityId and a short rationale to show the person its Connect card.`;
+    ? `Not connected yet: ${listed}. If the task needs it, call capability_authorization_request with that capabilityId and a short rationale to show the person its Connect card.${none}`
+    : `Not connected yet: ${listed}. If the task needs one, call capability_authorization_request with its capabilityId and a short rationale to show the person its Connect card.${none}`;
+}
+
+/**
+ * The structured counterpart of connectableIntegrationNotice: whether a
+ * Connect card is in the chat, and which event shows it. A reply can rely on
+ * it instead of assuming a card was shown. Undefined when that is unknown.
+ */
+export function connectCardField(
+  integration: ConnectableIntegration | undefined,
+  card: ConnectCardOutcome | undefined,
+): Record<string, unknown> | undefined {
+  if (card === "unknown") return undefined;
+  return card && integration
+    ? {
+        shown: true,
+        capabilityId: integration.capabilityId,
+        eventId: card.eventId,
+        ...(card.alreadyShown ? { alreadyShown: true } : {}),
+      }
+    : { shown: false };
 }
 
 /**
@@ -487,6 +635,26 @@ const CONNECTABLE_LOOKUP_TIMEOUT_MS = 2_000;
  */
 const BESIDE_STRONG_MATCHES_LOOKUP_TIMEOUT_MS = 1_500;
 
+/** A tool-name prefix that is an aliased MCP tool's digest, or a start of one. */
+const ALIASED_MCP_DIGEST_PREFIX = /^mcp_[0-9a-f]{4,24}_{0,2}$/;
+
+/**
+ * The words a tool_list filter writes, for finding an integration it names:
+ * the name prefix and group with digests, `mcp_` and `connection/` keys and
+ * separators removed ("clickup" from namePrefix "clickup_"). Empty for a
+ * filter of digests or punctuation alone.
+ */
+function listingFilterText(namePrefix: string, group: string): string {
+  const text = [namePrefix, group]
+    .join(" ")
+    .replace(/\bmcp_[0-9a-f]*_*/gi, " ")
+    .replace(/\bconnection\/[0-9a-f]*/gi, " ")
+    .replace(/\b[0-9a-f]{12,}\b/gi, " ")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+  return hasSearchTerms(text) && text.split(" ").length <= 6 ? text : "";
+}
+
 /** The promise's result, or a rejection once the signal aborts, whichever comes first. */
 function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   promise.catch(() => undefined);
@@ -544,6 +712,84 @@ export function catalogConnectableIntegrationLookup(server: {
       : await server.callTool(INTEGRATION_CATALOG_TOOL_NAME, args, null, options);
     return connectableIntegrationsFromCatalogResult(result);
   };
+}
+
+/**
+ * How long an accepted search waits for its Connect card: posting it reads the
+ * catalog and writes the card, so it gets longer than the catalog read alone.
+ */
+const CONNECT_CARD_TIMEOUT_MS = 10_000;
+
+/** The person-facing reason on a Connect card a search shows. */
+function discoveryCardRationale(integration: ConnectableIntegration): string {
+  return `Connect ${integration.name} so the agent can use it for this task.`;
+}
+
+/**
+ * Shows a Connect card with the harness control server's card tool, through
+ * the same authorized call path, policy and card as a model call of that tool.
+ * The call says it comes from tool discovery, so the card is shown at most
+ * once per chat. A result without a card (ready, unavailable, input needed)
+ * or a failed call shows nothing.
+ */
+export function catalogConnectCardRequest(server: {
+  callTool(
+    toolName: string,
+    args: Record<string, unknown> | null,
+    meta?: Record<string, unknown> | null,
+    options?: { signal?: AbortSignal },
+  ): Promise<unknown>;
+  callToolResult?(
+    toolName: string,
+    args: Record<string, unknown> | null,
+    meta?: Record<string, unknown> | null,
+    options?: { signal?: AbortSignal },
+  ): Promise<unknown>;
+}): ConnectCardRequest {
+  return async (integration, signal) => {
+    const timeout = AbortSignal.timeout(CONNECT_CARD_TIMEOUT_MS);
+    const options = { signal: signal ? AbortSignal.any([signal, timeout]) : timeout };
+    const args = {
+      capabilityId: integration.capabilityId,
+      rationale: discoveryCardRationale(integration),
+    };
+    const meta = { [TOOL_DISCOVERY_CARD_META_KEY]: true };
+    const result = server.callToolResult
+      ? await server.callToolResult(INTEGRATION_CARD_TOOL_NAME, args, meta, options)
+      : await server.callTool(INTEGRATION_CARD_TOOL_NAME, args, meta, options);
+    return connectCardReceiptFromResult(result);
+  };
+}
+
+/**
+ * The card a capability_authorization_request result says is in the chat:
+ * only an explicit `cardShown: true` with the event that shows it counts.
+ * Accepts the MCP content array or a full result.
+ */
+export function connectCardReceiptFromResult(result: unknown): ConnectCardReceipt | null {
+  if (isRecord(result) && result.isError === true) return null;
+  const content = Array.isArray(result)
+    ? result
+    : isRecord(result) && Array.isArray(result.content)
+      ? result.content
+      : [];
+  for (const block of content) {
+    if (!isRecord(block) || block.type !== "text" || typeof block.text !== "string") continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(block.text);
+    } catch {
+      continue;
+    }
+    if (!isRecord(parsed) || parsed.cardShown !== true) continue;
+    if (typeof parsed.eventId !== "string" || !parsed.eventId) continue;
+    return {
+      eventId: parsed.eventId,
+      alreadyShown: parsed.alreadyShown === true,
+      ...(typeof parsed.message === "string" && parsed.message ? { message: parsed.message } : {}),
+    };
+  }
+  return null;
 }
 
 /**
@@ -684,6 +930,11 @@ export class LazyToolRuntime {
      * out searchable once prepared still expose it.
      */
     private readonly pendingPreparationDefers = true,
+    /**
+     * Shows the Connect card of an integration a search clearly names;
+     * absent means searches only name it.
+     */
+    private readonly connectCardRequest?: ConnectCardRequest,
   ) {
     this.routerWasExposed = routerInHistory;
     this.controlTools =
@@ -711,6 +962,92 @@ export class LazyToolRuntime {
 
   hasPendingPreparation(): boolean {
     return !this.preparationSettled;
+  }
+
+  private discoveryCardSink: DiscoveryCardSink | undefined;
+
+  /** Catalog lookup failures already recorded for the current sink. */
+  private recordedLookupFailures = new Set<string>();
+
+  /** Where skipped and failed discovery cards are recorded; absent records nothing. */
+  setDiscoveryCardSink(sink: DiscoveryCardSink | undefined): void {
+    this.discoveryCardSink = sink;
+    this.recordedLookupFailures = new Set();
+  }
+
+  /** Stops recording into the given sink, unless a later run replaced it. */
+  releaseDiscoveryCardSink(sink: DiscoveryCardSink | undefined): void {
+    if (this.discoveryCardSink === sink) this.setDiscoveryCardSink(undefined);
+  }
+
+  /** Best effort: recording never delays or fails discovery. */
+  private recordDiscoveryCard(event: DiscoveryCardEvent): void {
+    const sink = this.discoveryCardSink;
+    if (!sink) return;
+    // A catalog that cannot be read fails every search alike: record it once
+    // per run and source, not once per search.
+    if (event.reason === "lookup_failed" || event.reason === "lookup_timed_out") {
+      const key = `${event.source}:${event.reason}`;
+      if (this.recordedLookupFailures.has(key)) return;
+      this.recordedLookupFailures.add(key);
+    }
+    void Promise.resolve()
+      .then(() => sink(event))
+      .catch(() => undefined);
+  }
+
+  /**
+   * Shows the Connect card of the integration a search or listing clearly
+   * names, through the card tool, and records why none was newly shown.
+   * Undefined when no card was requested.
+   */
+  private async discoveryCard(
+    connectable: ConnectableIntegrations,
+    source: DiscoveryCardEvent["source"],
+    query: string,
+    signal?: AbortSignal,
+  ): Promise<ConnectCardOutcome | undefined> {
+    const record = (
+      outcome: DiscoveryCardEvent["outcome"],
+      integrations: readonly ConnectableIntegration[],
+      reason?: DiscoveryCardEvent["reason"],
+    ) =>
+      this.recordDiscoveryCard({
+        source,
+        outcome,
+        ...(reason ? { reason } : {}),
+        query: Array.from(query).slice(0, 500).join(""),
+        integrations: integrations.map(({ capabilityId, name }) => ({ capabilityId, name })),
+      });
+    const integration = connectable.clearlyNamed;
+    if (!integration) {
+      if (connectable.skipped)
+        record("skipped", connectable.considered ?? connectable.named, connectable.skipped);
+      return undefined;
+    }
+    if (!this.connectCardRequest) {
+      record("skipped", [integration], "no_card_tool");
+      return undefined;
+    }
+    let card: ConnectCardOutcome;
+    try {
+      card = await this.connectCardRequest(integration, signal);
+    } catch (error) {
+      // Cancellation belongs to the owning turn. Any other failure (no card
+      // tool this attempt, a policy refusal, a timeout) leaves the result
+      // naming the integration as before, without saying whether a card was
+      // posted.
+      signal?.throwIfAborted();
+      record(
+        "failed",
+        [integration],
+        error instanceof Error && error.name === "TimeoutError" ? "timeout" : "error",
+      );
+      return "unknown";
+    }
+    if (card === null) record("not_shown", [integration]);
+    else if (card.alreadyShown) record("already_shown", [integration]);
+    return card;
   }
 
   async prepareConditionalRouter(): Promise<void> {
@@ -1144,7 +1481,57 @@ export class LazyToolRuntime {
   }
 
   /** One decision and one detached receipt per call; never recompute historical output. */
-  async prepareSearch(rawArguments: unknown, signal?: AbortSignal): Promise<GenericSearchMarker> {
+  async prepareSearch(
+    rawArguments: unknown,
+    signal?: AbortSignal,
+    decided?: Promise<SearchDecision>,
+  ): Promise<GenericSearchMarker> {
+    const decision = await (decided ?? this.decideSearch(rawArguments, signal));
+    return this.commitSearch(await this.withConnectableNotice(decision, signal));
+  }
+
+  /**
+   * Names the integrations an accepted search found that the person can
+   * connect. One the search clearly names gets its Connect card now, through
+   * the card tool (once per chat), so the card never depends on a second
+   * call; the result then says the card is shown. Showing it waits for the
+   * accepted call because an early decision may be dropped. Without a card in
+   * the chat, the result says none is shown.
+   */
+  private async withConnectableNotice(
+    decision: SearchDecision,
+    signal?: AbortSignal,
+  ): Promise<SearchDecision> {
+    const connectable = decision.connectable;
+    if (!connectable) return decision;
+    const integration = connectable.clearlyNamed;
+    const card =
+      (await this.discoveryCard(connectable, "tool_search", decision.query, signal)) ?? null;
+    if (!connectable.named.length) return decision;
+    const notice = this.withNotice(
+      decision.result,
+      "notConnected",
+      connectableIntegrationNotice(connectable.named, card),
+    );
+    const field = connectCardField(integration, card);
+    return {
+      ...decision,
+      result: field
+        ? {
+            ...notice,
+            output: JSON.stringify({ ...JSON.parse(notice.output), connectCard: field }),
+          }
+        : notice,
+    };
+  }
+
+  /**
+   * The slow part of a search: ranking, the decision model and the catalog
+   * lookup. It reads this turn's search state but never writes it, so a
+   * stream may start it as soon as the call is complete and drop it if the
+   * response never finishes; only {@link commitSearch} records the search.
+   */
+  async decideSearch(rawArguments: unknown, signal?: AbortSignal): Promise<SearchDecision> {
     signal?.throwIfAborted();
     // The decision is replayed verbatim when the call executes, so it must
     // read the prepared catalog. Preparation can settle while the model is
@@ -1157,22 +1544,12 @@ export class LazyToolRuntime {
     if (parsed.names !== undefined) {
       const resolve = this.exactMcpNameResolver();
       const exact = { ...parsed, names: parsed.names.map((name) => resolve(name) ?? name) };
-      const loaded = this.withCandidatesNotice({
+      const result = this.withCandidatesNotice({
         version: 2,
         output: this.genericSearchOutput(exact),
         tools: structuredClone(this.searchDisclosure(exact)),
       });
-      // Loading one account's tools by exact name (after browsing a group,
-      // say) names the person's other accounts once per turn, as a ranked
-      // search reaching that account does.
-      const accounts = this.connectedAccountsNotice(loaded);
-      return this.remembered(
-        this.withAlreadyAvailable(
-          accounts ? this.withNotice(loaded, "connectedAccounts", accounts) : loaded,
-          query,
-          parsed.names,
-        ),
-      );
+      return { result, query, names: parsed.names };
     }
     const pool = this.searchableTools(this.currentTools);
     this.searchIndex ??= new ToolSearchIndex(pool);
@@ -1182,7 +1559,7 @@ export class LazyToolRuntime {
       .filter(isFunctionTool)
       .map((t) => t.name);
     const strongest = this.searchIndex
-      .bestMatches(query)
+      .strongestMatches(query, STRONGEST_PER_REQUEST)
       .filter(isFunctionTool)
       .map((t) => t.name);
     // Either integration setup tool brings the other. A search that names an
@@ -1197,19 +1574,24 @@ export class LazyToolRuntime {
     // companions wait for it.
     const setup = integrationSetupToolNames(pool);
     const owners = this.integrationOwners(strong);
-    const lookup: Promise<ConnectableIntegration[]> =
+    const lookup: Promise<ConnectableIntegrations> =
       named.length ||
       setup.length < 2 ||
       owners.some((owner) => integrationNamedIn(query, owner)) ||
       (strong.length > 0 && !mayNameUninstalledIntegration(query, this.searchIndex))
-        ? Promise.resolve([])
-        : this.connectableIntegrations(query, owners, strong.length > 0, signal);
+        ? Promise.resolve({ named: [] })
+        : this.connectableIntegrations(
+            query,
+            owners,
+            { besideStrongMatches: strong.length > 0 },
+            signal,
+          );
     // Rejects only on cancellation, which the search itself observes.
     lookup.catch(() => undefined);
     const setupFor = async (chosen: readonly string[]) =>
       (chosen.some(isIntegrationSetupToolName)
         ? setup
-        : (await lookup).length
+        : (await lookup).named.length
           ? [INTEGRATION_CARD_TOOL_NAME]
           : []
       ).filter((name) => !chosen.includes(name));
@@ -1232,17 +1614,28 @@ export class LazyToolRuntime {
         ? ranked
         : this.withCandidatesNotice(ranked);
     const connectable = await lookup;
-    const withConnectable = connectable.length
-      ? this.withNotice(result, "notConnected", connectableIntegrationNotice(connectable))
-      : result;
-    const accounts = this.connectedAccountsNotice(withConnectable);
+    return {
+      result,
+      query,
+      names: undefined,
+      ...(connectable.named.length || connectable.skipped ? { connectable } : {}),
+    };
+  }
+
+  /**
+   * Finish a decided search when its call is accepted: name the person's
+   * other connected accounts (once per turn), note tools every request
+   * already carries, and record what it loaded and showed for later searches.
+   * Loading one account's tools by exact name (after browsing a group, say)
+   * names the other accounts too, as a ranked search reaching that account does.
+   */
+  private commitSearch({ result, query, names }: SearchDecision): GenericSearchMarker {
+    const accounts = this.connectedAccountsNotice(result);
     return this.remembered(
       this.withAlreadyAvailable(
-        accounts
-          ? this.withNotice(withConnectable, "connectedAccounts", accounts)
-          : withConnectable,
+        accounts ? this.withNotice(result, "connectedAccounts", accounts) : result,
         query,
-        undefined,
+        names,
       ),
     );
   }
@@ -1413,32 +1806,71 @@ export class LazyToolRuntime {
   private async connectableIntegrations(
     query: string,
     owners: readonly IntegrationOwner[],
-    besideStrongMatches: boolean,
+    {
+      besideStrongMatches = false,
+      literal = false,
+    }: {
+      besideStrongMatches?: boolean;
+      /**
+       * The query is a listing filter (a tool-name prefix or group), not
+       * prose: an integration it names is named on purpose.
+       */
+      literal?: boolean;
+    },
     signal?: AbortSignal,
-  ): Promise<ConnectableIntegration[]> {
-    if (!this.connectableLookup) return [];
-    // A search that strongly matched installed tools is otherwise ready at
-    // once, so it waits for the catalog only briefly, whether or not the
-    // lookup observes its signal.
-    const bounded = besideStrongMatches
-      ? signal
-        ? AbortSignal.any([signal, AbortSignal.timeout(BESIDE_STRONG_MATCHES_LOOKUP_TIMEOUT_MS)])
-        : AbortSignal.timeout(BESIDE_STRONG_MATCHES_LOOKUP_TIMEOUT_MS)
-      : signal;
+  ): Promise<ConnectableIntegrations> {
+    if (!this.connectableLookup) return { named: [] };
+    // A search that strongly matched installed tools, or a listing, is
+    // otherwise ready at once, so it waits for the catalog only briefly,
+    // whether or not the lookup observes its signal.
+    const bounded =
+      besideStrongMatches || literal
+        ? signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(BESIDE_STRONG_MATCHES_LOOKUP_TIMEOUT_MS)])
+          : AbortSignal.timeout(BESIDE_STRONG_MATCHES_LOOKUP_TIMEOUT_MS)
+        : signal;
     try {
       const lookup = this.connectableLookup(query, bounded);
       const matches =
         bounded && bounded !== signal ? await untilAborted(lookup, bounded) : await lookup;
       // Named among every match, so an installed sibling still shows that
       // its vendor domain is shared, then without the strong matches' own.
-      return connectableIntegrationsNamedIn(query, matches, besideStrongMatches).filter(
-        (integration) => !owners.some((owner) => ownsIntegration(owner, integration)),
+      const notOwned = (integration: ConnectableIntegration) =>
+        !owners.some((owner) => ownsIntegration(owner, integration));
+      const named = connectableIntegrationsNamedIn(query, matches, besideStrongMatches).filter(
+        notOwned,
       );
-    } catch {
+      // Clearly named: the only one named, and named distinctively (which
+      // beside strong matches every named integration already is) or in a
+      // listing filter.
+      const clearlyNamed =
+        named.length === 1 &&
+        (besideStrongMatches ||
+          literal ||
+          connectableIntegrationsNamedIn(query, matches, true).some(
+            (integration) => integration.capabilityId === named[0]!.capabilityId,
+          ))
+          ? named[0]
+          : undefined;
+      if (clearlyNamed) return { named, clearlyNamed };
+      if (named.length) {
+        const skipped = named.length > 1 ? "several_named" : "not_distinctive";
+        return { named, skipped };
+      }
+      // Beside strong matches only distinctive mentions are named; a plain
+      // one is still worth recording as skipped.
+      const plain = besideStrongMatches
+        ? connectableIntegrationsNamedIn(query, matches).filter(notOwned)
+        : [];
+      return plain.length ? { named, skipped: "not_distinctive", considered: plain } : { named };
+    } catch (error) {
       // Cancellation belongs to the owning turn; any other failure only means
       // this result names no connectable integration.
       signal?.throwIfAborted();
-      return [];
+      const timedOut =
+        (bounded !== undefined && bounded !== signal && bounded.aborted) ||
+        (error instanceof Error && error.name === "TimeoutError");
+      return { named: [], skipped: timedOut ? "lookup_timed_out" : "lookup_failed" };
     }
   }
 
@@ -1613,10 +2045,11 @@ export class LazyToolRuntime {
             : keywordRanking(unit.text, depth),
         ),
       );
-    // Without a selector, the best match for each request is loaded: the top
-    // of its fused ranking, else the best keyword match. When keyword ranking
-    // cannot tell (a tie, or a clause without resource words) the top-ranked
-    // candidate still is, since an empty result hides candidates that fit.
+    // Without a selector, each request loads the top of its fused ranking,
+    // else its best keyword match and the close ones from the same
+    // integration (a fused ranking has no scores to tell close from far).
+    // When nothing ranks, the top-ranked candidate still loads, since an
+    // empty result hides candidates that fit.
     const lexical = () =>
       named.length
         ? named
@@ -1862,139 +2295,200 @@ export class LazyToolRuntime {
         additionalProperties: false,
       } as never,
       strict: false,
-      execute: async (input: unknown) => {
-        await this.ensurePrepared();
-        const args = isRecord(input) ? input : {};
-        const prefix = typeof args.namePrefix === "string" ? args.namePrefix : "";
-        const group = typeof args.group === "string" ? args.group : undefined;
-        const serverIds = this.modelMcpServerIds();
-        const cursor = typeof args.cursor === "string" ? args.cursor : undefined;
-        const limit =
-          typeof args.limit === "number" && Number.isFinite(args.limit)
-            ? Math.max(1, Math.min(40, Math.floor(args.limit)))
-            : 20;
-        // Digest aliases sort by their readable name part, so one connection's
-        // tools page alphabetically rather than in digest order.
-        const sortKey = (name: string) =>
-          isAliasedMcpToolName(name)
-            ? `mcp__${name.slice(name.indexOf("__") + 2)}\u0000${name}`
-            : name;
-        const authorizedTools = [...new Set(this.searchableTools(this.currentTools))]
-          .filter(isFunctionTool)
-          .map((tool) => ({ tool, key: sortKey(tool.name) }))
-          .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
-          .map(({ tool }) => tool);
-        // A prefix also matches the name after the server separator, in the
-        // form a server publishes it (`projects.` or `projects_`).
-        const shortPrefix = prefix.includes("__") ? null : prefix.replace(/[^A-Za-z0-9_]/g, "_");
-        const hasPrefix = (name: string) =>
-          name.startsWith(prefix) ||
-          (shortPrefix !== null &&
-            name.includes("__") &&
-            name.slice(name.lastIndexOf("__") + 2).startsWith(shortPrefix));
-        const tools = authorizedTools.filter(
-          (tool) =>
-            hasPrefix(tool.name) &&
-            (group === undefined || toolGroup(tool.name, serverIds) === group),
-        );
-        if (args.view === "groups") {
-          const groups = toolGroups(tools, serverIds);
-          const cursorIndex =
-            cursor === undefined ? -1 : groups.findIndex((entry) => entry.group === cursor);
-          if (cursor !== undefined && cursorIndex === -1)
-            return JSON.stringify({
-              error: "invalid_cursor",
-              message: "Restart listing without a cursor in the current authorized catalog.",
-            });
-          const page: typeof groups = [];
-          let index = cursorIndex + 1;
-          for (; index < groups.length && page.length < limit; index++) {
-            const entry = groups[index]!;
-            if (
-              Buffer.byteLength(
-                JSON.stringify({
-                  groups: [...page, entry],
-                  total: groups.length,
-                  nextCursor: entry.group,
-                }),
-              ) >
-              16 * 1024
-            ) {
-              if (!page.length)
-                return JSON.stringify({
-                  error: "descriptor_too_large",
-                  message: "A tool group exceeds the listing budget.",
-                });
-              break;
-            }
-            page.push(entry);
-          }
-          return JSON.stringify({
-            groups: page,
-            total: groups.length,
-            nextCursor: index < groups.length ? page.at(-1)!.group : null,
-            ...(cursor === undefined ? this.unavailableSources() : {}),
-          });
-        }
-        const cursorIndex =
-          cursor === undefined ? -1 : tools.findIndex((tool) => tool.name === cursor);
-        if (cursor !== undefined && cursorIndex === -1) {
-          return JSON.stringify({
-            error: "invalid_cursor",
-            message: "Restart listing without a cursor in the current authorized catalog.",
-          });
-        }
-        const descriptors: { name: string; description: string }[] = [];
-        let index = cursorIndex + 1;
-        for (; index < tools.length && descriptors.length < limit; index++) {
-          const tool = tools[index]!;
-          const descriptor = toolDescriptor(tool);
-          const candidate = {
-            tools: [...descriptors, descriptor],
-            total: tools.length,
-            nextCursor: tool.name,
-          };
-          if (Buffer.byteLength(JSON.stringify(candidate)) > 16 * 1024) {
-            if (descriptors.length === 0) {
-              return JSON.stringify({
-                error: "descriptor_too_large",
-                message: "A tool name exceeds the listing budget.",
-              });
-            }
-            break;
-          }
-          descriptors.push(descriptor);
-        }
-        const result = {
-          tools: descriptors,
-          total: tools.length,
-          nextCursor: index < tools.length ? descriptors.at(-1)!.name : null,
-          ...(cursor === undefined ? this.unavailableSources() : {}),
-        };
-        if (!prefix || tools.length > 0 || group !== undefined) return JSON.stringify(result);
-
-        // Preserve literal-prefix pagination. Recovery hints are descriptors
-        // from the same authorized deferred pool, never schemas or new grants.
-        const recovery = {
-          ...result,
-          message:
-            "No tool names match this literal prefix. This does not establish capability absence. Load any suggested exact names with tool_search, or retry tool_list without namePrefix to browse the authorized catalog.",
-          suggestions: [] as { name: string; description: string }[],
-        };
-        for (const candidate of authorizedTools) {
-          if (!candidate.name.includes(prefix)) continue;
-          const suggestion = {
-            name: candidate.name,
-            description: Array.from(candidate.description).slice(0, 160).join(""),
-          };
-          const next = { ...recovery, suggestions: [...recovery.suggestions, suggestion] };
-          if (Buffer.byteLength(JSON.stringify(next)) > 16 * 1024) continue;
-          recovery.suggestions.push(suggestion);
-          if (recovery.suggestions.length >= Math.min(limit, 8)) break;
-        }
-        return JSON.stringify(recovery);
-      },
+      execute: async (input: unknown, _context: unknown, details) =>
+        await this.withListingConnectCard(
+          await this.listToolsOutput(input),
+          input,
+          details?.signal,
+        ),
     }) as unknown as Tool;
+  }
+
+  /**
+   * A first listing page that a name filter left empty, when the filter names
+   * an integration the person has not installed but can connect: the listing
+   * names it, as a search would, and shows its Connect card when it names
+   * that one integration. A listing without such a filter is unchanged.
+   */
+  private async withListingConnectCard(
+    output: string,
+    input: unknown,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    const args = isRecord(input) ? input : {};
+    if (args.cursor !== undefined) return output;
+    const filter = listingFilterText(
+      typeof args.namePrefix === "string" ? args.namePrefix : "",
+      typeof args.group === "string" ? args.group : "",
+    );
+    if (!filter) return output;
+    const listed = JSON.parse(output) as Record<string, unknown>;
+    if (listed.total !== 0) return output;
+    const pool = this.searchableTools(this.currentTools).filter(isFunctionTool);
+    const connectable = await this.connectableIntegrations(
+      filter,
+      this.integrationOwners(pool.map((tool) => tool.name)),
+      { literal: true },
+      signal,
+    );
+    const card = await this.discoveryCard(connectable, "tool_list", filter, signal);
+    if (!connectable.named.length) return output;
+    const field = connectCardField(connectable.clearlyNamed, card ?? null);
+    return JSON.stringify({
+      ...listed,
+      notConnected: connectableIntegrationNotice(connectable.named, card ?? null),
+      ...(field ? { connectCard: field } : {}),
+    });
+  }
+
+  /** One tool_list page as its JSON output. */
+  private async listToolsOutput(input: unknown): Promise<string> {
+    await this.ensurePrepared();
+    const args = isRecord(input) ? input : {};
+    const prefix = typeof args.namePrefix === "string" ? args.namePrefix : "";
+    const group = typeof args.group === "string" ? args.group : undefined;
+    const serverIds = this.modelMcpServerIds();
+    const cursor = typeof args.cursor === "string" ? args.cursor : undefined;
+    const limit =
+      typeof args.limit === "number" && Number.isFinite(args.limit)
+        ? Math.max(1, Math.min(40, Math.floor(args.limit)))
+        : 20;
+    // Digest aliases sort by their readable name part, so one connection's
+    // tools page alphabetically rather than in digest order.
+    const sortKey = (name: string) =>
+      isAliasedMcpToolName(name) ? `mcp__${name.slice(name.indexOf("__") + 2)}\u0000${name}` : name;
+    const authorizedTools = [...new Set(this.searchableTools(this.currentTools))]
+      .filter(isFunctionTool)
+      .map((tool) => ({ tool, key: sortKey(tool.name) }))
+      .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+      .map(({ tool }) => tool);
+    // A prefix also matches the name after the server separator, in the
+    // form a server publishes it (`projects.` or `projects_`).
+    const shortPrefix = prefix.includes("__") ? null : prefix.replace(/[^A-Za-z0-9_]/g, "_");
+    const hasPrefix = (name: string) =>
+      name.startsWith(prefix) ||
+      (shortPrefix !== null &&
+        name.includes("__") &&
+        name.slice(name.lastIndexOf("__") + 2).startsWith(shortPrefix));
+    const inGroup = (tool: Tool & { name: string }) =>
+      group === undefined || toolGroup(tool.name, serverIds) === group;
+    let tools = authorizedTools.filter((tool) => hasPrefix(tool.name) && inGroup(tool));
+    // An aliased tool's digest (`mcp_<digest>`) is that one tool's own, not
+    // its connection's: such a prefix lists every tool of the connection the
+    // tools it matches belong to.
+    const connectionPrefix =
+      ALIASED_MCP_DIGEST_PREFIX.test(prefix) &&
+      tools.length > 0 &&
+      tools.every((tool) => serverIds.has(tool.name));
+    if (connectionPrefix) {
+      const servers = new Set(tools.map((tool) => serverIds.get(tool.name)));
+      tools = authorizedTools.filter(
+        (tool) => servers.has(serverIds.get(tool.name)) && inGroup(tool),
+      );
+    }
+    const connectionNote = connectionPrefix
+      ? {
+          message:
+            "namePrefix is one tool's own digest, so this lists every tool of that tool's connection.",
+        }
+      : {};
+    if (args.view === "groups") {
+      const groups = toolGroups(tools, serverIds);
+      const cursorIndex =
+        cursor === undefined ? -1 : groups.findIndex((entry) => entry.group === cursor);
+      if (cursor !== undefined && cursorIndex === -1)
+        return JSON.stringify({
+          error: "invalid_cursor",
+          message: "Restart listing without a cursor in the current authorized catalog.",
+        });
+      const page: typeof groups = [];
+      let index = cursorIndex + 1;
+      for (; index < groups.length && page.length < limit; index++) {
+        const entry = groups[index]!;
+        if (
+          Buffer.byteLength(
+            JSON.stringify({
+              groups: [...page, entry],
+              total: groups.length,
+              nextCursor: entry.group,
+            }),
+          ) >
+          16 * 1024
+        ) {
+          if (!page.length)
+            return JSON.stringify({
+              error: "descriptor_too_large",
+              message: "A tool group exceeds the listing budget.",
+            });
+          break;
+        }
+        page.push(entry);
+      }
+      return JSON.stringify({
+        groups: page,
+        total: groups.length,
+        nextCursor: index < groups.length ? page.at(-1)!.group : null,
+        ...connectionNote,
+        ...(cursor === undefined ? this.unavailableSources() : {}),
+      });
+    }
+    const cursorIndex = cursor === undefined ? -1 : tools.findIndex((tool) => tool.name === cursor);
+    if (cursor !== undefined && cursorIndex === -1) {
+      return JSON.stringify({
+        error: "invalid_cursor",
+        message: "Restart listing without a cursor in the current authorized catalog.",
+      });
+    }
+    const descriptors: { name: string; description: string }[] = [];
+    let index = cursorIndex + 1;
+    for (; index < tools.length && descriptors.length < limit; index++) {
+      const tool = tools[index]!;
+      const descriptor = toolDescriptor(tool);
+      const candidate = {
+        tools: [...descriptors, descriptor],
+        total: tools.length,
+        nextCursor: tool.name,
+      };
+      if (Buffer.byteLength(JSON.stringify(candidate)) > 16 * 1024) {
+        if (descriptors.length === 0) {
+          return JSON.stringify({
+            error: "descriptor_too_large",
+            message: "A tool name exceeds the listing budget.",
+          });
+        }
+        break;
+      }
+      descriptors.push(descriptor);
+    }
+    const result = {
+      tools: descriptors,
+      total: tools.length,
+      nextCursor: index < tools.length ? descriptors.at(-1)!.name : null,
+      ...connectionNote,
+      ...(cursor === undefined ? this.unavailableSources() : {}),
+    };
+    if (!prefix || tools.length > 0 || group !== undefined) return JSON.stringify(result);
+
+    // Preserve literal-prefix pagination. Recovery hints are descriptors
+    // from the same authorized deferred pool, never schemas or new grants.
+    const recovery = {
+      ...result,
+      message:
+        "No tool names match this literal prefix. This does not establish capability absence. Load any suggested exact names with tool_search, or retry tool_list without namePrefix to browse the authorized catalog.",
+      suggestions: [] as { name: string; description: string }[],
+    };
+    for (const candidate of authorizedTools) {
+      if (!candidate.name.includes(prefix)) continue;
+      const suggestion = {
+        name: candidate.name,
+        description: Array.from(candidate.description).slice(0, 160).join(""),
+      };
+      const next = { ...recovery, suggestions: [...recovery.suggestions, suggestion] };
+      if (Buffer.byteLength(JSON.stringify(next)) > 16 * 1024) continue;
+      recovery.suggestions.push(suggestion);
+      if (recovery.suggestions.length >= Math.min(limit, 8)) break;
+    }
+    return JSON.stringify(recovery);
   }
 
   private buildGenericSearchTool(): Tool {
@@ -2122,6 +2616,7 @@ export function installLazyToolRuntime(
   meaningRanker?: ToolMeaningRanker,
   mcpToolNames?: () => ReadonlyMap<string, string>,
   pendingPreparationDefers = true,
+  connectCardRequest?: ConnectCardRequest,
 ): LazyToolRuntime {
   const runtime = new LazyToolRuntime(
     transport,
@@ -2142,6 +2637,7 @@ export function installLazyToolRuntime(
     meaningRanker,
     mcpToolNames,
     pendingPreparationDefers,
+    connectCardRequest,
   );
   installLazyToolRuntimeOnAgent(agent, runtime);
   return runtime;
@@ -2396,6 +2892,7 @@ async function transformResponseItem(
   received: unknown,
   runtime: LazyToolRuntime,
   signal?: AbortSignal,
+  decided?: EarlySearchDecisions,
 ): Promise<unknown[]> {
   const item = await withProviderValidCallName(received, runtime);
   if (isRecord(item) && item.type === "tool_search_call") {
@@ -2409,7 +2906,11 @@ async function transformResponseItem(
           ...item,
           providerData: {
             ...providerData,
-            [SEARCH_MARKER_KEY]: await runtime.prepareSearch(item.arguments, signal),
+            [SEARCH_MARKER_KEY]: await runtime.prepareSearch(
+              item.arguments,
+              signal,
+              decided?.take(item),
+            ),
           },
         },
       ];
@@ -2433,7 +2934,7 @@ async function transformResponseItem(
   const items = transformGenericDispatchCall(
     item,
     runtime,
-    search ? await runtime.prepareSearch(item.arguments, signal) : undefined,
+    search ? await runtime.prepareSearch(item.arguments, signal, decided?.take(item)) : undefined,
   );
   return items.map((candidate) => withFamilyDisclosure(candidate, runtime));
 }
@@ -2468,14 +2969,72 @@ async function transformResponseOutput(
   output: ModelResponse["output"],
   runtime: LazyToolRuntime,
   signal?: AbortSignal,
+  decided?: EarlySearchDecisions,
 ): Promise<ModelResponse["output"]> {
   const transformed = (
-    await Promise.all(output.map((item) => transformResponseItem(item, runtime, signal)))
+    await Promise.all(output.map((item) => transformResponseItem(item, runtime, signal, decided)))
   ).flat();
   const unchanged =
     transformed.length === output.length &&
     transformed.every((item, index) => item === output[index]);
   return unchanged ? output : (transformed as ModelResponse["output"]);
+}
+
+/**
+ * Searches one streamed response started deciding while the provider was
+ * still finishing it. A client search call is complete at its
+ * `response.output_item.done`; the response's terminal event can follow
+ * hundreds of milliseconds later, and ranking or the decision model would
+ * otherwise only begin then, delaying the response's settlement and the next
+ * request by the whole search. Each decision is recorded in the turn's
+ * search state only when its call is transformed, and one the response never
+ * completes is dropped unrecorded.
+ */
+class EarlySearchDecisions {
+  private readonly pending = new Map<string, Promise<SearchDecision>>();
+
+  constructor(
+    private readonly runtime: LazyToolRuntime,
+    private readonly signal: AbortSignal | undefined,
+  ) {}
+
+  /** Start deciding the search a raw Responses stream event completes, if any. */
+  observe(event: StreamEvent): void {
+    if (event.type !== "model") return;
+    const raw = (event as { event?: unknown }).event;
+    if (!isRecord(raw) || raw.type !== "response.output_item.done") return;
+    const item = raw.item;
+    if (!isRecord(item)) return;
+    const isClientSearch = item.type === "tool_search_call" && item.execution === "client";
+    const isGenericSearch =
+      this.runtime.transport === "generic_dispatch" &&
+      item.type === "function_call" &&
+      item.name === TOOL_SEARCH_NAME &&
+      typeof item.arguments === "string";
+    if (!isClientSearch && !isGenericSearch) return;
+    const key = earlySearchKey(item);
+    if (key === null || this.pending.has(key)) return;
+    const decision = this.runtime.decideSearch(item.arguments, this.signal);
+    // Observed when the call is transformed; a dropped response leaves it unobserved.
+    decision.catch(() => undefined);
+    this.pending.set(key, decision);
+  }
+
+  /** The decision started for this call, once; undefined decides it now. */
+  take(item: Record<string, unknown>): Promise<SearchDecision> | undefined {
+    const key = earlySearchKey(item);
+    if (key === null) return undefined;
+    const decision = this.pending.get(key);
+    this.pending.delete(key);
+    return decision;
+  }
+}
+
+/** The same call in the raw stream and in the SDK's converted output. */
+function earlySearchKey(item: Record<string, unknown>): string | null {
+  const id = callId(item);
+  if (!id) return null;
+  return `${String(item.type)}\u0000${id}\u0000${JSON.stringify(item.arguments ?? null)}`;
 }
 
 /**
@@ -2750,6 +3309,7 @@ class LazyToolModel implements Model {
     rememberPreparedModelRequest(prepared);
     void notifyModelRequestCapture(prepared);
     let responseStartedPreparation = false;
+    const decided = new EarlySearchDecisions(this.runtime, request.signal);
     for await (const event of streamPreemptibleModelRequest(prepared, (preemptible) =>
       this.inner.getStreamedResponse(preemptible),
     )) {
@@ -2759,6 +3319,7 @@ class LazyToolModel implements Model {
         responseStartedPreparation = true;
         this.runtime.startPreparation();
       }
+      decided.observe(event);
       if (event.type === "response_done") {
         if (responseRequiresToolPreparation(event.response, this.runtime)) {
           await this.runtime.ensurePrepared();
@@ -2774,6 +3335,7 @@ class LazyToolModel implements Model {
                   event.response.output as ModelResponse["output"],
                   this.runtime,
                   request.signal,
+                  decided,
                 )) as typeof event.response.output,
               },
             } as StreamEvent)

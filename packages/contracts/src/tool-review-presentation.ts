@@ -260,6 +260,13 @@ const fieldPointer = (key: string, index: number, parent = "") =>
     ? `/~2${index}`
     : pointer(key);
 
+/** At most this many plain values of a nested argument object show on the card. */
+const INLINE_OBJECT_LEAVES = 4;
+
+/** The argument name a field stands for, so a host can name it; long names stay unnamed. */
+const reviewFieldKey = (key: string): { key?: string } =>
+  key.length > 0 && key.length <= 256 ? { key } : {};
+
 export function toolReviewFields(
   argumentsValue: unknown,
   context?: ToolReviewContext,
@@ -330,9 +337,42 @@ export function toolReviewFields(
   }
   const api = apiEnvelopeReviewFields(args, context);
   if (api) return api;
+  const labelFor = (key: string) =>
+    (context?.fieldLabels && Object.hasOwn(context.fieldLabels, key)
+      ? context.fieldLabels[key]
+      : undefined) ?? toolReviewFieldLabel(key);
+  // A small object of plain values (an update's `record`, a `changes` map)
+  // shows each value on the card, so a person sees what they approve
+  // without opening Details; anything larger stays one counted row.
+  const rows: { key: string; value: unknown; path: string; label: string; nested?: true }[] = [];
+  entries.forEach(([key, value], index) => {
+    const path = fieldPointer(key, index);
+    const label = labelFor(key);
+    const leaves = plainObject(value) ? Object.entries(value) : [];
+    if (
+      !protectedReviewField(key, context?.protectedFields) &&
+      leaves.length > 0 &&
+      leaves.length <= INLINE_OBJECT_LEAVES &&
+      leaves.every(
+        ([, leaf]) => leaf === null || ["string", "number", "boolean"].includes(typeof leaf),
+      )
+    ) {
+      leaves.forEach(([leafKey, leaf], position) =>
+        rows.push({
+          key: leafKey,
+          value: leaf,
+          path: `${path}${fieldPointer(leafKey, position, path)}`,
+          label: `${label} · ${toolReviewFieldLabel(leafKey)}`,
+          nested: true,
+        }),
+      );
+      return;
+    }
+    rows.push({ key, value, path, label });
+  });
   return {
-    moreFields: Math.max(0, entries.length - 16),
-    fields: entries.slice(0, 16).map(([key, value], index) => {
+    moreFields: Math.max(0, rows.length - 16),
+    fields: rows.slice(0, 16).map(({ key, value, path, label, nested }) => {
       const hidden = protectedReviewField(key, context?.protectedFields);
       const safe = hidden ? "[Protected value]" : value;
       const count = !hidden && Array.isArray(value) ? value.length : undefined;
@@ -356,14 +396,11 @@ export function toolReviewFields(
               ? `${Object.keys(safe).length} field${Object.keys(safe).length === 1 ? "" : "s"}`
               : valueText(safe);
       return {
-        path: fieldPointer(key, index),
-        label: bound(
-          (context?.fieldLabels && Object.hasOwn(context.fieldLabels, key)
-            ? context.fieldLabels[key]
-            : undefined) ?? toolReviewFieldLabel(key),
-          256,
-        ),
+        path,
+        ...(nested ? {} : reviewFieldKey(key)),
+        label: bound(label, 256),
         preview: bound(text, 240),
+        ...(!hidden && typeof value === "boolean" ? { booleanValue: value } : {}),
         ...(count !== undefined ? { count } : {}),
         truncated:
           !hidden &&
@@ -793,6 +830,7 @@ function apiEnvelopeReviewFields(
     if (hidden)
       return {
         path: entry.path,
+        ...reviewFieldKey(entry.key),
         label,
         preview: "[Protected value]",
         truncated: false,
@@ -821,8 +859,10 @@ function apiEnvelopeReviewFields(
     const limit = read !== undefined || typeof value === "string" ? API_TEXT_PREVIEW : 240;
     return {
       path: entry.path,
+      ...reviewFieldKey(entry.key),
       label: bound(label, 256),
       preview: reading?.fitted ? text : bound(text, limit),
+      ...(typeof value === "boolean" ? { booleanValue: value } : {}),
       ...(count !== undefined ? { count } : {}),
       // A plain reading is the value a person checks, shown as text; its exact
       // structure stays in Details. A bare size ("3 fields") opens it here.
@@ -917,7 +957,13 @@ export function toolReviewAction(
   context?: ToolReviewContext,
 ): Pick<
   ToolActionReview,
-  "title" | "approveLabel" | "effects" | "consequence" | "selectionCount" | "selectionKind"
+  | "title"
+  | "approveLabel"
+  | "approveLabelCode"
+  | "effects"
+  | "consequence"
+  | "selectionCount"
+  | "selectionKind"
 > {
   const fallback = {
     title:
@@ -931,6 +977,8 @@ export function toolReviewAction(
     // An app action's card asks the person a plain question ("Invite … to
     // your organization?"), so its button answers it.
     approveLabel: toolName === APP_ACTION_REVIEW_TOOL ? "Allow" : "Approve action",
+    approveLabelCode:
+      toolName === APP_ACTION_REVIEW_TOOL ? ("allow" as const) : ("approve_action" as const),
     effects: [] as string[],
   };
   if (toolName === APP_ACTION_REVIEW_TOOL) {

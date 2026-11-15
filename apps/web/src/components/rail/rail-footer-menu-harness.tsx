@@ -13,6 +13,8 @@ export type RailFooterMenuConfig = {
   /** Grants sessions:create in the workspace, which is what enables Send feedback. */
   canSendFeedback?: boolean;
   pendingInvitations?: number;
+  /** Grants billing:read on the workspace's organization, which shows Billing and receipts. */
+  canReadBilling?: boolean;
 };
 
 export async function loadRailFooterMenuHarness() {
@@ -56,6 +58,7 @@ export async function loadRailFooterMenuHarness() {
         supportEmail: footer.supportEmail,
       },
       authSession: null,
+      workspaces: [{ id: "workspace-1", accountId: "account-1" }],
       accessContext: {
         mode: "local",
         subjectId: "local",
@@ -63,7 +66,9 @@ export async function loadRailFooterMenuHarness() {
         workspaceGrants: footer.canSendFeedback
           ? [{ workspaceId: "workspace-1", permissions: ["sessions:create"] }]
           : [],
-        accountGrants: [],
+        accountGrants: footer.canReadBilling
+          ? [{ accountId: "account-1", role: "owner", permissions: ["billing:read"] }]
+          : [],
       },
       keyAuthRequired: false,
       forgetAccessKey: () => undefined,

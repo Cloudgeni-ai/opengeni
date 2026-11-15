@@ -13,6 +13,7 @@ import {
   type ResponsesWebSocketEndpoint,
 } from "../src/responses-websocket";
 import { parseCodexUsageHeaders } from "../src/fetch";
+import { normalizeCodexRequestBody } from "../src/normalize";
 import {
   markResponsesPrefixReady,
   hasResponsesTurn,
@@ -974,6 +975,83 @@ describe("continuing the previous response on a connection", () => {
     });
     socket.emit({ type: "response.completed", response: { id: "resp_3" } });
     await (await third).text();
+  });
+
+  test("a client tool search replayed without its id and status continues the response", async () => {
+    const { transport, sockets } = harness();
+    const normalized = (input: unknown[]) =>
+      normalizeCodexRequestBody(structuredClone({ ...base, input }), (slug) => slug);
+    // As the backend streams a client-executed tool search.
+    const search = {
+      id: "tsc_1",
+      type: "tool_search_call",
+      status: "completed",
+      arguments: { query: "calendar", limit: 3 },
+      call_id: "call_search",
+      execution: "client",
+    };
+    const first = transport(URL, request(normalized([user])));
+    const socket = await nextSend(() => sockets[0]);
+    socket.emit({ type: "response.output_item.done", output_index: 0, item: reasoning });
+    socket.emit({ type: "response.output_item.done", output_index: 1, item: search });
+    socket.emit({ type: "response.completed", response: { id: "resp_1" } });
+    await (await first).text();
+
+    // The SDK sends the call back with its id and status, and the Codex
+    // normalizer strips both before the transport sees the request.
+    const disclosure = {
+      type: "tool_search_output",
+      call_id: "call_search",
+      execution: "client",
+      status: "completed",
+      tools: [{ type: "function", name: "create_event", parameters: { type: "object" } }],
+    };
+    const { pending, sent } = await sendNext(
+      transport,
+      socket,
+      normalized([user, sentBack[0], { ...search, status: "completed" }, disclosure]),
+    );
+    expect(sent.previous_response_id).toBe("resp_1");
+    expect(sent.input).toEqual([
+      {
+        type: "tool_search_output",
+        call_id: "call_search",
+        execution: "client",
+        tools: disclosure.tools,
+      },
+    ]);
+    socket.emit({ type: "response.completed", response: { id: "resp_2" } });
+    const continued = await pending;
+    expect(continued.headers.get(CODEX_TRANSPORT_HEADER)).toBe(
+      "websocket; connection=reused; input=incremental",
+    );
+    await continued.text();
+  });
+
+  test("a replayed tool search with different arguments sends the full input", async () => {
+    const { transport, sockets } = harness();
+    const search = {
+      id: "tsc_1",
+      type: "tool_search_call",
+      status: "completed",
+      arguments: { query: "calendar" },
+      call_id: "call_search",
+      execution: "client",
+    };
+    const first = transport(URL, request({ ...base, input: [user] }));
+    const socket = await nextSend(() => sockets[0]);
+    socket.emit({ type: "response.output_item.done", output_index: 0, item: search });
+    socket.emit({ type: "response.completed", response: { id: "resp_1" } });
+    await (await first).text();
+    const changed = { ...search, arguments: { query: "mail" } };
+    delete (changed as { id?: string }).id;
+    const { pending, sent } = await sendNext(transport, socket, {
+      ...base,
+      input: [user, changed, result],
+    });
+    expect(sent).not.toHaveProperty("previous_response_id");
+    socket.emit({ type: "response.completed", response: { id: "resp_2" } });
+    await (await pending).text();
   });
 
   test("empty terminal output reconstructs completed items in index order", async () => {

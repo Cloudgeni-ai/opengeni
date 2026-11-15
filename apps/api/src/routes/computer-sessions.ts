@@ -111,7 +111,6 @@ import {
 } from "../browser-controller-authority";
 import {
   recordSourcePlacementMove,
-  reconcileListedSourcePlacementMoves,
   retireFormerPlacementControllers,
   retireSourceFormerPlacements,
 } from "../former-placement-retirement";
@@ -277,7 +276,7 @@ export function computerScreenshotResponse(
 ): Response {
   // Copy exactly the image bytes: a Node Buffer view may share a larger
   // backing allocation, which `.slice().buffer` would expose whole.
-  return new Response(Uint8Array.from(frame.data).buffer, {
+  return new Response(new Uint8Array(frame.data).buffer, {
     status: 200,
     headers: {
       "cache-control": "no-store",
@@ -307,28 +306,20 @@ export function registerComputerSessionRoutes(
   app.get("/v1/workspaces/:workspaceId/computer-sessions", async (context) => {
     const workspaceId = context.req.param("workspaceId") ?? "";
     const grant = await requireAccessGrant(context, deps, workspaceId, "sessions:read");
-    const list = async () => {
-      const listed = await listComputerSessions(deps.db, {
-        accountId: grant.accountId,
-        workspaceId,
-        ...parseInteractionSessionListQuery(context.req.query()),
-      });
-      return {
+    // Reading a list changes nothing. A Desktop, and a browser that shares its
+    // controller, on a machine its chat has moved away from keeps running
+    // there, so the chat can move back and continue; only its End retires it.
+    const listed = await listComputerSessions(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      ...parseInteractionSessionListQuery(context.req.query()),
+    });
+    return context.json(
+      ComputerSessionListResponse.parse({
         ...listed,
         sessions: await filterInteractionSessionsForGrant(deps, grant, listed.sessions),
-      };
-    };
-    let listed = await list();
-    // A Desktop left behind by its task's move is retired, not reusable.
-    if (
-      await reconcileListedSourcePlacementMoves(channelServices, {
-        grant,
-        sessions: listed.sessions,
-      })
-    ) {
-      listed = await list();
-    }
-    return context.json(ComputerSessionListResponse.parse(listed));
+      }),
+    );
   });
 
   app.get("/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId", async (context) => {

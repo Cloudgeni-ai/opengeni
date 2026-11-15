@@ -58,7 +58,10 @@ import {
   readRejectionEnvelope,
   type HttpRejectionFacts,
 } from "./http/rejection-telemetry";
-import { observeInteractionRouteOutcome } from "./interaction-metrics";
+import {
+  interactionFailureReasonFromError,
+  observeInteractionRouteOutcome,
+} from "./interaction-metrics";
 import {
   isOAuthCallbackRoute,
   observeConnectAttemptTransition,
@@ -164,6 +167,12 @@ import { cors } from "hono/cors";
 import { getCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
 import {
+  CONSOLE_CONTENT_SECURITY_PATH,
+  consoleContentSecuritySources,
+  type ConsoleContentSecuritySources,
+} from "./http/console-content-security";
+import { registerImageProxyRoutes } from "./routes/image-proxy";
+import {
   ApiHttpError,
   agentConfigHttpError,
   allowanceExhaustedHttpError,
@@ -179,6 +188,7 @@ import {
   regionRestrictedHttpError,
   authenticationRequiredHttpError,
   missingPermissionHttpError,
+  sessionMissingHttpError,
   scheduledTaskTargetAccessHttpError,
   sessionUsageLimitHttpError,
   workspaceControlBusyHttpError,
@@ -250,6 +260,7 @@ import {
   managedAuthNewSignupsPausedResponse,
   managedAuthOAuthReturnMatches,
   resolveManagedAuthOAuthAttempt,
+  managedAuthPublicOrigins,
   findManagedAuthOAuthState,
 } from "./auth/managed-auth";
 import {
@@ -336,6 +347,7 @@ import {
   markLocalInternalDispatch,
 } from "./http/local-browser-boundary";
 import {
+  agentAttemptStaleHttpError,
   alongsideAuthorization,
   billingOriginForAccessGrant,
   requireLiveAgentAttemptGrant,
@@ -347,6 +359,7 @@ import { registerSessionAvatarImageRoutes } from "./routes/session-avatar-image"
 import { registerCodexRoutes } from "./routes/codex";
 import { registerOrganizationModelProviderRoutes } from "./routes/organization-model-providers";
 import { registerOrganizationCompatibleModelEndpointRoutes } from "./routes/organization-compatible-model-endpoints";
+import { registerOrganizationAnthropicApiKeyRoutes } from "./routes/organization-anthropic-api-keys";
 import { registerOrganizationModelDefaultsRoutes } from "./routes/organization-model-defaults";
 import {
   registerModelAccountSettingsRoutes,
@@ -359,6 +372,8 @@ import { registerOrganizationIntegrationPolicyRoutes } from "./routes/organizati
 import { registerOrganizationConnectorRoutes } from "./routes/organization-connectors";
 import { registerSuperGrokRoutes } from "./routes/supergrok";
 import { registerConnectionRoutes } from "./routes/connections";
+import { registerNangoRoutes } from "./routes/nango";
+import { registerWorkspaceModelKeyPriceRoutes } from "./routes/workspace-model-key-prices";
 import { registerVaultProviderRoutes, vaultProviderRegistryFor } from "./routes/vault-providers";
 import { registerConnectRoutes } from "./routes/connect";
 
@@ -421,6 +436,7 @@ import { registerCompanyProfileRoutes } from "./routes/company-profile";
 import { registerCompanyBrainRoutes } from "./routes/company-brain";
 import { registerSlackTaskPolicyRoutes } from "./routes/slack-task-policy";
 import { registerSlackBotAccessRoutes } from "./routes/slack-bot-access";
+import { registerTeamsBotReachRoutes } from "./routes/teams-bot-reach";
 import { registerSlackAgentRoutes } from "./routes/slack-agents";
 import { registerSlackAgentUpdateRoutes } from "./routes/slack-agent-updates";
 import { registerWorkspaceStateRoutes } from "./routes/workspace-state";
@@ -444,7 +460,9 @@ import { registerSessionArtifactAssociationRoutes } from "./routes/session-artif
 import { registerVideoGenerationRoutes } from "./routes/video-generation";
 import { registerCanonicalHumanIdentityRoutes } from "./routes/canonical-human-identities";
 import { registerOrganizationMembershipRoutes } from "./routes/organization-memberships";
+import { adminStepUpGuard } from "./auth/admin-step-up";
 import { registerOrganizationSessionRoutes } from "./routes/organization-sessions";
+import { registerConsoleRoutes } from "./routes/console";
 import { registerOrganizationRecoveryRoutes } from "./routes/organization-recovery";
 import { registerManagedOnboardingRoutes } from "./routes/managed-onboarding";
 import {
@@ -496,6 +514,7 @@ export {
   withDefaultEnabledCapabilityMcpTools,
 } from "@opengeni/core";
 export { workflowIdForSession } from "@opengeni/core";
+import { nangoBackendsFor, nangoReplacedSocialProviders } from "@opengeni/core";
 export { replaySessionEvents, sseSessionStream, sseWorkspaceControlStream } from "./http/sse";
 
 export const API_MAX_REQUEST_BODY_BYTES = 32 * 1024 * 1024;
@@ -735,6 +754,7 @@ export function createAppComposition(
           deployment: speechToText,
           ...(deps.codexFetch ? { codexFetch: deps.codexFetch } : {}),
           log: (message, attributes) => observability.error(message, attributes),
+          warn: (message, attributes) => observability.warn(message, attributes),
         })
       : deps.transcription;
   const transcriptionSegmenter =
@@ -855,6 +875,16 @@ export function createAppComposition(
     }
   };
 
+  // Every API response, including errors, Better Auth and streams, tells the
+  // browser never to sniff a different content type. Set after the handler
+  // ran so it covers responses a route built itself; a route's own value wins.
+  app.use("*", async (c, next) => {
+    await next();
+    if (!c.res.headers.has("x-content-type-options")) {
+      c.header("x-content-type-options", "nosniff");
+    }
+  });
+
   // A trusted in-process dispatcher (a published Site, an organization
   // action) fixed who pays for this exact request; read it before any
   // middleware rebuilds the Request.
@@ -873,6 +903,11 @@ export function createAppComposition(
     correlationIds.set(c, correlationId);
     c.header(OPENGENI_CORRELATION_HEADER, correlationId);
     await next();
+    // A Response a route built itself replaces the prepared headers unless a
+    // later middleware materialized the response first; keep the id either way.
+    if (!c.res.headers.has(OPENGENI_CORRELATION_HEADER)) {
+      c.header(OPENGENI_CORRELATION_HEADER, correlationId);
+    }
   });
 
   // Unauthenticated local mode: admit only requests addressed to this computer
@@ -990,24 +1025,31 @@ export function createAppComposition(
       // request without credentials acts as the local user, so any site could
       // otherwise read its responses. Origins outside the local policy get no
       // CORS grant (in local development the boundary above refused them).
-      return origin ? localCors(c, next) : next();
+      return origin ? localCors(c, next) : withVaryOrigin(c, next);
     }
-    if (origin && landingOrigins.has(origin) && c.req.path === DISPLAY_IDENTITY_PATH) {
+    if (!origin) {
+      // No Origin header means no cross-origin browser read: servers, CLIs,
+      // same-origin GETs and no-cors subresources. They need no CORS grant, so
+      // none is sent. The answer still varies by Origin, so a cache never
+      // hands this grant-less response to a later cross-origin request.
+      return withVaryOrigin(c, next);
+    }
+    if (landingOrigins.has(origin) && c.req.path === DISPLAY_IDENTITY_PATH) {
       return displayIdentityCors(c, next);
     }
-    const middleware =
-      origin && allowedCorsOrigin(deps.settings.corsAllowOriginRegex, origin)
-        ? credentialedCors
-        : publicApiCors;
-    if (middleware === publicApiCors && c.req.path === DISPLAY_IDENTITY_PATH) {
-      // The answer depends on the caller's origin and cookie; caches must not
-      // share it across origins (the credentialed middlewares add Vary already).
-      return middleware(c, async () => {
-        await next();
-        c.res.headers.append("vary", "Origin");
-      });
-    }
-    return middleware(c, next);
+    // Allowlisted console origins get credentialed CORS. Every other browser
+    // origin gets the wildcard: customer pages call the public API directly
+    // with a bearer API key, which needs no cookie. The wildcard never carries
+    // credentials (browsers refuse `*` with credentials, and none is sent), so
+    // a non-allowlisted origin can never read a cookie-authenticated answer.
+    const middleware = allowedCorsOrigin(deps.settings.corsAllowOriginRegex, origin)
+      ? credentialedCors
+      : publicApiCors;
+    if (middleware === credentialedCors) return middleware(c, next);
+    // The wildcard answer differs from the grant-less no-Origin answer, so it
+    // varies by Origin too: a shared cache must never hand one to the other
+    // (the credentialed middleware adds Vary: Origin itself).
+    return middleware(c, () => withVaryOrigin(c, next));
   });
 
   const standardRequestBodyLimit = bodyLimit({
@@ -1114,6 +1156,7 @@ export function createAppComposition(
             status,
             durationMs: durationSeconds * 1000,
             rejectionReason: rejection?.reason,
+            failureReason: status >= 400 ? interactionFailureReasonFromError(c.error) : null,
           });
           if (isOAuthCallbackRoute(route)) {
             observeOAuthCallback(observability, {
@@ -1159,6 +1202,7 @@ export function createAppComposition(
             status,
             durationMs: durationSeconds * 1000,
             rejectionReason: rejection.reason,
+            failureReason: interactionFailureReasonFromError(error),
           });
           observability.recordHttpRejection({
             method: c.req.method,
@@ -1311,6 +1355,10 @@ export function createAppComposition(
   // content never answers an Opengeni workspace that isn't EU-only.
   app.use("/v1/*", callingWorkspaceContentFlowGuard(routeDeps));
 
+  // Owners and admins confirm admin changes with a recent passkey; runs after
+  // personal API keys and agents acting as a person are stamped.
+  app.use("/v1/*", adminStepUpGuard(routeDeps));
+
   // These product-owned auth routes must be registered before Better Auth's
   // wildcard handler or the provider returns its own 404 first.
   registerManagedOnboardingRoutes(app, routeDeps);
@@ -1453,7 +1501,7 @@ export function createAppComposition(
           managedAuth,
           c.req.raw,
           oauthCallbackProvider,
-          deps.settings.publicBaseUrl!,
+          managedAuthPublicOrigins(deps.settings),
         );
         if (!attempt || !authority || attempt.authorityHash !== managedAuthSha256(authority)) {
           throw new HTTPException(409, { message: "provider_route_blocked" });
@@ -1478,12 +1526,12 @@ export function createAppComposition(
           !handled.authSessionId &&
           managedAuthOAuthReturnMatches(
             providerResponse.headers.get("location") ?? "",
-            new URL(deps.settings.publicBaseUrl!).origin,
+            attempt.returnOrigin,
             attempt.transactionId,
             "complete",
           )
         ) {
-          const location = new URL("/account-auth", deps.settings.publicBaseUrl!);
+          const location = new URL("/account-auth", attempt.returnOrigin);
           location.searchParams.set("transaction", attempt.transactionId);
           location.searchParams.set("social", "error");
           providerResponse = Response.redirect(location, 302);
@@ -1518,7 +1566,7 @@ export function createAppComposition(
             // proves that completion did not commit. An uncertain outcome may
             // already point the selected slot at this session, so the callback
             // must not independently revoke it.
-            const location = new URL("/account-auth", deps.settings.publicBaseUrl!);
+            const location = new URL("/account-auth", attempt.returnOrigin);
             location.searchParams.set("transaction", attempt.transactionId);
             location.searchParams.set("social", "error");
             providerResponse = Response.redirect(location, 302);
@@ -1609,6 +1657,32 @@ export function createAppComposition(
   registerMcpOAuthRoutes(app, routeDeps);
 
   registerClientErrorRoutes(app, { observability, settings: deps.settings });
+
+  // The external origins the console's Content-Security-Policy must allow;
+  // the web server reads them (see http/console-content-security.ts).
+  let consoleContentSecurity: {
+    expiresAt: number;
+    value: Promise<ConsoleContentSecuritySources>;
+  } | null = null;
+  app.get(CONSOLE_CONTENT_SECURITY_PATH, async (c) => {
+    const now = Date.now();
+    if (!consoleContentSecurity || consoleContentSecurity.expiresAt <= now) {
+      const value = resolveCatalogSettings(deps.db, deps.settings)
+        .then((resolved) => resolved.settings)
+        .catch(() => undefined)
+        .then((catalogSettings) =>
+          consoleContentSecuritySources({
+            settings: deps.settings,
+            ...(catalogSettings ? { catalogSettings } : {}),
+            objectStorage: routeDeps.objectStorage,
+          }),
+        );
+      consoleContentSecurity = { expiresAt: now + 60_000, value };
+    }
+    c.header("cache-control", "no-store");
+    return c.json(await consoleContentSecurity.value);
+  });
+  registerImageProxyRoutes(app, routeDeps);
   registerAnalyticsConsentRoutes(app, { observability, settings: deps.settings });
 
   app.get("/v1/config/client", async (c) => {
@@ -2035,7 +2109,7 @@ export function createAppComposition(
         await withAccessGrantSessionRlsContext(routeDeps, grant, next);
         return;
       }
-      if (workspaceActorContextExempt(c.req.method, new URL(c.req.url).pathname)) {
+      if (workspaceActorContextExempt(c.req.method, new URL(c.req.url).pathname, c.req.path)) {
         await next();
         return;
       }
@@ -2244,6 +2318,9 @@ export function createAppComposition(
         const mcp = buildOpenGeniMcpServer(mcpDeps, grant, {
           requestOrigin: new URL(c.req.url).origin,
           slackBotAvailable,
+          nangoReplacedSocialProviders: nangoReplacedSocialProviders(
+            await nangoBackendsFor(routeDeps.db, routeDeps.settings),
+          ),
           appActions: sessionScope
             ? {
                 access: {
@@ -2276,6 +2353,26 @@ export function createAppComposition(
   });
 
   // Known calls need no preceding full-catalog discovery or replica-local attestation.
+  // Every targeted tool route, the Site consent prompt included, keeps the
+  // caller's fresh grant: a person's request fence requires it. Organization
+  // keys and external actors are re-read by the request fence itself.
+  const freshToolCaller =
+    (
+      c: Context,
+      workspaceId: string,
+      authorization: Awaited<ReturnType<typeof requireAccessGrantAuthorization>>,
+    ) =>
+    async () => {
+      const live = await requireFreshAccessGrant(c, routeDeps, workspaceId, "workspace:read");
+      const original = authorization.grant;
+      if (
+        live.accountId !== original.accountId ||
+        live.subjectId !== original.subjectId ||
+        live.principalKind !== original.principalKind ||
+        original.permissions.some((permission) => !hasPermission(live.permissions, permission))
+      )
+        throw new HTTPException(403, { message: "tool_access_changed" });
+    };
   for (const operation of ["resolve", "invoke", "target-approvals", "manifest"] as const) {
     app.post(`/v1/workspaces/:workspaceId/tools/${operation}`, async (c) => {
       const workspaceId = c.req.param("workspaceId");
@@ -2288,19 +2385,7 @@ export function createAppComposition(
       let fence: TargetAuthorityFence | undefined;
       const options = {
         signal: c.req.raw.signal,
-        // Human callers keep their fresh grant. Organization keys and external
-        // actors are re-read by the request fence itself.
-        reauthorize: async () => {
-          const live = await requireFreshAccessGrant(c, routeDeps, workspaceId, "workspace:read");
-          const original = authorization.grant;
-          if (
-            live.accountId !== original.accountId ||
-            live.subjectId !== original.subjectId ||
-            live.principalKind !== original.principalKind ||
-            original.permissions.some((permission) => !hasPermission(live.permissions, permission))
-          )
-            throw new HTTPException(403, { message: "tool_access_changed" });
-        },
+        reauthorize: freshToolCaller(c, workspaceId, authorization),
         onFence: (created: TargetAuthorityFence) => {
           fence = created;
         },
@@ -2317,7 +2402,7 @@ export function createAppComposition(
       parseRequestBody(schema, body, { status: 400, message: "Invalid targeted tool request" });
       c.header("cache-control", "no-store");
       const started = performance.now();
-      let outcome: "ok" | "failed" = "failed";
+      let outcome: "ok" | "failed" | "aborted" = "failed";
       try {
         const response =
           operation === "resolve"
@@ -2356,6 +2441,15 @@ export function createAppComposition(
         );
         outcome = "ok";
         return c.json(response, operation === "target-approvals" ? 201 : 200);
+      } catch (error) {
+        // A caller that disconnects aborts the target work through `signal`.
+        // That is a client disconnect, not a server failure: answer with the
+        // client-gone convention (mcp/request-abort.ts), 499 and no body.
+        if (c.req.raw.signal.aborted) {
+          outcome = "aborted";
+          return new Response(null, { status: 499 });
+        }
+        throw error;
       } finally {
         recordWorkspaceToolTargetOperation(routeDeps.observability, {
           operation,
@@ -2384,6 +2478,9 @@ export function createAppComposition(
     return c.json(
       await describeWorkspaceSiteToolConsent(routeDeps, authorization, body, {
         signal: c.req.raw.signal,
+        // Reading what the call would do prepares the viewer's route under
+        // the same request fence as the call itself.
+        reauthorize: freshToolCaller(c, workspaceId, authorization),
       }),
     );
   });
@@ -2650,6 +2747,8 @@ export function createAppComposition(
   registerPersonalGitHubGitBrokerRoutes(app, routeDeps);
   registerPersonalGitHubGatewayRoutes(app, routeDeps);
   registerConnectionRoutes(app, routeDeps);
+  registerNangoRoutes(app, routeDeps);
+  registerWorkspaceModelKeyPriceRoutes(app, routeDeps);
   registerVaultProviderRoutes(app, routeDeps);
   registerConnectRoutes(app, routeDeps);
 
@@ -2690,6 +2789,7 @@ export function createAppComposition(
   registerCodexRoutes(app, routeDeps);
   registerOrganizationModelProviderRoutes(app, routeDeps);
   registerOrganizationCompatibleModelEndpointRoutes(app, routeDeps);
+  registerOrganizationAnthropicApiKeyRoutes(app, routeDeps);
   registerOrganizationModelDefaultsRoutes(app, routeDeps);
   registerModelAccountSettingsRoutes(app, routeDeps);
   registerModelAccountChoiceRoutes(app, routeDeps);
@@ -2711,10 +2811,12 @@ export function createAppComposition(
   registerCanonicalHumanIdentityRoutes(app, routeDeps);
   registerOrganizationMembershipRoutes(app, routeDeps);
   registerOrganizationSessionRoutes(app, routeDeps);
+  registerConsoleRoutes(app, routeDeps);
   registerOrganizationRecoveryRoutes(app, routeDeps);
   registerUserResourceAuthorityRoutes(app, routeDeps);
   registerSlackInteractionRoutes(app, routeDeps);
   registerTeamsBotRoutes(app, routeDeps);
+  registerTeamsBotReachRoutes(app, routeDeps);
 
   app.notFound((c) => {
     if (!new URL(c.req.url).pathname.startsWith("/v1/")) return c.text("Not Found", 404);
@@ -2757,6 +2859,8 @@ export function createAppComposition(
               details: { code: rawError.code },
             })
           : (missingPermissionHttpError(rawError) ??
+            agentAttemptStaleHttpError(rawError, c.req.raw) ??
+            sessionMissingHttpError(rawError, c.req.url, c.req.method) ??
             authenticationRequiredHttpError(rawError) ??
             sessionUsageLimitHttpError(rawError) ??
             allowanceExhaustedHttpError(rawError) ??
@@ -2860,6 +2964,12 @@ export function appendVary(current: string | null, value: string): string {
   return values.join(", ");
 }
 
+/** Runs the rest of the chain, then marks the response as varying by `Origin`. */
+async function withVaryOrigin(c: Context, next: () => Promise<void>): Promise<void> {
+  await next();
+  c.header("vary", appendVary(c.res.headers.get("vary"), "Origin"));
+}
+
 const publicWorkspaceBrowserRoutePatterns = [
   /^\/v1\/workspaces\/[^/]+\/github\/connect$/,
   /^\/v1\/workspaces\/[^/]+\/github\/installations\/[^/]+\/configure$/,
@@ -2888,7 +2998,16 @@ function nativeWorkspaceMiddleware(middleware: MiddlewareHandler): MiddlewareHan
   };
 }
 
-export function workspaceActorContextExempt(method: string, pathname: string): boolean {
+/**
+ * Whether a workspace route applies its own gate instead of the ordinary
+ * actor middleware. `routingPath` is the decoded path Hono routes by
+ * (`c.req.path`); it defaults to `pathname`.
+ */
+export function workspaceActorContextExempt(
+  method: string,
+  pathname: string,
+  routingPath: string = pathname,
+): boolean {
   // Import adapters apply their own exact create/control gates and request-local RLS in core.
   if (isSessionHistoryImportRequest(method, pathname)) return true;
   // Organization budget authority is independent of ordinary workspace
@@ -2901,6 +3020,13 @@ export function workspaceActorContextExempt(method: string, pathname: string): b
   )
     return true;
   if (/^\/v1\/workspaces\/[^/]+\/mcp(?:\/(?:docs|files))?$/.test(pathname)) return true;
+  // Linking a Slack account from a Slack link is for people who may have no
+  // access to the workspace yet: an organization member links without it, and
+  // anyone else asks for it. These routes require a managed sign-in and the
+  // signed link (or the request it prepared for that person) and scope their
+  // own reads and writes to the workspace. Matched on the path the request
+  // is routed by, so the exemption and the handler always agree.
+  if (isSlackUserLinkIntentRequest(method, routingPath)) return true;
   if (
     method === "GET" &&
     publicWorkspaceBrowserRoutePatterns.some((route) => route.test(pathname))
@@ -2908,6 +3034,20 @@ export function workspaceActorContextExempt(method: string, pathname: string): b
     return true;
   }
   return method === "POST" && /^\/v1\/workspaces\/[^/]+\/github\/installations$/.test(pathname);
+}
+
+const SLACK_USER_LINK_INTENTS = String.raw`^/v1/workspaces/[^/]+/integrations/slack/user-link-intents`;
+const slackUserLinkIntentRoutes = {
+  POST: [
+    new RegExp(`${SLACK_USER_LINK_INTENTS}$`),
+    new RegExp(`${SLACK_USER_LINK_INTENTS}/[^/]+/(?:link|request-access|cancel)$`),
+  ],
+  GET: [new RegExp(`${SLACK_USER_LINK_INTENTS}/[^/]+$`)],
+} as const;
+
+function isSlackUserLinkIntentRequest(method: string, pathname: string): boolean {
+  const routes = slackUserLinkIntentRoutes[method as keyof typeof slackUserLinkIntentRoutes];
+  return routes?.some((route) => route.test(pathname)) ?? false;
 }
 
 function workspaceRequestRequiresCodexAccountPrevalidation(request: Request): boolean {
@@ -3507,6 +3647,8 @@ const routeLabelPatterns: Array<{
   },
   { pattern: /^\/metrics$/, label: "/metrics" },
   { pattern: /^\/v1\/config\/client$/, label: "/v1/config/client" },
+  { pattern: /^\/v1\/config\/content-security$/, label: "/v1/config/content-security" },
+  { pattern: /^\/v1\/image-proxy$/, label: "/v1/image-proxy" },
   { pattern: /^\/v1\/client-errors$/, label: "/v1/client-errors" },
   { pattern: /^\/v1\/analytics-consent$/, label: "/v1/analytics-consent" },
   { pattern: /^\/v1\/billing$/, label: "/v1/billing" },
@@ -4243,6 +4385,13 @@ const routeLabelPatterns: Array<{
     pattern: /^\/v1\/integrations\/oauth\/callback$/,
     label: "/v1/integrations/oauth/callback",
   },
+  { pattern: /^\/v1\/integrations\/nango\/connect$/, label: "/v1/integrations/nango/connect" },
+  {
+    pattern: /^\/v1\/integrations\/nango\/connect\/complete$/,
+    label: "/v1/integrations/nango/connect/complete",
+  },
+  { pattern: /^\/v1\/integrations\/nango\/webhook$/, label: "/v1/integrations/nango/webhook" },
+  { pattern: /^\/v1\/billing\/integration-usage$/, label: "/v1/billing/integration-usage" },
   {
     pattern: /^\/v1\/integrations\/provider-oauth\/callback$/,
     label: "/v1/integrations/provider-oauth/callback",
@@ -4434,6 +4583,8 @@ export function isApiContractProtectedMutation(method: string, pathname: string)
     pathname === "/v1/integrations/slack/events" ||
     pathname === "/v1/integrations/slack/commands" ||
     pathname === "/v1/integrations/slack/interactions" ||
+    // Nango calls this itself and signs it with the webhook signing key.
+    pathname === "/v1/integrations/nango/webhook" ||
     pathname.startsWith("/v1/github/") ||
     // A stale tab must still report the error that follows a rollout.
     pathname === CLIENT_ERRORS_PATH ||

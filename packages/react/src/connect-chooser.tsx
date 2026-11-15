@@ -26,6 +26,8 @@ export type ConnectChooserProps = {
    * workspace): connect their own account without asking who may use it.
    */
   personalOnly?: boolean;
+  /** Sign-in runs in a popup: it ends on a page that closes the popup. */
+  finishInPopup?: boolean;
 };
 
 /** Catalog readiness is supplied by the authenticated backend, never inferred
@@ -53,6 +55,7 @@ function ScopedChooser({
   compact = false,
   initialProviderId = "",
   personalOnly = false,
+  finishInPopup = false,
 }: ConnectChooserProps) {
   const t = useOpenGeniText();
   const view = useConnect(controller);
@@ -158,6 +161,7 @@ function ScopedChooser({
           providerId,
           ownership: chosenOwnership,
           returnUrl,
+          ...(finishInPopup ? { finishInPopup: true as const } : {}),
           idempotencyKey: crypto.randomUUID(),
         })
         .catch(() => setFailed(true));

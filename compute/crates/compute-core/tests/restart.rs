@@ -131,6 +131,7 @@ fn a_slow_archive_under_way_is_cancelled_and_never_waited_for() {
     let (step, archive) = the_start(&rig.send(Input::Sleep {
         sandbox: ID,
         level: Level::Archived,
+        keep: true,
     }));
     assert_eq!(step, Step::Archive);
 
@@ -155,6 +156,7 @@ fn an_archive_too_late_to_cancel_still_has_its_memory_image_forgotten() {
     let (_, archive) = the_start(&rig.send(Input::Sleep {
         sandbox: ID,
         level: Level::Archived,
+        keep: true,
     }));
     rig.send(Input::Restart { sandbox: ID });
     let (step, forget) = the_start(&rig.finish(archive, Outcome::Done));

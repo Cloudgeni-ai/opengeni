@@ -501,7 +501,7 @@ test("a Send refused at the limit keeps the message to restore, without Retry", 
   await box.fill(text);
   await box.press("Enter");
   // The failed message says what happened; the notice holds the one remedy.
-  await refused.getByText("This task's usage limit is reached. Your message is saved.").waitFor();
+  await refused.getByText("This task's usage limit is reached.").waitFor();
   await refused.getByText(text).first().waitFor();
   expect(await refused.getByRole("button", { name: /retry/i }).count()).toBe(0);
   await refused.getByText("$50.40 of $50.00 API-equivalent model usage.").waitFor();

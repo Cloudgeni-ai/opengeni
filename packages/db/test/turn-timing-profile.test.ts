@@ -159,6 +159,30 @@ describe("turn timing profiles from recorded event logs", () => {
       profile.steps.filter((step) => step.kind === "startup").map((step) => step.name),
     ).toEqual(["credential_mint", "tools", "client_publication", "model_preparation"]);
   });
+
+  test("a Messages turn's in-turn compaction is its own category, not the gap after a tool", async () => {
+    // The compaction's summary call reports usage with no request audit and
+    // no timing; without its own category its 6.7 s was after_tool.
+    const profile = computeTurnTimingProfile(
+      fixtureInput(await loadTurnTimingFixture("messages-in-turn-compaction")),
+    );
+    expectExactSum(profile);
+    expect(nonZero(profile)).toEqual({
+      turn_start: 800,
+      dispatch: 424,
+      model_unsplit: 8278,
+      compaction: 6699,
+      sandbox_tool: 1085,
+      own_tool: 67,
+      after_model: 190,
+      after_tool: 85,
+      turn_end: 72,
+    });
+    expect(profile.toolCalls).toBe(4);
+    expect(profile.steps.filter((step) => step.kind === "compaction")).toMatchObject([
+      { category: "compaction", name: "proactive", outcome: "completed", ms: 6699 },
+    ]);
+  });
 });
 
 describe("turn timing attribution rules", () => {
@@ -346,6 +370,72 @@ describe("turn timing attribution rules", () => {
     );
     expectExactSum(profile);
     expect(profile.wallMs).toBe(1_000);
+  });
+
+  test("a compaction whose model call has no request audit is compaction, not after_tool", () => {
+    // A Messages-style in-turn compaction: its summary call reports usage
+    // without a request audit or timing, between a tool result and the next
+    // request.
+    const profile = synthetic(
+      [
+        event("agent.model.request", 200, { phase: "completed", durationMs: 100 }),
+        event("agent.model.usage", 201, { provider: "p", model: "m", purpose: "main" }),
+        event("agent.toolCall.created", 210, {
+          id: "c1",
+          name: "exec_command",
+          toolFamily: "shell",
+        }),
+        event("agent.toolCall.output", 400, { id: "c1", output: "ok" }),
+        event("session.context.compaction.started", 402, { trigger: "proactive" }),
+        event("agent.model.usage", 5_300, { provider: "p", model: "m", purpose: "compaction" }),
+        event("session.context.compacted", 5_402),
+        event("agent.model.request", 5_500, { phase: "completed", durationMs: 90 }),
+      ],
+      5_600,
+    );
+    expectExactSum(profile);
+    expect(nonZero(profile)).toEqual({
+      queue: 100,
+      model_unsplit: 100 + 90,
+      after_model: 10 + 8,
+      sandbox_tool: 190,
+      after_tool: 2,
+      compaction: 5_000,
+      turn_end: 100,
+    });
+    expect(profile.steps.find((step) => step.kind === "compaction")).toMatchObject({
+      category: "compaction",
+      name: "proactive",
+      outcome: "completed",
+      ms: 5_000,
+      exclusiveMs: 5_000,
+    });
+    expect(profile.provider).toBe("p");
+  });
+
+  test("a compaction owns its audited model call; a skipped or unfinished one still counts", () => {
+    const profile = synthetic(
+      [
+        event("session.context.compaction.started", 200, { trigger: "auto" }),
+        event("agent.model.request", 1_200, { phase: "completed", durationMs: 900 }),
+        event("agent.model.usage", 1_201, { provider: "p", purpose: "compaction" }),
+        event("session.context.compaction.skipped", 1_300),
+        event("agent.model.request", 2_000, { phase: "completed", durationMs: 500 }),
+        event("session.context.compaction.started", 2_100, { trigger: "overflow" }),
+      ],
+      3_000,
+    );
+    expectExactSum(profile);
+    expect(nonZero(profile)).toEqual({
+      queue: 100,
+      turn_start: 100,
+      compaction: 1_100 + 900,
+      after_model: 200 + 100,
+      model_unsplit: 500,
+    });
+    expect(
+      profile.steps.filter((step) => step.kind === "compaction").map((step) => step.outcome),
+    ).toEqual(["skipped", "incomplete"]);
   });
 
   test("tool families and categories", () => {

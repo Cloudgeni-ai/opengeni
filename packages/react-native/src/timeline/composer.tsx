@@ -8,6 +8,7 @@ import { useEffect, useState, type ComponentRef, type ReactNode, type Ref } from
 import {
   AccessibilityInfo,
   ActivityIndicator,
+  Keyboard,
   Platform,
   Pressable,
   Text,
@@ -25,6 +26,7 @@ import type { NativeVoiceInput } from "../voice-input";
 import type { NativePickedFile } from "../adapters";
 import { useNativeTimelineMessages, type NativeTimelineMessages } from "./messages";
 import { useComposerImagePaste } from "./paste";
+import { composerFieldSize } from "./composer-field-size";
 import {
   composerAlternateSend,
   composerTrailingMode,
@@ -204,16 +206,12 @@ export function SessionComposer(props: SessionComposerProps) {
   const ios = Platform.OS === "ios";
   const pasteInputId = useComposerImagePaste(props.onPasteImages);
   // One line of the field at the person's text size (the line height scales with it).
-  const { fontScale } = useWindowDimensions();
+  const { fontScale, height: windowHeight } = useWindowDimensions();
   const line = Math.ceil(22 * fontScale);
-  const [height, setHeight] = useState(line);
-  const empty = !props.value;
-  useEffect(() => {
-    if (empty) setHeight(line);
-  }, [empty, line]);
   // Track the keyboard directly: React Native's KeyboardAvoidingView mis-measures
   // inside modals and overlays; the animated keyboard height does not.
   const keyboard = useAnimatedKeyboard();
+  const keyboardHeight = useKeyboardHeight();
   const floating = props.floating ?? false;
   // Only Liquid Glass lets the conversation scroll beneath the composer, and
   // then under a scroll-edge fade like the system bars: the glass picks up the
@@ -259,6 +257,17 @@ export function SessionComposer(props: SessionComposerProps) {
         ) : null}
       </>
     ) : null;
+  const fieldBounds = (inline: boolean) => {
+    const { height, minHeight, maxHeight } = composerFieldSize({
+      line,
+      padding: inline ? 14 : 16,
+      minHeight: inline ? 36 : 40,
+      hasText: Boolean(props.value),
+      windowHeight,
+      keyboardHeight,
+    });
+    return { minHeight, maxHeight, ...(ios && height !== undefined ? { height } : {}) };
+  };
   const field = (inline: boolean) => (
     <TextInput
       ref={props.inputRef}
@@ -273,29 +282,17 @@ export function SessionComposer(props: SessionComposerProps) {
       multiline
       autoFocus={props.autoFocus}
       {...textFieldSelectionColors(c, Platform.OS)}
-      onContentSizeChange={(event) =>
-        setHeight(Math.min(150, Math.max(line, event.nativeEvent.contentSize.height)))
-      }
       style={{
         ...fontStyle(theme),
         fontSize: fieldSize,
         lineHeight: 22,
         color: c.fg,
         ...(inline
-          ? { paddingTop: 7, paddingBottom: 7, paddingHorizontal: 6, minHeight: 36 }
-          : { paddingTop: 14, paddingBottom: 2, paddingHorizontal: 16, minHeight: 40 }),
-        // The inline field sizes itself; the stacked one tracks its content.
-        // (iOS never shrinks a self-sized multiline field, so an empty one is pinned.)
-        // A cleared field (after Send) returns to one line: iOS does not report
-        // the smaller content size, so the last height would otherwise stick.
-        height: ios
-          ? inline
-            ? props.value
-              ? undefined
-              : Math.max(36, line + 14)
-            : (props.value ? height : line) + 16
-          : undefined,
-        maxHeight: 166,
+          ? { paddingTop: 7, paddingBottom: 7, paddingHorizontal: 6 }
+          : { paddingTop: 14, paddingBottom: 2, paddingHorizontal: 16 }),
+        // The field grows with its text up to several lines, then scrolls.
+        // On iOS an empty field is pinned to one line; Android sizes it itself.
+        ...fieldBounds(inline),
         textAlignVertical: inline ? "center" : "top",
       }}
     />
@@ -903,4 +900,23 @@ function CallAction({ call, messages }: { call: ComposerCall; messages: NativeTi
       )}
     </Pressable>
   );
+}
+
+/**
+ * The keyboard's height once it has settled, for layout that only needs to
+ * know how much room is left (the animated lift tracks it frame by frame).
+ */
+function useKeyboardHeight(): number {
+  const [height, setHeight] = useState(() => Keyboard.metrics()?.height ?? 0);
+  useEffect(() => {
+    const shown = Keyboard.addListener("keyboardDidShow", (event) =>
+      setHeight(event.endCoordinates.height),
+    );
+    const hidden = Keyboard.addListener("keyboardDidHide", () => setHeight(0));
+    return () => {
+      shown.remove();
+      hidden.remove();
+    };
+  }, []);
+  return height;
 }

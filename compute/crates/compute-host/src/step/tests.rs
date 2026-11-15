@@ -18,6 +18,7 @@ use crate::store::{Directory, NoStore};
 /// A VMM with one VM, which counts what it is asked to do.
 #[derive(Debug, Default)]
 struct Counting {
+    boots: AtomicUsize,
     restores: AtomicUsize,
     resumes: AtomicUsize,
     stops: AtomicUsize,
@@ -28,8 +29,6 @@ struct Counting {
     /// Whether it refuses every memory image, as a VMM refuses a snapshot
     /// format it no longer reads.
     refuses: AtomicBool,
-    /// How its next resumes fail, one each, before they succeed again.
-    resume_failures: std::sync::Mutex<std::collections::VecDeque<ErrorKind>>,
     /// Whether its VM has ended: [`Engine::exited`] resolves once it has.
     ended: tokio::sync::watch::Sender<bool>,
 }
@@ -61,7 +60,8 @@ impl Engine for Counting {
     }
 
     async fn boot(&self, _: &VmSpec) -> Result<(), EngineError> {
-        unreachable!("no step here boots")
+        self.boots.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 
     async fn restore(&self, _: &VmSpec, _: &RestoreFiles) -> Result<(), EngineError> {
@@ -82,10 +82,7 @@ impl Engine for Counting {
 
     async fn resume(&self, (): &()) -> Result<(), EngineError> {
         self.resumes.fetch_add(1, Ordering::SeqCst);
-        let failure = self.resume_failures.lock().unwrap().pop_front();
-        failure.map_or(Ok(()), |kind| {
-            Err(EngineError::new(kind, "resume", "refused"))
-        })
+        Ok(())
     }
 
     async fn compress(&self, (): &(), _: &CancellationToken) -> Result<Completion, EngineError> {
@@ -173,6 +170,11 @@ impl Sandbox {
 
     /// Inserts the sandbox's record and applies `change` to it.
     async fn record(&self, change: Change) -> Record {
+        self.record_as(1_000_000, change).await
+    }
+
+    /// Like [`Self::record`], with its VM's user and group `uid`.
+    async fn record_as(&self, uid: u32, change: Change) -> Record {
         let config = SandboxConfig {
             disk_mib: None,
             reach: Vec::new(),
@@ -185,8 +187,8 @@ impl Sandbox {
             link: None,
         };
         let allocation = Allocation {
-            uid: 1_000_000,
-            gid: 1_000_000,
+            uid,
+            gid: uid,
             link: None,
             disk_bytes: None,
         };
@@ -810,10 +812,10 @@ async fn a_save_waiting_for_memory_that_does_not_arrive_can_be_cancelled() {
     assert!(!durable.image);
 }
 
-/// A checkpoint cancelled before it began, or while it waits for its
-/// memory, reports that it wrote nothing, so the core books nothing for
-/// it; a step that began its work, such as a save waiting for its memory,
-/// may have written.
+/// A checkpoint cancelled before it began reports that it wrote nothing,
+/// so the core books nothing for it; a step that began its work, such as a
+/// save waiting for its memory, may have written. A checkpoint never waits
+/// for the memory: it copies the disk alone.
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_checkpoint_cancelled_before_it_captured_anything_reports_it_wrote_nothing() {
@@ -834,25 +836,23 @@ async fn a_checkpoint_cancelled_before_it_captured_anything_reports_it_wrote_not
             Vec::new(),
         )
     };
-    for (step, wrote) in [(Step::Checkpoint, false), (Step::Save, true)] {
-        let mut job = sandbox.job(NoStore, record.clone(), true);
-        // A pager that never listens: the memory it serves never completes.
-        job.live.as_mut().unwrap().memory.paging = Some(silent(&format!("{step:?}.sock")));
-        let cancel = job.cancel.clone();
-        let running = tokio::spawn(async move { job.run(step).await });
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        assert!(
-            !running.is_finished(),
-            "{step:?} did not wait for the memory"
-        );
-        cancel.cancel();
-        let ran = tokio::time::timeout(Duration::from_secs(5), running)
-            .await
-            .expect("the cancelled step ends")
-            .unwrap();
-        assert_eq!(ran.outcome, Outcome::Cancelled, "{step:?}");
-        assert_eq!(ran.report.wrote, wrote, "{step:?}");
-    }
+    let mut job = sandbox.job(NoStore, record, true);
+    // A pager that never listens: the memory it serves never completes.
+    job.live.as_mut().unwrap().memory.paging = Some(silent("save.sock"));
+    let cancel = job.cancel.clone();
+    let running = tokio::spawn(async move { job.run(Step::Save).await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !running.is_finished(),
+        "the save did not wait for the memory"
+    );
+    cancel.cancel();
+    let ran = tokio::time::timeout(Duration::from_secs(5), running)
+        .await
+        .expect("the cancelled save ends")
+        .unwrap();
+    assert_eq!(ran.outcome, Outcome::Cancelled);
+    assert!(ran.report.wrote);
 }
 
 /// A checkpoint cancelled once it asked its guest to write its disks out
@@ -1013,58 +1013,6 @@ async fn a_vm_whose_disk_cannot_be_vouched_for_is_kept_unsaved() {
     assert!(!durable.image, "the record vouches for an image");
 }
 
-/// A checkpoint resumes the VM it paused through failures that changed
-/// nothing, even once cancelled, since its sandbox is in use, for as long
-/// as the VM lives; a failure that may have changed something, or the VM
-/// ending, ends the tries.
-#[tokio::test]
-async fn a_checkpoint_resumes_its_paused_vm_through_transient_failures() {
-    let sandbox = Sandbox::new().await;
-    let record = sandbox.record(Change::new()).await;
-    let job = sandbox.job(NoStore, record, true);
-    job.cancel.cancel();
-    let fail = |kinds: &[ErrorKind]| {
-        let mut failures = sandbox.engine.resume_failures.lock().unwrap();
-        failures.clear();
-        failures.extend(kinds);
-    };
-
-    fail(&[ErrorKind::Transient; 3]);
-    job.resume_paused(&()).await.unwrap();
-    assert_eq!(Counting::count(&sandbox.engine.resumes), 4);
-
-    fail(&[
-        ErrorKind::Transient,
-        ErrorKind::MemoryLost,
-        ErrorKind::Transient,
-    ]);
-    let error = job.resume_paused(&()).await.unwrap_err();
-    assert_eq!(error.kind, ErrorKind::MemoryLost);
-    assert_eq!(Counting::count(&sandbox.engine.resumes), 6);
-
-    // A VMM that goes on answering that nothing changed is tried for as
-    // long as the VM lives, well past the point where that is an error,
-    // about once a second once the waits have grown.
-    tokio::time::pause();
-    fail(&[ErrorKind::Transient; 1_000]);
-    let begin = tokio::time::Instant::now();
-    let ends = async {
-        tokio::time::sleep(Duration::from_secs(120)).await;
-        sandbox.engine.ended.send_replace(true);
-    };
-    let (resumed, ()) = tokio::join!(job.resume_paused(&()), ends);
-    // Once the VM ends, its memory is gone.
-    assert_eq!(resumed.unwrap_err().kind, ErrorKind::MemoryLost);
-    assert!(begin.elapsed() >= Duration::from_secs(120));
-    let tries = Counting::count(&sandbox.engine.resumes) - 6;
-    assert!((115..135).contains(&tries), "{tries} tries");
-
-    // An ended VM is not asked to resume at all.
-    let error = job.resume_paused(&()).await.unwrap_err();
-    assert_eq!(error.kind, ErrorKind::MemoryLost);
-    assert_eq!(Counting::count(&sandbox.engine.resumes), tries + 6);
-}
-
 fn written(jail: &Path) -> SnapshotFiles {
     SnapshotFiles {
         state: jail.join("save.state"),
@@ -1097,4 +1045,101 @@ fn snapshot_outputs_must_be_plain_files_of_their_own() {
     fs::write(&files.state, "state").unwrap();
     assert!(take_written(&files, &scratch).is_err());
     assert_eq!(fs::read_to_string(&secret).unwrap(), "host only");
+}
+
+/// Runs `debugfs -w` with each of `requests` on the file system at `disk`.
+fn debugfs(disk: &Path, requests: &[&str]) {
+    for request in requests {
+        let ran = std::process::Command::new("debugfs")
+            .args(["-w", "-R", request])
+            .arg(disk)
+            .output()
+            .unwrap();
+        assert!(ran.status.success(), "debugfs {request}: {ran:?}");
+    }
+}
+
+/// A fresh boot repairs a disk whose superblock records errors before its
+/// VM starts, as the VM's own user, and its step says what was fixed; the
+/// next fresh boot finds the disk healthy and leaves it alone (ADR 43).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fresh_boot_repairs_a_file_system_its_guest_found_errors_in() {
+    let sandbox = Sandbox::new().await;
+    let disk = &sandbox.paths.disk;
+    fs::File::create(disk).unwrap().set_len(64 << 20).unwrap();
+    let made = std::process::Command::new("mkfs.ext4")
+        .args(["-q", "-F"])
+        .arg(disk)
+        .status();
+    if !made.is_ok_and(|made| made.success()) {
+        eprintln!("skipped: no mkfs.ext4");
+        return;
+    }
+    // A directory entry naming a cleared inode, as lost writes leave one,
+    // and the errors the guest's kernel recorded meeting it.
+    debugfs(
+        disk,
+        &[
+            "mkdir work",
+            "write /dev/null work/file",
+            "clri work/file",
+            "ssv state 3",
+            "ssv error_count 12",
+            "ssv first_error_time 20261106000914",
+            "ssv first_error_func ext4_orphan_get",
+            "ssv last_error_time 20261113182733",
+            "ssv last_error_func ext4_lookup",
+        ],
+    );
+    fs::write(sandbox.root.path().join("vmlinux"), "kernel").unwrap();
+    // As root the repair runs as the VM's own user; otherwise as the
+    // test's, which is all it can hand the disk to.
+    let euid = rustix::process::geteuid().as_raw();
+    let uid = if euid == 0 { 1_000_000 } else { euid };
+    let record = sandbox.record_as(uid, Change::new()).await;
+
+    let ran = sandbox.job(NoStore, record, false).run(Step::Boot).await;
+    assert_eq!(ran.outcome, Outcome::Done);
+    assert_eq!(Counting::count(&sandbox.engine.boots), 1);
+    let [event] = ran.report.notes.events.as_slice() else {
+        panic!("no single repair event: {:?}", ran.report.notes.events);
+    };
+    assert_eq!(event.name, "compute.disk.repair");
+    let attribute = |key: &str| {
+        event
+            .attributes
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.clone())
+    };
+    assert_eq!(
+        attribute("compute.disk.repair"),
+        Some("repaired".into()),
+        "{event:?}"
+    );
+    assert_eq!(attribute("compute.disk.errors"), Some(12_u32.into()));
+    assert_eq!(
+        attribute("compute.disk.last_error_function"),
+        Some("ext4_lookup:0".to_owned().into())
+    );
+    let checked = std::process::Command::new("e2fsck")
+        .args(["-f", "-n"])
+        .arg(disk)
+        .output()
+        .unwrap();
+    assert!(checked.status.success(), "{checked:?}");
+    assert_eq!(
+        std::os::unix::fs::MetadataExt::uid(&fs::metadata(disk).unwrap()),
+        uid
+    );
+
+    // Healthy now: the next fresh boot only reads its superblock.
+    let record = sandbox.records.settle(sandbox.id).await.unwrap();
+    let ran = sandbox.job(NoStore, record, false).run(Step::Boot).await;
+    assert_eq!(ran.outcome, Outcome::Done);
+    assert!(
+        ran.report.notes.events.is_empty(),
+        "{:?}",
+        ran.report.notes.events
+    );
 }

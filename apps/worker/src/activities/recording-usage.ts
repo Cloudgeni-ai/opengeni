@@ -466,14 +466,18 @@ export function reportRecordingProcessing(
       stages[`${stage}CpuSeconds`] = round(usage.cpuSeconds);
       stages[`${stage}PeakMemoryMegabytes`] = round(usage.peakMemoryBytes / 1024 / 1024);
     }
+    // `errorCode` would make the observability boundary read this line as an
+    // operational error and keep only its class, so the code is its `reason`.
     observability.info("recording processed", {
       ...context,
-      purpose: report.purpose,
-      providerId: report.provider,
+      ...(typeof context.versionId === "string" ? { correlationId: context.versionId } : {}),
+      recordingPurpose: report.purpose,
+      provider: report.provider,
       model: report.model,
       funding: report.funding,
       outcome: report.outcome,
-      ...(report.errorCode ? { errorCode: report.errorCode } : {}),
+      ...(report.errorCode ? { reason: report.errorCode } : {}),
+      durationMs: Math.round(report.wallSeconds * 1_000),
       audioSeconds: round(report.audioSeconds),
       ...(report.sentAudioSeconds !== null
         ? { sentAudioSeconds: round(report.sentAudioSeconds) }

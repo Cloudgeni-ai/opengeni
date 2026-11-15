@@ -15,7 +15,6 @@ fn reading(start: Instant, secs: u64, incarnation: u64, cpu_ms: u64, io: u64) ->
         at: start + Duration::from_secs(secs),
         cpu: Some(Duration::from_millis(cpu_ms)),
         io: Some(io),
-        last_before_pause: false,
     }
 }
 
@@ -53,13 +52,12 @@ fn a_busy_guest_counts_once_a_full_window_passed() {
     assert_eq!(busy, [5, 10]);
 }
 
-/// The regression the review found: a lazily woken guest's checkpoint
-/// waits for its hydration before capturing, and the agent cannot read the
-/// VM meanwhile. The step lends its readings from the start, so a guest
-/// working through that wait stays busy instead of falling asleep after
-/// the checkpoint.
+/// A checkpoint holds the VM while its guest runs on, and the agent cannot
+/// read the VM meanwhile. The step lends its readings from start to end, so
+/// a guest working through a long checkpoint stays busy instead of falling
+/// asleep after it.
 #[test]
-fn a_guest_working_while_a_checkpoint_waits_to_capture_stays_busy() {
+fn a_guest_working_through_a_checkpoint_stays_busy() {
     let start = Instant::now();
     let mut usage = Usage::default();
     assert!(!usage.sample(Some(busy_at(start, 0)), RULE));
@@ -91,104 +89,21 @@ fn until_a_checkpoint_lends_a_reading_the_window_goes_on() {
 }
 
 #[test]
-fn the_last_reading_before_the_pause_is_judged_at_once_and_ends_the_window() {
-    let start = Instant::now();
-    let mut usage = Usage::default();
-    assert!(!usage.sample(Some(busy_at(start, 0)), RULE));
-    usage.step_started(true);
-    // Two seconds into the window: early, but a rate shows in part of one.
-    assert!(usage.lend(busy_at(start, 2).before_pause(), Some(RULE)));
-    assert!(usage.window.is_none());
-    assert!(usage.lent.is_none());
-    // A quiet guest's last reading is judged too, and is not busy.
-    let mut quiet = Usage::default();
-    assert!(!quiet.sample(Some(quiet_at(start, 0)), RULE));
-    quiet.step_started(true);
-    assert!(!quiet.lend(quiet_at(start, 3).before_pause(), Some(RULE)));
-    assert!(quiet.window.is_none());
-    // Without a busy rule nothing is judged, but the window still ends.
-    let mut unruled = Usage::default();
-    assert!(!unruled.sample(Some(busy_at(start, 0)), RULE));
-    assert!(!unruled.lend(busy_at(start, 2).before_pause(), None));
-    assert!(unruled.window.is_none());
-}
-
-#[test]
-fn the_capture_does_not_count_as_a_quiet_guest_s_work() {
-    let start = Instant::now();
-    let mut usage = Usage::default();
-    assert!(!usage.sample(Some(quiet_at(start, 0)), RULE));
-    usage.step_started(true);
-    assert!(!usage.sample(None, RULE));
-    assert!(!usage.lend(quiet_at(start, 2).before_pause(), Some(RULE)));
-    // The VM's processor time jumps by four seconds while it is paused and
-    // captured, which a window spanning the pause would count.
-    let jump = 4_000;
-    let after = |secs: u64| reading(start, secs, 1, secs * 10 + jump, 0);
-    let mut busy = Vec::new();
-    for secs in 3..=20 {
-        assert!(!usage.lend(after(secs), Some(RULE)));
-        if usage.sample(None, RULE) {
-            busy.push(secs);
-        }
-    }
-    assert!(busy.is_empty(), "busy at {busy:?}");
-    // The checkpoint ends: its last window is quiet too.
-    assert!(!usage.judge_now(&after(21), RULE));
-}
-
-#[test]
 fn a_short_window_at_a_checkpoint_s_end_is_judged_at_once() {
     let start = Instant::now();
     let mut usage = Usage::default();
     usage.step_started(true);
     assert!(!usage.lend(busy_at(start, 10), Some(RULE)));
     assert!(!usage.sample(None, RULE));
-    // A second after the resume, well short of a window.
+    // A second later, well short of a window.
     assert!(usage.judge_now(&busy_at(start, 11), RULE));
     assert!(!usage.judge_now(&reading(start, 11, 1, 10 * 500 + 10, 0), RULE));
     // Judging leaves the window open.
     assert!(usage.window.is_some());
 }
 
-/// The regression the third review found: the last reading before the
-/// capture ends the window, and a checkpoint can end before the agent's
-/// next tick after the resume. The first reading lent after the resume
-/// starts the next window by itself, so the checkpoint's end judges what
-/// the guest did since the resume.
 #[test]
-fn a_checkpoint_ending_before_the_next_tick_judges_the_guest_since_the_resume() {
-    let start = Instant::now();
-    let ended = |cpu_ms: u64| {
-        let mut usage = Usage::default();
-        assert!(!usage.sample(Some(quiet_at(start, 0)), RULE));
-        usage.step_started(true);
-        assert!(!usage.lend(quiet_at(start, 2).before_pause(), Some(RULE)));
-        assert!(usage.window.is_none());
-        // Resumed at 3 s, after a capture that cost the VM 4 s of
-        // processor time; no sample() follows before the checkpoint ends.
-        let resumed = reading(start, 3, 1, 3 * 10 + 4_000, 0);
-        assert!(!usage.lend(resumed, Some(RULE)));
-        assert!(usage.window.is_some(), "the resume did not start a window");
-        let end = Reading {
-            at: resumed.at + Duration::from_millis(200),
-            cpu: resumed.cpu.map(|cpu| cpu + Duration::from_millis(cpu_ms)),
-            ..resumed
-        };
-        usage.judge_now(&end, RULE)
-    };
-    // 200 ms of full-processor work since the resume is busy.
-    assert!(ended(200));
-    // Next to none is not, and the capture's 4 s never counts.
-    assert!(!ended(1));
-    // Without a busy rule nothing starts or is judged.
-    let mut unruled = Usage::default();
-    assert!(!unruled.lend(quiet_at(start, 3), None));
-    assert!(unruled.window.is_none());
-}
-
-#[test]
-fn a_resumed_guest_nothing_can_be_read_of_counts_as_busy_at_once() {
+fn a_lent_reading_of_a_guest_nothing_can_be_read_of_counts_as_busy_at_once() {
     let start = Instant::now();
     let mut usage = Usage::default();
     usage.step_started(true);

@@ -30,14 +30,14 @@ jobs:
   publish:
     environment: package-release
     if: ${{ inputs.confirm }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: write
       checks: read
       id-token: write
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_sha }}
           fetch-depth: 1
@@ -45,16 +45,12 @@ jobs:
 
       - name: Restore complete checkout history without listing refs
         shell: bash
-        timeout-minutes: 5
+        timeout-minutes: 7
         env:
           EXPECTED_CHECKOUT_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
           checked_out_sha="$(git rev-parse HEAD 2>/dev/null)"
-          fetch_args=()
-          if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
-            fetch_args+=(--unshallow)
-          fi
           selected_fetch="$checked_out_sha"
           if [ -n "${EXPECTED_SELECTED_PULL_REF:-}" ]; then
             if [[ ! "$EXPECTED_SELECTED_PULL_REF" =~ ^refs/pull/[0-9]+/head$ ]]; then
@@ -63,11 +59,25 @@ jobs:
             fi
             selected_fetch="+$EXPECTED_SELECTED_PULL_REF:refs/remotes/origin/selected-pull"
           fi
-          if ! git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
-            '+refs/heads/main:refs/remotes/origin/main' \
-            '+refs/heads/production:refs/remotes/origin/production' \
-            '+refs/tags/*:refs/tags/*' \
-            "$selected_fetch" >/dev/null 2>&1; then
+          # A fetch occasionally stalls on GitHub's side; a normal one takes
+          # about a minute. Bound each attempt and try again a few times.
+          fetched=false
+          for attempt in 1 2 3; do
+            fetch_args=()
+            if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
+              fetch_args+=(--unshallow)
+            fi
+            if timeout --kill-after=10s 120s git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
+              '+refs/heads/main:refs/remotes/origin/main' \
+              '+refs/heads/production:refs/remotes/origin/production' \
+              '+refs/tags/*:refs/tags/*' \
+              "$selected_fetch" >/dev/null 2>&1; then
+              fetched=true
+              break
+            fi
+            echo "::warning::Repository history fetch attempt $attempt failed or stalled"
+          done
+          if [ "$fetched" != true ]; then
             echo "::error::Could not restore complete repository history"
             exit 1
           fi
@@ -169,14 +179,14 @@ jobs:
         run: bun scripts/verify-release-packages.ts
 
       - name: Retain pre-publication package plan
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: package-publication-plan-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: evidence/release-packages-plan.json
           if-no-files-found: error
           retention-days: 90
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         if: steps.package-plan.outputs.needs_publish == 'true'
         with:
           node-version: 24
@@ -210,7 +220,7 @@ jobs:
           bun run test:registry-dependency-exports --published-source
 
       - name: Retain verified package identity
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: package-publication-verified-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: evidence/release-packages-verified.json

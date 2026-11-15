@@ -94,6 +94,57 @@ describe("stock new conversation", () => {
       }
     }, 60_000);
 
+    test(`a refused creation says why and keeps a usable draft at ${width}px`, async () => {
+      const page = await browser.newPage({ viewport: { width, height: 900 } });
+      const errors: string[] = [];
+      page.on("pageerror", (error) => errors.push(error.message));
+      try {
+        await page.goto(`${baseUrl}/embedded-chat.html?scenario=empty&refuse=1`, {
+          waitUntil: "networkidle",
+        });
+        const input = page.getByRole("textbox", { name: "Ask anything…", exact: true });
+        await input.fill("First request");
+        const send = page.getByRole("button", { name: "Send", exact: true });
+        await send.click();
+        const alert = page.getByRole("alert");
+        await alert.waitFor();
+        expect(await alert.textContent()).toBe(
+          "Ultrafast isn't available for this model. Choose another speed.",
+        );
+        // A definite refusal is not an unconfirmed create: no Retry, the draft stays editable.
+        expect(await page.getByRole("button", { name: "Retry", exact: true }).count()).toBe(0);
+        expect(await input.inputValue()).toBe("First request");
+        expect(await send.isEnabled()).toBe(true);
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+          true,
+        );
+        const evidence = process.env.OPENGENI_CONVERSATION_EVIDENCE_DIR;
+        if (evidence) {
+          mkdirSync(evidence, { recursive: true });
+          await page.screenshot({ path: `${evidence}/creation-refused-${width}.png` });
+        }
+        await send.click();
+        const attempts = await page.evaluate(() => {
+          const fixture = (
+            window as unknown as {
+              embeddedCreationHarness: {
+                attempts: Array<{ idempotencyKey?: string }>;
+                finish: () => void;
+              };
+            }
+          ).embeddedCreationHarness;
+          fixture.finish();
+          return fixture.attempts;
+        });
+        expect(attempts).toHaveLength(2);
+        expect(attempts[1]!.idempotencyKey).not.toBe(attempts[0]!.idempotencyKey);
+        await page.getByRole("textbox", { name: "Message the agent", exact: true }).waitFor();
+        expect(errors).toEqual([]);
+      } finally {
+        await page.close();
+      }
+    }, 60_000);
+
     test(`standalone new conversation inherits the host theme at ${width}px`, async () => {
       const page = await browser.newPage({ viewport: { width, height: 900 } });
       try {

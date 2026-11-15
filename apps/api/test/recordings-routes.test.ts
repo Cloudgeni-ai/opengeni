@@ -1218,7 +1218,7 @@ describe("recording routes", () => {
     const scope = await fixture();
     await shared.admin`
       update workspaces set settings = settings
-        || '{"recordings":{"keyterms":["Tripletex","Vatra"]}}'::jsonb
+        || '{"recordings":{"keyterms":["Kubernetes","Acme"]}}'::jsonb
       where id = ${scope.workspaceId}`;
     const listened = async (keyterms?: string[]) => {
       const recordingId = crypto.randomUUID();
@@ -1254,15 +1254,15 @@ describe("recording routes", () => {
       return options.keyterms;
     };
     // Every meeting listens for the workspace's words.
-    expect(await listened()).toEqual(["Tripletex", "Vatra"]);
+    expect(await listened()).toEqual(["Kubernetes", "Acme"]);
     // A meeting's own come first, and a word is listened for once.
-    expect(await listened(["Pelle", "vatra"])).toEqual(["Pelle", "vatra", "Tripletex"]);
+    expect(await listened(["Grafana", "acme"])).toEqual(["Grafana", "acme", "Kubernetes"]);
   });
 
   test("the words a meeting listens for stop at what one request takes", () => {
     const many = Array.from({ length: 100 }, (_, index) => `word ${index}`);
-    expect(meetingKeyterms(["Pelle"], many)).toHaveLength(100);
-    expect(meetingKeyterms(["Pelle"], many)[0]).toBe("Pelle");
+    expect(meetingKeyterms(["Grafana"], many)).toHaveLength(100);
+    expect(meetingKeyterms(["Grafana"], many)[0]).toBe("Grafana");
     expect(meetingKeyterms(undefined, undefined)).toEqual([]);
   });
 

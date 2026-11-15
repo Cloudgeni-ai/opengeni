@@ -8,6 +8,20 @@ import { useSharedQuery } from "@opengeni/react/app/lib/shared-query";
 export const SUBSCRIPTION_USAGE_POOL_QUERY_PREFIX = ["subscription-usage-pools"] as const;
 const PROVIDER_LABELS = { codex: "Codex", claude: "Claude", xai: "SuperGrok" };
 
+/** The pooled accounts whose paid usage credits are on, and those that haven't said. */
+export function poolUsageCredits(pool: SubscriptionUsagePool | null | undefined): {
+  on: string[];
+  unknown: string[];
+} {
+  const accounts = pool?.usageCredits ?? [];
+  return {
+    on: accounts.filter((account) => account.state === "on").map((account) => account.label),
+    unknown: accounts
+      .filter((account) => account.state === "unknown")
+      .map((account) => account.label),
+  };
+}
+
 export function poolForecastSentence(
   forecast: SubscriptionUsagePool["windows"][number]["forecast"],
   now: number,
@@ -87,6 +101,7 @@ export function SubscriptionUsagePoolView({
           account.resetsAt !== null &&
           Date.parse(account.resetsAt) > now,
       ) ?? [];
+  const credits = poolUsageCredits(pool);
   return (
     <section
       className="flex min-w-0 flex-col gap-4 px-3 py-5"
@@ -115,9 +130,18 @@ export function SubscriptionUsagePoolView({
           .
         </p>
       ) : null}
+      {credits.on.length > 0 ? (
+        <p className="m-0 text-xs leading-4 text-fg">
+          Usage credits are on for {credits.on.join(", ")}: Claude can bill usage past the plan
+          limits to {credits.on.length === 1 ? "it" : "them"}.
+        </p>
+      ) : null}
       <p className="m-0 text-xs leading-4 text-fg-subtle">
         {window.remainingPercent !== null && unreported.length > 0
           ? `Leaves out ${unreported.map((account) => account.label).join(", ")}, which ${unreported.length === 1 ? "hasn't" : "haven't"} reported ${unreported.length === 1 ? "its" : "their"} limit yet. `
+          : null}
+        {credits.unknown.length > 0
+          ? `${credits.unknown.join(", ")} ${credits.unknown.length === 1 ? "hasn't" : "haven't"} reported whether usage credits are on. `
           : null}
         {pool.observedAt ? (
           <>
@@ -179,7 +203,14 @@ export function ProviderGroupHeading({
     shown && shown.remainingPercent !== null
       ? poolForecastSentence(shown.forecast, minuteNow)
       : null;
-  const words = facts?.filter((fact): fact is string => Boolean(fact)) ?? null;
+  const creditsOn = poolUsageCredits(pool?.pool).on.length;
+  const words =
+    facts === null
+      ? null
+      : [
+          ...facts.filter((fact): fact is string => Boolean(fact)),
+          ...(creditsOn > 0 ? [`${creditsOn} with usage credits on`] : []),
+        ];
   return (
     <li className="col-span-full list-none px-3 pt-6 pb-3 first:pt-2">
       <div className="flex min-h-10 items-start justify-between gap-4">

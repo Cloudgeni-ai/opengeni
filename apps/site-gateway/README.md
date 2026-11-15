@@ -8,6 +8,18 @@ and security headers. Every authorization decision stays in the Opengeni API
 [docs/design/published-sites-2026-10-14.md](../../docs/design/published-sites-2026-10-14.md);
 shared contracts: `packages/contracts/src/site-publishing.ts`.
 
+## HTML frame host on `og.<sites domain>`
+
+The reserved `og` label (no Site can take it) serves the console's HTML frame
+host: `GET`/`HEAD /_og/html-frame` returns the loader page from
+`@opengeni/contracts/html-frame-host` with
+`Content-Security-Policy: sandbox <frame flags>; frame-ancestors <APP_ORIGIN>`,
+no `X-Frame-Options`, `nosniff`, `Referrer-Policy: no-referrer`, HSTS outside
+development and `Cache-Control: public, max-age=3600`. Every other path or
+method on that host is a 404. The console renders agent-authored HTML in an
+opaque-origin sandboxed frame of this page, so that HTML never runs under the
+console's own Content-Security-Policy.
+
 ## Routes on every Site host
 
 | Path | Behavior |

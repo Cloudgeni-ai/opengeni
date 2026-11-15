@@ -135,7 +135,12 @@ export function pendingApprovalReview(
     title: approval.display?.title ?? options.formatToolName(toolName),
     ...approvalTargetFacts(approval),
   };
-  const action = toolReviewAction(toolName, approval.arguments, context);
+  // The host's approve word is given here, so the plain default's code is not kept.
+  const { approveLabelCode: _plainDefault, ...action } = toolReviewAction(
+    toolName,
+    approval.arguments,
+    context,
+  );
   return {
     version: 1,
     id: approval.id,
@@ -143,6 +148,7 @@ export function pendingApprovalReview(
     revision: "legacy",
     status: "pending",
     ...action,
+    toolName,
     ...(approval.display?.accountLabel ? { accountLabel: approval.display.accountLabel } : {}),
     ...toolReviewFields(approval.arguments, context, toolName),
     reason: "",

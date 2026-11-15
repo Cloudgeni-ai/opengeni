@@ -521,16 +521,35 @@ async fn a_vmm_that_never_stops_waiting_for_memory_fails_in_the_end() {
     );
 }
 
+/// What every boot adds for the keyboard controller; see [`KEYBOARD`].
+const KEYS: &str = "i8042.noaux i8042.nomux i8042.dumbkbd";
+
 #[test]
 fn boot_pins_the_clock_source_restore_can_correct() {
     assert_eq!(
         boot_args("console=ttyS0 quiet", None),
-        "console=ttyS0 quiet clocksource=kvm-clock"
+        format!("console=ttyS0 quiet clocksource=kvm-clock {KEYS}")
     );
-    assert_eq!(boot_args("", None), "clocksource=kvm-clock");
+    assert_eq!(boot_args("", None), format!("clocksource=kvm-clock {KEYS}"));
     assert_eq!(
         boot_args("console=ttyS0 clocksource=tsc", None),
-        "console=ttyS0 clocksource=tsc"
+        format!("console=ttyS0 clocksource=tsc {KEYS}")
+    );
+}
+
+/// A guest's kernel neither commands Firecracker's keyboard, which answers
+/// none of its commands and so held every boot for half a second, nor looks
+/// for a mouse or multiplexer behind it. A caller that sets anything of the
+/// keyboard controller's itself keeps exactly its own.
+#[test]
+fn boot_skips_the_keyboard_probe_firecracker_never_answers() {
+    assert_eq!(
+        boot_args("console=ttyS0 reboot=k panic=1", None),
+        format!("console=ttyS0 reboot=k panic=1 clocksource=kvm-clock {KEYS}")
+    );
+    assert_eq!(
+        boot_args("reboot=k i8042.nokbd", None),
+        "reboot=k i8042.nokbd clocksource=kvm-clock"
     );
 }
 
@@ -540,11 +559,11 @@ fn a_guest_reports_freed_memory_in_blocks_the_host_can_give_back() {
     assert_eq!(balloon::reporting_order(PageSize::Huge), 9);
     assert_eq!(
         boot_args("console=ttyS0", Some(PageSize::Huge)),
-        "console=ttyS0 clocksource=kvm-clock page_reporting.page_reporting_order=9"
+        format!("console=ttyS0 clocksource=kvm-clock {KEYS} page_reporting.page_reporting_order=9")
     );
     assert_eq!(
         boot_args("quiet", Some(PageSize::Base)),
-        "quiet clocksource=kvm-clock page_reporting.page_reporting_order=0"
+        format!("quiet clocksource=kvm-clock {KEYS} page_reporting.page_reporting_order=0")
     );
     // The caller's own order stands, and a guest that reports nothing gets none.
     assert_eq!(
@@ -552,9 +571,12 @@ fn a_guest_reports_freed_memory_in_blocks_the_host_can_give_back() {
             "page_reporting.page_reporting_order=3 clocksource=tsc",
             Some(PageSize::Huge)
         ),
-        "page_reporting.page_reporting_order=3 clocksource=tsc"
+        format!("page_reporting.page_reporting_order=3 clocksource=tsc {KEYS}")
     );
-    assert_eq!(boot_args("quiet", None), "quiet clocksource=kvm-clock");
+    assert_eq!(
+        boot_args("quiet", None),
+        format!("quiet clocksource=kvm-clock {KEYS}")
+    );
 }
 
 #[test]

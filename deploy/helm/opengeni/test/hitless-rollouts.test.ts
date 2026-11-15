@@ -64,4 +64,27 @@ describe("hitless API and web rollouts", () => {
       ).toBeUndefined();
     }
   });
+
+  test("the API learns how long it has after SIGTERM to drain its connections", async () => {
+    const graceEnv = (manifests: Manifest[]) =>
+      (container(deployment(manifests, "hpa-test-opengeni-api")).env ?? []).filter(
+        (entry: { name: string }) => entry.name === "OPENGENI_API_SHUTDOWN_GRACE_MS",
+      );
+    // 30 s pod grace less the 10 s preStop sleep.
+    expect(graceEnv(await render({}))).toEqual([
+      { name: "OPENGENI_API_SHUTDOWN_GRACE_MS", value: "20000" },
+    ]);
+    expect(
+      graceEnv(
+        await render({ api: { terminationGracePeriodSeconds: 60, preStopDrainSeconds: 0 } }),
+      ),
+    ).toEqual([{ name: "OPENGENI_API_SHUTDOWN_GRACE_MS", value: "60000" }]);
+    // An explicit setting is owned by config.
+    expect(graceEnv(await render({ config: { OPENGENI_API_SHUTDOWN_GRACE_MS: "5000" } }))).toEqual(
+      [],
+    );
+    await expect(render({ api: { preStopDrainSeconds: 30 } })).rejects.toThrow(
+      "api.preStopDrainSeconds (30) must be less than api.terminationGracePeriodSeconds (30)",
+    );
+  });
 });

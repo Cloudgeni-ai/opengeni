@@ -36,6 +36,7 @@ import {
 } from "./computer-media";
 import {
   ComputerBackendError,
+  ComputerHelperStoppedError,
   type ComputerBackendActionCommand,
   type ComputerBackendCaptureOptions,
   type ComputerBackendFrame,
@@ -208,8 +209,9 @@ export class ComputerDriver implements ComputerInteractionDriver {
   async dispatchNative(command: ComputerNativeCommand): Promise<ComputerNativeResult> {
     this.assertOpen();
     const materialized = materializeNativeCommandSecrets(command);
+    let client: ComputerBackend | undefined;
     try {
-      const client = await this.activeClient();
+      client = await this.activeClient();
       if (!client.callNative)
         throw new InteractionDefiniteDriverError("unsupported", "Native CUA tools are unavailable");
       return ComputerNativeResult.parse({
@@ -220,6 +222,8 @@ export class ComputerDriver implements ComputerInteractionDriver {
         ...(await client.callNative(materialized)),
       });
     } catch (error) {
+      if (error instanceof ComputerHelperStoppedError && client)
+        throw await this.helperRestarted(error, client);
       if (error instanceof ComputerBackendError) {
         const code = interactionErrorCode(error.code);
         const message = driverErrorMessage(error.message);
@@ -235,10 +239,12 @@ export class ComputerDriver implements ComputerInteractionDriver {
   async validate(command: ComputerActionCommand): Promise<void> {
     this.assertOpen();
     try {
-      const client = await this.activeClient();
-      this.assertClickContinuation(command, client);
-      this.assertActionBatch(command, client);
-      await client.validate(nativeCommand(command));
+      // A check sends nothing, so a stopped helper is replaced for it too.
+      await this.readWithRecovery(async (client) => {
+        this.assertClickContinuation(command, client);
+        this.assertActionBatch(command, client);
+        await client.validate(nativeCommand(command));
+      });
     } catch (error) {
       throw predispatchError(error);
     }
@@ -253,23 +259,27 @@ export class ComputerDriver implements ComputerInteractionDriver {
     // A stand-in names an element's label, which could show a typed secret.
     const standIn = trace ? (item: ComputerBackendRoleStandIn) => trace.record(item) : undefined;
     const unconfirmed = trace ? () => trace.record(COMPUTER_UNCONFIRMED_INPUT_TRACE) : undefined;
+    let client: ComputerBackend | undefined;
     try {
-      const client = await this.activeClient();
-      this.assertClickContinuation(command, client);
-      this.assertActionBatch(command, client);
+      const active = await this.activeClient();
+      client = active;
+      this.assertClickContinuation(command, active);
+      this.assertActionBatch(command, active);
       const native = nativeCommand(materialized);
-      const observation = await client
+      const observation = await active
         .dispatch(native, standIn, unconfirmed)
         .catch(async (error: unknown) => {
           const text = this.capabilities.clipboard ? untypeableText(materialized, error) : null;
           if (text === null) throw error;
-          return await pasteText(client, native, text);
+          return await pasteText(active, native, text);
         });
       // An action that opened a window returns that window, and leaves the
       // computer in it.
       this.current = observation?.target.id ?? command.targetId;
       return observation === null ? null : this.projectObservation(observation);
     } catch (error) {
+      if (error instanceof ComputerHelperStoppedError && client)
+        throw await this.helperRestarted(error, client);
       if (error instanceof ComputerBackendError) {
         const code = interactionErrorCode(error.code);
         const message = driverErrorMessage(error.message);
@@ -718,6 +728,26 @@ export class ComputerDriver implements ComputerInteractionDriver {
       const replacement = await this.recoverClient(client);
       return await operation(replacement);
     }
+  }
+
+  /** An action whose helper had stopped before it was sent: nothing was done.
+   * The helper is replaced now, so a retry after a fresh look works; refs
+   * and frames of the stopped helper are gone with it. */
+  private async helperRestarted(
+    error: ComputerHelperStoppedError,
+    stopped: ComputerBackend,
+  ): Promise<Error> {
+    if (!this.clientFactory) return error;
+    try {
+      await this.recoverClient(stopped);
+    } catch (recoveryError) {
+      return recoveryError instanceof Error ? recoveryError : new Error(String(recoveryError));
+    }
+    return new InteractionDefiniteDriverError(
+      "resource_unavailable",
+      "The computer helper had stopped, so nothing was done. It has been restarted: observe the screen again, then retry.",
+      true,
+    );
   }
 
   private async recoverClient(failedClient: ComputerBackend): Promise<ComputerBackend> {

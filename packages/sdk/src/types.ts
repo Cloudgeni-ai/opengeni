@@ -323,6 +323,12 @@ export type ToolGatewaySiteConsentAccount = {
   identity: ToolGatewayIdentity;
   connector: string;
   account: string;
+  /** The viewer's own connection behind the route, for reconnecting it. */
+  connectionId?: string;
+  /** The catalog capability that reconnects it, when there is one. */
+  capabilityId?: string | null;
+  /** The connection is shared with the workspace rather than the viewer's own. */
+  shared?: boolean;
 };
 /** The provider's own reading of the call (for Gmail, the message as it would be sent). */
 export type ToolGatewaySiteConsentReview = {
@@ -1109,6 +1115,18 @@ export type ConnectionMetadata = {
    * connections and from older servers.
    */
   accountIdentity?: "verified" | "reconnect" | "single" | undefined;
+  /**
+   * A workspace's own OpenAI, Azure OpenAI or OpenAI-compatible model key
+   * only (those providers report no cost): the price its model was given, or
+   * null. Absent for other connections and from older servers.
+   */
+  listPrice?: ConnectedModelListPrice | null | undefined;
+  /**
+   * A workspace's own model key only, in workspace connection lists: whether
+   * its model's usage gets a cost estimate. False means its calls are
+   * recorded as unpriced and spend limits can't count them.
+   */
+  listPriceKnown?: boolean | undefined;
   createdBySubjectId: string | null;
   updatedBySubjectId: string | null;
   createdAt: string;
@@ -2096,6 +2114,11 @@ export type Session = {
   pinVersion?: number;
   /** Personal explicit acknowledgment state. */
   unread?: boolean;
+  /**
+   * True when this failed session's failure was consumed by its parent agent,
+   * which owns the follow-up. Absent when false and on older servers.
+   */
+  failureHandled?: boolean | undefined;
   /** Personal actively-working label. */
   activelyWorking?: boolean;
   /** Optimistic unread/actively-working revision. */
@@ -2204,6 +2227,7 @@ export type SessionListEntry = Pick<
   | "pinnedAt"
   | "pinVersion"
   | "unread"
+  | "failureHandled"
   | "activelyWorking"
   | "attentionVersion"
   | "archived"
@@ -2824,6 +2848,7 @@ export const SESSION_EVENT_TYPES = [
   "agent.model.request",
   "agent.model.usage",
   "tool.auth_needed",
+  "tool.discovery_card",
   "credential.auth_needed",
   "agent.updated",
   "rig.setup.started",
@@ -3166,6 +3191,15 @@ export type ToolAuthNeededPayload = {
         action: "connect" | "add_credentials" | "enable";
         rationale: string;
         requiredVariables: string[];
+        /** Values the person enters on the card before connecting; `value` is the agent's prefill. */
+        inputs?:
+          | Array<{
+              id: string;
+              label: string;
+              placeholder?: string | undefined;
+              value?: string | undefined;
+            }>
+          | undefined;
       }
     | undefined;
   /** Agent suggestion; never a connection or permission grant. */
@@ -4876,6 +4910,25 @@ export type ClaudeUsageRequestStatus = {
   source?: "response_headers" | "provider" | undefined;
 };
 export type { SubscriptionUsagePool, SubscriptionUsagePoolsResponse } from "@opengeni/contracts";
+import type {
+  ClaudeExtraUsage,
+  ClaudeLimitResets,
+  ClaudeServiceState,
+  ClaudeSurfaceUsageWindow,
+  ClaudeUsageLimit,
+  ClaudeWallReset,
+} from "@opengeni/contracts";
+export type {
+  ClaudeExtraUsage,
+  ClaudeLimitResetClaim,
+  ClaudeLimitResetClaimResult,
+  ClaudeLimitResetGrant,
+  ClaudeLimitResets,
+  ClaudeServiceState,
+  ClaudeSurfaceUsageWindow,
+  ClaudeUsageLimit,
+  ClaudeWallReset,
+} from "@opengeni/contracts";
 
 export type ClaudeSubscriptionUsage = {
   connected: boolean;
@@ -4887,6 +4940,18 @@ export type ClaudeSubscriptionUsage = {
   refreshCheckedAt: string | null;
   requestStatus?: ClaudeUsageRequestStatus | null | undefined;
   requestRestrictions?: ClaudeUsageRequestStatus[] | undefined;
+  /** Limit reset grants Claude offers the account (absent: not read yet). */
+  limitResets?: ClaudeLimitResets | null | undefined;
+  /** The at-the-limit reset program, read only while the account is at a limit. */
+  wallReset?: ClaudeWallReset | null | undefined;
+  /** Claude's limit list, with each scoped limit's share of the weekly limit. */
+  limits?: ClaudeUsageLimit[] | undefined;
+  /** Paid usage credits. Absent or null: not reported, so unknown (never off). */
+  extraUsage?: ClaudeExtraUsage | null | undefined;
+  /** Weekly limits of other Claude surfaces, for information only. */
+  surfaceWindows?: ClaudeSurfaceUsageWindow[] | undefined;
+  /** Service state from the newest model response (fallback, overage, slow tier, grace). */
+  serviceState?: ClaudeServiceState | null | undefined;
 };
 
 export type OrganizationModelProviderConnection = {
@@ -4933,9 +4998,58 @@ export type RevokeOrganizationModelProviderConnectionRequest = {
   expectedVersion: number;
 };
 
-export type OrganizationProviderCustomModel = WorkspaceGatewayCustomModel;
+/**
+ * An administrator's own list rate for a connected model, in USD micros
+ * (1 USD = 1,000,000) per 1M tokens. Without a cached-input rate, cached
+ * input is priced as input.
+ */
+export type ConnectedModelListPricing = {
+  inputMicrosPerMillionTokens: number;
+  cachedInputMicrosPerMillionTokens?: number | undefined;
+  cacheWriteMicrosPerMillionTokens?: number | undefined;
+  outputMicrosPerMillionTokens: number;
+};
+/**
+ * What a connected model's usage costs, for usage estimates, spend limits
+ * and Insights (never a charge): the catalogue model whose list rate it
+ * shares, such as an Azure deployment's base model, or an explicit rate.
+ */
+export type ConnectedModelListPrice =
+  | { basis: "model"; modelId: string }
+  | { basis: "custom"; pricing: ConnectedModelListPricing };
+export type OrganizationProviderCustomModel = WorkspaceGatewayCustomModel & {
+  /**
+   * OpenAI, Azure OpenAI and OpenAI-compatible models only (their providers
+   * report no cost): the price the model was given, or null.
+   */
+  listPrice?: ConnectedModelListPrice | null | undefined;
+  /**
+   * OpenAI, Azure OpenAI and OpenAI-compatible models only: whether its usage
+   * gets a cost estimate. False means its calls are recorded as unpriced and
+   * spend limits can't count them.
+   */
+  listPriceKnown?: boolean | undefined;
+};
 export type OrganizationProviderCustomModelsResponse = {
   models: OrganizationProviderCustomModel[];
+  /** OpenAI and Azure OpenAI only: catalogue models with a known list rate to price a model like. */
+  priceBasisModelIds?: string[] | undefined;
+};
+/** Set or clear (null) what an organization model's usage costs. */
+export type SetOrganizationCustomModelListPriceRequest = {
+  expectedVersion: number;
+  listPrice: ConnectedModelListPrice | null;
+};
+/**
+ * Set or clear (null) what a workspace model key's model costs. Its price is
+ * not part of the key's version, so no version is expected.
+ */
+export type SetWorkspaceModelKeyListPriceRequest = {
+  listPrice: ConnectedModelListPrice | null;
+};
+/** Catalogue models with a known list rate that a connected model can be priced like. */
+export type ModelPriceBasisModelsResponse = {
+  priceBasisModelIds: string[];
 };
 export type CreateOrganizationProviderCustomModelRequest = CreateWorkspaceGatewayCustomModelRequest;
 export type DeleteOrganizationProviderCustomModelRequest = DeleteWorkspaceGatewayCustomModelRequest;
@@ -4979,6 +5093,37 @@ export type OrganizationCompatibleEndpoint = {
 };
 export type OrganizationCompatibleEndpointsResponse = {
   endpoints: OrganizationCompatibleEndpoint[];
+  /** Catalogue models with a known list rate that a model can be priced like. */
+  priceBasisModelIds?: string[] | undefined;
+};
+/**
+ * One API key of an organization's Anthropic API connection, which can hold
+ * several. The connection's own key is the first; each session keeps one key
+ * while it serves. Never includes the key itself.
+ */
+export type OrganizationAnthropicApiKey = {
+  id: string;
+  /** Null for the connection's own key. */
+  label: string | null;
+  /** Whether this is the connection's own key (replaced or disconnected with the connection). */
+  connectionKey: boolean;
+  /** The Anthropic organization the key belongs to, when known. */
+  anthropicOrganizationId: string | null;
+  /** When Anthropic refused the key because its organization is out of credits; null while it serves. */
+  creditRefusedAt: string | null;
+  createdAt: string;
+};
+export type OrganizationAnthropicApiKeysResponse = {
+  connectionVersion: number;
+  keys: OrganizationAnthropicApiKey[];
+};
+/** Add a further key; the API checks it with Anthropic's free model listing first. */
+export type AddOrganizationAnthropicApiKeyRequest = {
+  apiKey: string;
+  label: string;
+};
+export type UpdateOrganizationAnthropicApiKeyRequest = {
+  label: string;
 };
 /**
  * Connect an endpoint with its first model; the API checks it with a short
@@ -5566,6 +5711,8 @@ export type CodexUsagePayload = {
     fiveHour: CodexUsageWindow | null;
     weekly: CodexUsageWindow | null;
     unknownWindowExhausted: boolean;
+    /** The provider flags this feature limit as spent. */
+    limitReached?: boolean;
   }>;
   credits?: {
     hasCredits: boolean;
@@ -9310,17 +9457,48 @@ export type FileDownloadUrlResponse = {
   expiresAt: string;
 };
 
+/** Where a {@link FileUploadSource} sends its bytes: the signed object-storage PUT. */
+export type FileUploadTarget = {
+  /** Pre-signed URL; it carries its own authority, so send no API credentials or cookies. */
+  url: string;
+  /** Headers the PUT must carry exactly (the signature covers them, content type included). */
+  headers: Record<string, string>;
+  /** Exact number of bytes the PUT must send. */
+  sizeBytes: number;
+  /** Aborted when the upload's deadline passes; stop the transfer then. */
+  signal: AbortSignal;
+};
+
+/**
+ * File bytes the caller sends itself, for example a native upload streamed
+ * from disk with progress, so a long video never has to be held in memory.
+ * The SDK still opens and completes the upload; `send` performs only the
+ * signed PUT and reports its HTTP status.
+ */
+export type FileUploadSource = {
+  /** Exact size of the bytes `send` will PUT. */
+  sizeBytes: number;
+  send(target: FileUploadTarget): Promise<{ status: number }>;
+};
+
 /** Bytes accepted by the `uploadFile` helper. */
-export type FileUploadData = Blob | ArrayBuffer | Uint8Array | string;
+export type FileUploadData = Blob | ArrayBuffer | Uint8Array | string | FileUploadSource;
 
 export type UploadFileInput = {
   scope?: "workspace" | "personal";
   filename: string;
   contentType: string;
   data: FileUploadData;
+  /**
+   * Hex SHA-256 of the bytes. Computed from `data` when omitted, except for a
+   * {@link FileUploadSource}, whose bytes the SDK never reads: without one the
+   * server records the digest itself for files small enough to show the model inline.
+   */
   sha256?: string | undefined;
   /** Optional deadline for the signed object-storage PUT. */
   timeoutMs?: number | undefined;
+  /** Cancels the upload: the step in flight is aborted and the call rejects. */
+  signal?: AbortSignal | undefined;
   /** The upload is an app-shot (images only): the window it shows and what it said. */
   appShot?: AppShotCapture | undefined;
 };
@@ -9866,6 +10044,10 @@ export type CreateCapabilityCatalogItemRequest = {
   installUrl?: string | undefined;
   authModel?: string | undefined;
   metadata?: Record<string, unknown> | undefined;
+  /** The catalog entry whose Connect card asked for this connection's inputs. */
+  connectFor?: string | undefined;
+  /** With `connectFor`: the values the person entered on that card, by input id. */
+  connectInputs?: Record<string, string> | undefined;
 };
 
 export type EnableCapabilityRequest = {
@@ -10505,12 +10687,25 @@ export type GitHubAppSetupMode = "platform" | "operator";
 
 export type GitHubInstallationLifecycle = "active" | "suspended" | "deleted" | "unverified";
 
+/**
+ * Why an installation is not active, in terms of the fix. Null while active;
+ * servers before this field omit it.
+ */
+export type GitHubInstallationIssue =
+  | "uninstalled"
+  | "suspended"
+  | "no_repositories"
+  | "owner_unconfirmed"
+  | "github_unreachable"
+  | "account_changed";
+
 export type GitHubInstallationBinding = {
   installationId: number;
   githubAccountId: number | null;
   accountLogin: string | null;
   accountType: string | null;
   lifecycle: GitHubInstallationLifecycle;
+  issue?: GitHubInstallationIssue | null | undefined;
   repositoryScope: GitHubRepositoryScope;
   repositoryCount: number;
   /** Opengeni-owned entry point for changing the installation's repository allowlist. */
@@ -10545,6 +10740,13 @@ export type GitHubRepositoriesResponse = {
 export type GitHubActionPolicyDecision = "allow" | "ask" | "block";
 export type GitHubActionPolicyEffectiveDecision = GitHubActionPolicyDecision | "mixed";
 export type GitHubActionPolicyGroup = "routine" | "review" | "merge";
+/**
+ * The groups of a personal actor. `sensitive` (Settings and deletions) covers
+ * repository settings, secrets, environments, deletions, tag and
+ * default-branch rewrites and unrecognised requests made with `gh` or Git. It
+ * defaults to Ask.
+ */
+export type PersonalGitHubActionPolicyGroup = GitHubActionPolicyGroup | "sensitive";
 
 export type GitHubActionPolicyActor =
   | { kind: "workspace_app"; installationId: number }
@@ -10552,7 +10754,10 @@ export type GitHubActionPolicyActor =
 
 export type GitHubActionPolicyActorState = GitHubActionPolicyActor & {
   label: string;
-  groups: Record<GitHubActionPolicyGroup, GitHubActionPolicyEffectiveDecision>;
+  /** `sensitive` is present for personal actors only. */
+  groups: Record<GitHubActionPolicyGroup, GitHubActionPolicyEffectiveDecision> & {
+    sensitive?: GitHubActionPolicyEffectiveDecision;
+  };
 };
 
 export type GitHubActionPoliciesResponse = {
@@ -10562,7 +10767,8 @@ export type GitHubActionPoliciesResponse = {
 
 export type UpdateGitHubActionPolicyRequest = {
   actor: GitHubActionPolicyActor;
-  group: GitHubActionPolicyGroup;
+  /** `sensitive` applies only to personal actors. */
+  group: PersonalGitHubActionPolicyGroup;
   decision: GitHubActionPolicyDecision;
 };
 
@@ -11049,6 +11255,41 @@ export type CreateBillingPortalRequest = {
 export type CreateBillingPortalResponse = {
   portalSessionId: string;
   url: string;
+};
+
+export type ListBillingReceiptsQuery = {
+  accountId?: string | undefined;
+  /** The nextCursor of the previous page. */
+  cursor?: string | undefined;
+  /** Receipts per page, 1 to 50. Defaults to 10. */
+  limit?: number | undefined;
+};
+
+/**
+ * One successful payment and where to download its receipt: plan invoices,
+ * credit purchases and automatic top-ups alike. Amounts are in the currency's
+ * smallest unit (cents for USD).
+ */
+export type BillingReceipt = {
+  id: string;
+  createdAt: string;
+  kind: "plan" | "credits" | "auto_top_up" | "other";
+  /** What the payment was for, in a few words. */
+  description: string;
+  amount: number;
+  currency: string;
+  amountRefunded: number;
+  refunded: boolean;
+  /** Stripe's receipt for the payment. */
+  receiptUrl: string | null;
+  /** The invoice page and PDF when the payment paid an invoice. */
+  invoiceUrl: string | null;
+  invoicePdfUrl: string | null;
+};
+
+export type ListBillingReceiptsResponse = {
+  receipts: BillingReceipt[];
+  nextCursor: string | null;
 };
 
 export type UserMessageEventInput = {
@@ -11848,6 +12089,12 @@ export type AgentConfigRequest = {
   /** Alias of the session `instructions` field. */
   instructions?: string | undefined;
   renderer?: AgentRenderer | undefined;
+  /**
+   * How automatic chat titles are written, added after the title request's
+   * fixed rules (max 8,000 chars), for example "If the messages have no clear
+   * language, write the title in Norwegian bokmål."; null clears it.
+   */
+  titleInstructions?: string | null | undefined;
   /** Vaults this session may use (input only); intersected with the parent's policy. */
   vaultPolicy?: VaultPolicy | undefined;
 };
@@ -11896,6 +12143,8 @@ export type ResolvedAgentConfig = {
     | "deployment_default"
     | "inherited"
     | "legacy_conversion";
+  /** The host's title instructions; absent when none are set. */
+  titleInstructions?: string | undefined;
 };
 
 export type AgentEffectiveTools = {

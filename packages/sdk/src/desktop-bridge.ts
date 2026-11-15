@@ -956,6 +956,10 @@ export interface WelcomeUnreachable {
 /** What the first-run page shows while there is no account to show. */
 export interface WelcomeState {
   productName: string;
+  /**
+   * The server Continue signs in to: a signed-out account's own server when
+   * the page signs it in again, else the app's.
+   */
   defaultServerUrl: string;
   /** The page offers "Use another server"; an app made for one server doesn't. */
   otherServers?: boolean;

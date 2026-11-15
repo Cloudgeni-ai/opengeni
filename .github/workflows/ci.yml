@@ -75,7 +75,7 @@ jobs:
   automation-admission:
     name: Admit automation Version PR
     if: ${{ github.event_name == 'workflow_dispatch' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 320
     permissions:
       actions: read # authenticate the exact Version PR producer run
@@ -92,7 +92,7 @@ jobs:
       # workflow_dispatch is sent to ref=main. Pin the checkout again so helper
       # and dependency bytes are the exact trusted base, never candidate bytes.
       - name: Check out trusted workflow source
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 1
@@ -100,16 +100,12 @@ jobs:
 
       - name: Restore complete checkout history without listing refs
         shell: bash
-        timeout-minutes: 5
+        timeout-minutes: 7
         env:
           EXPECTED_CHECKOUT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           checked_out_sha="$(git rev-parse HEAD 2>/dev/null)"
-          fetch_args=()
-          if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
-            fetch_args+=(--unshallow)
-          fi
           selected_fetch="$checked_out_sha"
           if [ -n "${EXPECTED_SELECTED_PULL_REF:-}" ]; then
             if [[ ! "$EXPECTED_SELECTED_PULL_REF" =~ ^refs/pull/[0-9]+/head$ ]]; then
@@ -118,11 +114,25 @@ jobs:
             fi
             selected_fetch="+$EXPECTED_SELECTED_PULL_REF:refs/remotes/origin/selected-pull"
           fi
-          if ! git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
-            '+refs/heads/main:refs/remotes/origin/main' \
-            '+refs/heads/production:refs/remotes/origin/production' \
-            '+refs/tags/*:refs/tags/*' \
-            "$selected_fetch" >/dev/null 2>&1; then
+          # A fetch occasionally stalls on GitHub's side; a normal one takes
+          # about a minute. Bound each attempt and try again a few times.
+          fetched=false
+          for attempt in 1 2 3; do
+            fetch_args=()
+            if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
+              fetch_args+=(--unshallow)
+            fi
+            if timeout --kill-after=10s 120s git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
+              '+refs/heads/main:refs/remotes/origin/main' \
+              '+refs/heads/production:refs/remotes/origin/production' \
+              '+refs/tags/*:refs/tags/*' \
+              "$selected_fetch" >/dev/null 2>&1; then
+              fetched=true
+              break
+            fi
+            echo "::warning::Repository history fetch attempt $attempt failed or stalled"
+          done
+          if [ "$fetched" != true ]; then
             echo "::error::Could not restore complete repository history"
             exit 1
           fi
@@ -235,7 +245,7 @@ jobs:
       !(needs.batch-receipt.result == 'success' && (needs.batch-receipt.outputs.kind == 'attested' || needs.batch-receipt.outputs.kind == 'intermediate')) &&
       !startsWith(github.event.head_commit.message, 'chore: version packages') &&
       !contains(github.event.head_commit.message, 'changeset-release/main') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       actions: write # cancel this run
@@ -265,7 +275,7 @@ jobs:
   batch-receipt:
     name: Batch receipt
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -280,7 +290,7 @@ jobs:
       tree: ${{ steps.receipt.outputs.tree }}
       final_sha: ${{ steps.receipt.outputs.final_sha }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # A batch lands at most maxBatch members on its base.
           fetch-depth: 32
@@ -293,7 +303,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: bun scripts/ci/batch-receipt.ts
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: batch-receipt-${{ github.sha }}
           path: batch-receipt.json
@@ -304,8 +314,8 @@ jobs:
     name: Explain change impact
     needs: [automation-admission, main-ci-cadence, batch-receipt]
     if: ${{ !cancelled() && needs.main-ci-cadence.result != 'failure' && !(needs.batch-receipt.result == 'success' && needs.batch-receipt.outputs.kind == 'intermediate') && !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 17
+    runs-on: ubuntu-24.04
+    timeout-minutes: 19
     outputs:
       attested: ${{ steps.receipt.outputs.attested }}
       batch_run_id: ${{ steps.receipt.outputs.batch_run_id }}
@@ -328,7 +338,7 @@ jobs:
       browser_lane_matrix: ${{ steps.plan.outputs.browser_lane_matrix }}
     steps:
       - name: Check out exact candidate
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 1
@@ -336,17 +346,13 @@ jobs:
 
       - name: Restore complete checkout history without listing refs
         shell: bash
-        timeout-minutes: 5
+        timeout-minutes: 7
         env:
           EXPECTED_CHECKOUT_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
           EXPECTED_SELECTED_PULL_REF: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number) || '' }}
         run: |
           set -euo pipefail
           checked_out_sha="$(git rev-parse HEAD 2>/dev/null)"
-          fetch_args=()
-          if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
-            fetch_args+=(--unshallow)
-          fi
           selected_fetch="$checked_out_sha"
           if [ -n "${EXPECTED_SELECTED_PULL_REF:-}" ]; then
             if [[ ! "$EXPECTED_SELECTED_PULL_REF" =~ ^refs/pull/[0-9]+/head$ ]]; then
@@ -355,11 +361,25 @@ jobs:
             fi
             selected_fetch="+$EXPECTED_SELECTED_PULL_REF:refs/remotes/origin/selected-pull"
           fi
-          if ! git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
-            '+refs/heads/main:refs/remotes/origin/main' \
-            '+refs/heads/production:refs/remotes/origin/production' \
-            '+refs/tags/*:refs/tags/*' \
-            "$selected_fetch" >/dev/null 2>&1; then
+          # A fetch occasionally stalls on GitHub's side; a normal one takes
+          # about a minute. Bound each attempt and try again a few times.
+          fetched=false
+          for attempt in 1 2 3; do
+            fetch_args=()
+            if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
+              fetch_args+=(--unshallow)
+            fi
+            if timeout --kill-after=10s 120s git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
+              '+refs/heads/main:refs/remotes/origin/main' \
+              '+refs/heads/production:refs/remotes/origin/production' \
+              '+refs/tags/*:refs/tags/*' \
+              "$selected_fetch" >/dev/null 2>&1; then
+              fetched=true
+              break
+            fi
+            echo "::warning::Repository history fetch attempt $attempt failed or stalled"
+          done
+          if [ "$fetched" != true ]; then
             echo "::error::Could not restore complete repository history"
             exit 1
           fi
@@ -522,7 +542,7 @@ jobs:
           mv ci-profile/dependencies.json.tmp ci-profile/dependencies.json
 
       - name: Upload exact impact plan
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ci-impact-plan
           path: impact-plan.json
@@ -531,7 +551,7 @@ jobs:
 
       - name: Upload dependency resource profile
         if: ${{ failure() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ci-profile-dependencies
           path: ci-profile/dependencies.json
@@ -542,11 +562,11 @@ jobs:
     name: Source and type contracts
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') && needs.plan.outputs.attested != 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
       - name: Check out repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 1
@@ -554,17 +574,13 @@ jobs:
 
       - name: Restore complete checkout history without listing refs
         shell: bash
-        timeout-minutes: 5
+        timeout-minutes: 7
         env:
           EXPECTED_CHECKOUT_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
           EXPECTED_SELECTED_PULL_REF: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number) || '' }}
         run: |
           set -euo pipefail
           checked_out_sha="$(git rev-parse HEAD 2>/dev/null)"
-          fetch_args=()
-          if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
-            fetch_args+=(--unshallow)
-          fi
           selected_fetch="$checked_out_sha"
           if [ -n "${EXPECTED_SELECTED_PULL_REF:-}" ]; then
             if [[ ! "$EXPECTED_SELECTED_PULL_REF" =~ ^refs/pull/[0-9]+/head$ ]]; then
@@ -573,11 +589,25 @@ jobs:
             fi
             selected_fetch="+$EXPECTED_SELECTED_PULL_REF:refs/remotes/origin/selected-pull"
           fi
-          if ! git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
-            '+refs/heads/main:refs/remotes/origin/main' \
-            '+refs/heads/production:refs/remotes/origin/production' \
-            '+refs/tags/*:refs/tags/*' \
-            "$selected_fetch" >/dev/null 2>&1; then
+          # A fetch occasionally stalls on GitHub's side; a normal one takes
+          # about a minute. Bound each attempt and try again a few times.
+          fetched=false
+          for attempt in 1 2 3; do
+            fetch_args=()
+            if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
+              fetch_args+=(--unshallow)
+            fi
+            if timeout --kill-after=10s 120s git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
+              '+refs/heads/main:refs/remotes/origin/main' \
+              '+refs/heads/production:refs/remotes/origin/production' \
+              '+refs/tags/*:refs/tags/*' \
+              "$selected_fetch" >/dev/null 2>&1; then
+              fetched=true
+              break
+            fi
+            echo "::warning::Repository history fetch attempt $attempt failed or stalled"
+          done
+          if [ "$fetched" != true ]; then
             echo "::error::Could not restore complete repository history"
             exit 1
           fi
@@ -625,7 +655,7 @@ jobs:
         run: bun scripts/generate-site-browser-runtime.ts --check
 
       - name: Download exact impact plan
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ci-impact-plan
           path: ${{ runner.temp }}/ci-impact-plan
@@ -736,7 +766,7 @@ jobs:
 
       - name: Upload source-contract resource profiles
         if: ${{ failure() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ci-profile-source-contracts
           path: |
@@ -749,7 +779,7 @@ jobs:
     name: Unit tests (shard ${{ matrix.number }}/${{ matrix.total }})
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.unit_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') && needs.plan.outputs.attested != 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
       # Finish independent shards so one failure cannot hide other regressions.
@@ -758,7 +788,7 @@ jobs:
         include: ${{ fromJSON(needs.plan.outputs.unit_matrix) }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 1
@@ -766,17 +796,13 @@ jobs:
 
       - name: Restore complete checkout history without listing refs
         shell: bash
-        timeout-minutes: 5
+        timeout-minutes: 7
         env:
           EXPECTED_CHECKOUT_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
           EXPECTED_SELECTED_PULL_REF: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number) || '' }}
         run: |
           set -euo pipefail
           checked_out_sha="$(git rev-parse HEAD 2>/dev/null)"
-          fetch_args=()
-          if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
-            fetch_args+=(--unshallow)
-          fi
           selected_fetch="$checked_out_sha"
           if [ -n "${EXPECTED_SELECTED_PULL_REF:-}" ]; then
             if [[ ! "$EXPECTED_SELECTED_PULL_REF" =~ ^refs/pull/[0-9]+/head$ ]]; then
@@ -785,11 +811,25 @@ jobs:
             fi
             selected_fetch="+$EXPECTED_SELECTED_PULL_REF:refs/remotes/origin/selected-pull"
           fi
-          if ! git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
-            '+refs/heads/main:refs/remotes/origin/main' \
-            '+refs/heads/production:refs/remotes/origin/production' \
-            '+refs/tags/*:refs/tags/*' \
-            "$selected_fetch" >/dev/null 2>&1; then
+          # A fetch occasionally stalls on GitHub's side; a normal one takes
+          # about a minute. Bound each attempt and try again a few times.
+          fetched=false
+          for attempt in 1 2 3; do
+            fetch_args=()
+            if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
+              fetch_args+=(--unshallow)
+            fi
+            if timeout --kill-after=10s 120s git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
+              '+refs/heads/main:refs/remotes/origin/main' \
+              '+refs/heads/production:refs/remotes/origin/production' \
+              '+refs/tags/*:refs/tags/*' \
+              "$selected_fetch" >/dev/null 2>&1; then
+              fetched=true
+              break
+            fi
+            echo "::warning::Repository history fetch attempt $attempt failed or stalled"
+          done
+          if [ "$fetched" != true ]; then
             echo "::error::Could not restore complete repository history"
             exit 1
           fi
@@ -830,7 +870,7 @@ jobs:
         run: bun packages/testing/src/acquisition-diagnostics.ts -- bun install --frozen-lockfile
 
       - name: Download exact impact plan
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ci-impact-plan
 
@@ -849,7 +889,7 @@ jobs:
 
       - name: Upload unit resource profile
         if: ${{ failure() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ci-profile-unit-${{ matrix.number }}
           path: ci-profile/unit-${{ matrix.number }}.json
@@ -860,7 +900,7 @@ jobs:
     name: Real-service shard ${{ matrix.number }}/${{ matrix.total }}
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.integration_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') && needs.plan.outputs.attested != 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     strategy:
       fail-fast: true
@@ -868,7 +908,7 @@ jobs:
         include: ${{ fromJSON(needs.plan.outputs.integration_matrix) }}
     steps:
       - name: Check out exact candidate
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
@@ -882,7 +922,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Download exact impact plan
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ci-impact-plan
 
@@ -899,7 +939,7 @@ jobs:
 
       - name: Upload integration resource profile
         if: ${{ failure() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ci-profile-integration-${{ matrix.number }}
           path: |
@@ -908,105 +948,33 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  # The E2E and browser lanes live in reusable workflows so PR CI (pr-ci.yml)
+  # runs exactly the same jobs for a PR's impacted subset.
   e2e-shards:
-    name: Impacted E2E shard ${{ matrix.number }}/${{ matrix.total }}
+    name: Impacted E2E
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.e2e_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') && needs.plan.outputs.attested != 'true' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 35
-    strategy:
-      fail-fast: true
-      matrix:
-        include: ${{ fromJSON(needs.plan.outputs.e2e_matrix) }}
-    steps:
-      - name: Check out exact candidate
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
-          persist-credentials: false
-
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-        with:
-          bun-version-file: .bun-version
-
-      - name: Cache Bun dependencies
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.bun/install/cache
-          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-          restore-keys: |
-            bun-${{ runner.os }}-
-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Download exact impact plan
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: ci-impact-plan
-
-      - name: Stabilize Ubuntu package downloads
-        run: |
-          for source_file in \
-            /etc/apt/apt-mirrors.txt \
-            /etc/apt/sources.list \
-            /etc/apt/sources.list.d/ubuntu.sources; do
-            if [[ -f "$source_file" ]]; then
-              sudo sed -i \
-                -e 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
-                -e 's|https://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
-                "$source_file"
-            fi
-          done
-          printf '%s\n' \
-            'Acquire::Retries "3";' \
-            'Acquire::http::Timeout "30";' \
-            'Acquire::https::Timeout "30";' \
-            | sudo tee /etc/apt/apt.conf.d/99opengeni-ci-network >/dev/null
-
-      # Firefox is included because the impact plan can select the artifact
-      # browser E2E tests (artifact-spreadsheet-*.browser.e2e.ts). WebKit is
-      # included because multi-engine product E2E files such as the Gateway
-      # settings acceptance launch it directly. A Chromium-only install makes
-      # either class fail before exercising application behavior.
-      - name: Install pinned browser runtimes
-        uses: ./.github/actions/playwright-browsers
-        timeout-minutes: 17
-        with:
-          browsers: chromium firefox webkit
-
-      - name: Run exactly the impacted E2E tests
-        timeout-minutes: 13
-        run: >-
-          bun scripts/ci/profile-command.ts
-          --name e2e-${{ matrix.number }}
-          --output ci-profile/e2e-${{ matrix.number }}.json
-          --timeout-seconds 720
-          -- bun scripts/ci/run-test-shard.ts --plan impact-plan.json --tier e2e
-          --shard ${{ matrix.index }} --shards ${{ matrix.total }}
-          --file-profile ci-profile/e2e-${{ matrix.number }}-files.json
-
-      - name: Upload E2E resource profile on failure
-        if: ${{ failure() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: ci-profile-e2e-${{ matrix.number }}
-          path: |
-            ci-profile/e2e-${{ matrix.number }}.json
-            ci-profile/e2e-${{ matrix.number }}-files.json
-          if-no-files-found: ignore
-          retention-days: 14
+    uses: ./.github/workflows/ci-e2e-shards.yml
+    with:
+      ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
+      plan_artifact: ci-impact-plan
+      matrix: ${{ needs.plan.outputs.e2e_matrix }}
 
   test-suite:
     name: Real-service and recovery tests
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') && needs.plan.outputs.attested != 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
+      - name: Room on the runner
+        run: |
+          # The real workspace capture builds the sandbox image, which can fill the
+          # hosted runner's disk; the runner image carries toolchains this job never uses.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
       - name: Check out repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 1
@@ -1014,17 +982,13 @@ jobs:
 
       - name: Restore complete checkout history without listing refs
         shell: bash
-        timeout-minutes: 5
+        timeout-minutes: 7
         env:
           EXPECTED_CHECKOUT_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
           EXPECTED_SELECTED_PULL_REF: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number) || '' }}
         run: |
           set -euo pipefail
           checked_out_sha="$(git rev-parse HEAD 2>/dev/null)"
-          fetch_args=()
-          if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
-            fetch_args+=(--unshallow)
-          fi
           selected_fetch="$checked_out_sha"
           if [ -n "${EXPECTED_SELECTED_PULL_REF:-}" ]; then
             if [[ ! "$EXPECTED_SELECTED_PULL_REF" =~ ^refs/pull/[0-9]+/head$ ]]; then
@@ -1033,11 +997,25 @@ jobs:
             fi
             selected_fetch="+$EXPECTED_SELECTED_PULL_REF:refs/remotes/origin/selected-pull"
           fi
-          if ! git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
-            '+refs/heads/main:refs/remotes/origin/main' \
-            '+refs/heads/production:refs/remotes/origin/production' \
-            '+refs/tags/*:refs/tags/*' \
-            "$selected_fetch" >/dev/null 2>&1; then
+          # A fetch occasionally stalls on GitHub's side; a normal one takes
+          # about a minute. Bound each attempt and try again a few times.
+          fetched=false
+          for attempt in 1 2 3; do
+            fetch_args=()
+            if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
+              fetch_args+=(--unshallow)
+            fi
+            if timeout --kill-after=10s 120s git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
+              '+refs/heads/main:refs/remotes/origin/main' \
+              '+refs/heads/production:refs/remotes/origin/production' \
+              '+refs/tags/*:refs/tags/*' \
+              "$selected_fetch" >/dev/null 2>&1; then
+              fetched=true
+              break
+            fi
+            echo "::warning::Repository history fetch attempt $attempt failed or stalled"
+          done
+          if [ "$fetched" != true ]; then
             echo "::error::Could not restore complete repository history"
             exit 1
           fi
@@ -1106,393 +1084,23 @@ jobs:
             ./apps/worker/test/context-compaction-activity.test.ts
 
   browser-acceptance:
-    name: Browser and visual acceptance (${{ matrix.lane }})
+    name: Browser acceptance
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.browser_lane_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') && needs.plan.outputs.attested != 'true' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 71
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJSON(needs.plan.outputs.browser_lane_matrix) }}
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Restore complete checkout history without listing refs
-        shell: bash
-        timeout-minutes: 5
-        env:
-          EXPECTED_CHECKOUT_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
-          EXPECTED_SELECTED_PULL_REF: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number) || '' }}
-        run: |
-          set -euo pipefail
-          checked_out_sha="$(git rev-parse HEAD 2>/dev/null)"
-          fetch_args=()
-          if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
-            fetch_args+=(--unshallow)
-          fi
-          selected_fetch="$checked_out_sha"
-          if [ -n "${EXPECTED_SELECTED_PULL_REF:-}" ]; then
-            if [[ ! "$EXPECTED_SELECTED_PULL_REF" =~ ^refs/pull/[0-9]+/head$ ]]; then
-              echo "::error::Selected checkout identity changed"
-              exit 1
-            fi
-            selected_fetch="+$EXPECTED_SELECTED_PULL_REF:refs/remotes/origin/selected-pull"
-          fi
-          if ! git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
-            '+refs/heads/main:refs/remotes/origin/main' \
-            '+refs/heads/production:refs/remotes/origin/production' \
-            '+refs/tags/*:refs/tags/*' \
-            "$selected_fetch" >/dev/null 2>&1; then
-            echo "::error::Could not restore complete repository history"
-            exit 1
-          fi
-          if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" != false ] ||
-             [ "$(git rev-parse HEAD 2>/dev/null)" != "$checked_out_sha" ]; then
-            echo "::error::Repository history or source identity changed"
-            exit 1
-          fi
-          if [ -n "${EXPECTED_SELECTED_PULL_REF:-}" ] &&
-             [ "$(git rev-parse refs/remotes/origin/selected-pull 2>/dev/null)" != "$checked_out_sha" ]; then
-            echo "::error::Selected checkout identity changed"
-            exit 1
-          fi
-          if [ -n "${EXPECTED_CHECKOUT_SHA:-}" ] &&
-             [ "$checked_out_sha" != "$EXPECTED_CHECKOUT_SHA" ]; then
-            echo "::error::Selected checkout identity changed"
-            exit 1
-          fi
-          if [ -n "${EXPECTED_CHECKOUT_REF:-}" ] &&
-             [ "$(git rev-parse "$EXPECTED_CHECKOUT_REF" 2>/dev/null)" != "$checked_out_sha" ]; then
-            echo "::error::Selected checkout identity changed"
-            exit 1
-          fi
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-        with:
-          bun-version-file: .bun-version
-
-      - name: Cache Bun dependencies
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.bun/install/cache
-          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-          restore-keys: |
-            bun-${{ runner.os }}-
-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Stabilize Ubuntu package downloads
-        run: |
-          for source_file in \
-            /etc/apt/apt-mirrors.txt \
-            /etc/apt/sources.list \
-            /etc/apt/sources.list.d/ubuntu.sources; do
-            if [[ -f "$source_file" ]]; then
-              sudo sed -i \
-                -e 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
-                -e 's|https://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
-                "$source_file"
-            fi
-          done
-          printf '%s\n' \
-            'Acquire::Retries "3";' \
-            'Acquire::http::Timeout "30";' \
-            'Acquire::https::Timeout "30";' \
-            | sudo tee /etc/apt/apt.conf.d/99opengeni-ci-network >/dev/null
-
-      - name: Install pinned lane browser runtimes
-        uses: ./.github/actions/playwright-browsers
-        timeout-minutes: 17
-        with:
-          browsers: ${{ matrix.lane == 'workbench' && 'chromium firefox webkit' || matrix.lane == 'accounts' && matrix.engine || 'chromium' }}
-
-      - name: Browser account session-set acceptance
-        if: ${{ matrix.lane == 'accounts' }}
-        id: browser_accounts
-        timeout-minutes: 14
-        env:
-          # This lane must prove the migrated owner plus restricted opengeni_app
-          # FORCE-RLS boundary. A missing real database is a hard failure.
-          OPENGENI_REQUIRE_REAL_DB: "1"
-          OPENGENI_ACCOUNT_BROWSER_ENGINE: ${{ matrix.engine }}
-          OPENGENI_ACCOUNT_EVIDENCE_DIR: /tmp/opengeni-account-acceptance
-        run: |
-          bun test --max-concurrency=1 --timeout 180000 \
-            ./packages/db/test/managed-auth-session-sets.test.ts \
-            ./apps/api/test/managed-auth-session-sets.integration.test.ts
-          if [ "$OPENGENI_ACCOUNT_BROWSER_ENGINE" = "chromium" ]; then
-            bun scripts/run-browser-e2e.ts ./test/e2e/browser-account-request-observation.browser.e2e.ts
-          fi
-          bun scripts/run-browser-e2e.ts \
-            ./test/e2e/browser-accounts-acceptance.e2e.ts
-
-      - name: Editable artifact browser acceptance
-        if: ${{ matrix.lane == 'workbench' }}
-        run: |
-          bun scripts/run-browser-e2e.ts \
-            ./test/e2e/artifact-spreadsheet-canvas.browser.e2e.ts \
-            ./test/e2e/artifact-spreadsheet-scroll.browser.e2e.ts \
-            ./test/e2e/artifact-static-renderer.browser.e2e.ts
-
-      - name: Install pinned artifact native toolchain
-        if: ${{ matrix.lane == 'workbench' }}
-        working-directory: packages/artifact-tool/kernel
-        run: |
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          rustup show active-toolchain
-
-      - name: Editable artifact full-stack browser acceptance
-        if: ${{ matrix.lane == 'workbench' }}
-        id: editable_artifact_browser
-        env:
-          OPENGENI_EDITABLE_ARTIFACT_EVIDENCE_DIR: /tmp/opengeni-editable-artifact-evidence
-        run: bun scripts/run-browser-e2e.ts ./test/e2e/editable-artifacts.browser.e2e.ts
-
-      - name: Codex quota and entitlement browser acceptance
-        if: ${{ matrix.lane == 'interaction' }}
-        env:
-          # Human-only redemption recovery and allocator independence require
-          # the real FORCE-RLS/OCC/PostgreSQL boundary; no skipped green path.
-          OPENGENI_REQUIRE_REAL_DB: "1"
-          OPENGENI_CODEX_QUOTA_EVIDENCE_DIR: /tmp/codex-quota-evidence
-        run: bun scripts/run-browser-e2e.ts ./test/e2e/codex-overview.e2e.ts
-
-      - name: Capabilities control-center browser acceptance
-        if: ${{ matrix.lane == 'interaction' }}
-        run: |
-          bun scripts/run-browser-e2e.ts \
-            ./test/e2e/custom-api-control-center.browser.e2e.ts \
-            ./test/e2e/source-packages-control-center.browser.e2e.ts
-
-      - name: Compact session-search header browser acceptance
-        if: ${{ matrix.lane == 'interaction' }}
-        id: session_search_header_browser
-        timeout-minutes: 8
-        env:
-          OPENGENI_REQUIRE_REAL_DB: "1"
-          OPENGENI_SESSION_SEARCH_ARTIFACT_DIR: /tmp/session-search-header-evidence
-        run: >-
-          bun test --max-concurrency=1 --timeout 300000
-          --test-name-pattern 'desktop expanded header keeps icon-only search inline|restores.*focus|mobile result navigation'
-          ./test/e2e/session-search.browser.e2e.ts
-
-      - name: Queue surface browser acceptance
-        if: ${{ matrix.lane == 'interaction' }}
-        id: queue_surface_browser
-        run: bun scripts/run-browser-e2e.ts ./test/e2e/queue-surface.browser.e2e.ts
-
-      - name: Long user-message disclosure browser acceptance
-        if: ${{ matrix.lane == 'interaction' }}
-        run: bun scripts/run-browser-e2e.ts ./test/e2e/user-message-disclosure.browser.e2e.ts
-
-      - name: Timeline pagination and tip-follow browser regressions
-        if: ${{ matrix.lane == 'interaction' }}
-        run: |
-          bun scripts/run-browser-e2e.ts \
-            ./test/e2e/timeline-scroll.browser.e2e.ts \
-            ./test/e2e/timeline-tip-follow.browser.e2e.ts \
-            ./test/e2e/timeline-exchange-fold.browser.e2e.ts
-
-      - name: Public realtime SDK demo browser acceptance
-        if: ${{ matrix.lane == 'interaction' }}
-        env:
-          OPENGENI_REALTIME_DEMO_EVIDENCE_DIR: /tmp/opengeni-realtime-demo-evidence
-        run: bun scripts/run-browser-e2e.ts ./test/e2e/realtime-demo.browser.e2e.ts
-
-      - name: Session pin browser acceptance
-        if: ${{ matrix.lane == 'knowledge' }}
-        id: session_pin_browser
-        # Includes a production web build, real PostgreSQL setup, and 29 serial
-        # browser cases. Runs on 17c5f19e and b8fd5140 passed all 29 cases but
-        # hit the old 6m cap at 362s (337s tests, 25s setup/teardown). Allow
-        # bounded suite headroom without changing individual test deadlines.
-        timeout-minutes: 8
-        env:
-          # This browser gate must fail when its real PostgreSQL boundary is unavailable.
-          OPENGENI_REQUIRE_REAL_DB: "1"
-        run: bun test --max-concurrency=1 --timeout 180000 ./test/e2e/session-pins.browser.e2e.ts
-
-      - name: Responsive knowledge surfaces browser acceptance
-        if: ${{ matrix.lane == 'knowledge' }}
-        id: knowledge_surfaces_browser
-        timeout-minutes: 6
-        env:
-          # This gate traverses the public configured-principal API and must fail
-          # rather than skip when its real PostgreSQL boundary is unavailable.
-          OPENGENI_REQUIRE_REAL_DB: "1"
-        run: bun test --max-concurrency=1 --timeout 300000 ./test/e2e/knowledge-surfaces.browser.e2e.ts
-
-      - name: Organization onboarding lifecycle acceptance
-        if: ${{ matrix.lane == 'onboarding' }}
-        id: organization_onboarding
-        timeout-minutes: 8
-        env:
-          # The owner migration principal, opengeni_app FORCE-RLS boundary, and
-          # durable invitation state are mandatory. A missing database must fail.
-          OPENGENI_REQUIRE_REAL_DB: "1"
-          OPENGENI_ONBOARDING_EVIDENCE_DIR: /tmp/opengeni-onboarding-evidence
-        run: >-
-          bun scripts/run-browser-e2e.ts
-          ./test/e2e/organization-onboarding-acceptance.e2e.ts
-
-      - name: Workbench browser acceptance
-        if: ${{ matrix.lane == 'workbench' }}
-        id: workbench_browser
-        timeout-minutes: 4
-        run: bun test --max-concurrency=1 --timeout 180000 ./test/e2e/workbench.browser.e2e.ts
-
-      - name: Upload browser account acceptance evidence
-        if: >-
-          ${{ always() && matrix.lane == 'accounts' &&
-          (steps.browser_accounts.outcome == 'success' ||
-          steps.browser_accounts.outcome == 'failure') }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: browser-account-acceptance-${{ matrix.engine }}
-          if-no-files-found: error
-          retention-days: 14
-          path: /tmp/opengeni-account-acceptance
-
-      - name: Upload session pin visual evidence
-        # A preceding repository-wide gate may fail before the browser command
-        # starts. In that case there are no screenshots to upload, and turning
-        # that skipped command into a second artifact failure obscures the real
-        # cause. Once the browser gate actually runs, preserve its visual
-        # evidence on both green and red outcomes; a failure report is needed
-        # to diagnose a browser regression just as much as a passing capture.
-        # `if-no-files-found: error` remains mandatory in either case.
-        if: >-
-          ${{ always() &&
-          matrix.lane == 'knowledge' &&
-          (steps.session_pin_browser.outcome == 'success' ||
-          steps.session_pin_browser.outcome == 'failure') }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: sessionpin-session-pin-visual-evidence
-          if-no-files-found: error
-          retention-days: 14
-          path: |
-            /tmp/sessionpin-session-pin-desktop-light.png
-            /tmp/sessionpin-session-pin-desktop-dark.png
-            /tmp/sessionpin-session-pin-mobile-light.png
-            /tmp/sessionpin-session-pin-mobile-dark.png
-            /tmp/sessionpin-session-pin-mobile-375-light.png
-            /tmp/sessionpin-session-pin-mobile-375-dark.png
-
-      - name: Upload compact session-search header evidence
-        if: >-
-          ${{ always() && matrix.lane == 'interaction' &&
-          (steps.session_search_header_browser.outcome == 'success' ||
-          steps.session_search_header_browser.outcome == 'failure') }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: session-search-header-evidence
-          if-no-files-found: error
-          retention-days: 14
-          path: /tmp/session-search-header-evidence
-
-      - name: Upload Codex quota visual evidence
-        if: ${{ always() && matrix.lane == 'interaction' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: codex-quota-codex-quota-entitlement-visual-evidence
-          if-no-files-found: error
-          retention-days: 14
-          path: |
-            /tmp/codex-quota-evidence/codex-quota-desktop-light.png
-            /tmp/codex-quota-evidence/codex-quota-desktop-dark.png
-            /tmp/codex-quota-evidence/codex-quota-mobile-light.png
-            /tmp/codex-quota-evidence/codex-quota-mobile-dark.png
-
-      - name: Upload responsive knowledge-surface evidence
-        if: ${{ always() && matrix.lane == 'knowledge' && (steps.knowledge_surfaces_browser.outcome == 'success' || steps.knowledge_surfaces_browser.outcome == 'failure') }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: responsive-knowledge-surface-evidence
-          if-no-files-found: error
-          retention-days: 14
-          path: |
-            /tmp/knowledge-surfaces-320-light-memory.png
-            /tmp/knowledge-surfaces-320-dark-memory.png
-            /tmp/knowledge-surfaces-375-light-variable-sets.png
-            /tmp/knowledge-surfaces-375-dark-variable-sets.png
-            /tmp/knowledge-surfaces-768-light-documents.png
-            /tmp/knowledge-surfaces-768-dark-documents.png
-            /tmp/knowledge-surfaces-desktop-light-memory.png
-            /tmp/knowledge-surfaces-desktop-dark-memory.png
-            /tmp/agent-knowledge-320-light-overview.png
-            /tmp/agent-knowledge-375-dark-overview.png
-            /tmp/agent-knowledge-768-light-overview.png
-            /tmp/agent-knowledge-desktop-dark-overview.png
-
-      - name: Upload organization onboarding evidence
-        if: >-
-          ${{ always() &&
-          matrix.lane == 'onboarding' &&
-          (steps.organization_onboarding.outcome == 'success' ||
-          steps.organization_onboarding.outcome == 'failure') }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: organization-onboarding-acceptance-evidence
-          if-no-files-found: error
-          retention-days: 14
-          path: |
-            /tmp/opengeni-onboarding-evidence/organization-onboarding-evidence.json
-            /tmp/opengeni-onboarding-evidence/onboarding-owner-desktop-1440.png
-            /tmp/opengeni-onboarding-evidence/onboarding-setup-mobile-390.png
-            /tmp/opengeni-onboarding-evidence/onboarding-registered-mobile-320.png
-            /tmp/opengeni-onboarding-evidence/contrast-failure.json
-            /tmp/opengeni-onboarding-evidence/contrast-failure.png
-
-      - name: Upload workbench visual evidence
-        if: >-
-          ${{ always() &&
-          matrix.lane == 'workbench' &&
-          (steps.workbench_browser.outcome == 'success' ||
-          steps.workbench_browser.outcome == 'failure') }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: workbench-visual-evidence
-          if-no-files-found: error
-          retention-days: 14
-          path: |
-            /tmp/workbench-mobile-dark-dense.png
-            /tmp/workbench-tablet-light-offline.png
-            /tmp/workbench-desktop-dark-changes.png
-            /tmp/workbench-desktop-light-files.png
-
-      - name: Upload editable artifact visual evidence
-        if: >-
-          ${{ always() &&
-          matrix.lane == 'workbench' &&
-          (steps.editable_artifact_browser.outcome == 'success' ||
-          steps.editable_artifact_browser.outcome == 'failure') }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: editable-artifact-visual-evidence
-          if-no-files-found: error
-          retention-days: 14
-          path: |
-            /tmp/opengeni-editable-artifact-evidence/editable-artifact-document-dark.png
-            /tmp/opengeni-editable-artifact-evidence/editable-artifact-spreadsheet-dark.png
-            /tmp/opengeni-editable-artifact-evidence/editable-artifact-presentation-dark.png
+    uses: ./.github/workflows/ci-browser-acceptance.yml
+    with:
+      ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
+      matrix: ${{ needs.plan.outputs.browser_lane_matrix }}
 
   package-contracts:
     name: Package and bundle contracts
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.build_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') && needs.plan.outputs.attested != 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 55
     steps:
       - name: Check out repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 1
@@ -1500,17 +1108,13 @@ jobs:
 
       - name: Restore complete checkout history without listing refs
         shell: bash
-        timeout-minutes: 5
+        timeout-minutes: 7
         env:
           EXPECTED_CHECKOUT_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
           EXPECTED_SELECTED_PULL_REF: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number) || '' }}
         run: |
           set -euo pipefail
           checked_out_sha="$(git rev-parse HEAD 2>/dev/null)"
-          fetch_args=()
-          if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
-            fetch_args+=(--unshallow)
-          fi
           selected_fetch="$checked_out_sha"
           if [ -n "${EXPECTED_SELECTED_PULL_REF:-}" ]; then
             if [[ ! "$EXPECTED_SELECTED_PULL_REF" =~ ^refs/pull/[0-9]+/head$ ]]; then
@@ -1519,11 +1123,25 @@ jobs:
             fi
             selected_fetch="+$EXPECTED_SELECTED_PULL_REF:refs/remotes/origin/selected-pull"
           fi
-          if ! git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
-            '+refs/heads/main:refs/remotes/origin/main' \
-            '+refs/heads/production:refs/remotes/origin/production' \
-            '+refs/tags/*:refs/tags/*' \
-            "$selected_fetch" >/dev/null 2>&1; then
+          # A fetch occasionally stalls on GitHub's side; a normal one takes
+          # about a minute. Bound each attempt and try again a few times.
+          fetched=false
+          for attempt in 1 2 3; do
+            fetch_args=()
+            if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
+              fetch_args+=(--unshallow)
+            fi
+            if timeout --kill-after=10s 120s git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
+              '+refs/heads/main:refs/remotes/origin/main' \
+              '+refs/heads/production:refs/remotes/origin/production' \
+              '+refs/tags/*:refs/tags/*' \
+              "$selected_fetch" >/dev/null 2>&1; then
+              fetched=true
+              break
+            fi
+            echo "::warning::Repository history fetch attempt $attempt failed or stalled"
+          done
+          if [ "$fetched" != true ]; then
             echo "::error::Could not restore complete repository history"
             exit 1
           fi
@@ -1564,7 +1182,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Download exact impact plan
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ci-impact-plan
 
@@ -1627,7 +1245,7 @@ jobs:
 
       - name: Retain failed canonical modality WASM rebuild
         if: ${{ failure() && steps.modality-wasm-rebuild.outcome == 'failure' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ci-canonical-modality-wasm-${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
           path: .opengeni/ci-canonical-modality-wasm
@@ -1674,7 +1292,7 @@ jobs:
       # Keep workflow-owned regressions with their own immutable tooling tree;
       # never skip them or replace the candidate when it predates these files.
       - name: Check out registry export guard tooling
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.workflow_sha }}
           path: .ci/registry-export-guard
@@ -1747,7 +1365,7 @@ jobs:
 
       - name: Upload package-build resource profile
         if: ${{ failure() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ci-profile-packages
           path: |
@@ -1760,13 +1378,13 @@ jobs:
     name: Real Chromium browser controller
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.browserd_real_e2e == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') && needs.plan.outputs.attested != 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # 17m browser installation + 2m recovery + 13m headless + 5m headed,
     # with 3m for checkout, dependencies and cleanup.
     timeout-minutes: 40
     steps:
       - name: Check out exact candidate
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
@@ -1832,7 +1450,7 @@ jobs:
     # result here canary admission refuses it (docs/merge-batcher.md).
     needs: [plan, source-contracts, unit-shards, integration-shards, e2e-shards, test-suite, browser-acceptance, browserd-real-e2e, package-contracts, deployment, artifact-runtime, images, batch-receipt]
     if: ${{ always() && !(needs.batch-receipt.result == 'success' && needs.batch-receipt.outputs.kind == 'intermediate') && !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Require successful impact planning before candidate execution
@@ -1841,7 +1459,7 @@ jobs:
         run: test "$PLAN_RESULT" = "success"
 
       - name: Check out exact aggregate source
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
@@ -1889,11 +1507,11 @@ jobs:
     # Every image-producing source needs the deployment receipt, including a
     # docs-only main push. Staging validates it before importing these images.
     if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.plan.outputs.mode != 'docs' || needs.plan.outputs.bake_images == 'true') && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Check out repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
@@ -1940,7 +1558,13 @@ jobs:
             exit 1
           fi
           helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-          helm dependency build deploy/observability
+          # Chart downloads from GitHub releases occasionally fail for a moment.
+          for attempt in 1 2 3; do
+            helm dependency build deploy/observability && break
+            if [ "$attempt" = 3 ]; then exit 1; fi
+            echo "::warning::helm dependency build attempt $attempt failed; retrying"
+            sleep $((attempt * 10))
+          done
           helm lint deploy/observability
           helm template opengeni-observability deploy/observability \
             --namespace observability \
@@ -2147,13 +1771,13 @@ jobs:
     # final aggregates still require every lane and image.
     needs: [automation-admission, plan, source-contracts, unit-shards, integration-shards, e2e-shards, test-suite, browser-acceptance, browserd-real-e2e, package-contracts, deployment, artifact-runtime]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && !startsWith(github.ref, 'refs/heads/batch/') && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
     steps:
       - name: Check out exact aggregate source
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
@@ -2203,8 +1827,8 @@ jobs:
     # succeeded; other events still build the image after validation settles.
     environment: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'public-release' || 'ci-build' }}
     needs: [automation-admission, plan, artifact-runtime, release-image-validation]
-    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') && (github.event_name != 'push' || github.ref != 'refs/heads/main' || needs.release-image-validation.result == 'success') }}
-    runs-on: ubuntu-latest
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && !startsWith(github.ref, 'refs/heads/batch/') && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') && (github.event_name != 'push' || github.ref != 'refs/heads/main' || needs.release-image-validation.result == 'success') }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
       contents: read
@@ -2213,13 +1837,13 @@ jobs:
       api_digest: ${{ steps.api_image.outputs.digest }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       - name: Download exact artifact runtime inputs
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ needs.artifact-runtime.outputs.artifact_name }}
           path: .release/artifact-runtime
@@ -2231,7 +1855,13 @@ jobs:
       - name: Install Rust toolchain for canary agent bake
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         run: |
-          rustup toolchain install 1.97.1 --profile minimal --no-self-update
+          # The toolchain download occasionally fails to reach static.rust-lang.org.
+          for attempt in 1 2 3; do
+            rustup toolchain install 1.97.1 --profile minimal --no-self-update && break
+            if [ "$attempt" = 3 ]; then exit 1; fi
+            echo "::warning::rustup toolchain install attempt $attempt failed; retrying"
+            sleep $((attempt * 10))
+          done
           rustup default 1.97.1
 
       - name: Install Bun for canary interaction bundle
@@ -2275,14 +1905,26 @@ jobs:
             done
           done
 
+      # The signed binaries are staged under agent/install/baked. The cargo
+      # build tree (four release builds) and SDKs this job never uses would
+      # otherwise leave the two-architecture image build without disk.
+      - name: Free runner disk before the image build
+        run: |
+          sudo rm -rf agent/target "$HOME/.cargo/registry" \
+            /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
       - name: Set up QEMU
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+        with:
+          cleanup: false # the hosted runner is discarded; removing the builder took minutes
 
       - name: Log in to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -2290,12 +1932,12 @@ jobs:
 
       - name: Build API image
         id: api_image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: ./.github/actions/docker-build-retry
         with:
           context: .
           file: docker/opengeni.Dockerfile
           target: api
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
           push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           tags: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('ghcr.io/cloudgeni-ai/opengeni-api:canary-sha-{0}', github.sha) || 'opengeni-api:ci' }}
           labels: |
@@ -2306,11 +1948,65 @@ jobs:
           build-args: |
             OPENGENI_SERVER_VERSION=sha-${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
+  # A batch candidate has no release approval to order (release-image-validation
+  # skips it), but a job starts only once every job it needs has settled, even
+  # one that is skipped, so api-image would wait for the last test lane. The
+  # batch builds the same API image here as soon as the artifact runtime is
+  # ready; the final aggregates still require every lane and image.
+  batch-api-image:
+    name: Build batch API workload image
+    environment: ci-build
+    needs: [plan, artifact-runtime]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/batch/') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Download exact artifact runtime inputs
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.artifact-runtime.outputs.artifact_name }}
+          path: .release/artifact-runtime
+
+      - name: Free runner disk before the image build
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+        with:
+          cleanup: false # the hosted runner is discarded; removing the builder took minutes
+
+      - name: Build API image
+        id: api_image
+        uses: ./.github/actions/docker-build-retry
+        with:
+          context: .
+          file: docker/opengeni.Dockerfile
+          target: api
+          platforms: linux/amd64
+          push: false
+          tags: opengeni-api:ci
+          labels: |
+            org.opencontainers.image.revision=${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=gha,scope=opengeni-ci-api
+          build-args: |
+            OPENGENI_SERVER_VERSION=sha-${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
   worker-image:
     name: Build worker workload image
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     permissions:
       contents: read
@@ -2318,20 +2014,29 @@ jobs:
     outputs:
       worker_digest: ${{ steps.worker_image.outputs.digest }}
     steps:
+      - name: Room on the runner
+        run: |
+          # The worker image compiles Rust and can fill the hosted runner's disk;
+          # the runner image carries toolchains this job never uses.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
       - name: Check out repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       - name: Set up QEMU
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+        with:
+          cleanup: false # the hosted runner is discarded; removing the builder took minutes
 
       - name: Log in to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -2339,12 +2044,12 @@ jobs:
 
       - name: Build worker image
         id: worker_image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: ./.github/actions/docker-build-retry
         with:
           context: .
           file: docker/opengeni.Dockerfile
           target: worker
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
           push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           tags: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('ghcr.io/cloudgeni-ai/opengeni-worker:canary-sha-{0}', github.sha) || 'opengeni-worker:ci' }}
           labels: |
@@ -2359,7 +2064,7 @@ jobs:
     name: Build web workload image
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     permissions:
       contents: read
@@ -2368,16 +2073,18 @@ jobs:
       web_digest: ${{ steps.web_image.outputs.digest }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+        with:
+          cleanup: false # the hosted runner is discarded; removing the builder took minutes
 
       - name: Log in to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -2385,7 +2092,7 @@ jobs:
 
       - name: Build web image
         id: web_image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: ./.github/actions/docker-build-retry
         with:
           context: .
           file: docker/opengeni.Dockerfile
@@ -2406,7 +2113,7 @@ jobs:
     name: Build artifact materializer workload image
     needs: [automation-admission, plan, artifact-runtime]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     permissions:
       contents: read
@@ -2415,25 +2122,28 @@ jobs:
       artifact_materializer_digest: ${{ steps.artifact_materializer_image.outputs.digest }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       - name: Download exact artifact runtime inputs
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ needs.artifact-runtime.outputs.artifact_name }}
           path: .release/artifact-runtime
 
       - name: Set up QEMU
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+        with:
+          cleanup: false # the hosted runner is discarded; removing the builder took minutes
 
       - name: Log in to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -2441,12 +2151,12 @@ jobs:
 
       - name: Build artifact materializer image
         id: artifact_materializer_image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: ./.github/actions/docker-build-retry
         with:
           context: .
           file: docker/opengeni.Dockerfile
           target: artifact-materializer
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
           push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           tags: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('ghcr.io/cloudgeni-ai/opengeni-artifact-materializer:canary-sha-{0}', github.sha) || 'opengeni-artifact-materializer:ci' }}
           labels: |
@@ -2461,7 +2171,7 @@ jobs:
     name: Build artifact outbox dispatcher workload image
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     permissions:
       contents: read
@@ -2470,19 +2180,22 @@ jobs:
       artifact_outbox_dispatcher_digest: ${{ steps.artifact_outbox_dispatcher_image.outputs.digest }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       - name: Set up QEMU
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+        with:
+          cleanup: false # the hosted runner is discarded; removing the builder took minutes
 
       - name: Log in to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -2490,12 +2203,12 @@ jobs:
 
       - name: Build artifact outbox dispatcher image
         id: artifact_outbox_dispatcher_image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: ./.github/actions/docker-build-retry
         with:
           context: .
           file: docker/opengeni.Dockerfile
           target: artifact-outbox-dispatcher
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
           push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           tags: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('ghcr.io/cloudgeni-ai/opengeni-artifact-outbox-dispatcher:canary-sha-{0}', github.sha) || 'opengeni-artifact-outbox-dispatcher:ci' }}
           labels: |
@@ -2510,7 +2223,7 @@ jobs:
     name: Build relay workload image
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -2519,19 +2232,22 @@ jobs:
       relay_digest: ${{ steps.relay_image.outputs.digest }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       - name: Set up QEMU
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+        with:
+          cleanup: false # the hosted runner is discarded; removing the builder took minutes
 
       - name: Log in to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -2539,11 +2255,11 @@ jobs:
 
       - name: Build relay image
         id: relay_image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: ./.github/actions/docker-build-retry
         with:
           context: agent
           file: agent/crates/opengeni-relay/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
           push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           tags: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('ghcr.io/cloudgeni-ai/opengeni-relay:canary-sha-{0}', github.sha) || 'opengeni-relay:ci' }}
           labels: |
@@ -2551,49 +2267,95 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
           cache-from: type=gha,scope=opengeni-ci-relay
           cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,mode=min,scope=opengeni-ci-relay,ignore-error=true' || '' }}
+  # The sandbox images are the longest image builds, and the artifact runtime
+  # is only their last few layers. They start with the other lanes, build every
+  # layer that does not need the runtime while artifact-runtime is still
+  # producing it, then wait for its run-local artifact (uploaded only once
+  # artifact-runtime proved it) and finish the build from the warm cache.
   sandbox-image:
     name: Build headless sandbox workload image
-    needs: [automation-admission, plan, artifact-runtime]
-    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+    needs: [automation-admission, plan]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.plan.outputs.artifact_runtime_required == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
     permissions:
+      actions: read # find this run's artifact runtime inputs
       contents: read
       packages: write # push the immutable exact-main-SHA canary image; PR and automation runs remain build-only
     outputs:
       sandbox_digest: ${{ steps.sandbox_image.outputs.digest }}
     steps:
+      - name: Room on the runner
+        run: |
+          # The sandbox image can fill the hosted runner's disk; the runner image carries
+          # toolchains this job never uses.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
       - name: Check out repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-      - name: Download exact artifact runtime inputs
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: ${{ needs.artifact-runtime.outputs.artifact_name }}
-          path: .release/artifact-runtime
       - name: Set up QEMU
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+        with:
+          cleanup: false # the hosted runner is discarded; removing the builder took minutes
 
       - name: Log in to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build headless sandbox image
-        id: sandbox_image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      - name: Build headless sandbox layers before the runtime inputs exist
+        uses: ./.github/actions/docker-build-retry
+        env:
+          DOCKER_BUILD_SUMMARY: false
+          DOCKER_BUILD_RECORD_UPLOAD: false
         with:
           context: .
           file: docker/sandbox.Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
           build-args: OPENGENI_SOURCE_SHA=${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          outputs: type=cacheonly
+          provenance: false
+          cache-from: type=gha,scope=opengeni-ci-sandbox
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Wait for exact artifact runtime inputs
+        id: runtime_inputs
+        timeout-minutes: 60
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: bun scripts/ci/wait-for-run-artifact.ts --name "artifact-runtime-containers-$SOURCE_SHA" --producer "Build exact artifact runtime inputs"
+
+      - name: Download exact artifact runtime inputs
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ steps.runtime_inputs.outputs.artifact_name }}
+          path: ${{ runner.temp }}/artifact-runtime
+
+      - name: Build headless sandbox image
+        id: sandbox_image
+        uses: ./.github/actions/docker-build-retry
+        with:
+          context: .
+          build-contexts: artifact-runtime-inputs=${{ runner.temp }}/artifact-runtime
+          file: docker/sandbox.Dockerfile
+          platforms: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+          build-args: |
+            OPENGENI_SOURCE_SHA=${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+            OPENGENI_REQUIRE_ARTIFACT_RUNTIME=true
           push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           tags: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('ghcr.io/cloudgeni-ai/opengeni-sandbox:canary-sha-{0}', github.sha) || 'opengeni-sandbox:ci' }}
           labels: |
@@ -2607,11 +2369,12 @@ jobs:
   # controller on the same source revision.
   desktop-image:
     name: Build desktop sandbox workload image
-    needs: [automation-admission, plan, artifact-runtime]
-    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+    needs: [automation-admission, plan]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.plan.outputs.artifact_runtime_required == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
     permissions:
+      actions: read # find this run's artifact runtime inputs
       contents: read
       packages: write # push the immutable exact-main-SHA canary image; PR and automation runs remain build-only
     outputs:
@@ -2624,33 +2387,66 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
       - name: Check out repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-      - name: Download exact artifact runtime inputs
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: ${{ needs.artifact-runtime.outputs.artifact_name }}
-          path: .release/artifact-runtime
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+        with:
+          cleanup: false # the hosted runner is discarded; removing the builder took minutes
 
       - name: Log in to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build desktop sandbox image
-        id: desktop_image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      - name: Build desktop sandbox layers before the runtime inputs exist
+        uses: ./.github/actions/docker-build-retry
+        env:
+          DOCKER_BUILD_SUMMARY: false
+          DOCKER_BUILD_RECORD_UPLOAD: false
         with:
           context: .
           file: docker/desktop.Dockerfile
           platforms: linux/amd64
           build-args: OPENGENI_SOURCE_SHA=${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          outputs: type=cacheonly
+          provenance: false
+          cache-from: type=gha,scope=opengeni-ci-desktop
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Wait for exact artifact runtime inputs
+        id: runtime_inputs
+        timeout-minutes: 60
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: bun scripts/ci/wait-for-run-artifact.ts --name "artifact-runtime-containers-$SOURCE_SHA" --producer "Build exact artifact runtime inputs"
+
+      - name: Download exact artifact runtime inputs
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ steps.runtime_inputs.outputs.artifact_name }}
+          path: ${{ runner.temp }}/artifact-runtime
+
+      - name: Build desktop sandbox image
+        id: desktop_image
+        uses: ./.github/actions/docker-build-retry
+        with:
+          context: .
+          build-contexts: artifact-runtime-inputs=${{ runner.temp }}/artifact-runtime
+          file: docker/desktop.Dockerfile
+          platforms: linux/amd64
+          build-args: |
+            OPENGENI_SOURCE_SHA=${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+            OPENGENI_REQUIRE_ARTIFACT_RUNTIME=true
           push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           tags: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('ghcr.io/cloudgeni-ai/opengeni-desktop:canary-sha-{0}', github.sha) || 'opengeni-desktop:ci' }}
           labels: |
@@ -2677,6 +2473,7 @@ jobs:
       - automation-admission
       - plan
       - api-image
+      - batch-api-image
       - worker-image
       - web-image
       - artifact-materializer-image
@@ -2685,14 +2482,14 @@ jobs:
       - sandbox-image
       - desktop-image
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
     steps:
       - name: Require every workload image build
         env:
-          API_IMAGE_RESULT: ${{ needs.api-image.result }}
+          API_IMAGE_RESULT: ${{ startsWith(github.ref, 'refs/heads/batch/') && needs.batch-api-image.result || needs.api-image.result }}
           WORKER_IMAGE_RESULT: ${{ needs.worker-image.result }}
           WEB_IMAGE_RESULT: ${{ needs.web-image.result }}
           ARTIFACT_MATERIALIZER_IMAGE_RESULT: ${{ needs.artifact-materializer-image.result }}
@@ -2712,7 +2509,7 @@ jobs:
           test "$DESKTOP_IMAGE_RESULT" = "success"
 
       - name: Check out exact aggregate source
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
@@ -2789,7 +2586,7 @@ jobs:
 
       - name: Upload exact-main-SHA canary receipt
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: canary-images-${{ github.sha }}
           path: |
@@ -2802,7 +2599,7 @@ jobs:
     name: Report exact-head automation CI
     needs: [automation-admission, test, deployment, images]
     if: ${{ always() && github.event_name == 'workflow_dispatch' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       checks: write
@@ -2816,7 +2613,7 @@ jobs:
       AUTOMATION_SOURCE_RUN_ATTEMPT: ${{ inputs.source_release_run_attempt }}
     steps:
       - name: Check out trusted workflow source
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -2834,14 +2631,14 @@ jobs:
     # last full-green SHA, intermediate members included.
     needs: [batch-receipt]
     if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && !(needs.batch-receipt.result == 'success' && needs.batch-receipt.outputs.kind == 'intermediate') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
       actions: read
       statuses: read
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -2861,7 +2658,7 @@ jobs:
     # (test, images) already verify every lane they cover; require each direct
     # need explicitly and never publish from a cancelled run.
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.test.result == 'success' && needs.deployment.result == 'success' && needs.images.result == 'success' && needs.merge-content.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.mode == 'full' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -2897,7 +2694,7 @@ jobs:
           gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
             -f state=success -f context='Full CI' -f target_url="$url" \
             -f description="$description"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: full-green-main-${{ github.sha }}
           path: full-green-main.json

@@ -38,9 +38,10 @@ test("live status names the model, provider condition and attempt without promis
     "Claude Opus 5.5 is overloaded at the provider (Amazon Bedrock) — retrying (attempt 2 of 5)…",
   );
   expect(container.textContent).toContain(
-    "Your message is saved. Opengeni keeps retrying automatically for a few minutes.",
+    "Opengeni keeps retrying automatically for a few minutes.",
   );
   expect(container.textContent).not.toMatch(/next retry at|reset|\b\d{1,2}:\d{2}\b/i);
+  expect(container.textContent).not.toMatch(/saved/i);
   expect(container.querySelector("button")).toBeNull();
   expect(container.querySelector("details")).toBeNull();
   await act(async () =>

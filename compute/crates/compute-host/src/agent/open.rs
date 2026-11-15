@@ -37,9 +37,25 @@ pub(super) async fn open_root(
         None => None,
     };
     let (records, strays) = Records::open(config.root.clone(), HANDOVER, host_lock).await?;
-    let images = host_images(config);
+    let images = host_images(config, staged_kernel(config).await);
     check_fit(&images, &records)?;
     Ok((core, records, strays, images))
+}
+
+/// The kernel each boot copies into its jail: the agent's own copy of the
+/// host's, which it makes now that it holds the state root (see
+/// [`layout::stage_kernel`]). Without one, boots copy the host's file, as
+/// they always did.
+async fn staged_kernel(config: &HostConfig) -> PathBuf {
+    let (kernel, root) = (config.kernel.clone(), config.root.clone());
+    let staged = tokio::task::spawn_blocking(move || layout::stage_kernel(&kernel, &root))
+        .await
+        .map_err(|error| std::io::Error::other(error.to_string()))
+        .and_then(|staged| staged);
+    staged.unwrap_or_else(|error| {
+        tracing::warn!(kernel = %config.kernel.display(), %error, "the guest kernel is not staged on the state root; each boot copies it whole");
+        config.kernel.clone()
+    })
 }
 
 /// Checks that this host's settings fit every recorded sandbox: a sandbox
@@ -62,9 +78,9 @@ fn check_fit(images: &Images, records: &Records) -> Result<(), HostError> {
 }
 
 /// How this host's VMs are laid out, from its settings.
-fn host_images(config: &HostConfig) -> Images {
+fn host_images(config: &HostConfig, kernel: PathBuf) -> Images {
     Images {
-        kernel: config.kernel.clone(),
+        kernel,
         boot_args: layout::command_line(&config.boot_args, config.network.is_some()),
         first_uid: config.first_uid,
         network: config.network.clone(),

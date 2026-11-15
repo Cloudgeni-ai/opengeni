@@ -1,7 +1,8 @@
-import { AppearanceSubmenu } from "@/components/appearance-menu";
+import { AppearanceSubmenu, SimplifiedInterfaceMenuItem } from "@/components/appearance-menu";
 import { DesktopAppSubmenu, ExcelAddinMenuItem } from "@/components/desktop-app-menu";
 import { HelpMenu } from "@/components/help-menu";
 import { useBrowserAccounts } from "@opengeni/react/accounts";
+import { prepareRecordingsForSignOut } from "@opengeni/react/meetings-recorder";
 import type { ManagedAuthSessionSetProjection } from "@opengeni/sdk/accounts";
 import { CheckIcon, LogOutIcon, RefreshCwIcon, UserRoundPlusIcon, UsersIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -30,9 +31,12 @@ import {
   DropdownMenuTrigger,
 } from "@opengeni/react/ui/dropdown-menu";
 import { AccountTrigger } from "@/components/rail/account-trigger";
+import { recordingOwnerForSignOut } from "@/lib/sign-out-recordings";
 import { useRail } from "@opengeni/react/app/components/rail/rail-context";
 import { AccountUsageMenuItem } from "@opengeni/react/app/components/usage/usage-entry";
 import { MyThingsMenuItem } from "@/components/my-things-menu-item";
+import { BillingMenuItem } from "@/components/billing-menu-item";
+import { ConsoleMenuItem } from "@/components/console-menu-item";
 import { useNewOrganizationMenuItem } from "@/components/rail/switcher-block";
 import {
   accountMenuAriaLabel,
@@ -154,8 +158,18 @@ export function BrowserAccountMenu({
 
   async function confirmLogoutOne() {
     if (!logoutTarget) return;
+    const target = logoutTarget;
+    const replacement = replacementSlotId;
+    // Recordings of theirs still uploading from here: wait for them, or
+    // discard them and go on signing out.
+    const owner = recordingOwnerForSignOut(projection, target.id);
+    if (!(await prepareRecordingsForSignOut(owner))) {
+      setLogoutTarget(null);
+      restoreFocus();
+      return;
+    }
     try {
-      const settled = await accounts.logoutSlot(logoutTarget.id, replacementSlotId);
+      const settled = await accounts.logoutSlot(target.id, replacement);
       if (settled) {
         setLogoutTarget(null);
         restoreFocus();
@@ -168,6 +182,10 @@ export function BrowserAccountMenu({
   }
 
   async function confirmLogoutAll() {
+    if (!(await prepareRecordingsForSignOut(recordingOwnerForSignOut(projection, "all")))) {
+      setLogoutAllOpen(false);
+      return;
+    }
     try {
       const settled = await accounts.logoutAll();
       if (settled) setLogoutAllOpen(false);
@@ -285,9 +303,18 @@ export function BrowserAccountMenu({
             workspaceId={rail.workspaceId}
             className="forced-colors:text-[CanvasText]!"
           />
+          <BillingMenuItem
+            workspaceId={rail.workspaceId}
+            className="forced-colors:text-[CanvasText]!"
+          />
+          <ConsoleMenuItem
+            workspaceId={rail.workspaceId}
+            className="forced-colors:text-[CanvasText]!"
+          />
           <DropdownMenuSeparator />
           <AccountUsageMenuItem workspaceId={rail.workspaceId} />
           <AppearanceSubmenu />
+          <SimplifiedInterfaceMenuItem />
           <HelpMenu
             documentationUrl={context.clientConfig.documentationUrl}
             supportEmail={context.clientConfig.supportEmail}

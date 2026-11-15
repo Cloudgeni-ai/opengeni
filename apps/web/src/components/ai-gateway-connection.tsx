@@ -291,7 +291,7 @@ function claudeWorkspaceConfig(
         : "Calls use this workspace connection's Claude subscription limits.",
     connectionManagerDescription:
       "Members with connection-management access manage this workspace connection.",
-    keyPlaceholder: () => (kind === "anthropic" ? "sk-ant-api…" : "sk-ant-oat…"),
+    keyPlaceholder: () => (kind === "anthropic" ? "sk-ant-…" : "sk-ant-oat…"),
     customModelsDescription:
       "Choose models for this workspace. Availability depends on the connected account.",
     customModelConnectedHelp:
@@ -1826,12 +1826,15 @@ export function ProviderConnectionPage({
   onConnect,
   onEditAccess,
   footnote,
+  keys,
 }: {
   state: ProviderConnection;
   /** The workspace's or organization's name. */
   scopeName?: ReactNode;
   /** A last quiet section, such as where else a key can be connected. */
   footnote?: ReactNode;
+  /** A section after the models, such as an organization's several Anthropic API keys. */
+  keys?: ReactNode;
   onBack?: (() => void) | undefined;
   onConnect: () => void;
   onEditAccess?: (() => void) | undefined;
@@ -1992,6 +1995,7 @@ export function ProviderConnectionPage({
         ) : null}
         {state.claudeUsage && state.connected ? <ClaudeUsage state={state.claudeUsage} /> : null}
         <ProviderCustomModels state={state} />
+        {keys ?? null}
         {showAccess && onEditAccess ? (
           <DetailSection title="Access">
             <SettingRowGroup className="-my-3">

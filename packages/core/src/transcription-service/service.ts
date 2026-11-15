@@ -28,6 +28,10 @@ import {
   type SpeechToTextDeployment,
   type SpeechToTextDeploymentOptions,
 } from "./deployment";
+import {
+  recordingTranscriptionFailureLogAttributes,
+  sendRecordingTranscriptionRequest,
+} from "../recording-transcription-request";
 import { createFfmpegAudioNormalizer, type TranscriptionAudioNormalizer } from "./normalize";
 import { errorMessage } from "@opengeni/contracts/values";
 
@@ -72,6 +76,11 @@ export function createTranscriptionService(input: {
   normalizeAudio?: TranscriptionAudioNormalizer;
   /** Loud operator log for settlement failures after provider success. */
   log?: (message: string, attributes: Record<string, string | number | boolean>) => void;
+  /**
+   * Operator log for each failed provider request, with what the provider
+   * said; its attributes are made for the observability boundary.
+   */
+  warn?: (message: string, attributes: Record<string, string | number>) => void;
   /** In-process settlement retry pacing after an inline failure. */
   settlementRetryDelaysMilliseconds?: readonly number[];
 }): TranscriptionService {
@@ -98,6 +107,11 @@ export function createTranscriptionService(input: {
     input.log ??
     ((message: string, attributes: Record<string, string | number | boolean>) => {
       console.error(message, attributes);
+    });
+  const warn =
+    input.warn ??
+    ((message: string, attributes: Record<string, string | number>) => {
+      console.warn(message, attributes);
     });
   const billing =
     input.billing ??
@@ -214,12 +228,39 @@ export function createTranscriptionService(input: {
     }
   };
   const ordered = (context: TranscriptionAvailabilityContext) =>
-    orderedProviders(
-      providers,
-      deployment.pinned
-        ? { ...context, preferredProvider: deployment.pinned.providerId, fallbackEnabled: false }
-        : context,
+    lastIfOutOfCredit(
+      orderedProviders(
+        providers,
+        deployment.pinned
+          ? { ...context, preferredProvider: deployment.pinned.providerId, fallbackEnabled: false }
+          : context,
+      ),
+      context.workspaceId,
     );
+  /**
+   * Providers that said a workspace's account is out of credit, and until
+   * when. Meanwhile they're tried after the others, so a dictation doesn't
+   * wait on a refusal first; still tried when nothing else can hear it, so
+   * the person learns why.
+   */
+  const outOfCredit = new Map<string, number>();
+  const creditKey = (providerId: string, workspaceId: string | undefined) =>
+    `${workspaceId ?? ""}\u0000${providerId}`;
+  const spent = (providerId: string, workspaceId: string | undefined) => {
+    const key = creditKey(providerId, workspaceId);
+    const until = outOfCredit.get(key);
+    if (until === undefined) return false;
+    if (until > now().getTime()) return true;
+    outOfCredit.delete(key);
+    return false;
+  };
+  const lastIfOutOfCredit = <Provider extends { readonly id: string }>(
+    candidates: readonly Provider[],
+    workspaceId: string | undefined,
+  ): Provider[] => [
+    ...candidates.filter((provider) => !spent(provider.id, workspaceId)),
+    ...candidates.filter((provider) => spent(provider.id, workspaceId)),
+  ];
   const readyProviderIds = async (context: TranscriptionAvailabilityContext) => {
     // Every ready provider, for the workspace provider picker. One failing
     // probe means that provider is not ready; it never fails the caller.
@@ -347,6 +388,12 @@ export function createTranscriptionService(input: {
       // Checked again right before the audio is sent.
       await deployment.assertRegion(provider.id, scopeContext, "voice_input");
       const fallBack = async (error: unknown) => {
+        if (error instanceof TranscriptionServiceError && error.providerCode === "quota_exceeded") {
+          outOfCredit.set(
+            creditKey(provider.id, request.workspaceId),
+            now().getTime() + OUT_OF_CREDIT_RETRY_MILLISECONDS,
+          );
+        }
         if (
           error instanceof TranscriptionServiceError &&
           error.fallbackSafe &&
@@ -443,8 +490,9 @@ export function createTranscriptionService(input: {
       const deadline = createProviderRequestDeadline(request.signal, remainingMilliseconds);
       let result: RecordingTranscriptionResult;
       try {
-        result = await provider.provider.transcribe(
-          {
+        result = await sendRecordingTranscriptionRequest({
+          provider: provider.provider,
+          request: {
             audio: {
               bytes: audio,
               mimeType: providerMimeType,
@@ -466,8 +514,15 @@ export function createTranscriptionService(input: {
               requestId: request.requestId,
             },
           },
-          credentials.credentials,
-        );
+          credentials: credentials.credentials,
+          // The length the call is billed for, which the server measured or trusts.
+          audioMilliseconds: (billingContext?.trustedDurationSeconds ?? audioSeconds) * 1_000,
+          onFailure: (failure) =>
+            warn(
+              "Transcription provider request failed",
+              recordingTranscriptionFailureLogAttributes(failure),
+            ),
+        });
         if (deadline.timedOut && !request.signal?.aborted) {
           throw new TranscriptionServiceError({
             code: "timeout",
@@ -487,6 +542,8 @@ export function createTranscriptionService(input: {
       } finally {
         deadline.dispose();
       }
+      // It heard this one, so its credit is back.
+      outOfCredit.delete(creditKey(provider.id, request.workspaceId));
       const latencyMs = Math.round(performance.now() - startedAt);
       let creditCostMicros = 0;
       const settle = async () => {
@@ -584,6 +641,9 @@ export function transcriptText(result: RecordingTranscriptionResult): string {
   }
   return text.trim();
 }
+
+/** How long a provider out of credit is tried after the others. */
+const OUT_OF_CREDIT_RETRY_MILLISECONDS = 15 * 60_000;
 
 const AUDIO_FORMAT_MIME_TYPES: Record<RecordingProviderAudioFormat, readonly string[]> = {
   flac: ["audio/flac", "audio/x-flac"],

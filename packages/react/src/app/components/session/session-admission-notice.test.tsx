@@ -3,6 +3,11 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { ChatSession as Session } from "@opengeni/sdk";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { englishMessages } from "../../../messages/en";
+import {
+  sessionAdmissionReason,
+  sessionAdmissionShowsMachineAccess,
+} from "../../../session-admission-model";
 import {
   admissionRecheckControl,
   admissionControlNeedsRefresh,
@@ -63,6 +68,16 @@ async function render(overrides: Partial<Parameters<typeof SessionAdmissionNotic
 }
 
 describe("session admission notice", () => {
+  // The message is already visible in the chat; the notice only says what blocks
+  // it, who or what fixes it, and that it starts by itself.
+  test("no admission notice says the message is saved", () => {
+    const admission = Object.entries(englishMessages).filter(([key]) =>
+      key.startsWith("sessionAdmission."),
+    );
+    expect(admission.length).toBeGreaterThan(20);
+    expect(admission.filter(([, value]) => /\bsaved\b/i.test(value))).toEqual([]);
+  });
+
   test("a confirmed pointer change says it starts there by itself, with no button", async () => {
     const onRecheck = await render({
       session: { ...session(), activeSandboxId: "machine" },
@@ -87,7 +102,9 @@ describe("session admission notice", () => {
       ),
     );
     expect(container.textContent).toContain("Starting on the new machine");
-    expect(container.textContent).toContain("It starts by itself on the new machine");
+    expect(container.textContent).toContain("The message starts by itself.");
+    // One line under the title: where it starts is already said once.
+    expect(container.textContent!.split("new machine")).toHaveLength(2);
     expect(container.querySelector("button")).toBeNull();
     expect(onRecheck).not.toHaveBeenCalled();
   });
@@ -104,9 +121,9 @@ describe("session admission notice", () => {
     });
     expect(container.textContent).toContain("This message needs a different machine");
     expect(container.textContent).toContain("Alex’s personal machine");
-    expect(container.textContent).toContain("The message is saved");
+    expect(container.textContent).not.toMatch(/saved/i);
     expect(container.textContent).toContain(
-      "It starts by itself once the chat is on a machine you can use",
+      "The message starts by itself once the chat is on a machine its sender can use",
     );
     expect([...container.querySelectorAll("button")].map((button) => button.textContent)).toEqual([
       "Choose machine",
@@ -144,7 +161,7 @@ describe("session admission notice", () => {
       onAllowMachine,
     });
     expect(container.textContent).toContain("Machine access needed");
-    expect(container.textContent).toContain("isn’t allowed to use “My machine” right now");
+    expect(container.textContent).toContain("isn’t allowed to use “My machine”.");
     expect(container.textContent).not.toContain("Permission needed");
     const buttons = [...container.querySelectorAll("button")];
     expect(buttons.map((button) => button.textContent)).toEqual(["Allow for this chat"]);
@@ -186,7 +203,7 @@ describe("session admission notice", () => {
       },
     });
     expect(container.textContent).toContain("Machine access needed");
-    expect(container.textContent).toContain("You can allow it in the machine’s settings.");
+    expect(container.textContent).toContain("Allow it in the machine’s settings.");
     expect(container.textContent).not.toContain("Allow it for this chat");
     expect(container.querySelector("button")).toBeNull();
   });
@@ -205,9 +222,93 @@ describe("session admission notice", () => {
     });
     expect(container.textContent).toContain("Machine access needed");
     expect(container.textContent).toContain(
-      "Only Alex can allow it. It starts by itself once they do.",
+      "Only Alex can allow it. The message starts by itself once they do.",
     );
     expect(container.querySelector("button")).toBeNull();
+  });
+
+  const ownMachine = {
+    sandboxId: "new-machine",
+    machineName: "My machine",
+    ownerName: "Sam",
+    isOwner: true,
+    queuedTurnBlocked: false,
+  };
+
+  test("a paused owner reads one consistent line: it starts when the chat is resumed", async () => {
+    await render({ paused: true, machineAccess: ownMachine, onAllowMachine: async () => {} });
+    expect(container.textContent).toContain(
+      "Allow it for this chat. Your message starts when the chat is resumed.",
+    );
+    expect(container.textContent).not.toContain("right away");
+    expect(container.textContent).not.toContain("This chat is also paused");
+    expect([...container.querySelectorAll("button")].map((b) => b.textContent)).toEqual([
+      "Allow for this chat",
+    ]);
+  });
+
+  test("a paused owner without Allow here is told it starts once resumed, not by itself", async () => {
+    await render({ paused: true, machineAccess: ownMachine });
+    expect(container.textContent).toContain(
+      "Allow it in the machine’s settings. Your message starts when the chat is resumed.",
+    );
+    expect(container.textContent).not.toContain("starts by itself");
+    expect(container.textContent).not.toContain("This chat is also paused");
+  });
+
+  test("in a shared chat, the owner learns Allow shows the workspace what runs on the machine", async () => {
+    const shared = { ...session(), tenancy: { visibility: "workspace" } } as unknown as Session;
+    await render({
+      session: shared,
+      sharedChat: true,
+      machineAccess: ownMachine,
+      onAllowMachine: async () => {},
+    });
+    expect(container.textContent).toContain(
+      "People in this workspace will see what the agent does on the machine.",
+    );
+    await act(async () => root!.unmount());
+    root = undefined;
+    container.remove();
+    // Workspace visibility in a Personal workspace: nobody else sees the chat.
+    await render({ session: shared, machineAccess: ownMachine, onAllowMachine: async () => {} });
+    expect(container.textContent).not.toContain("People in this workspace will see");
+  });
+
+  test("route: the shared line follows the heads-up's rule, and the heads-up steps aside only for it", async () => {
+    const route = await Bun.file(`${import.meta.dir}/../../routes/session.tsx`).text();
+    expect(route).toContain("sharedChat={sharedChat}");
+    // While the owner is asked to allow the machine, the notice carries the
+    // shared line, so the composer heads-up doesn't repeat it.
+    expect(route).toContain("(sharedChat && !ownerAskedToAllow)");
+    expect(route).toContain("sessionAdmissionShowsMachineAccess(");
+    // When other people's waiting updates are explained instead, the notice
+    // has no shared line, so the heads-up stays.
+    const reason = sessionAdmissionReason(session());
+    expect(sessionAdmissionShowsMachineAccess(reason, ownMachine)).toBe(true);
+    expect(
+      sessionAdmissionShowsMachineAccess(reason, {
+        ...ownMachine,
+        waitingWork: [{ name: "Alex", isYou: false, results: 1 }],
+      }),
+    ).toBe(false);
+    const shared = { ...session(), tenancy: { visibility: "workspace" } } as unknown as Session;
+    await render({
+      session: shared,
+      sharedChat: true,
+      machineAccess: { ...ownMachine, waitingWork: [{ name: "Alex", isYou: false, results: 1 }] },
+      onAllowMachine: async () => {},
+    });
+    expect(container.textContent).not.toContain("People in this workspace will see");
+  });
+
+  test("someone else in a paused chat still sees the paused note", async () => {
+    await render({
+      paused: true,
+      session: session("personal_resource_grant_required"),
+      machineAccess: { ...ownMachine, isOwner: false },
+    });
+    expect(container.textContent).toContain("This chat is also paused");
   });
 
   test("a failed Allow is announced without exposing server errors", async () => {
@@ -379,7 +480,7 @@ describe("session admission notice", () => {
       expect(container.textContent).toContain(
         button ? "If it still doesn’t start" : "starts by itself",
       );
-      expect(container.textContent).toContain("message is saved");
+      expect(container.textContent).not.toMatch(/saved/i);
       expect(container.textContent).not.toContain("Recheck");
       expect(container.querySelector("button")?.textContent ?? null).toBe(button);
       expect(container.innerHTML).not.toContain("secret-database-detail");
@@ -393,7 +494,9 @@ describe("session admission notice", () => {
     const onRecheck = await render();
     expect(container.textContent).toContain("Permission needed");
     expect(container.textContent).toContain("machine or resources");
-    expect(container.textContent).toContain("starts by itself once access");
+    expect(container.textContent).toContain(
+      "or a workspace admin, can fix this. The message starts by itself once they do.",
+    );
     expect(container.querySelector("button")).toBeNull();
     expect(onRecheck).not.toHaveBeenCalled();
   });
@@ -402,7 +505,7 @@ describe("session admission notice", () => {
     await render({ session: session("initiator_membership_required") });
     expect(container.textContent).toContain("Workspace access needed");
     expect(container.textContent).toContain(
-      "A workspace admin can restore their access. It starts by itself once they do.",
+      "A workspace admin can restore their access. The message starts by itself once they do.",
     );
     expect(container.querySelector("button")).toBeNull();
   });

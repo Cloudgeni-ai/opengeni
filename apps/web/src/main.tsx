@@ -1,9 +1,14 @@
+// Before anything renders or parses: the page's content hosting and Zod's JIT.
+import "./lib/content-security-boot";
 import "./lib/crypto-random-uuid";
 // Must evaluate before ./App creates the router from the current URL.
 import "./lib/signup-attribution-boot";
+import "./lib/console-host-boot";
+import "./lib/simplified-interface-landing-boot";
 // Backs the shared session UI with this app's router and API helpers.
 import "./app-host";
 import { AppearanceProvider } from "@opengeni/react/app/lib/appearance";
+import { SimplifiedInterfaceProvider } from "@opengeni/react/app/lib/simplified-interface";
 import { markClassicScrollbars } from "@opengeni/react/scrollbars";
 import React from "react";
 import { createRoot } from "react-dom/client";
@@ -32,6 +37,7 @@ import {
   currentViteBuildId,
   installVitePreloadRecovery,
 } from "./lib/vite-preload-recovery";
+import { SimplifiedInterfaceChrome } from "./components/simplified-interface-chrome";
 import "./styles.css";
 import { toast } from "sonner";
 
@@ -99,9 +105,13 @@ if (reportClientSignals) {
 function renderApp() {
   createRoot(document.getElementById("root")!).render(
     <React.StrictMode>
-      <AppearanceProvider>
-        <App />
-      </AppearanceProvider>
+      <SimplifiedInterfaceProvider>
+        <AppearanceProvider>
+          <SimplifiedInterfaceChrome>
+            <App />
+          </SimplifiedInterfaceChrome>
+        </AppearanceProvider>
+      </SimplifiedInterfaceProvider>
     </React.StrictMode>,
   );
 }

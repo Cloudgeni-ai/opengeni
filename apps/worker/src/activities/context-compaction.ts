@@ -513,8 +513,8 @@ type SummarizedCheckpoint = {
  * the budget becomes half of that request's estimate and the same chunk is
  * refitted (a bisection), and later chunks keep the smaller budget. A single
  * batch over the budget has its tool output shortened where the portable
- * preparation can; one that still cannot fit fails the rebuild without
- * sending it.
+ * preparation can; one that still cannot fit fails the summary without
+ * sending it, and the switch trims history instead.
  */
 async function summarizeTranscriptInBoundedRequests(
   summarize: CompactionSummarizer,
@@ -993,10 +993,10 @@ async function compactContextPortable(
     // keep the newest requests and platform context exactly as a summarized
     // checkpoint would, with a deterministic note in place of the summary.
     // No other model is called, so no history leaves the chat's provider.
-    // A model switch must rebuild from a real summary: trimming would move the
-    // chat off Codex for good and drop its checkpoint, so it fails as before.
+    // A model switch trims the same way: the person chose to leave Codex, and
+    // failing would only send the same refused request again every turn.
     const reason = compactionTrimFallbackReason(error, options.cancellationSignal);
-    if (!reason || options.portableModelSwitch) throw error;
+    if (!reason) throw error;
     fallback = { reason, error };
     summarizedItems = canonicalItems;
     deferredItems = [];
@@ -1039,7 +1039,25 @@ async function compactContextPortable(
     const tokensAfter = estimateTokens(await projectForWire([...built.history, ...deferredItems]));
     return { replacement: built, estimatedTokensAfter: tokensAfter };
   };
-  const { replacement, estimatedTokensAfter } = await buildReplacement();
+  let { replacement, estimatedTokensAfter } = await buildReplacement();
+  if (
+    options.portableModelSwitch &&
+    summarized &&
+    estimatedTokensAfter + prefixTokens > structuralBudget
+  ) {
+    // The new model's summary is too long to install. A switch cannot keep
+    // history as it was (no other model reads Codex's checkpoint), so this
+    // unusable summary is replaced by trimming like any other.
+    fallback = {
+      reason: "summary_unusable",
+      error: new EmptyCompactionSummaryError({
+        stage: "portable_model_switch",
+        reason: "replacement_exceeds_model_budget",
+      }),
+    };
+    summarized = null;
+    ({ replacement, estimatedTokensAfter } = await buildReplacement());
+  }
   // A trimmed checkpoint that would not help leaves history as it was, and
   // the turn fails with the summary's own error, as it did without the fallback.
   const trimDidNotHelp = async (outcome: string): Promise<never> => {

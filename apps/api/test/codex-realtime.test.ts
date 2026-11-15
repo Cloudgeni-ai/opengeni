@@ -216,7 +216,7 @@ describe("session Codex realtime broker", () => {
     expect(capturedAuth?.accessToken).toBe(BEARER_DEFAULT);
     expect(capturedAuth?.chatgptAccountId).toBe("account-bound");
     expect(capturedAuth?.isFedramp).toBe(true);
-    expect(capturedAuth?.clientVersion).toBe("0.159.2");
+    expect(capturedAuth?.clientVersion).toBe("0.167.1");
     expect(capturedInput).toEqual({
       ...request,
       sessionId: "session-one",

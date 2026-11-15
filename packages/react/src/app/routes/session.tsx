@@ -48,6 +48,7 @@ import { useSessionStartupTimeline } from "../../lib/session-startup-timeline";
 import { useComposerWithStreamState } from "../../lib/use-calm-service-failure";
 import {
   chatComposerPlaceholder,
+  detailBeyondHeadline,
   failedSessionCopy,
   failureFallbackReason,
   MACHINE_ACCESS_REQUIRED_CODE,
@@ -60,7 +61,7 @@ import {
 } from "../lib/composer-send-blocking";
 import { ChatPaymentPages } from "../components/chat-payment-pages";
 import { creditRefusalRecord, type CreditRefusalRecord } from "../lib/model-access";
-import { timelineShowsFailure } from "../lib/timeline-failure-owner";
+import { bannerFailureEventIds, timelineShowsFailure } from "../lib/timeline-failure-owner";
 import { sessionDisplayTitle } from "../lib/session-rename";
 import { canArchiveChat, requestSessionArchive } from "../lib/archive-session";
 import { notifySessionListChanged } from "../lib/session-list-invalidation";
@@ -84,6 +85,7 @@ import {
 import {
   sessionAdmissionNeedsDifferentMachine,
   sessionAdmissionReason,
+  sessionAdmissionShowsMachineAccess,
 } from "../../session-admission-model";
 import {
   connectorSelectionUpdate,
@@ -144,6 +146,7 @@ import {
   approvalsDecidable,
   projectPendingApprovals,
   useComposer,
+  uploadScopeForSession,
   useFileAttachments,
   useGoal,
   useHumanInputRequests,
@@ -204,6 +207,7 @@ import { creationHandoffReconciled } from "../lib/session-creation-handoff";
 import { FollowUpRepositoryMenuBody } from "../components/follow-up-repository-picker";
 import { MarkdownText } from "../components/markdown";
 import { ModelPicker, type SessionToolSelection } from "../components/pickers";
+import { useSimplifiedInterface } from "../lib/simplified-interface";
 import {
   TerminalSessionArchive,
   TerminalSessionBanner,
@@ -2390,6 +2394,7 @@ function SessionChatPane(props: {
   const [composerFocusSignal, setComposerFocusSignal] = useState(0);
   const focusEvents = useUiEventTarget("window");
   const [modelPickerSession, setModelPickerSession] = useState<string | null>(null);
+  const { simplified: simplifiedInterface } = useSimplifiedInterface();
   // The API's authoritative "model is not available" refusal for this session,
   // which also covers connection-owned models the catalog cannot judge.
   const [refusedModel, setRefusedModel] = useState<{ sessionId: string; model: string } | null>(
@@ -2608,12 +2613,7 @@ function SessionChatPane(props: {
   );
   // Workspace-scoped: the provider (mounted on the workspace route) supplies
   // the workspaceId, so the hook needs no positional argument.
-  const attachments = useFileAttachments({
-    scope:
-      props.session.tenancy?.visibility === "private" || props.session.memoryScope === "user"
-        ? "personal"
-        : "workspace",
-  });
+  const attachments = useFileAttachments({ scope: uploadScopeForSession(props.session) });
   const repositories = useFollowUpRepositories(props.session, props.onConnectGitHubApp);
   const firstPartyToolOptions = firstPartySessionToolOptionsFor(
     clientFirstPartyMcpToolPolicy(context.clientConfig).allowed,
@@ -2655,7 +2655,13 @@ function SessionChatPane(props: {
       context.workspaces.find((candidate) => candidate.id === props.session.workspaceId) ?? null,
       context.managedSelfContext,
     );
-  const showMachineAccess = machineAccess !== null && (!machineAccess.isOwner || sharedChat);
+  // While the owner is asked to allow the machine, the blocked-message notice
+  // says the workspace will see the work, so the heads-up would repeat it.
+  const ownerAskedToAllow =
+    machineAccess?.isOwner === true &&
+    sessionAdmissionShowsMachineAccess(sessionAdmissionReason(props.session), machineAccess);
+  const showMachineAccess =
+    machineAccess !== null && (!machineAccess.isOwner || (sharedChat && !ownerAskedToAllow));
   const connectionAccounts = useConnectionAccounts(
     context.client,
     {
@@ -3039,9 +3045,10 @@ function SessionChatPane(props: {
     ...(props.initialDraft ? { initialDraft: props.initialDraft } : {}),
     // The console always offers the other choice beside Send.
     offerQueue: true,
-    // Ordinary Send is acknowledged locally. Clear only resources captured in
-    // that immutable optimistic operation; later additions belong to the next
-    // draft, while retry keeps the original resource refs in the failed bubble.
+    // Send and Steer are acknowledged locally: the message leaves the box
+    // when it is shown. Clear only resources captured in that immutable
+    // operation; later additions belong to the next draft, while retry keeps
+    // the original resource refs in the failed bubble.
     onSubmitted: (_text, input) => {
       noteTurnFailureAction("send_message");
       attachments.removeReadyFiles(
@@ -3051,9 +3058,9 @@ function SessionChatPane(props: {
       );
       repositories.commitSent(input.resources ?? []);
     },
-    // Steer and recovered sends do not pass through onSubmitted. Keep the
-    // host-owned upload/repository queue in sync once those inputs are
-    // accepted too; the immutable input snapshot preserves later additions.
+    // Recovered sends do not pass through onSubmitted. Keep the host-owned
+    // upload/repository queue in sync once those inputs are accepted too;
+    // the immutable input snapshot preserves later additions.
     onSent: (_text, input) => {
       setCreditRefusal(null);
       attachments.removeReadyFiles(
@@ -3179,6 +3186,19 @@ function SessionChatPane(props: {
   const canChooseRecoveryModel = !modelPickerDisabled;
   // An own-key or API stop names its one fix; no model choice or free credit fixes it.
   const stopRefusal = props.creditExhausted ? props.creditRefusal : null;
+  // The failure events the banner presents, which the timeline then doesn't repeat.
+  const bannerFailureIds = useMemo(
+    () =>
+      props.failure
+        ? bannerFailureEventIds(
+            props.events,
+            props.failure,
+            // As the banner: a structural sandbox failure outranks a credit stop.
+            props.creditExhausted && !props.failure.structuralSandboxFailure,
+          )
+        : undefined,
+    [props.events, props.failure, props.creditExhausted],
+  );
   // Free credit can still cover other models after this model's credit ran out.
   const creditGap =
     props.creditExhausted && !stopRefusal
@@ -3190,19 +3210,33 @@ function SessionChatPane(props: {
   // Shown while the banner chunk loads or if it fails. On the free model the
   // generic daily-limit line then gives way to the free-model copy; that brief
   // text change keeps the free-model copy out of the direct session bundle.
-  const failureFallback = props.failure ? (
+  // The timeline leaves this failure's text to the banner, so the fallback
+  // keeps the recorded text reachable too.
+  const fallbackCopy = props.failure
+    ? failedSessionCopy(
+        props.failure,
+        props.creditExhausted && !props.failure.structuralSandboxFailure,
+        Boolean(composerPolicy && composerPolicy.model !== props.session.model),
+        canChooseRecoveryModel && !props.failure.structuralSandboxFailure,
+        creditGap,
+        stopRefusal,
+      )
+    : null;
+  const fallbackReason = fallbackCopy ? failureFallbackReason(fallbackCopy, canBuyCredits) : "";
+  const fallbackDetail = detailBeyondHeadline(fallbackReason, fallbackCopy?.detail);
+  const failureFallback = fallbackCopy ? (
     <div role="alert" className={cn("mx-auto my-2 w-full max-w-3xl text-sm text-fg-muted", gutter)}>
-      {failureFallbackReason(
-        failedSessionCopy(
-          props.failure,
-          props.creditExhausted && !props.failure.structuralSandboxFailure,
-          Boolean(composerPolicy && composerPolicy.model !== props.session.model),
-          canChooseRecoveryModel && !props.failure.structuralSandboxFailure,
-          creditGap,
-          stopRefusal,
-        ),
-        canBuyCredits,
-      )}
+      {fallbackReason}
+      {fallbackDetail ? (
+        <details className="mt-1 text-xs">
+          <summary className="cursor-pointer select-none text-fg-subtle hover:text-fg-muted">
+            Details
+          </summary>
+          <p className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-2xs">
+            {fallbackDetail}
+          </p>
+        </details>
+      ) : null}
     </div>
   ) : null;
   const model = composerPolicy?.model ?? props.session.model;
@@ -4275,6 +4309,7 @@ function SessionChatPane(props: {
                           }}
                           renderMessageSender={renderMessageSender}
                           allowanceExhaustedLabels={CONSOLE_TIMELINE_ALLOWANCE_LABELS}
+                          presentedFailureEventIds={failureRecovery ? bannerFailureIds : undefined}
                           trailingState={
                             <>
                               {/* Recovery follows the failed request, only in the latest history window.
@@ -4454,6 +4489,7 @@ function SessionChatPane(props: {
                 key={`${props.session.workspaceId}:${props.session.id}`}
                 session={props.session}
                 machineAccess={machineAccess}
+                sharedChat={sharedChat}
                 machineAction={
                   <SessionMachinePickerAction
                     queuedWork
@@ -4833,35 +4869,39 @@ function SessionChatPane(props: {
                 })}
                 controls={
                   <div className="@container/model-controls flex min-w-0 flex-1 items-center gap-1.5">
-                    <ModelPicker
-                      hasImageAttachments={attachments.attachments.some(
-                        (file) => file.status !== "failed" && file.contentType.startsWith("image/"),
-                      )}
-                      open={modelPickerSession === props.session.id && !pendingRetryInput}
-                      onOpenChange={(open) => {
-                        setModelPickerSession(open ? props.session.id : null);
-                        if (open) void modelCatalog.refresh();
-                      }}
-                      rows={modelCatalog.rows}
-                      model={model}
-                      effort={reasoningEffort}
-                      latencyMode={latencyMode}
-                      disabled={modelPickerDisabled}
-                      loading={modelCatalog.loading || composer.draftLoading}
-                      error={modelCatalog.error ?? composerPolicyError}
-                      sessionKey={props.session.id}
-                      menuSide="top"
-                      connectModelsHref={`/workspaces/${encodeURIComponent(props.session.workspaceId)}/settings?section=models`}
-                      claudeSubscriptionAvailable={
-                        context.clientConfig.claudeSubscriptionEnabled === true
-                      }
-                      onModelChange={(modelId) => {
-                        composer.setModel(modelId);
-                        usageModelSwitch.modelPicked(modelId);
-                      }}
-                      onEffortChange={composer.setReasoningEffort}
-                      onLatencyModeChange={composer.setLatencyMode}
-                    />
+                    {/* The simplified interface has one model policy: a chat keeps the one it started with. */}
+                    {simplifiedInterface ? null : (
+                      <ModelPicker
+                        hasImageAttachments={attachments.attachments.some(
+                          (file) =>
+                            file.status !== "failed" && file.contentType.startsWith("image/"),
+                        )}
+                        open={modelPickerSession === props.session.id && !pendingRetryInput}
+                        onOpenChange={(open) => {
+                          setModelPickerSession(open ? props.session.id : null);
+                          if (open) void modelCatalog.refresh();
+                        }}
+                        rows={modelCatalog.rows}
+                        model={model}
+                        effort={reasoningEffort}
+                        latencyMode={latencyMode}
+                        disabled={modelPickerDisabled}
+                        loading={modelCatalog.loading || composer.draftLoading}
+                        error={modelCatalog.error ?? composerPolicyError}
+                        sessionKey={props.session.id}
+                        menuSide="top"
+                        connectModelsHref={`/workspaces/${encodeURIComponent(props.session.workspaceId)}/settings?section=models`}
+                        claudeSubscriptionAvailable={
+                          context.clientConfig.claudeSubscriptionEnabled === true
+                        }
+                        onModelChange={(modelId) => {
+                          composer.setModel(modelId);
+                          usageModelSwitch.modelPicked(modelId);
+                        }}
+                        onEffortChange={composer.setReasoningEffort}
+                        onLatencyModeChange={composer.setLatencyMode}
+                      />
+                    )}
                     {durableToolsError ? (
                       <span className="sr-only" role="alert">
                         {durableToolsError}

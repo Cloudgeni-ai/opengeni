@@ -1224,7 +1224,10 @@ describe("effective-tools projection agrees with actual model preparation", () =
         expect(captured.resolvedModel!.provider.kind).toBe(subscription);
         expect(captured.resolvedModel!.configured.id).toBe(modelId);
         expect(captured.resolvedModel!.configured.capabilities.reasoning.runnable).toBe(true);
-        expect(captured.buildOptions.reasoningSummary).toBeUndefined();
+        // Codex states the same `detailed` the runtime default sends; SuperGrok keeps the default.
+        expect(captured.buildOptions.reasoningSummary).toBe(
+          subscription === "codex-subscription" ? "detailed" : undefined,
+        );
         const result = sessionWithEffectiveToolPolicy(
           captured.session,
           captured.selectedServerIds,
@@ -1981,7 +1984,7 @@ const INVENTORY = {
     "## Autonomy and persistence": 3047,
     "# Destructive Actions": 547,
     "# Runtime mechanics": 20,
-    "## New messages while you work": 805,
+    "## New messages while you work": 589,
     "## Compaction": 698,
   },
   tools: { request_human_input: 2048 },

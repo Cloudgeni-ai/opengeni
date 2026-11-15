@@ -21,10 +21,17 @@
    users would; `&signals=no-goal` hides only the goal (`{ goal: false }`).
    `&agents=1` makes the host pass two helper agents in `chromeProps`.
    `&mark=1` leads the live turn row with a host mark
-   (`turnSummary.renderLiveMark`). */
+   (`turnSummary.renderLiveMark`). `&refuse=1` makes the first new-chat create a
+   definite refusal from a host endpoint (a 400 with its own reason). */
 import { createRoot } from "react-dom/client";
 import { useState } from "react";
-import type { SendMessageInput, Session, SessionEvent, SessionQueueSnapshot } from "@opengeni/sdk";
+import {
+  OpenGeniApiError,
+  type SendMessageInput,
+  type Session,
+  type SessionEvent,
+  type SessionQueueSnapshot,
+} from "@opengeni/sdk";
 import {
   OpenGeniChat,
   OpenGeniProvider,
@@ -717,6 +724,16 @@ Object.assign(client, {
     creationFixture.attempts.push(structuredClone(input));
     if (params.get("retry") === "1" && creationFixture.attempts.length === 1)
       throw new TypeError("Response lost");
+    if (params.get("refuse") === "1" && creationFixture.attempts.length === 1)
+      throw new OpenGeniApiError(
+        400,
+        JSON.stringify({
+          error: "Ultrafast isn't available for this model. Choose another speed.",
+          code: "BAD_REQUEST",
+          details: { field: "latencyMode" },
+        }),
+        { outcomeUnknown: false },
+      );
     await new Promise<void>((resolve) => {
       creationFixture.finish = resolve;
     });

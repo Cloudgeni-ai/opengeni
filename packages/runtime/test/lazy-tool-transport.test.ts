@@ -2213,9 +2213,9 @@ describe("generic lazy tool dispatch", () => {
       JSON.stringify({ query: "weather capability", limit: 20 }),
       undefined as never,
     );
-    // A tie loads the top candidate and lists the others compactly.
+    // A tie loads the strongest three and lists the others compactly.
     const parsed = JSON.parse(String(output)) as { tools: unknown[]; suggestions: unknown[] };
-    expect(parsed.tools.length).toBe(1);
+    expect(parsed.tools.length).toBe(3);
     expect(parsed.tools.length + parsed.suggestions.length).toBe(tools.length);
     expect(Buffer.byteLength(String(output))).toBeLessThan(3_000);
     expect(Buffer.byteLength(String(output))).toBeLessThanOrEqual(

@@ -44,6 +44,10 @@ pub struct BuildArgs {
     /// storage URL, or a directory on this host.
     #[arg(long)]
     store: Option<String>,
+    /// An image built earlier, to make this one by changing a copy of, so
+    /// the two share all but what changed (ADR 40).
+    #[arg(long)]
+    before: Option<PathBuf>,
 }
 
 /// Builds the image `args` names, stores it if asked, and prints what was
@@ -62,6 +66,7 @@ pub async fn build(args: BuildArgs) -> anyhow::Result<()> {
         work: work.clone(),
         output: args.output.clone(),
         free_bytes: args.free_gib << 30,
+        before: args.before,
     })
     .await;
     if scratch {

@@ -1,0 +1,441 @@
+{
+ "description": "Messages subscription turn with an in-turn proactive compaction whose summary call has no request audit or usage timing.",
+ "turn": {
+  "createdAt": "2026-11-09T21:15:01.089Z",
+  "startedAt": "2026-11-09T21:15:01.089Z",
+  "finishedAt": "2026-11-09T21:15:18.789Z",
+  "status": "completed"
+ },
+ "attempts": [
+  {
+   "id": "00000000-0000-4000-8000-000000000001",
+   "startedAt": "2026-11-09T21:15:01.008Z",
+   "closedAt": "2026-11-09T21:15:18.789Z",
+   "outcome": "completed"
+  }
+ ],
+ "events": [
+  {
+   "type": "turn.started",
+   "sequence": 1,
+   "occurredAt": "2026-11-09T21:15:01.427Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {}
+  },
+  {
+   "type": "turn.startup.phase.completed",
+   "sequence": 2,
+   "occurredAt": "2026-11-09T21:15:01.590Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "credential_mint",
+    "durationMs": 0.41921500116586685
+   }
+  },
+  {
+   "type": "turn.startup.phase.completed",
+   "sequence": 3,
+   "occurredAt": "2026-11-09T21:15:01.783Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "tools",
+    "durationMs": 91
+   }
+  },
+  {
+   "type": "turn.startup.phase.completed",
+   "sequence": 4,
+   "occurredAt": "2026-11-09T21:15:01.841Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "credential_materialization",
+    "durationMs": 0.3035630024969578
+   }
+  },
+  {
+   "type": "turn.startup.phase.completed",
+   "sequence": 5,
+   "occurredAt": "2026-11-09T21:15:01.952Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "model_preparation",
+    "durationMs": 47
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 6,
+   "occurredAt": "2026-11-09T21:15:01.949Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "started",
+    "provider": "organization-claude-subscription",
+    "dispatchId": "2"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 7,
+   "occurredAt": "2026-11-09T21:15:03.880Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "first_byte",
+    "provider": "organization-claude-subscription",
+    "dispatchId": "2",
+    "durationMs": 1920
+   }
+  },
+  {
+   "type": "agent.model.usage",
+   "sequence": 8,
+   "occurredAt": "2026-11-09T21:15:04.315Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "model": "organization-claude-subscription/claude-haiku-5-5",
+    "purpose": "main",
+    "provider": "organization-claude-subscription",
+    "timing": {
+     "durationMs": 2290,
+     "preDispatchMs": 71
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 9,
+   "occurredAt": "2026-11-09T21:15:04.313Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "completed",
+    "provider": "organization-claude-subscription",
+    "dispatchId": "2",
+    "durationMs": 2353
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 10,
+   "occurredAt": "2026-11-09T21:15:04.363Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "toolu_1",
+    "name": "exec_command",
+    "toolFamily": "exec_command"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 11,
+   "occurredAt": "2026-11-09T21:15:04.833Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "toolu_1",
+    "output": "Chunk ID: 29"
+   }
+  },
+  {
+   "type": "session.context.compaction.started",
+   "sequence": 12,
+   "occurredAt": "2026-11-09T21:15:04.918Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "trigger": "proactive"
+   }
+  },
+  {
+   "type": "agent.model.usage",
+   "sequence": 13,
+   "occurredAt": "2026-11-09T21:15:11.442Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "model": "organization-claude-subscription/claude-haiku-5-5",
+    "purpose": "compaction",
+    "provider": "organization-claude-subscription"
+   }
+  },
+  {
+   "type": "session.context.compacted",
+   "sequence": 14,
+   "occurredAt": "2026-11-09T21:15:11.617Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {}
+  },
+  {
+   "type": "turn.startup.phase.completed",
+   "sequence": 15,
+   "occurredAt": "2026-11-09T21:15:11.705Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "credential_materialization",
+    "durationMs": 0.018360000103712082
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 16,
+   "occurredAt": "2026-11-09T21:15:11.763Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "started",
+    "provider": "organization-claude-subscription",
+    "dispatchId": "2"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 17,
+   "occurredAt": "2026-11-09T21:15:13.004Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "first_byte",
+    "provider": "organization-claude-subscription",
+    "dispatchId": "2",
+    "durationMs": 1241
+   }
+  },
+  {
+   "type": "agent.model.usage",
+   "sequence": 18,
+   "occurredAt": "2026-11-09T21:15:14.161Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "model": "organization-claude-subscription/claude-haiku-5-5",
+    "purpose": "main",
+    "provider": "organization-claude-subscription",
+    "timing": {
+     "durationMs": 2293,
+     "preDispatchMs": 101,
+     "timeToFirstTokenMs": 2287
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 19,
+   "occurredAt": "2026-11-09T21:15:14.134Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "completed",
+    "provider": "organization-claude-subscription",
+    "dispatchId": "2",
+    "durationMs": 2371
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 20,
+   "occurredAt": "2026-11-09T21:15:14.191Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "toolu_2",
+    "name": "exec_command",
+    "toolFamily": "exec_command"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 21,
+   "occurredAt": "2026-11-09T21:15:14.806Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "toolu_2",
+    "output": "Chunk ID: 75"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 22,
+   "occurredAt": "2026-11-09T21:15:14.892Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "started",
+    "provider": "organization-claude-subscription",
+    "dispatchId": "2"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 23,
+   "occurredAt": "2026-11-09T21:15:15.764Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "first_byte",
+    "provider": "organization-claude-subscription",
+    "dispatchId": "2",
+    "durationMs": 872
+   }
+  },
+  {
+   "type": "agent.model.usage",
+   "sequence": 24,
+   "occurredAt": "2026-11-09T21:15:16.513Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "model": "organization-claude-subscription/claude-haiku-5-5",
+    "purpose": "main",
+    "provider": "organization-claude-subscription",
+    "timing": {
+     "durationMs": 1494,
+     "preDispatchMs": 121,
+     "timeToFirstTextMs": 1473,
+     "timeToFirstTokenMs": 1472
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 25,
+   "occurredAt": "2026-11-09T21:15:16.495Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "completed",
+    "provider": "organization-claude-subscription",
+    "dispatchId": "2",
+    "durationMs": 1603
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 26,
+   "occurredAt": "2026-11-09T21:15:16.610Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "toolu_3",
+    "name": "tool_search",
+    "toolFamily": "tool_search"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 27,
+   "occurredAt": "2026-11-09T21:15:16.627Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "toolu_3",
+    "output": "{\"tools\":[{\""
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 28,
+   "occurredAt": "2026-11-09T21:15:16.634Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "started",
+    "provider": "organization-claude-subscription",
+    "dispatchId": "2"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 29,
+   "occurredAt": "2026-11-09T21:15:17.470Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "first_byte",
+    "provider": "organization-claude-subscription",
+    "dispatchId": "2",
+    "durationMs": 836
+   }
+  },
+  {
+   "type": "agent.model.usage",
+   "sequence": 30,
+   "occurredAt": "2026-11-09T21:15:17.605Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "model": "organization-claude-subscription/claude-haiku-5-5",
+    "purpose": "main",
+    "provider": "organization-claude-subscription",
+    "timing": {
+     "durationMs": 914,
+     "preDispatchMs": 187
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 31,
+   "occurredAt": "2026-11-09T21:15:17.602Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "completed",
+    "provider": "organization-claude-subscription",
+    "dispatchId": "2",
+    "durationMs": 968
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 32,
+   "occurredAt": "2026-11-09T21:15:17.640Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "toolu_4",
+    "name": "opengeni__notification_withdraw",
+    "toolFamily": "notification_withdraw"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 33,
+   "occurredAt": "2026-11-09T21:15:17.690Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "toolu_4"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 34,
+   "occurredAt": "2026-11-09T21:15:17.733Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "started",
+    "provider": "organization-claude-subscription",
+    "dispatchId": "2"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 35,
+   "occurredAt": "2026-11-09T21:15:18.678Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "first_byte",
+    "provider": "organization-claude-subscription",
+    "dispatchId": "2",
+    "durationMs": 945
+   }
+  },
+  {
+   "type": "agent.model.usage",
+   "sequence": 36,
+   "occurredAt": "2026-11-09T21:15:18.719Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "model": "organization-claude-subscription/claude-haiku-5-5",
+    "purpose": "main",
+    "provider": "organization-claude-subscription",
+    "timing": {
+     "durationMs": 944,
+     "preDispatchMs": 79,
+     "timeToFirstTextMs": 916,
+     "timeToFirstTokenMs": 916
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 37,
+   "occurredAt": "2026-11-09T21:15:18.717Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "completed",
+    "provider": "organization-claude-subscription",
+    "dispatchId": "2",
+    "durationMs": 983
+   }
+  }
+ ]
+}

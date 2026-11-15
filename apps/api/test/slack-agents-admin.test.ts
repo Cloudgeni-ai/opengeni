@@ -349,9 +349,10 @@ describe("Slack agents administration", () => {
     expect(created.status).toBe(201);
     const { agent } = (await created.json()) as { agent: { id: string; version: number } };
     // An agent named before the stricter rules: its name is stored as is.
-    // (An older release's write: the legacy sync carries it into the agent.)
-    await shared!
-      .admin`update slack_agents set name = 'Test', name_key = 'test' where id = ${agent.id}`;
+    await shared!.admin.begin(async (sql) => {
+      await sql`update agents set name = 'Test', name_key = 'test' where id = ${agent.id}`;
+      await sql`update agent_slack_installs set name_key = 'test' where agent_id = ${agent.id}`;
+    });
     const [older] = await shared!.admin<{ version: number }[]>`
       select version from agents where id = ${agent.id}`;
     const unchanged = await app().request(`${base}/${agent.id}`, {
@@ -433,7 +434,8 @@ describe("Slack agents administration", () => {
     const refused = await setOpen(workspaceAdmin, agent.version, true);
     expect(refused.status).toBe(403);
     const [unchanged] = await shared!.admin<{ open: boolean; version: number }[]>`
-      select open, version from slack_agents where id = ${agent.id}`;
+      select i.open, a.version from agent_slack_installs i join agents a on a.id = i.agent_id
+      where i.agent_id = ${agent.id}`;
     expect(unchanged).toEqual({ open: false, version: agent.version });
 
     // An organization admin can.
@@ -449,7 +451,8 @@ describe("Slack agents administration", () => {
     const raced = await setOpen(workspaceAdmin, openAgent.version + 1, true);
     expect(raced.status).toBe(409);
     const [stillOpen] = await shared!.admin<{ open: boolean; version: number }[]>`
-      select open, version from slack_agents where id = ${agent.id}`;
+      select i.open, a.version from agent_slack_installs i join agents a on a.id = i.agent_id
+      where i.agent_id = ${agent.id}`;
     expect(stillOpen).toEqual({ open: true, version: openAgent.version });
 
     // Any admin of its workspace can close it again.

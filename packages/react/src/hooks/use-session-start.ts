@@ -1,6 +1,6 @@
 import type { ChatClient } from "@opengeni/sdk";
 import type { MachineView, ChatSession as Session, SessionMachineAccess } from "@opengeni/sdk";
-import { useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useOpenGeniText } from "../messages/runtime";
 import {
   allowMachineForChat,
@@ -98,6 +98,12 @@ export type UseSessionStartResult = {
    * when the session client cannot. Throws when it could not be confirmed.
    */
   continueWaitingWork: (() => Promise<void>) | undefined;
+  /**
+   * While the machine's owner is asked to allow it: other people in the
+   * workspace can see this chat (workspace visibility, outside a Personal
+   * workspace). False otherwise, and while the workspace kind is unknown.
+   */
+  sharedChat: boolean;
 };
 
 /**
@@ -165,6 +171,35 @@ export function useSessionStart({
     await Promise.all([onSessionChanged(), refreshMachines()]);
   }, [onSessionChanged, refreshMachines]);
   const needsMachineAccess = sessionAdmissionNeedsMachineAccess(reason, machineAccess);
+  // Whether allowing the owner's machine also shows the workspace what runs
+  // on it: only a workspace-visible chat outside a Personal workspace. The
+  // workspace kind is read only when the owner is asked to allow it.
+  const visibleToWorkspace = session.tenancy?.visibility === "workspace";
+  const askOwner = needsMachineAccess && machineAccess?.isOwner === true;
+  const [workspaceKind, setWorkspaceKind] = useState<{ id: string; kind: string } | null>(null);
+  const workspaceClient = client as Partial<{
+    getWorkspace: (workspaceId: string) => Promise<{ kind?: string | null }>;
+  }>;
+  const canReadWorkspace = typeof workspaceClient.getWorkspace === "function";
+  const knownKind = workspaceKind?.id === workspaceId ? workspaceKind.kind : null;
+  useEffect(() => {
+    if (!visibleToWorkspace || !askOwner || !canReadWorkspace || knownKind !== null) return;
+    let cancelled = false;
+    workspaceClient.getWorkspace!(workspaceId).then(
+      (workspace) => {
+        if (!cancelled && typeof workspace?.kind === "string")
+          setWorkspaceKind({ id: workspaceId, kind: workspace.kind });
+      },
+      () => {
+        // Unknown kind: say nothing about sharing rather than risk a wrong claim.
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [askOwner, canReadWorkspace, knownKind, visibleToWorkspace, workspaceClient, workspaceId]);
+  const sharedChat =
+    askOwner && visibleToWorkspace && knownKind !== null && knownKind !== "personal";
   const allowClient = client as unknown as Partial<AllowMachineClient>;
   const ownMachine =
     needsMachineAccess && machineAccess?.isOwner
@@ -263,5 +298,6 @@ export function useSessionStart({
     needsMachineAccess,
     allowMachine: canAllow ? allowMachine : undefined,
     continueWaitingWork: canContinue ? continueWaitingWork : undefined,
+    sharedChat,
   };
 }

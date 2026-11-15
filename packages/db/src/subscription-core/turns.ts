@@ -32,7 +32,6 @@ import {
   decidePlacement,
   quotaCapacity,
   storedQuotaDocument,
-  subscriptionCoreCredentialRefresher,
   type Ineligibility,
   type PlacementDecision,
   type PlacementInput,
@@ -44,8 +43,6 @@ import {
 } from "@opengeni/subscriptions";
 
 import { rawRows, withRlsContext, type Database } from "../database";
-
-import { decryptEnvironmentValue, encryptEnvironmentValue } from "../environment-crypto";
 
 import {
   withSubscriptionCoreAcceptedTurn,
@@ -63,9 +60,15 @@ import {
   persistSubscriptionCoreRefreshWithPlan,
   readSubscriptionSessionBinding,
   releaseSubscriptionTurnLease,
+  subscriptionTurnLeaseHeldSql,
   writeSubscriptionSessionBinding,
   type SubscriptionSessionBinding,
 } from "../subscription-core-repository";
+
+import {
+  decodeSubscriptionCoreCredential,
+  rotateSubscriptionCoreCredential,
+} from "./credential-rotation";
 
 import {
   memoByProvider,
@@ -702,6 +705,23 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
         : policy.kind === "valid" && policy.policy.latencyMode === "ultrafast"
           ? [upstreamModelId, modelServiceTierCatalogEntry(upstreamModelId, "ultrafast")]
           : [upstreamModelId];
+    const providerConnections = worldInput.connections.filter(
+      (connection) => connection.provider === providerId,
+    );
+    // A fresh catalog routes the turn to the accounts that list its model.
+    // When no account lists it, the catalog cannot choose, and its silence is
+    // ambiguous: the plan may lack the model, a rollout may be in progress, or
+    // the provider may hide it from this client version. This turn has no
+    // other provider to move to, so waiting would strand it behind an
+    // unrelated reset. Placement then runs on capacity alone, and the
+    // provider's answer decides: a plan refusal takes the plan-entitlement
+    // path, a client-version refusal fails the turn visibly. Cross-provider
+    // failover keeps its own catalog view (failover-world.ts).
+    const catalogDecides =
+      upstreamModelId !== null &&
+      providerConnections.some(
+        (connection) => connection.observedModelSlugs?.includes(upstreamModelId) === true,
+      );
     const input: PlacementInput = {
       ...worldInput,
       session: {
@@ -715,20 +735,18 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
         }),
       },
       settings: { ...worldInput.settings, crossProviderFailover: false, fallbackOrder: {} },
-      connections: worldInput.connections
-        .filter((connection) => connection.provider === providerId)
-        .map((connection) =>
-          requiredCatalogEntries !== null && connection.observedModelSlugs != null
-            ? {
-                ...connection,
-                entitledModelIds: requiredCatalogEntries.every((entry) =>
-                  connection.observedModelSlugs!.includes(entry),
-                )
-                  ? [productModelId]
-                  : [],
-              }
-            : connection,
-        ),
+      connections: providerConnections.map((connection) =>
+        catalogDecides && requiredCatalogEntries !== null && connection.observedModelSlugs != null
+          ? {
+              ...connection,
+              entitledModelIds: requiredCatalogEntries.every((entry) =>
+                connection.observedModelSlugs!.includes(entry),
+              )
+                ? [productModelId]
+                : [],
+            }
+          : connection,
+      ),
     };
     return { input, deletedExplicit };
   }
@@ -1136,7 +1154,7 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
     }>(
       tx,
       sql`select connection_id::text as connection_id, provider, holder_id, generation,
-        leased_until, leased_until > clock_timestamp() as live
+        leased_until, ${subscriptionTurnLeaseHeldSql()} as live
       from subscription_leases
       where account_id = ${identity.accountId}::uuid
         and workspace_id = ${identity.workspaceId}::uuid
@@ -1313,15 +1331,7 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
   }
 
   function decodeCredential(key: Uint8Array, encrypted: string): unknown {
-    let plaintext: string;
-    try {
-      plaintext = decryptEnvironmentValue(key, encrypted);
-    } catch {
-      // Fixed text and no cause: never echo ciphertext or key material.
-      throw new Error(`A core ${provider.adapter.displayName} credential could not be decrypted`);
-    }
-    // The adapter throws fixed text for malformed plaintext (never echoing it).
-    return provider.adapter.credential.decode(plaintext);
+    return decodeSubscriptionCoreCredential(provider, key, encrypted);
   }
 
   function encryptionKey(settings: Settings): Uint8Array {
@@ -1430,78 +1440,45 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
         holderId: lease.holderId,
         generation: lease.generation,
       },
-      async (tx, credential): Promise<SubscriptionCoreRefreshOutcome> => {
-        if (credential.refreshGeneration !== observedRefreshGeneration)
-          return { kind: "superseded" };
-        let current: unknown;
-        try {
-          current = decodeCredential(key, credential.credentialEncrypted);
-        } catch (error) {
-          return { kind: "error", error };
-        }
-        // Renewal depends on the credential's format, never on the provider.
-        const refresher = subscriptionCoreCredentialRefresher(provider.adapter, current);
-        if (!refresher) {
-          // A credential that never renews (an API key, a setup token) is
-          // refreshed only when it expired or the provider refused it: only a
-          // new sign-in recovers, so mark the connection needs-relogin under
-          // the same one-shot authorization a permanent refusal uses.
-          const message = provider.adapter.reloginText("");
-          const [marked] = await rawRows<{ marked: boolean }>(
-            tx,
-            sql`select opengeni_private.fail_subscription_core_refresh(${providerId},
-              ${identity.accountId}::uuid, ${identity.workspaceId}::uuid,
-              ${identity.sessionId}::uuid, ${identity.turnId}::uuid,
-              ${lease.connectionId}::uuid, ${credential.refreshGeneration}::bigint,
-              ${message}
-            ) as marked`,
-          );
-          return { kind: "relogin", message, marked: marked?.marked === true };
-        }
-        try {
-          const rotated = await refresher.rotate(current);
-          // Persist before any other fallible work: a rolled-back transaction
-          // would discard the only valid refresh token.
-          const persisted = await persistSubscriptionCoreRefreshWithPlan(tx, {
-            provider: providerId,
-            accountId: identity.accountId,
-            workspaceId: identity.workspaceId,
-            sessionId: identity.sessionId,
-            turnId: identity.turnId,
-            connectionId: lease.connectionId,
-            expectedRefreshGeneration: credential.refreshGeneration,
-            credentialEncrypted: encryptEnvironmentValue(
-              key,
-              provider.adapter.credential.encode(rotated.credential),
-            ),
-            expiresAt: rotated.expiresAt,
-            lastRefreshAt: now(),
-            planType: rotated.planType,
-          });
-          if (!persisted) return { kind: "superseded" };
-          return {
-            kind: "refreshed",
-            credential: rotated.credential,
-            refreshGeneration: credential.refreshGeneration + 1,
-            planType: rotated.planType,
-          };
-        } catch (error) {
-          const relogin = refresher.reloginMessage(error);
-          if (relogin !== null) {
-            const [marked] = await rawRows<{ marked: boolean }>(
-              tx,
-              sql`select opengeni_private.fail_subscription_core_refresh(${providerId},
-                ${identity.accountId}::uuid, ${identity.workspaceId}::uuid,
-                ${identity.sessionId}::uuid, ${identity.turnId}::uuid,
-                ${lease.connectionId}::uuid, ${credential.refreshGeneration}::bigint,
-                ${provider.adapter.reloginText(relogin)}
-              ) as marked`,
-            );
-            return { kind: "relogin", message: relogin, marked: marked?.marked === true };
-          }
-          return { kind: "error", error };
-        }
-      },
+      // The lock already began the refresh: the shared rotation persists
+      // through the turn's one-shot authorization.
+      (tx, credential): Promise<SubscriptionCoreRefreshOutcome> =>
+        rotateSubscriptionCoreCredential(
+          tx,
+          provider,
+          key,
+          {
+            begin: async () => credential,
+            persist: (writeTx, input) =>
+              persistSubscriptionCoreRefreshWithPlan(writeTx, {
+                provider: providerId,
+                accountId: identity.accountId,
+                workspaceId: identity.workspaceId,
+                sessionId: identity.sessionId,
+                turnId: identity.turnId,
+                connectionId: lease.connectionId,
+                expectedRefreshGeneration: input.refreshGeneration,
+                credentialEncrypted: input.credentialEncrypted,
+                expiresAt: input.expiresAt,
+                lastRefreshAt: input.refreshedAt,
+                planType: input.planType,
+              }),
+            fail: async (writeTx, input) => {
+              const [marked] = await rawRows<{ marked: boolean }>(
+                writeTx,
+                sql`select opengeni_private.fail_subscription_core_refresh(${providerId},
+                  ${identity.accountId}::uuid, ${identity.workspaceId}::uuid,
+                  ${identity.sessionId}::uuid, ${identity.turnId}::uuid,
+                  ${lease.connectionId}::uuid, ${input.refreshGeneration}::bigint,
+                  ${input.message}
+                ) as marked`,
+              );
+              return marked?.marked === true;
+            },
+          },
+          observedRefreshGeneration,
+          now,
+        ),
     );
     if (result.status !== "completed") return { kind: result.status };
     return result.value;

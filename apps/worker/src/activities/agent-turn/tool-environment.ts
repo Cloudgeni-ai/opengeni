@@ -48,6 +48,7 @@ import {
   listSandboxGroupRepositoryResources,
   settleSessionRepositoryCleanup,
   sessionHasToolRouterHistory,
+  recordNangoUsageEvent,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
@@ -108,7 +109,9 @@ import {
   connectionReconnectDay,
   connectionsNeedingReconnectFor,
   listConnectionsNeedingReconnect,
+  nangoBackendsFor,
   postConnectionNeedsReauthNotice,
+  connectedCommandOutputLook,
   type ConnectionNeedingReconnect,
 } from "@opengeni/core";
 import { withFirstPartyTools } from "../goals";
@@ -500,6 +503,15 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     throwIfWorkerShuttingDown,
     throwIfTurnCancelled,
   } = deps;
+  // One reader per command for the whole attempt: each look continues from
+  // the last instead of replaying everything again.
+  const lookAtLedgerCommand = bus
+    ? connectedCommandOutputLook(db, bus, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+      })
+    : undefined;
 
   const accountRoutes = expandMcpAccountRoutes({
     settings: canonicalRunSettings,
@@ -529,6 +541,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             subjectId: turn.initiatingHumanSubjectId ?? null,
+            integrationBackends: await nangoBackendsFor(db, runSettings),
           }).catch((error: unknown) => {
             observability.warn("Connections needing reconnect were not read", {
               error: error instanceof Error ? error.message : String(error),
@@ -1402,6 +1415,13 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     cancellationSignal,
     undefined,
   );
+  // Read once per attempt: a backend flip reaches the next attempt, never a
+  // tool call already in flight.
+  const nangoIntegrationDefinitions = new Map(
+    [...(await nangoBackendsFor(db, runSettings))].map(
+      ([key, integration]) => [key, integration.definition] as const,
+    ),
+  );
   try {
     eventing.preparedTools = await waitForTurnOperation(
       runtime.prepareTools(githubRestMcp.settings, githubRestMcp.tools, {
@@ -1475,6 +1495,14 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
             }
           : {}),
         onAuthNeeded: publishToolAuthNeeded,
+        nangoIntegrationDefinitions,
+        recordNangoUsage: (report) =>
+          recordNangoUsageEvent(db, {
+            ...report,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: credentialSubjectId ?? turn.initiatingHumanSubjectId ?? null,
+          }),
         materializeConnectorAttachments,
         materializeGmailFile: async (request) => {
           throwIfWorkerShuttingDown();
@@ -1513,7 +1541,11 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
             media.sdkOwnedSandboxSession) as {
             refreshOwnedCommand?: (id: string) => Promise<boolean>;
           } | null;
-          return (await owned?.refreshOwnedCommand?.(commandId)) ?? false;
+          if (await owned?.refreshOwnedCommand?.(commandId)) return true;
+          // A Connected Machine command this attempt did not start (an earlier
+          // turn's, or one from before the session moved to another machine)
+          // is read from the machine its ledger names, never the current one.
+          return (await lookAtLedgerCommand?.(commandId)) ?? false;
         },
         spillOversizedModelToolResult: async ({ operationId, result }) =>
           await toolResultSpill.spill({

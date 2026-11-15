@@ -3,6 +3,7 @@ import {
   ComputerNativeCommand,
   interactionDriverDiagnostic,
   type InteractionDriverDiagnostic,
+  type InteractionFailureReason,
 } from "@opengeni/contracts";
 import { boundComputerNativeReceipt } from "@opengeni/interaction";
 import { createHash, timingSafeEqual } from "node:crypto";
@@ -10,6 +11,7 @@ import { connect, type Socket } from "node:net";
 import { summarizeUpdateBlockers, type UpdateBlocker } from "./update-admission";
 import {
   BROWSER_ACTION_NOTE_KIND_VERSIONS,
+  BROWSER_ACTION_RECEIPT_FAILURE_REASON_PARAMETER,
   BROWSER_ACTION_RECEIPT_NOTES_PARAMETER,
   BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER,
   BROWSER_OBSERVATION_NOTICES_PARAMETER,
@@ -20,6 +22,8 @@ import {
   BROWSER_PROFILE_ARTIFACT_FORMAT,
   BrowserActionCommand,
   BrowserDownloadExportRequest,
+  BrowserDownloadUploadRequest,
+  BrowserDownloadUploadStatus,
   BrowserRecordingExportReceipt,
   BrowserRecordingExportRequest,
   BrowserRecordingStartRequest,
@@ -713,10 +717,11 @@ export class BrowserControlServer {
         request,
         async () => await this.supervisor.action(command, observationNotices(url)),
       );
-      // Older clients parse receipts strictly. Return resolved targets and
-      // per-action notes only to a caller that asked for them, and only the
-      // note kinds its version of the receipt knows.
-      const { targets, notes, ...base } = receipt;
+      // Older clients parse receipts strictly. Return resolved targets,
+      // per-action notes and the operator-only failure reason only to a
+      // caller that asked for them, and only the note kinds its version of
+      // the receipt knows.
+      const { targets, notes, failureReason, ...base } = receipt;
       const notesVersion = Number(url.searchParams.get(BROWSER_ACTION_RECEIPT_NOTES_PARAMETER));
       const knownNotes = notes?.filter(
         (note) => BROWSER_ACTION_NOTE_KIND_VERSIONS[note.kind] <= notesVersion,
@@ -728,6 +733,10 @@ export class BrowserControlServer {
           ? { targets }
           : {}),
         ...(knownNotes !== undefined && knownNotes.length > 0 ? { notes: knownNotes } : {}),
+        ...(failureReason !== undefined &&
+        url.searchParams.get(BROWSER_ACTION_RECEIPT_FAILURE_REASON_PARAMETER) === "1"
+          ? { failureReason }
+          : {}),
       });
     }
     if (
@@ -921,6 +930,28 @@ export class BrowserControlServer {
         );
       }
       return success(await this.supervisor.exportDownload(reference, exported.data));
+    }
+    if (segments.length === 6 && segments[3] === "downloads" && segments[5] === "uploads") {
+      if (request.method !== "POST") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      const downloadId = requireUuid(segments[4], "download id");
+      const uploading = BrowserDownloadUploadRequest.safeParse(await readJson(request));
+      if (!uploading.success) {
+        throw new ProtocolError("invalid_action", "download export authority is invalid", 400);
+      }
+      if (uploading.data.downloadId !== downloadId) {
+        throw new ProtocolError(
+          "operation_conflict",
+          "download export targets another resource",
+          409,
+        );
+      }
+      return success(
+        BrowserDownloadUploadStatus.parse(
+          await this.supervisor.uploadDownload(reference, uploading.data),
+        ),
+      );
     }
     if (segments.length === 5 && segments[3] === "operations") {
       if (request.method !== "GET") {
@@ -2458,7 +2489,7 @@ async function browserReadResponse<T>(
         true,
         503,
         undefined,
-        interactionDriverDiagnostic(error),
+        { diagnostic: interactionDriverDiagnostic(error) },
       );
     }
     return respond(value);
@@ -2467,7 +2498,9 @@ async function browserReadResponse<T>(
 
 /** The protocol failure for a thrown value. A driver failure also carries an
  * operator diagnostic beside the error (never inside it, so callers and models
- * see the same error) and is reported to `onDriverFailure` for local logs. */
+ * see the same error) and is reported to `onDriverFailure` for local logs. A
+ * typed driver error's operator-only failure reason travels beside the error
+ * the same way. */
 function protocolResponse(
   error: unknown,
   onDriverFailure?: (diagnostic: InteractionDriverDiagnostic) => void,
@@ -2478,15 +2511,20 @@ function protocolResponse(
     retryable: boolean,
     status: number,
     details?: Record<string, string>,
+    failureReason?: InteractionFailureReason,
   ): Response => {
-    if (code !== "driver_failed") return failureResponse(code, message, retryable, status, details);
+    if (code !== "driver_failed")
+      return failureResponse(code, message, retryable, status, details, { failureReason });
     const diagnostic = interactionDriverDiagnostic(error);
     try {
       onDriverFailure?.(diagnostic);
     } catch {
       // Diagnostics must never alter the controller response contract.
     }
-    return failureResponse(code, message, retryable, status, details, diagnostic);
+    return failureResponse(code, message, retryable, status, details, {
+      diagnostic,
+      failureReason,
+    });
   };
   if (error instanceof BrowserWorkingRuntimeUnavailableError) {
     return fail(
@@ -2521,12 +2559,26 @@ function protocolResponse(
     );
   }
   if (error instanceof InteractionDefiniteDriverError) {
-    return fail(error.code, error.message, false, interactionStatus(error.code));
+    return fail(
+      error.code,
+      error.message,
+      false,
+      interactionStatus(error.code),
+      undefined,
+      error.failureReason,
+    );
   }
   // A driver that cannot tell whether its change happened (a tab close whose
   // browser connection ended) says so, so the caller checks before retrying.
   if (error instanceof InteractionOutcomeUnknownDriverError) {
-    return fail(error.code, error.message, error.retryable, interactionStatus(error.code));
+    return fail(
+      error.code,
+      error.message,
+      error.retryable,
+      interactionStatus(error.code),
+      undefined,
+      error.failureReason,
+    );
   }
   // One reply the browser connection refused (too large, or not JSON) failed
   // only this request; the same request would fail again, a smaller one not.
@@ -2581,7 +2633,10 @@ function failureResponse(
   retryable: boolean,
   status: number,
   details?: Record<string, string>,
-  diagnostic?: InteractionDriverDiagnostic,
+  beside: {
+    diagnostic?: InteractionDriverDiagnostic | undefined;
+    failureReason?: InteractionFailureReason | undefined;
+  } = {},
 ): Response {
   const headers: Record<string, string> = { "cache-control": "no-store" };
   if (status === 401) headers["www-authenticate"] = "Bearer";
@@ -2591,7 +2646,9 @@ function failureResponse(
       protocolVersion: BROWSER_CONTROL_PROTOCOL_VERSION,
       ok: false,
       error: { code, message, retryable, ...(details ? { details } : {}) },
-      ...(diagnostic ? { diagnostic } : {}),
+      ...(beside.diagnostic ? { diagnostic: beside.diagnostic } : {}),
+      // Clients that predate the field ignore it.
+      ...(beside.failureReason ? { failureReason: beside.failureReason } : {}),
     }),
     { status, headers },
   );
@@ -2620,7 +2677,7 @@ function routeNeedsControl(segments: readonly string[], request: Request): boole
   if (
     segments[3] === "actions" ||
     segments[3] === "external-auth" ||
-    (segments[3] === "downloads" && segments[5] === "exports") ||
+    (segments[3] === "downloads" && (segments[5] === "exports" || segments[5] === "uploads")) ||
     (segments[3] === "recordings" && request.method === "POST") ||
     (segments[3] === "operations" && request.method === "POST")
   ) {

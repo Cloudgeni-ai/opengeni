@@ -18,9 +18,24 @@ export type OpenGeniSiteAiResult = {
   after: number;
 };
 
+/** The turn waits for the person: an approval or an answer, given in Opengeni. */
+export type OpenGeniSiteAiWait = {
+  kind: "approval" | "input";
+};
+
 export type OpenGeniSiteAiOptions = {
   /** Stops observing, not the underlying work. Use the ordinary session control API to cancel. */
   signal?: AbortSignal;
+  /**
+   * Wait through approvals and input requests: once the person answers in
+   * Opengeni, the same turn goes on and the call resolves with its final
+   * result. Without it, a wait resolves at once with status `pending`.
+   * A person may answer much later, so pass a `signal` (for example
+   * `AbortSignal.timeout(...)`) to stop observing; the work goes on.
+   */
+  waitForApproval?: boolean;
+  /** Called when the turn starts waiting for the person, so the app can say so. */
+  onWait?: (wait: OpenGeniSiteAiWait) => void;
   /** Retain the handle before waiting for output, including when observation is interrupted. */
   onSession?: (sessionId: string) => void;
   /** Append-only answer text, folded by the same SDK implementation as embedded chat. */
@@ -28,7 +43,11 @@ export type OpenGeniSiteAiOptions = {
 };
 
 export type OpenGeniSiteAi = {
-  /** Starts an ordinary viewer-owned Site session and returns its first turn's output. */
+  /**
+   * Starts an ordinary viewer-owned Site session and returns its first turn's
+   * output. With `waitForApproval`, a turn that waits for an approval or an
+   * answer resolves once the person gives it and the turn finishes.
+   */
   run(
     request: OpenGeniSiteAiRequest,
     options?: OpenGeniSiteAiOptions,
@@ -162,6 +181,21 @@ export function createOpenGeniSiteAi(
     const waiting = (session: Session) =>
       session.status === "requires_action" &&
       (!session.activeTurnId || !fold?.turnId || session.activeTurnId === fold.turnId);
+    // Each wait is reported once, by the event that started it.
+    let reportedWait = -1;
+    const reportWait = () => {
+      const event = pending.event;
+      const at = event ? eventCursor(event) : 0;
+      if (at <= reportedWait) return;
+      reportedWait = at;
+      options.onWait?.({
+        kind: event?.type === "session.humanInput.requested" ? "input" : "approval",
+      });
+    };
+    // Set while the turn waits for the person and observation waits with it.
+    let waitingThrough = false;
+    // Reopens of a stream that closed without progress back off up to a ceiling.
+    let quietReopens = 0;
     try {
       let session = await readSession();
       // Reconstruct the exact prefix separately: unlike SSE coalescing, this
@@ -180,9 +214,15 @@ export function createOpenGeniSiteAi(
           if (waiting(fresh)) {
             if (!fold) selectTurn(fresh.activeTurnId ?? lastTurnId(prefix));
             else if (!fold.turnId) fold.turnId = fresh.activeTurnId ?? null;
-            if (pending.event && eventCursor(pending.event) > cutoff)
-              emit(fold!.push(pending.event).chunks);
-            return reply("pending");
+            reportWait();
+            if (!options.waitForApproval) {
+              if (pending.event && eventCursor(pending.event) > cutoff)
+                emit(fold!.push(pending.event).chunks);
+              return reply("pending");
+            }
+            // The person answers in Opengeni; the same turn then goes on.
+            // Keep observing it until it settles.
+            waitingThrough = true;
           }
           session = fresh;
         }
@@ -191,9 +231,23 @@ export function createOpenGeniSiteAi(
           after: Math.max(cutoff, after),
           signal: streamAbort.signal,
         });
+        const opened = after;
         for (;;) {
           const next = await observe(() => stream!.next(), upstream.signal);
-          if (next.done) throw new Error("The Site AI event stream ended before the turn settled.");
+          if (next.done) {
+            if (!waitingThrough)
+              throw new Error("The Site AI event stream ended before the turn settled.");
+            // A wait can outlast one stream: reopen while the turn still waits.
+            closeStream();
+            session = await readSession();
+            if (!waiting(session) && session.lastSequence <= after)
+              throw new Error("The Site AI event stream ended before the turn settled.");
+            if (after === opened) {
+              await pause(reopenDelay(quietReopens), upstream.signal);
+              quietReopens += 1;
+            } else quietReopens = 0;
+            break;
+          }
           consume(next.value);
           if (terminal) return reply(terminal);
           if (isWait(next.value) && (!next.value.turnId || next.value.turnId === fold?.turnId)) {
@@ -264,6 +318,23 @@ function eventCursor(event: SessionEvent): number {
     event.coveredThrough ?? 0,
     sessionEventStreamCoveredThrough(event) ?? 0,
   );
+}
+
+/** How long to wait before reopening a stream that ended while the turn waits. */
+const STREAM_REOPEN_DELAY_MS = 1000;
+/** The longest wait between quiet reopens. */
+const STREAM_REOPEN_MAX_DELAY_MS = 30_000;
+
+/** Doubles with each quiet reopen in a row, up to the ceiling. */
+export function reopenDelay(quietReopens: number): number {
+  return Math.min(
+    STREAM_REOPEN_MAX_DELAY_MS,
+    STREAM_REOPEN_DELAY_MS * 2 ** Math.min(quietReopens, 16),
+  );
+}
+
+function pause(ms: number, signal: AbortSignal): Promise<void> {
+  return observe(() => new Promise<void>((resolve) => setTimeout(resolve, ms)), signal);
 }
 
 /** Event-page reads have no signal option; observation can still stop immediately. */

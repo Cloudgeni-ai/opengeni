@@ -1,8 +1,8 @@
 // Agents reads and writes (src/agents.ts and the Slack agent functions built
 // on them) under the production database setup: restricted runtime role,
-// FORCE RLS. Covers revisions, the legacy rows written in the same
-// transaction (and the legacy sync triggers staying out of the way), Slack
-// availability in one installation, name clashes, and the Slack projections.
+// FORCE RLS. Covers revisions, Slack availability in several installations
+// (and what turning it off in one removes), name clashes, and the Slack
+// projections.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { sql } from "drizzle-orm";
 import {
@@ -10,7 +10,7 @@ import {
   type RestrictedRuntimeTestDatabase,
 } from "@opengeni/testing/shared-pg";
 import {
-  agentInstructionsSql,
+  claimSlackAgentOpenNotice,
   createAgent,
   createDb,
   deleteAgent,
@@ -21,10 +21,14 @@ import {
   getSlackAgent,
   insertSlackAgent,
   listAgentSlackInstalls,
+  listAgentsMissingFromSlack,
+  listSlackAgentIntroChannelIds,
   listSlackAgentsForConnection,
   putAgentSlackInstall,
   readSessionAgentPrompt,
+  recordSlackAgentIntroPost,
   sessionAgentRequiresPrivateChat,
+  touchSlackAgentUserState,
   updateAgent,
   updateSlackAgent,
   withWorkspaceSessionActivityRls,
@@ -47,10 +51,14 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-/** An organization with a Slack installation's workspace, the agents' home, and two installations. */
+/**
+ * An organization with the agents' home and two Slack installations, each
+ * bound to its own workspace.
+ */
 async function organization() {
   const accountId = crypto.randomUUID();
   const install = crypto.randomUUID();
+  const otherInstall = crypto.randomUUID();
   const home = crypto.randomUUID();
   const connectionId = crypto.randomUUID();
   const otherConnectionId = crypto.randomUUID();
@@ -58,26 +66,32 @@ async function organization() {
   await shared.admin`insert into managed_accounts (id, name) values (${accountId}, 'Agents')`;
   for (const [id, name] of [
     [install, "Slack home"],
+    [otherInstall, "Other Slack home"],
     [home, "Team"],
   ] as const) {
     await shared.admin`insert into workspaces (id, account_id, name) values (${id}, ${accountId}, ${name})`;
     await shared.admin`insert into workspace_inference_controls (account_id, workspace_id)
       values (${accountId}, ${id}) on conflict (workspace_id) do nothing`;
   }
-  for (const id of [connectionId, otherConnectionId]) {
+  for (const [id, workspaceId] of [
+    [connectionId, install],
+    [otherConnectionId, otherInstall],
+  ] as const) {
     await shared.admin`insert into connections
       (id, account_id, workspace_id, provider_domain, kind, status, credential_encrypted)
-      values (${id}, ${accountId}, ${install}, 'slack.com', 'app_install', 'active', '\\x00'::bytea)`;
+      values (${id}, ${accountId}, ${workspaceId}, 'slack.com', 'app_install', 'active', '\\x00'::bytea)`;
   }
   return {
     accountId,
     install,
+    otherInstall,
     home,
     connectionId,
     otherConnectionId,
     owner,
     homeScope: { accountId, workspaceId: home },
     installScope: { accountId, workspaceId: install },
+    otherInstallScope: { accountId, workspaceId: otherInstall },
   };
 }
 
@@ -101,23 +115,6 @@ function agentInput(org: Org, overrides: Partial<CreateAgentInput> = {}): Create
   };
 }
 
-async function legacySlackRow(id: string) {
-  const [row] = await shared.admin<
-    {
-      workspace_id: string;
-      target_workspace_id: string;
-      name: string;
-      name_key: string;
-      instructions: string;
-      open: boolean;
-      version: number;
-      avatar: unknown;
-    }[]
-  >`select workspace_id::text, target_workspace_id::text, name, name_key, instructions, open,
-      version, avatar from slack_agents where id = ${id}`;
-  return row ?? null;
-}
-
 async function revisionCount(id: string): Promise<number> {
   const [row] = await shared.admin<{ count: number }[]>`
     select count(*)::int as count from agent_revisions where agent_id = ${id}`;
@@ -125,22 +122,17 @@ async function revisionCount(id: string): Promise<number> {
 }
 
 describe("agents data layer (restricted runtime role)", () => {
-  test("revisions, the legacy template row and the triggers standing aside", async () => {
+  test("revisions, and a bot template is only an agent", async () => {
     const org = await organization();
     const { agent } = await createAgent(
       app.db,
       org.homeScope,
-      agentInput(org, {
-        origin: "bot_template",
-        firstMessage: "Plan it.",
-        legacyBotTemplate: true,
-      }),
+      agentInput(org, { origin: "bot_template", firstMessage: "Plan it." }),
     );
     expect(await revisionCount(agent.id)).toBe(1);
     // A First message joins the Instructions as its own paragraph.
     expect(agent.content).toMatchObject({
       instructions: "Be brief.\n\nWhen a chat starts:\nPlan it.",
-      firstMessage: "",
     });
     const [stored] = await shared.admin<{ instructions: string; first_message: string }[]>`
       select instructions, first_message from agent_revisions where agent_id = ${agent.id}`;
@@ -148,9 +140,6 @@ describe("agents data layer (restricted runtime role)", () => {
       instructions: "Be brief.\n\nWhen a chat starts:\nPlan it.",
       first_message: "",
     });
-    const [template] = await shared.admin<{ setup_instructions: string }[]>`
-      select setup_instructions from bot_templates where id = ${agent.id}`;
-    expect(template?.setup_instructions).toBe("Be brief.\n\nWhen a chat starts:\nPlan it.");
 
     // A retried create with the same id finds the agent it made.
     const again = await createAgent(app.db, org.homeScope, {
@@ -174,11 +163,7 @@ describe("agents data layer (restricted runtime role)", () => {
         content: { instructions: "Plan the release.", createdBySubjectId: "user:editor" },
       },
     });
-    // Exactly one new revision: the template trigger did not add its own.
     expect(await revisionCount(agent.id)).toBe(2);
-    const [synced] = await shared.admin<{ setup_instructions: string }[]>`
-      select setup_instructions from bot_templates where id = ${agent.id}`;
-    expect(synced?.setup_instructions).toBe("Plan the release.");
     expect(
       await updateAgent(app.db, org.homeScope, {
         agentId: agent.id,
@@ -189,39 +174,23 @@ describe("agents data layer (restricted runtime role)", () => {
     ).toMatchObject({ kind: "version_conflict" });
 
     expect(await deleteAgent(app.db, org.homeScope, agent.id)).toBe(true);
-    expect(await shared.admin`select id from bot_templates where id = ${agent.id}`).toHaveLength(0);
+    expect(await getAgent(app.db, org.homeScope, agent.id)).toBeNull();
   }, 120_000);
 
-  test("an older First message joins the Instructions when read, and is stored that way on the next change", async () => {
+  test("an older client's First message joins the Instructions, once, even past their limit", async () => {
     const org = await organization();
     const { agent } = await createAgent(app.db, org.homeScope, agentInput(org));
-    // As an older release stores it: a revision with a First message.
-    const olderRevision = async (instructions: string, firstMessage: string) => {
-      await shared.admin.begin(async (tx) => {
-        const [row] = await tx<{ revision: number }[]>`
-          update agents set current_revision = current_revision + 1
-          where id = ${agent.id} returning current_revision as revision`;
-        await tx`insert into agent_revisions (agent_id, account_id, workspace_id, revision, name,
-            instructions, first_message)
-          values (${agent.id}, ${org.accountId}, ${org.home}, ${row!.revision}, 'Release helper',
-            ${instructions}, ${firstMessage})`;
-      });
-    };
-    await olderRevision("Be brief.", "  Ask which release.  ");
-    const read = await getAgent(app.db, org.homeScope, agent.id);
-    expect(read?.content).toMatchObject({
-      instructions: "Be brief.\n\nWhen a chat starts:\nAsk which release.",
-      firstMessage: "",
-    });
-    expect(read?.hasFirstMessage).toBe(false);
-    // Any change stores it joined, once.
-    const renamed = await updateAgent(app.db, org.homeScope, {
+    const joined = await updateAgent(app.db, org.homeScope, {
       agentId: agent.id,
-      expectedVersion: read!.version,
+      expectedVersion: agent.version,
       actorSubjectId: org.owner,
-      patch: { name: "Release desk" },
+      patch: { firstMessage: "  Ask which release.  " },
     });
-    expect(renamed).toMatchObject({ kind: "updated", revised: true });
+    expect(joined).toMatchObject({
+      kind: "updated",
+      revised: true,
+      agent: { content: { instructions: "Be brief.\n\nWhen a chat starts:\nAsk which release." } },
+    });
     const [stored] = await shared.admin<{ instructions: string; first_message: string }[]>`
       select r.instructions, r.first_message from agents a
       join agent_revisions r on r.agent_id = a.id and r.revision = a.current_revision
@@ -238,8 +207,7 @@ describe("agents data layer (restricted runtime role)", () => {
       patch: { firstMessage: "Ask which release." },
     });
     expect(again).toMatchObject({ kind: "updated", revised: false });
-    // New Instructions replace a stored First message: they were written over the joined text.
-    await olderRevision("Be brief.", "Ask which release.");
+    // New Instructions replace the joined text they were written over.
     const rewritten = await updateAgent(app.db, org.homeScope, {
       agentId: agent.id,
       expectedVersion: null,
@@ -248,70 +216,32 @@ describe("agents data layer (restricted runtime role)", () => {
     });
     expect(rewritten).toMatchObject({
       kind: "updated",
-      agent: { content: { instructions: "Be thorough.", firstMessage: "" } },
+      agent: { content: { instructions: "Be thorough." } },
     });
-    // Too long together: both are kept as sent, and readers still see them joined.
-    const long = "x".repeat(15_000);
+    // Too long together for a person's Instructions: still one text.
+    const long = "x".repeat(20_000);
     const kept = await createAgent(
       app.db,
       org.homeScope,
-      agentInput(org, { name: "Long one", instructions: long, firstMessage: "y".repeat(15_000) }),
+      agentInput(org, { name: "Long one", instructions: long, firstMessage: "y".repeat(20_000) }),
     );
     const [both] = await shared.admin<{ instructions: string; first_message: string }[]>`
       select instructions, first_message from agent_revisions where agent_id = ${kept.agent.id}`;
-    expect(both?.instructions.length).toBe(15_000);
-    expect(both?.first_message.length).toBe(15_000);
-    expect(kept.agent.content?.instructions.length).toBe(
-      30_002 + `${AGENT_FIRST_MESSAGE_LEAD}\n`.length,
-    );
-    // A legacy template row copies the stored First message as it is, never a
-    // cut joined text, so an older release writing it back loses nothing.
-    const keptTemplate = await createAgent(
-      app.db,
-      org.homeScope,
-      agentInput(org, {
-        name: "Long template",
-        origin: "bot_template",
-        legacyBotTemplate: true,
-        instructions: long,
-        firstMessage: "y".repeat(15_000),
-      }),
-    );
-    const [legacy] = await shared.admin<{ setup_instructions: string }[]>`
-      select setup_instructions from bot_templates where id = ${keptTemplate.agent.id}`;
-    expect(legacy?.setup_instructions).toBe("y".repeat(15_000));
-    // The SQL form, for reads that never map an agent, reads the same.
-    const viaSql = async (instructions: string, firstMessage: string) => {
-      const rows = (await app.db.execute(
-        sql`select ${agentInstructionsSql("r")} as joined
-          from (values (${instructions}::text, ${firstMessage}::text)) as r(instructions, first_message)`,
-      )) as unknown as { rows?: { joined: string }[] } | { joined: string }[];
-      const list = Array.isArray(rows) ? rows : (rows.rows ?? []);
-      return list[0]?.joined;
-    };
-    for (const [instructions, firstMessage] of [
-      ["Be brief.", ""],
-      ["Be brief.", "  Ask which release.\n"],
-      ["", " Ask. "],
-      ["Be brief. Ask.", "Ask."],
-      ["Line one\n", "Line two"],
-    ] as const) {
-      expect(await viaSql(instructions, firstMessage)).toBe(
-        agentInstructionsWithFirstMessage(instructions, firstMessage),
-      );
-    }
+    expect(both?.first_message).toBe("");
+    expect(both?.instructions).toBe(agentInstructionsWithFirstMessage(long, "y".repeat(20_000)));
+    expect(both?.instructions.length).toBe(40_002 + `${AGENT_FIRST_MESSAGE_LEAD}\n`.length);
+    expect(kept.agent.content?.instructions).toBe(both?.instructions);
   }, 120_000);
 
-  test("Slack availability: one installation, the legacy row, names and projections", async () => {
+  test("Slack availability: several installations, names and projections", async () => {
     const org = await organization();
     const { agent } = await createAgent(app.db, org.homeScope, agentInput(org));
-    const put = (agentId: string, connectionId: string, open?: boolean) =>
+    const put = (agentId: string, connectionId: string) =>
       putAgentSlackInstall(app.db, org.homeScope, {
         agentId,
         connectionId,
         slackTeamId: "T0AGENTS",
-        installWorkspaceId: org.install,
-        ...(open !== undefined ? { open } : {}),
+        installWorkspaceId: connectionId === org.connectionId ? org.install : org.otherInstall,
         actorSubjectId: org.owner,
       });
 
@@ -320,49 +250,67 @@ describe("agents data layer (restricted runtime role)", () => {
       kind: "saved",
       created: true,
       install: { nameKey: "releasehelper", open: false, installWorkspaceId: org.install },
-    });
-    // The legacy row lives in the installation's workspace and targets the home.
-    expect(await legacySlackRow(agent.id)).toMatchObject({
-      workspace_id: org.install,
-      target_workspace_id: org.home,
-      name: "Release helper",
-      name_key: "releasehelper",
-      instructions: "Be brief.",
       // Turning Slack on is a change of the agent.
-      version: agent.version + 1,
-      avatar: { kind: "letters", letters: "RH" },
+      agent: { version: agent.version + 1 },
     });
-    // No duplicate revision from the Slack agent trigger.
     expect(await revisionCount(agent.id)).toBe(1);
-    // Idempotent, and at most one installation until the contract step.
+    // Idempotent, and available in a second installation too.
     expect(await put(agent.id, org.connectionId)).toMatchObject({ kind: "saved", created: false });
     expect(await put(agent.id, org.otherConnectionId)).toMatchObject({
-      kind: "single_install",
-      connectionId: org.connectionId,
+      kind: "saved",
+      created: true,
+      install: { installWorkspaceId: org.otherInstall },
     });
+    expect(
+      (await listAgentSlackInstalls(app.db, org.homeScope, [agent.id])).map(
+        (install) => install.connectionId,
+      ),
+    ).toEqual([org.connectionId, org.otherConnectionId]);
 
-    // Read from the installation's own workspace, Instructions included.
+    // Read from each installation's own workspace, Instructions included.
     const [projected] = await listSlackAgentsForConnection(app.db, org.installScope, {
       connectionId: org.connectionId,
     });
     expect(projected).toMatchObject({
       id: agent.id,
       workspaceId: org.install,
+      connectionId: org.connectionId,
       targetWorkspaceId: org.home,
       instructions: "Be brief.",
       knowledgeCollectionId: null,
+      avatar: { kind: "letters", letters: "RH" },
     });
     expect(
+      await listSlackAgentsForConnection(app.db, org.otherInstallScope, {
+        connectionId: org.otherConnectionId,
+      }),
+    ).toMatchObject([{ id: agent.id, workspaceId: org.otherInstall }]);
+    // Not from a workspace that is not the installation's.
+    expect(
+      await listSlackAgentsForConnection(app.db, org.installScope, {
+        connectionId: org.otherConnectionId,
+      }),
+    ).toEqual([]);
+    expect(
       await getSlackAgent(app.db, { accountId: org.accountId, agentId: agent.id }),
-    ).toMatchObject({ instructions: "Be brief." });
+    ).toMatchObject({ instructions: "Be brief.", connectionId: org.connectionId });
+    expect(
+      await getSlackAgent(app.db, {
+        accountId: org.accountId,
+        agentId: agent.id,
+        connectionId: org.otherConnectionId,
+      }),
+    ).toMatchObject({ connectionId: org.otherConnectionId, workspaceId: org.otherInstall });
 
-    // Another agent with the same Slack name is refused there; the first keeps it.
+    // Another agent with the same Slack name is refused in both installations;
+    // the first keeps it.
     const { agent: twin } = await createAgent(
       app.db,
       org.homeScope,
       agentInput(org, { name: "Release Helper" }),
     );
     expect(await put(twin.id, org.connectionId)).toEqual({ kind: "name_taken" });
+    expect(await put(twin.id, org.otherConnectionId)).toEqual({ kind: "name_taken" });
     expect(await listAgentSlackInstalls(app.db, org.homeScope, [twin.id])).toEqual([]);
     const { agent: other } = await createAgent(
       app.db,
@@ -379,9 +327,21 @@ describe("agents data layer (restricted runtime role)", () => {
     expect(clash).toMatchObject({ kind: "slack_name_taken", connectionId: org.connectionId });
     expect((await getAgent(app.db, org.homeScope, other.id))?.name).toBe("Ops desk");
 
-    // Changes reach the legacy row; open mirrors the agent's version.
-    const opened = await put(agent.id, org.connectionId, true);
-    expect(opened).toMatchObject({ kind: "saved", install: { open: true } });
+    // Anyone in the organization is the agent's own; the previous release
+    // reads it from each installation's `open`. A rename renames the handle
+    // in every installation.
+    const opened = await updateAgent(app.db, org.homeScope, {
+      agentId: agent.id,
+      expectedVersion: null,
+      actorSubjectId: org.owner,
+      patch: { organizationAccess: true },
+    });
+    expect(opened).toMatchObject({ kind: "updated", agent: { organizationAccess: true } });
+    expect(
+      (await listAgentSlackInstalls(app.db, org.homeScope, [agent.id])).map(
+        (install) => install.open,
+      ),
+    ).toEqual([true, true]);
     const revised = await updateAgent(app.db, org.homeScope, {
       agentId: agent.id,
       expectedVersion: null,
@@ -390,22 +350,64 @@ describe("agents data layer (restricted runtime role)", () => {
     });
     expect(revised.kind).toBe("updated");
     const current = await getAgent(app.db, org.homeScope, agent.id);
-    expect(await legacySlackRow(agent.id)).toMatchObject({
+    expect(
+      (await listAgentSlackInstalls(app.db, org.homeScope, [agent.id])).map((install) => [
+        install.nameKey,
+        install.open,
+      ]),
+    ).toEqual([
+      ["releaselead", true],
+      ["releaselead", true],
+    ]);
+    expect(
+      await getSlackAgent(app.db, {
+        accountId: org.accountId,
+        agentId: agent.id,
+        connectionId: org.connectionId,
+      }),
+    ).toMatchObject({
       name: "Release lead",
-      name_key: "releaselead",
       instructions: "Be very brief.",
       open: true,
       version: current!.version,
     });
 
-    // Off in Slack: the legacy row goes, the agent and its revisions stay.
+    // Only the agent's own setting decides (since 1448); an installation's
+    // `open` is kept equal to it for the previous release, which reads it.
+    await shared.admin`update agent_slack_installs set open = false
+      where agent_id = ${agent.id} and connection_id = ${org.connectionId}`;
+    expect((await getAgent(app.db, org.homeScope, agent.id))?.organizationAccess).toBe(true);
+    for (const connectionId of [org.connectionId, org.otherConnectionId]) {
+      expect(
+        await getSlackAgent(app.db, { accountId: org.accountId, agentId: agent.id, connectionId }),
+      ).toMatchObject({ open: true });
+    }
+    expect(
+      await updateAgent(app.db, org.homeScope, {
+        agentId: agent.id,
+        expectedVersion: null,
+        actorSubjectId: org.owner,
+        patch: { description: "Still open." },
+      }),
+    ).toMatchObject({ kind: "updated", agent: { organizationAccess: true } });
+    expect(
+      (await listAgentSlackInstalls(app.db, org.homeScope, [agent.id])).map(
+        (install) => install.open,
+      ),
+    ).toEqual([true, true]);
+
+    // Off in one installation: the other installation, the agent and its revisions stay.
     expect(
       await deleteAgentSlackInstall(app.db, org.homeScope, {
         agentId: agent.id,
         connectionId: org.connectionId,
       }),
     ).toBe(true);
-    expect(await legacySlackRow(agent.id)).toBeNull();
+    expect(
+      (await listAgentSlackInstalls(app.db, org.homeScope, [agent.id])).map(
+        (install) => install.connectionId,
+      ),
+    ).toEqual([org.otherConnectionId]);
     expect(await getAgent(app.db, org.homeScope, agent.id)).not.toBeNull();
     expect(await revisionCount(agent.id)).toBe(2);
   }, 120_000);
@@ -481,7 +483,6 @@ describe("agents data layer (restricted runtime role)", () => {
 
     expect(await deleteSlackAgent(app.db, org.installScope, { agentId: created.id })).toBe(true);
     expect(await getAgent(app.db, org.homeScope, created.id)).toBeNull();
-    expect(await legacySlackRow(created.id)).toBeNull();
   }, 120_000);
 
   test("a chat's agent: sessions.agent_id, or an older Slack chat's interaction", async () => {
@@ -612,31 +613,109 @@ describe("agents data layer (restricted runtime role)", () => {
     expect((await prompt(onShared))?.instructions).toBeNull();
   }, 120_000);
 
-  test("the legacy Slack row's version never goes backwards", async () => {
+  test("turning Slack off in one installation removes only that installation's Slack records", async () => {
     const org = await organization();
     const { agent } = await createAgent(app.db, org.homeScope, agentInput(org));
-    await putAgentSlackInstall(app.db, org.homeScope, {
+    for (const [connectionId, installWorkspaceId] of [
+      [org.connectionId, org.install],
+      [org.otherConnectionId, org.otherInstall],
+    ] as const) {
+      expect(
+        (
+          await putAgentSlackInstall(app.db, org.homeScope, {
+            agentId: agent.id,
+            connectionId,
+            slackTeamId: "T0AGENTS",
+            installWorkspaceId,
+            actorSubjectId: org.owner,
+          })
+        ).kind,
+      ).toBe("saved");
+    }
+    // One record per installation.
+    for (const [connectionId, scope, slackId] of [
+      [org.connectionId, org.installScope, "ONE"],
+      [org.otherConnectionId, org.otherInstallScope, "TWO"],
+    ] as const) {
+      expect(
+        await touchSlackAgentUserState(app.db, scope, {
+          connectionId,
+          slackAgentId: agent.id,
+          slackUserId: `U0${slackId}`,
+          hintInteractionId: null,
+        }),
+      ).toEqual({ showHint: false });
+      await recordSlackAgentIntroPost(app.db, scope, {
+        connectionId,
+        slackAgentId: agent.id,
+        slackChannelId: `C0${slackId}`,
+        postedBySubjectId: org.owner,
+      });
+      expect(
+        await listSlackAgentIntroChannelIds(app.db, scope, {
+          slackAgentId: agent.id,
+          connectionId,
+        }),
+      ).toEqual([`C0${slackId}`]);
+    }
+    const counts = async () => {
+      const [row] = await shared.admin<{ states: number; intros: number }[]>`
+        select
+          (select count(*)::int from slack_agent_user_states where slack_agent_id = ${agent.id}) as states,
+          (select count(*)::int from slack_agent_intro_posts where slack_agent_id = ${agent.id}) as intros`;
+      return row;
+    };
+    expect(await counts()).toEqual({ states: 2, intros: 2 });
+
+    // The same Slack person (Enterprise Grid) or shared channel (Slack
+    // Connect) in both installations: a record in each.
+    expect(
+      await touchSlackAgentUserState(app.db, org.otherInstallScope, {
+        connectionId: org.otherConnectionId,
+        slackAgentId: agent.id,
+        slackUserId: "U0ONE",
+        hintInteractionId: crypto.randomUUID(),
+      }),
+    ).toEqual({ showHint: true });
+    const notice = crypto.randomUUID();
+    expect(
+      await claimSlackAgentOpenNotice(app.db, org.otherInstallScope, {
+        connectionId: org.otherConnectionId,
+        slackAgentId: agent.id,
+        slackUserId: "U0ONE",
+        interactionId: notice,
+      }),
+    ).toBe(true);
+    await recordSlackAgentIntroPost(app.db, org.otherInstallScope, {
+      connectionId: org.otherConnectionId,
+      slackAgentId: agent.id,
+      slackChannelId: "C0ONE",
+      postedBySubjectId: org.owner,
+    });
+    expect(
+      await listSlackAgentIntroChannelIds(app.db, org.otherInstallScope, {
+        slackAgentId: agent.id,
+        connectionId: org.otherConnectionId,
+      }),
+    ).toEqual(["C0ONE", "C0TWO"]);
+    expect(await counts()).toEqual({ states: 3, intros: 3 });
+
+    await deleteAgentSlackInstall(app.db, org.homeScope, {
       agentId: agent.id,
       connectionId: org.connectionId,
-      slackTeamId: "T0AGENTS",
-      installWorkspaceId: org.install,
-      actorSubjectId: org.owner,
     });
-    await shared.admin`update slack_agents set version = 7 where id = ${agent.id}`;
-    const revised = await updateAgent(app.db, org.homeScope, {
-      agentId: agent.id,
-      expectedVersion: null,
-      actorSubjectId: org.owner,
-      patch: { description: "Newer" },
-    });
-    expect(revised.kind).toBe("updated");
-    expect(await legacySlackRow(agent.id)).toMatchObject({ version: 8 });
-    expect(
-      (await getSlackAgent(app.db, { accountId: org.accountId, agentId: agent.id }))?.version,
-    ).toBe(8);
+    expect(await counts()).toEqual({ states: 2, intros: 2 });
+    const left = await shared.admin<{ connection_id: string }[]>`
+      select distinct connection_id::text from slack_agent_user_states
+      where slack_agent_id = ${agent.id}`;
+    expect(left.map((row) => row.connection_id)).toEqual([org.otherConnectionId]);
+
+    // Deleting the agent removes the rest.
+    await deleteAgent(app.db, org.homeScope, agent.id);
+    expect(await counts()).toEqual({ states: 0, intros: 0 });
   }, 120_000);
 
-  test("an agent in Slack stays shared, checked under its row lock", async () => {
+  test("an agent in Slack is always shared: Only me takes it out of Slack, under its row lock", async () => {
     const org = await organization();
     const { agent: mine } = await createAgent(
       app.db,
@@ -653,7 +732,7 @@ describe("agents data layer (restricted runtime role)", () => {
         actorSubjectId: org.owner,
       }),
     ).toEqual({ kind: "requires_workspace_visibility" });
-    expect(await legacySlackRow(mine.id)).toBeNull();
+    expect(await listAgentSlackInstalls(app.db, org.homeScope, [mine.id])).toEqual([]);
 
     const { agent } = await createAgent(app.db, org.homeScope, agentInput(org));
     const saved = await putAgentSlackInstall(app.db, org.homeScope, {
@@ -680,11 +759,76 @@ describe("agents data layer (restricted runtime role)", () => {
         actorSubjectId: org.owner,
         patch: { visibility: "private", ownerSubjectId: org.owner },
       }),
-    ).toEqual({ kind: "requires_workspace_visibility" });
-    expect((await getAgent(app.db, org.homeScope, agent.id))?.visibility).toBe("workspace");
+    ).toMatchObject({ kind: "updated", agent: { visibility: "private" } });
+    expect(await listAgentSlackInstalls(app.db, org.homeScope, [agent.id])).toEqual([]);
+    // The agent stays.
+    expect((await getAgent(app.db, org.homeScope, agent.id))?.visibility).toBe("private");
   }, 120_000);
 
-  test("the legacy Slack API accepts either version during the rollout", async () => {
+  test("Opengeni can make an agent no person made available in Slack", async () => {
+    const org = await organization();
+    const { agent } = await createAgent(
+      app.db,
+      org.homeScope,
+      agentInput(org, { createdBySubjectId: null, name: "Keyed agent" }),
+    );
+    const saved = await putAgentSlackInstall(app.db, org.homeScope, {
+      agentId: agent.id,
+      connectionId: org.connectionId,
+      slackTeamId: "T0AGENTS",
+      installWorkspaceId: org.install,
+      actorSubjectId: null,
+    });
+    expect(saved).toMatchObject({ kind: "saved", install: { enabledBySubjectId: null } });
+
+    // What each installation is still missing: shared agents not in it yet,
+    // oldest first.
+    const { agent: other } = await createAgent(
+      app.db,
+      org.homeScope,
+      agentInput(org, { name: "Second desk" }),
+    );
+    const { agent: third } = await createAgent(
+      app.db,
+      org.homeScope,
+      agentInput(org, { name: "Third desk" }),
+    );
+    await createAgent(
+      app.db,
+      org.homeScope,
+      agentInput(org, { name: "Diary", visibility: "private", ownerSubjectId: org.owner }),
+    );
+    const missing = (scope: typeof org.installScope, connectionId: string) =>
+      listAgentsMissingFromSlack(app.db, scope, { connectionId });
+    expect(await missing(org.installScope, org.connectionId)).toEqual([
+      { id: other.id, workspaceId: org.home, name: "Second desk", createdBySubjectId: org.owner },
+      { id: third.id, workspaceId: org.home, name: "Third desk", createdBySubjectId: org.owner },
+    ]);
+    // Being in one installation doesn't keep it out of another.
+    expect(
+      (await missing(org.otherInstallScope, org.otherConnectionId)).map((row) => row.id),
+    ).toEqual([agent.id, other.id, third.id]);
+
+    // Opengeni adding an agent on its own leaves its version alone, so an
+    // open edit form can still save; a person turning it on bumps it.
+    const before = (await getAgent(app.db, org.homeScope, other.id))?.version;
+    expect(
+      await putAgentSlackInstall(app.db, org.homeScope, {
+        agentId: other.id,
+        connectionId: org.connectionId,
+        slackTeamId: "T0AGENTS",
+        installWorkspaceId: org.install,
+        actorSubjectId: org.owner,
+        automatic: true,
+      }),
+    ).toMatchObject({ kind: "saved" });
+    expect((await getAgent(app.db, org.homeScope, other.id))?.version).toBe(before);
+    expect(await missing(org.installScope, org.connectionId)).toEqual([
+      expect.objectContaining({ id: third.id }),
+    ]);
+  }, 120_000);
+
+  test("the Slack agents API uses the agent's own version", async () => {
     const org = await organization();
     const created = await insertSlackAgent(app.db, org.installScope, {
       connectionId: org.connectionId,
@@ -699,34 +843,32 @@ describe("agents data layer (restricted runtime role)", () => {
       createdBySubjectId: org.owner,
     });
     if (created === "name_taken") throw new Error("unexpected name clash");
-    // As after the backfill: the legacy row is ahead of the agent.
-    await shared.admin`update slack_agents set version = 7 where id = ${created.id}`;
     const shown = await getSlackAgent(app.db, { accountId: org.accountId, agentId: created.id });
-    expect(shown?.version).toBe(7);
+    const agentVersion = (await getAgent(app.db, org.homeScope, created.id))!.version;
+    expect(shown?.version).toBe(agentVersion);
     const updated = await updateSlackAgent(app.db, org.installScope, {
       agentId: created.id,
-      expectedVersion: 7,
+      expectedVersion: agentVersion,
       actorSubjectId: org.owner,
-      patch: { description: "From an older page" },
+      patch: { description: "Changed" },
     });
     if (!updated || typeof updated === "string") throw new Error(`update failed: ${updated}`);
-    expect(updated.version).toBe(8);
-    expect(await legacySlackRow(created.id)).toMatchObject({ version: 8 });
-    expect((await getAgent(app.db, org.homeScope, created.id))?.version).toBe(8);
+    expect(updated.version).toBe(agentVersion + 1);
+    expect((await getAgent(app.db, org.homeScope, created.id))?.version).toBe(agentVersion + 1);
     expect(
       await updateSlackAgent(app.db, org.installScope, {
         agentId: created.id,
-        expectedVersion: 7,
+        expectedVersion: agentVersion,
         patch: { description: "Stale" },
       }),
     ).toBe("version_conflict");
     // Only open changed: one version step, no new revision.
     const opened = await updateSlackAgent(app.db, org.installScope, {
       agentId: created.id,
-      expectedVersion: 8,
+      expectedVersion: agentVersion + 1,
       patch: { open: true },
     });
     if (!opened || typeof opened === "string") throw new Error(`open failed: ${opened}`);
-    expect(opened).toMatchObject({ open: true, version: 9 });
+    expect(opened).toMatchObject({ open: true, version: agentVersion + 2 });
   }, 120_000);
 });

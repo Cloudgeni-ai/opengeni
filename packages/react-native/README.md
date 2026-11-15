@@ -83,6 +83,54 @@ screen readers. The default is no mark.
 />
 ```
 
+### Model levels
+
+To give people two or three named levels instead of every model, put
+`ModelLevelControl` in the composer's `options`, where you would put the model
+pill. Each level is one catalog model at one reasoning effort and may offer
+Ultrafast; the levels are the same `ModelLevel` objects as on web
+(`@opengeni/react` `modelPickerProps.levels`).
+
+```tsx
+import { ModelLevelControl } from "@opengeni/react-native/timeline";
+
+const levels = [
+  { id: "standard", label: "Standard", model: "example/everyday", effort: "high" },
+  { id: "thorough", label: "Thorough", model: "example/frontier", effort: "high", ultrafast: true },
+] as const;
+
+<NativeSessionScreen
+  controller={controller}
+  composer={{
+    options: (
+      <ModelLevelControl
+        levels={levels}
+        models={models}
+        model={model}
+        effort={effort}
+        latencyMode={latencyMode}
+        onModelChange={setModel}
+        onEffortChange={setEffort}
+        onLatencyModeChange={setLatencyMode}
+        onSelectionFeedback={(kind) => haptics(kind)}
+        fallback={<YourModelPill />}
+      />
+    ),
+  }}
+/>;
+```
+
+Tap or swipe the control to change level. Ultrafast shows only on levels with
+`ultrafast: true` whose model can run it, and turns on only when people press
+and hold the control until the charge fills (on the last level, pushing past
+the end works too); screen readers get "Turn on Ultrafast" as an action. `onSelectionFeedback` reports `level`, `armed` (the
+charge is full) and `ultrafast` so you can play haptics. Levels whose model the
+workspace cannot run are left out; with none left, `fallback` is shown. A chat
+on another model keeps it, and the control shows that model's name until a
+level is picked. On a new-chat screen pass `startOnFirstLevel` so the chat
+starts on the first level instead of the workspace default. To keep the full picker for some people, render your model
+pill instead.
+
 ### Approval cards
 
 Each pending approval shows a review card above the composer. On its own the
@@ -180,7 +228,8 @@ function AgentCall({ session }: { session: SessionInputs }) {
 - `useNativeSessionRealtime` takes the same session inputs as `useSessionRealtime` from `@opengeni/react/session-realtime` (client, workspace, session, status, control, events). Pick the voice model with `useRealtimeModelSelection`. Native voice supports the WebRTC models; check with `nativeRealtimeModelSupported`.
 - `useNativeRealtimeCall` starts and ends the system call with the voice session and mirrors mute both ways. Without a call adapter, voice still works without a system call; on Android, `systemCall` stays false because there is no call screen.
 - When a live call is silent on one side, `notice` says why and the call view shows it: the microphone picks up no sound at all, or a reply arrived but did not play. The realtime snapshot carries the same as the `no_input_audio` and `output_silent` diagnostics.
-- Calls started outside the app (Siri, Phone recents, a home-screen quick action whose type ends in `.call`) arrive as `startRequested` events, or through `takePendingStartRequest()` after a cold launch. The host decides which session they talk to.
+- Calls started outside the app (Siri, Phone recents, a home-screen quick action whose type ends in `.call`, a voice command) arrive as `startRequested` events, or through `takePendingStartRequest()` after a cold launch. The host decides which session they talk to. A request that names a chat carries its `target` session and its `workspaceId`; `callFromOutside(sessionId, workspaceId)` calls a session in another workspace of the signed-in account. Requests wait natively until JavaScript takes them (for up to a minute), so a request that launched the app is not lost to an early listener, and each starts once.
+- **Voice commands:** `adapter.setCallCommands([{ id, workspaceId, sessionId, name }])` tells the system which chats the person can call by name. On iOS the generated intent offers them as its chat parameter ("Call Research in Opengeni"), and the app's App Shortcuts are refreshed; on Android each becomes a launcher shortcut (touch and hold the app icon), and `adapter.pinCallCommand(command)` asks the launcher to put one on the home screen. Write only the signed-in account's commands, and an empty list on sign-out. Commands are opt-in per chat: never pass every chat.
 - `NativeAgentCallProvider` defaults generic outside calls to a fresh realtime session; `resolveOutsideCall` can preserve a host's explicit preferences. An explicit session request still wins. Generic calls keep a generic system-recents handle; calling a named session records that session. Selecting another session as conversational context does not change the active voice session.
 
 ### iOS configuration
@@ -205,10 +254,13 @@ Expo autolinking picks up this package's call module. Add the config plugin to t
 ```
 
 - **Info.plist:** `UIBackgroundModes` gains `audio` and `voip` (CallKit refuses call requests from an app without `voip`, so the call would still talk but never appear as a system call), `NSUserActivityTypes` gains `INStartCallIntent` (redial from Phone recents), and `NSMicrophoneUsageDescription` is set unless the app already sets it.
-- **App Intent and App Shortcuts:** a generated Swift file in the app target declares a "start a call" intent and its Siri phrases. `{app}` stands for the app's name and must appear exactly once in each phrase (Siri requires it). Without any setup the action then works from Siri, Spotlight and the Shortcuts app, and can be assigned to the Action button. The intent opens the app and arrives as a `startRequested` event with no target, so the host chooses the session.
+- **App Intent and App Shortcuts:** a generated Swift file in the app target declares a "start a call" intent and its Siri phrases. `{app}` stands for the app's name and must appear exactly once in each phrase (Siri requires it). Without any setup the action then works from Siri, Spotlight and the Shortcuts app, and can be assigned to the Action button. The intent opens the app and arrives as a `startRequested` event with no target, so the host chooses the session. It requires an unlocked device (`authenticationPolicy = .requiresAuthentication`): from a locked phone Siri asks the person to unlock first.
+- **`chatPhrases`** (default `["Call {chat} in {app}", "Talk to {chat} in {app}"]`): the phrases for voice commands. `{chat}` (exactly once) stands for a command's name and `{app}` for the app's name. The intent's optional chat parameter lists exactly the commands set with `setCallCommands`, so each command appears as its own App Shortcut. Pass `[]` to offer none. `chatTitle` and `chatSummary` (`"Call {chat}"`) label the parameter in Shortcuts.
+- **Calls from Phone recents and "call … using" requests** (`INStartCallIntent`) on a locked phone wait for the person to unlock it, for up to 30 seconds, and are then dropped. "Locked" is what iOS reports as protected data being unavailable: with a passcode that starts about 10 seconds after the screen locks, so a request in those first seconds still starts, and a phone without a passcode never counts as locked. In CarPlay a locked phone asks for the unlock as well.
 - **`alternativeAppNames`:** extra names Siri accepts for the app (`INAlternativeAppNames`), for example the agent's own name, so "Call Agent" works in an app called something else.
 - Set `"appIntents": false` inside `call` to skip the generated intent.
 - **`androidSystemCall: true`** (inside `call`): Android calls become system calls, a self-managed Telecom call with a call notification and a foreground service that keeps it going with the screen off, so a cellular call holds it and Bluetooth headsets and watches answer and hang up. When the app uses `expo-notifications`, agents' calls also ring the phone like a phone call: the server's high-priority push shows the incoming-call notification and a full-screen ring screen on the lock screen, and answering hands the call to the same `incoming` events as on iOS. The plugin adds the permissions this needs (`MANAGE_OWN_CALLS`, the phone-call and microphone foreground service types, notifications and full-screen intents), the service, the ring screen and the messaging service. Play asks apps that declare these to explain them, so it is off by default; without it, Android calls play through the phone's call audio without a system call.
+- **`androidMessagingService: "app"`** (inside `call`, with `androidSystemCall: true`): the app delivers agents' rings from its own Firebase messaging service instead of the one this package declares (`"opengeni"`, the default). The plugin then declares no messaging service, so the app's service stays the only one receiving pushes, and sets the `dev.opengeni.call.APP_MESSAGING_SERVICE` meta-data flag, so agents can ring the phone with or without `expo-notifications`. Permissions, the call service and the ring screen are the same as above. See [Android rings through your own messaging service](#android-rings-through-your-own-messaging-service).
 - **`iosAudioDevice: true`** (inside `call`, needs `react-native-webrtc`): WebRTC's audio on iOS runs through Opengeni's call audio device instead of WebRTC's built-in one. While a CallKit call rings, the device sends silent audio and plays nothing, so the voice session can connect before the person answers without the microphone opening (`incoming.connectsBeforeAnswer` is then true). Once CallKit activates the audio session it runs Apple's voice-processing I/O, as WebRTC's own device does. Off by default.
 
 For meetings that keep recording with the screen locked, add `"recording": true`: it adds the `audio` background mode on iOS and the microphone foreground service on Android. An entry with only `recording` sets up nothing for calls, so a meetings-only app gets no `voip` mode, call activity or Siri intents. Add `call` as well to set up both, or pass `"call": false` to leave calls out of any entry.
@@ -230,3 +282,67 @@ Without the plugin, set the keys yourself:
 CallKit refuses call requests from an app without the `voip` background mode, so without it the call still talks but never appears as a system call (lock screen, Dynamic Island, Phone recents, headset controls).
 
 In a monorepo where this package is linked rather than installed, add its folder to `expo.autolinking.searchPaths` in the app's `package.json`.
+
+### Android rings through your own messaging service
+
+An app that already has its own Firebase messaging service (for example from `@react-native-firebase/messaging` or a native SDK) keeps it and hands agents' rings to Opengeni from it. Set `"androidMessagingService": "app"` next to `"androidSystemCall": true` in `call`, then call `OpenGeniCallPush.handle` first in the service's `onMessageReceived`:
+
+```kotlin
+import dev.opengeni.call.OpenGeniCallPush
+
+class AppMessagingService : FirebaseMessagingService() {
+  override fun onMessageReceived(message: RemoteMessage) {
+    // A ring, or the end of a ring answered or declined elsewhere: Opengeni shows it.
+    if (OpenGeniCallPush.handle(this, message.data)) return
+    // ...the app's own handling of every other push
+  }
+}
+```
+
+`handle(context, data): Boolean` (`OpenGeniCallPush.handle(context, data)` from Java too) returns true when it consumed the message: it reported a ring as an incoming system call, or stopped a ring that was settled elsewhere. Show nothing for it then. It returns false for any other message, and for a ring this phone cannot show as a system call (Android before 8.0, or system calls not permitted); handle that as an ordinary push, which for a ring means showing the "… is calling" notification from its `title` and `message` entries. It returns quickly and is safe on the service's background thread.
+
+Keep exactly one service for `com.google.firebase.MESSAGING_EVENT`. If the app also uses `expo-notifications`, its service is in the build too: extend `ExpoFirebaseMessagingService` and call `super.onMessageReceived` for messages `handle` did not consume, or remove the other one in the manifest. Register the phone's FCM registration token with Opengeni as for any push (`registerNativePushDevice` with `platform: "android"` and the package name as `appId`), and again when Firebase rotates it.
+
+The ring arrives as a high-priority FCM data message (`android.priority: "HIGH"`, no `notification` block). Its collapse key is the call id and it expires when the ring does, so a phone that comes online too late never rings. Every data entry is a string; the call is the JSON in `opengeniCall`:
+
+| `type` | Other `opengeniCall` fields | Other data entries |
+| --- | --- | --- |
+| `"ring"` | `callId`, `sessionId`, `workspaceId`, `subjectId`, `title` (the caller shown, or null), `reason` (why the agent calls, or null), `ringUntil` (ISO 8601 time the ring stops, or null) | `title`, `message` and `body` of the ordinary "… is calling" notification |
+| `"ended"` | `callId`, `reason`: `"answeredElsewhere"`, `"declinedElsewhere"` or `"remoteEnded"` | none; there is nothing to show |
+
+```json
+{
+  "opengeniCall": "{\"type\":\"ring\",\"callId\":\"…\",\"sessionId\":\"…\",\"workspaceId\":\"…\",\"subjectId\":\"…\",\"title\":\"Agent\",\"reason\":\"The deploy finished\",\"ringUntil\":\"2026-01-01T12:00:40.000Z\"}",
+  "title": "Agent is calling",
+  "message": "The deploy finished",
+  "body": "{…}"
+}
+```
+
+`createExpoCallAdapter()` reports `incoming` on such a build as on one with Opengeni's own messaging service, so `NativeAgentCallProvider` takes the rings without further setup.
+
+### Full-screen rings on Android 14 and later
+
+From Android 14, Play grants `USE_FULL_SCREEN_INTENT` up front only to apps whose core function is calling or alarms. In any other app an agent's ring shows only as a heads-up notification, easy to miss on a locked phone, until the person allows full-screen notifications for the app in system settings. `useFullScreenRings(callAdapter)` tracks this and re-checks whenever the app returns to the foreground, for example from that setting:
+
+```tsx
+import { useFullScreenRings } from "@opengeni/react-native";
+
+const fullScreen = useFullScreenRings(callAdapter);
+
+<Switch
+  value={callsOn}
+  onValueChange={(on) => {
+    setCallsOn(on);
+    // Explains why in an alert and offers to open the setting; nothing when allowed.
+    if (on) fullScreen.ask();
+  }}
+/>;
+{callsOn && !fullScreen.allowed ? (
+  <Button title={fullScreen.messages.title} onPress={() => void fullScreen.openSettings()} />
+) : null}
+```
+
+- `allowed` is false only on Android 14 and later while the setting is off; it is true on iOS (CallKit always rings full screen), on older Android, and in builds that cannot ring.
+- `ask()` shows the explanation with "Not now" and "Open settings"; `openSettings()` opens the app's full-screen notification setting directly (or its notification settings where a phone has no such screen) and resolves false if nothing opened. `messages` holds the default, translatable text for a settings row or footer; pass `messages` to replace it.
+- The same check is on the call adapter for hosts without React state: `incoming.canRingFullScreen?.()` and `incoming.openFullScreenRingSettings?.()`, both absent where rings always show full screen.

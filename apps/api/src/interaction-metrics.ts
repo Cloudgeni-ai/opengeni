@@ -8,6 +8,11 @@ import type {
   ComputerActionRequest,
   ComputerSessionMutationResponse,
   InteractionInterventionMutationResponse,
+  InteractionFailureReason,
+} from "@opengeni/contracts";
+import {
+  INTERACTION_DESTINATION_FAILURE_REASONS,
+  parseInteractionFailureReason,
 } from "@opengeni/contracts";
 import {
   interactionAuthMetricObserver,
@@ -15,7 +20,10 @@ import {
   interactionOperationMetricObserver,
   type Observability,
 } from "@opengeni/observability";
-import type { ComputerFrameEvidenceMismatchReason } from "@opengeni/runtime/sandbox";
+import {
+  BrowserControlRequestError,
+  type ComputerFrameEvidenceMismatchReason,
+} from "@opengeni/runtime/sandbox";
 
 type InteractionActionReceipt = BrowserActionReceipt | ComputerActionReceipt;
 type InteractionLifecycleMutation =
@@ -45,13 +53,15 @@ export function observeBrowserActionResult(
   startedAtMs: number,
   request: BrowserActionRequest,
   receipt: BrowserActionReceipt,
+  /** The operator-only reason the controller returned beside the receipt. */
+  failureReason?: InteractionFailureReason | null,
 ): void {
   interactionOperationMetricObserver(observability)({
     resource: "browser",
     operation: "act",
     mode: browserActionMode(request.action),
     outcome: actionReceiptOutcome(receipt),
-    reason: actionReceiptReason(receipt),
+    reason: actionReceiptReason(receipt, failureReason),
     durationMs: elapsedMs(startedAtMs),
   });
 }
@@ -186,10 +196,18 @@ function actionReceiptOutcome(receipt: Pick<InteractionActionReceipt, "state" | 
   return receipt.state;
 }
 
-function actionReceiptReason(receipt: Pick<InteractionActionReceipt, "state" | "error">): string {
-  if (receipt.state !== "failed") return "none";
-  const code = receipt.error?.code;
-  return code && INTERACTION_ERROR_REASONS.has(code) ? code : "action_failed";
+/**
+ * Why an operation failed or ended with an unknown outcome: the controller's
+ * operator-only reason when it gave one (a website that did not answer, or
+ * the specific failure behind a generic outcome_unknown), else the error code.
+ */
+function actionReceiptReason(
+  receipt: Pick<InteractionActionReceipt, "state" | "error">,
+  failureReason?: InteractionFailureReason | null,
+): string {
+  if (receipt.state !== "failed" && receipt.state !== "outcome_unknown") return "none";
+  const reason = parseInteractionFailureReason(failureReason) ?? receipt.error?.code;
+  return reason && INTERACTION_ERROR_REASONS.has(reason) ? reason : "action_failed";
 }
 
 function elapsedMs(startedAtMs: number): number {
@@ -266,7 +284,7 @@ export function interactionRouteOperation(
   return INTERACTION_ROUTE_OPERATIONS.get(`${method} ${route}`) ?? null;
 }
 
-const INTERACTION_ERROR_REASONS = new Set([
+const INTERACTION_ERROR_REASONS: ReadonlySet<string> = new Set([
   "resource_not_found",
   "resource_unavailable",
   "controller_stale",
@@ -286,18 +304,40 @@ const INTERACTION_ERROR_REASONS = new Set([
   "outcome_unknown",
   "invalid_action",
   "timeout",
+  "tab_not_responding",
+  "tab_crashed",
   "controller_lost",
   "driver_failed",
+  // The website the browser was asked to load failed, not the browser.
+  ...INTERACTION_DESTINATION_FAILURE_REASONS,
 ]);
 
 /**
+ * The operator-only failure reason a browser controller sent beside a
+ * refused request, found on the thrown error or any error it wraps.
+ */
+export function interactionFailureReasonFromError(error: unknown): InteractionFailureReason | null {
+  let current: unknown = error;
+  for (let depth = 0; depth < 8 && current instanceof Error; depth += 1) {
+    if (current instanceof BrowserControlRequestError)
+      return parseInteractionFailureReason(current.failureReason);
+    current = current.cause;
+  }
+  return null;
+}
+
+/**
  * Bounded failure reason for a refused or failed interaction route, derived
- * only from the HTTP status and the content-free rejection classification.
+ * only from the HTTP status, the content-free rejection classification and
+ * the controller's operator-only failure reason.
  */
 export function interactionRouteFailureReason(
   status: number,
   rejectionReason: string | undefined,
+  failureReason?: InteractionFailureReason | null,
 ): string {
+  const controllerReason = parseInteractionFailureReason(failureReason);
+  if (controllerReason && INTERACTION_ERROR_REASONS.has(controllerReason)) return controllerReason;
   if (rejectionReason?.startsWith("permission:")) return "permission_denied";
   if (rejectionReason?.startsWith("control:")) return rejectionReason.replace(":", "_");
   if (rejectionReason && INTERACTION_ERROR_REASONS.has(rejectionReason)) return rejectionReason;
@@ -326,6 +366,8 @@ export function observeInteractionRouteOutcome(
     status: number;
     durationMs: number;
     rejectionReason?: string | undefined;
+    /** The controller's operator-only reason (interactionFailureReasonFromError). */
+    failureReason?: InteractionFailureReason | null | undefined;
   },
 ): void {
   const operation = interactionRouteOperation(input.method, input.route);
@@ -333,7 +375,7 @@ export function observeInteractionRouteOutcome(
   const failed = input.status >= 400;
   if (!failed && operation.successObservedByHandler) return;
   const reason = failed
-    ? interactionRouteFailureReason(input.status, input.rejectionReason)
+    ? interactionRouteFailureReason(input.status, input.rejectionReason, input.failureReason)
     : "none";
   interactionOperationMetricObserver(observability)({
     resource: operation.resource,

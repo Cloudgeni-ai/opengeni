@@ -248,9 +248,10 @@ impl Handle {
     pub fn prepare(
         &self,
         image: &str,
+        before: Option<crate::protocol::ImageId>,
     ) -> Result<crate::rootfs::Progress, crate::rootfs::PrepareError> {
         match &self.preparer {
-            Some(preparer) => preparer.prepare(image),
+            Some(preparer) => preparer.prepare(image, before),
             None => Err(crate::rootfs::PrepareError::Unavailable(
                 "it has no guest programs to build with, or no store to keep images in",
             )),
@@ -285,6 +286,23 @@ impl Handle {
             priority,
             by: super::observe::By::Fleet,
             reply: Some(reply),
+        })
+        .await?
+    }
+
+    /// Has the stored image `image` on this host ahead of creates, with
+    /// the templates of `before`'s shapes on it (see
+    /// [`crate::protocol::Request::Keep`]). Returns once the request is
+    /// accepted, not once the image is here.
+    pub async fn keep(
+        &self,
+        image: crate::protocol::ImageId,
+        before: Option<crate::protocol::ImageId>,
+    ) -> Result<(), HostError> {
+        self.ask(|reply| Command::Keep {
+            image,
+            before,
+            reply,
         })
         .await?
     }

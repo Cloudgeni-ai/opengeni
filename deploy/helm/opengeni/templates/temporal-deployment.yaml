@@ -33,6 +33,10 @@ spec:
           ports:
             - name: grpc
               containerPort: {{ .Values.temporal.service.port }}
+            {{- with (.Values.temporal.metrics).port }}
+            - name: metrics
+              containerPort: {{ int64 . }}
+            {{- end }}
           env:
             - name: HTTP_PROXY
               value: ""
@@ -55,6 +59,10 @@ spec:
                   key: {{ .Values.temporal.postgres.passwordKey }}
             - name: POSTGRES_SEEDS
               value: {{ include "opengeni.temporalPostgresHost" . | quote }}
+            {{- with (.Values.temporal.metrics).port }}
+            - name: PROMETHEUS_ENDPOINT
+              value: {{ printf "0.0.0.0:%d" (int64 .) | quote }}
+            {{- end }}
             - name: BIND_ON_IP
               value: 0.0.0.0
             - name: DYNAMIC_CONFIG_FILE_PATH

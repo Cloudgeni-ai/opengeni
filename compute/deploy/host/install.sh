@@ -39,7 +39,7 @@
 #   and every file it writes reaches the disk before it takes its name)
 #   - checks this bundle against its SHA256SUMS
 #   - installs the packages the agent runs (iproute2, nftables, e2fsprogs,
-#     xfsprogs) and its certificate script needs (curl, jq, openssl)
+#     xfsprogs, rsync) and its certificate script needs (curl, jq, openssl)
 #   - installs this release under /opt/compute/releases/<version>, checks
 #     that its agent binary runs on this host, and points
 #     /opt/compute/current at it
@@ -149,8 +149,8 @@ has() { echo "$2  $1" | sha256sum -c --quiet --status - 2>/dev/null; }
 
 log "packages"
 missing=
-for tool in ip:iproute2 nft:nftables mkfs.ext4:e2fsprogs mkfs.xfs:xfsprogs curl:curl findmnt:util-linux flock:util-linux \
-  jq:jq openssl:openssl; do
+for tool in ip:iproute2 nft:nftables mkfs.ext4:e2fsprogs e2fsck:e2fsprogs mkfs.xfs:xfsprogs curl:curl findmnt:util-linux flock:util-linux \
+  jq:jq openssl:openssl rsync:rsync; do
   command -v "${tool%%:*}" >/dev/null || missing="$missing ${tool#*:}"
 done
 if [ -n "$missing" ]; then

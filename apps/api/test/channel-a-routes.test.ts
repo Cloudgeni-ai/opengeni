@@ -796,6 +796,10 @@ describe("P4.4 Channel-A route discipline", () => {
     expect(channelASeam.slice(decorateAt, serviceAt)).toContain(
       "routingSession.fileSystemAuthority()",
     );
+    // Managed boxes: the chat's own Git credential directory.
+    expect(channelASeam.slice(decorateAt, serviceAt)).toContain(
+      "withGitSessionSession(tokenScopedSession, gitSessionKey(session.id))",
+    );
     expect(channelASeam.slice(serviceAt, serviceAt + 300)).toContain("session: scopedSession");
     expect(channelASeam.slice(serviceAt, serviceAt + 300)).toContain(
       "workspaceRoot: fileSystemAuthority.root",

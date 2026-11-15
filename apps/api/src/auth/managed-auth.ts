@@ -576,6 +576,8 @@ export function createManagedAuth(
       ...(splitCsv(settings.betterAuthAllowedHosts).length > 0
         ? { trustedProxyHeaders: true }
         : {}),
+      // Unset keeps Better Auth's own cookie names, so existing sessions stay valid.
+      ...(settings.betterAuthCookiePrefix ? { cookiePrefix: settings.betterAuthCookiePrefix } : {}),
       ...(settings.betterAuthCookieDomain
         ? {
             crossSubDomainCookies: {
@@ -751,6 +753,7 @@ export function createManagedAuth(
           if (passwordHash === "verified") return;
           const url = await verificationUrl(
             settings,
+            request,
             user.email,
             managedSignUpVerificationClaims(context.secret, user.id, passwordHash),
             callbackURL ?? "/",
@@ -1013,6 +1016,8 @@ export type ManagedAuthOAuthAttempt = {
   transactionSecretHash: string;
   expectedGeneration: string;
   expectedActorEpoch: string;
+  /** The public origin sign-in started from and returns to (the app's or Console's). */
+  returnOrigin: string;
 };
 
 /**
@@ -1041,10 +1046,15 @@ export async function resolveManagedAuthOAuthAttempt(
   auth: ManagedAuth,
   request: Request,
   provider: "google" | "github",
-  publicBaseUrl: string,
+  /** The public base URL, or every public origin sign-in may start from. */
+  publicOrigins: string | readonly string[],
 ): Promise<ManagedAuthOAuthAttempt | null> {
-  const expectedOrigin = canonicalPublicOrigin(publicBaseUrl);
-  if (!expectedOrigin) return null;
+  const expectedOrigins = new Set(
+    (typeof publicOrigins === "string" ? [publicOrigins] : publicOrigins).flatMap(
+      (candidate) => canonicalPublicOrigin(candidate) ?? [],
+    ),
+  );
+  if (expectedOrigins.size === 0) return null;
   const state = new URL(request.url).searchParams.get("state");
   if (!state) return null;
   const verification = await findManagedAuthOAuthState(auth, state);
@@ -1080,9 +1090,13 @@ export async function resolveManagedAuthOAuthAttempt(
   }
   const callbackURL = typeof stateData.callbackURL === "string" ? stateData.callbackURL : null;
   const errorURL = typeof stateData.errorURL === "string" ? stateData.errorURL : null;
+  // Both returns go back to the one origin the sign-in started from.
+  const expectedOrigin =
+    callbackURL && URL.canParse(callbackURL) ? new URL(callbackURL).origin : "";
   if (
     !callbackURL ||
     !errorURL ||
+    !expectedOrigins.has(expectedOrigin) ||
     !managedAuthOAuthReturnMatches(callbackURL, expectedOrigin, value.transactionId, "complete") ||
     !managedAuthOAuthReturnMatches(errorURL, expectedOrigin, value.transactionId, "error")
   ) {
@@ -1095,6 +1109,7 @@ export async function resolveManagedAuthOAuthAttempt(
     transactionSecretHash: value.transactionSecretHash,
     expectedGeneration: value.expectedGeneration,
     expectedActorEpoch: value.expectedActorEpoch,
+    returnOrigin: expectedOrigin,
   };
 }
 
@@ -1155,6 +1170,64 @@ function betterAuthBaseUrl(settings: Settings) {
   };
 }
 
+/**
+ * The public base URL a browser request reached: its forwarded host when that
+ * host is one of OPENGENI_BETTER_AUTH_ALLOWED_HOSTS (the app's and Opengeni
+ * Console's hosts), otherwise OPENGENI_PUBLIC_BASE_URL. Links in emails sent
+ * for the request use it, so they open on the host the person used.
+ */
+export function managedAuthRequestBaseUrl(
+  settings: Pick<Settings, "publicBaseUrl" | "betterAuthAllowedHosts">,
+  request: Request | undefined,
+): string {
+  const fallback = settings.publicBaseUrl!;
+  if (!request) return fallback;
+  const allowed = new Set(splitCsv(settings.betterAuthAllowedHosts).map((h) => h.toLowerCase()));
+  if (allowed.size === 0) return fallback;
+  const forwarded =
+    request.headers.get("x-forwarded-host")?.split(",")[0]?.trim() ??
+    request.headers.get("host")?.trim();
+  const host = forwarded?.toLowerCase();
+  if (!host || !allowed.has(host)) return fallback;
+  const protocol = new URL(fallback).protocol;
+  return `${protocol}//${host}`;
+}
+
+/**
+ * Every public base URL links may open on, the request's own first: the
+ * request's allowed host, OPENGENI_PUBLIC_BASE_URL, then the other allowed hosts.
+ */
+export function managedAuthPublicBaseUrls(
+  settings: Pick<Settings, "publicBaseUrl" | "betterAuthAllowedHosts">,
+  request: Request | undefined,
+): string[] {
+  if (!settings.publicBaseUrl) return [];
+  const protocol = new URL(settings.publicBaseUrl).protocol;
+  return [
+    ...new Set([
+      managedAuthRequestBaseUrl(settings, request),
+      settings.publicBaseUrl,
+      ...splitCsv(settings.betterAuthAllowedHosts).map(
+        (host) => `${protocol}//${host.toLowerCase()}`,
+      ),
+    ]),
+  ];
+}
+
+/** Every browser origin the deployment's sign-in pages are served from. */
+/**
+ * Origins a sign-in may return to: the trusted origins and every allowed
+ * public host (such as Opengeni Console's), so a Google or GitHub sign-in
+ * started on the Console host comes back there.
+ */
+export function managedAuthPublicOrigins(settings: Settings): string[] {
+  const origins = new Set(betterAuthTrustedOrigins(settings));
+  for (const base of managedAuthPublicBaseUrls(settings, undefined)) {
+    origins.add(new URL(base).origin);
+  }
+  return [...origins];
+}
+
 function betterAuthTrustedOrigins(settings: Settings): string[] {
   const origins = new Set<string>();
   if (settings.publicBaseUrl) {
@@ -1192,6 +1265,7 @@ function emailVerificationMessage(to: string, url: string): Omit<ManagedEmailMes
 
 async function verificationUrl(
   settings: Settings,
+  request: Request | undefined,
   email: string,
   claims: Record<string, string>,
   callbackURL: string,
@@ -1211,7 +1285,9 @@ async function verificationUrl(
     undefined,
     claims,
   );
-  const url = new URL("/v1/auth/verify-email", settings.publicBaseUrl);
+  // The link opens on the allowed public host the sign-up came from (the app,
+  // or Opengeni Console), so verifying lands where the person started.
+  const url = new URL("/v1/auth/verify-email", managedAuthRequestBaseUrl(settings, request));
   url.searchParams.set("token", token);
   url.searchParams.set("callbackURL", callbackURL);
   return url.toString();

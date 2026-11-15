@@ -111,7 +111,7 @@ export function createGitHubSkillSourceClient(
       if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(normalized)) {
         throw new Error("GitHub Skill file contained invalid base64");
       }
-      const bytes = Uint8Array.from(Buffer.from(normalized, "base64"));
+      const bytes = new Uint8Array(Buffer.from(normalized, "base64"));
       if (
         typeof payload.size === "number" &&
         Number.isSafeInteger(payload.size) &&

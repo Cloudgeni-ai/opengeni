@@ -4,6 +4,30 @@ Pull requests land through the [merge batcher](merge-batcher.md), whose batch
 CI runs what the combined change affects. `main` itself runs the **full** suite
 and builds the release images; releases deploy only a SHA whose full run passed.
 
+## PR CI
+
+`pr-ci.yml` gives each PR one required result, **PR CI**, which the batcher
+needs on the exact head. Beside the fast checks (lint, guards, affected types,
+a capped unit sample and the web bundle), it runs part of the browser and E2E
+coverage that batches run, so a PR's own deterministic browser failure shows on
+the PR instead of failing a batch of PRs:
+
+- The jobs are Batch's own: `ci-e2e-shards.yml` and `ci-browser-acceptance.yml`
+  are reusable workflows that `ci.yml` and `pr-ci.yml` both call.
+- `scripts/ci/pr-fast-plan.ts` picks from the impact plan. Authored tests (a
+  changed test, or one that imports a changed shared helper or fixture, or a
+  fixture under a package's `test/` directory) run in E2E and in their
+  browser acceptance lanes. Authored E2E tests that do not fit the budget get
+  a warning annotation on the PR. E2E tests that depend directly on a
+  touched workspace add a cheapest-first sample of about one shard. A CI or
+  toolchain fence does not hide either.
+- E2E has a budget of estimated profile seconds and at most four shards.
+  Whatever does not fit is deferred to Batch, which still runs the complete
+  impacted set. The plan step's summary lists the selection and what it
+  deferred.
+- Docs-only PRs select nothing and stay fast. The aggregate requires each
+  selected lane to succeed and each unselected one to be skipped.
+
 ## Full CI on main
 
 - `ci.yml` uses a full plan on `main`: every test lane, deployment artifacts,
@@ -57,6 +81,12 @@ workflows, so `open-version-pr.yml` dispatches both their authenticated full CI
 and PR CI on the exact head. With PR CI green and `queue-ready` added, they land
 through the batcher alone, as a true merge commit, because release provenance
 needs it.
+
+The same holds for every PR a workflow here opens with `GITHUB_TOKEN`, such as
+the browser-engine and Grok client pin refreshes. PR CI accepts a
+`workflow_dispatch` run for a PR whose branch is in this repository and whose
+author is `github-actions[bot]`, and only on its exact head. To give such a PR
+CI, run `gh workflow run pr-ci.yml --ref <branch> -f pr_number=<n> -f head_sha=<head>`.
 
 Release source admission accepts an exact-head merge onto a moving `main` only
 when the merge keeps that head, the integration base keeps the reviewed base,

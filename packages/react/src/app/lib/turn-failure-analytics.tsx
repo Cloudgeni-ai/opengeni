@@ -25,6 +25,7 @@ export const TURN_FAILURE_CLASSES = [
   "provider_quota",
   "rate_limited",
   "provider_error",
+  "model_history",
   "model_unavailable",
   "codex_account",
   "safety_refusal",

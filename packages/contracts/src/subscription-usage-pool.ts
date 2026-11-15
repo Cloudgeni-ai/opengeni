@@ -34,6 +34,20 @@ export const SubscriptionUsagePool = /* @__PURE__ */ defineSchema(() =>
         }),
       }),
     ),
+    /**
+     * Each pooled account's paid usage credits (Claude only): `on` means
+     * the provider can bill usage past the plan limits. `unknown` until the
+     * provider reports it. Absent for other providers and from older servers.
+     */
+    usageCredits: z
+      .array(
+        z.object({
+          id: primitives.uuid,
+          label: primitives.string,
+          state: z.enum(["on", "off", "unknown"]),
+        }),
+      )
+      .optional(),
   }),
 );
 export type SubscriptionUsagePool = z.infer<typeof SubscriptionUsagePool>;

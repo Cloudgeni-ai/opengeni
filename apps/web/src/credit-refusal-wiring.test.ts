@@ -30,7 +30,9 @@ describe("credit refusal wiring", () => {
   test("the composer and the plain failure line know who is viewing", async () => {
     const session = await source("routes/session.tsx");
     expect(session).toMatch(/useComposer\(props\.session\.id, \{\s*canBuyCredits,/);
-    expect(session).toMatch(/failureFallbackReason\([\s\S]*?stopRefusal,\s*\),\s*canBuyCredits,/);
+    expect(session).toMatch(
+      /const fallbackCopy = props\.failure\s*\?\s*failedSessionCopy\([\s\S]*?stopRefusal,\s*\)\s*:\s*null;\s*const fallbackReason = fallbackCopy \? failureFallbackReason\(fallbackCopy, canBuyCredits\)/,
+    );
   });
 
   test("the fallback credits dialog keeps the refusal code", async () => {

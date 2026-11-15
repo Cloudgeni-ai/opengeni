@@ -268,6 +268,18 @@ describe("the words a command whose workspace machine stopped answering gets", (
     );
   });
 
+  test("the compute service could not carry out or confirm the restart", () => {
+    const text = renderSelfhostedFault(unresponsive("host_unavailable", false));
+    expect(text).toContain("a restart could not be carried out or confirmed");
+    // A 503 does not prove the restart did not happen, nor that the box runs
+    // on (its host may be lost): the words hedge both.
+    expect(text).toContain("probably not restarted");
+    expect(text).toContain("If its host is only restarting its own agent, the machine runs on");
+    expect(text).not.toContain("the machine keeps running");
+    expect(text).toContain("check running commands with command_read");
+    expect(text).not.toContain("restarting it failed");
+  });
+
   test("answering again", () => {
     expect(renderSelfhostedFault(unresponsive("answering", true))).toContain("is answering again");
     // A start that may have reached it may still be running, or be stopping:

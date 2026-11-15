@@ -292,6 +292,8 @@ else renderWaitingOrCancelled(result.status);
 
 The app may validate/parse returned text into its own result schema. Model
 failure rejects; approval/input waits return `pending`, not a successful answer.
+With `waitForApproval: true`, observation waits through the wait (the person
+answers in Opengeni) and resolves with the final result; `onWait` reports it.
 Aborting observation does not cancel execution. Use native session control when
 cancellation is intended. `site.ai.result(id)` replays without creating work;
 pass the retained `turnId` to resume a particular pending turn. With `after`,
