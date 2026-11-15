@@ -41,6 +41,8 @@ export type CodexAdditionalLimit = {
   weekly: CodexUsageWindow | null;
   /** Unknown-duration feature caps still block repair of a prior quota refusal. */
   unknownWindowExhausted: boolean;
+  /** The provider flags this feature limit as spent (`limit_reached` or `allowed: false`). */
+  limitReached?: boolean | undefined;
 };
 
 export type CodexUsageStatus = "ok" | "limit_reached" | "error" | "no-data";
@@ -262,12 +264,14 @@ export function normalizeCodexUsage(httpStatus: number, rawPayload: unknown): Co
       meteredFeature: al.metered_feature,
       primary: al.primary_window ?? null,
       secondary: al.secondary_window ?? null,
+      limitReached: false,
     })),
     ...(body.additional_rate_limits ?? []).map((al) => ({
       limitName: al.limit_name,
       meteredFeature: al.metered_feature,
       primary: al.rate_limit?.primary_window ?? null,
       secondary: al.rate_limit?.secondary_window ?? null,
+      limitReached: al.rate_limit?.limit_reached === true || al.rate_limit?.allowed === false,
     })),
   ];
   const additionalLimits: CodexAdditionalLimit[] | undefined =
@@ -286,6 +290,7 @@ export function normalizeCodexUsage(httpStatus: number, rawPayload: unknown): Co
                 window.limit_window_seconds !== CODEX_WEEKLY_WINDOW_SECONDS &&
                 (window.used_percent ?? 0) >= 100,
             ),
+            ...(al.limitReached ? { limitReached: true } : {}),
           };
         })
       : undefined;
@@ -334,6 +339,7 @@ export function codexUsageConfirmsQuotaAvailable(payload: CodexUsagePayload): bo
     (limit) =>
       (limit.fiveHour?.percent ?? 0) >= 100 ||
       (limit.weekly?.percent ?? 0) >= 100 ||
-      limit.unknownWindowExhausted,
+      limit.unknownWindowExhausted ||
+      limit.limitReached === true,
   );
 }

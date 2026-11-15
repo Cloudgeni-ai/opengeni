@@ -326,6 +326,35 @@ describe("normalizeCodexUsage", () => {
     expect(out.additionalLimits?.[0]?.fiveHour?.percent).toBe(100);
     expect(codexUsageConfirmsQuotaAvailable(out)).toBe(false);
   });
+
+  test("a nested feature limit spent by its flags blocks cooldown repair without windows", () => {
+    const spent = (rateLimit: Record<string, unknown>) =>
+      normalizeCodexUsage(
+        200,
+        liveBody({
+          additional_rate_limits: [
+            { limit_name: "spark", metered_feature: "codex_bengalfox", rate_limit: rateLimit },
+          ],
+        }),
+      );
+    const flagged = spent({ allowed: false, limit_reached: true, primary_window: null });
+    expect(flagged.status).toBe("ok");
+    expect(flagged.additionalLimits?.[0]?.limitReached).toBe(true);
+    expect(codexUsageConfirmsQuotaAvailable(flagged)).toBe(false);
+    const nearlyFull = spent({
+      allowed: false,
+      limit_reached: false,
+      primary_window: { used_percent: 99.4, limit_window_seconds: 18000 },
+    });
+    expect(codexUsageConfirmsQuotaAvailable(nearlyFull)).toBe(false);
+    const open = spent({
+      allowed: true,
+      limit_reached: false,
+      primary_window: { used_percent: 10, limit_window_seconds: 18000 },
+    });
+    expect(open.additionalLimits?.[0]?.limitReached).toBeUndefined();
+    expect(codexUsageConfirmsQuotaAvailable(open)).toBe(true);
+  });
 });
 
 describe("buildCodexUsageWindowFromCache", () => {
