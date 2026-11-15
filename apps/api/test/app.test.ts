@@ -160,6 +160,23 @@ describe("API helpers", () => {
     ] as const) {
       expect(workspaceActorContextExempt(method, path)).toBe(false);
     }
+    // They match the decoded path the request is routed by (`c.req.path`):
+    // an encoded character in a fixed segment routes to the handler, so it is
+    // exempt with it, and not on the raw path alone.
+    const encoded = `/v1/workspaces/${workspace}/integrations/slack/user%2Dlink-intents`;
+    expect(workspaceActorContextExempt("POST", encoded, links)).toBe(true);
+    expect(workspaceActorContextExempt("POST", encoded)).toBe(false);
+    // HEAD and trailing slashes stay behind the ordinary check.
+    expect(workspaceActorContextExempt("HEAD", `${links}/request-1`)).toBe(false);
+    expect(workspaceActorContextExempt("POST", `${links}/`)).toBe(false);
+    expect(workspaceActorContextExempt("GET", `${links}/request-1/`)).toBe(false);
+    expect(workspaceActorContextExempt("POST", `${links}/request-1/link/`)).toBe(false);
+    // An encoded `/` (which routing leaves encoded) stays inside one segment:
+    // it is the request id, or it matches no route.
+    expect(workspaceActorContextExempt("GET", `${links}/request%2F1`)).toBe(true);
+    expect(workspaceActorContextExempt("POST", `${links}/request%2F1/link`)).toBe(true);
+    expect(workspaceActorContextExempt("POST", `${links}%2Frequest-1%2Flink`)).toBe(false);
+    expect(workspaceActorContextExempt("GET", `${links}%2Frequest-1`)).toBe(false);
   });
 
   test("keeps signed-state GitHub connect public until its route-specific browser grant", async () => {
@@ -1771,6 +1788,79 @@ describe("API helpers", () => {
         },
       }),
     ).rejects.toThrow("reserved for the canonical Codex Apps service");
+  });
+
+  test("refuses a Business Central address that would drop its environment", async () => {
+    const created = createCatalogItem({
+      db: {} as Database,
+      accountId: crypto.randomUUID(),
+      workspaceId: crypto.randomUUID(),
+      payload: {
+        kind: "mcp",
+        source: "manual",
+        name: "Microsoft Dynamics",
+        description: null,
+        category: "custom",
+        tags: [],
+        homepageUrl: null,
+        endpointUrl: "https://businesscentral.dynamics.com/opengenitest2026/Production",
+        installUrl: null,
+        authModel: null,
+        metadata: {},
+      },
+    });
+    await expect(created).rejects.toMatchObject({ status: 422 });
+    await expect(created).rejects.toThrow('"opengenitest2026" isn\'t a tenant ID or domain');
+  });
+
+  test("a connection a Connect card asked inputs for must follow its entry's rule", async () => {
+    const create = (endpointUrl: string, connectFor: string) =>
+      createCatalogItem({
+        db: {} as Database,
+        accountId: crypto.randomUUID(),
+        workspaceId: crypto.randomUUID(),
+        payload: {
+          kind: "mcp",
+          source: "manual",
+          name: "Microsoft Dynamics",
+          category: "custom",
+          tags: [],
+          endpointUrl,
+          metadata: {},
+          connectFor,
+        },
+      });
+    // Any other server is refused before anything is read or written.
+    const other = create("https://attacker.example/mcp", "api:microsoft-dynamics");
+    await expect(other).rejects.toMatchObject({ status: 422 });
+    await expect(other).rejects.toThrow("That isn't a Dynamics environment address");
+    const unreadable = create(
+      "https://businesscentral.dynamics.com/opengenitest2026/Production",
+      "api:microsoft-dynamics",
+    );
+    await expect(unreadable).rejects.toThrow('"opengenitest2026" isn\'t a tenant ID or domain');
+    // The card's own inputs follow the same rule.
+    await expect(
+      createCatalogItem({
+        db: {} as Database,
+        accountId: crypto.randomUUID(),
+        workspaceId: crypto.randomUUID(),
+        payload: {
+          kind: "mcp",
+          source: "manual",
+          name: "Microsoft Dynamics",
+          category: "custom",
+          tags: [],
+          metadata: {},
+          connectFor: "api:microsoft-dynamics",
+          connectInputs: { endpointUrl: "attacker.example" },
+        },
+      }),
+    ).rejects.toThrow("That isn't a Dynamics environment address");
+    // An entry without connect-time inputs can't be named.
+    await expect(
+      create("https://contoso.crm4.dynamics.com/", "api:github-app"),
+    ).rejects.toMatchObject({ status: 422 });
   });
 
   test("omits credential-header capability MCPs when their headers cannot be decrypted", () => {

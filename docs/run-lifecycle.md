@@ -5064,6 +5064,20 @@ already scheduled activities keep their recorded timeout and retry options.
 A provider or database outage can still
 prevent delivery; this recovery contract does not claim to remove that outage.
 
+### Repeated identical tool calls
+
+A model can get stuck calling one tool with the same arguments over and over
+while nothing changes. `installRepeatedToolCallGuard`
+(`packages/runtime/src/repeated-tool-call-guard.ts`) wraps every function tool
+of the turn's agent, its clones, and tools bound by name. Once one exact call
+(same tool, same arguments in any key order) has returned the same result 8
+times in a row, an identical call started within 30 seconds of the last one
+that ran returns a short notice as its result instead of running, and the run
+continues. A changed result restarts the count, so calls whose results change
+are never affected; polling slower than 30 seconds always runs. The notice is
+the call's ordinary tool result, so it is recorded with the turn's other
+results; there is no separate event.
+
 ## Goals — what makes long runs continue
 
 Agents stop prematurely. A **goal** flips the default so terminal settlement of

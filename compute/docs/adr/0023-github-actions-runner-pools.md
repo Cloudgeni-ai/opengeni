@@ -92,7 +92,9 @@ delivery can be late or missed.
   stopped between registering it and starting its sandbox), once the
   actions service says it is in the pool's scale set: a pool of the same
   name in another runner group has its own. Every sandbox has a timeout,
-  the pool's longest job, in case all else fails.
+  the pool's longest job, in case all else fails. It is set when the
+  runner starts, idle, and set again from now when its job starts, so a
+  runner that waited hours for its job still gives the job all of it.
 - **No state of its own.** What runs is read back from the sandboxes'
   metadata and GitHub every 30 s and at start, so a restart or a standby
   taking over loses nothing and never leaks a sandbox or a registration. A

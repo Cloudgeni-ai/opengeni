@@ -12185,6 +12185,7 @@
       "shape": {
         "$": "object",
         "$.availability": "ref(AgentSlackAvailability)! null",
+        "$.botDisplayName": "string?",
         "$.connectionId": "string!",
         "$.slackTeamId": "string!",
         "$.slackTeamName": "string! null",
@@ -17044,6 +17045,9 @@
         "$": "object",
         "$.authModel": "string?",
         "$.category": "string?",
+        "$.connectFor": "string?",
+        "$.connectInputs": "object?",
+        "$.connectInputs{}": "string",
         "$.description": "string?",
         "$.endpointUrl": "string?",
         "$.homepageUrl": "string?",

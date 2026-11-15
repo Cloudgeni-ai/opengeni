@@ -77,6 +77,11 @@ export const ACTION_PLAIN_STRING_MAPS: ReadonlyArray<{ path: RegExp; reason: str
     reason: "a vault item's secret references by field: names for later use, never values",
   },
   {
+    path: /^request\.connectInputs$/,
+    reason:
+      "the values a Connect card asks for before sign-in, such as an environment address, never credentials",
+  },
+  {
     path: /\.entrySources\.(fallbackOrder|providers|rotation)$/,
     reason: "where each model account setting comes from (workspace or organization)",
   },

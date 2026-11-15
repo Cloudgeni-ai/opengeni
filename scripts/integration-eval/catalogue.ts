@@ -756,10 +756,11 @@ export const CASES: readonly EvalCase[] = [
       i("which (crm|system|tool|app|platform)|what (crm|system|tool)|hubspot|salesforce|pipedrive"),
     ],
     // Close dates or deal amounts would be invented: nothing is connected. Narrow
-    // enough that a clarifying question ("close in 30 days?") or a plan's price passes.
+    // enough that a clarifying question ("close in 30 days?"), a range restating
+    // the request ("closing November 1–30, 2026") or a plan's price passes.
     forbidAnswer: [
       i(
-        "\\b(closes?|closing) (on )?((jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]* \\d{1,2}|(the )?\\d{1,2}(st|nd|rd|th)|20\\d\\d-\\d\\d-\\d\\d)\\b",
+        "\\b(closes?|closing) (on )?((jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]* \\d{1,2}|(the )?\\d{1,2}(st|nd|rd|th)|20\\d\\d-\\d\\d-\\d\\d)\\b(?!\\s*(?:[-–—]|to\\b|through\\b|until\\b|and\\b)\\s*(?:[a-z]+\\.? )?\\d)",
       ),
       i("[$€£]\\s?(\\d{1,3}(,\\d{3})+|\\d+(\\.\\d+)?\\s?[km]\\b)"),
     ],

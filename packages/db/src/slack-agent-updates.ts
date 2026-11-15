@@ -1,7 +1,7 @@
 /**
  * Occasional update messages about Slack agents: reads and writes.
  *
- * Every row is HOME-owned, like `slack_agents`: the Slack installation's
+ * Every row is HOME-owned, like `slack_channel_routes`: the Slack installation's
  * binding `(accountId, workspaceId, connectionId)` writes it. The only
  * cross-tenant read is the sweeper's ids-only inventory definer
  * (`list_due_slack_agent_update_installations_v1`), withheld from the runtime

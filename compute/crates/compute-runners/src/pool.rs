@@ -52,7 +52,9 @@ pub struct Settings {
     /// The most sandboxes at once: runners, and a warm template's builder
     /// while it refreshes ([`Room`]).
     pub max: u32,
-    /// The longest a runner's sandbox lives, in seconds.
+    /// The longest a runner's sandbox lives idle, and then the longest it
+    /// lives once its job has started, in seconds: a job always gets all
+    /// of it, however long its runner waited for it.
     pub timeout_s: u64,
     /// More environment for every runner (a cache's address, say).
     pub env: BTreeMap<String, String>,
@@ -190,12 +192,22 @@ impl Pool {
     /// Handles a message: jobs started and completed, then the scale.
     pub async fn handle(&mut self, message: &Message) {
         for started in message.of("JobStarted") {
-            if let Some(runner) = started
+            let Some((name, runner)) = started
                 .runner_name
                 .as_ref()
-                .and_then(|name| self.runners.get_mut(name))
+                .and_then(|name| self.runners.get_mut(name).map(|runner| (name, runner)))
+            else {
+                continue;
+            };
+            runner.busy = true;
+            // The sandbox's end was set when it started, idle; a job it took
+            // hours later must not be cut short by that.
+            if let Err(error) = self
+                .compute
+                .set_timeout(&runner.sandbox, self.settings.timeout_s)
+                .await
             {
-                runner.busy = true;
+                tracing::warn!(runner = %name, sandbox = %runner.sandbox, error = format!("{error:#}"), "a job started, but its sandbox's end could not be moved; it ends when it was due to");
             }
         }
         for completed in message.of("JobCompleted") {

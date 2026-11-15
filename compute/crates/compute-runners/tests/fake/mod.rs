@@ -81,6 +81,8 @@ pub struct World {
     /// How long a sandbox creation takes.
     pub create_delay: Duration,
     pub killed: Vec<String>,
+    /// Sandboxes' ends moved, and to how many seconds from then.
+    pub timeouts: Vec<(String, u64)>,
     /// The repository's default branch's head.
     pub head: String,
     pub processes: Vec<Process>,
@@ -167,6 +169,7 @@ impl Fake {
             .route("/queue/{id}", delete(delete_message))
             .route("/v2/sandboxes", post(create).get(list))
             .route("/sandboxes/{id}", delete(kill))
+            .route("/sandboxes/{id}/timeout", post(set_timeout))
             .route("/repos/acme/web", get(repository))
             .route("/repos/acme/web/commits/{branch}", get(commit))
             .route("/process.Process/Start", post(start_process))
@@ -520,6 +523,20 @@ async fn kill(State(fake): State<Fake>, Path(id): Path<String>) -> StatusCode {
     } else {
         StatusCode::NOT_FOUND
     }
+}
+
+async fn set_timeout(
+    State(fake): State<Fake>,
+    Path(id): Path<String>,
+    axum::Json(body): axum::Json<Value>,
+) -> StatusCode {
+    let mut world = fake.world();
+    if !world.sandboxes.contains_key(&id) {
+        return StatusCode::NOT_FOUND;
+    }
+    let timeout = body["timeout"].as_u64().unwrap();
+    world.timeouts.push((id, timeout));
+    StatusCode::NO_CONTENT
 }
 
 async fn repository() -> Response {

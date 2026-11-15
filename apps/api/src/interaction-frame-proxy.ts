@@ -227,7 +227,7 @@ export class InteractionFrameProxyConnection implements ApiWebSocketConnection {
       return;
     }
     const bytes =
-      message instanceof Uint8Array ? Uint8Array.from(message) : new Uint8Array(message).slice();
+      message instanceof Uint8Array ? new Uint8Array(message) : new Uint8Array(message).slice();
     if (this.upstreamOpen && this.upstream) {
       this.upstream.send(webSocketBinary(bytes));
       return;

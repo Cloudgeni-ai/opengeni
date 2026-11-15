@@ -360,7 +360,7 @@ function decodeInlineMcpImage(
   ) {
     return null;
   }
-  const bytes = Uint8Array.from(Buffer.from(data, "base64"));
+  const bytes = new Uint8Array(Buffer.from(data, "base64"));
   return bytes.byteLength > 0 && bytes.byteLength <= COMPUTER_SCREENSHOT_MAX_BYTES
     ? { bytes, mediaType: mimeType }
     : null;
@@ -659,7 +659,7 @@ export function retainedScreenshotIdentity(input: {
     .update("\0")
     .update(input.toolOutputId)
     .digest("hex");
-  const uuidBytes = Uint8Array.from(Buffer.from(settlementKey.slice(0, 32), "hex"));
+  const uuidBytes = new Uint8Array(Buffer.from(settlementKey.slice(0, 32), "hex"));
   uuidBytes[6] = (uuidBytes[6]! & 0x0f) | 0x80;
   uuidBytes[8] = (uuidBytes[8]! & 0x3f) | 0x80;
   const hex = Buffer.from(uuidBytes).toString("hex");

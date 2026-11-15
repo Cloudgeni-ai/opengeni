@@ -780,14 +780,14 @@ function checksum(bytes: Uint8Array): bigint {
 
 async function sha256Text(bytes: Uint8Array): Promise<string> {
   const digest = new Uint8Array(
-    await crypto.subtle.digest("SHA-256", Uint8Array.from(bytes).buffer),
+    await crypto.subtle.digest("SHA-256", new Uint8Array(bytes).buffer),
   );
   return `sha256:${[...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const digest = new Uint8Array(
-    await crypto.subtle.digest("SHA-256", Uint8Array.from(bytes).buffer),
+    await crypto.subtle.digest("SHA-256", new Uint8Array(bytes).buffer),
   );
   return [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }

@@ -310,17 +310,24 @@ export async function declareSiteToolsForEveryViewer(
   grant: AccessGrant,
   declared: readonly ToolGatewayIdentity[],
   readAccounts: typeof readSiteToolAccountInventory = readSiteToolAccountInventory,
+  readTurnBindings: typeof getSessionTurnMcpAccountBindings = getSessionTurnMcpAccountBindings,
 ): Promise<ToolGatewayIdentity[]> {
   if (declared.length === 0) return [...declared];
   const claims = exactAgentAttemptClaims(grant);
   if (claims) {
-    // A turn this cannot read is refused by the publication itself; pair nothing.
-    const bindings = await getSessionTurnMcpAccountBindings(
+    // Pairing nothing would leave the Site working only for the publisher, so
+    // a turn whose bindings can't be read refuses the publication.
+    const bindings = await readTurnBindings(
       deps.db,
       grant.workspaceId,
       claims.sessionId,
       claims.turnId,
-    ).catch(() => null);
+    ).catch((error: unknown) => {
+      throw new WorkspaceArtifactOperationError(
+        "Couldn't read this turn's connected accounts, so the Site's tools couldn't be shared with other viewers. Nothing was published; publish again.",
+        { cause: error },
+      );
+    });
     return siteToolDeclarationsForEveryViewer({ accounts: bindings ?? [] }, declared);
   }
   return siteToolDeclarationsForEveryViewer(await readAccounts(deps, grant), declared);

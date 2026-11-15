@@ -1,5 +1,29 @@
 # @opengeni/db
 
+## 6.22.0
+
+### Patch Changes
+
+- 1f25da5: Approval run states are checked against their size limits in one linear pass in the worker before any database work, on save and on read. The database no longer counts their JSON nodes with `jsonb_path_query`, which took quadratic time: a run state with a few hundred thousand array elements cost seconds to minutes of database CPU, partly while the session row was locked.
+- 6597d38: The Console sessions list loads again for organizations with many sessions: each page's per-session cost is now one lookup by the credit ledger's idempotency index instead of a full ledger scan per session, which exceeded the Console's 20 s query limit. Spend per organization key also reads the ledger once instead of once per managed workspace. Totals are unchanged.
+- c36183c: Disconnecting a Google account (Gmail, Drive, Calendar or a Google integration) now ends Opengeni's access at Google too: the disconnected connection no longer keeps any Google tokens, and the grant is revoked with Google once the disconnect is saved. Google revokes a grant for every connection of that Google account, so while another of your connections of the same account is still connected, the grant stays at Google and only the disconnected connection's tokens are deleted. When Google can't be reached, the stored tokens are still deleted. Other services disconnect as before.
+
+  `revokeConnection` accepts `replacementCredentialEncrypted` to replace the stored credential in the same write.
+
+- 0d72a8b: Count the JSON nodes and object properties of session history items in linear time. The counts previously came from row-producing `jsonb_path_query('strict $.**')` scans, which Postgres serves in quadratic time for large items; they now come from `jsonb_path_query_array` with the same results and the same history limits.
+- 07ecbcc: Skills whose SKILL.md description is a multi-line YAML block install again: the installed Skill's summary folds line breaks into spaces, and any remaining invalid Skill metadata returns a 422 instead of a server error. Chat titles now work on chat-API routes that report unset usage counters as null, and a failed title logs a content-free reason (the failing stage, error name and provider status or code).
+- c105ed2: Microsoft Teams feedback (thumbs up or down) on replies in routed 1:1 chats, including Personal and other non-home workspaces, and in chats with agents anyone in the organization may use, is now recorded instead of being refused as `feedback_not_permitted`. It is authorized like the chat itself: the reacting person must be the linked owner of that chat, with live organization membership and access to its workspace (organization-agent chats record as `teams-agent:<agentId>` while the agent is still open to them). `TeamsDeliveredReply` adds the chat's `workspace_id`, `actor_id` and `agent_id`. Linking a Teams account with workspace routing now also refuses an agent acting for the person; only the person signed in to Opengeni themselves can link.
+- Updated dependencies [d50092b]
+- Updated dependencies [07ecbcc]
+  - @opengeni/contracts@6.22.0
+  - @opengeni/observability@6.22.0
+  - @opengeni/codemode@6.22.0
+  - @opengeni/codex@6.22.0
+  - @opengeni/config@6.22.0
+  - @opengeni/network@6.22.0
+  - @opengeni/subscriptions@6.22.0
+  - @opengeni/xai-subscription@6.22.0
+
 ## 6.21.0
 
 ### Minor Changes

@@ -1,5 +1,50 @@
 # @opengeni/api-router
 
+## 6.22.0
+
+### Patch Changes
+
+- 3bf1c71: A Connected Machine command's completion no longer reaches its session minutes late on a slow uplink. The agent sent the few-byte completion notice, its retries and its operation inventory through the same first-in-first-out connection as command output, so the notice waited behind every output frame already queued (or was dropped from a full queue) until the next reconnect. The agent now sends them on its control connection, repeating an unacknowledged completion with every heartbeat. Opengeni's collector also used to give up on a completed command's output after five seconds without it, attach again (queuing the same frames once more) and back off for up to five minutes; it now follows one attachment until the exit arrives or its claim budget ends. `replayConnectedCommandOutput` requires a deadline for terminal replays. Failed completion, inventory collection, probe, settlement and output release warnings now carry a closed `reason` code (`claim_deadline`, `exit_frontier_not_reached`, `exit_frontier_mismatch`, `output_transport_unavailable`, `control_<code>`, `database_<sqlstate>` or `unclassified`), exported by the new `connectedCommandFailureReason`, since telemetry does not export error text.
+- c36183c: Disconnecting a Google account (Gmail, Drive, Calendar or a Google integration) now ends Opengeni's access at Google too: the disconnected connection no longer keeps any Google tokens, and the grant is revoked with Google once the disconnect is saved. Google revokes a grant for every connection of that Google account, so while another of your connections of the same account is still connected, the grant stays at Google and only the disconnected connection's tokens are deleted. When Google can't be reached, the stored tokens are still deleted. Other services disconnect as before.
+
+  `revokeConnection` accepts `replacementCredentialEncrypted` to replace the stored credential in the same write.
+
+- 07ecbcc: Skills whose SKILL.md description is a multi-line YAML block install again: the installed Skill's summary folds line breaks into spaces, and any remaining invalid Skill metadata returns a 422 instead of a server error. Chat titles now work on chat-API routes that report unset usage counters as null, and a failed title logs a content-free reason (the failing stage, error name and provider status or code).
+- Updated dependencies [1f25da5]
+- Updated dependencies [3bf1c71]
+- Updated dependencies [6597d38]
+- Updated dependencies [d50092b]
+- Updated dependencies [3604f11]
+- Updated dependencies [c36183c]
+- Updated dependencies [0d72a8b]
+- Updated dependencies [07ecbcc]
+- Updated dependencies [c105ed2]
+  - @opengeni/db@6.22.0
+  - @opengeni/runtime@6.22.0
+  - @opengeni/contracts@6.22.0
+  - @opengeni/observability@6.22.0
+  - @opengeni/core@6.22.0
+  - @opengeni/documents@6.22.0
+  - @opengeni/events@6.22.0
+  - @opengeni/artifact-tool@6.22.0
+  - @opengeni/capabilities@6.22.0
+  - @opengeni/codemode@6.22.0
+  - @opengeni/codex@6.22.0
+  - @opengeni/config@6.22.0
+  - @opengeni/decisions@6.22.0
+  - @opengeni/github@6.22.0
+  - @opengeni/interaction@6.22.0
+  - @opengeni/storage@6.22.0
+  - @opengeni/tool-gateway@6.22.0
+  - @opengeni/vaults@6.22.0
+  - @opengeni/vaults-bitwarden@6.22.0
+  - @opengeni/vaults-keeper@6.22.0
+  - @opengeni/vaults-onepassword@6.22.0
+  - @opengeni/vaults-protonpass@6.22.0
+  - @opengeni/agent-proto@6.22.0
+  - @opengeni/network@6.22.0
+  - @opengeni/xai-subscription@6.22.0
+
 ## 6.21.0
 
 ### Patch Changes

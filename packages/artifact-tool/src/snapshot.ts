@@ -62,7 +62,7 @@ export function createArtifactSnapshot(
     runtimeTarget: native.target,
     kernelVersion: native.buildIdentity,
     stateHash: native.stateHash(),
-    snapshotBytes: Uint8Array.from(native.snapshot()),
+    snapshotBytes: new Uint8Array(native.snapshot()),
   };
   if (state.modality === "spreadsheet") {
     if (!(native instanceof NativeSpreadsheetSession)) {
@@ -73,7 +73,7 @@ export function createArtifactSnapshot(
       modality: "spreadsheet" as const,
       modelSchemaVersion: SPREADSHEET_ARTIFACT_MODEL_SCHEMA_VERSION,
       snapshotVersion: SPREADSHEET_COLLABORATION_SNAPSHOT_VERSION,
-      coveredCausalFrontierBytes: Uint8Array.from(native.frontier()),
+      coveredCausalFrontierBytes: new Uint8Array(native.frontier()),
       operationProtocolVersion: COMMITTED_TRANSACTION_PROTOCOL_VERSION,
       crdtStateVersion: SPREADSHEET_COLLABORATION_SNAPSHOT_VERSION,
     });

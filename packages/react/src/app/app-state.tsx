@@ -443,6 +443,10 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   const [slackLinkContinuationWorkspaceId, setSlackLinkContinuationWorkspaceId] = useState<
     string | null
   >(slackLink.workspaceId);
+  // The workspace whose Slack link just completed. It outlives the access
+  // revalidation and route remounts that follow, so the person keeps seeing
+  // that it worked.
+  const [slackLinkLinkedWorkspaceId, setSlackLinkLinkedWorkspaceId] = useState<string | null>(null);
   const [invalidSlackLinkQueryWorkspaceId, setInvalidSlackLinkQueryWorkspaceId] = useState<
     string | null
   >(host.initialInvalidSlackLinkQueryWorkspaceId);
@@ -786,6 +790,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       if (options?.preservePendingSlackLink !== true) {
         slackLink.clear();
         setSlackLinkContinuationWorkspaceId(null);
+        setSlackLinkLinkedWorkspaceId(null);
       }
       resetWorkspaceState(null, true);
     },
@@ -2813,7 +2818,16 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   const clearSlackLinkContinuation = useCallback(() => {
     slackLink.clear();
     setSlackLinkContinuationWorkspaceId(null);
+    setSlackLinkLinkedWorkspaceId(null);
   }, [slackLink]);
+  const completeSlackLinkContinuation = useCallback(
+    (workspaceId: string) => {
+      slackLink.clear();
+      setSlackLinkContinuationWorkspaceId(null);
+      setSlackLinkLinkedWorkspaceId(workspaceId);
+    },
+    [slackLink],
+  );
 
   const appContext = useMemo<AppContextValue | null>(() => {
     return clientConfig && accessContext
@@ -2826,9 +2840,11 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           workspaces,
           managedSelfContext,
           slackLinkContinuationWorkspaceId,
+          slackLinkLinkedWorkspaceId,
           invalidSlackLinkQueryWorkspaceId,
           preparePendingSlackLink,
           clearSlackLinkContinuation,
+          completeSlackLinkContinuation,
           accessKeyVersion,
           keyAuthRequired: keyAuthRequired === true,
           model,
@@ -2928,6 +2944,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     busy,
     captureWorkspaceInvocation,
     clearSlackLinkContinuation,
+    completeSlackLinkContinuation,
     client,
     clientConfig,
     workspaceConfig,
@@ -2983,6 +3000,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     preparePendingSlackLink,
     prepareWorkspaceTransition,
     slackLinkContinuationWorkspaceId,
+    slackLinkLinkedWorkspaceId,
     latencyMode,
     reasoningEffort,
     revalidatePrincipalAccess,
@@ -3052,6 +3070,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     revalidatePrincipalAccess,
     defaultWorkspaceId,
     slackLinkContinuationWorkspaceId,
+    slackLinkLinkedWorkspaceId,
     routedWorkspace,
     creditRequired,
     setCreditRequired,

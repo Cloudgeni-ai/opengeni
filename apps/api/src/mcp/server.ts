@@ -166,6 +166,7 @@ import {
   createTaskNote,
   listTaskNotes,
   replaceTaskNote,
+  TaskNoteRefusedError,
   releaseWorkClaim,
   upsertWorkClaim,
   acceptSessionHumanInputResponse,
@@ -309,13 +310,42 @@ import {
   MICROSOFT_DYNAMICS_CAPABILITY_ID,
   MICROSOFT_DYNAMICS_CONNECTION_NAME,
   microsoftDynamicsEnvironmentAddress,
+  microsoftDynamicsAddressProblem,
   microsoftDynamicsMcpEndpoint,
   microsoftDynamicsProductForMcpUrl,
   type MicrosoftDynamicsProduct,
 } from "@opengeni/contracts/microsoft-dynamics";
+import {
+  capabilityConnectEndpoint,
+  capabilityConnectInputs,
+  type CapabilityConnectInput,
+} from "@opengeni/contracts/capability-connect-inputs";
 
-/** What the agent needs before it can show a Microsoft Dynamics Connect card. */
-const MICROSOFT_DYNAMICS_SETUP_DETAIL = `Each connection is one Dynamics environment. Ask the person for the web address they open Dynamics at (for example https://contoso.crm4.dynamics.com, or https://businesscentral.dynamics.com/<tenant>/<environment> for Business Central; any page of it works). If they don't know it, they can open Dynamics and copy the address bar, or find Environment URL in the Power Platform admin center. Then call custom_mcp_setup_request with name "${MICROSOFT_DYNAMICS_CONNECTION_NAME}" and that address as endpointUrl. Its card signs them in with their Microsoft work account.`;
+/**
+ * How to show a card that asks the person for its connect-time inputs: the
+ * card tool posts it, and the agent may fill in values the person already gave.
+ */
+function connectInputsCardDetail(
+  capabilityId: string,
+  inputs: readonly CapabilityConnectInput[],
+): string {
+  const asks = inputs.map((input) => input.label.toLowerCase()).join(" and ");
+  const keys = inputs.map((input) => input.id).join(", ");
+  return `Call capability_authorization_request with capabilityId ${capabilityId}: its card asks the person for the ${asks}, then signs them in. If they already gave it, also pass it in inputs (${keys}) to fill it in.`;
+}
+
+/** A catalog match's connect-time inputs, which its card asks the person for. */
+function connectInputsOf(
+  item: CapabilityCatalogItem,
+  setup: CapabilitySetupProjection,
+): { connectInputs?: { id: string; label: string }[] } {
+  const inputs =
+    setup.status === "authorization_required" && capabilityConnectInputs(item.surfaceType);
+  return inputs ? { connectInputs: inputs.map(({ id, label }) => ({ id, label })) } : {};
+}
+
+/** How a Microsoft Dynamics environment is connected. */
+const MICROSOFT_DYNAMICS_SETUP_DETAIL = `Each connection is one Dynamics environment. ${connectInputsCardDetail(MICROSOFT_DYNAMICS_CAPABILITY_ID, capabilityConnectInputs("microsoft_dynamics") ?? [])}`;
 
 /** The workspace's own Dynamics environments: catalog entries for an exact environment endpoint. */
 function microsoftDynamicsEnvironments(
@@ -386,12 +416,15 @@ const SETUP_CARD_CONTINUES =
 function microsoftDynamicsSetupProblem(
   settings: ApiRouteDeps["settings"],
   product: MicrosoftDynamicsProduct | null,
+  addressProblem: string | null = null,
 ): string | null {
   if (
     !settings.microsoftDynamicsClientId?.trim() ||
     !settings.microsoftDynamicsClientSecret?.trim()
   )
     return "Microsoft Dynamics isn't available on this Opengeni deployment yet. Nothing was posted; tell the person.";
+  if (!product && addressProblem)
+    return `${addressProblem} Nothing was posted; ask the person for that address, then call custom_mcp_setup_request again.`;
   if (!product)
     return "That isn't a Dynamics environment address. Ask the person to open Dynamics and copy the address bar (it looks like https://contoso.crm4.dynamics.com), or find Environment URL in the Power Platform admin center, then call custom_mcp_setup_request again.";
   return null;
@@ -518,6 +551,7 @@ import {
   markToolArgumentRejection,
   toolArgumentRejectionResult,
 } from "./tool-argument-error";
+import { databaseToolFailureResult, taskNoteRefusalResult } from "./database-tool-failure";
 import {
   boundSessionEventCompactResult,
   boundSessionEventMcpPage,
@@ -1283,8 +1317,16 @@ export class PolicyMcpServer extends McpServer {
     }
     this.registeredToolCount += 1;
     const handler = cb as (...args: unknown[]) => unknown;
-    return super.registerTool(name, config, ((...args: unknown[]) => {
-      return dispatchWithSessionAuthorizationReadReuse(() => handler(...args));
+    return super.registerTool(name, config, (async (...args: unknown[]) => {
+      try {
+        return await dispatchWithSessionAuthorizationReadReuse(() => handler(...args));
+      } catch (error) {
+        // The SDK would return the thrown message verbatim; a raw database
+        // error's message is its query and every parameter.
+        const databaseFailure = databaseToolFailureResult(name, error);
+        if (databaseFailure) return databaseFailure;
+        throw error;
+      }
     }) as ToolCallback<InputArgs>);
   }
 
@@ -4557,6 +4599,15 @@ function registerTaskNoteTools(
   const authorize = async () => {
     await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
   };
+  // A refusal the task-note routines raise becomes a typed, actionable result.
+  const result = async (run: () => Promise<unknown>) => {
+    try {
+      return json(await run());
+    } catch (error) {
+      if (error instanceof TaskNoteRefusedError) return taskNoteRefusalResult(error);
+      throw error;
+    }
+  };
   const boundedUtf8 = (maxBytes: number, label: string) =>
     z4
       .string()
@@ -4586,12 +4637,13 @@ function registerTaskNoteTools(
     },
     async ({ includeArchived, limit }) => {
       await authorize();
-      return json(
-        await listTaskNotes(deps.db, {
-          ...attemptClaims(),
-          includeArchived,
-          limit,
-        }),
+      return await result(
+        async () =>
+          await listTaskNotes(deps.db, {
+            ...attemptClaims(),
+            includeArchived,
+            limit,
+          }),
       );
     },
   );
@@ -4610,14 +4662,15 @@ function registerTaskNoteTools(
     },
     async ({ operationId, kind, text, expiresInDays }) => {
       await authorize();
-      return json(
-        await createTaskNote(deps.db, {
-          ...attemptClaims(),
-          operationId,
-          kind,
-          text,
-          expiresInDays,
-        }),
+      return await result(
+        async () =>
+          await createTaskNote(deps.db, {
+            ...attemptClaims(),
+            operationId,
+            kind,
+            text,
+            expiresInDays,
+          }),
       );
     },
   );
@@ -4636,14 +4689,15 @@ function registerTaskNoteTools(
     },
     async ({ operationId, noteId, expectedVersion, reason }) => {
       await authorize();
-      return json(
-        await archiveTaskNote(deps.db, {
-          ...attemptClaims(),
-          operationId,
-          noteId,
-          expectedVersion,
-          reason,
-        }),
+      return await result(
+        async () =>
+          await archiveTaskNote(deps.db, {
+            ...attemptClaims(),
+            operationId,
+            noteId,
+            expectedVersion,
+            reason,
+          }),
       );
     },
   );
@@ -4680,17 +4734,18 @@ function registerTaskNoteTools(
       reason,
     }) => {
       await authorize();
-      return json(
-        await replaceTaskNote(deps.db, {
-          ...attemptClaims(),
-          operationId,
-          replacedNoteId,
-          expectedReplacedVersion,
-          replacementKind,
-          replacementText,
-          replacementExpiresInDays,
-          reason,
-        }),
+      return await result(
+        async () =>
+          await replaceTaskNote(deps.db, {
+            ...attemptClaims(),
+            operationId,
+            replacedNoteId,
+            expectedReplacedVersion,
+            replacementKind,
+            replacementText,
+            replacementExpiresInDays,
+            reason,
+          }),
       );
     },
   );
@@ -8020,6 +8075,7 @@ function registerCapabilityDiscoveryTools(
           setup: {
             ...setup,
             requiredVariables: capabilityRequiredVariables(item),
+            ...connectInputsOf(item, setup),
             nextAction:
               setup.status === "authorization_required" ||
               setup.reconnect?.some((account) => account.reconnectHere)
@@ -8079,14 +8135,29 @@ function registerCapabilityDiscoveryTools(
           .describe(
             "When setup.reconnect lists accounts that stopped working: the connectionId of the one to reconnect. The card then reconnects that same account.",
           ),
+        inputs: z4
+          .record(z4.string().min(1).max(64), z4.string().max(2048))
+          .optional()
+          .describe(
+            "When setup.connectInputs lists values the card asks for: those the person already gave, by id. The card shows them filled in.",
+          ),
       },
     },
-    async ({ capabilityId, rationale, connectionId }, extra) => {
+    async ({ capabilityId, rationale, connectionId, inputs }, extra) => {
+      // No values is the same as no inputs.
+      const suppliedInputs = inputs && Object.keys(inputs).length > 0 ? inputs : undefined;
       await authorize();
       // Tool discovery shows a card for a search that clearly names one
       // integration; it shows that card at most once per chat.
       const fromDiscovery = extra?._meta?.[TOOL_DISCOVERY_CARD_META_KEY] === true;
       const current = await catalog();
+      // What the card's message adds about connections already here.
+      let alsoHere = "";
+      // The agent's inputs chose an existing connection instead of a card field.
+      let inputsConsumed = false;
+      // The agent's inputs name a connection not here yet: the card asks for
+      // it even when another connection of the entry is ready.
+      let anotherConnection = false;
       let item =
         [...current.items, ...recommendations()].find(
           (candidate) => candidate.id === capabilityId,
@@ -8109,26 +8180,51 @@ function registerCapabilityDiscoveryTools(
             message: own.detail,
           });
         const environments = await dynamicsEnvironmentSetups(current.items);
-        const connectable = environments.filter(
-          ({ setup }) => setup.status === "authorization_required",
-        );
         const fromEnvironments = microsoftDynamicsSetupFromEnvironments(environments);
-        if (fromEnvironments?.status !== "ready" && connectable.length === 1) {
-          item = connectable[0]!.item;
+        // Inputs that name an environment already here answer with that
+        // environment. Inputs that name another one, or can't be used, get
+        // the card that asks for it.
+        const named = suppliedInputs
+          ? capabilityConnectEndpoint(item.surfaceType, suppliedInputs)
+          : null;
+        const namedHere =
+          named && "endpointUrl" in named
+            ? environments.find(
+                ({ item: environment }) =>
+                  (environment.mcpUrl ?? environment.endpointUrl) === named.endpointUrl,
+              )
+            : undefined;
+        if (namedHere) {
+          item = namedHere.item;
+          inputsConsumed = true;
+        } else if (suppliedInputs) {
+          anotherConnection = true;
         } else {
-          return json({
-            capabilityId: item.id,
-            status: fromEnvironments?.status === "ready" ? "ready" : "input_required",
-            cardShown: false,
-            message: fromEnvironments?.detail ?? MICROSOFT_DYNAMICS_SETUP_DETAIL,
-          });
+          if (fromEnvironments?.status === "ready")
+            return json({
+              capabilityId: item.id,
+              status: "ready",
+              cardShown: false,
+              message: fromEnvironments.detail,
+            });
+          // The only environment this person can still connect needs no
+          // address.
+          const connectable = environments.filter(
+            ({ setup }) => setup.status === "authorization_required",
+          );
+          if (connectable.length === 1) item = connectable[0]!.item;
+          else if (fromEnvironments) alsoHere = ` ${fromEnvironments.detail}`;
         }
       }
-      const [[setup], inventory] = await Promise.all([
+      const [[projected], inventory] = await Promise.all([
         setupProjections([item]),
         reconnectInventory([item]),
       ]);
-      if (!setup) throw new Error("Capability setup projection is unavailable.");
+      if (!projected) throw new Error("Capability setup projection is unavailable.");
+      const setup: CapabilitySetupProjection =
+        anotherConnection && projected.status === "ready"
+          ? { status: "authorization_required", action: "connect", detail: projected.detail }
+          : projected;
       // An account of this entry that stopped working is reconnected in place:
       // a first-time Connect cannot replace it. The agent names the one the
       // task needs; without a name, the only one here is used while no
@@ -8199,11 +8295,26 @@ function registerCapabilityDiscoveryTools(
       const personCannotConnect =
         person !== null &&
         inChatCapabilitySetup(person, item.id, item, memberIntegrationSetup).kind === "unavailable";
+      // A card for a new connection asks for the entry's connect-time inputs,
+      // filled in with what the agent passed when that is usable.
+      const declaredInputs = reconnect ? null : capabilityConnectInputs(item.surfaceType);
+      const supplied = declaredInputs && suppliedInputs ? suppliedInputs : null;
+      const suppliedEndpoint = supplied
+        ? capabilityConnectEndpoint(item.surfaceType, supplied)
+        : null;
+      const cardInputs = declaredInputs?.map((input) => {
+        const value = supplied?.[input.id]?.trim();
+        return {
+          ...input,
+          ...(value && suppliedEndpoint && "endpointUrl" in suppliedEndpoint ? { value } : {}),
+        };
+      });
       const { eventId, alreadyShown } = await appendCapabilityCardEvent(deps, grant, sessionId, {
         item,
         action: reconnect ? "connect" : (setup.action ?? "connect"),
         rationale,
         ...(reconnect ? { reconnect } : {}),
+        ...(cardInputs ? { inputs: cardInputs } : {}),
         // Tool discovery's card is not posted again until the person writes.
         // A model call always posts: a card whose state changed (a machine
         // just connected) is worth showing again.
@@ -8213,15 +8324,19 @@ function registerCapabilityDiscoveryTools(
       // never report one that was not shown. A card already there keeps the
       // status and guidance it would have had, and says it was not reposted.
       const shown = { cardShown: eventId !== null, ...(alreadyShown ? { alreadyShown } : {}) };
+      const inputsUnused =
+        suppliedInputs && !declaredInputs && !inputsConsumed
+          ? " The inputs you passed were not used: this card asks for none."
+          : "";
       const posted = (body: { message: string } & Record<string, unknown>) =>
-        json(
-          alreadyShown
-            ? {
-                ...body,
-                message: `${body.message.replace(" was posted", " is already in this chat")} It was not posted again.`,
-              }
-            : body,
-        );
+        json({
+          ...body,
+          message: `${
+            alreadyShown
+              ? `${body.message.replace(" was posted", " is already in this chat")} It was not posted again.`
+              : body.message
+          }${inputsUnused}`,
+        });
       if (reconnect) {
         return posted({
           capabilityId: item.id,
@@ -8270,11 +8385,13 @@ function registerCapabilityDiscoveryTools(
             ? "The Connected Machine card was posted. It shows the person what to do, so do not describe its buttons or steps; nothing is connected yet. Do not paste an enroll token into the chat."
             : item.id === EXCEL_ADDIN_CAPABILITY_ID
               ? "The Excel add-in card was posted with its install link and steps, so do not repeat them; no workbook is connected yet. excel_run works once the person opens the add-in in their workbook."
-              : item.surfaceType === "integration_definition"
-                ? integrationDefinitionCardPostedMessage(item)
-                : item.kind === "plugin"
-                  ? `The ${item.name} plugin card was posted. The person reviews what it adds and installs it for the workspace; nothing is installed yet. Once they do, its Skills are yours from your next turn, and its MCP servers may still need connecting: search the catalog for them then.`
-                  : `The recommendation was posted for human confirmation. No access has been granted yet. ${SETUP_CARD_CONTINUES}`,
+              : declaredInputs
+                ? `The card was posted. It asks the person for the ${declaredInputs.map((input) => input.label.toLowerCase()).join(" and ")}, then signs them in; nothing is connected yet.${suppliedEndpoint && "problem" in suppliedEndpoint ? ` What you passed was not filled in: ${suppliedEndpoint.problem}` : ""} ${SETUP_CARD_CONTINUES}${alsoHere}`
+                : item.surfaceType === "integration_definition"
+                  ? integrationDefinitionCardPostedMessage(item)
+                  : item.kind === "plugin"
+                    ? `The ${item.name} plugin card was posted. The person reviews what it adds and installs it for the workspace; nothing is installed yet. Once they do, its Skills are yours from your next turn, and its MCP servers may still need connecting: search the catalog for them then.`
+                    : `The recommendation was posted for human confirmation. No access has been granted yet. ${SETUP_CARD_CONTINUES}`,
       });
     },
   );
@@ -8291,7 +8408,9 @@ function registerCapabilityDiscoveryTools(
           .url()
           .max(2048)
           .refine((url) => {
-            if (microsoftDynamicsMcpEndpoint(url)) return true;
+            // An unreadable Dynamics address is answered with what to paste instead.
+            if (microsoftDynamicsMcpEndpoint(url) || microsoftDynamicsAddressProblem(url))
+              return true;
             const parsed = new URL(url);
             return (
               parsed.protocol === "https:" &&
@@ -8348,12 +8467,18 @@ function registerCapabilityDiscoveryTools(
       // A Dynamics environment address becomes its connection endpoint and
       // signs in through Microsoft; say plainly when this deployment can't.
       const dynamics = microsoftDynamicsMcpEndpoint(suppliedEndpointUrl);
+      const addressProblem = dynamics ? null : microsoftDynamicsAddressProblem(suppliedEndpointUrl);
       if (
         dynamics ||
+        addressProblem ||
         (name.trim().toLowerCase() === MICROSOFT_DYNAMICS_CONNECTION_NAME.toLowerCase() &&
           looksLikeMicrosoftDynamicsPage(suppliedEndpointUrl))
       ) {
-        const unavailable = microsoftDynamicsSetupProblem(deps.settings, dynamics?.product ?? null);
+        const unavailable = microsoftDynamicsSetupProblem(
+          deps.settings,
+          dynamics?.product ?? null,
+          addressProblem,
+        );
         if (unavailable) return json({ status: "unavailable", message: unavailable });
       }
       const endpointUrl = dynamics
@@ -8671,6 +8796,8 @@ async function appendCapabilityCardEvent(
     toolName?: string;
     /** The account that stopped working which this card reconnects. */
     reconnect?: ConnectionNeedingReconnect;
+    /** The connect-time inputs the card asks for, with the agent's values. */
+    inputs?: NonNullable<ToolAuthNeededPayload["capability"]>["inputs"];
     /**
      * Post the card only when no current card of the same kind for the
      * capability is already shown in this turn, or (`since_latest_message`)
@@ -8728,6 +8855,7 @@ function capabilityCardPayload(
     rationale: string;
     toolName?: string;
     reconnect?: Pick<ConnectionNeedingReconnect, "connectionId" | "ownership">;
+    inputs?: NonNullable<ToolAuthNeededPayload["capability"]>["inputs"];
   },
 ): ToolAuthNeededPayload {
   return ToolAuthNeededPayload.parse({
@@ -8752,6 +8880,7 @@ function capabilityCardPayload(
       action: input.action,
       rationale: input.rationale,
       requiredVariables: capabilityRequiredVariables(item),
+      ...(input.inputs?.length ? { inputs: input.inputs } : {}),
     },
   });
 }

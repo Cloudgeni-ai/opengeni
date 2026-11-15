@@ -15,6 +15,12 @@ import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { rawRows, withRlsContext } from "./database";
+import {
+  isDatabaseConnectionLoss,
+  isRetryableDatabaseTransportFailure,
+  nestedPostgresMessage,
+  nestedPostgresSqlState,
+} from "./persistence-errors";
 
 export type TaskNoteAttemptClaims = {
   accountId: string;
@@ -53,6 +59,106 @@ export type ListTaskNotesInput = TaskNoteAttemptClaims & {
   includeArchived?: boolean;
   limit?: number;
 };
+
+export type TaskNoteOperation = "save" | "archive" | "replace" | "list";
+
+/**
+ * Why the task-note routines refused a call, from the SQLSTATE and fixed
+ * message they raise:
+ * - `active_note_limit`: the root task tree already holds the most active notes (54000).
+ * - `invalid_input`: the routine's own input check failed (22023).
+ * - `operation_conflict`: the operation ID was already used with other input or
+ *   by another attempt (23505 raised by the routine).
+ * - `note_not_found`: the note is not in this task tree (P0002).
+ * - `note_not_active`: the note was already archived, replaced or expired (40001
+ *   raised by the lifecycle check).
+ * - `attempt_not_authorized`: the caller is not the exact current attempt of a
+ *   visible session in the tree (42501).
+ * - `transient`: the database briefly could not answer (lost connection,
+ *   deadlock, serialization or lock timeout, or a concurrent duplicate insert).
+ */
+export type TaskNoteRefusalReason =
+  | "active_note_limit"
+  | "invalid_input"
+  | "operation_conflict"
+  | "note_not_found"
+  | "note_not_active"
+  | "attempt_not_authorized"
+  | "transient";
+
+/**
+ * A task-note call the database refused, classified so callers can explain it
+ * without the driver error. The message is fixed and never carries SQL,
+ * parameters or note text; the original failure stays only as `cause`.
+ */
+export class TaskNoteRefusedError extends Error {
+  override name = "TaskNoteRefusedError";
+
+  constructor(
+    readonly operation: TaskNoteOperation,
+    readonly reason: TaskNoteRefusalReason,
+    readonly sqlState: string | null,
+    options?: { cause?: unknown },
+  ) {
+    super(`Task note ${operation} refused: ${reason}`, options);
+  }
+}
+
+// The fixed messages the task-note routines raise, by refusal. Matching the
+// message as well as the SQLSTATE keeps a generic driver failure with the same
+// code (a unique violation, a serialization victim) from being misreported.
+const TASK_NOTE_RAISED_MESSAGES: ReadonlyMap<string, TaskNoteRefusalReason> = new Map([
+  ["54000:task note active-record limit reached", "active_note_limit"],
+  ["22023:task note input is invalid", "invalid_input"],
+  ["22023:task note archive input is invalid", "invalid_input"],
+  ["22023:task note list input is invalid", "invalid_input"],
+  ["22023:Task-note replacement input is invalid", "invalid_input"],
+  ["23505:task note operation conflicts with another input or attempt", "operation_conflict"],
+  [
+    "23505:task note archive operation conflicts with another input or attempt",
+    "operation_conflict",
+  ],
+  [
+    "23505:Task-note replacement operation conflicts with another input or attempt",
+    "operation_conflict",
+  ],
+  ["P0002:task note is unavailable", "note_not_found"],
+  ["P0002:Task note is unavailable for replacement", "note_not_found"],
+  ["40001:task note archive version conflict", "note_not_active"],
+  ["40001:Task-note replacement version or lifecycle conflict", "note_not_active"],
+]);
+
+// Contention the transaction rolled back from, and a unique violation the
+// routine did not raise itself (two exact retries racing on one operation ID).
+const TRANSIENT_TASK_NOTE_SQLSTATES = new Set(["40001", "40P01", "55P03", "23505"]);
+
+/**
+ * Classify a failed task-note call, or null when it is not a refusal these
+ * routines are known to raise. Unknown failures keep their original error.
+ */
+export function classifyTaskNoteFailure(
+  operation: TaskNoteOperation,
+  error: unknown,
+): TaskNoteRefusedError | null {
+  if (error instanceof TaskNoteRefusedError) return error;
+  const sqlState = nestedPostgresSqlState(error);
+  let reason: TaskNoteRefusalReason | null = null;
+  if (sqlState !== null) {
+    reason = TASK_NOTE_RAISED_MESSAGES.get(`${sqlState}:${nestedPostgresMessage(error)}`) ?? null;
+    if (!reason && sqlState === "42501") reason = "attempt_not_authorized";
+    if (!reason && TRANSIENT_TASK_NOTE_SQLSTATES.has(sqlState)) reason = "transient";
+  }
+  if (!reason && (isDatabaseConnectionLoss(error) || isRetryableDatabaseTransportFailure(error))) {
+    reason = "transient";
+  }
+  return reason ? new TaskNoteRefusedError(operation, reason, sqlState, { cause: error }) : null;
+}
+
+function refusingTaskNoteFailure(operation: TaskNoteOperation) {
+  return (error: unknown): never => {
+    throw classifyTaskNoteFailure(operation, error) ?? error;
+  };
+}
 
 type TaskNoteRow = {
   note_id: string;
@@ -166,7 +272,7 @@ export async function createTaskNote(db: Database, input: CreateTaskNoteInput) {
           ${input.expiresInDays}::integer
         )`,
       ),
-  );
+  ).catch(refusingTaskNoteFailure("save"));
   if (rows.length !== 1) throw new Error("Task note create returned no durable receipt");
   return TaskNoteMutationResult.parse({ note: noteFromRow(rows[0]!), replayed: rows[0]!.replayed });
 }
@@ -193,7 +299,7 @@ export async function archiveTaskNote(db: Database, input: ArchiveTaskNoteInput)
           ${input.reason}::text
         )`,
       ),
-  );
+  ).catch(refusingTaskNoteFailure("archive"));
   if (rows.length !== 1) throw new Error("Task note archive returned no durable receipt");
   return TaskNoteMutationResult.parse({ note: noteFromRow(rows[0]!), replayed: rows[0]!.replayed });
 }
@@ -243,7 +349,7 @@ export async function replaceTaskNote(db: Database, input: ReplaceTaskNoteInput)
           ${input.reason}::text
         )`,
       ),
-  );
+  ).catch(refusingTaskNoteFailure("replace"));
   const row = rows[0];
   if (!row || rows.length !== 1) throw new Error("Task-note replacement returned no receipt");
   return TaskNoteReplacementResult.parse({
@@ -295,6 +401,6 @@ export async function listTaskNotes(db: Database, input: ListTaskNotesInput) {
           ${limit}::integer
         )`,
       ),
-  );
+  ).catch(refusingTaskNoteFailure("list"));
   return TaskNoteListResponse.parse({ notes: rows.map(noteFromRow) });
 }

@@ -1514,13 +1514,23 @@ export class SelfhostedSession {
       }
     };
     const remoteControl: RemoteOperationControl = {
-      abandonExecCommand: async (requestedOpId) => {
-        if (requestedOpId !== opId || !foregroundFinished || terminalProof || notDispatched)
+      abandonExecCommand: async (requestedOpId, options) => {
+        if (
+          requestedOpId !== opId ||
+          (!foregroundFinished && options?.consumerEnding !== true) ||
+          terminalProof ||
+          notDispatched ||
+          // A background yield is adopting this operation right now; its own
+          // commit releases the caller's fence.
+          ownershipTransferPending
+        )
           return false;
         if (!this.abandonCommand) return false;
-        // The command's original consumer has ended. Reuse its exact launch
-        // identity even if the machine never answers again or an earlier
-        // adoption failed. No OpStart, route lookup, or output ACK is needed.
+        // The command's original consumer has ended, or is ending with its
+        // worker. Reuse its exact launch identity even if the machine never
+        // answers again or an earlier adoption failed. No OpStart, route
+        // lookup, or output ACK is needed. A foreground wait still pending
+        // keeps running; if it completes, it settles the adopted command.
         await abandon();
         return true;
       },
@@ -1554,6 +1564,10 @@ export class SelfhostedSession {
                 await this.captureBackgroundCommandOutput?.(adoptedCommandId, frames);
             },
             onYield: async () => {
+              // The ending attempt already handed this operation to the
+              // command ledger (abandonExecCommand): one record per operation.
+              if (abandonment) await abandonment.catch(() => undefined);
+              if (adoptedCommandId) return;
               ownershipTransferPending = true;
               notifyDurableOpOwnershipTransferStarted(opId);
               const adopted = await this.adoptBackgroundCommand!({
@@ -2008,7 +2022,7 @@ export class SelfhostedSession {
     }
     return {
       type: "image",
-      image: { data: Uint8Array.from(bytes), mediaType },
+      image: { data: new Uint8Array(bytes), mediaType },
     };
   }
 

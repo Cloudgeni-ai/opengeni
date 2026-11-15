@@ -45,7 +45,7 @@ function digestParts(...parts: readonly string[]): Buffer {
 }
 
 function uuidFromDigest(digest: Buffer): string {
-  const bytes = Uint8Array.from(digest.subarray(0, 16));
+  const bytes = new Uint8Array(digest.subarray(0, 16));
   bytes[6] = (bytes[6]! & 0x0f) | 0x50;
   bytes[8] = (bytes[8]! & 0x3f) | 0x80;
   const hex = Buffer.from(bytes).toString("hex");

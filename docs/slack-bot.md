@@ -195,6 +195,13 @@ full-length ones still work), a URL that is still too long is left off, and a
 post Slack refuses (`invalid_arguments`) with a name or picture is sent once
 more as the app's, so it still arrives.
 
+Two cases still post without the picture; the message itself always arrives.
+While older and newer servers run side by side during a rollout, or after a
+rollback, an older server cannot verify the shorter avatar links, so a picture
+it is asked for doesn't load. And on a deployment whose public hostname is
+longer than about 39 characters, an image avatar's URL is still over Slack's
+255-character limit, so its posts show the name with no picture.
+
 `files:write` is an optional bot grant, requested by the canonical manifest but
 not required for existing installations to remain eligible. Apply the generated
 manifest to the Slack app before reinstalling the Opengeni workspace bot. Older
@@ -475,7 +482,7 @@ Agents need workspace routing (`OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED`). With
 
 ### Data
 
-A Slack agent is an agent with an `agent_slack_installs` row per Slack installation it answers in (keyed by its connection, home-owned, recording the installation's own workspace), and the columns below reference that row (`agent_id`, `connection_id`); see [agents.md](agents.md#contract). The legacy `slack_agents` table, one row per agent in one installation under the installation's home tenancy, is no longer read or written (leftover rows are only deleted); it stays only until the legacy drop.
+A Slack agent is an agent with an `agent_slack_installs` row per Slack installation it answers in ([agents.md](agents.md)), each recording the installation's own workspace, the handle's `name_key` (lower-cased with spaces and hyphens removed, unique per installation) and `open` (default off). The columns below reference those rows (`agent_id`, `connection_id`). The legacy `slack_agents` table is gone.
 
 - `slack_channel_routes.slack_agent_id`: the channel's "who answers" setting may name an agent. Turning the agent off in that installation (or deleting it) deletes that setting.
 - `slack_interactions.slack_agent_id` is frozen when a thread binds. `handoff_from_slack_agent_id` records who passed it on, and `last_inbound_*` says which message the chat is answering.
