@@ -451,9 +451,9 @@ the start of every later request:
   that first sees a new value, exactly like the Skill catalog. A change
   appends a new item that replaces the old one; withdrawn governance appends an
   explicit "no workspace governance" item. A change that an attempt sees during
-  its turn (after a capacity wait, a recovery, or between two model requests,
-  which restarts the attempt before the request is sent) is appended at the end
-  of the history before the next request, so earlier items stay identical.
+  its turn (after a capacity wait, a recovery, or between two model requests of
+  the same attempt) is appended at the end of the history before the next
+  request, so earlier items stay identical.
   Compaction re-adds only the latest governance item after the Skill catalog.
 - An agent's Instructions are the exception that is allowed in the system
   prompt, because every chat of one agent shares them: chats bound to an agent

@@ -207,7 +207,7 @@ test("a turn that waited after acceptance sends its first request under the gove
   expect(scripted.sent[0]).not.toContain("RULE_BEFORE_ACCEPTANCE");
 });
 
-test("governance activated between two model requests is appended before the next one; what was sent stays identical", async () => {
+test("governance activated between two model requests is appended before the next one in the same attempt; what was sent stays identical", async () => {
   const f = await fixture();
   await f.activatePolicy("RULE_A");
   await start(f);
@@ -216,17 +216,17 @@ test("governance activated between two model requests is appended before the nex
     { output: [assistantMessage("done")] },
   ]);
   // The tool runs between the two requests; the owner changes the policy then.
-  const first = await runTurn(f, scripted, async () => await f.activatePolicy("RULE_B"));
-  // The second request was refused before it was sent; the same turn continues.
-  expect(first.status).toBe("recovering");
-  expect(scripted.sent).toHaveLength(1);
-  const recovery = (
-    await listSessionEvents(app.db, f.workspaceId, f.session.id, { after: 0, limit: 200 })
-  ).find((event) => event.type === "turn.recovery.requested");
-  expect(recovery?.payload).toMatchObject({ reason: "workspace_governance_changed" });
-
-  expect((await runTurn(f, scripted)).status).toBe("idle");
+  // The attempt rebinds and samples on: no restart, no recovery.
+  expect((await runTurn(f, scripted, async () => await f.activatePolicy("RULE_B"))).status).toBe(
+    "idle",
+  );
   expect(scripted.sent).toHaveLength(2);
+  const events = await listSessionEvents(app.db, f.workspaceId, f.session.id, {
+    after: 0,
+    limit: 200,
+  });
+  expect(events.filter((event) => event.type.startsWith("turn.recovery"))).toEqual([]);
+  expect(events.filter((event) => event.type === "turn.started")).toHaveLength(1);
   const [before, after] = scripted.sent.map((sent) => JSON.parse(sent) as unknown[]);
   // Every item the first request sent is sent again unchanged, first.
   expect(after!.slice(0, before!.length)).toEqual(before!);

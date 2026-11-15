@@ -1092,9 +1092,12 @@ runs, not when its turn was accepted. An attempt that sees other governance
 than the newest governance item (the turn waited for capacity or recovered)
 appends the current governance at the end of the history before its first
 request. Model-call admission compares the attempt's snapshots with the
-active governance before every request; a change made during the attempt
-ends it before the request is sent (`workspace_governance_changed`
-recovery), and the next attempt appends the new governance.
+active governance before every request. On a change made during the
+attempt, the request is not sent: inside a stream the stream ends at that
+model-step boundary (like a Steer handover, with every event of the
+completed step kept), the attempt refreshes its snapshot rows in place,
+appends the new governance, rebuilds its input from the durable history and
+samples on. There is no restart, recovery event or status change.
 Optional application `modelContext` is not part of
 that prefix: claim stores it as a separate leading `input_text` part of the
 exact chronological user message. Standard timeline rendering omits it, while

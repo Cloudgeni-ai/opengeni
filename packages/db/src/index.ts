@@ -81304,10 +81304,12 @@ export async function claimSessionWorkForAttempt(
                 connectorActionPolicies: connectorPolicyRows,
               }),
           );
-          // Freeze governance only after this exact attempt is durably claimed,
-          // while the claim transaction still owns the session/turn/attempt
-          // locks. Later policy or preference activation applies to a future
-          // attempt and can never move accepted queued/in-flight work.
+          // Snapshot governance only after this exact attempt is durably
+          // claimed, while the claim transaction still owns the
+          // session/turn/attempt locks. A later policy activation reaches the
+          // running attempt only through its own in-place snapshot refresh
+          // before a model request; preference activation applies to a
+          // future turn.
           await tx.execute(sql`
             SELECT snapshot.id
             FROM workspace_instruction_policy_get_or_create_snapshot(

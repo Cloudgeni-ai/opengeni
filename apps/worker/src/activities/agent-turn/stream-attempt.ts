@@ -185,7 +185,6 @@ import {
   PostCompactionContinuationEmptyError,
   shouldRecoverCompactionProviderFailure,
   classifyContextWindowOverflowError,
-  WorkspaceGovernanceChangedError,
 } from "./errors";
 import type { GovernanceModelOk } from "./governance-model";
 import {
@@ -392,6 +391,8 @@ export type TurnStreamAttemptDeps = {
   workspaceGovernance: string | null;
   /** The governance snapshots it was rendered from, checked before each request. */
   workspaceGovernanceBasis: GovernanceModelOk["workspaceGovernanceBasis"];
+  /** Rebinds the attempt to the governance active now (see governance-model). */
+  rebindWorkspaceGovernance: GovernanceModelOk["rebindWorkspaceGovernance"];
 };
 
 export async function attachPendingUpdatesBeforePreparingModelInput(input: {
@@ -538,9 +539,16 @@ export async function runTurnStreamAttempt(
     sandboxCodemodeTokenExpiresAt,
     runCredentialResolver,
     videoGenerationAcceptancesByCallId,
-    workspaceGovernance,
-    workspaceGovernanceBasis,
+    rebindWorkspaceGovernance,
   } = deps;
+  // The governance this attempt runs under. A change admission notices
+  // between model requests rebinds both, inside this attempt.
+  let workspaceGovernance = deps.workspaceGovernance;
+  let workspaceGovernanceBasis = deps.workspaceGovernanceBasis;
+  // Set when a rebind found nothing to refresh although the check called the
+  // governance stale. The next request then goes out without that check, so
+  // a disagreement between the check and the snapshot routine cannot loop.
+  let skipNextGovernanceCheck = false;
 
   // Build one attempt from canonical history. The provider adapter creates
   // only the temporary wire view required by this turn's selected API;
@@ -946,6 +954,9 @@ export async function runTurnStreamAttempt(
   // Set when the stream ended for a Steer, at a step boundary or by cutting
   // the model request short; the stream is then settled as a handover.
   let steerHandover = false;
+  // Set when the stream ended because the workspace governance changed after
+  // the attempt's snapshots: the attempt rebinds and samples on.
+  let governanceHandover = false;
   // Set when the stream ended because a model response had no text and no
   // tool call; the turn then gets one reply reminder, never a re-sample loop.
   let contentlessResponseHandover = false;
@@ -1006,7 +1017,6 @@ export async function runTurnStreamAttempt(
     creditPolicyRevision = usage.value;
     if (pendingSteer.status === "rejected") throw pendingSteer.reason;
     if (governance.status === "rejected") throw governance.reason;
-    if (!governance.value) throw new WorkspaceGovernanceChangedError();
     // The Steer read ran alongside the slower checks, so the watch may have
     // seen a Steer committed after it. Such a watch is not proof of a
     // withdrawn Steer: read again before re-arming it, or the request would
@@ -1031,14 +1041,61 @@ export async function runTurnStreamAttempt(
     // (withdrawn, or the automation run that steered was paused). Listen
     // again, or every later request would be cut short at once.
     if (checkSteer && steerWatch?.signal().aborted) steerWatch.rearm();
+    const skipGovernanceCheck = skipNextGovernanceCheck;
+    skipNextGovernanceCheck = false;
+    if (!governance.value && !skipGovernanceCheck) {
+      if (options.yieldToSteer === true) {
+        // Inside a stream the SDK holds the input in memory. End the stream
+        // at this boundary, before the request leaves the worker; it is then
+        // rebuilt from the durable history with the new governance appended.
+        governanceHandover = true;
+        throw new ModelStepHandover("workspace_governance");
+      }
+      // Between streams: the input is rebuilt right here.
+      await rebindAndAppendWorkspaceGovernance();
+    }
+  };
+  // Governance changed after this attempt took its snapshots. Refresh the
+  // attempt's snapshots, append the governance it now runs under as a new
+  // history item at the request boundary (earlier items never change), and
+  // rebuild the model input from the durable history.
+  const rebindAndAppendWorkspaceGovernance = async () => {
+    const rebound = await rebindWorkspaceGovernance();
+    if (
+      JSON.stringify(rebound.workspaceGovernanceBasis) === JSON.stringify(workspaceGovernanceBasis)
+    ) {
+      skipNextGovernanceCheck = true;
+      observability.warn("workspace governance check and snapshot disagree; continuing", {
+        sessionId: input.sessionId,
+        turnId: activeTurnId,
+      });
+    }
+    workspaceGovernance = rebound.workspaceGovernance;
+    workspaceGovernanceBasis = rebound.workspaceGovernanceBasis;
+    await refreshSessionWorkspaceGovernance(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: activeTurnId,
+      expectedExecutionGeneration: attempt.executionGeneration,
+      expectedAttemptId: input.attemptId,
+      governance: workspaceGovernance,
+    });
+    await prepareRunAttemptInput();
   };
   const runStreamAttempt = async (options: {
     requireTerminalModelResponse: boolean;
-  }): Promise<RunAgentTurnResult | "reply_nudge" | "resume_after_withdrawn_handover"> => {
+  }): Promise<
+    | RunAgentTurnResult
+    | "reply_nudge"
+    | "resume_after_withdrawn_handover"
+    | "resume_after_governance_change"
+  > => {
     if (!runInput) {
       throw new Error("Run input was not prepared");
     }
     steerHandover = false;
+    governanceHandover = false;
     contentlessResponseHandover = false;
     let compactionHandover: Error | undefined;
     // Keep the fence in step with a Steer the watch already noticed.
@@ -2291,8 +2348,10 @@ export async function runTurnStreamAttempt(
       options.requireTerminalModelResponse &&
       !eventing.preparedTools?.inputWaitYield?.yielded &&
       // A handover to a Steer deliberately ends this stream before its
-      // first request; it is settled below, not recovered.
+      // first request; it is settled below, not recovered. So does a
+      // governance handover, which samples on after rebinding.
       !steerHandover &&
+      !governanceHandover &&
       eventing.stream.interruptions.length === 0 &&
       modelResponseState.responseCount === responseCountBeforeStream
     ) {
@@ -2682,6 +2741,16 @@ export async function runTurnStreamAttempt(
       control.turnMetricOutcome = "cancelled";
       control.activityStatus = "idle";
       return claimedResult({ status: "idle" });
+    }
+    if (governanceHandover) {
+      // Admission found newer workspace governance and ended the stream
+      // before the next request left the worker; every event of the completed
+      // step was consumed above. The same attempt rebinds to the current
+      // governance, appends it after the step, and samples on.
+      await historySink.reconcileConversationTruth({ requireDurable: true });
+      await subscriptionCoreTurnOf(providerTurn)?.requests?.checkpoint();
+      await rebindAndAppendWorkspaceGovernance();
+      return "resume_after_governance_change";
     }
     // A goal completion that carried a reply ends the turn at the tool
     // boundary like a wait, but that reply is the turn's final answer: it
@@ -3108,7 +3177,13 @@ export async function runTurnStreamAttempt(
         const result = await runStreamAttempt({
           requireTerminalModelResponse: retriedAfterCompaction,
         });
-        if (result === "reply_nudge" || result === "resume_after_withdrawn_handover") continue;
+        if (
+          result === "reply_nudge" ||
+          result === "resume_after_withdrawn_handover" ||
+          result === "resume_after_governance_change"
+        ) {
+          continue;
+        }
         if (retriedAfterCompaction) {
           observability.info("context compaction recovery succeeded after in-activity retry", {
             sessionId: input.sessionId,

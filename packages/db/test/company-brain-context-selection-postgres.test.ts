@@ -330,8 +330,50 @@ describe("accepted-turn Company Brain context selection", () => {
     const ruleB = await activatePolicy("Keep production very stable.", ruleA);
     expect(await governanceIsCurrent(first, firstSnapshots)).toBe(false);
 
-    // The turn continues in a recovery attempt, which snapshots the new rule;
-    // the turn's Company Brain receipt keeps its first attempt's record.
+    // The same attempt rebinds: its snapshot row is refreshed in place to the
+    // new rule, and the receipt keeps the record it made first.
+    const rebound = await governanceSnapshots(first);
+    expect(rebound.policy.id).toBe(firstSnapshots.policy.id);
+    expect(rebound.policy.entries.map((entry) => entry.revisionId)).toEqual([ruleB.id]);
+    expect(rebound.policy.entryHash).not.toBe(firstSnapshots.policy.entryHash);
+    expect(await governanceIsCurrent(first, rebound)).toBe(true);
+    const [stamps] = await shared.admin<Array<{ rows: number; refreshed: boolean }>>`
+      select count(*)::int as "rows", bool_and(created_at > ${firstSnapshots.policy.createdAt}) as "refreshed"
+      from workspace_instruction_policy_snapshots
+      where attempt_id = ${first.attemptId}
+    `;
+    expect(stamps).toEqual({ rows: 1, refreshed: true });
+    expect((await resolve(first)).receipt).toMatchObject({
+      id: firstReceipt.id,
+      instructionPolicyEntryHash: firstSnapshots.policy.entryHash,
+    });
+    // Asking again with nothing changed keeps the row exactly as it is.
+    expect(await governanceSnapshots(first)).toEqual(rebound);
+    // Only the routine may refresh: any other update stays refused, even by
+    // the table owner, and so does one that would move the row to another
+    // attempt.
+    await expectSqlState(
+      async () =>
+        await shared!.admin`
+          update workspace_instruction_policy_snapshots set created_at = now()
+          where attempt_id = ${first.attemptId}
+        `,
+      "55000",
+    );
+    await expectSqlState(
+      async () =>
+        await shared!.admin.begin(async (tx) => {
+          await tx`select set_config('opengeni.governance_snapshot_refresh', ${first.attemptId}, true)`;
+          await tx`
+            update company_profile_snapshots set turn_id = gen_random_uuid(), created_at = now()
+            where attempt_id = ${first.attemptId}
+          `;
+        }),
+      "55000",
+    );
+
+    // The turn continues in a recovery attempt, which snapshots the current
+    // rule; the turn's Company Brain receipt keeps its first attempt's record.
     const second = await seedAttempt({
       ...scope,
       sessionId: f.root.id,
@@ -367,6 +409,11 @@ describe("accepted-turn Company Brain context selection", () => {
       reason: "Governance test",
     });
     expect(await governanceIsCurrent(second, secondSnapshots)).toBe(false);
+    const reboundProfile = await governanceSnapshots(second);
+    expect(reboundProfile.profile.id).toBe(secondSnapshots.profile.id);
+    expect(reboundProfile.profile.profile?.id).toBe(profile.revision!.id);
+    expect(reboundProfile.policy).toEqual(secondSnapshots.policy);
+    expect(await governanceIsCurrent(second, reboundProfile)).toBe(true);
     const third = await seedAttempt({
       ...scope,
       sessionId: f.root.id,

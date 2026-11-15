@@ -88,7 +88,6 @@ import {
   isSandboxMachineReplacing,
   sandboxLifecycleTransitionDiagnostic,
   sandboxRouteTransitionCode,
-  isWorkspaceGovernanceChangedError,
   safeErrorDiagnostic,
   agentRunFailurePayload,
   agentRunRecoveryFailurePayload,
@@ -508,45 +507,6 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
         continueDelayMs: SESSION_USAGE_CUSTODY_RECHECK_MS,
       });
     }
-  }
-  // The workspace governance changed after this attempt took its snapshots.
-  // Admission refused the next model request before it was sent, so nothing
-  // is replayed: the same turn continues at once in a new attempt, which
-  // snapshots the current governance and appends it to the history before
-  // its first request.
-  if (
-    isWorkspaceGovernanceChangedError(error) &&
-    recoveryTurnId &&
-    attempt.triggerEventId &&
-    eventing.publish &&
-    eventing.turnStartedPublished
-  ) {
-    await flushRuntimeBatcher();
-    await historySink.reconcileConversationTruth({ requireDurable: true });
-    const recovery = await requestTurnRecovery(db, input.workspaceId, {
-      sessionId: input.sessionId,
-      turnId: recoveryTurnId,
-      triggerEventId: attempt.triggerEventId,
-      attemptId: input.attemptId,
-      reason: "workspace_governance_changed",
-      detail: { code: "workspace_governance_changed", effectiveBoundary: "next_attempt" },
-    });
-    if (recovery.action === "stale") {
-      acknowledgeLostAttemptOwnership();
-      control.activityStatus = "cancelled";
-      control.turnMetricOutcome = "cancelled";
-      return claimedResult({ status: "cancelled" });
-    }
-    if (recovery.action !== "recovering") {
-      throw new Error("Workspace governance change could not recover the current turn");
-    }
-    acknowledgeRecoveryQuiescence();
-    await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
-    control.activityStatus = "recovering";
-    control.turnMetricOutcome = "recovering";
-    control.turnRecoveryCause = "control";
-    control.activityError = error;
-    return claimedResult({ status: "recovering" });
   }
   if (routeTransitionCode && recoveryTurnId && eventing.publish && eventing.turnStartedPublished) {
     try {

@@ -111,6 +111,13 @@ export type GovernanceModelDeps = {
   startRigProviderImageRefresh?: StartRigProviderImageRefresh | null;
 };
 
+/** The governance snapshots an attempt's rendered governance came from. */
+export type WorkspaceGovernanceBasis = {
+  policyRole: string | null;
+  instructionPolicyEntryHash: string;
+  companyProfileSnapshotHash: string | null;
+};
+
 export type GovernanceModelOk = {
   runtimePreparationStartedAt: number;
   rigVersion:
@@ -134,11 +141,17 @@ export type GovernanceModelOk = {
    * (see `workspaceGovernanceSnapshotsAreCurrent`); the profile hash is null
    * when the governance does not show the organization profile.
    */
-  workspaceGovernanceBasis: {
-    policyRole: string | null;
-    instructionPolicyEntryHash: string;
-    companyProfileSnapshotHash: string | null;
-  };
+  workspaceGovernanceBasis: WorkspaceGovernanceBasis;
+  /**
+   * Rebinds this attempt to the governance active now: its snapshots are
+   * refreshed in place and the governance is rendered again, exactly as for
+   * `workspaceGovernance`. Used when admission finds that governance changed
+   * after the attempt took its snapshots; the attempt continues.
+   */
+  rebindWorkspaceGovernance: () => Promise<{
+    workspaceGovernance: string | null;
+    workspaceGovernanceBasis: WorkspaceGovernanceBasis;
+  }>;
   structuredWorkspacePolicyActive: boolean;
   /** False when the workspace turned Opengeni credits off (model policy). */
   workspaceCreditModelsAllowed: boolean;
@@ -308,20 +321,43 @@ export async function prepareGovernanceAndModel(
   const memoryPromptMode = contextSelection.receipt.memoryPromptMode;
   assertWorkspaceHumanInputAllowed(agentHumanInputEnabled, "resume", humanInputResume !== null);
   const companyProfileIncluded = contextSelection.receipt.companyProfileIncluded;
-  const workspaceGovernance = renderWorkspaceGovernanceContext(
-    {
-      // Learning settings only steer an agent that can save Knowledge,
-      // instructions or Skills; a configured agent without those is not told them.
-      ...(agentCanLearn(session.agent) ? { learningPolicy: deps.learningPolicy } : {}),
-      companyProfile: companyProfileSnapshot,
-      instructionPolicy: instructionPolicySnapshot,
-      preferences: preferenceSnapshot,
+  const renderGovernance = (
+    companyProfile: typeof companyProfileSnapshot,
+    instructionPolicy: typeof instructionPolicySnapshot,
+  ) => ({
+    workspaceGovernance: renderWorkspaceGovernanceContext(
+      {
+        // Learning settings only steer an agent that can save Knowledge,
+        // instructions or Skills; a configured agent without those is not told them.
+        ...(agentCanLearn(session.agent) ? { learningPolicy: deps.learningPolicy } : {}),
+        companyProfile,
+        instructionPolicy,
+        preferences: preferenceSnapshot,
+      },
+      {
+        includeCompanyProfile: companyProfileIncluded,
+        sharedSkillReader: true,
+      },
+    ),
+    workspaceGovernanceBasis: {
+      policyRole: instructionPolicy.policyRole,
+      instructionPolicyEntryHash: instructionPolicy.entryHash,
+      companyProfileSnapshotHash: companyProfileIncluded ? companyProfile.snapshotHash : null,
     },
-    {
-      includeCompanyProfile: companyProfileIncluded,
-      sharedSkillReader: true,
-    },
+  });
+  const { workspaceGovernance, workspaceGovernanceBasis } = renderGovernance(
+    companyProfileSnapshot,
+    instructionPolicySnapshot,
   );
+  // The snapshot routines refresh this attempt's snapshot rows in place when
+  // the active governance differs from what they hold.
+  const rebindWorkspaceGovernance = async () => {
+    const [companyProfile, instructionPolicy] = await Promise.all([
+      getOrCreateCompanyProfileSnapshot(db, governanceClaims),
+      getOrCreateWorkspaceInstructionPolicySnapshot(db, governanceClaims),
+    ]);
+    return renderGovernance(companyProfile, instructionPolicy);
+  };
   const structuredWorkspacePolicyActive =
     hasActiveWorkspaceInstructionPolicy(instructionPolicySnapshot);
   const workspaceMemory = contextSelection.workspaceMemory;
@@ -596,13 +632,8 @@ export async function prepareGovernanceAndModel(
       workspaceAgentInstructions,
       workspaceAgentIdentity,
       workspaceGovernance,
-      workspaceGovernanceBasis: {
-        policyRole: instructionPolicySnapshot.policyRole,
-        instructionPolicyEntryHash: instructionPolicySnapshot.entryHash,
-        companyProfileSnapshotHash: companyProfileIncluded
-          ? companyProfileSnapshot.snapshotHash
-          : null,
-      },
+      workspaceGovernanceBasis,
+      rebindWorkspaceGovernance,
       structuredWorkspacePolicyActive,
       workspaceCreditModelsAllowed: workspaceModelPolicy?.allowCreditModels !== false,
       hostedToolsBillCredits,
