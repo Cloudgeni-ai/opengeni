@@ -1,5 +1,66 @@
 # @opengeni/api-router
 
+## 6.23.0
+
+### Patch Changes
+
+- c0089e1: The agent editor shows an agent's image icon and keeps it when other fields are saved, instead of clearing it.
+
+  An agent's Slack rows (`GET /agents/:id/slack`) carry the Opengeni app's name in each Slack workspace as optional `botDisplayName`, so the agent page shows how people really ask it there (for example `@Opengeni Staging Release Scribe`); without it, clients use `@Opengeni`.
+
+- adc2409: A Business Central address is never read by dropping part of its path. An address such as `businesscentral.dynamics.com/opengenitest2026/Production`, whose first segment is neither a tenant ID nor a domain, used to connect an environment named `opengenitest2026` and ignore `Production`, so every query failed with "Environment does not exist". Such addresses, and addresses with more after the environment than a web client page, are now refused with what to paste instead: the address bar while Business Central is open, or `businesscentral.dynamics.com/<tenant>.onmicrosoft.com/<environment>`. Tenant ID or domain with environment, environment only, and `?company=` addresses work as before. `microsoftDynamicsAddressProblem` returns that explanation; `custom_mcp_setup_request` answers with it and adding such an address as an MCP server is refused with 422.
+
+  When an agent publishes a Site and its turn's account bindings can't be read, the publication is now refused with a clear error instead of declaring only the publisher's own account routes (which left the Site's tools working only for the publisher).
+
+- f6a7c28: Connect cards can ask for connect-time inputs. An integration whose connections each need a value first (Microsoft Dynamics: the environment's address) declares those inputs in `@opengeni/contracts/capability-connect-inputs`. `capability_authorization_request` and tool discovery now post its Connect card, which asks the person for the value in one field with one Connect action, instead of answering `input_required` with no card. The agent can prefill a value with the tool's new `inputs` argument; it is used only when it follows the entry's rule. Catalog matches list the inputs as `setup.connectInputs`, the card payload carries them as `capability.inputs`, and capability creation takes `connectFor` with `connectInputs`, so the API applies the same rule to what the person entered and returns the connection already in the workspace for the same endpoint.
+
+  A runtime guard stops repeated identical tool calls. Once one exact call has returned the same result 8 times in a row in a turn, an identical call started within 30 seconds of the last one returns a short notice instead of running, and the run continues. Calls whose results change, and polling slower than 30 seconds, are unaffected.
+
+- 892b27b: An agent attempt's request no longer fails with HTTP 500 when the attempt's turn moves on while the request is in flight. This covers the first-party MCP routes (`/mcp`, `/mcp/docs`, `/mcp/files`), the `/files/*` and artifact routes, and every other workspace route that enters the agent's request context. The live-attempt check passed, but the attempt's learning-policy read then went through the database's own attempt fence, which refused ("Knowledge turn attempt is stale"), and that refusal escaped as an internal error. The same happened when a route's own file-owner check found the attempt stale after the request context was entered. These cases now get the same 403 `agent_attempt_caller_stale` answer as any other stale attempt.
+- dd981d4: A Site's direct call to a tool set to Ask first now shows the in-Site Send/Cancel confirmation for a signed-in person instead of failing with HTTP 500 ("The workspace could not complete the request"). The confirmation prompt (`POST /v1/workspaces/{workspaceId}/tools/site-consent`) reads what the call would do on the viewer's own account under the same request fence as the call, and that fence requires the person's fresh grant, which only the other targeted tool routes passed. The prompt route now passes it too, so Send approves and runs the call once and Cancel runs nothing.
+- 37c35ed: Task-note tools now explain a refused call instead of returning the raw database error. A save into a task tree that already holds its 500 active notes says so and points to task_note_archive; an unknown note, a reused operation ID, a note that is no longer active, a superseded attempt, invalid input and a brief database outage each get their own typed error code and next step. Any other first-party tool that fails with a raw database error now returns a short typed error with its SQLSTATE, and never the query, its parameters or the caller's own text.
+- f0cc559: Listing workspace files now costs about one page instead of the whole account. The listing filtered every ready file in the account with one OR predicate (shared files in this workspace, or the reader's private files that reach it), so Postgres could not use the workspace creation-time index; it ran the Google Drive authorization function on every row, then sorted and limited. That function writes and deletes a runtime row per call, so an account with about 100k files took many minutes for a page of five. The listing now reads newest-first candidates from separate ordered index walks (shared files, the reader's own private files in this workspace, and the reader's own private files that reach it from elsewhere), merges them, and runs the authorization only on the page's candidates, fetching more only when a candidate is rejected. Visibility rules and the cursor format are unchanged. Four partial indexes are built concurrently, and a CHECK records that a private file has exactly one owner (added NOT VALID, then validated). A cancelled or abandoned files request now cancels its database query and returns 499 instead of leaving the query running.
+- Updated dependencies [c0089e1]
+- Updated dependencies [c0089e1]
+- Updated dependencies [982cce9]
+- Updated dependencies [9dd96b0]
+- Updated dependencies [adc2409]
+- Updated dependencies [f6a7c28]
+- Updated dependencies [1d7e007]
+- Updated dependencies [892b27b]
+- Updated dependencies [5ba261b]
+- Updated dependencies [cfde5ba]
+- Updated dependencies [37c35ed]
+- Updated dependencies [32a19a3]
+- Updated dependencies [621f4d2]
+- Updated dependencies [92a5650]
+- Updated dependencies [f0cc559]
+  - @opengeni/contracts@6.23.0
+  - @opengeni/db@6.23.0
+  - @opengeni/runtime@6.23.0
+  - @opengeni/core@6.23.0
+  - @opengeni/capabilities@6.23.0
+  - @opengeni/artifact-tool@6.23.0
+  - @opengeni/vaults-protonpass@6.23.0
+  - @opengeni/codemode@6.23.0
+  - @opengeni/codex@6.23.0
+  - @opengeni/config@6.23.0
+  - @opengeni/decisions@6.23.0
+  - @opengeni/documents@6.23.0
+  - @opengeni/events@6.23.0
+  - @opengeni/github@6.23.0
+  - @opengeni/interaction@6.23.0
+  - @opengeni/observability@6.23.0
+  - @opengeni/storage@6.23.0
+  - @opengeni/tool-gateway@6.23.0
+  - @opengeni/vaults@6.23.0
+  - @opengeni/vaults-bitwarden@6.23.0
+  - @opengeni/vaults-keeper@6.23.0
+  - @opengeni/vaults-onepassword@6.23.0
+  - @opengeni/agent-proto@6.23.0
+  - @opengeni/network@6.23.0
+  - @opengeni/xai-subscription@6.23.0
+
 ## 6.22.0
 
 ### Patch Changes
