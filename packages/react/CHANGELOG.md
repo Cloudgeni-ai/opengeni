@@ -1,5 +1,30 @@
 # @opengeni/react
 
+## 6.23.0
+
+### Minor Changes
+
+- f6a7c28: Connect cards can ask for connect-time inputs. An integration whose connections each need a value first (Microsoft Dynamics: the environment's address) declares those inputs in `@opengeni/contracts/capability-connect-inputs`. `capability_authorization_request` and tool discovery now post its Connect card, which asks the person for the value in one field with one Connect action, instead of answering `input_required` with no card. The agent can prefill a value with the tool's new `inputs` argument; it is used only when it follows the entry's rule. Catalog matches list the inputs as `setup.connectInputs`, the card payload carries them as `capability.inputs`, and capability creation takes `connectFor` with `connectInputs`, so the API applies the same rule to what the person entered and returns the connection already in the workspace for the same endpoint.
+
+  A runtime guard stops repeated identical tool calls. Once one exact call has returned the same result 8 times in a row in a turn, an identical call started within 30 seconds of the last one returns a short notice instead of running, and the run continues. Calls whose results change, and polling slower than 30 seconds, are unaffected.
+
+- c0089e1: Linking a Slack account from a Slack link now ends on a page that stays put: "Linked. Go back to Slack and ask again." Before, the app revalidated access right after linking and someone without access to the link's workspace (an organization member, for example) was sent silently to their own workspace. Someone in the workspace sees the same words in a dialog they close. `AppContextValue` gains optional `slackLinkLinkedWorkspaceId` and `completeSlackLinkContinuation`.
+
+### Patch Changes
+
+- c0089e1: The agent editor shows an agent's image icon and keeps it when other fields are saved, instead of clearing it.
+
+  An agent's Slack rows (`GET /agents/:id/slack`) carry the Opengeni app's name in each Slack workspace as optional `botDisplayName`, so the agent page shows how people really ask it there (for example `@Opengeni Staging Release Scribe`); without it, clients use `@Opengeni`.
+
+- f6f8c51: Links in chat replies are easy to see. A new `link` color token (`--og-color-link` on web, `link` in the native theme) colors every text link a calm blue in both themes, readable on every chat surface. The native chat now underlines links like the web chat, announces them as links and shows a soft wash while one is pressed. Web URLs, autolinked URLs, artifact, Site, chat and file links, and links in lists and tables all share the style. Hosts that rebranded links through `--og-color-accent-strong` set `--og-color-link` instead.
+- Updated dependencies [c0089e1]
+- Updated dependencies [9dd96b0]
+- Updated dependencies [adc2409]
+- Updated dependencies [f6a7c28]
+  - @opengeni/contracts@6.23.0
+  - @opengeni/sdk@6.23.0
+  - @opengeni/connect@6.23.0
+
 ## 6.22.0
 
 ### Patch Changes

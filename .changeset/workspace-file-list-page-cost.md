@@ -1,6 +1,0 @@
----
-"@opengeni/db": patch
-"@opengeni/api-router": patch
----
-
-Listing workspace files now costs about one page instead of the whole account. The listing filtered every ready file in the account with one OR predicate (shared files in this workspace, or the reader's private files that reach it), so Postgres could not use the workspace creation-time index; it ran the Google Drive authorization function on every row, then sorted and limited. That function writes and deletes a runtime row per call, so an account with about 100k files took many minutes for a page of five. The listing now reads newest-first candidates from separate ordered index walks (shared files, the reader's own private files in this workspace, and the reader's own private files that reach it from elsewhere), merges them, and runs the authorization only on the page's candidates, fetching more only when a candidate is rejected. Visibility rules and the cursor format are unchanged. Four partial indexes are built concurrently, and a CHECK records that a private file has exactly one owner (added NOT VALID, then validated). A cancelled or abandoned files request now cancels its database query and returns 499 instead of leaving the query running.

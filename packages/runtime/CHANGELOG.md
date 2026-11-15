@@ -1,5 +1,44 @@
 # @opengeni/runtime
 
+## 6.23.0
+
+### Minor Changes
+
+- f6a7c28: Connect cards can ask for connect-time inputs. An integration whose connections each need a value first (Microsoft Dynamics: the environment's address) declares those inputs in `@opengeni/contracts/capability-connect-inputs`. `capability_authorization_request` and tool discovery now post its Connect card, which asks the person for the value in one field with one Connect action, instead of answering `input_required` with no card. The agent can prefill a value with the tool's new `inputs` argument; it is used only when it follows the entry's rule. Catalog matches list the inputs as `setup.connectInputs`, the card payload carries them as `capability.inputs`, and capability creation takes `connectFor` with `connectInputs`, so the API applies the same rule to what the person entered and returns the connection already in the workspace for the same endpoint.
+
+  A runtime guard stops repeated identical tool calls. Once one exact call has returned the same result 8 times in a row in a turn, an identical call started within 30 seconds of the last one returns a short notice instead of running, and the run continues. Calls whose results change, and polling slower than 30 seconds, are unaffected.
+
+### Patch Changes
+
+- 982cce9: An organization's pooled Anthropic API key that Anthropic refuses for lack of credits after its response has begun streaming now moves the request to the chat's next key, the same as a refusal before the stream. Anthropic reports such a refusal as an error event inside an HTTP 200 stream, which previously failed the turn with `anthropic_stream_error` and left the key unmarked, so later turns kept trying it. The key is now marked out of credits and the same request is sent again on the next key, including while continuing a paused response. The turn fails only when no key with credits remains. A connection with a single key fails as before.
+- 9dd96b0: Restoring a large workspace archive no longer multiplies worker memory. Byte copies used `Uint8Array.from(buffer)`, which Bun runs element by element through its generic iterator path when the source is a Node Buffer (the result of base64 decoding, file reads, object storage and Postgres bytea). That used about 16 times the archive size in transient memory and was about 100 times slower. A cold restore did it at least twice, so restoring a workspace archive of a few hundred MB could take a worker past 15 GB and kill it. Byte copies now use `new Uint8Array(buffer)`, which makes the same copy at native speed. Archive base64 is decoded once into a view of the decoded bytes. Canonical form is now checked from the decoded length and the final four characters instead of re-encoding the whole archive. Object-storage restores verify the fetched bytes directly instead of decoding the base64 copy again. Native snapshot receipts are recognised from their ASCII prefix without decoding a whole tar archive as text. Restoring a 48 MB archive now raises peak memory by about 2 times the archive size instead of 37 times, and takes 0.2 seconds instead of 3.4 seconds.
+- 5ba261b: Saving a browser download (and any other routed workspace file import) into a Modal sandbox works again. The import's internal steps ran through a wrapper of the Modal session, and Modal's lossless output collection only recognised the session itself, so every save failed at once as "completion is pending or unknown" without starting the transfer. A forwarding wrapper now shares its session's output collection.
+- 92a5650: A turn interrupted by a turn worker shutdown, such as a rolling deploy, now resumes on another worker within seconds instead of stalling for about five minutes. This fixes two separate causes.
+
+  First, when the shutdown cancelled the turn while a Connected Machine command was still running (for example a generated-file download or a slow `exec_command`), finalization waited for the machine to prove the command had exited. A slow or silent machine could not do that before the worker's force stop. The worker then died without settling the activity, writing its quiescence receipt or releasing its subscription lease, and recovery waited for the two-minute heartbeat timeout. Now, when the turn ends because its worker is shutting down, each still-running machine command goes to the session's command ledger with a stop request (the custody already used for machines that stop answering), and finalization continues without waiting. Pause, Steer and normal completion still wait for exact exit proof.
+
+  Second, a dead attempt's subscription turn lease was held until its five-minute TTL expired, so the next generation was refused with `subscription_lease_busy`. A newer generation of the same turn can now take over the lease once the holder's attempt has written its quiescence receipt, which proves it can no longer use the account. Renewal, current-lease checks and usage finalization still use the lease's own expiry.
+
+- Updated dependencies [c0089e1]
+- Updated dependencies [9dd96b0]
+- Updated dependencies [adc2409]
+- Updated dependencies [f6a7c28]
+  - @opengeni/contracts@6.23.0
+  - @opengeni/capabilities@6.23.0
+  - @opengeni/sdk@6.23.0
+  - @opengeni/codemode@6.23.0
+  - @opengeni/codex@6.23.0
+  - @opengeni/config@6.23.0
+  - @opengeni/decisions@6.23.0
+  - @opengeni/interaction@6.23.0
+  - @opengeni/observability@6.23.0
+  - @opengeni/tool-gateway@6.23.0
+  - @opengeni/vaults@6.23.0
+  - @opengeni/jev@6.23.0
+  - @opengeni/agent-proto@6.23.0
+  - @opengeni/network@6.23.0
+  - @opengeni/xai-subscription@6.23.0
+
 ## 6.22.0
 
 ### Patch Changes
