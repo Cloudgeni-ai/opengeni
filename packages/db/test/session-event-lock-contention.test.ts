@@ -72,7 +72,11 @@ async function workspace() {
       subjectId: id,
     })
   ).workspaceGrants[0]!;
-  return { accountId: grant.accountId, workspaceId: grant.workspaceId!, subjectId: grant.subjectId };
+  return {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId!,
+    subjectId: grant.subjectId,
+  };
 }
 
 type Grant = Awaited<ReturnType<typeof workspace>>;
@@ -197,7 +201,7 @@ test("parallel worker and API appends, admission churn and output custody keep o
     set.add(token);
     accepted.set(sessionId, set);
   };
-  let stop = false;
+  const actors = { stop: false };
   const worker = async (run: Running) => {
     for (let step = 0; step < 6; step += 1) {
       const semantic = `w:${run.sessionId}:${step}`;
@@ -232,7 +236,7 @@ test("parallel worker and API appends, admission churn and output custody keep o
   };
   const api = async (index: number) => {
     let round = 0;
-    while (!stop) {
+    while (!actors.stop) {
       const run = running[(index + round) % running.length]!;
       const token = `api:${index}:${round++}`;
       await appendSessionEvents(client.db, grant.workspaceId, run.sessionId, [
@@ -243,9 +247,13 @@ test("parallel worker and API appends, admission churn and output custody keep o
   };
   const admission = async () => {
     let round = 0;
-    while (!stop) {
+    while (!actors.stop) {
       const target = idle[round % idle.length]!;
-      await controlSession(grant, target.id, Math.floor(round / idle.length) % 2 ? "resume" : "pause");
+      await controlSession(
+        grant,
+        target.id,
+        Math.floor(round / idle.length) % 2 ? "resume" : "pause",
+      );
       if (round % 3 === 0) await updateWorkspaceSettings(client.db, grant.workspaceId, {});
       round += 1;
     }
@@ -253,7 +261,7 @@ test("parallel worker and API appends, admission churn and output custody keep o
   const claimWins = new Map<string, number>();
   const custodian = async (index: number) => {
     let round = 0;
-    while (!stop) {
+    while (!actors.stop) {
       const identity = custody[(index + round++) % custody.length]!;
       const claimId = crypto.randomUUID();
       if (await claimConnectedCommandOutputCollection(client.db, { ...identity, claimId })) {
@@ -270,7 +278,7 @@ test("parallel worker and API appends, admission churn and output custody keep o
   try {
     await Promise.all(running.map(worker));
   } finally {
-    stop = true;
+    actors.stop = true;
     await Promise.all(background);
   }
 
@@ -284,9 +292,9 @@ test("parallel worker and API appends, admission churn and output custody keep o
     // Worker events keep their producer order within the session.
     const workerTokens = tokens.filter((token) => token.startsWith("w:"));
     expect(workerTokens).toEqual(
-      Array.from({ length: 6 }, (_, step) => {
+      Array.from({ length: 6 }, (_step, step) => {
         const semantic = `w:${run.sessionId}:${step}`;
-        return [semantic, ...Array.from({ length: 4 }, (_, index) => `${semantic}:d${index}`)];
+        return [semantic, ...Array.from({ length: 4 }, (_delta, index) => `${semantic}:d${index}`)];
       }).flat(),
     );
     const [cursor] = await admin<{ last_sequence: string; session_last: string }[]>`

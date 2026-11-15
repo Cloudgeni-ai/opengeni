@@ -430,9 +430,7 @@ test("connected-command output custody writers lock only their exact command row
     expect(prefixLocks).toEqual([]);
     // The workspace-control and Site admission fences are standalone advisory
     // statements; the scope's own tenancy setup statement is unchanged.
-    expect(
-      queries.filter((query) => /^\s*select pg_advisory_xact_lock/i.test(query)),
-    ).toEqual([]);
+    expect(queries.filter((query) => /^\s*select pg_advisory_xact_lock/i.test(query))).toEqual([]);
   } finally {
     driver.options.debug = false;
   }

@@ -47,8 +47,8 @@ const shared = await acquireSharedTestDatabase(`session-event-contention-${label
 if (!shared) throw new Error("Real PostgreSQL required");
 const admin = postgres(shared.adminUrl, { max: 2, prepare: false, onnotice: () => {} });
 const pgss = await admin`
-  select exists (select 1 from pg_available_extensions where name = 'pg_stat_statements') as ok`
-  .then(async ([row]) => {
+  select exists (select 1 from pg_available_extensions where name = 'pg_stat_statements') as ok`.then(
+  async ([row]) => {
     if (!row?.ok) return false;
     await admin`create extension if not exists pg_stat_statements`;
     try {
@@ -57,7 +57,8 @@ const pgss = await admin`
     } catch {
       return false;
     }
-  });
+  },
+);
 
 // Loopback relay that delays every chunk, so lock hold times include realistic
 // client/server round trips instead of loopback microseconds.
@@ -215,7 +216,10 @@ async function timed<T>(name: string, run: () => Promise<T>): Promise<T> {
 }
 
 async function modelTurn(run: Running): Promise<void> {
-  const append = (name: string, events: Array<{ type: string; payload: Record<string, unknown> }>) =>
+  const append = (
+    name: string,
+    events: Array<{ type: string; payload: Record<string, unknown> }>,
+  ) =>
     timed(name, async () => {
       const result = await appendSessionEventsForTurnAttempt(
         db,
@@ -290,10 +294,10 @@ async function modelTurn(run: Running): Promise<void> {
   }
 }
 
-let stop = false;
+const flags = { stop: false, sampling: true };
 async function apiWriter(index: number): Promise<void> {
   let round = 0;
-  while (!stop) {
+  while (!flags.stop) {
     const target = running[(index + round++) % running.length]!;
     await timed("api.append", () =>
       appendSessionEvents(db, workspaceId, target.sessionId, [
@@ -306,7 +310,7 @@ async function apiWriter(index: number): Promise<void> {
 
 async function admissionActor(): Promise<void> {
   let round = 0;
-  while (!stop) {
+  while (!flags.stop) {
     const target = idle[round % idle.length]!;
     const action = Math.floor(round / idle.length) % 2 === 0 ? "pause" : "resume";
     round += 1;
@@ -333,7 +337,7 @@ async function admissionActor(): Promise<void> {
 
 async function custodyWorker(index: number): Promise<void> {
   let round = 0;
-  while (!stop) {
+  while (!flags.stop) {
     const identity = custody[(index + round++ * custodyWorkers) % custody.length]!;
     const claimId = crypto.randomUUID();
     const claimed = await timed("custody.claim", () =>
@@ -354,9 +358,8 @@ const sampler = postgres(shared.adminUrl, { max: 1, prepare: false });
 const waitSamples = new Map<string, number>();
 let samplerTicks = 0;
 const samplerIntervalMs = 5;
-let sampling = true;
 const samplerLoop = (async () => {
-  while (sampling) {
+  while (flags.sampling) {
     const rows = await sampler<{ kind: string; count: number }[]>`
       select coalesce(wait_event, 'other') as kind, count(*)::int as count
       from pg_stat_activity
@@ -379,10 +382,10 @@ const background = [
 ];
 await Promise.all(running.map((run) => modelTurn(run)));
 const wallMs = performance.now() - startedAt;
-stop = true;
+flags.stop = true;
 await Promise.all(background);
 const samplerWallMs = performance.now() - startedAt;
-sampling = false;
+flags.sampling = false;
 await samplerLoop;
 
 // Ordering and exactly-once: per session, contiguous sequences and every
@@ -391,7 +394,8 @@ for (const run of running) {
   const rows = await admin<{ sequence: string; type: string }[]>`
     select sequence::text as sequence, type from session_events
     where session_id = ${run.sessionId} order by session_events.sequence`;
-  if (process.env.BENCH_DEBUG) console.error(rows.map((row) => `${row.sequence}:${row.type}`).join(" "));
+  if (process.env.BENCH_DEBUG)
+    console.error(rows.map((row) => `${row.sequence}:${row.type}`).join(" "));
   rows.forEach((row, index) => assert.equal(Number(row.sequence), index + 1));
   const deltas = rows.filter((row) => row.type === "agent.message.delta").length;
   assert.equal(deltas, steps * 4 * 5);
@@ -413,34 +417,36 @@ const [totals] = pgss
   : [];
 const percentile = (values: number[], p: number) => {
   const sorted = [...values].sort((a, b) => a - b);
-  return Number((sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))] ?? 0).toFixed(2));
+  return Number(
+    (sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))] ?? 0).toFixed(2),
+  );
 };
 const report = JSON.stringify(
-    {
-      label,
-      sessions,
-      steps,
-      oneWayDelayMs,
-      wallMs: Math.round(wallMs),
-      dbExecMs: totals?.total_ms ?? null,
-      dbCalls: totals ? Number(totals.calls) : null,
-      lockWaitMsByKind: Object.fromEntries(
-        [...waitSamples].map(([kind, count]) => [
-          kind,
-          Math.round(count * (samplerWallMs / Math.max(1, samplerTicks))),
-        ]),
-      ),
-      ops: Object.fromEntries(
-        [...latencies].map(([name, values]) => [
-          name,
-          { n: values.length, p50: percentile(values, 0.5), p95: percentile(values, 0.95) },
-        ]),
-      ),
-      topStatements: statements,
-    },
-    null,
-    2,
-  );
+  {
+    label,
+    sessions,
+    steps,
+    oneWayDelayMs,
+    wallMs: Math.round(wallMs),
+    dbExecMs: totals?.total_ms ?? null,
+    dbCalls: totals ? Number(totals.calls) : null,
+    lockWaitMsByKind: Object.fromEntries(
+      [...waitSamples].map(([kind, count]) => [
+        kind,
+        Math.round(count * (samplerWallMs / Math.max(1, samplerTicks))),
+      ]),
+    ),
+    ops: Object.fromEntries(
+      [...latencies].map(([name, values]) => [
+        name,
+        { n: values.length, p50: percentile(values, 0.5), p95: percentile(values, 0.95) },
+      ]),
+    ),
+    topStatements: statements,
+  },
+  null,
+  2,
+);
 if (process.env.BENCH_OUT) await Bun.write(process.env.BENCH_OUT, report);
 else console.log(report);
 
