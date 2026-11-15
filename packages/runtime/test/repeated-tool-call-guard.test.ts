@@ -91,6 +91,77 @@ describe("repeated tool call guard", () => {
     expect(runs).toBe(REPEATED_CALL_LIMIT * 4);
   });
 
+  test("per-call metadata the runtime adds to a command result does not make it differ", async () => {
+    const time = clock();
+    const guard = createRepeatedToolCallGuard(time.now);
+    let runs = 0;
+    let output = "";
+    // Shapes a command result takes: a provider receipt line, and the SDK's
+    // chunk id and wall time, each new on every call.
+    const call = () =>
+      guardRepeatedToolCall(guard, "exec_command", '{"cmd":"true"}', async () => {
+        runs += 1;
+        const receipt = crypto.randomUUID();
+        return runs % 2
+          ? `Provider output receipt: ${receipt}\nProcess exited with code 0\nOutput:\n${output}`
+          : `Native output receipt: ${receipt}\nChunk ID: ${receipt.slice(0, 6)}\nWall time: 0.0${runs} seconds\nProcess exited with code 0\nOutput:\n${output}`;
+      });
+    for (let index = 0; index < REPEATED_CALL_LIMIT; index += 1) {
+      expect(await call()).not.toBe(REPEATED_CALL_NOTICE);
+      time.advance(2_000);
+    }
+    expect(await call()).toBe(REPEATED_CALL_NOTICE);
+    expect(runs).toBe(REPEATED_CALL_LIMIT);
+
+    // Output that changes, or a different exit code, is a different result.
+    const changing = createRepeatedToolCallGuard(time.now);
+    let polls = 0;
+    for (let index = 0; index < REPEATED_CALL_LIMIT * 2; index += 1) {
+      const result = await guardRepeatedToolCall(
+        changing,
+        "exec_command",
+        '{"cmd":"date"}',
+        async () => {
+          polls += 1;
+          return `Provider output receipt: ${crypto.randomUUID()}\nProcess exited with code ${polls % 2}\nOutput:\nline ${polls % 3 ? "a" : "b"}`;
+        },
+      );
+      expect(result).not.toBe(REPEATED_CALL_NOTICE);
+    }
+    // A receipt-like line in the command's own output is compared as written.
+    const printed = createRepeatedToolCallGuard(time.now);
+    for (let index = 0; index < REPEATED_CALL_LIMIT * 2; index += 1) {
+      const result = await guardRepeatedToolCall(
+        printed,
+        "exec_command",
+        '{"cmd":"uuidgen"}',
+        async () =>
+          `Process exited with code 0\nOutput:\nProvider output receipt: ${crypto.randomUUID()}`,
+      );
+      expect(result).not.toBe(REPEATED_CALL_NOTICE);
+    }
+  });
+
+  test("two identical calls that alternate are each counted", async () => {
+    const time = clock();
+    const guard = createRepeatedToolCallGuard(time.now);
+    let runs = 0;
+    const list = (args: string) =>
+      guardRepeatedToolCall(guard, "tool_list", args, async () => {
+        runs += 1;
+        return `{"tools":[],"for":${JSON.stringify(args)}}`;
+      });
+    for (let index = 0; index < REPEATED_CALL_LIMIT; index += 1) {
+      expect(await list('{"view":"groups"}')).not.toBe(REPEATED_CALL_NOTICE);
+      time.advance(1_500);
+      expect(await list('{"namePrefix":"dynamics"}')).not.toBe(REPEATED_CALL_NOTICE);
+      time.advance(1_500);
+    }
+    expect(await list('{"view":"groups"}')).toBe(REPEATED_CALL_NOTICE);
+    expect(await list('{"namePrefix":"dynamics"}')).toBe(REPEATED_CALL_NOTICE);
+    expect(runs).toBe(REPEATED_CALL_LIMIT * 2);
+  });
+
   test("polling slower than the window always runs", async () => {
     const time = clock();
     const guard = createRepeatedToolCallGuard(time.now);

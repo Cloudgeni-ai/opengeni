@@ -67,11 +67,46 @@ function callKey(toolName: string, input: unknown): string {
   return createHash("sha256").update(`${toolName}\u0000${args}`).digest("hex");
 }
 
-/** A digest of a result, or null when it can't be compared (never counted). */
+/**
+ * Lines the runtime writes into a command result's metadata header that are
+ * new on every call (a chunk id, a wall time, an output receipt id). Only the
+ * header before the first `Output:` line is read; the command's own output is
+ * compared as written.
+ */
+const PER_CALL_HEADER_LINE =
+  /^(?:Chunk ID: \S+|Wall time: [\d.]+ seconds|[A-Z][A-Za-z]* output receipt: [0-9a-f-]{36})\r?$/u;
+const OUTPUT_DELIMITER = /^Output:\r?$/mu;
+
+/** A result text without the metadata lines that differ on every call. */
+function withoutPerCallMetadata(text: string): string {
+  const delimiter = OUTPUT_DELIMITER.exec(text);
+  if (!delimiter) return text;
+  const header = text.slice(0, delimiter.index).split("\n");
+  const kept = header.filter((line) => !PER_CALL_HEADER_LINE.test(line));
+  if (kept.length === header.length) return text;
+  return `${kept.join("\n")}${text.slice(delimiter.index)}`;
+}
+
+/** The result with per-call metadata removed from every text in it. */
+function comparableResult(value: unknown, depth = 0): unknown {
+  if (typeof value === "string") return withoutPerCallMetadata(value);
+  if (depth > 4 || !value || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map((item) => comparableResult(item, depth + 1));
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [key, comparableResult(item, depth + 1)]),
+  );
+}
+
+/**
+ * A digest of a result, or null when it can't be compared (never counted).
+ * Metadata the runtime adds to every call (see PER_CALL_HEADER_LINE) is left
+ * out, so a command that prints the same output each time compares equal.
+ */
 function resultDigest(output: unknown): string | null {
   let text: string | undefined;
   try {
-    text = typeof output === "string" ? output : JSON.stringify(output);
+    const comparable = comparableResult(output);
+    text = typeof comparable === "string" ? comparable : JSON.stringify(comparable);
   } catch {
     return null;
   }

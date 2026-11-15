@@ -204,9 +204,18 @@ export function isIntegrationNearSpelling(word: string, name: string): boolean {
  * Flow); a one-word name written as its parts ("joined": "hub spot" for
  * HubSpot); a near spelling of it ("near_spelling"); or its vendor's domain
  * word ("domain": "jira" for Atlassian at jira.com), unless differently named
- * products share that domain (see sharedVendorDomains).
+ * products share that domain (see sharedVendorDomains); or, for a name of
+ * several words, the one word of it that is also its own domain's word
+ * ("product_word": "Dynamics" for Microsoft Dynamics at dynamics.com, the
+ * product's brand without its vendor).
  */
-export type IntegrationMentionKind = "name" | "unspaced" | "joined" | "near_spelling" | "domain";
+export type IntegrationMentionKind =
+  | "name"
+  | "unspaced"
+  | "joined"
+  | "near_spelling"
+  | "domain"
+  | "product_word";
 
 export type IntegrationMention = {
   kind: IntegrationMentionKind;
@@ -343,13 +352,25 @@ export function integrationMentionMatcher(
       !options.sharedDomains?.has(shape.registrableDomain ?? "")
         ? vendorWord
         : null;
+    // A later word of the name that is also its domain's word is the
+    // product's own brand ("dynamics" for Microsoft Dynamics at
+    // dynamics.com); a vendor word that opens the name ("google" for Google
+    // Calendar) is not.
+    const productWord =
+      vendorWord &&
+      nameWords.indexOf(vendorWord) > 0 &&
+      writtenWords.has(vendorWord) &&
+      !options.sharedDomains?.has(shape.registrableDomain ?? "")
+        ? vendorWord
+        : null;
     const nameFirstLetter = shape.firstLetter;
-    if (!domainWord && !firstLetters.has(nameFirstLetter)) return [];
+    if (!domainWord && !productWord && !firstLetters.has(nameFirstLetter)) return [];
     const mentions: IntegrationMention[] = [];
     const widest = Math.min(Math.max(nameWords.length, parts.split(" ").length) + 1, 4);
     for (let start = 0; start < words.length; start += 1) {
       const { word: first, capitalised } = words[start]!;
       if (first === domainWord) mentions.push({ kind: "domain", capitalised });
+      if (first === productWord) mentions.push({ kind: "product_word", capitalised });
       if (!first.startsWith(nameFirstLetter)) continue;
       for (let width = 1; width <= widest && start + width <= words.length; width += 1) {
         const window = words.slice(start, start + width).map((w) => w.word);
@@ -392,7 +413,8 @@ export function integrationMentionsIn(
  * several words, as words or as one word ("google calendar", "wisprflow"); or
  * a one-word name that is not an ordinary word in shape (inner capitals or
  * digits: "hubspot", "context7"). "close the ticket", "linear regression",
- * "the box is empty" and "hub spot" written as two words are not.
+ * "the box is empty", "hub spot" written as two words and a product word in
+ * lower case ("group dynamics") are not.
  */
 export function isDistinctiveIntegrationMention(
   mention: IntegrationMention,

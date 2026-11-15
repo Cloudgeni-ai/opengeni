@@ -593,6 +593,32 @@ describe("agent capability catalog search", () => {
       );
     });
 
+    test("a product word of a multi-word name names it among task words", () => {
+      const dynamics = nativeConnectionCapabilityRecommendations({
+        microsoftDynamics: true,
+      }).filter((entry) => entry.id === "api:microsoft-dynamics");
+      const withDynamics = [...catalog, ...dynamics];
+      const lookup = (query: string) =>
+        searchCapabilityCatalogItems(withDynamics, query, 5).map(({ item: entry }) => ({
+          capabilityId: entry.id,
+          name: entry.name,
+          providerDomain: capabilityCatalogSearchProviderDomain(entry) ?? undefined,
+        }));
+      // Search queries models wrote for "What open opportunities do we have
+      // in Dynamics 365?": the task words outranked the name before.
+      for (const query of [
+        "Read/list Dynamics 365 CRM sales opportunities records, filter opportunity status open; retrieve opportunity names and amounts",
+        "What open opportunities do we have in Dynamics 365?",
+        "Read open opportunity records from Dynamics 365 CRM, including name, estimated value, close date and owner; use connected integration tools.",
+      ]) {
+        const matches = lookup(query);
+        expect({ query, first: matches[0]?.name }).toEqual({ query, first: "Microsoft Dynamics" });
+        expect(connectableIntegrationsNamedIn(query, matches, true).map((m) => m.name)).toEqual([
+          "Microsoft Dynamics",
+        ]);
+      }
+    });
+
     test("entries whose names agree with a named one share its boost", () => {
       const github = [
         item({
