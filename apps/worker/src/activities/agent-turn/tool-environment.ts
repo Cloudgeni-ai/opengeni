@@ -111,6 +111,7 @@ import {
   listConnectionsNeedingReconnect,
   nangoBackendsFor,
   postConnectionNeedsReauthNotice,
+  connectedCommandOutputLook,
   type ConnectionNeedingReconnect,
 } from "@opengeni/core";
 import { withFirstPartyTools } from "../goals";
@@ -502,6 +503,15 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     throwIfWorkerShuttingDown,
     throwIfTurnCancelled,
   } = deps;
+  // One reader per command for the whole attempt: each look continues from
+  // the last instead of replaying everything again.
+  const lookAtLedgerCommand = bus
+    ? connectedCommandOutputLook(db, bus, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+      })
+    : undefined;
 
   const accountRoutes = expandMcpAccountRoutes({
     settings: canonicalRunSettings,
@@ -1531,7 +1541,11 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
             media.sdkOwnedSandboxSession) as {
             refreshOwnedCommand?: (id: string) => Promise<boolean>;
           } | null;
-          return (await owned?.refreshOwnedCommand?.(commandId)) ?? false;
+          if (await owned?.refreshOwnedCommand?.(commandId)) return true;
+          // A Connected Machine command this attempt did not start (an earlier
+          // turn's, or one from before the session moved to another machine)
+          // is read from the machine its ledger names, never the current one.
+          return (await lookAtLedgerCommand?.(commandId)) ?? false;
         },
         spillOversizedModelToolResult: async ({ operationId, result }) =>
           await toolResultSpill.spill({

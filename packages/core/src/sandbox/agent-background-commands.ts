@@ -5,10 +5,22 @@ import {
   type Database,
   type SessionWorkflowWake,
 } from "@opengeni/db";
-import { recordConnectedCommandOutputConsumption } from "@opengeni/db/session-background-commands";
+import {
+  recordConnectedCommandOutputConsumption,
+  runningConnectedCommandLocator,
+} from "@opengeni/db/session-background-commands";
 import { createConnectedCommandOutputCapture } from "@opengeni/db/session-command-output";
 import type { EventBus } from "@opengeni/events";
-import { NatsControlRpc, type SelfhostedSessionDeps } from "@opengeni/runtime/sandbox";
+import {
+  defaultSelfhostedRetryClock,
+  NatsControlRpc,
+  NatsOpStreamTransport,
+  OpStreamExecClient,
+  replayConnectedCommandOutput,
+  subjectFor,
+  withoutWaking,
+  type SelfhostedSessionDeps,
+} from "@opengeni/runtime/sandbox";
 import { releaseStoredConnectedCommandOutput } from "./output-release";
 
 export function captureConnectedCommandOutput(
@@ -168,5 +180,81 @@ export function agentBackgroundCommandDeps(
       }
       if (settlement) await signalBackgroundCommandWakes(settlement.wakes, args.wake);
     },
+  };
+}
+
+/** Control requests of a session's output look at a command it no longer
+ * reaches through its current machine. */
+const CONNECTED_COMMAND_LOOK_TIMEOUT_MS = 10_000;
+
+/**
+ * Reads a running Connected Machine command's output from the machine that
+ * runs it, for an attempt that did not start it: after its session moved to
+ * another machine and back, or in any later turn. The command keeps running
+ * on its machine whatever the session does, and its immutable ledger locator
+ * says where. Each look stores the output produced since the previous one
+ * (one reader per command, reused for the attempt) and settles nothing: the
+ * runner's pushed exit or the reconciler settles it. A look never wakes a
+ * sleeping sandbox. `false` when the command is not a running Connected
+ * Machine command of this session, or its machine cannot be read now; the
+ * durable output then answers the read.
+ */
+export function connectedCommandOutputLook(
+  db: Database,
+  bus: EventBus,
+  ids: { accountId: string; workspaceId: string; sessionId: string },
+  /** Tests inject the machine reader. */
+  readerFor?: (locator: {
+    controlWorkspaceId: string;
+    enrollmentId: string;
+    connectionInstanceId: string;
+  }) => Pick<OpStreamExecClient, "readExisting">,
+): (commandId: string) => Promise<boolean> {
+  const readers = new Map<
+    string,
+    { opId: string; client: Pick<OpStreamExecClient, "readExisting"> }
+  >();
+  const capture = captureConnectedCommandOutput(db, ids, bus);
+  return async (commandId) => {
+    const getOpStreamConnection = bus.getOpStreamConnection?.bind(bus);
+    if (!readerFor && !getOpStreamConnection) return false;
+    let reader = readers.get(commandId);
+    if (!reader) {
+      const locator = await runningConnectedCommandLocator(db, { ...ids, commandId });
+      if (!locator) return false;
+      reader = {
+        opId: locator.opId,
+        client:
+          readerFor?.(locator) ??
+          new OpStreamExecClient({
+            workspaceId: locator.controlWorkspaceId,
+            agentId: locator.enrollmentId,
+            connectionInstanceId: locator.connectionInstanceId,
+            epoch: 0,
+            controlRpc: withoutWaking(new NatsControlRpc(async () => bus.getRequestConnection())),
+            rpcSubject: subjectFor(
+              locator.controlWorkspaceId,
+              locator.enrollmentId,
+              locator.connectionInstanceId,
+            ),
+            transport: new NatsOpStreamTransport(async () => getOpStreamConnection!()),
+            controlTimeoutMs: CONNECTED_COMMAND_LOOK_TIMEOUT_MS,
+            retryClock: defaultSelfhostedRetryClock,
+            journal: { attachGeneration: () => String(Date.now()), persistSettled: () => {} },
+          }),
+      };
+      readers.set(commandId, reader);
+    }
+    try {
+      await replayConnectedCommandOutput(reader.client, reader.opId, false, async (frames) =>
+        capture(commandId, frames),
+      );
+      return true;
+    } catch {
+      // Released, lost, offline or replaced: the stored output and the
+      // command's own settlement answer the read.
+      readers.delete(commandId);
+      return false;
+    }
   };
 }

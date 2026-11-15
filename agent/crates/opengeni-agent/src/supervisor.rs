@@ -73,9 +73,11 @@ const CAPACITY_RESAMPLE: Duration = Duration::from_secs(60);
 const UPDATE_IDLE_RECHECK: Duration = Duration::from_secs(10);
 #[cfg(test)]
 const UPDATE_IDLE_RECHECK: Duration = Duration::from_millis(20);
-/// Op frames queued toward the bulk publisher. A pipe diameter for the
-/// fire-and-forget lane: a full channel DROPS the frame (allowed — op frames
-/// are healed by gap-detection + OpAttach replay), it never blocks a pump.
+/// Op frames queued toward the bulk publisher. A pipe diameter, not a limit:
+/// a full channel refuses the frame without blocking the pump, which keeps it
+/// and sends it once the channel drains. Frames are never dropped for want of
+/// room: a replay of a retained backlog is far wider than the channel, and a
+/// frame dropped from its tail is one the consumer cannot notice is missing.
 const BULK_CHANNEL_DEPTH: usize = 1024;
 
 /// The current generation's bulk frame channel: (subject, encoded OpFrame)
@@ -225,11 +227,11 @@ fn control_event_sink(lane: ControlLane, subject: String) -> crate::ops::FrameSi
     Arc::new(move |bytes: Vec<u8>| {
         let Some(client) = lane.read().expect("control lane lock").clone() else {
             debug!("no control connection; the completion is reported on the next heartbeat");
-            return;
+            return crate::job::Delivery::Taken;
         };
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             debug!("no runtime for the completion notice; it is reported on the next heartbeat");
-            return;
+            return crate::job::Delivery::Taken;
         };
         let subject = subject.clone();
         runtime.spawn(async move {
@@ -237,6 +239,7 @@ fn control_event_sink(lane: ControlLane, subject: String) -> crate::ops::FrameSi
                 debug!(%error, "completion notice not sent; it is reported on the next heartbeat");
             }
         });
+        crate::job::Delivery::Taken
     })
 }
 
@@ -269,16 +272,27 @@ impl FrameLanes {
 /// Builds the frame sink of one op on a link's bulk lane.
 fn bulk_frame_sink(lane: BulkLane, subject: String, engine: Arc<Engine>) -> crate::ops::FrameSink {
     Arc::new(move |bytes: Vec<u8>| {
-        let delivered = match lane.read().expect("bulk lock").as_ref() {
-            Some(tx) => tx.try_send((subject.clone(), bytes)).is_ok(),
-            None => false,
-        };
-        if !delivered {
-            // Protocol-healed (gap-detect + OpAttach replay), but RECORDED:
-            // a rising counter means the bulk lane is down or undersized.
-            engine.note_frame_dropped();
-            debug!("bulk lane full/closed; op frame dropped (replay heals)");
+        use tokio::sync::mpsc::error::TrySendError;
+        if let Some(tx) = lane.read().expect("bulk lock").as_ref() {
+            match tx.try_send((subject.clone(), bytes)) {
+                Ok(()) => return crate::job::Delivery::Taken,
+                // Full: the pump keeps the frame and sends it once this
+                // generation's channel has room (or has closed).
+                Err(TrySendError::Full(_)) => {
+                    let tx = tx.clone();
+                    return crate::job::Delivery::Full(Box::pin(async move {
+                        let _ = tx.reserve().await;
+                    }));
+                }
+                Err(TrySendError::Closed(_)) => {}
+            }
         }
+        // No connection: the frame is gone with it. The consumer re-attaches
+        // after the reconnect and its replay carries it. RECORDED: a rising
+        // counter means the bulk lane is down.
+        engine.note_frame_dropped();
+        debug!("bulk lane closed; op frame dropped (replay heals)");
+        crate::job::Delivery::Taken
     })
 }
 
@@ -3827,7 +3841,7 @@ mod tests {
                 command.arg("-c").arg("printf listening; sleep 30");
                 opengeni_agent_platform::spawn_contained(command, None)
             },
-            |_| {},
+            |_| crate::job::Delivery::Taken,
             |exit| format!("{exit:?}").into_bytes(),
             |_, _| {},
         );
@@ -4125,7 +4139,7 @@ mod tests {
                 command.arg("-c").arg("printf synthetic-result");
                 opengeni_agent_platform::spawn_contained(command, None)
             },
-            |_| {},
+            |_| crate::job::Delivery::Taken,
             |exit| format!("{exit:?}").into_bytes(),
             move |sequence, exit: &JobExit| {
                 drop(reservation);
@@ -4260,11 +4274,11 @@ mod tests {
         tx.try_send(("queued.output".into(), vec![0; 1024]))
             .unwrap();
         let bulk: BulkLane = Arc::new(std::sync::RwLock::new(Some(tx)));
-        let dropped_before = engine.frames_dropped_total();
-        bulk_frame_sink(bulk, subject.into(), engine.clone())(vec![1]);
-        assert_eq!(
-            engine.frames_dropped_total(),
-            dropped_before + 1,
+        assert!(
+            matches!(
+                bulk_frame_sink(bulk, subject.into(), engine.clone())(vec![1]),
+                crate::job::Delivery::Full(_)
+            ),
             "a notice on the saturated bulk lane never leaves"
         );
 
@@ -4293,6 +4307,97 @@ mod tests {
                 .is_err()
         );
         acknowledge_update_result(&engine, &operation, &started, sequence).await;
+    }
+
+    /// A collector that attaches after the command produced its output (the
+    /// session moved to another machine meanwhile) receives the whole retained
+    /// backlog at once. The bulk lane is far narrower than that backlog; a
+    /// full lane must hold the replay back until it drains, never drop the
+    /// frames past its depth (nothing would ever send them again: the reader
+    /// has no later frame to notice the gap by).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_backlog_replay_wider_than_the_bulk_lane_loses_no_frame() {
+        use opengeni_agent_platform::NativePlatform;
+
+        let directory = tempfile::tempdir().unwrap();
+        let engine = Engine::new(
+            directory.path().join("spool"),
+            opengeni_agent_engine::HostCapacity::default(),
+        );
+        let platform = Arc::new(NativePlatform::with_root(std::env::temp_dir()));
+        // No live lane while the command runs: nobody reads it.
+        let lane: BulkLane = Arc::new(std::sync::RwLock::new(None));
+        let started = crate::ops::serve_op_start(
+            &engine,
+            &platform,
+            bulk_frame_sink(lane.clone(), "test.op.backlog".into(), engine.clone()),
+            "op-backlog".into(),
+            v1::OpStart {
+                op: Some(v1::op_start::Op::Exec(v1::ExecRequest {
+                    command: vec![
+                        "for i in 1 2 3 4 5 6 7 8 9 10 11 12; do echo line$i; sleep 0.02; done"
+                            .into(),
+                    ],
+                    shell: true,
+                    ..Default::default()
+                })),
+                window_bytes: 1 << 20,
+                deadline_ms: 0,
+                origin_id: "session-1".into(),
+                connection_generation: 0,
+            },
+        )
+        .await;
+        assert!(started.error.is_none(), "{started:?}");
+        let op = crate::engine::scoped_op_id("default", "op-backlog");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !matches!(
+                engine.query(&op),
+                opengeni_agent_engine::registry::QueryAnswer::Complete { .. }
+            ) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the command completes");
+
+        // A collector attaches from the start through a lane four frames deep.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        *lane.write().unwrap() = Some(tx);
+        let attach = crate::ops::serve_op_attach(
+            &engine,
+            "attach-1".into(),
+            &v1::OpAttach {
+                op_id: "op-backlog".into(),
+                from_seq: 0,
+                attach_generation: 2,
+                window_bytes: 1 << 20,
+            },
+        );
+        assert!(attach.error.is_none(), "{attach:?}");
+
+        // The lane drains at its own pace; no second attach is ever sent.
+        let mut seqs = Vec::new();
+        let exit_seq = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let (_, bytes) = rx.recv().await.expect("lane open");
+                tokio::time::sleep(Duration::from_millis(2)).await;
+                let frame = v1::OpFrame::decode(bytes.as_slice()).unwrap();
+                seqs.push(frame.seq);
+                if matches!(frame.body, Some(v1::op_frame::Body::Exit(_))) {
+                    return frame.seq;
+                }
+            }
+        })
+        .await
+        .expect("the exit frame arrives after the whole backlog");
+        assert!(exit_seq > 4, "the backlog is wider than the lane");
+        assert_eq!(
+            seqs,
+            (1..=exit_seq).collect::<Vec<_>>(),
+            "every frame, in order"
+        );
     }
 
     #[cfg(unix)]
@@ -4392,7 +4497,7 @@ mod tests {
                                 command.arg("-c").arg("sleep 30");
                                 opengeni_agent_platform::spawn_contained(command, None)
                             },
-                            |_| {},
+                            |_| crate::job::Delivery::Taken,
                             |exit| format!("{exit:?}").into_bytes(),
                             |_, _| {},
                         )
@@ -4611,7 +4716,7 @@ mod tests {
             None,
             0,
             || Err(std::io::Error::other("synthetic spawn failure")),
-            |_| {},
+            |_| crate::job::Delivery::Taken,
             |_| Vec::new(),
             |_, _| {},
         );

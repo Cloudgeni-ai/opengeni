@@ -318,7 +318,7 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
-  "packages/db/src/session-command-output.ts#appendSessionCommandOutput": {
+  "packages/db/src/session-command-output.ts#appendSessionCommandOutputs": {
     inserts: 1,
     contract: "canonical",
   },
