@@ -285,6 +285,68 @@ describe("access-grant session RLS context", () => {
     expect(context).not.toHaveBeenCalled();
   });
 
+  test("an attempt that goes stale after its liveness check passed is refused as stale, not a fault", async () => {
+    const context = spyOn(db, "withSessionRlsActorContext");
+    const attemptId = "88888888-8888-4888-8888-888888888888";
+    spyOn(core, "requireLiveAgentAttemptAuthorization").mockResolvedValue({
+      subjectId: "worker:first-party-mcp",
+      callerSessionId: sessionId,
+      turnId,
+      attemptId,
+      executionGeneration: 1,
+      initiatingHumanSubjectId: null,
+    } as never);
+    // The database's own attempt fence saw the turn after it moved on.
+    const fenced = Object.assign(new Error("Failed query: SELECT knowledge_entry_read(...)"), {
+      cause: { code: "42501", message: "Knowledge turn attempt is stale" },
+    });
+    spyOn(db, "freezeAgentLearningPolicy").mockRejectedValue(fenced);
+    const caught = await withAccessGrantSessionRlsContext(
+      { db: {} } as never,
+      grant({
+        principalKind: "agent_attempt",
+        metadata: { sessionId, turnId, attemptId, executionGeneration: 1 },
+      }),
+      async () => "unreachable",
+    ).catch((error: unknown) => error);
+    expect(caught).toBeInstanceOf(ApiHttpError);
+    expect(caught).toMatchObject({
+      status: 403,
+      code: "forbidden",
+      retryable: false,
+      outcomeUnknown: false,
+      details: { code: "agent_attempt_caller_stale" },
+      cause: fenced,
+    });
+    expect(context).not.toHaveBeenCalled();
+  });
+
+  test("a policy refusal that is not about the attempt's liveness is not relabelled", async () => {
+    const attemptId = "99999999-9999-4999-8999-999999999999";
+    spyOn(core, "requireLiveAgentAttemptAuthorization").mockResolvedValue({
+      subjectId: "worker:first-party-mcp",
+      callerSessionId: sessionId,
+      turnId,
+      attemptId,
+      executionGeneration: 1,
+      initiatingHumanSubjectId: null,
+    } as never);
+    const refused = Object.assign(new Error("Failed query"), {
+      cause: { code: "42501", message: "Knowledge workspace unavailable" },
+    });
+    spyOn(db, "freezeAgentLearningPolicy").mockRejectedValue(refused);
+    await expect(
+      withAccessGrantSessionRlsContext(
+        { db: {} } as never,
+        grant({
+          principalKind: "agent_attempt",
+          metadata: { sessionId, turnId, attemptId, executionGeneration: 1 },
+        }),
+        async () => "unreachable",
+      ),
+    ).rejects.toBe(refused);
+  });
+
   test("work started alongside a gate is dropped when the gate refuses", async () => {
     const refused = new Error("refused");
     await expect(

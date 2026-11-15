@@ -12,6 +12,8 @@ import {
   billingOriginOverride,
   freezeAgentLearningPolicy,
   getSlackPrivateSessionOwnerSubjectId,
+  isAgentAttemptLivenessFence,
+  nestedAuthorityRefusalMessage,
   readTurnBillingOrigin,
   withBillingOriginOverride,
   withSessionRlsActorContext,
@@ -44,6 +46,21 @@ function agentAttemptAuthorityError(
   });
   if (cause !== undefined) error.cause = cause;
   return error;
+}
+
+/**
+ * The learning-policy read goes through the database's own attempt fence,
+ * which locks the session, turn and attempt. When the turn moves on after the
+ * live-attempt check passed (the attempt finished, was superseded or
+ * interrupted while the request was in flight), that fence refuses instead.
+ * It is the same stale attempt, so it gets the same refusal, not a 500.
+ */
+function staleAttemptFenceAsRefusal(error: unknown): never {
+  const message = nestedAuthorityRefusalMessage(error);
+  if (message !== null && isAgentAttemptLivenessFence(message)) {
+    throw agentAttemptAuthorityError("caller_stale", error);
+  }
+  throw error;
 }
 
 /**
@@ -287,6 +304,7 @@ export async function withAccessGrantSessionRlsContext<T>(
         learning,
         slackPrivateOwnerSubjectId,
       }),
+      staleAttemptFenceAsRefusal,
     );
   try {
     // The learning policy is keyed by the exact attempt, which a live actor
