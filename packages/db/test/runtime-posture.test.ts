@@ -1821,6 +1821,15 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
+          // 1430 drops the seven retired Knowledge sync tables: five with full
+          // runtime DML and two append-only ACL evidence tables.
+          -(tables === FORCE_RLS_TABLES || tables === RUNTIME_DML_TABLES
+            ? 7
+            : tables === RUNTIME_FULL_DML_TABLES
+              ? 5
+              : tables === RUNTIME_READ_INSERT_TABLES
+                ? 2
+                : 0) +
           // 1106 adds the workspace-isolated external member revocation
           // markers: runtime read, insert and update, no delete.
           (tables === FORCE_RLS_TABLES ||
@@ -2144,6 +2153,12 @@ describe("runtime database posture evaluator", () => {
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES ? 2 : 0) +
           // Migrations with an entry in runtime-posture-migrations/, one file each.
           migrationTableCount(tableClass(tables)) +
+          // 1445 and 1446 drop slack_agents and bot_templates: two full-DML FORCE-RLS tables.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? -2
+            : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
@@ -2234,8 +2249,11 @@ describe("runtime database posture evaluator", () => {
       expect(RUNTIME_FULL_DML_TABLES).toContain("secret_approval_rules");
       expect(FORCE_RLS_TABLES).toContain("automation_templates");
       expect(RUNTIME_FULL_DML_TABLES).toContain("automation_templates");
-      expect(FORCE_RLS_TABLES).toContain("bot_templates");
-      expect(RUNTIME_FULL_DML_TABLES).toContain("bot_templates");
+      // 1445 and 1446 dropped the legacy Slack agents and bot templates tables.
+      expect(FORCE_RLS_TABLES).not.toContain("bot_templates" as never);
+      expect(RUNTIME_FULL_DML_TABLES).not.toContain("bot_templates" as never);
+      expect(FORCE_RLS_TABLES).not.toContain("slack_agents" as never);
+      expect(RUNTIME_FULL_DML_TABLES).not.toContain("slack_agents" as never);
       expect(FORCE_RLS_TABLES).toContain("secret_use_approvals");
       expect(RUNTIME_FULL_DML_TABLES).toContain("secret_use_approvals");
       expect(FORCE_RLS_TABLES).toContain("session_title_operations");
@@ -2300,6 +2318,7 @@ describe("runtime database posture evaluator", () => {
       ]);
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount +
+          -7 + // 1430 drops the retired Knowledge sync tables.
           1 + // 1106 external member revocation markers.
           1 + // 1092 chat share links.
           3 + // 0981-0982 promotional funding and signed machine evidence.
@@ -2313,10 +2332,12 @@ describe("runtime database posture evaluator", () => {
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +
           organizationRecoveryProtectedTableCount -
-          8,
+          8 -
+          2, // 1445 and 1446 dropped slack_agents and bot_templates.
       );
       expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(
         tableCount +
+          -7 + // 1430 drops the retired Knowledge sync tables.
           1 + // 1106 external member revocation markers.
           1 + // 1092 chat share links.
           3 + // 0981-0982 promotional funding and signed machine evidence.
@@ -2330,7 +2351,8 @@ describe("runtime database posture evaluator", () => {
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +
           organizationRecoveryProtectedTableCount -
-          8,
+          8 -
+          2, // 1445 and 1446 dropped slack_agents and bot_templates.
       );
       expect(RUNTIME_TABLE_PRIVILEGES.feedback_submissions).toEqual(["SELECT", "INSERT"]);
       expect(RUNTIME_TABLE_PRIVILEGES.memory_slack_publication_configurations).toEqual([

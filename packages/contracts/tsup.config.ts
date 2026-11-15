@@ -73,6 +73,7 @@ export default defineConfig({
     "src/slack-bot-scopes.ts",
     "src/slack-rest-mcp.ts",
     "src/microsoft-dynamics.ts",
+    "src/capability-connect-inputs.ts",
     "src/editable-artifacts.ts",
     "src/editable-artifact-committed-transaction.ts",
     "src/editable-artifact-serialized-commit.ts",

@@ -243,6 +243,23 @@ impl Compute {
         }
     }
 
+    /// Has sandbox `id` end `timeout_s` seconds from now, whenever it was
+    /// due to end before.
+    pub async fn set_timeout(&self, id: &str, timeout_s: u64) -> Result<()> {
+        let response = self
+            .request(Method::POST, &format!("/sandboxes/{id}/timeout"))
+            .json(&serde_json::json!({ "timeout": timeout_s }))
+            .send()
+            .await?;
+        match response.status() {
+            StatusCode::NO_CONTENT | StatusCode::OK => Ok(()),
+            status => bail!(
+                "setting sandbox {id}'s timeout: {status} {}",
+                response.text().await.unwrap_or_default()
+            ),
+        }
+    }
+
     /// Saves sandbox `id`'s disk as the template `name`.
     /// A save cut short, as when the control service restarts during it,
     /// is found by its name if it was made after all, and asked again

@@ -132,7 +132,7 @@ export class NativeEditableArtifactKernelAdapter
   ): ReturnType<EditableArtifactAgentInspectionKernelPort["query"]> {
     const session = await this.openCurrentState(input.state);
     try {
-      return Uint8Array.from(session.query(input.queryBytes));
+      return new Uint8Array(session.query(input.queryBytes));
     } finally {
       session.dispose();
     }

@@ -679,7 +679,7 @@ class ByteWriter {
   constructor(private readonly maximum: number) {}
 
   finish(): Uint8Array {
-    return Uint8Array.from(this.#bytes);
+    return new Uint8Array(this.#bytes);
   }
   bytes(value: Uint8Array): void {
     if (this.#bytes.length + value.byteLength > this.maximum) {

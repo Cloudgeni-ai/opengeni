@@ -1,5 +1,21 @@
 # @opengeni/react-native
 
+## 6.23.0
+
+### Patch Changes
+
+- f6f8c51: Links in chat replies are easy to see. A new `link` color token (`--og-color-link` on web, `link` in the native theme) colors every text link a calm blue in both themes, readable on every chat surface. The native chat now underlines links like the web chat, announces them as links and shows a soft wash while one is pressed. Web URLs, autolinked URLs, artifact, Site, chat and file links, and links in lists and tables all share the style. Hosts that rebranded links through `--og-color-accent-strong` set `--og-color-link` instead.
+- bce18b7: The native chat shows the animated thinking orb again while a reply is being prepared, next to the status text, as the web chat does. It had been replaced by a small spinner. The orb still disappears on the first useful output, the status stays stable and says when a start takes longer than usual, a failed preparation stays visible, and a host's `renderPreparing` still replaces the default visual.
+- Updated dependencies [c0089e1]
+- Updated dependencies [9dd96b0]
+- Updated dependencies [adc2409]
+- Updated dependencies [f6f8c51]
+- Updated dependencies [f6a7c28]
+- Updated dependencies [c0089e1]
+  - @opengeni/contracts@6.23.0
+  - @opengeni/react@6.23.0
+  - @opengeni/sdk@6.23.0
+
 ## 6.22.0
 
 ### Patch Changes

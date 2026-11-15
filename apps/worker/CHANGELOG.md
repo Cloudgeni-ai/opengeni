@@ -1,5 +1,59 @@
 # @opengeni/worker-bundle
 
+## 6.23.0
+
+### Patch Changes
+
+- cfde5ba: Retry of a failed turn that was resumed by an approval or a human-input answer now continues from the conversation, where the decided tool call and its result already are, instead of failing with "Open suffix resume has no interruption rows".
+- 92a5650: A turn interrupted by a turn worker shutdown, such as a rolling deploy, now resumes on another worker within seconds instead of stalling for about five minutes. This fixes two separate causes.
+
+  First, when the shutdown cancelled the turn while a Connected Machine command was still running (for example a generated-file download or a slow `exec_command`), finalization waited for the machine to prove the command had exited. A slow or silent machine could not do that before the worker's force stop. The worker then died without settling the activity, writing its quiescence receipt or releasing its subscription lease, and recovery waited for the two-minute heartbeat timeout. Now, when the turn ends because its worker is shutting down, each still-running machine command goes to the session's command ledger with a stop request (the custody already used for machines that stop answering), and finalization continues without waiting. Pause, Steer and normal completion still wait for exact exit proof.
+
+  Second, a dead attempt's subscription turn lease was held until its five-minute TTL expired, so the next generation was refused with `subscription_lease_busy`. A newer generation of the same turn can now take over the lease once the holder's attempt has written its quiescence receipt, which proves it can no longer use the account. Renewal, current-lease checks and usage finalization still use the lease's own expiry.
+
+- Updated dependencies [c0089e1]
+- Updated dependencies [c0089e1]
+- Updated dependencies [982cce9]
+- Updated dependencies [9dd96b0]
+- Updated dependencies [adc2409]
+- Updated dependencies [f6a7c28]
+- Updated dependencies [1d7e007]
+- Updated dependencies [892b27b]
+- Updated dependencies [5ba261b]
+- Updated dependencies [cfde5ba]
+- Updated dependencies [37c35ed]
+- Updated dependencies [32a19a3]
+- Updated dependencies [621f4d2]
+- Updated dependencies [92a5650]
+- Updated dependencies [f0cc559]
+  - @opengeni/contracts@6.23.0
+  - @opengeni/db@6.23.0
+  - @opengeni/runtime@6.23.0
+  - @opengeni/core@6.23.0
+  - @opengeni/capabilities@6.23.0
+  - @opengeni/vaults-protonpass@6.23.0
+  - @opengeni/sdk@6.23.0
+  - @opengeni/codemode@6.23.0
+  - @opengeni/codex@6.23.0
+  - @opengeni/config@6.23.0
+  - @opengeni/decisions@6.23.0
+  - @opengeni/documents@6.23.0
+  - @opengeni/events@6.23.0
+  - @opengeni/github@6.23.0
+  - @opengeni/interaction@6.23.0
+  - @opengeni/observability@6.23.0
+  - @opengeni/storage@6.23.0
+  - @opengeni/tool-gateway@6.23.0
+  - @opengeni/vaults@6.23.0
+  - @opengeni/vaults-bitwarden@6.23.0
+  - @opengeni/vaults-keeper@6.23.0
+  - @opengeni/vaults-onepassword@6.23.0
+  - @opengeni/jev@6.23.0
+  - @opengeni/agent-proto@6.23.0
+  - @opengeni/network@6.23.0
+  - @opengeni/subscriptions@6.23.0
+  - @opengeni/xai-subscription@6.23.0
+
 ## 6.22.0
 
 ### Patch Changes

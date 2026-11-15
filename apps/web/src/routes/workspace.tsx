@@ -29,6 +29,14 @@ import { workspaceManagementLocation } from "@opengeni/react/app/lib/workspace-m
 import { OrganizationWorkspaceAdministrationBoundary } from "@/components/settings/organization-workspace-administration";
 import { Button } from "@opengeni/react/ui/button";
 import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@opengeni/react/ui/dialog";
 import { WorkspaceTenantBoundary } from "@opengeni/react/app/components/workspace-tenant-boundary";
 import { WorkspaceUnavailableRoute } from "@/routes/workspace-unavailable";
 import { useAppContext, type AppContextValue } from "@opengeni/react/app/app-context";
@@ -153,7 +161,7 @@ export function SlackLinkPanel({
   linked: boolean;
   title: string;
   description: ReactNode;
-  action: ReactNode;
+  action?: ReactNode;
 }) {
   const Icon = linked ? CircleCheckIcon : LinkIcon;
   return (
@@ -168,7 +176,7 @@ export function SlackLinkPanel({
         />
         <h1 className="text-base font-semibold">{title}</h1>
         <p className="mt-2 text-sm leading-5 text-fg-muted">{description}</p>
-        <div className="mt-4 flex flex-wrap justify-center gap-2">{action}</div>
+        {action ? <div className="mt-4 flex flex-wrap justify-center gap-2">{action}</div> : null}
       </div>
     </section>
   );
@@ -220,6 +228,50 @@ export function SlackLinkConfirmDialog({
   );
 }
 
+export const SLACK_LINK_LINKED_TITLE = "Linked.";
+export const SLACK_LINK_LINKED_DESCRIPTION = "Go back to Slack and ask again.";
+
+/**
+ * After a Slack account is linked, for someone without access to the link's
+ * workspace: it stays on screen, since Slack is where they continue.
+ */
+export function SlackLinkLinkedPanel() {
+  return (
+    <SlackLinkPanel
+      linked
+      title={SLACK_LINK_LINKED_TITLE}
+      description={SLACK_LINK_LINKED_DESCRIPTION}
+    />
+  );
+}
+
+/** The same outcome for someone in the workspace, over the workspace they're in. */
+export function SlackLinkLinkedDialog({ open, onDone }: { open: boolean; onDone: () => void }) {
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) onDone();
+      }}
+    >
+      <DialogContent showCloseButton={false} className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 text-base">
+            <CircleCheckIcon aria-hidden className="size-5 text-status-idle" />
+            {SLACK_LINK_LINKED_TITLE}
+          </DialogTitle>
+          <DialogDescription>{SLACK_LINK_LINKED_DESCRIPTION}</DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button type="button" className="min-h-11" onClick={onDone}>
+            Done
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export function WorkspaceShellRouteContent({
   workspaceId,
   context,
@@ -243,6 +295,7 @@ export function WorkspaceShellRouteContent({
     captureWorkspaceInvocation,
     clearSlackLinkContinuation,
     client,
+    completeSlackLinkContinuation,
     ownsWorkspaceInvocation,
     preparePendingSlackLink,
     revalidatePrincipalAccess,
@@ -293,8 +346,13 @@ export function WorkspaceShellRouteContent({
   const workspaceStateReady = context.workspaceStateOwnerId === workspaceId;
 
   const hasSlackLinkContinuation = context.slackLinkContinuationWorkspaceId === workspaceId;
+  // Kept by the app, so it survives the access revalidation after linking.
+  const slackLinked = context.slackLinkLinkedWorkspaceId === workspaceId;
   const hasNarrowSlackFlow =
-    hasSlackLinkContinuation || slackAccessRequest !== null || slackAccessError !== null;
+    hasSlackLinkContinuation ||
+    slackLinked ||
+    slackAccessRequest !== null ||
+    slackAccessError !== null;
 
   useEffect(() => {
     activeSlackOperation.current = null;
@@ -305,14 +363,18 @@ export function WorkspaceShellRouteContent({
   const completeSlackAccess = useCallback(
     (operation: WorkspaceOperationIdentity): boolean => {
       if (!ownsSlackOperation(operation)) return false;
-      toast.success("Slack identity linked", {
-        description: "You can return to Slack and invoke Opengeni again.",
-      });
-      clearSlackLinkContinuation();
+      if (completeSlackLinkContinuation) completeSlackLinkContinuation(workspaceId);
+      else clearSlackLinkContinuation();
       revalidatePrincipalAccess();
       return true;
     },
-    [clearSlackLinkContinuation, ownsSlackOperation, revalidatePrincipalAccess],
+    [
+      clearSlackLinkContinuation,
+      completeSlackLinkContinuation,
+      ownsSlackOperation,
+      revalidatePrincipalAccess,
+      workspaceId,
+    ],
   );
 
   const refreshSlackAccess = useCallback(
@@ -598,21 +660,10 @@ export function WorkspaceShellRouteContent({
           aria-label="Slack workspace access"
           className="flex min-h-full items-center justify-center bg-canvas p-4"
         >
-          {!slackAccessRequest && !slackAccessError ? (
+          {slackLinked || (slackAccessRequest?.status === "completed" && !slackAccessError) ? (
+            <SlackLinkLinkedPanel />
+          ) : !slackAccessRequest && !slackAccessError ? (
             <LoadingPanel label="Checking Slack access" />
-          ) : slackAccessRequest?.status === "completed" && !slackAccessError ? (
-            <SlackLinkPanel
-              linked
-              title="Slack account linked"
-              description="You can go back to Slack."
-              action={
-                <Button asChild type="button" variant="outline">
-                  <Link to="/" onClick={context.clearSlackLinkContinuation}>
-                    Open Opengeni
-                  </Link>
-                </Button>
-              }
-            />
           ) : slackAccessRequest?.status === "prepared" && slackAccessRequest.canLink ? (
             <SlackLinkPanel
               linked={false}
@@ -709,6 +760,7 @@ export function WorkspaceShellRouteContent({
         onLink={linkSlackAccount}
         onCancel={() => void cancelSlackAccess({ stay: true })}
       />
+      <SlackLinkLinkedDialog open={slackLinked} onDone={context.clearSlackLinkContinuation} />
       <AuthorizedWorkspaceShell
         context={context}
         workspaceId={workspaceId}

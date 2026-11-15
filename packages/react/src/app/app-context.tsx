@@ -78,6 +78,10 @@ export type AppContextValue = {
   /** Creates or joins the one server-side prepare request for the bootstrapped bearer. */
   preparePendingSlackLink: (workspaceId: string) => Promise<SlackUserLinkAccessRequest | null>;
   clearSlackLinkContinuation: () => void;
+  /** The workspace whose Slack link just completed; kept until the link flow is cleared. */
+  slackLinkLinkedWorkspaceId?: string | null | undefined;
+  /** Ends the link flow as linked, keeping that outcome visible across access revalidation. */
+  completeSlackLinkContinuation?: ((workspaceId: string) => void) | undefined;
   accessKeyVersion: number;
   keyAuthRequired: boolean;
   model: string;

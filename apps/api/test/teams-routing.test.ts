@@ -77,7 +77,6 @@ describe("where a Teams 1:1 message goes", () => {
         target: { workspaceId: "research", agentId: null },
         text: "run the numbers",
         source: "prefix",
-        remember: false,
         announce: true,
       }),
     );
@@ -87,7 +86,7 @@ describe("where a Teams 1:1 message goes", () => {
     });
   });
 
-  test("an agent addressed by name answers and becomes the chat's choice", () => {
+  test("an agent addressed by name answers this one message and leaves the chat's choice", () => {
     for (const text of ["Planner: draft it", "+planner draft it", "planner, draft it"])
       expect(route(text)).toEqual(
         expect.objectContaining({
@@ -96,15 +95,15 @@ describe("where a Teams 1:1 message goes", () => {
           agentName: "Planner",
           workspaceLabel: "Research",
           text: "draft it",
-          remember: true,
+          source: "agent",
         }),
       );
-    expect(route("+planner")).toEqual({
-      kind: "switched",
-      target: { workspaceId: "research", agentId: "planner" },
-      workspaceLabel: "Research",
-      agentName: "Planner",
-    });
+    // A name on its own changes nothing: only switch does.
+    for (const text of ["+planner", "Planner:"])
+      expect(route(text, { workspaceId: "home", agentId: null })).toEqual({
+        kind: "hint",
+        text: "To ask **Planner**, start your message with **Planner:**. To use it for every new message, send **switch Planner**.",
+      });
     // An agent whose workspace the person can't use is named, never served elsewhere.
     expect(route("+auditor check")).toEqual({
       kind: "denied",
@@ -125,6 +124,10 @@ describe("where a Teams 1:1 message goes", () => {
         source: "main",
       }),
     );
+    expect(route("Opengeni Assistant", { workspaceId: "research", agentId: "planner" })).toEqual({
+      kind: "hint",
+      text: "To ask the main assistant, start your message with **Opengeni Assistant:**. Send **switch** to choose what this chat uses.",
+    });
     // A remembered workspace that no longer works is refused, never swapped
     // for the Personal or only workspace.
     expect(
@@ -146,7 +149,7 @@ describe("where a Teams 1:1 message goes", () => {
 
   test("a remembered choice is used while it works and refused once it doesn't", () => {
     expect(route("next step", { workspaceId: "research", agentId: null })).toEqual(
-      expect.objectContaining({ kind: "resolved", source: "choice", remember: false }),
+      expect.objectContaining({ kind: "resolved", source: "choice" }),
     );
     expect(route("next step", { workspaceId: "finance", agentId: null })).toEqual({
       kind: "denied",
@@ -280,14 +283,53 @@ describe("agents anyone in the organization may use", () => {
     ).toEqual(
       expect.objectContaining({ kind: "resolved", target: { workspaceId: "home", agentId: null } }),
     );
+    // With no default to go to, the card keeps the message without the address.
     expect(
       resolveTeamsRoute({
         text: "Opengeni: hello",
         appName: "Opengeni",
         directory: open(),
         choice: finance,
+      }),
+    ).toEqual(expect.objectContaining({ kind: "ask", text: "hello" }));
+    // The app name on its own only explains, even then.
+    expect(
+      resolveTeamsRoute({
+        text: "Opengeni",
+        appName: "Opengeni",
+        directory: open(),
+        choice: finance,
       }).kind,
-    ).toBe("ask");
+    ).toBe("hint");
+  });
+
+  test("an agent addressed once leaves even an unavailable choice to be refused later", () => {
+    // The stored choice no longer works, but the address names its own target.
+    expect(route("Planner: draft it", { workspaceId: "finance", agentId: null })).toEqual(
+      expect.objectContaining({
+        kind: "resolved",
+        target: { workspaceId: "research", agentId: "planner" },
+        source: "agent",
+      }),
+    );
+    expect(
+      route("Planner: draft it", { workspaceId: "finance", agentId: null }),
+    ).not.toHaveProperty("forgetChoice");
+  });
+
+  test("an agent named like a workspace is switched to from the card", () => {
+    const d = directory({
+      candidates: [
+        { workspaceId: "home", label: "Home", personal: false },
+        { workspaceId: "research", label: "Planner", personal: false },
+      ],
+    });
+    expect(
+      resolveTeamsRoute({ text: "+planner", appName: "Opengeni", directory: d, choice: null }),
+    ).toEqual({
+      kind: "hint",
+      text: "To ask **Planner**, start your message with **Planner:**. To use it for every new message, send **switch** and pick it.",
+    });
   });
 
   test("a switch card keeps room for workspaces however many agents there are", () => {

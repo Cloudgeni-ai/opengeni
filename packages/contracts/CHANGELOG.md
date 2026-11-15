@@ -1,5 +1,24 @@
 # @opengeni/contracts
 
+## 6.23.0
+
+### Minor Changes
+
+- c0089e1: The agent editor shows an agent's image icon and keeps it when other fields are saved, instead of clearing it.
+
+  An agent's Slack rows (`GET /agents/:id/slack`) carry the Opengeni app's name in each Slack workspace as optional `botDisplayName`, so the agent page shows how people really ask it there (for example `@Opengeni Staging Release Scribe`); without it, clients use `@Opengeni`.
+
+- f6a7c28: Connect cards can ask for connect-time inputs. An integration whose connections each need a value first (Microsoft Dynamics: the environment's address) declares those inputs in `@opengeni/contracts/capability-connect-inputs`. `capability_authorization_request` and tool discovery now post its Connect card, which asks the person for the value in one field with one Connect action, instead of answering `input_required` with no card. The agent can prefill a value with the tool's new `inputs` argument; it is used only when it follows the entry's rule. Catalog matches list the inputs as `setup.connectInputs`, the card payload carries them as `capability.inputs`, and capability creation takes `connectFor` with `connectInputs`, so the API applies the same rule to what the person entered and returns the connection already in the workspace for the same endpoint.
+
+  A runtime guard stops repeated identical tool calls. Once one exact call has returned the same result 8 times in a row in a turn, an identical call started within 30 seconds of the last one returns a short notice instead of running, and the run continues. Calls whose results change, and polling slower than 30 seconds, are unaffected.
+
+### Patch Changes
+
+- 9dd96b0: Restoring a large workspace archive no longer multiplies worker memory. Byte copies used `Uint8Array.from(buffer)`, which Bun runs element by element through its generic iterator path when the source is a Node Buffer (the result of base64 decoding, file reads, object storage and Postgres bytea). That used about 16 times the archive size in transient memory and was about 100 times slower. A cold restore did it at least twice, so restoring a workspace archive of a few hundred MB could take a worker past 15 GB and kill it. Byte copies now use `new Uint8Array(buffer)`, which makes the same copy at native speed. Archive base64 is decoded once into a view of the decoded bytes. Canonical form is now checked from the decoded length and the final four characters instead of re-encoding the whole archive. Object-storage restores verify the fetched bytes directly instead of decoding the base64 copy again. Native snapshot receipts are recognised from their ASCII prefix without decoding a whole tar archive as text. Restoring a 48 MB archive now raises peak memory by about 2 times the archive size instead of 37 times, and takes 0.2 seconds instead of 3.4 seconds.
+- adc2409: A Business Central address is never read by dropping part of its path. An address such as `businesscentral.dynamics.com/opengenitest2026/Production`, whose first segment is neither a tenant ID nor a domain, used to connect an environment named `opengenitest2026` and ignore `Production`, so every query failed with "Environment does not exist". Such addresses, and addresses with more after the environment than a web client page, are now refused with what to paste instead: the address bar while Business Central is open, or `businesscentral.dynamics.com/<tenant>.onmicrosoft.com/<environment>`. Tenant ID or domain with environment, environment only, and `?company=` addresses work as before. `microsoftDynamicsAddressProblem` returns that explanation; `custom_mcp_setup_request` answers with it and adding such an address as an MCP server is refused with 422.
+
+  When an agent publishes a Site and its turn's account bindings can't be read, the publication is now refused with a clear error instead of declaring only the publisher's own account routes (which left the Site's tools working only for the publisher).
+
 ## 6.22.0
 
 ### Minor Changes

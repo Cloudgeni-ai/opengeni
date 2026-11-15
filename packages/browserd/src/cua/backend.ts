@@ -129,6 +129,11 @@ const UNTITLED_STRIP_MAX_SIDE = 100;
 /** How long a field check waits before reading a window again, when the
  * reading straight after the input does not show it yet. */
 const INPUT_REREAD_MS = 150;
+/** How long a click stays the point typing goes to (see typeAtClick). The
+ * window can change meanwhile by means this process never sees (the
+ * person, a device's own tools), and a click sent again at an old point
+ * could press whatever is there now. */
+const CLICKED_POINT_MS = 120_000;
 /** CUA's refusal of background typing when the window's focused element is
  * not a text input (see typeAtClick). */
 const NO_FOCUSED_TEXT_INPUT = "no_focused_text_input";
@@ -198,10 +203,11 @@ export class CuaComputerBackend implements ComputerBackend {
   /** Per window, the point of a click that was its latest action, in the
    * screenshot pixels of the frame the click used (with that frame's size):
    * where typing goes next when the window's content is not in its
-   * accessibility tree (see typeAtClick). Any other action forgets it. */
+   * accessibility tree (see typeAtClick). Any other action forgets it, and
+   * it lapses after CLICKED_POINT_MS. */
   private readonly clickedPoints = new Map<
     string,
-    { x: number; y: number; width: number; height: number }
+    { x: number; y: number; width: number; height: number; at: number }
   >();
   private tail: Promise<unknown> = Promise.resolve();
   private closing = false;
@@ -459,9 +465,12 @@ export class CuaComputerBackend implements ComputerBackend {
     if (command.action.type === "launch")
       return this.dispatchLaunch(command, command.action.applicationId);
     return this.run(async () => {
-      // Only a click that is the window's latest action says where typing goes.
-      const clickedAt = this.clickedPoints.get(command.targetId);
+      // Only a recent click that is the window's latest action says where
+      // typing goes.
+      const clicked = this.clickedPoints.get(command.targetId);
       this.clickedPoints.delete(command.targetId);
+      const clickedAt =
+        clicked && Date.now() - clicked.at <= CLICKED_POINT_MS ? clicked : undefined;
       if (command.action.type === "batch")
         return await this.dispatchBatch(command, false, standIn, unconfirmed);
       if (command.action.type === "focus") return await this.dispatchFocus(command);
@@ -614,6 +623,7 @@ export class CuaComputerBackend implements ComputerBackend {
           y: Number(click.args.y),
           width: clickFrame.width,
           height: clickFrame.height,
+          at: Date.now(),
         });
       if (after?.target.id !== command.targetId) return after;
       const confirmed = await this.confirmInput(after, operations);
@@ -642,7 +652,7 @@ export class CuaComputerBackend implements ComputerBackend {
    * clicks the field again to focus it and makes this window its app's key
    * window before sending any key, so the keys reach this window only. The
    * refused attempt sent nothing. Only a click that was this window's latest
-   * action counts.
+   * action, within the last two minutes, counts.
    */
   private typeAtClick(
     command: ComputerBackendActionCommand,

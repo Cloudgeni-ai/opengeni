@@ -680,6 +680,25 @@ describe("catalogue", () => {
     for (const testCase of selectCases("all")) expect(skipped).not.toContain(testCase.integration);
     expect(selectCases("linear").every((testCase) => testCase.integration === "linear")).toBe(true);
   });
+
+  test("a close-date range that restates the request is not an invented close date", () => {
+    const row = CASES.find((item) => item.id === "microsoft_dynamics.clarify.unnamed-crm")!;
+    const invented = (answer: string) =>
+      (row.forbidAnswer ?? []).some((pattern) => pattern.test(answer));
+    for (const answer of [
+      "Which CRM should I check for opportunities closing November 1–30, 2026?",
+      "Opportunities closing Nov 1 - Nov 30 need a connected CRM. Which one do you use?",
+      "Deals closing 2026-11-01 to 2026-11-30: which system are they in?",
+      "Should I count deals that close in 30 days?",
+    ])
+      expect(invented(answer)).toBe(false);
+    for (const answer of [
+      "Acme renewal closes November 14, 2026 for $48,000.",
+      "Two opportunities: Contoso closing on Nov 21 and Fabrikam closing the 28th.",
+      "Northwind closes 2026-11-30.",
+    ])
+      expect(invented(answer)).toBe(true);
+  });
 });
 
 describe("grid", () => {

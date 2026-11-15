@@ -347,6 +347,7 @@ import {
   markLocalInternalDispatch,
 } from "./http/local-browser-boundary";
 import {
+  agentAttemptStaleHttpError,
   alongsideAuthorization,
   billingOriginForAccessGrant,
   requireLiveAgentAttemptGrant,
@@ -2108,7 +2109,7 @@ export function createAppComposition(
         await withAccessGrantSessionRlsContext(routeDeps, grant, next);
         return;
       }
-      if (workspaceActorContextExempt(c.req.method, new URL(c.req.url).pathname)) {
+      if (workspaceActorContextExempt(c.req.method, new URL(c.req.url).pathname, c.req.path)) {
         await next();
         return;
       }
@@ -2352,6 +2353,26 @@ export function createAppComposition(
   });
 
   // Known calls need no preceding full-catalog discovery or replica-local attestation.
+  // Every targeted tool route, the Site consent prompt included, keeps the
+  // caller's fresh grant: a person's request fence requires it. Organization
+  // keys and external actors are re-read by the request fence itself.
+  const freshToolCaller =
+    (
+      c: Context,
+      workspaceId: string,
+      authorization: Awaited<ReturnType<typeof requireAccessGrantAuthorization>>,
+    ) =>
+    async () => {
+      const live = await requireFreshAccessGrant(c, routeDeps, workspaceId, "workspace:read");
+      const original = authorization.grant;
+      if (
+        live.accountId !== original.accountId ||
+        live.subjectId !== original.subjectId ||
+        live.principalKind !== original.principalKind ||
+        original.permissions.some((permission) => !hasPermission(live.permissions, permission))
+      )
+        throw new HTTPException(403, { message: "tool_access_changed" });
+    };
   for (const operation of ["resolve", "invoke", "target-approvals", "manifest"] as const) {
     app.post(`/v1/workspaces/:workspaceId/tools/${operation}`, async (c) => {
       const workspaceId = c.req.param("workspaceId");
@@ -2364,19 +2385,7 @@ export function createAppComposition(
       let fence: TargetAuthorityFence | undefined;
       const options = {
         signal: c.req.raw.signal,
-        // Human callers keep their fresh grant. Organization keys and external
-        // actors are re-read by the request fence itself.
-        reauthorize: async () => {
-          const live = await requireFreshAccessGrant(c, routeDeps, workspaceId, "workspace:read");
-          const original = authorization.grant;
-          if (
-            live.accountId !== original.accountId ||
-            live.subjectId !== original.subjectId ||
-            live.principalKind !== original.principalKind ||
-            original.permissions.some((permission) => !hasPermission(live.permissions, permission))
-          )
-            throw new HTTPException(403, { message: "tool_access_changed" });
-        },
+        reauthorize: freshToolCaller(c, workspaceId, authorization),
         onFence: (created: TargetAuthorityFence) => {
           fence = created;
         },
@@ -2469,6 +2478,9 @@ export function createAppComposition(
     return c.json(
       await describeWorkspaceSiteToolConsent(routeDeps, authorization, body, {
         signal: c.req.raw.signal,
+        // Reading what the call would do prepares the viewer's route under
+        // the same request fence as the call itself.
+        reauthorize: freshToolCaller(c, workspaceId, authorization),
       }),
     );
   });
@@ -2847,6 +2859,7 @@ export function createAppComposition(
               details: { code: rawError.code },
             })
           : (missingPermissionHttpError(rawError) ??
+            agentAttemptStaleHttpError(rawError, c.req.raw) ??
             sessionMissingHttpError(rawError, c.req.url, c.req.method) ??
             authenticationRequiredHttpError(rawError) ??
             sessionUsageLimitHttpError(rawError) ??
@@ -2985,7 +2998,16 @@ function nativeWorkspaceMiddleware(middleware: MiddlewareHandler): MiddlewareHan
   };
 }
 
-export function workspaceActorContextExempt(method: string, pathname: string): boolean {
+/**
+ * Whether a workspace route applies its own gate instead of the ordinary
+ * actor middleware. `routingPath` is the decoded path Hono routes by
+ * (`c.req.path`); it defaults to `pathname`.
+ */
+export function workspaceActorContextExempt(
+  method: string,
+  pathname: string,
+  routingPath: string = pathname,
+): boolean {
   // Import adapters apply their own exact create/control gates and request-local RLS in core.
   if (isSessionHistoryImportRequest(method, pathname)) return true;
   // Organization budget authority is independent of ordinary workspace
@@ -3002,8 +3024,9 @@ export function workspaceActorContextExempt(method: string, pathname: string): b
   // access to the workspace yet: an organization member links without it, and
   // anyone else asks for it. These routes require a managed sign-in and the
   // signed link (or the request it prepared for that person) and scope their
-  // own reads and writes to the workspace.
-  if (isSlackUserLinkIntentRequest(method, pathname)) return true;
+  // own reads and writes to the workspace. Matched on the path the request
+  // is routed by, so the exemption and the handler always agree.
+  if (isSlackUserLinkIntentRequest(method, routingPath)) return true;
   if (
     method === "GET" &&
     publicWorkspaceBrowserRoutePatterns.some((route) => route.test(pathname))

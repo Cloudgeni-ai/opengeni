@@ -107,8 +107,11 @@ export const SESSION_AUTHORIZATION_DEFAULT_REAUTHORIZE_MS = 15_000;
 export class SessionAuthorizationDeniedError extends Error {
   readonly code = "SESSION_NOT_FOUND_OR_DENIED";
 
-  constructor(readonly reason: "not_found" | "forbidden" | "revoked" | "caller_stale") {
-    super("Session not found or access denied");
+  constructor(
+    readonly reason: "not_found" | "forbidden" | "revoked" | "caller_stale",
+    options?: ErrorOptions,
+  ) {
+    super("Session not found or access denied", options);
     this.name = "SessionAuthorizationDeniedError";
   }
 }

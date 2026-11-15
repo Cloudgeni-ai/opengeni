@@ -104,6 +104,24 @@ test("interaction failure alert ignores websites that fail but keeps Opengeni's 
     false,
     "open_target",
   );
+  // The agent pointing at an element that matches nothing or several, or
+  // asking for an action the page cannot take: the browser worked.
+  for (const reason of ["locator_not_found", "locator_ambiguous", "invalid_action"]) {
+    scenario(
+      `the agent's own ${reason} mistakes do not page`,
+      [operations("failed", reason, 2), operations("completed", "none", 1)],
+      false,
+    );
+  }
+  scenario(
+    "agent addressing mistakes cannot dilute the browser's own failures",
+    [
+      operations("failed", "locator_ambiguous", 10),
+      operations("outcome_unknown", "timeout", 3),
+      operations("completed", "none", 5),
+    ],
+    0.375,
+  );
 
   // The browser or its controller failing still pages.
   for (const [outcome, reason] of [
