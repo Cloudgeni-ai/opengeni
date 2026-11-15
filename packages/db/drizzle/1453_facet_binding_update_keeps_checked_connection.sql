@@ -14,7 +14,9 @@
 --
 -- The Connection was checked when it was bound. An update that keeps the same
 -- Connection, account and workspace cannot move it to another tenant, so it is
--- not checked again. Inserts, and updates that change the Connection or the
+-- not checked again (nothing moves a Connection to another account, workspace
+-- or owner, so the earlier check still holds). Inserts, and updates that
+-- change the Connection or the
 -- tenant, are checked exactly as before, and the rule that a personal
 -- instance's Connection cannot change owner is unchanged.
 --

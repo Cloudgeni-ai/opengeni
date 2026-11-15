@@ -68,3 +68,34 @@ Why this is general: the descriptions describe the provider's operations, the
 generic tools are opt-in for any reviewed OpenAPI definition and name no
 provider, and the errors describe the request. Size: the four definitions'
 tool lists shrink from 855 to 89 tools.
+
+## Separate installs of one integration are accounts of one connector
+
+No new strings. A turn with two installs of the same integration definition
+(a second account added as its own install, such as "Outlook Calendar -
+Account 2") used to label each as its own connector with no account line, so
+a search reaching one did not name the other. Now both take the definition's
+name and their account, with the existing texts. Before and after, for a
+shared install and a personal one:
+
+```text
+before: Outlook Calendar — bendik@example.com · Shared
+before: Outlook Calendar - Account 2 — iris@example.com · Yours
+after:  Outlook Calendar — bendik@example.com · Shared
+after:  Outlook Calendar — iris@example.com · Yours
+```
+
+Each of their tools now starts with the existing account line, for example:
+
+```text
++ Account: Outlook Calendar — iris@example.com · Yours. Use only this account; if the intended account for a write is unclear, ask before calling.
+```
+
+and the existing search notice names the other account
+(`These tools reach Outlook Calendar (bendik@example.com). Also connected:
+Outlook Calendar (iris@example.com). …`).
+
+Why this is general: it applies to every API integration definition with more
+than one install, built-in or workspace-defined, and reuses the labels
+connector accounts already get. Size: one account line per tool of a
+connector with several accounts, as for connector accounts today.

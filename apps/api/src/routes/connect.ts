@@ -1281,10 +1281,11 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         expectedRevision: input.expectedRevision,
         operationId: input.idempotencyKey,
         inputDigest: createHash("sha256").update(stableJson(input)).digest("hex"),
-        // Preview and install only read the source and the saved account; the
-        // install is written in commit's one transaction. A failure (for
-        // example the install refused by the database) leaves the attempt
-        // ready to advance again rather than refused as in flight.
+        // Preview and install have no non-repeatable remote effects (they read
+        // the source and may refresh the saved account's token); the install
+        // is written in commit's one transaction. A failure (for example the
+        // install refused by the database) leaves the attempt ready to advance
+        // again rather than refused as in flight.
         releaseClaimOnFailure: true,
         authorize: (tx, _attempt, origin) =>
           requireConnectOwnerAuthority(tx, scope, advancePermission, origin),

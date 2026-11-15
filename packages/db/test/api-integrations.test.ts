@@ -591,7 +591,7 @@ describe("API Integration persistence", () => {
         createdBySubjectId: subjectId,
       });
       const base = integrationInput(connection.id, `inventory-upgrade-${suffix.slice(0, 8)}`);
-      return await installApiIntegration(client!.db, {
+      const installed = await installApiIntegration(client!.db, {
         ...base,
         subjectId,
         ownership: "subject",
@@ -599,20 +599,64 @@ describe("API Integration persistence", () => {
           ...base.revision,
           id: `openapi:${revision.repeat(24)}`,
           contentSha256: revision.repeat(64),
+          // The newer revision changes a selected tool, so moving the earlier
+          // person's instance also resets their preferences for it.
+          tools: base.revision.tools.map((tool) =>
+            revision === "2" && tool.id === "update_item"
+              ? {
+                  ...tool,
+                  description: "Update an inventory item's fields.",
+                  inputSchema: {
+                    type: "object",
+                    properties: { id: { type: "string" }, name: { type: "string" } },
+                  },
+                }
+              : tool,
+          ),
         },
       });
+      return { ...installed, connectionId: connection.id, input: base };
     };
     const earlier = await personalInstall(earlierSubjectId, "1");
     const later = await personalInstall(laterSubjectId, "2");
 
     expect(later.instanceId).not.toBe(earlier.instanceId);
-    for (const subjectId of [earlierSubjectId, laterSubjectId])
-      expect(await listInstalledApiIntegrations(client.db, first.workspaceId, subjectId)).toEqual([
-        expect.objectContaining({
-          revision: expect.objectContaining({ id: `openapi:${"2".repeat(24)}` }),
-          connectionStatus: "active",
-        }),
-      ]);
+    const expectInstances = async () => {
+      for (const [subjectId, own] of [
+        [earlierSubjectId, earlier],
+        [laterSubjectId, later],
+      ] as const)
+        expect(
+          await listInstalledApiIntegrations(client!.db, first.workspaceId, subjectId),
+        ).toEqual([
+          expect.objectContaining({
+            instanceId: own.instanceId,
+            revision: expect.objectContaining({ id: `openapi:${"2".repeat(24)}` }),
+            connectionRef: expect.objectContaining({ connectionId: own.connectionId }),
+            connectionStatus: "active",
+          }),
+        ]);
+    };
+    await expectInstances();
+
+    // Moving the earlier person's instance gives the later person no hold on
+    // it: they still cannot bind it to their own Connection.
+    await expect(
+      installApiIntegration(client.db, {
+        ...later.input,
+        subjectId: laterSubjectId,
+        ownership: "subject",
+        connectionId: later.connectionId,
+        instanceKey: earlier.instanceKey,
+        displayName: "Later person's inventory",
+        revision: {
+          ...later.input.revision,
+          id: `openapi:${"2".repeat(24)}`,
+          contentSha256: "2".repeat(64),
+        },
+      }),
+    ).rejects.toBeInstanceOf(IntegrationFacetBindingOwnershipConflictError);
+    await expectInstances();
   }, 60_000);
 
   test("keeps a victim personal instance unchanged across cross-subject rebind attempts", async () => {

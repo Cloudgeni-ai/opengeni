@@ -5,6 +5,7 @@ import type {
   ToolRef,
 } from "@opengeni/contracts";
 import type { ApiIntegrationRuntime } from "@opengeni/db";
+import { integrationDefinitionById } from "@opengeni/capabilities";
 import { integrationDefinitionCategory } from "./capabilities";
 
 // Accepted turns keep the labels they were admitted with, including the older words.
@@ -243,6 +244,10 @@ export function expandApiIntegrationAccountRoutes(input: {
 /**
  * Account labels for the API integration routes `expandApiIntegrationAccountRoutes`
  * selects, keyed by route server ID, labelled the same way as connector routes.
+ * Separate installs of one integration definition (a second account added as
+ * its own install) are accounts of one connector: they share its name, and
+ * each names its account, so the model can tell them apart and a search
+ * reaching one names the others.
  */
 export function apiIntegrationAccountLabels(input: {
   integrations: readonly ApiIntegrationRuntime[];
@@ -252,21 +257,43 @@ export function apiIntegrationAccountLabels(input: {
   const labels = new Map<string, McpAccountRouteLabel>();
   if (input.bindings == null) return labels;
   const selected = new Set(input.tools.map((tool) => tool.id));
+  const connectors = new Map<
+    string,
+    { integrations: ApiIntegrationRuntime[]; bindings: McpConnectionAccountBinding[] }
+  >();
   for (const integration of input.integrations) {
     const usable = input.bindings.filter(
       (binding) =>
         binding.canonicalServerId === integration.serverId && selected.has(binding.serverId),
     );
+    if (!usable.length) continue;
+    const key = JSON.stringify([integration.definitionProvenance, integration.definitionId]);
+    const connector = connectors.get(key) ?? { integrations: [], bindings: [] };
+    connector.integrations.push(integration);
+    connector.bindings.push(...usable);
+    connectors.set(key, connector);
+  }
+  for (const { integrations, bindings } of connectors.values()) {
+    const integration = integrations[0]!;
+    const curated = integration.definitionProvenance === "curated";
+    // One install keeps its own name. Several take the reviewed definition's
+    // name, or else the shortest install name ("Billing" beside "Billing -
+    // Account 2").
+    const name =
+      integrations.length === 1
+        ? integration.name
+        : ((curated ? integrationDefinitionById(integration.definitionId)?.name : undefined) ??
+          integrations
+            .map((item) => item.name)
+            .sort((left, right) => left.length - right.length || left.localeCompare(right))[0]!);
     const routeLabels = accountRouteLabels(
-      integration.name,
-      usable,
+      name,
+      bindings,
       connectedAccountKind(
-        integration.definitionProvenance === "curated"
-          ? integrationDefinitionCategory(integration.definitionId)
-          : undefined,
+        curated ? integrationDefinitionCategory(integration.definitionId) : undefined,
       ),
     );
-    for (const [index, binding] of usable.entries())
+    for (const [index, binding] of bindings.entries())
       labels.set(binding.serverId, routeLabels[index]!);
   }
   return labels;

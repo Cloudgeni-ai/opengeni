@@ -78,7 +78,14 @@ export async function executeConnectOperation(input: {
   try {
     return await finish();
   } catch (error) {
-    await releaseConnectOperation(db, scope, operation).catch(() => undefined);
+    await releaseConnectOperation(db, scope, operation).catch((releaseError: unknown) => {
+      // The original failure is what the caller sees; a claim left occupied
+      // only makes the attempt refuse the next advance as in flight.
+      console.warn("[connect] could not release a failed operation's claim", {
+        attemptId: operation.attemptId,
+        error: releaseError instanceof Error ? releaseError.message : String(releaseError),
+      });
+    });
     throw error;
   }
 
