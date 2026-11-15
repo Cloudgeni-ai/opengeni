@@ -219,6 +219,113 @@ describe("normalizeCodexUsage", () => {
       balance: "12.5",
     });
   });
+
+  // Shape of a live 200 on November 15, 2026 (values replaced): the provider
+  // reports `balance: null` and other nulls for an account without purchased
+  // credits. That used to fail the whole parse and report status "error".
+  test("provider nulls in credits and optional fields keep the quota windows", () => {
+    const out = normalizeCodexUsage(
+      200,
+      liveBody({
+        user_id: "user-x",
+        code_review_rate_limit: null,
+        additional_rate_limits: null,
+        model_usage: {},
+        credits: {
+          has_credits: false,
+          unlimited: false,
+          overage_limit_reached: false,
+          balance: null,
+          approx_local_messages: null,
+          approx_cloud_messages: null,
+        },
+        spend_control: { reached: false, individual_limit: null },
+        rate_limit_reached_type: null,
+        promo: null,
+      }),
+    );
+    expect(out.status).toBe("ok");
+    expect(out.planType).toBe("pro");
+    expect(out.fiveHour?.remaining).toBe(60);
+    expect(out.weekly?.remaining).toBe(88);
+    expect(out.credits).toEqual({
+      hasCredits: false,
+      unlimited: false,
+      overageLimitReached: false,
+      balance: null,
+    });
+  });
+
+  test("null window timing and flags are treated as absent", () => {
+    const out = normalizeCodexUsage(
+      200,
+      liveBody({
+        rate_limit: {
+          allowed: null,
+          limit_reached: null,
+          primary_window: {
+            used_percent: 20,
+            reset_after_seconds: null,
+            reset_at: null,
+            limit_window_seconds: 18000,
+          },
+          secondary_window: null,
+        },
+      }),
+    );
+    expect(out.status).toBe("ok");
+    expect(out.fiveHour?.remaining).toBe(80);
+    expect(out.fiveHour?.resetAt).toBeNull();
+  });
+
+  test("a malformed display-only section does not sink the quota read", () => {
+    const out = normalizeCodexUsage(
+      200,
+      liveBody({ plan_type: 7, credits: { balance: { amount: 1 } } }),
+    );
+    expect(out.status).toBe("ok");
+    expect(out.planType).toBeNull();
+    expect(out.credits).toBeUndefined();
+    expect(out.weekly?.remaining).toBe(88);
+  });
+
+  test("a malformed quota window still fails closed", () => {
+    const out = normalizeCodexUsage(
+      200,
+      liveBody({
+        rate_limit: {
+          allowed: true,
+          limit_reached: false,
+          primary_window: { used_percent: "100", limit_window_seconds: 604800 },
+        },
+      }),
+    );
+    expect(out.status).toBe("error");
+  });
+
+  test("feature limits in the nested additional_rate_limits shape are read", () => {
+    const out = normalizeCodexUsage(
+      200,
+      liveBody({
+        additional_rate_limits: [
+          {
+            limit_name: "spark",
+            metered_feature: "codex_bengalfox",
+            rate_limit: {
+              allowed: false,
+              limit_reached: true,
+              primary_window: { used_percent: 100, limit_window_seconds: 18000 },
+              secondary_window: null,
+            },
+          },
+        ],
+      }),
+    );
+    expect(out.status).toBe("ok");
+    expect(out.additionalLimits?.[0]?.limitName).toBe("spark");
+    expect(out.additionalLimits?.[0]?.fiveHour?.percent).toBe(100);
+    expect(codexUsageConfirmsQuotaAvailable(out)).toBe(false);
+  });
 });
 
 describe("buildCodexUsageWindowFromCache", () => {
