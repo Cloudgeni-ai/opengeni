@@ -32,6 +32,27 @@ import { createApp } from "../src/app";
 const SECRET = "first-party-mcp-stale-attempt-secret";
 const listTools = { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} };
 
+type StaleRoute = { method: "POST" | "GET"; path: string };
+// The first-party MCP routes, and a REST file route whose file-owner check
+// reads the same learning policy before its handler runs.
+const ROUTES: StaleRoute[] = [
+  { method: "POST", path: "mcp/docs" },
+  { method: "GET", path: "mcp/docs" },
+  { method: "POST", path: "mcp/files" },
+  { method: "GET", path: "mcp/files" },
+  { method: "GET", path: `files/${crypto.randomUUID()}` },
+];
+
+async function expectStaleAttemptRefusal(response: Response): Promise<void> {
+  const body = (await response.json()) as { error?: Record<string, unknown> };
+  expect({ status: response.status, details: body.error?.details }).toEqual({
+    status: 403,
+    details: { code: "agent_attempt_caller_stale" },
+  });
+  expect(body.error).toMatchObject({ code: "forbidden", retryable: false });
+  expect(String(body.error?.message)).toContain("turn attempt that is no longer active");
+}
+
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
 let pooled: ReturnType<typeof postgres>;
@@ -124,19 +145,35 @@ async function fixture() {
     workflowClient: {} as SessionWorkflowClient,
     sessionAuthorization: null,
   });
-  const request = (path: "docs" | "files", method: "POST" | "GET") =>
-    app.request(
-      new Request(`http://127.0.0.1:8000/v1/workspaces/${owner.workspaceId}/mcp/${path}`, {
-        method,
+  const request = (route: StaleRoute, credential = authorization) => {
+    const post = route.method === "POST";
+    return app.request(
+      new Request(`http://127.0.0.1:8000/v1/workspaces/${owner.workspaceId}/${route.path}`, {
+        method: route.method,
         headers: {
           accept: "application/json, text/event-stream",
-          authorization,
-          ...(method === "POST" ? { "content-type": "application/json" } : {}),
+          authorization: credential,
+          ...(post ? { "content-type": "application/json" } : {}),
         },
-        ...(method === "POST" ? { body: JSON.stringify(listTools) } : {}),
+        ...(post ? { body: JSON.stringify(listTools) } : {}),
       }),
     );
-  return { request, turnId: claimed.turn.id };
+  };
+  const staleCredential = async () =>
+    `Bearer ${await signDelegatedAccessToken(SECRET, {
+      accountId: owner.accountId,
+      workspaceId: owner.workspaceId,
+      subjectId: "worker:first-party-mcp",
+      permissions: [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS],
+      principalKind: "agent_attempt",
+      sessionId: session.id,
+      turnId: claimed.turn.id,
+      attemptId: crypto.randomUUID(),
+      executionGeneration: claimed.turn.executionGeneration,
+      firstPartyMcpTools: [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+      exp: Math.floor(Date.now() / 1000) + 3_600,
+    })}`;
+  return { request, staleCredential, turnId: claimed.turn.id };
 }
 
 /**
@@ -164,45 +201,83 @@ async function untilFenceWaits(): Promise<void> {
   throw new Error("the request's attempt fence never waited on the turn");
 }
 
-describe("first-party MCP requests from an attempt that goes stale in flight", () => {
-  for (const path of ["docs", "files"] as const) {
-    for (const method of ["POST", "GET"] as const) {
-      test(`${method} /mcp/${path} answers a stale attempt with 403, never 500`, async () => {
-        const { request, turnId } = await fixture();
-        // The turn's next execution generation is being written (a recovery or
-        // a finish) while the request arrives; it commits only once the
-        // request's liveness check has passed against the earlier state.
-        const writer = await shared.admin.reserve();
-        let response: Response;
-        try {
-          await writer`begin`;
-          // Session before turn, the order turn writers lock them in.
-          await writer`
-            select 1 from sessions
-            where id = (select session_id from session_turns where id = ${turnId})
-            for update
-          `;
-          await writer`select 1 from session_turns where id = ${turnId} for update`;
-          const pending = request(path, method);
-          await untilFenceWaits();
-          await writer`
-            update session_turns
-            set execution_generation = execution_generation + 1
-            where id = ${turnId}
-          `;
-          await writer`commit`;
-          response = await pending;
-        } finally {
-          writer.release();
-        }
-        const body = (await response.json()) as { error?: Record<string, unknown> };
-        expect({ status: response.status, details: body.error?.details }).toEqual({
-          status: 403,
-          details: { code: "agent_attempt_caller_stale" },
-        });
-        expect(body.error).toMatchObject({ code: "forbidden", retryable: false });
-        expect(String(body.error?.message)).toContain("turn attempt that is no longer active");
-      }, 60_000);
+describe("agent requests from an attempt that goes stale in flight", () => {
+  for (const route of ROUTES) {
+    const label = route.path.startsWith("files/") ? "/files/:fileId" : `/${route.path}`;
+    test(`${route.method} ${label} answers a stale attempt with 403, never 500`, async () => {
+      const { request, turnId } = await fixture();
+      // The turn's next execution generation is being written (a recovery or
+      // a finish) while the request arrives; it commits only once the
+      // request's liveness check has passed against the earlier state.
+      const writer = await shared.admin.reserve();
+      let response: Response;
+      try {
+        await writer`begin`;
+        // Session before turn, the order turn writers lock them in.
+        await writer`
+          select 1 from sessions
+          where id = (select session_id from session_turns where id = ${turnId})
+          for update
+        `;
+        await writer`select 1 from session_turns where id = ${turnId} for update`;
+        const pending = request(route);
+        await untilFenceWaits();
+        await writer`
+          update session_turns
+          set execution_generation = execution_generation + 1
+          where id = ${turnId}
+        `;
+        await writer`commit`;
+        response = await pending;
+      } finally {
+        writer.release();
+      }
+      await expectStaleAttemptRefusal(response);
+    }, 60_000);
+  }
+});
+
+describe("a file route whose own file-owner check sees the attempt go stale", () => {
+  test("GET /files/:fileId answers with 403, never 500", async () => {
+    const { request, turnId } = await fixture();
+    const route: StaleRoute = { method: "GET", path: `files/${crypto.randomUUID()}` };
+    // A first request leaves the attempt's learning policy remembered, so the
+    // next one's request context does not read it again. Only the file
+    // route's own owner check reads it, after its own liveness check.
+    const warm = await request(route);
+    expect(warm.status).toBe(404);
+    const writer = await shared.admin.reserve();
+    let response: Response;
+    try {
+      await writer`begin`;
+      await writer`
+        select 1 from sessions
+        where id = (select session_id from session_turns where id = ${turnId})
+        for update
+      `;
+      await writer`select 1 from session_turns where id = ${turnId} for update`;
+      const pending = request(route);
+      await untilFenceWaits();
+      await writer`
+        update session_turns
+        set execution_generation = execution_generation + 1
+        where id = ${turnId}
+      `;
+      await writer`commit`;
+      response = await pending;
+    } finally {
+      writer.release();
     }
+    await expectStaleAttemptRefusal(response);
+  }, 60_000);
+});
+
+describe("agent requests from an attempt that is already stale", () => {
+  for (const route of ROUTES) {
+    const label = route.path.startsWith("files/") ? "/files/:fileId" : `/${route.path}`;
+    test(`${route.method} ${label} answers with 403, never 500`, async () => {
+      const { request, staleCredential } = await fixture();
+      await expectStaleAttemptRefusal(await request(route, await staleCredential()));
+    }, 60_000);
   }
 });

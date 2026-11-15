@@ -7,6 +7,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HTTPException } from "hono/http-exception";
 import {
+  agentAttemptStaleHttpError,
   alongsideAuthorization,
   requireLiveAgentAttemptGrant,
   withAccessGrantSessionRlsContext,
@@ -345,6 +346,38 @@ describe("access-grant session RLS context", () => {
         async () => "unreachable",
       ),
     ).rejects.toBe(refused);
+  });
+
+  test("a stale attempt found after the request context is answered centrally as stale", () => {
+    const denied = new core.SessionAuthorizationDeniedError("caller_stale");
+    expect(agentAttemptStaleHttpError(denied)).toMatchObject({
+      status: 403,
+      code: "forbidden",
+      details: { code: "agent_attempt_caller_stale" },
+      cause: denied,
+    });
+    const fenced = Object.assign(new Error("Failed query"), {
+      cause: { code: "42501", message: "Knowledge attempt is interrupted" },
+    });
+    expect(agentAttemptStaleHttpError(fenced)).toMatchObject({
+      status: 403,
+      details: { code: "agent_attempt_caller_stale" },
+      cause: fenced,
+    });
+    // Other session refusals keep their route's own meaning.
+    for (const reason of ["not_found", "forbidden", "revoked"] as const) {
+      expect(agentAttemptStaleHttpError(new core.SessionAuthorizationDeniedError(reason))).toBe(
+        null,
+      );
+    }
+    expect(
+      agentAttemptStaleHttpError(
+        Object.assign(new Error("Failed query"), {
+          cause: { code: "42501", message: "Knowledge workspace unavailable" },
+        }),
+      ),
+    ).toBe(null);
+    expect(agentAttemptStaleHttpError(new Error("boom"))).toBe(null);
   });
 
   test("work started alongside a gate is dropped when the gate refuses", async () => {

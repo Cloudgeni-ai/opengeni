@@ -64,6 +64,26 @@ function staleAttemptFenceAsRefusal(error: unknown): never {
 }
 
 /**
+ * The central answer for an agent attempt found stale after its request
+ * context was entered: by a later handler or middleware's own liveness check
+ * (Hono hands their errors straight to `onError`, past the request context's
+ * own mapping), or by the database's attempt fence on a later read. Both are
+ * the same stale attempt the request context refuses up front, so they get its
+ * refusal, never a 500. Every other session refusal keeps its route's meaning.
+ */
+export function agentAttemptStaleHttpError(error: unknown): ApiHttpError | null {
+  if (error instanceof SessionAuthorizationDeniedError) {
+    return error.reason === "caller_stale"
+      ? agentAttemptAuthorityError("caller_stale", error)
+      : null;
+  }
+  const message = nestedAuthorityRefusalMessage(error);
+  return message !== null && isAgentAttemptLivenessFence(message)
+    ? agentAttemptAuthorityError("caller_stale", error)
+    : null;
+}
+
+/**
  * Trusted payer for a non-agent grant: an authenticated human session pays as
  * that human; keys and services are service work. An agent attempt must be
  * resolved through the validated middleware context installed below.

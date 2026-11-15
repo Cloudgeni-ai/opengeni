@@ -347,6 +347,7 @@ import {
   markLocalInternalDispatch,
 } from "./http/local-browser-boundary";
 import {
+  agentAttemptStaleHttpError,
   alongsideAuthorization,
   billingOriginForAccessGrant,
   requireLiveAgentAttemptGrant,
@@ -2847,6 +2848,7 @@ export function createAppComposition(
               details: { code: rawError.code },
             })
           : (missingPermissionHttpError(rawError) ??
+            agentAttemptStaleHttpError(rawError) ??
             sessionMissingHttpError(rawError, c.req.url, c.req.method) ??
             authenticationRequiredHttpError(rawError) ??
             sessionUsageLimitHttpError(rawError) ??
