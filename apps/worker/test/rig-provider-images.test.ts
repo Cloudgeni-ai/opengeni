@@ -1117,4 +1117,72 @@ describe("Modal provider image rebuilds", () => {
       select({ ...result, contentHash: current.contentHash, startedAt: current.startedAt }).reason,
     ).toBe("build_failed_retryable");
   });
+
+  test("only a snapshot that ran out of time is recorded as retryable", async () => {
+    const buildWith = async (buildImage: () => Promise<unknown>) => {
+      const stop = new AbortController();
+      return await buildVerifiedRigProviderImage(
+        {
+          settings: platformSettings({ rigProviderImageSnapshotTimeoutMs: 420_000 }),
+          db: {} as never,
+          observability: { warn: () => undefined } as never,
+          accountId: "33333333-3333-4333-8333-333333333333",
+          workspaceId: "44444444-4444-4444-8444-444444444444",
+          existingVersionId: VERSION_ID,
+          definition: base,
+          target: { kind: "version", id: VERSION_ID },
+          established: {
+            backendId: "modal",
+            client: {},
+            instanceId: "sb-build",
+            session: { state: { sandboxId: "sb-build" } },
+            sessionState: {},
+          } as never,
+          ownership: {
+            leaseId: "lease-build",
+            leaseEpoch: 1,
+            workspaceGeneration: 0,
+            instanceId: "sb-build",
+          },
+          lifecycle: { signal: stop.signal, cleanupDeadlineAtMs: null, dispose: () => undefined },
+          signal: stop.signal,
+        },
+        {
+          buildImage: buildImage as never,
+          verifyColdBoot: async () => {
+            throw new Error("not reached");
+          },
+          claim: async (_db, input) => ({ status: "claimed", image: input.image, replaced: null }),
+          finalize: async () => true,
+          currentImage: async () => null,
+          deleteComputeTemplate: async () => undefined,
+        },
+      );
+    };
+    const timeoutError = Object.assign(new Error("snapshot did not finish"), {
+      name: "TimeoutError",
+    });
+    const timedOut = await buildWith(async () => {
+      throw timeoutError;
+    });
+    expect(timedOut.error?.retryable).toBe(true);
+    const wrapped = await buildWith(async () => {
+      throw new Error("snapshot failed", { cause: { code: "DEADLINE_EXCEEDED" } });
+    });
+    expect(wrapped.error?.retryable).toBe(true);
+
+    // Failures that would repeat are not rebuilt automatically.
+    const refused = await buildWith(async () => {
+      throw new Error("image rejected by the provider");
+    });
+    expect(refused.status).toBe("failed");
+    expect(refused.error?.retryable).toBe(false);
+    expect(
+      select({ ...refused, contentHash: current.contentHash, startedAt: current.startedAt }).reason,
+    ).toBe("not_ready");
+    // A failure after the snapshot returned (here, no image identity) is not a timeout.
+    const incomplete = await buildWith(async () => null);
+    expect(incomplete.status).toBe("failed");
+    expect(incomplete.error?.retryable).toBe(false);
+  });
 });

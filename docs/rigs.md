@@ -26,7 +26,7 @@ cannot create a broader dependency than its Sandbox Environment.
 ## Configuration
 
 - `OPENGENI_RIG_SETUP_TIMEOUT_MS` — the budget for the sandbox environment's own setup script, separate from the general 120s sandbox-lifecycle-hook default. Defaults to 600000 (10 minutes). Applies to both a live turn's setup hook and a sandbox environment-CI verification run.
-- `OPENGENI_RIG_PROVIDER_IMAGE_SNAPSHOT_TIMEOUT_MS` — the provider budget for the filesystem snapshot that makes a verified sandbox environment's prebuilt image. Defaults to 300000 (5 minutes). It is separate from `OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS`, which still bounds ordinary workspace snapshots.
+- `OPENGENI_RIG_PROVIDER_IMAGE_SNAPSHOT_TIMEOUT_MS` — the provider budget for the filesystem snapshot that makes a verified sandbox environment's prebuilt image. Defaults to 300000 (5 minutes), at most 600000 (10 minutes) so setup, the snapshot and the cold boot check fit in the verification activity. It is separate from `OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS`, which still bounds ordinary workspace snapshots.
 - `OPENGENI_RIG_VERIFICATION_LEASE_OWNERSHIP_ENABLED` — default `false`. When false, sandbox environment CI fails before lease acquire/provider create rather than falling back to an unowned sandbox. Enable only after every worker capable of running the global sandbox reaper has the matching pre-termination lease revalidation behavior; see [Operational rollout](#operational-rollout).
 - No dedicated encryption key: a sandbox environment's `setupScript`/`checks` are not secret material. A setup script that needs a secret uses a `{{secret:…}}` reference like any other command (see [`secrets.md`](secrets.md)). Historical `image` values are inert metadata, not executable configuration.
 

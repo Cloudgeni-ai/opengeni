@@ -2165,13 +2165,14 @@ const SettingsSchema = z.object({
   // Sandbox Environment into its prebuilt image. A whole set-up filesystem
   // takes much longer to snapshot than a turn's best-effort workspace save, so
   // it does not share OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS. Keep it well inside
-  // the 15-minute verification activity. Env:
+  // the 15-minute verification activity (setup, the snapshot and the cold
+  // boot check share it), so it is capped at 10 minutes. Env:
   // OPENGENI_RIG_PROVIDER_IMAGE_SNAPSHOT_TIMEOUT_MS. Default 5min.
   rigProviderImageSnapshotTimeoutMs: z.coerce
     .number()
     .int()
     .positive()
-    .max(SANDBOX_SNAPSHOT_MAX_TIMEOUT_MS)
+    .max(600_000)
     .default(300_000),
   // --- sandbox warm-time billing (P2.1) ---
   // Per-backend warm rate (usd_micros/sec), like modelPricingJson: an empty {}
