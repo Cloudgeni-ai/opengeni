@@ -282,6 +282,16 @@ function ArtifactListRoute({
                   }
                 : undefined
             }
+            onArchive={
+              canPin
+                ? async (item) => {
+                    await context.client.archiveEditableArtifact(workspaceId, item.id);
+                    invalidateAfterMutation();
+                    // The delete already succeeded; a failed refresh must not report it failed.
+                    void catalog.refresh().catch(() => undefined);
+                  }
+                : undefined
+            }
           />
         </LineTabsContent>
       </LineTabs>

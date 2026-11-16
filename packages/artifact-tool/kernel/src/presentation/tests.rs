@@ -519,3 +519,129 @@ fn deterministic_edit_sequences_preserve_snapshot_and_spatial_parity() {
         );
     }
 }
+
+#[test]
+fn deleting_slide_content_and_the_slide_in_one_batch_is_atomic() {
+    let mut deck = minimal_deck();
+    let delete_slide = PresentationBatch::from_commands(vec![
+        PresentationCommand::DeleteNode { id: id(5) },
+        PresentationCommand::DeleteSlide { id: id(4) },
+    ]);
+
+    let mut expected = deck.clone();
+    let receipt = expected
+        .apply_batch(&delete_slide)
+        .expect("content and slide delete in one batch");
+    assert_eq!(receipt.command_count, 2);
+    assert!(expected.slide(id(4)).is_none());
+    assert!(expected.node(id(5)).is_none());
+    assert!(expected.slide_order.is_empty());
+    assert!(!expected.spatial.contains_key(&SceneOwner::Slide(id(4))));
+    let snapshot = encode_presentation_snapshot(&expected).expect("encode");
+    assert_eq!(
+        decode_presentation_snapshot(&snapshot).expect("decode"),
+        expected
+    );
+
+    // A later failing command rolls back the content delete, the slide delete
+    // and the slide's spatial index.
+    let before = deck.clone();
+    let error = deck
+        .apply_batch(&PresentationBatch::from_commands(vec![
+            PresentationCommand::DeleteNode { id: id(5) },
+            PresentationCommand::DeleteSlide { id: id(4) },
+            PresentationCommand::SetSlideTitle {
+                id: id(4),
+                title: "Gone".to_owned(),
+            },
+        ]))
+        .expect_err("title on deleted slide rejected");
+    assert_eq!(
+        error,
+        PresentationBatchError {
+            command_index: 2,
+            kind: PresentationError::UnknownSlide(id(4)),
+        }
+    );
+    assert_eq!(deck, before);
+    let probe = rect(15, 25, 1, 1);
+    assert_eq!(
+        deck.hit_test(SceneOwner::Slide(id(4)), probe.x, probe.y, 4)
+            .expect("restored slide hit test")
+            .first()
+            .map(|node| node.id),
+        Some(id(5))
+    );
+
+    // Rolling back the open transaction undoes the whole batch, and applying
+    // it again redoes it to the same state.
+    let transaction = deck.begin_batch(&delete_slide).expect("begin");
+    assert!(transaction.presentation().slide(id(4)).is_none());
+    transaction.rollback();
+    assert_eq!(deck, before);
+    drop(deck.begin_batch(&delete_slide).expect("begin again"));
+    assert_eq!(deck, before);
+    deck.apply_batch(&delete_slide).expect("redo");
+    assert_eq!(deck, expected);
+}
+
+#[test]
+fn deleting_layout_and_master_content_with_their_owners_is_atomic() {
+    let mut deck = minimal_deck();
+    deck.apply_batch(&PresentationBatch::from_commands(vec![
+        PresentationCommand::InsertNode {
+            owner: SceneOwner::Master(id(2)),
+            parent: None,
+            index: 0,
+            node: shape(id(6), "Master footer", rect(0, 0, 50, 10), "Footer"),
+        },
+        PresentationCommand::InsertNode {
+            owner: SceneOwner::Layout(id(3)),
+            parent: None,
+            index: 0,
+            node: shape(id(7), "Layout title", rect(0, 20, 50, 10), "Title"),
+        },
+    ]))
+    .expect("seed inherited content");
+    assert!(deck.spatial.contains_key(&SceneOwner::Master(id(2))));
+    assert!(deck.spatial.contains_key(&SceneOwner::Layout(id(3))));
+    let delete_all = PresentationBatch::from_commands(vec![
+        PresentationCommand::DeleteNode { id: id(5) },
+        PresentationCommand::DeleteSlide { id: id(4) },
+        PresentationCommand::DeleteNode { id: id(7) },
+        PresentationCommand::DeleteLayout { id: id(3) },
+        PresentationCommand::DeleteNode { id: id(6) },
+        PresentationCommand::DeleteMaster { id: id(2) },
+    ]);
+
+    let before = deck.clone();
+    let mut failing = delete_all.commands().to_vec();
+    failing.push(PresentationCommand::DeleteMaster { id: id(2) });
+    let error = deck
+        .apply_batch(&PresentationBatch::from_commands(failing))
+        .expect_err("second master delete rejected");
+    assert_eq!(
+        error,
+        PresentationBatchError {
+            command_index: 6,
+            kind: PresentationError::UnknownMaster(id(2)),
+        }
+    );
+    assert_eq!(deck, before);
+
+    deck.begin_batch(&delete_all).expect("begin").rollback();
+    assert_eq!(deck, before);
+
+    deck.apply_batch(&delete_all)
+        .expect("content and owners delete in one batch");
+    assert!(deck.masters.is_empty());
+    assert!(deck.layouts.is_empty());
+    assert!(deck.slides.is_empty());
+    assert!(deck.nodes.is_empty());
+    assert!(deck.spatial.is_empty());
+    let snapshot = encode_presentation_snapshot(&deck).expect("encode");
+    assert_eq!(
+        decode_presentation_snapshot(&snapshot).expect("decode"),
+        deck
+    );
+}

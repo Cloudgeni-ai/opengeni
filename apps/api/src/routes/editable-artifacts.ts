@@ -29,7 +29,12 @@ import {
   type EditableArtifactPinnedVersion,
   type EditableArtifactModality,
 } from "@opengeni/core";
-import { hasEditableArtifactSessionLink, listEditableArtifactIdsForSession } from "@opengeni/db";
+import {
+  archiveEditableArtifact,
+  EditableArtifactArchiveForbiddenError,
+  hasEditableArtifactSessionLink,
+  listEditableArtifactIdsForSession,
+} from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { z } from "zod";
 
@@ -545,6 +550,8 @@ export function registerEditableArtifactRoutes(
     } catch (error) {
       throw editableArtifactHttpError(error);
     }
+    // A deleted (archived) artifact no longer opens.
+    if (artifact.lifecycle !== "active") throw applicationHttpError("not_found");
     context.header("cache-control", "private, no-store");
     const [result] = await projectWithAudiences(grant, scope, [artifact]);
     return context.json(result, 200);
@@ -581,6 +588,7 @@ export function registerEditableArtifactRoutes(
       }
     };
     const artifact = await read();
+    if (artifact.lifecycle !== "active") throw applicationHttpError("not_found");
     let changed: PersistedEditableArtifactAudience;
     try {
       changed = await audiences.change(grant, {
@@ -613,6 +621,38 @@ export function registerEditableArtifactRoutes(
       ),
       200,
     );
+  });
+
+  // Archive (the app's Delete): it leaves the Artifacts list and no longer
+  // opens or takes edits. One-way; archiving again returns it unchanged.
+  app.post(`${item}/archive`, async (context) => {
+    const workspaceId = context.req.param("workspaceId");
+    const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:publish");
+    const artifactId = editableArtifactId(parseArtifactId(context.req.param("artifactId")));
+    const scope = editableArtifactScope({ accountId: grant.accountId, workspaceId });
+    const actor = editableArtifactActorForGrant(grant, AUDIENCE_READ_REPLICA_ID);
+    try {
+      await archiveEditableArtifact(deps.db, scope, { artifactId, actor });
+    } catch (error) {
+      if (error instanceof EditableArtifactArchiveForbiddenError)
+        throw new ApiHttpError(403, { code: "forbidden", message: error.message });
+      if (error instanceof EditableArtifactPersistenceError && error.code === "not_found")
+        throw applicationHttpError("not_found");
+      throw error;
+    }
+    let artifact: EditableArtifact;
+    try {
+      artifact = await requireEditableArtifactApplication(deps).readArtifact({
+        scope,
+        actor,
+        artifactId,
+      });
+    } catch (error) {
+      throw editableArtifactHttpError(error);
+    }
+    context.header("cache-control", "private, no-store");
+    const [result] = await projectWithAudiences(grant, scope, [artifact]);
+    return context.json(result, 200);
   });
 
   app.post(`${item}/live-ticket`, async (context) => {
@@ -726,6 +766,7 @@ export function registerEditableArtifactRoutes(
     const body = await parseBoundedVersionRequest(context);
     const scope = editableArtifactScope({ accountId: grant.accountId, workspaceId });
     const actor = editableArtifactActorForGrant(grant, body.replicaId);
+    await requireActiveArtifact(deps, { scope, actor, artifactId });
     try {
       const result = await requireEditableArtifactExports(deps).pinVersion({
         scope,
@@ -752,6 +793,7 @@ export function registerEditableArtifactRoutes(
     const body = await parseBoundedMaterializationRequest(context);
     const scope = editableArtifactScope({ accountId: grant.accountId, workspaceId });
     const actor = editableArtifactActorForGrant(grant, body.replicaId);
+    await requireActiveArtifact(deps, { scope, actor, artifactId });
     // Without a materializer workload the job would stay queued forever.
     if (!deps.settings.artifactMaterializerDeployed) {
       throw new ApiHttpError(503, {
@@ -787,6 +829,7 @@ export function registerEditableArtifactRoutes(
     const jobId = parseArtifactId(context.req.param("jobId"));
     const actor = editableArtifactActorForGrant(grant, context.req.query("replicaId") ?? "");
     const scope = editableArtifactScope({ accountId: grant.accountId, workspaceId });
+    await requireActiveArtifact(deps, { scope, actor, artifactId });
     try {
       const job = await requireEditableArtifactExports(deps).getMaterialization({
         scope,
@@ -808,6 +851,7 @@ export function registerEditableArtifactRoutes(
     const jobId = parseArtifactId(context.req.param("jobId"));
     const actor = editableArtifactActorForGrant(grant, context.req.query("replicaId") ?? "");
     const scope = editableArtifactScope({ accountId: grant.accountId, workspaceId });
+    await requireActiveArtifact(deps, { scope, actor, artifactId });
     let download: EditableArtifactMaterializationDownload;
     try {
       download = await requireEditableArtifactExports(deps).openMaterializationDownload({
@@ -871,6 +915,20 @@ function requireEditableArtifactApplication(
     throw editableArtifactHttpError(new EditableArtifactApplicationError("unavailable"));
   }
   return deps.editableArtifacts;
+}
+
+// A deleted (archived) artifact reads as missing, so it can't be exported either.
+async function requireActiveArtifact(
+  deps: EditableArtifactRouteDependencies,
+  input: Parameters<EditableArtifactApplicationPort["readArtifact"]>[0],
+): Promise<void> {
+  let artifact: EditableArtifact;
+  try {
+    artifact = await requireEditableArtifactApplication(deps).readArtifact(input);
+  } catch (error) {
+    throw editableArtifactHttpError(error);
+  }
+  if (artifact.lifecycle !== "active") throw applicationHttpError("not_found");
 }
 
 function requireEditableArtifactExports(
