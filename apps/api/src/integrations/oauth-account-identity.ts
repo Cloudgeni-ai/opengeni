@@ -247,3 +247,45 @@ export function withAccountIdentityState<T extends ConnectionMetadata>(
     return accountIdentity ? { ...connection, accountIdentity } : connection;
   });
 }
+
+/**
+ * The person's own logins that alone make a new, verified account read as
+ * account_reconnect_required: live, active logins of the same service and
+ * account namespace whose account was never confirmed (connected before it
+ * could be, or its check failed). Confirming them could let the new account
+ * through, so they are worth checking again. Empty when the decision is not
+ * that refusal, or when something else would still refuse it (a login from
+ * another account namespace, or one that can't be used to check again).
+ */
+export function unverifiedLoginsBlockingNewAccount(
+  input: Parameters<typeof decideOAuthAccountConnection>[0],
+): ConnectionMetadata[] {
+  if (input.requestedConnectionId) return [];
+  const decision = decideOAuthAccountConnection(input);
+  if (decision.kind !== "reject" || decision.reason !== "account_reconnect_required") return [];
+  const live = input.accounts.filter(
+    (connection) =>
+      connection.subjectId === input.ownerSubjectId &&
+      connection.kind === "oauth2" &&
+      connection.status !== "revoked" &&
+      sameResource(connection, input.mcpUrl),
+  );
+  const unverified = live.filter(
+    (connection) => !verifiedIdentity(connection.metadata, input.identityKeys),
+  );
+  const otherNamespace = live.some(
+    (connection) =>
+      connection.providerDomain !== input.providerDomain ||
+      connection.metadata.authorizationServerIssuer !== input.metadata.authorizationServerIssuer,
+  );
+  if (otherNamespace || unverified.some((connection) => connection.status !== "active")) return [];
+  return unverified;
+}
+
+/** Whether `identity` names an account on its own for these identity keys. */
+export function identityConfirmsAccount(
+  identity: Record<string, unknown>,
+  identityKeys: readonly string[] | undefined,
+): boolean {
+  return verifiedIdentity(identity, identityKeys) !== null;
+}

@@ -1,7 +1,10 @@
 import { registrableHostDomain } from "@opengeni/capabilities";
 import type { CapabilityCatalogItem, OrganizationIntegrationPolicy } from "@opengeni/contracts";
 import { deploymentCannotConnect } from "@opengeni/contracts/personal-integration-setup";
-import { dedicatedMcpIntegrationKey } from "./organization-integration-catalog";
+import {
+  dedicatedMcpIntegrationKey,
+  organizationIntegrationCatalog,
+} from "./organization-integration-catalog";
 
 /**
  * Built-in integrations and the public-registry entries that duplicate them.
@@ -116,5 +119,29 @@ export function builtInIntegrationTurnedOffDetail(
   const key = builtInIntegrationKey(item);
   if (!key || policy.mode === "unrestricted" || policy.allowedIntegrationKeys.includes(key))
     return null;
-  return `${item.name} is turned off for this organization, so it can't be connected here. An organization admin can turn it on in the organization's integration settings.`;
+  return builtInIntegrationTurnedOffMessage(item.name);
+}
+
+/** What the person is told when their organization turned a built-in integration off. */
+export function builtInIntegrationTurnedOffMessage(name: string): string {
+  return `${name} is turned off for this organization, so it can't be connected here. An organization admin can turn it on in the organization's integration settings.`;
+}
+
+/**
+ * The built-in integration a sign-in to this MCP endpoint duplicates, when it
+ * is not the integration being connected: a custom connection to Gmail's,
+ * Google Calendar's, Google Drive's or Slack's reviewed endpoint is that
+ * built-in by another route, so the organization's choice for the built-in
+ * applies to it too. Null for every other endpoint.
+ */
+export function builtInIntegrationDuplicatedByEndpoint(
+  mcpUrl: string | null | undefined,
+  integrationKey: string | null | undefined,
+): { key: string; label: string } | null {
+  const key = dedicatedMcpIntegrationKey(mcpUrl);
+  if (!key || key === integrationKey) return null;
+  const label =
+    organizationIntegrationCatalog().integrations.find((integration) => integration.key === key)
+      ?.label ?? key;
+  return { key, label };
 }

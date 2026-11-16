@@ -11,6 +11,7 @@ import {
   applyNangoBackendsToSettings,
   builtInConnectorCatalogItems,
   builtInIntegrationDuplicated,
+  builtInIntegrationDuplicatedByEndpoint,
   builtInIntegrationKey,
   builtInIntegrationTurnedOffDetail,
   configuredMcpCatalogItems,
@@ -241,5 +242,29 @@ describe("connector setup gates", () => {
     expect(gated.runtime.operatorOAuthClient).toEqual({ configured: false });
     const gmail = applyConnectorSetupGates(registryGmail, settings, noClient, new Map());
     expect(gmail.runtime.operatorOAuthClient).toEqual({ configured: false });
+  });
+});
+
+describe("a custom sign-in to a built-in integration's endpoint", () => {
+  test("is that built-in by another route", () => {
+    expect(builtInIntegrationDuplicatedByEndpoint(GMAIL_MCP, undefined)).toEqual({
+      key: "gmail",
+      label: "Gmail",
+    });
+    expect(builtInIntegrationDuplicatedByEndpoint(DRIVE_MCP, null)).toEqual({
+      key: "google-drive",
+      label: "Google Drive",
+    });
+    expect(
+      builtInIntegrationDuplicatedByEndpoint("https://calendarmcp.googleapis.com/mcp/v1", null)
+        ?.key,
+    ).toBe("google-calendar");
+  });
+
+  test("not when it is the built-in itself, or another endpoint", () => {
+    expect(builtInIntegrationDuplicatedByEndpoint(DRIVE_MCP, "google-drive")).toBeNull();
+    expect(builtInIntegrationDuplicatedByEndpoint("https://mcp.linear.app/mcp", null)).toBeNull();
+    expect(builtInIntegrationDuplicatedByEndpoint("not a url", null)).toBeNull();
+    expect(builtInIntegrationDuplicatedByEndpoint(undefined, null)).toBeNull();
   });
 });

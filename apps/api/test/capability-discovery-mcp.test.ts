@@ -12,8 +12,10 @@ import {
 } from "@opengeni/contracts";
 import { createCatalogItem, type ApiRouteDeps } from "@opengeni/core";
 import {
+  createImportBatch,
   enableCapabilityInstallation,
   upsertCapabilityCatalogItem,
+  upsertRegistryCapabilityCatalogItem,
   persistAttemptToolCatalog,
   bootstrapWorkspace,
   createDb,
@@ -1814,18 +1816,24 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
     if (!shared) throw new Error("Real PostgreSQL fixture required");
     const gmailUrl = "https://gmailmcp.googleapis.com/mcp/v1";
     const registryId = `mcp:integrations-sh:gmailmcp-googleapis-com-${crypto.randomUUID().slice(0, 8)}`;
-    await upsertCapabilityCatalogItem(client.db, {
-      accountId: workspace.accountId,
-      workspaceId: workspace.workspaceId,
+    // Registry rows are global, as the integrations.sh importer stores them.
+    const batch = await createImportBatch(client.db, {
+      source: "integrations.sh",
+      snapshotDate: new Date("2026-11-16T00:00:00.000Z"),
+      attributionNote: "test fixture",
+    });
+    await upsertRegistryCapabilityCatalogItem(client.db, {
       id: registryId,
-      kind: "mcp",
-      source: "registry",
+      providerDomain: "gmailmcp.googleapis.com",
       name: "Gmail",
       description: "Search and read Gmail through Google's hosted MCP server.",
-      endpointUrl: gmailUrl,
       mcpUrl: gmailUrl,
-      providerDomain: "gmailmcp.googleapis.com",
+      transport: "streamable-http",
       authKind: "oauth2",
+      credentialFacts: [],
+      tier: "verified",
+      provenance: "official",
+      importBatchId: batch.id,
       metadata: { mcpProbe: { status: "real" } },
     });
     const builtInGmail = {
@@ -1919,7 +1927,8 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
       }
     } finally {
       await shared.admin`delete from organization_integration_policies where account_id = ${workspace.accountId}`;
-      await shared.admin`delete from capability_catalog_items where workspace_id = ${workspace.workspaceId} and id = ${registryId}`;
+      await shared.admin`delete from capability_catalog_items where id = ${registryId} and source = 'registry'`;
+      await shared.admin`delete from import_batches where id = ${batch.id}`;
     }
   }, 60_000);
 
