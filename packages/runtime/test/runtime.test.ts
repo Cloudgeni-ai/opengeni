@@ -3693,7 +3693,6 @@ describe("runtime event normalization", () => {
             defaultAccount: own,
           },
         });
-      // The route order the worker gives: the person's own account first.
       const alice = await accountFixture("f", own, "alice@example.test");
       const team = await accountFixture(
         "0",
@@ -3706,7 +3705,8 @@ describe("runtime event normalization", () => {
           toolPreparationReady: Promise.all([alice.prepared.ready, team.prepared.ready]).then(
             () => undefined,
           ),
-          mcpServers: [...alice.prepared.mcpServers, ...team.prepared.mcpServers],
+          // Separate installs can list the shared account first.
+          mcpServers: [...team.prepared.mcpServers, ...alice.prepared.mcpServers],
         });
         const model = new ScriptedModel([
           {
@@ -3730,8 +3730,8 @@ describe("runtime event normalization", () => {
         }
         await result.completed;
         const searchOutput = JSON.stringify(model.requests[1]!.input);
-        // Identical tools of the two accounts tie; the person's own, listed
-        // first, loads, and the shared copy's preview names the default.
+        // Identical tools of the two accounts tie; the person's own default
+        // loads although listed second, and the shared copy names the default.
         expect(searchOutput).toContain(
           "Account: Documents — alice@example.test · Yours (the default: the person's own account). Use only this account. When the request does not say which account to write to, use the default; ask only if there is none.",
         );

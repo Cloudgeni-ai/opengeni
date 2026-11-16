@@ -4599,6 +4599,7 @@ function maybeInstallLazyToolTransport(
           connector: route.connector,
           ...(route.kind ? { kind: route.kind } : {}),
           ...(route.providerDomain ? { providerDomain: route.providerDomain } : {}),
+          ...(route.defaultAccount ? { isDefault: route.defaultAccount === route.model } : {}),
         };
         for (const name of server.modelToolNames()) accounts.set(name, account);
       }

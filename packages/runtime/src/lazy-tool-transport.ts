@@ -527,6 +527,11 @@ export type ConnectedToolAccount = {
   kind?: string;
   /** The connector's vendor domain, when known. */
   providerDomain?: string;
+  /**
+   * Whether this is its connector's default account for writes, when the
+   * connector has one among several accounts; absent when it has none.
+   */
+  isDefault?: boolean;
 };
 
 /** At most this many other accounts are named; the rest are counted. */
@@ -1367,8 +1372,21 @@ export class LazyToolRuntime {
     return wrapped;
   }
 
+  /**
+   * The tools search ranks, with the copies a connector's other accounts have
+   * after the rest. Identical tools of several accounts tie in ranking and the
+   * first listed wins, so a tie goes to the connector's default account
+   * whatever order its accounts' servers were listed in.
+   */
   private searchableTools(tools: readonly Tool[]): Tool[] {
-    return tools.filter((tool) => isFunctionTool(tool) && this.searchableToolNames.has(tool.name));
+    const searchable = tools.filter(
+      (tool) => isFunctionTool(tool) && this.searchableToolNames.has(tool.name),
+    );
+    const accounts = this.connectedAccounts?.();
+    if (!accounts?.size) return searchable;
+    const notDefault = (tool: Tool) =>
+      isFunctionTool(tool) && accounts.get(tool.name)?.isDefault === false;
+    return [...searchable.filter((tool) => !notDefault(tool)), ...searchable.filter(notDefault)];
   }
 
   /**
