@@ -1869,15 +1869,27 @@ export async function runTurnStreamAttempt(
           if (Array.isArray(rawStreamHistory)) {
             // The completed image item is normally retained from its own
             // run-item event above. Scan once at the terminal response as
-            // a compatibility backstop before reconciliation can persist
-            // provider bytes. Never rescan history for every token delta.
+            // a compatibility backstop. Every history checkpoint (including
+            // one a tool result may reach before this scan) retains images
+            // itself before persisting, so provider bytes are never stored.
+            // Never rescan history for every token delta.
             await media.retainNativeGeneratedImagesFromHistory(
               rawStreamHistory as Array<Record<string, unknown>>,
             );
           }
           streamSawPerResponseUsage ||= responseResult.usageReported;
           releaseAdmission();
-          await historySink.reconcileConversationTruth();
+          // The next model request may already be in flight: this checkpoint
+          // must never fail the settlement, which would abort that request
+          // before its usage is recorded. It is best-effort; the next
+          // request's dispatch checkpoint and every turn-ending checkpoint
+          // require durable history and retry it.
+          await historySink.reconcileConversationTruth().catch((error: unknown) => {
+            console.error(
+              "response history checkpoint failed; the next durable checkpoint retries it",
+              safeErrorDiagnostic(error),
+            );
+          });
           const responseSettledAt = performance.now();
           recordModelStepPhase(observability, {
             provider: streamProvider,

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, expect, setDefaultTimeout, test } from "bun:test";
+import { afterAll, beforeAll, expect, setDefaultTimeout, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -25,6 +25,7 @@ import {
   recordModelTransportStarted,
 } from "../../../packages/runtime/src/model-preparation-diagnostics";
 import { createActivityTestHarness } from "../src/activities";
+import * as historySinkModule from "../src/activities/agent-turn/history-sink";
 import { settleRecordedModelUsage } from "../src/activities/agent-turn/model-usage";
 import {
   HistoryScriptedModel,
@@ -771,4 +772,82 @@ test("a tool result commits once its response's usage is durable, before that re
   // The tool results did not wait for those slowed ledger writes.
   expect(outputDurableBeforeBilling).toEqual({ "call-0": true, "call-1": true });
   expectLedgerSettledOnce(await durableTurnState(ctx, session.id), "slowed ledger");
+});
+
+test("a response's own history checkpoint failing after the model-call slot is released fails nothing: the next request runs and its usage is recorded", async () => {
+  const ctx = await fixture();
+  await applyCreditLedgerEntry(app.db, {
+    accountId: ctx.accountId,
+    type: "credit_topup",
+    amountMicros: 100_000_000,
+    idempotencyKey: crypto.randomUUID(),
+  });
+  const session = await startSession(ctx);
+  // The first response's own (non-mandatory) history checkpoint rejects.
+  const original = historySinkModule.createTurnHistorySink;
+  let injected = 0;
+  const create = spyOn(historySinkModule, "createTurnHistorySink").mockImplementation((deps) => {
+    const sink = original(deps);
+    const reconcile = sink.reconcileConversationTruth;
+    sink.reconcileConversationTruth = (options) => {
+      if (options === undefined && injected === 0) {
+        injected += 1;
+        return reconcile(options).then(() => {
+          throw new Error("synthetic response history checkpoint failure");
+        });
+      }
+      return reconcile(options);
+    };
+    return sink;
+  });
+  const executions: string[] = [];
+  const steps: string[] = [];
+  const settings = crashTestSettings(shared.appUrl);
+  const activities = createActivityTestHarness({
+    settings,
+    db: app.db,
+    bus: new MemoryEventBus(),
+    runtime: scriptedRuntime(
+      new HistoryScriptedModel({ beforeResponse: (step) => void steps.push(step) }),
+      async (callId) => {
+        executions.push(callId);
+        return `${callId} done`;
+      },
+    ),
+    observability: createObservability(settings, { component: "worker" }),
+  });
+  let result: Awaited<ReturnType<typeof activities.runAgentTurn>>;
+  try {
+    result = await activities.runAgentTurn({
+      accountId: ctx.accountId,
+      workspaceId: ctx.workspaceId,
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+  } finally {
+    create.mockRestore();
+  }
+  expect(injected).toBe(1);
+  expect(result.status).toBe("idle");
+  expect(steps).toEqual(["call-0", "call-1", "final"]);
+  expect(executions).toEqual(["call-0", "call-1"]);
+  const state = await durableTurnState(ctx, session.id);
+  // Every response's usage, including the requests after the failed
+  // checkpoint, is recorded and settled exactly once.
+  expect(state.usageFacts).toHaveLength(3);
+  expectLedgerSettledOnce(state, "response checkpoint failure");
+  // The history is durable anyway: later checkpoints persisted it.
+  const history = await sql<{ type: string; call_id: string | null }[]>`
+    select item_ordered->>'type' as type,
+      coalesce(item_ordered->>'callId', item_ordered->>'call_id') as call_id
+    from session_history_items where session_id = ${session.id} order by position`;
+  for (const callId of ["call-0", "call-1"]) {
+    expect(history.filter((row) => row.call_id === callId).map((row) => row.type)).toEqual([
+      "function_call",
+      "function_call_result",
+    ]);
+  }
 });
