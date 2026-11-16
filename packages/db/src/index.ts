@@ -7974,6 +7974,8 @@ export type CreateConnectionInput = {
   verifiedInstallAt?: Date | null;
   verifiedInstallVersion?: number | null;
   metadata?: Record<string, unknown>;
+  /** The person's own name for the connection (already normalized). */
+  label?: string | null;
   createdBySubjectId?: string | null;
   updatedBySubjectId?: string | null;
 };
@@ -8040,6 +8042,8 @@ export type UpdateConnectionInput = {
   verifiedInstallAt?: Date | null;
   verifiedInstallVersion?: number | null;
   metadata?: Record<string, unknown>;
+  /** Rename: display only, so it changes neither `version` nor authority. */
+  label?: string | null;
   updatedBySubjectId?: string | null;
 };
 
@@ -13634,6 +13638,7 @@ async function createConnectionInScope(
       verifiedInstallAt: input.verifiedInstallAt ?? null,
       verifiedInstallVersion: input.verifiedInstallVersion ?? null,
       metadata: input.metadata ?? {},
+      label: input.label ?? null,
       createdBySubjectId: input.createdBySubjectId ?? null,
       updatedBySubjectId: input.updatedBySubjectId ?? input.createdBySubjectId ?? null,
     })
@@ -14493,6 +14498,7 @@ async function updateConnectionInScope(
       ? { verifiedInstallVersion: input.verifiedInstallVersion }
       : {}),
     ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+    ...(input.label !== undefined ? { label: input.label } : {}),
     ...(input.updatedBySubjectId !== undefined
       ? { updatedBySubjectId: input.updatedBySubjectId }
       : {}),

@@ -25,6 +25,7 @@ import {
 } from "./integration-sources";
 export * from "./integration-sources";
 import { defineSchema } from "./define-schema";
+import { CONNECTION_LABEL_MAX_LENGTH } from "./connection-account-label";
 import { SessionAvatar, SessionDescription } from "./bots";
 import { secretValue } from "./secret-value";
 export * from "./session-target";
@@ -15226,6 +15227,12 @@ export const FikenOAuthStartResponse = /* @__PURE__ */ defineSchema(() =>
 );
 export type FikenOAuthStartResponse = z.infer<typeof FikenOAuthStartResponse>;
 
+/** A person's name for a connection as sent; the server trims it and drops control characters. */
+export const ConnectionLabelInput = /* @__PURE__ */ defineSchema(() =>
+  z.string().max(CONNECTION_LABEL_MAX_LENGTH),
+);
+export type ConnectionLabelInput = z.infer<typeof ConnectionLabelInput>;
+
 export const ConnectionMetadata = /* @__PURE__ */ defineSchema(() =>
   z.object({
     id: primitives.uuid,
@@ -15248,6 +15255,13 @@ export const ConnectionMetadata = /* @__PURE__ */ defineSchema(() =>
     verifiedInstallAt: primitives.string.datetime({ offset: true }).nullable().optional(),
     verifiedInstallVersion: z.number().int().positive().nullable().optional(),
     metadata: z.record(primitives.string, z.unknown()),
+    /**
+     * The name the person gave this connection, such as "Team inbox key".
+     * People and agents see it when the provider doesn't say which account a
+     * connection is (API keys, services without an identity); a provider
+     * identity such as an email always comes first. Absent when unnamed.
+     */
+    label: z.string().min(1).max(CONNECTION_LABEL_MAX_LENGTH).nullable().optional(),
     /**
      * Whether this OAuth MCP account can be told apart from another account of
      * the same service: `verified` (its account is known), `reconnect` (the
@@ -15409,6 +15423,8 @@ export const CreateConnectionRequest = /* @__PURE__ */ defineSchema(() =>
     grantedScopes: z.array(primitives.nonEmptyString).default([]),
     expiresAt: primitives.string.datetime({ offset: true }).nullable().optional(),
     metadata: z.record(primitives.string, z.unknown()).default({}),
+    /** A name for this connection, shown when the provider gives no account identity. */
+    label: ConnectionLabelInput.nullable().optional(),
     operationId: primitives.optionalUuid,
     /** For direct OpenAI/Azure keys: run a short provider check before saving. */
     verifyModelAccess: primitives.optionalBoolean,
@@ -15481,6 +15497,12 @@ export const UpdateConnectionRequest = /* @__PURE__ */ defineSchema(() =>
     grantedScopes: z.array(primitives.nonEmptyString).optional(),
     expiresAt: primitives.string.datetime({ offset: true }).nullable().optional(),
     metadata: z.record(primitives.string, z.unknown()).optional(),
+    /**
+     * Rename the connection: the name shown when the provider gives no account
+     * identity. Null or blank removes it. Send it on its own; a rename never
+     * changes the credential, its version or what already-accepted work uses.
+     */
+    label: ConnectionLabelInput.nullable().optional(),
     expectedVersion: z.number().int().positive().optional(),
     operationId: primitives.optionalUuid,
   }),

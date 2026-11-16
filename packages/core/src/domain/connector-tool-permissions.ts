@@ -1,5 +1,5 @@
 import { slackRestMcpToolsForScopes } from "@opengeni/contracts/slack-rest-mcp";
-import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";
+import { connectionAccountLabel } from "@opengeni/contracts/connection-account-label";
 import { mcpAccountBindingsFromVisibleConnections } from "./mcp-account-bindings";
 import {
   personalWorkspaceExtensionApiIntegrations,
@@ -206,7 +206,7 @@ async function resolveTarget(input: Input) {
       connection,
       connectionId: accountId(integration),
       accountLabel: connection
-        ? connectionAccountIdentityLabel(connection.metadata, integration.displayName)
+        ? connectionAccountLabel(connection, integration.displayName)
         : integration.displayName,
       accounts,
       instanceKey: integration.instanceKey,
