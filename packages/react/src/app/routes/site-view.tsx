@@ -26,6 +26,7 @@ import {
   PanelRightOpenIcon,
   PinIcon,
   PlusIcon,
+  RotateCcwIcon,
 } from "lucide-react";
 import {
   lazy,
@@ -79,7 +80,13 @@ import {
   useSitePublicationLink,
 } from "../components/artifacts/site-public-link";
 import { useAppApi } from "../lib/app-api";
-import { useConsoleSiteToolBridge, useConsoleSiteViewer } from "../lib/console-site";
+import {
+  notifySiteToolReadinessChanged,
+  useConsoleSiteToolBridge,
+  useConsoleSiteViewer,
+} from "../lib/console-site";
+import { toast } from "../lib/toast";
+import { userErrorText } from "../../ui/api-error";
 import { Link, useNavigate } from "../lib/navigation";
 import { hasWorkspacePermission } from "../lib/permissions";
 import type { SiteViewArtifactsReturn } from "../lib/routes";
@@ -356,6 +363,7 @@ export function SiteViewRoute({
                       workspaceId={workspaceId}
                       origin={{ siteId, title: artifact.title }}
                       hasVersion={Boolean(artifact.currentVersion)}
+                      versionId={artifact.currentVersion?.id ?? null}
                     />
                   ) : null}
                 </>
@@ -446,13 +454,16 @@ function SiteActionsMenu({
   workspaceId,
   origin,
   hasVersion,
+  versionId,
 }: {
   workspaceId: string;
   origin: { siteId: string; title: string };
   hasVersion: boolean;
+  versionId: string | null;
 }) {
   const site = useSiteActions(workspaceId, origin, { hasVersion });
   const sidebar = useSiteSidebarActions(workspaceId, origin);
+  const resetAllowed = useResetSiteToolAllowances(workspaceId, origin.siteId, versionId);
   return (
     <span data-site-actions-root="" className="contents">
       <DropdownMenu>
@@ -492,6 +503,12 @@ function SiteActionsMenu({
               Site details
             </Link>
           </DropdownMenuItem>
+          {resetAllowed ? (
+            <DropdownMenuItem disabled={resetAllowed.busy} onSelect={resetAllowed.run}>
+              <RotateCcwIcon aria-hidden="true" />
+              Reset allowed actions
+            </DropdownMenuItem>
+          ) : null}
           {sidebar ? (
             <>
               <DropdownMenuSeparator />
@@ -505,6 +522,41 @@ function SiteActionsMenu({
       </DropdownMenu>
     </span>
   );
+}
+
+/**
+ * Forget this person's "Always allow" choices on this Site: its next actions
+ * ask again. Open frames hear it as a readiness change.
+ */
+function useResetSiteToolAllowances(
+  workspaceId: string,
+  siteId: string,
+  versionId: string | null,
+): { busy: boolean; run: () => void } | null {
+  const api = useAppApi();
+  const [busy, setBusy] = useState(false);
+  const run = useCallback(() => {
+    if (!versionId) return;
+    setBusy(true);
+    api
+      .request<{ version: 1; removed: number }>(
+        `/v1/workspaces/${encodeURIComponent(workspaceId)}/tools/site-allowances/reset`,
+        {
+          method: "POST",
+          body: JSON.stringify({ siteArtifactId: siteId, siteVersionId: versionId }),
+        },
+      )
+      .then(
+        () => {
+          notifySiteToolReadinessChanged(siteId);
+          toast.success("Allowed actions reset");
+        },
+        (error: unknown) =>
+          toast.error("Couldn't reset allowed actions", { description: userErrorText(error) }),
+      )
+      .finally(() => setBusy(false));
+  }, [api, siteId, versionId, workspaceId]);
+  return versionId ? { busy, run } : null;
 }
 
 const PAGE_SIZE = 30;

@@ -349,6 +349,59 @@ export type ToolGatewaySiteConsentResponse = {
   review: ToolGatewaySiteConsentReview | null;
   connect: { capabilityId: string | null; name: string; providerDomain: string } | null;
 };
+/**
+ * What the current viewer can do with a Site's declared tool, asked before
+ * anything runs. Advisory: every call is still checked in full.
+ *
+ * - `ready`: it runs when called (`confirm` says whether it may still ask).
+ * - `confirm`: it runs after the viewer confirms in the Opengeni frame.
+ * - `choose_account`: the viewer picks one of several accounts in the frame.
+ * - `connect`: the viewer has no account for it yet; the frame offers Connect.
+ * - `reconnect`: the viewer's account for it must sign in again.
+ * - `blocked`: tool permissions block it on this account.
+ * - `open_in_opengeni`: it needs the viewer in Opengeni (a published address has no frame).
+ * - `unavailable`: it can't run for this viewer on this Site.
+ */
+export type ToolGatewaySiteReadinessState =
+  | "ready"
+  | "confirm"
+  | "choose_account"
+  | "connect"
+  | "reconnect"
+  | "blocked"
+  | "open_in_opengeni"
+  | "unavailable";
+export type ToolGatewaySiteReadinessTool = {
+  /** The target as it was asked for. */
+  target: ToolGatewayTarget;
+  state: ToolGatewaySiteReadinessState;
+  /**
+   * Whether a call asks first: `never`, `always`, `remembered` (the viewer
+   * chose "Always allow" for it on this Site) or `maybe` (it depends on the
+   * call or on the provider).
+   */
+  confirm: "never" | "always" | "remembered" | "maybe";
+  /** The account it runs as, when one is known. */
+  runsAs: { connector: string; account: string; shared: boolean } | null;
+  /** The connector it uses ("Gmail"), when it uses one. */
+  connector: string | null;
+};
+export type ToolGatewaySiteReadinessRequest = {
+  targets: ToolGatewayTarget[];
+  siteArtifactId: string;
+  siteVersionId: string;
+};
+export type ToolGatewaySiteReadinessResponse = {
+  version: 1;
+  /** One entry per requested target, in order. */
+  tools: ToolGatewaySiteReadinessTool[];
+};
+/** Remove every "Always allow for this Site" choice the caller made on one Site (host code only). */
+export type ToolGatewaySiteAllowancesResetRequest = {
+  siteArtifactId: string;
+  siteVersionId: string;
+};
+export type ToolGatewaySiteAllowancesResetResponse = { version: 1; removed: number };
 export type ToolGatewayManifestRequest = {
   identities: ToolGatewayIdentity[];
   siteArtifactId?: string;

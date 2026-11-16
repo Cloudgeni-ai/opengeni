@@ -401,9 +401,30 @@ the publisher's own account routes with their connector so other viewers get
 their own account or the connect card instead. Every other way a Site call
 stops reaches the viewer as a plain state and the Site as a typed `code`
 (`site_tool_reconnect_required`, `site_tool_permission_denied`,
-`site_tool_not_available_for_viewer`, `site_tool_outcome_unknown`,
-`site_tool_unavailable`); see "Failures" in the same design. See
+`site_tool_not_available_for_viewer`, `site_tool_blocked`,
+`site_tool_open_in_opengeni`, `site_tool_upstream_unavailable`,
+`site_tool_outcome_unknown`, `site_tool_unavailable`); see "Failures" in the
+same design. See
 "Host-native consent" in `docs/design/workspace-html-sites-2026-09-01.md`.
+
+`POST tools/readiness` (`{siteArtifactId, siteVersionId, targets}`, 1–128
+targets) tells a Site what each declared tool needs for this viewer before a
+click: `state` (`ready`, `confirm`, `choose_account`, `connect`, `reconnect`,
+`blocked`, `open_in_opengeni`, `unavailable`), `confirm`
+(`never`/`always`/`remembered`/`maybe`), `runsAs` and `connector`. It reads the
+same authority as invoke (the Site's declarations, the viewer's accounts and
+routing, saved tool permissions, "Always allow on this Site" and connection
+status) and never prepares a provider or calls one; invoke still enforces
+everything. `POST tools/site-allowances/reset` removes the caller's own "Always
+allow" choices on one Site (people only).
+
+A gateway call whose MCP server could not be reached before anything was sent
+(connection refused, DNS failure, a tunnel that is gone; proven by the typed
+socket/DNS code, never from message text) answers 503 `upstream_unavailable`
+with `details.code` `tool_server_unreachable`, `retryable: true` and
+`outcomeUnknown: false`, for every gateway caller. Any other transport failure
+during execution stays 502 `tool_outcome_unknown`. A tool set to Block answers
+403 with `details.code` `tool_blocked`.
 
 `POST tools/target-approvals` issues a version-2 binding over the existing
 executable effect digest and Site tuple. Exact caller, identity, arguments and

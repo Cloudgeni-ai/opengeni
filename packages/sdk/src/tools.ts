@@ -15,6 +15,7 @@ import type {
   ToolGatewayTargetApprovalResponse,
   ToolGatewayManifestRequest,
   ToolGatewayManifestResponse,
+  ToolGatewaySiteReadinessResponse,
 } from "./types";
 import { createKnownWorkspaceTools } from "./known-tools";
 import { OpenGeniApiError } from "./errors";
@@ -71,6 +72,18 @@ export type OpenGeniWorkspaceTools<
       request: ToolGatewayManifestRequest,
       options?: { signal?: AbortSignal },
     ) => Promise<ToolGatewayManifestResponse>;
+    /**
+     * What the current viewer can do with each of a Site's declared tools
+     * before anything runs: `ready`, `confirm`, `choose_account`, `connect`,
+     * `reconnect`, `blocked`, `open_in_opengeni` or `unavailable`, with the
+     * account it runs as. Advisory: every call is still checked in full. In
+     * Site code the host supplies the Site; elsewhere pass `siteArtifactId`
+     * and `siteVersionId`.
+     */
+    readonly $readiness: (
+      targets: readonly ToolGatewayTarget[],
+      options?: { signal?: AbortSignal; siteArtifactId?: string; siteVersionId?: string },
+    ) => Promise<ToolGatewaySiteReadinessResponse>;
     readonly $approveTarget: (
       identity: ToolGatewayIdentity,
       argumentsValue?: Record<string, unknown>,
@@ -366,6 +379,11 @@ export class OpenGeniToolsClient implements OpenGeniToolsFacade {
         if (property === "$catalog") return catalog;
         if (property === "$call") return callIdentity;
         if (property === "$approve") return approveIdentity;
+        if (property === "$readiness")
+          return toolReadiness(
+            this.transport,
+            `/v1/workspaces/${encodeURIComponent(normalizedWorkspaceId)}/tools`,
+          );
         if (property === "$declarations") {
           return async (options: { signal?: AbortSignal } = {}) =>
             await this.transport.requestJson<ToolGatewayDeclarationsResponse>(
@@ -381,6 +399,25 @@ export class OpenGeniToolsClient implements OpenGeniToolsFacade {
       },
     });
   }
+}
+
+/** `$readiness` over one workspace's tool routes. */
+export function toolReadiness(
+  transport: OpenGeniToolTransport,
+  base: string,
+): OpenGeniWorkspaceTools["$readiness"] {
+  return async (targets, options = {}) =>
+    await transport.requestJson<ToolGatewaySiteReadinessResponse>(
+      "POST",
+      `${base}/readiness`,
+      {
+        targets: [...targets],
+        ...(options.siteArtifactId ? { siteArtifactId: options.siteArtifactId } : {}),
+        ...(options.siteVersionId ? { siteVersionId: options.siteVersionId } : {}),
+      },
+      {},
+      options.signal ? { signal: options.signal } : {},
+    );
 }
 
 function findCatalogEntry(

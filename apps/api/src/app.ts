@@ -24,6 +24,8 @@ import {
   invokeWorkspaceToolTarget,
   approveWorkspaceToolTarget,
   describeWorkspaceSiteToolConsent,
+  describeWorkspaceSiteToolReadiness,
+  resetWorkspaceSiteToolAllowances,
   resolveWorkspaceToolManifest,
 } from "./workspace-tool-target";
 import type { TargetAuthorityFence } from "./workspace-tool-target-fence";
@@ -101,6 +103,8 @@ import {
   ToolGatewayInvokeRequest,
   ToolGatewayTargetApprovalRequest,
   ToolGatewaySiteConsentRequest,
+  ToolGatewaySiteReadinessRequest,
+  ToolGatewaySiteAllowancesResetRequest,
   ToolGatewayManifestRequest,
   type AccessGrant,
   type ClientAgentConfig,
@@ -2373,7 +2377,13 @@ export function createAppComposition(
       )
         throw new HTTPException(403, { message: "tool_access_changed" });
     };
-  for (const operation of ["resolve", "invoke", "target-approvals", "manifest"] as const) {
+  for (const operation of [
+    "resolve",
+    "invoke",
+    "target-approvals",
+    "manifest",
+    "readiness",
+  ] as const) {
     app.post(`/v1/workspaces/:workspaceId/tools/${operation}`, async (c) => {
       const workspaceId = c.req.param("workspaceId");
       const authorization = await requireAccessGrantAuthorization(
@@ -2398,7 +2408,9 @@ export function createAppComposition(
             ? ToolGatewayInvokeRequest
             : operation === "manifest"
               ? ToolGatewayManifestRequest
-              : ToolGatewayTargetApprovalRequest;
+              : operation === "readiness"
+                ? ToolGatewaySiteReadinessRequest
+                : ToolGatewayTargetApprovalRequest;
       parseRequestBody(schema, body, { status: 400, message: "Invalid targeted tool request" });
       c.header("cache-control", "no-store");
       const started = performance.now();
@@ -2426,12 +2438,19 @@ export function createAppComposition(
                     ToolGatewayManifestRequest.parse(body),
                     options,
                   )
-                : await approveWorkspaceToolTarget(
-                    routeDeps,
-                    authorization,
-                    ToolGatewayTargetApprovalRequest.parse(body),
-                    options,
-                  );
+                : operation === "readiness"
+                  ? await describeWorkspaceSiteToolReadiness(
+                      routeDeps,
+                      authorization,
+                      ToolGatewaySiteReadinessRequest.parse(body),
+                      options,
+                    )
+                  : await approveWorkspaceToolTarget(
+                      routeDeps,
+                      authorization,
+                      ToolGatewayTargetApprovalRequest.parse(body),
+                      options,
+                    );
         c.header(
           "server-timing",
           `gw-target;dur=${(performance.now() - started).toFixed(1)};desc="${operation}"` +
@@ -2480,6 +2499,29 @@ export function createAppComposition(
         signal: c.req.raw.signal,
         // Reading what the call would do prepares the viewer's route under
         // the same request fence as the call itself.
+        reauthorize: freshToolCaller(c, workspaceId, authorization),
+      }),
+    );
+  });
+  // The person's own "Always allow for this Site" choices on one Site, from
+  // the Opengeni frame's Site menu.
+  app.post("/v1/workspaces/:workspaceId/tools/site-allowances/reset", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      routeDeps,
+      workspaceId,
+      "workspace:read",
+    );
+    const body = parseRequestBody(
+      ToolGatewaySiteAllowancesResetRequest,
+      await c.req.json().catch(() => null),
+      { status: 400, message: "Invalid Site allowances request" },
+    );
+    c.header("cache-control", "no-store");
+    return c.json(
+      await resetWorkspaceSiteToolAllowances(routeDeps, authorization, body, {
+        signal: c.req.raw.signal,
         reauthorize: freshToolCaller(c, workspaceId, authorization),
       }),
     );
@@ -3699,7 +3741,7 @@ const routeLabelPatterns: Array<{
   },
   {
     pattern:
-      /^\/v1\/workspaces\/[^/]+\/tools\/(resolve|invoke|target-approvals|manifest|site-consent)$/,
+      /^\/v1\/workspaces\/[^/]+\/tools\/(resolve|invoke|target-approvals|manifest|readiness|site-consent|site-allowances\/reset)$/,
     label: (match) => `/v1/workspaces/:workspaceId/tools/${match[1]}`,
   },
   {

@@ -6097,6 +6097,12 @@ export type PreparedAgentTools = {
    */
   unavailableMcpServers: ReadonlyMap<string, string>;
   /**
+   * Live, by-reference: the servers among `unavailableMcpServers` that could
+   * not be reached at all (connection refused, DNS failure, timeout), so a
+   * caller can say "try again" instead of "this tool doesn't exist".
+   */
+  unreachableMcpServers: ReadonlySet<string>;
+  /**
    * Optional completion fence for non-eager MCP discovery. Only session-marked
    * eager servers are connected/listed before this handle is returned. Search,
    * deferred invocation, Codemode activation, and final cleanup may join this
@@ -6662,6 +6668,8 @@ export async function prepareAgentTools(
   // sanitizing fetch and the current turn's tool_search description.
   const codexConnectorNamespaces = options.deferredCodexConnectorNamespaces ?? new Set<string>();
   const unavailableMcpServers = new Map<string, string>(options.preparationUnavailableMcpServers);
+  // The best-effort servers among them that could not be reached at all.
+  const unreachableMcpServers = new Set<string>();
   // Why a connection-backed server's setup was refused a credential, by
   // server id, so its connect/list failure says why instead of a bare 401.
   const setupAuthNeededReasons = new Map<string, ToolAuthNeededPayload["reason"]>();
@@ -7086,6 +7094,7 @@ export async function prepareAgentTools(
     // list, and any server whose list was trimmed to fit this turn.
     if (entry.server instanceof PrefixedMcpServer) {
       entry.server.unavailableSink = unavailableMcpServers;
+      entry.server.unreachableSink = unreachableMcpServers;
       entry.server.setupAuthNeededReasons = setupAuthNeededReasons;
     }
   }
@@ -7132,14 +7141,13 @@ export async function prepareAgentTools(
     for (const failed of connected.failed) {
       if (failed instanceof PrefixedMcpServer) {
         failed.releaseAggregateBudget();
+        const error = connected.errors.get(failed);
         unavailableMcpServers.set(
           failed.registryId,
-          mcpUnavailableReason(
-            connected.errors.get(failed),
-            "connect",
-            setupAuthNeededReasons.get(failed.registryId),
-          ),
+          mcpUnavailableReason(error, "connect", setupAuthNeededReasons.get(failed.registryId)),
         );
+        if (!setupAuthNeededReasons.has(failed.registryId) && isMcpServerUnreachableError(error))
+          unreachableMcpServers.add(failed.registryId);
       }
       if (
         !(failed instanceof PrefixedMcpServer) ||
@@ -7318,6 +7326,7 @@ export async function prepareAgentTools(
         },
         codexConnectorNamespaces,
         unavailableMcpServers,
+        unreachableMcpServers,
       };
     } catch (error) {
       // In deferred mode the eager and in-process servers have already been
@@ -7448,6 +7457,7 @@ export async function prepareAgentTools(
     },
     codexConnectorNamespaces,
     unavailableMcpServers,
+    unreachableMcpServers,
     ready,
     startDeferredPreparation,
   };
@@ -9334,6 +9344,20 @@ const MCP_CONNECTIVITY_ERROR_CODES = new Set([
   "ECONNREFUSED",
   "EPIPE",
 ]);
+// Socket and DNS failures that happen before a request can leave the process,
+// so the server cannot have received (or acted on) anything.
+const MCP_REQUEST_NOT_SENT_ERROR_CODES = new Set([
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "EAI_NONAME",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  // Bun's fetch
+  "CONNECTIONREFUSED",
+  "FAILEDTOOPENSOCKET",
+]);
+const DESTINATION_NOT_SENT_REASONS = new Set(["dns_failed", "dns_empty"]);
 const MCP_REQUEST_TIMEOUT_MESSAGES = new Set([
   "Request timed out",
   "MCP error -32001: Request timed out",
@@ -9362,6 +9386,7 @@ function inspectMcpTransportError(
   hasConnectivityMarker: boolean;
   hasTypedError: boolean;
   hasRequestTimeout: boolean;
+  hasNotSentCode: boolean;
   httpStatuses: number[];
   statuses: number[];
 } {
@@ -9374,6 +9399,7 @@ function inspectMcpTransportError(
   let hasConnectivityMarker = false;
   let hasTypedError = false;
   let hasRequestTimeout = false;
+  let hasNotSentCode = false;
   let inspectedNodes = 0;
   let complete = true;
 
@@ -9390,7 +9416,11 @@ function inspectMcpTransportError(
     let code: unknown;
     let failureKind: unknown;
     let message: unknown;
+    let reason: unknown;
+    let name: unknown;
     try {
+      reason = record.reason;
+      name = record.name;
       const status = record.status;
       const statusCode = record.statusCode;
       code = record.code;
@@ -9424,6 +9454,14 @@ function inspectMcpTransportError(
     }
     if (failureKind === "connectivity_unavailable") {
       hasConnectivityMarker = true;
+    }
+    if (
+      (typeof code === "string" && MCP_REQUEST_NOT_SENT_ERROR_CODES.has(code.toUpperCase())) ||
+      (name === "DestinationPolicyError" &&
+        typeof reason === "string" &&
+        DESTINATION_NOT_SENT_REASONS.has(reason))
+    ) {
+      hasNotSentCode = true;
     }
     if (
       code === -32_000 &&
@@ -9472,6 +9510,7 @@ function inspectMcpTransportError(
     hasConnectivityMarker,
     hasTypedError,
     hasRequestTimeout,
+    hasNotSentCode,
     httpStatuses,
     statuses,
   };
@@ -9549,6 +9588,44 @@ export function isMcpTransportConnectivityError(error: unknown): boolean {
     typeof error === "object" &&
     mcpTransportFailureKind(error) === "connectivity_unavailable"
   );
+}
+
+/**
+ * An MCP server that could not be reached: its transport failed to connect,
+ * timed out, or carried a typed socket/DNS failure. Used to say "try again"
+ * for a server that dropped out of a preparation, never to retry a call.
+ */
+export function isMcpServerUnreachableError(error: unknown): boolean {
+  try {
+    if (!error || typeof error !== "object") return false;
+    if (isMcpRequestTimeoutError(error) || isMcpTransportConnectivityError(error)) return true;
+    if (isRawMcpTransportConnectivityError(error)) return true;
+    return isMcpRequestNotSentError(error);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A failure that proves the request never left: the whole error chain was
+ * inspected, no HTTP response or timeout is involved, and it carries a typed
+ * socket/DNS code that only occurs before anything is sent. A caller may say
+ * the outcome is known (nothing happened) and that retrying is safe.
+ */
+export function isMcpRequestNotSentError(error: unknown): boolean {
+  try {
+    if (!error || typeof error !== "object") return false;
+    const inspection = inspectMcpTransportError(error);
+    return (
+      inspection.complete &&
+      inspection.hasNotSentCode &&
+      inspection.httpStatuses.length === 0 &&
+      !inspection.hasConnectionClosed &&
+      !inspection.hasRequestTimeout
+    );
+  } catch {
+    return false;
+  }
 }
 
 /** Only the verified required first-party connect/list boundary may grant this wait. */
@@ -10381,6 +10458,8 @@ export class PrefixedMcpServer implements MCPServer {
   private loggedListToolsFailure = false;
   /** Where this server records that some or all of its tools are unavailable this attempt. */
   unavailableSink: Map<string, string> | undefined;
+  /** Where this server records that it could not be reached this attempt (see `unreachableMcpServers`). */
+  unreachableSink: Set<string> | undefined;
   /** Why setup was refused a credential, by server id (see connectionBrokerFetch). */
   setupAuthNeededReasons: ReadonlyMap<string, ToolAuthNeededPayload["reason"]> | undefined;
   /** Set by this server's transport when a tools/list response is refused for size. */
@@ -10878,6 +10957,12 @@ export class PrefixedMcpServer implements MCPServer {
           ? "connected, but its tool list is larger than one turn can hold, so its tools are unavailable this turn."
           : mcpUnavailableReason(error, "list", this.setupAuthNeededReasons?.get(this.registryId)),
       );
+      if (
+        !tooLarge &&
+        !this.setupAuthNeededReasons?.has(this.registryId) &&
+        isMcpServerUnreachableError(error)
+      )
+        this.unreachableSink?.add(this.registryId);
       this.releaseAggregateBudget();
       return [];
     }

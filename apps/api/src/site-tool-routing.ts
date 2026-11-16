@@ -6,7 +6,9 @@ import {
 import {
   availableMcpAccountBindings,
   expandMcpAccountRoutes,
+  mcpAccountBindingsFromVisibleConnections,
   settingsWithEnabledCapabilityMcpServers,
+  visibleMcpAccountConnections,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
@@ -116,7 +118,20 @@ export type SiteToolAccountInventory = {
   plain: ReadonlySet<string>;
   /** The viewer's own account routes. */
   accounts: ReadonlyArray<Omit<SiteToolAccount, "identity"> & { serverId: string }>;
+  /** Each server's own approval recommendation and approval identity input. */
+  servers?: ReadonlyMap<string, SiteToolServerApproval>;
 };
+
+/** What decides whether a server's tools ask first (see `prepareWorkspaceToolGateway`). */
+export type SiteToolServerApproval = {
+  url?: string;
+  /** A fixed connection the server is bound to, when it has one. */
+  connectionId?: string;
+  requireApproval?: boolean | readonly string[];
+};
+
+/** "ada@example.com · Yours" -> "ada@example.com" */
+const accountName = (label: string) => label.replace(/ · [^·]+$/u, "");
 
 /** The viewer's own connector accounts, read once; grants nothing by itself. */
 export async function readSiteToolAccountInventory(
@@ -151,7 +166,15 @@ export async function readSiteToolAccountInventory(
   const routes = expandMcpAccountRoutes({ settings, tools, bindings });
   const canonical = new Map<string, SiteToolConnect>();
   const plain = new Set<string>();
+  const servers = new Map<string, SiteToolServerApproval>();
   for (const server of settings.mcpServers) {
+    servers.set(server.id, {
+      ...(server.url ? { url: server.url } : {}),
+      ...(server.connectionRef?.connectionId
+        ? { connectionId: server.connectionRef.connectionId }
+        : {}),
+      ...(server.requireApproval === undefined ? {} : { requireApproval: server.requireApproval }),
+    });
     const ref = server.connectionRef;
     if (!ref || ref.authoritySource === "host") {
       plain.add(server.id);
@@ -168,8 +191,7 @@ export async function readSiteToolAccountInventory(
     // Only routes the gateway would actually expose to this viewer.
     const label = routes.accountLabels.get(binding.serverId);
     if (!label || !canonical.has(binding.canonicalServerId)) return [];
-    // "ada@example.com · Yours" -> "ada@example.com"
-    const account = binding.accountLabel.replace(/ · [^·]+$/u, "");
+    const account = accountName(binding.accountLabel);
     return [
       {
         serverId: binding.serverId,
@@ -181,7 +203,67 @@ export async function readSiteToolAccountInventory(
       },
     ];
   });
-  return { canonical, plain, accounts };
+  return { canonical, plain, accounts, servers };
+}
+
+/** An account of the viewer's that would serve a connector but must sign in again. */
+export type SiteToolReconnectAccount = {
+  canonicalServerId: string;
+  connectionId: string;
+  account: string;
+  shared: boolean;
+};
+
+/**
+ * The viewer's accounts that stopped working (they must sign in again), as
+ * the connectors they would serve: the same visibility and matching as the
+ * working accounts in `readSiteToolAccountInventory`. Advisory only (it never
+ * routes a call), so the viewer is offered Reconnect for that account instead
+ * of Connect for a new one.
+ */
+export async function readSiteToolReconnectAccounts(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  canonicalServerIds: readonly string[],
+): Promise<SiteToolReconnectAccount[]> {
+  if (
+    canonicalServerIds.length === 0 ||
+    grant.principalKind === "service" ||
+    grant.principalKind === "api_key"
+  )
+    return [];
+  const source = {
+    kind: "subject" as const,
+    accountId: grant.accountId,
+    subjectId: grant.subjectId,
+  };
+  const connections = await visibleMcpAccountConnections(deps.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    source,
+  });
+  const stale = connections.filter(
+    (connection) => connection.status === "needs_reauth" || connection.status === "error",
+  );
+  if (stale.length === 0) return [];
+  const base = deps.catalogSourceSettings ?? deps.settings;
+  const settings = await settingsWithEnabledCapabilityMcpServers(deps.db, grant.workspaceId, base, {
+    subjectId: grant.subjectId,
+  });
+  const wanted = new Set(canonicalServerIds);
+  return mcpAccountBindingsFromVisibleConnections({
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    subjectId: grant.subjectId,
+    servers: settings.mcpServers.filter((server) => wanted.has(server.id)),
+    // Matched as if they still worked; only their status differs.
+    connections: stale.map((connection) => ({ ...connection, status: "active" as const })),
+  }).map((binding) => ({
+    canonicalServerId: binding.canonicalServerId,
+    connectionId: binding.connectionId,
+    account: accountName(binding.accountLabel),
+    shared: binding.subjectScope === "workspace",
+  }));
 }
 
 /**

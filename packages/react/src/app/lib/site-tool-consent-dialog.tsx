@@ -142,22 +142,33 @@ export function SiteToolConsentDialog({
     onDecision(decision);
   };
   const account = prompt.accounts.find((item) => identityKey(item.identity) === selected);
-  const from =
+  // Whose account the action runs as: the chosen account (and whether the
+  // workspace shares it), or the viewer when no account is involved.
+  const shared = account?.shared === true ? " · Shared with workspace" : "";
+  const runsAs =
     prompt.accounts.length > 1 ? (
-      <SelectMenu
-        variant="native"
-        size="sm"
-        aria-label="From"
-        value={selected}
-        onValueChange={choose}
-        options={prompt.accounts.map((item) => ({
-          value: identityKey(item.identity),
-          label: item.account,
-        }))}
-      />
+      <span className="flex min-w-0 items-center gap-2">
+        <SelectMenu
+          variant="native"
+          size="sm"
+          aria-label="Runs as"
+          value={selected}
+          onValueChange={choose}
+          options={prompt.accounts.map((item) => ({
+            value: identityKey(item.identity),
+            label: item.account,
+          }))}
+        />
+        {shared ? <span className="shrink-0 text-fg-muted">Shared with workspace</span> : null}
+      </span>
     ) : account ? (
-      account.account
-    ) : null;
+      <>
+        {account.account}
+        {shared ? <span className="text-fg-muted">{shared}</span> : null}
+      </>
+    ) : (
+      "You"
+    );
   return (
     <ConfirmDialog
       open
@@ -177,27 +188,23 @@ export function SiteToolConsentDialog({
         })
       }
     >
-      {from || summary.rows.length > 0 ? (
-        <dl className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-4 gap-y-2 text-sm">
-          {from ? (
-            <>
-              <dt className="text-fg-muted">From</dt>
-              <dd className="min-w-0 truncate">{from}</dd>
-            </>
-          ) : null}
-          {summary.rows.map((row) => (
-            <div key={row.label} className="contents">
-              <dt className="text-fg-muted">{row.label}</dt>
-              <dd className="min-w-0 break-words">{row.value}</dd>
-            </div>
-          ))}
-        </dl>
-      ) : null}
+      <dl className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-4 gap-y-2 text-sm">
+        <dt className="text-fg-muted">Runs as</dt>
+        <dd className="min-w-0 truncate">{runsAs}</dd>
+        {summary.rows.map((row) => (
+          <div key={row.label} className="contents">
+            <dt className="text-fg-muted">{row.label}</dt>
+            <dd className="min-w-0 break-words">{row.value}</dd>
+          </div>
+        ))}
+      </dl>
       {review === "failed" ? (
         <p className="text-sm text-danger">Couldn't read this from the selected account.</p>
       ) : null}
       <CheckboxField
-        label="Always allow for this Site"
+        label={
+          account ? "Always allow on this Site from this account" : "Always allow on this Site"
+        }
         checked={alwaysAllow}
         onCheckedChange={setAlwaysAllow}
       />
@@ -275,7 +282,8 @@ export function SiteToolRecover({
     );
   const retry = failure.retryable;
   const hint =
-    failure.code === "site_tool_permission_denied" && failure.system
+    (failure.code === "site_tool_permission_denied" || failure.code === "site_tool_blocked") &&
+    failure.system
       ? t("siteToolRecover.askWhoeverManages", { system: failure.system })
       : failure.code === "site_tool_not_available_for_viewer"
         ? t("siteToolRecover.askSiteOwner")

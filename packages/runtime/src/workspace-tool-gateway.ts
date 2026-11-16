@@ -6,6 +6,9 @@
 export {
   // A connection that cannot serve an approved call; nothing reached the provider.
   ConnectionApprovalPreflightError,
+  // A server that could not be reached / a request that provably never left.
+  isMcpRequestNotSentError,
+  isMcpServerUnreachableError,
   prepareAgentTools as prepareWorkspaceToolGatewayTools,
   type LocalMcpServerRegistration,
   type PreparedAgentTools as PreparedWorkspaceToolGatewayTools,

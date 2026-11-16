@@ -76,6 +76,8 @@ import {
 import {
   ConnectionApprovalPreflightError,
   isMcpAccountParameterChoiceError,
+  isMcpRequestNotSentError,
+  isMcpServerUnreachableError,
   type LocalMcpServerRegistration,
   type PreparedWorkspaceToolGatewayTools,
   type ResolveConnectionCredentialInput,
@@ -131,6 +133,12 @@ export type PreparedWorkspaceToolGateway = Pick<
   toolGateway: NonNullable<PreparedWorkspaceToolGatewayTools["toolGateway"]>;
   toolGatewayCatalog: NonNullable<PreparedWorkspaceToolGatewayTools["toolGatewayCatalog"]>;
   reauthorize?: () => Promise<void>;
+  /**
+   * Servers that dropped out of this preparation because they could not be
+   * reached (`PreparedAgentTools.unreachableMcpServers`), so a missing tool
+   * on one of them is answered as "try again", not as a tool that isn't there.
+   */
+  unreachable?: ReadonlySet<string>;
   /**
    * The provider's own review of exact arguments (for Gmail, the message as it
    * would be sent), read through the same fenced connection. Empty when the
@@ -1195,6 +1203,7 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
     toolGateway: prepared.toolGateway,
     toolGatewayCatalog: prepared.toolGatewayCatalog,
     close: prepared.close,
+    unreachable: prepared.unreachableMcpServers,
     review: async (identity, args) => {
       const server = prepared.mcpServers.find(
         (candidate) => (candidate as { registryId?: unknown }).registryId === identity.serverId,
@@ -1392,6 +1401,10 @@ export async function callWorkspaceToolGateway(
     source: entry?.source ?? "aggregate",
   });
   try {
+    // Missing because its server couldn't be reached, not because the catalog
+    // changed: nothing was sent, so the same call can simply be tried again.
+    if (!entry && prepared.unreachable?.has(request.identity.serverId))
+      throw toolServerUnreachableError();
     const siteContext =
       request.siteArtifactId && request.siteVersionId
         ? {
@@ -1449,9 +1462,16 @@ export async function callWorkspaceToolGateway(
     const secretContext = siteContext
       ? { siteId: siteContext.siteArtifactId, siteVersion: siteContext.siteVersionId }
       : null;
-    const result = await withSiteSecretContext(secretContext, () =>
-      origin ? withSiteSessionOrigin(origin, () => preparedCall.execute()) : preparedCall.execute(),
-    );
+    let result: Awaited<ReturnType<PreparedToolGatewayCall["execute"]>>;
+    try {
+      result = await withSiteSecretContext(secretContext, () =>
+        origin
+          ? withSiteSessionOrigin(origin, () => preparedCall.execute())
+          : preparedCall.execute(),
+      );
+    } catch (error) {
+      throwWorkspaceToolGatewayExecuteError(error);
+    }
     observation.end(result.isError ? "tool_error" : "ok");
     return ToolGatewayCallResponse.parse({
       operationId,
@@ -1582,8 +1602,16 @@ export function throwWorkspaceToolGatewayHttpError(error: unknown): never {
     throw new HTTPException(409, { message: error.code, cause: error });
   }
   if (error instanceof ToolGatewayBlockedError) {
-    throw new HTTPException(403, { message: error.code, cause: error });
+    // The message stays the bare code existing callers match on.
+    throw new ApiHttpError(403, {
+      code: "forbidden",
+      message: error.code,
+      retryable: false,
+      outcomeUnknown: false,
+      details: { code: "tool_blocked" },
+    });
   }
+  if (isMcpRequestNotSentError(error)) throw toolServerUnreachableError();
   if (isMcpAccountParameterChoiceError(error)) {
     // Nothing was sent; the message names the account's values to choose from.
     throw new ApiHttpError(422, {
@@ -1632,6 +1660,40 @@ export function throwWorkspaceToolGatewayHttpError(error: unknown): never {
     });
   }
   throw error;
+}
+
+/**
+ * The tool's server could not be reached (connection refused, DNS failure,
+ * a tunnel that is gone, or a timeout while connecting), and the call itself
+ * was never sent. Safe to retry.
+ */
+export function toolServerUnreachableError(): ApiHttpError {
+  return new ApiHttpError(503, {
+    code: "upstream_unavailable",
+    message: "The tool's server couldn't be reached. Nothing was sent; try again.",
+    retryable: true,
+    outcomeUnknown: false,
+    details: { code: "tool_server_unreachable" },
+  });
+}
+
+/**
+ * A failure while executing a prepared call. A request that provably never
+ * left is retryable; any other typed transport failure may have reached the
+ * provider, so its outcome is unknown. Everything else keeps the ordinary
+ * gateway mapping.
+ */
+export function throwWorkspaceToolGatewayExecuteError(error: unknown): never {
+  if (isMcpRequestNotSentError(error)) throw toolServerUnreachableError();
+  if (!(error instanceof HTTPException) && isMcpServerUnreachableError(error))
+    throw new ApiHttpError(502, {
+      code: "upstream_unavailable",
+      message: "The tool call ended without a confirmed result. Reconcile before retrying.",
+      retryable: false,
+      outcomeUnknown: true,
+      details: { code: "tool_outcome_unknown" },
+    });
+  throwWorkspaceToolGatewayHttpError(error);
 }
 
 /** A saved Site version, only when the caller can see the Site. */
