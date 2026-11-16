@@ -1,5 +1,21 @@
 # @opengeni/config
 
+## 6.24.0
+
+### Patch Changes
+
+- 477f1db: Agent turns spend less time before each model request. The checks run before every model request (task usage limit, funding, workspace allowance and monthly limits) now read in parallel and still report the same refusal as before. Packaged Skills and interaction tool schemas are prepared once per process instead of on every turn.
+
+  New latency metrics: `opengeni_model_response_to_next_dispatch_seconds` (the gap from one model response to the next request, by phase) and the parts of response metering (`response_usage_lease`, `_billing`, `_cache`, `_checkpoint` on `opengeni_model_step_phase_duration_seconds`). A small sample of agent turns also exports its database statement spans when OTLP tracing is configured.
+
+  Prebuilt Sandbox Environment images on Modal are rebuilt again after a build stops for more than 20 minutes or fails with a retryable error, and the image snapshot has its own timeout (`OPENGENI_RIG_PROVIDER_IMAGE_SNAPSHOT_TIMEOUT_MS`, default 5 minutes) instead of the 60-second workspace snapshot timeout.
+
+- Updated dependencies [24104b1]
+- Updated dependencies [c0248a5]
+  - @opengeni/codex@6.24.0
+  - @opengeni/contracts@6.24.0
+  - @opengeni/xai-subscription@6.24.0
+
 ## 6.23.0
 
 ### Patch Changes
