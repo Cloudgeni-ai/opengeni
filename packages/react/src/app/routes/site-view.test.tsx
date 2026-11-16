@@ -1295,7 +1295,12 @@ test("the Site's own menu copies its title, duplicates it and opens its details"
     "More Site actions",
   );
   // Without a sidebar listing the Site, its Pin and Archive have nowhere to act.
-  expect(siteActions(container)).toEqual(["Copy title", "Duplicate", "Site details", "Reset allowed actions"]);
+  expect(siteActions(container)).toEqual([
+    "Copy title",
+    "Duplicate",
+    "Site details",
+    "Reset allowed actions",
+  ]);
   // The chat's menu keeps to the chat.
   const chatMenu = [...container.querySelectorAll("[role='menu']")].filter(
     (menu) => !menu.closest("[data-site-actions-root]"),
@@ -1321,7 +1326,13 @@ test("the Site's menu pins and archives through the sidebar's own actions", asyn
   });
   try {
     const { container } = await render();
-    expect(siteActions(container)).toEqual(["Copy title", "Unpin", "Site details", "Reset allowed actions", "Archive"]);
+    expect(siteActions(container)).toEqual([
+      "Copy title",
+      "Unpin",
+      "Site details",
+      "Reset allowed actions",
+      "Archive",
+    ]);
     await act(async () => button(container, "Unpin")!.click());
     await act(async () => button(container, "Archive")!.click());
     expect(pins).toEqual([[siteId, false]]);
