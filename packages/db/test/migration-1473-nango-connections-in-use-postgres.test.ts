@@ -2,8 +2,9 @@
  * Migration 1473: opengeni_private.nango_connections_in_use_v1 answers which
  * Nango connections a live row still stands for, deployment-wide. It runs as
  * the table owner, which FORCE ROW LEVEL SECURITY binds too, so it must read
- * through its owner-only policy when migrated by a role without BYPASSRLS
- * (as in production), and the runtime role must still see only its own rows.
+ * through the one-transaction tenancy inventory window when migrated by a role
+ * without BYPASSRLS (as in production), close that window again, and leave the
+ * runtime role seeing only its own rows.
  */
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
@@ -93,7 +94,12 @@ describe("migration 1473: Nango connections in use", () => {
     );
     // Without any workspace context, as the sweep and disconnect call it.
     expect([...(await nangoConnectionsInUse(client!.db, ids))!]).toEqual(["in-use-live"]);
-    // The owner-only policy never widens what the runtime role reads itself.
+    // The inventory window it opened is closed again.
+    const [windows] = await owned.admin.unsafe(
+      "select count(*)::text as count from opengeni_private.organization_tenancy_inventory_capabilities",
+    );
+    expect(windows?.count).toBe("0");
+    // It never widens what the runtime role reads itself.
     const [visible] = await rawRows<{ count: string }>(
       client!.db,
       sql`select count(*)::text as count from connections`,

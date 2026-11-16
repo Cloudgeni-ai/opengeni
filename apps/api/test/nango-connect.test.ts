@@ -329,4 +329,29 @@ describe("Nango webhook", () => {
       ),
     ).toBe("ignored");
   });
+
+  test("asks Nango to retry when the person's connections cannot be read", async () => {
+    for (const operation of ["refresh", "deletion"]) {
+      const event = JSON.stringify({
+        type: "auth",
+        operation,
+        connectionId: "nango-conn",
+        providerConfigKey: "google-mail",
+        success: operation !== "refresh",
+        tags: {
+          organization_id: "00000000-0000-4000-8000-000000000001",
+          opengeni_workspace_id: "00000000-0000-4000-8000-000000000002",
+          end_user_id: "user:00000000-0000-4000-8000-000000000003",
+          opengeni_integration: "gmail",
+          opengeni_attempt_id: "attempt",
+        },
+      });
+      await expect(
+        handleNangoWebhook(
+          { db: unreachableDb, settings, nangoBackends: async () => backends },
+          { rawBody: event, signature: sign(event) },
+        ),
+      ).rejects.toMatchObject({ status: 503 });
+    }
+  });
 });

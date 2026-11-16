@@ -18,25 +18,19 @@
 -- read as a reason to delete nothing.
 --
 -- connections forces row-level security on its owner too, and the definer
--- runs as that owner with no workspace context, so it reads through an
--- owner-only policy limited to Nango-backed rows (the runtime role never
--- matches it, as in 1153 and 1406).
+-- runs as that owner with no workspace context. It opens the existing
+-- one-transaction owner inventory window (the organization tenancy
+-- inventory capability, as nango_affected_connections in 1406 does) for
+-- the length of the query and closes it again, so no other owner routine
+-- gains a wider read. It only closes a window it opened itself.
 --
--- Rolling: one owner-only read policy and one read-only definer the
--- previous release never calls.
+-- The person's own reads can also miss a row the listing drops (a row
+-- without bound authority), which they cannot detect; that is the residual
+-- risk this definer removes once granted.
+--
+-- Rolling: one read-only definer the previous release never calls.
 SET LOCAL lock_timeout = '5s';
-
-DO $nango_connections_in_use_read$
-DECLARE
-  owner_name text := current_user;
-BEGIN
-  EXECUTE pg_catalog.format(
-    'CREATE POLICY nango_connections_in_use_read ON connections FOR SELECT TO %I '
-      'USING (metadata ->> ''integrationBackend'' = ''nango'')',
-    owner_name
-  );
-END
-$nango_connections_in_use_read$;
+SET LOCAL statement_timeout = '5min';
 
 DO $nango_connections_in_use$
 DECLARE
@@ -45,16 +39,30 @@ BEGIN
   EXECUTE pg_catalog.format($definition$
     CREATE FUNCTION opengeni_private.nango_connections_in_use_v1(p_nango_connection_ids text[])
     RETURNS TABLE(nango_connection_id text)
-    LANGUAGE sql
-    STABLE
+    LANGUAGE plpgsql
+    VOLATILE
     SECURITY DEFINER
     SET search_path = pg_catalog, %1$I, pg_temp
     AS $body$
-      SELECT DISTINCT connection.metadata ->> 'nangoConnectionId'
-      FROM connections connection
-      WHERE connection.metadata ->> 'integrationBackend' = 'nango'
-        AND connection.metadata ->> 'nangoConnectionId' = ANY (p_nango_connection_ids[1:1000])
-        AND connection.status <> 'revoked'
+    DECLARE opened integer;
+    BEGIN
+      INSERT INTO opengeni_private.organization_tenancy_inventory_capabilities (
+        backend_pid, transaction_id
+      ) VALUES (pg_catalog.pg_backend_pid(), pg_catalog.pg_current_xact_id())
+      ON CONFLICT DO NOTHING;
+      GET DIAGNOSTICS opened = ROW_COUNT;
+      RETURN QUERY
+        SELECT DISTINCT connection.metadata ->> 'nangoConnectionId'
+        FROM connections connection
+        WHERE connection.metadata ->> 'integrationBackend' = 'nango'
+          AND connection.metadata ->> 'nangoConnectionId' = ANY (p_nango_connection_ids[1:1000])
+          AND connection.status <> 'revoked';
+      IF opened > 0 THEN
+        DELETE FROM opengeni_private.organization_tenancy_inventory_capabilities
+        WHERE backend_pid = pg_catalog.pg_backend_pid()
+          AND transaction_id = pg_catalog.pg_current_xact_id_if_assigned();
+      END IF;
+    END
     $body$
   $definition$, data_schema);
 END

@@ -115,11 +115,15 @@ connections; that is not a duplicate.
   Whether a Nango connection is still used is decided deployment-wide by
   `opengeni_private.nango_connections_in_use_v1` (migration 1473: any
   non-revoked Nango row that names it, whatever its membership or authority
-  state; it reads through an owner-only policy on Nango rows, since
-  `connections` forces row-level security on its owner too). 1473 withholds its runtime grant (the previous release rejects a
+  state; it opens the one-transaction tenancy inventory window for its own
+  query only, since `connections` forces row-level security on its owner
+  too). 1473 withholds its runtime grant (the previous release rejects a
   grant on a definer it does not know); until a later migration grants it,
   the person's own reads decide, and a membership that is not active or an
-  organization that cannot be read means nothing is deleted, except a
+  organization that cannot be read means nothing is deleted. Those reads
+  cannot see a row without bound authority, so until the grant such a row's
+  Nango connection can still be deleted (Nango rows made since the
+  16 November launch all bind authority). The exception is a
   refused or failed attempt's own connection that Nango made within the
   last two hours and no readable row names (never after a failed read).
   An existing connection replaces a fresh one only while Nango reports it

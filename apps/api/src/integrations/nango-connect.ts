@@ -1065,13 +1065,17 @@ export async function handleNangoWebhook(
   const ownership = integration ? integrationOwnership(integration) : "personal";
   // Every live row of this person, in any organization, that stands for the
   // Nango connection: rows in several organizations may share one.
-  const standing = (
-    await listPersonNangoConnections(deps.db, {
-      subjectId,
-      providerConfigKey: event.providerConfigKey,
-      knownWorkspaceIds: [workspaceId],
-    }).catch(() => ({ rows: [] as ConnectionMetadata[], complete: false }))
-  ).rows.filter((connection) => nangoConnectionIdOf(connection) === event.connectionId);
+  const person = await listPersonNangoConnections(deps.db, {
+    subjectId,
+    providerConfigKey: event.providerConfigKey,
+    knownWorkspaceIds: [workspaceId],
+  }).catch(() => ({ rows: [] as ConnectionMetadata[], complete: false, readFailed: true }));
+  const standing = person.rows.filter(
+    (connection) => nangoConnectionIdOf(connection) === event.connectionId,
+  );
+  // A failed read is not "no row stands for it": answer so Nango retries.
+  if (person.readFailed && standing.length === 0 && event.operation !== "creation")
+    throw new HTTPException(503, { message: "Connections could not be read; retry" });
   const usage = (
     stored: ConnectionMetadata,
     kind: "connection_needs_reauth" | "connection_deleted" | "connection_reconnected",
