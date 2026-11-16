@@ -12,7 +12,7 @@ control state `"active"`, `delivery: "coalesced_internal_update"`) as
 ended. The tool descriptions and results now say which mode was used and when
 the target reads it; the prompt only follows the rename.
 
-Size: about +10 bytes. The legacy contract carries the same rename in the
+Size: +14 bytes in the modular prompt, +2 bytes in the legacy contract. The legacy contract carries the same rename in the
 delegation sentence, so that sentence stays in parity. The two session-target
 sentences exist only in the modular prompt, so their lines in
 `2026-11-11-legacy-sentence-edits.md` are edited in place.
