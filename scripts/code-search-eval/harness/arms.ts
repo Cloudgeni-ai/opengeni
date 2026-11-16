@@ -286,6 +286,9 @@ export function jevRerankArm(
     batch?: number;
     threshold?: number;
     name?: string;
+    /** Payload shrink for providers with small input limits. */
+    excerptLines?: number;
+    maxTaskChars?: number;
   } = {},
 ): Arm {
   const candidates = options.candidates ?? 30;
@@ -305,17 +308,18 @@ export function jevRerankArm(
       );
       const usage = zeroUsage();
       const probability = new Map<string, number>();
+      let misses = 0;
       for (let i = 0; i < files.length; i += batch) {
         const group = files.slice(i, i + batch);
         const state = {
-          task: task.query.slice(0, 6000),
+          task: task.query.slice(0, options.maxTaskChars ?? 6000),
           candidates: Object.fromEntries(
             group.map((file, j) => [
               `c${j}`,
               {
                 path: file,
                 excerpts: spansOf(file).map((s) =>
-                  excerpt(index.get(file) ?? "", s),
+                  excerpt(index.get(file) ?? "", s, options.excerptLines),
                 ),
               },
             ]),
@@ -330,7 +334,17 @@ export function jevRerankArm(
             },
           ]),
         );
-        const result = await decisionModel.decide(state, questions, { signal });
+        let result: Awaited<ReturnType<DecisionModel["decide"]>>;
+        try {
+          result = await decisionModel.decide(state, questions, { signal });
+        } catch (error) {
+          // A request the provider refuses as invalid (HTTP 400, e.g. over its input limit) is not
+          // billed; its files count as rejected and the task goes on.
+          if ((error as { status?: number }).status !== 400) throw error;
+          misses += group.length;
+          for (const file of group) probability.set(file, 0);
+          continue;
+        }
         addUsage(usage, {
           modelCalls: 1,
           inputTokens: result.usage.inputTokens ?? 0,
@@ -357,6 +371,7 @@ export function jevRerankArm(
           files: ordered,
           spans: budgetSpans(ordered.flatMap((f) => spansOf(f))),
           fileScores: Object.fromEntries(ranked.map((r) => [r.file, r.p])),
+          ...(misses ? { misses } : {}),
         },
         usage,
       };

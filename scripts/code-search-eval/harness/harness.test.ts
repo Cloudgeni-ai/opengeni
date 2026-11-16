@@ -605,6 +605,27 @@ describe("arms on a real checkout", () => {
     expect(usage.cashUsd).toBeGreaterThan(0);
   });
 
+  test("rerank counts a refused (400) batch as rejected files and continues", async () => {
+    const refusing: DecisionModel = {
+      async decide() {
+        throw Object.assign(new Error("too long"), { status: 400 });
+      },
+    };
+    const { prediction, usage } = await jevRerankArm(refusing, {
+      threshold: 0.2,
+    }).run(t(), ctx());
+    expect(prediction.misses).toBeGreaterThan(0);
+    // Every batch refused: the arm falls back to the top of the candidate ranking.
+    expect(prediction.files.length).toBeLessThanOrEqual(3);
+    expect(usage.modelCalls).toBe(0);
+    const failing: DecisionModel = {
+      async decide() {
+        throw Object.assign(new Error("down"), { status: 500 });
+      },
+    };
+    await expect(jevRerankArm(failing).run(t(), ctx())).rejects.toThrow();
+  });
+
   test("code_search arm runs the real pipeline on a local workspace", async () => {
     const neutral: DecisionModel = {
       async decide(_input, questions) {
@@ -751,6 +772,45 @@ describe("decision models", () => {
     await expect(
       model.decide({ big: "x".repeat(4000) }, questions),
     ).rejects.toBeInstanceOf(BudgetStop);
+  });
+  test("question maps over the provider cap are split into several requests", async () => {
+    const ledger = new TokenLedger(1_000_000);
+    const sentIds: string[][] = [];
+    const model = createDecisionModelsDecisionModel({
+      apiKey: "k",
+      model: "s1-pro",
+      ledger,
+      arm: "dm",
+      taskId: () => "t",
+      maxQuestions: 3,
+      fetch: async (_url, init) => {
+        const ids = Object.keys(
+          (JSON.parse(String(init.body)) as { questions: object }).questions,
+        );
+        sentIds.push(ids);
+        return reply({
+          model: "s1-pro-x",
+          answers: Object.fromEntries(
+            ids.map((id) => [id, { type: "noul", noul: 0.5 }]),
+          ),
+          usage: { input_tokens: 100 },
+        });
+      },
+    });
+    const many = Object.fromEntries(
+      ["a", "b", "c", "d", "e"].map((id) => [id, questions.p]),
+    );
+    const result = await model.decide({ s: 1 }, many);
+    expect(sentIds.map((ids) => ids.length).sort()).toEqual([2, 3]);
+    expect(Object.keys(result.answers).sort()).toEqual([
+      "a",
+      "b",
+      "c",
+      "d",
+      "e",
+    ]);
+    expect(result.usage.inputTokens).toBe(200);
+    expect(ledger.usedTokens).toBe(200);
   });
 });
 

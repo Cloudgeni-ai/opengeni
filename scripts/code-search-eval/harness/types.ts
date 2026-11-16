@@ -22,6 +22,8 @@ export type Prediction = {
   spans: Span[];
   /** Per-file relevance from a scoring arm, kept so a cut chosen on dev can be applied afterwards. */
   fileScores?: Record<string, number>;
+  /** Candidates a decision provider refused to judge (HTTP 400, not billed), counted as rejected. */
+  misses?: number;
 };
 
 export type Usage = {

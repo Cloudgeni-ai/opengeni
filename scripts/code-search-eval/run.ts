@@ -196,7 +196,14 @@ async function buildArms(): Promise<Arm[]> {
     if (name === "jev-rerank") return jevRerankArm(gatewayModel!);
     if (name === "code-search") return codeSearchArm(gatewayModel!);
     if (name === "dm-rerank")
-      return jevRerankArm(dmModel!, { name: "dm-rerank" });
+      // Decision Models takes 3 questions and 8K input tokens per s1-pro request: 3 candidates per
+      // call with shorter excerpts keeps a call inside both limits.
+      return jevRerankArm(dmModel!, {
+        name: "dm-rerank",
+        batch: 3,
+        excerptLines: 30,
+        maxTaskChars: 5000,
+      });
     if (name === "dm-code-search")
       return codeSearchArm(dmModel!, "dm-code-search");
     if (name === "dense" || name === "hybrid-dense") {

@@ -91,6 +91,8 @@ export function createDecisionModelsDecisionModel(options: {
   taskId: () => string;
   baseUrl?: string;
   concurrency?: number;
+  /** The provider's per-request question cap (GET /v1/models max_questions; s1-pro: 3). */
+  maxQuestions?: number;
   /** Test transport. */
   fetch?: (url: string, init: RequestInit) => Promise<Response>;
 }): DecisionModel {
@@ -104,34 +106,68 @@ export function createDecisionModelsDecisionModel(options: {
     ...(options.fetch ? { fetch: options.fetch } : {}),
   });
   const inner = createJevDecisionModel(client);
+  const maxQuestions = options.maxQuestions ?? 3;
+  const single: DecisionModel["decide"] = async (
+    input,
+    questions,
+    decideOptions = {},
+  ) => {
+    const taskId = options.taskId();
+    // Reserve the request's own size estimate, doubled for chunked question maps and estimate error.
+    const estimate = 2 * estimateJevTokens({ input, questions }) + 1_000;
+    const hold = options.ledger.reserve(options.arm, taskId, estimate);
+    let reported: number | null = null;
+    try {
+      const result = await inner.decide(input, questions, {
+        ...decideOptions,
+        onUsage: async (usage: DecisionUsage) => {
+          reported = usage.inputTokens;
+          await decideOptions.onUsage?.(usage);
+        },
+      });
+      hold.settle(reported ?? estimate);
+      return result;
+    } catch (error) {
+      const status = (error as { status?: number }).status;
+      if (reported !== null) hold.settle(reported);
+      // A timeout or connection failure may still have been processed; count the estimate.
+      else if (status === undefined) hold.settle(estimate);
+      else hold.release();
+      if (status === 401 || status === 402 || status === 403)
+        throw options.ledger.halt(options.arm, taskId, `HTTP ${status}`);
+      throw error;
+    }
+  };
   return {
     warmUp: (n) => inner.warmUp?.(n),
+    // Question maps over the provider's cap go as several requests about the same input.
     async decide(input, questions, decideOptions = {}) {
-      const taskId = options.taskId();
-      // Reserve the request's own size estimate, doubled for chunked question maps and estimate error.
-      const estimate = 2 * estimateJevTokens({ input, questions }) + 1_000;
-      const hold = options.ledger.reserve(options.arm, taskId, estimate);
-      let reported: number | null = null;
-      try {
-        const result = await inner.decide(input, questions, {
-          ...decideOptions,
-          onUsage: async (usage: DecisionUsage) => {
-            reported = usage.inputTokens;
-            await decideOptions.onUsage?.(usage);
-          },
-        });
-        hold.settle(reported ?? estimate);
-        return result;
-      } catch (error) {
-        const status = (error as { status?: number }).status;
-        if (reported !== null) hold.settle(reported);
-        // A timeout or connection failure may still have been processed; count the estimate.
-        else if (status === undefined) hold.settle(estimate);
-        else hold.release();
-        if (status === 401 || status === 402 || status === 403)
-          throw options.ledger.halt(options.arm, taskId, `HTTP ${status}`);
-        throw error;
-      }
+      const ids = Object.keys(questions);
+      if (ids.length <= maxQuestions)
+        return single(input, questions, decideOptions);
+      const parts: (typeof questions)[] = [];
+      for (let i = 0; i < ids.length; i += maxQuestions)
+        parts.push(
+          Object.fromEntries(
+            ids.slice(i, i + maxQuestions).map((id) => [id, questions[id]!]),
+          ) as typeof questions,
+        );
+      const results = await Promise.all(
+        parts.map((q) => single(input, q, decideOptions)),
+      );
+      const sum = (pick: (u: DecisionUsage) => number | null) =>
+        results.every((r) => pick(r.usage) !== null)
+          ? results.reduce((n, r) => n + (pick(r.usage) ?? 0), 0)
+          : null;
+      return {
+        answers: Object.assign({}, ...results.map((r) => r.answers)),
+        usage: {
+          ...results[0]!.usage,
+          requests: results.reduce((n, r) => n + (r.usage.requests ?? 1), 0),
+          inputTokens: sum((u) => u.inputTokens),
+          costUsd: sum((u) => u.costUsd),
+        },
+      } as never;
     },
   };
 }
