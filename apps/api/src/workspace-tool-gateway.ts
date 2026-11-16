@@ -974,6 +974,7 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
               {
                 knowledge: await knowledgeContextForGateway(routeDeps, grant),
                 settings: firstPartySettings,
+                observability: routeDeps.observability,
               },
             ),
           ),

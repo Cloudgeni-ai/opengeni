@@ -39,6 +39,15 @@ cause kind and diagnostic ID; the existing opt-in protected diagnostics sink
 receives bounded cause locations, never exception messages, request bodies or
 credentials.
 
+Every first-party MCP surface (`opengeni`, files and Knowledge) is built on
+`FirstPartyMcpServer` (`apps/api/src/mcp/database-tool-failure.ts`). A tool that
+throws a raw database error returns a typed `isError` result instead of the
+driver's message, which would quote the SQL and its parameters: read-only
+session, brief outage (retryable), or a refusal named only by its class
+(conflict, missing reference, broken data rule, value too long, not allowed)
+and SQLSTATE. The error itself goes only to the server error log and its
+diagnostic.
+
 ### Organization MCP server
 
 Connect any MCP client to `<public origin>/v1/mcp`. Sign-in opens the web
