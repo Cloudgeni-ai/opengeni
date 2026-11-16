@@ -255,6 +255,17 @@ describe("lexical index", () => {
 });
 
 describe("repo map", () => {
+  test("indented and long data lines are matched quickly", () => {
+    const line = " ".repeat(390) + "x";
+    const started = performance.now();
+    expect(
+      extractDefinitions(
+        "t.c",
+        `${line}\n${"1, ".repeat(40_000)}\n  public static int main(void) {\n}`,
+      ),
+    ).toEqual([{ file: "t.c", name: "main", start: 3, end: 4 }]);
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
   test("definitions across languages", () => {
     const names = (f: string, t: string) =>
       extractDefinitions(f, t).map((d) => d.name);

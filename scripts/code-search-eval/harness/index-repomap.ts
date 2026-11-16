@@ -17,7 +17,8 @@ const DEFINITION_PATTERNS: RegExp[] = [
   /^func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)/, // go
   /^type\s+([A-Za-z_]\w*)\s+(?:struct|interface)/, // go
   /^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:fn|struct|enum|trait|impl(?:<[^>]*>)?)\s+([A-Za-z_]\w*)/, // rust
-  /^\s*(?:public|private|protected|static|final|abstract|\s)*[\w<>\[\],\s]+\s+([A-Za-z_]\w*)\s*\([^;]*\)\s*(?:throws[^{]*)?\{\s*$/, // java, c, c++ functions
+  // Leading whitespace has one owner (`^\s*`): the old `(?:…|\s)*[…\s]+\s+` prefix backtracked as n^4 on indented lines.
+  /^\s*(?:(?:public|private|protected|static|final|abstract)\s+)*[\w<>\[\],][\w<>\[\],\s]*\s+([A-Za-z_]\w*)\s*\([^;]*\)\s*(?:throws[^{]*)?\{\s*$/, // java, c, c++ functions
   /^\s*(?:struct|union|enum)\s+([A-Za-z_]\w*)\s*\{/, // c
   /^#define\s+([A-Za-z_]\w*)/,
 ];
@@ -25,10 +26,14 @@ const KEYWORDS = new Set(
   "if for while switch return catch else new sizeof".split(" "),
 );
 
+const MAX_DEFINITION_LINE = 400;
+
 export function extractDefinitions(file: string, text: string): Definition[] {
   const lines = text.split("\n");
   const defs: Definition[] = [];
   lines.forEach((line, i) => {
+    // Long lines are data (tables, minified code); the patterns backtrack badly on them.
+    if (line.length > MAX_DEFINITION_LINE) return;
     for (const pattern of DEFINITION_PATTERNS) {
       const name = pattern.exec(line)?.[1];
       if (name && !KEYWORDS.has(name) && name.length > 1) {
