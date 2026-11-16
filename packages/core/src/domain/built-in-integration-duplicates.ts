@@ -95,7 +95,11 @@ export function builtInIntegrationDuplicated(
   const key = builtInIntegrationKey(item);
   if (key !== null)
     return offered.find((candidate) => builtInIntegrationKey(candidate) === key) ?? null;
-  const domain = registrableDomainOf(item.providerDomain) ?? registrableDomainOf(endpointOf(item));
+  // Only an MCP server's own endpoint names the service it connects; a
+  // plugin's or registry row's provider domain can be its homepage (often
+  // github.com), which says nothing about what it connects to.
+  if (item.kind !== "mcp") return null;
+  const domain = registrableDomainOf(endpointOf(item));
   if (!domain) return null;
   return offered.find((candidate) => builtInServiceDomains(candidate).includes(domain)) ?? null;
 }

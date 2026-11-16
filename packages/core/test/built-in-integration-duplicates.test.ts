@@ -204,6 +204,35 @@ describe("registry entries that duplicate a built-in integration", () => {
     expect(builtInIntegrationDuplicated(learn, [outlook, learn])).toBeNull();
   });
 
+  test("a plugin whose homepage is the domain of a Nango integration stays listed", () => {
+    const backends = effectiveNangoIntegrations(
+      [
+        setting("github", {
+          displayName: "GitHub",
+          tools: { source: "nango" },
+          accountIdentity: { url: "https://api.github.com/user", field: "login" },
+        }),
+      ],
+      true,
+    );
+    const settings = applyNangoBackendsToSettings(testSettings({ mcpServers: [] }), backends);
+    const github = configuredMcpCatalogItems(settings, backends)[0]!;
+    expect(github.metadata.serviceDomain).toBe("github.com");
+    const homepagePlugin = CapabilityCatalogItem.parse({
+      id: "plugin:marketplace/acme/triage",
+      kind: "plugin",
+      source: "public_registry",
+      name: "Triage",
+      description: "",
+      surfaceType: "plugin_package",
+      authKind: "none",
+      enabled: false,
+      providerDomain: "github.com",
+      metadata: { skills: ["triage"], mcpEndpoints: [] },
+    });
+    expect(builtInIntegrationDuplicated(homepagePlugin, [github, homepagePlugin])).toBeNull();
+  });
+
   test("a registry entry turned on in this workspace stays listed", () => {
     const installed = { ...registryGmail, enabled: true };
     expect(builtInIntegrationDuplicated(installed, [configuredGmail, installed])).toBeNull();
