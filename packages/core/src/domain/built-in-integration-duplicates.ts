@@ -110,16 +110,46 @@ export function withoutBuiltInIntegrationDuplicates<T extends CapabilityCatalogI
 /**
  * Why the organization's integration policy refuses this built-in
  * integration, for the agent to tell the person; null when it is allowed or
- * is not a built-in integration.
+ * is not a built-in integration. A plugin that adds nothing but built-in
+ * integrations' reviewed MCP endpoints is those integrations by another
+ * route: refused when the policy leaves all of them out.
  */
 export function builtInIntegrationTurnedOffDetail(
   item: CapabilityCatalogItem,
   policy: Pick<OrganizationIntegrationPolicy, "mode" | "allowedIntegrationKeys">,
 ): string | null {
+  if (policy.mode === "unrestricted") return null;
+  const pluginKeys = pluginBuiltInIntegrationKeys(item);
+  if (pluginKeys)
+    return pluginKeys.every((key) => !policy.allowedIntegrationKeys.includes(key))
+      ? builtInIntegrationTurnedOffMessage(item.name)
+      : null;
   const key = builtInIntegrationKey(item);
-  if (!key || policy.mode === "unrestricted" || policy.allowedIntegrationKeys.includes(key))
-    return null;
+  if (!key || policy.allowedIntegrationKeys.includes(key)) return null;
   return builtInIntegrationTurnedOffMessage(item.name);
+}
+
+/**
+ * The built-in integration keys of a not-installed plugin whose only parts
+ * are MCP servers at built-in integrations' reviewed endpoints (the Gmail
+ * plugin is Gmail's endpoint). Null for any other item, including plugins
+ * with Skills or another server, which add something of their own.
+ */
+export function pluginBuiltInIntegrationKeys(item: CapabilityCatalogItem): string[] | null {
+  if (item.kind !== "plugin" || item.enabled) return null;
+  const skills = item.metadata.skills;
+  if (Array.isArray(skills) && skills.length > 0) return null;
+  const endpoints = Array.isArray(item.metadata.mcpEndpoints) ? item.metadata.mcpEndpoints : [];
+  if (!endpoints.length) return null;
+  const keys = endpoints.map((endpoint) =>
+    typeof endpoint === "string" ? dedicatedMcpIntegrationKey(endpoint) : null,
+  );
+  return keys.every((key): key is string => key !== null) ? [...new Set(keys)] : null;
+}
+
+/** Whether the organization's integration policy decides this item's setup. */
+export function builtInIntegrationPolicyApplies(item: CapabilityCatalogItem): boolean {
+  return builtInIntegrationKey(item) !== null || pluginBuiltInIntegrationKeys(item) !== null;
 }
 
 /** What the person is told when their organization turned a built-in integration off. */

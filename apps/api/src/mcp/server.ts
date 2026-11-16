@@ -268,7 +268,7 @@ import {
   listConnectionsNeedingReconnect,
   nangoBackendsFor,
   builtInIntegrationDuplicated,
-  builtInIntegrationKey,
+  builtInIntegrationPolicyApplies,
   builtInIntegrationTurnedOffDetail,
   withoutBuiltInIntegrationDuplicates,
   nangoReplacedSocialProviders,
@@ -7909,7 +7909,7 @@ function registerCapabilityDiscoveryTools(
   ): Promise<CapabilitySetupProjection[]> => {
     const [setups, policy] = await Promise.all([
       projectSetupsAllowed(items),
-      items.some((item) => builtInIntegrationKey(item) !== null)
+      items.some(builtInIntegrationPolicyApplies)
         ? readOrganizationIntegrationPolicyForServing(deps.db, {
             accountId: grant.accountId,
           }).catch(() => null)
@@ -8076,7 +8076,10 @@ function registerCapabilityDiscoveryTools(
         (_, index) => projected[ranked.length + index]!.status !== "unavailable",
       );
       for (const [index, { item }] of ranked.entries()) {
-        if (item.kind !== "plugin" || item.enabled) continue;
+        // A plugin that is only a built-in the organization turned off keeps
+        // that answer: it has no card.
+        if (item.kind !== "plugin" || item.enabled || setups[index]!.status === "unavailable")
+          continue;
         const endpoints = new Set(pluginMcpEndpointKeys(item));
         setups[index] = pluginCapabilitySetup(
           item,

@@ -839,6 +839,8 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
     expect(sentry.setup.detail).toBe(
       "Not installed. The person can review what the sentry plugin adds and install it for the workspace from its card.",
     );
+    // Later tests search the same workspace for Gmail.
+    await shared.admin`delete from capability_catalog_items where id = ${connectionId} and workspace_id = ${workspace.workspaceId}`;
   }, 60_000);
   test("'connect Microsoft Dynamics' shows a card that asks for the environment, and turns an address into the card's endpoint", async () => {
     if (!shared) return;
@@ -1921,6 +1923,16 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
           const requested = await turnedOff.request(registryId);
           expect(requested).toMatchObject({ status: "unavailable", cardShown: false });
           expect(requested.message).toContain("turned off for this organization");
+          // The Gmail plugin is only Gmail's reviewed endpoint: no install card either.
+          const plugin = (await turnedOff.search("Gmail")).find(
+            (match) => match.capabilityId === "plugin:marketplace/openai/gmail",
+          );
+          expect(plugin?.setup).toMatchObject({ status: "unavailable" });
+          expect(plugin?.setup.detail).toContain("is turned off for this organization");
+          expect(await turnedOff.request("plugin:marketplace/openai/gmail")).toMatchObject({
+            status: "unavailable",
+            cardShown: false,
+          });
         } finally {
           await turnedOff.close();
         }

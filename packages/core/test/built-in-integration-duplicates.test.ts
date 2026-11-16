@@ -15,6 +15,7 @@ import {
   builtInIntegrationKey,
   builtInIntegrationTurnedOffDetail,
   configuredMcpCatalogItems,
+  pluginBuiltInIntegrationKeys,
   withoutBuiltInIntegrationDuplicates,
   withoutNangoReplacedSocialItems,
 } from "../src";
@@ -266,5 +267,55 @@ describe("a custom sign-in to a built-in integration's endpoint", () => {
     expect(builtInIntegrationDuplicatedByEndpoint("https://mcp.linear.app/mcp", null)).toBeNull();
     expect(builtInIntegrationDuplicatedByEndpoint("not a url", null)).toBeNull();
     expect(builtInIntegrationDuplicatedByEndpoint(undefined, null)).toBeNull();
+  });
+});
+
+function plugin(metadata: Record<string, unknown>, enabled = false): CapabilityCatalogItem {
+  return CapabilityCatalogItem.parse({
+    id: "plugin:marketplace/test/plugin",
+    kind: "plugin",
+    source: "public_registry",
+    name: "Mail plugin",
+    description: "",
+    surfaceType: "plugin_package",
+    authKind: "none",
+    enabled,
+    metadata,
+  });
+}
+
+describe("plugins that are only a built-in integration", () => {
+  const gmail = "https://gmailmcp.googleapis.com/mcp/v1";
+  const restricted = { mode: "restricted" as const, allowedIntegrationKeys: ["custom:mcp"] };
+
+  test("a plugin of only Gmail's reviewed endpoint is turned off with Gmail", () => {
+    const item = plugin({ skills: [], mcpEndpoints: [gmail] });
+    expect(pluginBuiltInIntegrationKeys(item)).toEqual(["gmail"]);
+    expect(builtInIntegrationTurnedOffDetail(item, restricted)).toContain(
+      "Mail plugin is turned off for this organization",
+    );
+    expect(
+      builtInIntegrationTurnedOffDetail(item, {
+        mode: "restricted",
+        allowedIntegrationKeys: ["gmail"],
+      }),
+    ).toBeNull();
+    expect(
+      builtInIntegrationTurnedOffDetail(item, { mode: "unrestricted", allowedIntegrationKeys: [] }),
+    ).toBeNull();
+  });
+
+  test("plugins that add something else, or are installed, are not decided by the policy", () => {
+    expect(
+      pluginBuiltInIntegrationKeys(plugin({ skills: ["triage"], mcpEndpoints: [gmail] })),
+    ).toBe(null);
+    expect(
+      pluginBuiltInIntegrationKeys(
+        plugin({ skills: [], mcpEndpoints: [gmail, "https://mcp.example.com/mcp"] }),
+      ),
+    ).toBeNull();
+    expect(pluginBuiltInIntegrationKeys(plugin({ skills: [], mcpEndpoints: [gmail] }, true))).toBe(
+      null,
+    );
   });
 });
