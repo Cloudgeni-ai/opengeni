@@ -1202,6 +1202,14 @@ export function SessionRoute({
             context.client.listOwnConnectionAccounts(workspaceId, { includeInactive: true }),
           find: findConnectRecoveryAccount,
         });
+        if (target?.via === "connector") {
+          // An integration platform's account signs in again through its
+          // connector's own Connect, never a native reconnect attempt.
+          page.assign(
+            `/workspaces/${encodeURIComponent(target.workspaceId)}/capabilities?reconnect_domain=${encodeURIComponent(item.providerDomain)}`,
+          );
+          return;
+        }
         if (target) {
           const { account } = target;
           const request: NativeConnectRequest = {

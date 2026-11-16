@@ -176,7 +176,8 @@ function ScopedAccounts({
                   </svg>
                 </summary>
                 <div className="og-connect-account-actions">
-                  {returnUrl && account.status === "auth_needed" && (
+                  {/* An integration platform's account signs in again through its connector. */}
+                  {returnUrl && account.status === "auth_needed" && !account.backend && (
                     <button
                       type="button"
                       aria-label={t("connectAccounts.reconnectLabel", { label: account.label })}

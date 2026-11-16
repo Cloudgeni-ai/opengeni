@@ -3,7 +3,7 @@
 // ("Use it here"): a Site in the second workspace resolves, confirms and runs
 // its tools on that account, on real PostgreSQL under row-level security.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
@@ -17,15 +17,18 @@ import {
   bootstrapWorkspace,
   createConnection,
   createDb,
+  createOrganizationApiKey,
   createWorkspaceArtifact,
   encryptEnvironmentValue,
   getConnectionMetadata,
   registerDbBinding,
+  revokeSelfUserResourceGrant,
   updateConnectorToolPermissionPolicies,
   type DbClient,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
+import { createApp } from "../src/app";
 import {
   approveWorkspaceToolTarget,
   describeWorkspaceSiteToolConsent,
@@ -176,7 +179,11 @@ async function fixture() {
   const deps = { db, settings } as ApiRouteDeps;
   return {
     db,
+    suffix,
     grant,
+    homeGrant,
+    settings,
+    authorityId,
     subjectId,
     connection,
     canonical,
@@ -291,6 +298,237 @@ describe("Site tools on an account turned on from another workspace", () => {
       );
       expect(called.result.isError).not.toBe(true);
       expect(f.effects()).toBe(1);
+    } finally {
+      f.provider.stop(true);
+    }
+  }, 120_000);
+
+  const readinessOf = async (f: Awaited<ReturnType<typeof fixture>>) =>
+    (
+      await describeWorkspaceSiteToolReadiness(
+        f.deps,
+        f.authorization,
+        { ...f.site, targets: [{ identity: f.canonical }] },
+        human,
+      )
+    ).tools[0]!;
+  const resolveAs = (f: Awaited<ReturnType<typeof fixture>>) =>
+    resolveWorkspaceToolTarget(
+      f.deps,
+      f.authorization,
+      { ...f.site, target: { identity: f.canonical } },
+      human,
+    );
+  const credential = (f: Awaited<ReturnType<typeof fixture>>, token: string) =>
+    encryptEnvironmentValue(
+      environmentsEncryptionKeyBytes(f.settings)!,
+      JSON.stringify({ headers: { authorization: `Bearer ${token}` } }),
+    );
+
+  test("another member's account turned on here is never the viewer's", async () => {
+    if (!shared) return;
+    const f = await fixture();
+    try {
+      // Another member of this workspace, with an account of their own added
+      // in their own workspace and turned on here.
+      const other = `human:${crypto.randomUUID()}`;
+      const workspace = (key: string, name: string) =>
+        bootstrapWorkspace(f.db, {
+          accountExternalSource: "site-tool-cross-workspace",
+          accountExternalId: f.suffix,
+          accountName: "Cross-workspace accounts",
+          workspaceExternalSource: "site-tool-cross-workspace",
+          workspaceExternalId: `${f.suffix}:${key}`,
+          workspaceName: name,
+          subjectId: other,
+        });
+      const theirHome = (await workspace("their-home", "Their home")).workspaceGrants.find(
+        (entry) =>
+          entry.workspaceId !== f.grant.workspaceId &&
+          entry.workspaceId !== f.homeGrant.workspaceId,
+      )!;
+      const theirHere = await workspace("here", "Here");
+      await shared!.admin`
+        insert into organization_memberships (account_id, subject_id, status, personal_workspace_id)
+        values (${f.grant.accountId}, ${other}, 'active', ${theirHome.workspaceId})
+      `;
+      const theirs = await createConnection(f.db, {
+        accountId: theirHome.accountId,
+        workspaceId: theirHome.workspaceId,
+        subjectId: other,
+        providerDomain: "127.0.0.1",
+        kind: "api_key",
+        credentialEncrypted: credential(f, "theirs"),
+        metadata: { displayName: "bob@example.com" },
+        createdBySubjectId: other,
+      });
+      const theirAuthority = (await getConnectionMetadata(
+        f.db,
+        theirHome.workspaceId,
+        theirs.id,
+        other,
+      ))!.authorityId!;
+      await turnOnOwnLoginHere(f.db, {
+        accountId: f.grant.accountId,
+        workspaceId: f.grant.workspaceId,
+        subjectId: other,
+        authorityId: theirAuthority,
+      });
+      expect((await readinessOf(f)).state).toBe("connect");
+      await expect(resolveAs(f)).rejects.toMatchObject({
+        details: { code: "site_tool_connection_required" },
+      });
+      expect(f.effects()).toBe(0);
+      // It is turned on here: its owner's own Site call resolves to it.
+      const theirAuthorization = accessGrantAuthorizationFromContext(
+        theirHere,
+        theirHere.workspaceGrants.find((entry) => entry.workspaceId === f.grant.workspaceId)!,
+      );
+      theirAuthorization.canonicalManagedHumanSession = true;
+      const theirConsent = await describeWorkspaceSiteToolConsent(
+        f.deps,
+        theirAuthorization,
+        { identity: f.canonical, ...f.site, arguments: { title: "Hello" } },
+        human,
+      );
+      expect(theirConsent.accounts.map((account) => account.connectionId)).toEqual([theirs.id]);
+    } finally {
+      f.provider.stop(true);
+    }
+  }, 120_000);
+
+  test("another workspace's shared account is never used here", async () => {
+    if (!shared) return;
+    const f = await fixture();
+    try {
+      await createConnection(f.db, {
+        accountId: f.homeGrant.accountId,
+        workspaceId: f.homeGrant.workspaceId,
+        subjectId: null,
+        providerDomain: "127.0.0.1",
+        kind: "api_key",
+        credentialEncrypted: credential(f, "home-shared"),
+        metadata: { displayName: "Home team" },
+        createdBySubjectId: f.subjectId,
+      });
+      expect((await readinessOf(f)).state).toBe("connect");
+      await expect(resolveAs(f)).rejects.toMatchObject({
+        details: { code: "site_tool_connection_required" },
+      });
+    } finally {
+      f.provider.stop(true);
+    }
+  }, 120_000);
+
+  test("an organization service key reaches no personal account", async () => {
+    if (!shared) return;
+    const f = await fixture();
+    try {
+      await f.turnOn();
+      await f.setPolicy("allow");
+      const bearer = `ogk_cross_${crypto.randomUUID().replaceAll("-", "")}`;
+      await createOrganizationApiKey(f.db, {
+        accountId: f.grant.accountId,
+        name: "Cross-workspace key",
+        prefix: bearer.slice(0, 12),
+        keyHash: createHash("sha256").update(bearer).digest("hex"),
+        permissions: ["workspace:read"],
+      });
+      const app = createApp({
+        settings: f.settings,
+        db: f.db,
+        bus: {} as never,
+        workflowClient: {} as never,
+        objectStorage: null,
+      } as never);
+      const post = async (operation: string, body: unknown) =>
+        await app.request(
+          `http://localhost/v1/workspaces/${f.grant.workspaceId}/tools/${operation}`,
+          {
+            method: "POST",
+            headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" },
+            body: JSON.stringify(body),
+          },
+        );
+      const resolved = await post("resolve", { ...f.site, target: { identity: f.canonical } });
+      // A service key has no personal accounts, here or anywhere.
+      expect(resolved.status).toBe(409);
+      expect(await resolved.json()).toMatchObject({
+        error: { details: { code: "site_tool_connection_required" } },
+      });
+      const invoked = await post("invoke", {
+        ...f.site,
+        target: { identity: f.canonical },
+        operationId: crypto.randomUUID(),
+        arguments: { title: "Hello" },
+      });
+      expect(invoked.status).toBe(409);
+      expect(await invoked.json()).toMatchObject({
+        error: { details: { code: "site_tool_connection_required" } },
+      });
+      expect(f.effects()).toBe(0);
+    } finally {
+      f.provider.stop(true);
+    }
+  }, 120_000);
+
+  test("an account turned off here after preparation is refused before it runs", async () => {
+    if (!shared) return;
+    const f = await fixture();
+    try {
+      await f.turnOn();
+      await f.setPolicy("ask");
+      const resolved = await resolveAs(f);
+      const consent = await describeWorkspaceSiteToolConsent(
+        f.deps,
+        f.authorization,
+        { identity: f.canonical, ...f.site, arguments: { title: "Hello" } },
+        human,
+      );
+      const route = consent.accounts[0]!.identity;
+      const operationId = crypto.randomUUID();
+      const approved = await approveWorkspaceToolTarget(
+        f.deps,
+        f.authorization,
+        {
+          identity: route,
+          ...f.site,
+          operationId,
+          arguments: { title: "Hello" },
+          expectedDefinitionDigest: resolved.definitionDigest,
+        },
+        human,
+      );
+      // Turned off here between the confirmation and the call.
+      const [grantRow] = await shared!.admin<Array<{ id: string }>>`
+        select id from organization_user_resource_grants
+        where workspace_id = ${f.grant.workspaceId} and authority_id = ${f.authorityId}
+          and status = 'active'
+      `;
+      await revokeSelfUserResourceGrant(f.db, {
+        accountId: f.grant.accountId,
+        workspaceId: f.grant.workspaceId,
+        subjectId: f.subjectId,
+        grantId: grantRow!.id,
+      });
+      const refused = await invokeWorkspaceToolTarget(
+        f.deps,
+        f.authorization,
+        {
+          ...f.site,
+          target: { identity: route },
+          operationId,
+          arguments: { title: "Hello" },
+          approvalToken: approved.approvalToken,
+        },
+        human,
+      ).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      // The fence re-reads the account's authority at the call.
+      expect(refused).toMatchObject({ status: 403, message: "site_tool_not_authorized" });
+      expect(f.effects()).toBe(0);
     } finally {
       f.provider.stop(true);
     }

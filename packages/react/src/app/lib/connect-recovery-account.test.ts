@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import type { ConnectionMetadata } from "../types";
 import { findConnectRecoveryTarget } from "./connect-recovery-account";
 
-type Account = { id: string; providerId: string };
+type Account = { id: string; providerId: string; backend?: "nango" };
 const find = (accounts: readonly Account[], id: string) =>
   accounts.find((account) => account.id === id) ?? null;
 const own = (id: string, workspaceId: string) =>
@@ -40,6 +40,7 @@ test("an account of this workspace is recovered here", async () => {
   expect(await target).toEqual({
     account: { id: "direct", providerId: "gmail" },
     workspaceId: "here",
+    via: "native",
   });
   expect(reads).toEqual(["here"]);
 });
@@ -56,6 +57,7 @@ test("an own account turned on here from another workspace is recovered in that 
   expect(await target).toEqual({
     account: { id: "use-it-here", providerId: "gmail" },
     workspaceId: "integration-tests",
+    via: "native",
   });
   expect(reads).toEqual(["here", "integration-tests"]);
 });
@@ -76,4 +78,20 @@ test("an account in neither list, or an unreadable inventory, is not found", asy
       connectionId: "shared",
     }).target,
   ).toBeNull();
+});
+
+test("an integration platform's account never starts a native reconnect, here or elsewhere", async () => {
+  const nango: Account = { id: "nango-1", providerId: "gmail", backend: "nango" };
+  expect(await lookup({ byWorkspace: { here: [nango] }, connectionId: "nango-1" }).target).toEqual({
+    account: nango,
+    workspaceId: "here",
+    via: "connector",
+  });
+  expect(
+    await lookup({
+      byWorkspace: { here: [], home: [nango] },
+      ownAccounts: [own("nango-1", "home")],
+      connectionId: "nango-1",
+    }).target,
+  ).toEqual({ account: nango, workspaceId: "home", via: "connector" });
 });

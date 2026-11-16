@@ -88,6 +88,19 @@ function button(container: HTMLElement, text: string) {
   if (!result) throw new Error(`Missing button ${text}`);
   return result;
 }
+test("an integration platform's account that needs sign-in offers no native reconnect", async () => {
+  const source = controller(async () => [{ ...account, status: "auth_needed", backend: "nango" }]);
+  const view = await renderComponent(
+    <ConnectAccounts controller={source} returnUrl="https://host.example/done" />,
+  );
+  try {
+    expect(view.container.querySelector("summary")?.textContent).toContain("My account");
+    expect(() => button(view.container, "Reconnect My account")).toThrow();
+  } finally {
+    await view.unmount();
+    source.dispose();
+  }
+});
 test("disconnect requires confirmation and forwards observed version then reloads", async () => {
   let calls = 0;
   let removed = false;

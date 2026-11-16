@@ -224,10 +224,11 @@ async function nangoRows(target: Owner) {
         id: string;
         status: string;
         granted_scopes: string[];
+        provider_domain: string;
         nango_connection_id: string;
         email: string;
       }>
-    >`select id, status, granted_scopes, metadata->>'nangoConnectionId' as nango_connection_id,
+    >`select id, status, granted_scopes, provider_domain, metadata->>'nangoConnectionId' as nango_connection_id,
         metadata->>'accountEmail' as email
       from connections
       where workspace_id = ${target.workspaceId} and provider_domain = 'nango:gmail'
@@ -479,6 +480,29 @@ describe("Nango connections in PostgreSQL", () => {
       metadata: { oauthDiscovery: true, mcpUrl: "https://gmailmcp.googleapis.com/mcp/v1" },
       createdBySubjectId: target.subjectId,
     });
+    // A workspace-shared Nango Gmail account, and one that needs sign-in.
+    const sharedNango = await createConnection(client.db, {
+      accountId: target.accountId,
+      workspaceId: target.workspaceId,
+      subjectId: null,
+      providerDomain: nangoRow!.provider_domain,
+      kind: "oauth2",
+      status: "active",
+      credentialEncrypted: "unused",
+      metadata: { integrationBackend: "nango", mcpUrl: "https://gmailmcp.googleapis.com/mcp/v1" },
+      createdBySubjectId: target.subjectId,
+    });
+    const signedOutNango = await createConnection(client.db, {
+      accountId: target.accountId,
+      workspaceId: target.workspaceId,
+      subjectId: null,
+      providerDomain: nangoRow!.provider_domain,
+      kind: "oauth2",
+      status: "needs_reauth",
+      credentialEncrypted: "unused",
+      metadata: { integrationBackend: "nango", mcpUrl: "https://gmailmcp.googleapis.com/mcp/v1" },
+      createdBySubjectId: target.subjectId,
+    });
     // This deployment serves Gmail through Nango.
     await shared!.admin`insert into integration_backend_revisions
         (integration_key, backend, nango_provider_config_key, enabled, changed_by, reason)
@@ -513,12 +537,33 @@ describe("Nango connections in PostgreSQL", () => {
           label: "gmailmcp.googleapis.com",
           ownership: "personal",
           status: "connected",
+          // Marked, so no Connect UI starts a native reconnect for it.
+          backend: "nango",
+        }),
+      );
+      // A shared Nango Google account is usable; only a native shared Google
+      // sign-in is not.
+      expect(accounts).toContainEqual(
+        expect.objectContaining({
+          id: sharedNango.id,
+          ownership: "workspace",
+          status: "connected",
+          backend: "nango",
+        }),
+      );
+      expect(accounts).toContainEqual(
+        expect.objectContaining({
+          id: signedOutNango.id,
+          status: "auth_needed",
+          backend: "nango",
         }),
       );
       // The replaced native account cannot be used while Nango serves Gmail.
-      expect(accounts).toContainEqual(
-        expect.objectContaining({ id: native.id, providerId: "gmail", status: "auth_needed" }),
+      const nativeRow = (accounts as Array<Record<string, unknown>>).find(
+        (account) => account.id === native.id,
       );
+      expect(nativeRow).toMatchObject({ providerId: "gmail", status: "auth_needed" });
+      expect(nativeRow).not.toHaveProperty("backend");
       // The inventory the runtime and health read (a delegated token is never
       // a personal-account source, so read it as the person's own session).
       const inventory = projectConnectionsForBackends(

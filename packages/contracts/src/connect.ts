@@ -61,6 +61,12 @@ export const ConnectAccount = /* @__PURE__ */ defineSchema(() =>
       label: z.string().max(256),
       ownership: ConnectOwnership,
       status: z.enum(["connected", "auth_needed", "disabled"]),
+      /**
+       * `nango`: the account is held by an integration platform. It is
+       * signed in again through its connector's own Connect, never a native
+       * reconnect attempt, and its access is fixed (no step-up).
+       */
+      backend: z.literal("nango").optional(),
     })
     .strict(),
 );

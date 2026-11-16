@@ -337,7 +337,6 @@ import {
   GMAIL_REST_MCP_BRIDGE_ADAPTER,
   gmailRestResultOutcome,
   isOfficialGmailMcpConfig,
-  type GmailRestMcpBridgeConfig,
   type GmailRestMcpBridgeContext,
 } from "./gmail-rest-mcp";
 import {
@@ -1214,6 +1213,12 @@ export type {
 
 ensureReadableStreamFrom();
 
+/** What every built-in bridge adapter matches a configured MCP server on. */
+export type BuiltInMcpBridgeConfig = {
+  readonly url: string;
+  readonly connectionRef?: McpServerConnectionRef;
+};
+
 type BuiltInMcpBridgeContext = GmailRestMcpBridgeContext &
   GoogleCalendarRestMcpBridgeContext &
   SlackRestMcpBridgeContext &
@@ -1223,7 +1228,7 @@ type BuiltInMcpBridgeContext = GmailRestMcpBridgeContext &
   DriveMcpBridgeContext &
   NangoToolsMcpBridgeContext;
 const BUILT_IN_MCP_BRIDGE_ADAPTERS: readonly LocalMcpBridgeAdapter<
-  GmailRestMcpBridgeConfig,
+  BuiltInMcpBridgeConfig,
   BuiltInMcpBridgeContext
 >[] = Object.freeze([
   GMAIL_REST_MCP_BRIDGE_ADAPTER,
@@ -1242,7 +1247,7 @@ const BUILT_IN_MCP_BRIDGE_ADAPTERS: readonly LocalMcpBridgeAdapter<
  * a bridge. Never contacts the provider; the bridge still decides each call.
  */
 export function mcpToolScopeNeed(
-  config: GmailRestMcpBridgeConfig,
+  config: BuiltInMcpBridgeConfig,
   toolName: string,
   grantedScopes: readonly string[],
 ): readonly string[] | null {
@@ -6995,7 +7000,7 @@ export async function prepareAgentTools(
         // adapter-owned matchers. Adding another provider extends this registry;
         // generic transport/catalog code never branches on provider identity.
         const bridge = createLocalMcpBridgeFromAdapters<
-          GmailRestMcpBridgeConfig,
+          BuiltInMcpBridgeConfig,
           BuiltInMcpBridgeContext
         >(
           BUILT_IN_MCP_BRIDGE_ADAPTERS,

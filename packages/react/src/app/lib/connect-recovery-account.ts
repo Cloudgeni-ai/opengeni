@@ -1,7 +1,16 @@
 import type { ConnectionMetadata } from "../types";
 
-/** A connect account to recover and the workspace whose Connect owns it. */
-export type ConnectRecoveryTarget<Account> = { account: Account; workspaceId: string };
+/**
+ * A connect account to recover and the workspace whose Connect owns it.
+ * `via`: `native` reconnects that exact account through a connect attempt;
+ * `connector` (an account held by an integration platform) signs in again
+ * through its connector's own Connect, never a native attempt.
+ */
+export type ConnectRecoveryTarget<Account> = {
+  account: Account;
+  workspaceId: string;
+  via: "native" | "connector";
+};
 
 /**
  * The exact account a chat notice names, for a reconnect or a step-up. An
@@ -11,7 +20,9 @@ export type ConnectRecoveryTarget<Account> = { account: Account; workspaceId: st
  * (the one connection health reads) says which workspace that is. Each read
  * is authorized by the API as usual; null when the account is not found.
  */
-export async function findConnectRecoveryTarget<Account>(input: {
+export async function findConnectRecoveryTarget<
+  Account extends { backend?: string | undefined },
+>(input: {
   workspaceId: string;
   connectionId: string;
   /** `GET /connect/accounts` for one workspace. */
@@ -21,7 +32,7 @@ export async function findConnectRecoveryTarget<Account>(input: {
   find: (accounts: readonly Account[], connectionId: string) => Account | null;
 }): Promise<ConnectRecoveryTarget<Account> | null> {
   const here = input.find(await input.accounts(input.workspaceId), input.connectionId);
-  if (here) return { account: here, workspaceId: input.workspaceId };
+  if (here) return target(here, input.workspaceId);
   const own = (await input.ownAccounts().catch(() => [])).find(
     (connection) =>
       connection.id === input.connectionId &&
@@ -33,5 +44,12 @@ export async function findConnectRecoveryTarget<Account>(input: {
     await input.accounts(own.workspaceId).catch(() => []),
     input.connectionId,
   );
-  return elsewhere ? { account: elsewhere, workspaceId: own.workspaceId } : null;
+  return elsewhere ? target(elsewhere, own.workspaceId) : null;
+}
+
+function target<Account extends { backend?: string | undefined }>(
+  account: Account,
+  workspaceId: string,
+): ConnectRecoveryTarget<Account> {
+  return { account, workspaceId, via: account.backend ? "connector" : "native" };
 }

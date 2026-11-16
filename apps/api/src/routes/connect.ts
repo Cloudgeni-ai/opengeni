@@ -629,18 +629,20 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                     : "auth_needed",
             }),
           ];
+        // A Nango connection serves its connector's MCP endpoint like a
+        // discovered OAuth sign-in does, but is signed in again through its
+        // connector's own Connect: marked, so no native reconnect starts.
+        const nango = connection.metadata.integrationBackend === "nango";
         if (
           connection.kind === "oauth2" &&
-          // A Nango connection serves its connector's MCP endpoint like a
-          // discovered OAuth sign-in does.
-          (connection.metadata.oauthDiscovery ||
-            connection.metadata.integrationBackend === "nango") &&
+          (connection.metadata.oauthDiscovery || nango) &&
           typeof connection.metadata.mcpUrl === "string"
         )
           return [
             ConnectAccount.parse({
               id: connection.id,
               version: connection.version,
+              ...(nango ? { backend: "nango" as const } : {}),
               providerId:
                 connection.metadata.mcpUrl === OPENGENI_PERSONAL_SLACK_MCP_URL
                   ? "slack-personal"
@@ -656,11 +658,15 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               status:
                 connection.status === "revoked"
                   ? "disabled"
-                  : [
+                  : // A native shared Google sign-in is not supported; a
+                    // shared Nango account is.
+                    !nango &&
+                      [
                         OFFICIAL_GMAIL_MCP_URL,
                         OFFICIAL_DRIVE_MCP_URL,
                         OFFICIAL_GOOGLE_CALENDAR_MCP_URL,
-                      ].includes(connection.metadata.mcpUrl) && connection.subjectId === null
+                      ].includes(connection.metadata.mcpUrl) &&
+                      connection.subjectId === null
                     ? "auth_needed"
                     : connection.status === "active"
                       ? "connected"

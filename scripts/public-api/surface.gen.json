@@ -16217,6 +16217,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.backend": "const?=[\"\\\"nango\\\"\"]",
         "$.id": "string!",
         "$.label": "string!",
         "$.ownership": "ref(ConnectOwnership)!",
