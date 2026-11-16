@@ -209,6 +209,7 @@ export function useGitHubIntegration({
   const [actionPolicyBusy, setActionPolicyBusy] = useState<string | null>(null);
   const actionPolicyRequest = useRef(0);
   const actionPolicyMutation = useRef<number | null>(null);
+  const actionPoliciesShown = useRef(false);
   const installations = status?.installations ?? [];
   const busy = context.githubAppBusy || disconnecting;
 
@@ -293,8 +294,9 @@ export function useGitHubIntegration({
 
   /**
    * Reads the approvals. A `background` read (the page opened again, or the
-   * window regained focus) keeps what is shown if it fails, and never
-   * interrupts a save: the save's own result is newer.
+   * window regained focus) keeps the table if it fails, and never interrupts
+   * a save: the save's own result is newer. With no table yet, it fails like
+   * any read, so Retry shows.
    */
   const refreshActionPolicies = useCallback(
     async ({ background = false }: { background?: boolean } = {}) => {
@@ -304,10 +306,13 @@ export function useGitHubIntegration({
       try {
         const policies = await context.client.getGitHubActionPolicies(workspaceId);
         if (actionPolicyRequest.current !== request) return;
+        actionPoliciesShown.current = true;
         setActionPolicies(policies);
         setActionPolicyFailed(false);
       } catch {
-        if (actionPolicyRequest.current !== request || background) return;
+        if (actionPolicyRequest.current !== request) return;
+        if (background && actionPoliciesShown.current) return;
+        actionPoliciesShown.current = false;
         setActionPolicies(null);
         setActionPolicyFailed(true);
       }
@@ -316,6 +321,7 @@ export function useGitHubIntegration({
   );
 
   useEffect(() => {
+    actionPoliciesShown.current = false;
     setActionPolicies(null);
     setActionPolicyBusy(null);
     actionPolicyMutation.current = null;

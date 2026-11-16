@@ -488,6 +488,45 @@ describe("GitHub action approval controls", () => {
     }
   });
 
+  test("a background read that fails before the first load still offers Retry", async () => {
+    const context = appContext(
+      ["github:manage"],
+      mock(async () => ({})),
+    );
+    let finishFirst: (() => void) | null = null;
+    let calls = 0;
+    const getPolicies = mock(() => {
+      calls += 1;
+      if (calls === 1) {
+        return new Promise((resolve) => {
+          finishFirst = () =>
+            resolve({
+              enabled: true,
+              actors: [workspaceAppActor(71, { routine: "ask", review: "ask", merge: "ask" })],
+            });
+        });
+      }
+      return Promise.reject(new Error("unavailable"));
+    });
+    (context.client as Record<string, unknown>).getGitHubActionPolicies = getPolicies;
+    const rendered = await renderAdapter(context, WORKSPACE_ID, true);
+    try {
+      await act(async () => {
+        window.dispatchEvent(new Event("focus"));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      await act(async () => {
+        finishFirst?.();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(policies(rendered.model()).failure?.message).toBe(
+        "Approval settings could not be loaded.",
+      );
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
   test("regaining focus does not undo a save in progress", async () => {
     let finishSave: (() => void) | null = null;
     const update = mock(
