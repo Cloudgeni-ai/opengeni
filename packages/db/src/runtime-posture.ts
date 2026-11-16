@@ -66,7 +66,8 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * compact (1240), and the session storage pass's inventory of sessions with
  * content to collect and its collector of unreferenced content blobs (1359),
  * and the sandbox reaper's inventory of cold sandboxes whose chats are all
- * archived (1404).
+ * archived (1404), and the organization-wide sandbox counts behind
+ * plan-tiered sandbox limits (1471).
  * Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
@@ -103,6 +104,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "session_content_garbage_candidates_v1(integer)",
   "collect_session_content_garbage_v1(uuid, uuid, integer)",
   "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
+  "organization_warm_sandbox_counts_v1(uuid, text, uuid)",
 ] as const;
 
 /**
@@ -142,6 +144,8 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * 1404 withholds the inventory of cold sandboxes whose chats are all
  * archived; until it is granted, such a non-compute sandbox keeps its saved
  * workspace until its chats are deleted (as before).
+ * 1471 withholds the organization-wide sandbox counts; until they are
+ * granted, only the per-workspace viewer limit is enforced (as before).
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -153,6 +157,7 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_content_garbage_candidates_v1(integer)",
   "collect_session_content_garbage_v1(uuid, uuid, integer)",
   "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
+  "organization_warm_sandbox_counts_v1(uuid, text, uuid)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -272,6 +277,11 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
   "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)": [
     "sandbox_leases",
     "sessions",
+  ],
+  "organization_warm_sandbox_counts_v1(uuid, text, uuid)": [
+    "sandbox_leases",
+    "sandbox_lease_holders",
+    "workspaces",
   ],
 };
 

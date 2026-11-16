@@ -24,11 +24,12 @@ import {
   applyGitAuthPointerEnvironment,
   hasGitCredentialRepositorySelection,
   resolveStreamTokenSecret,
+  sandboxPlanLimits,
   sandboxLifecycleTransitionWaitMs,
   sandboxWarmRateMicrosPerSecond,
   stableSandboxEnvironmentForRun,
 } from "@opengeni/config";
-import type { Settings } from "@opengeni/config";
+import type { SandboxPlanLimit, Settings } from "@opengeni/config";
 import { type AccessGrant, type Session, type StreamUrlRotatedPayload } from "@opengeni/contracts";
 import {
   acquireLease,
@@ -45,6 +46,7 @@ import {
   SandboxLeaseSupersededError,
   SandboxViewerAdmissionBlockedError,
   SandboxViewerBoxLimitError,
+  SandboxOrganizationBoxLimitError,
   SandboxPaidComputeAdmissionError,
   type Database,
   type LeaseSnapshot,
@@ -277,6 +279,11 @@ export async function attachViewer(
       viewerOnlyBoxLimit: input.operationScoped
         ? 0
         : settings.sandboxMaxViewerOnlyBoxesPerWorkspace,
+      // Operation-scoped holds still count toward and respect the running-box
+      // limit; only the viewer-only limits exempt them.
+      sandboxPlanLimits: input.operationScoped
+        ? runningLimitsOnly(sandboxPlanLimits(settings))
+        : sandboxPlanLimits(settings),
       ...(input.waitSignal ? { waitSignal: input.waitSignal } : {}),
     });
   } catch (error) {
@@ -284,9 +291,15 @@ export async function attachViewer(
       // 429 is the client's existing "viewer cap reached" signal: the surface
       // degrades instead of retrying into the limit.
       throw new HTTPException(429, {
+        message: viewerBoxLimitMessage(error),
+        cause: error,
+      });
+    }
+    if (error instanceof SandboxOrganizationBoxLimitError) {
+      throw new HTTPException(429, {
         message:
-          `this workspace already keeps ${error.limit} computers running with no task; ` +
-          "close one or start a task in this chat",
+          `your organization already runs ${error.limit} computers, the most its plan allows; ` +
+          "close one or wait for a task to finish",
         cause: error,
       });
     }
@@ -1602,4 +1615,30 @@ function viewerIdAsUuid(rawViewerId: string): string {
   b[16] = variantNibble.toString(16);
   const s = b.join("");
   return `${s.slice(0, 8)}-${s.slice(8, 12)}-${s.slice(12, 16)}-${s.slice(16, 20)}-${s.slice(20, 32)}`;
+}
+
+function viewerBoxLimitMessage(error: SandboxViewerBoxLimitError): string {
+  const action = "close one or start a task in this chat";
+  if (error.limit === 0) {
+    return "this account cannot keep computers running without a task; start a task in this chat";
+  }
+  switch (error.scope) {
+    case "organization":
+      return `your organization already keeps ${error.limit} computers running with no task; ${action}`;
+    case "member":
+      return `you already keep ${error.limit} computers running with no task; ${action}`;
+    default:
+      return `this workspace already keeps ${error.limit} computers running with no task; ${action}`;
+  }
+}
+
+function runningLimitsOnly(limits: Readonly<Record<string, SandboxPlanLimit>>) {
+  return Object.fromEntries(
+    Object.entries(limits).map(([tier, limit]) => [
+      tier,
+      limit.runningBoxesPerOrganization === undefined
+        ? {}
+        : { runningBoxesPerOrganization: limit.runningBoxesPerOrganization },
+    ]),
+  );
 }

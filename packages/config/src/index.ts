@@ -2191,6 +2191,9 @@ const SettingsSchema = z.object({
   // heartbeating viewer keeps it running indefinitely; this bounds that free
   // compute per workspace. Boxes a turn holds never count. 0 = unbounded.
   sandboxMaxViewerOnlyBoxesPerWorkspace: z.coerce.number().int().nonnegative().default(3),
+  // Organization-wide sandbox limits by subscription plan (see
+  // parseSandboxPlanLimitsJson). Empty = DEFAULT_SANDBOX_PLAN_LIMITS; "{}" = none.
+  sandboxPlanLimitsJson: z.string().default(""),
   sandboxPreparationProfiles: z.string().default("none"),
   sandboxEnvAllowlist: z.string().default(""),
   // Comma-separated image references a workspace may select as its default
@@ -6588,6 +6591,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     sandboxMaxViewerOnlyBoxesPerWorkspace: optional(
       "OPENGENI_SANDBOX_MAX_VIEWER_ONLY_BOXES_PER_WORKSPACE",
     ),
+    sandboxPlanLimitsJson: optional("OPENGENI_SANDBOX_PLAN_LIMITS_JSON"),
     sandboxPreparationProfiles: optional("OPENGENI_SANDBOX_PREPARATION_PROFILES"),
     sandboxEnvAllowlist: optional("OPENGENI_SANDBOX_ENV_ALLOWLIST"),
     sandboxImageAllowlist: optional("OPENGENI_SANDBOX_IMAGE_ALLOWLIST"),
@@ -12273,6 +12277,110 @@ export function parseSandboxWarmRateJson(raw: string): Record<string, number> {
   return out;
 }
 
+/**
+ * Organization-wide sandbox limits for one plan tier. An omitted field is
+ * unbounded; 0 refuses every such box.
+ *
+ * - `viewerOnlyBoxesPerOrganization`: boxes kept warm by a viewer with no
+ *   turn holder, across all of the organization's workspaces.
+ * - `viewerOnlyBoxesPerMember`: the same, kept warm by one person's viewer.
+ * - `runningBoxesPerOrganization`: every running managed box (warming, warm or
+ *   draining; Connected Machines never count), including boxes agent turns
+ *   hold. A new box beyond it waits for a slot instead of starting.
+ */
+export type SandboxPlanLimit = {
+  viewerOnlyBoxesPerOrganization?: number;
+  viewerOnlyBoxesPerMember?: number;
+  runningBoxesPerOrganization?: number;
+};
+
+/**
+ * Limits by tier. Tiers are subscription plan keys (`free`, `pro`, `max`,
+ * `enterprise`, or any operator-defined key), plus `none` for an organization
+ * with no plan row (plans disabled) and `restricted` for a Free or plan-less
+ * organization whose promotion decision is `held` or `denied`. A tier absent
+ * from the table is unbounded.
+ */
+export type SandboxPlanLimits = Readonly<Record<string, SandboxPlanLimit>>;
+
+const SANDBOX_PLAN_LIMIT_FIELDS = [
+  "viewerOnlyBoxesPerOrganization",
+  "viewerOnlyBoxesPerMember",
+  "runningBoxesPerOrganization",
+] as const;
+
+export const DEFAULT_SANDBOX_PLAN_LIMITS: SandboxPlanLimits = {
+  free: {
+    viewerOnlyBoxesPerOrganization: 2,
+    viewerOnlyBoxesPerMember: 1,
+    runningBoxesPerOrganization: 3,
+  },
+  restricted: {
+    viewerOnlyBoxesPerOrganization: 0,
+    viewerOnlyBoxesPerMember: 0,
+    runningBoxesPerOrganization: 3,
+  },
+  pro: {
+    viewerOnlyBoxesPerOrganization: 10,
+    viewerOnlyBoxesPerMember: 3,
+    runningBoxesPerOrganization: 20,
+  },
+  max: {
+    viewerOnlyBoxesPerOrganization: 30,
+    viewerOnlyBoxesPerMember: 5,
+    runningBoxesPerOrganization: 50,
+  },
+};
+
+/** Parse OPENGENI_SANDBOX_PLAN_LIMITS_JSON; blank keeps the defaults. */
+export function parseSandboxPlanLimitsJson(raw: string): SandboxPlanLimits {
+  if (!raw.trim()) return DEFAULT_SANDBOX_PLAN_LIMITS;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(
+      `OPENGENI_SANDBOX_PLAN_LIMITS_JSON must be valid JSON: ${errorMessage(error)}`,
+      {
+        cause: error,
+      },
+    );
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("OPENGENI_SANDBOX_PLAN_LIMITS_JSON must be a JSON object keyed by plan tier");
+  }
+  const out: Record<string, SandboxPlanLimit> = {};
+  for (const [tier, value] of Object.entries(parsed)) {
+    if (!tier.trim()) {
+      throw new Error("OPENGENI_SANDBOX_PLAN_LIMITS_JSON contains an empty plan tier");
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error(`OPENGENI_SANDBOX_PLAN_LIMITS_JSON tier ${tier} must be an object`);
+    }
+    const limit: SandboxPlanLimit = {};
+    for (const [field, amount] of Object.entries(value)) {
+      if (!(SANDBOX_PLAN_LIMIT_FIELDS as readonly string[]).includes(field)) {
+        throw new Error(
+          `OPENGENI_SANDBOX_PLAN_LIMITS_JSON tier ${tier} has unknown field ${field}`,
+        );
+      }
+      if (amount === null) continue;
+      if (typeof amount !== "number" || !Number.isSafeInteger(amount) || amount < 0) {
+        throw new Error(
+          `OPENGENI_SANDBOX_PLAN_LIMITS_JSON ${tier}.${field} must be a non-negative integer or null`,
+        );
+      }
+      limit[field as (typeof SANDBOX_PLAN_LIMIT_FIELDS)[number]] = amount;
+    }
+    out[tier] = limit;
+  }
+  return out;
+}
+
+export function sandboxPlanLimits(settings: Settings): SandboxPlanLimits {
+  return parseSandboxPlanLimitsJson(settings.sandboxPlanLimitsJson);
+}
+
 // Resolve the warm rate (usd_micros/sec) for a backend; 0 when the backend has no
 // configured rate (the box is metered in seconds but not cost-debited).
 export function sandboxWarmRateMicrosPerSecond(settings: Settings, backend: string): number {
@@ -13343,6 +13451,8 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
   // workers. The provider is withheld and the API logs voiceInputPricingIssues.
   sandboxEnvironmentVariableNames(settings);
   sandboxLifecycleHookIds(settings);
+  // Fail fast on a malformed plan-limit table.
+  parseSandboxPlanLimitsJson(settings.sandboxPlanLimitsJson);
   // Fail fast on a malformed warm-rate table (P2.1).
   const warmRates = parseSandboxWarmRateJson(settings.sandboxWarmRateMicrosPerSecondJson);
   // The meter rounds each settled interval to whole USD micros. Fractional

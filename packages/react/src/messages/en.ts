@@ -2245,6 +2245,8 @@ export const englishMessages = {
   "lib.providerRecovery.opengeniIsPreparingTheSandbox": "{product} is preparing the sandbox",
   "lib.providerRecovery.opengeniIsRecoveringTheSandbox": "{product} is recovering the sandbox",
   "lib.providerRecovery.opengeniIsSavingTheSandbox": "{product} is saving the sandbox workspace",
+  "lib.providerRecovery.yourPlanSRunningComputerLimit":
+    "Your organization is running as many computers as its plan allows; this task continues when one frees up",
   "lib.providerRecovery.opengeniRetriedTimesWithoutSuccess_one":
     "{product} retried {count} time without success.",
   "lib.providerRecovery.opengeniRetriedTimesWithoutSuccess_other":
