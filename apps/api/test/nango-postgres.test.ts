@@ -576,13 +576,11 @@ describe("Nango connections in PostgreSQL", () => {
     );
     const [firstRow] = await nangoRows(first);
     const [secondRow] = await nangoRows(second);
+    // Each organization keeps what was consented there.
     expect(firstRow).toMatchObject({
       status: "active",
       nango_connection_id: "ns-2",
-      granted_scopes: [
-        "https://www.googleapis.com/auth/gmail.readonly",
-        "https://mail.google.com/",
-      ],
+      granted_scopes: ["https://www.googleapis.com/auth/gmail.readonly"],
     });
     expect(secondRow).toMatchObject({ status: "active", nango_connection_id: "ns-2" });
     expect(nango.deleted("ns-1")).toBe(true);
@@ -864,6 +862,11 @@ describe("Nango connections in PostgreSQL", () => {
     await connect(target, nango, "na-4", "turn@example.com", "https://mail.google.com/");
     expect(await generation()).toBe(accepted + 1);
     expect(await brokerLoad()).toBeNull();
+    // A row saved before account keys: its first reconnect keeps authority too.
+    await shared!.admin`update connections set account_identity_key = null where id = ${row!.id}`;
+    const legacy = await generation();
+    await connect(target, nango, "na-5", "turn@example.com", "https://mail.google.com/");
+    expect(await generation()).toBe(legacy);
   });
 
   test("a replayed completion whose identity read fails keeps the stored connection", async () => {
@@ -901,21 +904,32 @@ describe("Nango connections in PostgreSQL", () => {
     });
   });
 
-  test("a narrower grant or a disallowing organization is not repointed", async () => {
+  test("a narrower grant shares the broader connection; a disallowing organization is left", async () => {
     if (!shared) return;
     const broad = await owner("nango repoint broad");
     const narrow = await owner("nango repoint narrow", broad.subjectId);
     const nango = fakeNango();
     const both = "https://www.googleapis.com/auth/gmail.readonly https://mail.google.com/";
     await connect(broad, nango, "nrp-1", "repoint@example.com", both);
-    // A narrower grant elsewhere must not shrink the broad organization's access.
+    // A narrower grant elsewhere must not shrink the broad organization's
+    // access, and is not billed twice: it uses the broader connection, with
+    // only its own scopes.
     await connect(narrow, nango, "nrp-2", "repoint@example.com");
     expect((await nangoRows(broad))[0]).toMatchObject({
       status: "active",
       nango_connection_id: "nrp-1",
+      granted_scopes: [
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://mail.google.com/",
+      ],
     });
-    expect((await nangoRows(narrow))[0]).toMatchObject({ nango_connection_id: "nrp-2" });
+    expect((await nangoRows(narrow))[0]).toMatchObject({
+      status: "active",
+      nango_connection_id: "nrp-1",
+      granted_scopes: ["https://www.googleapis.com/auth/gmail.readonly"],
+    });
     expect(nango.deleted("nrp-1")).toBe(false);
+    expect(nango.deleted("nrp-2")).toBe(true);
 
     // An organization that has since disallowed Gmail keeps its own row as it is.
     const restricted = await owner("nango repoint restricted");
@@ -943,6 +957,29 @@ describe("Nango connections in PostgreSQL", () => {
       where account_id = ${second.accountId} and subject_id = ${second.subjectId}`;
     await disconnect(first, firstRow!.id, nango);
     expect(nango.deleted("nsu-2")).toBe(false);
+    // A fresh attempt that fails is still never left billed.
+    const token = await signedState(first);
+    nango.remote.push({
+      connectionId: "nsu-attempt",
+      tags: attemptTags(first, readNangoConnectState(settings, token).nonce),
+      email: "suspended@example.com",
+      scope: "https://www.googleapis.com/auth/gmail.readonly",
+      authErrors: 0,
+      created: new Date().toISOString(),
+      identityStatus: 403,
+    });
+    await expect(
+      completeNangoConnect(
+        {
+          db: client.db,
+          settings,
+          fetchImpl: nango.fetchImpl,
+          nangoBackends: async () => backends,
+        },
+        { state: token, browser: { bindingDigests: [], signedInSubjectId: null } },
+      ),
+    ).rejects.toThrow();
+    expect(nango.deleted("nsu-attempt")).toBe(true);
     expect(await sweepNangoConnections(sweepDeps(nango))).toMatchObject({ deletedOrphans: [] });
     expect(nango.deleted("nsu-2")).toBe(false);
     // Once granted, the deployment-wide check decides: still in use, then not.

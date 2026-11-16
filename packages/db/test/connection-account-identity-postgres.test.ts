@@ -6,6 +6,7 @@ import {
   connectionAccountIdentityKey,
   createConnection,
   createDb,
+  persistProviderOAuthConnection,
   revokeConnection,
   updateConnection,
   type DbClient,
@@ -168,5 +169,71 @@ describe("one live connection per owner and verified account", () => {
     expect(await generation()).toBe(start + 3);
     await revokeConnection(client.db, workspace.workspaceId, created.id, workspace.subjectId);
     expect(await generation()).toBeGreaterThan(start + 3);
+  }, 60_000);
+
+  test("a reconnect of a row saved before keys keeps its generation when the writer vouches for it", async () => {
+    const workspace = await organization();
+    const legacy = await connect(workspace, { personal: true, accountIdentityKey: null });
+    const generation = async () =>
+      Number(
+        (
+          await shared.admin<Array<{ authority_generation: string }>>`
+            select authority_generation from connections where id = ${legacy.id}`
+        )[0]!.authority_generation,
+      );
+    const start = await generation();
+    await updateConnection(client.db, {
+      workspaceId: workspace.workspaceId,
+      connectionId: legacy.id,
+      visibleToSubjectId: workspace.subjectId,
+      credentialEncrypted: "reconnected",
+      accountIdentityKey: KEY,
+      previousAccountIdentityKey: KEY,
+    });
+    expect(await generation()).toBe(start);
+  }, 60_000);
+
+  test("provider OAuth reconnects the live row, never a revoked duplicate", async () => {
+    const workspace = await organization();
+    const metadata = {
+      credentialRole: "test_personal",
+      providerFamily: "test",
+      providerPrincipalId: "principal-1",
+    };
+    const legacy = () =>
+      createConnection(client.db, {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        subjectId: workspace.subjectId,
+        providerDomain: "provider.example",
+        kind: "oauth2",
+        credentialEncrypted: "legacy",
+        metadata,
+        createdBySubjectId: workspace.subjectId,
+      });
+    // Duplicates an older release left, both without a key.
+    const older = await legacy();
+    const newer = await legacy();
+    const persist = () =>
+      persistProviderOAuthConnection(client.db, {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        subjectId: workspace.subjectId,
+        visibleToSubjectId: workspace.subjectId,
+        providerDomain: "provider.example",
+        kind: "oauth2",
+        status: "active",
+        credentialEncrypted: `token-${crypto.randomUUID()}`,
+        grantedScopes: [],
+        metadata,
+        credentialRole: "test_personal",
+        providerFamily: "test",
+        providerPrincipalId: "principal-1",
+        createdBySubjectId: workspace.subjectId,
+      });
+    expect((await persist())?.id).toBe(newer.id);
+    // Disconnecting the other duplicate makes it the most recently updated row.
+    await revokeConnection(client.db, workspace.workspaceId, older.id, workspace.subjectId);
+    expect((await persist())?.id).toBe(newer.id);
   }, 60_000);
 });

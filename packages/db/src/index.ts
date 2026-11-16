@@ -8040,6 +8040,12 @@ export type UpdateConnectionInput = {
   metadata?: Record<string, unknown>;
   /** See connectionAccountIdentityKey; undefined keeps the stored key. */
   accountIdentityKey?: string | null;
+  /**
+   * The key the writer derives from the stored row's own verified account,
+   * for a row saved before keys existed. With `accountIdentityKey` equal to
+   * it (and no scope lost) the reconnect keeps `authorityGeneration`.
+   */
+  previousAccountIdentityKey?: string | null;
   updatedBySubjectId?: string | null;
 };
 
@@ -14311,7 +14317,13 @@ export async function persistProviderOAuthConnection(
                   sql`${schema.connections.metadata} ->> 'providerPrincipalId' = ${input.providerPrincipalId}`,
                 ),
               )
-              .orderBy(desc(schema.connections.updatedAt), desc(schema.connections.id))
+              // A live row first: reactivating a revoked duplicate would
+              // collide with the live row that holds the account.
+              .orderBy(
+                sql`${schema.connections.status} = 'revoked'`,
+                desc(schema.connections.updatedAt),
+                desc(schema.connections.id),
+              )
               .for("update")
               .limit(1)
           )[0];
@@ -14356,6 +14368,8 @@ export async function persistProviderOAuthConnection(
           grantedScopes: input.grantedScopes ?? [],
           expiresAt: input.expiresAt ?? null,
           accountIdentityKey,
+          // Matched on the same provider principal: the same account.
+          previousAccountIdentityKey: accountIdentityKey,
           metadata: {
             ...existing.metadata,
             ...(input.metadata ?? {}),
@@ -14529,12 +14543,17 @@ export async function verifyPersonalGitHubRepositorySelections(
 function sameAccountReconnectGeneration(input: UpdateConnectionInput) {
   const next = sql`${schema.connections.authorityGeneration} + 1`;
   if (!input.accountIdentityKey) return next;
+  // A row saved before keys existed carries none; the writer then vouches
+  // for the stored row's account with the key it derives from that row.
+  const stored = input.previousAccountIdentityKey
+    ? sql`coalesce(${schema.connections.accountIdentityKey}, ${input.previousAccountIdentityKey})`
+    : sql`${schema.connections.accountIdentityKey}`;
   const keepsScopes =
     input.grantedScopes === undefined
       ? sql`true`
       : sql`${JSON.stringify(input.grantedScopes)}::jsonb @> ${schema.connections.grantedScopes}`;
   return sql`case
-    when ${schema.connections.accountIdentityKey} = ${input.accountIdentityKey} and ${keepsScopes}
+    when ${stored} = ${input.accountIdentityKey} and ${keepsScopes}
       then ${schema.connections.authorityGeneration}
     else ${next}
   end`;

@@ -92,14 +92,17 @@ connections; that is not a duplicate.
 - Rows stay per organization (organizations never share rows, and a Nango
   row is always personal), but the same person's rows for the same verified
   account in every organization they belong to stand for one Nango
-  connection: the newest verified one. When a connect stores a connection,
-  the person's other rows for that account are pointed at it (credential,
-  grants, status active) and the connections they stood for are deleted. A
-  reconnect in one organization therefore also repairs the same account in
-  the others. A row is not pointed at it when the new grant lacks one of the
-  row's scopes (a narrower consent must not shrink another organization's
-  access) or when that row's organization no longer allows the integration;
-  such a row keeps its own connection.
+  connection: the newest verified one, unless an existing healthy one of
+  the account already covers every row's scopes (a narrower connect
+  elsewhere), which is then kept instead. When a connect stores a
+  connection, the person's other rows for that account are pointed at the
+  shared one (credential and status active; each row keeps its own granted
+  scopes, so no organization gains access it did not consent to) and the
+  connections they stood for are deleted. A reconnect in one organization
+  therefore also repairs the same account in the others. A row is not
+  pointed at a connection whose grant lacks one of the row's scopes, or when
+  its organization no longer allows the integration; such a row keeps its
+  own connection.
 - A Nango connection is deleted only when no live (not revoked) row of that
   person still stands for it: disconnecting in one organization keeps the
   connection the others use, and the last disconnect deletes it.
@@ -115,7 +118,9 @@ connections; that is not a duplicate.
   state). 1473 withholds its runtime grant (the previous release rejects a
   grant on a definer it does not know); until a later migration grants it,
   the person's own reads decide, and a membership that is not active or an
-  organization that cannot be read means nothing is deleted.
+  organization that cannot be read means nothing is deleted, except a
+  refused or failed attempt's own connection that Nango made within the
+  last two hours and no readable row names.
 - Connections without a verified account are never merged. Config-only
   integrations (LinkedIn, X) without an `accountIdentity` therefore add a
   Nango connection on each connect, and each stays billed until its row is
@@ -123,8 +128,9 @@ connections; that is not a duplicate.
 - Reconnecting the same verified account into its row keeps the row's
   `authority_generation` when the new grant includes every scope the row had,
   so turns already running on it keep working; the Nango connection id may
-  change. A different account, fewer scopes, a revoke or a status change
-  still advance it.
+  change. A row saved before account keys counts as the same account when
+  it was matched on the verified account. A different account, fewer
+  scopes, a revoke or a status change still advance it.
 - Within one organization the database holds it too: each row carries its
   account's `account_identity_key` (the Nango integration and the verified
   account), unique among one person's live rows (see

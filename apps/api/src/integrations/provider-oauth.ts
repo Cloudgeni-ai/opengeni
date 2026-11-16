@@ -47,6 +47,7 @@ import {
   persistProviderOAuthConnection,
   getConnectAttempt,
   finishConnectOperation,
+  isConnectionAccountIdentityConflict,
 } from "@opengeni/db";
 import { createSignedState, readSignedState } from "@opengeni/github";
 import {
@@ -544,8 +545,13 @@ export async function completeApiIntegrationProviderOAuth(
           }
         : {}),
     };
+    // Another live row already holds this account: a conflict, not a crash.
     const persist = (database: import("@opengeni/db").Database) =>
-      persistProviderOAuthConnection(database, persistenceInput);
+      persistProviderOAuthConnection(database, persistenceInput).catch((error: unknown) => {
+        if (isConnectionAccountIdentityConflict(error))
+          throw new ProviderOAuthCallbackError("connection_conflict");
+        throw error;
+      });
     if (connectOperation) {
       // Null (unreadable in time) saves the account and finishes it later.
       const owner = state;

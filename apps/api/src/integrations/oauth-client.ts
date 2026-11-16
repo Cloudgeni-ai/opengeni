@@ -1334,6 +1334,18 @@ async function completeMcpOAuthCallbackWithinDeadline(
         identityKeys,
         subjectKey,
       });
+      // The key of the reconnected row's own verified account, for a row
+      // saved before keys existed (same account: accepted work keeps it).
+      const reconnected = state.connectionId ? accounts.get(state.connectionId) : undefined;
+      const previousAccountIdentityKey = reconnected
+        ? oauthAccountIdentityKey({
+            providerDomain: reconnected.providerDomain,
+            mcpUrl: state.mcpUrl,
+            metadata: reconnected.metadata,
+            identityKeys,
+            subjectKey,
+          })
+        : null;
       const write = state!.connectionId
         ? updateConnection(scopedDb, {
             workspaceId: state.workspaceId,
@@ -1349,6 +1361,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
             expiresAt: token.expiresAt,
             metadata,
             accountIdentityKey,
+            previousAccountIdentityKey,
             updatedBySubjectId: state.subjectId,
           })
         : createConnection(scopedDb, {

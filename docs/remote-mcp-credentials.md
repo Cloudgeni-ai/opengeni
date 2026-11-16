@@ -277,8 +277,17 @@ connected or reconnected.
 Reconnecting the same account into its row is not an authority change: when
 the update carries the row's own key and its new grant includes every scope
 the row had, `authority_generation` stays, so a turn accepted on the row
-keeps using it with the new token. A different account, fewer scopes, a
-writer without a key, a revoke or a status change still advance it.
+keeps using it with the new token. A row saved before keys existed counts
+when the writer derives the same key from the stored row's own verified
+account (`previousAccountIdentityKey`). A different account, fewer scopes, a
+writer without a key, a revoke or a status change still advance it. The MCP
+key includes the authorization server issuer and the identity the provider
+verified (its account ID when recorded); if either changes between connects,
+the key changes and that one reconnect advances the generation.
+
+Provider OAuth keys are per workspace (the workspace is part of the key), as
+those connections are. Reconnecting picks the live row of the provider
+principal before any revoked duplicate.
 
 An exact `connectionRef.connectionId` remains pinned to that account, including
 custom API instances. Multi-account selectors are unpinned; the explicit

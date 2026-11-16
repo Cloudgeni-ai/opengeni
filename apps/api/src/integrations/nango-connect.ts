@@ -487,6 +487,7 @@ async function releaseAttemptConnection(
     providerConfigKey: input.providerConfigKey,
     nangoConnectionIds: [nangoConnectionId],
     knownWorkspaceIds: [input.workspaceId],
+    freshAttempt: true,
   }).catch(() => undefined);
 }
 
@@ -687,6 +688,9 @@ async function persistNangoConnection(
       expiresAt: null,
       metadata,
       accountIdentityKey,
+      // Matched on the verified account: a row saved before keys existed is
+      // the same account, so accepted work keeps using it.
+      previousAccountIdentityKey: accountIdentityKey,
       updatedBySubjectId: input.subjectId,
     }).catch(alreadyConnected);
     if (!updated) throw new HTTPException(409, { message: "connection changed; try again" });
@@ -890,6 +894,7 @@ export async function completeNangoConnect(
         providerConfigKey: state.providerConfigKey,
         nangoConnectionIds: [match.connectionId],
         knownWorkspaceIds: [state.workspaceId],
+        freshAttempt: true,
       }).catch(() => undefined);
     throw error;
   }
@@ -1150,6 +1155,7 @@ export async function handleNangoWebhook(
             providerConfigKey: integration.providerConfigKey,
             nangoConnectionIds: [event.connectionId],
             knownWorkspaceIds: [workspaceId],
+            freshAttempt: true,
           }).catch(() => undefined);
         throw error;
       }
