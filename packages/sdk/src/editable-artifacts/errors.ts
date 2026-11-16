@@ -12,6 +12,13 @@ export type EditableArtifactSyncErrorCode =
   | "pending_conflict"
   | "reconnect_exhausted";
 
+/**
+ * Blocked-pending (and Worker error) code for a document/presentation command
+ * that the kernel rejects over the exact head it was authored against. Such
+ * an edit can never commit, so the controller discards it from the WAL.
+ */
+export const EDITABLE_ARTIFACT_COMMAND_REJECTED = "command_rejected";
+
 export class EditableArtifactSyncError extends Error {
   readonly code: EditableArtifactSyncErrorCode;
   readonly retryable: boolean;

@@ -1,5 +1,14 @@
 # @opengeni/codemode
 
+## 6.24.0
+
+### Patch Changes
+
+- Updated dependencies [c0248a5]
+  - @opengeni/contracts@6.24.0
+  - @opengeni/sdk@6.24.0
+  - @opengeni/tool-gateway@6.24.0
+
 ## 6.23.0
 
 ### Patch Changes

@@ -12,18 +12,21 @@ import type {
   PresentationArtifactSlideCatalogItem,
 } from "@opengeni/sdk/editable-artifacts";
 
-import {
-  composePresentationEditorProjection,
-  EditablePresentationArtifactSurface,
-  flattenPresentationRichText,
-  replacePresentationRichText,
-} from "../src/components/artifacts/editable-presentation";
 import { actRun, flush, registerDom, renderComponent } from "./render-hook";
 import { createOpenGeniText } from "../src/messages/runtime";
 
 const englishText = createOpenGeniText();
 
 registerDom();
+// Imported after the DOM exists: Radix decides at load whether layout effects
+// run, and the delete confirmation dialog portals from one.
+const {
+  composePresentationEditorProjection,
+  EditablePresentationArtifactSurface,
+  flattenPresentationRichText,
+  presentationNodeDeletionCommands,
+  replacePresentationRichText,
+} = await import("../src/components/artifacts/editable-presentation");
 
 const ARTIFACT_ID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const PRESENTATION_ID = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -82,6 +85,13 @@ class FakePresentationSession {
     };
     for (const listener of this.listeners) listener(this.view);
   }
+  /** A collaborator's committed slide deletion arriving from the server. */
+  removeSlideRemotely(slideId: string): void {
+    this.slides = this.slides
+      .filter((candidate) => candidate.id !== slideId)
+      .map((candidate, index) => ({ ...candidate, index }));
+    this.refreshProjection();
+  }
   refreshProjection(): void {
     this.revision += 1n;
     this.view = {
@@ -130,6 +140,38 @@ class FakePresentationSession {
   async applyPresentationCommands(
     batch: PresentationArtifactCommandBatch,
   ): Promise<EditableArtifactPendingTransaction> {
+    // Mirror the kernel's structural delete rules: only empty slides and
+    // groups can be deleted, never a node a connector still attaches to.
+    let nodes = this.nodes;
+    for (const command of batch.commands) {
+      if (command.kind === "node.delete") {
+        if (nodes.some((node) => node.parentId === command.id)) {
+          throw new Error("[ARTIFACT_PRESENTATION_BATCH_REJECTED] presentation scene is not empty");
+        }
+        if (
+          nodes.some(
+            (node) =>
+              node.content.kind === "connector" &&
+              (node.content.start.nodeId === command.id || node.content.end.nodeId === command.id),
+          )
+        ) {
+          throw new Error("[ARTIFACT_PRESENTATION_BATCH_REJECTED] referenced object");
+        }
+        nodes = nodes.filter((node) => node.id !== command.id);
+      } else if (command.kind === "slide.delete") {
+        if (batch.commands.some((other) => other.kind !== "slide.delete")) {
+          throw new Error("[ARTIFACT_PRESENTATION_BATCH_REJECTED] unknown presentation slide");
+        }
+        if (
+          nodes.some(
+            (node) =>
+              !node.inherited && node.source.kind === "slide" && node.source.id === command.id,
+          )
+        ) {
+          throw new Error("[ARTIFACT_PRESENTATION_BATCH_REJECTED] presentation scene is not empty");
+        }
+      }
+    }
     this.commands.push(batch);
     const command = batch.commands[0];
     if (command?.kind === "node.bounds.set") {
@@ -157,7 +199,7 @@ class FakePresentationSession {
         ...this.nodes.slice(command.index),
       ];
     } else if (command?.kind === "node.delete") {
-      this.nodes = this.nodes.filter((node) => node.id !== command.id);
+      this.nodes = nodes;
     } else if (command?.kind === "slide.delete") {
       this.slides = this.slides
         .filter((candidate) => candidate.id !== command.id)
@@ -395,14 +437,96 @@ describe("SDK-backed editable presentation", () => {
     expect(fake.createCalls).toBe(1);
     expect(rendered.container.querySelectorAll('[role="option"]')).toHaveLength(2);
 
-    const remove = rendered.container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Delete slide"]',
-    )!;
+    const remove = deleteControl(rendered.container);
+    expect(remove.textContent).toBe("Delete slide");
     await actRun(() => remove.click());
+    await flush();
+    expect(fake.commands).toHaveLength(0);
+    await actRun(() => confirmButton("Delete slide").click());
     await flush(40);
     expect(fake.commands.at(-1)?.commands[0]).toMatchObject({ kind: "slide.delete" });
     expect(rendered.container.querySelectorAll('[role="option"]')).toHaveLength(1);
     await rendered.unmount();
+  });
+
+  test("deletes a slide that still has objects, after confirmation", async () => {
+    const fake = new FakePresentationSession();
+    const rendered = await renderComponent(
+      <EditablePresentationArtifactSurface
+        session={fake as unknown as EditableArtifactSession}
+        title="Deck"
+      />,
+    );
+    try {
+      await flush(30);
+      const remove = deleteControl(rendered.container);
+      expect(remove.textContent).toBe("Delete slide");
+      await actRun(() => remove.click());
+      await flush();
+      expect(document.body.textContent).toContain("Delete slide 1?");
+      expect(document.body.textContent).toContain("The slide and everything on it are removed.");
+      expect(fake.commands).toHaveLength(0);
+
+      await actRun(() => confirmButton("Delete slide").click());
+      await flush(60);
+      // Children before their group; inherited master objects are untouched;
+      // the slide is deleted in its own batch once it is empty.
+      expect(fake.commands.map((batch) => batch.commands)).toEqual([
+        [
+          { kind: "node.delete", id: SHAPE_ID },
+          { kind: "node.delete", id: CHILD_ID },
+          { kind: "node.delete", id: GROUP_ID },
+        ],
+        [{ kind: "slide.delete", id: SLIDE_ID }],
+      ]);
+      expect(rendered.container.querySelectorAll('[role="option"]')).toHaveLength(0);
+      expect(rendered.container.textContent).not.toContain("Change not saved");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("cancelling the delete confirmation changes nothing", async () => {
+    const fake = new FakePresentationSession();
+    const rendered = await renderComponent(
+      <EditablePresentationArtifactSurface
+        session={fake as unknown as EditableArtifactSession}
+        title="Deck"
+      />,
+    );
+    try {
+      await flush(30);
+      await actRun(() => deleteControl(rendered.container).click());
+      await flush();
+      await actRun(() => confirmButton("Cancel").click());
+      await flush(30);
+      expect(fake.commands).toHaveLength(0);
+      expect(rendered.container.querySelectorAll('[role="option"]')).toHaveLength(1);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("an open confirmation closes, deleting nothing, when its slide is removed meanwhile", async () => {
+    const fake = new FakePresentationSession();
+    const rendered = await renderComponent(
+      <EditablePresentationArtifactSurface
+        session={fake as unknown as EditableArtifactSession}
+        title="Deck"
+      />,
+    );
+    try {
+      await flush(30);
+      await actRun(() => deleteControl(rendered.container).click());
+      await flush();
+      expect(document.body.querySelector('[role="alertdialog"], [role="dialog"]')).not.toBeNull();
+      await actRun(() => fake.removeSlideRemotely(SLIDE_ID));
+      await flush(40);
+      expect(document.body.querySelector('[role="alertdialog"], [role="dialog"]')).toBeNull();
+      expect(fake.commands).toHaveLength(0);
+    } finally {
+      await rendered.unmount();
+    }
   });
 
   test("adds and removes an editable text box through canonical node commands", async () => {
@@ -426,14 +550,47 @@ describe("SDK-backed editable presentation", () => {
       node: { name: "Text box", content: { kind: "shape", geometry: "text-box" } },
     });
 
-    const remove = rendered.container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Delete selected object"]',
-    )!;
+    const remove = deleteControl(rendered.container);
+    expect(remove.textContent).toBe("Delete object");
     expect(remove.disabled).toBe(false);
     await actRun(() => remove.click());
+    await flush();
+    await actRun(() => confirmButton("Delete object").click());
     await flush(40);
     expect(fake.commands.at(-1)?.commands[0]).toMatchObject({ kind: "node.delete" });
     await rendered.unmount();
+  });
+
+  test("deletes a selected group with its children", async () => {
+    const fake = new FakePresentationSession();
+    const rendered = await renderComponent(
+      <EditablePresentationArtifactSurface
+        session={fake as unknown as EditableArtifactSession}
+        title="Deck"
+      />,
+    );
+    try {
+      await flush(30);
+      const editor = rendered.container.querySelector<SVGSVGElement>('[role="application"]')!;
+      await actRun(() => editor.focus());
+      // "]" selects the next object in paint order: Heading, then Group.
+      for (let step = 0; step < 2; step += 1) {
+        await actRun(() =>
+          editor.dispatchEvent(new KeyboardEvent("keydown", { key: "]", bubbles: true })),
+        );
+      }
+      await actRun(() => deleteControl(rendered.container).click());
+      await flush();
+      expect(document.body.textContent).toContain("Delete Group?");
+      await actRun(() => confirmButton("Delete object").click());
+      await flush(40);
+      expect(fake.commands.at(-1)?.commands).toEqual([
+        { kind: "node.delete", id: CHILD_ID },
+        { kind: "node.delete", id: GROUP_ID },
+      ]);
+    } finally {
+      await rendered.unmount();
+    }
   });
 
   test("preserves an active text draft across authoritative projection refreshes", async () => {
@@ -485,6 +642,98 @@ describe("SDK-backed editable presentation", () => {
     await rendered.unmount();
   });
 
+  test("node deletion order: connectors and children first, outside connectors detached", () => {
+    const owner = { kind: "slide" as const, id: SLIDE_ID };
+    const base = makeNodes()[0]!;
+    const node = (
+      id: string,
+      parentId: string | null,
+      content: PresentationArtifactEditorSceneNode["content"] = base.content,
+      inherited = false,
+    ): PresentationArtifactEditorSceneNode => ({
+      ...base,
+      id,
+      parentId,
+      inherited,
+      source: inherited ? { kind: "master", id: MASTER_ID } : owner,
+      content,
+    });
+    const connector = (from: string | null, to: string | null) =>
+      ({
+        kind: "connector",
+        connectorKind: "straight",
+        start: { nodeId: from, x: 0, y: 0 },
+        end: { nodeId: to, x: 1, y: 1 },
+        line: { fill: { kind: "none" }, width: 1, dash: "solid" },
+      }) as PresentationArtifactEditorSceneNode["content"];
+    const group = {
+      kind: "group",
+      childOffsetX: 0,
+      childOffsetY: 0,
+      childExtentWidth: 1,
+      childExtentHeight: 1,
+      children: [],
+    } as unknown as PresentationArtifactEditorSceneNode["content"];
+    const nodes = [
+      node("outer", null, group),
+      node("inner", "outer", group),
+      node("leaf", "inner"),
+      node("other", null),
+      node("inside-link", "outer", connector("leaf", "inner")),
+      node("outside-link", null, connector("leaf", "other")),
+      node("master", null, base.content, true),
+    ];
+    const order = (commands: ReturnType<typeof presentationNodeDeletionCommands>) =>
+      commands.map((command) => `${command.kind}:${"id" in command ? command.id : ""}`);
+    const subtree = presentationNodeDeletionCommands(nodes, SLIDE_ID, "outer");
+    expect(order(subtree)).toEqual([
+      "node.content.set:outside-link",
+      "node.delete:inside-link",
+      "node.delete:leaf",
+      "node.delete:inner",
+      "node.delete:outer",
+    ]);
+    expect(subtree[0]).toMatchObject({
+      content: { start: { nodeId: null }, end: { nodeId: "other" } },
+    });
+    const everything = order(presentationNodeDeletionCommands(nodes, SLIDE_ID, null));
+    expect(everything).not.toContain("node.delete:master");
+    expect(everything.filter((entry) => entry.startsWith("node.content.set"))).toEqual([]);
+    for (const [before, after] of [
+      ["inside-link", "leaf"],
+      ["outside-link", "leaf"],
+      ["outside-link", "other"],
+      ["leaf", "inner"],
+      ["inner", "outer"],
+    ]) {
+      expect(everything.indexOf(`node.delete:${before}`)).toBeLessThan(
+        everything.indexOf(`node.delete:${after}`),
+      );
+    }
+    // A cycle cannot be ordered; every node is still emitted for the kernel to judge.
+    const cyclic = [node("a", null, connector("b", null)), node("b", null, connector("a", null))];
+    expect(presentationNodeDeletionCommands(cyclic, SLIDE_ID, null)).toHaveLength(2);
+    // Unknown root falls back to a plain delete.
+    expect(presentationNodeDeletionCommands(nodes, SLIDE_ID, "missing")).toEqual([
+      { kind: "node.delete", id: "missing" },
+    ]);
+  });
+
+  test("node deletion order stays fast on a slide at the interactive node limit", () => {
+    const base = makeNodes()[0]!;
+    const nodes: PresentationArtifactEditorSceneNode[] = [];
+    // Groups listed before their children, the worst case for a rescanning order.
+    for (let index = 0; index < 16_384; index += 1) {
+      nodes.push({ ...base, id: `n${index}`, parentId: index === 0 ? null : `n${index - 1}` });
+    }
+    const started = performance.now();
+    const commands = presentationNodeDeletionCommands(nodes, SLIDE_ID, null);
+    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(commands).toHaveLength(16_384);
+    expect(commands[0]).toEqual({ kind: "node.delete", id: "n16383" });
+    expect(commands.at(-1)).toEqual({ kind: "node.delete", id: "n0" });
+  });
+
   test("rich-text replacement preserves unaffected styles and paragraph alignment", () => {
     const before = richText();
     const after = replacePresentationRichText(before, "Hello world", "Hello brave world");
@@ -505,6 +754,24 @@ function slide(id = SLIDE_ID, title = "Intro"): PresentationArtifactSlideCatalog
     background: { kind: "solid", color: 0xffffffff },
     layout: null,
   };
+}
+
+function deleteControl(container: HTMLElement): HTMLButtonElement {
+  const buttons = container.querySelectorAll<HTMLButtonElement>(
+    "button[data-og-presentation-delete]",
+  );
+  expect(buttons).toHaveLength(1);
+  return buttons[0]!;
+}
+
+function confirmButton(label: string): HTMLButtonElement {
+  const dialog = document.body.querySelector('[role="dialog"], [role="alertdialog"]');
+  expect(dialog).not.toBeNull();
+  const button = [...dialog!.querySelectorAll<HTMLButtonElement>("button")].find(
+    (candidate) => candidate.textContent?.trim() === label,
+  );
+  expect(button).toBeDefined();
+  return button!;
 }
 
 function makeNodes(): readonly PresentationArtifactEditorSceneNode[] {

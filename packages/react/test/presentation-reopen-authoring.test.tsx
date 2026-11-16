@@ -28,10 +28,12 @@ import {
 } from "../../sdk/src/editable-artifacts/worker/kernel-adapter";
 import { sha256Hex } from "../../sdk/src/editable-artifacts/worker/wire-codec";
 import { InProcessArtifactWorker } from "../../sdk/test/editable-artifacts/in-process-artifact-worker";
-import { EditablePresentationArtifactSurface } from "../src/components/artifacts/editable-presentation";
 import { actRun, flush, registerDom, renderComponent } from "./render-hook";
 
 registerDom();
+// Imported after the DOM exists: Radix decides at load whether layout effects run.
+const { EditablePresentationArtifactSurface } =
+  await import("../src/components/artifacts/editable-presentation");
 
 const ARTIFACT_ID = "10000000000000000000000000000001";
 const FIRST_REPLICA = "0000000000000001";

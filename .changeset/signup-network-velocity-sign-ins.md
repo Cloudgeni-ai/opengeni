@@ -1,0 +1,6 @@
+---
+"@opengeni/db": patch
+"@opengeni/api-router": patch
+---
+
+Free-credit farm detection now sees organizations created through the legacy `POST /v1/organizations` route, and counts the networks new owners sign in from. That route writes the same self-serve setup receipt and Free eligibility as organization onboarding but never passed the signup network, so the per-network rate limit, the velocity rule and its observations never saw it; a farm used it for 664 organizations from 52 addresses in one evening without a single hold. The route now records the trusted client network, applies the same rate limit (HTTP 429) and evaluates the new and recent same-network organizations after commit. The velocity rule (`ip-velocity-v1`) also counts, per exact network an owner signed in from around setup, the new organizations whose owners signed in from it around their own setup, and holds at the existing threshold (rule `ip-velocity-sign-in-v1`), so a setup without a signup network or from a rotating address is still caught. Same mode, window and threshold; manual decisions and operator releases kept; invited members never counted; prefixes alone never hold; keyed hashes only; bounded and fail-open.
