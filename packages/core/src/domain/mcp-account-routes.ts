@@ -32,10 +32,28 @@ function accountScope(binding: McpConnectionAccountBinding): "Yours" | "Shared" 
 }
 
 /**
+ * One connector's accounts in the order the turn offers them: the person's
+ * own before shared ones, otherwise as accepted. Tools of several accounts
+ * tie in search, and the first listed wins the tie.
+ */
+function personalFirst<T extends { subjectScope: McpConnectionAccountBinding["subjectScope"] }>(
+  bindings: readonly T[],
+): T[] {
+  return [
+    ...bindings.filter((binding) => binding.subjectScope === "subject"),
+    ...bindings.filter((binding) => binding.subjectScope !== "subject"),
+  ];
+}
+
+/**
  * The labels of one connector's accounts in a turn. People only need the
  * account to tell several apart. Two accounts with the same identity (personal
  * and workspace) keep their scope to stay distinct. The model always sees the
  * scope, so a personal and a shared account never read the same.
+ *
+ * With several accounts, the person's own account is the connector's default
+ * when it is the only one of theirs; every route names it. Several of the
+ * person's own, or only shared ones, have no default.
  */
 function accountRouteLabels(
   connector: string,
@@ -43,6 +61,13 @@ function accountRouteLabels(
   kind?: string,
 ): McpAccountRouteLabel[] {
   const identities = bindings.map(accountIdentity);
+  const models = bindings.map(
+    (binding, index) => `${connector} — ${identities[index]!} · ${accountScope(binding)}`,
+  );
+  const own = bindings.flatMap((binding, index) =>
+    binding.subjectScope === "subject" ? [index] : [],
+  );
+  const defaultAccount = bindings.length > 1 && own.length === 1 ? models[own[0]!] : undefined;
   return bindings.map((binding, index) => {
     const identity = identities[index]!;
     const account =
@@ -52,10 +77,11 @@ function accountRouteLabels(
           ? identity
           : `${identity} · ${accountScope(binding)}`;
     return {
-      model: `${connector} — ${identity} · ${accountScope(binding)}`,
+      model: models[index]!,
       connector,
       providerDomain: binding.providerDomain,
       ...(account ? { account } : {}),
+      ...(defaultAccount ? { defaultAccount } : {}),
       ...(kind ? { kind } : {}),
     };
   });
@@ -158,11 +184,13 @@ export function expandMcpAccountRoutes(input: {
       else gap(canonical, "no_account");
       continue;
     }
-    const usable = bindings.filter(
-      (binding) =>
-        canonical.connectionRef!.authoritySource !== "host" &&
-        canonical.connectionRef!.providerDomain === binding.providerDomain &&
-        (!canonical.connectionRef!.kind || canonical.connectionRef!.kind === binding.kind),
+    const usable = personalFirst(
+      bindings.filter(
+        (binding) =>
+          canonical.connectionRef!.authoritySource !== "host" &&
+          canonical.connectionRef!.providerDomain === binding.providerDomain &&
+          (!canonical.connectionRef!.kind || canonical.connectionRef!.kind === binding.kind),
+      ),
     );
     if (usable.length === 0) gap(canonical, "account_setup_changed");
     const connector = canonical.name ?? canonical.id;
@@ -220,8 +248,8 @@ export function expandApiIntegrationAccountRoutes(input: {
     );
   const acceptedBindings = input.bindings;
   return input.integrations.flatMap((integration) => {
-    const bindings = acceptedBindings.filter(
-      (binding) => binding.canonicalServerId === integration.serverId,
+    const bindings = personalFirst(
+      acceptedBindings.filter((binding) => binding.canonicalServerId === integration.serverId),
     );
     if (bindings.length === 0)
       return !integration.connectionRef && selected.has(integration.serverId) ? [integration] : [];

@@ -4592,7 +4592,10 @@ function maybeInstallLazyToolTransport(
         if (!route) continue;
         const account: ConnectedToolAccount = {
           source: server.registryId,
-          label: route.account ? `${route.connector} (${route.account})` : route.connector,
+          // The connector's default account says so, as its tools' account line does.
+          label: route.account
+            ? `${route.connector} (${route.account}${route.defaultAccount === route.model ? ", the default" : ""})`
+            : route.connector,
           connector: route.connector,
           ...(route.kind ? { kind: route.kind } : {}),
           ...(route.providerDomain ? { providerDomain: route.providerDomain } : {}),
@@ -10794,7 +10797,7 @@ export class PrefixedMcpServer implements MCPServer {
             // connector to tell apart. With one account the line adds nothing
             // the model can act on, and it would repeat on every tool.
             ...(this.accountLabel?.account
-              ? { description: withAccountLine(this.accountLabel.model, tool.description) }
+              ? { description: withAccountLine(this.accountLabel, tool.description) }
               : {}),
           };
         })

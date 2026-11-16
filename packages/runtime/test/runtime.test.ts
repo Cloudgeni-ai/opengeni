@@ -3603,7 +3603,7 @@ describe("runtime event normalization", () => {
           }
           if (named) {
             expect(tools[0]!.description).toStartWith(
-              "Account: Documents — Personal: alice@example.test. Use only this account; if the intended account for a write is unclear, ask before calling.\n",
+              "Account: Documents — Personal: alice@example.test. Use only this account. When the request does not say which account to write to, use the default; ask only if there is none.\n",
             );
           }
         } finally {
@@ -3675,6 +3675,77 @@ describe("runtime event normalization", () => {
         alice.mcp.close();
         await bob.prepared.close();
         bob.mcp.close();
+      }
+    });
+
+    test("of two accounts, a search loads the person's own default and every copy names it", async () => {
+      const own = "Documents — alice@example.test · Yours";
+      const accountFixture = (letter: string, model: string, account: string) =>
+        connectorPolicyFixture({
+          connectorDecision: "allow",
+          serverId: `account-${letter.repeat(64)}`,
+          lazyToolTransport: "generic_dispatch",
+          accountLabel: {
+            model,
+            connector: "Documents",
+            providerDomain: "docs.example.test",
+            account,
+            defaultAccount: own,
+          },
+        });
+      // The route order the worker gives: the person's own account first.
+      const alice = await accountFixture("f", own, "alice@example.test");
+      const team = await accountFixture(
+        "0",
+        "Documents — team@example.test · Shared",
+        "team@example.test",
+      );
+      try {
+        const agent = buildOpenGeniAgent(alice.settings, [], {
+          lazyToolTransport: "generic_dispatch",
+          toolPreparationReady: Promise.all([alice.prepared.ready, team.prepared.ready]).then(
+            () => undefined,
+          ),
+          mcpServers: [...alice.prepared.mcpServers, ...team.prepared.mcpServers],
+        });
+        const model = new ScriptedModel([
+          {
+            output: [
+              scriptedFunctionCall(
+                "tool_search",
+                { query: "search documents", limit: 1 },
+                "search-call",
+              ),
+            ],
+          },
+          { outputText: "done" },
+        ]);
+        const result = await runAgentStream(
+          agent.clone({ model }),
+          "Find my notes",
+          alice.settings,
+        );
+        for await (const _event of result.toStream()) {
+          // Drain the search and the answer.
+        }
+        await result.completed;
+        const searchOutput = JSON.stringify(model.requests[1]!.input);
+        // Identical tools of the two accounts tie; the person's own, listed
+        // first, loads, and the shared copy's preview names the default.
+        expect(searchOutput).toContain(
+          "Account: Documents — alice@example.test · Yours (the default: the person's own account). Use only this account. When the request does not say which account to write to, use the default; ask only if there is none.",
+        );
+        expect(searchOutput).toContain(
+          "Account: Documents — team@example.test · Shared (not the default; the default is the person's own account, Documents — alice@example.test · Yours).",
+        );
+        expect(searchOutput).toContain(
+          "These tools reach Documents (alice@example.test, the default). Also connected: Documents (team@example.test).",
+        );
+      } finally {
+        await alice.prepared.close();
+        alice.mcp.close();
+        await team.prepared.close();
+        team.mcp.close();
       }
     });
 

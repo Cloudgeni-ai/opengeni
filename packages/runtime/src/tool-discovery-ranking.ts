@@ -183,14 +183,32 @@ function fieldOf(tokens: readonly string[]): Field {
 }
 
 const ACCOUNT_LINE_GUIDANCE =
-  "Use only this account; if the intended account for a write is unclear, ask before calling.";
+  "Use only this account. When the request does not say which account to write to, use the default; ask only if there is none.";
+
+/** The connector's accounts this route belongs among, as its label names them. */
+export type AccountLineLabel = Readonly<{ model: string; defaultAccount?: string | undefined }>;
+
+/**
+ * The account a description names: the route's model label, and whether it
+ * is the connector's default for writes and why, or which account is.
+ */
+export function accountLineName(label: AccountLineLabel): string {
+  if (!label.defaultAccount) return label.model;
+  return label.defaultAccount === label.model
+    ? `${label.model} (the default: the person's own account)`
+    : `${label.model} (not the default; the default is the person's own account, ${label.defaultAccount})`;
+}
 
 /**
  * A connected-account tool's description when the turn has several accounts
  * of its connector: a first line naming the account, then the tool's own text.
  */
-export function withAccountLine(account: string, description: string | undefined): string {
-  return `Account: ${account}. ${ACCOUNT_LINE_GUIDANCE}\n${description ?? ""}`.trimEnd();
+export function withAccountLine(
+  account: string | AccountLineLabel,
+  description: string | undefined,
+): string {
+  const name = typeof account === "string" ? account : accountLineName(account);
+  return `Account: ${name}. ${ACCOUNT_LINE_GUIDANCE}\n${description ?? ""}`.trimEnd();
 }
 
 /** The account a withAccountLine description names, and the tool's own text. */
