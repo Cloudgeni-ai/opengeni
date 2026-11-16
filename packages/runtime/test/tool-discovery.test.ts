@@ -14,6 +14,7 @@ import {
 import OpenAI from "openai";
 import { testSettings } from "@opengeni/testing";
 import { createHttpDecisionModel } from "@opengeni/decisions";
+import { MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION } from "@opengeni/capabilities";
 import { ToolSearchIndex } from "../src/tool-discovery-ranking";
 import { toolDescriptor } from "../src/tool-discovery-catalog";
 import { rankToolPool } from "../src/codex-tool-search";
@@ -192,6 +193,56 @@ describe("tool discovery ranking", () => {
     expect(index.rank("get a site by path", 1)).toEqual([byPath]);
     // The run-together name itself still finds its tool.
     expect(index.rank("me_createmessages", 1)).toEqual([draft]);
+  });
+  test("the reviewed Outlook Mail draft tools rank by what each drafts", () => {
+    // Reviewed descriptions as shipped, under the names the compiler gives them.
+    const reviewed = MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION.source;
+    const operations = reviewed.kind === "openapi" ? (reviewed.operationAllowlist ?? []) : [];
+    const reviewedTool = (name: string, method: string, path: string) => {
+      const entry = operations.find(
+        (operation) =>
+          typeof operation === "object" && operation.method === method && operation.path === path,
+      );
+      if (!entry || typeof entry !== "object" || !entry.description)
+        throw new Error(`${method} ${path} is not a reviewed Outlook Mail operation`);
+      return candidate(
+        `mcp_x__${name}`,
+        `${entry.description} POST ${path}. Changes external state. Your tool permissions determine whether review is needed.`,
+      );
+    };
+    const draft = reviewedTool("me_createmessages", "post", "/me/messages");
+    const reply = reviewedTool(
+      "me_messages_message_createreply",
+      "post",
+      "/me/messages/{message-id}/createReply",
+    );
+    const forward = reviewedTool(
+      "me_messages_message_createforward",
+      "post",
+      "/me/messages/{message-id}/createForward",
+    );
+    const pool = [
+      forward,
+      reply,
+      reviewedTool(
+        "me_messages_message_createreplyall",
+        "post",
+        "/me/messages/{message-id}/createReplyAll",
+      ),
+      reviewedTool("me_sendmail", "post", "/me/sendMail"),
+      reviewedTool("me_messages_message_send", "post", "/me/messages/{message-id}/send"),
+      draft,
+    ];
+    const index = new ToolSearchIndex(pool);
+    for (const query of [
+      "create outlook draft email",
+      "draft an email",
+      "create an email draft",
+      "save an email as a draft without sending",
+    ])
+      expect([query, index.rank(query, 1)[0]?.name]).toEqual([query, draft.name]);
+    expect(index.rank("draft a reply", 1)).toEqual([reply]);
+    expect(index.rank("forward this email as a draft", 1)).toEqual([forward]);
   });
   test("run-together names win in a realistic catalog without moving ordinary names", () => {
     const extra = [

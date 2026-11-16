@@ -48,6 +48,8 @@ export const DEFAULT_SCOPE: readonly IntegrationId[] = [
   "gmail",
   "slack",
   "outlook_mail",
+  "outlook_calendar",
+  "outlook_contacts",
   "onedrive",
   "sharepoint",
   "apollo",
@@ -678,12 +680,17 @@ export const CASES: readonly EvalCase[] = [
     note: "Account identity: the connected test mailbox is Iris Tenley's.",
   },
   ...notConnected("outlook_calendar", [
-    { slug: "meetings", prompt: "What meetings do I have in Outlook Calendar this week?" },
+    {
+      slug: "meetings",
+      prompt: "What meetings do I have in Outlook Calendar this week?",
+      core: true,
+    },
   ]),
   {
     id: "outlook_calendar.read.review",
     integration: "outlook_calendar",
     kind: "read",
+    core: true,
     prompt: "When is the Halcyon launch review on my Outlook Calendar?",
     expectAnswer: [i("wed|18"), i("\\b(10|0?9)[:.]00\\b|\\b(10|9) ?(a\\.?m|am)\\b")],
   },
@@ -707,12 +714,17 @@ export const CASES: readonly EvalCase[] = [
 
   // ── Outlook Contacts ─────────────────────────────────────────────────────
   ...notConnected("outlook_contacts", [
-    { slug: "lookup", prompt: "What's Ada Quill's phone number in my Outlook contacts?" },
+    {
+      slug: "lookup",
+      prompt: "What's Ada Quill's phone number in my Outlook contacts?",
+      core: true,
+    },
   ]),
   {
     id: "outlook_contacts.read.phone",
     integration: "outlook_contacts",
     kind: "read",
+    core: true,
     prompt:
       "What's Ada Quill's mobile number in my Outlook contacts, and which company is she with?",
     expectAnswer: [i("400 ?12 ?345"), i("bluefin")],
