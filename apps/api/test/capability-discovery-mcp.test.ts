@@ -1810,6 +1810,119 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
     }
   }, 60_000);
 
+  test("a registry entry for a built-in integration gives way to it; a built-in the organization turned off gets no card", async () => {
+    if (!shared) throw new Error("Real PostgreSQL fixture required");
+    const gmailUrl = "https://gmailmcp.googleapis.com/mcp/v1";
+    const registryId = `mcp:integrations-sh:gmailmcp-googleapis-com-${crypto.randomUUID().slice(0, 8)}`;
+    await upsertCapabilityCatalogItem(client.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      id: registryId,
+      kind: "mcp",
+      source: "registry",
+      name: "Gmail",
+      description: "Search and read Gmail through Google's hosted MCP server.",
+      endpointUrl: gmailUrl,
+      mcpUrl: gmailUrl,
+      providerDomain: "gmailmcp.googleapis.com",
+      authKind: "oauth2",
+      metadata: { mcpProbe: { status: "real" } },
+    });
+    const builtInGmail = {
+      id: "gmail",
+      name: "Gmail",
+      url: gmailUrl,
+      connectionRef: {
+        providerDomain: "gmailmcp.googleapis.com",
+        subjectScope: "subject" as const,
+        kind: "oauth2" as const,
+      },
+    };
+    const open = async (settings: ReturnType<typeof testSettings>) => {
+      const attempt = await seedAttempt();
+      const server = buildOpenGeniMcpServer(
+        { settings, db: client.db, bus: new MemoryEventBus() } as ApiRouteDeps,
+        {
+          accountId: workspace.accountId,
+          workspaceId: workspace.workspaceId,
+          subjectId: "worker:first-party-mcp",
+          permissions: ["workspace:read"],
+          principalKind: "agent_attempt",
+          metadata: {
+            ...attempt,
+            firstPartyMcpTools: ["capability_catalog_search", "capability_authorization_request"],
+          },
+        },
+      );
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      const mcp = new Client({ name: "capability-discovery-test", version: "1" });
+      await server.connect(serverTransport);
+      await mcp.connect(clientTransport);
+      const search = async (query: string) =>
+        (
+          mcpJson(
+            await mcp.callTool({ name: "capability_catalog_search", arguments: { query } }),
+          ) as {
+            matches: Array<{ capabilityId: string; setup: { status: string; detail: string } }>;
+          }
+        ).matches;
+      const request = async (capabilityId: string) =>
+        mcpJson(
+          await mcp.callTool({
+            name: "capability_authorization_request",
+            arguments: { capabilityId, rationale: "Read the person's mail." },
+          }),
+        ) as { capabilityId: string; status: string; cardShown: boolean; message: string };
+      return {
+        search,
+        request,
+        close: async () => await Promise.all([mcp.close(), server.close()]),
+      };
+    };
+    try {
+      // The deployment serves Gmail itself: the registry's Gmail row is not
+      // offered beside it, and a request for that row gets the built-in.
+      const withBuiltIn = await open(
+        testSettings({ googleConnectorSetupEnabled: true, mcpServers: [builtInGmail] }),
+      );
+      try {
+        const ids = (await withBuiltIn.search("Gmail")).map((match) => match.capabilityId);
+        expect(ids).toContain("mcp:gmail");
+        expect(ids).not.toContain(registryId);
+        expect((await withBuiltIn.request(registryId)).capabilityId).toBe("mcp:gmail");
+      } finally {
+        await withBuiltIn.close();
+      }
+
+      // The organization turned Gmail off: neither entry gets a card, and the
+      // agent is told why.
+      await shared.admin`insert into organization_integration_policies (account_id, mode, allowed_integration_keys, revision)
+        values (${workspace.accountId}, 'restricted', '["custom:mcp"]'::jsonb, 1)`;
+      for (const settings of [
+        testSettings({ googleConnectorSetupEnabled: true, mcpServers: [builtInGmail] }),
+        testSettings({ googleConnectorSetupEnabled: true }),
+      ]) {
+        const turnedOff = await open(settings);
+        try {
+          const gmail = (await turnedOff.search("Gmail")).filter((match) =>
+            ["mcp:gmail", registryId].includes(match.capabilityId),
+          );
+          expect(gmail).toHaveLength(1);
+          expect(gmail[0]!.setup).toMatchObject({ status: "unavailable" });
+          expect(gmail[0]!.setup.detail).toContain("Gmail is turned off for this organization");
+          const requested = await turnedOff.request(registryId);
+          expect(requested).toMatchObject({ status: "unavailable", cardShown: false });
+          expect(requested.message).toContain("turned off for this organization");
+        } finally {
+          await turnedOff.close();
+        }
+      }
+    } finally {
+      await shared.admin`delete from organization_integration_policies where account_id = ${workspace.accountId}`;
+      await shared.admin`delete from capability_catalog_items where workspace_id = ${workspace.workspaceId} and id = ${registryId}`;
+    }
+  }, 60_000);
+
   test("finds a near-spelled custom MCP and suggests closest names on a miss", async () => {
     if (!shared) throw new Error("Real PostgreSQL fixture required");
     const capabilityId = `mcp:whisprflow-${crypto.randomUUID()}`;
