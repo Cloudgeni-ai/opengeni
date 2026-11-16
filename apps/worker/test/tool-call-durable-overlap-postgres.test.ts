@@ -25,6 +25,7 @@ import {
   recordModelTransportStarted,
 } from "../../../packages/runtime/src/model-preparation-diagnostics";
 import { createActivityTestHarness } from "../src/activities";
+import { settleRecordedModelUsage } from "../src/activities/agent-turn/model-usage";
 import {
   HistoryScriptedModel,
   adminSql,
@@ -282,13 +283,21 @@ async function durableTurnState(ctx: Ctx, sessionId: string) {
   const openCalls = await sql<{ call_id: string }[]>`
     select call_id from session_pending_tool_calls
     where session_id = ${sessionId} and result_recorded_at is null`;
-  // The durable usage facts, and each response's ledger by source
-  // (`<turnId>:<responseId>`).
-  const usageFacts = await sql<{ source_id: string; response_id: string }[]>`
-    select turn_id::text || ':' || (payload->>'sourceKey') as source_id,
-      payload->>'sourceKey' as response_id
-    from session_events
-    where session_id = ${sessionId} and type = 'agent.model.usage'`;
+  // The durable usage facts (a fenced attempt's is its rejected audit row),
+  // and each response's ledger by source (`<turnId>:<responseId>`).
+  const usageFacts = await sql<{ source_id: string; response_id: string; rejected: boolean }[]>`
+    select distinct on (source_id) source_id, response_id, rejected from (
+      select turn_id::text || ':' || (usage->>'sourceKey') as source_id,
+        usage->>'sourceKey' as response_id, rejected, sequence
+      from (
+        select turn_id, sequence, type = 'turn.event.rejected_late' as rejected,
+          case when type = 'agent.model.usage' then payload else payload->'rejectedPayload' end as usage
+        from session_events
+        where session_id = ${sessionId}
+          and (type = 'agent.model.usage'
+            or (type = 'turn.event.rejected_late' and payload->>'rejectedType' = 'agent.model.usage'))
+      ) usage_rows
+    ) facts order by source_id, sequence`;
   const ledger = await sql<{ kind: string; source_id: string }[]>`
     select event_type as kind, source_resource_id as source_id from usage_events
     where session_id = ${sessionId} and event_type in ('model.tokens', 'model.cost')
@@ -329,12 +338,26 @@ function expectLedgerSettledOnce(state: TurnState, label: string) {
   }
 }
 
+// The attempt is fenced (declared dead and replaced) while call-1's response
+// streams: it may not record the call, but the response's usage is recorded
+// as its rejected audit row and its ledger is still finished exactly once.
+const FENCED_POINTS = [
+  // Not killed: the fenced attempt settles its own ledger and ends.
+  "fenced",
+  // Killed after the usage audit row committed, before its ledger writes.
+  "fenced_usage_committed",
+  // Killed after its ledger writes committed.
+  "fenced_debit_committed",
+] as const;
+
 const CRASH_CASES = [
   // Worker-death recovery settles the dead attempt's owed ledger itself.
   ...CRASH_POINTS.map((point) => ({ point, recovery: "activity" as const })),
   // Without it (the recovery activity's settlement failed), the turn's next
   // attempt settles it before its first model request.
   { point: "combined_committed" as const, recovery: "next_attempt" as const },
+  ...FENCED_POINTS.map((point) => ({ point, recovery: "activity" as const })),
+  { point: "fenced_usage_committed" as const, recovery: "next_attempt" as const },
 ];
 
 for (const { point, recovery } of CRASH_CASES) {
@@ -349,7 +372,8 @@ for (const { point, recovery } of CRASH_CASES) {
     const session = await startSession(ctx);
     const logFile = join(scratch, `${point}-${session.id}.jsonl`);
     const crashed = await runCrashedAttempt(ctx, session.id, point, logFile);
-    if (crashed.signal !== "SIGKILL") {
+    const fenced = point.startsWith("fenced");
+    if (point !== "fenced" && crashed.signal !== "SIGKILL") {
       throw new Error(
         `child did not crash at ${point} (exit ${crashed.exitCode}): ${crashed.stdout}\n${crashed.stderr.slice(-4_000)}`,
       );
@@ -384,6 +408,22 @@ for (const { point, recovery } of CRASH_CASES) {
       const [fact] = call1Usage(atCrash);
       expect(ledgerFor(atCrash, fact!.source_id)).toEqual(settledOnce);
     }
+    if (fenced) {
+      // The fence landed during call-1's response; that attempt recorded
+      // call-1's usage only as its rejected audit row, never the call.
+      expect(crashLog.some((entry) => entry.kind === "fenced")).toBe(true);
+      const [fact] = call1Usage(atCrash);
+      expect(fact?.rejected).toBe(true);
+      expect(atCrash.created.map((row) => row.id)).toEqual(["call-0"]);
+      expect(crashLog.some((entry) => entry.kind === "tool" && entry.callId === "call-1")).toBe(
+        false,
+      );
+      expect(ledgerFor(atCrash, fact!.source_id)).toEqual(
+        point === "fenced_usage_committed"
+          ? { "model.tokens": 0, "model.cost": 0, model_usage_debit: 0 }
+          : settledOnce,
+      );
+    }
 
     const settings = crashTestSettings(shared.appUrl);
     const model = new HistoryScriptedModel({
@@ -412,11 +452,12 @@ for (const { point, recovery } of CRASH_CASES) {
         attemptId: crashed.attemptId,
         timeoutType: "HEARTBEAT",
       });
-      expect(recovered.action).toBe("recovering");
+      // A fenced attempt was already replaced by the orchestrator.
+      if (!fenced) expect(recovered.action).toBe("recovering");
       // Owed ledger writes are finished by recovery itself, before (and
       // without) any further attempt.
       expectLedgerSettledOnce(await durableTurnState(ctx, session.id), `${point}: recovered`);
-    } else {
+    } else if (!fenced) {
       const recovered = await recoverSessionDispatch(app.db, ctx.workspaceId, {
         sessionId: session.id,
         attemptId: crashed.attemptId,
@@ -520,3 +561,85 @@ for (const { point, recovery } of CRASH_CASES) {
     );
   });
 }
+
+test("a ledger write that fails after the usage commit is finished once by failure settlement, and a settled turn lists nothing owed", async () => {
+  const ctx = await fixture();
+  await applyCreditLedgerEntry(app.db, {
+    accountId: ctx.accountId,
+    type: "credit_topup",
+    amountMicros: 100_000_000,
+    idempotencyKey: crypto.randomUUID(),
+  });
+  const session = await startSession(ctx);
+  // The credit debit fails for this account (a ledger outage), after the
+  // response's usage, history and tool call committed.
+  const guard = `fail_model_debit_${ctx.accountId.replaceAll("-", "")}`;
+  await sql.unsafe(`
+    create function ${guard}() returns trigger language plpgsql as $$
+    begin
+      if new.type = 'model_usage_debit' and new.account_id = '${ctx.accountId}'::uuid then
+        raise exception 'synthetic ledger outage';
+      end if;
+      return new;
+    end $$;
+    create trigger ${guard} before insert on credit_ledger_entries
+      for each row execute function ${guard}()`);
+  const settings = crashTestSettings(shared.appUrl);
+  const executions: string[] = [];
+  const activities = createActivityTestHarness({
+    settings,
+    db: app.db,
+    bus: new MemoryEventBus(),
+    runtime: scriptedRuntime(new HistoryScriptedModel(), async (callId) => {
+      executions.push(callId);
+      return `${callId} done`;
+    }),
+    observability: createObservability(settings, { component: "worker" }),
+  });
+  const attemptId = crypto.randomUUID();
+  const outcome = await activities
+    .runAgentTurn({
+      accountId: ctx.accountId,
+      workspaceId: ctx.workspaceId,
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      trigger: { kind: "next" },
+    })
+    .then(
+      (result) => result.status,
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    );
+  expect(outcome).not.toBe("idle");
+  await sql.unsafe(`drop trigger ${guard} on credit_ledger_entries; drop function ${guard}()`);
+  const failed = await durableTurnState(ctx, session.id);
+  // The response's usage is durable; its debit is owed, not lost.
+  expect(failed.usageFacts.length).toBeGreaterThan(0);
+  const owed = failed.usageFacts.filter(
+    (fact) => ledgerFor(failed, fact.source_id).model_usage_debit === 0,
+  );
+  expect(owed.length).toBeGreaterThan(0);
+
+  // The attempt's failure settlement finishes it.
+  await activities.failSessionAttempt({
+    accountId: ctx.accountId,
+    workspaceId: ctx.workspaceId,
+    sessionId: session.id,
+    attemptId,
+    workflowId: `session-${session.id}`,
+  });
+  const settled = await durableTurnState(ctx, session.id);
+  expectLedgerSettledOnce(settled, "failure settlement");
+  // Every later boundary finds nothing owed: one listing query, no writes.
+  const before = settled.ledger.length;
+  expect(
+    await settleRecordedModelUsage(settings, app.db, {
+      workspaceId: ctx.workspaceId,
+      sessionId: session.id,
+    }),
+  ).toBe(0);
+  expect((await durableTurnState(ctx, session.id)).ledger.length).toBe(before);
+  // No tool of the failed response ran twice.
+  expect(new Set(executions).size).toBe(executions.length);
+});

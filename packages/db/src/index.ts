@@ -42529,36 +42529,63 @@ export async function listSessionEvents(
 }
 
 /**
- * The durable `agent.model.usage` events of one turn, or of one attempt, in
- * session order. Worker recovery settles their recorded usage again; every
- * settlement write is idempotent per source, so a settled response is a no-op.
+ * The recorded model responses of a session (optionally one turn, one attempt
+ * or a recent window) whose deferred ledger writes have not finished, in
+ * session order. A response's usage event (or, for a fenced attempt, its
+ * `turn.event.rejected_late` audit row) records the settlement's charges and
+ * the idempotency key of its last ledger write (`completionKey`); a response
+ * is owed while no usage or credit ledger row has that key. One query; a
+ * settled response costs one index probe per table and no write.
  */
-export async function listModelUsageEventsForSettlement(
+export async function listOwedModelUsageSettlements(
   db: Database,
   workspaceId: string,
-  input: { sessionId: string; turnId?: string; attemptId?: string },
+  input: { sessionId: string; turnId?: string; attemptId?: string; since?: Date },
 ): Promise<
-  Array<{ id: string; turnId: string | null; turnAttemptId: string | null; payload: unknown }>
+  Array<{
+    id: string;
+    accountId: string;
+    turnId: string | null;
+    turnAttemptId: string | null;
+    /** A fenced attempt's `turn.event.rejected_late` audit row. */
+    rejected: boolean;
+    /** The usage event's payload (unwrapped from a rejected audit row). */
+    payload: unknown;
+  }>
 > {
-  if (!input.turnId && !input.attemptId) return [];
+  const events = schema.sessionEvents;
+  const usagePayload = sql`(case when ${events.type} = 'agent.model.usage' then ${events.payload} else ${events.payload} -> 'rejectedPayload' end)`;
+  const completionKey = sql`(${usagePayload} -> 'settlement' -> 'charges' ->> 'completionKey')`;
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const filters: SQL[] = [
-      eq(schema.sessionEvents.workspaceId, workspaceId),
-      eq(schema.sessionEvents.sessionId, input.sessionId),
-      eq(schema.sessionEvents.type, "agent.model.usage"),
+      eq(events.workspaceId, workspaceId),
+      eq(events.sessionId, input.sessionId),
+      or(
+        and(eq(events.type, "agent.model.usage"), eq(events.turnAssociation, "current")),
+        and(
+          eq(events.type, "turn.event.rejected_late"),
+          sql`${events.payload} ->> 'rejectedType' = 'agent.model.usage'`,
+        ),
+      )!,
+      sql`${completionKey} is not null`,
+      sql`not exists (select 1 from ${schema.usageEvents} where ${schema.usageEvents.idempotencyKey} = ${completionKey})`,
+      sql`not exists (select 1 from ${schema.creditLedgerEntries} where ${schema.creditLedgerEntries.idempotencyKey} = ${completionKey})`,
     ];
-    if (input.turnId) filters.push(eq(schema.sessionEvents.turnId, input.turnId));
-    if (input.attemptId) filters.push(eq(schema.sessionEvents.turnAttemptId, input.attemptId));
+    if (input.turnId) filters.push(eq(events.turnId, input.turnId));
+    if (input.attemptId) filters.push(eq(events.turnAttemptId, input.attemptId));
+    if (input.since) filters.push(gte(events.createdAt, input.since));
     return await scopedDb
       .select({
-        id: schema.sessionEvents.id,
-        turnId: schema.sessionEvents.turnId,
-        turnAttemptId: schema.sessionEvents.turnAttemptId,
-        payload: schema.sessionEvents.payload,
+        id: events.id,
+        accountId: events.accountId,
+        turnId: events.turnId,
+        turnAttemptId: events.turnAttemptId,
+        rejected: sql<boolean>`(${events.type} <> 'agent.model.usage')`,
+        payload: sql<unknown>`${usagePayload}`,
       })
-      .from(schema.sessionEvents)
+      .from(events)
       .where(and(...filters))
-      .orderBy(asc(schema.sessionEvents.sequence));
+      .orderBy(asc(events.sequence));
   });
 }
 

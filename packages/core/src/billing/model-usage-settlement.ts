@@ -13,6 +13,8 @@ import {
   ORGANIZATION_OPPER_PROVIDER_ID,
   WORKSPACE_GATEWAY_PROVIDER_ID,
   WORKSPACE_OPPER_PROVIDER_ID,
+  hostedWebSearchCharge,
+  paidHostedToolsChargeCredits,
   type Settings,
 } from "@opengeni/config";
 import { createHash } from "node:crypto";
@@ -36,7 +38,11 @@ import {
 } from "@opengeni/db";
 import type { ModelCallUsageNormalization, ModelResponseUsage } from "@opengeni/runtime";
 import type { ModelUsageInput } from "@opengeni/config";
-import { settleHostedWebSearchUsage } from "../domain/web-search-billing";
+import {
+  HOSTED_WEB_SEARCH_SOURCE_PREFIX,
+  WEB_SEARCH_DEBIT_TYPE,
+  settleHostedWebSearchUsage,
+} from "../domain/web-search-billing";
 import {
   byokListEquivalent,
   byokPlatformFeeActive,
@@ -146,6 +152,42 @@ export type ModelUsageSettlementInput = {
    * custody the failure throws.
    */
   receiptCustody?: ((receipt: HeldSessionUsageReceipt, error: unknown) => void) | null;
+  /**
+   * The charges priced when the response's usage was recorded
+   * (`planModelUsageSettlement`). A settlement finished later (by recovery)
+   * charges exactly these instead of repricing.
+   */
+  recordedCharges?: ModelUsageSettlementCharges;
+  /**
+   * The task usage receipt the committed usage event already metered (its
+   * database trigger records `<turnId>:<sourceKey>` in the event's own
+   * transaction). When it matches the receipt this settlement would write,
+   * the direct receipt write is skipped; any other value writes it.
+   */
+  receiptMeteredByEvent?: { amountMicros: number | null; pricingSource: string | null } | null;
+};
+
+/**
+ * What one response's settlement charges, priced once from the deployment's
+ * prices and rates. `completionKey` is the idempotency key of the last ledger
+ * write the settlement makes (each write is awaited in order, so that row
+ * proves every earlier one), or null when it writes no ledger row.
+ */
+export type ModelUsageSettlementCharges = {
+  /** Credit path only: the response is priced and debited. */
+  debits: boolean;
+  /** `model.cost` and the credit debit (0 outside a debit). */
+  creditCostMicros: number;
+  /** External path only: the bring-your-own-key platform fee (0 when none). */
+  byokPlatformFeeMicros: number;
+  /** Credit path only: the hosted searches it charges, or null when none apply. */
+  hostedWebSearch: {
+    requests: number;
+    providerMicros: number;
+    creditMicros: number;
+    marginBps: number;
+  } | null;
+  completionKey: string | null;
 };
 
 export type ExternalModelProviderCost = {
@@ -217,22 +259,23 @@ export function sessionUsageReceiptSourceId(sourceId: string, turnId?: string | 
  * configured share of its list-price equivalent (the fallback rate when no
  * list price is known), debited once per source from paid credit.
  */
+type ByokPricedInput = {
+  listPriceMicros: number | null;
+  reportedCostMicros: number | null;
+  pricingSource: ModelUsageBillingRecord["pricingSource"];
+  inputTokens: number | null;
+  outputTokens: number | null;
+};
+
 async function chargeByokPlatformFee(
   settings: Settings,
   db: Database,
   input: ModelUsageSettlementInput,
-  priced: {
-    listPriceMicros: number | null;
-    reportedCostMicros: number | null;
-    pricingSource: ModelUsageBillingRecord["pricingSource"];
-    inputTokens: number | null;
-    outputTokens: number | null;
-  },
+  priced: ByokPricedInput,
+  feeMicros: number,
 ): Promise<number> {
-  if (!byokPlatformFeeActive(settings, input.accountId)) return 0;
-  const list = byokListEquivalent(priced);
-  const feeMicros = byokPlatformFeeMicros(list.listMicros, settings.byokPlatformFeeBps);
   if (feeMicros <= 0) return 0;
+  const list = byokListEquivalent(priced);
   await applyByokPlatformFeeDebit(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -265,6 +308,130 @@ export function priceModelUsage(
   input: ModelUsageSettlementInput,
 ): ModelUsageBillingRecord {
   return modelUsagePricing(settings, input).record;
+}
+
+/**
+ * `priceModelUsage` plus the charges its settlement makes. Pure; throws where
+ * settlement would. Record `charges` with the usage, and pass them back as
+ * `recordedCharges` to settle the same amounts later.
+ */
+export function planModelUsageSettlement(
+  settings: Settings,
+  input: ModelUsageSettlementInput,
+): { record: ModelUsageBillingRecord; charges: ModelUsageSettlementCharges } {
+  const pricing = modelUsagePricing(settings, input);
+  return { record: pricing.record, charges: settlementCharges(settings, input, pricing) };
+}
+
+type ModelUsagePricing = ReturnType<typeof modelUsagePricing>;
+
+function byokPricedInput(
+  settings: Settings,
+  input: ModelUsageSettlementInput,
+  pricing: ModelUsagePricing,
+): ByokPricedInput {
+  const {
+    gatewayBilling,
+    configuredListPricingModel,
+    pricingBreakdown,
+    hasCompleteCoreTokenTelemetry,
+    sanitizedUsage,
+    estimatedProviderCostMicros,
+    pricingSource,
+  } = pricing;
+  return {
+    // The list price, even on a gateway route, then a reported cost.
+    listPriceMicros:
+      hasCompleteCoreTokenTelemetry && configuredListPricingModel
+        ? (calculateModelListUsageCostSnapshot(
+            settings,
+            configuredListPricingModel,
+            sanitizedUsage,
+            {
+              latencyMode: input.latencyMode ?? "standard",
+              priceContextKnown: false,
+            },
+          )?.providerCostMicros ?? null)
+        : !gatewayBilling && hasCompleteCoreTokenTelemetry
+          ? (pricingBreakdown?.providerCostMicros ?? null)
+          : null,
+    reportedCostMicros: gatewayBilling ? estimatedProviderCostMicros : null,
+    pricingSource,
+    inputTokens: sanitizedUsage.inputTokens ?? null,
+    outputTokens: sanitizedUsage.outputTokens ?? null,
+  };
+}
+
+/** Mirrors the write order of `settleModelUsage` exactly; see its branches. */
+function settlementCharges(
+  settings: Settings,
+  input: ModelUsageSettlementInput,
+  pricing: ModelUsagePricing,
+): ModelUsageSettlementCharges {
+  const { sourceId } = input;
+  const { chargesOpenGeniCredits, countsTowardTokenCap, totalTokens, gatewayBilling } = pricing;
+  if (!chargesOpenGeniCredits) {
+    const byok =
+      byokPlatformFeeActive(settings, input.accountId) &&
+      (input.byok ??
+        ownModelFunding(resolveModelProviderForTurn(settings, input.model)?.model) === "api_key");
+    const feeMicros = byok
+      ? Math.max(
+          0,
+          byokPlatformFeeMicros(
+            byokListEquivalent(byokPricedInput(settings, input, pricing)).listMicros,
+            settings.byokPlatformFeeBps,
+          ),
+        )
+      : 0;
+    return {
+      debits: false,
+      creditCostMicros: 0,
+      byokPlatformFeeMicros: feeMicros,
+      hostedWebSearch: null,
+      completionKey:
+        feeMicros > 0
+          ? `credit:${BYOK_PLATFORM_FEE_TYPE}:${sourceId}`
+          : `usage:model.cost:${sourceId}`,
+    };
+  }
+  const shouldDebit = pricing.shouldDebit;
+  const requests = input.hostedWebSearchRequests ?? 0;
+  const hostedWebSearch =
+    shouldDebit &&
+    !gatewayBilling &&
+    requests > 0 &&
+    input.turnId &&
+    input.sessionId &&
+    paidHostedToolsChargeCredits(settings, {
+      accountId: input.accountId,
+      chargesOpenGeniCredits: true,
+    })
+      ? { requests, ...hostedWebSearchCharge(settings, requests) }
+      : null;
+  const hostedSourceId = `${HOSTED_WEB_SEARCH_SOURCE_PREFIX}:${sourceId}`;
+  const hostedKey = hostedWebSearch
+    ? hostedWebSearch.creditMicros > 0
+      ? `credit:${WEB_SEARCH_DEBIT_TYPE}:${hostedSourceId}`
+      : `usage:web_search.search_requests:${hostedSourceId}`
+    : null;
+  const debits = shouldDebit && (totalTokens > 0 || gatewayBilling !== undefined);
+  const creditCostMicros = debits ? (pricing.pricingBreakdown?.creditCostMicros ?? 0) : 0;
+  const tokensKey =
+    countsTowardTokenCap && totalTokens > 0 ? `usage:model.tokens:${sourceId}` : null;
+  return {
+    debits,
+    creditCostMicros,
+    byokPlatformFeeMicros: 0,
+    hostedWebSearch,
+    completionKey:
+      hostedKey ??
+      (debits
+        ? creditCostMicros > 0
+          ? `credit:model_usage_debit:${sourceId}`
+          : `usage:model.cost:${sourceId}`
+        : tokensKey),
+  };
 }
 
 function modelUsagePricing(settings: Settings, input: ModelUsageSettlementInput) {
@@ -416,12 +583,14 @@ function modelUsagePricing(settings: Settings, input: ModelUsageSettlementInput)
   const shouldDebit = settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
   const debits =
     chargesOpenGeniCredits && shouldDebit && (totalTokens > 0 || gatewayBilling !== undefined);
-  if (debits && !pricingBreakdown) {
+  if (debits && !pricingBreakdown && !input.recordedCharges) {
     throw new Error(`Missing model pricing for ${input.model}`);
   }
   const record: ModelUsageBillingRecord = {
     billingPath: chargesOpenGeniCredits ? "opengeni_credits" : "external",
-    pricedCostMicros: debits ? pricingBreakdown!.creditCostMicros : 0,
+    pricedCostMicros: debits
+      ? (input.recordedCharges?.creditCostMicros ?? pricingBreakdown!.creditCostMicros)
+      : 0,
     estimatedProviderCostMicros,
     equivalentCreditCostMicros,
     pricingSource,
@@ -458,26 +627,25 @@ export async function settleModelUsage(
   input: ModelUsageSettlementInput,
 ): Promise<ModelUsageBillingRecord> {
   const normalizedUsage = input.normalizedUsage;
+  const pricing = modelUsagePricing(settings, input);
   const {
     usageContext,
-    sanitizedUsage,
     inputTokens,
     outputTokens,
     totalTokens,
     chargesOpenGeniCredits,
     countsTowardTokenCap,
     gatewayBilling,
-    configuredListPricingModel,
     pricingBreakdown,
-    hasCompleteCoreTokenTelemetry,
     listClasses,
     externalCost,
     externalCostMicros,
     estimatedProviderCostMicros,
     equivalentCreditCostMicros,
     pricingSource,
-    shouldDebit,
-  } = modelUsagePricing(settings, input);
+  } = pricing;
+  // Recovery settles the amounts priced when the usage was recorded.
+  const charges = input.recordedCharges ?? settlementCharges(settings, input, pricing);
   // Per-task usage limit meter. Synchronous and awaited before any
   // credit/usage write: the canonical pre-margin estimate is recorded once
   // per source identity against the session's task root, for every funding
@@ -501,12 +669,20 @@ export async function settleModelUsage(
       model: input.model,
     };
     let receipt: Awaited<ReturnType<typeof settleSessionUsageReceipt>> | null = null;
+    const metered = input.receiptMeteredByEvent;
+    const meteredByEvent =
+      metered !== undefined &&
+      metered !== null &&
+      metered.amountMicros === held.amountMicros &&
+      (held.amountMicros === null || metered.pricingSource === held.pricingSource);
     try {
-      receipt = await settleSessionUsageReceipt(db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        ...held,
-      });
+      if (!meteredByEvent) {
+        receipt = await settleSessionUsageReceipt(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          ...held,
+        });
+      }
     } catch (error) {
       if (!input.receiptCustody) {
         recordSessionUsageLimitEvent(input.usageLimitMetrics, "settlement", "accounting_failure");
@@ -574,33 +750,16 @@ export async function settleModelUsage(
       ...usageContext,
       idempotencyKey: `usage:model.cost:${input.sourceId}`,
     });
-    // Explicit from the caller, else the served route: the person's own API
-    // key, never their own subscription (no fee) or a deployment-funded free
-    // model.
-    const byok =
-      byokPlatformFeeActive(settings, input.accountId) &&
-      (input.byok ??
-        ownModelFunding(resolveModelProviderForTurn(settings, input.model)?.model) === "api_key");
-    const byokFee = byok
-      ? await chargeByokPlatformFee(settings, db, input, {
-          // The list price, even on a gateway route, then a reported cost.
-          listPriceMicros:
-            hasCompleteCoreTokenTelemetry && configuredListPricingModel
-              ? (calculateModelListUsageCostSnapshot(
-                  settings,
-                  configuredListPricingModel,
-                  sanitizedUsage,
-                  { latencyMode: input.latencyMode ?? "standard", priceContextKnown: false },
-                )?.providerCostMicros ?? null)
-              : !gatewayBilling && hasCompleteCoreTokenTelemetry
-                ? (pricingBreakdown?.providerCostMicros ?? null)
-                : null,
-          reportedCostMicros: gatewayBilling ? estimatedProviderCostMicros : null,
-          pricingSource,
-          inputTokens: sanitizedUsage.inputTokens ?? null,
-          outputTokens: sanitizedUsage.outputTokens ?? null,
-        })
-      : 0;
+    // The fee is planned in `settlementCharges`: explicit from the caller,
+    // else the served route (the person's own API key, never their own
+    // subscription or a deployment-funded free model).
+    const byokFee = await chargeByokPlatformFee(
+      settings,
+      db,
+      input,
+      byokPricedInput(settings, input, pricing),
+      charges.byokPlatformFeeMicros,
+    );
     return {
       billingPath: "external",
       pricedCostMicros: 0,
@@ -618,8 +777,8 @@ export async function settleModelUsage(
   // it is never charged again. The searches run on the provider's search
   // backend, so the model route's residency claim is not recorded on them.
   const settleHostedWebSearch = async () => {
-    const requests = input.hostedWebSearchRequests ?? 0;
-    if (gatewayBilling || requests <= 0 || !input.turnId || !input.sessionId) return;
+    const hosted = charges.hostedWebSearch;
+    if (!hosted || !input.turnId || !input.sessionId) return;
     await settleHostedWebSearchUsage(db, settings, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
@@ -628,12 +787,18 @@ export async function settleModelUsage(
       turnAttemptId: input.turnAttemptId ?? null,
       sourceId: input.sourceId,
       model: input.model,
-      requests,
+      requests: hosted.requests,
+      charge: {
+        providerMicros: hosted.providerMicros,
+        creditMicros: hosted.creditMicros,
+        marginBps: hosted.marginBps,
+      },
       ...(input.billingOrigin ? { billingOrigin: input.billingOrigin } : {}),
     });
   };
-  if (!shouldDebit || (totalTokens === 0 && !gatewayBilling)) {
-    if (shouldDebit) await settleHostedWebSearch();
+  if (!charges.debits) {
+    // Only a debiting deployment plans hosted searches.
+    await settleHostedWebSearch();
     return {
       billingPath: "opengeni_credits",
       pricedCostMicros: 0,
@@ -645,10 +810,10 @@ export async function settleModelUsage(
       ...(gatewayBilling ? { upstreamProvider: gatewayBilling.finalProvider } : {}),
     };
   }
-  if (!pricingBreakdown) {
+  if (!input.recordedCharges && !pricingBreakdown) {
     throw new Error(`Missing model pricing for ${input.model}`);
   }
-  const costMicros = pricingBreakdown.creditCostMicros;
+  const costMicros = charges.creditCostMicros;
   await recordUsageEvent(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,

@@ -4,7 +4,7 @@
 // model dispatch. The parent then runs worker-death recovery and a new
 // attempt; killing this process cannot destroy any durable system.
 import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { createDb } from "@opengeni/db";
+import { createDb, recoverSessionDispatch } from "@opengeni/db";
 import { createObservability, type Observability } from "@opengeni/observability";
 import { createActivityTestHarness } from "../../src/activities";
 import {
@@ -46,10 +46,22 @@ const model = new HistoryScriptedModel({
   beforeResponse: (step) => {
     if (point === "next_dispatch" && step === "final") crash();
   },
-  onResponse: (step, responseId) => {
+  onResponse: async (step, responseId) => {
     latestStep = step;
     latestResponseId = responseId;
     appendCrashLog(logFile, { kind: "response", pid: process.pid, step, responseId });
+    // The orchestrator declares this worker dead and fences its attempt while
+    // the provider is still answering: the response's usage was incurred but
+    // this attempt may not record its tool calls.
+    if (point.startsWith("fenced") && step === "call-1") {
+      const recovered = await recoverSessionDispatch(app.db, workspaceId, {
+        sessionId,
+        attemptId,
+        timeoutType: "HEARTBEAT",
+        maxRedispatches: 3,
+      });
+      appendCrashLog(logFile, { kind: "fenced", pid: process.pid, action: recovered.action });
+    }
   },
   afterResponse: (step) => {
     // The provider stream has ended and the SDK asked for its next event.
@@ -90,9 +102,14 @@ const observability: Observability = new Proxy(base, {
             }
             if (phase === "response_usage_checkpoint") {
               call1Committed = true;
-              if (point === "combined_committed") crash();
+              // Combined commit, or for a fenced attempt its usage-only audit row.
+              if (point === "combined_committed" || point === "fenced_usage_committed") crash();
             }
-            if (phase === "response_usage_billing" && point === "debit_committed") crash();
+            if (
+              phase === "response_usage_billing" &&
+              (point === "debit_committed" || point === "fenced_debit_committed")
+            )
+              crash();
           }
         }
         // Inside the combined transaction (usage with the call's records, so

@@ -114,6 +114,8 @@ export type SessionStateActivityOverrides = Partial<{
 // and the session fails for real on the next death. A plain constant by
 // design — this is a pathology bound, not a run-length limit.
 export const WORKER_DEATH_MAX_REDISPATCHES = 3;
+/** How far back an idle session looks for responses whose ledger is still owed. */
+export const OWED_MODEL_USAGE_IDLE_WINDOW_MS = 24 * 60 * 60 * 1_000;
 
 export function createSessionStateActivities(
   services: () => Promise<ControlActivityServices>,
@@ -171,10 +173,44 @@ export function createSessionStateActivities(
     overrides.recordWorkerDeathRecoveryMetrics ?? recordWorkerDeathRecoveryMetrics;
   const settleRecordedModelUsageFn = overrides.settleRecordedModelUsage ?? settleRecordedModelUsage;
 
+  /**
+   * Finish any owed ledger writes of recorded model responses (see
+   * settleRecordedModelUsage). Best-effort: a failure never blocks the
+   * session's own settlement, and every later attempt, failure, recovery and
+   * idle boundary of the session tries again.
+   */
+  async function settleOwedModelUsage(
+    activityServices: Pick<ControlActivityServices, "settings" | "db" | "observability">,
+    scope: Omit<Parameters<typeof settleRecordedModelUsage>[2], "observability">,
+    boundary: "attempt_failure" | "worker_death" | "session_idle",
+  ): Promise<void> {
+    try {
+      await settleRecordedModelUsageFn(activityServices.settings, activityServices.db, {
+        ...scope,
+        observability: activityServices.observability,
+      });
+    } catch (error) {
+      activityServices.observability.warn?.("recorded model usage settlement failed", {
+        boundary,
+        workspaceId: scope.workspaceId,
+        sessionId: scope.sessionId,
+        ...(scope.attemptId ? { attemptId: scope.attemptId } : {}),
+        errorName: error instanceof Error ? error.name : "unknown",
+      });
+    }
+  }
+
   async function failSessionAttempt(
     input: FailSessionAttemptInput,
   ): Promise<FailSessionAttemptResult> {
     const { db, bus, settings, observability, wakeSessionWorkflow } = await services();
+    // The failed attempt may have recorded usage whose ledger writes did not
+    // finish (a billing failure after its usage commit).
+    await settleOwedModelUsage(
+      { settings, db, observability },
+      { workspaceId: input.workspaceId, sessionId: input.sessionId, attemptId: input.attemptId },
+      "attempt_failure",
+    );
     let session: Awaited<ReturnType<typeof requireSession>>;
     try {
       session = await requireSessionFn(db, input.workspaceId, input.sessionId);
@@ -624,24 +660,12 @@ export function createSessionStateActivities(
     const { settings, db, bus, observability, wakeSessionWorkflow } = await services();
     // The dead attempt may have made a response's usage durable before its
     // ledger writes. Settle them now (idempotent per source), also for a turn
-    // that gets no further attempt. A failure here never blocks recovery; the
-    // next attempt of the turn settles them again before its first request.
-    try {
-      await settleRecordedModelUsageFn(settings, db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        attemptId: input.attemptId,
-        observability,
-      });
-    } catch (error) {
-      observability.warn?.("recorded model usage settlement failed during worker-death recovery", {
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        attemptId: input.attemptId,
-        errorName: error instanceof Error ? error.name : "unknown",
-      });
-    }
+    // that gets no further attempt.
+    await settleOwedModelUsage(
+      { settings, db, observability },
+      { workspaceId: input.workspaceId, sessionId: input.sessionId, attemptId: input.attemptId },
+      "worker_death",
+    );
     const result = await recoverSessionDispatchFn(db, input.workspaceId, {
       sessionId: input.sessionId,
       attemptId: input.attemptId,
@@ -884,6 +908,18 @@ export function createSessionStateActivities(
 
   async function markSessionIdle(input: MarkSessionIdleInput): Promise<void> {
     const { db, bus, settings, observability, wakeSessionWorkflow } = await services();
+    // The session's work is settled: finish any of its recent responses whose
+    // ledger writes are still owed (for example a turn whose billing failed
+    // and whose failure settlement could not finish them either).
+    await settleOwedModelUsage(
+      { settings, db, observability },
+      {
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        since: new Date(Date.now() - OWED_MODEL_USAGE_IDLE_WINDOW_MS),
+      },
+      "session_idle",
+    );
     let settled: Awaited<ReturnType<typeof settleSessionIdleWithParentOutbox>>;
     try {
       settled = await settleSessionIdleWithParentOutboxFn(db, input.workspaceId, input.sessionId);

@@ -1052,7 +1052,6 @@ export async function runTurnStreamAttempt(
     if (!ledgerRecoveredAttempts.has(attempt)) {
       try {
         await settleRecordedModelUsage(settings, db, {
-          accountId: input.accountId,
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
           turnId: activeTurnId,
@@ -1646,7 +1645,9 @@ export async function runTurnStreamAttempt(
       while (true) {
         const read = nextStreamEvent(iterator, activityContext);
         // A settlement failure ends the attempt now, as when it was awaited
-        // inline, rather than after the response's tools finish.
+        // inline, rather than after the response's tools finish. The read it
+        // abandons may still reject; that rejection is already handled.
+        if (responseSettlement) void read.catch(() => undefined);
         const next = await (responseSettlement
           ? Promise.race([read, responseSettlement.failed])
           : read);

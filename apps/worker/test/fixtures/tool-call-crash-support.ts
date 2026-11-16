@@ -15,6 +15,7 @@ export type CrashLogEntry =
   | { kind: "response"; pid: number; step: ModelStep; responseId: string }
   | { kind: "billed"; pid: number; responseId: string }
   | { kind: "in_combined_write"; pid: number }
+  | { kind: "fenced"; pid: number; action: string }
   | {
       kind: "tool_entry";
       pid: number;
@@ -71,7 +72,7 @@ export class HistoryScriptedModel implements Model {
   constructor(
     private readonly hooks: {
       beforeResponse?: (step: ModelStep) => void;
-      onResponse?: (step: ModelStep, responseId: string) => void;
+      onResponse?: (step: ModelStep, responseId: string) => void | Promise<void>;
       afterResponse?: (step: ModelStep) => void;
     } = {},
   ) {}
@@ -88,7 +89,7 @@ export class HistoryScriptedModel implements Model {
     await recordModelTransportStarted();
     recordModelTransportDispatched(performance.now());
     const responseId = `resp-${step}-${crypto.randomUUID()}`;
-    this.hooks.onResponse?.(step, responseId);
+    await this.hooks.onResponse?.(step, responseId);
     const output =
       step === "final"
         ? [assistantMessage("All steps done.")]
