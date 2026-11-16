@@ -10,6 +10,7 @@ import type {
   SocialConnection,
 } from "../types";
 import { errorMessage } from "@opengeni/contracts/values";
+import { sameConnectorProviderDomain } from "@opengeni/contracts/nango";
 
 export type CapabilityFilter = "all" | CapabilityKind;
 
@@ -772,8 +773,8 @@ export function connectionHealth(
   if (!loaded) return { state: "unverified" };
   const sameProvider = (candidate: ConnectionMetadata) =>
     candidate.kind === ref.kind &&
-    normalizeProviderDomain(candidate.providerDomain) ===
-      normalizeProviderDomain(ref.providerDomain);
+    // Either backend's account counts for its connector (native or Nango).
+    sameConnectorProviderDomain(candidate.providerDomain, ref.providerDomain);
   if (
     (ref.accountSelection === "all_eligible" && !ref.connectionId) ||
     ref.subjectScope === "subject"

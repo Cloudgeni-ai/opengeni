@@ -17,9 +17,17 @@ import {
   type IntegrationBackendSetting,
   type Permission,
 } from "@opengeni/contracts";
-import { bootstrapWorkspace, createDb, getConnectionMetadata, type DbClient } from "@opengeni/db";
+import {
+  bootstrapWorkspace,
+  createConnection,
+  createDb,
+  getConnectionMetadata,
+  integrationBackendSettingsCache,
+  type DbClient,
+} from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
+import { listOwnConnectionMetadata, projectConnectionsForBackends } from "@opengeni/core";
 import { createApp } from "../src/app";
 import {
   completeNangoConnect,
@@ -451,6 +459,88 @@ describe("Nango connections in PostgreSQL", () => {
         (request) => request.method === "DELETE" && request.url.pathname === "/connections/nd-1",
       ),
     ).toBe(true);
+  });
+
+  test("an active Nango account is the connector's account in the account lists", async () => {
+    if (!shared) return;
+    const target = await owner("nango account lists");
+    const nango = fakeNango();
+    await connect(target, nango, "na-1", "lists@example.com");
+    const [nangoRow] = await nangoRows(target);
+    // The native account the Nango one replaced.
+    const native = await createConnection(client.db, {
+      accountId: target.accountId,
+      workspaceId: target.workspaceId,
+      subjectId: target.subjectId,
+      providerDomain: "gmailmcp.googleapis.com",
+      kind: "oauth2",
+      status: "active",
+      credentialEncrypted: "unused",
+      metadata: { oauthDiscovery: true, mcpUrl: "https://gmailmcp.googleapis.com/mcp/v1" },
+      createdBySubjectId: target.subjectId,
+    });
+    // This deployment serves Gmail through Nango.
+    await shared!.admin`insert into integration_backend_revisions
+        (integration_key, backend, nango_provider_config_key, enabled, changed_by, reason)
+      values ('gmail', 'nango', 'google-mail', true, 'test', 'nango account lists test')`;
+    integrationBackendSettingsCache.invalidate();
+    try {
+      const app = createApp({
+        settings,
+        db: client.db,
+        bus: {} as never,
+        workflowClient: {} as never,
+        managedAuth: null,
+      } as never);
+      const token = await signDelegatedAccessToken(delegationSecret, {
+        ...target,
+        permissions: ["workspace:read", "connections:read"],
+        principalKind: "human_session",
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      });
+      const read = async (path: string) => {
+        const response = await app.request(`/v1/workspaces/${target.workspaceId}${path}`, {
+          headers: { authorization: `Bearer ${token}` },
+        });
+        expect(response.status).toBe(200);
+        return await response.json();
+      };
+      const accounts = await read("/connect/accounts");
+      expect(accounts).toContainEqual(
+        expect.objectContaining({
+          id: nangoRow!.id,
+          providerId: "gmail",
+          label: "gmailmcp.googleapis.com",
+          ownership: "personal",
+          status: "connected",
+        }),
+      );
+      // The replaced native account cannot be used while Nango serves Gmail.
+      expect(accounts).toContainEqual(
+        expect.objectContaining({ id: native.id, providerId: "gmail", status: "auth_needed" }),
+      );
+      // The inventory the runtime and health read (a delegated token is never
+      // a personal-account source, so read it as the person's own session).
+      const inventory = projectConnectionsForBackends(
+        await listOwnConnectionMetadata(client.db, {
+          ...target,
+          reach: "anywhere",
+          includeInactive: true,
+        }),
+        backends,
+      );
+      expect(inventory.map((connection) => [connection.id, connection.status])).toEqual(
+        expect.arrayContaining([
+          [nangoRow!.id, "active"],
+          [native.id, "needs_reauth"],
+        ]),
+      );
+    } finally {
+      await shared!.admin`insert into integration_backend_revisions
+          (integration_key, backend, nango_provider_config_key, enabled, changed_by, reason)
+        values ('gmail', 'native', null, true, 'test', 'nango account lists test done')`;
+      integrationBackendSettingsCache.invalidate();
+    }
   });
 
   test("the usage API reads one's own organization and refuses another", async () => {

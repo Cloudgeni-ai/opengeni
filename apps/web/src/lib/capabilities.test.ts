@@ -892,6 +892,48 @@ describe("connectionHealth", () => {
     test("an unread inventory stays unverified", () => {
       expect(connectionHealth(binding, [], false)).toEqual({ state: "unverified" });
     });
+
+  });
+
+  describe("a connector served through Nango", () => {
+    // Installations keep the native catalog domain whichever backend connected the account.
+    const binding = item({
+      enabled: true,
+      connectionRef: {
+        providerDomain: "gmailmcp.googleapis.com",
+        kind: "oauth2",
+        subjectScope: "subject",
+      },
+    });
+    const own = (overrides: Partial<ConnectionMetadata>) =>
+      connection({ subjectId: "current-user", turnedOnHere: true, ...overrides });
+
+    test("an active Nango account is Connected despite removed native ones", () => {
+      const nango = own({ id: "nango", providerDomain: "nango:gmail" });
+      const removed = own({
+        id: "native",
+        providerDomain: "gmailmcp.googleapis.com",
+        status: "revoked",
+      });
+      const superseded = own({
+        id: "superseded",
+        providerDomain: "gmailmcp.googleapis.com",
+        status: "needs_reauth",
+        metadata: { integrationBackendProjection: "superseded" },
+      });
+      expect(connectionHealth(binding, [removed, superseded, nango], true)).toEqual({
+        state: "connected",
+        connection: nango,
+      });
+    });
+
+    test("another connector's Nango account does not count", () => {
+      const other = own({ id: "calendar", providerDomain: "nango:google-calendar" });
+      expect(connectionHealth(binding, [other], true)).toMatchObject({
+        state: "attention",
+        reason: "not_connected",
+      });
+    });
   });
 
   test("an all-eligible selector counts only accounts the runtime resolves here", () => {

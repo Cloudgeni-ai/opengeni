@@ -23,6 +23,7 @@ import {
   stableJson,
   assertOrganizationIntegrationAllowed,
   OPENGENI_PERSONAL_SLACK_MCP_URL,
+  connectorProviderDomain,
 } from "@opengeni/contracts";
 import {
   CORE_INTEGRATION_DEFINITIONS,
@@ -61,6 +62,8 @@ import {
   MissingPermissionRefusal,
   WORKSPACE_SETTINGS_REFUSAL,
   workspaceSettingsAuthorized,
+  nangoBackendsFor,
+  projectConnectionsForBackends,
   type AccessGrantAuthorization,
   type ApiRouteDeps,
 } from "@opengeni/core";
@@ -510,8 +513,13 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/connect/accounts", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const { grant } = await requireAccessGrantAuthorization(c, deps, workspaceId, "workspace:read");
+    // Read as the inventory does while an integration's backend is switched:
+    // a native account of a Nango-backed connector needs its Nango account.
     const connections = hasPermission(grant.permissions, "connections:read")
-      ? await listConnectionsMetadata(deps.db, workspaceId, grant.subjectId)
+      ? projectConnectionsForBackends(
+          await listConnectionsMetadata(deps.db, workspaceId, grant.subjectId),
+          await nangoBackendsFor(deps.db, deps.settings),
+        )
       : [];
     const githubInstallations =
       hasPermission(grant.permissions, "github:use") ||
@@ -623,7 +631,10 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           ];
         if (
           connection.kind === "oauth2" &&
-          connection.metadata.oauthDiscovery &&
+          // A Nango connection serves its connector's MCP endpoint like a
+          // discovered OAuth sign-in does.
+          (connection.metadata.oauthDiscovery ||
+            connection.metadata.integrationBackend === "nango") &&
           typeof connection.metadata.mcpUrl === "string"
         )
           return [
@@ -640,7 +651,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                       : connection.metadata.mcpUrl === OFFICIAL_GOOGLE_CALENDAR_MCP_URL
                         ? "google-calendar"
                         : "mcp-oauth",
-              label: connection.providerDomain,
+              label: connectorProviderDomain(connection.providerDomain),
               ownership: connection.subjectId === null ? "workspace" : "personal",
               status:
                 connection.status === "revoked"

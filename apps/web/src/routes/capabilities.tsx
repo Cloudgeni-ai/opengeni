@@ -6,6 +6,7 @@ import {
 } from "@opengeni/react/app/lib/drive-connect-return";
 import type { ChatClient } from "@opengeni/sdk";
 import { PERSONAL_INTEGRATION_SETUP_PERMISSION } from "@opengeni/contracts/personal-integration-setup";
+import { sameConnectorProviderDomain } from "@opengeni/contracts/nango";
 import type { SkillSummary } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import {
@@ -161,7 +162,6 @@ import {
   connectionRepair,
   isConnectorCatalogItem,
   isMissingCredentialsError,
-  normalizeProviderDomain,
   oauthConnectionRef,
   catalogConnectionAccountSelection,
   oauthConnectionOwnership,
@@ -1559,12 +1559,11 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
     if (!domain) return;
     reconnectHandled.current = true;
     clearReturnParams();
-    const target = normalizeProviderDomain(domain);
     const item = items.find(
       (candidate) =>
         candidate.enabled &&
         candidate.connectionRef &&
-        normalizeProviderDomain(candidate.connectionRef.providerDomain) === target,
+        sameConnectorProviderDomain(candidate.connectionRef.providerDomain, domain),
     );
     if (item) {
       setSelected(

@@ -154,6 +154,27 @@ export function nativeNangoIntegrationForProviderDomain(domain: string | null | 
   );
 }
 
+/**
+ * The connector a provider domain belongs to, as the catalog names it: a Nango
+ * connection of a reviewed native connector names that connector's native
+ * domain, so an account from either backend counts as the same connector's.
+ * Any other domain is itself (trimmed, lowercase, without a leading "www.").
+ * Matching only; which backend serves a call is decided separately.
+ */
+export function connectorProviderDomain(providerDomain: string): string {
+  const normalized = providerDomain
+    .trim()
+    .toLowerCase()
+    .replace(/^www\./u, "");
+  const native = nativeNangoIntegrationByKey(nangoIntegrationKeyFromProviderDomain(normalized));
+  return native ? native.nativeProviderDomain : normalized;
+}
+
+/** Whether two provider domains name the same connector (see `connectorProviderDomain`). */
+export function sameConnectorProviderDomain(left: string, right: string): boolean {
+  return connectorProviderDomain(left) === connectorProviderDomain(right);
+}
+
 /** Whether a provider URL is one of the exact destinations an integration may proxy. */
 export function nangoDestinationAllowed(
   destinations: readonly NangoDestination[],
