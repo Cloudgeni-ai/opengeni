@@ -1107,6 +1107,8 @@ import {
   WORKSPACE_OPPER_CONNECTION_ROLE,
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
   VERCEL_AI_GATEWAY_CONNECTION_ROLE,
+  type SandboxPlanLimit,
+  type SandboxPlanLimits,
   type Settings,
 } from "@opengeni/config";
 import { SandboxTransitionWaitBudget } from "./sandbox-transition-wait";
@@ -49173,6 +49175,18 @@ export interface AcquireLeaseInput {
   /** Optional owner cancellation for the transition wait. No holder exists
    * while a capture/rotation fence is observed, so cancellation is leak-free. */
   waitSignal?: AbortSignal;
+  /** Viewer holders only: the most boxes this workspace may keep warm with a
+   * viewer and no turn holder. A new viewer that would start, re-arm or adopt
+   * one more such box is refused with SandboxViewerBoxLimitError; joining a box
+   * another viewer or a turn already holds is always admitted. Omitted or 0 =
+   * no limit. */
+  viewerOnlyBoxLimit?: number;
+  /** Organization-wide limits by plan tier (resolveSandboxPlanTier). Viewer
+   * holders are refused beyond the tier's viewer-only limits with
+   * SandboxViewerBoxLimitError; electing a new box beyond its running-box
+   * limit is refused (non-turn holders) or capacity-blocked (turns). Omitted =
+   * no organization limits. */
+  sandboxPlanLimits?: SandboxPlanLimits;
 }
 
 export type AcquireLeaseResult =
@@ -49200,8 +49214,14 @@ export type AcquireLeaseResult =
         | "superseded"
         | "capture_in_progress"
         | "rotation_in_progress"
-        | "provider_recovery_in_progress";
+        | "provider_recovery_in_progress"
+        // A turn electing a new box while its organization already runs the
+        // most boxes its plan allows. No holder is registered and no provider
+        // create is licensed; the turn parks and retries later.
+        | "organization_sandbox_capacity";
       lease: LeaseSnapshot;
+      /** organization_sandbox_capacity only: the plan's running-box limit. */
+      organizationBoxLimit?: number;
       /** Remaining durable capture budget from PostgreSQL's clock. Present only
        * for an exact active capture; callers cap it at the lifecycle ceiling. */
       captureRemainingMs?: number;
@@ -49534,10 +49554,13 @@ export class SandboxLeaseTransitionError extends Error {
     public readonly reason:
       | "capture_in_progress"
       | "rotation_in_progress"
-      | "provider_recovery_in_progress",
+      | "provider_recovery_in_progress"
+      | "organization_sandbox_capacity",
     public readonly backend: string,
     public readonly instanceId: string | null,
     public readonly liveness: SandboxLeaseLiveness,
+    /** organization_sandbox_capacity only: the plan's running-box limit. */
+    public readonly organizationBoxLimit?: number,
   ) {
     super(
       `Sandbox lifecycle transition still in progress for group ${sandboxGroupId} ` +
@@ -49563,6 +49586,134 @@ export class SandboxViewerAdmissionBlockedError extends Error {
         : "Sandbox viewer admission is blocked because the workspace warm allowance is exhausted",
     );
   }
+}
+
+/**
+ * A viewer would start or re-arm one more box that no turn holds, and the
+ * workspace already keeps `limit` such viewer-only boxes warm. Turn-held boxes
+ * never count and are never refused: this bounds compute a viewer alone keeps
+ * running, not agent work.
+ */
+export type SandboxViewerBoxLimitScope = "workspace" | "organization" | "member";
+
+export class SandboxViewerBoxLimitError extends Error {
+  readonly name = "SandboxViewerBoxLimitError";
+
+  constructor(
+    public readonly workspaceId: string,
+    public readonly sandboxGroupId: string,
+    public readonly limit: number,
+    public readonly scope: SandboxViewerBoxLimitScope = "workspace",
+  ) {
+    super(
+      `Sandbox viewer admission is blocked because the ${
+        scope === "member" ? "member" : scope
+      } already keeps ${limit} sandboxes warm with no running task`,
+    );
+  }
+}
+
+/**
+ * Starting one more box would exceed the organization's running-box limit
+ * for its plan. Raised for holders that cannot wait (viewer, direct,
+ * interaction); a turn instead parks until a slot frees.
+ */
+export class SandboxOrganizationBoxLimitError extends Error {
+  readonly name = "SandboxOrganizationBoxLimitError";
+
+  constructor(
+    public readonly workspaceId: string,
+    public readonly sandboxGroupId: string,
+    public readonly limit: number,
+  ) {
+    super(`The organization already runs ${limit} sandboxes, the most its plan allows`);
+  }
+}
+
+/** The organization-wide count definer (1475); withheld for one release. */
+export const ORGANIZATION_WARM_SANDBOX_COUNTS_ROUTINE =
+  "opengeni_private.organization_warm_sandbox_counts_v1(uuid, text, uuid)";
+
+/**
+ * The plan tier whose sandbox limits apply to an organization: its plan key
+ * (a paid plan only while active, trialing or past due), `none` without a
+ * plan row, and `restricted` for a Free or plan-less organization whose
+ * promotion decision is `held` or `denied`. Reads only the caller's own
+ * organization's rows under the current account context.
+ */
+export async function resolveSandboxPlanTier(tx: Database, accountId: string): Promise<string> {
+  const [row] = await rawRows<{
+    plan_key: string | null;
+    status: string | null;
+    decision: string | null;
+  }>(
+    tx,
+    sql`select plan.plan_key, plan.status, decision.decision
+      from (select ${accountId}::uuid as account_id) organization
+      left join organization_plans plan on plan.account_id = organization.account_id
+      left join promotion_decisions decision on decision.account_id = organization.account_id`,
+  );
+  const planKey = row?.plan_key ?? null;
+  let tier: string;
+  if (planKey === null) tier = "none";
+  else if (planKey === "free" || planKey === "enterprise") tier = planKey;
+  else if (["active", "trialing", "past_due"].includes(row?.status ?? "")) tier = planKey;
+  else tier = "free";
+  if ((tier === "free" || tier === "none") && ["held", "denied"].includes(row?.decision ?? "")) {
+    return "restricted";
+  }
+  return tier;
+}
+
+function sandboxPlanLimitFor(limits: SandboxPlanLimits, tier: string): SandboxPlanLimit {
+  return Object.hasOwn(limits, tier) ? (limits[tier] ?? {}) : {};
+}
+
+type OrganizationWarmSandboxCounts = {
+  viewerOnlyBoxes: number;
+  subjectViewerOnlyBoxes: number;
+  runningBoxes: number;
+};
+
+/** Null while the deployment's database withholds the definer (1475). */
+async function organizationWarmSandboxCounts(
+  tx: Database,
+  input: { accountId: string; subjectId: string | null; excludeLeaseId: string },
+): Promise<OrganizationWarmSandboxCounts | null> {
+  const [granted] = await rawRows<{ granted: boolean | null }>(
+    tx,
+    sql`select has_function_privilege(
+      to_regprocedure(${ORGANIZATION_WARM_SANDBOX_COUNTS_ROUTINE})::oid, 'EXECUTE') as granted`,
+  );
+  if (granted?.granted !== true) return null;
+  const [row] = await rawRows<{
+    viewer_only_boxes: number;
+    subject_viewer_only_boxes: number;
+    running_boxes: number;
+  }>(
+    tx,
+    sql`select viewer_only_boxes, subject_viewer_only_boxes, running_boxes
+      from opengeni_private.organization_warm_sandbox_counts_v1(
+        ${input.accountId}::uuid, ${input.subjectId}::text, ${input.excludeLeaseId}::uuid)`,
+  );
+  return {
+    viewerOnlyBoxes: Number(row?.viewer_only_boxes ?? 0),
+    subjectViewerOnlyBoxes: Number(row?.subject_viewer_only_boxes ?? 0),
+    runningBoxes: Number(row?.running_boxes ?? 0),
+  };
+}
+
+/**
+ * Serialize sandbox-limit counts for one organization. Taken last in an
+ * admission, after the lease's own locks; its holder then waits only for its
+ * own lease row, so no admission can wait on a lock this one holds.
+ */
+async function lockOrganizationSandboxLimit(tx: Database, accountId: string): Promise<void> {
+  await tx.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(
+      ${`sandbox-organization-box-limit:${accountId}`}, 0
+    ))`,
+  );
 }
 
 export class SandboxPaidComputeAdmissionError extends Error {
@@ -51039,6 +51190,103 @@ async function acquireLeaseOnce(
           }
         }
 
+        // A viewer alone can start a box and keep it warm for as long as it
+        // heartbeats, with no task and no model spend. Bound how many such
+        // boxes one workspace, one organization and one member keep warm.
+        // Joining a box that a turn or another viewer already keeps warm adds
+        // no compute and is always admitted, as is replaying this exact holder.
+        const viewerOnlyBoxLimit = input.viewerOnlyBoxLimit ?? 0;
+        const planLimit = input.sandboxPlanLimits
+          ? sandboxPlanLimitFor(
+              input.sandboxPlanLimits,
+              await resolveSandboxPlanTier(tx, accountId),
+            )
+          : {};
+        const organizationViewerLimit = planLimit.viewerOnlyBoxesPerOrganization;
+        const memberViewerLimit = input.viewerSubjectId
+          ? planLimit.viewerOnlyBoxesPerMember
+          : undefined;
+        if (
+          kind === "viewer" &&
+          Number(row.turn_holders) === 0 &&
+          (viewerOnlyBoxLimit > 0 ||
+            organizationViewerLimit !== undefined ||
+            memberViewerLimit !== undefined)
+        ) {
+          const current = await tx.execute<{ held: boolean; joins_viewer_box: boolean }>(sql`
+            select
+              exists (select 1 from sandbox_lease_holders
+                where lease_id = ${row.id} and kind = 'viewer' and holder_id = ${holderId}) as held,
+              (${liveness}::text in ('warming', 'warm') and exists (select 1 from sandbox_lease_holders
+                where lease_id = ${row.id} and kind = 'viewer')) as joins_viewer_box
+          `);
+          if (!current[0]?.held && !current[0]?.joins_viewer_box) {
+            // Two viewers on different groups each hold only their own group
+            // lock. The organization key serializes their counts so every
+            // limit is exact.
+            await lockOrganizationSandboxLimit(tx, accountId);
+            if (organizationViewerLimit === 0 || memberViewerLimit === 0) {
+              throw new SandboxViewerBoxLimitError(
+                workspaceId,
+                sandboxGroupId,
+                0,
+                organizationViewerLimit === 0 ? "organization" : "member",
+              );
+            }
+            if (viewerOnlyBoxLimit > 0) {
+              const others = await tx.execute<{ n: number }>(sql`
+                select count(*)::int as n from sandbox_leases other
+                where other.workspace_id = ${workspaceId}
+                  and other.id <> ${row.id}
+                  and other.liveness in ('warming', 'warm')
+                  and other.turn_holders = 0
+                  and exists (select 1 from sandbox_lease_holders h
+                    where h.lease_id = other.id and h.kind = 'viewer')
+              `);
+              if (Number(others[0]?.n ?? 0) >= viewerOnlyBoxLimit) {
+                throw new SandboxViewerBoxLimitError(
+                  workspaceId,
+                  sandboxGroupId,
+                  viewerOnlyBoxLimit,
+                );
+              }
+            }
+            if (organizationViewerLimit !== undefined || memberViewerLimit !== undefined) {
+              // Until 1475's definer is granted only the workspace limit and
+              // the zero limits above apply.
+              const counts = await organizationWarmSandboxCounts(tx, {
+                accountId,
+                subjectId: input.viewerSubjectId ?? null,
+                excludeLeaseId: row.id,
+              });
+              if (
+                counts &&
+                organizationViewerLimit !== undefined &&
+                counts.viewerOnlyBoxes >= organizationViewerLimit
+              ) {
+                throw new SandboxViewerBoxLimitError(
+                  workspaceId,
+                  sandboxGroupId,
+                  organizationViewerLimit,
+                  "organization",
+                );
+              }
+              if (
+                counts &&
+                memberViewerLimit !== undefined &&
+                counts.subjectViewerOnlyBoxes >= memberViewerLimit
+              ) {
+                throw new SandboxViewerBoxLimitError(
+                  workspaceId,
+                  sandboxGroupId,
+                  memberViewerLimit,
+                  "member",
+                );
+              }
+            }
+          }
+        }
+
         // Provider-native capture may temporarily pause the box. Do not attach
         // another holder while that operation owns the exact lease: the caller
         // retries after the claim clears, before it can reach the provider.
@@ -51233,6 +51481,38 @@ async function acquireLeaseOnce(
               lease: mapLeaseRow(row),
             };
           }
+          // A new box counts against the organization's running-box limit for
+          // its plan. Attaching to, or re-arming, a box that already runs
+          // adds none and never reaches this election.
+          const runningBoxLimit =
+            backend === "selfhosted" ? undefined : planLimit.runningBoxesPerOrganization;
+          if (runningBoxLimit !== undefined) {
+            await lockOrganizationSandboxLimit(tx, accountId);
+            // Until 1475's definer is granted only a zero limit applies.
+            const counts =
+              runningBoxLimit === 0
+                ? null
+                : await organizationWarmSandboxCounts(tx, {
+                    accountId,
+                    subjectId: null,
+                    excludeLeaseId: row.id,
+                  });
+            if (runningBoxLimit === 0 || (counts && counts.runningBoxes >= runningBoxLimit)) {
+              if (kind !== "turn") {
+                throw new SandboxOrganizationBoxLimitError(
+                  workspaceId,
+                  sandboxGroupId,
+                  runningBoxLimit,
+                );
+              }
+              return {
+                role: "fenced" as const,
+                reason: "organization_sandbox_capacity" as const,
+                lease: mapLeaseRow(row),
+                organizationBoxLimit: runningBoxLimit,
+              };
+            }
+          }
           const casRows = await tx.execute<{ id: string }>(sql`
           update sandbox_leases set
             liveness = 'warming',
@@ -51366,6 +51646,8 @@ export async function acquireLease(
       result.role !== "fenced" ||
       result.reason === "superseded" ||
       result.reason === "rotation_in_progress" ||
+      // A slot frees on the scale of minutes; never busy-wait for one here.
+      result.reason === "organization_sandbox_capacity" ||
       now >= waitBudget.deadline
     ) {
       return result;
@@ -58477,7 +58759,15 @@ export type LeaseHolderHeartbeatStatus =
   | {
       holderAlive: true;
       leaseExtended: false;
-      fence: "epoch" | "liveness" | "rotation_requested" | "funding";
+      fence:
+        | "epoch"
+        | "liveness"
+        | "rotation_requested"
+        | "funding"
+        // Viewer holders only: the workspace's monthly warm allowance is
+        // exhausted and no turn holds this box. The viewer must detach so the
+        // box drains; the warm-cap admission gate refuses its re-attach.
+        | "viewer_allowance_exhausted";
     };
 
 export async function heartbeatLeaseHolderStatus(
@@ -58517,8 +58807,11 @@ export async function heartbeatLeaseHolderStatus(
           lease_epoch: number | string;
           liveness: SandboxLeaseLiveness;
           rotation_requested_at: Date | string | null;
+          turn_holders: number | string;
         }>(sql`
-          select id, account_id, workspace_id, resume_state, lease_epoch, liveness, rotation_requested_at from sandbox_leases
+          select id, account_id, workspace_id, resume_state, lease_epoch, liveness, rotation_requested_at,
+            turn_holders
+          from sandbox_leases
           where workspace_id = ${input.workspaceId}
             and sandbox_group_id = ${input.sandboxGroupId}
           for update
@@ -58563,6 +58856,25 @@ export async function heartbeatLeaseHolderStatus(
           return { holderAlive: true, leaseExtended: false, fence: "liveness" };
         if (lease.rotation_requested_at !== null)
           return { holderAlive: true, leaseExtended: false, fence: "rotation_requested" };
+        // The warm-cap gate refuses new viewers, but a viewer that attached
+        // before the cap closed would otherwise keep a task-less box warm for
+        // as long as it heartbeats. End that viewer-only hold here. A box a
+        // turn holds keeps running, exactly like the reaper's force drain.
+        if (input.kind === "viewer" && Number(lease.turn_holders) === 0) {
+          const gates = await tx.execute<{
+            sandbox_viewer_force_drain_reason: SandboxViewerForceDrainReason | null;
+          }>(sql`
+            select sandbox_viewer_force_drain_reason from workspaces
+            where id = ${input.workspaceId}
+          `);
+          if (gates[0]?.sandbox_viewer_force_drain_reason === "warm_cap") {
+            return {
+              holderAlive: true,
+              leaseExtended: false,
+              fence: "viewer_allowance_exhausted",
+            };
+          }
+        }
         if (
           (input.billingMode ?? snapshot?.mode) === "credits" &&
           snapshot?.mode === "credits" &&

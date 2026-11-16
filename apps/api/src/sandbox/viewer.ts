@@ -24,11 +24,12 @@ import {
   applyGitAuthPointerEnvironment,
   hasGitCredentialRepositorySelection,
   resolveStreamTokenSecret,
+  sandboxPlanLimits,
   sandboxLifecycleTransitionWaitMs,
   sandboxWarmRateMicrosPerSecond,
   stableSandboxEnvironmentForRun,
 } from "@opengeni/config";
-import type { Settings } from "@opengeni/config";
+import type { SandboxPlanLimit, Settings } from "@opengeni/config";
 import { type AccessGrant, type Session, type StreamUrlRotatedPayload } from "@opengeni/contracts";
 import {
   acquireLease,
@@ -44,6 +45,8 @@ import {
   releaseLeaseHolder,
   SandboxLeaseSupersededError,
   SandboxViewerAdmissionBlockedError,
+  SandboxViewerBoxLimitError,
+  SandboxOrganizationBoxLimitError,
   SandboxPaidComputeAdmissionError,
   type Database,
   type LeaseSnapshot,
@@ -200,6 +203,10 @@ export async function attachViewer(
     grant?: AccessGrant;
     /** Cancel lifecycle waiting when the originating HTTP request disconnects. */
     waitSignal?: AbortSignal;
+    /** A hold its route owner releases when one operation completes (fleet
+     * readiness), not a watching viewer. It cannot keep a box warm on its own,
+     * so the viewer-only box limit does not apply. */
+    operationScoped?: boolean;
   },
 ): Promise<ViewerAttachResult> {
   const { db, settings } = services;
@@ -269,9 +276,33 @@ export async function attachViewer(
       leaseTtlMs,
       warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
       captureWaitMs: sandboxLifecycleTransitionWaitMs(settings),
+      viewerOnlyBoxLimit: input.operationScoped
+        ? 0
+        : settings.sandboxMaxViewerOnlyBoxesPerWorkspace,
+      // Operation-scoped holds still count toward and respect the running-box
+      // limit; only the viewer-only limits exempt them.
+      sandboxPlanLimits: input.operationScoped
+        ? runningLimitsOnly(sandboxPlanLimits(settings))
+        : sandboxPlanLimits(settings),
       ...(input.waitSignal ? { waitSignal: input.waitSignal } : {}),
     });
   } catch (error) {
+    if (error instanceof SandboxViewerBoxLimitError) {
+      // 429 is the client's existing "viewer cap reached" signal: the surface
+      // degrades instead of retrying into the limit.
+      throw new HTTPException(429, {
+        message: viewerBoxLimitMessage(error),
+        cause: error,
+      });
+    }
+    if (error instanceof SandboxOrganizationBoxLimitError) {
+      throw new HTTPException(429, {
+        message:
+          `your organization already runs ${error.limit} computers, the most its plan allows; ` +
+          "close one or wait for a task to finish",
+        cause: error,
+      });
+    }
     if (error instanceof SandboxPaidComputeAdmissionError) {
       throw new HTTPException(402, { message: error.message, cause: error });
     }
@@ -514,6 +545,7 @@ export async function ensureSessionGroupReady(
         workspaceId: input.workspaceId,
         session: input.session,
         ...(input.subjectId ? { viewerSubjectId: input.subjectId } : {}),
+        operationScoped: true,
       });
       let releasePromise: Promise<void> | undefined;
       release = () =>
@@ -568,6 +600,19 @@ export async function heartbeatViewer(
     expectedEpoch: input.expectedEpoch,
     billingMode: services.settings.sandboxWarmBillingMode,
   });
+  // An exhausted monthly warm allowance ends a viewer-only hold: release this
+  // viewer so the box can drain. Its re-attach meets the warm-cap gate.
+  if (status.fence === "viewer_allowance_exhausted") {
+    await releaseLeaseHolder(services.db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sandboxGroupId: input.sandboxGroupId,
+      kind: "viewer",
+      holderId: input.viewerId,
+      idleGraceMs: services.settings.sandboxIdleGraceMs,
+    });
+    return false;
+  }
   // A funding fence stops renewing paid provider time, but the holder is
   // deliberately kept alive while the viewer winds down or adds funds. Other
   // fences (epoch/rotation/drain) still require the client to re-attach.
@@ -1570,4 +1615,30 @@ function viewerIdAsUuid(rawViewerId: string): string {
   b[16] = variantNibble.toString(16);
   const s = b.join("");
   return `${s.slice(0, 8)}-${s.slice(8, 12)}-${s.slice(12, 16)}-${s.slice(16, 20)}-${s.slice(20, 32)}`;
+}
+
+function viewerBoxLimitMessage(error: SandboxViewerBoxLimitError): string {
+  const action = "close one or start a task in this chat";
+  if (error.limit === 0) {
+    return "this account cannot keep computers running without a task; start a task in this chat";
+  }
+  switch (error.scope) {
+    case "organization":
+      return `your organization already keeps ${error.limit} computers running with no task; ${action}`;
+    case "member":
+      return `you already keep ${error.limit} computers running with no task; ${action}`;
+    default:
+      return `this workspace already keeps ${error.limit} computers running with no task; ${action}`;
+  }
+}
+
+function runningLimitsOnly(limits: Readonly<Record<string, SandboxPlanLimit>>) {
+  return Object.fromEntries(
+    Object.entries(limits).map(([tier, limit]) => [
+      tier,
+      limit.runningBoxesPerOrganization === undefined
+        ? {}
+        : { runningBoxesPerOrganization: limit.runningBoxesPerOrganization },
+    ]),
+  );
 }
