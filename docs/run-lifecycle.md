@@ -4321,33 +4321,49 @@ A box with a turn, process, Browser/ComputerSession or direct operation is
 never counted or drained by them. Compute and selfhosted boxes are exempt.
 
 - Idle drain (`OPENGENI_SANDBOX_VIEWER_IDLE_DRAIN_MS`, default 30 minutes, `0`
-  disables). The web client reports on every heartbeat how long ago the person
-  last used the page (`lastInteractionAgeMs`: pointer, keyboard, wheel, touch,
-  window focus or the page becoming visible); the API keeps the newest as the
-  holder's `last_interaction_at`. A box's activity is the newest viewer attach,
-  reported interaction, or turn created or finished in its sessions. Clients
-  that do not report interaction therefore fall back to the attach time and
-  session activity. When nothing happened for the window, the reaper deletes
-  the viewer holders and moves the lease to draining with the ordinary idle
-  grace, so the workspace is saved and the box stops as when the last tab
-  closes. The page's next heartbeat answers `alive: false`; a page that knows
-  the window (`viewerIdleDrainMs` on the attach response) waits for the
-  person's next interaction and then re-attaches, which resumes the box.
+  disables). The web client reports on every attach and heartbeat how long ago
+  the person last used the page (`lastInteractionAgeMs`: pointer, keyboard,
+  wheel, touch, window focus or the page becoming visible); the API keeps the
+  newest as the holder's `last_interaction_at`. A viewer's activity is its last
+  reported interaction, otherwise its attach time; a box's activity is the
+  newest of its viewers' activity and turns created or finished in its
+  sessions. Clients that do not report interaction therefore fall back to the
+  attach time and session activity. When nothing happened for the window, the
+  reaper deletes the viewer holders, records the release
+  (`sandbox_leases.viewer_idle_drained_at`) and moves the lease to draining with
+  the ordinary idle grace, so the workspace is saved and the box stops as when
+  the last tab closes. The page's next heartbeat answers `alive: false`. A
+  later viewer attach to that box that reports no interaction after the
+  release, while the session had no turn or open work since, is refused with
+  429, so an unattended page or an old client re-attaching on its own cannot
+  reset the idle clock. A page that knows the window (`viewerIdleDrainMs` on
+  the attach response) waits for the person's next interaction and then
+  re-attaches, which is admitted and resumes the box; the record is cleared.
 - Per-account cap (`OPENGENI_SANDBOX_MAX_VIEWER_ONLY_WARM_PER_ACCOUNT`,
   default 10, `0` disables). The reaper counts such boxes per account
-  (organization, across its workspaces) and drains the least recently active
-  ones over the cap. While an account is at the cap, each of its workspaces
-  that holds such a box is stamped (`workspaces.sandbox_viewer_only_cap_until`,
-  three reaper periods, at least two minutes), and a person-facing viewer
-  attach that would warm another viewer-only box is refused with 429; joining
-  a box that is already warm is not. The in-workspace count is also checked at
-  attach time, so the cap holds exactly within one workspace and within one
-  reaper pass across workspaces. The session still loads without a live box.
+  (organization, across its workspaces). Over the cap it drains the least
+  recently active ones, but only boxes whose viewers have been quiet for at
+  least five minutes; boxes in active use are never evicted. While an account
+  is at the cap, every workspace of the account is stamped
+  (`workspaces.sandbox_viewer_only_cap_until`, three reaper periods, at least
+  two minutes, refreshed only when less than half remains), and a
+  person-facing viewer attach that would warm another viewer-only box is
+  refused with 429; joining a box that is already warm is not. Attach also
+  counts the workspace's viewer-only boxes with the reaper's predicate under
+  an account-level advisory lock, so concurrent attaches cannot overshoot
+  within a workspace; across workspaces admission follows the stamp, so it is
+  exact within one reaper pass. The session still loads without a live box and
+  the page does not keep polling for one.
 
-Every decision is rechecked under the lease lock, so a viewer that reported
-interaction, an attach or a turn after the reaper's read keeps the box. Drains
-log `sandbox reaper: drained viewer-only box` with the reason, inactivity and
-whether the client reported interaction, and count
+Sessions with open work are an intentional exception: while a session is
+`queued`, `requires_action`, `waiting_capacity` or otherwise open, a person or
+the agent may still act, so its viewer-held box is neither drained nor counted.
+
+Every decision is rechecked under the lease lock on the database clock, so a
+viewer that reported interaction, an attach or a turn after the reaper's read
+keeps the box. Idle drains run before the cap is planned over the boxes still
+warm. Drains log `sandbox reaper: drained viewer-only box` with the reason,
+inactivity and whether the client reported interaction, and count
 `opengeni_sandbox_viewer_only_drains_total{reason}` (`viewer_idle`,
 `viewer_account_cap`).
 

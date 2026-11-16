@@ -22238,6 +22238,11 @@ export const AttachViewerRequest = /* @__PURE__ */ /* @__PURE__ */ defineSchema(
     desktop: primitives.optionalBoolean,
     terminal: primitives.optionalBoolean,
     files: primitives.optionalBoolean,
+    // How long ago the person last interacted with the page, as on the viewer
+    // heartbeat. A box the server stopped because its page went unused is only
+    // warmed again by an attach that reports interaction since then (or after
+    // the session is used). Optional; older clients omit it.
+    lastInteractionAgeMs: z.number().finite().nonnegative().optional(),
   }),
 );
 export type AttachViewerRequest = z.infer<typeof AttachViewerRequest>;

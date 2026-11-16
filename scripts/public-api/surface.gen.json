@@ -12772,6 +12772,7 @@
         "$": "object",
         "$.desktop": "boolean?",
         "$.files": "boolean?",
+        "$.lastInteractionAgeMs": "number?",
         "$.terminal": "boolean?",
         "$.viewerId": "string?"
       }

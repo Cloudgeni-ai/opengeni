@@ -203,9 +203,14 @@ export async function attachViewer(
     grant?: AccessGrant;
     /** Cancel lifecycle waiting when the originating HTTP request disconnects. */
     waitSignal?: AbortSignal;
-    /** Apply the per-account cap on warm boxes held only by viewers. Set by
-     * the person-facing attach route; fleet readiness probes leave it off. */
+    /** Apply the bounds on warm boxes held only by viewers: the per-account
+     * cap, and refusing to re-warm a box stopped because its page went unused
+     * unless the attach reports interaction since. Set by the person-facing
+     * attach route; fleet readiness probes leave it off. */
     enforceViewerOnlyWarmCap?: boolean;
+    /** How long ago the attaching page last saw user interaction, when the
+     * client reports it. */
+    interactionAgeMs?: number;
   },
 ): Promise<ViewerAttachResult> {
   const { db, settings } = services;
@@ -277,7 +282,13 @@ export async function attachViewer(
       captureWaitMs: sandboxLifecycleTransitionWaitMs(settings),
       ...(input.waitSignal ? { waitSignal: input.waitSignal } : {}),
       ...(input.enforceViewerOnlyWarmCap
-        ? { viewerOnlyWarmCap: settings.sandboxMaxViewerOnlyWarmPerAccount }
+        ? {
+            viewerOnlyWarmCap: settings.sandboxMaxViewerOnlyWarmPerAccount,
+            enforceViewerIdleReattach: settings.sandboxViewerIdleDrainMs > 0,
+          }
+        : {}),
+      ...(input.interactionAgeMs !== undefined
+        ? { viewerInteractionAgeMs: input.interactionAgeMs }
         : {}),
     });
   } catch (error) {
@@ -291,7 +302,9 @@ export async function attachViewer(
             ? "insufficient workspace credits for an idle sandbox viewer"
             : error.reason === "viewer_only_cap"
               ? "too many sandboxes are kept warm for viewers only in this organization; the session is available without a live sandbox"
-              : "workspace sandbox warm allowance exhausted",
+              : error.reason === "viewer_idle"
+                ? "the sandbox was stopped because its page went unused; interact with the page to resume it"
+                : "workspace sandbox warm allowance exhausted",
         cause: error,
       });
     }

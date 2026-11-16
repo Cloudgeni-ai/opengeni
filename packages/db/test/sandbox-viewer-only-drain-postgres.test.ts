@@ -201,7 +201,8 @@ describe("viewer-only warm box bounds (real packages/db + RLS)", () => {
       ...ids,
       sandboxGroupId: groupId,
       expectedEpoch: epoch,
-      activeAtOrBefore: minutesAgo(30),
+      reason: "viewer_idle",
+      quietForMs: 30 * 60_000,
       idleGraceMs: 60_000,
     });
     expect(outcome).toEqual({ drained: true, releasedViewers: 1 });
@@ -213,10 +214,31 @@ describe("viewer-only warm box bounds (real packages/db + RLS)", () => {
     });
     expect(await listViewerOnlyWarmLeases(db, ids)).toEqual([]);
 
+    // The unattended page (or an old client) re-attaches on its own, without
+    // reporting interaction since the release: refused, so it cannot reset
+    // the idle clock. A stale report is refused the same way.
+    const reattach = (holderId: string, viewerInteractionAgeMs?: number) =>
+      acquireLease(db, {
+        ...ids,
+        sandboxGroupId: groupId,
+        kind: "viewer",
+        holderId,
+        backend: "modal",
+        leaseTtlMs: 90_000,
+        viewerOnlyWarmCap: 10,
+        enforceViewerIdleReattach: true,
+        ...(viewerInteractionAgeMs === undefined ? {} : { viewerInteractionAgeMs }),
+      });
+    await expect(reattach("tab-a")).rejects.toMatchObject({ reason: "viewer_idle" });
+    await expect(reattach("tab-a", 60 * 60_000)).rejects.toMatchObject({
+      reason: "viewer_idle",
+    });
+    expect((await readLease(ids, groupId)).holders).toBe(0);
+
     // The reaper saves the workspace and stops the box (simulated: cold).
-    // The person comes back: the viewer attaches again and the box cold
-    // starts, even with the cap on, because the account holds no other
-    // viewer-only box.
+    // The person comes back and interacts: the viewer attaches again and the
+    // box cold starts, even with the cap on, because the account holds no
+    // other viewer-only box.
     await admin`
         update sandbox_leases set liveness = 'cold', instance_id = null, expires_at = now()
         where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${groupId}`;
@@ -228,8 +250,17 @@ describe("viewer-only warm box bounds (real packages/db + RLS)", () => {
       backend: "modal",
       leaseTtlMs: 90_000,
       viewerOnlyWarmCap: 10,
+      enforceViewerIdleReattach: true,
+      // The person just interacted (after the release).
+      viewerInteractionAgeMs: 0,
     });
     expect(back.role).toBe("spawner");
+    const [marker] = await admin<{ drained_at: Date | null; interaction_at: Date | null }[]>`
+      select lease.viewer_idle_drained_at as drained_at, holder.last_interaction_at as interaction_at
+      from sandbox_leases lease join sandbox_lease_holders holder on holder.lease_id = lease.id
+      where lease.workspace_id = ${ids.workspaceId} and lease.sandbox_group_id = ${groupId}`;
+    expect(marker!.drained_at).toBeNull();
+    expect(marker!.interaction_at).not.toBeNull();
     expect(await readLease(ids, groupId)).toMatchObject({
       liveness: "warming",
       holders: 1,
@@ -273,7 +304,8 @@ describe("viewer-only warm box bounds (real packages/db + RLS)", () => {
       ...ids,
       sandboxGroupId: groupId,
       expectedEpoch: epoch,
-      activeAtOrBefore: minutesAgo(30),
+      reason: "viewer_idle",
+      quietForMs: 30 * 60_000,
       idleGraceMs: 60_000,
     });
     expect(outcome).toEqual({
@@ -327,13 +359,13 @@ describe("viewer-only warm box bounds (real packages/db + RLS)", () => {
     );
     expect(byGroup.get(open.groupId)!.openSessionWork).toBe(true);
 
-    const cutoff = minutesAgo(30);
     const drain = (groupId: string, expectedEpoch: number) =>
       drainViewerOnlyLease(db, {
         ...ids,
         sandboxGroupId: groupId,
         expectedEpoch,
-        activeAtOrBefore: cutoff,
+        reason: "viewer_idle",
+        quietForMs: 30 * 60_000,
         idleGraceMs: 60_000,
       });
     expect(await drain(recent.groupId, recent.epoch)).toEqual({
@@ -410,10 +442,11 @@ describe("viewer-only warm box bounds (real packages/db + RLS)", () => {
     });
   }, 180_000);
 
-  test("the reaper's account-wide gate refuses viewer-only warming in another workspace until it lapses", async () => {
+  test("the reaper's gate covers every workspace of the account, is not rewritten while fresh, and lapses", async () => {
     if (!available) return;
     const ids = await freshWorkspace();
     const sibling = await freshWorkspace(ids.accountId);
+    const other = await freshWorkspace();
     const attach = (workspace: Ids, holderId: string) =>
       acquireLease(db, {
         ...workspace,
@@ -425,18 +458,113 @@ describe("viewer-only warm box bounds (real packages/db + RLS)", () => {
         viewerOnlyWarmCap: 10,
       });
 
-    await stampViewerOnlyCapGate(db, { ...sibling, forMs: 120_000 });
-    // A shorter stamp never moves the gate back.
-    await stampViewerOnlyCapGate(db, { ...sibling, forMs: 1 });
+    // Stamped from one workspace, it gates every workspace of the account,
+    // including one that holds no viewer-only box, and no other account.
+    expect(await stampViewerOnlyCapGate(db, { ...ids, forMs: 120_000 })).toBe(2);
+    const readGate = async (workspaceId: string) => {
+      const [row] = await admin<{ until: Date | null }[]>`
+        select sandbox_viewer_only_cap_until as until from workspaces where id = ${workspaceId}`;
+      return row!.until;
+    };
+    const first = await readGate(sibling.workspaceId);
+    // While more than half of it remains, a pass does not rewrite the rows,
+    // and a shorter stamp never moves the gate back.
+    expect(await stampViewerOnlyCapGate(db, { ...ids, forMs: 120_000 })).toBe(0);
+    expect(await stampViewerOnlyCapGate(db, { ...ids, forMs: 1 })).toBe(0);
+    expect((await readGate(sibling.workspaceId))!.getTime()).toBe(first!.getTime());
     await expect(attach(sibling, "tab-gated")).rejects.toMatchObject({
       reason: "viewer_only_cap",
     });
-    // Other workspaces of the account are gated only when stamped.
-    await attach(ids, "tab-free");
+    await expect(attach(ids, "tab-gated-too")).rejects.toMatchObject({
+      reason: "viewer_only_cap",
+    });
+    await attach(other, "tab-other-account");
 
     await admin`
         update workspaces set sandbox_viewer_only_cap_until = now() - interval '1 second'
-        where id = ${sibling.workspaceId}`;
+        where account_id = ${ids.accountId}`;
     await attach(sibling, "tab-after");
+  }, 180_000);
+
+  test("boxes with open session work are not counted against the cap at attach", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const waiting = await warmGroup(ids, [{ kind: "viewer", holderId: "tab-waiting" }]);
+    await sessionOnBox(ids, waiting.groupId, { minutesAgo: 5, status: "requires_action" });
+    // The only other viewer-only box is waiting on a person: a new one warms.
+    await acquireLease(db, {
+      ...ids,
+      sandboxGroupId: crypto.randomUUID(),
+      kind: "viewer",
+      holderId: "tab-new",
+      backend: "modal",
+      leaseTtlMs: 90_000,
+      viewerOnlyWarmCap: 1,
+    });
+  }, 180_000);
+
+  test("after an idle release, a turn in the session lets a page re-attach without reporting interaction", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const { groupId, epoch } = await warmGroup(ids, [{ kind: "viewer", holderId: "tab-a" }]);
+    const sessionId = await sessionOnBox(ids, groupId, { minutesAgo: 120 });
+    await backdateHolders(ids, groupId, 90);
+    expect(
+      await drainViewerOnlyLease(db, {
+        ...ids,
+        sandboxGroupId: groupId,
+        expectedEpoch: epoch,
+        reason: "viewer_idle",
+        quietForMs: 30 * 60_000,
+        idleGraceMs: 60_000,
+      }),
+    ).toEqual({ drained: true, releasedViewers: 1 });
+    const reattach = () =>
+      acquireLease(db, {
+        ...ids,
+        sandboxGroupId: groupId,
+        kind: "viewer",
+        holderId: "tab-a",
+        backend: "modal",
+        leaseTtlMs: 90_000,
+        enforceViewerIdleReattach: true,
+      });
+    await expect(reattach()).rejects.toMatchObject({ reason: "viewer_idle" });
+    // The reaper saves and stops the box (simulated: cold); then a turn runs.
+    await admin`
+      update sandbox_leases set liveness = 'cold', instance_id = null, expires_at = now()
+      where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${groupId}`;
+    await expect(reattach()).rejects.toMatchObject({ reason: "viewer_idle" });
+    await admin`
+      insert into session_turns (id, account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+                                 status, position, prompt, model, reasoning_effort, sandbox_backend, created_at)
+      values (${crypto.randomUUID()}, ${ids.accountId}, ${ids.workspaceId}, ${sessionId}, ${crypto.randomUUID()}, 'wf',
+              'completed', 2, 'again', 'gpt', 'medium', 'modal', now())`;
+    const back = await reattach();
+    expect(back.role).toBe("spawner");
+    expect((await readLease(ids, groupId)).holders).toBe(1);
+  }, 180_000);
+  test("concurrent attaches warming different boxes cannot together exceed the cap", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const results = await Promise.allSettled(
+      [0, 1, 2].map((index) =>
+        acquireLease(db, {
+          ...ids,
+          sandboxGroupId: crypto.randomUUID(),
+          kind: "viewer",
+          holderId: `tab-${index}`,
+          backend: "modal",
+          leaseTtlMs: 90_000,
+          viewerOnlyWarmCap: 1,
+        }),
+      ),
+    );
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    for (const result of results) {
+      if (result.status === "rejected") {
+        expect(result.reason).toMatchObject({ reason: "viewer_only_cap" });
+      }
+    }
   }, 180_000);
 });

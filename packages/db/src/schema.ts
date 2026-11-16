@@ -10984,6 +10984,10 @@ export const sandboxLeases = pgTable(
     rotationReason: text("rotation_reason", {
       enum: ["provider_deadline", "operator", "teardown_claim"],
     }),
+    // The reaper released this box's viewers because nobody used the page for
+    // the viewer idle window (1474). A viewer attach that reports no newer
+    // interaction is refused until a person or a turn uses the session again.
+    viewerIdleDrainedAt: timestamp("viewer_idle_drained_at", { withTimezone: true }),
     // A chat or workspace deletion ended this compute lease's group: its
     // sandbox is deleted without a workspace capture (0861).
     groupEndRequestedAt: timestamp("group_end_requested_at", { withTimezone: true }),

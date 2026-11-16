@@ -5,21 +5,24 @@
 // heartbeats arrive. Each maintenance pass:
 //
 //   1. idle drain: drains a box whose every holder is a viewer, whose sessions
-//      have no open work, and where nothing (a viewer attach, interaction a
-//      viewer reported, a message or turn) happened for the idle window;
-//   2. per-account cap: counts, per account across its workspaces, the
-//      remaining viewer-only boxes and drains the least recently active ones
-//      over the cap; while an account is at the cap its workspaces are stamped
-//      so a viewer attach does not warm another viewer-only box.
+//      have no open work, and where nobody used it (reported viewer
+//      interaction, the attach of a page that never reported any, a message or
+//      turn) for the idle window;
+//   2. per-account cap: counts, per account across its workspaces, the boxes
+//      still warm and drains the least recently active ones over the cap,
+//      but only those nobody used for VIEWER_ONLY_CAP_QUIET_MS: a box in use
+//      is never evicted. While an account is at the cap every workspace of it
+//      is stamped, so a viewer attach does not warm another viewer-only box.
 //
 // Drains use the ordinary path (viewers released, lease warm -> draining), so
-// the workspace is saved and a returning viewer just resumes the box.
+// the workspace is saved and a returning person just resumes the box.
 import type { MeterableWarmLease, ViewerOnlyWarmLease } from "@opengeni/db";
 import {
   drainViewerOnlyLease,
   listViewerOnlyWarmLeases,
   stampViewerOnlyCapGate,
   VIEWER_ONLY_CAP_EXEMPT_BACKENDS,
+  VIEWER_ONLY_CAP_QUIET_MS,
 } from "@opengeni/db";
 import { errorMessage } from "@opengeni/contracts/values";
 import {
@@ -31,56 +34,68 @@ import type { ControlActivityServices as ActivityServices } from "./types";
 export type ViewerOnlyDrainDecision = {
   lease: ViewerOnlyWarmLease;
   reason: SandboxViewerOnlyDrainReason;
-  /** Drain only if nothing on the box was active after this time. */
-  activeAtOrBefore: Date;
+  /** Drain only if nothing on the box was active for this long. */
+  quietForMs: number;
+  /** And nothing was active after this time (cap: the ranked activity). */
+  activeAtOrBefore?: Date;
 };
 
-export type ViewerOnlyDrainPlan = {
+function inactiveForMs(lease: ViewerOnlyWarmLease): number {
+  return lease.observedAt.getTime() - lease.lastActiveAt.getTime();
+}
+
+/**
+ * Idle drains. Pure: the caller rechecks every decision under the lease lock.
+ * A box with open session work (a queued, running, recovering or waiting
+ * turn) or one another owner is capturing or rotating is never drained. An
+ * idle window of 0 disables idle draining.
+ */
+export function planViewerOnlyIdleDrains(
+  leases: readonly ViewerOnlyWarmLease[],
+  options: { idleDrainMs: number },
+): ViewerOnlyDrainDecision[] {
+  if (options.idleDrainMs <= 0) return [];
+  return leases
+    .filter(
+      (lease) =>
+        !lease.openSessionWork &&
+        !lease.transitioning &&
+        inactiveForMs(lease) >= options.idleDrainMs,
+    )
+    .map((lease) => ({ lease, reason: "viewer_idle", quietForMs: options.idleDrainMs }));
+}
+
+export type ViewerOnlyCapPlan = {
   drains: ViewerOnlyDrainDecision[];
-  /** Accounts at their cap after the planned drains, with the workspaces that
-   * hold their viewer-only boxes (stamped so attaches stop warming more). */
-  cappedWorkspaces: { accountId: string; workspaceId: string }[];
+  /** Accounts at their cap (one of their workspaces each, for the RLS
+   * context); every workspace of them is stamped. */
+  cappedAccounts: { accountId: string; workspaceId: string }[];
 };
 
 /**
- * Decide which viewer-only boxes to drain. Pure: the caller rechecks every
- * decision under the lease lock before acting.
- *
- * - A box with open session work (a queued, running, recovering or waiting
- *   turn) is never drained and never counted against the cap.
- * - Idle: nothing happened for `idleDrainMs` (0 disables).
- * - Cap: of the remaining boxes of one account, the least recently active over
- *   `maxPerAccount` (0 disables) are drained. A box another owner is
- *   capturing or rotating still counts but is left to that owner.
+ * Cap drains over the boxes still warm. Pure. Boxes with open session work
+ * are not counted. Of each account's boxes over `maxPerAccount` (0 disables),
+ * the least recently active are drained, skipping any used within
+ * `quietMs` or held by a capture or rotation (those still count).
  */
-export function planViewerOnlyDrains(
+export function planViewerOnlyCapDrains(
   leases: readonly ViewerOnlyWarmLease[],
-  options: { nowMs: number; idleDrainMs: number; maxPerAccount: number },
-): ViewerOnlyDrainPlan {
+  options: { maxPerAccount: number; quietMs?: number },
+): ViewerOnlyCapPlan {
   const drains: ViewerOnlyDrainDecision[] = [];
-  const cappedWorkspaces: { accountId: string; workspaceId: string }[] = [];
-  const idleCutoff = new Date(options.nowMs - options.idleDrainMs);
+  const cappedAccounts: { accountId: string; workspaceId: string }[] = [];
+  if (options.maxPerAccount <= 0) return { drains, cappedAccounts };
+  const quietMs = options.quietMs ?? VIEWER_ONLY_CAP_QUIET_MS;
   const byAccount = new Map<string, ViewerOnlyWarmLease[]>();
   for (const lease of leases) {
     if (lease.openSessionWork) continue;
-    if (
-      options.idleDrainMs > 0 &&
-      !lease.transitioning &&
-      lease.lastActiveAt.getTime() <= idleCutoff.getTime()
-    ) {
-      drains.push({
-        lease,
-        reason: "viewer_idle",
-        activeAtOrBefore: idleCutoff,
-      });
-      continue;
-    }
     const accountLeases = byAccount.get(lease.accountId) ?? [];
     accountLeases.push(lease);
     byAccount.set(lease.accountId, accountLeases);
   }
-  if (options.maxPerAccount <= 0) return { drains, cappedWorkspaces };
-  for (const [accountId, accountLeases] of byAccount) {
+  for (const [accountId, accountLeases] of [...byAccount].sort(([left], [right]) =>
+    left.localeCompare(right),
+  )) {
     if (accountLeases.length < options.maxPerAccount) continue;
     // Least recently active first; the group id only makes ties stable.
     const ordered = [...accountLeases].sort(
@@ -91,20 +106,18 @@ export function planViewerOnlyDrains(
     let over = ordered.length - options.maxPerAccount;
     for (const lease of ordered) {
       if (over <= 0) break;
-      if (lease.transitioning) continue;
+      if (lease.transitioning || inactiveForMs(lease) < quietMs) continue;
       drains.push({
         lease,
         reason: "viewer_account_cap",
+        quietForMs: quietMs,
         activeAtOrBefore: lease.lastActiveAt,
       });
       over -= 1;
     }
-    const workspaceIds = new Set(accountLeases.map((lease) => lease.workspaceId));
-    for (const workspaceId of [...workspaceIds].sort()) {
-      cappedWorkspaces.push({ accountId, workspaceId });
-    }
+    cappedAccounts.push({ accountId, workspaceId: ordered[0]!.workspaceId });
   }
-  return { drains, cappedWorkspaces };
+  return { drains, cappedAccounts };
 }
 
 /** How long one cap stamp lasts: long enough to cover the gap to the next
@@ -116,20 +129,20 @@ export function viewerOnlyCapGateMs(reaperPeriodMs: number): number {
 export type ViewerOnlyBoundsResult = {
   inspected: number;
   drained: Record<SandboxViewerOnlyDrainReason, number>;
-  cappedWorkspaces: number;
+  cappedAccounts: number;
 };
 
 /** One maintenance pass of both bounds. Best-effort per workspace and box. */
 export async function boundViewerOnlyWarmBoxes(
   services: Pick<ActivityServices, "db" | "settings" | "observability">,
   warmLeases: readonly MeterableWarmLease[],
-  options: { nowMs?: number; concurrency?: number } = {},
+  options: { concurrency?: number } = {},
 ): Promise<ViewerOnlyBoundsResult> {
   const { db, settings, observability } = services;
   const result: ViewerOnlyBoundsResult = {
     inspected: 0,
     drained: { viewer_idle: 0, viewer_account_cap: 0 },
-    cappedWorkspaces: 0,
+    cappedAccounts: 0,
   };
   const idleDrainMs = settings.sandboxViewerIdleDrainMs;
   const maxPerAccount = settings.sandboxMaxViewerOnlyWarmPerAccount;
@@ -154,14 +167,9 @@ export async function boundViewerOnlyWarmBoxes(
     }
   });
   result.inspected = viewerOnly.length;
-  const nowMs = options.nowMs ?? Date.now();
-  const plan = planViewerOnlyDrains(viewerOnly, {
-    nowMs,
-    idleDrainMs,
-    maxPerAccount,
-  });
 
-  await forEachLimited(plan.drains, concurrency, async (decision) => {
+  const drained = new Set<string>();
+  const execute = async (decision: ViewerOnlyDrainDecision): Promise<void> => {
     const { lease } = decision;
     try {
       const outcome = await drainViewerOnlyLease(db, {
@@ -169,7 +177,9 @@ export async function boundViewerOnlyWarmBoxes(
         workspaceId: lease.workspaceId,
         sandboxGroupId: lease.sandboxGroupId,
         expectedEpoch: lease.leaseEpoch,
-        activeAtOrBefore: decision.activeAtOrBefore,
+        reason: decision.reason,
+        quietForMs: decision.quietForMs,
+        ...(decision.activeAtOrBefore ? { activeAtOrBefore: decision.activeAtOrBefore } : {}),
         idleGraceMs: settings.sandboxIdleGraceMs,
       });
       if (!outcome.drained) {
@@ -182,6 +192,7 @@ export async function boundViewerOnlyWarmBoxes(
         });
         return;
       }
+      drained.add(`${lease.workspaceId}:${lease.sandboxGroupId}`);
       result.drained[decision.reason] += 1;
       recordSandboxViewerOnlyDrain(observability, decision.reason);
       observability.info("sandbox reaper: drained viewer-only box", {
@@ -191,7 +202,7 @@ export async function boundViewerOnlyWarmBoxes(
         sandboxGroupId: lease.sandboxGroupId,
         leaseEpoch: lease.leaseEpoch,
         releasedViewers: outcome.releasedViewers,
-        inactiveForMs: Math.max(0, nowMs - lease.lastActiveAt.getTime()),
+        inactiveForMs: Math.max(0, inactiveForMs(lease)),
         interactionReported: lease.interactionReported,
         ...(decision.reason === "viewer_idle"
           ? { idleDrainMs }
@@ -206,25 +217,33 @@ export async function boundViewerOnlyWarmBoxes(
         error: errorMessage(error),
       });
     }
-  });
+  };
+
+  // Idle drains first; the cap then counts only what is still warm, so an
+  // idle drain the recheck refused still counts against the cap.
+  await forEachLimited(planViewerOnlyIdleDrains(viewerOnly, { idleDrainMs }), concurrency, execute);
+  const remaining = viewerOnly.filter(
+    (lease) => !drained.has(`${lease.workspaceId}:${lease.sandboxGroupId}`),
+  );
+  const cap = planViewerOnlyCapDrains(remaining, { maxPerAccount });
+  await forEachLimited(cap.drains, concurrency, execute);
 
   const gateMs = viewerOnlyCapGateMs(settings.sandboxLeaseReaperPeriodMs);
-  await forEachLimited(plan.cappedWorkspaces, concurrency, async (target) => {
+  await forEachLimited(cap.cappedAccounts, concurrency, async (target) => {
     try {
       await stampViewerOnlyCapGate(db, { ...target, forMs: gateMs });
-      result.cappedWorkspaces += 1;
+      result.cappedAccounts += 1;
     } catch (error) {
-      observability.warn("sandbox reaper: viewer-only cap stamp failed for workspace", {
+      observability.warn("sandbox reaper: viewer-only cap stamp failed for account", {
         ...target,
         error: errorMessage(error),
       });
     }
   });
-  if (plan.cappedWorkspaces.length > 0) {
+  if (cap.cappedAccounts.length > 0) {
     observability.info("sandbox reaper: accounts at the viewer-only warm box cap", {
       maxViewerOnlyWarmPerAccount: maxPerAccount,
-      accounts: new Set(plan.cappedWorkspaces.map((target) => target.accountId)).size,
-      workspaces: plan.cappedWorkspaces.length,
+      accounts: cap.cappedAccounts.length,
     });
   }
   return result;

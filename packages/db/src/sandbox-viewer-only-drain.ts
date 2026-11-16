@@ -8,16 +8,22 @@
 //   - idle drain: a box whose every holder is a viewer, whose sessions have no
 //     open turn, and that saw no viewer attach, reported viewer interaction,
 //     message or turn for the idle window is released and drained;
-//   - per-account cap: at most N such boxes per account (organization), the
-//     least recently active drained first.
+//   - per-account cap: at most N such boxes per account (organization). Over
+//     the cap the least recently active boxes nobody has used for a short
+//     quiet period are drained, and further viewer-only warming is refused;
+//     a box someone is using is never evicted by the cap.
 //
 // Both drains go through the ordinary drain path: the viewer holders are
 // deleted and the lease moves warm -> draining with the normal idle grace, so
 // the reaper saves the workspace and stops the box exactly as it does when the
-// last tab closes. A viewer that returns re-attaches and the box resumes.
+// last tab closes. A person who returns re-attaches and the box resumes.
 //
 // Everything runs in the workspace's own RLS context. The cross-workspace
 // inventory comes from the existing list_meterable_warm_leases definer.
+//
+// A viewer's activity is the last interaction it reported, or its attach time
+// when it never reported one (an older client). The box's activity also
+// includes turns created or finished in its sessions.
 import { sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { rawRows, withRlsContext } from "./database";
@@ -42,15 +48,26 @@ export const VIEWER_ONLY_CAP_EXEMPT_BACKENDS: ReadonlySet<string> = new Set([
 
 export type ViewerOnlyDrainReason = "viewer_idle" | "viewer_account_cap";
 
+/** The cap drains only boxes nobody has used for at least this long (several
+ * viewer heartbeats), so a person using a box is never evicted by the cap. */
+export const VIEWER_ONLY_CAP_QUIET_MS = 5 * 60_000;
+
+const EXEMPT_BACKENDS_SQL = sql.raw(
+  [...VIEWER_ONLY_CAP_EXEMPT_BACKENDS].map((backend) => `'${backend}'`).join(", "),
+);
+
 export type ViewerOnlyWarmLease = {
   accountId: string;
   workspaceId: string;
   sandboxGroupId: string;
   leaseEpoch: number;
   viewerHolders: number;
-  /** Newest of: a viewer attach, an interaction a viewer reported, a turn
-   * created or finished in one of the box's sessions. */
+  /** Newest of: each viewer's last reported interaction (its attach time when
+   * it never reported one), a turn created or finished in one of the box's
+   * sessions. */
   lastActiveAt: Date;
+  /** Database time of the read; decisions measure inactivity against it. */
+  observedAt: Date;
   /** Whether any viewer on the box reported interaction (a current client). */
   interactionReported: boolean;
   /** A session of the box has open work; never drained here. */
@@ -69,6 +86,7 @@ type ViewerOnlyLeaseRow = {
   viewers: number | string;
   interaction_reported: boolean | null;
   last_active_at: Date | string;
+  observed_at: Date | string;
   open_session_work: boolean | null;
   transitioning: boolean;
 };
@@ -76,6 +94,33 @@ type ViewerOnlyLeaseRow = {
 const OPEN_STATUS_SQL = sql.raw(
   VIEWER_ONLY_OPEN_SESSION_STATUSES.map((status) => `'${status}'`).join(", "),
 );
+
+/**
+ * The lease `lease` (an alias in the caller's FROM) is held only by viewers:
+ * no turn holder, an included backend, at least one holder and every holder a
+ * viewer, and no session of its group with open work. Shared by the reaper's
+ * inventory and the attach-time cap count so both count the same boxes.
+ */
+export function viewerOnlyLeaseSql(lease: string) {
+  const alias = sql.raw(lease);
+  return sql`(
+    ${alias}.turn_holders = 0
+    and ${alias}.backend not in (${EXEMPT_BACKENDS_SQL})
+    and exists (
+      select 1 from sandbox_lease_holders holder where holder.lease_id = ${alias}.id
+    )
+    and not exists (
+      select 1 from sandbox_lease_holders holder
+      where holder.lease_id = ${alias}.id and holder.kind <> 'viewer'
+    )
+    and not exists (
+      select 1 from sessions chat
+      where chat.workspace_id = ${alias}.workspace_id
+        and chat.sandbox_group_id = ${alias}.sandbox_group_id
+        and chat.status in (${OPEN_STATUS_SQL})
+    )
+  )`;
+}
 
 /** Warm, viewer-only leases of one workspace (optionally one group) with
  * their activity. Caller supplies the RLS-scoped executor. */
@@ -91,6 +136,7 @@ function viewerOnlyLeaseQuery(workspaceId: string, sandboxGroupId: string | null
       holders.interaction_reported,
       greatest(holders.last_attach_or_interaction, sessions_activity.last_turn_activity)
         as last_active_at,
+      now() as observed_at,
       coalesce(sessions_activity.open_work, false) as open_session_work,
       (
         lease.archive_capture_id is not null
@@ -103,7 +149,7 @@ function viewerOnlyLeaseQuery(workspaceId: string, sandboxGroupId: string | null
         count(*)::int as total,
         count(*) filter (where holder.kind = 'viewer')::int as viewers,
         bool_or(holder.last_interaction_at is not null) as interaction_reported,
-        max(greatest(holder.created_at, holder.last_interaction_at)) as last_attach_or_interaction
+        max(coalesce(holder.last_interaction_at, holder.created_at)) as last_attach_or_interaction
       from sandbox_lease_holders holder
       where holder.lease_id = lease.id
     ) holders
@@ -135,7 +181,7 @@ function viewerOnlyLeaseQuery(workspaceId: string, sandboxGroupId: string | null
       ${sandboxGroupId === null ? sql`` : sql`and lease.sandbox_group_id = ${sandboxGroupId}`}
       and lease.liveness = 'warm'
       and lease.turn_holders = 0
-      and lease.backend not in ('compute', 'selfhosted')
+      and lease.backend not in (${EXEMPT_BACKENDS_SQL})
       and holders.total > 0
       and holders.total = holders.viewers
     order by lease.sandbox_group_id
@@ -150,6 +196,7 @@ function mapViewerOnlyLease(row: ViewerOnlyLeaseRow): ViewerOnlyWarmLease {
     leaseEpoch: Number(row.lease_epoch),
     viewerHolders: Number(row.viewers),
     lastActiveAt: new Date(row.last_active_at),
+    observedAt: new Date(row.observed_at),
     interactionReported: row.interaction_reported === true,
     openSessionWork: row.open_session_work === true,
     transitioning: row.transitioning === true,
@@ -201,9 +248,13 @@ export async function drainViewerOnlyLease(
     workspaceId: string;
     sandboxGroupId: string;
     expectedEpoch: number;
-    /** The box is drained only if nothing on it was active after this time:
-     * the idle cutoff, or the activity time the cap decision ranked. */
-    activeAtOrBefore: Date;
+    reason: ViewerOnlyDrainReason;
+    /** The box is drained only if nothing on it was active for this long,
+     * measured on the database clock under the lease lock. */
+    quietForMs: number;
+    /** And, when given, nothing was active after this time (the activity the
+     * cap decision ranked). */
+    activeAtOrBefore?: Date;
     idleGraceMs: number;
   },
 ): Promise<ViewerOnlyDrainOutcome> {
@@ -240,7 +291,13 @@ export async function drainViewerOnlyLease(
         if (!current) return { drained: false, reason: "not_viewer_only" };
         if (current.openSessionWork) return { drained: false, reason: "open_session_work" };
         if (current.transitioning) return { drained: false, reason: "transitioning" };
-        if (current.lastActiveAt.getTime() > input.activeAtOrBefore.getTime()) {
+        const quietCutoffMs =
+          current.observedAt.getTime() - Math.max(0, Math.floor(input.quietForMs));
+        if (
+          current.lastActiveAt.getTime() > quietCutoffMs ||
+          (input.activeAtOrBefore !== undefined &&
+            current.lastActiveAt.getTime() > input.activeAtOrBefore.getTime())
+        ) {
           return { drained: false, reason: "active_since_decision" };
         }
         const released = await rawRows<{ id: string }>(
@@ -256,6 +313,7 @@ export async function drainViewerOnlyLease(
             refcount = 0, turn_holders = 0, viewer_holders = 0,
             liveness = 'draining',
             expires_at = now() + (${String(input.idleGraceMs)} || ' milliseconds')::interval,
+            ${input.reason === "viewer_idle" ? sql`viewer_idle_drained_at = now(),` : sql``}
             updated_at = now()
           where id = ${lease.id}
             and liveness = 'warm'
@@ -266,25 +324,35 @@ export async function drainViewerOnlyLease(
   );
 }
 
-/** Stamp the viewer-only cap gate on one workspace of an account that is at
- * its cap (see AcquireLeaseInput.viewerOnlyWarmCap). The stamp only moves
- * forward and lapses by itself after `forMs`. */
+/** Gate every workspace of an account that is at its viewer-only warm box cap
+ * (see AcquireLeaseInput.viewerOnlyWarmCap). The stamp only moves forward,
+ * lapses by itself after `forMs`, and is rewritten only once less than half
+ * of it remains, so steady passes do not rewrite workspace rows. Returns the
+ * number of workspaces stamped. */
 export async function stampViewerOnlyCapGate(
   db: Database,
   input: { accountId: string; workspaceId: string; forMs: number },
-): Promise<void> {
-  await withRlsContext(
+): Promise<number> {
+  const forMs = Math.max(0, Math.floor(input.forMs));
+  return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
-      await scopedDb.execute(sql`
-        update workspaces set
-          sandbox_viewer_only_cap_until = greatest(
-            sandbox_viewer_only_cap_until,
-            now() + (${String(Math.max(0, Math.floor(input.forMs)))} || ' milliseconds')::interval
-          )
-        where id = ${input.workspaceId}
-      `);
+      const rows = await rawRows<{ id: string }>(
+        scopedDb,
+        sql`
+          update workspaces set
+            sandbox_viewer_only_cap_until = now() + (${String(forMs)} || ' milliseconds')::interval
+          where account_id = ${input.accountId}
+            and (
+              sandbox_viewer_only_cap_until is null
+              or sandbox_viewer_only_cap_until
+                < now() + (${String(Math.floor(forMs / 2))} || ' milliseconds')::interval
+            )
+          returning id
+        `,
+      );
+      return rows.length;
     },
   );
 }

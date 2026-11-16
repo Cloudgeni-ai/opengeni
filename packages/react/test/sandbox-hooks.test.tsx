@@ -355,7 +355,12 @@ describe("useSessionCapabilities", () => {
       );
       await flush();
       expect(attachCalls).toBe(1);
-      expect(attachRequests[0]).toEqual({ desktop: false, terminal: false, files: true });
+      expect(attachRequests[0]).toEqual({
+        desktop: false,
+        terminal: false,
+        files: true,
+        lastInteractionAgeMs: expect.any(Number),
+      });
       expect(hook.result.current.capabilities?.Terminal.url).toBeNull();
       // A holder was minted → the box is live, not resting on the benign on-demand state.
       expect(hook.result.current.state).toBe("ready");
@@ -390,7 +395,12 @@ describe("useSessionCapabilities", () => {
     );
     await flush();
 
-    expect(attachRequests[0]).toEqual({ desktop: false, terminal: true, files: false });
+    expect(attachRequests[0]).toEqual({
+      desktop: false,
+      terminal: true,
+      files: false,
+      lastInteractionAgeMs: expect.any(Number),
+    });
     expect(hook.result.current.capabilities?.Terminal).toMatchObject({
       transport: "pty-ws",
       url: "https://terminal.example/fresh",
@@ -1978,6 +1988,112 @@ describe("useSessionCapabilities viewer interaction reporting", () => {
     alive = false;
     await flush(80);
     expect(attaches).toBeGreaterThanOrEqual(2);
+    await hook.unmount();
+  });
+  test("the attach reports interaction, and an outside re-check while the person is away does not re-attach", async () => {
+    const attaches: AttachViewerRequest[] = [];
+    let alive = true;
+    const client = fakeClient({
+      getStreamCapabilities: async () => beatingCapabilities(),
+      attachViewer: async (_workspaceId, _sessionId, request) => {
+        attaches.push(request ?? {});
+        return fakeAttachResponse({ viewerIdleDrainMs: 1 });
+      },
+      heartbeatViewer: async () => ({ alive }),
+      detachViewer: async () => {},
+    });
+    const hook = await renderHook(
+      () => useSessionCapabilities(SESSION_ID, { ...ctx, client, attachDesktop: true }),
+      undefined,
+    );
+    await flush(30);
+    expect(attaches).toHaveLength(1);
+    expect(typeof attaches[0]!.lastInteractionAgeMs).toBe("number");
+    alive = false;
+    await flush(80);
+    expect(hook.result.current.state).toBe("on-demand");
+    // Something else (a workspace event) asks for a fresh negotiation.
+    await actRun(() => hook.result.current.renegotiate());
+    await flush(60);
+    expect(attaches).toHaveLength(1);
+    alive = true;
+    await actRun(() => {
+      window.dispatchEvent(new Event("pointerdown"));
+    });
+    await flush(30);
+    expect(attaches).toHaveLength(2);
+    await hook.unmount();
+  });
+
+  test("a refused attach (429) on a cold box settles without polling for a warm-up", async () => {
+    let reads = 0;
+    const client = fakeClient({
+      getStreamCapabilities: async () => {
+        reads += 1;
+        return fakeColdCapabilities();
+      },
+      attachViewer: async () => {
+        throw new OpenGeniApiError(
+          429,
+          "too many sandboxes are kept warm for viewers only in this organization; the session is available without a live sandbox",
+        );
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useSessionCapabilities(SESSION_ID, {
+          ...ctx,
+          client,
+          attachDesktop: true,
+          warmingPollMs: 10,
+        }),
+      undefined,
+    );
+    await flush(80);
+    expect(hook.result.current.viewerCapReached).toBe(true);
+    expect(hook.result.current.state).toBe("on-demand");
+    expect(reads).toBe(1);
+    await hook.unmount();
+  });
+
+  test("a box stopped while its page went unused re-attaches on the next interaction, not as a viewer cap", async () => {
+    let attaches = 0;
+    const client = fakeClient({
+      getStreamCapabilities: async () =>
+        attaches > 1 ? beatingCapabilities() : fakeColdCapabilities(),
+      attachViewer: async () => {
+        attaches += 1;
+        if (attaches === 1) {
+          throw new OpenGeniApiError(
+            429,
+            "the sandbox was stopped because its page went unused; interact with the page to resume it",
+          );
+        }
+        return fakeAttachResponse({ viewerIdleDrainMs: 1_800_000 });
+      },
+      heartbeatViewer: async () => ({ alive: true }),
+      detachViewer: async () => {},
+    });
+    const hook = await renderHook(
+      () =>
+        useSessionCapabilities(SESSION_ID, {
+          ...ctx,
+          client,
+          attachDesktop: true,
+          warmingPollMs: 10,
+        }),
+      undefined,
+    );
+    await flush(40);
+    expect(attaches).toBe(1);
+    expect(hook.result.current.viewerCapReached).toBe(false);
+    expect(hook.result.current.state).toBe("on-demand");
+    await actRun(() => {
+      window.dispatchEvent(new Event("keydown"));
+    });
+    await flush(40);
+    expect(attaches).toBe(2);
+    expect(hook.result.current.viewerId).not.toBeNull();
     await hook.unmount();
   });
 });

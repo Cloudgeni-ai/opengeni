@@ -257,6 +257,7 @@ export function useSessionCapabilities(
       setViewerId(null);
       epochRef.current = 0;
       viewerIdRef.current = null;
+      resumeOnInteractionRef.current = false;
     }
     if (!lifecycleEnabled || !sessionId) {
       setState("idle");
@@ -270,7 +271,11 @@ export function useSessionCapabilities(
     // the replacement grant degrades.
     viewerIdRef.current = null;
     setViewerId(null);
-    resumeOnInteractionRef.current = false;
+    // Still set when the server released this page's viewer while the person
+    // was away and they have not come back: this negotiation (an outside
+    // re-check) reads capabilities but must not re-attach and re-warm the box.
+    // Their next interaction clears it and re-negotiates with an attach.
+    const awaitingInteraction = resumeOnInteractionRef.current;
     let cancelled = false;
     // The server's viewer idle window from the attach (null: off or unknown).
     let idleDrainMs: number | null = null;
@@ -418,7 +423,11 @@ export function useSessionCapabilities(
         // being advertised; liveness (cold included) does not suppress it — POST
         // /viewers warms a cold box exactly as it does for a desktop/terminal engage.
         const wantFilesAttach = attachFiles && caps.FileSystem.available;
-        if (wantDesktopAttach || wantTerminalAttach || wantFilesAttach) {
+        // Set when the server refused the attach for a bound on boxes kept warm
+        // only for viewers (429): the session stays usable without a live box,
+        // so do not poll for a warm-up that will not come.
+        let attachRefused = false;
+        if (!awaitingInteraction && (wantDesktopAttach || wantTerminalAttach || wantFilesAttach)) {
           try {
             // Declare WHICH plane we're attaching for. `desktop:true` opts into the
             // un-redacted pixel plane (which carries the consent gate); a
@@ -428,6 +437,7 @@ export function useSessionCapabilities(
               desktop: wantDesktopAttach,
               terminal: wantTerminalAttach,
               files: wantFilesAttach,
+              lastInteractionAgeMs: Math.max(0, Date.now() - lastInteractionRef.current),
             });
             if (cancelled) {
               // The attach crossed an identity/unmount boundary after the server
@@ -508,7 +518,19 @@ export function useSessionCapabilities(
                   );
                 }
               } else if (cause.status === 429) {
-                setViewerCapReached(true);
+                if (cause.message.includes("went unused")) {
+                  // The box was stopped while nobody used the page: wait for
+                  // the person to interact, then attach again.
+                  attachRefused = true;
+                  resumeOnInteractionRef.current = true;
+                } else {
+                  setViewerCapReached(true);
+                  // The organization's cap on boxes kept warm only for
+                  // viewers: nothing will warm this box for us, so rest
+                  // on-demand instead of polling toward a warm-up. Other
+                  // limits keep polling, as another holder may warm it.
+                  if (cause.message.includes("for viewers only")) attachRefused = true;
+                }
               } else if (cause.status === 403) {
                 setState("error");
                 setError(cause);
@@ -528,7 +550,10 @@ export function useSessionCapabilities(
         // non-warm lease "warming in flight" — worth polling, and worth surfacing a
         // stall as an error. With no warm-up requested a cold lease is the benign
         // boxless resting state (below), never an error.
-        const warmUpRequested = wantDesktopAttach || wantTerminalAttach || wantFilesAttach;
+        const warmUpRequested =
+          !awaitingInteraction &&
+          !attachRefused &&
+          (wantDesktopAttach || wantTerminalAttach || wantFilesAttach);
         if (sandboxAcceptsLiveIo(caps.liveness) || localViewerId) {
           setState("ready");
           startHeartbeat(caps);

@@ -5390,6 +5390,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         waitSignal: c.req.raw.signal,
         ...(parsed.viewerId ? { viewerId: parsed.viewerId } : {}),
         enforceViewerOnlyWarmCap: true,
+        ...(parsed.lastInteractionAgeMs !== undefined
+          ? { interactionAgeMs: parsed.lastInteractionAgeMs }
+          : {}),
       });
 
       // P4.2 — the viewer now holds a WARM box; mint the real pixel cell IN-PROCESS

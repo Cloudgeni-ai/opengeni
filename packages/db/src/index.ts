@@ -1458,7 +1458,11 @@ export * from "./insights-model-bundle";
 export * from "./insights-usage-bundle";
 export * from "./insights-unified";
 export * from "./sandbox-viewer-only-drain";
-import { VIEWER_ONLY_CAP_EXEMPT_BACKENDS } from "./sandbox-viewer-only-drain";
+import {
+  VIEWER_ONLY_CAP_EXEMPT_BACKENDS,
+  VIEWER_ONLY_OPEN_SESSION_STATUSES,
+  viewerOnlyLeaseSql,
+} from "./sandbox-viewer-only-drain";
 export * from "./organization-membership-lifecycle";
 import {
   assertActiveManagedHumanOrganizationMembership,
@@ -49183,6 +49187,15 @@ export interface AcquireLeaseInput {
    * while the reaper's account-wide gate is stamped on the workspace. Omitted
    * or 0: no cap (fleet readiness probes, legacy callers). */
   viewerOnlyWarmCap?: number;
+  /** Viewer holders only: refuse (`viewer_idle`) an attach to a box whose
+   * viewers the reaper released for the viewer idle window, unless the attach
+   * reports interaction after that release or a turn used the session since.
+   * Set by the person-facing attach route when the idle drain is on. */
+  enforceViewerIdleReattach?: boolean;
+  /** Viewer holders only: how long ago the attaching page last saw real user
+   * interaction, when the client reports it (see
+   * normalizeViewerInteractionAgeMs). Recorded on the holder. */
+  viewerInteractionAgeMs?: number | null;
 }
 
 export type AcquireLeaseResult =
@@ -49565,14 +49578,16 @@ export class SandboxViewerAdmissionBlockedError extends Error {
   constructor(
     public readonly workspaceId: string,
     public readonly sandboxGroupId: string,
-    public readonly reason: SandboxViewerForceDrainReason | "viewer_only_cap",
+    public readonly reason: SandboxViewerForceDrainReason | "viewer_only_cap" | "viewer_idle",
   ) {
     super(
       reason === "balance"
         ? "Sandbox viewer admission is blocked because the workspace has no managed credits"
         : reason === "viewer_only_cap"
           ? "Sandbox viewer admission is blocked because the organization already keeps the maximum number of sandboxes warm for viewers only"
-          : "Sandbox viewer admission is blocked because the workspace warm allowance is exhausted",
+          : reason === "viewer_idle"
+            ? "Sandbox viewer admission is blocked because the sandbox was stopped after its page went unused; interact with the page to resume it"
+            : "Sandbox viewer admission is blocked because the workspace warm allowance is exhausted",
     );
   }
 }
@@ -50801,19 +50816,29 @@ async function upsertLeaseHolder(
   viewerAuthority: {
     subjectId: string | null;
     authorityEpoch: number | null;
+    /** Viewer holders only: the attaching page's reported interaction age. */
+    interactionAgeMs?: number | null;
   } = {
     subjectId: null,
     authorityEpoch: null,
   },
 ): Promise<void> {
+  const interactionAgeMs =
+    kind === "viewer" ? normalizeViewerInteractionAgeMs(viewerAuthority.interactionAgeMs) : null;
+  const lastInteractionAt =
+    interactionAgeMs === null
+      ? sql`null::timestamptz`
+      : sql`now() - (${String(interactionAgeMs)} || ' milliseconds')::interval`;
   await tx.execute(sql`
     insert into sandbox_lease_holders
       (account_id, workspace_id, lease_id, kind, holder_id, subject_id,
-       viewer_subject_id, viewer_authority_epoch, last_heartbeat_at)
+       viewer_subject_id, viewer_authority_epoch, last_heartbeat_at, last_interaction_at)
     values (${accountId}, ${workspaceId}, ${leaseId}, ${kind}, ${holderId}, ${subjectId},
-      ${viewerAuthority.subjectId}, ${viewerAuthority.authorityEpoch}, now())
+      ${viewerAuthority.subjectId}, ${viewerAuthority.authorityEpoch}, now(), ${lastInteractionAt})
     on conflict (lease_id, kind, holder_id)
       do update set last_heartbeat_at = now(),
+        last_interaction_at = greatest(
+          sandbox_lease_holders.last_interaction_at, excluded.last_interaction_at),
         viewer_subject_id = coalesce(excluded.viewer_subject_id,
           sandbox_lease_holders.viewer_subject_id),
         -- The recorded (subject, epoch) pair stays coherent. Same subject (or
@@ -51051,12 +51076,76 @@ async function acquireLeaseOnce(
           }
         }
 
+        const viewerInteractionAgeMs =
+          kind === "viewer" ? normalizeViewerInteractionAgeMs(input.viewerInteractionAgeMs) : null;
+
+        // Viewer-only idle drain: the reaper released this box's viewers
+        // because nobody used the page. An attach that reports no interaction
+        // since then (an unattended page or an older client re-attaching on
+        // its own) must not warm it again and reset the idle clock. A person
+        // who interacts, a turn in the session, or a box someone else already
+        // holds admits it as usual.
+        const viewerIdleDrainedAt = (row as { viewer_idle_drained_at?: Date | string | null })
+          .viewer_idle_drained_at;
+        if (
+          kind === "viewer" &&
+          input.enforceViewerIdleReattach === true &&
+          viewerIdleDrainedAt !== null &&
+          viewerIdleDrainedAt !== undefined &&
+          Number(row.turn_holders) === 0
+        ) {
+          const idleRows = await tx.execute<{ refuse: boolean }>(sql`
+            select (
+              not exists (
+                select 1 from sandbox_lease_holders holder where holder.lease_id = ${row.id}
+              )
+              and ${
+                viewerInteractionAgeMs === null
+                  ? sql`true`
+                  : sql`now() - (${String(viewerInteractionAgeMs)} || ' milliseconds')::interval
+                      <= ${viewerIdleDrainedAt}::timestamptz`
+              }
+              and not exists (
+                select 1 from sessions chat
+                where chat.workspace_id = ${workspaceId}
+                  and chat.sandbox_group_id = ${sandboxGroupId}
+                  and (
+                    chat.status in (${sql.raw(
+                      VIEWER_ONLY_OPEN_SESSION_STATUSES.map((status) => `'${status}'`).join(", "),
+                    )})
+                    or exists (
+                      select 1 from session_turns turn
+                      where turn.workspace_id = chat.workspace_id
+                        and turn.session_id = chat.id
+                        and (
+                          turn.created_at > ${viewerIdleDrainedAt}::timestamptz
+                          or turn.finished_at > ${viewerIdleDrainedAt}::timestamptz
+                        )
+                    )
+                  )
+              )
+            ) as refuse
+          `);
+          if (idleRows[0]?.refuse === true) {
+            throw new SandboxViewerAdmissionBlockedError(
+              workspaceId,
+              sandboxGroupId,
+              "viewer_idle",
+            );
+          }
+          // Admitted: the session is in use again; the marker has done its job.
+          await tx.execute(sql`
+            update sandbox_leases set viewer_idle_drained_at = null where id = ${row.id}
+          `);
+        }
+
         // Per-account cap on warm boxes held only by viewers. Only an attach
         // that would warm ANOTHER such box is refused: joining a box that is
         // already warm or held by anything else adds no box, and a box with a
-        // turn is never viewer-only. The exact lease lock serializes arrivals
-        // on this group; the in-workspace count is exact, and the reaper's
-        // short-lived stamp carries the account-wide count across workspaces.
+        // turn is never viewer-only. Arrivals for one account serialize on an
+        // advisory lock, so the in-workspace count holds under concurrency;
+        // the reaper's short-lived stamp on every workspace of the account
+        // carries the account-wide count across workspaces.
         if (
           kind === "viewer" &&
           (input.viewerOnlyWarmCap ?? 0) > 0 &&
@@ -51064,49 +51153,47 @@ async function acquireLeaseOnce(
           Number(row.turn_holders) === 0 &&
           (liveness === "cold" || liveness === "draining")
         ) {
-          const capRows = await tx.execute<{
-            held: boolean;
-            gated: boolean;
-            viewer_only_warm: number | string;
-          }>(sql`
-            select
-              exists (
-                select 1 from sandbox_lease_holders holder where holder.lease_id = ${row.id}
-              ) as held,
-              coalesce((
-                select workspace.sandbox_viewer_only_cap_until > now()
-                from workspaces workspace
-                where workspace.id = ${workspaceId}
-              ), false) as gated,
-              (
-                select count(*)
-                from sandbox_leases other
-                where other.workspace_id = ${workspaceId}
-                  and other.id <> ${row.id}
-                  and other.liveness in ('warm', 'warming')
-                  and other.turn_holders = 0
-                  and other.backend not in ('compute', 'selfhosted')
-                  and exists (
-                    select 1 from sandbox_lease_holders holder
-                    where holder.lease_id = other.id
-                  )
-                  and not exists (
-                    select 1 from sandbox_lease_holders holder
-                    where holder.lease_id = other.id and holder.kind <> 'viewer'
-                  )
-              ) as viewer_only_warm
+          const held = await tx.execute<{ held: boolean }>(sql`
+            select exists (
+              select 1 from sandbox_lease_holders holder where holder.lease_id = ${row.id}
+            ) as held
           `);
-          const cap = capRows[0];
-          if (
-            cap &&
-            !cap.held &&
-            (cap.gated || Number(cap.viewer_only_warm) >= (input.viewerOnlyWarmCap ?? 0))
-          ) {
-            throw new SandboxViewerAdmissionBlockedError(
-              workspaceId,
-              sandboxGroupId,
-              "viewer_only_cap",
+          if (held[0]?.held !== true) {
+            await tx.execute(
+              sql`select pg_advisory_xact_lock(hashtextextended(
+                ${`sandbox-viewer-only-cap:${accountId}`}, 0
+              ))`,
             );
+            const capRows = await tx.execute<{
+              gated: boolean;
+              viewer_only_warm: number | string;
+            }>(sql`
+              select
+                coalesce((
+                  select workspace.sandbox_viewer_only_cap_until > now()
+                  from workspaces workspace
+                  where workspace.id = ${workspaceId}
+                ), false) as gated,
+                (
+                  select count(*)
+                  from sandbox_leases other
+                  where other.workspace_id = ${workspaceId}
+                    and other.id <> ${row.id}
+                    and other.liveness in ('warm', 'warming')
+                    and ${viewerOnlyLeaseSql("other")}
+                ) as viewer_only_warm
+            `);
+            const cap = capRows[0];
+            if (
+              cap &&
+              (cap.gated || Number(cap.viewer_only_warm) >= (input.viewerOnlyWarmCap ?? 0))
+            ) {
+              throw new SandboxViewerAdmissionBlockedError(
+                workspaceId,
+                sandboxGroupId,
+                "viewer_only_cap",
+              );
+            }
           }
         }
 
@@ -51266,6 +51353,7 @@ async function acquireLeaseOnce(
           await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId, {
             subjectId: input.viewerSubjectId ?? null,
             authorityEpoch: input.viewerAuthorityEpoch ?? null,
+            interactionAgeMs: viewerInteractionAgeMs,
           });
           const updated = await recomputeAndStampLease(tx, row.id, input.leaseTtlMs, "warm");
           return { role: "rearmed" as const, lease: mapLeaseRow(updated) };
@@ -51329,6 +51417,7 @@ async function acquireLeaseOnce(
           await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId, {
             subjectId: input.viewerSubjectId ?? null,
             authorityEpoch: input.viewerAuthorityEpoch ?? null,
+            interactionAgeMs: viewerInteractionAgeMs,
           });
           const updated = await recomputeAndStampLease(tx, row.id, warmingLeaseTtlMs, null);
           // casRows.length === 0 cannot happen under the held row lock (defensive):
@@ -51373,6 +51462,7 @@ async function acquireLeaseOnce(
         await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId, {
           subjectId: input.viewerSubjectId ?? null,
           authorityEpoch: input.viewerAuthorityEpoch ?? null,
+          interactionAgeMs: viewerInteractionAgeMs,
         });
         const attachTtlMs = liveness === "warming" ? warmingLeaseTtlMs : input.leaseTtlMs;
         const updated = await recomputeAndStampLease(tx, row.id, attachTtlMs, null);

@@ -747,6 +747,9 @@ export type AttachViewerRequest = {
   desktop?: boolean | undefined;
   terminal?: boolean | undefined;
   files?: boolean | undefined;
+  /** How long ago the person last interacted with the page; omit when
+   * unknown. */
+  lastInteractionAgeMs?: number | undefined;
 };
 
 // Mirror of `@opengeni/contracts` ViewerHolder + the P4.2 desktop-stream fields

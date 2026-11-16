@@ -14,15 +14,19 @@ import {
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
+import { createObservability } from "@opengeni/observability";
+import { createSandboxLeaseActivities } from "../src/activities/sandbox-lease";
+import type { ActivityServices } from "../src/activities/types";
 import {
   boundViewerOnlyWarmBoxes,
-  planViewerOnlyDrains,
+  planViewerOnlyCapDrains,
+  planViewerOnlyIdleDrains,
   viewerOnlyCapGateMs,
 } from "../src/activities/sandbox-viewer-only-bounds";
 
 // The reaper's bounds on warm boxes held only by viewers (docs/run-lifecycle.md,
-// "Boxes held only by viewers"): the pure planner, and one full maintenance
-// pass against real PostgreSQL with the decisions observable as structured
+// "Boxes held only by viewers"): the pure planners, and full maintenance
+// passes against real PostgreSQL with the decisions observable as structured
 // logs and opengeni_sandbox_viewer_only_drains_total{reason}.
 
 const MINUTE = 60_000;
@@ -37,6 +41,7 @@ function lease(overrides: Partial<ViewerOnlyWarmLease> & { id: string }): Viewer
     leaseEpoch: 1,
     viewerHolders: 1,
     lastActiveAt: new Date(NOW - MINUTE),
+    observedAt: new Date(NOW),
     interactionReported: true,
     openSessionWork: false,
     transitioning: false,
@@ -44,100 +49,83 @@ function lease(overrides: Partial<ViewerOnlyWarmLease> & { id: string }): Viewer
   };
 }
 
-describe("planViewerOnlyDrains", () => {
+const ago = (minutes: number) => new Date(NOW - minutes * MINUTE);
+
+describe("planViewerOnlyIdleDrains", () => {
   test("drains idle boxes and keeps active, open-work and transitioning ones", () => {
-    const plan = planViewerOnlyDrains(
+    const drains = planViewerOnlyIdleDrains(
       [
-        lease({ id: "idle", lastActiveAt: new Date(NOW - 31 * MINUTE) }),
-        lease({ id: "active", lastActiveAt: new Date(NOW - 2 * MINUTE) }),
-        lease({
-          id: "open",
-          lastActiveAt: new Date(NOW - 90 * MINUTE),
-          openSessionWork: true,
-        }),
-        lease({
-          id: "moving",
-          lastActiveAt: new Date(NOW - 90 * MINUTE),
-          transitioning: true,
-        }),
+        lease({ id: "idle", lastActiveAt: ago(31) }),
+        lease({ id: "active", lastActiveAt: ago(2) }),
+        lease({ id: "open", lastActiveAt: ago(90), openSessionWork: true }),
+        lease({ id: "moving", lastActiveAt: ago(90), transitioning: true }),
       ],
-      { nowMs: NOW, idleDrainMs: 30 * MINUTE, maxPerAccount: 0 },
+      { idleDrainMs: 30 * MINUTE },
     );
-    expect(plan.drains.map((drain) => [drain.lease.sandboxGroupId, drain.reason])).toEqual([
-      ["idle", "viewer_idle"],
+    expect(drains).toEqual([
+      expect.objectContaining({ reason: "viewer_idle", quietForMs: 30 * MINUTE }),
     ]);
-    expect(plan.drains[0]!.activeAtOrBefore.getTime()).toBe(NOW - 30 * MINUTE);
-    expect(plan.cappedWorkspaces).toEqual([]);
+    expect(drains[0]!.lease.sandboxGroupId).toBe("idle");
   });
 
-  test("an idle drain of 0 disables idle draining", () => {
-    const plan = planViewerOnlyDrains(
-      [lease({ id: "old", lastActiveAt: new Date(NOW - 24 * 60 * MINUTE) })],
-      { nowMs: NOW, idleDrainMs: 0, maxPerAccount: 0 },
-    );
-    expect(plan.drains).toEqual([]);
+  test("an idle window of 0 disables idle draining", () => {
+    expect(
+      planViewerOnlyIdleDrains([lease({ id: "old", lastActiveAt: ago(24 * 60) })], {
+        idleDrainMs: 0,
+      }),
+    ).toEqual([]);
   });
+});
 
-  test("the cap drains the least recently active over it, per account across workspaces", () => {
-    const plan = planViewerOnlyDrains(
+describe("planViewerOnlyCapDrains", () => {
+  test("drains the least recently active quiet boxes over the cap, per account across workspaces", () => {
+    const plan = planViewerOnlyCapDrains(
       [
-        lease({
-          id: "a1",
-          workspaceId: "w1",
-          lastActiveAt: new Date(NOW - 5 * MINUTE),
-        }),
-        lease({
-          id: "a2",
-          workspaceId: "w2",
-          lastActiveAt: new Date(NOW - 9 * MINUTE),
-        }),
-        lease({
-          id: "a3",
-          workspaceId: "w1",
-          lastActiveAt: new Date(NOW - 1 * MINUTE),
-        }),
-        lease({
-          id: "a4",
-          workspaceId: "w2",
-          lastActiveAt: new Date(NOW - 7 * MINUTE),
-        }),
+        lease({ id: "a1", workspaceId: "w1", lastActiveAt: ago(8) }),
+        lease({ id: "a2", workspaceId: "w2", lastActiveAt: ago(12) }),
+        lease({ id: "a3", workspaceId: "w1", lastActiveAt: ago(1) }),
+        lease({ id: "a4", workspaceId: "w2", lastActiveAt: ago(10) }),
         // Open work is never counted against the cap.
         lease({ id: "a5", workspaceId: "w3", openSessionWork: true }),
         // Another account under its cap.
         lease({ id: "b1", accountId: "account-b", workspaceId: "wb" }),
       ],
-      { nowMs: NOW, idleDrainMs: 30 * MINUTE, maxPerAccount: 2 },
+      { maxPerAccount: 2, quietMs: 5 * MINUTE },
     );
-    expect(plan.drains.map((drain) => [drain.lease.sandboxGroupId, drain.reason])).toEqual([
-      ["a2", "viewer_account_cap"],
-      ["a4", "viewer_account_cap"],
-    ]);
-    // A cap drain only proceeds if nothing happened since the ranked activity.
-    expect(plan.drains[0]!.activeAtOrBefore.getTime()).toBe(NOW - 9 * MINUTE);
-    expect(plan.cappedWorkspaces).toEqual([
-      { accountId: "account-a", workspaceId: "w1" },
-      { accountId: "account-a", workspaceId: "w2" },
-    ]);
+    expect(plan.drains.map((drain) => drain.lease.sandboxGroupId)).toEqual(["a2", "a4"]);
+    expect(plan.drains[0]).toMatchObject({
+      reason: "viewer_account_cap",
+      quietForMs: 5 * MINUTE,
+      activeAtOrBefore: ago(12),
+    });
+    expect(plan.cappedAccounts).toEqual([{ accountId: "account-a", workspaceId: "w2" }]);
   });
 
-  test("idle drains count first; a transitioning box counts but is not drained", () => {
-    const plan = planViewerOnlyDrains(
-      [
-        lease({ id: "idle", lastActiveAt: new Date(NOW - 60 * MINUTE) }),
-        lease({
-          id: "moving",
-          lastActiveAt: new Date(NOW - 20 * MINUTE),
-          transitioning: true,
-        }),
-        lease({ id: "older", lastActiveAt: new Date(NOW - 10 * MINUTE) }),
-        lease({ id: "newer", lastActiveAt: new Date(NOW - 1 * MINUTE) }),
-      ],
-      { nowMs: NOW, idleDrainMs: 30 * MINUTE, maxPerAccount: 2 },
+  test("boxes people are using are never evicted, even far over the cap", () => {
+    const leases = Array.from({ length: 11 }, (_, index) =>
+      lease({ id: `busy-${index}`, lastActiveAt: ago(index % 4) }),
     );
-    expect(plan.drains.map((drain) => [drain.lease.sandboxGroupId, drain.reason])).toEqual([
-      ["idle", "viewer_idle"],
-      ["older", "viewer_account_cap"],
-    ]);
+    const plan = planViewerOnlyCapDrains(leases, { maxPerAccount: 10, quietMs: 5 * MINUTE });
+    expect(plan.drains).toEqual([]);
+    // Still at the cap: further viewer-only warming is gated instead.
+    expect(plan.cappedAccounts).toHaveLength(1);
+  });
+
+  test("a transitioning box counts but is not drained; 0 disables the cap", () => {
+    const leases = [
+      lease({ id: "moving", lastActiveAt: ago(20), transitioning: true }),
+      lease({ id: "older", lastActiveAt: ago(10) }),
+      lease({ id: "newer", lastActiveAt: ago(9) }),
+    ];
+    expect(
+      planViewerOnlyCapDrains(leases, { maxPerAccount: 2, quietMs: 5 * MINUTE }).drains.map(
+        (drain) => drain.lease.sandboxGroupId,
+      ),
+    ).toEqual(["older"]);
+    expect(planViewerOnlyCapDrains(leases, { maxPerAccount: 0 })).toEqual({
+      drains: [],
+      cappedAccounts: [],
+    });
   });
 
   test("the cap gate outlives the gap to the next pass", () => {
@@ -262,7 +250,9 @@ describe("boundViewerOnlyWarmBoxes (real PostgreSQL)", () => {
     });
     // Two more recent viewer-only boxes in the sibling workspace.
     const older = await warmViewerBox(second, 20);
-    const newer = await warmViewerBox(second, 5);
+    const newer = await warmViewerBox(second, 1);
+    // A workspace of the same account with no viewer-only box.
+    const empty = await workspace(first.accountId);
     // A turn next to the viewer: never counted or drained.
     const working = await warmViewerBox(second, 120, "turn");
 
@@ -309,11 +299,12 @@ describe("boundViewerOnlyWarmBoxes (real PostgreSQL)", () => {
       reason: "viewer_account_cap",
     });
 
-    // The account is at its cap: both workspaces are gated for a short while.
-    expect(result.cappedWorkspaces).toBe(2);
+    // The account is at its cap: every workspace of it is gated for a short while.
+    expect(result.cappedAccounts).toBe(1);
     const gates = await admin<{ id: string; gated: boolean }[]>`
         select id, sandbox_viewer_only_cap_until > now() as gated from workspaces
-        where id in (${first.workspaceId}, ${second.workspaceId})`;
+        where id in (${first.workspaceId}, ${second.workspaceId}, ${empty.workspaceId})`;
+    expect(gates).toHaveLength(3);
     expect(gates.every((gate) => gate.gated)).toBe(true);
     await expect(
       acquireLease(db, {
@@ -346,5 +337,38 @@ describe("boundViewerOnlyWarmBoxes (real PostgreSQL)", () => {
     );
     expect(result.inspected).toBe(0);
     expect(await liveness(ids.workspaceId, box.groupId)).toBe("warm");
+  }, 180_000);
+  test("the reaper's maintenance sweep applies the bounds", async () => {
+    const ids = await workspace();
+    const idle = await warmViewerBox(ids, 120);
+    const settings = testSettings({
+      sandboxBackend: "modal",
+      sandboxOwnershipEnabled: true,
+      sandboxViewerIdleDrainMs: 30 * MINUTE,
+      sandboxMaxViewerOnlyWarmPerAccount: 10,
+    });
+    const services = async (): Promise<ActivityServices> => ({
+      settings,
+      db,
+      bus: null as never,
+      runtime: null as never,
+      objectStorage: null,
+      documentServices: null as never,
+      observability: createObservability(settings, { component: "worker-test" }),
+      wakeSessionWorkflow: null,
+    });
+    const activities = createSandboxLeaseActivities(services, {
+      sweepModalOrphans: async () => 0,
+      inspectOpenSandboxKubernetesInventory: async () => null as never,
+    });
+    const result = await activities.maintainSandboxLeaseSweep({
+      examined: 0,
+      started: 0,
+      alreadyRunning: 0,
+      startFailed: 0,
+      rotationsRequested: 0,
+    });
+    expect(result.forceDrained).toBeGreaterThanOrEqual(1);
+    expect(await liveness(ids.workspaceId, idle.groupId)).toBe("draining");
   }, 180_000);
 });
