@@ -93,8 +93,10 @@ const observability: Observability = new Proxy(base, {
         const phase = input.labels?.phase;
         if (input.name === "opengeni_model_step_phase_duration_seconds") {
           // The latest response's deferred ledger writes committed.
-          if (phase === "response_usage_billing")
+          if (phase === "response_usage_billing") {
             appendCrashLog(logFile, { kind: "billed", pid: process.pid, responseId: latestResponseId! });
+            if (latestStep === "call-1") call1Billed = true;
+          }
           if (latestStep === "call-1") {
             if (phase === "response_usage_lease") {
               call1LeaseRenewed = true;
@@ -139,6 +141,42 @@ const observability: Observability = new Proxy(base, {
     return Reflect.get(target, key, receiver);
   },
 });
+// output_before_debit: call-1's ledger writes are slowed in the database, so
+// its tool output (which waits only for the response's usage commit) becomes
+// durable while those writes are still pending; the worker dies right then.
+let call1Billed = false;
+let outputWatch: ReturnType<typeof setInterval> | null = null;
+if (point === "output_before_debit") {
+  const slow = `tool_crash_slow_ledger_${sessionId.replaceAll("-", "")}`;
+  await sql.unsafe(`
+    create function ${slow}() returns trigger language plpgsql as $$
+    begin
+      if new.session_id = '${sessionId}'::uuid and new.source_resource_id like '%resp-call-1-%' then
+        perform pg_sleep(1.5);
+      end if;
+      return new;
+    end $$;
+    create trigger ${slow} before insert on usage_events
+      for each row execute function ${slow}()`);
+  let polling = false;
+  outputWatch = setInterval(() => {
+    if (polling) return;
+    polling = true;
+    void sql<{ id: string }[]>`
+      select payload->>'id' as id from session_events
+      where session_id = ${sessionId} and type = 'agent.toolCall.output'
+        and payload->>'id' = 'call-1'`
+      .then((rows) => {
+        if (rows.length > 0 && !call1Billed) {
+          appendCrashLog(logFile, { kind: "output_before_debit", pid: process.pid });
+          crash();
+        }
+      })
+      .finally(() => {
+        polling = false;
+      });
+  }, 2);
+}
 // Billing of a response that completed before the crash is observed above;
 // a response with no usage phase is logged as billed by the parent from the
 // usage ledger instead.
@@ -158,6 +196,7 @@ const result = await activities.runAgentTurn({
   attemptId,
   trigger: { kind: "next" },
 });
+if (outputWatch) clearInterval(outputWatch);
 console.log(`TOOL_CRASH_RESULT ${JSON.stringify({ status: result.status })}`);
 await sql.end();
 await app.close();

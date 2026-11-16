@@ -243,6 +243,9 @@ const CRASH_POINTS = [
   "tool_ran",
   // The tool returned; its output is not yet persisted.
   "tool_completed",
+  // The tool's output is durable while its response's ledger writes are
+  // still pending (tool results wait only for the response's usage commit).
+  "output_before_debit",
   // Everything settled; the next model request is about to be sent.
   "next_dispatch",
 ] as const;
@@ -305,7 +308,12 @@ async function durableTurnState(ctx: Ctx, sessionId: string) {
     union all
     select type as kind, source_id from credit_ledger_entries
     where account_id = ${ctx.accountId} and type = 'model_usage_debit'`;
-  return { outputs, created, openCalls, usageFacts, ledger };
+  // The task usage-limit receipts (metered by the usage event or written
+  // directly), by the same source identity.
+  const receipts = await sql<{ source_id: string }[]>`
+    select source_id from opengeni_private.session_usage_limit_receipts
+    where source_session_id = ${sessionId}`;
+  return { outputs, created, openCalls, usageFacts, ledger, receipts };
 }
 
 type TurnState = Awaited<ReturnType<typeof durableTurnState>>;
@@ -330,6 +338,15 @@ function expectLedgerSettledOnce(state: TurnState, label: string) {
     });
   }
   const facts = new Set(state.usageFacts.map((fact) => fact.source_id));
+  // Each task receipt is recorded once, for a durable usage fact.
+  for (const row of state.receipts) {
+    expect({
+      label,
+      receipt: row.source_id,
+      count: state.receipts.filter((other) => other.source_id === row.source_id).length,
+      recordedFact: facts.has(row.source_id),
+    }).toEqual({ label, receipt: row.source_id, count: 1, recordedFact: true });
+  }
   for (const row of state.ledger) {
     expect({ label, kind: row.kind, recordedFact: facts.has(row.source_id) }).toEqual({
       label,
@@ -357,6 +374,7 @@ const CRASH_CASES = [
   // Without it (the recovery activity's settlement failed), the turn's next
   // attempt settles it before its first model request.
   { point: "combined_committed" as const, recovery: "next_attempt" as const },
+  { point: "output_before_debit" as const, recovery: "next_attempt" as const },
   ...FENCED_POINTS.map((point) => ({ point, recovery: "activity" as const })),
   { point: "fenced_usage_committed" as const, recovery: "next_attempt" as const },
 ];
@@ -378,6 +396,10 @@ for (const { point, recovery } of CRASH_CASES) {
       throw new Error(
         `child did not crash at ${point} (exit ${crashed.exitCode}): ${crashed.stdout}\n${crashed.stderr.slice(-4_000)}`,
       );
+    }
+    if (point === "output_before_debit") {
+      const slow = `tool_crash_slow_ledger_${session.id.replaceAll("-", "")}`;
+      await sql.unsafe(`drop trigger ${slow} on usage_events; drop function ${slow}()`);
     }
     const atCrash = await durableTurnState(ctx, session.id);
     const crashLog = await readCrashLog(logFile);
@@ -404,6 +426,18 @@ for (const { point, recovery } of CRASH_CASES) {
         "model.cost": 0,
         model_usage_debit: 0,
       });
+    }
+    if (point === "output_before_debit") {
+      // The call's output committed before its response's ledger finished,
+      // and the next model request was never sent.
+      expect(crashLog.some((entry) => entry.kind === "output_before_debit")).toBe(true);
+      const [fact] = call1Usage(atCrash);
+      expect(fact).toBeDefined();
+      expect(atCrash.outputs.map((row) => row.id)).toEqual(["call-0", "call-1"]);
+      expect(ledgerFor(atCrash, fact!.source_id)).not.toEqual(settledOnce);
+      expect(crashLog.some((entry) => entry.kind === "response" && entry.step === "final")).toBe(
+        false,
+      );
     }
     if (point === "debit_committed") {
       const [fact] = call1Usage(atCrash);
@@ -558,6 +592,7 @@ for (const { point, recovery } of CRASH_CASES) {
           .map((entry) => (entry as { step: string }).step),
         usageFacts: final.usageFacts.length,
         ledgerRows: final.ledger.length,
+        receipts: final.receipts.length,
       }),
     );
   });
@@ -643,4 +678,97 @@ test("a ledger write that fails after the usage commit is finished once by failu
   expect((await durableTurnState(ctx, session.id)).ledger.length).toBe(before);
   // No tool of the failed response ran twice.
   expect(new Set(executions).size).toBe(executions.length);
+});
+
+test("a tool result commits once its response's usage is durable, before that response's slowed ledger writes; the next model request still waits for them", async () => {
+  const ctx = await fixture();
+  await applyCreditLedgerEntry(app.db, {
+    accountId: ctx.accountId,
+    type: "credit_topup",
+    amountMicros: 100_000_000,
+    idempotencyKey: crypto.randomUUID(),
+  });
+  const session = await startSession(ctx);
+  // Every ledger write of this session's responses is slow.
+  const slow = `slow_ledger_${session.id.replaceAll("-", "")}`;
+  await sql.unsafe(`
+    create function ${slow}() returns trigger language plpgsql as $$
+    begin
+      if new.session_id = '${session.id}'::uuid then perform pg_sleep(0.4); end if;
+      return new;
+    end $$;
+    create trigger ${slow} before insert on usage_events
+      for each row execute function ${slow}()`);
+  const order: string[] = [];
+  let latestStep = "";
+  const settings = crashTestSettings(shared.appUrl);
+  const base = createObservability(settings, { component: "worker" });
+  const observability: Observability = new Proxy(base, {
+    get(target, key, receiver) {
+      if (key === "observeHistogram") {
+        return (input: { name: string; labels?: Record<string, string> }) => {
+          if (
+            input.name === "opengeni_model_step_phase_duration_seconds" &&
+            input.labels?.phase === "response_usage_billing"
+          )
+            order.push(`billed:${latestStep}`);
+          return target.observeHistogram(input as never);
+        };
+      }
+      return Reflect.get(target, key, receiver);
+    },
+  });
+  const outputDurableBeforeBilling: Record<string, boolean> = {};
+  const activities = createActivityTestHarness({
+    settings,
+    db: app.db,
+    bus: new MemoryEventBus(),
+    runtime: scriptedRuntime(
+      new HistoryScriptedModel({
+        beforeResponse: (step) => {
+          order.push(`request:${step}`);
+          latestStep = step;
+        },
+      }),
+      async (callId) => `${callId} done`,
+    ),
+    observability,
+  });
+  const watch = setInterval(() => {
+    void sql<{ id: string }[]>`
+      select payload->>'id' as id from session_events
+      where session_id = ${session.id} and type = 'agent.toolCall.output'`.then((rows) => {
+      for (const { id } of rows) {
+        if (outputDurableBeforeBilling[id] === undefined)
+          outputDurableBeforeBilling[id] = !order.includes(`billed:${id}`);
+      }
+    });
+  }, 5);
+  try {
+    const result = await activities.runAgentTurn({
+      accountId: ctx.accountId,
+      workspaceId: ctx.workspaceId,
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(result.status).toBe("idle");
+  } finally {
+    clearInterval(watch);
+    await sql.unsafe(`drop trigger ${slow} on usage_events; drop function ${slow}()`);
+  }
+  // Each response's ledger finished before the next model request was sent.
+  expect(order).toEqual([
+    "request:call-0",
+    "billed:call-0",
+    "request:call-1",
+    "billed:call-1",
+    "request:final",
+    "billed:final",
+  ]);
+  // The tool results did not wait for those slowed ledger writes.
+  expect(outputDurableBeforeBilling).toEqual({ "call-0": true, "call-1": true });
+  expectLedgerSettledOnce(await durableTurnState(ctx, session.id), "slowed ledger");
 });

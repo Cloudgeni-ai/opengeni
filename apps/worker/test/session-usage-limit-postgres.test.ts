@@ -609,8 +609,18 @@ function connectionClosed() {
   );
 }
 
-function dbFailureSourceRows(rows: Awaited<ReturnType<typeof receipts>>, sessionId: string) {
-  return rows.filter((row) => row.source_id.includes(`dbfail-${sessionId}`));
+/**
+ * A response id over the usage event trigger's source-key bound, so the event
+ * cannot meter its task receipt: the receipt still takes the direct write
+ * these custody tests fail on purpose, under its digest identity.
+ */
+function unmeteredResponseId(sessionId: string) {
+  return `dbfail-${sessionId}-${"u".repeat(1_100)}`;
+}
+
+function dbFailureSourceRows(rows: Awaited<ReturnType<typeof receipts>>) {
+  // The receipt stores the digest identity of `unmeteredResponseId`.
+  return rows.filter((row) => row.source_id.startsWith("sha256:"));
 }
 
 test("F1/AC13: a one-off receipt write failure is held and written before the next request; no provider replay, recorded once", async () => {
@@ -630,7 +640,7 @@ test("F1/AC13: a one-off receipt write failure is held and written before the ne
     },
   );
   const scripted = new ScriptedModel([
-    paidToolCall(`dbfail-${session.id}`),
+    paidToolCall(unmeteredResponseId(session.id)),
     { inputTokens: 100, output: [assistantMessage("done")] },
     { inputTokens: 100, output: [assistantMessage("must never be requested")] },
   ]);
@@ -643,7 +653,7 @@ test("F1/AC13: a one-off receipt write failure is held and written before the ne
   // The response was kept: the turn continued from it with exactly one more request.
   expect(scripted.calls).toBe(2);
   const rows = await receipts(session.id);
-  expect(dbFailureSourceRows(rows, session.id)).toEqual([
+  expect(dbFailureSourceRows(rows)).toEqual([
     expect.objectContaining({ amount_micros: "100", pricing_source: "configured_list_price" }),
   ]);
   expect(rows).toHaveLength(2);
@@ -663,7 +673,7 @@ test("F1/AC13: a persistent receipt failure stops before the next request, the r
   const session = await startSession(ctx);
   await setLimit(ctx, session.id, 1_000_000);
   const scripted = new ScriptedModel([
-    paidToolCall(`dbfail-${session.id}`),
+    paidToolCall(unmeteredResponseId(session.id)),
     { inputTokens: 100, output: [assistantMessage("done")] },
     { inputTokens: 100, output: [assistantMessage("must never be requested")] },
   ]);
@@ -727,7 +737,7 @@ test("F1/AC13: a persistent receipt failure stops before the next request, the r
   expect(detail.sessionUsageReceipts).toEqual([
     expect.objectContaining({
       sessionId: session.id,
-      sourceId: expect.stringContaining(`dbfail-${session.id}`),
+      sourceId: expect.stringMatching(/^sha256:/),
       amountMicros: 100,
       pricingSource: "configured_list_price",
     }),
@@ -748,8 +758,10 @@ test("F1/AC13: a persistent receipt failure stops before the next request, the r
       error: "post-claim database recovery",
     });
     expect((recovered as { action?: string }).action).not.toBe("stale");
-    expect(lane.mock.calls.map((args) => args[1].sourceId)).toEqual([
-      expect.stringContaining(`dbfail-${session.id}`),
+    // The held receipt and the turn's owed-usage settlement both write the
+    // same original identity; the second write deduplicates.
+    expect([...new Set(lane.mock.calls.map((args) => args[1].sourceId))]).toEqual([
+      detail.sessionUsageReceipts?.[0]?.sourceId,
     ]);
   } finally {
     lane.mockRestore();
@@ -766,7 +778,7 @@ test("F1/AC13: a persistent receipt failure stops before the next request, the r
   });
   expect(scripted.calls).toBe(2);
   const rows = await receipts(session.id);
-  expect(dbFailureSourceRows(rows, session.id)).toEqual([
+  expect(dbFailureSourceRows(rows)).toEqual([
     expect.objectContaining({ amount_micros: "100", pricing_source: "configured_list_price" }),
   ]);
   expect(await usage(ctx, session.id)).toMatchObject({
@@ -776,7 +788,7 @@ test("F1/AC13: a persistent receipt failure stops before the next request, the r
   });
 });
 
-test("re-review N3: a final response whose direct receipt write keeps failing completes once; its committed usage event already recorded the exact receipt", async () => {
+test("re-review N3: a final response completes once without a direct receipt write; its committed usage event already recorded the exact receipt", async () => {
   resetSessionUsageReceiptCustodyForTests();
   const ctx = await fixture();
   const session = await startSession(ctx, { message: "Answer directly" });
@@ -802,7 +814,9 @@ test("re-review N3: a final response whose direct receipt write keeps failing co
   } finally {
     settle.mockRestore();
   }
-  expect(directFailures).toBe(1);
+  // The committed usage event metered the receipt in its own transaction, so
+  // the deferred settlement never writes (or fails to write) it again.
+  expect(directFailures).toBe(0);
   // One request, a normal completion: no recovery, so no second request.
   expect(result.status).toBe("idle");
   expect(scripted.calls).toBe(1);
