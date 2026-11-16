@@ -1,5 +1,47 @@
 import type { StreamEvent } from "@openai/agents";
 
+/**
+ * The SDK's terminal model response. Its usage, billing and history checkpoint
+ * settle while the consumer commits the response's own items; the response
+ * normalizes to no session event of its own.
+ */
+export function settlesAlongsideResponseItems(event: { type: string; data?: unknown }): boolean {
+  return (
+    event.type === "raw_model_stream_event" &&
+    !!event.data &&
+    typeof event.data === "object" &&
+    (event.data as { type?: unknown }).type === "response_done"
+  );
+}
+
+// The items the SDK streams from a model response before any of its tools
+// run. Committing them touches only the event log and the pending-call
+// ledger, never the conversation history or media the settlement writes.
+const RESPONSE_ITEM_EVENT_NAMES = new Set([
+  "message_output_created",
+  "reasoning_item_created",
+  "tool_called",
+  "tool_search_called",
+]);
+
+/**
+ * Whether an event may be committed while the previous response's usage is
+ * still settling. Everything else (tool results, provider-hosted calls,
+ * another response, the stream end) waits for the settlement first.
+ */
+export function responseSettlementOverlaps(event: { type: string }): boolean {
+  if (event.type !== "run_item_stream_event") return false;
+  const { name, item } = event as { name?: unknown; item?: { rawItem?: unknown } };
+  if (typeof name !== "string" || !RESPONSE_ITEM_EVENT_NAMES.has(name)) return false;
+  const raw = item?.rawItem;
+  // Provider-hosted calls carry results and media of their own.
+  return !(
+    raw &&
+    typeof raw === "object" &&
+    (raw as { type?: unknown }).type === "hosted_tool_call"
+  );
+}
+
 /** SDK producer/consumer rendezvous. Usage stays on the sole consumer writer. */
 export function createModelCallAdmission(input: {
   signal: AbortSignal;
@@ -24,6 +66,34 @@ export function createModelCallAdmission(input: {
   const receipts = new WeakMap<object, Receipt>();
   const responseReceipts = new Map<string, Receipt>();
   const pending = new Set<Receipt>();
+  // Tool calls the consumer has made durable (pending-call receipt and
+  // agent.toolCall.created committed), keyed by call id. The producer awaits
+  // them before any tool of the response runs. Either side may come first.
+  const toolCallReceipts = new Map<string, Receipt & { settled: boolean }>();
+  const toolCallReceipt = (callId: string) => {
+    let receipt = toolCallReceipts.get(callId);
+    if (!receipt) {
+      let resolve!: () => void;
+      let reject!: (error: unknown) => void;
+      const promise = new Promise<void>((yes, no) => {
+        resolve = yes;
+        reject = no;
+      });
+      void promise.catch(() => undefined);
+      const created: Receipt & { settled: boolean } = {
+        promise,
+        settled: false,
+        resolve: () => {
+          created.settled = true;
+          resolve();
+        },
+        reject,
+      };
+      receipt = created;
+      toolCallReceipts.set(callId, receipt);
+    }
+    return receipt;
+  };
   const responseId = (event: unknown): string | null => {
     const id = (event as { response?: { id?: unknown } } | null)?.response?.id;
     return typeof id === "string" && id.length > 0 ? id : null;
@@ -51,6 +121,8 @@ export function createModelCallAdmission(input: {
     for (const receipt of pending) receipt.reject(error);
     pending.clear();
     responseReceipts.clear();
+    for (const receipt of toolCallReceipts.values()) receipt.reject(error);
+    toolCallReceipts.clear();
   };
   const abort = () => fail(input.signal.reason ?? new Error("Model stream cancelled"));
   input.signal.addEventListener("abort", abort, { once: true });
@@ -118,11 +190,36 @@ export function createModelCallAdmission(input: {
       if (id) responseReceipts.delete(id);
       receipt.resolve();
     },
+    /** Consumer: this call's pending receipt and created event are durable. */
+    toolCallDurable: (callId: string) => {
+      if (failed) return;
+      toolCallReceipt(callId).resolve();
+    },
+    /**
+     * Producer: wait until every listed call of a response is durable, before
+     * any of its tools runs. Fails with the stream's failure instead.
+     */
+    awaitToolCallsDurable: async (callIds: readonly string[]): Promise<void> => {
+      if (callIds.length === 0) return;
+      if (failed) throw failure;
+      const waiting = callIds.map((callId) => toolCallReceipt(callId));
+      if (waiting.some((receipt) => !receipt.settled)) {
+        await Promise.race([Promise.all(waiting.map((receipt) => receipt.promise)), halted]);
+      }
+      if (failed) throw failure;
+      // A call id is gated once; a later response reusing it registers anew.
+      for (const callId of callIds) toolCallReceipts.delete(callId);
+    },
     fail,
     close: () => {
       input.signal.removeEventListener("abort", abort);
       if (pending.size > 0) fail(new Error("Model stream closed before response settlement"));
+      // A producer still waiting for a call's durability can never be released
+      // by a closed consumer; its tools must not run.
+      if ([...toolCallReceipts.values()].some((receipt) => !receipt.settled))
+        fail(new Error("Model stream closed before tool-call durability"));
       responseReceipts.clear();
+      toolCallReceipts.clear();
     },
   };
 }

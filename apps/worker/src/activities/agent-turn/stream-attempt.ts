@@ -161,7 +161,11 @@ import {
   type SessionTurn,
 } from "@opengeni/contracts";
 import { createModelCheckpointMemoryCollector } from "../../model-checkpoint-memory-collector";
-import { createModelCallAdmission } from "./model-call-admission";
+import {
+  createModelCallAdmission,
+  responseSettlementOverlaps,
+  settlesAlongsideResponseItems,
+} from "./model-call-admission";
 import { isCoreSourceDisconnectedError } from "./subscription-core-capacity";
 import { revalidatePlacedSubscriptionCore } from "./subscription-core-placed";
 
@@ -1284,6 +1288,17 @@ export async function runTurnStreamAttempt(
             responseCreditPolicyRevisions.add(creditPolicyRevision);
             return modelCallAdmission.onModelResponse(event);
           },
+          // No tool of a response runs before its calls are durable: the
+          // pending-call receipt crash recovery resolves, and the created
+          // event. The consumer commits them while the response's usage
+          // settles (see responseSettlementOverlaps below).
+          beforeToolExecution: (items) =>
+            modelCallAdmission.awaitToolCallsDurable(
+              items.flatMap((item) => {
+                const call = pendingToolCallFromSdkEvent({ type: "run_item_stream_event", item });
+                return call ? [call.callId] : [];
+              }),
+            ),
           onContentlessModelResponse: () => {
             contentlessResponseHandover = true;
           },
@@ -1554,13 +1569,36 @@ export async function runTurnStreamAttempt(
     // The local opening tool load and its search result precede the first
     // provider response; they are not its first byte.
     let openingToolLoadInFlight = false;
+    // A response's usage, billing and history checkpoint settle while the
+    // consumer commits that response's own items (its tool calls above all),
+    // so its tools start once their calls are durable instead of after
+    // billing. Every other event, the stream end and failure handling wait for
+    // the settlement first; the producer's next model request already waits
+    // for it through admission.
+    type ResponseSettlement = { settled: Promise<void>; failed: Promise<never> };
+    let responseSettlement: ResponseSettlement | null = null;
+    const awaitResponseSettlement = async () => {
+      const inFlight = responseSettlement;
+      if (!inFlight) return;
+      await inFlight.settled;
+      if (responseSettlement === inFlight) responseSettlement = null;
+    };
     try {
       while (true) {
-        const next = await nextStreamEvent(iterator, activityContext);
+        const read = nextStreamEvent(iterator, activityContext);
+        // A settlement failure ends the attempt now, as when it was awaited
+        // inline, rather than after the response's tools finish.
+        const next = await (responseSettlement
+          ? Promise.race([read, responseSettlement.failed])
+          : read);
         recordStreamBootstrap();
         if (next.done) {
+          await awaitResponseSettlement();
           streamDone = true;
           break;
+        }
+        if (responseSettlement && !responseSettlementOverlaps(next.value)) {
+          await awaitResponseSettlement();
         }
         if (next.value.type === "raw_model_stream_event")
           openingToolLoadInFlight = isOpeningToolLoadResponse(next.value.data);
@@ -1592,7 +1630,7 @@ export async function runTurnStreamAttempt(
           responseLatencyFailure = error;
         }
         const responseSettlementStartedAt = performance.now();
-        const responseResult = await processModelResponseTerminalEvent({
+        const responseProcessing = processModelResponseTerminalEvent({
           creditPolicyRevision,
           event: next.value,
           state: modelResponseState,
@@ -1645,9 +1683,25 @@ export async function runTurnStreamAttempt(
             return request;
           },
           processingResidency: turnProcessingResidency,
+          // A new response starts a new tool-call batch. Reset at the claim,
+          // before any of this response's items are read.
+          onClaimed: () => {
+            currentToolBatchCallIds = new Set<string>();
+            currentToolBatchCompletedCallIds = new Set<string>();
+          },
         });
-        if (responseLatencyFailure !== undefined) throw responseLatencyFailure;
-        if (responseResult.status === "processed") {
+        const settledEvent = next.value;
+        const settledStream = eventing.stream;
+        const settleResponse = async () => {
+          const responseResult = await responseProcessing;
+          if (responseResult.status === "processed") {
+            await completeResponseSettlement(responseResult);
+          }
+          // Release after settlement. The producer checks fresh admission before
+          // its next request; a final response keeps the revision it ran under.
+          modelCallAdmission.settle(settledEvent);
+        };
+        const completeResponseSettlement = async (responseResult: { usageReported: boolean }) => {
           const responseUsageSettledAt = performance.now();
           recordModelStepPhase(observability, {
             provider: streamProvider,
@@ -1661,7 +1715,7 @@ export async function runTurnStreamAttempt(
             // Usage-bearing responses already committed completion with their
             // response checkpoint. Providers omitting usage retain an audit.
             if (!responseResult.usageReported)
-              await publishFallbackProviderEvents(fallbackProviderCompletionEvents(next.value));
+              await publishFallbackProviderEvents(fallbackProviderCompletionEvents(settledEvent));
             fallbackProviderRequestLifecycleStartedAt = null;
             attempt.providerRecoveryCount = 0;
           }
@@ -1674,7 +1728,7 @@ export async function runTurnStreamAttempt(
             });
             attempt.providerRecoveryObservation = undefined;
           }
-          const rawStreamHistory = (eventing.stream.state as { history?: unknown[] }).history;
+          const rawStreamHistory = (settledStream.state as { history?: unknown[] }).history;
           if (Array.isArray(rawStreamHistory)) {
             // The completed image item is normally retained from its own
             // run-item event above. Scan once at the terminal response as
@@ -1685,8 +1739,6 @@ export async function runTurnStreamAttempt(
             );
           }
           streamSawPerResponseUsage ||= responseResult.usageReported;
-          currentToolBatchCallIds = new Set<string>();
-          currentToolBatchCompletedCallIds = new Set<string>();
           await historySink.reconcileConversationTruth();
           const responseSettledAt = performance.now();
           recordModelStepPhase(observability, {
@@ -1701,10 +1753,34 @@ export async function runTurnStreamAttempt(
           });
           turnLifecycleMetricsFor(observability).progress({ attemptId: input.attemptId });
           modelCheckpointMemoryCollector.schedule(observability);
+        };
+        if (responseLatencyFailure !== undefined) {
+          await responseProcessing;
+          throw responseLatencyFailure;
         }
-        // Release after settlement. The producer checks fresh admission before
-        // its next request; a final response keeps the revision it ran under.
-        modelCallAdmission.settle(next.value);
+        if (settlesAlongsideResponseItems(next.value)) {
+          // The claim and its response-local resets ran synchronously above;
+          // the rest settles alongside this response's items.
+          const settled = settleResponse();
+          const inFlight: ResponseSettlement = {
+            settled,
+            failed: settled.then(
+              () => {
+                if (responseSettlement === inFlight) responseSettlement = null;
+                return new Promise<never>(() => undefined);
+              },
+              (error: unknown) => {
+                // Stop the producer at once: no further tool or model call.
+                modelCallAdmission.fail(error);
+                throw error;
+              },
+            ),
+          };
+          void inFlight.failed.catch(() => undefined);
+          responseSettlement = inFlight;
+        } else {
+          await settleResponse();
+        }
         if (
           next.value.type === "raw_model_stream_event" &&
           isPreemptedModelResponse(next.value.data)
@@ -2127,6 +2203,8 @@ export async function runTurnStreamAttempt(
               "turn attempt ended while recording an in-flight tool call",
             );
         }
+        // Its receipt and created event are committed: the call may run.
+        if (pendingToolCall) modelCallAdmission.toolCallDurable(pendingToolCall.callId);
         const videoAcceptance = completedToolCall
           ? videoGenerationAcceptancesByCallId.get(completedToolCall.callId)
           : undefined;
@@ -2180,6 +2258,9 @@ export async function runTurnStreamAttempt(
       // Close this stream before any failure publication; a legitimate
       // compaction retry may start a new, independently fenced generation.
       closeStreamWaitAdmission?.();
+      // A response still settling commits its usage before any failure is
+      // published; its own failure is the error being handled here.
+      await responseSettlement?.settled.catch(() => undefined);
       if (fallbackProviderRequestLifecycleStartedAt !== null) {
         const durationMs = Math.max(
           0,

@@ -374,6 +374,8 @@ export async function processModelResponseTerminalEvent(input: {
   promptCacheRequest?: () => Promise<PromptCacheRequestFingerprint | null> | null;
   /** Processing residency of the route that served the call (see `servedRouteProcessingResidency`). */
   processingResidency: ModelCallProcessingResidencyV1;
+  /** Called synchronously once this event is claimed as a new response, before any await. */
+  onClaimed?: () => void;
 }): Promise<
   | { status: "not_response" }
   | { status: "duplicate"; sourceKey: string }
@@ -409,6 +411,7 @@ export async function processModelResponseTerminalEvent(input: {
   }
   input.state.claimedSourceKeys.add(sourceKey);
   input.state.responseCount = responseOrdinal;
+  input.onClaimed?.();
   const timing = input.responseTiming?.() ?? null;
   const promptCacheRequest = input.promptCacheRequest?.() ?? null;
 
