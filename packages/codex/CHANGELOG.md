@@ -1,5 +1,13 @@
 # @opengeni/codex
 
+## 6.24.1
+
+### Patch Changes
+
+- Updated dependencies [5fd2c21]
+  - @opengeni/contracts@6.24.1
+  - @opengeni/network@6.24.1
+
 ## 6.24.0
 
 ### Patch Changes
