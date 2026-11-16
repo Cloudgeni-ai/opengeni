@@ -253,11 +253,21 @@ async function chargeByokPlatformFee(
   return feeMicros;
 }
 
-export async function settleModelUsage(
+/**
+ * The pure part of `settleModelUsage`: validation and pricing, no writes. It
+ * throws exactly where settlement would before its first write, so a caller
+ * can make the response's usage durable with this snapshot and settle the
+ * ledger afterwards (settlement reprices identically and is idempotent per
+ * `sourceId`). The record omits only the BYOK fee, which settlement reports.
+ */
+export function priceModelUsage(
   settings: Settings,
-  db: Database,
   input: ModelUsageSettlementInput,
-): Promise<ModelUsageBillingRecord> {
+): ModelUsageBillingRecord {
+  return modelUsagePricing(settings, input).record;
+}
+
+function modelUsagePricing(settings: Settings, input: ModelUsageSettlementInput) {
   const normalizedUsage = input.normalizedUsage;
   const usageContext = {
     ...(input.initiator
@@ -403,6 +413,71 @@ export async function settleModelUsage(
       : estimatedProviderCostMicros !== null
         ? ("configured_list_price" as const)
         : null;
+  const shouldDebit = settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
+  const debits =
+    chargesOpenGeniCredits && shouldDebit && (totalTokens > 0 || gatewayBilling !== undefined);
+  if (debits && !pricingBreakdown) {
+    throw new Error(`Missing model pricing for ${input.model}`);
+  }
+  const record: ModelUsageBillingRecord = {
+    billingPath: chargesOpenGeniCredits ? "opengeni_credits" : "external",
+    pricedCostMicros: debits ? pricingBreakdown!.creditCostMicros : 0,
+    estimatedProviderCostMicros,
+    equivalentCreditCostMicros,
+    pricingSource,
+    ...listClasses,
+    normalizedUsage,
+    ...(gatewayBilling ? { upstreamProvider: gatewayBilling.finalProvider } : {}),
+  };
+  return {
+    record,
+    usageContext,
+    sanitizedUsage,
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    chargesOpenGeniCredits,
+    countsTowardTokenCap,
+    gatewayBilling,
+    configuredListPricingModel,
+    pricingBreakdown,
+    hasCompleteCoreTokenTelemetry,
+    listClasses,
+    externalCost,
+    externalCostMicros,
+    estimatedProviderCostMicros,
+    equivalentCreditCostMicros,
+    pricingSource,
+    shouldDebit,
+  };
+}
+
+export async function settleModelUsage(
+  settings: Settings,
+  db: Database,
+  input: ModelUsageSettlementInput,
+): Promise<ModelUsageBillingRecord> {
+  const normalizedUsage = input.normalizedUsage;
+  const {
+    usageContext,
+    sanitizedUsage,
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    chargesOpenGeniCredits,
+    countsTowardTokenCap,
+    gatewayBilling,
+    configuredListPricingModel,
+    pricingBreakdown,
+    hasCompleteCoreTokenTelemetry,
+    listClasses,
+    externalCost,
+    externalCostMicros,
+    estimatedProviderCostMicros,
+    equivalentCreditCostMicros,
+    pricingSource,
+    shouldDebit,
+  } = modelUsagePricing(settings, input);
   // Per-task usage limit meter. Synchronous and awaited before any
   // credit/usage write: the canonical pre-margin estimate is recorded once
   // per source identity against the session's task root, for every funding
@@ -538,7 +613,6 @@ export async function settleModelUsage(
       ...(gatewayBilling ? { upstreamProvider: gatewayBilling.finalProvider } : {}),
     };
   }
-  const shouldDebit = settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
   // Hosted provider searches are not in the token price. A Gateway-reported
   // cost is the provider's whole bill for the response, search included, so
   // it is never charged again. The searches run on the provider's search

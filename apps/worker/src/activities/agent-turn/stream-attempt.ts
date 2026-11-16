@@ -158,13 +158,16 @@ import {
   withPublicApprovalFields,
   type RetainedArtifactMetadata,
   type SessionEvent,
+  type SessionEventType,
   type SessionTurn,
 } from "@opengeni/contracts";
 import { createModelCheckpointMemoryCollector } from "../../model-checkpoint-memory-collector";
 import {
   createModelCallAdmission,
+  createResponseItemBundle,
   responseSettlementOverlaps,
   settlesAlongsideResponseItems,
+  type ResponseItemBundle,
 } from "./model-call-admission";
 import { isCoreSourceDisconnectedError } from "./subscription-core-capacity";
 import { revalidatePlacedSubscriptionCore } from "./subscription-core-placed";
@@ -206,6 +209,8 @@ import {
   assertModelResponseLatencyMode,
   processModelResponseTerminalEvent,
   processSessionTitleModelUsageEvent,
+  settleRecordedModelUsage,
+  type ResponseItemsCommit,
   emitModelCallUsage,
   recordModelUsageAndDebitCredits,
   recordAuthoritativeModelCallFact,
@@ -451,6 +456,9 @@ export async function prepareHistoryWithStartupPhase(input: {
     }
   }
 }
+
+// Attempts that have settled the recorded usage of their turn's earlier attempts.
+const ledgerRecoveredAttempts = new WeakSet<object>();
 
 export async function runTurnStreamAttempt(
   deps: TurnStreamAttemptDeps,
@@ -1036,6 +1044,30 @@ export async function runTurnStreamAttempt(
     // boundary, both during preparation and in-activity recovery. Revalidate
     // the accepted turn's frozen human before another stream can dispatch.
     if (options.requireTerminalModelResponse) await revalidateModelCallAdmission();
+    // An earlier attempt of this turn may have died after a response's usage
+    // committed but before its ledger writes. Finish them (idempotently)
+    // before this attempt's first model request can be admitted. A failed
+    // read or write is retried at this attempt's next stream boundary.
+    if (!ledgerRecoveredAttempts.has(attempt)) {
+      try {
+        await settleRecordedModelUsage(settings, db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: activeTurnId,
+          excludeAttemptId: input.attemptId,
+          observability,
+        });
+        ledgerRecoveredAttempts.add(attempt);
+      } catch (error) {
+        observability.warn?.("recorded model usage settlement failed before model admission", {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          attemptId: input.attemptId,
+          errorName: error instanceof Error ? error.name : "unknown",
+        });
+      }
+    }
     const modelCallAdmission = createModelCallAdmission({
       signal: runtimeCancellationSignal,
       admit: () => revalidateModelCallAdmission({ yieldToSteer: true }),
@@ -1058,6 +1090,20 @@ export async function runTurnStreamAttempt(
     // calls. Durable recovery remains call/result based and needs no batch
     // schema or compatibility state.
     let currentToolBatchCallIds = new Set<string>();
+    // The items of the response whose usage is being prepared. They commit
+    // in the same append as that usage (one write before any tool runs).
+    type CollectedResponseItems = ResponseItemBundle<
+      { type: SessionEventType; payload: unknown },
+      SessionEventMutation<"event">
+    >;
+    // Assigned from callbacks: keep the declared type, not a narrowed `null`.
+    let openResponseItems = null as CollectedResponseItems | null;
+    // The items the SDK last reported streamed, until their calls are durable.
+    let streamedResponseItems = null as readonly unknown[] | null;
+    const closeResponseItems = () => {
+      openResponseItems?.close();
+      openResponseItems = null;
+    };
     // Content-free per-call family + start time for opengeni_agent_tool_calls_total.
     const toolCallMetricStarts = new Map<
       string,
@@ -1290,15 +1336,24 @@ export async function runTurnStreamAttempt(
           },
           // No tool of a response runs before its calls are durable: the
           // pending-call receipt crash recovery resolves, and the created
-          // event. The consumer commits them while the response's usage
-          // settles (see responseSettlementOverlaps below).
-          beforeToolExecution: (items) =>
-            modelCallAdmission.awaitToolCallsDurable(
-              items.flatMap((item) => {
-                const call = pendingToolCallFromSdkEvent({ type: "run_item_stream_event", item });
-                return call ? [call.callId] : [];
-              }),
-            ),
+          // event. The consumer commits them with the response's usage
+          // (see openResponseItems below).
+          beforeToolExecution: async (items) => {
+            // The producer may get here before the consumer has read the
+            // response's end; a response collected later picks these up.
+            streamedResponseItems = items;
+            openResponseItems?.streamed(items);
+            try {
+              await modelCallAdmission.awaitToolCallsDurable(
+                items.flatMap((item) => {
+                  const call = pendingToolCallFromSdkEvent({ type: "run_item_stream_event", item });
+                  return call ? [call.callId] : [];
+                }),
+              );
+            } finally {
+              if (streamedResponseItems === items) streamedResponseItems = null;
+            }
+          },
           onContentlessModelResponse: () => {
             contentlessResponseHandover = true;
           },
@@ -1569,12 +1624,12 @@ export async function runTurnStreamAttempt(
     // The local opening tool load and its search result precede the first
     // provider response; they are not its first byte.
     let openingToolLoadInFlight = false;
-    // A response's usage, billing and history checkpoint settle while the
-    // consumer commits that response's own items (its tool calls above all),
-    // so its tools start once their calls are durable instead of after
-    // billing. Every other event, the stream end and failure handling wait for
-    // the settlement first; the producer's next model request already waits
-    // for it through admission.
+    // A response's settlement runs while the consumer reads that response's
+    // own items (its tool calls above all): it commits the response's usage,
+    // history and items in one transaction, releases the response's tools,
+    // then writes the usage ledger alongside them. Every other event, the
+    // stream end and failure handling wait for the settlement first; the
+    // producer's next model request already waits for it through admission.
     type ResponseSettlement = { settled: Promise<void>; failed: Promise<never> };
     let responseSettlement: ResponseSettlement | null = null;
     const awaitResponseSettlement = async () => {
@@ -1593,10 +1648,18 @@ export async function runTurnStreamAttempt(
           : read);
         recordStreamBootstrap();
         if (next.done) {
+          closeResponseItems();
           await awaitResponseSettlement();
           streamDone = true;
           break;
         }
+        // An item of the response whose usage is being prepared commits with
+        // that usage. Anything else ends the response's items first.
+        const responseItems =
+          openResponseItems?.isOpen() && responseSettlementOverlaps(next.value)
+            ? openResponseItems
+            : null;
+        if (!responseItems) closeResponseItems();
         if (responseSettlement && !responseSettlementOverlaps(next.value)) {
           await awaitResponseSettlement();
         }
@@ -1630,6 +1693,11 @@ export async function runTurnStreamAttempt(
           responseLatencyFailure = error;
         }
         const responseSettlementStartedAt = performance.now();
+        // A terminal response settling alongside its items collects them for
+        // its usage commit (see openResponseItems).
+        const collectsResponseItems =
+          settlesAlongsideResponseItems(next.value) && responseLatencyFailure === undefined;
+        let claimedResponseItems = null as CollectedResponseItems | null;
         const responseProcessing = processModelResponseTerminalEvent({
           creditPolicyRevision,
           event: next.value,
@@ -1688,7 +1756,48 @@ export async function runTurnStreamAttempt(
           onClaimed: () => {
             currentToolBatchCallIds = new Set<string>();
             currentToolBatchCompletedCallIds = new Set<string>();
+            if (!collectsResponseItems) return;
+            closeResponseItems();
+            claimedResponseItems = createResponseItemBundle<
+              { type: SessionEventType; payload: unknown },
+              SessionEventMutation<"event">
+            >();
+            openResponseItems = claimedResponseItems;
+            if (streamedResponseItems) claimedResponseItems.streamed(streamedResponseItems);
+            // Start writing the response's streamed text now; its items
+            // follow it in the log.
+            void eventing.batcher?.flush().catch(() => undefined);
           },
+          ...(collectsResponseItems
+            ? {
+                responseItems: async () => {
+                  const items = claimedResponseItems;
+                  if (!items) return null;
+                  await items.closed;
+                  await eventing.batcher?.flush();
+                  const mutations = [...items.mutations];
+                  return {
+                    events: [...items.events],
+                    ...(mutations.length > 0
+                      ? {
+                          mutate: async (tx, fence) => {
+                            for (const mutate of mutations) {
+                              if (!(await mutate(tx, fence))) return false;
+                            }
+                            return true;
+                          },
+                        }
+                      : {}),
+                    // Its receipts and created events are committed: the
+                    // calls may run.
+                    committed: () => {
+                      for (const callId of items.callIds)
+                        modelCallAdmission.toolCallDurable(callId);
+                    },
+                  } satisfies ResponseItemsCommit;
+                },
+              }
+            : {}),
         });
         const settledEvent = next.value;
         const settledStream = eventing.stream;
@@ -2083,6 +2192,7 @@ export async function runTurnStreamAttempt(
               : { messagePhases },
           );
         // A model-written copy of a search record is never shown as chat text.
+        let toolCallCollected = false;
         for (const event of evidenceEchoGuard.filter(normalized)) {
           if (event.type === "agent.toolCall.created") {
             const preparedServers = eventing.preparedTools?.mcpServers ?? [];
@@ -2172,6 +2282,13 @@ export async function runTurnStreamAttempt(
                 }
               }),
             );
+          } else if (responseItems) {
+            // Committed with the response's usage (closed below).
+            responseItems.events.push(event);
+            if (checkpoint) {
+              responseItems.mutations.push(checkpoint);
+              if (pendingToolCall) toolCallCollected = true;
+            }
           } else {
             await eventing.batcher.push(event, checkpoint);
           }
@@ -2203,8 +2320,14 @@ export async function runTurnStreamAttempt(
               "turn attempt ended while recording an in-flight tool call",
             );
         }
-        // Its receipt and created event are committed: the call may run.
-        if (pendingToolCall) modelCallAdmission.toolCallDurable(pendingToolCall.callId);
+        // Its receipt and created event are committed: the call may run. A
+        // collected call runs once the response's usage commit carries it.
+        if (pendingToolCall) {
+          if (toolCallCollected) responseItems!.callIds.push(pendingToolCall.callId);
+          else modelCallAdmission.toolCallDurable(pendingToolCall.callId);
+        }
+        if (responseItems && next.value.type === "run_item_stream_event")
+          responseItems.read(next.value.item);
         const videoAcceptance = completedToolCall
           ? videoGenerationAcceptancesByCallId.get(completedToolCall.callId)
           : undefined;
@@ -2259,7 +2382,9 @@ export async function runTurnStreamAttempt(
       // compaction retry may start a new, independently fenced generation.
       closeStreamWaitAdmission?.();
       // A response still settling commits its usage before any failure is
-      // published; its own failure is the error being handled here.
+      // published, with the items read so far; its own failure is the error
+      // being handled here. Admission already failed, so none of its tools runs.
+      closeResponseItems();
       await responseSettlement?.settled.catch(() => undefined);
       if (fallbackProviderRequestLifecycleStartedAt !== null) {
         const durationMs = Math.max(

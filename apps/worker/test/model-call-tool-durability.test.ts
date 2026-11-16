@@ -3,6 +3,7 @@ import { Agent, Runner, tool } from "@openai/agents";
 import { ScriptedModel, assistantMessage, functionCall } from "@opengeni/testing/scripted-model";
 import {
   createModelCallAdmission,
+  createResponseItemBundle,
   responseSettlementOverlaps,
   settlesAlongsideResponseItems,
 } from "../src/activities/agent-turn/model-call-admission";
@@ -141,4 +142,43 @@ test("only a response's own pre-tool items settle alongside its usage", () => {
   // Provider-hosted calls carry their own results and media.
   expect(responseSettlementOverlaps(item("tool_called", { type: "hosted_tool_call" }))).toBe(false);
   expect(responseSettlementOverlaps({ type: "raw_model_stream_event" })).toBe(false);
+});
+
+test("a response's items close for its usage commit once every streamed item is read", async () => {
+  const call = { type: "tool_call_item", rawItem: { type: "function_call" } };
+  const message = { type: "message_output_item", rawItem: { type: "message" } };
+  const hosted = { type: "tool_call_item", rawItem: { type: "hosted_tool_call" } };
+  const output = { type: "tool_call_output_item", rawItem: { type: "function_call_result" } };
+  const closed = (bundle: { closed: Promise<void> }) =>
+    Promise.race([bundle.closed.then(() => true), Bun.sleep(5).then(() => false)]);
+
+  // The SDK may report its streamed items before the consumer reads them.
+  const early = createResponseItemBundle<string, string>();
+  early.streamed([message, call, hosted, output]);
+  early.read(message);
+  expect(await closed(early)).toBe(false);
+  early.read(call);
+  // Hosted calls and outputs are not collected; they end collection on their own.
+  expect(await closed(early)).toBe(true);
+  expect(early.isOpen()).toBe(false);
+
+  // Or after the consumer has read them all.
+  const late = createResponseItemBundle<string, string>();
+  late.read(call);
+  expect(await closed(late)).toBe(false);
+  late.streamed([call]);
+  expect(await closed(late)).toBe(true);
+
+  // A response with no collected items closes as soon as it is reported.
+  const empty = createResponseItemBundle<string, string>();
+  empty.streamed([output]);
+  expect(await closed(empty)).toBe(true);
+
+  // Any other event, the stream end or a failure closes it early.
+  const interrupted = createResponseItemBundle<string, string>();
+  interrupted.streamed([call]);
+  interrupted.close();
+  expect(await closed(interrupted)).toBe(true);
+  interrupted.streamed([call]);
+  expect(interrupted.isOpen()).toBe(false);
 });

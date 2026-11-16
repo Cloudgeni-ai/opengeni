@@ -1,9 +1,9 @@
 import type { StreamEvent } from "@openai/agents";
 
 /**
- * The SDK's terminal model response. Its usage, billing and history checkpoint
- * settle while the consumer commits the response's own items; the response
- * normalizes to no session event of its own.
+ * The SDK's terminal model response. It settles while the consumer reads the
+ * response's own items, which commit with its usage; the response normalizes
+ * to no session event of its own.
  */
 export function settlesAlongsideResponseItems(event: { type: string; data?: unknown }): boolean {
   return (
@@ -15,8 +15,8 @@ export function settlesAlongsideResponseItems(event: { type: string; data?: unkn
 }
 
 // The items the SDK streams from a model response before any of its tools
-// run. Committing them touches only the event log and the pending-call
-// ledger, never the conversation history or media the settlement writes.
+// run. Their events and pending-call receipts commit in the response's usage
+// transaction; they touch no conversation history or media of their own.
 const RESPONSE_ITEM_EVENT_NAMES = new Set([
   "message_output_created",
   "reasoning_item_created",
@@ -25,9 +25,10 @@ const RESPONSE_ITEM_EVENT_NAMES = new Set([
 ]);
 
 /**
- * Whether an event may be committed while the previous response's usage is
- * still settling. Everything else (tool results, provider-hosted calls,
- * another response, the stream end) waits for the settlement first.
+ * Whether an event may be read while the previous response's usage is still
+ * settling (its items then commit with that usage). Everything else (tool
+ * results, provider-hosted calls, another response, the stream end) waits
+ * for the settlement first.
  */
 export function responseSettlementOverlaps(event: { type: string }): boolean {
   if (event.type !== "run_item_stream_event") return false;
@@ -41,6 +42,75 @@ export function responseSettlementOverlaps(event: { type: string }): boolean {
     (raw as { type?: unknown }).type === "hosted_tool_call"
   );
 }
+
+// The run-item event the SDK streams for each kind of response item.
+const RESPONSE_ITEM_EVENT_NAME_BY_TYPE: Record<string, string> = {
+  message_output_item: "message_output_created",
+  reasoning_item: "reasoning_item_created",
+  tool_call_item: "tool_called",
+  tool_search_call_item: "tool_search_called",
+};
+
+/**
+ * The items of one model response that commit in the same append as its
+ * usage: the consumer collects them while the usage is prepared, and the
+ * settlement takes them once closed. It closes when the consumer has read
+ * every such item the SDK streamed for the response (reported before any of
+ * its tools may run), or earlier at any other event, the stream end or a
+ * failure; items read after that commit on their own.
+ */
+export function createResponseItemBundle<Event, Mutation>() {
+  const events: Event[] = [];
+  const mutations: Mutation[] = [];
+  const callIds: string[] = [];
+  const read = new Set<object>();
+  let expected: Set<object> | null = null;
+  let open = true;
+  let resolveClosed!: () => void;
+  const closed = new Promise<void>((resolve) => {
+    resolveClosed = resolve;
+  });
+  const close = () => {
+    if (!open) return;
+    open = false;
+    resolveClosed();
+  };
+  return {
+    events,
+    mutations,
+    callIds,
+    closed,
+    isOpen: () => open,
+    /** Consumer: an item of this response was collected. */
+    read: (item: object) => {
+      read.add(item);
+      if (expected?.delete(item) && expected.size === 0) close();
+    },
+    /** Producer: the SDK streamed this response's items, before its tools. */
+    streamed: (items: readonly unknown[]) => {
+      if (!open) return;
+      expected = new Set(
+        items.filter(
+          (item): item is object =>
+            !!item &&
+            typeof item === "object" &&
+            !read.has(item) &&
+            responseSettlementOverlaps({
+              type: "run_item_stream_event",
+              name: RESPONSE_ITEM_EVENT_NAME_BY_TYPE[(item as { type?: string }).type ?? ""],
+              item,
+            } as { type: string }),
+        ),
+      );
+      if (expected.size === 0) close();
+    },
+    close,
+  };
+}
+
+export type ResponseItemBundle<Event, Mutation> = ReturnType<
+  typeof createResponseItemBundle<Event, Mutation>
+>;
 
 /** SDK producer/consumer rendezvous. Usage stays on the sole consumer writer. */
 export function createModelCallAdmission(input: {

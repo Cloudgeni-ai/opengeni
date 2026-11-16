@@ -4,6 +4,7 @@ import { appendFileSync } from "node:fs";
 import { tool, type Model, type ModelRequest, type StreamEvent } from "@openai/agents";
 import postgres from "postgres";
 import { ScriptedModel, assistantMessage, functionCall } from "@opengeni/testing/scripted-model";
+import { testSettings } from "@opengeni/testing/settings";
 import { createProductionAgentRuntime, type OpenGeniRuntime } from "@opengeni/runtime";
 import {
   recordModelTransportDispatched,
@@ -13,12 +14,14 @@ import {
 export type CrashLogEntry =
   | { kind: "response"; pid: number; step: ModelStep; responseId: string }
   | { kind: "billed"; pid: number; responseId: string }
+  | { kind: "in_combined_write"; pid: number }
   | {
       kind: "tool_entry";
       pid: number;
       callId: string;
       pendingRows: number;
       createdEvents: number;
+      usageInSameCommit: number;
     }
   | { kind: "tool"; pid: number; callId: string };
 
@@ -174,5 +177,35 @@ export async function durableCallState(sql: postgres.Sql, sessionId: string, cal
     select count(*)::int as count from session_events
     where session_id = ${sessionId} and type = 'agent.toolCall.created'
       and payload->>'id' = ${callId}`;
-  return { pendingRows: pending!.count, createdEvents: created!.count };
+  // The response's usage committed in the same transaction as the call
+  // (one transaction shares one `now()`).
+  const [usage] = await sql<{ count: number }[]>`
+    select count(*)::int as count from session_events usage_event
+    join session_events created_event
+      on created_event.session_id = usage_event.session_id
+     and created_event.type = 'agent.toolCall.created'
+     and created_event.payload->>'id' = ${callId}
+     and created_event.created_at = usage_event.created_at
+    where usage_event.session_id = ${sessionId} and usage_event.type = 'agent.model.usage'`;
+  return {
+    pendingRows: pending!.count,
+    createdEvents: created!.count,
+    usageInSameCommit: usage!.count,
+  };
+}
+
+/** Credit billing on, so each response's ledger includes a credit debit. */
+export function crashTestSettings(databaseUrl: string) {
+  return testSettings({
+    databaseUrl,
+    openaiModel: "scripted-model",
+    sandboxBackend: "none",
+    billingMode: "stripe",
+    modelPricingJson: JSON.stringify({
+      "scripted-model": {
+        inputMicrosPerMillionTokens: 1_000_000,
+        outputMicrosPerMillionTokens: 1_000_000,
+      },
+    }),
+  });
 }

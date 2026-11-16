@@ -42528,6 +42528,40 @@ export async function listSessionEvents(
   });
 }
 
+/**
+ * The durable `agent.model.usage` events of one turn, or of one attempt, in
+ * session order. Worker recovery settles their recorded usage again; every
+ * settlement write is idempotent per source, so a settled response is a no-op.
+ */
+export async function listModelUsageEventsForSettlement(
+  db: Database,
+  workspaceId: string,
+  input: { sessionId: string; turnId?: string; attemptId?: string },
+): Promise<
+  Array<{ id: string; turnId: string | null; turnAttemptId: string | null; payload: unknown }>
+> {
+  if (!input.turnId && !input.attemptId) return [];
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const filters: SQL[] = [
+      eq(schema.sessionEvents.workspaceId, workspaceId),
+      eq(schema.sessionEvents.sessionId, input.sessionId),
+      eq(schema.sessionEvents.type, "agent.model.usage"),
+    ];
+    if (input.turnId) filters.push(eq(schema.sessionEvents.turnId, input.turnId));
+    if (input.attemptId) filters.push(eq(schema.sessionEvents.turnAttemptId, input.attemptId));
+    return await scopedDb
+      .select({
+        id: schema.sessionEvents.id,
+        turnId: schema.sessionEvents.turnId,
+        turnAttemptId: schema.sessionEvents.turnAttemptId,
+        payload: schema.sessionEvents.payload,
+      })
+      .from(schema.sessionEvents)
+      .where(and(...filters))
+      .orderBy(asc(schema.sessionEvents.sequence));
+  });
+}
+
 function normalizeEventSequence(value: number | undefined, fallback: number): number {
   if (value === undefined || !Number.isFinite(value)) {
     return fallback;

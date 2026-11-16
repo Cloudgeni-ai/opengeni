@@ -4,7 +4,6 @@
 // model dispatch. The parent then runs worker-death recovery and a new
 // attempt; killing this process cannot destroy any durable system.
 import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { testSettings } from "@opengeni/testing/settings";
 import { createDb } from "@opengeni/db";
 import { createObservability, type Observability } from "@opengeni/observability";
 import { createActivityTestHarness } from "../../src/activities";
@@ -12,6 +11,7 @@ import {
   HistoryScriptedModel,
   adminSql,
   appendCrashLog,
+  crashTestSettings,
   durableCallState,
   scriptedRuntime,
   type ModelStep,
@@ -68,22 +68,45 @@ const runtime = scriptedRuntime(model, async (callId) => {
   return `${callId} done`;
 });
 
-const settings = testSettings({ databaseUrl: appUrl, openaiModel: "scripted-model", sandboxBackend: "none" });
+const settings = crashTestSettings(appUrl);
 const base = createObservability(settings, { component: "worker" });
+// Response settlement of call-1: lease renewed, then its one combined commit
+// (usage, history, tool-call records), then its deferred ledger writes.
+let call1LeaseRenewed = false;
+let call1Committed = false;
 const observability: Observability = new Proxy(base, {
   get(target, key, receiver) {
     if (key === "observeHistogram") {
       return (input: { name: string; labels?: Record<string, string> }) => {
         const phase = input.labels?.phase;
         if (input.name === "opengeni_model_step_phase_duration_seconds") {
-          // Billing of the latest response committed.
+          // The latest response's deferred ledger writes committed.
           if (phase === "response_usage_billing")
             appendCrashLog(logFile, { kind: "billed", pid: process.pid, responseId: latestResponseId! });
           if (latestStep === "call-1") {
-            if (phase === "response_usage_lease" && point === "settlement_started") crash();
-            if (phase === "response_usage_billing" && point === "billing_committed") crash();
-            if (phase === "response_usage_checkpoint" && point === "usage_committed") crash();
+            if (phase === "response_usage_lease") {
+              call1LeaseRenewed = true;
+              if (point === "settlement_started") crash();
+            }
+            if (phase === "response_usage_checkpoint") {
+              call1Committed = true;
+              if (point === "combined_committed") crash();
+            }
+            if (phase === "response_usage_billing" && point === "debit_committed") crash();
           }
+        }
+        // Inside the combined transaction (usage with the call's records, so
+        // more than one event): its rows are written, it has not committed.
+        if (
+          input.name === "opengeni_session_event_append_phase_seconds" &&
+          phase === "projection" &&
+          input.labels?.batch_size_class !== "1" &&
+          call1LeaseRenewed &&
+          !call1Committed &&
+          point === "combined_write_during"
+        ) {
+          appendCrashLog(logFile, { kind: "in_combined_write", pid: process.pid });
+          crash();
         }
         return target.observeHistogram(input as never);
       };

@@ -12,6 +12,7 @@ import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import { ScriptedModel, functionCall, assistantMessage } from "@opengeni/testing/scripted-model";
 import {
+  applyCreditLedgerEntry,
   bootstrapWorkspace,
   createDb,
   createSession,
@@ -28,6 +29,7 @@ import {
   HistoryScriptedModel,
   adminSql,
   appendCrashLog as appendCrashLogInParent,
+  crashTestSettings,
   durableCallState,
   readCrashLog,
   scriptedRuntime,
@@ -215,18 +217,25 @@ test("bench: response end to next dispatch over a multi-step local turn", async 
   );
   // Every call was recoverable before its tool started.
   expect(atToolStart).toHaveLength(steps);
-  for (const state of atToolStart) expect(state).toEqual({ pendingRows: 1, createdEvents: 1 });
+  // Every call was recoverable before its tool started, in the same commit
+  // as its response's usage.
+  for (const state of atToolStart)
+    expect(state).toEqual({ pendingRows: 1, createdEvents: 1, usageInSameCommit: 1 });
 });
 
 const CRASH_POINTS = [
   // The provider stream ended; nothing of the response is durable yet.
   "response_end",
-  // Usage settlement started (lease renewed); billing not committed.
+  // Usage settlement started (lease renewed); the combined commit has not.
   "settlement_started",
-  // Billing committed; the usage event and history checkpoint are not.
-  "billing_committed",
-  // Usage event and history checkpoint committed.
-  "usage_committed",
+  // Inside the combined transaction (usage event, history, call receipts and
+  // created events written, not committed).
+  "combined_write_during",
+  // The combined transaction committed; the deferred ledger writes (usage
+  // events, credit debit) have not run.
+  "combined_committed",
+  // The deferred ledger writes committed.
+  "debit_committed",
   // The tool was invoked; its side effect has not happened.
   "tool_entry",
   // The tool's side effect happened; it has not returned.
@@ -263,9 +272,9 @@ async function runCrashedAttempt(ctx: Ctx, sessionId: string, point: string, log
   return { attemptId, signal: child.signalCode, exitCode: child.exitCode, stdout, stderr };
 }
 
-async function durableTurnState(sessionId: string) {
-  const outputs = await sql<{ id: string; payload: Record<string, unknown> }[]>`
-    select payload->>'id' as id, payload from session_events
+async function durableTurnState(ctx: Ctx, sessionId: string) {
+  const outputs = await sql<{ id: string }[]>`
+    select payload->>'id' as id from session_events
     where session_id = ${sessionId} and type = 'agent.toolCall.output' order by sequence`;
   const created = await sql<{ id: string }[]>`
     select payload->>'id' as id from session_events
@@ -273,18 +282,70 @@ async function durableTurnState(sessionId: string) {
   const openCalls = await sql<{ call_id: string }[]>`
     select call_id from session_pending_tool_calls
     where session_id = ${sessionId} and result_recorded_at is null`;
-  const usage = await sql<{ source_resource_id: string | null; idempotency_key: string }[]>`
-    select source_resource_id, idempotency_key from usage_events
-    where session_id = ${sessionId} and event_type = 'model.tokens'`;
-  const usageEvents = await sql<{ response_id: string | null }[]>`
-    select payload->>'responseId' as response_id from session_events
+  // The durable usage facts, and each response's ledger by source
+  // (`<turnId>:<responseId>`).
+  const usageFacts = await sql<{ source_id: string; response_id: string }[]>`
+    select turn_id::text || ':' || (payload->>'sourceKey') as source_id,
+      payload->>'sourceKey' as response_id
+    from session_events
     where session_id = ${sessionId} and type = 'agent.model.usage'`;
-  return { outputs, created, openCalls, usage, usageEvents };
+  const ledger = await sql<{ kind: string; source_id: string }[]>`
+    select event_type as kind, source_resource_id as source_id from usage_events
+    where session_id = ${sessionId} and event_type in ('model.tokens', 'model.cost')
+    union all
+    select type as kind, source_id from credit_ledger_entries
+    where account_id = ${ctx.accountId} and type = 'model_usage_debit'`;
+  return { outputs, created, openCalls, usageFacts, ledger };
 }
 
-for (const point of CRASH_POINTS) {
-  test(`a worker killed at ${point} loses no tool call or settled usage`, async () => {
+type TurnState = Awaited<ReturnType<typeof durableTurnState>>;
+const LEDGER_KINDS = ["model.tokens", "model.cost", "model_usage_debit"] as const;
+const ledgerFor = (state: TurnState, sourceId: string) =>
+  Object.fromEntries(
+    LEDGER_KINDS.map((kind) => [
+      kind,
+      state.ledger.filter((row) => row.kind === kind && row.source_id === sourceId).length,
+    ]),
+  );
+const settledOnce = Object.fromEntries(LEDGER_KINDS.map((kind) => [kind, 1]));
+
+/** Every durable usage fact has its whole ledger exactly once, and no ledger
+ * row exists without its durable usage fact. */
+function expectLedgerSettledOnce(state: TurnState, label: string) {
+  for (const fact of state.usageFacts) {
+    expect({ label, source: fact.source_id, ledger: ledgerFor(state, fact.source_id) }).toEqual({
+      label,
+      source: fact.source_id,
+      ledger: settledOnce,
+    });
+  }
+  const facts = new Set(state.usageFacts.map((fact) => fact.source_id));
+  for (const row of state.ledger) {
+    expect({ label, kind: row.kind, recordedFact: facts.has(row.source_id) }).toEqual({
+      label,
+      kind: row.kind,
+      recordedFact: true,
+    });
+  }
+}
+
+const CRASH_CASES = [
+  // Worker-death recovery settles the dead attempt's owed ledger itself.
+  ...CRASH_POINTS.map((point) => ({ point, recovery: "activity" as const })),
+  // Without it (the recovery activity's settlement failed), the turn's next
+  // attempt settles it before its first model request.
+  { point: "combined_committed" as const, recovery: "next_attempt" as const },
+];
+
+for (const { point, recovery } of CRASH_CASES) {
+  test(`a worker killed at ${point} loses no tool call or usage (recovered by ${recovery})`, async () => {
     const ctx = await fixture();
+    await applyCreditLedgerEntry(app.db, {
+      accountId: ctx.accountId,
+      type: "credit_topup",
+      amountMicros: 100_000_000,
+      idempotencyKey: crypto.randomUUID(),
+    });
     const session = await startSession(ctx);
     const logFile = join(scratch, `${point}-${session.id}.jsonl`);
     const crashed = await runCrashedAttempt(ctx, session.id, point, logFile);
@@ -293,19 +354,38 @@ for (const point of CRASH_POINTS) {
         `child did not crash at ${point} (exit ${crashed.exitCode}): ${crashed.stdout}\n${crashed.stderr.slice(-4_000)}`,
       );
     }
-    const atCrash = await durableTurnState(session.id);
+    const atCrash = await durableTurnState(ctx, session.id);
+    const crashLog = await readCrashLog(logFile);
+    const call1Usage = (state: TurnState) =>
+      state.usageFacts.filter((fact) => fact.response_id.startsWith("resp-call-1-"));
+    if (point === "response_end" || point === "settlement_started") {
+      // Nothing of the response is durable.
+      expect(call1Usage(atCrash)).toHaveLength(0);
+      expect(atCrash.created.map((row) => row.id)).toEqual(["call-0"]);
+    }
+    if (point === "combined_write_during") {
+      // Killed inside the transaction: none of it is durable.
+      expect(crashLog.some((entry) => entry.kind === "in_combined_write")).toBe(true);
+      expect(call1Usage(atCrash)).toHaveLength(0);
+      expect(atCrash.created.map((row) => row.id)).toEqual(["call-0"]);
+    }
+    if (point === "combined_committed") {
+      // Usage and the call are durable together; the ledger is still owed.
+      const [fact] = call1Usage(atCrash);
+      expect(fact).toBeDefined();
+      expect(atCrash.created.map((row) => row.id)).toEqual(["call-0", "call-1"]);
+      expect(ledgerFor(atCrash, fact!.source_id)).toEqual({
+        "model.tokens": 0,
+        "model.cost": 0,
+        model_usage_debit: 0,
+      });
+    }
+    if (point === "debit_committed") {
+      const [fact] = call1Usage(atCrash);
+      expect(ledgerFor(atCrash, fact!.source_id)).toEqual(settledOnce);
+    }
 
-    // Worker-death recovery, then the same turn's next attempt (in process).
-    const recovered = await recoverSessionDispatch(app.db, ctx.workspaceId, {
-      sessionId: session.id,
-      attemptId: crashed.attemptId,
-      timeoutType: "HEARTBEAT",
-      maxRedispatches: 3,
-    });
-    expect(recovered.action).toBe("recovering");
-    const recoveredState = await durableTurnState(session.id);
-    expect(recoveredState.openCalls).toHaveLength(0);
-
+    const settings = crashTestSettings(shared.appUrl);
     const model = new HistoryScriptedModel({
       onResponse: (step, responseId) =>
         appendCrashLogInParent(logFile, { kind: "response", pid: process.pid, step, responseId }),
@@ -316,11 +396,6 @@ for (const point of CRASH_POINTS) {
       appendCrashLogInParent(logFile, { kind: "tool", pid: process.pid, callId });
       return `${callId} done`;
     });
-    const settings = testSettings({
-      databaseUrl: shared.appUrl,
-      openaiModel: "scripted-model",
-      sandboxBackend: "none",
-    });
     const activities = createActivityTestHarness({
       settings,
       db: app.db,
@@ -328,6 +403,31 @@ for (const point of CRASH_POINTS) {
       runtime,
       observability: createObservability(settings, { component: "worker" }),
     });
+    // Worker-death recovery, then the same turn's next attempt (in process).
+    if (recovery === "activity") {
+      const recovered = await activities.recoverDispatch({
+        accountId: ctx.accountId,
+        workspaceId: ctx.workspaceId,
+        sessionId: session.id,
+        attemptId: crashed.attemptId,
+        timeoutType: "HEARTBEAT",
+      });
+      expect(recovered.action).toBe("recovering");
+      // Owed ledger writes are finished by recovery itself, before (and
+      // without) any further attempt.
+      expectLedgerSettledOnce(await durableTurnState(ctx, session.id), `${point}: recovered`);
+    } else {
+      const recovered = await recoverSessionDispatch(app.db, ctx.workspaceId, {
+        sessionId: session.id,
+        attemptId: crashed.attemptId,
+        timeoutType: "HEARTBEAT",
+        maxRedispatches: 3,
+      });
+      expect(recovered.action).toBe("recovering");
+    }
+    const recoveredState = await durableTurnState(ctx, session.id);
+    expect(recoveredState.openCalls).toHaveLength(0);
+
     const resumed = await activities.runAgentTurn({
       accountId: ctx.accountId,
       workspaceId: ctx.workspaceId,
@@ -340,13 +440,14 @@ for (const point of CRASH_POINTS) {
     expect(resumed.status).toBe("idle");
 
     const log = await readCrashLog(logFile);
-    const final = await durableTurnState(session.id);
+    const final = await durableTurnState(ctx, session.id);
     const executions = new Map<string, number>();
     for (const entry of log) {
       if (entry.kind === "tool")
         executions.set(entry.callId, (executions.get(entry.callId) ?? 0) + 1);
     }
-    // No tool started before its call was recoverable.
+    // No tool started before its call, and its response's usage, were
+    // recoverable, all in one commit.
     for (const entry of log) {
       if (entry.kind === "tool_entry") {
         expect({
@@ -354,7 +455,14 @@ for (const point of CRASH_POINTS) {
           callId: entry.callId,
           pendingRows: entry.pendingRows,
           createdEvents: entry.createdEvents,
-        }).toEqual({ point, callId: entry.callId, pendingRows: 1, createdEvents: 1 });
+          usageInSameCommit: entry.usageInSameCommit,
+        }).toEqual({
+          point,
+          callId: entry.callId,
+          pendingRows: 1,
+          createdEvents: 1,
+          usageInSameCommit: 1,
+        });
       }
     }
     // No duplicate execution: each call ran at most once across both attempts.
@@ -370,47 +478,44 @@ for (const point of CRASH_POINTS) {
       });
     }
     expect(final.openCalls).toHaveLength(0);
-    // A call that ran before the crash is never asked for again: recovery
+    // A call recorded before the crash is never asked for again: recovery
     // closed it and the model saw its (interrupted) result.
     if (atCrash.created.some((row) => row.id === "call-1")) {
       expect(
         log.filter((entry) => entry.kind === "response" && entry.step === "call-1"),
       ).toHaveLength(1);
     }
-    // No lost or doubled usage: every response billed before the crash, and
-    // every response of the resumed attempt, is billed exactly once.
-    const billedBeforeCrash = log.flatMap((entry) =>
-      entry.kind === "billed" ? [entry.responseId] : [],
-    );
-    const resumedResponses = log.flatMap((entry) =>
-      entry.kind === "response" && entry.pid === process.pid ? [entry.responseId] : [],
-    );
-    const usageFor = (responseId: string) =>
-      final.usage.filter(
-        (row) =>
-          row.source_resource_id?.includes(responseId) || row.idempotency_key.includes(responseId),
-      ).length;
-    for (const responseId of [...billedBeforeCrash, ...resumedResponses]) {
-      expect({ responseId, usage: usageFor(responseId) }).toEqual({ responseId, usage: 1 });
-    }
+    // No lost or doubled usage: every usage fact durable at the crash, and
+    // every response of the resumed attempt, has its whole ledger exactly
+    // once; no ledger row exists without its usage fact.
+    expectLedgerSettledOnce(final, `${point}: final`);
+    const facts = new Set(final.usageFacts.map((fact) => fact.response_id));
+    for (const fact of atCrash.usageFacts) expect(facts.has(fact.response_id)).toBe(true);
     for (const entry of log) {
-      if (entry.kind === "response") expect(usageFor(entry.responseId)).toBeLessThanOrEqual(1);
+      if (entry.kind === "response" && entry.pid === process.pid)
+        expect({ response: entry.responseId, fact: facts.has(entry.responseId) }).toEqual({
+          response: entry.responseId,
+          fact: true,
+        });
     }
     console.log(
       "TOOL_CRASH_MATRIX",
       JSON.stringify({
         point,
+        recovery,
         atCrash: {
           created: atCrash.created.map((row) => row.id),
           outputs: atCrash.outputs.map((row) => row.id),
           openCalls: atCrash.openCalls.map((row) => row.call_id),
-          billedResponses: atCrash.usage.length,
+          usageFacts: atCrash.usageFacts.length,
+          ledgerRows: atCrash.ledger.length,
         },
         executions: Object.fromEntries(executions),
         modelResponses: log
           .filter((entry) => entry.kind === "response")
           .map((entry) => (entry as { step: string }).step),
-        billedResponses: final.usage.length,
+        usageFacts: final.usageFacts.length,
+        ledgerRows: final.ledger.length,
       }),
     );
   });

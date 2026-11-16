@@ -10,6 +10,7 @@ import {
 } from "@opengeni/contracts";
 import {
   isStoredVerbatimAsLosslessJsonString,
+  listModelUsageEventsForSettlement,
   recordModelCallFact,
   setSessionLastInputTokensInTransaction,
   type AppendEventInput,
@@ -59,11 +60,13 @@ import {
   releaseHeldSessionUsageReceiptMeteredByEvent,
 } from "./session-usage-custody";
 import {
+  priceModelUsage,
   sanitizedModelUsageInput,
   sessionUsageMeterAmountMicros,
   settleModelUsage,
   settleHostedWebSearchUsage,
   type ModelUsageBillingRecord,
+  type ModelUsageSettlementInput,
 } from "@opengeni/core";
 
 export function modelUsageSourceKey(input: {
@@ -376,6 +379,12 @@ export async function processModelResponseTerminalEvent(input: {
   processingResidency: ModelCallProcessingResidencyV1;
   /** Called synchronously once this event is claimed as a new response, before any await. */
   onClaimed?: () => void;
+  /**
+   * The claimed response's own items (messages, reasoning, tool-call records
+   * and their pending-call receipts). Resolves once the consumer has read
+   * them; they commit in the same transaction as the response's usage.
+   */
+  responseItems?: () => Promise<ResponseItemsCommit | null>;
 }): Promise<
   | { status: "not_response" }
   | { status: "duplicate"; sourceKey: string }
@@ -412,6 +421,28 @@ export async function processModelResponseTerminalEvent(input: {
   input.state.claimedSourceKeys.add(sourceKey);
   input.state.responseCount = responseOrdinal;
   input.onClaimed?.();
+  // The response's own items, once the consumer has read them; taken once.
+  let responseItems: ResponseItemsCommit | null | undefined;
+  let responseItemsCommitted = false;
+  const takeResponseItems = async (): Promise<ResponseItemsCommit | null> => {
+    if (responseItems === undefined) responseItems = (await input.responseItems?.()) ?? null;
+    return responseItems;
+  };
+  const markResponseItemsCommitted = () => {
+    if (responseItemsCommitted || !responseItems) return;
+    responseItemsCommitted = true;
+    responseItems.committed();
+  };
+  // Without a usage event to ride on, the items still commit as one append.
+  const commitResponseItemsAlone = async () => {
+    const items = await takeResponseItems();
+    if (!items || responseItemsCommitted) return;
+    if (items.events.length > 0) {
+      if (!input.publish) throw new Error("Response items cannot be recorded without a publisher");
+      await input.publish(items.events, true, items.mutate);
+    }
+    markResponseItemsCommitted();
+  };
   const timing = input.responseTiming?.() ?? null;
   const promptCacheRequest = input.promptCacheRequest?.() ?? null;
 
@@ -454,6 +485,7 @@ export async function processModelResponseTerminalEvent(input: {
     leaseLostMessage: input.leaseLostMessage,
     recordUsage: async () => {
       if (!responseUsage) {
+        await commitResponseItemsAlone();
         // No usage means no token debit here, but the provider still ran
         // these searches. Each response settles its own under its own source
         // key, so a stream that mixes responses with and without usage
@@ -464,33 +496,35 @@ export async function processModelResponseTerminalEvent(input: {
         });
         return;
       }
-      const billing = await timedUsagePhase("response_usage_billing", () =>
-        recordModelUsageAndDebitCredits(input.settings, input.db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: input.turnId,
-          turnAttemptId: input.turnAttemptId,
-          model: input.model,
-          creditPolicyRevision: input.creditPolicyRevision,
-          externallyBilled: input.externallyBilled,
-          ...(input.byok !== undefined ? { byok: input.byok } : {}),
-          ...(input.chargesOpenGeniCredits !== undefined
-            ? { chargesOpenGeniCredits: input.chargesOpenGeniCredits }
-            : {}),
-          ...(input.countsTowardTokenCap !== undefined
-            ? { countsTowardTokenCap: input.countsTowardTokenCap }
-            : {}),
-          usage: responseUsage.usage,
-          normalizedUsage,
-          gatewayBilling: responseUsage.gatewayBilling,
-          webSearchRequests: responseUsage.webSearchRequests,
-          sourceKey,
-          ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
-          observability: input.observability,
-          metricProvider: input.provider,
-        }),
-      );
+      const settlementInput: Parameters<typeof recordModelUsageAndDebitCredits>[2] = {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        turnAttemptId: input.turnAttemptId,
+        model: input.model,
+        creditPolicyRevision: input.creditPolicyRevision,
+        externallyBilled: input.externallyBilled,
+        ...(input.byok !== undefined ? { byok: input.byok } : {}),
+        ...(input.chargesOpenGeniCredits !== undefined
+          ? { chargesOpenGeniCredits: input.chargesOpenGeniCredits }
+          : {}),
+        ...(input.countsTowardTokenCap !== undefined
+          ? { countsTowardTokenCap: input.countsTowardTokenCap }
+          : {}),
+        usage: responseUsage.usage,
+        normalizedUsage,
+        gatewayBilling: responseUsage.gatewayBilling,
+        webSearchRequests: responseUsage.webSearchRequests,
+        sourceKey,
+        ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
+        observability: input.observability,
+        metricProvider: input.provider,
+      };
+      // Price first: it fails exactly where the ledger writes would, before
+      // anything is durable. The ledger writes themselves run after the
+      // response's usage is durable (below), alongside its tools.
+      const billing = priceRecordedModelUsage(input.settings, settlementInput);
       const recordFact = (factDb: ActivityServices["db"]) =>
         billing
           ? recordAuthoritativeModelCallFact({
@@ -520,6 +554,11 @@ export async function processModelResponseTerminalEvent(input: {
       );
       const commitUsage = async (history?: SessionEventMutation<"event">) => {
         const completionEvents = input.completionEvents?.() ?? [];
+        // The response's own items (messages, reasoning, tool-call records)
+        // commit in this same transaction, so usage and the calls recovery
+        // resolves become durable together, before any of the tools runs.
+        const items = await takeResponseItems();
+        const alreadyEmitted = input.emittedSourceKeys.has(sourceKey);
         authoritative = await emitModelCallUsage({
           observability: input.observability,
           publish: input.publish,
@@ -542,16 +581,15 @@ export async function processModelResponseTerminalEvent(input: {
           emittedSourceKeys: input.emittedSourceKeys,
           timing,
           processingResidency: input.processingResidency,
-          additionalEvents: completionEvents,
+          additionalEvents: [...completionEvents, ...(items?.events ?? [])],
+          ...(items?.mutate ? { mutate: items.mutate } : {}),
+          ...(billing ? { settlement: recordedModelUsageSettlement(settlementInput) } : {}),
           ...(input.checkpoint
             ? {
                 project: async (tx, fence, events) => {
                   signalsCommitted = false;
                   // A replayed provider response cannot replace context signals.
                   if (!fence.allowed || !isCanonicalModelUsage(events, sourceKey)) return;
-                  // The fact remains best-effort in its own savepoint, but completes
-                  // before the same lost-lease checkpoint as the standalone path.
-                  await recordFact(tx);
                   if (input.leaseLost()) return;
                   await setSessionLastInputTokensInTransaction(tx, fence, lastInputTokens);
                   if (history) await history(tx, fence);
@@ -560,18 +598,54 @@ export async function processModelResponseTerminalEvent(input: {
               }
             : {}),
         });
+        // The usage is durable once its source key is emitted, by this append or
+        // an earlier one; the items rode along only on this append.
+        usageDurable = input.emittedSourceKeys.has(sourceKey);
+        if (items) {
+          if (usageDurable && !alreadyEmitted) markResponseItemsCommitted();
+          else await commitResponseItemsAlone();
+        }
         if (completionEvents.length > 0) input.onCompletionCommitted?.();
         // Already-incurred usage commits even when the credential was lost.
         // Do not acknowledge a prepared history checkpoint in that case.
         if (input.checkpoint && input.leaseLost()) throw new Error(input.leaseLostMessage);
         return authoritative && signalsCommitted;
       };
-      await timedUsagePhase("response_usage_checkpoint", async () => {
-        if (input.checkpoint && !input.leaseLost()) await input.checkpoint(commitUsage);
-        else await commitUsage();
-      });
+      let usageDurable = false;
+      let afterCommitFailure: { error: unknown } | null = null;
+      try {
+        await timedUsagePhase("response_usage_checkpoint", async () => {
+          if (input.checkpoint && !input.leaseLost()) await input.checkpoint(commitUsage);
+          else await commitUsage();
+        });
+      } catch (error) {
+        // Before the usage commit nothing of this response is durable and no
+        // tool of it has run: the attempt fails and the model is asked again.
+        // The provider already charged for the response, so its ledger writes
+        // still land (idempotent per source) before the failure propagates.
+        if (!usageDurable) {
+          await timedUsagePhase("response_usage_billing", () =>
+            recordModelUsageAndDebitCredits(input.settings, input.db, settlementInput),
+          );
+          throw error;
+        }
+        afterCommitFailure = { error };
+      }
+      // The response's usage is durable. Its ledger writes (usage events,
+      // credit debit, platform fee, hosted searches) are idempotent per source
+      // and run here, alongside the tools; the next model request waits for
+      // them. If this worker dies first, recovery settles the recorded usage
+      // (settleRecordedModelUsage) exactly once.
+      // The best-effort call fact (analytics only; it catches its own
+      // failures) is written alongside them, off the commit the tools wait on.
+      await Promise.all([
+        timedUsagePhase("response_usage_billing", () =>
+          recordModelUsageAndDebitCredits(input.settings, input.db, settlementInput),
+        ),
+        authoritative ? recordFact(input.db) : undefined,
+      ]);
+      if (afterCommitFailure) throw afterCommitFailure.error;
       if (authoritative && billing) {
-        if (!input.checkpoint) await recordFact(input.db);
         recordAuthoritativeModelUsageMetrics({
           observability: input.observability,
           settings: input.settings,
@@ -862,6 +936,13 @@ export async function emitModelCallUsage(input: {
    * event so a fact rebuilt from it keeps the route's recorded region.
    */
   processingResidency: ModelCallProcessingResidencyV1;
+  /**
+   * What recovery needs to settle this response's ledger again when the
+   * event commits before its billing writes (see `settleRecordedModelUsage`).
+   */
+  settlement?: RecordedModelUsageSettlementV1;
+  /** Committed in the same transaction as the event, before `project`. */
+  mutate?: SessionEventMutation<"event">;
 }): Promise<boolean> {
   const usage =
     input.usage && typeof input.usage === "object" && "usage" in input.usage
@@ -903,12 +984,13 @@ export async function emitModelCallUsage(input: {
           ...(input.timing ? { timing: input.timing } : {}),
           processingResidency: modelCallProcessingResidencyClaim(input.processingResidency),
           ...telemetry,
+          ...(input.settlement ? { settlement: input.settlement } : {}),
         },
       },
       ...(input.additionalEvents ?? []),
     ],
     true,
-    undefined,
+    input.mutate,
     input.project,
   );
   input.emittedSourceKeys?.add(input.sourceKey);
@@ -1050,41 +1132,38 @@ export function applyCodexCacheTelemetry(
 export type { ModelUsageBillingRecord };
 export { sanitizedModelUsageInput };
 
-// Exported for unit testing the external-billing bypass; not part of the activity surface.
-export async function recordModelUsageAndDebitCredits(
+/** A response's own items, committed with its usage in one append. */
+export type ResponseItemsCommit = {
+  events: Parameters<TurnEventPublisher>[0];
+  mutate?: SessionEventMutation<"event">;
+  /** The append carrying the items committed. */
+  committed: () => void;
+};
+
+/**
+ * The billing inputs of one response, stored on its `agent.model.usage`
+ * event. The event commits before the response's ledger writes, so recovery
+ * can settle them later from durable truth alone (settleRecordedModelUsage).
+ */
+export type RecordedModelUsageSettlementV1 = {
+  version: 1;
+  chargesOpenGeniCredits: boolean;
+  countsTowardTokenCap: boolean;
+  byok?: boolean;
+  creditPolicyRevision?: number;
+  latencyMode?: LatencyMode;
+  gatewayBilling?: ModelResponseUsage["gatewayBilling"];
+  webSearchRequests?: number;
+  normalizedUsage: ModelCallUsageNormalization;
+};
+
+type RecordedModelUsageInput = Parameters<typeof recordModelUsageAndDebitCredits>[2];
+
+function modelUsageSettlementInput(
   settings: Settings,
-  db: ActivityServices["db"],
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-    turnId: string;
-    turnAttemptId: string;
-    model: string;
-    externallyBilled: boolean;
-    chargesOpenGeniCredits?: boolean;
-    countsTowardTokenCap?: boolean;
-    /** Served by the person's own API key; omitted resolves from the model. */
-    byok?: boolean;
-    creditPolicyRevision?: number | undefined;
-    gatewayBilling?: ModelResponseUsage["gatewayBilling"];
-    /** Hosted provider searches the response reported; charged on credit-billed turns. */
-    webSearchRequests?: number | undefined;
-    usage?: ModelUsageInput | ModelCallUsageInput | null;
-    normalizedUsage?: ModelCallUsageNormalization;
-    sourceKey: string;
-    latencyMode?: LatencyMode;
-    observability?: ActivityServices["observability"];
-    /** Configured provider id for metric labels; never billing authority. */
-    metricProvider?: string;
-    /** The caller retains the response durably and retries the whole transaction. */
-    atomicReceiptPersistence?: boolean;
-  },
-): Promise<ModelUsageBillingRecord | null> {
-  if (!input.usage) {
-    return null;
-  }
-  return await settleModelUsage(settings, db, {
+  input: RecordedModelUsageInput & { usage: NonNullable<RecordedModelUsageInput["usage"]> },
+): ModelUsageSettlementInput {
+  return {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     model: input.model,
@@ -1124,7 +1203,166 @@ export async function recordModelUsageAndDebitCredits(
         grantDebitedMicros: result.grantDebitedMicros,
       });
     },
+  };
+}
+
+/** The billing record `recordModelUsageAndDebitCredits` would return, without writing. */
+export function priceRecordedModelUsage(
+  settings: Settings,
+  input: RecordedModelUsageInput,
+): ModelUsageBillingRecord | null {
+  if (!input.usage) return null;
+  return priceModelUsage(
+    settings,
+    modelUsageSettlementInput(settings, { ...input, usage: input.usage }),
+  );
+}
+
+/** The recovery record stored with a response's usage event. */
+export function recordedModelUsageSettlement(
+  input: RecordedModelUsageInput,
+): RecordedModelUsageSettlementV1 {
+  const settlement: RecordedModelUsageSettlementV1 = {
+    version: 1,
+    chargesOpenGeniCredits: input.chargesOpenGeniCredits ?? !input.externallyBilled,
+    countsTowardTokenCap: input.countsTowardTokenCap ?? !input.externallyBilled,
+    normalizedUsage: input.normalizedUsage ?? normalizeModelCallUsage(input.usage!),
+  };
+  if (input.byok !== undefined) settlement.byok = input.byok;
+  if (input.creditPolicyRevision !== undefined)
+    settlement.creditPolicyRevision = input.creditPolicyRevision;
+  if (input.latencyMode) settlement.latencyMode = input.latencyMode;
+  if (input.gatewayBilling) settlement.gatewayBilling = input.gatewayBilling;
+  if (input.webSearchRequests) settlement.webSearchRequests = input.webSearchRequests;
+  return settlement;
+}
+
+function parseRecordedModelUsageSettlement(payload: unknown): {
+  model: string;
+  sourceKey: string;
+  settlement: RecordedModelUsageSettlementV1;
+} | null {
+  if (!payload || typeof payload !== "object") return null;
+  const { model, sourceKey, settlement } = payload as {
+    model?: unknown;
+    sourceKey?: unknown;
+    settlement?: unknown;
+  };
+  if (typeof model !== "string" || typeof sourceKey !== "string") return null;
+  if (!settlement || typeof settlement !== "object") return null;
+  const recorded = settlement as Partial<RecordedModelUsageSettlementV1>;
+  if (
+    recorded.version !== 1 ||
+    typeof recorded.chargesOpenGeniCredits !== "boolean" ||
+    typeof recorded.countsTowardTokenCap !== "boolean" ||
+    !recorded.normalizedUsage ||
+    typeof recorded.normalizedUsage !== "object"
+  ) {
+    return null;
+  }
+  return { model, sourceKey, settlement: recorded as RecordedModelUsageSettlementV1 };
+}
+
+/**
+ * Settle the ledger of every recorded model response of a turn (or of one
+ * attempt) from its durable `agent.model.usage` event. A response's usage
+ * event commits before its ledger writes, so a worker that dies in between
+ * leaves them owed; this finishes them. Every write is idempotent per source
+ * (`<turnId>:<sourceKey>`), so a settled response is a no-op and none is
+ * charged twice.
+ */
+export async function settleRecordedModelUsage(
+  settings: Settings,
+  db: ActivityServices["db"],
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId?: string;
+    attemptId?: string;
+    /** Skip this attempt's own responses (it settles them itself). */
+    excludeAttemptId?: string;
+    observability?: ActivityServices["observability"];
+  },
+): Promise<number> {
+  const events = await listModelUsageEventsForSettlement(db, input.workspaceId, {
+    sessionId: input.sessionId,
+    ...(input.turnId ? { turnId: input.turnId } : {}),
+    ...(input.attemptId ? { attemptId: input.attemptId } : {}),
   });
+  let settled = 0;
+  for (const event of events) {
+    const recorded = parseRecordedModelUsageSettlement(event.payload);
+    if (!recorded || !event.turnId || !event.turnAttemptId) continue;
+    if (event.turnAttemptId === input.excludeAttemptId) continue;
+    const { settlement } = recorded;
+    await recordModelUsageAndDebitCredits(settings, db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: event.turnId,
+      turnAttemptId: event.turnAttemptId,
+      model: recorded.model,
+      externallyBilled: !settlement.chargesOpenGeniCredits,
+      chargesOpenGeniCredits: settlement.chargesOpenGeniCredits,
+      countsTowardTokenCap: settlement.countsTowardTokenCap,
+      ...(settlement.byok !== undefined ? { byok: settlement.byok } : {}),
+      creditPolicyRevision: settlement.creditPolicyRevision,
+      ...(settlement.gatewayBilling ? { gatewayBilling: settlement.gatewayBilling } : {}),
+      ...(settlement.webSearchRequests ? { webSearchRequests: settlement.webSearchRequests } : {}),
+      // Pricing reads only the normalized usage; the raw form is not retained.
+      usage: {},
+      normalizedUsage: settlement.normalizedUsage,
+      sourceKey: recorded.sourceKey,
+      ...(settlement.latencyMode ? { latencyMode: settlement.latencyMode } : {}),
+      ...(input.observability ? { observability: input.observability } : {}),
+      // The event's own trigger already metered the task usage receipt.
+      atomicReceiptPersistence: true,
+    });
+    settled += 1;
+  }
+  return settled;
+}
+
+// Exported for unit testing the external-billing bypass; not part of the activity surface.
+export async function recordModelUsageAndDebitCredits(
+  settings: Settings,
+  db: ActivityServices["db"],
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    turnAttemptId: string;
+    model: string;
+    externallyBilled: boolean;
+    chargesOpenGeniCredits?: boolean;
+    countsTowardTokenCap?: boolean;
+    /** Served by the person's own API key; omitted resolves from the model. */
+    byok?: boolean;
+    creditPolicyRevision?: number | undefined;
+    gatewayBilling?: ModelResponseUsage["gatewayBilling"];
+    /** Hosted provider searches the response reported; charged on credit-billed turns. */
+    webSearchRequests?: number | undefined;
+    usage?: ModelUsageInput | ModelCallUsageInput | null;
+    normalizedUsage?: ModelCallUsageNormalization;
+    sourceKey: string;
+    latencyMode?: LatencyMode;
+    observability?: ActivityServices["observability"];
+    /** Configured provider id for metric labels; never billing authority. */
+    metricProvider?: string;
+    /** The caller retains the response durably and retries the whole transaction. */
+    atomicReceiptPersistence?: boolean;
+  },
+): Promise<ModelUsageBillingRecord | null> {
+  if (!input.usage) {
+    return null;
+  }
+  return await settleModelUsage(
+    settings,
+    db,
+    modelUsageSettlementInput(settings, { ...input, usage: input.usage }),
+  );
 }
 
 const modelMetricProductIds = new WeakMap<Settings, Map<string, string>>();

@@ -1,4 +1,5 @@
 import { FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE } from "./agent-turn/provider-recovery-policy";
+import { settleRecordedModelUsage } from "./agent-turn/model-usage";
 import {
   settleSessionAttemptInterruptions,
   applySessionTurnSettlement,
@@ -105,6 +106,7 @@ export type SessionStateActivityOverrides = Partial<{
   notifyParentOfChildIdle: typeof notifyParentOfChildIdle;
   recordTurnsQueuedGauge: typeof recordTurnsQueuedGauge;
   recordWorkerDeathRecoveryMetrics: typeof recordWorkerDeathRecoveryMetrics;
+  settleRecordedModelUsage: typeof settleRecordedModelUsage;
 }>;
 
 // Crash-loop guard for worker-death re-dispatch: a turn that takes a worker
@@ -167,6 +169,7 @@ export function createSessionStateActivities(
   const recordTurnsQueuedGaugeFn = overrides.recordTurnsQueuedGauge ?? recordTurnsQueuedGauge;
   const recordWorkerDeathRecoveryMetricsFn =
     overrides.recordWorkerDeathRecoveryMetrics ?? recordWorkerDeathRecoveryMetrics;
+  const settleRecordedModelUsageFn = overrides.settleRecordedModelUsage ?? settleRecordedModelUsage;
 
   async function failSessionAttempt(
     input: FailSessionAttemptInput,
@@ -619,6 +622,26 @@ export function createSessionStateActivities(
    */
   async function recoverDispatch(input: RecoverDispatchInput): Promise<RecoverDispatchResult> {
     const { settings, db, bus, observability, wakeSessionWorkflow } = await services();
+    // The dead attempt may have made a response's usage durable before its
+    // ledger writes. Settle them now (idempotent per source), also for a turn
+    // that gets no further attempt. A failure here never blocks recovery; the
+    // next attempt of the turn settles them again before its first request.
+    try {
+      await settleRecordedModelUsageFn(settings, db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        attemptId: input.attemptId,
+        observability,
+      });
+    } catch (error) {
+      observability.warn?.("recorded model usage settlement failed during worker-death recovery", {
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        attemptId: input.attemptId,
+        errorName: error instanceof Error ? error.name : "unknown",
+      });
+    }
     const result = await recoverSessionDispatchFn(db, input.workspaceId, {
       sessionId: input.sessionId,
       attemptId: input.attemptId,
