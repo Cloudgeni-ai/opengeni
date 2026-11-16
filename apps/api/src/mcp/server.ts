@@ -262,6 +262,7 @@ import {
   SessionAuthorizationUnavailableError,
   dispatchWithSessionAuthorizationReadReuse,
   searchCapabilityCatalogItems,
+  connectedFirstCatalogMatchOrder,
   suggestCapabilityCatalogItems,
   connectionReconnectDay,
   connectionsNeedingReconnectFor,
@@ -8074,7 +8075,14 @@ function registerCapabilityDiscoveryTools(
             .map((connection) => ({ capabilityId: connection.id, name: connection.name })),
         );
       }
-      const matches = ranked.map(({ item, matchedOn, approximate }, index) => {
+      // A service the person can already use comes before a same-category
+      // one they would still have to connect, unless the query names it.
+      const order = connectedFirstCatalogMatchOrder(
+        ranked,
+        setups.map((setup) => setup.status === "ready"),
+      );
+      const matches = order.map((index) => {
+        const { item, matchedOn, approximate } = ranked[index]!;
         const setup = withCapabilityReconnectSetup(
           item,
           setups[index]!,

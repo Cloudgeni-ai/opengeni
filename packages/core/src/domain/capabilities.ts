@@ -3779,6 +3779,11 @@ export type CapabilityCatalogSearchMatch = {
    * distance hit), never through an exact, prefix, or substring hit.
    */
   approximate: boolean;
+  /**
+   * The query names this entry (or one whose name agrees with it), not just
+   * words it shares with the entry.
+   */
+  named: boolean;
 };
 
 export type CapabilityCatalogSuggestion = {
@@ -3911,7 +3916,8 @@ export function searchCapabilityCatalogItems(
       // vendor's domain word) ranks above entries that only share ordinary
       // words with a sentence. So do entries whose names agree with a named
       // one ("GitHub App" when "GitHub" is named), keeping their usual order.
-      if (namedNames.some((name) => integrationNamesAgree(name, item.name))) {
+      const named = namedNames.some((name) => integrationNamesAgree(name, item.name));
+      if (named) {
         if (score === 0) matchedOn.add("name");
         score += NAMED_ENTRY_BONUS;
       }
@@ -3919,7 +3925,7 @@ export function searchCapabilityCatalogItems(
       if (item.enabled) score += 12;
       if (item.tier === "verified") score += 8;
       if (item.source === "built_in") score += 6;
-      return [{ item, score, matchedOn: [...matchedOn], approximate }];
+      return [{ item, score, matchedOn: [...matchedOn], approximate, named }];
     })
     .sort(
       (left, right) =>
@@ -3929,6 +3935,38 @@ export function searchCapabilityCatalogItems(
         left.item.id.localeCompare(right.item.id),
     )
     .slice(0, boundedLimit);
+}
+
+/**
+ * The order to present catalog matches in once their setup in this chat is
+ * known, as indexes into `matches`. A match the person can already use
+ * (ready) comes before a match of the same category they would still have to
+ * connect, so a request for a kind of service ("read my email") reaches the
+ * connected service before a Connect card for an unconnected alternative.
+ * A match the query names keeps its place: asking for that service by name
+ * still finds it first. Everything else keeps the ranked order.
+ */
+export function connectedFirstCatalogMatchOrder(
+  matches: readonly Pick<CapabilityCatalogSearchMatch, "item" | "named">[],
+  ready: readonly boolean[],
+): number[] {
+  const order: number[] = [];
+  const placed = new Set<number>();
+  const place = (index: number) => {
+    if (placed.has(index)) return;
+    placed.add(index);
+    order.push(index);
+  };
+  for (const [index, match] of matches.entries()) {
+    if (!ready[index] && !match.named) {
+      for (const [other, candidate] of matches.entries()) {
+        if (other > index && ready[other] && candidate.item.category === match.item.category)
+          place(other);
+      }
+    }
+    place(index);
+  }
+  return order;
 }
 
 /**

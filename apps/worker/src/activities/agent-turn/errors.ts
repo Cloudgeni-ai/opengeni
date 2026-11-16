@@ -727,7 +727,7 @@ function unavailableMcpConnectorsNotice(input: {
   return [
     "Connector availability for this turn: these connectors are configured for this chat, but their tools were not loaded this turn, so tool search and tool lists do not show them.",
     ...lines,
-    "When the person's request needs one of them, tell them which connector is unavailable and why, using only the reason given here; do not guess another cause or claim to have read or updated that system. Continue with unaffected work only when safe.",
+    "Loaded tools that can do the task come first: a request needs one of them only when the person named it or no loaded tool can do it. When it does, tell them which connector is unavailable and why, using only the reason given here; do not guess another cause or claim to have read or updated that system. Continue with unaffected work only when safe.",
   ].join("\n");
 }
 
