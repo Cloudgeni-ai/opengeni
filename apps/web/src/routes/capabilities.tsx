@@ -116,6 +116,7 @@ import {
   useFinishUnfinishedConnectSetups,
 } from "@/components/capabilities/use-api-integration-accounts";
 import {
+  nativeCatalogItemCannotConnect,
   nativeCatalogItemNotice,
   nativeCatalogItemVisible,
   nativeIntegrationModel,
@@ -507,9 +508,11 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
       items.filter(
         (item) =>
           isConnectorCatalogItem(item) &&
-          nativeCatalogItemVisible(item, nativeConnectCatalog, nativeConnectionFacts),
+          nativeCatalogItemVisible(item, nativeConnectCatalog, nativeConnectionFacts, {
+            searching: hasQuery,
+          }),
       ),
-    [items, nativeConnectCatalog, nativeConnectionFacts],
+    [items, nativeConnectCatalog, nativeConnectionFacts, hasQuery],
   );
   // The Featured strip shows curated connectors when nothing narrows the list;
   // the grid then carries the long tail. A search or a non-MCP filter hides the
@@ -644,10 +647,12 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
     ),
   }));
   const connectorChip = (item: CapabilityCatalogItem) =>
-    connectionAccessChip(
-      capabilityStateChip(item, connectionHealth(item, connections ?? [], connectionsLoaded)),
-      connectionsAccessDenied,
-    );
+    !item.enabled && nativeCatalogItemCannotConnect(item)
+      ? { label: "Unavailable" as const, tone: "plain" as const }
+      : connectionAccessChip(
+          capabilityStateChip(item, connectionHealth(item, connections ?? [], connectionsLoaded)),
+          connectionsAccessDenied,
+        );
   const openIntegrationFrom = () => {
     integrationOpenerRef.current =
       document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -1192,12 +1197,15 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
   // --- Connect flows ---------------------------------------------------------
 
   async function handleAction(action: ConnectAction): Promise<boolean> {
-    // Removing one account is management of an existing row, never fresh setup.
+    // Removing or renaming one account is management of an existing row, never
+    // fresh setup.
     if (
       !selected ||
       !selectedItem ||
       busyId !== null ||
-      (selectedSetupUnavailable && action.type !== "remove_connection")
+      (selectedSetupUnavailable &&
+        action.type !== "remove_connection" &&
+        action.type !== "rename_connection")
     )
       return false;
     // Social authorization starts a new provider attempt even when existing
@@ -1230,11 +1238,13 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
         },
         action,
       );
-      if (action.type === "remove_connection") catalogConnectionAccounts.onRetry();
+      if (action.type === "remove_connection" || action.type === "rename_connection")
+        catalogConnectionAccounts.onRetry();
       return true;
     } catch (error) {
       await refresh();
-      if (action.type === "remove_connection") catalogConnectionAccounts.onRetry();
+      if (action.type === "remove_connection" || action.type === "rename_connection")
+        catalogConnectionAccounts.onRetry();
       const copy = capabilityErrorToast(error, "Something went wrong");
       setSheetError(
         isMissingCredentialsError(error)
@@ -1785,6 +1795,8 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
             hasWorkspacePermission(context.accessContext, accountWorkspaceId, "connections:write"),
           onRemove: (connection) =>
             handleAction({ type: "remove_connection", item: selectedItem, connection }),
+          onRename: (connection, label) =>
+            handleAction({ type: "rename_connection", item: selectedItem, connection, label }),
         }}
         canManageSocial={canManageSocial}
         socialSetupAvailable={selectedSocialSetupAvailable}

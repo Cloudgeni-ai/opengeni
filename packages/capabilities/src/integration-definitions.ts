@@ -359,7 +359,7 @@ export const MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION: IntegrationDefinitio
         summary: "Create draft message",
         requiredScopes: MAIL_SCOPE,
         description:
-          "Create a draft in the signed-in person's Drafts folder without sending it. Send it later with the send draft tool.",
+          "Create a new email draft in the signed-in person's Drafts folder without sending it. Send it later with the send draft tool.",
       },
       {
         path: "/me/messages/{message-id}",
@@ -1078,7 +1078,7 @@ export const MICROSOFT_SHAREPOINT_INTEGRATION_DEFINITION: IntegrationDefinition 
         searchEntityTypes: SHAREPOINT_SEARCH_ENTITY_TYPES,
         requiredScopes: SHAREPOINT_SCOPE,
         description:
-          'Search SharePoint and OneDrive files, lists and sites the signed-in person can access. Send {"requests":[{"entityTypes":["driveItem"],"query":{"queryString":"..."},"from":0,"size":25}]}. Use entityTypes driveItem for files, listItem for list items, site for sites, list for lists and libraries. Send exactly one entry in requests per call; its entityTypes may combine driveItem, listItem and list, but search site in a call of its own. KQL is supported in queryString (for example filetype:docx or path:"https://contoso.sharepoint.com/sites/hr"). Page with from and size. Only driveItem, listItem, list, site and drive can be searched here.',
+          'Search SharePoint and OneDrive files, lists, list items and sites the signed-in person can access. Send {"requests":[{"entityTypes":["driveItem","listItem","list","site"],"query":{"queryString":"..."},"from":0,"size":25}]}. Use entityTypes driveItem for files, listItem for list items, list for lists and libraries, site for sites and drive for document libraries; one request may combine any of them, which finds content whatever its kind. List rows are listItem results, not driveItem. KQL is supported in queryString (for example filetype:docx or path:"https://contoso.sharepoint.com/sites/hr"). Page with from and size. Only driveItem, listItem, list, site and drive can be searched here.',
       },
       {
         path: "/sites",
@@ -1123,6 +1123,8 @@ export const MICROSOFT_SHAREPOINT_INTEGRATION_DEFINITION: IntegrationDefinition 
         method: "get",
         odataSkipToken: true,
         requiredScopes: SHAREPOINT_SCOPE,
+        description:
+          "List a site's lists and document libraries with their ids and names. Read a list's rows with the list items tool.",
       },
       { path: "/sites/{site-id}/lists/{list-id}", method: "get", requiredScopes: SHAREPOINT_SCOPE },
       {
@@ -1164,7 +1166,14 @@ export const MICROSOFT_SHAREPOINT_INTEGRATION_DEFINITION: IntegrationDefinition 
         method: "get",
         requiredScopes: SHAREPOINT_SCOPE,
         description:
-          "Read a file or folder in a document library. A file's response includes @microsoft.graph.downloadUrl, a short-lived pre-authenticated link: download the file bytes from it directly, without credentials.",
+          "Read a file or folder in a document library: its name, size, dates and web link. Read a file's content with the download file tool.",
+      },
+      {
+        path: "/drives/{drive-id}/items/{driveItem-id}/content",
+        method: "get",
+        summary: "Download file",
+        requiredScopes: SHAREPOINT_SCOPE,
+        description: "Download a document library file's content by its drive id and item id.",
       },
       {
         path: "/drives/{drive-id}/items/{driveItem-id}/children",

@@ -45,6 +45,7 @@ import { isGitHubGatewayApprovalId } from "./github-gateway";
 export * from "./active-session-history";
 import type { ActiveSessionHistoryFootprint } from "./active-session-history";
 export * from "./session-search-records";
+export * from "./console-sign-in-audit";
 export * from "./model-call-timing";
 export * from "./sandbox-stop-notice";
 export * from "./turn-timing-profile";
@@ -7976,6 +7977,8 @@ export type CreateConnectionInput = {
   metadata?: Record<string, unknown>;
   /** See connectionAccountIdentityKey; omit when the account is unverified. */
   accountIdentityKey?: string | null;
+  /** The person's own name for the connection (already normalized). */
+  label?: string | null;
   createdBySubjectId?: string | null;
   updatedBySubjectId?: string | null;
 };
@@ -8053,6 +8056,8 @@ export type UpdateConnectionInput = {
    * it (and no scope lost) the reconnect keeps `authorityGeneration`.
    */
   previousAccountIdentityKey?: string | null;
+  /** Rename: display only, so it changes neither `version` nor authority. */
+  label?: string | null;
   updatedBySubjectId?: string | null;
 };
 
@@ -13648,6 +13653,7 @@ async function createConnectionInScope(
       verifiedInstallVersion: input.verifiedInstallVersion ?? null,
       metadata: input.metadata ?? {},
       accountIdentityKey: input.accountIdentityKey ?? null,
+      label: input.label ?? null,
       createdBySubjectId: input.createdBySubjectId ?? null,
       updatedBySubjectId: input.updatedBySubjectId ?? input.createdBySubjectId ?? null,
     })
@@ -13780,7 +13786,7 @@ export class ConnectionAccountAlreadyConnectedError extends Error {
   }
 }
 
-/** Whether an error is the live-account uniqueness check (migration 1479). */
+/** Whether an error is the live-account uniqueness check (migration 1480). */
 export function isConnectionAccountIdentityConflict(error: unknown): boolean {
   if (error instanceof ConnectionAccountAlreadyConnectedError) return true;
   return (
@@ -14600,6 +14606,7 @@ async function updateConnectionInScope(
       : input.credentialEncrypted !== undefined
         ? { accountIdentityKey: null }
         : {}),
+    ...(input.label !== undefined ? { label: input.label } : {}),
     ...(input.updatedBySubjectId !== undefined
       ? { updatedBySubjectId: input.updatedBySubjectId }
       : {}),

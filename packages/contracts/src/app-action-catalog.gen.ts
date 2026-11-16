@@ -2568,6 +2568,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "GET /v1/console-sign-in/start",
+    "method": "GET",
+    "path": "/v1/console-sign-in/start",
+    "request": [],
+    "query": [
+      "return"
+    ],
+    "response": []
+  },
+  {
     "id": "GET /v1/image-proxy",
     "method": "GET",
     "path": "/v1/image-proxy",
@@ -7199,6 +7209,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [],
     "permission": "sessions:control"
+  },
+  {
+    "id": "POST /v1/console-sign-in/authorize",
+    "method": "POST",
+    "path": "/v1/console-sign-in/authorize",
+    "request": [],
+    "response": []
   },
   {
     "id": "POST /v1/organizations/:organizationId/codex/accounts/:accountId/activate",

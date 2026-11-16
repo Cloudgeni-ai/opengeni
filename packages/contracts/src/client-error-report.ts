@@ -338,6 +338,7 @@ export const CLIENT_PAGES = [
   "device",
   "connect-agent",
   "native-sign-in",
+  "console-sign-in",
   "reset-password",
   "shared-chat",
   "setup-account",

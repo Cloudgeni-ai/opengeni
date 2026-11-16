@@ -618,7 +618,7 @@ function safePosture(): RuntimeDatabasePosture {
         hasDependents: false,
         configuration: ["search_path=pg_catalog, public, pg_temp"],
       },
-      // 1480 reads only connections, present in every current posture, and
+      // 1481 reads only connections, present in every current posture, and
       // withholds its runtime grant.
       {
         name: "nango_connections_in_use_v1(text[])",

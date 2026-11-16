@@ -424,7 +424,8 @@ describe("first-party MCP tool visibility policy", () => {
   test("agent discovery exposes recursive pause scope and receipt-versus-progress guidance", async () => {
     const names: FirstPartyMcpToolName[] = [
       "session_pause",
-      "session_send_message",
+      "session_queue_message",
+      "session_steer",
       "session_get",
       "session_events",
     ];
@@ -443,13 +444,28 @@ describe("first-party MCP tool visibility policy", () => {
       expect(descriptions.get("session_pause")).toContain(
         "pausing an ancestor also stops this caller",
       );
-      expect(descriptions.get("session_send_message")).toContain("Acceptance is not execution");
-      expect(descriptions.get("session_send_message")).toContain(
-        "match that ID in payload.updateIds",
+      // Queue and Steer read like a person's two modes, each naming the other.
+      // The runtime discovery test ranks these exact first sentences against a
+      // realistic connected catalog, so plain "send a message to a session"
+      // searches find Queue before any mail send tool.
+      expect(descriptions.get("session_queue_message")).toStartWith(
+        "Send a message to another session or agent: send messages to a worker you spawned, your parent or a peer session. Like a person's Queue in the chat, a session that is mid-turn gets the message only after its current turn ends, and it does not change what that session is doing now",
       );
-      expect(descriptions.get("session_send_message")).toContain("retain the event turnId");
-      expect(descriptions.get("session_send_message")).toContain(
-        "An unrelated in-flight turn completing does not prove delivery",
+      expect(descriptions.get("session_queue_message")).toContain(
+        "To change what a session is doing now, use session_steer instead.",
+      );
+      expect(descriptions.get("session_steer")).toStartWith(
+        "Change what another session or agent (a worker you spawned, your parent or a peer) is doing now. Like a person's Steer in the chat, it gets your instruction at its next step",
+      );
+      expect(descriptions.get("session_steer")).toContain(
+        "To add information without changing what a session is doing now, use session_queue_message instead.",
+      );
+      expect(descriptions.get("session_queue_message")).toContain("Queued is not delivered");
+      expect(descriptions.get("session_queue_message")).toContain(
+        "follow the returned updateId with session_message_status",
+      );
+      expect(descriptions.get("session_queue_message")).toContain(
+        "another of the target's turns finishing does not prove it got your message",
       );
       expect(
         registeredToolInputSchema(server, "session_events").safeParse({
@@ -460,8 +476,8 @@ describe("first-party MCP tool visibility policy", () => {
           after: 0,
         }).success,
       ).toBeTrue();
-      expect(descriptions.get("session_send_message")).toContain(
-        "Do not resend an unconsumed message",
+      expect(descriptions.get("session_queue_message")).toContain(
+        "Do not send a message again while it is still queued",
       );
       expect(descriptions.get("session_get")).toContain(
         "Queued status and updatedAt are not proof of execution",
@@ -481,11 +497,14 @@ describe("first-party MCP tool visibility policy", () => {
       }).catalog;
       const declarations = generateCodemodeDeclarations(catalog);
       expect(declarations).toContain("pausing an ancestor also stops this caller");
-      expect(declarations).toContain("Acceptance is not execution");
-      expect(declarations).toContain("match that ID in payload.updateIds");
+      // Declarations keep each description's opening, which carries the mode.
       expect(declarations).toContain(
-        "An unrelated in-flight turn completing does not prove delivery",
+        "Like a person's Queue in the chat, a session that is mid-turn",
       );
+      expect(declarations).toContain(
+        "To change what a session is doing now, use session_steer instead.",
+      );
+      expect(declarations).toContain("Like a person's Steer in the chat");
     } finally {
       await Promise.all([client.close(), server.close()]);
     }
@@ -496,7 +515,7 @@ describe("first-party MCP tool visibility policy", () => {
       "session_create",
       "session_wait",
       "session_get",
-      "session_send_message",
+      "session_queue_message",
       "wait_for_input",
     ];
     const server = buildOpenGeniMcpServer(
@@ -516,17 +535,17 @@ describe("first-party MCP tool visibility policy", () => {
     expect(description("session_create")).toContain(
       "Explicit user requests and applicable Skill guidance for delegation, independent review, or fresh workers override that default within existing authority",
     );
-    expect(description("session_send_message")).toContain(
+    expect(description("session_queue_message")).toContain(
       "override that default within existing authority",
     );
     expect(description("session_create")).toContain(
-      "send a related follow-up to a worker you already spawned with session_send_message",
+      "queue a related follow-up to a worker you already spawned with session_queue_message",
     );
     expect(description("session_create")).toContain(
       "call wait_for_input and end the turn instead of alternating session_wait and session_get",
     );
-    expect(description("session_send_message")).toContain(
-      "message a worker you already spawned instead of spawning a new one",
+    expect(description("session_queue_message")).toContain(
+      "queue a follow-up to a worker you already spawned instead of spawning a new one",
     );
     expect(description("session_get")).toContain("An unchanged snapshot is not new evidence");
     expect(description("session_wait")).toContain(
@@ -1286,7 +1305,7 @@ describe("first-party MCP tool visibility policy", () => {
     ) as ApiRouteDeps["db"];
     const server = buildOpenGeniMcpServer(
       routeDeps,
-      grant(["sessions:create", "sessions:control"], ["session_create", "session_send_message"], {
+      grant(["sessions:create", "sessions:control"], ["session_create", "session_queue_message"], {
         nestedAgentDepth: 1,
         effectiveMaxNestedAgentDepth: 3,
       }),
@@ -1314,9 +1333,9 @@ describe("first-party MCP tool visibility policy", () => {
     ) as ApiRouteDeps["db"];
     const messageServer = buildOpenGeniMcpServer(
       routeDeps,
-      grant(["sessions:control"], ["session_send_message"]),
+      grant(["sessions:control"], ["session_queue_message"]),
     );
-    const message = await callRegisteredTool(messageServer, "session_send_message", {
+    const message = await callRegisteredTool(messageServer, "session_queue_message", {
       sessionId: crypto.randomUUID(),
       text: "status",
       idempotencyKey: crypto.randomUUID(),
@@ -1325,7 +1344,7 @@ describe("first-party MCP tool visibility policy", () => {
       isError: true,
       structuredContent: {
         error: {
-          code: "session_send_message_conflict",
+          code: "session_queue_message_conflict",
           message: "target session is no longer writable",
         },
       },
@@ -1335,7 +1354,7 @@ describe("first-party MCP tool visibility policy", () => {
 
   test("all orchestration catches retain evidence bound to the caller, never request target", async () => {
     const targetSessionId = crypto.randomUUID();
-    for (const tool of ["session_create", "session_send_message", "session_steer"] as const) {
+    for (const tool of ["session_create", "session_queue_message", "session_steer"] as const) {
       let databaseTouches = 0;
       const routeDeps = deps();
       routeDeps.db = new Proxy(
@@ -1800,8 +1819,8 @@ describe("app-action tools", () => {
       const message = index
         .rank("message a session in another workspace", 3)
         .map((tool) => tool.name);
-      expect(message).toContain("opengeni__session_send_message");
-      for (const name of ["session_send_message", "session_get", "session_events"]) {
+      expect(message).toContain("opengeni__session_queue_message");
+      for (const name of ["session_queue_message", "session_get", "session_events"]) {
         expect(
           JSON.stringify(listedTools.find((tool) => tool.name === name)?.inputSchema),
           name,

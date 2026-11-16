@@ -29,6 +29,7 @@ import { Button } from "@opengeni/react/ui/button";
 import { EmptyState } from "@opengeni/react/ui/empty-state";
 import { ErrorMessage } from "@opengeni/react/ui/error-message";
 import { onConsoleHost } from "@/lib/console-route";
+import { rememberConsoleSignedOut } from "@/lib/console-sign-in";
 
 export type ConsoleClient = ChatClient<OpenGeniBrowserClient>;
 
@@ -112,6 +113,9 @@ export function useConsoleSignOut(): (() => void) | null {
   if (context.clientConfig.auth.mode !== "managedSession") return null;
   const browserAccounts = context.clientConfig.managedAuthSessionSetMode !== "legacy";
   return () => {
+    // On Console's own host, the signed-out page then waits for Continue
+    // instead of signing straight back in with the app's session.
+    if (onConsoleHost()) rememberConsoleSignedOut();
     const done =
       browserAccounts && accounts ? accounts.logoutAll() : context.handleManagedSignOut();
     void Promise.resolve(done).catch((error: unknown) =>

@@ -222,7 +222,7 @@ archived by a person qualifies when all of these hold for the idle period:
    From that moment the database refuses new turns, attempts, history, goals,
    workflow wakes and machine inputs for the session (`SESSION_ARCHIVED_READ_ONLY`),
    the API refuses sends and steers with 409, and the agent tools
-   `session_send_message` and `session_steer` return a non-retryable
+   `session_queue_message` and `session_steer` return a non-retryable
    `<tool>_session_read_only` error that says to start a new session. A
    message cannot race the archive.
    The session's workflow treats the session as closed: its work peek

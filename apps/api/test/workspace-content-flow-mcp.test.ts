@@ -223,7 +223,7 @@ describe("session tools in another workspace", () => {
   test("nothing runs when the setting can't be read", async () => {
     const here = await workspace(false);
     const there = await sameOrganization(here);
-    for (const tool of ["session_get", "session_send_message"] as const) {
+    for (const tool of ["session_get", "session_queue_message"] as const) {
       const { result, ran } = await reachOther(here, there, tool, unreadableDb());
       expect(ran).toBe(false);
       expect(result.isError).toBe(true);

@@ -68,7 +68,7 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * and the sandbox reaper's inventory of cold sandboxes whose chats are all
  * archived (1404), the organization-wide sandbox counts behind
  * plan-tiered sandbox limits (1475), and the deployment-wide check of
- * which Nango connections a live connection still stands for (1480).
+ * which Nango connections a live connection still stands for (1481).
  * Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
@@ -148,7 +148,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * workspace until its chats are deleted (as before).
  * 1475 withholds the organization-wide sandbox counts; until they are
  * granted, only the per-workspace viewer limit is enforced (as before).
- * 1480 withholds the check of which Nango connections a live connection
+ * 1481 withholds the check of which Nango connections a live connection
  * stands for; until it is granted, deleting a Nango connection is decided
  * from the person's own reads, and nothing is deleted when one of their
  * organizations cannot be fully read.

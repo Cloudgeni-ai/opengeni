@@ -1,7 +1,7 @@
 -- deployment-mode: rolling
 -- One active connection per owner, integration and verified external account.
 -- Writers that verify which provider account a connection belongs to stamp
--- an opaque key (see connectionAccountIdentityKey); migration 1479 makes it
+-- an opaque key (see connectionAccountIdentityKey); migration 1480 makes it
 -- unique among a single owner's live connections. Null (every existing row,
 -- and any connection whose account is not verified) is never deduplicated.
 --

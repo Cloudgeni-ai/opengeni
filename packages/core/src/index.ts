@@ -151,6 +151,7 @@ export * from "./domain/personal-github-repository-access";
 export * from "./domain/connections-needing-reconnect";
 export * from "./domain/nango-integrations";
 export * from "./domain/nango-connection-sharing";
+export * from "./domain/built-in-integration-duplicates";
 export {
   listApiIntegrationsWithPersonalExtension,
   type PersonalWorkspaceExtensionApiIntegration,

@@ -261,6 +261,7 @@ const BUILT_IN_TOOL_STEPS: Readonly<Record<string, ToolStepId>> = {
   operation_read: "checkProgress",
   session_set_model: "changeModel",
   session_create: "startHelper",
+  session_queue_message: "messageAssistant",
   session_send_message: "messageAssistant",
   session_steer: "messageAssistant",
   session_human_input_respond: "messageAssistant",

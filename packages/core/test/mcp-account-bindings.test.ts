@@ -152,7 +152,108 @@ test("workspace and two personal accounts attach with distinct exact routes", ()
     bindings.find((binding) => binding.subjectScope === "workspace")?.ownerSubjectId,
   ).toBeNull();
   expect(personalDelegationsForAccountBindings(bindings)).toHaveLength(2);
-  expect(bindings.map((binding) => binding.accountLabel)).toContain("Alice · Example · Yours");
+  // Two personal accounts that read the same are told apart for the agent;
+  // the shared one already differs by scope and keeps its plain label.
+  const labels = bindings.map((binding) => binding.accountLabel);
+  expect(new Set(labels).size).toBe(3);
+  expect(labels).toContain("Alice · Example · Shared");
+  expect(
+    labels.filter((label) => label.startsWith("Alice · Example · Connected Sep 20 00:00 UTC · ")),
+  ).toHaveLength(2);
+});
+
+function apiKeyConnection(
+  createdAt: string,
+  extra: Partial<ConnectionMetadata> = {},
+): ConnectionMetadata {
+  return {
+    ...connection(),
+    providerDomain: "mcp.example.test",
+    kind: "api_key",
+    metadata: { mcpUrl: "https://mcp.example.test/mcp", resource: "https://mcp.example.test/mcp" },
+    createdAt,
+    updatedAt: createdAt,
+    ...extra,
+  };
+}
+const apiKeyServer = {
+  id: "example-mcp",
+  url: "https://mcp.example.test/mcp",
+  cacheToolsList: false,
+  connectionRef: { providerDomain: "mcp.example.test", kind: "api_key" as const },
+};
+
+test("unnamed API-key accounts of one server read differently for the agent", () => {
+  const first = apiKeyConnection("2026-10-25T09:00:00.000Z");
+  const second = apiKeyConnection("2026-10-27T15:30:00.000Z");
+  const labels = mcpAccountBindingsFromVisibleConnections({
+    ...input,
+    servers: [apiKeyServer],
+    connections: [first, second],
+  }).map((binding) => binding.accountLabel);
+  expect(labels.sort()).toEqual([
+    "mcp.example.test account · Connected Oct 25 · Yours",
+    "mcp.example.test account · Connected Oct 27 · Yours",
+  ]);
+  // Same day: the time (UTC) tells them apart.
+  const sameDay = mcpAccountBindingsFromVisibleConnections({
+    ...input,
+    servers: [apiKeyServer],
+    connections: [first, apiKeyConnection("2026-10-25T14:05:00.000Z")],
+  }).map((binding) => binding.accountLabel);
+  expect(sameDay.sort()).toEqual([
+    "mcp.example.test account · Connected Oct 25 09:00 UTC · Yours",
+    "mcp.example.test account · Connected Oct 25 14:05 UTC · Yours",
+  ]);
+});
+
+test("a person's name labels an account; a verified identity always wins over it", () => {
+  const named = apiKeyConnection("2026-10-25T09:00:00.000Z", { label: "Team inbox" });
+  const unnamed = apiKeyConnection("2026-10-25T09:00:00.000Z");
+  const identified = {
+    ...apiKeyConnection("2026-10-25T09:00:00.000Z", { label: "Team inbox" }),
+    metadata: { mcpUrl: "https://mcp.example.test/mcp", email: "ops@example.test" },
+  };
+  const labels = mcpAccountBindingsFromVisibleConnections({
+    ...input,
+    servers: [apiKeyServer],
+    connections: [named, unnamed, identified],
+  }).map((binding) => binding.accountLabel);
+  expect(labels.sort()).toEqual([
+    "Team inbox · Yours",
+    "mcp.example.test account · Yours",
+    "ops@example.test · Yours",
+  ]);
+});
+
+test("an account keeps its label when a selection narrows the turn to it", () => {
+  const first = apiKeyConnection("2026-10-25T09:00:00.000Z");
+  const second = apiKeyConnection("2026-10-27T15:30:00.000Z");
+  const all = mcpAccountBindingsFromVisibleConnections({
+    ...input,
+    servers: [apiKeyServer],
+    connections: [first, second],
+  });
+  const narrowed = mcpAccountBindingsFromVisibleConnections({
+    ...input,
+    servers: [apiKeyServer],
+    connections: [first, second],
+    selections: [{ serverId: apiKeyServer.id, connectionId: second.id }],
+  });
+  expect(narrowed).toHaveLength(1);
+  expect(narrowed[0]?.accountLabel).toBe(
+    all.find((binding) => binding.connectionId === second.id)?.accountLabel,
+  );
+  expect(narrowed[0]?.accountLabel).toBe("mcp.example.test account · Connected Oct 27 · Yours");
+});
+
+test("a unique unnamed account keeps exactly its previous label", () => {
+  const [binding] = mcpAccountBindingsFromVisibleConnections({
+    ...input,
+    servers: [apiKeyServer],
+    connections: [apiKeyConnection("2026-10-25T09:00:00.000Z")],
+  });
+  expect(binding?.accountLabel).toBe("mcp.example.test account · Yours");
 });
 
 test("intentional catalog selectors accept workspace and personal accounts and freeze exact refs", () => {

@@ -36,6 +36,8 @@ export const McpMutationReceiptOutcome = /* @__PURE__ */ defineSchema(() =>
     "deleted",
     "unchanged",
     "accepted",
+    "queued",
+    "steered",
     "triggered",
     "repaired",
     "replayed",
@@ -101,6 +103,12 @@ export const McpMutationReceipt = /* @__PURE__ */ defineSchema(() =>
       committed: z.literal(true),
       outcome: McpMutationReceiptOutcome,
       changed: primitives.boolean,
+      /**
+       * One plain sentence saying what happened, for an outcome whose fields
+       * alone are easy to misread (for example when another session will
+       * read a queued message).
+       */
+      summary: boundedUtf8String(512, 1).optional(),
       resource: McpMutationResource,
       relatedResources: z.array(McpMutationResource).max(8).optional(),
       timestamp: primitives.string.datetime({ offset: true }),
@@ -135,7 +143,10 @@ export const McpMutationReceipt = /* @__PURE__ */ defineSchema(() =>
       rootSessionId: boundedUtf8String(256, 1).optional(),
       nestedAgentDepth: z.number().int().nonnegative().optional(),
       effectiveMaxNestedAgentDepth: z.number().int().nonnegative().optional(),
-      /** Bounded session_steer compatibility alias for resource.id. */
+      /**
+       * The update ID an agent follows with session_message_status, on
+       * session_queue_message and session_steer receipts; equals resource.id.
+       */
       updateId: boundedUtf8String(256, 1).optional(),
     })
     .strict()
@@ -175,30 +186,30 @@ export const McpMutationReceipt = /* @__PURE__ */ defineSchema(() =>
         }
       }
 
-      // An agent's steer is a system update followed by its update id; a
-      // sessionless (human/API) steer is a turn, like a sent message.
+      // An agent's queued message or steer is a system update followed by its
+      // update id; a sessionless (human/API) one is a turn.
       if (
-        receipt.operation === "session_steer" &&
+        (receipt.operation === "session_steer" || receipt.operation === "session_queue_message") &&
         receipt.resource.type === "session_system_update"
       ) {
         if (receipt.updateId === undefined) {
           context.addIssue({
             code: "custom",
             path: ["updateId"],
-            message: "session_steer receipts require updateId",
+            message: `${receipt.operation} receipts require updateId`,
           });
         } else if (receipt.updateId !== receipt.resource.id) {
           context.addIssue({
             code: "custom",
             path: ["updateId"],
-            message: "session_steer updateId must equal resource.id",
+            message: `${receipt.operation} updateId must equal resource.id`,
           });
         }
       } else if (receipt.updateId !== undefined) {
         context.addIssue({
           code: "custom",
           path: ["updateId"],
-          message: "updateId is only valid for session_steer receipts",
+          message: "updateId is only valid for an agent's session_queue_message or session_steer",
         });
       }
 

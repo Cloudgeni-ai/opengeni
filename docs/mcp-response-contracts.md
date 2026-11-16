@@ -202,7 +202,7 @@ still permission-, deployment-, session-, and exact-attempt-catalog-dependent.
 | First-party: `wait_for_input` | Mutation | Durable wait receipt (`status`, absolute `deadlineAt`, operation id/replay fact, next action) |
 | First-party: `session_wait`, `command_wait` | Read/wait | Bounded durable state/event result; timeout is non-mutating and never cancels work |
 | First-party: `rig_propose_change`, `rig_verify`, `rig_promote` | Mutation | v1 receipt |
-| First-party: `session_create`, `session_send_message`, `session_pause`, `session_resume`, `session_steer`, `set_other_session_title` | Mutation | v1 receipt |
+| First-party: `session_create`, `session_queue_message`, `session_pause`, `session_resume`, `session_steer`, `set_other_session_title` | Mutation | v1 receipt |
 | First-party: `secret_save`, `secret_move`, `secret_delete` | Mutation | Item summary and ready references; secret values are never returned. The retired `variable_set_*` and `environment_*` tools are no longer registered. |
 | First-party: `knowledge_save` | Mutation | Bounded revision/publication receipt |
 | First-party: `files_get_download_url` | Read | Bounded access URL/result required to perform the read; not a redundant entity echo |

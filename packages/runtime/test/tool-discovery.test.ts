@@ -14,6 +14,7 @@ import {
 import OpenAI from "openai";
 import { testSettings } from "@opengeni/testing";
 import { createHttpDecisionModel } from "@opengeni/decisions";
+import { MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION } from "@opengeni/capabilities";
 import { ToolSearchIndex } from "../src/tool-discovery-ranking";
 import { toolDescriptor } from "../src/tool-discovery-catalog";
 import { rankToolPool } from "../src/codex-tool-search";
@@ -193,6 +194,56 @@ describe("tool discovery ranking", () => {
     // The run-together name itself still finds its tool.
     expect(index.rank("me_createmessages", 1)).toEqual([draft]);
   });
+  test("the reviewed Outlook Mail draft tools rank by what each drafts", () => {
+    // Reviewed descriptions as shipped, under the names the compiler gives them.
+    const reviewed = MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION.source;
+    const operations = reviewed.kind === "openapi" ? (reviewed.operationAllowlist ?? []) : [];
+    const reviewedTool = (name: string, method: string, path: string) => {
+      const entry = operations.find(
+        (operation) =>
+          typeof operation === "object" && operation.method === method && operation.path === path,
+      );
+      if (!entry || typeof entry !== "object" || !entry.description)
+        throw new Error(`${method} ${path} is not a reviewed Outlook Mail operation`);
+      return candidate(
+        `mcp_x__${name}`,
+        `${entry.description} POST ${path}. Changes external state. Your tool permissions determine whether review is needed.`,
+      );
+    };
+    const draft = reviewedTool("me_createmessages", "post", "/me/messages");
+    const reply = reviewedTool(
+      "me_messages_message_createreply",
+      "post",
+      "/me/messages/{message-id}/createReply",
+    );
+    const forward = reviewedTool(
+      "me_messages_message_createforward",
+      "post",
+      "/me/messages/{message-id}/createForward",
+    );
+    const pool = [
+      forward,
+      reply,
+      reviewedTool(
+        "me_messages_message_createreplyall",
+        "post",
+        "/me/messages/{message-id}/createReplyAll",
+      ),
+      reviewedTool("me_sendmail", "post", "/me/sendMail"),
+      reviewedTool("me_messages_message_send", "post", "/me/messages/{message-id}/send"),
+      draft,
+    ];
+    const index = new ToolSearchIndex(pool);
+    for (const query of [
+      "create outlook draft email",
+      "draft an email",
+      "create an email draft",
+      "save an email as a draft without sending",
+    ])
+      expect([query, index.rank(query, 1)[0]?.name]).toEqual([query, draft.name]);
+    expect(index.rank("draft a reply", 1)).toEqual([reply]);
+    expect(index.rank("forward this email as a draft", 1)).toEqual([forward]);
+  });
   test("run-together names win in a realistic catalog without moving ordinary names", () => {
     const extra = [
       candidate("mcp__crm__addresses_list", "List every postal address saved for a contact."),
@@ -212,6 +263,35 @@ describe("tool discovery ranking", () => {
     expect(names(index.rank("post a message", 3))).not.toContain("mcp__db__postgres_query");
     // A leading verb comes off only when the tool uses the rest of the word.
     expect(best("list repository webhooks")).toBe("mcp__hooks__repos_listwebhooks");
+  });
+  test("plain session messaging searches find Queue before any mail send in a realistic catalog", () => {
+    const index = new ToolSearchIndex(CONNECTED_TOOL_CATALOG.map(catalogTool));
+    const position = (query: string, name: string) => names(index.rank(query, 20)).indexOf(name);
+    const mailSends = (query: string) =>
+      names(index.rank(query, 20)).filter(
+        (name) => !name.startsWith("opengeni__") && /send_?message|sendmail/.test(name),
+      );
+    for (const query of [
+      "send message to another session",
+      "send message to parent session",
+      "message a worker I spawned",
+      "tell my worker",
+      "message the parent session",
+      "queue a message for a session",
+    ]) {
+      const queue = position(query, "opengeni__session_queue_message");
+      expect(queue).toBeGreaterThanOrEqual(0);
+      for (const mail of mailSends(query)) expect(queue).toBeLessThan(position(query, mail));
+    }
+    for (const query of [
+      "send message to another session",
+      "send message to parent session",
+      "message the parent session",
+    ])
+      expect(names(index.rank(query, 1))).toEqual(["opengeni__session_queue_message"]);
+    // Steer reads as changing what a session is doing now.
+    expect(position("change what my worker is doing", "opengeni__session_steer")).toBeLessThan(3);
+    expect(position("steer a worker", "opengeni__session_steer")).toBeLessThan(3);
   });
   test("a name word is split only with evidence from the tool's own words", () => {
     const settings = candidate("mcp_x__list_settings", "Lists the mail filters and forwarding.");
@@ -540,12 +620,12 @@ describe("decision selection", () => {
         "Spawn a new agent session (a worker) for a concrete, bounded subtask that can run independently.",
       ),
       candidate(
-        "workspace__session_send_message",
-        "Send a message to a session. To continue related work, message a worker you already spawned instead of spawning a new one.",
+        "workspace__session_queue_message",
+        "Send a message to another session or agent: send messages to a worker you spawned, your parent or a peer session. To continue related work, queue a follow-up to a worker you already spawned instead of spawning a new one.",
       ),
       candidate(
         "workspace__session_message_status",
-        "Follow the exact update ID returned by session_send_message. Returns delivery state and the consuming turn.",
+        "Follow the exact update ID returned by session_queue_message. Returns delivery state and the consuming turn.",
       ),
       candidate("workspace__sessions_list", "Discover sessions in this workspace."),
       candidate("calendar__create_event", "Create a calendar event."),
@@ -553,12 +633,12 @@ describe("decision selection", () => {
     const index = new ToolSearchIndex(sessions);
     const loaded = names(
       index.strongestMatches(
-        "Create a separate worker session, then send a follow-up message to that same session",
+        "Create a separate worker session, then queue a follow-up message to that same session",
         3,
       ),
     );
     expect(loaded).toContain("workspace__session_create");
-    expect(loaded).toContain("workspace__session_send_message");
+    expect(loaded).toContain("workspace__session_queue_message");
     expect(loaded).not.toContain("calendar__create_event");
     const accounts = new ToolSearchIndex([
       candidate("mail_home__search_messages", "Search email messages in the mailbox."),

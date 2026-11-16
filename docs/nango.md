@@ -53,6 +53,15 @@ flight finishes on the credential it already resolved.
   by its definition.
 - When `x` is Nango-backed, the native X social card and the first-party
   `x_*` tools are hidden, and calls to them are refused at call time.
+- Agent catalog search leaves out a public-registry entry that duplicates a
+  built-in integration the deployment offers (by the reviewed endpoint's policy
+  key, or the service's provider domain), and a card requested for it is the
+  built-in's. A built-in whose organization policy key is not allowed gets no
+  card; the agent is told it is turned off for the organization
+  (`packages/core/src/domain/built-in-integration-duplicates.ts`).
+- A Google connector Nango serves is not gated by this deployment's own Google
+  sign-in setup (`OPENGENI_GOOGLE_CONNECTOR_SETUP_ENABLED`, operator OAuth
+  client): it signs in through Nango's app.
 
 ### Connections
 
@@ -113,11 +122,11 @@ connections; that is not a duplicate.
   deployment-wide lock per person and integration, so concurrent connects,
   disconnects and the sweep converge; deletes happen under that lock.
   Whether a Nango connection is still used is decided deployment-wide by
-  `opengeni_private.nango_connections_in_use_v1` (migration 1480: any
+  `opengeni_private.nango_connections_in_use_v1` (migration 1481: any
   non-revoked Nango row that names it, whatever its membership or authority
   state; it opens the one-transaction tenancy inventory window for its own
   query only, since `connections` forces row-level security on its owner
-  too). 1480 withholds its runtime grant (the previous release rejects a
+  too). 1481 withholds its runtime grant (the previous release rejects a
   grant on a definer it does not know); until a later migration grants it,
   the person's own reads decide, and a membership that is not active or an
   organization that cannot be read means nothing is deleted. Those reads

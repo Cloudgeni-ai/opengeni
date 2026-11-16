@@ -190,6 +190,10 @@
       "types": "./src/console.ts",
       "default": "./src/console.ts"
     },
+    "./console-sign-in": {
+      "types": "./src/console-sign-in.ts",
+      "default": "./src/console-sign-in.ts"
+    },
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"

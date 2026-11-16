@@ -237,6 +237,15 @@ Drive and Atlassian duplicates saved under different clients before this rule
 keeps the one that refreshed most recently, since that proves its client still
 works; a login a Slack agent depends on is also left in place.
 
+A service's account check (its reviewed identity verifier) is read once more
+when the first read times out or fails briefly, within the same bounded
+budget, so one slow answer doesn't save a login without its account. Before a
+new, verified account is refused as `account_reconnect_required`, the person's
+live logins of that service whose account was never confirmed (at most three)
+are checked again with their own saved sign-in, and each confirmed account is
+recorded on its login; the connection is then decided from the stored logins
+as before, so a login that still can't be confirmed keeps the refusal.
+
 Google accounts also have a stable account ID. Gmail, Google Calendar and
 Google Drive sign-ins record Google's OpenID subject as `metadata.googleSubject`
 beside the verified email. They ask for `openid` as well as the service's
@@ -262,7 +271,7 @@ and added again.
 The database holds the same rule for every backend. A writer that verified
 which provider account a connection is stores `connections.account_identity_key`
 (`connectionAccountIdentityKey`: SHA-256 of the integration and the account),
-and migration 1479 allows one live (not revoked) row per organization, owner (a
+and migration 1480 allows one live (not revoked) row per organization, owner (a
 person, or a workspace for a shared connection) and key. OAuth MCP logins use
 the provider, issuer, resource group and Google's account ID when recorded,
 else the verified identity; Nango connections use the Nango integration and

@@ -2006,8 +2006,12 @@ export const connections = pgTable(
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     // Opaque key of the integration and verified provider account behind this
     // connection (see connectionAccountIdentityKey); null when unverified. At
-    // most one live row per organization, owner and key (migration 1479).
+    // most one live row per organization, owner and key (migration 1480).
     accountIdentityKey: text("account_identity_key"),
+    // The person's own name for the connection, shown when the provider gives
+    // no account identity. Display only: never part of `version` or the
+    // authority generation, and never used to select credentials.
+    label: text("label"),
     // A workspace's own OpenAI, Azure OpenAI or OpenAI-compatible model key
     // only: what its model's usage costs, for usage estimates and spend limits
     // (see organizationModelProviderCustomModels). The catalogue model whose

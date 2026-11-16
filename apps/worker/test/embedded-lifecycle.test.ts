@@ -844,7 +844,7 @@ describe("embedded worker lifecycle contract", () => {
             has_dependents: false,
             configuration: ["search_path=pg_catalog, public, pg_temp"],
           })),
-          // Migration 1480: the deployment-wide Nango in-use check, created
+          // Migration 1481: the deployment-wide Nango in-use check, created
           // without runtime EXECUTE until a later migration grants it.
           {
             name: "nango_connections_in_use_v1(text[])",

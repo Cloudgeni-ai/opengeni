@@ -25,6 +25,7 @@ import {
 } from "./integration-sources";
 export * from "./integration-sources";
 import { defineSchema } from "./define-schema";
+import { CONNECTION_LABEL_MAX_LENGTH } from "./connection-account-label";
 import { SessionAvatar, SessionDescription } from "./bots";
 import { secretValue } from "./secret-value";
 export * from "./session-target";
@@ -1164,6 +1165,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "command_wait",
   "command_read",
   "session_create",
+  "session_queue_message",
   "session_send_message",
   "session_message_status",
   "session_target_get",
@@ -1398,13 +1400,29 @@ export const RETIRED_SECRET_TOOL_NAMES = [
   "environment_set_variable",
 ] as const satisfies readonly FirstPartyMcpToolName[];
 const retiredSecretTools = new Set<FirstPartyMcpToolName>(RETIRED_SECRET_TOOL_NAMES);
-const RETIRED_SECRET_TOOL_SUCCESSORS = {
+
+/**
+ * Session tools renamed so an agent's two ways of messaging a session read
+ * like a person's Queue and Steer. Stored tool selections naming the old name
+ * still parse and select its successor; the remote server never registers the
+ * old name, so it is not an alias a model can call.
+ */
+export const RETIRED_SESSION_TOOL_NAMES = [
+  "session_send_message",
+] as const satisfies readonly FirstPartyMcpToolName[];
+const retiredSessionTools = new Set<FirstPartyMcpToolName>(RETIRED_SESSION_TOOL_NAMES);
+
+const RETIRED_TOOL_SUCCESSORS = {
   variable_set_list: "secret_search",
   environment_list: "secret_search",
   variable_set_get_variable: "secret_get",
   variable_set_set_variable: "secret_save",
   environment_set_variable: "secret_save",
-} as const satisfies Record<(typeof RETIRED_SECRET_TOOL_NAMES)[number], FirstPartyMcpToolName>;
+  session_send_message: "session_queue_message",
+} as const satisfies Record<
+  (typeof RETIRED_SECRET_TOOL_NAMES)[number] | (typeof RETIRED_SESSION_TOOL_NAMES)[number],
+  FirstPartyMcpToolName
+>;
 
 /** Runtime interpretation only: never rewrite accepted conversation/tool receipts. */
 export function currentAgentLearningToolSelection(
@@ -1428,7 +1446,7 @@ export function currentAgentLearningToolSelection(
     selected.add("instruction_policy_save");
     selected.add("instruction_policy_get");
   }
-  for (const [retired, successor] of Object.entries(RETIRED_SECRET_TOOL_SUCCESSORS)) {
+  for (const [retired, successor] of Object.entries(RETIRED_TOOL_SUCCESSORS)) {
     if (selected.has(retired as FirstPartyMcpToolName)) selected.add(successor);
   }
   // Only already-selected legacy confirmations survive for paused turn recovery.
@@ -1436,7 +1454,9 @@ export function currentAgentLearningToolSelection(
   return [...selected].filter(
     (name) =>
       name === "remember_confirm" ||
-      (!retiredLearningTools.has(name) && !retiredSecretTools.has(name)),
+      (!retiredLearningTools.has(name) &&
+        !retiredSecretTools.has(name) &&
+        !retiredSessionTools.has(name)),
   );
 }
 
@@ -1448,6 +1468,7 @@ const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAMES = [
   "atlassian_get",
   ...RETIRED_AGENT_LEARNING_TOOL_NAMES,
   ...RETIRED_SECRET_TOOL_NAMES,
+  ...RETIRED_SESSION_TOOL_NAMES,
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
 const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAME_SET = new Set<FirstPartyMcpToolName>(
@@ -1521,6 +1542,7 @@ export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
   (name) =>
     !retiredLearningTools.has(name) &&
     !retiredSecretTools.has(name) &&
+    !retiredSessionTools.has(name) &&
     !name.startsWith("social_") &&
     !name.startsWith("x_") &&
     !name.startsWith("reddit_") &&
@@ -15226,6 +15248,12 @@ export const FikenOAuthStartResponse = /* @__PURE__ */ defineSchema(() =>
 );
 export type FikenOAuthStartResponse = z.infer<typeof FikenOAuthStartResponse>;
 
+/** A person's name for a connection as sent; the server trims it and drops control characters. */
+export const ConnectionLabelInput = /* @__PURE__ */ defineSchema(() =>
+  z.string().max(CONNECTION_LABEL_MAX_LENGTH),
+);
+export type ConnectionLabelInput = z.infer<typeof ConnectionLabelInput>;
+
 export const ConnectionMetadata = /* @__PURE__ */ defineSchema(() =>
   z.object({
     id: primitives.uuid,
@@ -15248,6 +15276,13 @@ export const ConnectionMetadata = /* @__PURE__ */ defineSchema(() =>
     verifiedInstallAt: primitives.string.datetime({ offset: true }).nullable().optional(),
     verifiedInstallVersion: z.number().int().positive().nullable().optional(),
     metadata: z.record(primitives.string, z.unknown()),
+    /**
+     * The name the person gave this connection, such as "Team inbox key".
+     * People and agents see it when the provider doesn't say which account a
+     * connection is (API keys, services without an identity); a provider
+     * identity such as an email always comes first. Absent when unnamed.
+     */
+    label: z.string().min(1).max(CONNECTION_LABEL_MAX_LENGTH).nullable().optional(),
     /**
      * Whether this OAuth MCP account can be told apart from another account of
      * the same service: `verified` (its account is known), `reconnect` (the
@@ -15409,6 +15444,8 @@ export const CreateConnectionRequest = /* @__PURE__ */ defineSchema(() =>
     grantedScopes: z.array(primitives.nonEmptyString).default([]),
     expiresAt: primitives.string.datetime({ offset: true }).nullable().optional(),
     metadata: z.record(primitives.string, z.unknown()).default({}),
+    /** A name for this connection, shown when the provider gives no account identity. */
+    label: ConnectionLabelInput.nullable().optional(),
     operationId: primitives.optionalUuid,
     /** For direct OpenAI/Azure keys: run a short provider check before saving. */
     verifyModelAccess: primitives.optionalBoolean,
@@ -15481,6 +15518,12 @@ export const UpdateConnectionRequest = /* @__PURE__ */ defineSchema(() =>
     grantedScopes: z.array(primitives.nonEmptyString).optional(),
     expiresAt: primitives.string.datetime({ offset: true }).nullable().optional(),
     metadata: z.record(primitives.string, z.unknown()).optional(),
+    /**
+     * Rename the connection: the name shown when the provider gives no account
+     * identity. Null or blank removes it. Send it on its own; a rename never
+     * changes the credential, its version or what already-accepted work uses.
+     */
+    label: ConnectionLabelInput.nullable().optional(),
     expectedVersion: z.number().int().positive().optional(),
     operationId: primitives.optionalUuid,
   }),
@@ -24258,7 +24301,7 @@ export * from "./console";
 
 export type { PluginDiscoveryItem, PluginDiscoveryPage } from "./plugin-discovery";
 export { mcpEndpointIdentity } from "./mcp-endpoint";
-export { pluginMcpUnavailableReason } from "./mcp-endpoint";
+export { mcpHostsDeploymentCannotConnect, pluginMcpUnavailableReason } from "./mcp-endpoint";
 export * from "./connector-tool-permissions";
 export * from "./session-mcp-tool-permissions";
 export * from "./mcp-catalog-limits";
