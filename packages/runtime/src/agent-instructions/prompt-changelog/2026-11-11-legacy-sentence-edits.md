@@ -109,8 +109,8 @@ result.
 ```diff
 + For a conversation about another session, use session_target_get/set to remember or clear the selected target; selection is context, not permission to mutate.
 + Discover with sessions_list and inspect with session_events; keep voice in this session.
-+ Send only when asked, and use Steer only for an explicit change of direction.
-+ After Send or Steer, use session_message_status with the returned update ID to follow its exact consuming turn and read the indicated result before relaying it.
++ Queue a message only when asked, and use Steer only for an explicit change of direction.
++ After Queue or Steer, use session_message_status with the returned update ID to follow its exact consuming turn and read the indicated result before relaying it.
 + Do not resend pending work or mistake acceptance for completion.
 ```
 

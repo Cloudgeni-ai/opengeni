@@ -302,6 +302,13 @@ impl Presentation {
         }
         let mut rebuilt = Vec::with_capacity(affected_owners.len());
         for owner in affected_owners {
+            // An owner deleted later in the same batch has no scene left to
+            // index. Its empty index is installed below, which removes the
+            // stale entry while recording it for transaction rollback.
+            if self.scene(owner).is_err() {
+                rebuilt.push((owner, SpatialIndex::default()));
+                continue;
+            }
             let index = match self.rebuild_spatial_index(owner) {
                 Ok(index) => index,
                 Err(kind) => {
@@ -457,6 +464,7 @@ impl Presentation {
                 let index = order_index(&self.master_order, *id)?;
                 let master = self.masters.remove(id).expect("validated master exists");
                 self.master_order.remove(index);
+                affected.insert(SceneOwner::Master(*id));
                 Ok(Undo::RestoreMaster { index, master })
             }
             PresentationCommand::DeleteLayout { id } => {
@@ -477,6 +485,7 @@ impl Presentation {
                 let index = order_index(&self.layout_order, *id)?;
                 let layout = self.layouts.remove(id).expect("validated layout exists");
                 self.layout_order.remove(index);
+                affected.insert(SceneOwner::Layout(*id));
                 Ok(Undo::RestoreLayout { index, layout })
             }
             PresentationCommand::DeleteSlide { id } => {
@@ -490,7 +499,7 @@ impl Presentation {
                 let index = order_index(&self.slide_order, *id)?;
                 let slide = self.slides.remove(id).expect("validated slide exists");
                 self.slide_order.remove(index);
-                self.spatial.remove(&SceneOwner::Slide(*id));
+                affected.insert(SceneOwner::Slide(*id));
                 Ok(Undo::RestoreSlide { index, slide })
             }
             PresentationCommand::SetSlideTitle { id, title } => {

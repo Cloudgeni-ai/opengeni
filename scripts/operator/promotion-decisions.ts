@@ -43,6 +43,8 @@ const { values } = parseArgs({
     "rate-limit-max": { type: "string" },
     // Denied network rule (migration 1368).
     "denied-network-mode": { type: "string" },
+    // Sign-in network velocity (migration 1471).
+    "sign-in-network-mode": { type: "string" },
     rule: { type: "string" },
     "network-holds": { type: "boolean" },
     "network-capture-flagged": { type: "boolean" },
@@ -115,9 +117,14 @@ function networkVelocityChanges(): SignupNetworkVelocityChanges {
       throw new Error("--denied-network-mode must be off, observe or enforce");
     changes.deniedNetworkMode = values["denied-network-mode"] as "off" | "observe" | "enforce";
   }
+  if (values["sign-in-network-mode"] !== undefined) {
+    if (!["off", "observe", "enforce"].includes(values["sign-in-network-mode"]))
+      throw new Error("--sign-in-network-mode must be off, observe or enforce");
+    changes.signInNetworkMode = values["sign-in-network-mode"] as "off" | "observe" | "enforce";
+  }
   if (Object.keys(changes).length === 0)
     throw new Error(
-      "Give at least one of --mode, --window-hours, --exact-threshold, --prefix-threshold, --rate-limit, --rate-limit-max, --denied-network-mode",
+      "Give at least one of --mode, --window-hours, --exact-threshold, --prefix-threshold, --rate-limit, --rate-limit-max, --denied-network-mode, --sign-in-network-mode",
     );
   return changes;
 }

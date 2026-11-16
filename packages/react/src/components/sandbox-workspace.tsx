@@ -818,7 +818,11 @@ export function useSandboxWorkspaceTabs(
             workspaceError={
               caps.error ??
               (caps.viewerCapReached
-                ? new Error(t("sandboxWorkspace.theLiveWorkspaceViewerLimit"))
+                ? new Error(
+                    caps.viewerCapReason === "computers"
+                      ? t("sandboxWorkspace.tooManyComputersRunningWithoutTask")
+                      : t("sandboxWorkspace.theLiveWorkspaceViewerLimit"),
+                  )
                 : filesWarmRequested && caps.state === "on-demand" && !fileSystemOn
                   ? new Error(t("sandboxWorkspace.thisMachineDoesNotCurrently"))
                   : null)
@@ -990,6 +994,7 @@ export function useSandboxWorkspaceTabs(
     caps.state,
     caps.error,
     caps.viewerCapReached,
+    caps.viewerCapReason,
     caps.renegotiate,
     filesWarmRequested,
     requestWarmIntent,

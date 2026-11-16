@@ -570,7 +570,7 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
     refresh,
     onRuntimeChanged,
   });
-  const github = useGitHubIntegration({ workspaceId });
+  const github = useGitHubIntegration({ workspaceId, pageOpen: openIntegration === "github" });
   // Outlook Mail/Calendar/Contacts and OneDrive: one row per provider, folding
   // every connected account into that row's Connected accounts block. Every
   // curated definition here is oauth2-only, so a single shared effect (below)
@@ -1221,12 +1221,15 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
   // --- Connect flows ---------------------------------------------------------
 
   async function handleAction(action: ConnectAction): Promise<boolean> {
-    // Removing one account is management of an existing row, never fresh setup.
+    // Removing or renaming one account is management of an existing row, never
+    // fresh setup.
     if (
       !selected ||
       !selectedItem ||
+      busyId !== null ||
       (selectedSetupUnavailable &&
         action.type !== "remove_connection" &&
+        action.type !== "rename_connection" &&
         action.type !== "turn_on_here")
     )
       return false;
@@ -1278,12 +1281,20 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
         },
         action,
       );
-      if (action.type === "remove_connection" || action.type === "turn_on_here")
+      if (
+        action.type === "remove_connection" ||
+        action.type === "rename_connection" ||
+        action.type === "turn_on_here"
+      )
         catalogConnectionAccounts.onRetry();
       return true;
     } catch (error) {
       await refresh();
-      if (action.type === "remove_connection" || action.type === "turn_on_here")
+      if (
+        action.type === "remove_connection" ||
+        action.type === "rename_connection" ||
+        action.type === "turn_on_here"
+      )
         catalogConnectionAccounts.onRetry();
       const copy = capabilityErrorToast(error, "Something went wrong");
       setSheetError(
@@ -1834,6 +1845,8 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
             hasWorkspacePermission(context.accessContext, accountWorkspaceId, "connections:write"),
           onRemove: (connection) =>
             handleAction({ type: "remove_connection", item: selectedItem, connection }),
+          onRename: (connection, label) =>
+            handleAction({ type: "rename_connection", item: selectedItem, connection, label }),
         }}
         canManageSocial={canManageSocial}
         socialSetupAvailable={selectedSocialSetupAvailable}

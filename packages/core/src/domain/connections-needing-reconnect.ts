@@ -1,4 +1,4 @@
-import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";
+import { connectionAccountLabel } from "@opengeni/contracts/connection-account-label";
 import {
   NOTIFICATION_SUBTITLE_MAX_CHARS,
   SessionNotificationPostedPayload,
@@ -54,7 +54,7 @@ function needingReconnect(
     providerDomain: connection.providerDomain,
     mcpUrl: typeof mcpUrl === "string" && mcpUrl ? mcpUrl : null,
     ownership: connection.subjectId === null ? "workspace" : "personal",
-    account: connectionAccountIdentityLabel(connection.metadata, connection.providerDomain),
+    account: connectionAccountLabel(connection, connection.providerDomain),
     since: connection.updatedAt,
     addedHere: connection.workspaceId === workspaceId,
   };
@@ -203,7 +203,7 @@ export async function postConnectionNeedsReauthNotice(
       broken.subjectId,
     );
     const service = providerName(broken.providerDomain);
-    const account = connection ? connectionAccountIdentityLabel(connection.metadata, "") : "";
+    const account = connection ? connectionAccountLabel(connection, "") : "";
     const payload = SessionNotificationPostedPayload.parse({
       key: connectionNeedsReauthNoticeKey(broken.connectionId),
       title: `${service} needs reconnecting`,

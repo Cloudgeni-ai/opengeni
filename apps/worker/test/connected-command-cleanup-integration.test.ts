@@ -787,20 +787,33 @@ test("offline output is neither due nor claimed until reconnect, without changin
         connection_lease_expires_at=${connection === "null" ? null : connection === "expired" ? new Date(0) : new Date(Date.now() + 3600000)},
         went_offline_at=${connection === "goodbye" ? new Date() : null},
         went_offline_reason=null where id=${fixture.identity.enrollmentId}`;
+      await fixture.due();
       expect(await due()).toBe(false);
       const rpc = noRunnerRpc();
+      const sweptAt = Date.now();
       await releaseOutput(client.db, settings, observability, fixture.outputBus, rpc);
       expect(rpc.requests()).toBe(0);
       const after = await fixture.stored();
       expect(after.reconcile_attempts).toBe(before.reconcile_attempts);
+      expect(after.last_reconcile_outcome).toBe(before.last_reconcile_outcome);
+      expect(after.reconcile_claim_id).toBeNull();
       expect(after.output_consumed_at).toEqual(before.output_consumed_at);
       expect(after.output_exit_seq).toBe(before.output_exit_seq);
       expect(after.output_release_observed_at).toBeNull();
       expect(after.output_unavailable_at).toBeNull();
+      // Not reread by every claim: due again after its age since exit, at
+      // least 30 seconds (it exited moments ago).
+      const deferredMs = after.reconcile_after.getTime() - sweptAt;
+      expect(deferredMs).toBeGreaterThan(25_000);
+      expect(deferredMs).toBeLessThan(40_000);
     }
     await shared.admin`update enrollments set connection_instance_id='launch',
       connection_lease_expires_at=now()+interval '1 hour',went_offline_at=null, went_offline_reason=null
       where id=${fixture.identity.enrollmentId}`;
+    // The runner is back; the row is found once its deferral ends.
+    expect(await due()).toBe(false);
+    await shared.admin`update session_background_commands set reconcile_after=now()
+      where id=${fixture.identity.commandId}`;
     expect(await due()).toBe(true);
     await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
     expect((await fixture.stored()).output_consumed_at).toBeInstanceOf(Date);
@@ -1539,4 +1552,153 @@ test("a release recorded where the output was stored ends the obligation, only f
   await fixture.due();
   await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
   expect(fixture.operations).toEqual([]);
+});
+
+/** `count` exited, uncaptured connected commands on one fresh runner, due at
+ * `dueAt` and exited `exitedAgo` ago. */
+async function exitedBacklog(count: number, dueAt: string, exitedAgo: string) {
+  const sessionId = await seed(count);
+  await shared.admin`update session_background_commands set state='exited',exit_code=0,
+    settlement_reason='op_exit',settled_at=now()-${exitedAgo}::interval,
+    reconcile_after=${dueAt}::timestamptz where session_id=${sessionId}`;
+  const [row] = await shared.admin`select enrollment_id from session_background_commands
+    where session_id=${sessionId} limit 1`;
+  return { sessionId, enrollmentId: row!.enrollment_id as string };
+}
+
+test("rows whose runner is offline are pushed back once, not reread by every claim, and released once it returns", async () => {
+  // Ahead of the claimable rows in claim order: a recent and an old offline backlog.
+  const recent = await exitedBacklog(30, "1999-01-01T00:00:00Z", "5 seconds");
+  const old = await exitedBacklog(30, "1999-01-02T00:00:00Z", "2 hours");
+  const live = await exitedBacklog(30, "2000-01-01T00:00:00Z", "1 hour");
+  const offline = [recent, old];
+  for (const backlog of offline)
+    await shared.admin`update enrollments set connection_lease_expires_at=now()-interval '1 minute'
+      where id=${backlog.enrollmentId}`;
+  const rows = async (sessionId: string) =>
+    await shared.admin`select id,reconcile_after,reconcile_claim_id,reconcile_attempts,
+      last_reconcile_outcome from session_background_commands where session_id=${sessionId}
+      order by id`;
+  const claim = async () =>
+    await claimConnectedCommandOutputReleases(client.db, {
+      claimId: crypto.randomUUID(),
+      limit: 20,
+      claimTtlMs: 300_000,
+    });
+  try {
+    const before = Date.now();
+    const first = await claim();
+    expect(first).toHaveLength(20);
+    expect(first.every((row) => row.sessionId === live.sessionId)).toBe(true);
+    const deferred = await Promise.all(offline.map((backlog) => rows(backlog.sessionId)));
+    for (const [index, backlogRows] of deferred.entries()) {
+      // Due again after its age since exit: at least 30 seconds, at most 5 minutes.
+      const expectedMs = index === 0 ? 30_000 : 300_000;
+      for (const row of backlogRows) {
+        const delay = row.reconcile_after.getTime() - before;
+        expect(delay).toBeGreaterThan(expectedMs - 10_000);
+        expect(delay).toBeLessThan(expectedMs + 10_000);
+        expect(row.reconcile_claim_id).toBeNull();
+        expect(row.reconcile_attempts).toBe(0);
+        expect(row.last_reconcile_outcome).toBeNull();
+      }
+    }
+    // The next claim takes the rest without touching the deferred rows again.
+    const second = await claim();
+    expect(second).toHaveLength(10);
+    expect(second.every((row) => row.sessionId === live.sessionId)).toBe(true);
+    expect(await Promise.all(offline.map((backlog) => rows(backlog.sessionId)))).toEqual(deferred);
+    expect(await claim()).toEqual([]);
+
+    // Still offline when due again: pushed back again, never claimed or expired.
+    await shared.admin`update session_background_commands set reconcile_after=now()
+      where session_id=${old.sessionId}`;
+    expect(await claim()).toEqual([]);
+    const [stillOffline] =
+      await shared.admin`select count(*)::int n from session_background_commands
+      where session_id=${old.sessionId} and reconcile_after > now() + interval '4 minutes'
+        and output_unavailable_at is null and reconcile_claim_id is null`;
+    expect(stillOffline!.n).toBe(30);
+
+    // Its runner returns: every row is claimed once its deferral ends.
+    await shared.admin`update enrollments set connection_lease_expires_at=now()+interval '1 hour'
+      where id=${old.enrollmentId}`;
+    expect(await claim()).toEqual([]);
+    await shared.admin`update session_background_commands set reconcile_after=now()
+      where session_id=${old.sessionId}`;
+    const returned = [...(await claim()), ...(await claim())];
+    expect(returned).toHaveLength(30);
+    expect(new Set(returned.map((row) => row.commandId)).size).toBe(30);
+    expect(returned.every((row) => row.sessionId === old.sessionId)).toBe(true);
+  } finally {
+    for (const backlog of [recent, old, live]) await parkSession(backlog.sessionId);
+  }
+});
+
+test("output behind more offline rows than one claim defers is still claimed in that sweep", async () => {
+  // 250 offline rows ahead of 30 claimable ones: more than one claim defers.
+  const offline = await exitedBacklog(250, "1999-01-01T00:00:00Z", "2 hours");
+  const live = await exitedBacklog(30, "2000-01-01T00:00:00Z", "1 hour");
+  await shared.admin`update enrollments set connection_lease_expires_at=now()-interval '1 minute'
+    where id=${offline.enrollmentId}`;
+  const claim = async () =>
+    await claimConnectedCommandOutputReleases(client.db, {
+      claimId: crypto.randomUUID(),
+      limit: 20,
+      claimTtlMs: 300_000,
+    });
+  const offlineDue = async () =>
+    (
+      await shared.admin`select count(*)::int n from session_background_commands
+        where session_id=${offline.sessionId} and reconcile_after <= now()
+          and reconcile_claim_id is null`
+    )[0]!.n as number;
+  try {
+    // A sweep claims until a claim comes back short of its limit, so these
+    // two claims are one sweep: every claimable row is claimed in it.
+    const first = await claim();
+    expect(first).toHaveLength(20);
+    expect(first.every((row) => row.sessionId === live.sessionId)).toBe(true);
+    // Only the deferral cap moved; the rest stay due, untouched.
+    expect(await offlineDue()).toBe(50);
+    const second = await claim();
+    expect(second).toHaveLength(10);
+    expect(second.every((row) => row.sessionId === live.sessionId)).toBe(true);
+    expect(new Set([...first, ...second].map((row) => row.commandId)).size).toBe(30);
+    expect(await offlineDue()).toBe(0);
+    expect(await claim()).toEqual([]);
+  } finally {
+    for (const backlog of [offline, live]) await parkSession(backlog.sessionId);
+  }
+});
+
+test("a final ACK the runner keeps answering as retained backs off, and is still retried", async () => {
+  const fixture = await terminalOutputFixture();
+  try {
+    await shared.admin`update session_background_commands set reconcile_attempts=2
+      where id=${fixture.identity.commandId}`;
+    await fixture.due();
+    const delays: number[] = [];
+    for (let pass = 0; pass < 3; pass++) {
+      const before = Date.now();
+      await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
+      const row = await fixture.stored();
+      expect(row.last_reconcile_outcome).toBe("output_ack_published");
+      expect(row.output_release_observed_at).toBeNull();
+      delays.push(row.reconcile_after.getTime() - before);
+      await fixture.due();
+    }
+    // 30 s doubling per attempt to five minutes, not every reaper period.
+    for (const [index, expected] of [120_000, 240_000, 300_000].entries()) {
+      expect(delays[index]!).toBeGreaterThan(expected - 10_000);
+      expect(delays[index]!).toBeLessThan(expected + 10_000);
+    }
+    fixture.runner.lostOps.add(fixture.identity.opId);
+    await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
+    const released = await fixture.stored();
+    expect(released.output_release_observed_at).toBeInstanceOf(Date);
+    expect(released.last_reconcile_outcome).toBe("output_released");
+  } finally {
+    await parkSession(fixture.identity.sessionId);
+  }
 });

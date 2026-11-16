@@ -1219,6 +1219,126 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
     });
   }, 60_000);
 
+  test("an exhausted warm allowance detaches an already attached viewer so its task-less box drains", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const { sandboxGroupId, sessionId } = await seedWarmBox(accountId, workspaceId);
+    const session = await getSession(db, workspaceId, sessionId);
+    const attached = await attachViewer(
+      { db, settings: localDeploymentSettings },
+      { accountId, workspaceId, session: session! },
+    );
+    const capEventKey = `viewer-warm-cap:${crypto.randomUUID()}`;
+    await admin`INSERT INTO usage_events(account_id,workspace_id,event_type,quantity,unit,idempotency_key,occurred_at)
+      VALUES(${accountId},${workspaceId},'sandbox.warm_seconds',10,'seconds',${capEventKey},now())`;
+    await forceDrainOverLimitViewerOnlyBoxes(db, {
+      workspaceId,
+      enforceBalance: false,
+      maxWarmSecondsPerWorkspace: 5,
+      idleGraceMs: settings.sandboxIdleGraceMs,
+    });
+    // The force drain alone spares the attached viewer; its next heartbeat ends it.
+    expect((await readLease(db, workspaceId, sandboxGroupId))?.viewerHolders).toBe(1);
+
+    const alive = await heartbeatViewer(
+      { db, settings: localDeploymentSettings },
+      {
+        accountId,
+        workspaceId,
+        sandboxGroupId,
+        viewerId: attached.viewerId,
+        expectedEpoch: attached.leaseEpoch,
+      },
+    );
+    expect(alive).toBe(false);
+    expect(await readLease(db, workspaceId, sandboxGroupId)).toMatchObject({
+      liveness: "draining",
+      refcount: 0,
+      viewerHolders: 0,
+    });
+  }, 60_000);
+
+  test("a viewer that would keep one box too many warm without a task receives 429", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const first = await seedWarmBox(accountId, workspaceId);
+    const second = await seedWarmBox(accountId, workspaceId);
+    const limited = testSettings({
+      ...localDeploymentSettings,
+      sandboxMaxViewerOnlyBoxesPerWorkspace: 1,
+    });
+    const firstSession = await getSession(db, workspaceId, first.sessionId);
+    const secondSession = await getSession(db, workspaceId, second.sessionId);
+    expect(
+      (
+        await attachViewer(
+          { db, settings: limited },
+          { accountId, workspaceId, session: firstSession! },
+        )
+      ).liveness,
+    ).toBe("warm");
+
+    let blocked: unknown;
+    try {
+      await attachViewer(
+        { db, settings: limited },
+        { accountId, workspaceId, session: secondSession! },
+      );
+    } catch (error) {
+      blocked = error;
+    }
+    expect(blocked).toBeInstanceOf(HTTPException);
+    expect((blocked as HTTPException).status).toBe(429);
+    expect((blocked as Error).message).toContain("no task");
+    // Clients branch on the machine-readable refusal, not the message.
+    expect((blocked as { details?: unknown }).details).toEqual({
+      viewerRefusal: "computer_limit",
+    });
+    expect((await readLease(db, workspaceId, second.sandboxGroupId))?.viewerHolders).toBe(0);
+  }, 60_000);
+
+  test("the person-facing attach reports the idle window and the heartbeat records reported interaction", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const { sandboxGroupId, sessionId } = await seedWarmBox(accountId, workspaceId);
+    const session = await getSession(db, workspaceId, sessionId);
+    const idleSettings = testSettings({
+      ...localDeploymentSettings,
+      sandboxViewerIdleDrainMs: 1_800_000,
+    });
+
+    // Joining the warm box is allowed and advertises the idle window.
+    const attached = await attachViewer(
+      { db, settings: idleSettings },
+      { accountId, workspaceId, session: session!, interactionAgeMs: 1_000 },
+    );
+    expect(attached.liveness).toBe("warm");
+    expect(attached.viewerIdleDrainMs).toBe(1_800_000);
+
+    // The heartbeat records the interaction the client reports.
+    const alive = await heartbeatViewer(
+      { db, settings: idleSettings },
+      {
+        accountId,
+        workspaceId,
+        sandboxGroupId,
+        viewerId: attached.viewerId,
+        expectedEpoch: attached.leaseEpoch,
+        interactionAgeMs: 4_000,
+      },
+    );
+    expect(alive).toBe(true);
+    const [holder] = await admin<{ age_ms: number }[]>`
+      select (extract(epoch from now() - holder.last_interaction_at) * 1000)::int as age_ms
+      from sandbox_lease_holders holder
+      join sandbox_leases lease on lease.id = holder.lease_id
+      where lease.workspace_id = ${workspaceId} and lease.sandbox_group_id = ${sandboxGroupId}
+        and holder.kind = 'viewer'`;
+    // The attach reported 1 s ago, the heartbeat 4 s ago: the newest is kept.
+    expect(holder!.age_ms).toBeGreaterThanOrEqual(500);
+    expect(holder!.age_ms).toBeLessThan(60_000);
+  }, 60_000);
+
   test("fleet readiness returns a live viewer hold until its route owner releases it", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();

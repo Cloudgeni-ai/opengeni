@@ -318,11 +318,13 @@ export class EditableArtifactAgentApplication {
     input: EditableArtifactAgentContext & Readonly<{ artifactId: EditableArtifactId }>,
   ): Promise<EditableArtifactAgentMetadata> {
     const context = agentContext(input);
-    const artifact = await this.dependencies.domain.getArtifact({
-      scope: context.scope,
-      actor: context.actor,
-      artifactId: editableArtifactId(input.artifactId),
-    });
+    const artifact = requireActive(
+      await this.dependencies.domain.getArtifact({
+        scope: context.scope,
+        actor: context.actor,
+        artifactId: editableArtifactId(input.artifactId),
+      }),
+    );
     await this.touch(context, artifact.id);
     return projectArtifact(artifact);
   }
@@ -344,6 +346,7 @@ export class EditableArtifactAgentApplication {
       actor: context.actor,
       artifactId,
     });
+    requireActive(state.artifact);
     if (state.modality !== input.request.modality)
       throw new TypeError("Artifact modality mismatch");
     const queryBytes = encodeQuery(input.request);
@@ -503,6 +506,7 @@ export class EditableArtifactAgentApplication {
       actor: context.actor,
       artifactId,
     });
+    requireActive(artifact);
     // Refuse before pinning a version: the agent learns what does exist.
     await this.dependencies.exports.preflight({
       modality: artifact.modality,
@@ -564,11 +568,14 @@ export class EditableArtifactAgentApplication {
   > {
     const context = agentContext(input);
     const artifactId = editableArtifactId(input.artifactId);
-    const artifact = await this.dependencies.domain.getArtifact({
-      scope: context.scope,
-      actor: context.actor,
-      artifactId,
-    });
+    // A deleted artifact's export never turns into a new workspace file.
+    const artifact = requireActive(
+      await this.dependencies.domain.getArtifact({
+        scope: context.scope,
+        actor: context.actor,
+        artifactId,
+      }),
+    );
     const job = await this.dependencies.exports.getMaterialization({
       scope: context.scope,
       actor: context.actor,
@@ -757,4 +764,11 @@ function exportChildIdempotencyKey(
     .update(value, "utf8")
     .digest("hex");
   return `artifact-export:${operation}:${digest}`;
+}
+
+/** A deleted (archived) artifact no longer opens, for agents as for people. */
+function requireActive<T extends { lifecycle: string }>(artifact: T): T {
+  if (artifact.lifecycle !== "active")
+    throw new EditableArtifactDomainError("not_found", "Editable artifact was deleted");
+  return artifact;
 }

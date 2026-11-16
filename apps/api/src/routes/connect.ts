@@ -12,9 +12,14 @@ import {
   ConnectOperationRequest,
   ConnectProvider,
   ConnectAccount,
+  CONNECT_CONNECTION_LABEL_FIELD,
   connectProviderAcceptsRequestedScopes,
   preparedMcpHeaders,
 } from "@opengeni/contracts/connect";
+import {
+  connectionAccountLabel,
+  normalizeConnectionLabel,
+} from "@opengeni/contracts/connection-account-label";
 import {
   API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
   InstallApiIntegrationRequest,
@@ -619,7 +624,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               id: connection.id,
               version: connection.version,
               providerId: connection.metadata.connectAdapter,
-              label: connection.providerDomain,
+              label: connectionAccountLabel(connection, connection.providerDomain).slice(0, 256),
               ownership: connection.subjectId === null ? "workspace" : "personal",
               status:
                 connection.status === "revoked"
@@ -653,7 +658,12 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                       : connection.metadata.mcpUrl === OFFICIAL_GOOGLE_CALENDAR_MCP_URL
                         ? "google-calendar"
                         : "mcp-oauth",
-              label: connectorProviderDomain(connection.providerDomain),
+              // A Nango row is named by the connector it serves, not the
+              // integration platform's domain.
+              label: connectionAccountLabel(
+                connection,
+                connectorProviderDomain(connection.providerDomain),
+              ).slice(0, 256),
               ownership: connection.subjectId === null ? "workspace" : "personal",
               status:
                 connection.status === "revoked"
@@ -982,12 +992,16 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (["mcp-bearer", "mcp-headers"].includes(before.providerId)) {
       if (action.type !== "credentials")
         throw new HTTPException(422, { message: "MCP credentials required" });
+      // The optional name is not a credential: take it out before the
+      // credential values are checked, and keep the current name when blank.
+      const { [CONNECT_CONNECTION_LABEL_FIELD]: labelValue, ...credentialValues } = action.values;
+      const label = normalizeConnectionLabel(labelValue);
       let values: { mcpUrl: string; headers: string } | { mcpUrl: string; token: string };
       if (before.mcpSetup) {
         try {
           values = {
             mcpUrl: before.mcpSetup.endpointUrl,
-            headers: JSON.stringify(preparedMcpHeaders(before.mcpSetup, action.values)),
+            headers: JSON.stringify(preparedMcpHeaders(before.mcpSetup, credentialValues)),
           };
         } catch {
           throw new HTTPException(422, { message: "Supply exactly the requested secret fields" });
@@ -1001,7 +1015,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                   headers: z.string().min(2).max(65_536),
                 })
                 .strict()
-                .parse(action.values)
+                .parse(credentialValues)
             : z
                 .object({
                   mcpUrl: z.string().url().max(4096),
@@ -1012,7 +1026,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                     .regex(/^[^\u0000-\u0020\u007f]+$/),
                 })
                 .strict()
-                .parse(action.values);
+                .parse(credentialValues);
       }
       let credentialHeaders: Record<string, string>;
       try {
@@ -1143,6 +1157,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                       grantedScopes: [],
                       expiresAt: null,
                       metadata,
+                      ...(label ? { label } : {}),
                       updatedBySubjectId: scope.subjectId,
                     })
                   : await createConnection(tx, {
@@ -1155,6 +1170,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                       grantedScopes: [],
                       expiresAt: null,
                       metadata,
+                      ...(label ? { label } : {}),
                       createdBySubjectId: scope.subjectId,
                     });
                 if (!connection) throw new HTTPException(409, { message: "MCP account changed" });
@@ -1177,7 +1193,10 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                     id: connection.id,
                     version: connection.version,
                     providerId: current.providerId,
-                    label: connection.providerDomain,
+                    label: connectionAccountLabel(connection, connection.providerDomain).slice(
+                      0,
+                      256,
+                    ),
                     ownership: current.ownership,
                     status: "connected",
                   },
@@ -1954,7 +1973,10 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                       id: existing.id,
                       version: existing.version,
                       providerId: input.providerId,
-                      label: existing.providerDomain,
+                      label: connectionAccountLabel(existing, existing.providerDomain).slice(
+                        0,
+                        256,
+                      ),
                       ownership: input.ownership,
                       status: "auth_needed" as const,
                     },
@@ -1962,59 +1984,76 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                 : {}),
               nextAction: {
                 type: "credentials",
-                fields: input.mcpSetup
-                  ? input.mcpSetup.secretFields.map((field) => ({
-                      name: field.id,
-                      label: field.label,
-                      required: true,
-                      secret: true,
-                    }))
-                  : ["slack-personal", "gmail", "google-drive", "google-calendar"].includes(
-                        input.providerId,
-                      )
-                    ? []
-                    : input.providerId === "fiken-token"
-                      ? [
-                          {
-                            name: "apiToken",
-                            label: "Fiken API token",
-                            required: true,
-                            secret: true,
-                          },
-                          {
-                            name: "defaultCompanySlug",
-                            label: "Default company slug (optional)",
-                            required: false,
-                            secret: false,
-                          },
-                        ]
-                      : [
-                          {
-                            name: "mcpUrl",
-                            label: "MCP server URL",
-                            required: true,
-                            secret: false,
-                          },
-                          ...(input.providerId === "mcp-bearer"
-                            ? [
-                                {
-                                  name: "token",
-                                  label: "Bearer credential",
-                                  required: true,
-                                  secret: true,
-                                },
-                              ]
-                            : input.providerId === "mcp-headers"
+                fields: [
+                  ...(input.mcpSetup
+                    ? input.mcpSetup.secretFields.map((field) => ({
+                        name: field.id,
+                        label: field.label,
+                        required: true,
+                        secret: true,
+                      }))
+                    : ["slack-personal", "gmail", "google-drive", "google-calendar"].includes(
+                          input.providerId,
+                        )
+                      ? []
+                      : input.providerId === "fiken-token"
+                        ? [
+                            {
+                              name: "apiToken",
+                              label: "Fiken API token",
+                              required: true,
+                              secret: true,
+                            },
+                            {
+                              name: "defaultCompanySlug",
+                              label: "Default company slug (optional)",
+                              required: false,
+                              secret: false,
+                            },
+                          ]
+                        : [
+                            {
+                              name: "mcpUrl",
+                              label: "MCP server URL",
+                              required: true,
+                              secret: false,
+                            },
+                            ...(input.providerId === "mcp-bearer"
                               ? [
                                   {
-                                    name: "headers",
-                                    label: "Credential headers (JSON)",
+                                    name: "token",
+                                    label: "Bearer credential",
                                     required: true,
                                     secret: true,
                                   },
                                 ]
-                              : []),
-                        ],
+                              : input.providerId === "mcp-headers"
+                                ? [
+                                    {
+                                      name: "headers",
+                                      label: "Credential headers (JSON)",
+                                      required: true,
+                                      secret: true,
+                                    },
+                                  ]
+                                : []),
+                          ]),
+                  // A key tells nobody which account it is, so the person
+                  // may name it: people and agents then tell it apart from
+                  // another key for the same server.
+                  ...(["mcp-bearer", "mcp-headers"].includes(input.providerId)
+                    ? [
+                        {
+                          name: CONNECT_CONNECTION_LABEL_FIELD,
+                          label: existing
+                            ? "Name (optional, keeps the current one)"
+                            : "Name (optional)",
+                          required: false,
+                          secret: false,
+                        },
+                      ]
+                    : []),
+                ],
               },
               expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
             },

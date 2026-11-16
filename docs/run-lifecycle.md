@@ -1565,6 +1565,21 @@ with "The turn continues automatically as soon as the sandbox is ready." It has
 no attempt counter because the wait has no retry budget; the turn resumes on the
 lifecycle wake.
 
+**Organization sandbox capacity.** A turn that would start a new box while its
+organization already runs the most boxes its plan allows
+(`OPENGENI_SANDBOX_PLAN_LIMITS_JSON`, `runningBoxesPerOrganization`; see
+[deployment](deployment.md)) is not given one: the cold election returns
+`fenced` reason `organization_sandbox_capacity`, registers no holder and
+licenses no provider create. The worker settles it like any other lifecycle
+transition (`sandbox_lifecycle_transition`, `transitionReason:
+"organization_sandbox_capacity"`, `organizationBoxLimit`), settling unstarted
+commands as not started, and parks the same turn for
+`ORGANIZATION_SANDBOX_CAPACITY_RETRY_MS` (one minute) with no retry budget and no
+turn worker held. The replacement attempt asks again; joining or re-arming a box
+that already runs never counts. This is a concurrency bound, never a run-length
+limit: an admitted turn keeps its box for as long as it works. The lazy
+provisioner never retries the transition in place.
+
 **Durable recovery observability.** The control worker reads one content-free,
 cross-workspace aggregate per minute,
 `opengeni_private.summarize_session_recovery_backlog()` (migration 0633; the
@@ -2369,7 +2384,7 @@ single value `external` for every connector, API-integration, Codex Apps, and
 custom tool. Server, raw tool, tenant, request, error, and content values are
 deliberately absent from labels.
 
-First-party `session_create` and `session_send_message` failures return an MCP
+First-party `session_create` and `session_queue_message` failures return an MCP
 `isError` result with a bounded structured `{ error: { code, message } }`
 projection. The durable tool-output event retains that raw MCP result, and the
 React timeline promotes the two calls to worker rows that display the safe code
@@ -2887,7 +2902,7 @@ bounded, independently useful work with a defined integration point. Parent
 work must stay disjoint from the delegated implementation. Independent review
 or comparison can examine the same subject with a distinct deliverable.
 Delegation has setup and coordination overhead, so the default prefers a direct
-answer for small work and a `session_send_message` follow-up to an existing child
+answer for small work and a `session_queue_message` follow-up to an existing child
 over another spawn. Explicit user requests and applicable Skill guidance for
 delegation, independent review, or fresh workers override that default within
 existing authority. For
@@ -4310,6 +4325,68 @@ counts inspections (`checkpointing` when browser saves were prepared,
 `released` when holders were released without a save, `not_eligible`,
 `inspection_failed`). A person returning exactly as the box is being released
 may see the browser `suspending`, then resume it.
+
+**Boxes held only by viewers.** A viewer holder (an open session page using
+the desktop, terminal or files plane) keeps its box warm for as long as its
+heartbeats arrive. Admission already refuses a viewer that would warm one more
+viewer-only box beyond `OPENGENI_SANDBOX_MAX_VIEWER_ONLY_BOXES_PER_WORKSPACE`
+or the plan tier's limits ([deployment](deployment.md)), but a box a turn,
+process or readiness hold kept warm becomes viewer-only when that holder
+leaves, and nothing ended a viewer-only hold. The sandbox reaper therefore
+applies two bounds after admission. Both apply only to warm boxes whose every
+holder is a viewer, with no turn holder and no session of the sandbox group
+with open work (`queued`, `running`, `requires_action`, `recovering`,
+`waiting_capacity`). A box with a turn, process, Browser/ComputerSession or
+direct operation is never counted or drained by them. Compute and selfhosted
+boxes are exempt, and so is every box of an organization in the `embedded`
+(host-provisioned) or `enterprise` plan tier ([deployment](deployment.md)),
+whose host may hold viewers without reporting interaction.
+
+- Idle drain (`OPENGENI_SANDBOX_VIEWER_IDLE_DRAIN_MS`, default 30 minutes, `0`
+  disables). The server bounds the hold by what it observes: the viewers'
+  attach times and turns created or finished in the box's sessions. The web
+  client may extend it by reporting, on every attach and heartbeat, how long
+  ago the person last used the page (`lastInteractionAgeMs`: pointer,
+  keyboard, wheel, touch, window focus or the page becoming visible); the API
+  keeps the newest as the holder's `last_interaction_at`. Only a person's own
+  signed-in session can report it: the API ignores the field from an API key
+  (workspace, organization or personal), a delegated or service caller, so
+  such a viewer is bounded by what the server observes. A viewer's activity
+  is its last reported interaction, otherwise its attach time; a box's
+  activity is the newest of its viewers' activity and its sessions' turns.
+  When nothing happened for the window, the reaper deletes the viewer
+  holders, records the release (`sandbox_leases.viewer_idle_drained_at`) and
+  moves the lease to draining with the ordinary idle grace, so the workspace
+  is saved and the box stops as when the last tab closes. The page's next
+  heartbeat answers `alive: false`. For one more idle window after the
+  release, a person-facing viewer attach to that box that reports no
+  interaction after the release, while the session had no turn or open work
+  since, is refused with 429 (`details.viewerRefusal: "viewer_idle"`), so an
+  unattended page or an old client re-attaching on its own cannot reset the
+  idle clock at once. After that window any attach is admitted, so a person
+  returning on an older client, or someone else, can warm the box. A page
+  that knows the window (`viewerIdleDrainMs` on the attach response) waits for
+  the person's next interaction and then re-attaches, which is admitted and
+  resumes the box; the record is cleared.
+- Over-limit drain. The reaper counts the boxes still warm per workspace
+  (`OPENGENI_SANDBOX_MAX_VIEWER_ONLY_BOXES_PER_WORKSPACE`) and per
+  organization across its workspaces (the plan tier's
+  `viewerOnlyBoxesPerOrganization`) and, over either limit, drains the least
+  recently active boxes, but only boxes nobody has used for at least five
+  minutes; a box in active use is never evicted, and admission keeps new
+  boxes within the limits.
+
+Sessions with open work are an intentional exception: while a session is
+`queued`, `requires_action`, `waiting_capacity` or otherwise open, a person or
+the agent may still act, so its viewer-held box is neither drained nor counted.
+
+Every decision is rechecked under the lease lock on the database clock, so a
+viewer that reported interaction, an attach or a turn after the reaper's read
+keeps the box. Idle drains run before the limits are applied to the boxes
+still warm. Drains log `sandbox reaper: drained viewer-only box` with the
+reason, inactivity and whether the client reported interaction, and count
+`opengeni_sandbox_viewer_only_drains_total{reason}` (`viewer_idle`,
+`viewer_workspace_limit`, `viewer_organization_limit`).
 
 **Browsers and desktops on a retired instance.** A browser or desktop
 controller runs inside one exact provider instance (`placement_instance_id`),

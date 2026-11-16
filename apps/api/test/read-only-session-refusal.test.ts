@@ -30,7 +30,7 @@ describe("read-only session refusals", () => {
     expect(readOnlySessionRefusal(null)).toBeNull();
   });
 
-  for (const tool of ["session_send_message", "session_steer"] as const) {
+  for (const tool of ["session_queue_message", "session_steer"] as const) {
     test(`${tool} tells the calling agent the session is read-only`, () => {
       expect(orchestrationFailureEnvelope(tool, guardError("SESSION_ARCHIVED_READ_ONLY"))).toEqual({
         error: {
@@ -44,9 +44,9 @@ describe("read-only session refusals", () => {
   }
 
   test("other orchestration failures keep the generic result", () => {
-    expect(orchestrationFailureEnvelope("session_send_message", new Error("boom")).error.code).toBe(
-      "session_send_message_failed",
-    );
+    expect(
+      orchestrationFailureEnvelope("session_queue_message", new Error("boom")).error.code,
+    ).toBe("session_queue_message_failed");
   });
 
   test("a steer into somebody else's personal machine says why nothing was applied", () => {

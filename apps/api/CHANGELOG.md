@@ -1,5 +1,91 @@
 # @opengeni/api-router
 
+## 6.24.1
+
+### Patch Changes
+
+- e4c5c29: Free-credit farm detection now sees organizations created through the legacy `POST /v1/organizations` route, and counts the networks new owners sign in from. That route writes the same self-serve setup receipt and Free eligibility as organization onboarding but never passed the signup network, so the per-network rate limit, the velocity rule and its observations never saw it; a farm used it for 664 organizations from 52 addresses in one evening without a single hold. The route now records the trusted client network, applies the same rate limit (HTTP 429) and evaluates the new and recent same-network organizations after commit. The velocity rule (`ip-velocity-v1`) also counts, per exact network an owner signed in from around setup, the new organizations whose owners signed in from it around their own setup, and holds at the existing threshold (rule `ip-velocity-sign-in-v1`), so a setup without a signup network or from a rotating address is still caught. Same mode, window and threshold; manual decisions and operator releases kept; invited members never counted; prefixes alone never hold; keyed hashes only; bounded and fail-open.
+- Updated dependencies [f041392]
+- Updated dependencies [5fd2c21]
+- Updated dependencies [e4c5c29]
+  - @opengeni/db@6.24.1
+  - @opengeni/config@6.24.1
+  - @opengeni/contracts@6.24.1
+  - @opengeni/core@6.24.1
+  - @opengeni/documents@6.24.1
+  - @opengeni/events@6.24.1
+  - @opengeni/github@6.24.1
+  - @opengeni/runtime@6.24.1
+  - @opengeni/storage@6.24.1
+  - @opengeni/codemode@6.24.1
+  - @opengeni/artifact-tool@6.24.1
+  - @opengeni/capabilities@6.24.1
+  - @opengeni/codex@6.24.1
+  - @opengeni/decisions@6.24.1
+  - @opengeni/interaction@6.24.1
+  - @opengeni/observability@6.24.1
+  - @opengeni/tool-gateway@6.24.1
+  - @opengeni/vaults@6.24.1
+  - @opengeni/vaults-bitwarden@6.24.1
+  - @opengeni/vaults-keeper@6.24.1
+  - @opengeni/vaults-onepassword@6.24.1
+  - @opengeni/vaults-protonpass@6.24.1
+  - @opengeni/agent-proto@6.24.1
+  - @opengeni/network@6.24.1
+  - @opengeni/xai-subscription@6.24.1
+
+## 6.24.0
+
+### Patch Changes
+
+- 8924854: Connecting an API integration (OpenAPI, GraphQL or built-in definition) no longer fails with a 500 when another person in the workspace already has a personal instance of it at an older revision. A new revision moves every instance to it, and the facet binding check looked up the other person's personal Connection as the caller, who cannot see it; an update that keeps a binding's Connection and tenant is no longer checked again (migration 1453). Inserts and Connection changes are checked as before.
+
+  A failed preview or install in Connect now frees the attempt, so "Add selected tools" can be tried again instead of answering 409 "in flight or uncertain". Only operations that read their source and write in one transaction opt in (`releaseClaimOnFailure`); operations with provider effects keep their claim.
+
+- 8924854: Outlook Mail, Outlook Calendar, Outlook Contacts and OneDrive now offer a reviewed set of tools with hand-written names and descriptions (25, 20, 13 and 19 operations, down from 150, 177, 76 and 452), instead of every Graph operation under their path prefixes. Retained operations keep their tool ids. When an install moves to a new revision (including other people's instances moved by someone else's install), one that had every tool gets every tool of the new revision, and one whose chosen tools left the set gets the generic tools so those operations stay reachable; other choices are kept as they were. Free/busy schedules no longer need approval (they only read).
+
+  A reviewed definition can opt in to `genericPathScope`: a find tool searches the reviewed document's operations under its prefixes, and a read tool (GET) and a change tool (other methods, Ask by default) call one of them by its concrete path, which must match an in-scope operation segment by segment. The four Graph definitions above opt in with their earlier prefixes, so rare operations stay reachable.
+
+  Reviewed allowlist entries accept `put` and `delete`, a reviewed `summary` and `operationId`, and a `requestPath` naming other path parameters than the provider's (unnamed ones are dropped, new ones described with `pathParameterDescriptions`).
+
+  Every Microsoft Graph definition now reads a commit-pinned Graph OpenAPI document checked against its SHA-256 (`source.pinned`), not msgraph-metadata's moving master branch, so upstream changes no longer create new revisions on their own. `bun scripts/graph-openapi-pin.ts --diff <commit>` shows the operation changes before the pin is moved.
+
+- Updated dependencies [8924854]
+- Updated dependencies [0ad29b9]
+- Updated dependencies [24104b1]
+- Updated dependencies [8924854]
+- Updated dependencies [e6c9e45]
+- Updated dependencies [b9baad4]
+- Updated dependencies [8924854]
+- Updated dependencies [c0248a5]
+- Updated dependencies [1b544b0]
+- Updated dependencies [477f1db]
+  - @opengeni/core@6.24.0
+  - @opengeni/db@6.24.0
+  - @opengeni/codex@6.24.0
+  - @opengeni/runtime@6.24.0
+  - @opengeni/capabilities@6.24.0
+  - @opengeni/contracts@6.24.0
+  - @opengeni/config@6.24.0
+  - @opengeni/documents@6.24.0
+  - @opengeni/events@6.24.0
+  - @opengeni/artifact-tool@6.24.0
+  - @opengeni/codemode@6.24.0
+  - @opengeni/decisions@6.24.0
+  - @opengeni/github@6.24.0
+  - @opengeni/interaction@6.24.0
+  - @opengeni/observability@6.24.0
+  - @opengeni/storage@6.24.0
+  - @opengeni/tool-gateway@6.24.0
+  - @opengeni/vaults@6.24.0
+  - @opengeni/vaults-bitwarden@6.24.0
+  - @opengeni/vaults-keeper@6.24.0
+  - @opengeni/vaults-onepassword@6.24.0
+  - @opengeni/vaults-protonpass@6.24.0
+  - @opengeni/agent-proto@6.24.0
+  - @opengeni/network@6.24.0
+  - @opengeni/xai-subscription@6.24.0
+
 ## 6.23.0
 
 ### Patch Changes

@@ -1,0 +1,47 @@
+name: Queue bot pin pull requests
+
+# The pin-refresh workflows (browser-engine-pins.yml, xai-client-version-pin.yml)
+# open a pull request and dispatch PR CI on it, but nothing queued it. This adds
+# queue-ready once PR CI passed on its exact head and it can land; the merge
+# batcher then tests it on current main as usual. Only those workflows' bot
+# branches, opened and committed by github-actions[bot], are ever queued; see
+# scripts/ci/queue-bot-pin-prs.ts. A schedule, because PR CI that a workflow's
+# token dispatched starts no workflow_run, and the batcher's own schedule picks
+# up the label.
+on:
+  schedule:
+    - cron: "7,37 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: bot-pin-pr-queue
+  cancel-in-progress: false
+
+jobs:
+  queue:
+    name: Queue ready bot pin pull requests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      checks: read
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Check out the script from main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          sparse-checkout: |
+            /.bun-version
+            /scripts/ci/queue-bot-pin-prs.ts
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: .bun-version
+      - name: Queue them
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bun scripts/ci/queue-bot-pin-prs.ts

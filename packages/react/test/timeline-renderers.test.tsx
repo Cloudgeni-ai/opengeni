@@ -1230,7 +1230,7 @@ describe("durable machine-input timeline", () => {
           }),
           timelineEvent("agent.toolCall.created", {
             id: "call-message",
-            name: "opengeni__session_send_message",
+            name: "opengeni__session_queue_message",
             arguments: { sessionId: agentId, text: "Include webhooks too." },
           }),
           timelineEvent("agent.toolCall.output", {

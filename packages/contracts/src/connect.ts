@@ -9,6 +9,12 @@ export { PreparedMcpSetup, preparedMcpHeaders } from "./prepared-mcp-setup";
 
 const opaqueId = /* @__PURE__ */ defineSchema(() => z.string().min(1).max(512));
 /**
+ * The optional, non-secret field in a key-based MCP credentials step that names
+ * the connection (see `ConnectionMetadata.label`). Its hyphen keeps it apart
+ * from every prepared setup's secret field IDs.
+ */
+export const CONNECT_CONNECTION_LABEL_FIELD = "connection-label";
+/**
  * More provider access asked for when reconnecting an existing account, for
  * example the Gmail permission a later tool call needs. The server bounds it by
  * the reviewed connector's own permission list; it can never widen past it.

@@ -238,8 +238,15 @@ export const englishMessages = {
   "artifacts.presentationEditor.changeNotSaved": "Change not saved",
   "artifacts.presentationEditor.chart": "Chart",
   "artifacts.presentationEditor.chooseSlide": "Choose slide",
-  "artifacts.presentationEditor.deleteSelectedObject": "Delete selected object",
+  "artifacts.presentationEditor.deleteObject": "Delete object",
+  "artifacts.presentationEditor.deleteObjectDescription": "It is removed from this slide.",
+  "artifacts.presentationEditor.deleteObjectHint": "Remove the selected object from this slide",
+  "artifacts.presentationEditor.deleteObjectTitle": "Delete {name}?",
   "artifacts.presentationEditor.deleteSlide": "Delete slide",
+  "artifacts.presentationEditor.deleteSlideDescription":
+    "The slide and everything on it are removed.",
+  "artifacts.presentationEditor.deleteSlideHint": "Remove this slide and everything on it",
+  "artifacts.presentationEditor.deleteSlideTitle": "Delete slide {index}?",
   "artifacts.presentationEditor.editName": "Edit {name}",
   "artifacts.presentationEditor.fitSlide": "Fit slide",
   "artifacts.presentationEditor.group": "Group",
@@ -1753,6 +1760,7 @@ export const englishMessages = {
     "Voice input is off in {workspace}. Choose another workspace.",
   "desktopDictation.settings.workspaceVoiceOffOption": "Voice input is turned off.",
   "desktopViewer.clickReturnControlOrCtrl": "· click Return control (or Ctrl+Alt+Shift)",
+  "desktopViewer.computerLimitReached": "Computer limit reached",
   "desktopViewer.connectingToTheDesktop": "Connecting to the desktop…",
   "desktopViewer.couldnTConnect": "Couldn’t connect",
   "desktopViewer.couldnTOpenDesktop": "Couldn’t open desktop",
@@ -2239,6 +2247,8 @@ export const englishMessages = {
   "lib.providerRecovery.opengeniIsPreparingTheSandbox": "{product} is preparing the sandbox",
   "lib.providerRecovery.opengeniIsRecoveringTheSandbox": "{product} is recovering the sandbox",
   "lib.providerRecovery.opengeniIsSavingTheSandbox": "{product} is saving the sandbox workspace",
+  "lib.providerRecovery.yourPlanSRunningComputerLimit":
+    "Your organization is running as many computers as its plan allows; this task continues when one frees up",
   "lib.providerRecovery.opengeniRetriedTimesWithoutSuccess_one":
     "{product} retried {count} time without success.",
   "lib.providerRecovery.opengeniRetriedTimesWithoutSuccess_other":
@@ -4511,6 +4521,8 @@ export const englishMessages = {
   "sandboxWorkspace.thisBranchMatchesTheRemote": "This branch matches the remote default branch.",
   "sandboxWorkspace.thisMachineDoesNotCurrently":
     "This machine does not currently expose a live file system.",
+  "sandboxWorkspace.tooManyComputersRunningWithoutTask":
+    "Your plan's computer limit is reached. Close another computer or start a task in this chat.",
   "sandboxWorkspace.uncommitted": "Uncommitted",
   "sandboxWorkspace.wakeTheSandboxToCompare":
     "Wake the sandbox to compare this branch with the remote default branch.",

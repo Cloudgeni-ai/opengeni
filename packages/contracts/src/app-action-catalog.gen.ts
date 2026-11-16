@@ -357,6 +357,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "workspace:read"
   },
   {
+    "id": "archiveEditableArtifact",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/editable-artifacts/:artifactId/archive",
+    "request": [],
+    "response": [],
+    "permission": "artifacts:publish"
+  },
+  {
     "id": "archiveKnowledgeEntry",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/knowledge/entries/:entryId/archive",

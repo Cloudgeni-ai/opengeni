@@ -514,6 +514,7 @@ import {
   type Model,
   type ModelRequest,
   type ModelResponse,
+  type RunItem,
   type SerializedTool,
   type Tool,
 } from "@openai/agents";
@@ -11692,11 +11693,24 @@ export async function prepareRunInput(
   return { input: state, persistedHistoryCount: history.length };
 }
 
+function beforeToolExecutionRunOption(
+  overrides: RunAgentStreamOptions,
+): Pick<NonNullable<Parameters<typeof run>[2]>, "beforeToolExecution"> {
+  const gate = overrides.beforeToolExecution;
+  return gate ? { beforeToolExecution: ({ items }) => gate(items) } : {};
+}
+
 export type RunAgentStreamOptions = {
   /** Producer-side gate before calling any resolved model/provider. */
   beforeModelRequest?: ModelCallLifecycle["beforeModelRequest"];
   /** Register terminal response settlement before the next producer model request. */
   onModelResponse?: ModelCallLifecycle["onModelResponse"];
+  /**
+   * Awaited after a model response's items have been streamed and before any
+   * of its tools, handoffs or approvals run. Hosts make the response's tool
+   * calls durable here; a rejection fails the run before any tool starts.
+   */
+  beforeToolExecution?: (items: readonly RunItem[]) => Promise<void> | void;
   /**
    * Called when the run ends at a model-step boundary because the previous
    * response had no text and no tool call (see contentlessModelResponseGuard).
@@ -12269,6 +12283,7 @@ async function runAgentStreamInternal(
       ...lazyToolRunBindings(agent),
       callModelInputFilter: ownedFilter,
       errorHandlers: withModelStepHandover(inputWaitYield?.errorHandlers),
+      ...beforeToolExecutionRunOption(overrides),
       ...(overrides.signal ? { signal: overrides.signal } : {}),
     };
     ownedRunOptions.sandbox = {
@@ -12453,6 +12468,7 @@ async function runAgentStreamInternal(
     // every mid-turn follow-up.
     callModelInputFilter,
     errorHandlers: withModelStepHandover(inputWaitYield?.errorHandlers),
+    ...beforeToolExecutionRunOption(overrides),
     ...(overrides.signal ? { signal: overrides.signal } : {}),
   };
   if (client) {

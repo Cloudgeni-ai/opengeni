@@ -5,7 +5,7 @@ import type {
   SessionAuthorizationSurface,
   UserResourceKind,
 } from "@opengeni/contracts";
-import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";
+import { connectionAccountLabel } from "@opengeni/contracts/connection-account-label";
 import {
   isSubjectOwnPersonalWorkspace,
   issueSelfUserResourceGrant,
@@ -459,7 +459,7 @@ export async function nameOwnResources(
     });
     for (const connection of connections) {
       names.set(ownResourceKey({ resourceKind: "connection", resourceId: connection.id }), {
-        name: connectionAccountIdentityLabel(connection.metadata, connection.providerDomain),
+        name: connectionAccountLabel(connection, connection.providerDomain),
         provider: connection.providerDomain,
         plan: null,
         ...(connection.status === "revoked" ? { removed: true } : {}),

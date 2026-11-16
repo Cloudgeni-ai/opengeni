@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { sql } from "drizzle-orm";
 import type postgres from "postgres";
 import {
   AgentEvent,
@@ -31,6 +32,7 @@ import {
 } from "@opengeni/db";
 import { CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE } from "@opengeni/contracts";
 import {
+  classifyConnectedCommandOps,
   getSessionBackgroundCommand,
   locateConnectedCommandCompletion,
   readSessionBackgroundCommandOutput,
@@ -237,6 +239,78 @@ test("ingestion batches a burst without acknowledging missing rows or changing r
     stop();
   }
   expect(await getSessionBackgroundCommand(client.db, command)).toMatchObject({ state: "running" });
+});
+
+test("a foreground completion is classified without writing; a background one still finds its row", async () => {
+  const command = await fixture(true);
+  const runner = {
+    controlWorkspaceId: command.controlWorkspaceId,
+    enrollmentId: command.enrollmentId,
+    connectionInstanceId: command.connectionInstanceId,
+  };
+  // The transaction id a classification assigned: null when it wrote nothing
+  // (no fence capability row), so the statement needs no commit flush.
+  const classify = async (opIds: string[]) =>
+    await client.db.transaction(async (tx) => {
+      const rows = await tx.execute<{ op_id: string; command_id: string; state: string }>(sql`
+        select op_id, command_id, state from opengeni_private.classify_connected_command_ops(
+          ${runner.controlWorkspaceId}::uuid, ${runner.enrollmentId}::uuid,
+          ${runner.connectionInstanceId}::text,
+          array(select jsonb_array_elements_text(${JSON.stringify(opIds)}::jsonb)))`);
+      const [xid] = await tx.execute<{ xid: string | null }>(
+        sql`select pg_current_xact_id_if_assigned()::text as xid`,
+      );
+      return { rows: [...rows], wrote: xid!.xid !== null };
+    });
+  const foreground = Array.from({ length: 3 }, () => crypto.randomUUID());
+
+  expect(await classify(foreground)).toEqual({ rows: [], wrote: false });
+  // Another runner process's command with the same op id is not this one's.
+  expect(
+    await classifyConnectedCommandOps(client.db, {
+      ...runner,
+      connectionInstanceId: crypto.randomUUID(),
+      opIds: [command.opId],
+    }),
+  ).toEqual(new Map());
+
+  const background = await classify([...foreground, command.opId]);
+  expect(background.rows).toEqual([
+    { op_id: command.opId, command_id: command.commandId, state: "running" },
+  ]);
+  expect(background.wrote).toBe(true);
+  expect(
+    (await classifyConnectedCommandOps(client.db, { ...runner, opIds: [command.opId] })).get(
+      command.opId,
+    ),
+  ).toMatchObject([{ commandId: command.commandId, state: "running" }]);
+
+  // A projection row from before its op id was recorded may be any op of its
+  // runner process: that process keeps the full lookup, with the same answer.
+  await shared.admin`update opengeni_private.maintenance_probe_session_background_commands
+    set op_id = null where id = ${command.commandId}`;
+  expect(await classify(foreground)).toEqual({ rows: [], wrote: true });
+  expect((await classify([command.opId])).rows).toHaveLength(1);
+  // Any change to the command records its op id again.
+  await settleConnectedMachineSessionBackgroundCommand(client.db, {
+    ...command,
+    outcome: "exited",
+    exitCode: 0,
+    reason: "op_exit",
+  });
+  expect(await classify(foreground)).toEqual({ rows: [], wrote: false });
+  expect(await classify([command.opId])).toMatchObject({
+    rows: [{ op_id: command.opId, state: "exited" }],
+    wrote: true,
+  });
+  const [projected] = await shared.admin`select op_id from
+    opengeni_private.maintenance_probe_session_background_commands where id = ${command.commandId}`;
+  expect(projected!.op_id).toBe(command.opId);
+  await shared.admin`delete from session_background_commands where id = ${command.commandId}`;
+  const [removed] = await shared.admin`select count(*)::int n from
+    opengeni_private.maintenance_probe_session_background_commands where id = ${command.commandId}`;
+  expect(removed!.n).toBe(0);
+  expect(await classify([command.opId])).toEqual({ rows: [], wrote: false });
 });
 
 test("pushed terminal proof settles the original command once despite route changes and reaper backoff", async () => {

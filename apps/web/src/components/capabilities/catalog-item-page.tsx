@@ -145,7 +145,12 @@ export function CatalogItemPage({
   /** Per-account Reconnect / Remove / Add. Omit to show the accounts read-only. */
   accountManagement?: Pick<
     CatalogConnectedAccountsManagement,
-    "viewerSubjectId" | "canWrite" | "canRemoveOwnIn" | "canReconnectOwnIn" | "onRemove"
+    | "viewerSubjectId"
+    | "canWrite"
+    | "canRemoveOwnIn"
+    | "canReconnectOwnIn"
+    | "onRemove"
+    | "onRename"
   >;
   /** Only the person's own account can be connected here (a Personal
    * workspace, or no permission to connect a shared one): no ownership choice. */
@@ -642,7 +647,10 @@ export function CatalogItemPage({
               submitLabel={`Connect ${title}`}
               submitIcon={null}
               busy={busy}
-              onSubmit={(headers) => onAction({ type: "api_key", item, ownership, headers })}
+              nameField
+              onSubmit={(headers, label) =>
+                onAction({ type: "api_key", item, ownership, headers, label })
+              }
             />
           </div>
         </DetailSection>

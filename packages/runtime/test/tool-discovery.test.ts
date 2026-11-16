@@ -213,6 +213,35 @@ describe("tool discovery ranking", () => {
     // A leading verb comes off only when the tool uses the rest of the word.
     expect(best("list repository webhooks")).toBe("mcp__hooks__repos_listwebhooks");
   });
+  test("plain session messaging searches find Queue before any mail send in a realistic catalog", () => {
+    const index = new ToolSearchIndex(CONNECTED_TOOL_CATALOG.map(catalogTool));
+    const position = (query: string, name: string) => names(index.rank(query, 20)).indexOf(name);
+    const mailSends = (query: string) =>
+      names(index.rank(query, 20)).filter(
+        (name) => !name.startsWith("opengeni__") && /send_?message|sendmail/.test(name),
+      );
+    for (const query of [
+      "send message to another session",
+      "send message to parent session",
+      "message a worker I spawned",
+      "tell my worker",
+      "message the parent session",
+      "queue a message for a session",
+    ]) {
+      const queue = position(query, "opengeni__session_queue_message");
+      expect(queue).toBeGreaterThanOrEqual(0);
+      for (const mail of mailSends(query)) expect(queue).toBeLessThan(position(query, mail));
+    }
+    for (const query of [
+      "send message to another session",
+      "send message to parent session",
+      "message the parent session",
+    ])
+      expect(names(index.rank(query, 1))).toEqual(["opengeni__session_queue_message"]);
+    // Steer reads as changing what a session is doing now.
+    expect(position("change what my worker is doing", "opengeni__session_steer")).toBeLessThan(3);
+    expect(position("steer a worker", "opengeni__session_steer")).toBeLessThan(3);
+  });
   test("a name word is split only with evidence from the tool's own words", () => {
     const settings = candidate("mcp_x__list_settings", "Lists the mail filters and forwarding.");
     const changeset = candidate("mcp_x__changeset_get", "Get one changeset by ID.");
@@ -540,12 +569,12 @@ describe("decision selection", () => {
         "Spawn a new agent session (a worker) for a concrete, bounded subtask that can run independently.",
       ),
       candidate(
-        "workspace__session_send_message",
-        "Send a message to a session. To continue related work, message a worker you already spawned instead of spawning a new one.",
+        "workspace__session_queue_message",
+        "Send a message to another session or agent: send messages to a worker you spawned, your parent or a peer session. To continue related work, queue a follow-up to a worker you already spawned instead of spawning a new one.",
       ),
       candidate(
         "workspace__session_message_status",
-        "Follow the exact update ID returned by session_send_message. Returns delivery state and the consuming turn.",
+        "Follow the exact update ID returned by session_queue_message. Returns delivery state and the consuming turn.",
       ),
       candidate("workspace__sessions_list", "Discover sessions in this workspace."),
       candidate("calendar__create_event", "Create a calendar event."),
@@ -553,12 +582,12 @@ describe("decision selection", () => {
     const index = new ToolSearchIndex(sessions);
     const loaded = names(
       index.strongestMatches(
-        "Create a separate worker session, then send a follow-up message to that same session",
+        "Create a separate worker session, then queue a follow-up message to that same session",
         3,
       ),
     );
     expect(loaded).toContain("workspace__session_create");
-    expect(loaded).toContain("workspace__session_send_message");
+    expect(loaded).toContain("workspace__session_queue_message");
     expect(loaded).not.toContain("calendar__create_event");
     const accounts = new ToolSearchIndex([
       candidate("mail_home__search_messages", "Search email messages in the mailbox."),

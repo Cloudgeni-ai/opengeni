@@ -339,7 +339,7 @@ or admin manages.
   into the action.
 - The ordinary session tools reach chats in the granter's other workspaces
   through the same authority. `session_get`, `session_events`, `session_wait`,
-  `session_send_message`, `session_steer`, `session_pause` and
+  `session_queue_message`, `session_steer`, `session_pause` and
   `session_resume` take an optional `workspaceId` (from the chat's link).
   When it names another workspace, the tool runs there as the granter through
   the workspace tool gateway's invoke action (`POST
@@ -777,7 +777,7 @@ branch's requirements as cumulative. Additional native contract refinements
 retain their preflight messages so cross-field failures explain the required
 relationship. Downstream provider and storage exceptions are separate failures.
 
-Unexpected failures in `session_create`, `session_send_message`, and
+Unexpected failures in `session_create`, `session_queue_message`, and
 `session_steer` retain a bounded `error.diagnostic` in the ordinary failed-tool
 receipt. It contains cause classes, reviewed source locations or location
 fingerprints, line/column, a typed PostgreSQL SQLSTATE when available, and exact

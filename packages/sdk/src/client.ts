@@ -10243,6 +10243,24 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Delete a document, spreadsheet or presentation by archiving it: it
+   * leaves the Artifacts list and no longer opens or takes edits. One-way.
+   */
+  async archiveEditableArtifact(
+    workspaceId: string,
+    artifactId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<EditableArtifactResource> {
+    return await this.requestJson<EditableArtifactResource>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/editable-artifacts/${encodeURIComponent(artifactId)}/archive`,
+      {},
+      undefined,
+      options,
+    );
+  }
+
   /** A Site's data collections, usage and limits. Needs a manager of the Site. */
   async getSiteData(
     workspaceId: string,

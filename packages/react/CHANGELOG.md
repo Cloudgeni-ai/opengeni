@@ -1,5 +1,30 @@
 # @opengeni/react
 
+## 6.24.1
+
+### Patch Changes
+
+- f041392: A viewer can no longer keep unlimited sandboxes running with no task. Opening a desktop, terminal or file editor starts a sandbox, and a heartbeating viewer kept it warm indefinitely; under `usage_only` warm billing that compute was free, so scripted accounts could hold hundreds of boxes. A workspace now keeps at most `OPENGENI_SANDBOX_MAX_VIEWER_ONLY_BOXES_PER_WORKSPACE` boxes (default 3, `0` = unbounded) warm with only viewers attached; a viewer that would add one more gets HTTP 429, which the web client already shows as the viewer cap. Joining a box a task or another viewer already holds is unaffected. When the monthly warm allowance (`OPENGENI_SANDBOX_MAX_WARM_SECONDS_PER_WORKSPACE`) is exhausted, viewers on boxes with no running task are now detached on their next heartbeat so those boxes drain, instead of staying warm until the viewer closes; boxes a task holds keep running.
+
+  Organizations now also get sandbox limits by subscription plan, counted across every workspace and member (`OPENGENI_SANDBOX_PLAN_LIMITS_JSON`). Defaults: Free 2 viewer-only boxes per organization and 1 per person, Pro 10/3, Max 30/5, Enterprise unbounded; a Free organization whose promotion decision is `held` or `denied` keeps none. Each plan also caps running boxes, including those agent turns hold (Free 3, Pro 20, Max 50): a turn that needs a new box beyond it waits for a slot, retrying every minute without holding a worker, instead of starting one. The organization-wide counts use a new database function (migration 1475) whose runtime grant follows in a later release; until then only the zero limits and the per-workspace viewer limit apply.
+
+- e5ce845: Deleting a slide no longer makes a presentation unopenable. The editor sent a bare `slide.delete` for slides that still had objects, which the kernel always rejects; the SDK saved that edit to the browser's local pending queue before validating it, so every later open replayed it and failed with `[ARTIFACT_PRESENTATION_BATCH_REJECTED] presentation scene is not empty`. Document and presentation edits are now checked against the current state before they are saved, a retained edit the kernel rejects is discarded on open so affected presentations open again, and slide deletion removes the slide's own objects first. The editor's two unlabelled trash buttons are replaced by one labelled Delete control with a tooltip that targets the selected object, or the current slide when nothing is selected, and asks for confirmation.
+- Updated dependencies [e5ce845]
+- Updated dependencies [5fd2c21]
+  - @opengeni/sdk@6.24.1
+  - @opengeni/contracts@6.24.1
+  - @opengeni/connect@6.24.1
+
+## 6.24.0
+
+### Patch Changes
+
+- 0d981bd: The app shell supports a simplified interface for people who arrive from gogeni.ai. It is a per-browser presentation flag (`?simplified_interface=1` on the landing URL, `=0` to turn it off) that the web app stores locally and never sends to the server. While it is on, the product reads "Geni", the rail and settings list fewer destinations (Knowledge and Automations move under "Advanced"), the composer offers only files and voice, new chats and schedules use one credit-billed model, and suggestions and automation templates speak to business work. Off is the default and nothing changes for other browsers; every page still opens by its address, and no permission depends on the flag. `useSimplifiedInterface()` from `@opengeni/react/app/lib/simplified-interface` reads it, and components rendered without its provider behave as before.
+- Updated dependencies [c0248a5]
+  - @opengeni/contracts@6.24.0
+  - @opengeni/sdk@6.24.0
+  - @opengeni/connect@6.24.0
+
 ## 6.23.0
 
 ### Minor Changes

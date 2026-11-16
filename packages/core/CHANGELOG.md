@@ -1,5 +1,71 @@
 # @opengeni/core
 
+## 6.24.1
+
+### Patch Changes
+
+- Updated dependencies [f041392]
+- Updated dependencies [5fd2c21]
+- Updated dependencies [e4c5c29]
+  - @opengeni/db@6.24.1
+  - @opengeni/config@6.24.1
+  - @opengeni/contracts@6.24.1
+  - @opengeni/documents@6.24.1
+  - @opengeni/events@6.24.1
+  - @opengeni/runtime@6.24.1
+  - @opengeni/storage@6.24.1
+  - @opengeni/capabilities@6.24.1
+  - @opengeni/codex@6.24.1
+  - @opengeni/observability@6.24.1
+  - @opengeni/tool-gateway@6.24.1
+  - @opengeni/vaults@6.24.1
+  - @opengeni/network@6.24.1
+  - @opengeni/xai-subscription@6.24.1
+
+## 6.24.0
+
+### Patch Changes
+
+- 8924854: Separate installs of one API integration definition (a second account added as its own install) are now labelled as accounts of one connector: they share the definition's name and each names its account, so the model can tell them apart and a tool search reaching one names the others.
+- 8924854: Connecting an API integration (OpenAPI, GraphQL or built-in definition) no longer fails with a 500 when another person in the workspace already has a personal instance of it at an older revision. A new revision moves every instance to it, and the facet binding check looked up the other person's personal Connection as the caller, who cannot see it; an update that keeps a binding's Connection and tenant is no longer checked again (migration 1453). Inserts and Connection changes are checked as before.
+
+  A failed preview or install in Connect now frees the attempt, so "Add selected tools" can be tried again instead of answering 409 "in flight or uncertain". Only operations that read their source and write in one transaction opt in (`releaseClaimOnFailure`); operations with provider effects keep their claim.
+
+- e6c9e45: A Connected Machine background command no longer reads as running for minutes after it finished when its session switched to another machine and back, and its output keeps flowing to the session after such a switch. When a reader attached to a command that had produced a large backlog (thousands of output frames, for example a test run that finished while the session was elsewhere), the agent sent the whole backlog into its 1,024-frame output queue at once and dropped every frame past the queue's depth, including the exit frame. Nothing re-sent them until the reader's 30-second silence check, which recovered about one queue's worth per check, so collecting a 6,600-frame command took more than three minutes, and a large enough backlog could never be collected within one collector's claim. The agent now holds its next frame while the queue is full and sends it as soon as the queue drains, so nothing is dropped for want of room. Collectors store replayed output a batch per transaction instead of one transaction per frame, so a retry that replays frames an earlier collector already stored gets further each time. A look at a running command now follows its attachment until it holds everything the machine had retained when it attached, instead of stopping after a quarter of a second with the same prefix every time, and `command_read`/`command_wait` in a later attempt read a running command from the machine its ledger names (not the session's current machine). `readExisting` takes an `untilCaughtUp` option, `appendSessionCommandOutputs` stores several chunks of one command in one transaction, and `connectedCommandOutputLook` reads a session's running command from its ledger locator.
+- c0248a5: A `git commit` or `git push` run through `exec_command` or `run_on` that would carry a secret value Opengeni filled in for a reference earlier in that sandbox is no longer run. The result names the file and line (and commit) and says how to write the reference literally instead. Matching is exact against a keyed ledger of resolved values kept in the sandbox; files that are not committed never block, and the command runs if the check itself fails. See "Keeping values out of commits" in `docs/secrets.md`.
+
+  The prompt, the `secrets` Skill and secret-resolution hints now say the backslash escape keeps a reference as literal text in files as well as commands. `apply_patch` resolves references only in added lines, so context and removed lines match files that hold a literal reference.
+
+- 477f1db: Agent turns spend less time before each model request. The checks run before every model request (task usage limit, funding, workspace allowance and monthly limits) now read in parallel and still report the same refusal as before. Packaged Skills and interaction tool schemas are prepared once per process instead of on every turn.
+
+  New latency metrics: `opengeni_model_response_to_next_dispatch_seconds` (the gap from one model response to the next request, by phase) and the parts of response metering (`response_usage_lease`, `_billing`, `_cache`, `_checkpoint` on `opengeni_model_step_phase_duration_seconds`). A small sample of agent turns also exports its database statement spans when OTLP tracing is configured.
+
+  Prebuilt Sandbox Environment images on Modal are rebuilt again after a build stops for more than 20 minutes or fails with a retryable error, and the image snapshot has its own timeout (`OPENGENI_RIG_PROVIDER_IMAGE_SNAPSHOT_TIMEOUT_MS`, default 5 minutes) instead of the 60-second workspace snapshot timeout.
+
+- Updated dependencies [0ad29b9]
+- Updated dependencies [24104b1]
+- Updated dependencies [8924854]
+- Updated dependencies [e6c9e45]
+- Updated dependencies [b9baad4]
+- Updated dependencies [8924854]
+- Updated dependencies [c0248a5]
+- Updated dependencies [1b544b0]
+- Updated dependencies [477f1db]
+  - @opengeni/db@6.24.0
+  - @opengeni/codex@6.24.0
+  - @opengeni/runtime@6.24.0
+  - @opengeni/capabilities@6.24.0
+  - @opengeni/contracts@6.24.0
+  - @opengeni/config@6.24.0
+  - @opengeni/documents@6.24.0
+  - @opengeni/events@6.24.0
+  - @opengeni/observability@6.24.0
+  - @opengeni/storage@6.24.0
+  - @opengeni/tool-gateway@6.24.0
+  - @opengeni/vaults@6.24.0
+  - @opengeni/network@6.24.0
+  - @opengeni/xai-subscription@6.24.0
+
 ## 6.23.0
 
 ### Patch Changes
