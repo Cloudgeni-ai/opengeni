@@ -552,6 +552,18 @@ describe("a connected account of the same kind keeps the search from showing a c
     }
   });
 
+  test("an empty listing filtered by the integration's name keeps its card", async () => {
+    const { requested, request } = cardTool();
+    const runtime = runtimeWith("generic_dispatch", {
+      matches: [GMAIL_MAIL],
+      request,
+      accounts: new Map([[OUTLOOK_SEND, account("Outlook Mail", "communication")]]),
+    });
+    const output = await listing(runtime, { namePrefix: "gmail" });
+    expect(requested).toEqual([GMAIL_MAIL]);
+    expect(output.connectCard).toMatchObject({ shown: true });
+  });
+
   test("an integration without a catalog category keeps its card", async () => {
     const { requested, request } = cardTool();
     await runtimeWith("generic_dispatch", {
@@ -745,16 +757,16 @@ describe("discovery records why no card was newly shown", () => {
   });
 });
 
-describe("tool_list browsing that names an integration not installed", () => {
-  const listing = async (
-    runtime: LazyToolRuntime,
-    args: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> => {
-    const list = runtime.controlTools.find((t) => t.type === "function" && t.name === "tool_list");
-    if (!list || list.type !== "function") throw new Error("missing list");
-    return JSON.parse(String(await list.invoke({} as never, JSON.stringify(args))));
-  };
+const listing = async (
+  runtime: LazyToolRuntime,
+  args: Record<string, unknown>,
+): Promise<Record<string, unknown>> => {
+  const list = runtime.controlTools.find((t) => t.type === "function" && t.name === "tool_list");
+  if (!list || list.type !== "function") throw new Error("missing list");
+  return JSON.parse(String(await list.invoke({} as never, JSON.stringify(args))));
+};
 
+describe("tool_list browsing that names an integration not installed", () => {
   test("an empty filtered listing shows the card of the one integration it names", async () => {
     for (const args of [
       { view: "tools", group: "connection/0799034d9553", namePrefix: "clickup" },

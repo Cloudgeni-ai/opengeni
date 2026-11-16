@@ -3939,17 +3939,23 @@ export function searchCapabilityCatalogItems(
 
 /**
  * The order to present catalog matches in once their setup in this chat is
- * known, as indexes into `matches`. A match the person can already use
- * (ready) comes before a match of the same category they would still have to
- * connect, so a request for a kind of service ("read my email") reaches the
- * connected service before a Connect card for an unconnected alternative.
- * A match the query names keeps its place: asking for that service by name
- * still finds it first. Everything else keeps the ranked order.
+ * known, as indexes into `matches`. Matches the query names come first, in
+ * ranked order: asking for a service by name still finds it first. After
+ * them, a match the person can already use (ready) comes before a match of
+ * the same specific kind they would still have to connect, so a request for a
+ * kind of service ("read my email") reaches the connected service before a
+ * Connect card for an unconnected alternative. Generic categories
+ * ("integrations", "custom") name no kind and are never grouped. Everything
+ * else keeps the ranked order.
  */
 export function connectedFirstCatalogMatchOrder(
   matches: readonly Pick<CapabilityCatalogSearchMatch, "item" | "named">[],
   ready: readonly boolean[],
 ): number[] {
+  const kindOf = (index: number) => {
+    const category = matches[index]!.item.category;
+    return category && !GENERIC_MATCH_CATEGORIES.has(category) ? category : undefined;
+  };
   const order: number[] = [];
   const placed = new Set<number>();
   const place = (index: number) => {
@@ -3957,17 +3963,21 @@ export function connectedFirstCatalogMatchOrder(
     placed.add(index);
     order.push(index);
   };
-  for (const [index, match] of matches.entries()) {
-    if (!ready[index] && !match.named) {
-      for (const [other, candidate] of matches.entries()) {
-        if (other > index && ready[other] && candidate.item.category === match.item.category)
-          place(other);
+  for (const [index, match] of matches.entries()) if (match.named) place(index);
+  for (const index of matches.keys()) {
+    const kind = kindOf(index);
+    if (!ready[index] && kind && !placed.has(index)) {
+      for (const other of matches.keys()) {
+        if (other > index && ready[other] && kindOf(other) === kind) place(other);
       }
     }
     place(index);
   }
   return order;
 }
+
+/** Catalog categories that name no particular need (see connectedAccountKind). */
+const GENERIC_MATCH_CATEGORIES: ReadonlySet<string> = new Set(["integrations", "custom"]);
 
 /**
  * Closest catalog names for a query that matched nothing. A miss must never

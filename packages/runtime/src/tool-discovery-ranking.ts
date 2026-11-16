@@ -194,9 +194,13 @@ export type AccountLineLabel = Readonly<{ model: string; defaultAccount?: string
  */
 export function accountLineName(label: AccountLineLabel): string {
   if (!label.defaultAccount) return label.model;
-  return label.defaultAccount === label.model
-    ? `${label.model} (the default: the person's own account)`
-    : `${label.model} (not the default; the default is the person's own account, ${label.defaultAccount})`;
+  if (label.defaultAccount === label.model)
+    return `${label.model} (the default: the person's own account)`;
+  // Name the default by its account alone: the connector is this line's own.
+  const separator = label.defaultAccount.indexOf(" — ");
+  const account =
+    separator >= 0 ? label.defaultAccount.slice(separator + " — ".length) : label.defaultAccount;
+  return `${label.model} (not the default; the default is the person's own account, ${account})`;
 }
 
 /**

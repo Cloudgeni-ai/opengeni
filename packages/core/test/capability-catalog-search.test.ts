@@ -152,6 +152,34 @@ describe("agent capability catalog search", () => {
       );
     });
 
+    test("connected-first order never groups generic categories and keeps named matches first", () => {
+      const match = (category: string, named = false) => ({
+        item: item({ id: `x:${category}:${String(named)}`, name: "X", category }),
+        named,
+      });
+      // Generic categories name no kind: a ready custom server stays behind.
+      expect(
+        connectedFirstCatalogMatchOrder(
+          [match("custom"), match("integrations"), match("custom")],
+          [false, false, true],
+        ),
+      ).toEqual([0, 1, 2]);
+      // A named match comes first, before a ready alternative pulled forward.
+      expect(
+        connectedFirstCatalogMatchOrder(
+          [match("communication"), match("communication", true), match("communication")],
+          [false, false, true],
+        ),
+      ).toEqual([1, 2, 0]);
+      // Every index appears once.
+      const order = connectedFirstCatalogMatchOrder(
+        [match("files"), match("communication"), match("files"), match("communication")],
+        [false, false, true, true],
+      );
+      expect([...order].sort()).toEqual([0, 1, 2, 3]);
+      expect(order).toEqual([2, 0, 3, 1]);
+    });
+
     test("calendar, contacts, OneDrive and Teams requests find their own definition", () => {
       expect(top("Outlook calendar")).toEqual(["microsoft-outlook-calendar"]);
       expect(top("my hotmail calendar")).toEqual(["microsoft-outlook-calendar"]);

@@ -3736,7 +3736,7 @@ describe("runtime event normalization", () => {
           "Account: Documents — alice@example.test · Yours (the default: the person's own account). Use only this account. When the request does not say which account to write to, use the default; ask only if there is none.",
         );
         expect(searchOutput).toContain(
-          "Account: Documents — team@example.test · Shared (not the default; the default is the person's own account, Documents — alice@example.test · Yours).",
+          "Account: Documents — team@example.test · Shared (not the default; the default is the person's own account, alice@example.test · Yours).",
         );
         expect(searchOutput).toContain(
           "These tools reach Documents (alice@example.test, the default). Also connected: Documents (team@example.test).",

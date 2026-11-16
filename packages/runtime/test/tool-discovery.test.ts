@@ -310,6 +310,7 @@ describe("tool discovery ranking", () => {
   });
   test("an account line says which of a connector's accounts is the default for writes", () => {
     const own = "Calendar — Iris · Yours";
+    const ownAccount = "Iris · Yours";
     const shared = "Calendar — team@example.com · Shared";
     const guidance =
       "Use only this account. When the request does not say which account to write to, use the default; ask only if there is none.";
@@ -317,7 +318,7 @@ describe("tool discovery ranking", () => {
       `Account: ${own} (the default: the person's own account). ${guidance}\nCreate an event.`,
     );
     expect(withAccountLine({ model: shared, defaultAccount: own }, "Create an event.")).toBe(
-      `Account: ${shared} (not the default; the default is the person's own account, ${own}). ${guidance}\nCreate an event.`,
+      `Account: ${shared} (not the default; the default is the person's own account, ${ownAccount}). ${guidance}\nCreate an event.`,
     );
     // No clear default: the account alone, and the guidance says to ask.
     expect(withAccountLine({ model: shared }, "Create an event.")).toBe(
@@ -327,7 +328,7 @@ describe("tool discovery ranking", () => {
     expect(
       descriptionPreview(withAccountLine({ model: shared, defaultAccount: own }, "Create."), 500),
     ).toBe(
-      `Account: ${shared} (not the default; the default is the person's own account, ${own}). Create.`,
+      `Account: ${shared} (not the default; the default is the person's own account, ${ownAccount}). Create.`,
     );
   });
   test("ranks a connected account's tools past their account line", () => {

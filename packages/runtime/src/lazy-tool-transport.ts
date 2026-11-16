@@ -1897,8 +1897,9 @@ export class LazyToolRuntime {
       // the person's. When the person already has a connected account of the
       // same kind in this turn, its tools may do the task, so the search does
       // not show the card by itself; the result still names the integration
-      // and the model can request its card.
-      if (clearlyNamed && this.connectedAlternativeTo(clearlyNamed))
+      // and the model can request its card. A listing filter names it on
+      // purpose and keeps its card.
+      if (clearlyNamed && !literal && this.connectedAlternativeTo(clearlyNamed))
         return { named, skipped: "connected_alternative" };
       if (clearlyNamed) return { named, clearlyNamed };
       if (named.length) {

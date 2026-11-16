@@ -467,7 +467,7 @@ describe("unavailable connector operational context", () => {
         '- "cap-linear": it is disconnected, turned off, or no longer available to this chat in this workspace. Whoever manages this workspace\'s connectors can reconnect it or turn it back on.',
         '- "Acme Tickets" (tickets): no signed-in account for it was available to this turn. The person may not be signed in to it here, their sign-in may have expired or been removed, or their sign-in was not usable in this workspace yet when the message was sent (this can last a few minutes after their workspace access changes). They can sign in to it again, or send the message again shortly if their access just changed.',
         "- 2 more connectors are unavailable for the same kinds of reasons.",
-        "Loaded tools that can do the task come first: a request needs one of them only when the person named it or no loaded tool can do it. When it does, tell them which connector is unavailable and why, using only the reason given here; do not guess another cause or claim to have read or updated that system. Continue with unaffected work only when safe.",
+        "Prefer loaded tools that can do the task: one of these connectors is needed only when the person named it or no loaded tool can do it, and an answer from other tools says which of these was not checked. When one is needed, tell them which connector is unavailable and why, using only the reason given here; do not guess another cause or claim to have read or updated that system. Continue with unaffected work only when safe.",
       ].join("\n"),
     );
   });
