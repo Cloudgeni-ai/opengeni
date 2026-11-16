@@ -49669,8 +49669,13 @@ export function sandboxPlanTierExemptFromViewerOnlyBounds(tier: string): boolean
 export const SANDBOX_NEW_PLAN_TIER = "new";
 
 /** managed_accounts.external_source values of self-serve organizations: a
- * person's signup and an additional organization they create. */
-const SELF_SERVE_ACCOUNT_SOURCES = ["better-auth:user", "opengeni:additional-organization"];
+ * person's signup and an additional organization they create. Any other
+ * source is a host's. A guard test fails when a new account-creating path
+ * introduces a source that is in neither this list nor its known host list. */
+export const SELF_SERVE_ACCOUNT_SOURCES: readonly string[] = [
+  "better-auth:user",
+  "opengeni:additional-organization",
+];
 
 /**
  * The plan tier whose sandbox limits apply to an organization:

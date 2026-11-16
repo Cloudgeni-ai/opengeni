@@ -526,7 +526,9 @@ export function useSessionCapabilities(
                 }
               } else if (cause.status === 429) {
                 // The server names the refusal in details.viewerRefusal;
-                // servers before it only say so in the message.
+                // servers before it only say so in the message. Remove the
+                // message fallback once servers without viewerRefusal are no
+                // longer supported.
                 const refusal =
                   typeof cause.details?.viewerRefusal === "string"
                     ? cause.details.viewerRefusal
