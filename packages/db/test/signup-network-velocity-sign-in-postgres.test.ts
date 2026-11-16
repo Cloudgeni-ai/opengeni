@@ -190,10 +190,15 @@ async function lastHistory(accountId: string) {
 async function enforce() {
   await shared!
     .admin`select opengeni_private.set_promotion_enforcement(true,'test','sign-in velocity test',true)`;
-  await configure({ mode: "enforce" });
+  await configure({ mode: "enforce", signInNetworkMode: "enforce" });
 }
 async function reset() {
-  await configure({ mode: "off", rateLimitEnabled: false, exactHoldThreshold: 3 });
+  await configure({
+    mode: "off",
+    signInNetworkMode: "off",
+    rateLimitEnabled: false,
+    exactHoldThreshold: 3,
+  });
   await shared!.admin`update promotion_enforcement set enabled=false`;
 }
 const HELD = { decision: "held", actor: "service:promotion-detector" };
@@ -210,6 +215,11 @@ test("loopback, unspecified and link-local sign-in addresses are never a network
     opengeni_private.signup_network_exact_unit('0.0.0.0') as unspecified4,
     opengeni_private.signup_network_exact_unit('169.254.1.2') as linklocal,
     opengeni_private.signup_network_exact_unit('fe80::1') as v6linklocal,
+    opengeni_private.signup_network_exact_unit('10.1.2.3') as private10,
+    opengeni_private.signup_network_exact_unit('172.20.0.1') as private172,
+    opengeni_private.signup_network_exact_unit('192.168.1.1') as private192,
+    opengeni_private.signup_network_exact_unit('100.64.0.1') as shared,
+    opengeni_private.signup_network_exact_unit('fd00::1') as ula,
     opengeni_private.signup_network_exact_unit('::ffff:198.51.100.7') as public`;
   expect(units).toEqual({
     loopback: null,
@@ -220,6 +230,11 @@ test("loopback, unspecified and link-local sign-in addresses are never a network
     unspecified4: null,
     linklocal: null,
     v6linklocal: null,
+    private10: null,
+    private172: null,
+    private192: null,
+    shared: null,
+    ula: null,
     public: "198.51.100.7",
   });
 });
@@ -346,7 +361,7 @@ test("a sign-in after setup counts; an old sign-in from the network does not", a
 
 test("observe records without holding; manual decisions win and operator releases are never re-held", async () => {
   if (!shared || !client) return;
-  await configure({ mode: "observe" });
+  await configure({ mode: "observe", signInNetworkMode: "observe" });
   const ip = address();
   const observed = [await legacyOwner([ip]), await legacyOwner([ip]), await legacyOwner([ip])];
   for (const one of observed) expect(await decision(one.accountId)).toBeNull();
@@ -368,6 +383,44 @@ test("observe records without holding; manual decisions win and operator release
     expect(await decision(observed[1]!.accountId)).toMatchObject({
       decision: "eligible",
       actor: "operator:test",
+    });
+  } finally {
+    await reset();
+  }
+}, 180_000);
+
+test("the sign-in leg follows its own setting; the signup network rule does not depend on it", async () => {
+  if (!shared || !client) return;
+  await enforce();
+  await configure({ signInNetworkMode: "off" });
+  try {
+    const ip = address();
+    const unseen = [await legacyOwner([ip]), await legacyOwner([ip]), await legacyOwner([ip])];
+    expect(unseen[2]!.evaluateAccountIds).toEqual([]);
+    await evaluate(unseen.map((one) => one.accountId));
+    for (const one of unseen) {
+      expect(await decision(one.accountId)).toBeNull();
+      expect(await observation(one.accountId)).toBeNull();
+    }
+    // The signup network still holds with the sign-in leg off.
+    const source = rotating();
+    const exact = [
+      await legacyOwner([address()], source),
+      await legacyOwner([address()], source),
+      await legacyOwner([address()], source),
+    ];
+    for (const one of exact) expect(await decision(one.accountId)).toMatchObject(HELD);
+    expect(await lastHistory(exact[2]!.accountId)).toMatchObject({
+      rule_id: "ip-velocity-exact-v1",
+    });
+    // Observe: evidence without holds, while the signup network rule enforces.
+    await configure({ signInNetworkMode: "observe" });
+    await evaluate(unseen.map((one) => one.accountId));
+    expect(await decision(unseen[2]!.accountId)).toBeNull();
+    expect(await observation(unseen[2]!.accountId)).toMatchObject({
+      ruleId: "ip-velocity-sign-in-v1",
+      signInGroupSize: 3,
+      signInNetworkMode: "observe",
     });
   } finally {
     await reset();

@@ -71,6 +71,8 @@ export type SignupNetworkVelocitySettings = {
   /** Migration 1368; "off" until set. Older databases omit it. */
   deniedNetworkMode?: "off" | "observe" | "enforce";
   deniedNetworkLookbackDays?: number;
+  /** Migration 1471: velocity on owners' sign-in networks; "off" until set. Older databases omit it. */
+  signInNetworkMode?: "off" | "observe" | "enforce";
   operator: string | null;
   changedAt: string | null;
 };
@@ -85,6 +87,7 @@ export type SignupNetworkVelocityChanges = Partial<
     | "rateLimitEnabled"
     | "rateLimitMax"
     | "deniedNetworkMode"
+    | "signInNetworkMode"
   >
 >;
 

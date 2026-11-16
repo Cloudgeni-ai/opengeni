@@ -132,21 +132,26 @@ larger group still meets any threshold.
 request carried no signup network (before `1471`, every `POST /v1/organizations`
 setup) and farms that rotate the setup address. Since `1368` the database records
 every new owner's sign-in networks (keyed hashes of `auth_sessions` addresses,
-owners only), and `1471` counts them in the same rule: for each exact network the
-owner signed in from within the window of the setup (newest 20), the new
+owners only), and `1471` can count them in the same rule: for each exact network
+the owner signed in from within the window of the setup (newest 5), the new
 self-serve organizations set up within the window whose owners signed in from that
-network within the window of their own setup, including this one. When the
-largest such group reaches `exactHoldThreshold`, enforce holds with rule
+network within the window of their own setup, including this one. This leg has
+its own setting, `signInNetworkMode` (`off` until set, then `observe` or
+`enforce`), because the threshold was tuned on one address per setup. In
+`enforce`, when the largest group reaches `exactHoldThreshold`, it holds with rule
 `ip-velocity-sign-in-v1`. Evidence adds `signInGroupSize`, `signInGroup` (a short
-reference under the database key, never comparable with `addressGroup`) and
-`signInGroupSetupTimes`. Before counting, the owner's newer sign-ins are recorded,
-so a sign-in after setup counts too. An organization without a signup network is
-evaluated from its recorded setup time (kept 15 days). Loopback, unspecified and
-link-local session addresses are never recorded as networks. The setup trigger
-also lists up to 50 recent same-sign-in-network organizations for the
-after-commit evaluation. Every read is bounded (1000 candidates per network, 501
-per group) and failures are skipped, as above. The mode, window, threshold, manual
-decision and release rules are the same; prefixes still never hold on their own.
+reference under the database key, never comparable with `addressGroup`),
+`signInGroupSetupTimes` and `signInNetworkMode`. Before counting, the owner's newer
+sign-ins are recorded, so a sign-in after setup counts too. An organization without
+a signup network is evaluated from its recorded setup time (kept 15 days). "Within
+the window" is the overlap of a network's first and last recorded sign-in with it,
+an approximation. Loopback, unspecified, link-local, private and shared
+(100.64/10) session addresses are never networks. While the leg is on, the setup
+trigger also lists recent same-sign-in-network organizations (at most 51 in all)
+for the after-commit evaluation. Every read is bounded (200 candidates per
+network, 501 per group). The leg fails in its own block and never undoes the
+signup network result; it is skipped when that already holds. Manual decisions
+and releases are never overwritten, and prefixes still never hold on their own.
 
 Incident (15 Nov 2026): 665 owners created organizations through
 `POST /v1/organizations` from about 50 addresses in under four hours. That route
@@ -235,7 +240,8 @@ These apply to people and to agent reviewers using the JSON output.
 
 ### Rollback
 
-Set `--mode off` to stop new observations and holds. Release existing detector
+Set `--mode off` to stop new observations and holds (and
+`--sign-in-network-mode off` for the sign-in leg). Release existing detector
 holds of this rule with `--network-release-holds`. Turn the rate limit off with
 `--rate-limit off`. The migration is additive; recorded sources and history stay
 for review.
@@ -320,6 +326,9 @@ bun scripts/operator/promotion-decisions.ts --network-velocity-set --denied-netw
 # reason "Network used in the last 90 days by a denied or currently held account"
 # and a deniedNetwork evidence block.
 bun scripts/operator/promotion-decisions.ts --network-holds --limit 200
+# Sign-in network leg (migration 1471): observe first, then enforce
+bun scripts/operator/promotion-decisions.ts --network-velocity-set --sign-in-network-mode observe \
+  --revision <current-revision> --operator <operator-id> --reason 'Observe sign-in network velocity'
 # Rollback of this rule only
 bun scripts/operator/promotion-decisions.ts --network-release-holds --rule denied-network-v1 \
   --dry-run --operator <operator-id> --reason 'Roll back denied network holds'

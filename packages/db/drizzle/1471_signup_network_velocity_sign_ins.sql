@@ -1,5 +1,6 @@
 -- deployment-mode: rolling
--- online-safety-exception: unbatched-data: the one DELETE removes only loopback and unspecified network hashes through the address index; only development and test servers record them.
+-- online-safety-exception: unbatched-data: the one DELETE removes only loopback, unspecified and link-local network hashes through the address index; only development and test servers record them.
+-- online-safety-exception: constraint-validation: the CHECK is on a new nullable column of the small owner-only settings history table, as in 1368.
 -- Signup network velocity (1354): also count the networks new owners sign in
 -- from, and evaluate organizations whose setup had no signup network.
 --
@@ -12,6 +13,10 @@
 -- owner's session networks at setup (keyed hashes, exact networks, owners
 -- only) and the setup time of every new self-serve organization.
 --
+-- 0. Its own setting, signInNetworkMode (off, observe, enforce), off until
+--    an operator sets it, as deniedNetworkMode in 1368: the threshold was
+--    tuned on one address per setup, so the sign-in leg is observed before
+--    it holds.
 -- 1. Detect. ip-velocity-v1 also counts, for each exact network the owner
 --    signed in from around the setup, the distinct new self-serve
 --    organizations set up within the window whose owners signed in from that
@@ -27,10 +32,15 @@
 --    request had no signup network.
 -- 3. Setup times are kept 15 days (was 8), enough for the widest window
 --    (168 hours) around a setup that can still be evaluated (seven days).
--- 4. Loopback, unspecified and link-local session addresses are never a
---    client network (a development or test server records 127.0.0.1 for
---    every sign-in), so they are no longer recorded, and recorded ones are
---    removed: grouping on them would group every owner.
+-- 4. Loopback, unspecified, link-local, private (RFC 1918, ULA) and shared
+--    (100.64/10) session addresses are never a public client network (a
+--    development server records 127.0.0.1 for every sign-in, and a
+--    misconfigured proxy chain records the ingress address), so they are no
+--    longer recorded: grouping on them would group every owner. Recorded
+--    loopback and link-local units are removed; other recorded units age out.
+-- 5. "Around the setup" is the overlap of a network's first and last
+--    recorded sign-in with the window, an approximation: an owner who used a
+--    network long before and again after the setup counts for it.
 --
 -- Unchanged: the same mode, window and threshold; the current account only;
 -- manual decisions and operator releases are never overwritten; invited
@@ -46,7 +56,7 @@ DELETE FROM opengeni_private.signup_network_owner_addresses o
   WHERE o.data_schema = current_schema()
     AND o.address_hash IN (
       SELECT opengeni_private.signup_network_session_hash(current_schema(), loopback.address)
-      FROM (VALUES ('127.0.0.1'), ('0.0.0.0'), ('::1')) loopback(address));
+      FROM (VALUES ('127.0.0.1'), ('0.0.0.0'), ('::1'), ('fe80::1')) loopback(address));
 
 CREATE OR REPLACE FUNCTION opengeni_private.signup_network_exact_unit(p_address text)
 RETURNS text LANGUAGE plpgsql IMMUTABLE SET search_path = pg_catalog AS $$
@@ -59,16 +69,84 @@ BEGIN
     value := '0.0.0.0'::inet + (value - '::ffff:0.0.0.0'::inet);
   END IF;
   IF family(value) = 4 THEN
-    IF value << '127.0.0.0/8'::inet OR value << '0.0.0.0/8'::inet
-      OR value << '169.254.0.0/16'::inet THEN RETURN NULL; END IF;
+    IF value << '127.0.0.0/8'::inet OR value << '0.0.0.0/8'::inet OR value << '169.254.0.0/16'::inet
+      OR value << '10.0.0.0/8'::inet OR value << '172.16.0.0/12'::inet OR value << '192.168.0.0/16'::inet
+      OR value << '100.64.0.0/10'::inet THEN RETURN NULL; END IF;
     RETURN host(value);
   END IF;
-  IF value = '::'::inet OR value = '::1'::inet OR value << 'fe80::/10'::inet THEN RETURN NULL; END IF;
+  IF value = '::'::inet OR value = '::1'::inet OR value << 'fe80::/10'::inet
+    OR value << 'fc00::/7'::inet THEN RETURN NULL; END IF;
   RETURN network(set_masklen(value, 64))::text;
 EXCEPTION WHEN OTHERS THEN
   RETURN NULL;
 END $$;
 REVOKE ALL ON FUNCTION opengeni_private.signup_network_exact_unit(text) FROM PUBLIC;
+
+ALTER TABLE opengeni_private.signup_network_velocity_revisions
+  ADD COLUMN sign_in_network_mode text
+    CHECK (sign_in_network_mode IN ('off','observe','enforce'));
+
+-- 1368 settings plus signInNetworkMode (off unless set).
+CREATE OR REPLACE FUNCTION opengeni_private.signup_network_velocity_settings(p_data_schema text)
+RETURNS jsonb LANGUAGE sql STABLE SET search_path = pg_catalog AS $$
+  SELECT jsonb_build_object(
+    'revision', coalesce(current.revision, 0),
+    'mode', coalesce(current.mode, 'off'),
+    'windowHours', coalesce(current.window_hours, 24),
+    'exactHoldThreshold', coalesce(current.exact_hold_threshold, 3),
+    'prefixHoldThreshold', CASE WHEN current.revision IS NULL THEN NULL ELSE current.prefix_hold_threshold END,
+    'rateLimitEnabled', coalesce(current.rate_limit_enabled, false),
+    'rateLimitMax', coalesce(current.rate_limit_max, 5),
+    'rateLimitWindowHours', 1,
+    'deniedNetworkMode', coalesce(current.denied_network_mode, 'off'),
+    'deniedNetworkLookbackDays', 90,
+    'signInNetworkMode', coalesce(current.sign_in_network_mode, 'off'),
+    'operator', current.operator,
+    'changedAt', current.changed_at)
+  FROM (SELECT 1) AS one
+  LEFT JOIN LATERAL (
+    SELECT * FROM opengeni_private.signup_network_velocity_revisions r
+    WHERE r.data_schema = p_data_schema ORDER BY r.revision DESC LIMIT 1
+  ) AS current ON true
+$$;
+REVOKE ALL ON FUNCTION opengeni_private.signup_network_velocity_settings(text) FROM PUBLIC;
+
+-- Same as 1368, plus signInNetworkMode.
+CREATE OR REPLACE FUNCTION opengeni_private.set_signup_network_velocity(
+  p_changes jsonb, p_operator text, p_reason text, p_expected_revision bigint
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
+DECLARE target text := session_tenancy_fence_target_schema()::regnamespace::text;
+  previous jsonb; merged jsonb; unknown_keys text[]; result opengeni_private.signup_network_velocity_revisions%ROWTYPE;
+BEGIN
+  IF p_expected_revision IS NULL OR p_changes IS NULL OR jsonb_typeof(p_changes) <> 'object' THEN
+    RAISE EXCEPTION 'Signup network velocity settings need a change object and the expected revision'
+      USING ERRCODE = '22023';
+  END IF;
+  SELECT array_agg(key) INTO unknown_keys FROM jsonb_object_keys(p_changes) AS key
+    WHERE key NOT IN ('mode','windowHours','exactHoldThreshold','prefixHoldThreshold','rateLimitEnabled',
+      'rateLimitMax','deniedNetworkMode','signInNetworkMode');
+  IF unknown_keys IS NOT NULL THEN
+    RAISE EXCEPTION 'Unknown signup network velocity settings: %', array_to_string(unknown_keys, ', ')
+      USING ERRCODE = '22023';
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended('signup-network-velocity:' || target, 0));
+  previous := opengeni_private.signup_network_velocity_settings(target);
+  IF p_expected_revision <> (previous->>'revision')::bigint THEN
+    RAISE EXCEPTION 'Signup network velocity settings changed' USING ERRCODE = '40001';
+  END IF;
+  merged := previous || p_changes;
+  INSERT INTO opengeni_private.signup_network_velocity_revisions(data_schema, revision, mode, window_hours,
+    exact_hold_threshold, prefix_hold_threshold, rate_limit_enabled, rate_limit_max, denied_network_mode,
+    sign_in_network_mode, operator, reason)
+  VALUES (target, (previous->>'revision')::bigint + 1, merged->>'mode', (merged->>'windowHours')::integer,
+    (merged->>'exactHoldThreshold')::integer, (merged->>'prefixHoldThreshold')::integer,
+    (merged->>'rateLimitEnabled')::boolean, (merged->>'rateLimitMax')::integer,
+    merged->>'deniedNetworkMode', merged->>'signInNetworkMode', p_operator, p_reason)
+  RETURNING * INTO result;
+  RETURN jsonb_build_object('previous', previous - 'operator' - 'changedAt',
+    'current', opengeni_private.signup_network_velocity_settings(target));
+END $$;
+REVOKE ALL ON FUNCTION opengeni_private.set_signup_network_velocity(jsonb,text,text,bigint) FROM PUBLIC;
 
 -- Evaluates ONLY the current account (its own credit fence through
 -- set_promotion_decision); other accounts' rows are read, never locked.
@@ -79,18 +157,21 @@ DECLARE
   settings jsonb; source opengeni_private.signup_network_sources%ROWTYPE; setup_time timestamptz;
   window_size interval; exact_count integer := 0; prefix_count integer := 0;
   exact_times jsonb := '[]'::jsonb; exact_threshold integer; prefix_threshold integer;
-  sign_in record; sign_in_count integer := 0; exact_match boolean; prefix_match boolean;
+  sign_in_group text; sign_in_times jsonb; sign_in_count integer := 0; exact_match boolean; prefix_match boolean;
   sign_in_match boolean; facts jsonb; decision_row record; owner_user text; recorded_until timestamptz;
+  velocity_mode text; sign_in_mode text; hold boolean;
 BEGIN
   IF p_account_id IS DISTINCT FROM opengeni_private.current_account_id() THEN
     RAISE EXCEPTION 'Signup network velocity scope mismatch' USING ERRCODE = '42501';
   END IF;
   settings := opengeni_private.signup_network_velocity_settings(target);
-  IF settings->>'mode' = 'off' THEN RETURN; END IF;
+  velocity_mode := coalesce(settings->>'mode', 'off');
+  sign_in_mode := coalesce(settings->>'signInNetworkMode', 'off');
+  IF velocity_mode = 'off' AND sign_in_mode = 'off' THEN RETURN; END IF;
   SELECT * INTO source FROM opengeni_private.signup_network_sources
     WHERE data_schema = target AND account_id = p_account_id;
   setup_time := source.set_up_at;
-  IF setup_time IS NULL THEN
+  IF setup_time IS NULL AND sign_in_mode <> 'off' THEN
     SELECT setup.set_up_at INTO setup_time FROM opengeni_private.signup_network_owner_setups setup
       WHERE setup.data_schema = target AND setup.account_id = p_account_id;
   END IF;
@@ -101,8 +182,8 @@ BEGIN
   -- The owner's sign-ins since the networks were last recorded, as 1375:
   -- owner only (the signup record's owner, else the account's self-serve
   -- owner), one indexed look-up, written only when a newer sign-in has a
-  -- network. A failure evaluates what is already recorded.
-  BEGIN
+  -- network. A failure evaluates what is already recorded. Sign-in leg only.
+  IF sign_in_mode <> 'off' THEN BEGIN
     owner_user := source.owner_auth_user_id;
     IF owner_user IS NULL THEN
       SELECT a.external_id INTO owner_user FROM managed_accounts a
@@ -125,9 +206,9 @@ BEGIN
     END IF;
   EXCEPTION WHEN OTHERS THEN
     RAISE WARNING 'signup owner session networks were not refreshed (%)', SQLSTATE;
-  END;
+  END; END IF;
   -- Signup network (the API's hash of the setup request), as 1354.
-  IF source.address_hash IS NOT NULL THEN
+  IF velocity_mode <> 'off' AND source.address_hash IS NOT NULL THEN
     SELECT count(*)::integer, coalesce(jsonb_agg(to_char(peer.set_up_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI"Z"')
         ORDER BY peer.set_up_at) FILTER (WHERE peer.position <= 20), '[]'::jsonb)
       INTO exact_count, exact_times FROM (
@@ -146,50 +227,63 @@ BEGIN
   END IF;
   -- Sign-in networks (the database's hash of the owners' session networks).
   -- For each exact network this owner signed in from within the window of
-  -- the setup (newest 20), the organizations set up within the window whose
+  -- the setup (newest 5), the organizations set up within the window whose
   -- owners signed in from it within the window of their own setup; the
-  -- largest group counts. Bounded: 1000 candidate rows per network.
-  SELECT left(network.address_hash, 16) AS group_ref, members.size, members.times INTO sign_in
-  FROM (
-    SELECT own.address_hash FROM opengeni_private.signup_network_owner_addresses own
-    WHERE own.data_schema = target AND own.account_id = p_account_id
-      AND own.first_seen_at <= setup_time + window_size AND own.last_seen_at >= setup_time - window_size
-    ORDER BY own.last_seen_at DESC, own.address_hash LIMIT 20
-  ) network
-  CROSS JOIN LATERAL (
-    SELECT count(*)::integer AS size,
-      coalesce(jsonb_agg(to_char(member.set_up_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI"Z"')
-        ORDER BY member.set_up_at) FILTER (WHERE member.position <= 20), '[]'::jsonb) AS times
-    FROM (
-      SELECT candidate.set_up_at,
-        row_number() OVER (ORDER BY candidate.set_up_at, candidate.account_id) AS position
+  -- largest group counts. Bounded: 200 candidate rows per network. Its own
+  -- failure block: an error counts nothing and never undoes the other legs.
+  -- Skipped when the signup network already holds the account.
+  IF sign_in_mode <> 'off' AND NOT (velocity_mode = 'enforce' AND exact_count >= exact_threshold) THEN
+    BEGIN
+      SELECT left(network.address_hash, 16), members.size, members.times
+        INTO sign_in_group, sign_in_count, sign_in_times
       FROM (
-        SELECT peer.account_id, peer.first_seen_at, peer.last_seen_at,
-          coalesce(
-            (SELECT s.set_up_at FROM opengeni_private.signup_network_sources s
-              WHERE s.data_schema = target AND s.account_id = peer.account_id),
-            (SELECT o.set_up_at FROM opengeni_private.signup_network_owner_setups o
-              WHERE o.data_schema = target AND o.account_id = peer.account_id)) AS set_up_at
-        FROM opengeni_private.signup_network_owner_addresses peer
-        WHERE peer.data_schema = target AND peer.address_hash = network.address_hash
-          AND peer.last_seen_at >= setup_time - 2 * window_size
-          AND peer.first_seen_at <= setup_time + 2 * window_size
-        ORDER BY peer.last_seen_at DESC LIMIT 1000
-      ) candidate
-      WHERE candidate.set_up_at BETWEEN setup_time - window_size AND setup_time + window_size
-        AND candidate.first_seen_at <= candidate.set_up_at + window_size
-        AND candidate.last_seen_at >= candidate.set_up_at - window_size
-      ORDER BY candidate.set_up_at, candidate.account_id LIMIT 501
-    ) member
-  ) members
-  ORDER BY members.size DESC, network.address_hash LIMIT 1;
-  sign_in_count := coalesce(sign_in.size, 0);
+        SELECT own.address_hash FROM opengeni_private.signup_network_owner_addresses own
+        WHERE own.data_schema = target AND own.account_id = p_account_id
+          AND own.first_seen_at <= setup_time + window_size AND own.last_seen_at >= setup_time - window_size
+        ORDER BY own.last_seen_at DESC, own.address_hash LIMIT 5
+      ) network
+      CROSS JOIN LATERAL (
+        SELECT count(*)::integer AS size,
+          coalesce(jsonb_agg(to_char(member.set_up_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI"Z"')
+            ORDER BY member.set_up_at) FILTER (WHERE member.position <= 20), '[]'::jsonb) AS times
+        FROM (
+          SELECT candidate.set_up_at,
+            row_number() OVER (ORDER BY candidate.set_up_at, candidate.account_id) AS position
+          FROM (
+            SELECT peer.account_id, peer.first_seen_at, peer.last_seen_at,
+              coalesce(
+                (SELECT s.set_up_at FROM opengeni_private.signup_network_sources s
+                  WHERE s.data_schema = target AND s.account_id = peer.account_id),
+                (SELECT o.set_up_at FROM opengeni_private.signup_network_owner_setups o
+                  WHERE o.data_schema = target AND o.account_id = peer.account_id)) AS set_up_at
+            FROM opengeni_private.signup_network_owner_addresses peer
+            WHERE peer.data_schema = target AND peer.address_hash = network.address_hash
+              AND peer.last_seen_at >= setup_time - 2 * window_size
+              AND peer.first_seen_at <= setup_time + 2 * window_size
+            ORDER BY peer.last_seen_at DESC LIMIT 200
+          ) candidate
+          WHERE candidate.set_up_at BETWEEN setup_time - window_size AND setup_time + window_size
+            AND candidate.first_seen_at <= candidate.set_up_at + window_size
+            AND candidate.last_seen_at >= candidate.set_up_at - window_size
+          ORDER BY candidate.set_up_at, candidate.account_id LIMIT 501
+        ) member
+      ) members
+      ORDER BY members.size DESC, network.address_hash LIMIT 1;
+    EXCEPTION WHEN OTHERS THEN
+      RAISE WARNING 'signup sign-in network velocity skipped (%)', SQLSTATE;
+      sign_in_group := NULL; sign_in_count := 0; sign_in_times := NULL;
+    END;
+  END IF;
+  sign_in_count := coalesce(sign_in_count, 0);
   IF exact_count < 2 AND prefix_count < 2 AND sign_in_count < 2 THEN RETURN; END IF;
   exact_match := exact_count >= exact_threshold;
   prefix_match := prefix_threshold IS NOT NULL AND prefix_count >= prefix_threshold;
   sign_in_match := sign_in_count >= exact_threshold;
+  hold := (velocity_mode = 'enforce' AND (exact_match OR prefix_match))
+    OR (sign_in_mode = 'enforce' AND sign_in_match);
   facts := jsonb_build_object(
     'ruleId', CASE WHEN exact_match THEN 'ip-velocity-exact-v1'
+      WHEN prefix_match AND velocity_mode = 'enforce' THEN 'ip-velocity-prefix-v1'
       WHEN sign_in_match THEN 'ip-velocity-sign-in-v1'
       WHEN prefix_match THEN 'ip-velocity-prefix-v1'
       ELSE 'ip-velocity-observed-v1' END,
@@ -198,18 +292,19 @@ BEGIN
     'groupSizeAtLeast', exact_count > 500 OR prefix_count > 500 OR sign_in_count > 500,
     'exactHoldThreshold', exact_threshold, 'prefixHoldThreshold', prefix_threshold,
     'windowHours', (settings->>'windowHours')::integer, 'settingsRevision', (settings->>'revision')::bigint,
+    'signInNetworkMode', sign_in_mode,
     'addressGroup', left(source.address_hash, 16), 'prefixGroup', left(source.prefix_hash, 16),
-    'signInGroup', sign_in.group_ref,
+    'signInGroup', sign_in_group,
     'setUpAt', to_char(setup_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI"Z"'),
     'exactGroupSetupTimes', exact_times,
-    'signInGroupSetupTimes', coalesce(sign_in.times, '[]'::jsonb));
+    'signInGroupSetupTimes', coalesce(sign_in_times, '[]'::jsonb));
   -- Unchanged evidence writes nothing, so admission reads do not churn rows.
   INSERT INTO opengeni_private.promotion_detector_observations(data_schema, account_id, policy_version, evidence)
     VALUES (target, p_account_id, 'ip-velocity-v1', facts)
     ON CONFLICT (data_schema, account_id, policy_version) DO UPDATE
       SET evidence = excluded.evidence, last_seen_at = clock_timestamp()
       WHERE promotion_detector_observations.evidence IS DISTINCT FROM excluded.evidence;
-  IF settings->>'mode' = 'enforce' AND (exact_match OR prefix_match OR sign_in_match) THEN
+  IF hold THEN
     -- Same precedence as before: manual decisions (including an operator
     -- release) are never overwritten, and a detector hold is kept.
     SELECT * INTO decision_row FROM promotion_decisions WHERE account_id = p_account_id;
@@ -335,7 +430,8 @@ BEGIN
   -- network) and recent organizations whose owners signed in from this
   -- owner's networks within the window, newest first, after the signup
   -- network peers; at most 51 in all. Bounded per network; best-effort.
-  IF settings->>'mode' IN ('observe', 'enforce') THEN
+  -- Only while signInNetworkMode is observe or enforce.
+  IF settings->>'signInNetworkMode' IN ('observe', 'enforce') THEN
     BEGIN
       SELECT string_agg(listed.id, ',' ORDER BY listed.position) INTO evaluate_ids FROM (
         SELECT candidate.id, min(candidate.position) AS position FROM (
@@ -349,14 +445,14 @@ BEGIN
             SELECT own.address_hash FROM opengeni_private.signup_network_owner_addresses own
             WHERE own.data_schema = target AND own.account_id = NEW.account_id
               AND own.last_seen_at >= clock_timestamp() - make_interval(hours => (settings->>'windowHours')::integer)
-            ORDER BY own.last_seen_at DESC LIMIT 20
+            ORDER BY own.last_seen_at DESC LIMIT 5
           ) network
           CROSS JOIN LATERAL (
             SELECT o.account_id FROM opengeni_private.signup_network_owner_addresses o
             WHERE o.data_schema = target AND o.address_hash = network.address_hash
               AND o.account_id <> NEW.account_id
               AND o.last_seen_at >= clock_timestamp() - make_interval(hours => (settings->>'windowHours')::integer)
-            ORDER BY o.last_seen_at DESC LIMIT 100
+            ORDER BY o.last_seen_at DESC LIMIT 50
           ) peer
           JOIN opengeni_private.signup_network_owner_setups setup
             ON setup.data_schema = target AND setup.account_id = peer.account_id
@@ -413,7 +509,7 @@ DECLARE data_schema text := current_schema(); routine regprocedure;
 BEGIN
   FOR routine IN SELECT p.oid::regprocedure FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
     WHERE n.nspname = 'opengeni_private' AND p.proname IN ('grant_verified_signup_trial_credit',
-      'evaluate_signup_network_velocity')
+      'evaluate_signup_network_velocity', 'set_signup_network_velocity')
   LOOP
     EXECUTE format('ALTER FUNCTION %s SET search_path = pg_catalog, %I, opengeni_private, pg_temp', routine, data_schema);
   END LOOP;
