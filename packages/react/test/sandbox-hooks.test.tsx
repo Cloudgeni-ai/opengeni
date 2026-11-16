@@ -2058,6 +2058,42 @@ describe("useSessionCapabilities viewer interaction reporting", () => {
     await hook.unmount();
   });
 
+  test("a 429 is told apart by its machine-readable refusal, whatever its message says", async () => {
+    let reads = 0;
+    const refusal = (viewerRefusal: string) =>
+      new OpenGeniApiError(
+        429,
+        JSON.stringify({
+          error: { code: "limit_exceeded", message: "Limit reached.", details: { viewerRefusal } },
+        }),
+      );
+    const client = fakeClient({
+      getStreamCapabilities: async () => {
+        reads += 1;
+        return fakeColdCapabilities();
+      },
+      attachViewer: async () => {
+        throw refusal("computer_limit");
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useSessionCapabilities(SESSION_ID, {
+          ...ctx,
+          client,
+          attachDesktop: true,
+          warmingPollMs: 10,
+        }),
+      undefined,
+    );
+    await flush(80);
+    expect(hook.result.current.viewerCapReached).toBe(true);
+    expect(hook.result.current.viewerCapReason).toBe("computers");
+    expect(hook.result.current.state).toBe("on-demand");
+    expect(reads).toBe(1);
+    await hook.unmount();
+  });
+
   test("a box stopped while its page went unused re-attaches on the next interaction, not as a viewer cap", async () => {
     let attaches = 0;
     const client = fakeClient({

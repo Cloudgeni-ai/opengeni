@@ -92,6 +92,7 @@ import {
   verifiedDelegatedHumanAuthorizationForRequest,
 } from "@opengeni/core";
 import { establishApiSandboxSpawner } from "./rematerialize";
+import { ApiHttpError } from "../http/api-error";
 import { establishCachedChannelAHandle } from "./channel-a";
 import { errorMessage } from "@opengeni/contracts/values";
 
@@ -295,7 +296,7 @@ export async function attachViewer(
         : sandboxPlanLimits(settings),
       ...(input.waitSignal ? { waitSignal: input.waitSignal } : {}),
       ...(!input.operationScoped && settings.sandboxViewerIdleDrainMs > 0
-        ? { enforceViewerIdleReattach: true }
+        ? { viewerIdleReattachRefusalMs: settings.sandboxViewerIdleDrainMs }
         : {}),
       ...(input.interactionAgeMs !== undefined
         ? { viewerInteractionAgeMs: input.interactionAgeMs }
@@ -305,32 +306,31 @@ export async function attachViewer(
     if (error instanceof SandboxViewerBoxLimitError) {
       // 429 is the client's existing "viewer cap reached" signal: the surface
       // degrades instead of retrying into the limit.
-      throw new HTTPException(429, {
-        message: viewerBoxLimitMessage(error),
-        cause: error,
-      });
+      throw viewerRefusal(viewerBoxLimitMessage(error), "computer_limit");
     }
     if (error instanceof SandboxOrganizationBoxLimitError) {
-      throw new HTTPException(429, {
-        message:
-          `your organization already runs ${error.limit} computers, the most its plan allows; ` +
+      throw viewerRefusal(
+        `your organization already runs ${error.limit} computers, the most its plan allows; ` +
           "close one or wait for a task to finish",
-        cause: error,
-      });
+        "computer_limit",
+      );
     }
     if (error instanceof SandboxPaidComputeAdmissionError) {
       throw new HTTPException(402, { message: error.message, cause: error });
     }
     if (error instanceof SandboxViewerAdmissionBlockedError) {
-      throw new HTTPException(error.reason === "balance" ? 402 : 429, {
-        message:
-          error.reason === "balance"
-            ? "insufficient workspace credits for an idle sandbox viewer"
-            : error.reason === "viewer_idle"
-              ? "the sandbox was stopped because its page went unused; interact with the page to resume it"
-              : "workspace sandbox warm allowance exhausted",
-        cause: error,
-      });
+      if (error.reason === "balance") {
+        throw new HTTPException(402, {
+          message: "insufficient workspace credits for an idle sandbox viewer",
+          cause: error,
+        });
+      }
+      throw error.reason === "viewer_idle"
+        ? viewerRefusal(
+            "the sandbox was stopped because its page went unused; interact with the page to resume it",
+            "viewer_idle",
+          )
+        : viewerRefusal("workspace sandbox warm allowance exhausted", "warm_allowance");
     }
     throw error;
   }
@@ -1696,4 +1696,18 @@ export function viewerInteractionAgeFor(
     return {};
   }
   return { interactionAgeMs: lastInteractionAgeMs };
+}
+
+/** Why a viewer attach was refused with 429, in `error.details.viewerRefusal`:
+ * clients branch on it, never on the message. */
+export type ViewerRefusalReason = "viewer_idle" | "computer_limit" | "warm_allowance";
+
+function viewerRefusal(message: string, reason: ViewerRefusalReason): ApiHttpError {
+  return new ApiHttpError(429, {
+    code: "limit_exceeded",
+    message,
+    retryable: false,
+    outcomeUnknown: false,
+    details: { viewerRefusal: reason },
+  });
 }

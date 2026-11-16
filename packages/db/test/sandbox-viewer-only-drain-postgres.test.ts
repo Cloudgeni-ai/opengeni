@@ -242,7 +242,7 @@ describe("viewer-only warm box bounds (real packages/db + RLS)", () => {
         holderId,
         backend: "modal",
         leaseTtlMs: 90_000,
-        enforceViewerIdleReattach: true,
+        viewerIdleReattachRefusalMs: 30 * 60_000,
         ...(viewerInteractionAgeMs === undefined ? {} : { viewerInteractionAgeMs }),
       });
     await expect(reattach("tab-a")).rejects.toMatchObject({ reason: "viewer_idle" });
@@ -264,7 +264,7 @@ describe("viewer-only warm box bounds (real packages/db + RLS)", () => {
       holderId: "tab-a",
       backend: "modal",
       leaseTtlMs: 90_000,
-      enforceViewerIdleReattach: true,
+      viewerIdleReattachRefusalMs: 30 * 60_000,
       // The person just interacted (after the release).
       viewerInteractionAgeMs: 0,
     });
@@ -407,6 +407,50 @@ describe("viewer-only warm box bounds (real packages/db + RLS)", () => {
     }
   }, 180_000);
 
+  test("an idle release refuses a no-interaction re-attach only for one more idle window", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const { groupId, epoch } = await warmGroup(ids, [{ kind: "viewer", holderId: "tab-a" }]);
+    await sessionOnBox(ids, groupId, { minutesAgo: 120 });
+    await backdateHolders(ids, groupId, 90);
+    expect(
+      await drainViewerOnlyLease(db, {
+        ...ids,
+        sandboxGroupId: groupId,
+        expectedEpoch: epoch,
+        reason: "viewer_idle",
+        quietForMs: 30 * 60_000,
+        idleGraceMs: 60_000,
+      }),
+    ).toEqual({ drained: true, releasedViewers: 1 });
+    await admin`
+      update sandbox_leases set liveness = 'cold', instance_id = null, expires_at = now()
+      where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${groupId}`;
+    const reattach = (holderId: string) =>
+      acquireLease(db, {
+        ...ids,
+        sandboxGroupId: groupId,
+        kind: "viewer",
+        holderId,
+        backend: "modal",
+        leaseTtlMs: 90_000,
+        viewerIdleReattachRefusalMs: 30 * 60_000,
+      });
+    await expect(reattach("tab-a")).rejects.toMatchObject({ reason: "viewer_idle" });
+    // The next day (here: after the window), an older client, or someone
+    // else opening the session, warms the box again without reporting
+    // interaction; the idle clock starts over from that attach.
+    await admin`
+      update sandbox_leases set viewer_idle_drained_at = now() - interval '31 minutes'
+      where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${groupId}`;
+    const back = await reattach("tab-b");
+    expect(back.role).toBe("spawner");
+    const [marker] = await admin<{ drained_at: Date | null }[]>`
+      select viewer_idle_drained_at as drained_at from sandbox_leases
+      where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${groupId}`;
+    expect(marker!.drained_at).toBeNull();
+  }, 180_000);
+
   test("after an idle release, a turn in the session lets a page re-attach without reporting interaction", async () => {
     if (!available) return;
     const ids = await freshWorkspace();
@@ -431,7 +475,7 @@ describe("viewer-only warm box bounds (real packages/db + RLS)", () => {
         holderId: "tab-a",
         backend: "modal",
         leaseTtlMs: 90_000,
-        enforceViewerIdleReattach: true,
+        viewerIdleReattachRefusalMs: 30 * 60_000,
       });
     await expect(reattach()).rejects.toMatchObject({ reason: "viewer_idle" });
     // The reaper saves and stops the box (simulated: cold); then a turn runs.
@@ -448,7 +492,7 @@ describe("viewer-only warm box bounds (real packages/db + RLS)", () => {
     expect(back.role).toBe("spawner");
     expect((await readLease(ids, groupId)).holders).toBe(1);
   }, 180_000);
-  test("a free self-serve organization is capped; one with an external-source workspace is not", async () => {
+  test("a free self-serve organization is capped, with its Personal workspace; one an embedding product keeps is not", async () => {
     if (!available) return;
     const limits = DEFAULT_SANDBOX_PLAN_LIMITS;
     const viewer = (ids: Ids, holderId: string) =>
@@ -473,9 +517,22 @@ describe("viewer-only warm box bounds (real packages/db + RLS)", () => {
     expect((await viewer(selfServe, "a")).role).toBe("spawner");
     await expect(viewer(selfServe, "b")).rejects.toBeInstanceOf(SandboxViewerBoxLimitError);
 
-    // Free organization that owns a workspace with an external source (an
-    // embedding host): `embedded`, outside the workspace and plan limits.
+    // Every self-serve organization has a Personal workspace and comes from
+    // a signup; neither makes it embedded.
+    await admin`update managed_accounts set external_source = 'better-auth:user',
+        external_id = ${crypto.randomUUID()}
+      where id = ${selfServe.accountId}`;
+    await admin`insert into workspaces (account_id, name, external_source, external_id)
+      values (${selfServe.accountId}, 'Personal workspace', 'opengeni:organization-membership',
+              ${`${selfServe.accountId}:user:a`})`;
+    expect(await tierOf(selfServe)).toBe("free");
+    await expect(viewer(selfServe, "c")).rejects.toBeInstanceOf(SandboxViewerBoxLimitError);
+
+    // Free organization that owns a workspace an embedding product keeps:
+    // `embedded`, outside the workspace and plan limits.
     const embedded = await freshWorkspace();
+    await admin`update managed_accounts set created_at = now() - interval '10 days'
+      where id = ${embedded.accountId}`;
     await admin`insert into organization_plans (account_id, plan_key, status)
       values (${embedded.accountId}, 'free', 'active')`;
     await admin`insert into workspaces (account_id, name, external_source)
@@ -485,11 +542,34 @@ describe("viewer-only warm box bounds (real packages/db + RLS)", () => {
       expect((await viewer(embedded, holderId)).role).toBe("spawner");
     }
 
-    // An organization with an external source is embedded too.
+    // A member can create such a workspace, so it never lifts the `new` or
+    // `restricted` tier.
+    const young = await freshWorkspace();
+    await admin`insert into organization_plans (account_id, plan_key, status)
+      values (${young.accountId}, 'free', 'active')`;
+    await admin`insert into workspaces (account_id, name, external_source)
+      values (${young.accountId}, 'mine', 'opengeni-sdk:mine')`;
+    expect(await resolveSandboxPlanTierInWorkspace(db, { ...young, limits })).toBe("new");
+    await admin`update managed_accounts set created_at = now() - interval '10 days'
+      where id = ${young.accountId}`;
+    await admin`insert into promotion_enforcement (singleton, enabled) values (true, true)
+      on conflict (singleton) do update set enabled = excluded.enabled`;
+    await admin`insert into promotion_decisions (account_id, decision, revision, actor)
+      values (${young.accountId}, 'denied', 1, 'test')`;
+    try {
+      expect(await tierOf(young)).toBe("restricted");
+    } finally {
+      await admin`update promotion_enforcement set enabled = false`;
+    }
+
+    // An organization a host provisioned (its own external source is not a
+    // self-serve one) is embedded from the start, whatever else holds.
     const external = await freshWorkspace();
     await admin`update managed_accounts set external_source = 'opengeni-sdk:test'
       where id = ${external.accountId}`;
-    expect(await tierOf(external)).toBe(SANDBOX_EMBEDDED_PLAN_TIER);
+    expect(await resolveSandboxPlanTierInWorkspace(db, { ...external, limits })).toBe(
+      SANDBOX_EMBEDDED_PLAN_TIER,
+    );
   }, 180_000);
 
   test("joining a box a process or Browser/ComputerSession keeps warm is not one more viewer-only box", async () => {

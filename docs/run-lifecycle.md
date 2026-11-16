@@ -4339,8 +4339,8 @@ with open work (`queued`, `running`, `requires_action`, `recovering`,
 `waiting_capacity`). A box with a turn, process, Browser/ComputerSession or
 direct operation is never counted or drained by them. Compute and selfhosted
 boxes are exempt, and so is every box of an organization in the `embedded`
-plan tier (not self-serve: it, or one of its workspaces, has an external
-source), whose host may hold viewers without reporting interaction.
+plan tier (not self-serve; see [deployment](deployment.md)), whose host may
+hold viewers without reporting interaction.
 
 - Idle drain (`OPENGENI_SANDBOX_VIEWER_IDLE_DRAIN_MS`, default 30 minutes, `0`
   disables). The server bounds the hold by what it observes: the viewers'
@@ -4358,10 +4358,13 @@ source), whose host may hold viewers without reporting interaction.
   holders, records the release (`sandbox_leases.viewer_idle_drained_at`) and
   moves the lease to draining with the ordinary idle grace, so the workspace
   is saved and the box stops as when the last tab closes. The page's next
-  heartbeat answers `alive: false`. A later person-facing viewer attach to
-  that box that reports no interaction after the release, while the session
-  had no turn or open work since, is refused with 429, so an unattended page
-  or an old client re-attaching on its own cannot reset the idle clock. A page
+  heartbeat answers `alive: false`. For one more idle window after the
+  release, a person-facing viewer attach to that box that reports no
+  interaction after the release, while the session had no turn or open work
+  since, is refused with 429 (`details.viewerRefusal: "viewer_idle"`), so an
+  unattended page or an old client re-attaching on its own cannot reset the
+  idle clock at once. After that window any attach is admitted, so a person
+  returning on an older client, or someone else, can warm the box. A page
   that knows the window (`viewerIdleDrainMs` on the attach response) waits for
   the person's next interaction and then re-attaches, which is admitted and
   resumes the box; the record is cleared.

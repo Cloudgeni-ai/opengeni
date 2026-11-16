@@ -373,6 +373,9 @@ describe("boundViewerOnlyWarmBoxes (real PostgreSQL)", () => {
     const ids = await workspace();
     await admin`insert into organization_plans (account_id, plan_key, status)
       values (${ids.accountId}, 'free', 'active')`;
+    // Past the `new` tier, which a member-created workspace never lifts.
+    await admin`update managed_accounts set created_at = now() - interval '10 days'
+      where id = ${ids.accountId}`;
     await admin`insert into workspaces (account_id, name, external_source)
       values (${ids.accountId}, 'host', 'federation:test-host')`;
     const boxes = [

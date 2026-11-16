@@ -1290,6 +1290,10 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
     expect(blocked).toBeInstanceOf(HTTPException);
     expect((blocked as HTTPException).status).toBe(429);
     expect((blocked as Error).message).toContain("no task");
+    // Clients branch on the machine-readable refusal, not the message.
+    expect((blocked as { details?: unknown }).details).toEqual({
+      viewerRefusal: "computer_limit",
+    });
     expect((await readLease(db, workspaceId, second.sandboxGroupId))?.viewerHolders).toBe(0);
   }, 60_000);
 

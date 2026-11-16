@@ -525,7 +525,17 @@ export function useSessionCapabilities(
                   );
                 }
               } else if (cause.status === 429) {
-                if (cause.message.includes("went unused")) {
+                // The server names the refusal in details.viewerRefusal;
+                // servers before it only say so in the message.
+                const refusal =
+                  typeof cause.details?.viewerRefusal === "string"
+                    ? cause.details.viewerRefusal
+                    : cause.message.includes("went unused")
+                      ? "viewer_idle"
+                      : cause.message.includes("computers")
+                        ? "computer_limit"
+                        : null;
+                if (refusal === "viewer_idle") {
                   // The box was stopped while nobody used the page: wait for
                   // the person to interact, then attach again.
                   attachRefused = true;
@@ -537,7 +547,7 @@ export function useSessionCapabilities(
                   // this box for us, so rest on-demand instead of polling
                   // toward a warm-up. Other limits keep polling, as another
                   // holder may warm it.
-                  const computers = cause.message.includes("computers");
+                  const computers = refusal === "computer_limit";
                   setViewerCapReason(computers ? "computers" : "viewers");
                   if (computers) attachRefused = true;
                 }

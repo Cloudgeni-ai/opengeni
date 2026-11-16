@@ -1483,6 +1483,7 @@ import { managedPersonalWorkspacePermissions } from "./personal-workspace-permis
 import {
   joinedWorkspaceIsNotPersonal,
   membershipOutsidePersonalWorkspace,
+  PERSONAL_WORKSPACE_EXTERNAL_SOURCE,
 } from "./personal-workspace-membership";
 export { PERSONAL_WORKSPACE_EXTERNAL_SOURCE } from "./personal-workspace-membership";
 export { memoryTextForStorage } from "./memory-domain";
@@ -49189,11 +49190,14 @@ export interface AcquireLeaseInput {
    * limit is refused (non-turn holders) or capacity-blocked (turns). Omitted =
    * no organization limits. */
   sandboxPlanLimits?: SandboxPlanLimits;
-  /** Viewer holders only: refuse (`viewer_idle`) an attach to a box whose
-   * viewers the reaper released for the viewer idle window, unless the attach
-   * reports interaction after that release or a turn used the session since.
-   * Set by the person-facing attach route when the idle drain is on. */
-  enforceViewerIdleReattach?: boolean;
+  /** Viewer holders only: for this long after the reaper released a box's
+   * viewers for the viewer idle window, refuse (`viewer_idle`) an attach to
+   * it unless the attach reports interaction after that release or a turn
+   * used the session since. After it, any attach is admitted, so an older
+   * client or another person can warm the box again. The person-facing attach
+   * route sets it to the idle window when the idle drain is on; 0 or omitted
+   * never refuses. */
+  viewerIdleReattachRefusalMs?: number;
   /** Viewer holders only: how long ago the attaching page last saw real user
    * interaction, when the client reports it (see
    * normalizeViewerInteractionAgeMs). Recorded on the holder. */
@@ -49648,27 +49652,38 @@ export const ORGANIZATION_WARM_SANDBOX_COUNTS_ROUTINE =
   "opengeni_private.organization_warm_sandbox_counts_v1(uuid, text, uuid)";
 
 /** The tier of an organization that is not self-serve (an embedding host,
- * SDK or federated organization); unbounded unless configured. */
+ * SDK or federated organization); unbounded unless configured. See
+ * resolveSandboxPlanTier. */
 export const SANDBOX_EMBEDDED_PLAN_TIER = "embedded";
 
 /** The tier of a young Free self-serve organization, while the
  * `new` tier sets `organizationsYoungerThanMs`. */
 export const SANDBOX_NEW_PLAN_TIER = "new";
 
+/** managed_accounts.external_source values of self-serve organizations: a
+ * person's signup and an additional organization they create. */
+const SELF_SERVE_ACCOUNT_SOURCES = ["better-auth:user", "opengeni:additional-organization"];
+
+/** workspaces.external_source values every self-serve organization has: a
+ * member's Personal workspace and the legacy signup workspace. */
+const SELF_SERVE_WORKSPACE_SOURCES = [PERSONAL_WORKSPACE_EXTERNAL_SOURCE, "better-auth:user"];
+
 /**
  * The plan tier whose sandbox limits apply to an organization:
  *
- * - `embedded` for an organization that is not self-serve: the organization
- *   itself has an external source, or it owns a workspace that has one (an
- *   embedding product, the SDK or a federation provisions it). Its plan row
- *   does not describe who uses it, so plan limits never apply by default.
+ * - `embedded` for an organization a host provisioned: its external source is
+ *   not a self-serve one (a configured or local deployment, an embedding
+ *   host or the SDK bootstrap). Nobody self-serve can set it.
  * - otherwise its plan key (a paid plan only while active, trialing or past
  *   due), `none` without a plan row;
  * - `restricted` for a Free or plan-less organization whose promotion
  *   decision is `held` or `denied`, while promotion enforcement is on;
- * - `new` for any other Free organization created less than the
- *   `new` tier's `organizationsYoungerThanMs` ago (only when `limits` is
- *   given and sets it).
+ * - `new` for any other Free organization created less than the `new` tier's
+ *   `organizationsYoungerThanMs` ago (only when `limits` is given and sets it);
+ * - `embedded` for any other organization that owns a workspace an embedding
+ *   product keeps (one with an external source other than the Personal and
+ *   legacy signup workspaces). A member can create such a workspace, so it
+ *   never lifts `restricted` or `new`.
  *
  * The tier is the organization's, whatever credential the caller holds
  * (browser session, API key, native token or service).
@@ -49689,7 +49704,8 @@ export async function resolveSandboxPlanTier(
     status: string | null;
     decision: string | null;
     enforcement: boolean | null;
-    embedded: boolean | null;
+    hosted_account: boolean | null;
+    hosted_workspace: boolean | null;
     young: boolean | null;
   }>(
     tx,
@@ -49700,18 +49716,25 @@ export async function resolveSandboxPlanTier(
           where account.id = organization.account_id
             and account.created_at > now() - (${newTierAgeMs}::bigint * interval '1 millisecond')
         )) as young,
-        (
-          exists (select 1 from managed_accounts account
-            where account.id = organization.account_id and account.external_source is not null)
-          or exists (select 1 from workspaces workspace
-            where workspace.account_id = organization.account_id
-              and workspace.external_source is not null)
-        ) as embedded
+        exists (select 1 from managed_accounts account
+          where account.id = organization.account_id
+            and account.external_source is not null
+            and account.external_source not in (${sql.join(
+              SELF_SERVE_ACCOUNT_SOURCES.map((source) => sql`${source}`),
+              sql`, `,
+            )})) as hosted_account,
+        exists (select 1 from workspaces workspace
+          where workspace.account_id = organization.account_id
+            and workspace.external_source is not null
+            and workspace.external_source not in (${sql.join(
+              SELF_SERVE_WORKSPACE_SOURCES.map((source) => sql`${source}`),
+              sql`, `,
+            )})) as hosted_workspace
       from (select ${accountId}::uuid as account_id) organization
       left join organization_plans plan on plan.account_id = organization.account_id
       left join promotion_decisions decision on decision.account_id = organization.account_id`,
   );
-  if (row?.embedded === true) return SANDBOX_EMBEDDED_PLAN_TIER;
+  if (row?.hosted_account === true) return SANDBOX_EMBEDDED_PLAN_TIER;
   const planKey = row?.plan_key ?? null;
   let tier: string;
   if (planKey === null) tier = "none";
@@ -49726,6 +49749,7 @@ export async function resolveSandboxPlanTier(
     return "restricted";
   }
   if (tier === "free" && row?.young === true) return SANDBOX_NEW_PLAN_TIER;
+  if (row?.hosted_workspace === true) return SANDBOX_EMBEDDED_PLAN_TIER;
   return tier;
 }
 
@@ -51376,23 +51400,27 @@ async function acquireLeaseOnce(
           kind === "viewer" ? normalizeViewerInteractionAgeMs(input.viewerInteractionAgeMs) : null;
 
         // Viewer-only idle drain: the reaper released this box's viewers
-        // because nobody used the page. An attach that reports no interaction
-        // since then (an unattended page or an older client re-attaching on
-        // its own) must not warm it again and reset the idle clock. A person
-        // who interacts, a turn in the session, or a box someone else already
-        // holds admits it as usual.
+        // because nobody used the page. For one more idle window, an attach
+        // that reports no interaction since then (an unattended page or an
+        // older client re-attaching on its own) must not warm it again and
+        // reset the idle clock. A person who interacts, a turn in the session,
+        // a box someone else already holds, or any attach after that window
+        // (a person returning on an older client) admits it as usual.
         const viewerIdleDrainedAt = (row as { viewer_idle_drained_at?: Date | string | null })
           .viewer_idle_drained_at;
         if (
           kind === "viewer" &&
-          input.enforceViewerIdleReattach === true &&
+          (input.viewerIdleReattachRefusalMs ?? 0) > 0 &&
           viewerIdleDrainedAt !== null &&
           viewerIdleDrainedAt !== undefined &&
           Number(row.turn_holders) === 0
         ) {
           const idleRows = await tx.execute<{ refuse: boolean }>(sql`
             select (
-              not exists (
+              ${viewerIdleDrainedAt}::timestamptz > now() - (${String(
+                Math.floor(input.viewerIdleReattachRefusalMs ?? 0),
+              )} || ' milliseconds')::interval
+              and not exists (
                 select 1 from sandbox_lease_holders holder where holder.lease_id = ${row.id}
               )
               and ${
