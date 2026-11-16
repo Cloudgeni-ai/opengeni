@@ -436,12 +436,157 @@ describe("per-service identity verifiers", () => {
     }
   });
 
-  test("HubSpot, Sentry and Apollo stay unidentified and get the one-account rule", () => {
-    for (const url of [
-      "https://mcp.hubspot.com/anthropic",
-      "https://mcp.sentry.dev/mcp",
-      "https://mcp.apollo.io/mcp",
+  test("Stripe reads the current account_id shape and labels from GetAccount", async () => {
+    // The live server's answer: no email and an empty display name.
+    const info = {
+      account_id: "acct_1TrfPUDaGV12u0NB",
+      display_name: "",
+      dashboard_api_keys_link: "https://dashboard.stripe.com/acct_1TrfPUDaGV12u0NB/apikeys",
+    };
+    const account = {
+      id: "acct_1TrfPUDaGV12u0NB",
+      object: "account",
+      email: "billing@example.test",
+      settings: { dashboard: { display_name: "" } },
+      business_profile: { name: "Acme Inc" },
+    };
+    const read = await verify(STRIPE, {
+      get_stripe_account_info: { structuredContent: info, content: [] },
+      stripe_api_read: json(account),
+    });
+    expect(read.called).toEqual(["get_stripe_account_info", "stripe_api_read"]);
+    expect(read.result).toEqual({
+      identity: {
+        stripeAccountId: "acct_1TrfPUDaGV12u0NB",
+        stripeEmail: "billing@example.test",
+        stripeAccountName: "Acme Inc",
+      },
+    });
+    expect(connectionAccountIdentityLabel(read.result.identity ?? {}, "Stripe account")).toBe(
+      "billing@example.test · Acme Inc",
+    );
+    // The display name from the summary wins; GetAccount is optional.
+    expect(
+      (await verify(STRIPE, { get_stripe_account_info: json({ ...info, display_name: "Acme" }) }))
+        .result,
+    ).toEqual({
+      identity: { stripeAccountId: "acct_1TrfPUDaGV12u0NB", stripeAccountName: "Acme" },
+    });
+    expect(
+      (
+        await verify(STRIPE, {
+          get_stripe_account_info: json(info),
+          stripe_api_read: { isError: true, content: [] },
+        })
+      ).result,
+    ).toEqual({ identity: { stripeAccountId: "acct_1TrfPUDaGV12u0NB" } });
+    // GetAccount for another account never labels this one.
+    expect(
+      (
+        await verify(STRIPE, {
+          get_stripe_account_info: json(info),
+          stripe_api_read: json({ ...account, id: "acct_other" }),
+        })
+      ).result,
+    ).toEqual({ identity: { stripeAccountId: "acct_1TrfPUDaGV12u0NB" } });
+    expect(
+      (await verify(STRIPE, { get_stripe_account_info: json({ account_id: "cus_1" }) })).result,
+    ).toEqual({ failure: "invalid_identity" });
+  });
+
+  test("Sentry keys the account by the whoami user id", async () => {
+    const SENTRY = "https://mcp.sentry.dev/mcp";
+    const whoami = {
+      user: { id: "3210987", name: "Anna Berg", email: "anna@example.test" },
+      sessionConstraints: null,
+    };
+    const read = await verify(SENTRY, {
+      whoami: { structuredContent: whoami, content: [] },
+      find_organizations: json({
+        organizations: [{ slug: "halcyon", webUrl: null, regionUrl: null }],
+        hasMore: false,
+        nextCursor: null,
+      }),
+    });
+    expect(read.result).toEqual({
+      identity: {
+        sentryUserId: "3210987",
+        sentryEmail: "anna@example.test",
+        sentryName: "Anna Berg",
+        sentryOrganizationName: "halcyon",
+      },
+    });
+    expect(connectionAccountIdentityLabel(read.result.identity ?? {}, "Sentry account")).toBe(
+      "anna@example.test · halcyon",
+    );
+    // Several organizations name none; a session limited to one names that one.
+    const several = json({ organizations: [{ slug: "a" }, { slug: "b" }], hasMore: false });
+    expect(
+      (await verify(SENTRY, { whoami: json(whoami), find_organizations: several })).result,
+    ).toEqual({
+      identity: {
+        sentryUserId: "3210987",
+        sentryEmail: "anna@example.test",
+        sentryName: "Anna Berg",
+      },
+    });
+    expect(
+      (
+        await verify(SENTRY, {
+          whoami: json({ ...whoami, sessionConstraints: { organizationSlug: "b" } }),
+          find_organizations: several,
+        })
+      ).result.identity?.sentryOrganizationName,
+    ).toBe("b");
+    expect((await verify(SENTRY, {}, { listed: [] })).result).toEqual({
+      failure: "tool_missing",
+    });
+    for (const malformed of [
+      json({ user: { name: "Anna" } }),
+      { content: [{ type: "text", text: "You are authenticated as Anna" }] },
     ]) {
+      expect((await verify(SENTRY, { whoami: malformed })).result).toEqual({
+        failure: "invalid_identity",
+      });
+    }
+  });
+
+  test("Apollo keys the account by the current-user profile id", async () => {
+    const APOLLO = "https://mcp.apollo.io/mcp";
+    const profile = {
+      id: "66c8db577ed7f201b25c0eef",
+      team_id: "6095a710bd01d100a506d4ac",
+      first_name: "John",
+      last_name: "Doe",
+      title: "Developer",
+      email: "john.doe@example.test",
+    };
+    const read = await verify(APOLLO, { apollo_users_api_profile: json(profile) });
+    expect(read.result).toEqual({
+      identity: {
+        apolloUserId: "66c8db577ed7f201b25c0eef",
+        apolloEmail: "john.doe@example.test",
+        apolloName: "John Doe",
+      },
+    });
+    expect(connectionAccountIdentityLabel(read.result.identity ?? {}, "Apollo.io account")).toBe(
+      "john.doe@example.test",
+    );
+    expect(
+      (await verify(APOLLO, { apollo_users_api_profile: json({ user: profile }) })).result.identity
+        ?.apolloUserId,
+    ).toBe("66c8db577ed7f201b25c0eef");
+    expect((await verify(APOLLO, {}, { listed: [] })).result).toEqual({
+      failure: "tool_missing",
+    });
+    expect(
+      (await verify(APOLLO, { apollo_users_api_profile: json({ email: "x@example.test" }) }))
+        .result,
+    ).toEqual({ failure: "invalid_identity" });
+  });
+
+  test("HubSpot stays unidentified and gets the one-account rule", () => {
+    for (const url of ["https://mcp.hubspot.com/anthropic"]) {
       expect(accountIdentityVerifierFor(url)).toBeUndefined();
       expect(
         connectionAccountIdentityState({
