@@ -497,6 +497,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     rigProviderImageSnapshotTimeoutMs: 300_000,
     sandboxWarmRateMicrosPerSecondJson: "{}",
     sandboxMaxWarmSecondsPerWorkspace: 0,
+    sandboxMaxViewerOnlyBoxesPerWorkspace: 3,
+    sandboxPlanLimitsJson: "",
     sandboxPreparationProfiles: "none",
     sandboxEnvAllowlist: "",
     sandboxImageAllowlist: "",

@@ -491,6 +491,11 @@ and, when a call reads much less cache than the previous call of the same model
 in the session, a warm-miss class: `context_replaced`, `tools_changed`,
 `system_changed`, `history_rewritten` (with the first diverging checkpoint),
 `thinking_dropped`, `account_changed`, `idle_gap` or `unexplained`. The worker
+checks them in that order. `thinking_dropped` needs Claude to drop more signed
+thinking than it dropped for the previous call: a long conversation can drop
+the same old blocks on every request, which leaves the prompt unchanged, so a
+steady drop count falls through to the account, idle-gap or unexplained class.
+The worker
 also exports `opengeni_model_prompt_cache_warm_misses_total{class}`,
 `opengeni_model_prompt_cache_missed_tokens_total` and
 `opengeni_model_thinking_blocks_dropped_total{reason}`. `context_replaced`,

@@ -1565,6 +1565,21 @@ with "The turn continues automatically as soon as the sandbox is ready." It has
 no attempt counter because the wait has no retry budget; the turn resumes on the
 lifecycle wake.
 
+**Organization sandbox capacity.** A turn that would start a new box while its
+organization already runs the most boxes its plan allows
+(`OPENGENI_SANDBOX_PLAN_LIMITS_JSON`, `runningBoxesPerOrganization`; see
+[deployment](deployment.md)) is not given one: the cold election returns
+`fenced` reason `organization_sandbox_capacity`, registers no holder and
+licenses no provider create. The worker settles it like any other lifecycle
+transition (`sandbox_lifecycle_transition`, `transitionReason:
+"organization_sandbox_capacity"`, `organizationBoxLimit`), settling unstarted
+commands as not started, and parks the same turn for
+`ORGANIZATION_SANDBOX_CAPACITY_RETRY_MS` (one minute) with no retry budget and no
+turn worker held. The replacement attempt asks again; joining or re-arming a box
+that already runs never counts. This is a concurrency bound, never a run-length
+limit: an admitted turn keeps its box for as long as it works. The lazy
+provisioner never retries the transition in place.
+
 **Durable recovery observability.** The control worker reads one content-free,
 cross-workspace aggregate per minute,
 `opengeni_private.summarize_session_recovery_backlog()` (migration 0633; the

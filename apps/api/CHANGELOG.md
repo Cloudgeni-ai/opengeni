@@ -1,5 +1,39 @@
 # @opengeni/api-router
 
+## 6.24.1
+
+### Patch Changes
+
+- e4c5c29: Free-credit farm detection now sees organizations created through the legacy `POST /v1/organizations` route, and counts the networks new owners sign in from. That route writes the same self-serve setup receipt and Free eligibility as organization onboarding but never passed the signup network, so the per-network rate limit, the velocity rule and its observations never saw it; a farm used it for 664 organizations from 52 addresses in one evening without a single hold. The route now records the trusted client network, applies the same rate limit (HTTP 429) and evaluates the new and recent same-network organizations after commit. The velocity rule (`ip-velocity-v1`) also counts, per exact network an owner signed in from around setup, the new organizations whose owners signed in from it around their own setup, and holds at the existing threshold (rule `ip-velocity-sign-in-v1`), so a setup without a signup network or from a rotating address is still caught. Same mode, window and threshold; manual decisions and operator releases kept; invited members never counted; prefixes alone never hold; keyed hashes only; bounded and fail-open.
+- Updated dependencies [f041392]
+- Updated dependencies [5fd2c21]
+- Updated dependencies [e4c5c29]
+  - @opengeni/db@6.24.1
+  - @opengeni/config@6.24.1
+  - @opengeni/contracts@6.24.1
+  - @opengeni/core@6.24.1
+  - @opengeni/documents@6.24.1
+  - @opengeni/events@6.24.1
+  - @opengeni/github@6.24.1
+  - @opengeni/runtime@6.24.1
+  - @opengeni/storage@6.24.1
+  - @opengeni/codemode@6.24.1
+  - @opengeni/artifact-tool@6.24.1
+  - @opengeni/capabilities@6.24.1
+  - @opengeni/codex@6.24.1
+  - @opengeni/decisions@6.24.1
+  - @opengeni/interaction@6.24.1
+  - @opengeni/observability@6.24.1
+  - @opengeni/tool-gateway@6.24.1
+  - @opengeni/vaults@6.24.1
+  - @opengeni/vaults-bitwarden@6.24.1
+  - @opengeni/vaults-keeper@6.24.1
+  - @opengeni/vaults-onepassword@6.24.1
+  - @opengeni/vaults-protonpass@6.24.1
+  - @opengeni/agent-proto@6.24.1
+  - @opengeni/network@6.24.1
+  - @opengeni/xai-subscription@6.24.1
+
 ## 6.24.0
 
 ### Patch Changes

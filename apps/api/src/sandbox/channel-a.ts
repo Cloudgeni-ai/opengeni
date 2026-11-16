@@ -21,6 +21,7 @@ import {
   applyGitAuthPointerEnvironment,
   hasGitCredentialRepositorySelection,
   sandboxLifecycleTransitionWaitMs,
+  sandboxPlanLimits,
   sandboxWarmRateMicrosPerSecond,
   stableSandboxEnvironmentForRun,
   type Settings,
@@ -39,6 +40,7 @@ import {
   SandboxProviderReadLockUnavailableError,
   SandboxRigConflictError,
   SandboxPaidComputeAdmissionError,
+  SandboxOrganizationBoxLimitError,
   waitWhileLeaseWarming,
   withSandboxProviderReadLock,
   type Database,
@@ -1084,6 +1086,9 @@ async function withChannelAOperation<T>(
       leaseTtlMs,
       warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
       captureWaitMs: sandboxLifecycleTransitionWaitMs(settings),
+      // A direct operation that would start a new box counts against the
+      // organization's running-box limit (429 at the limit).
+      sandboxPlanLimits: sandboxPlanLimits(settings),
       ...(ctx.waitSignal ? { waitSignal: ctx.waitSignal } : {}),
     });
     // Close the commit/abort race before any provider handle is established.
@@ -1509,6 +1514,13 @@ export function mapChannelAError(error: unknown, waitSignal?: AbortSignal): unkn
   if (error instanceof HTTPException) return error;
   if (error instanceof SandboxPaidComputeAdmissionError)
     return new HTTPException(402, { message: error.message, cause: error });
+  if (error instanceof SandboxOrganizationBoxLimitError)
+    return new HTTPException(429, {
+      message:
+        `your organization already runs ${error.limit} computers, the most its plan allows; ` +
+        "close one or wait for a task to finish",
+      cause: error,
+    });
   if (isChannelARequestCancellation(error, waitSignal))
     return new HTTPException(499 as never, {
       message: "request cancelled",

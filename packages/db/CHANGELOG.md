@@ -1,5 +1,25 @@
 # @opengeni/db
 
+## 6.24.1
+
+### Patch Changes
+
+- f041392: A viewer can no longer keep unlimited sandboxes running with no task. Opening a desktop, terminal or file editor starts a sandbox, and a heartbeating viewer kept it warm indefinitely; under `usage_only` warm billing that compute was free, so scripted accounts could hold hundreds of boxes. A workspace now keeps at most `OPENGENI_SANDBOX_MAX_VIEWER_ONLY_BOXES_PER_WORKSPACE` boxes (default 3, `0` = unbounded) warm with only viewers attached; a viewer that would add one more gets HTTP 429, which the web client already shows as the viewer cap. Joining a box a task or another viewer already holds is unaffected. When the monthly warm allowance (`OPENGENI_SANDBOX_MAX_WARM_SECONDS_PER_WORKSPACE`) is exhausted, viewers on boxes with no running task are now detached on their next heartbeat so those boxes drain, instead of staying warm until the viewer closes; boxes a task holds keep running.
+
+  Organizations now also get sandbox limits by subscription plan, counted across every workspace and member (`OPENGENI_SANDBOX_PLAN_LIMITS_JSON`). Defaults: Free 2 viewer-only boxes per organization and 1 per person, Pro 10/3, Max 30/5, Enterprise unbounded; a Free organization whose promotion decision is `held` or `denied` keeps none. Each plan also caps running boxes, including those agent turns hold (Free 3, Pro 20, Max 50): a turn that needs a new box beyond it waits for a slot, retrying every minute without holding a worker, instead of starting one. The organization-wide counts use a new database function (migration 1475) whose runtime grant follows in a later release; until then only the zero limits and the per-workspace viewer limit apply.
+
+- e4c5c29: Free-credit farm detection now sees organizations created through the legacy `POST /v1/organizations` route, and counts the networks new owners sign in from. That route writes the same self-serve setup receipt and Free eligibility as organization onboarding but never passed the signup network, so the per-network rate limit, the velocity rule and its observations never saw it; a farm used it for 664 organizations from 52 addresses in one evening without a single hold. The route now records the trusted client network, applies the same rate limit (HTTP 429) and evaluates the new and recent same-network organizations after commit. The velocity rule (`ip-velocity-v1`) also counts, per exact network an owner signed in from around setup, the new organizations whose owners signed in from it around their own setup, and holds at the existing threshold (rule `ip-velocity-sign-in-v1`), so a setup without a signup network or from a rotating address is still caught. Same mode, window and threshold; manual decisions and operator releases kept; invited members never counted; prefixes alone never hold; keyed hashes only; bounded and fail-open.
+- Updated dependencies [f041392]
+- Updated dependencies [5fd2c21]
+  - @opengeni/config@6.24.1
+  - @opengeni/contracts@6.24.1
+  - @opengeni/codemode@6.24.1
+  - @opengeni/codex@6.24.1
+  - @opengeni/observability@6.24.1
+  - @opengeni/network@6.24.1
+  - @opengeni/subscriptions@6.24.1
+  - @opengeni/xai-subscription@6.24.1
+
 ## 6.24.0
 
 ### Patch Changes
