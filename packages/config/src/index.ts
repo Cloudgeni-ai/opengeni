@@ -2186,6 +2186,11 @@ const SettingsSchema = z.object({
   // cap force-drains its VIEWER-ONLY boxes (guarded AND turn_holders=0 — a paying
   // turn is never killed); the reaper then stop()s at refcount 0.
   sandboxMaxWarmSecondsPerWorkspace: z.coerce.number().int().nonnegative().default(0),
+  // Most sandboxes one workspace may keep warm with only a viewer attached (no
+  // turn holder). Opening a desktop, terminal or file editor starts a box and a
+  // heartbeating viewer keeps it running indefinitely; this bounds that free
+  // compute per workspace. Boxes a turn holds never count. 0 = unbounded.
+  sandboxMaxViewerOnlyBoxesPerWorkspace: z.coerce.number().int().nonnegative().default(3),
   sandboxPreparationProfiles: z.string().default("none"),
   sandboxEnvAllowlist: z.string().default(""),
   // Comma-separated image references a workspace may select as its default
@@ -6580,6 +6585,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     ),
     sandboxWarmBillingMode: optional("OPENGENI_SANDBOX_WARM_BILLING_MODE"),
     sandboxMaxWarmSecondsPerWorkspace: optional("OPENGENI_SANDBOX_MAX_WARM_SECONDS_PER_WORKSPACE"),
+    sandboxMaxViewerOnlyBoxesPerWorkspace: optional(
+      "OPENGENI_SANDBOX_MAX_VIEWER_ONLY_BOXES_PER_WORKSPACE",
+    ),
     sandboxPreparationProfiles: optional("OPENGENI_SANDBOX_PREPARATION_PROFILES"),
     sandboxEnvAllowlist: optional("OPENGENI_SANDBOX_ENV_ALLOWLIST"),
     sandboxImageAllowlist: optional("OPENGENI_SANDBOX_IMAGE_ALLOWLIST"),

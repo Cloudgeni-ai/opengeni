@@ -49173,6 +49173,12 @@ export interface AcquireLeaseInput {
   /** Optional owner cancellation for the transition wait. No holder exists
    * while a capture/rotation fence is observed, so cancellation is leak-free. */
   waitSignal?: AbortSignal;
+  /** Viewer holders only: the most boxes this workspace may keep warm with a
+   * viewer and no turn holder. A new viewer that would start, re-arm or adopt
+   * one more such box is refused with SandboxViewerBoxLimitError; joining a box
+   * another viewer or a turn already holds is always admitted. Omitted or 0 =
+   * no limit. */
+  viewerOnlyBoxLimit?: number;
 }
 
 export type AcquireLeaseResult =
@@ -49561,6 +49567,27 @@ export class SandboxViewerAdmissionBlockedError extends Error {
       reason === "balance"
         ? "Sandbox viewer admission is blocked because the workspace has no managed credits"
         : "Sandbox viewer admission is blocked because the workspace warm allowance is exhausted",
+    );
+  }
+}
+
+/**
+ * A viewer would start or re-arm one more box that no turn holds, and the
+ * workspace already keeps `limit` such viewer-only boxes warm. Turn-held boxes
+ * never count and are never refused: this bounds compute a viewer alone keeps
+ * running, not agent work.
+ */
+export class SandboxViewerBoxLimitError extends Error {
+  readonly name = "SandboxViewerBoxLimitError";
+
+  constructor(
+    public readonly workspaceId: string,
+    public readonly sandboxGroupId: string,
+    public readonly limit: number,
+  ) {
+    super(
+      `Sandbox viewer admission is blocked because the workspace already keeps ${limit} ` +
+        "sandboxes warm with no running task",
     );
   }
 }
@@ -51036,6 +51063,45 @@ async function acquireLeaseOnce(
           const reason = workspaceRows[0]?.sandbox_viewer_force_drain_reason ?? null;
           if (reason === "warm_cap") {
             throw new SandboxViewerAdmissionBlockedError(workspaceId, sandboxGroupId, reason);
+          }
+        }
+
+        // A viewer alone can start a box and keep it warm for as long as it
+        // heartbeats, with no task and no model spend. Bound how many such
+        // boxes one workspace keeps warm. Joining a box that a turn or another
+        // viewer already keeps warm adds no compute and is always admitted, as
+        // is replaying this exact holder.
+        const viewerOnlyBoxLimit = input.viewerOnlyBoxLimit ?? 0;
+        if (kind === "viewer" && viewerOnlyBoxLimit > 0 && Number(row.turn_holders) === 0) {
+          const current = await tx.execute<{ held: boolean; joins_viewer_box: boolean }>(sql`
+            select
+              exists (select 1 from sandbox_lease_holders
+                where lease_id = ${row.id} and kind = 'viewer' and holder_id = ${holderId}) as held,
+              (${liveness}::text in ('warming', 'warm') and exists (select 1 from sandbox_lease_holders
+                where lease_id = ${row.id} and kind = 'viewer')) as joins_viewer_box
+          `);
+          if (!current[0]?.held && !current[0]?.joins_viewer_box) {
+            // Two viewers on different groups each hold only their own group
+            // lock. This workspace key serializes their counts so the limit is
+            // exact. It is taken last, after this lease's own locks, and the
+            // holder of it waits for nothing but its own lease row.
+            await tx.execute(
+              sql`select pg_advisory_xact_lock(hashtextextended(
+                ${`sandbox-viewer-box-limit:${workspaceId}`}, 0
+              ))`,
+            );
+            const others = await tx.execute<{ n: number }>(sql`
+              select count(*)::int as n from sandbox_leases other
+              where other.workspace_id = ${workspaceId}
+                and other.id <> ${row.id}
+                and other.liveness in ('warming', 'warm')
+                and other.turn_holders = 0
+                and exists (select 1 from sandbox_lease_holders h
+                  where h.lease_id = other.id and h.kind = 'viewer')
+            `);
+            if (Number(others[0]?.n ?? 0) >= viewerOnlyBoxLimit) {
+              throw new SandboxViewerBoxLimitError(workspaceId, sandboxGroupId, viewerOnlyBoxLimit);
+            }
           }
         }
 
@@ -58477,7 +58543,15 @@ export type LeaseHolderHeartbeatStatus =
   | {
       holderAlive: true;
       leaseExtended: false;
-      fence: "epoch" | "liveness" | "rotation_requested" | "funding";
+      fence:
+        | "epoch"
+        | "liveness"
+        | "rotation_requested"
+        | "funding"
+        // Viewer holders only: the workspace's monthly warm allowance is
+        // exhausted and no turn holds this box. The viewer must detach so the
+        // box drains; the warm-cap admission gate refuses its re-attach.
+        | "viewer_allowance_exhausted";
     };
 
 export async function heartbeatLeaseHolderStatus(
@@ -58517,8 +58591,11 @@ export async function heartbeatLeaseHolderStatus(
           lease_epoch: number | string;
           liveness: SandboxLeaseLiveness;
           rotation_requested_at: Date | string | null;
+          turn_holders: number | string;
         }>(sql`
-          select id, account_id, workspace_id, resume_state, lease_epoch, liveness, rotation_requested_at from sandbox_leases
+          select id, account_id, workspace_id, resume_state, lease_epoch, liveness, rotation_requested_at,
+            turn_holders
+          from sandbox_leases
           where workspace_id = ${input.workspaceId}
             and sandbox_group_id = ${input.sandboxGroupId}
           for update
@@ -58563,6 +58640,25 @@ export async function heartbeatLeaseHolderStatus(
           return { holderAlive: true, leaseExtended: false, fence: "liveness" };
         if (lease.rotation_requested_at !== null)
           return { holderAlive: true, leaseExtended: false, fence: "rotation_requested" };
+        // The warm-cap gate refuses new viewers, but a viewer that attached
+        // before the cap closed would otherwise keep a task-less box warm for
+        // as long as it heartbeats. End that viewer-only hold here. A box a
+        // turn holds keeps running, exactly like the reaper's force drain.
+        if (input.kind === "viewer" && Number(lease.turn_holders) === 0) {
+          const gates = await tx.execute<{
+            sandbox_viewer_force_drain_reason: SandboxViewerForceDrainReason | null;
+          }>(sql`
+            select sandbox_viewer_force_drain_reason from workspaces
+            where id = ${input.workspaceId}
+          `);
+          if (gates[0]?.sandbox_viewer_force_drain_reason === "warm_cap") {
+            return {
+              holderAlive: true,
+              leaseExtended: false,
+              fence: "viewer_allowance_exhausted",
+            };
+          }
+        }
         if (
           (input.billingMode ?? snapshot?.mode) === "credits" &&
           snapshot?.mode === "credits" &&

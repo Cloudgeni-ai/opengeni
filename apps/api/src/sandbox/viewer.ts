@@ -44,6 +44,7 @@ import {
   releaseLeaseHolder,
   SandboxLeaseSupersededError,
   SandboxViewerAdmissionBlockedError,
+  SandboxViewerBoxLimitError,
   SandboxPaidComputeAdmissionError,
   type Database,
   type LeaseSnapshot,
@@ -200,6 +201,10 @@ export async function attachViewer(
     grant?: AccessGrant;
     /** Cancel lifecycle waiting when the originating HTTP request disconnects. */
     waitSignal?: AbortSignal;
+    /** A hold its route owner releases when one operation completes (fleet
+     * readiness), not a watching viewer. It cannot keep a box warm on its own,
+     * so the viewer-only box limit does not apply. */
+    operationScoped?: boolean;
   },
 ): Promise<ViewerAttachResult> {
   const { db, settings } = services;
@@ -269,9 +274,22 @@ export async function attachViewer(
       leaseTtlMs,
       warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
       captureWaitMs: sandboxLifecycleTransitionWaitMs(settings),
+      viewerOnlyBoxLimit: input.operationScoped
+        ? 0
+        : settings.sandboxMaxViewerOnlyBoxesPerWorkspace,
       ...(input.waitSignal ? { waitSignal: input.waitSignal } : {}),
     });
   } catch (error) {
+    if (error instanceof SandboxViewerBoxLimitError) {
+      // 429 is the client's existing "viewer cap reached" signal: the surface
+      // degrades instead of retrying into the limit.
+      throw new HTTPException(429, {
+        message:
+          `this workspace already keeps ${error.limit} computers running with no task; ` +
+          "close one or start a task in this chat",
+        cause: error,
+      });
+    }
     if (error instanceof SandboxPaidComputeAdmissionError) {
       throw new HTTPException(402, { message: error.message, cause: error });
     }
@@ -514,6 +532,7 @@ export async function ensureSessionGroupReady(
         workspaceId: input.workspaceId,
         session: input.session,
         ...(input.subjectId ? { viewerSubjectId: input.subjectId } : {}),
+        operationScoped: true,
       });
       let releasePromise: Promise<void> | undefined;
       release = () =>
@@ -568,6 +587,19 @@ export async function heartbeatViewer(
     expectedEpoch: input.expectedEpoch,
     billingMode: services.settings.sandboxWarmBillingMode,
   });
+  // An exhausted monthly warm allowance ends a viewer-only hold: release this
+  // viewer so the box can drain. Its re-attach meets the warm-cap gate.
+  if (status.fence === "viewer_allowance_exhausted") {
+    await releaseLeaseHolder(services.db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sandboxGroupId: input.sandboxGroupId,
+      kind: "viewer",
+      holderId: input.viewerId,
+      idleGraceMs: services.settings.sandboxIdleGraceMs,
+    });
+    return false;
+  }
   // A funding fence stops renewing paid provider time, but the holder is
   // deliberately kept alive while the viewer winds down or adds funds. Other
   // fences (epoch/rotation/drain) still require the client to re-attach.

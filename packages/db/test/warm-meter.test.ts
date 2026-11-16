@@ -15,6 +15,7 @@ import {
   reArmDrainingLease,
   releaseLeaseHolder,
   SandboxViewerAdmissionBlockedError,
+  SandboxViewerBoxLimitError,
   SandboxPaidComputeAdmissionError,
   heartbeatLeaseHolderStatus,
   type Database,
@@ -1086,6 +1087,126 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
     });
     expect(await listSandboxViewerForceDrainWorkspaceIds(db)).not.toContain(ws.workspaceId);
     expect((await acquireViewer("v4")).role).toBe("attached");
+  }, 60_000);
+
+  test("(6d) viewers alone keep at most the configured number of boxes warm per workspace", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const groupA = crypto.randomUUID();
+    const groupB = crypto.randomUUID();
+    const groupC = crypto.randomUUID();
+    const groupT = crypto.randomUUID();
+    const viewer = (sandboxGroupId: string, holderId: string) =>
+      acquireLease(db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        sandboxGroupId,
+        kind: "viewer",
+        holderId,
+        backend: "modal",
+        leaseTtlMs: 90_000,
+        viewerOnlyBoxLimit: 2,
+      });
+    const refusal = async (attempt: Promise<unknown>) => {
+      try {
+        await attempt;
+      } catch (error) {
+        return error;
+      }
+      return null;
+    };
+
+    // Two viewer-only boxes fit; one warming, one warm.
+    expect((await viewer(groupA, "a1")).role).toBe("spawner");
+    await warmGroup({ ...ws, groupId: groupB }, [{ kind: "viewer", holderId: "b1" }]);
+
+    // A third task-less box is refused before any provider work; the refusal
+    // rolls back the whole admission, so not even a cold lease row remains.
+    const refused = await refusal(viewer(groupC, "c1"));
+    expect(refused).toBeInstanceOf(SandboxViewerBoxLimitError);
+    expect((refused as SandboxViewerBoxLimitError).limit).toBe(2);
+    expect(await readLiveness(ws.workspaceId, groupC)).toBeUndefined();
+
+    // Joining a box a viewer already keeps warm adds no compute, and an exact
+    // holder replay is never refused.
+    expect((await viewer(groupB, "b2")).role).toBe("attached");
+    expect((await viewer(groupB, "b1")).role).toBe("attached");
+
+    // A box a turn holds never counts and is never refused.
+    await warmGroup({ ...ws, groupId: groupT }, [{ kind: "turn", holderId: "t1" }]);
+    expect((await viewer(groupT, "tv")).role).toBe("attached");
+
+    // Once a viewer-only box drains, its slot is free again.
+    for (const holderId of ["b1", "b2"]) {
+      await releaseLeaseHolder(db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        sandboxGroupId: groupB,
+        kind: "viewer",
+        holderId,
+        idleGraceMs: 60_000,
+      });
+    }
+    expect(await readLiveness(ws.workspaceId, groupB)).toBe("draining");
+    expect((await viewer(groupC, "c1")).role).toBe("spawner");
+
+    // Without a limit, admission is unchanged.
+    const unlimited = await acquireLease(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sandboxGroupId: crypto.randomUUID(),
+      kind: "viewer",
+      holderId: "free",
+      backend: "modal",
+      leaseTtlMs: 90_000,
+    });
+    expect(unlimited.role).toBe("spawner");
+  }, 60_000);
+
+  test("(6e) an exhausted warm allowance detaches viewers from task-less boxes, never from a running turn", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const viewerOnly = { ...ws, groupId: crypto.randomUUID() };
+    const turnHeld = { ...ws, groupId: crypto.randomUUID() };
+    const viewerEpoch = await warmGroup(viewerOnly, [{ kind: "viewer", holderId: "v1" }]);
+    const turnEpoch = await warmGroup(turnHeld, [
+      { kind: "turn", holderId: "t1" },
+      { kind: "viewer", holderId: "v2" },
+    ]);
+    const heartbeat = (groupId: string, holderId: string, expectedEpoch: number) =>
+      heartbeatLeaseHolderStatus(db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        sandboxGroupId: groupId,
+        kind: "viewer",
+        holderId,
+        leaseTtlMs: 90_000,
+        expectedEpoch,
+      });
+
+    // Before the allowance is exhausted both viewers renew normally.
+    expect((await heartbeat(viewerOnly.groupId, "v1", viewerEpoch)).leaseExtended).toBe(true);
+
+    await admin`insert into usage_events (account_id, workspace_id, event_type, quantity, unit, idempotency_key, occurred_at)
+      values (${ws.accountId}, ${ws.workspaceId}, 'sandbox.warm_seconds', 10, 'seconds', ${crypto.randomUUID()}, now())`;
+    const gate = await forceDrainOverLimitViewerOnlyBoxes(db, {
+      workspaceId: ws.workspaceId,
+      enforceBalance: false,
+      maxWarmSecondsPerWorkspace: 5,
+      idleGraceMs: 60_000,
+    });
+    expect(gate.reason).toBe("warm_cap");
+
+    expect(await heartbeat(viewerOnly.groupId, "v1", viewerEpoch)).toEqual({
+      holderAlive: true,
+      leaseExtended: false,
+      fence: "viewer_allowance_exhausted",
+    });
+    expect(await heartbeat(turnHeld.groupId, "v2", turnEpoch)).toEqual({
+      holderAlive: true,
+      leaseExtended: true,
+      fence: null,
+    });
   }, 60_000);
 
   test("(7) credits settles the full signed warm cost, idempotently, below zero", async () => {
