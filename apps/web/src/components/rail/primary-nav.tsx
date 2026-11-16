@@ -1,5 +1,5 @@
 import { useRouterState } from "@tanstack/react-router";
-import { ChevronDownIcon } from "lucide-react";
+import { ChevronDownIcon, SlidersHorizontalIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { useKnowledgeReviewIndicator } from "./use-knowledge-review-indicator";
@@ -8,11 +8,29 @@ import { useMeetingRecorderState } from "@opengeni/react/meetings";
 import { InboxLink } from "@/components/rail/inbox-link";
 import { useRail } from "@opengeni/react/app/components/rail/rail-context";
 import { WorkspaceConfigLink } from "@/components/rail/workspace-config-link";
-import { isConfigItemActive, PRIMARY_WORKSPACE_ITEMS } from "@/components/rail/workspace-nav-data";
+import {
+  advancedWorkspaceItems,
+  isConfigItemActive,
+  PRIMARY_WORKSPACE_ITEMS,
+  primaryWorkspaceItems,
+  type WorkspaceConfigItem,
+} from "@/components/rail/workspace-nav-data";
+import { useSimplifiedInterface } from "@opengeni/react/app/lib/simplified-interface";
 import { Button } from "@opengeni/react/ui/button";
 import { cn } from "@opengeni/react/app/lib/utils";
 
 const WORKSPACE_SHORTCUTS_EXPANDED_KEY = "opengeni.rail.nav";
+
+const ADVANCED_EXPANDED_KEY = "opengeni.rail.advanced";
+
+function initialAdvancedExpanded(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.localStorage.getItem(ADVANCED_EXPANDED_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
 
 function initialWorkspaceShortcutsExpanded(): boolean {
   if (typeof window === "undefined") return true;
@@ -44,25 +62,77 @@ export function WorkspaceShortcutLinks({
   const recorderState = useMeetingRecorderState();
   const recording = recorderState === "recording" || recorderState === "paused";
   const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const { simplified } = useSimplifiedInterface();
+  const listed = new Set(primaryWorkspaceItems(simplified).map((item) => item.to));
+  const advanced = advancedWorkspaceItems(simplified);
+  const [advancedExpanded, setAdvancedExpandedState] = useState(initialAdvancedExpanded);
+  const setAdvancedExpanded = (next: boolean) => {
+    setAdvancedExpandedState(next);
+    try {
+      window.localStorage.setItem(ADVANCED_EXPANDED_KEY, String(next));
+    } catch {
+      // Keep the in-memory choice when storage is unavailable.
+    }
+  };
+  const needsReview = (item: WorkspaceConfigItem) =>
+    item.to === "/workspaces/$workspaceId/state" && pendingKnowledge;
+  const needsAttention = (item: WorkspaceConfigItem) =>
+    item.to === "/workspaces/$workspaceId/automations" && schedulesNeedAttention;
+  const link = (item: WorkspaceConfigItem) => (
+    <WorkspaceConfigLink
+      key={item.to}
+      item={item}
+      needsReview={needsReview(item)}
+      needsAttention={needsAttention(item)}
+      recording={item.to === "/workspaces/$workspaceId/meetings" && recording}
+      workspaceId={rail.workspaceId}
+      variant="rail"
+      collapsed={rail.collapsed}
+      active={isConfigItemActive(pathname, rail.workspaceId, item.to)}
+      onNavigate={() => rail.setDrawerOpen(false)}
+    />
+  );
+  // The page you are on, and anything waiting for you, is never folded away.
+  const advancedOpen =
+    advancedExpanded ||
+    advanced.some(
+      (item) =>
+        isConfigItemActive(pathname, rail.workspaceId, item.to) ||
+        needsReview(item) ||
+        needsAttention(item),
+    );
 
   return (
     <div className={cn("grid gap-0.5", className)}>
-      {PRIMARY_WORKSPACE_ITEMS.map((item) => (
-        <WorkspaceConfigLink
-          key={item.to}
-          item={item}
-          needsReview={item.to === "/workspaces/$workspaceId/state" && pendingKnowledge}
-          needsAttention={
-            item.to === "/workspaces/$workspaceId/automations" && schedulesNeedAttention
-          }
-          recording={item.to === "/workspaces/$workspaceId/meetings" && recording}
-          workspaceId={rail.workspaceId}
-          variant="rail"
-          collapsed={rail.collapsed}
-          active={isConfigItemActive(pathname, rail.workspaceId, item.to)}
-          onNavigate={() => rail.setDrawerOpen(false)}
-        />
-      ))}
+      {/* A meeting being recorded keeps its link even where the interface leaves
+          Meetings out, so the recording can always be reached and stopped. */}
+      {PRIMARY_WORKSPACE_ITEMS.filter(
+        (item) =>
+          listed.has(item.to) || (recording && item.to === "/workspaces/$workspaceId/meetings"),
+      ).map(link)}
+      {advanced.length === 0 ? null : rail.collapsed ? (
+        // The icon rail has no room for a group: its pages keep their icons.
+        advanced.map(link)
+      ) : (
+        <>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            aria-expanded={advancedOpen}
+            onClick={() => setAdvancedExpanded(!advancedOpen)}
+            className="h-8 w-full justify-start gap-2.5 rounded-md px-2.5 font-normal text-fg-label hover:text-fg pointer-coarse:h-10"
+          >
+            <SlidersHorizontalIcon aria-hidden="true" className="size-4 shrink-0" />
+            <span className="min-w-0 flex-1 truncate text-left">Advanced</span>
+            <ChevronDownIcon
+              aria-hidden="true"
+              className={cn("size-3.5 shrink-0 transition-transform", advancedOpen && "rotate-180")}
+            />
+          </Button>
+          {advancedOpen ? <div className="grid gap-0.5 pl-3">{advanced.map(link)}</div> : null}
+        </>
+      )}
     </div>
   );
 }
@@ -78,7 +148,9 @@ export function PrimaryNavExtras() {
   const recorderState = useMeetingRecorderState();
   const recordingMeeting = recorderState === "recording" || recorderState === "paused";
   const pathname = useRouterState({ select: (state) => state.location.pathname });
-  const activeWorkspaceItem = PRIMARY_WORKSPACE_ITEMS.find((item) =>
+  const { simplified } = useSimplifiedInterface();
+  const items = [...primaryWorkspaceItems(simplified), ...advancedWorkspaceItems(simplified)];
+  const activeWorkspaceItem = items.find((item) =>
     isConfigItemActive(pathname, rail.workspaceId, item.to),
   );
   const activeWorkspaceSection = activeWorkspaceItem?.label;

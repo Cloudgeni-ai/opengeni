@@ -1342,6 +1342,7 @@ export async function saveComposerDraftInTransaction(
       : {}),
   });
   await lockSessionEventWriteRows(db, {
+    rowProjection: "event",
     workspaceId: input.workspaceId,
     controlLock: "already_locked",
   });
@@ -1428,6 +1429,7 @@ export async function moveQueuedTurnInTransaction(
       : {}),
   });
   await lockSessionEventWriteRows(db, {
+    rowProjection: "event",
     workspaceId: input.workspaceId,
     controlLock: "already_locked",
   });
@@ -1573,6 +1575,7 @@ export async function deleteSessionQueueItemInTransaction(
       : {}),
   });
   await lockSessionEventWriteRows(db, {
+    rowProjection: "event",
     workspaceId: input.workspaceId,
     controlLock: "already_locked",
   });
@@ -1715,6 +1718,7 @@ export async function editQueuedTurnInTransaction(
       : {}),
   });
   await lockSessionEventWriteRows(db, {
+    rowProjection: "event",
     workspaceId: input.workspaceId,
     controlLock: "already_locked",
   });
@@ -1929,6 +1933,7 @@ export async function steerQueuedTurnInTransaction(
   });
   const workspaceControl = admission.control;
   await lockSessionEventWriteRows(db, {
+    rowProjection: "event",
     workspaceId: input.workspaceId,
     controlLock: "already_locked",
     sessionIds:
@@ -3598,6 +3603,7 @@ export async function sendAgentMessageInTransaction(
       : {}),
   });
   await lockSessionEventWriteRows(db, {
+    rowProjection: "event",
     workspaceId: input.workspaceId,
     controlLock: "already_locked",
     sessionIds: [input.actor.sessionId, input.targetSessionId],
@@ -3896,6 +3902,7 @@ export async function steerAgentSessionInTransaction(
       : {}),
   });
   await lockSessionEventWriteRows(db, {
+    rowProjection: "event",
     workspaceId: input.workspaceId,
     controlLock: "already_locked",
     sessionIds: [input.actor.sessionId, input.targetSessionId],

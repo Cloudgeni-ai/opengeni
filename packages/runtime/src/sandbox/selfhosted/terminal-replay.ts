@@ -67,6 +67,11 @@ export function connectedCommandExitProof(exit: OpExit, observedAt: Date) {
 type ReplayResult = Awaited<ReturnType<OpStreamExecClient["readExisting"]>>;
 type ReplayCapture = Parameters<OpStreamExecClient["readExisting"]>[2];
 
+/** Frames handed to one capture call between deadline checks: the stores
+ * write them a batch per transaction, so a replay of thousands of frames is
+ * stored in seconds and its collector can stop between batches. */
+const REPLAY_CAPTURE_BATCH_FRAMES = 256;
+
 /** When a collector holding a claim taken at `claimedAtMs` must stop
  * replaying: its last read may run one control timeout past this, and five
  * seconds remain to settle the command before the claim can be taken over. */
@@ -79,13 +84,17 @@ export function connectedCommandReplayDeadline(
 }
 
 /** A finite terminal drain: settlement is forbidden until the verified exit
- * frontier has been captured. A fresh collector always replays retained truth.
+ * frontier has been captured. A fresh collector always replays retained truth;
+ * frames an earlier collector already stored cost it only an existence check,
+ * so every retry gets further than the one before.
  *
  * A terminal replay follows ONE attachment until the exit frame or its
  * deadline. Its frames share the runner's output connection with every other
- * command's, so on a slow link they can take minutes to arrive; giving up
- * early and attaching again would only queue the same frames once more behind
- * the ones already in flight. A running command's read stays a short look. */
+ * command's, which holds them back while it is full and never drops them, so
+ * giving up early and attaching again would only queue the same frames once
+ * more behind the ones already in flight. A running command's read follows
+ * its attachment until it holds every frame the runner had retained when it
+ * attached, so each look stores the output produced since the last one. */
 export async function replayConnectedCommandOutput(
   client: Pick<OpStreamExecClient, "readExisting">,
   opId: string,
@@ -109,6 +118,16 @@ export async function replayConnectedCommandOutput(
 ): Promise<ReplayResult> {
   if (terminalKnown && deadlineAt === undefined)
     throw new TypeError("A terminal output replay requires its collector's deadline");
+  if (!terminalKnown)
+    // A look at a running command settles nothing, and storing output is
+    // idempotent, so its frames are stored whenever they arrive; it ends
+    // once caught up, or at its caller's deadline.
+    return await client.readExisting(
+      opId,
+      deadlineAt === undefined ? 250 : Math.max(1, deadlineAt - Date.now()),
+      capture,
+      { untilCaughtUp: true },
+    );
   const checkDeadline = () => {
     if (deadlineAt !== undefined && Date.now() >= deadlineAt)
       throw new ConnectedCommandCollectionError(
@@ -120,9 +139,9 @@ export async function replayConnectedCommandOutput(
     deadlineAt === undefined
       ? capture
       : async (frames) => {
-          for (const frame of frames) {
+          for (let start = 0; start < frames.length; start += REPLAY_CAPTURE_BATCH_FRAMES) {
             checkDeadline();
-            await capture([frame]);
+            await capture(frames.slice(start, start + REPLAY_CAPTURE_BATCH_FRAMES));
           }
           checkDeadline();
         };
@@ -134,11 +153,11 @@ export async function replayConnectedCommandOutput(
     const before = capturedThrough;
     const replay = await client.readExisting(
       opId,
-      terminalKnown ? Math.max(1, deadlineAt! - Date.now()) : 250,
+      Math.max(1, deadlineAt! - Date.now()),
       boundedCapture,
     );
     checkDeadline();
-    if (!terminalKnown || replay.status === "completed" || replay.terminal) return replay;
+    if (replay.status === "completed" || replay.terminal) return replay;
     // Heartbeats and partial UTF-8 advance the contiguous protocol frontier
     // even when no decoded output chunk is produced.
     capturedThrough = BigInt(replay.replaySequence);

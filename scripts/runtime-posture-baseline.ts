@@ -14,6 +14,16 @@ export type RuntimePostureBaseline = {
 /** Historical production image from a cancelled upgrade rehearsal. */
 export const PRE_COMPATIBILITY_PRODUCTION_SOURCE = "bcc60cd80f2fd557e9f64beee38c1562d629de8c";
 
+/**
+ * The source revision production reports from /healthz, checked in addition
+ * to the pin (never instead of it) so a pin that lags production is caught.
+ * Anything other than a full commit SHA means "unknown", not an error.
+ */
+export function parseLiveProductionRevision(healthz: unknown): string | null {
+  const revision = (healthz as { deploymentRevision?: unknown } | null)?.deploymentRevision;
+  return typeof revision === "string" && /^[a-f0-9]{40}$/.test(revision) ? revision : null;
+}
+
 export function parseRuntimePostureBaseline(value: unknown): RuntimePostureBaseline {
   const pin = value as Partial<RuntimePostureBaseline> | null;
   if (

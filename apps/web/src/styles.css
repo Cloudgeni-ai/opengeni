@@ -24,6 +24,61 @@
   color-scheme: light;
 }
 
+/* Simplified interface (html[data-og-simplified-interface]): the same product
+   under the Geni name, for people who arrive from gogeni.ai. It takes that
+   site's palette so the app continues the page they came from: warm paper
+   chrome, soft hairlines, the green ink as the accent (focus, active marks,
+   links), and a solid ink primary button. Neutrals, status hues and the glow
+   are already shared. Nested themed subtrees follow, so a preview inside the
+   app matches the page. Values are the site's own tokens (--paper, --line,
+   --mint-ink). */
+[data-og-simplified-interface][data-og-theme="light"],
+[data-og-simplified-interface] [data-og-theme="light"] {
+  --og-color-bg: #fafaf8;
+  --og-color-surface-2: #f1f2ef;
+  --og-color-surface-3: #e8e9e5;
+  --og-color-selection: #e6e7e3;
+  --og-color-border: #e6e6e2;
+  --og-color-border-strong: #d2d3ce;
+  --og-color-accent: #237058;
+  --og-color-accent-strong: #126b50;
+  --og-color-accent-deep: #126b50;
+  --og-color-accent-fg: #ffffff;
+  --og-color-primary: #242424;
+  --og-color-primary-fg: #ffffff;
+  --og-color-primary-border: #242424;
+}
+
+[data-og-simplified-interface][data-og-theme="dark"],
+[data-og-simplified-interface] [data-og-theme="dark"] {
+  --og-color-accent: #83cbb0;
+  --og-color-accent-strong: #a6dcc8;
+  --og-color-accent-deep: #a6dcc8;
+  --og-color-accent-fg: #202020;
+  --og-color-primary: #e6e6e6;
+  --og-color-primary-fg: #202020;
+  --og-color-primary-border: #e6e6e6;
+}
+
+/* Its buttons are pills and its page titles are set in the display face, as
+   on the site. Icon-only buttons and card-like buttons that wrap text
+   (suggestion cards) keep their shape. */
+[data-og-simplified-interface]
+  [data-slot="button"]:is(
+    [data-variant="default"],
+    [data-variant="outline"],
+    [data-variant="secondary"],
+    [data-variant="destructive"]
+  ):not([data-size^="icon"], [class*="whitespace-normal"]) {
+  border-radius: 9999px;
+}
+
+[data-og-simplified-interface] h1 {
+  font-family: var(--font-display);
+  font-weight: 550;
+  letter-spacing: -0.03em;
+}
+
 /* The web app's own page: the document fills the window and never scrolls;
    each pane scrolls itself. */
 html,

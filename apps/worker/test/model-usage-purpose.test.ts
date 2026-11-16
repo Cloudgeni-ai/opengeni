@@ -214,7 +214,13 @@ test("main, compaction and session-title usage each record their purpose on the 
     ["main", "dispatch-A:aggregate", MAIN_MODEL, "current"],
   ]);
   for (const event of stored.slice(0, 3)) {
-    expect(Object.keys(event.payload).sort()).toEqual(SETTLED_PAYLOAD_KEYS);
+    // Only a main response defers its ledger writes, so only it records the
+    // inputs recovery needs to finish them.
+    const expectedKeys =
+      event.payload.purpose === "main"
+        ? [...SETTLED_PAYLOAD_KEYS, "settlement"].sort()
+        : SETTLED_PAYLOAD_KEYS;
+    expect(Object.keys(event.payload).sort()).toEqual(expectedKeys);
     expect(event.payload).toMatchObject({ billingPath: "external", provider: PROVIDER });
   }
   expect(logged.map((attributes) => attributes.purpose)).toEqual([

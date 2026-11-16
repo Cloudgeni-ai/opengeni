@@ -1,16 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import { Presentation } from "@opengeni/artifact-tool/reference";
 
-import {
-  PresentationArtifactSurface,
-  PresentationEditor,
-  PresentationProjectionEditor,
-  type PresentationCommit,
-  type PresentationEditorProjection,
+import type {
+  PresentationCommit,
+  PresentationEditorProjection,
 } from "../src/artifacts-presentation";
 import { actRun, flush, registerDom, renderComponent } from "./render-hook";
 
 registerDom();
+// Imported after the DOM exists: Radix decides at load whether layout effects run.
+const { PresentationArtifactSurface, PresentationEditor, PresentationProjectionEditor } =
+  await import("../src/artifacts-presentation");
 
 function makePresentation(slides = 1, objectsPerSlide = 1) {
   const presentation = Presentation.create({
@@ -92,15 +92,12 @@ describe("presentation artifact surface", () => {
       );
       try {
         await flush();
-        for (const label of [
-          "Add slide",
-          "Delete slide",
-          "Add text box",
-          "Delete selected object",
+        for (const selector of [
+          'button[aria-label="Add slide"]',
+          'button[aria-label="Add text box"]',
+          "button[data-og-presentation-delete]",
         ]) {
-          const button = rendered.container.querySelector<HTMLButtonElement>(
-            `button[aria-label="${label}"]`,
-          )!;
+          const button = rendered.container.querySelector<HTMLButtonElement>(selector)!;
           expect(button.disabled).toBe(true);
           await actRun(() => button.click());
         }

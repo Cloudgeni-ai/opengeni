@@ -83,6 +83,7 @@ import {
   rememberArtifactView,
   type ArtifactView,
 } from "../../lib/artifact-library-view";
+import { useSimplifiedInterface } from "../../lib/simplified-interface";
 import { cn } from "../../lib/utils";
 import { siteViewArtifactsReturn, type ArtifactReturnSearch } from "../../lib/routes";
 import { ArtifactKindTile, ArtifactTypeIcon } from "./artifact-page-chrome";
@@ -896,6 +897,7 @@ export function ArtifactLibrary({
    */
   viewer?: boolean | undefined;
 }) {
+  const { productName } = useSimplifiedInterface();
   const [view, setView] = useState<ArtifactView>(readArtifactView);
   const changeView = (next: ArtifactView) => {
     setView(next);
@@ -986,7 +988,7 @@ export function ArtifactLibrary({
         variant={compact ? "inline" : "page"}
         icon={<PanelsTopLeftIcon />}
         title="No artifacts yet"
-        description="Sites, images, documents, spreadsheets and presentations Opengeni makes show up here."
+        description={`Sites, images, documents, spreadsheets and presentations ${productName} makes show up here.`}
         action={emptyAction}
       />
     );

@@ -195,6 +195,7 @@ export type RigProviderImageSelectionReason =
   | "missing"
   | "unbuilt"
   | "build_abandoned"
+  | "build_failed_retryable"
   | "provider_unsupported"
   | "not_ready"
   | "not_cold_boot_validated"
@@ -238,6 +239,16 @@ export function resolveRigProviderImageSelection(
     const rebuild = computeRebuildReason(version, image, expectedContentHash, nowMs);
     if (rebuild === "missing")
       return { settings, reason: "missing", contentHash: null, imageId: null };
+    if (rebuild)
+      return { settings, reason: rebuild, contentHash: expectedContentHash, imageId: null };
+  }
+  if (backend === "modal") {
+    // A Modal record that is not ready is rebuilt the way compute's is: an
+    // abandoned build is taken over and a record for other content is
+    // replaced. A failed build of this exact content is retried when its
+    // failure was retryable (such as a snapshot timeout). A record that never
+    // existed stays missing.
+    const rebuild = image ? modalRebuildReason(image, expectedContentHash, nowMs) : null;
     if (rebuild)
       return { settings, reason: rebuild, contentHash: expectedContentHash, imageId: null };
   }
@@ -308,6 +319,31 @@ function computeRebuildReason(
   if (!(version.setupScript ?? "").trim()) return "missing";
   // Never built for compute, or recorded before compute could build.
   if (!image || image.status === "unsupported") return "unbuilt";
+  return unfinishedBuildRebuildReason(image, expectedContentHash, nowMs);
+}
+
+/** Why a Modal record that is not ready should be built again, or null. */
+function modalRebuildReason(
+  image: NonNullable<RigVersion["providerImages"][SandboxBackend]>,
+  expectedContentHash: string,
+  nowMs: number,
+): "build_abandoned" | "build_failed_retryable" | "content_mismatch" | null {
+  const unfinished = unfinishedBuildRebuildReason(image, expectedContentHash, nowMs);
+  if (unfinished) return unfinished;
+  if (image.status === "failed" && image.error?.retryable === true) {
+    return "build_failed_retryable";
+  }
+  return null;
+}
+
+/** The rebuild reasons every backend shares for a record that is not ready:
+ * a record for other content, or a build abandoned past the claim's
+ * staleness window. Null for a ready record. */
+function unfinishedBuildRebuildReason(
+  image: NonNullable<RigVersion["providerImages"][SandboxBackend]>,
+  expectedContentHash: string,
+  nowMs: number,
+): "build_abandoned" | "content_mismatch" | null {
   if (image.status === "ready") return null;
   // A record for other content: an earlier release's build that failed or
   // stopped. It must not hold back this release's build.

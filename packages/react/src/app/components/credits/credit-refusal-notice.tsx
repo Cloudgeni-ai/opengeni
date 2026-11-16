@@ -10,6 +10,7 @@ import type { FreeCreditGap } from "../../lib/free-credit-gap";
 import type { PaymentRefusalCode } from "../../lib/model-access";
 import { isUpgradeRefusal } from "../../../lib/format";
 import { useAppContext } from "../../app-context";
+import { useSimplifiedInterface } from "../../lib/simplified-interface";
 import { useCreditBalance } from "./use-credit-balance";
 
 /**
@@ -61,7 +62,10 @@ export function CreditRefusalNotice({
     : gap.covered.length > 0
       ? `Your credits cover ${modelListSummary(gap.covered.map((model) => model.label))}.`
       : null;
-  const connect = canConnectModel && gap.covered.length === 0 && !gap.selectionUsable;
+  // The simplified interface runs on credits only, so it never offers a provider account.
+  const { simplified, productName } = useSimplifiedInterface();
+  const connect =
+    !simplified && canConnectModel && gap.covered.length === 0 && !gap.selectionUsable;
   // Nothing left to switch to, so the server's advice to pick a model covered
   // by promotional credit doesn't apply. The balance says why: no credit at
   // all, or credit this model can't use.
@@ -121,16 +125,16 @@ export function CreditRefusalNotice({
   const reason =
     credit === "none"
       ? canBuyCredits
-        ? "Chats here are paid with Opengeni credits, and you don't have any right now."
-        : "Chats here are paid with Opengeni credits, and there are none left. Ask an organization owner to add some."
+        ? `Chats here are paid with ${productName} credits, and you don't have any right now.`
+        : `Chats here are paid with ${productName} credits, and there are none left. Ask an organization owner to add some.`
       : credit === "some"
         ? canBuyCredits
-          ? "This model can't use the Opengeni credits you have right now. Add credits, or choose another model."
-          : "This model can't use your organization's Opengeni credits right now. Choose another model, or ask an organization owner to add credits."
+          ? `This model can't use the ${productName} credits you have right now. Add credits, or choose another model.`
+          : `This model can't use your organization's ${productName} credits right now. Choose another model, or ask an organization owner to add credits.`
         : credit === "unknown"
           ? canBuyCredits
-            ? "This model needs Opengeni credits. Add credits, or choose another model."
-            : "This model needs Opengeni credits. Choose another model, or ask an organization owner to add credits."
+            ? `This model needs ${productName} credits. Add credits, or choose another model.`
+            : `This model needs ${productName} credits. Choose another model, or ask an organization owner to add credits.`
           : message
             ? apiErrorFacts(message).serverMessage
             : undefined;

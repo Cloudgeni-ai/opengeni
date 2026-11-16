@@ -1,5 +1,62 @@
 # @opengeni/db
 
+## 6.24.1
+
+### Patch Changes
+
+- f041392: A viewer can no longer keep unlimited sandboxes running with no task. Opening a desktop, terminal or file editor starts a sandbox, and a heartbeating viewer kept it warm indefinitely; under `usage_only` warm billing that compute was free, so scripted accounts could hold hundreds of boxes. A workspace now keeps at most `OPENGENI_SANDBOX_MAX_VIEWER_ONLY_BOXES_PER_WORKSPACE` boxes (default 3, `0` = unbounded) warm with only viewers attached; a viewer that would add one more gets HTTP 429, which the web client already shows as the viewer cap. Joining a box a task or another viewer already holds is unaffected. When the monthly warm allowance (`OPENGENI_SANDBOX_MAX_WARM_SECONDS_PER_WORKSPACE`) is exhausted, viewers on boxes with no running task are now detached on their next heartbeat so those boxes drain, instead of staying warm until the viewer closes; boxes a task holds keep running.
+
+  Organizations now also get sandbox limits by subscription plan, counted across every workspace and member (`OPENGENI_SANDBOX_PLAN_LIMITS_JSON`). Defaults: Free 2 viewer-only boxes per organization and 1 per person, Pro 10/3, Max 30/5, Enterprise unbounded; a Free organization whose promotion decision is `held` or `denied` keeps none. Each plan also caps running boxes, including those agent turns hold (Free 3, Pro 20, Max 50): a turn that needs a new box beyond it waits for a slot, retrying every minute without holding a worker, instead of starting one. The organization-wide counts use a new database function (migration 1475) whose runtime grant follows in a later release; until then only the zero limits and the per-workspace viewer limit apply.
+
+- e4c5c29: Free-credit farm detection now sees organizations created through the legacy `POST /v1/organizations` route, and counts the networks new owners sign in from. That route writes the same self-serve setup receipt and Free eligibility as organization onboarding but never passed the signup network, so the per-network rate limit, the velocity rule and its observations never saw it; a farm used it for 664 organizations from 52 addresses in one evening without a single hold. The route now records the trusted client network, applies the same rate limit (HTTP 429) and evaluates the new and recent same-network organizations after commit. The velocity rule (`ip-velocity-v1`) also counts, per exact network an owner signed in from around setup, the new organizations whose owners signed in from it around their own setup, and holds at the existing threshold (rule `ip-velocity-sign-in-v1`), so a setup without a signup network or from a rotating address is still caught. Same mode, window and threshold; manual decisions and operator releases kept; invited members never counted; prefixes alone never hold; keyed hashes only; bounded and fail-open.
+- Updated dependencies [f041392]
+- Updated dependencies [5fd2c21]
+  - @opengeni/config@6.24.1
+  - @opengeni/contracts@6.24.1
+  - @opengeni/codemode@6.24.1
+  - @opengeni/codex@6.24.1
+  - @opengeni/observability@6.24.1
+  - @opengeni/network@6.24.1
+  - @opengeni/subscriptions@6.24.1
+  - @opengeni/xai-subscription@6.24.1
+
+## 6.24.0
+
+### Patch Changes
+
+- 0ad29b9: Approving a tool call that changes connector permissions no longer stops the session. When an approved call, such as an update of the GitHub action approvals, changed connector permissions while its turn was running, the turn's next step refused to continue with "conflicts with a different or closed ownership chain". A running turn now keeps the permissions it started with when it picks up new messages or replays its claim, and the change applies from the next turn.
+- 8924854: Connecting an API integration (OpenAPI, GraphQL or built-in definition) no longer fails with a 500 when another person in the workspace already has a personal instance of it at an older revision. A new revision moves every instance to it, and the facet binding check looked up the other person's personal Connection as the caller, who cannot see it; an update that keeps a binding's Connection and tenant is no longer checked again (migration 1453). Inserts and Connection changes are checked as before.
+
+  A failed preview or install in Connect now frees the attempt, so "Add selected tools" can be tried again instead of answering 409 "in flight or uncertain". Only operations that read their source and write in one transaction opt in (`releaseClaimOnFailure`); operations with provider effects keep their claim.
+
+- e6c9e45: A Connected Machine background command no longer reads as running for minutes after it finished when its session switched to another machine and back, and its output keeps flowing to the session after such a switch. When a reader attached to a command that had produced a large backlog (thousands of output frames, for example a test run that finished while the session was elsewhere), the agent sent the whole backlog into its 1,024-frame output queue at once and dropped every frame past the queue's depth, including the exit frame. Nothing re-sent them until the reader's 30-second silence check, which recovered about one queue's worth per check, so collecting a 6,600-frame command took more than three minutes, and a large enough backlog could never be collected within one collector's claim. The agent now holds its next frame while the queue is full and sends it as soon as the queue drains, so nothing is dropped for want of room. Collectors store replayed output a batch per transaction instead of one transaction per frame, so a retry that replays frames an earlier collector already stored gets further each time. A look at a running command now follows its attachment until it holds everything the machine had retained when it attached, instead of stopping after a quarter of a second with the same prefix every time, and `command_read`/`command_wait` in a later attempt read a running command from the machine its ledger names (not the session's current machine). `readExisting` takes an `untilCaughtUp` option, `appendSessionCommandOutputs` stores several chunks of one command in one transaction, and `connectedCommandOutputLook` reads a session's running command from its ledger locator.
+- 8924854: Outlook Mail, Outlook Calendar, Outlook Contacts and OneDrive now offer a reviewed set of tools with hand-written names and descriptions (25, 20, 13 and 19 operations, down from 150, 177, 76 and 452), instead of every Graph operation under their path prefixes. Retained operations keep their tool ids. When an install moves to a new revision (including other people's instances moved by someone else's install), one that had every tool gets every tool of the new revision, and one whose chosen tools left the set gets the generic tools so those operations stay reachable; other choices are kept as they were. Free/busy schedules no longer need approval (they only read).
+
+  A reviewed definition can opt in to `genericPathScope`: a find tool searches the reviewed document's operations under its prefixes, and a read tool (GET) and a change tool (other methods, Ask by default) call one of them by its concrete path, which must match an in-scope operation segment by segment. The four Graph definitions above opt in with their earlier prefixes, so rare operations stay reachable.
+
+  Reviewed allowlist entries accept `put` and `delete`, a reviewed `summary` and `operationId`, and a `requestPath` naming other path parameters than the provider's (unnamed ones are dropped, new ones described with `pathParameterDescriptions`).
+
+  Every Microsoft Graph definition now reads a commit-pinned Graph OpenAPI document checked against its SHA-256 (`source.pinned`), not msgraph-metadata's moving master branch, so upstream changes no longer create new revisions on their own. `bun scripts/graph-openapi-pin.ts --diff <commit>` shows the operation changes before the pin is moved.
+
+- 1b544b0: Session event writes wait less for database locks. Session lock reads that do not use the session's stored inputs no longer fetch them, and background-command output bookkeeping now locks only its own command row instead of queueing behind, and blocking, the session's event appends. Session deletion, the only frequent holder of the exclusive workspace-control lock, is much faster because every foreign key its cascade checks now has a supporting index.
+- 477f1db: Agent turns spend less time before each model request. The checks run before every model request (task usage limit, funding, workspace allowance and monthly limits) now read in parallel and still report the same refusal as before. Packaged Skills and interaction tool schemas are prepared once per process instead of on every turn.
+
+  New latency metrics: `opengeni_model_response_to_next_dispatch_seconds` (the gap from one model response to the next request, by phase) and the parts of response metering (`response_usage_lease`, `_billing`, `_cache`, `_checkpoint` on `opengeni_model_step_phase_duration_seconds`). A small sample of agent turns also exports its database statement spans when OTLP tracing is configured.
+
+  Prebuilt Sandbox Environment images on Modal are rebuilt again after a build stops for more than 20 minutes or fails with a retryable error, and the image snapshot has its own timeout (`OPENGENI_RIG_PROVIDER_IMAGE_SNAPSHOT_TIMEOUT_MS`, default 5 minutes) instead of the 60-second workspace snapshot timeout.
+
+- Updated dependencies [24104b1]
+- Updated dependencies [c0248a5]
+- Updated dependencies [477f1db]
+  - @opengeni/codex@6.24.0
+  - @opengeni/contracts@6.24.0
+  - @opengeni/config@6.24.0
+  - @opengeni/codemode@6.24.0
+  - @opengeni/observability@6.24.0
+  - @opengeni/network@6.24.0
+  - @opengeni/subscriptions@6.24.0
+  - @opengeni/xai-subscription@6.24.0
+
 ## 6.23.0
 
 ### Minor Changes

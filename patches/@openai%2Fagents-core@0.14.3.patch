@@ -1,36 +1,3 @@
-diff --git a/node_modules/@openai/agents-core/.bun-tag-13b9d251eacb7a57 b/.bun-tag-13b9d251eacb7a57
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/node_modules/@openai/agents-core/.bun-tag-1a92431e4f62cd51 b/.bun-tag-1a92431e4f62cd51
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/node_modules/@openai/agents-core/.bun-tag-2b0b2155efcca04e b/.bun-tag-2b0b2155efcca04e
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/node_modules/@openai/agents-core/.bun-tag-2da6ec976600e880 b/.bun-tag-2da6ec976600e880
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/node_modules/@openai/agents-core/.bun-tag-34013d846a17e8af b/.bun-tag-34013d846a17e8af
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/node_modules/@openai/agents-core/.bun-tag-36e825f6e7410141 b/.bun-tag-36e825f6e7410141
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/node_modules/@openai/agents-core/.bun-tag-7c21d377cb19cf3e b/.bun-tag-7c21d377cb19cf3e
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/node_modules/@openai/agents-core/.bun-tag-ac46de758592501 b/.bun-tag-ac46de758592501
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/node_modules/@openai/agents-core/.bun-tag-b6cfd288f3599860 b/.bun-tag-b6cfd288f3599860
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/node_modules/@openai/agents-core/.bun-tag-c0c42b29c1e5d144 b/.bun-tag-c0c42b29c1e5d144
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/node_modules/@openai/agents-core/.bun-tag-dadebcd64451c0aa b/.bun-tag-dadebcd64451c0aa
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/dist/index.d.ts b/dist/index.d.ts
 index 21b58188472152339a1747df5cfe8dd256356cd1..1ecb7bff25d73312059991d05d44978f9331b033 100644
 --- a/dist/index.d.ts
@@ -49,7 +16,7 @@ index 21b58188472152339a1747df5cfe8dd256356cd1..1ecb7bff25d73312059991d05d44978f
  export { HostedTool, attachClientToolSearchExecutor, ComputerTool, computerTool, ShellTool, shellTool, ApplyPatchTool, applyPatchTool, HostedMCPTool, hostedMcpTool, FunctionTool, FunctionToolResult, FunctionToolTimeoutBehavior, ToolTimeoutErrorFunction, Tool, tool, toolNamespace, invokeFunctionTool, getClientToolSearchExecutor, getToolSearchRuntimeToolKey, ToolExecuteArgument, ToolEnabledFunction, ToolOptionsWithGuardrails, ToolAllowedCaller, ToolAllowedCallers, } from './tool';
  export type { ClientToolSearchExecutor, ClientToolSearchExecutorArgs, ClientToolSearchExecutorResult, ComputerOnSafetyCheckFunction, ComputerSafetyCheck, ComputerSafetyCheckResult, ShellToolEnvironment, ShellToolLocalEnvironment, ShellToolLocalSkill, ShellToolHostedEnvironment, ShellToolContainerAutoEnvironment, ShellToolContainerReferenceEnvironment, ShellToolContainerSkill, ShellToolSkillReference, ShellToolInlineSkill, ShellToolInlineSkillSource, ShellToolContainerNetworkPolicy, ShellToolContainerNetworkPolicyAllowlist, ShellToolContainerNetworkPolicyDisabled, ShellToolContainerNetworkPolicyDomainSecret, ToolInputParameters, ToolOutputSchema, ToolOptions, ToolNamespaceOptions, ToolOutputCustomData, FunctionToolCustomDataContext, FunctionToolCustomDataExtractor, ComputerToolCustomDataContext, ComputerToolCustomDataExtractor, ApplyPatchToolCustomDataContext, ApplyPatchToolCustomDataExtractor, } from './tool';
 diff --git a/dist/mcp.d.ts b/dist/mcp.d.ts
-index aa0b62edaa91a10ab64d7daa6a736ae22a35fa0b..0a4a718c07cb570a2ef9f4854c9a52b74c34bd22 100644
+index aa0b62edaa91a10ab64d7daa6a736ae22a35fa0b..125e854067ff262820f31cfdb1706c5a01a9c151 100644
 --- a/dist/mcp.d.ts
 +++ b/dist/mcp.d.ts
 @@ -14,6 +14,17 @@ export type MCPToolErrorFunction = (args: {
@@ -431,10 +398,10 @@ index 64732062d6cdeac0336ea0b3c53c8dd665475410..49be36016f362cdfb9e3257e46412226
      /**
       * A copy of the original input items.
 diff --git a/dist/run.d.ts b/dist/run.d.ts
-index 7863d754f4d6a5e1bfb99b8cde39417796533741..abe4b6f6c6e9ac8824a0b5d0ae1b909715db5c1a 100644
+index 7863d754f4d6a5e1bfb99b8cde39417796533741..969df40e3d2db99b0b1317ef6e663d5d72e27afd 100644
 --- a/dist/run.d.ts
 +++ b/dist/run.d.ts
-@@ -53,6 +53,27 @@ export type ToolErrorFormatter<TContext = unknown> = (args: ToolErrorFormatterAr
+@@ -53,6 +53,37 @@ export type ToolErrorFormatter<TContext = unknown> = (args: ToolErrorFormatterAr
   * SDK-side execution settings for local tool calls.
   */
  export type ToolNotFoundBehavior = 'raise_error' | 'return_error_to_model';
@@ -449,6 +416,16 @@ index 7863d754f4d6a5e1bfb99b8cde39417796533741..abe4b6f6c6e9ac8824a0b5d0ae1b9097
 +    toolCall: unknown;
 +}) => Promise<import('./tool').FunctionTool | null | undefined> | import('./tool').FunctionTool | null | undefined;
 +/**
++ * Awaited after a model response's items are processed (and, when streaming,
++ * enqueued as run item events) and before any of its tools, handoffs or
++ * approvals run. A host makes the calls durable here; a rejection fails the
++ * run before any tool starts.
++ */
++export type BeforeToolExecution = (args: {
++    agent: Agent<any, any>;
++    items: readonly import('./items').RunItem[];
++}) => Promise<void> | void;
++/**
 + * Selects the owner of conversation history supplied to a run.
 + *
 + * - `sdk` preserves the default Session and server-continuation behavior.
@@ -462,7 +439,7 @@ index 7863d754f4d6a5e1bfb99b8cde39417796533741..abe4b6f6c6e9ac8824a0b5d0ae1b9097
  /**
   * Configures settings for the entire agent run.
   */
-@@ -152,6 +173,18 @@ export type RunConfig = {
+@@ -152,6 +183,18 @@ export type RunConfig = {
       * system instructions or input items that will be sent to the model.
       */
      callModelInputFilter?: CallModelInputFilter;
@@ -481,7 +458,7 @@ index 7863d754f4d6a5e1bfb99b8cde39417796533741..abe4b6f6c6e9ac8824a0b5d0ae1b9097
      /**
       * Formats tool error messages that are returned to the model.
       * Returning `undefined` falls back to the SDK default message.
-@@ -161,6 +194,11 @@ export type RunConfig = {
+@@ -161,6 +204,11 @@ export type RunConfig = {
       * Controls how run items are converted into model input for subsequent turns.
       */
      reasoningItemIdPolicy?: ReasoningItemIdPolicy;
@@ -493,7 +470,7 @@ index 7863d754f4d6a5e1bfb99b8cde39417796533741..abe4b6f6c6e9ac8824a0b5d0ae1b9097
  };
  /**
   * Common run options shared between streaming and non-streaming execution pathways.
-@@ -174,12 +212,15 @@ type SharedRunOptions<TContext = undefined, TAgent extends Agent<any, any> = Age
+@@ -174,12 +222,16 @@ type SharedRunOptions<TContext = undefined, TAgent extends Agent<any, any> = Age
      session?: Session;
      sessionInputCallback?: SessionInputCallback;
      callModelInputFilter?: CallModelInputFilter;
@@ -506,11 +483,12 @@ index 7863d754f4d6a5e1bfb99b8cde39417796533741..abe4b6f6c6e9ac8824a0b5d0ae1b9097
      toolExecution?: ToolExecutionConfig;
      toolNotFoundBehavior?: ToolNotFoundBehavior;
 +    resolveMissingFunctionTool?: ResolveMissingFunctionTool;
++    beforeToolExecution?: BeforeToolExecution;
      toolNameCollisionPolicy?: ToolNameCollisionPolicy;
      /**
       * Error handlers keyed by error kind.
 diff --git a/dist/run.js b/dist/run.js
-index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..6dc487efcc73c9275e8e859ae10e1e30a1591fb3 100644
+index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..b4a8f5d1fbae9b5bc1742b67212311bfae54e29c 100644
 --- a/dist/run.js
 +++ b/dist/run.js
 @@ -99,6 +99,20 @@ class LazyDefaultModelProvider {
@@ -713,7 +691,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..6dc487efcc73c9275e8e859ae10e1e30
                          state._context.usage.add(state._lastTurnResponse.usage);
                          recordUsage(state._lastTurnResponse.usage);
                          state._noActiveAgentRun = false;
-@@ -784,6 +833,7 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -784,9 +833,16 @@ class Runner extends lifecycle_1.RunHooks {
                          }
                          const processedResponse = await (0, modelOutputs_1.processModelResponseAsync)(state._lastTurnResponse, state._currentAgent, preparedCall.tools, preparedCall.handoffs, state, [...preparedCall.turnInput, ...state._generatedItems], options.toolNotFoundBehavior, {
                              allowPromptSuppliedTools: preparedCall.allowPromptSuppliedTools,
@@ -721,7 +699,16 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..6dc487efcc73c9275e8e859ae10e1e30
                          });
                          state._lastProcessedResponse = processedResponse;
                          await guardrailTracker.awaitCompletion();
-@@ -960,7 +1010,7 @@ class Runner extends lifecycle_1.RunHooks {
++                        // Host durability gate: every call of this response is
++                        // recorded before any of its tools runs.
++                        await options.beforeToolExecution?.({
++                            agent: state._currentAgent,
++                            items: processedResponse.newItems,
++                        });
+                         const turnResult = await (0, turnResolution_1.resolveTurnAfterModelResponse)(state._currentAgent, state._originalInput, state._generatedItems, state._lastTurnResponse, state._lastProcessedResponse, this, state, toolErrorFormatter, agentToolParentRunConfig, options.errorHandlers, options.signal);
+                         (0, runLoop_1.applyTurnResult)({
+                             state,
+@@ -960,7 +1016,7 @@ class Runner extends lifecycle_1.RunHooks {
          let suppressStreamInputPersistence = false;
          let approvedToolCheckpointCompacted = false;
          let approvedToolCheckpointRequiresLocalInputCompaction = isResumedState && hasPersistedToolOutput(result.state);
@@ -730,7 +717,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..6dc487efcc73c9275e8e859ae10e1e30
          let currentTurnSpan;
          const parentUsageRecorder = (0, usageTracking_1.getRunnerParentUsageRecorder)(this);
          const recordUsage = (usage) => {
-@@ -971,7 +1021,7 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -971,7 +1027,7 @@ class Runner extends lifecycle_1.RunHooks {
          (0, usageTracking_1.setRunStateUsageRecorder)(result.state, recordUsage);
          const saveStreamResultWithCompactionOwnership = async (overrideOptions) => {
              const hasUnpersistedItems = result.newItems.length > result.state._currentTurnPersistedItemCount;
@@ -739,7 +726,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..6dc487efcc73c9275e8e859ae10e1e30
              const persistenceOptions = overrideOptions ??
                  (approvedToolCheckpointRequiresLocalInputCompaction
                      ? approvedToolCheckpointCompacted &&
-@@ -1104,7 +1154,7 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -1104,7 +1160,7 @@ class Runner extends lifecycle_1.RunHooks {
                          });
                          approvedToolCheckpointCompacted = true;
                          approvedToolCheckpointModelResponseCount =
@@ -748,7 +735,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..6dc487efcc73c9275e8e859ae10e1e30
                      }
                      // Don't reset counter here - resolveInterruptedTurn already adjusted it via rewind logic
                      // The counter will be reset when _currentTurn is incremented (starting a new turn)
-@@ -1190,7 +1240,9 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -1190,7 +1246,9 @@ class Runner extends lifecycle_1.RunHooks {
                      sessionTurnInputUpdate?.(sessionPreparedTurnInput, preparedSandboxAgent.turnInput);
                      const artifacts = await (0, modelPreparation_1.prepareAgentArtifacts)(result.state, preparedSandboxAgent.executionAgent, options.toolNameCollisionPolicy);
                      const preparedCall = await this.#prepareModelCall(result.state, preparedSandboxAgent.executionAgent, options, artifacts, preparedSandboxAgent.turnInput, serverConversationTracker, sessionInputUpdate);
@@ -759,7 +746,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..6dc487efcc73c9275e8e859ae10e1e30
                      await guardrailTracker.throwIfError();
                      // Initial request and session-persistence ordering remain unchanged.
                      // Once a logical turn is established, do not start another model
-@@ -1326,9 +1378,10 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -1326,9 +1384,10 @@ class Runner extends lifecycle_1.RunHooks {
                      if (serverConversationTracker) {
                          result.state.setConversationContext(serverConversationTracker.conversationId, serverConversationTracker.previousResponseId);
                      }
@@ -771,7 +758,20 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..6dc487efcc73c9275e8e859ae10e1e30
                      });
                      result.state._lastProcessedResponse = processedResponse;
                      // Record the items emitted directly from the model response so we do not
-@@ -1473,7 +1526,10 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -1337,6 +1396,12 @@ class Runner extends lifecycle_1.RunHooks {
+                     if (preToolItems.size > 0) {
+                         (0, streaming_1.streamStepItemsToRunResult)(result, processedResponse.newItems);
+                     }
++                    // Host durability gate: the streamed call items above are
++                    // recorded before any of this response's tools runs.
++                    await options.beforeToolExecution?.({
++                        agent: currentAgent,
++                        items: processedResponse.newItems,
++                    });
+                     const turnResult = await (0, turnResolution_1.resolveTurnAfterModelResponse)(currentAgent, result.state._originalInput, result.state._generatedItems, result.state._lastTurnResponse, result.state._lastProcessedResponse, this, result.state, toolErrorFormatter, agentToolParentRunConfig, options.errorHandlers, options.signal);
+                     (0, runLoop_1.applyTurnResult)({
+                         state: result.state,
+@@ -1473,7 +1538,10 @@ class Runner extends lifecycle_1.RunHooks {
                      ? options.context
                      : new runContext_1.RunContext(options.context), input, agent, options.maxTurns === undefined
                      ? constants_1.DEFAULT_MAX_TURNS
@@ -783,7 +783,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..6dc487efcc73c9275e8e859ae10e1e30
              if (isResumedState) {
                  state._agentToolInvocation = undefined;
                  if (options.maxTurns !== undefined) {
-@@ -1587,7 +1643,7 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -1587,7 +1655,7 @@ class Runner extends lifecycle_1.RunHooks {
              !(artifacts.toolsExplicitlyProvided &&
                  artifacts.serializedTools.length === 0 &&
                  artifacts.serializedHandoffs.length === 0);
@@ -793,7 +793,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..6dc487efcc73c9275e8e859ae10e1e30
          // is intentional when a filter removes everything.
          sessionInputUpdate?.(sourceItems, persistedItems);
 diff --git a/dist/run.mjs b/dist/run.mjs
-index 20a7ddd8049b4404585cee04fa32eec2a8453103..9c009a70c607d523eaf4e660772b6b746acd2ca5 100644
+index 20a7ddd8049b4404585cee04fa32eec2a8453103..86ed73a77ad93354e84be666f299caf6053edd7a 100644
 --- a/dist/run.mjs
 +++ b/dist/run.mjs
 @@ -59,6 +59,20 @@ class LazyDefaultModelProvider {
@@ -996,7 +996,7 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..9c009a70c607d523eaf4e660772b6b74
                          state._context.usage.add(state._lastTurnResponse.usage);
                          recordUsage(state._lastTurnResponse.usage);
                          state._noActiveAgentRun = false;
-@@ -744,6 +793,7 @@ export class Runner extends RunHooks {
+@@ -744,9 +793,16 @@ export class Runner extends RunHooks {
                          }
                          const processedResponse = await processModelResponseAsync(state._lastTurnResponse, state._currentAgent, preparedCall.tools, preparedCall.handoffs, state, [...preparedCall.turnInput, ...state._generatedItems], options.toolNotFoundBehavior, {
                              allowPromptSuppliedTools: preparedCall.allowPromptSuppliedTools,
@@ -1004,7 +1004,16 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..9c009a70c607d523eaf4e660772b6b74
                          });
                          state._lastProcessedResponse = processedResponse;
                          await guardrailTracker.awaitCompletion();
-@@ -920,7 +970,7 @@ export class Runner extends RunHooks {
++                        // Host durability gate: every call of this response is
++                        // recorded before any of its tools runs.
++                        await options.beforeToolExecution?.({
++                            agent: state._currentAgent,
++                            items: processedResponse.newItems,
++                        });
+                         const turnResult = await resolveTurnAfterModelResponse(state._currentAgent, state._originalInput, state._generatedItems, state._lastTurnResponse, state._lastProcessedResponse, this, state, toolErrorFormatter, agentToolParentRunConfig, options.errorHandlers, options.signal);
+                         applyTurnResult({
+                             state,
+@@ -920,7 +976,7 @@ export class Runner extends RunHooks {
          let suppressStreamInputPersistence = false;
          let approvedToolCheckpointCompacted = false;
          let approvedToolCheckpointRequiresLocalInputCompaction = isResumedState && hasPersistedToolOutput(result.state);
@@ -1013,7 +1022,7 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..9c009a70c607d523eaf4e660772b6b74
          let currentTurnSpan;
          const parentUsageRecorder = getRunnerParentUsageRecorder(this);
          const recordUsage = (usage) => {
-@@ -931,7 +981,7 @@ export class Runner extends RunHooks {
+@@ -931,7 +987,7 @@ export class Runner extends RunHooks {
          setRunStateUsageRecorder(result.state, recordUsage);
          const saveStreamResultWithCompactionOwnership = async (overrideOptions) => {
              const hasUnpersistedItems = result.newItems.length > result.state._currentTurnPersistedItemCount;
@@ -1022,7 +1031,7 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..9c009a70c607d523eaf4e660772b6b74
              const persistenceOptions = overrideOptions ??
                  (approvedToolCheckpointRequiresLocalInputCompaction
                      ? approvedToolCheckpointCompacted &&
-@@ -1064,7 +1114,7 @@ export class Runner extends RunHooks {
+@@ -1064,7 +1120,7 @@ export class Runner extends RunHooks {
                          });
                          approvedToolCheckpointCompacted = true;
                          approvedToolCheckpointModelResponseCount =
@@ -1031,7 +1040,7 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..9c009a70c607d523eaf4e660772b6b74
                      }
                      // Don't reset counter here - resolveInterruptedTurn already adjusted it via rewind logic
                      // The counter will be reset when _currentTurn is incremented (starting a new turn)
-@@ -1150,7 +1200,9 @@ export class Runner extends RunHooks {
+@@ -1150,7 +1206,9 @@ export class Runner extends RunHooks {
                      sessionTurnInputUpdate?.(sessionPreparedTurnInput, preparedSandboxAgent.turnInput);
                      const artifacts = await prepareAgentArtifacts(result.state, preparedSandboxAgent.executionAgent, options.toolNameCollisionPolicy);
                      const preparedCall = await this.#prepareModelCall(result.state, preparedSandboxAgent.executionAgent, options, artifacts, preparedSandboxAgent.turnInput, serverConversationTracker, sessionInputUpdate);
@@ -1042,7 +1051,7 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..9c009a70c607d523eaf4e660772b6b74
                      await guardrailTracker.throwIfError();
                      // Initial request and session-persistence ordering remain unchanged.
                      // Once a logical turn is established, do not start another model
-@@ -1286,9 +1338,10 @@ export class Runner extends RunHooks {
+@@ -1286,9 +1344,10 @@ export class Runner extends RunHooks {
                      if (serverConversationTracker) {
                          result.state.setConversationContext(serverConversationTracker.conversationId, serverConversationTracker.previousResponseId);
                      }
@@ -1054,7 +1063,20 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..9c009a70c607d523eaf4e660772b6b74
                      });
                      result.state._lastProcessedResponse = processedResponse;
                      // Record the items emitted directly from the model response so we do not
-@@ -1433,7 +1486,10 @@ export class Runner extends RunHooks {
+@@ -1297,6 +1356,12 @@ export class Runner extends RunHooks {
+                     if (preToolItems.size > 0) {
+                         streamStepItemsToRunResult(result, processedResponse.newItems);
+                     }
++                    // Host durability gate: the streamed call items above are
++                    // recorded before any of this response's tools runs.
++                    await options.beforeToolExecution?.({
++                        agent: currentAgent,
++                        items: processedResponse.newItems,
++                    });
+                     const turnResult = await resolveTurnAfterModelResponse(currentAgent, result.state._originalInput, result.state._generatedItems, result.state._lastTurnResponse, result.state._lastProcessedResponse, this, result.state, toolErrorFormatter, agentToolParentRunConfig, options.errorHandlers, options.signal);
+                     applyTurnResult({
+                         state: result.state,
+@@ -1433,7 +1498,10 @@ export class Runner extends RunHooks {
                      ? options.context
                      : new RunContext(options.context), input, agent, options.maxTurns === undefined
                      ? DEFAULT_MAX_TURNS
@@ -1066,7 +1088,7 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..9c009a70c607d523eaf4e660772b6b74
              if (isResumedState) {
                  state._agentToolInvocation = undefined;
                  if (options.maxTurns !== undefined) {
-@@ -1547,7 +1603,7 @@ export class Runner extends RunHooks {
+@@ -1547,7 +1615,7 @@ export class Runner extends RunHooks {
              !(artifacts.toolsExplicitlyProvided &&
                  artifacts.serializedTools.length === 0 &&
                  artifacts.serializedHandoffs.length === 0);
@@ -2177,7 +2199,7 @@ index 34dc1b761aee009ea97f2a26529f7246c44d018e..4ff195c2cfe634b56b942a675491b1f2
              if (toolNotFoundBehavior !== 'return_error_to_model') {
                  throwFunctionToolNotFound(resolved.toolName, agent);
 diff --git a/dist/runner/toolExecution.js b/dist/runner/toolExecution.js
-index e512db81769570ddd61957d4c6e12835025559f1..0fe873e7a317036fb1d053e701bfa0c1831c1c4b 100644
+index e512db81769570ddd61957d4c6e12835025559f1..c05a0777f5986feb60f7a5d8bda72ec7c1ef5274 100644
 --- a/dist/runner/toolExecution.js
 +++ b/dist/runner/toolExecution.js
 @@ -262,7 +262,7 @@ async function executeFunctionToolCalls(agent, toolRuns, runner, state, toolErro
@@ -2250,7 +2272,7 @@ index e512db81769570ddd61957d4c6e12835025559f1..0fe873e7a317036fb1d053e701bfa0c1
  function getMaxFunctionToolConcurrency(toolExecution) {
      return toolExecution?.maxFunctionToolConcurrency ?? undefined;
  }
-@@ -362,6 +402,19 @@ function buildApprovalRequestResult(deps, toolRun) {
+@@ -362,6 +416,19 @@ function buildApprovalRequestResult(deps, toolRun) {
          runItem: new items_1.RunToolApprovalItem(toolRun.toolCall, deps.agent, getFunctionToolIdentity(toolRun), (0, toolIdentity_1.getFunctionToolStateKey)(toolRun.tool)),
      };
  }
@@ -2270,7 +2292,7 @@ index e512db81769570ddd61957d4c6e12835025559f1..0fe873e7a317036fb1d053e701bfa0c1
  function buildFunctionFailureResult(deps, toolRun, output) {
      return {
          type: 'function_output',
-@@ -783,6 +836,17 @@ async function runApprovedFunctionTool(deps, toolRun, approvalArgs, preparedInpu
+@@ -783,6 +850,17 @@ async function runApprovedFunctionTool(deps, toolRun, approvalArgs, preparedInpu
                  if ((0, abortSignals_1.isSiblingCancellationSignal)(signal)) {
                      return buildSiblingCancellationResult();
                  }
@@ -2289,7 +2311,7 @@ index e512db81769570ddd61957d4c6e12835025559f1..0fe873e7a317036fb1d053e701bfa0c1
                  const outputGuardrailResults = [];
                  try {
 diff --git a/dist/runner/toolExecution.mjs b/dist/runner/toolExecution.mjs
-index afe9d23168c0aff1474008da0b267a04312b2c12..a67f0cb23259bbf11ad8d60928552ab5df91f9e3 100644
+index afe9d23168c0aff1474008da0b267a04312b2c12..db20d57a45dc263f3a5efc48db7da68b8181f352 100644
 --- a/dist/runner/toolExecution.mjs
 +++ b/dist/runner/toolExecution.mjs
 @@ -219,7 +219,7 @@ export async function executeFunctionToolCalls(agent, toolRuns, runner, state, t
@@ -2362,7 +2384,7 @@ index afe9d23168c0aff1474008da0b267a04312b2c12..a67f0cb23259bbf11ad8d60928552ab5
  function getMaxFunctionToolConcurrency(toolExecution) {
      return toolExecution?.maxFunctionToolConcurrency ?? undefined;
  }
-@@ -319,6 +359,19 @@ function buildApprovalRequestResult(deps, toolRun) {
+@@ -319,6 +373,19 @@ function buildApprovalRequestResult(deps, toolRun) {
          runItem: new RunToolApprovalItem(toolRun.toolCall, deps.agent, getFunctionToolIdentity(toolRun), getFunctionToolStateKey(toolRun.tool)),
      };
  }
@@ -2382,7 +2404,7 @@ index afe9d23168c0aff1474008da0b267a04312b2c12..a67f0cb23259bbf11ad8d60928552ab5
  function buildFunctionFailureResult(deps, toolRun, output) {
      return {
          type: 'function_output',
-@@ -740,6 +793,17 @@ async function runApprovedFunctionTool(deps, toolRun, approvalArgs, preparedInpu
+@@ -740,6 +807,17 @@ async function runApprovedFunctionTool(deps, toolRun, approvalArgs, preparedInpu
                  if (isSiblingCancellationSignal(signal)) {
                      return buildSiblingCancellationResult();
                  }
@@ -2976,7 +2998,7 @@ index fc2aa3141933c96cc080d65b05f7cffb13ee18d7..c4324d271c7bc90128dad0285198f687
  //# sourceMappingURL=workspacePaths.mjs.map
 \ No newline at end of file
 diff --git a/dist/shims/mcp-server/node.js b/dist/shims/mcp-server/node.js
-index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..acc557238ed0e85c01ff40af252d19e3abb4b9eb 100644
+index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..4c4d894d9156bd10baaad089dc840dc6ab29d9b2 100644
 --- a/dist/shims/mcp-server/node.js
 +++ b/dist/shims/mcp-server/node.js
 @@ -35,6 +35,8 @@ var __importStar = (this && this.__importStar) || (function () {
@@ -3671,7 +3693,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..acc557238ed0e85c01ff40af252d19e3
 -//# sourceMappingURL=node.js.map
 \ No newline at end of file
 diff --git a/dist/shims/mcp-server/node.mjs b/dist/shims/mcp-server/node.mjs
-index f5f1dc3e616690fc91032d545369333f95f49944..94393fb69ffade4eda2984119669c62209f0edf0 100644
+index f5f1dc3e616690fc91032d545369333f95f49944..c8c83f8ad7276a368e38eb8dc054fb4a0820dfc4 100644
 --- a/dist/shims/mcp-server/node.mjs
 +++ b/dist/shims/mcp-server/node.mjs
 @@ -1,9 +1,12 @@
@@ -4363,7 +4385,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..94393fb69ffade4eda2984119669c622
      get name() {
          return this._name;
 diff --git a/dist/tool.d.ts b/dist/tool.d.ts
-index b0e0743ce55d1e5475ea91eb652879a9cdc0cf0f..17cc21d81bee2f7139e836c47232ef8cf55afa80 100644
+index b0e0743ce55d1e5475ea91eb652879a9cdc0cf0f..b77575e3d5099e412fa0de91f65b2267c1d769be 100644
 --- a/dist/tool.d.ts
 +++ b/dist/tool.d.ts
 @@ -195,6 +195,18 @@ export type FunctionTool<Context = UnknownContext, TParameters extends ToolInput

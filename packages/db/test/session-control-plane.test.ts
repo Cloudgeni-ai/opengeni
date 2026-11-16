@@ -507,6 +507,52 @@ describe("clean session control plane", () => {
       expect(attempts).toEqual([attempt]);
     });
 
+    test("keeps its frozen connector policies when a policy changes before exact-attempt re-entry", async () => {
+      // An approved tool can change connector policies while its attempt runs
+      // (an approved GitHub action policy update did). Re-entering that attempt,
+      // as attaching pending updates to it does, must keep the snapshot it
+      // froze, not refuse it as a different ownership chain.
+      const { grant, policy, claimInput, claimed, attempt } = await policyAttempt();
+      await upsertConnectorActionPolicy(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        subjectId: grant.subjectId,
+        connectionId: policy.connectionId,
+        serverId: policy.serverId,
+        toolName: policy.toolName,
+        actionName: policy.actionName,
+        policy: "allow",
+      });
+      await upsertConnectorActionPolicy(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        subjectId: grant.subjectId,
+        connectionId: policy.connectionId,
+        serverId: policy.serverId,
+        toolName: "github_sensitive_request",
+        actionName: "github_sensitive_request",
+        policy: "allow",
+      });
+
+      const replay = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, claimInput);
+      expect(replay).toMatchObject({
+        action: "claimed",
+        turn: {
+          id: claimed.turn.id,
+          activeAttemptId: attempt.id,
+          executionGeneration: claimed.turn.executionGeneration,
+        },
+      });
+      const attempts = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+        db
+          .select()
+          .from(schema.sessionTurnAttempts)
+          .where(eq(schema.sessionTurnAttempts.turnId, claimed.turn.id)),
+      );
+      expect(attempts).toEqual([attempt]);
+      expect(attempts[0]!.connectorActionPolicies).toEqual(attempt.connectorActionPolicies);
+    });
+
     test("refuses genuine connector policy field and version changes on exact-attempt replay", async () => {
       const { attempt, register } = await policyAttempt();
       const [policy] = attempt.connectorActionPolicies;

@@ -8,6 +8,7 @@ import {
   MICROSOFT_OUTLOOK_CONTACTS_INTEGRATION_DEFINITION,
   MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
   MICROSOFT_SHAREPOINT_INTEGRATION_DEFINITION,
+  integrationDefinitionById,
 } from "@opengeni/capabilities";
 import type { Settings } from "@opengeni/config";
 import {
@@ -182,17 +183,18 @@ function providerFixture() {
         info: { title: sourceTitle, version: "1" },
         servers: [{ url: "https://graph.microsoft.com/v1.0" }],
         paths: {
-          "/me/drive/root/children": {
+          "/drives/{drive-id}/items/{driveItem-id}/children": {
             get: { operationId: "listFiles", responses: { "200": { description: "Files" } } },
           },
           "/me/joinedTeams": {
             get: { operationId: "listJoinedTeams", responses: { "200": { description: "Teams" } } },
           },
-          "/me/drive/items/{itemId}": {
+          "/drives/{drive-id}/items/{driveItem-id}": {
             get: {
               operationId: "getFile",
               parameters: [
-                { name: "itemId", in: "path", required: true, schema: { type: "string" } },
+                { name: "drive-id", in: "path", required: true, schema: { type: "string" } },
+                { name: "driveItem-id", in: "path", required: true, schema: { type: "string" } },
               ],
               responses: { "200": { description: "File" } },
             },
@@ -271,6 +273,13 @@ function testApp(fixture: ReturnType<typeof providerFixture>) {
     managedAuth: null,
     apiIntegrationOAuthFetch: fixture.fetch,
     apiIntegrationSourceFetch: fixture.fetch,
+    // The fixture serves a changing document at each definition's own source URL.
+    apiIntegrationDefinitionLookup: (definitionId: string) => {
+      const definition = integrationDefinitionById(definitionId);
+      if (definition?.source.kind !== "openapi") return definition;
+      const { pinned: _pinned, ...source } = definition.source;
+      return { ...definition, source };
+    },
   } as never);
 }
 
@@ -678,7 +687,9 @@ describe("API Integration provider OAuth", () => {
     expect(previewResponse.status).toBe(200);
     const preview = await previewResponse.json();
     expect(preview.state).toBe("preview");
-    expect(preview.nextAction.operations).toHaveLength(2);
+    // The fixture backs three reviewed tools (its item read also backs the read
+    // by path), and the definition adds its three generic path tools.
+    expect(preview.nextAction.operations).toHaveLength(6);
     const installInput = {
       expectedRevision: 3,
       idempotencyKey: crypto.randomUUID(),
@@ -1430,6 +1441,159 @@ describe("API Integration provider OAuth", () => {
     expect(await otherInstall.text()).toContain("connections:write");
   }, 60_000);
 
+  // Regression: installing a newer revision moves every instance of the
+  // integration, including other people's personal ones whose Connections the
+  // installer cannot see. That once failed the install step with a 500 and
+  // left the attempt refusing further advances as in flight.
+  test("a person's install of a newer revision through the preview step moves another person's personal instance", async () => {
+    if (!available) return;
+    // Two people in one workspace.
+    const ids = { account: crypto.randomUUID(), workspace: crypto.randomUUID() };
+    const join = async (subjectId: string) => {
+      const access = await bootstrapWorkspace(client.db, {
+        accountExternalSource: "test",
+        accountExternalId: `provider-oauth-account-${ids.account}`,
+        accountName: "Provider OAuth account",
+        workspaceExternalSource: "test",
+        workspaceExternalId: `provider-oauth-workspace-${ids.workspace}`,
+        workspaceName: "Provider OAuth workspace",
+        subjectId,
+      });
+      const grant = access.workspaceGrants[0]!;
+      return { accountId: grant.accountId, workspaceId: grant.workspaceId, subjectId };
+    };
+    const workspace = await join(`user:provider-oauth-${crypto.randomUUID()}`);
+    workspaceIds.push(workspace.workspaceId);
+    const laterSubjectId = `user:provider-oauth-later-${crypto.randomUUID()}`;
+    expect((await join(laterSubjectId)).workspaceId).toBe(workspace.workspaceId);
+    const fixture = providerFixture();
+    const app = testApp(fixture);
+    const base = `/v1/workspaces/${workspace.workspaceId}/connect/attempts`;
+    const headersFor = async (subjectId: string) => ({
+      authorization: await bearer({ ...workspace, subjectId }),
+      "content-type": "application/json",
+      "x-opengeni-access-key": EDGE_ACCESS_KEY,
+      [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+    });
+    const connect = async (headers: Record<string, string>) => {
+      fixture.microsoftPlans.push({
+        scopes: [...MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+        refreshToken: "microsoft-refresh-token",
+      });
+      const begun = await app.request(base, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          providerId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
+          ownership: "personal",
+          returnUrl: "https://host.example/chat",
+          idempotencyKey: crypto.randomUUID(),
+        }),
+      });
+      if (begun.status !== 200) throw new Error(`begin failed: ${await begun.text()}`);
+      const attempt = await begun.json();
+      await callback(fixture, new URL(attempt.nextAction.url).searchParams.get("state")!);
+      return attempt as { id: string };
+    };
+
+    // The first person connects their own account; the callback installs it.
+    const earlierHeaders = await headersFor(workspace.subjectId);
+    await connect(earlierHeaders);
+    const [earlier] = await listInstalledApiIntegrations(
+      client.db,
+      workspace.workspaceId,
+      workspace.subjectId,
+    );
+    expect(earlier).toBeDefined();
+
+    // The provider's description changes, so the next install is a newer
+    // revision. The second person's callback cannot read it, so the app
+    // takes the preview step.
+    fixture.setSourceTitle("Updated OneDrive fixture");
+    fixture.setMicrosoftPrincipalId("microsoft-principal-2");
+    const laterHeaders = await headersFor(laterSubjectId);
+    fixture.setSourceAvailable(false);
+    const attempt = await connect(laterHeaders);
+    const advance = (body: unknown) =>
+      app.request(`${base}/${attempt.id}/advance`, {
+        method: "POST",
+        headers: laterHeaders,
+        body: JSON.stringify(body),
+      });
+    // While the description is unreadable the preview fails; the attempt
+    // stays ready to advance again rather than refused as in flight.
+    const failed = await advance({
+      expectedRevision: 2,
+      idempotencyKey: crypto.randomUUID(),
+      action: { type: "retry" },
+    });
+    const afterFailure = await (
+      await app.request(`${base}/${attempt.id}`, { headers: laterHeaders })
+    ).json();
+    expect(failed.status).toBe(422);
+    expect(afterFailure).toMatchObject({
+      revision: 2,
+      state: "connected_but_incomplete",
+      credentialsCommitted: true,
+      integrationInstalled: false,
+    });
+    fixture.setSourceAvailable(true);
+    const preview = await (
+      await advance({
+        expectedRevision: afterFailure.revision,
+        idempotencyKey: crypto.randomUUID(),
+        action: { type: "retry" },
+      })
+    ).json();
+    if (preview.state !== "preview")
+      throw new Error(
+        `preview failed after ${failed.status}: ${JSON.stringify(preview)} ${JSON.stringify(afterFailure)}`,
+      );
+    const installed = await advance({
+      expectedRevision: preview.revision,
+      idempotencyKey: crypto.randomUUID(),
+      action: {
+        type: "install",
+        previewId: preview.nextAction.previewId,
+        contentHash: preview.nextAction.contentHash,
+        operationIds: preview.nextAction.operations.map(
+          (operation: { id: string }) => operation.id,
+        ),
+      },
+    });
+    expect(installed.status).toBe(200);
+    expect(await installed.json()).toMatchObject({
+      state: "complete",
+      credentialsCommitted: true,
+      integrationInstalled: true,
+    });
+
+    // Both people's instances now run the newer revision, each still bound to
+    // its own person's Connection.
+    const [laterInstance] = await listInstalledApiIntegrations(
+      client.db,
+      workspace.workspaceId,
+      laterSubjectId,
+    );
+    const [earlierInstance] = await listInstalledApiIntegrations(
+      client.db,
+      workspace.workspaceId,
+      workspace.subjectId,
+    );
+    expect(laterInstance!.revision.id).not.toBe(earlier!.revision.id);
+    expect(earlierInstance).toMatchObject({
+      instanceId: earlier!.instanceId,
+      revision: expect.objectContaining({ id: laterInstance!.revision.id }),
+      connectionRef: expect.objectContaining({
+        connectionId: earlier!.connectionRef!.connectionId,
+      }),
+      connectionStatus: "active",
+    });
+    expect(laterInstance!.connectionRef!.connectionId).not.toBe(
+      earlier!.connectionRef!.connectionId,
+    );
+  }, 60_000);
+
   test("a built-in integration finishes setup in its callback, with no step left for the app", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -1484,7 +1648,7 @@ describe("API Integration provider OAuth", () => {
       connectionRef: { connectionId: current.account.id },
     });
     // Every reviewed tool, exactly as the app's automatic install chose.
-    expect(installed!.allowedTools).toHaveLength(2);
+    expect(installed!.allowedTools).toHaveLength(6);
     // Nothing is pending for the app to resume.
     const pending = await (await app.request(base, { headers })).json();
     expect(JSON.stringify(pending)).not.toContain(attempt.id);
@@ -1670,7 +1834,7 @@ describe("API Integration provider OAuth", () => {
       definitionId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
       connectionRef: { connectionId: completed[0].account.id },
     });
-    expect(installed!.allowedTools).toHaveLength(2);
+    expect(installed!.allowedTools).toHaveLength(6);
     // Opening it again finds nothing left to do.
     expect(await (await finish()).json()).toEqual([]);
   }, 60_000);

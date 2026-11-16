@@ -133,6 +133,9 @@ export function registerOrganizationConnectorRoutes(app: Hono, deps: ApiRouteDep
         source,
         connection: null,
         transport,
+        ...(deps.apiIntegrationDefinitionLookup
+          ? { definitionLookup: deps.apiIntegrationDefinitionLookup }
+          : {}),
         authority: {
           accountId,
           // No workspace yet: the organization's setup is compiled once for

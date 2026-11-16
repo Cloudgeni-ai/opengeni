@@ -277,3 +277,34 @@ test("the authoritative fact writer forwards the served route's residency", asyn
   });
   expect(facts.map((fact) => fact.processingResidency)).toEqual([EU_CLAIM]);
 });
+
+test("response metering records its lease, billing, cache and checkpoint phases", async () => {
+  captureFacts();
+  const { publish } = durableEvents();
+  const base = callInput(publish);
+  await processModelResponseTerminalEvent({
+    ...base,
+    event: new RunRawModelStreamEvent({
+      type: "response_done",
+      response: { id: "msg_phases", output: [], usage },
+    } as any) as any,
+    state: createModelResponseEventState(new Set()),
+    metricProvider: "azure-eu",
+    emittedSourceKeys: new Set(),
+    setLastInputTokens: async () => undefined,
+    processingResidency: modelCallProcessingResidency(null),
+  });
+  const metrics = await base.observability.prometheusMetrics();
+  for (const phase of [
+    "response_usage_lease",
+    "response_usage_billing",
+    "response_usage_cache",
+    "response_usage_checkpoint",
+  ]) {
+    expect(metrics).toMatch(
+      new RegExp(
+        `opengeni_model_step_phase_duration_seconds_count\\{[^}]*phase="${phase}"[^}]*provider="azure-eu"[^}]*\\} 1\\b`,
+      ),
+    );
+  }
+});

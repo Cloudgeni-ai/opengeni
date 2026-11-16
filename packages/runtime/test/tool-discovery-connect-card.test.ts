@@ -33,6 +33,12 @@ const HUBSPOT = { capabilityId: "mcp:hubspot", name: "HubSpot", providerDomain: 
 const LINEAR = { capabilityId: "mcp:linear", name: "Linear", providerDomain: "linear.app" };
 const GMAIL = { capabilityId: "api:gmail", name: "Gmail" };
 const CALENDAR = { capabilityId: "api:google-calendar", name: "Google Calendar" };
+const DYNAMICS = {
+  capabilityId: "api:microsoft-dynamics",
+  name: "Microsoft Dynamics",
+  providerDomain: "dynamics.com",
+};
+const CLOSE = { capabilityId: "mcp:close", name: "Close", providerDomain: "close.com" };
 
 function candidate(name: string, description: string): Tool {
   return tool({
@@ -200,6 +206,27 @@ describe("a search that clearly names one connectable integration shows its card
         }).prepareSearch({ query });
         expect(requested).toEqual([integration]);
         expect(outputOf(result).connectCard).toMatchObject({ shown: true });
+      }
+    });
+
+    test(`${transport}: a product word names its integration over ordinary-word names`, async () => {
+      // Search queries models wrote for "What open opportunities do we have
+      // in Dynamics 365?". "close date" also reads as Close, an ordinary word.
+      for (const query of [
+        "Read/list Dynamics 365 CRM sales opportunities records, filter opportunity status open; retrieve opportunity names and amounts",
+        "Read open opportunity records from Dynamics 365 CRM, including name, estimated value, close date and owner; use connected integration tools.",
+      ]) {
+        const { requested, request } = cardTool();
+        const result = await runtimeWith(transport, {
+          matches: [DYNAMICS, CLOSE],
+          request,
+        }).prepareSearch({ query });
+        expect({ query, requested }).toEqual({ query, requested: [DYNAMICS] });
+        expect(outputOf(result).connectCard).toMatchObject({
+          shown: true,
+          capabilityId: DYNAMICS.capabilityId,
+        });
+        expect(outputOf(result).notConnected).not.toContain("Close");
       }
     });
 
@@ -503,6 +530,17 @@ describe("discovery records why no card was newly shown", () => {
     ]);
     expect(several.events).toMatchObject([
       { outcome: "skipped", reason: "several_named", integrations: [{ name: "Gmail" }, {}] },
+    ]);
+  });
+
+  test("skipped: a product word in lower case reads as an ordinary word", async () => {
+    const { requested, request } = cardTool();
+    const { runtime, events } = recording("generic_dispatch", { matches: [DYNAMICS], request });
+    await runtime.prepareSearch({ query: "notes on team dynamics from the retro" });
+    await settled();
+    expect(requested).toEqual([]);
+    expect(events).toMatchObject([
+      { outcome: "skipped", reason: "not_distinctive", integrations: [{ name: DYNAMICS.name }] },
     ]);
   });
 

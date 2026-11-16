@@ -1,8 +1,22 @@
 import { expect, test } from "bun:test";
 import {
   assertBaselineAdvanceScope,
+  parseLiveProductionRevision,
   parseRuntimePostureBaseline,
 } from "./runtime-posture-baseline";
+
+test("only a full reported commit counts as the live production revision", () => {
+  const sha = "6327db2c8b9fd642cb1dbfe3c51e11f45d327a2b";
+  expect(parseLiveProductionRevision({ deploymentRevision: sha, ok: true })).toBe(sha);
+  for (const value of [
+    null,
+    {},
+    { deploymentRevision: "6327db2c" },
+    { deploymentRevision: "main" },
+  ]) {
+    expect(parseLiveProductionRevision(value)).toBeNull();
+  }
+});
 
 test("a migration cannot move its own previous-binary goalposts", () => {
   const pin = "scripts/runtime-posture-baseline.json";

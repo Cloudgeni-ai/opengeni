@@ -29,6 +29,7 @@ import {
   sandboxProviderMaxRemainingLifetimeMs,
   sandboxArchiveCaptureTimeoutMs,
   sandboxLifecycleTransitionWaitMs,
+  sandboxPlanLimits,
   sandboxWarmRateMicrosPerSecond,
   type Settings,
 } from "@opengeni/config";
@@ -1445,6 +1446,9 @@ async function resumeBoxForTurnOnce(
     leaseTtlMs,
     warmingLeaseTtlMs: settings.sandboxLeaseWarmingTtlMs,
     captureWaitMs: sandboxLifecycleTransitionWaitMs(settings),
+    // A new box counts against the organization's running-box limit for its
+    // plan; at the limit the turn parks (organization_sandbox_capacity).
+    sandboxPlanLimits: sandboxPlanLimits(settings),
     ...(cancellationSignal ? { waitSignal: cancellationSignal } : {}),
   });
 
@@ -1638,6 +1642,7 @@ async function resumeBoxForTurnOnce(
         acquired.lease.backend,
         acquired.lease.instanceId,
         acquired.lease.liveness,
+        acquired.organizationBoxLimit,
       );
     }
     throw new SandboxLeaseSupersededError(ids.sandboxGroupId, acquired.lease.leaseEpoch, {

@@ -24,6 +24,11 @@ export function commandOutputClientEventIdPrefix(commandId: string) {
   return `command-output:${commandId}:`;
 }
 
+/** Frames stored per transaction by a connected capture: a statement-size
+ * bound, so one transaction's parameters stay well within PostgreSQL's limit
+ * while a replay of thousands of frames takes a few transactions, not one each. */
+export const CONNECTED_COMMAND_OUTPUT_FRAMES_PER_TRANSACTION = 256;
+
 /** One provider-frame identity scheme for attached reads, push and reconciliation. */
 export function createConnectedCommandOutputCapture(
   db: Database,
@@ -34,14 +39,23 @@ export function createConnectedCommandOutputCapture(
     commandId: string,
     frames: Array<{ sequence: string; stream: "stdout" | "stderr"; chunk: string }>,
   ) => {
-    for (const frame of frames) {
-      const events = await appendSessionCommandOutput(db, {
-        ...ids,
-        commandId,
-        chunkId: `op-frame:${frame.sequence}`,
-        stream: frame.stream,
-        chunk: frame.chunk,
-      });
+    for (
+      let start = 0;
+      start < frames.length;
+      start += CONNECTED_COMMAND_OUTPUT_FRAMES_PER_TRANSACTION
+    ) {
+      const events = await appendSessionCommandOutputs(
+        db,
+        frames
+          .slice(start, start + CONNECTED_COMMAND_OUTPUT_FRAMES_PER_TRANSACTION)
+          .map((frame) => ({
+            ...ids,
+            commandId,
+            chunkId: `op-frame:${frame.sequence}`,
+            stream: frame.stream,
+            chunk: frame.chunk,
+          })),
+      );
       if (events.length) await publish?.(events).catch(() => undefined);
     }
   };
@@ -54,9 +68,35 @@ export async function appendSessionCommandOutput(
   db: Database,
   input: SessionCommandOutputInput,
 ): Promise<SessionEvent[]> {
-  if (!input.chunkId || input.chunkId.length > 200)
-    throw new Error("Invalid command output chunk ID");
-  if (!input.chunk) return [];
+  return await appendSessionCommandOutputs(db, [input]);
+}
+
+/** Parts read or written per statement: keeps each statement's parameters
+ * well within PostgreSQL's limit however large a batch's chunks are. */
+const COMMAND_OUTPUT_PARTS_PER_STATEMENT = 1_000;
+
+/** Store several chunks of ONE command, in order, in one transaction. Each
+ * chunk keeps its own identity and is idempotent exactly as when stored
+ * alone; storing a batch only saves the transaction and lock per chunk. */
+export async function appendSessionCommandOutputs(
+  db: Database,
+  inputs: readonly SessionCommandOutputInput[],
+): Promise<SessionEvent[]> {
+  const input = inputs[0];
+  if (!input) return [];
+  for (const each of inputs) {
+    if (!each.chunkId || each.chunkId.length > 200)
+      throw new Error("Invalid command output chunk ID");
+    if (
+      each.accountId !== input.accountId ||
+      each.workspaceId !== input.workspaceId ||
+      each.sessionId !== input.sessionId ||
+      each.commandId !== input.commandId
+    )
+      throw new Error("A command output batch belongs to one command");
+  }
+  const chunks = inputs.filter((each) => each.chunk);
+  if (!chunks.length) return [];
   return await withSessionActivityRlsContext(db, input, async (tx) => {
     const events: SessionEvent[] = [];
     const locks = await lockSessionEventWriteRows(tx, {
@@ -94,39 +134,56 @@ export async function appendSessionCommandOutput(
         .limit(1);
       if (!process) throw new Error("Command output has no retained command identity");
     }
-    // A provider page can hold megabytes. Read and write its parts in one
-    // statement each so the session event lock is held briefly.
-    const parts: Array<{ clientEventId: string; chunk: string }> = [];
-    for (let offset = 0, part = 0; offset < input.chunk.length; part++) {
-      let end = Math.min(offset + 16_384, input.chunk.length);
-      if (end < input.chunk.length && /[\uD800-\uDBFF]/u.test(input.chunk[end - 1]!)) end -= 1;
-      parts.push({
-        clientEventId: `${commandOutputClientEventIdPrefix(input.commandId)}${input.chunkId}:${input.stream}:${part}`,
-        chunk: input.chunk.slice(offset, end),
-      });
-      offset = end;
+    // A provider page can hold megabytes. Read and write its parts a
+    // statement at a time so the session event lock is held briefly.
+    const parts: Array<{
+      clientEventId: string;
+      chunk: string;
+      stream: "stdout" | "stderr";
+      streamFidelity: "separate" | "merged";
+    }> = [];
+    for (const each of chunks) {
+      for (let offset = 0, part = 0; offset < each.chunk.length; part++) {
+        let end = Math.min(offset + 16_384, each.chunk.length);
+        if (end < each.chunk.length && /[\uD800-\uDBFF]/u.test(each.chunk[end - 1]!)) end -= 1;
+        parts.push({
+          clientEventId: `${commandOutputClientEventIdPrefix(each.commandId)}${each.chunkId}:${each.stream}:${part}`,
+          chunk: each.chunk.slice(offset, end),
+          stream: each.stream,
+          streamFidelity: each.streamFidelity ?? "separate",
+        });
+        offset = end;
+      }
     }
-    const existing = new Map(
-      (
-        await tx
-          .select({
-            clientEventId: schema.sessionEvents.clientEventId,
-            payload: schema.sessionEvents.payload,
-            version: schema.sessionEvents.payloadCodecVersion,
-          })
-          .from(schema.sessionEvents)
-          .where(
-            and(
-              eq(schema.sessionEvents.workspaceId, input.workspaceId),
-              eq(schema.sessionEvents.sessionId, input.sessionId),
-              inArray(
-                schema.sessionEvents.clientEventId,
-                parts.map((part) => part.clientEventId),
-              ),
+    const existing = new Map<
+      string,
+      {
+        payload: unknown;
+        version: (typeof schema.sessionEvents.$inferSelect)["payloadCodecVersion"];
+      }
+    >();
+    for (let start = 0; start < parts.length; start += COMMAND_OUTPUT_PARTS_PER_STATEMENT) {
+      const rows = await tx
+        .select({
+          clientEventId: schema.sessionEvents.clientEventId,
+          payload: schema.sessionEvents.payload,
+          version: schema.sessionEvents.payloadCodecVersion,
+        })
+        .from(schema.sessionEvents)
+        .where(
+          and(
+            eq(schema.sessionEvents.workspaceId, input.workspaceId),
+            eq(schema.sessionEvents.sessionId, input.sessionId),
+            inArray(
+              schema.sessionEvents.clientEventId,
+              parts
+                .slice(start, start + COMMAND_OUTPUT_PARTS_PER_STATEMENT)
+                .map((part) => part.clientEventId),
             ),
-          )
-      ).map((row) => [row.clientEventId, row]),
-    );
+          ),
+        );
+      for (const row of rows) if (row.clientEventId) existing.set(row.clientEventId, row);
+    }
     const missing = parts.filter((part) => {
       const row = existing.get(part.clientEventId);
       if (!row) return true;
@@ -134,18 +191,20 @@ export async function appendSessionCommandOutput(
       if (
         payload.chunk !== part.chunk ||
         payload.commandId !== input.commandId ||
-        payload.stream !== input.stream
+        payload.stream !== part.stream
       ) {
         throw new Error("Command output retry changed the captured chunk");
       }
       return false;
     });
     let sequence = session.lastSequence;
-    const inserted = missing.length
-      ? await tx
+    const inserted: Array<typeof schema.sessionEvents.$inferSelect> = [];
+    for (let start = 0; start < missing.length; start += COMMAND_OUTPUT_PARTS_PER_STATEMENT) {
+      inserted.push(
+        ...(await tx
           .insert(schema.sessionEvents)
           .values(
-            missing.map((part) =>
+            missing.slice(start, start + COMMAND_OUTPUT_PARTS_PER_STATEMENT).map((part) =>
               withLosslessContentWriteVersion(
                 {
                   accountId: input.accountId,
@@ -156,8 +215,8 @@ export async function appendSessionCommandOutput(
                   clientEventId: part.clientEventId,
                   payload: {
                     commandId: input.commandId,
-                    stream: input.stream,
-                    streamFidelity: input.streamFidelity ?? "separate",
+                    stream: part.stream,
+                    streamFidelity: part.streamFidelity,
                     chunk: part.chunk,
                   },
                 },
@@ -166,8 +225,9 @@ export async function appendSessionCommandOutput(
               ),
             ),
           )
-          .returning()
-      : [];
+          .returning()),
+      );
+    }
     for (const row of inserted.sort((a, b) => a.sequence - b.sequence))
       events.push({
         id: row.id,

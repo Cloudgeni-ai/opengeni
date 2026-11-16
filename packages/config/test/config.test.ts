@@ -1402,6 +1402,26 @@ describe("sandbox preparation profiles", () => {
     ).toBe(2_000);
   });
 
+  test("the Sandbox Environment image snapshot has its own longer timeout", () => {
+    const defaults = withEnv({}, () => getSettings());
+    expect(defaults.rigProviderImageSnapshotTimeoutMs).toBe(300_000);
+    expect(defaults.sandboxSnapshotTimeoutMs).toBe(60_000);
+    const configured = withEnv(
+      {
+        OPENGENI_RIG_PROVIDER_IMAGE_SNAPSHOT_TIMEOUT_MS: "540000",
+        OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS: "45000",
+      },
+      () => getSettings(),
+    );
+    expect(configured.rigProviderImageSnapshotTimeoutMs).toBe(540_000);
+    expect(configured.sandboxSnapshotTimeoutMs).toBe(45_000);
+    // It must leave room for setup and the cold boot check in the
+    // 15-minute verification activity.
+    expect(() =>
+      withEnv({ OPENGENI_RIG_PROVIDER_IMAGE_SNAPSHOT_TIMEOUT_MS: "900000" }, () => getSettings()),
+    ).toThrow();
+  });
+
   test("selfhosted exec defaults to unbounded while control stays at 30s", () => {
     const defaults = withEnv({}, () => getSettings());
     expect(defaults.sandboxSelfhostedExecTimeoutMs).toBe(0);

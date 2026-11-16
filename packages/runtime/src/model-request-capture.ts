@@ -1,5 +1,6 @@
 import { rememberPreparedModelRequest } from "./prepared-compaction-request";
 import { streamWithPreemption } from "./model-preemption";
+import { cloneRequestValue } from "./request-clone";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Model, ModelProvider, ModelRequest, StreamEvent } from "@openai/agents";
 
@@ -170,7 +171,7 @@ export async function notifyModelRequestCapture(request: ModelRequest): Promise<
 function snapshotModelRequestPrefix(request: ModelRequest): ModelRequest {
   return {
     ...request,
-    tools: structuredClone(request.tools),
+    tools: cloneRequestValue(request.tools),
   };
 }
 

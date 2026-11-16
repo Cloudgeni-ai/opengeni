@@ -16,6 +16,7 @@ import {
 } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
 import {
+  priceModelUsage,
   settleModelUsage,
   type ModelUsageSettlementInput,
 } from "../src/billing/model-usage-settlement";
@@ -126,6 +127,43 @@ test("a response costing more than the balance is charged in full and leaves it 
   expect(replay.billing.pricedCostMicros).toBe(cost);
   expect(replay.debits).toEqual([{ debitedMicros: 0, grantDebitedMicros: 0 }]);
   expect((await getBillingBalance(client.db, scope.accountId)).balanceMicros).toBe(11 * M - cost);
+  expect(await modelDebits(scope.accountId)).toHaveLength(1);
+}, 180_000);
+
+test("pricing a response writes nothing and matches what its settlement records", async () => {
+  if (!client || !shared) return;
+  const scope = await workspace();
+  await credit(scope.accountId, 10 * M);
+  const sourceId = `response-${crypto.randomUUID()}`;
+  const input: ModelUsageSettlementInput = {
+    accountId: scope.accountId,
+    workspaceId: scope.workspaceId,
+    model: "priced-model",
+    chargesOpenGeniCredits: true,
+    countsTowardTokenCap: true,
+    normalizedUsage: normalizeModelCallUsage({
+      inputTokens: 1_000_000,
+      outputTokens: 500_000,
+      totalTokens: 1_500_000,
+    }),
+    sourceId,
+  };
+  const priced = priceModelUsage(settings, input);
+  expect(await modelDebits(scope.accountId)).toHaveLength(0);
+  const { billing } = await settle(scope, { sourceId });
+  expect(priced).toEqual(billing);
+  // A debit without a price fails before anything is written, in both.
+  const unpriced = {
+    ...input,
+    model: "unpriced-model",
+    sourceId: `response-${crypto.randomUUID()}`,
+  };
+  expect(() => priceModelUsage(settings, unpriced)).toThrow(
+    "Missing model pricing for unpriced-model",
+  );
+  await expect(settleModelUsage(settings, client.db, unpriced)).rejects.toThrow(
+    "Missing model pricing for unpriced-model",
+  );
   expect(await modelDebits(scope.accountId)).toHaveLength(1);
 }, 180_000);
 

@@ -17,10 +17,12 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
-import type {
-  WorkspaceConfigIcon,
-  WorkspaceConfigItem,
+import {
+  itemDescription,
+  type WorkspaceConfigIcon,
+  type WorkspaceConfigItem,
 } from "@/components/rail/workspace-nav-data";
+import { useSimplifiedInterface } from "@opengeni/react/app/lib/simplified-interface";
 import { cn } from "@opengeni/react/app/lib/utils";
 
 const WORKSPACE_CONFIG_ICONS = {
@@ -58,6 +60,8 @@ export function WorkspaceConfigLink(props: {
   onNavigate?: () => void;
 }) {
   const { item, workspaceId, variant, active, collapsed, onNavigate } = props;
+  const { productName } = useSimplifiedInterface();
+  const description = itemDescription(item, productName);
   const attentionTitle = props.needsReview
     ? "Knowledge needs review"
     : props.needsAttention
@@ -89,8 +93,8 @@ export function WorkspaceConfigLink(props: {
           (props.recording
             ? "Recording a meeting"
             : collapsed
-              ? [item.label, item.description].filter(Boolean).join(" — ")
-              : item.description)
+              ? [item.label, description].filter(Boolean).join(" — ")
+              : description)
         }
         className={cn(
           "group relative flex h-8 items-center rounded-md text-sm font-normal text-fg-label transition-colors pointer-coarse:h-10",
@@ -139,7 +143,7 @@ export function WorkspaceConfigLink(props: {
         to={item.to}
         params={{ workspaceId }}
         data-active={active ? "true" : undefined}
-        title={item.description}
+        title={description}
         className={cn(
           "flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none",
           "hover:bg-hover hover:text-fg",
@@ -157,7 +161,7 @@ export function WorkspaceConfigLink(props: {
     <Link
       to={item.to}
       params={{ workspaceId }}
-      title={item.description}
+      title={description}
       className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-fg-muted transition-colors hover:bg-hover hover:text-fg"
       onClick={onNavigate}
     >

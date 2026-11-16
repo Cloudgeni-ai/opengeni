@@ -6,7 +6,11 @@ import { describe, expect, test } from "bun:test";
 import { ErrorCode, ExecRequest } from "@opengeni/agent-proto";
 import { SelfhostedControlError } from "../src/sandbox/selfhosted/control-rpc";
 import { OpStreamExecClient } from "../src/sandbox/selfhosted/op-stream";
-import { FakeOpRunner, InMemoryOpStreamTransport } from "../src/sandbox/selfhosted/op-testing";
+import {
+  FakeOpRunner,
+  InMemoryOpStreamTransport,
+  type FakeOpScript,
+} from "../src/sandbox/selfhosted/op-testing";
 import { OpStreamUnavailableError } from "../src/sandbox/selfhosted/op-transport";
 import {
   ConnectedCommandCollectionError,
@@ -30,7 +34,10 @@ class QueuedLinkTransport extends InMemoryOpStreamTransport {
   }
 }
 
-async function completedCommand(transport: InMemoryOpStreamTransport) {
+async function completedCommand(
+  transport: InMemoryOpStreamTransport,
+  script: FakeOpScript = { frames: [{ channel: "stdout", bytes: "done\n" }] },
+) {
   const runner = new FakeOpRunner({
     transport,
     workspaceId: WORKSPACE,
@@ -38,7 +45,7 @@ async function completedCommand(transport: InMemoryOpStreamTransport) {
     connectionInstanceId: CONNECTION,
   });
   const opId = "slow-link:0";
-  runner.script(opId, { frames: [{ channel: "stdout", bytes: "done\n" }] });
+  runner.script(opId, script);
   await runner.request(
     RPC_SUBJECT,
     {
@@ -90,6 +97,35 @@ describe("connected command terminal replay", () => {
     expect(replay.status).toBe("completed");
     expect(captured.join("")).toBe("done\n");
     // The same frames were not requested again behind the ones in flight.
+    expect(runner.runs.get(opId)!.attachCount).toBe(1);
+  }, 15_000);
+
+  test("a look at a running command stores all output retained so far, however long it takes to arrive", async () => {
+    // The look is the only reader once the attempt that started the command
+    // has ended (for example, its session moved to another machine). A look
+    // that stopped at a fixed quarter second stored only the frames that
+    // happened to arrive by then, the same prefix every time.
+    const transport = new QueuedLinkTransport(600);
+    const lines = Array.from({ length: 2_000 }, (_, index) => `line ${index}\n`);
+    const { runner, opId, client } = await completedCommand(transport, {
+      runningRetained: true,
+      frames: lines.map((bytes) => ({ channel: "stdout" as const, bytes })),
+    });
+    const captured: string[] = [];
+    const startedAt = Date.now();
+    const replay = await replayConnectedCommandOutput(
+      client,
+      opId,
+      false,
+      async (frames) => {
+        captured.push(...frames.map((frame) => frame.chunk));
+      },
+      Date.now() + 10_000,
+    );
+    expect(replay.status).toBe("running");
+    expect(captured.join("")).toBe(lines.join(""));
+    // It returned once caught up, not at its deadline.
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
     expect(runner.runs.get(opId)!.attachCount).toBe(1);
   }, 15_000);
 

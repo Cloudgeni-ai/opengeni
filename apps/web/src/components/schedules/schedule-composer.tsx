@@ -33,6 +33,7 @@ import { useFieldControlProps } from "@opengeni/react/ui/field";
 import { SelectMenu, type SelectOption } from "@opengeni/react/ui/select-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@opengeni/react/ui/tooltip";
 import { useAppContext } from "@opengeni/react/app/app-context";
+import { useSimplifiedInterface } from "@opengeni/react/app/lib/simplified-interface";
 import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import {
   gitHubRepositoryResource,
@@ -327,6 +328,7 @@ export function ComposerField({
   inheritsChatSettings,
 }: ComposerFieldProps) {
   const context = useAppContext();
+  const { simplified } = useSimplifiedInterface();
   const fieldProps = useFieldControlProps();
   const invalid = Boolean(fieldProps["aria-invalid"]);
 
@@ -503,7 +505,11 @@ export function ComposerField({
         onChange={(event) => update({ prompt: event.target.value })}
         rows={4}
         disabled={disabled}
-        placeholder="e.g. Summarize yesterday's AWS spend and flag anything unusual"
+        placeholder={
+          simplified
+            ? "e.g. Go through my inbox and list the emails that still need a reply"
+            : "e.g. Summarize yesterday's AWS spend and flag anything unusual"
+        }
         // The frame shows focus (border and glow); the global outline would draw a second ring.
         style={{ outline: "none" }}
         className={cn(
@@ -522,10 +528,11 @@ export function ComposerField({
           />
         ) : (
           <span className="text-xs leading-4.5 text-fg-muted">
-            Uses this chat's model, tools and machine.
+            {simplified ? "Uses this chat's tools." : "Uses this chat's model, tools and machine."}
           </span>
         )}
-        {!inheritsChatSettings ? (
+        {/* The simplified interface has one model policy, so a schedule has no model to pick. */}
+        {!inheritsChatSettings && !simplified ? (
           <div className="ml-auto flex min-w-0 items-center gap-1">
             {!draft.modelFollowsDefault ? (
               <Tooltip>

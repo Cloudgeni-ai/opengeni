@@ -1,4 +1,5 @@
 import {
+  CloudIcon,
   CreditCardIcon,
   EraserIcon,
   GitPullRequestIcon,
@@ -8,13 +9,16 @@ import {
   MessagesSquareIcon,
   MonitorIcon,
   PaletteIcon,
+  PlugIcon,
+  ShieldCheckIcon,
   Table2Icon,
   type LucideIcon,
 } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { AppearanceMenu } from "@/components/appearance-menu";
-import { BrandMark, Wordmark } from "@opengeni/react/app/components/brand-mark";
+import { Wordmark, WordmarkMark } from "@opengeni/react/app/components/brand-mark";
+import { useSimplifiedInterface } from "@opengeni/react/app/lib/simplified-interface";
 import { Button } from "@opengeni/react/ui/button";
 import {
   DropdownMenu,
@@ -79,6 +83,23 @@ const pitches: Record<SignedOutPitch, Pitch> = {
   },
 };
 
+// What someone arriving from gogeni.ai reads in place of the general pitch:
+// the promise that site makes, with nothing about building on the platform.
+const simplifiedPitch: Pitch = {
+  headline: "Your AI teammate",
+  emphasis: "that gets work done.",
+  lead: "Geni has a computer of its own. It works in your tools, in Slack and Teams, and asks before anything goes out.",
+  highlights: [
+    { icon: PlugIcon, text: "Works in the tools your team already uses" },
+    {
+      icon: CloudIcon,
+      text: "Keeps working on long tasks, even when you close your laptop",
+    },
+    { icon: ShieldCheckIcon, text: "Asks you before anything leaves the company" },
+  ],
+  tagline: "Your conversations. Your projects. One workspace.",
+};
+
 /** Operator-configured legal documents; absent unless the deployment publishes them. */
 export type SignedOutLegalLinks = {
   privacyPolicyUrl?: string | undefined;
@@ -102,7 +123,9 @@ export function SignedOutPage({
   /** Operator support address, offered as a mailto link when configured. */
   supportEmail?: string | undefined;
 }) {
-  const { headline, emphasis, lead, highlights, product, tagline } = pitches[pitch];
+  const { simplified } = useSimplifiedInterface();
+  const { headline, emphasis, lead, highlights, product, tagline } =
+    simplified && pitch === "general" ? simplifiedPitch : pitches[pitch];
   const legal = [
     { href: legalLinks?.privacyPolicyUrl, label: "Privacy", external: true },
     { href: legalLinks?.termsOfServiceUrl, label: "Terms", external: true },
@@ -119,7 +142,7 @@ export function SignedOutPage({
           className="mx-auto flex w-full max-w-[1040px] items-center justify-between gap-4 px-4 py-6 min-[721px]:px-10"
         >
           <div className="flex items-center gap-2.5 text-fg">
-            <BrandMark className="w-[31px]" />
+            <WordmarkMark className="w-[31px]" tileClassName="size-8" />
             <Wordmark className="text-[23px]" />
             {product ? (
               <span className="text-[23px] leading-none font-medium text-fg-muted">{product}</span>

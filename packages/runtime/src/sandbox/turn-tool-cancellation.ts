@@ -61,6 +61,15 @@ import {
   runWithSecretCarry,
   type SecretFilesWriter,
 } from "./secret-delivery";
+import {
+  SECRET_LEAK_SCAN_DEADLINE_SECONDS,
+  SECRET_LEAK_SCAN_MAX_BYTES,
+  SecretLeakGuard,
+  secretLedgerKeyFor,
+  type SecretLedgerKey,
+  type SecretLeakGuardRunner,
+  type SecretLedgerWriter,
+} from "./secret-leak-guard";
 
 /**
  * The shell a wrapper re-executes for a new session. The Opengeni agent sets
@@ -256,11 +265,41 @@ type CommandCancellationSession = {
   ): Promise<void>;
   /** Remove this attempt's secret files (attempt end; SEC-4). */
   clearSecretFilesForAttempt?(scope?: string): Promise<void>;
+  /** The secret leak guard's read-only helper command. */
+  execReadOnly?(args: {
+    cmd: string;
+    workdir?: string;
+    yieldTimeMs?: number;
+    maxOutputTokens?: number;
+  }): Promise<{ stdout?: string; exitCode?: number | null }>;
+  /** One private file of the secret leak guard's ledger. */
+  writeSecretLedger?(file: { path: string; content: Uint8Array }): Promise<void>;
 };
 
 function secretFilesWriter(session?: CommandCancellationSession): SecretFilesWriter | null {
   const write = session?.writeSecretFiles;
   return write ? async (scope, files) => await write.call(session, scope, files) : null;
+}
+
+/** The leak guard's helper runner on this session, or null when it has none. */
+function secretLeakGuardRunner(session?: CommandCancellationSession): SecretLeakGuardRunner | null {
+  const execReadOnly = session?.execReadOnly;
+  if (!execReadOnly) return null;
+  return async ({ cmd, workdir }) => {
+    const result = await execReadOnly.call(session, {
+      cmd,
+      ...(workdir ? { workdir } : {}),
+      yieldTimeMs: (SECRET_LEAK_SCAN_DEADLINE_SECONDS + 5) * 1000,
+      maxOutputTokens: SECRET_LEAK_SCAN_MAX_BYTES,
+    });
+    return { stdout: result.stdout ?? "", exitCode: result.exitCode ?? null };
+  };
+}
+
+/** The leak guard's ledger writer on this session, or null when it has none. */
+function secretLedgerWriter(session?: CommandCancellationSession): SecretLedgerWriter | null {
+  const write = session?.writeSecretLedger;
+  return write ? async (file) => await write.call(session, file) : null;
 }
 
 async function usesRemoteOperationCancellation(
@@ -1191,6 +1230,8 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   private readonly finishFloor: boolean;
   private readonly shellMarkerDirectory: string;
   private readonly secretResolver: SecretResolver | null;
+  /** Keeps values this attempt delivers out of git commits and pushes. */
+  private readonly leakGuard: SecretLeakGuard | null;
   private readonly credentials: CredentialEnvironment | null;
   private readonly secretFileSessions = new Set<CommandCancellationSession>();
   /** Routed-call scopes of this attempt's `exec_command` calls, by call id. */
@@ -1202,7 +1243,14 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     this.shellMarkerDirectory = posix.join(temporaryDirectory, "opengeni-turn-shell");
     this.cutPolling = options.cutPolling === true;
     this.finishFloor = this.cutPolling && options.finishFloor === true;
-    this.secretResolver = options.secretResolver ?? null;
+    const resolver = options.secretResolver ?? null;
+    this.leakGuard = resolver
+      ? new SecretLeakGuard(
+          options.secretLedgerKey ?? secretLedgerKeyFor(null),
+          resolver.principal.workspaceId,
+        )
+      : null;
+    this.secretResolver = resolver && this.leakGuard ? this.leakGuard.wrapResolver(resolver) : null;
     this.credentials = options.credentials ?? null;
     if (signal?.aborted) {
       this.cancel(signal.reason);
@@ -1886,6 +1934,19 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       useRemoteOpCancellation ? undefined : this.shellMarkerDirectory,
     );
     if (this.cancelled) throw cancellationError(this.reason);
+    // A git commit or push that would carry a value this sandbox received
+    // for a reference is refused before anything resolves or runs.
+    const guardRunner = this.leakGuard ? secretLeakGuardRunner(cancellationSession) : null;
+    if (this.leakGuard) {
+      const refusal = await this.leakGuard.check(
+        parsed.cmd,
+        guardRunner,
+        typeof parsed.workdir === "string" ? parsed.workdir : undefined,
+        this.observationCancellation.signal,
+      );
+      if (refusal !== null) return refusal;
+      if (this.cancelled) throw cancellationError(this.reason);
+    }
     // Secret references: managed sandboxes always parse the command in
     // POSIX sh (the wrapper below), so splice now; connected machines
     // splice in their own dialect at delivery. Resolution failures are
@@ -1906,6 +1967,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       if (isSecretReferenceError(error)) return error.toModelOutput();
       throw error;
     }
+    await this.leakGuard?.flush(secretLedgerWriter(cancellationSession));
     if (secret?.notes) reportProfileNotes(secret.notes);
     if (this.cancelled) throw cancellationError(this.reason);
     const commandText = secret?.text ?? parsed.cmd;
@@ -2158,6 +2220,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                 if (isSecretReferenceError(error)) return error.toModelOutput();
                 throw error;
               }
+              await this.leakGuard?.flush(secretLedgerWriter(cancellationSession));
               if (secretStdin) parsed.chars = secretStdin.text;
             }
             const cappedInput = parsed
@@ -2304,6 +2367,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               if (isSecretReferenceError(error)) return error.toModelOutput();
               throw error;
             }
+            await this.leakGuard?.flush(secretLedgerWriter(cancellationSession));
             return await tool.invoke(runContext, resolvedInput ?? input, details);
           }),
       };
@@ -2542,6 +2606,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         headers: false,
         writeFiles,
       });
+      await this.leakGuard?.flush(secretLedgerWriter(cancellationSession));
       return resolved === null ? operation : { ...(operation as object), diff: resolved };
     };
     const wrappedEditor: ApplyPatchEditor = {
@@ -3382,6 +3447,13 @@ export type TurnToolCancellationControllerOptions = {
    * references through literally.
    */
   secretResolver?: SecretResolver | null;
+  /**
+   * Key for the secret leak guard's ledger (docs/secrets.md, "Keeping values
+   * out of commits"); derive it from a server secret with
+   * `secretLedgerKeyFor` so every worker reads the same sandbox ledger.
+   * Omitted, a key of this process is used.
+   */
+  secretLedgerKey?: SecretLedgerKey;
   /**
    * The attempt's credential profile: its variables are added to the
    * environment of every `exec_command` (including commands that keep
