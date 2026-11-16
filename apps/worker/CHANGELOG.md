@@ -1,5 +1,54 @@
 # @opengeni/worker-bundle
 
+## 6.24.0
+
+### Patch Changes
+
+- e6c9e45: A Connected Machine background command no longer reads as running for minutes after it finished when its session switched to another machine and back, and its output keeps flowing to the session after such a switch. When a reader attached to a command that had produced a large backlog (thousands of output frames, for example a test run that finished while the session was elsewhere), the agent sent the whole backlog into its 1,024-frame output queue at once and dropped every frame past the queue's depth, including the exit frame. Nothing re-sent them until the reader's 30-second silence check, which recovered about one queue's worth per check, so collecting a 6,600-frame command took more than three minutes, and a large enough backlog could never be collected within one collector's claim. The agent now holds its next frame while the queue is full and sends it as soon as the queue drains, so nothing is dropped for want of room. Collectors store replayed output a batch per transaction instead of one transaction per frame, so a retry that replays frames an earlier collector already stored gets further each time. A look at a running command now follows its attachment until it holds everything the machine had retained when it attached, instead of stopping after a quarter of a second with the same prefix every time, and `command_read`/`command_wait` in a later attempt read a running command from the machine its ledger names (not the session's current machine). `readExisting` takes an `untilCaughtUp` option, `appendSessionCommandOutputs` stores several chunks of one command in one transaction, and `connectedCommandOutputLook` reads a session's running command from its ledger locator.
+- 477f1db: Agent turns spend less time before each model request. The checks run before every model request (task usage limit, funding, workspace allowance and monthly limits) now read in parallel and still report the same refusal as before. Packaged Skills and interaction tool schemas are prepared once per process instead of on every turn.
+
+  New latency metrics: `opengeni_model_response_to_next_dispatch_seconds` (the gap from one model response to the next request, by phase) and the parts of response metering (`response_usage_lease`, `_billing`, `_cache`, `_checkpoint` on `opengeni_model_step_phase_duration_seconds`). A small sample of agent turns also exports its database statement spans when OTLP tracing is configured.
+
+  Prebuilt Sandbox Environment images on Modal are rebuilt again after a build stops for more than 20 minutes or fails with a retryable error, and the image snapshot has its own timeout (`OPENGENI_RIG_PROVIDER_IMAGE_SNAPSHOT_TIMEOUT_MS`, default 5 minutes) instead of the 60-second workspace snapshot timeout.
+
+- Updated dependencies [8924854]
+- Updated dependencies [0ad29b9]
+- Updated dependencies [24104b1]
+- Updated dependencies [8924854]
+- Updated dependencies [e6c9e45]
+- Updated dependencies [b9baad4]
+- Updated dependencies [8924854]
+- Updated dependencies [c0248a5]
+- Updated dependencies [1b544b0]
+- Updated dependencies [477f1db]
+  - @opengeni/core@6.24.0
+  - @opengeni/db@6.24.0
+  - @opengeni/codex@6.24.0
+  - @opengeni/runtime@6.24.0
+  - @opengeni/capabilities@6.24.0
+  - @opengeni/contracts@6.24.0
+  - @opengeni/config@6.24.0
+  - @opengeni/documents@6.24.0
+  - @opengeni/events@6.24.0
+  - @opengeni/sdk@6.24.0
+  - @opengeni/codemode@6.24.0
+  - @opengeni/decisions@6.24.0
+  - @opengeni/github@6.24.0
+  - @opengeni/interaction@6.24.0
+  - @opengeni/observability@6.24.0
+  - @opengeni/storage@6.24.0
+  - @opengeni/tool-gateway@6.24.0
+  - @opengeni/vaults@6.24.0
+  - @opengeni/vaults-bitwarden@6.24.0
+  - @opengeni/vaults-keeper@6.24.0
+  - @opengeni/vaults-onepassword@6.24.0
+  - @opengeni/vaults-protonpass@6.24.0
+  - @opengeni/jev@6.24.0
+  - @opengeni/agent-proto@6.24.0
+  - @opengeni/network@6.24.0
+  - @opengeni/subscriptions@6.24.0
+  - @opengeni/xai-subscription@6.24.0
+
 ## 6.23.0
 
 ### Patch Changes

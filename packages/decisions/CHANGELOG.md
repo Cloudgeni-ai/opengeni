@@ -1,5 +1,12 @@
 # @opengeni/decisions
 
+## 6.24.0
+
+### Patch Changes
+
+- Updated dependencies [c0248a5]
+  - @opengeni/contracts@6.24.0
+
 ## 6.23.0
 
 ### Patch Changes
