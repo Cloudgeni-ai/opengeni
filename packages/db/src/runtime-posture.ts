@@ -144,8 +144,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * 1404 withholds the inventory of cold sandboxes whose chats are all
  * archived; until it is granted, such a non-compute sandbox keeps its saved
  * workspace until its chats are deleted (as before).
- * 1475 withholds the organization-wide sandbox counts; until they are
- * granted, only the per-workspace viewer limit is enforced (as before).
+ * 1475 withheld the organization-wide sandbox counts and 1478 granted them.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -157,7 +156,6 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_content_garbage_candidates_v1(integer)",
   "collect_session_content_garbage_v1(uuid, uuid, integer)",
   "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
-  "organization_warm_sandbox_counts_v1(uuid, text, uuid)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**

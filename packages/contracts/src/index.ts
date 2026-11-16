@@ -22238,6 +22238,11 @@ export const AttachViewerRequest = /* @__PURE__ */ /* @__PURE__ */ defineSchema(
     desktop: primitives.optionalBoolean,
     terminal: primitives.optionalBoolean,
     files: primitives.optionalBoolean,
+    // How long ago the person last interacted with the page, as on the viewer
+    // heartbeat. A box the server stopped because its page went unused is only
+    // warmed again by an attach that reports interaction since then (or after
+    // the session is used). Optional; older clients omit it.
+    lastInteractionAgeMs: z.number().finite().nonnegative().optional(),
   }),
 );
 export type AttachViewerRequest = z.infer<typeof AttachViewerRequest>;
@@ -22256,6 +22261,11 @@ export const ViewerHolder = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
     // The desktop pixel tunnel URL the viewer connects to directly; null until
     // a viewer grant is minted (gated until then).
     dataPlaneUrl: primitives.nullableString,
+    // How long a viewer may go without reporting interaction on its heartbeat
+    // (`lastInteractionAgeMs`) before the server may release it and drain a box
+    // held only by viewers. Null when the deployment disables the idle drain.
+    // Absent from older servers.
+    viewerIdleDrainMs: z.number().int().nonnegative().nullable().optional(),
   }),
 );
 export type ViewerHolder = z.infer<typeof ViewerHolder>;
@@ -22309,9 +22319,14 @@ export type AcknowledgeStreamResponse = z.infer<typeof AcknowledgeStreamResponse
 
 // POST .../viewers/:viewerId/heartbeat — refresh the holder TTL. Epoch-fenced:
 // a stale-epoch beat (a box re-established under a newer epoch) is rejected.
+// `lastInteractionAgeMs` (optional) is how long ago the person last interacted
+// with the page (pointer, keyboard, touch, focus). A box held only by viewers
+// that reported no interaction for the server's idle window is drained; older
+// clients that omit it fall back to the attach time and session activity.
 export const ViewerHeartbeatRequest = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
   z.object({
     leaseEpoch: primitives.nonnegativeInteger,
+    lastInteractionAgeMs: z.number().finite().nonnegative().optional(),
   }),
 );
 export type ViewerHeartbeatRequest = z.infer<typeof ViewerHeartbeatRequest>;

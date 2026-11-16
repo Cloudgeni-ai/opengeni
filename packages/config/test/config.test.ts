@@ -7,6 +7,8 @@ import {
 } from "@opengeni/contracts";
 import {
   DEFAULT_MODAL_IMAGE_REF,
+  DEFAULT_SANDBOX_PLAN_LIMITS,
+  parseSandboxPlanLimitsJson,
   FIRST_PARTY_MCP_CALL_TIMEOUT_MS,
   FIRST_PARTY_MCP_SETUP_TIMEOUT_MS,
   DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS,
@@ -2981,6 +2983,22 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
       () => getSettings(),
     );
     expect(settings.sandboxRotationLeadMs).toBe(290_001);
+  });
+
+  test("viewer-only idle drain defaults to 30 minutes and 0 disables it", () => {
+    const defaults = withEnv({}, () => getSettings());
+    expect(defaults.sandboxViewerIdleDrainMs).toBe(1_800_000);
+    const tuned = withEnv({ OPENGENI_SANDBOX_VIEWER_IDLE_DRAIN_MS: "600000" }, () => getSettings());
+    expect(tuned.sandboxViewerIdleDrainMs).toBe(600_000);
+    const off = withEnv({ OPENGENI_SANDBOX_VIEWER_IDLE_DRAIN_MS: "0" }, () => getSettings());
+    expect(off.sandboxViewerIdleDrainMs).toBe(0);
+  });
+
+  test("organizations that are not self-serve have an unbounded embedded plan tier", () => {
+    expect(DEFAULT_SANDBOX_PLAN_LIMITS.embedded).toEqual({});
+    expect(
+      parseSandboxPlanLimitsJson('{"embedded":{"viewerOnlyBoxesPerOrganization":40}}').embedded,
+    ).toEqual({ viewerOnlyBoxesPerOrganization: 40 });
   });
 
   test("idle command containment defaults to 30 minutes between idle grace and rotation lead", () => {

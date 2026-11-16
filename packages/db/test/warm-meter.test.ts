@@ -68,8 +68,14 @@ async function workspaceOf(accountId: string): Promise<{ accountId: string; work
   return { accountId, workspaceId: w!.id };
 }
 
-// Migration 1475 withholds the runtime grant for one release; grant it here so
-// the organization-wide counts can be exercised.
+// Migration 1475 created the definer withheld and 1478 grants it; granting it
+// again here is harmless and keeps these tests independent of that order.
+// The restricted tier applies only while promotion enforcement is on.
+async function setPromotionEnforcement(enabled: boolean): Promise<void> {
+  await admin`insert into promotion_enforcement (singleton, enabled) values (true, ${enabled})
+    on conflict (singleton) do update set enabled = excluded.enabled`;
+}
+
 async function grantOrganizationCounts(): Promise<void> {
   await admin.unsafe(
     "grant execute on function opengeni_private.organization_warm_sandbox_counts_v1(uuid, text, uuid) to opengeni_app",
@@ -1192,6 +1198,10 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
     expect(await tierOf(ws.accountId, ws.workspaceId)).toBe("none");
     await admin`insert into promotion_decisions (account_id, decision, revision, actor)
       values (${ws.accountId}, 'held', 1, 'test')`;
+    // A held decision restricts only while promotion enforcement is on.
+    await setPromotionEnforcement(false);
+    expect(await tierOf(ws.accountId, ws.workspaceId)).toBe("none");
+    await setPromotionEnforcement(true);
     expect(await tierOf(ws.accountId, ws.workspaceId)).toBe("restricted");
     await admin`insert into organization_plans (account_id, plan_key, status)
       values (${ws.accountId}, 'free', 'active')`;
@@ -1215,6 +1225,7 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
       values (${ws.accountId}, 'free', 'active')`;
     await admin`insert into promotion_decisions (account_id, decision, revision, actor)
       values (${ws.accountId}, 'denied', 1, 'test')`;
+    await setPromotionEnforcement(true);
     let refused: unknown;
     try {
       await acquireLease(db, {

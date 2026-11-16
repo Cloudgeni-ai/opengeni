@@ -1759,6 +1759,7 @@ export const englishMessages = {
     "Voice input is off in {workspace}. Choose another workspace.",
   "desktopDictation.settings.workspaceVoiceOffOption": "Voice input is turned off.",
   "desktopViewer.clickReturnControlOrCtrl": "· click Return control (or Ctrl+Alt+Shift)",
+  "desktopViewer.computerLimitReached": "Computer limit reached",
   "desktopViewer.connectingToTheDesktop": "Connecting to the desktop…",
   "desktopViewer.couldnTConnect": "Couldn’t connect",
   "desktopViewer.couldnTOpenDesktop": "Couldn’t open desktop",
@@ -4515,6 +4516,8 @@ export const englishMessages = {
   "sandboxWorkspace.thisBranchMatchesTheRemote": "This branch matches the remote default branch.",
   "sandboxWorkspace.thisMachineDoesNotCurrently":
     "This machine does not currently expose a live file system.",
+  "sandboxWorkspace.tooManyComputersRunningWithoutTask":
+    "Your plan's computer limit is reached. Close another computer or start a task in this chat.",
   "sandboxWorkspace.uncommitted": "Uncommitted",
   "sandboxWorkspace.wakeTheSandboxToCompare":
     "Wake the sandbox to compare this branch with the remote default branch.",

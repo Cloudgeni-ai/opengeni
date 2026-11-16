@@ -123,6 +123,9 @@ export type ViewerAttachResult = {
   // The viewer heartbeat cadence the client must beat at to keep the holder
   // alive (shorter than the viewer-holder TTL the reaper enforces).
   viewerHeartbeatIntervalMs: number;
+  // How long a viewer may go without reporting interaction before a box held
+  // only by viewers may be drained (null: the idle drain is off).
+  viewerIdleDrainMs: number | null;
   // The desktop pixel tunnel URL the viewer connects to directly. Null in P1.4
   // (the mint is P4); surfaced here so the shape is stable.
   dataPlaneUrl: string | null;
@@ -207,6 +210,11 @@ export async function attachViewer(
      * readiness), not a watching viewer. It cannot keep a box warm on its own,
      * so the viewer-only box limit does not apply. */
     operationScoped?: boolean;
+    /** How long ago the attaching page last saw user interaction, when the
+     * client reports it. A person-facing attach (not operation-scoped) to a
+     * box stopped because its page went unused is refused unless this shows
+     * interaction since, or the session was used again. */
+    interactionAgeMs?: number;
   },
 ): Promise<ViewerAttachResult> {
   const { db, settings } = services;
@@ -285,6 +293,12 @@ export async function attachViewer(
         ? runningLimitsOnly(sandboxPlanLimits(settings))
         : sandboxPlanLimits(settings),
       ...(input.waitSignal ? { waitSignal: input.waitSignal } : {}),
+      ...(!input.operationScoped && settings.sandboxViewerIdleDrainMs > 0
+        ? { enforceViewerIdleReattach: true }
+        : {}),
+      ...(input.interactionAgeMs !== undefined
+        ? { viewerInteractionAgeMs: input.interactionAgeMs }
+        : {}),
     });
   } catch (error) {
     if (error instanceof SandboxViewerBoxLimitError) {
@@ -311,7 +325,9 @@ export async function attachViewer(
         message:
           error.reason === "balance"
             ? "insufficient workspace credits for an idle sandbox viewer"
-            : "workspace sandbox warm allowance exhausted",
+            : error.reason === "viewer_idle"
+              ? "the sandbox was stopped because its page went unused; interact with the page to resume it"
+              : "workspace sandbox warm allowance exhausted",
         cause: error,
       });
     }
@@ -392,6 +408,7 @@ export async function attachViewer(
         archiveComplete: result.lease.archiveComplete,
         sandboxGroupId,
         viewerHeartbeatIntervalMs: viewerHeartbeatIntervalMs(settings),
+        viewerIdleDrainMs: viewerIdleDrainMs(settings),
         dataPlaneUrl: result.lease.dataPlaneUrl,
       };
     } catch (error) {
@@ -503,6 +520,7 @@ export async function attachViewer(
       archiveComplete: ready.lease.archiveComplete,
       sandboxGroupId,
       viewerHeartbeatIntervalMs: viewerHeartbeatIntervalMs(settings),
+      viewerIdleDrainMs: viewerIdleDrainMs(settings),
       dataPlaneUrl: ready.lease.dataPlaneUrl,
     };
   } catch (error) {
@@ -588,6 +606,9 @@ export async function heartbeatViewer(
     sandboxGroupId: string;
     viewerId: string;
     expectedEpoch: number;
+    /** How long ago the viewer last saw real user interaction, when the
+     * client reports it. Recorded for the viewer-only idle drain. */
+    interactionAgeMs?: number;
   },
 ): Promise<boolean> {
   const status = await heartbeatLeaseHolderStatus(services.db, {
@@ -599,6 +620,7 @@ export async function heartbeatViewer(
     leaseTtlMs: services.settings.sandboxLeaseTtlMs,
     expectedEpoch: input.expectedEpoch,
     billingMode: services.settings.sandboxWarmBillingMode,
+    ...(input.interactionAgeMs !== undefined ? { interactionAgeMs: input.interactionAgeMs } : {}),
   });
   // An exhausted monthly warm allowance ends a viewer-only hold: release this
   // viewer so the box can drain. Its re-attach meets the warm-cap gate.
@@ -664,6 +686,13 @@ export async function readGroupLease(
 // single missed beat never reaps a live viewer (two beats fit inside the TTL).
 export function viewerHeartbeatIntervalMs(settings: Settings): number {
   return Math.max(5_000, Math.floor(settings.sandboxViewerHolderTtlMs / 2));
+}
+
+// The viewer idle-drain window echoed to clients (null when disabled), so a
+// page that the server released while its person was away waits for them to
+// come back before re-attaching instead of re-warming the box at once.
+export function viewerIdleDrainMs(settings: Settings): number | null {
+  return settings.sandboxViewerIdleDrainMs > 0 ? settings.sandboxViewerIdleDrainMs : null;
 }
 
 // Drop a transiently-established, NON-OWNED handle. The box is owned by the LEASE
