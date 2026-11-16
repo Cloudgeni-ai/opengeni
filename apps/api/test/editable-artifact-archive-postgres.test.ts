@@ -200,7 +200,7 @@ test("archiving removes a presentation from Artifacts, is idempotent and needs t
         body: JSON.stringify({
           replicaId: "aaaaaaaaaaaaaaaa",
           idempotencyKey: "export-1",
-          ...body,
+          ...fields,
         }),
       },
     );
@@ -208,6 +208,20 @@ test("archiving removes a presentation from Artifacts, is idempotent and needs t
   expect(
     (await exportRequest("materializations", { versionId: "1".repeat(32), format: "pptx" })).status,
   ).toBe(404);
+  // Earlier exports and its audience are out of reach too.
+  const deletedItem = `/v1/workspaces/${scope.workspaceId}/editable-artifacts/${artifact.id}`;
+  const managerHeaders = { authorization: `Bearer ${manager}`, "content-type": "application/json" };
+  const job = "2".repeat(32);
+  for (const path of [`materializations/${job}`, `materializations/${job}/download`]) {
+    const response = await app.request(`${deletedItem}/${path}`, { headers: managerHeaders });
+    expect(response.status).toBe(404);
+  }
+  const visibility = await app.request(`${deletedItem}/visibility`, {
+    method: "PUT",
+    headers: managerHeaders,
+    body: JSON.stringify({ visibility: "workspace" }),
+  });
+  expect(visibility.status).toBe(404);
   await expect(
     application.mintLiveTicket({
       scope,

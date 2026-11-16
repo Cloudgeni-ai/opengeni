@@ -588,6 +588,7 @@ export function registerEditableArtifactRoutes(
       }
     };
     const artifact = await read();
+    if (artifact.lifecycle !== "active") throw applicationHttpError("not_found");
     let changed: PersistedEditableArtifactAudience;
     try {
       changed = await audiences.change(grant, {
@@ -828,6 +829,7 @@ export function registerEditableArtifactRoutes(
     const jobId = parseArtifactId(context.req.param("jobId"));
     const actor = editableArtifactActorForGrant(grant, context.req.query("replicaId") ?? "");
     const scope = editableArtifactScope({ accountId: grant.accountId, workspaceId });
+    await requireActiveArtifact(deps, { scope, actor, artifactId });
     try {
       const job = await requireEditableArtifactExports(deps).getMaterialization({
         scope,
@@ -849,6 +851,7 @@ export function registerEditableArtifactRoutes(
     const jobId = parseArtifactId(context.req.param("jobId"));
     const actor = editableArtifactActorForGrant(grant, context.req.query("replicaId") ?? "");
     const scope = editableArtifactScope({ accountId: grant.accountId, workspaceId });
+    await requireActiveArtifact(deps, { scope, actor, artifactId });
     let download: EditableArtifactMaterializationDownload;
     try {
       download = await requireEditableArtifactExports(deps).openMaterializationDownload({

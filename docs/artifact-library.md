@@ -104,8 +104,8 @@ already open on it keeps its view, and its next change is refused. A goal
 report document that is archived can no longer be delivered.
 As with a Site, anyone who can manage a shared artifact can delete it, not
 only its owner. Agents get the same answer: `editable_artifact_get`, inspect
-and export treat a deleted artifact as missing, and so do the `GET`, `versions`
-and `materializations` routes.
+and export treat a deleted artifact as missing, and so do the item, `versions`,
+`materializations` and `visibility` routes.
 
 Sites are shared work too. Since migration 0865 anyone with `artifacts:publish`
 who can see a Site manages it like its owner: Site Data and Site SQL,
