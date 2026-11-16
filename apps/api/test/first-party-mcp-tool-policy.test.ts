@@ -445,14 +445,17 @@ describe("first-party MCP tool visibility policy", () => {
         "pausing an ancestor also stops this caller",
       );
       // Queue and Steer read like a person's two modes, each naming the other.
-      expect(descriptions.get("session_queue_message")).toContain(
-        "like a person's Queue in the chat. A session that is mid-turn gets it only after its current turn ends, and it does not change what that session is doing now",
+      // The runtime discovery test ranks these exact first sentences against a
+      // realistic connected catalog, so plain "send a message to a session"
+      // searches find Queue before any mail send tool.
+      expect(descriptions.get("session_queue_message")).toStartWith(
+        "Send a message to another session or agent: send messages to a worker you spawned, your parent or a peer session. Like a person's Queue in the chat, a session that is mid-turn gets the message only after its current turn ends, and it does not change what that session is doing now",
       );
       expect(descriptions.get("session_queue_message")).toContain(
         "To change what a session is doing now, use session_steer instead.",
       );
-      expect(descriptions.get("session_steer")).toContain(
-        "like a person's Steer in the chat: it gets your instruction at its next step",
+      expect(descriptions.get("session_steer")).toStartWith(
+        "Change what another session or agent (a worker you spawned, your parent or a peer) is doing now. Like a person's Steer in the chat, it gets your instruction at its next step",
       );
       expect(descriptions.get("session_steer")).toContain(
         "To add information without changing what a session is doing now, use session_queue_message instead.",
@@ -474,7 +477,7 @@ describe("first-party MCP tool visibility policy", () => {
         }).success,
       ).toBeTrue();
       expect(descriptions.get("session_queue_message")).toContain(
-        "Do not resend a message that is still queued",
+        "Do not send a message again while it is still queued",
       );
       expect(descriptions.get("session_get")).toContain(
         "Queued status and updatedAt are not proof of execution",
@@ -495,11 +498,13 @@ describe("first-party MCP tool visibility policy", () => {
       const declarations = generateCodemodeDeclarations(catalog);
       expect(declarations).toContain("pausing an ancestor also stops this caller");
       // Declarations keep each description's opening, which carries the mode.
-      expect(declarations).toContain("in Queue mode, like a person's Queue in the chat");
+      expect(declarations).toContain(
+        "Like a person's Queue in the chat, a session that is mid-turn",
+      );
       expect(declarations).toContain(
         "To change what a session is doing now, use session_steer instead.",
       );
-      expect(declarations).toContain("like a person's Steer in the chat");
+      expect(declarations).toContain("Like a person's Steer in the chat");
     } finally {
       await Promise.all([client.close(), server.close()]);
     }
