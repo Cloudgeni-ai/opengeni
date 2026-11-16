@@ -1509,6 +1509,8 @@ export type RestrictedRuntimeTestDatabase = {
   ownerUrl: string;
   /** Superuser pool on the same database with `search_path` set to the schema. */
   admin: postgres.Sql;
+  /** Superuser URL for the same database (e.g. for a child process); set `search_path` to `schema`. */
+  adminUrl: string;
   /** Name of the NOSUPERUSER NOBYPASSRLS migration owner. */
   ownerRole: string;
   release: () => Promise<void>;
@@ -1554,6 +1556,7 @@ export async function acquireRestrictedRuntimeTestDatabase(
       appUrl: appUrl.toString(),
       ownerUrl: owner.ownerUrl,
       admin: pool,
+      adminUrl: owner.adminUrl,
       ownerRole: owner.ownerRole,
       release: async () => {
         await pool.end().catch(() => undefined);

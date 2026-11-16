@@ -2517,7 +2517,9 @@ export async function releaseClaimedConnectedCommandOutput(
       !(await settleConnectedCommandOutputReleaseClaim(db, {
         claim,
         outcome,
-        retryAfterMs: outcome === "published" ? settings.sandboxLeaseReaperPeriodMs : 0,
+        // A published final ACK is confirmed by a later look at the runner;
+        // one that keeps finding the op retained backs off like a failure.
+        retryAfterMs: outcome === "published" ? connectedOutputRetryMs(settings, claim) : 0,
       }))
     )
       throw new Error("Connected command output release no longer owns its exact claim");

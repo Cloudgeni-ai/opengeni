@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { CallModelInputFilter, ModelRequest } from "@openai/agents";
 import { findCompactionNeededError, type CompactionNeededError } from "./context-compaction";
 import { ModelStepHandover } from "./model-step-handover";
+import { cloneRequestValue } from "./request-clone";
 
 /** One owner per run; never share a prefix between sessions or rebuilt agents. */
 const requests = new WeakMap<object, Omit<ModelRequest, "input">>();
@@ -43,8 +44,8 @@ export function rememberPreparedModelRequest(request: ModelRequest): void {
   const { input: _input, ...prefix } = request;
   requests.set(scope.agent, {
     ...prefix,
-    tools: structuredClone(request.tools),
-    modelSettings: structuredClone(request.modelSettings),
+    tools: cloneRequestValue(request.tools),
+    modelSettings: cloneRequestValue(request.modelSettings),
   });
   if (!scope.pending) {
     withheldInputs.delete(scope.agent);

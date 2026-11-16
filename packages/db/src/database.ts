@@ -951,13 +951,13 @@ export async function setRlsContext(db: Database, context: RlsContext): Promise<
 
 /** An advisory transaction lock taken while a scope is established. `key` is
  * either a literal key or a prefix completed with the scope's account id. */
-type RlsScopeLock = {
+export type RlsScopeLock = {
   key: string | { accountPrefix: string };
   mode: "shared" | "exclusive";
   hash: "extended" | "text";
 };
 
-type RlsScopeInput = {
+export type RlsScopeInput = {
   /** The tenant account, or null to resolve it from `workspaceId` within the
    * same statement. */
   accountId: string | null;
@@ -980,16 +980,215 @@ function sessionTenancyLock(workspaceId: string): RlsScopeLock {
   return { key: `session-tenancy:${workspaceId}`, mode: "shared", hash: "extended" };
 }
 
-function rlsScopeLockCall(lock: RlsScopeLock): SQL {
+function rlsScopeLockCall(lock: RlsScopeLock, keyValue: unknown): SQL {
   const key =
     typeof lock.key === "string"
-      ? sql`${lock.key}::text`
-      : sql`(${lock.key.accountPrefix}::text || resolved.account_id)`;
+      ? sql`${keyValue}::text`
+      : sql`(${keyValue}::text || resolved.account_id)`;
   const hashed =
     lock.hash === "extended" ? sql`hashtextextended(${key}, 0)` : sql`hashtext(${key})`;
   return lock.mode === "shared"
     ? sql`pg_advisory_xact_lock_shared(${hashed})`
     : sql`pg_advisory_xact_lock(${hashed})`;
+}
+
+/** Every value an RLS scope statement binds; the rest of its text is its shape. */
+export type RlsScopeValues = {
+  accountId: string | null;
+  workspaceId: string | null;
+  settingsWorkspaceId: string;
+  agentRootSessionId: string;
+  siteId: string;
+  siteViewerPrincipal: string;
+  /** Defined exactly when the subject GUC is set. */
+  subjectId: string | undefined;
+  /** Defined exactly when a session actor is in scope. */
+  privateFileOwner: string | undefined;
+  initiatingHumanSubjectId: string | undefined;
+  /** Each lock's literal key or account prefix, in lock order. */
+  lockKeys: string[];
+};
+
+type RlsScopeSlots = { [K in Exclude<keyof RlsScopeValues, "lockKeys">]: unknown } & {
+  lockKeys: unknown[];
+};
+
+/** @internal The reference builder; exported for statement equivalence tests. */
+export function buildRlsScopeStatement(input: RlsScopeInput, values: RlsScopeSlots): SQL {
+  const account =
+    input.accountId !== null
+      ? sql`${values.accountId}::text`
+      : sql`(select ${schema.workspaces.accountId}::text from ${schema.workspaces} where ${schema.workspaces.id} = ${values.workspaceId}::uuid)`;
+  const settings: SQL[] = [
+    sql`set_config('opengeni.account_id', resolved.account_id, true)`,
+    sql`set_config('opengeni.workspace_id', ${values.settingsWorkspaceId}::text, true)`,
+    sql`set_config('opengeni.lossless_content_writer', '1', true)`,
+    sql`set_config('opengeni.sandbox_recovery_protocol_v2', '1', true)`,
+    sql`set_config('opengeni.pending_tool_event_output_v1', '1', true)`,
+    sql`set_config('opengeni.session_variable_set_attachments_v1', '1', true)`,
+    sql`set_config('opengeni.shared_personal_choice_v1', '1', true)`,
+    sql`set_config('opengeni.site_session_audience_v1', '1', true)`,
+    sql`set_config('jit', 'off', true)`,
+    sql`set_config('opengeni.agent_root_session_id', ${values.agentRootSessionId}::text, true)`,
+    sql`set_config('opengeni.site_id', ${values.siteId}::text, true)`,
+    sql`set_config('opengeni.site_viewer_principal', ${values.siteViewerPrincipal}::text, true)`,
+  ];
+  if (values.subjectId !== undefined) {
+    settings.push(sql`set_config('opengeni.subject_id', ${values.subjectId}::text, true)`);
+  }
+  if (values.privateFileOwner !== undefined) {
+    settings.push(
+      sql`set_config('opengeni.private_file_owner', ${values.privateFileOwner}::text, true)`,
+      sql`set_config('opengeni.initiating_human_subject_id', ${values.initiatingHumanSubjectId}::text, true)`,
+    );
+  }
+  const steps: SQL[] = [
+    sql`parent as materialized (select
+      current_setting('opengeni.account_id', true) as account_id,
+      current_setting('opengeni.workspace_id', true) as workspace_id,
+      current_setting('opengeni.subject_id', true) as subject_id,
+      current_setting('opengeni.private_file_owner', true) as private_file_owner,
+      current_setting('opengeni.initiating_human_subject_id', true) as initiating_human_subject_id,
+      current_setting('opengeni.personal_resource_human_subject_id', true) as personal_resource_human_subject_id,
+      current_setting('opengeni.personal_resource_actor_subject_id', true) as personal_resource_actor_subject_id,
+      current_setting('opengeni.agent_root_session_id', true) as agent_root_session_id,
+      current_setting('opengeni.site_id', true) as site_id,
+      current_setting('opengeni.site_viewer_principal', true) as site_viewer_principal)`,
+    sql`resolved as materialized (select ${account} as account_id from parent)`,
+    sql`scope as materialized (select ${sql.join(
+      settings.map((setting, index) => sql`${setting} as ${sql.raw(`s${index}`)}`),
+      sql`, `,
+    )} from resolved where resolved.account_id is not null and resolved.account_id <> '')`,
+  ];
+  let last = "scope";
+  input.locks.forEach((lock, index) => {
+    const name = `lock_${index}`;
+    steps.push(
+      sql`${sql.raw(name)} as materialized (select ${rlsScopeLockCall(lock, values.lockKeys[index])} as locked from ${sql.raw(last)}, resolved)`,
+    );
+    last = name;
+  });
+  return sql`with ${sql.join(steps, sql`, `)}
+      select
+        resolved.account_id as resolved_account_id,
+        current_setting('opengeni.account_id', true) as account_id,
+        current_setting('opengeni.workspace_id', true) as workspace_id,
+        current_setting('opengeni.subject_id', true) as subject_id,
+        parent.account_id as parent_account_id,
+        parent.workspace_id as parent_workspace_id,
+        parent.subject_id as parent_subject_id,
+        parent.private_file_owner as parent_private_file_owner,
+        parent.initiating_human_subject_id as parent_initiating_human_subject_id,
+        parent.personal_resource_human_subject_id as parent_personal_resource_human_subject_id,
+        parent.personal_resource_actor_subject_id as parent_personal_resource_actor_subject_id,
+        parent.agent_root_session_id as parent_agent_root_session_id,
+        parent.site_id as parent_site_id,
+        parent.site_viewer_principal as parent_site_viewer_principal
+      from ${sql.raw(last)}, resolved, parent`;
+}
+
+type RlsScopeTemplate = { text: string[]; slots: Array<(values: RlsScopeValues) => unknown> };
+/**
+ * Compiled RLS scope statements per database dialect and shape. This
+ * statement runs at the start of nearly every transaction, and building and
+ * rendering its few hundred SQL chunks dominated its cost. Its text depends
+ * only on its shape (account given or resolved, subject, actor, lock kinds);
+ * every value is a bound parameter. A shape is rendered once with a marker in
+ * every value position, so the template records exactly which value each
+ * parameter is; later scopes of that shape bind their values into the
+ * rendered text, producing the identical statement and parameters.
+ */
+const rlsScopeTemplates = new WeakMap<object, Map<string, RlsScopeTemplate | null>>();
+
+function rlsScopeShape(input: RlsScopeInput, values: RlsScopeValues): string {
+  return [
+    input.accountId === null ? "resolve" : "account",
+    values.subjectId === undefined ? "-" : "subject",
+    values.privateFileOwner === undefined ? "-" : "actor",
+    ...input.locks.map(
+      (lock) => `${typeof lock.key === "string" ? "key" : "prefix"}:${lock.hash}:${lock.mode}`,
+    ),
+  ].join("|");
+}
+
+/** @internal The statement `applyRlsScope` runs; exported for equivalence tests. */
+export function rlsScopeStatement(db: Database, input: RlsScopeInput, values: RlsScopeValues): SQL {
+  const dialect = (db as unknown as { dialect?: { sqlToQuery?: unknown } }).dialect;
+  if (!dialect || typeof dialect.sqlToQuery !== "function") {
+    return buildRlsScopeStatement(input, values);
+  }
+  let templates = rlsScopeTemplates.get(dialect);
+  if (!templates) {
+    templates = new Map();
+    rlsScopeTemplates.set(dialect, templates);
+  }
+  const shape = rlsScopeShape(input, values);
+  let template = templates.get(shape);
+  if (template === undefined) {
+    template = compileRlsScopeTemplate(
+      input,
+      values,
+      dialect as { sqlToQuery(query: SQL): { sql: string; params: unknown[] } },
+    );
+    templates.set(shape, template);
+  }
+  if (!template) return buildRlsScopeStatement(input, values);
+  return sql(
+    template.text as unknown as TemplateStringsArray,
+    ...template.slots.map((slot) => slot(values)),
+  );
+}
+
+function compileRlsScopeTemplate(
+  input: RlsScopeInput,
+  values: RlsScopeValues,
+  dialect: { sqlToQuery(query: SQL): { sql: string; params: unknown[] } },
+): RlsScopeTemplate | null {
+  const readers = new Map<unknown, (values: RlsScopeValues) => unknown>();
+  const marker = (name: string, read: (values: RlsScopeValues) => unknown) => {
+    const value = `\u0000opengeni-rls-scope-slot:${name}\u0000`;
+    readers.set(value, read);
+    return value;
+  };
+  const query = dialect.sqlToQuery(
+    buildRlsScopeStatement(input, {
+      accountId: marker("accountId", (v) => v.accountId),
+      workspaceId: marker("workspaceId", (v) => v.workspaceId),
+      settingsWorkspaceId: marker("settingsWorkspaceId", (v) => v.settingsWorkspaceId),
+      agentRootSessionId: marker("agentRootSessionId", (v) => v.agentRootSessionId),
+      siteId: marker("siteId", (v) => v.siteId),
+      siteViewerPrincipal: marker("siteViewerPrincipal", (v) => v.siteViewerPrincipal),
+      subjectId:
+        values.subjectId === undefined ? undefined : marker("subjectId", (v) => v.subjectId),
+      privateFileOwner:
+        values.privateFileOwner === undefined
+          ? undefined
+          : marker("privateFileOwner", (v) => v.privateFileOwner),
+      initiatingHumanSubjectId:
+        values.privateFileOwner === undefined
+          ? undefined
+          : marker("initiatingHumanSubjectId", (v) => v.initiatingHumanSubjectId),
+      lockKeys: input.locks.map((_lock, index) => marker(`lock${index}`, (v) => v.lockKeys[index])),
+    }),
+  );
+  // The rendered text numbers each bound parameter in order. Anything else
+  // (an unexpected placeholder, a value that is not one of the markers) keeps
+  // this shape on the ordinary builder.
+  const text = query.sql.split(/\$\d+/);
+  const placeholders = query.sql.match(/\$\d+/g) ?? [];
+  if (
+    placeholders.length !== query.params.length ||
+    placeholders.some((placeholder, index) => placeholder !== `$${index + 1}`)
+  ) {
+    return null;
+  }
+  const slots: RlsScopeTemplate["slots"] = [];
+  for (const param of query.params) {
+    const read = readers.get(param);
+    if (!read) return null;
+    slots.push(read);
+  }
+  return { text, slots };
 }
 
 /**
@@ -1026,59 +1225,6 @@ async function applyRlsScope(db: Database, input: RlsScopeInput): Promise<Applie
   const actor = sessionRlsActorContext.getStore();
   const siteViewer = siteViewerRlsContext.getStore();
   const subjectId = input.subjectId ?? actor?.subjectId;
-  const account =
-    input.accountId !== null
-      ? sql`${input.accountId}::text`
-      : sql`(select ${schema.workspaces.accountId}::text from ${schema.workspaces} where ${schema.workspaces.id} = ${input.workspaceId}::uuid)`;
-  const settings: SQL[] = [
-    sql`set_config('opengeni.account_id', resolved.account_id, true)`,
-    sql`set_config('opengeni.workspace_id', ${input.workspaceId ?? ""}::text, true)`,
-    sql`set_config('opengeni.lossless_content_writer', '1', true)`,
-    sql`set_config('opengeni.sandbox_recovery_protocol_v2', '1', true)`,
-    sql`set_config('opengeni.pending_tool_event_output_v1', '1', true)`,
-    sql`set_config('opengeni.session_variable_set_attachments_v1', '1', true)`,
-    sql`set_config('opengeni.shared_personal_choice_v1', '1', true)`,
-    sql`set_config('opengeni.site_session_audience_v1', '1', true)`,
-    sql`set_config('jit', 'off', true)`,
-    sql`set_config('opengeni.agent_root_session_id', ${actor?.agentRootSessionId ?? ""}::text, true)`,
-    sql`set_config('opengeni.site_id', ${siteViewer?.siteId ?? ""}::text, true)`,
-    sql`set_config('opengeni.site_viewer_principal', ${siteViewer?.principal ?? ""}::text, true)`,
-  ];
-  if (subjectId !== undefined) {
-    settings.push(sql`set_config('opengeni.subject_id', ${subjectId}::text, true)`);
-  }
-  if (actor) {
-    settings.push(
-      sql`set_config('opengeni.private_file_owner', ${actor.privateFileOwnerSubjectId ?? ""}::text, true)`,
-      sql`set_config('opengeni.initiating_human_subject_id', ${actor.initiatingHumanSubjectId ?? ""}::text, true)`,
-    );
-  }
-  const steps: SQL[] = [
-    sql`parent as materialized (select
-      current_setting('opengeni.account_id', true) as account_id,
-      current_setting('opengeni.workspace_id', true) as workspace_id,
-      current_setting('opengeni.subject_id', true) as subject_id,
-      current_setting('opengeni.private_file_owner', true) as private_file_owner,
-      current_setting('opengeni.initiating_human_subject_id', true) as initiating_human_subject_id,
-      current_setting('opengeni.personal_resource_human_subject_id', true) as personal_resource_human_subject_id,
-      current_setting('opengeni.personal_resource_actor_subject_id', true) as personal_resource_actor_subject_id,
-      current_setting('opengeni.agent_root_session_id', true) as agent_root_session_id,
-      current_setting('opengeni.site_id', true) as site_id,
-      current_setting('opengeni.site_viewer_principal', true) as site_viewer_principal)`,
-    sql`resolved as materialized (select ${account} as account_id from parent)`,
-    sql`scope as materialized (select ${sql.join(
-      settings.map((setting, index) => sql`${setting} as ${sql.raw(`s${index}`)}`),
-      sql`, `,
-    )} from resolved where resolved.account_id is not null and resolved.account_id <> '')`,
-  ];
-  let last = "scope";
-  input.locks.forEach((lock, index) => {
-    const name = `lock_${index}`;
-    steps.push(
-      sql`${sql.raw(name)} as materialized (select ${rlsScopeLockCall(lock)} as locked from ${sql.raw(last)}, resolved)`,
-    );
-    last = name;
-  });
   const [row] = await rawRows<{
     resolved_account_id: string;
     account_id: string | null;
@@ -1096,23 +1242,20 @@ async function applyRlsScope(db: Database, input: RlsScopeInput): Promise<Applie
     parent_site_viewer_principal: string | null;
   }>(
     db,
-    sql`with ${sql.join(steps, sql`, `)}
-      select
-        resolved.account_id as resolved_account_id,
-        current_setting('opengeni.account_id', true) as account_id,
-        current_setting('opengeni.workspace_id', true) as workspace_id,
-        current_setting('opengeni.subject_id', true) as subject_id,
-        parent.account_id as parent_account_id,
-        parent.workspace_id as parent_workspace_id,
-        parent.subject_id as parent_subject_id,
-        parent.private_file_owner as parent_private_file_owner,
-        parent.initiating_human_subject_id as parent_initiating_human_subject_id,
-        parent.personal_resource_human_subject_id as parent_personal_resource_human_subject_id,
-        parent.personal_resource_actor_subject_id as parent_personal_resource_actor_subject_id,
-        parent.agent_root_session_id as parent_agent_root_session_id,
-        parent.site_id as parent_site_id,
-        parent.site_viewer_principal as parent_site_viewer_principal
-      from ${sql.raw(last)}, resolved, parent`,
+    rlsScopeStatement(db, input, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      settingsWorkspaceId: input.workspaceId ?? "",
+      agentRootSessionId: actor?.agentRootSessionId ?? "",
+      siteId: siteViewer?.siteId ?? "",
+      siteViewerPrincipal: siteViewer?.principal ?? "",
+      subjectId,
+      privateFileOwner: actor ? (actor.privateFileOwnerSubjectId ?? "") : undefined,
+      initiatingHumanSubjectId: actor ? (actor.initiatingHumanSubjectId ?? "") : undefined,
+      lockKeys: input.locks.map((lock) =>
+        typeof lock.key === "string" ? lock.key : lock.key.accountPrefix,
+      ),
+    }),
   );
   if (!row) {
     if (input.accountId === null) throw new WorkspaceNotFoundError(input.workspaceId!);

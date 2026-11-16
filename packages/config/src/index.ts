@@ -132,6 +132,11 @@ import { isIP } from "node:net";
 import { z } from "zod";
 import { errorMessage } from "@opengeni/contracts/values";
 
+/** Parsed settings JSON per parser, keyed by raw text (see memoizedSettingsJson). */
+const settingsJsonParseCaches = new Map<(raw: string) => unknown, Map<string, unknown>>();
+/** Distinct deployment and workspace catalog texts a process keeps parsed, per parser. */
+const SETTINGS_JSON_PARSE_CACHE_ENTRIES = 64;
+
 /**
  * Default maximum provider silence on a generic OpenAI-compatible model stream
  * while the worker is waiting for the next chunk. Matches the Codex transport
@@ -4171,7 +4176,101 @@ const ModelNote = z
     message: "model notes must not contain newlines or the | field separator",
   });
 
+/**
+ * Parse settings JSON (model providers, pricing, cost policy) once per raw
+ * text. These are re-read on every model call and their schema validation is
+ * the expensive part. Each call still gets its own deep copy, so a caller
+ * that changes its result cannot affect another caller. A failure is never
+ * cached: invalid text throws afresh, with the parser's own error, every time.
+ * Only plain data is kept (what JSON text parses to); anything else is parsed
+ * on every call as before.
+ */
+function memoizedSettingsJson<T>(parse: (raw: string) => T, raw: string): T {
+  if (typeof raw !== "string") return parse(raw);
+  let parsed = settingsJsonParseCaches.get(parse) as Map<string, T> | undefined;
+  if (!parsed) {
+    parsed = new Map<string, T>();
+    settingsJsonParseCaches.set(parse, parsed);
+  }
+  const known = parsed.get(raw);
+  if (known !== undefined) {
+    // Refresh recency; the least recently used text is evicted first.
+    parsed.delete(raw);
+    parsed.set(raw, known);
+    return copyPlainData(known, new Map(), false) as T;
+  }
+  const value = parse(raw);
+  const retained = copyPlainData(value, new Map(), true);
+  if (retained === NOT_PLAIN_DATA) return value;
+  parsed.set(raw, retained as T);
+  if (parsed.size > SETTINGS_JSON_PARSE_CACHE_ENTRIES) {
+    parsed.delete(parsed.keys().next().value!);
+  }
+  return value;
+}
+
+const NOT_PLAIN_DATA: unique symbol = Symbol("not plain data");
+
+/**
+ * Deep copy of ordinary objects with writable, configurable, enumerable data
+ * properties, dense arrays and primitives, keeping shared references shared.
+ * When `check` is set, returns NOT_PLAIN_DATA for anything else (a class
+ * instance, accessor, function, symbol, sparse array); a value that passed
+ * the check once and was never handed out is copied without it.
+ */
+function copyPlainData(value: unknown, copies: Map<object, unknown>, check: boolean): unknown {
+  if (typeof value === "function" || typeof value === "symbol") return NOT_PLAIN_DATA;
+  if (typeof value !== "object" || value === null) return value;
+  const known = copies.get(value);
+  if (known !== undefined) return known;
+  if (Array.isArray(value)) {
+    if (check && Object.getPrototypeOf(value) !== Array.prototype) return NOT_PLAIN_DATA;
+    const out: unknown[] = new Array(value.length);
+    copies.set(value, out);
+    for (let index = 0; index < value.length; index += 1) {
+      if (check && !Object.hasOwn(value, index)) return NOT_PLAIN_DATA;
+      const entry = copyPlainData(value[index], copies, check);
+      if (entry === NOT_PLAIN_DATA) return NOT_PLAIN_DATA;
+      out[index] = entry;
+    }
+    if (check && Reflect.ownKeys(value).length !== value.length + 1) return NOT_PLAIN_DATA;
+    return out;
+  }
+  if (check && Object.getPrototypeOf(value) !== Object.prototype) return NOT_PLAIN_DATA;
+  const out: Record<string, unknown> = {};
+  copies.set(value, out);
+  const keys = check ? Reflect.ownKeys(value) : Object.keys(value);
+  for (const key of keys) {
+    if (check) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key)!;
+      if (
+        typeof key !== "string" ||
+        !("value" in descriptor) ||
+        !descriptor.enumerable ||
+        !descriptor.writable ||
+        !descriptor.configurable
+      )
+        return NOT_PLAIN_DATA;
+    }
+    const entry = copyPlainData((value as Record<string, unknown>)[key as string], copies, check);
+    if (entry === NOT_PLAIN_DATA) return NOT_PLAIN_DATA;
+    if (key === "__proto__")
+      Object.defineProperty(out, key, {
+        value: entry,
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
+    else out[key as string] = entry;
+  }
+  return out;
+}
+
 export function parseModelCostPolicyJson(raw: string): Record<string, ModelCostClass> {
+  return memoizedSettingsJson(parseModelCostPolicyJsonOnce, raw);
+}
+
+function parseModelCostPolicyJsonOnce(raw: string): Record<string, ModelCostClass> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -12213,6 +12312,12 @@ export function parseMcpServers(raw: string | undefined): unknown[] | undefined 
 export function parseModelPricingJson(
   raw: string,
 ): Record<string, ModelPricing | ModelPricingScheduleV1> {
+  return memoizedSettingsJson(parseModelPricingJsonOnce, raw);
+}
+
+function parseModelPricingJsonOnce(
+  raw: string,
+): Record<string, ModelPricing | ModelPricingScheduleV1> {
   if (!raw.trim() || raw.trim() === "{}") {
     return {};
   }
@@ -12394,6 +12499,10 @@ export function sandboxWarmRateMicrosPerSecond(settings: Settings, backend: stri
  * name so a malformed registry fails fast at boot (validateSettings calls this).
  */
 export function parseModelProvidersJson(raw: string): RegistryProvider[] {
+  return memoizedSettingsJson(parseModelProvidersJsonOnce, raw);
+}
+
+function parseModelProvidersJsonOnce(raw: string): RegistryProvider[] {
   if (!raw.trim() || raw.trim() === "[]") {
     return [];
   }

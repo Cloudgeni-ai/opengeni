@@ -42530,6 +42530,67 @@ export async function listSessionEvents(
   });
 }
 
+/**
+ * The recorded model responses of a session (optionally one turn, one attempt
+ * or a recent window) whose deferred ledger writes have not finished, in
+ * session order. A response's usage event (or, for a fenced attempt, its
+ * `turn.event.rejected_late` audit row) records the settlement's charges and
+ * the idempotency key of its last ledger write (`completionKey`); a response
+ * is owed while no usage or credit ledger row has that key. One query; a
+ * settled response costs one index probe per table and no write.
+ */
+export async function listOwedModelUsageSettlements(
+  db: Database,
+  workspaceId: string,
+  input: { sessionId: string; turnId?: string; attemptId?: string; since?: Date },
+): Promise<
+  Array<{
+    id: string;
+    accountId: string;
+    turnId: string | null;
+    turnAttemptId: string | null;
+    /** A fenced attempt's `turn.event.rejected_late` audit row. */
+    rejected: boolean;
+    /** The usage event's payload (unwrapped from a rejected audit row). */
+    payload: unknown;
+  }>
+> {
+  const events = schema.sessionEvents;
+  const usagePayload = sql`(case when ${events.type} = 'agent.model.usage' then ${events.payload} else ${events.payload} -> 'rejectedPayload' end)`;
+  const completionKey = sql`(${usagePayload} -> 'settlement' -> 'charges' ->> 'completionKey')`;
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const filters: SQL[] = [
+      eq(events.workspaceId, workspaceId),
+      eq(events.sessionId, input.sessionId),
+      or(
+        and(eq(events.type, "agent.model.usage"), eq(events.turnAssociation, "current")),
+        and(
+          eq(events.type, "turn.event.rejected_late"),
+          sql`${events.payload} ->> 'rejectedType' = 'agent.model.usage'`,
+        ),
+      )!,
+      sql`${completionKey} is not null`,
+      sql`not exists (select 1 from ${schema.usageEvents} where ${schema.usageEvents.idempotencyKey} = ${completionKey})`,
+      sql`not exists (select 1 from ${schema.creditLedgerEntries} where ${schema.creditLedgerEntries.idempotencyKey} = ${completionKey})`,
+    ];
+    if (input.turnId) filters.push(eq(events.turnId, input.turnId));
+    if (input.attemptId) filters.push(eq(events.turnAttemptId, input.attemptId));
+    if (input.since) filters.push(gte(events.createdAt, input.since));
+    return await scopedDb
+      .select({
+        id: events.id,
+        accountId: events.accountId,
+        turnId: events.turnId,
+        turnAttemptId: events.turnAttemptId,
+        rejected: sql<boolean>`(${events.type} <> 'agent.model.usage')`,
+        payload: sql<unknown>`${usagePayload}`,
+      })
+      .from(events)
+      .where(and(...filters))
+      .orderBy(asc(events.sequence));
+  });
+}
+
 function normalizeEventSequence(value: number | undefined, fallback: number): number {
   if (value === undefined || !Number.isFinite(value)) {
     return fallback;

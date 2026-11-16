@@ -105,10 +105,18 @@ function isHighSurrogate(code: number): boolean {
 /** Split text into content-defined chunks; never splits a surrogate pair. */
 export function chunkTextByContent(text: string): string[] {
   if (text.length <= CHUNK_MIN_UNITS) return [text];
-  const chunks: string[] = [];
-  let start = 0;
+  return chunkTextFrom(text, 0, []);
+}
+
+/**
+ * Continue chunking at `start`, which must be 0 or a chunk boundary. The
+ * rolling hash restarts at every boundary, so chunks after a boundary depend
+ * only on the text from it: this is exactly what a whole-text pass appends.
+ */
+function chunkTextFrom(text: string, from: number, chunks: string[]): string[] {
+  let start = from;
   let hash = 0;
-  for (let index = 0; index < text.length; index += 1) {
+  for (let index = from; index < text.length; index += 1) {
     const code = text.charCodeAt(index);
     hash = ((hash << 1) + GEAR[(code ^ (code >>> 8)) & 0xff]!) >>> 0;
     const length = index + 1 - start;
@@ -154,19 +162,32 @@ export function encodeAttemptToolCatalogContent(
 /** Externalize the repeated instruction/tool/skill prefix and the raw request body. */
 export function encodeModelContextSnapshotContent(
   snapshot: ModelContextSnapshot,
+  cache?: ModelContextSnapshotContentCache,
 ): EncodedValue<ModelContextSnapshot, ModelContextSnapshotContentRefs> {
   const blobs = new Map<string, unknown>();
   const body = snapshot.providerRequest?.body;
+  const field = (name: SnapshotContentField) => {
+    const value = snapshot[name];
+    if (!cache) return addBlob(blobs, value);
+    const digest = cache.fieldDigest(name, value);
+    if (!blobs.has(digest)) blobs.set(digest, value);
+    return digest;
+  };
+  const bodyChunks = (text: string) => {
+    if (!cache) return chunkTextByContent(text).map((chunk) => addBlob(blobs, chunk));
+    const { chunks, digests } = cache.bodyChunks(text);
+    return digests.map((digest, index) => {
+      if (!blobs.has(digest)) blobs.set(digest, chunks[index]);
+      return digest;
+    });
+  };
   const refs: ModelContextSnapshotContentRefs = {
     v: SESSION_CONTENT_REFS_VERSION,
-    instructions: addBlob(blobs, snapshot.instructions),
-    layers: addBlob(blobs, snapshot.layers),
-    tools: addBlob(blobs, snapshot.tools),
-    skills: addBlob(blobs, snapshot.skills),
-    body:
-      typeof body === "string"
-        ? chunkTextByContent(body).map((chunk) => addBlob(blobs, chunk))
-        : null,
+    instructions: field("instructions"),
+    layers: field("layers"),
+    tools: field("tools"),
+    skills: field("skills"),
+    body: typeof body === "string" ? bodyChunks(body) : null,
   };
   const stored: ModelContextSnapshot = {
     ...snapshot,
@@ -182,6 +203,186 @@ export function encodeModelContextSnapshotContent(
 }
 
 type BlobReader = Pick<Database, "select">;
+
+type SnapshotContentField = "instructions" | "layers" | "tools" | "skills";
+type BodyChunks = {
+  readonly text: string;
+  readonly chunks: readonly string[];
+  readonly digests: readonly string[];
+  /** `Buffer.byteLength(JSON.stringify(chunk))` per chunk. */
+  readonly jsonBytes: readonly number[];
+};
+type FieldMemo = {
+  /** Private copy: never handed out, so nothing can change it after the fact. */
+  copy: unknown;
+  digest: string;
+  /** Measured from the copy on first reuse; equal plain data prints alike. */
+  jsonBytes?: number;
+};
+/** Recent values per field; a run alternates SDK-prefix and wire-body captures. */
+const FIELD_MEMO_DEPTH = 2;
+
+/**
+ * Per-attempt memo for consecutive model-context snapshots of one run. Each
+ * request repeats the previous request's instructions, layers, tools and
+ * skills, and its body starts with the previous body. The memo recognizes a
+ * repeated value by comparing it with a private copy (structure and every
+ * primitive) and the shared prefix of a body chunk by chunk, so only new
+ * content is serialized and hashed. Every digest, chunk and byte count is
+ * exactly what the uncached functions compute.
+ */
+export class ModelContextSnapshotContentCache {
+  private readonly fields = new Map<SnapshotContentField, FieldMemo[]>();
+  private body: BodyChunks | null = null;
+
+  /** `Buffer.byteLength(JSON.stringify(value))` of a repeated field, when known. */
+  fieldJsonBytes(name: SnapshotContentField, value: unknown): number | undefined {
+    const memo = this.match(name, value);
+    if (!memo) return undefined;
+    memo.jsonBytes ??= Buffer.byteLength(JSON.stringify(memo.copy), "utf8");
+    return memo.jsonBytes;
+  }
+
+  fieldDigest(name: SnapshotContentField, value: unknown): string {
+    const known = this.match(name, value);
+    if (known) return known.digest;
+    const digest = digestContentValue(value);
+    let copy: unknown;
+    try {
+      copy = structuredClone(value);
+    } catch {
+      return digest;
+    }
+    const memos = this.fields.get(name) ?? [];
+    memos.unshift({ copy, digest });
+    memos.length = Math.min(memos.length, FIELD_MEMO_DEPTH);
+    this.fields.set(name, memos);
+    return digest;
+  }
+
+  /** `chunkTextByContent(text)` and each chunk's digest, reusing the shared prefix. */
+  bodyChunks(text: string): BodyChunks {
+    if (this.body?.text === text) return this.body;
+    const chunks: string[] = [];
+    const digests: string[] = [];
+    const jsonBytes: number[] = [];
+    const previous = this.body;
+    let offset = 0;
+    if (previous && text.length > CHUNK_MIN_UNITS) {
+      // A previous chunk ended at a boundary only if another chunk followed it.
+      for (let index = 0; index < previous.chunks.length - 1; index += 1) {
+        const chunk = previous.chunks[index]!;
+        if (!text.startsWith(chunk, offset)) break;
+        chunks.push(chunk);
+        digests.push(previous.digests[index]!);
+        jsonBytes.push(previous.jsonBytes[index]!);
+        offset += chunk.length;
+      }
+    }
+    const reused = chunks.length;
+    if (text.length <= CHUNK_MIN_UNITS) chunks.push(text);
+    else chunkTextFrom(text, offset, chunks);
+    for (let index = reused; index < chunks.length; index += 1) {
+      const encoded = canonicalJsonForContentDigest(chunks[index]!);
+      digests.push(createHash("sha256").update(encoded, "utf8").digest("hex"));
+      jsonBytes.push(Buffer.byteLength(encoded, "utf8"));
+    }
+    this.body = { text, chunks, digests, jsonBytes };
+    return this.body;
+  }
+
+  /** `Buffer.byteLength(JSON.stringify(text))`; chunks never split a surrogate pair. */
+  bodyJsonBytes(text: string): number {
+    const { jsonBytes } = this.bodyChunks(text);
+    return jsonBytes.reduce((total, bytes) => total + bytes - 2, 2);
+  }
+
+  private match(name: SnapshotContentField, value: unknown): FieldMemo | undefined {
+    const memos = this.fields.get(name);
+    if (!memos) return undefined;
+    for (const memo of memos) if (samePlainValue(value, memo.copy)) return memo;
+    return undefined;
+  }
+}
+
+/**
+ * Same plain data: ordinary objects with the same own enumerable keys in the
+ * same order, dense arrays, and identical primitives. Anything else (a class
+ * instance, a function, NaN) is reported different, which only costs a
+ * recomputation. Equal values serialize identically under any JSON encoding.
+ */
+function samePlainValue(value: unknown, copy: unknown): boolean {
+  if (typeof value !== "object" || value === null) {
+    return value === copy && typeof value !== "function" && typeof value !== "symbol";
+  }
+  if (typeof copy !== "object" || copy === null) return false;
+  if (Array.isArray(value)) {
+    if (Object.getPrototypeOf(value) !== Array.prototype) return false;
+    if (!Array.isArray(copy) || value.length !== copy.length) return false;
+    for (let index = 0; index < value.length; index += 1) {
+      if (!(index in value) || !(index in copy)) return false;
+      if (!samePlainValue(value[index], copy[index])) return false;
+    }
+    return Object.keys(value).length === value.length;
+  }
+  if (Object.getPrototypeOf(value) !== Object.prototype || Array.isArray(copy)) return false;
+  const keys = Object.keys(value);
+  const copyKeys = Object.keys(copy);
+  if (keys.length !== copyKeys.length) return false;
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index]!;
+    if (key !== copyKeys[index]) return false;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !("value" in descriptor)) return false;
+    if (!samePlainValue(descriptor.value, (copy as Record<string, unknown>)[key])) return false;
+  }
+  return true;
+}
+
+/**
+ * `Buffer.byteLength(JSON.stringify(snapshot), "utf8")` for a parsed (plain)
+ * snapshot, reusing the memo for repeated fields and the request body.
+ */
+export function modelContextSnapshotJsonUtf8Bytes(
+  snapshot: ModelContextSnapshot,
+  cache?: ModelContextSnapshotContentCache,
+): number {
+  if (!cache || Object.getPrototypeOf(snapshot) !== Object.prototype || "toJSON" in snapshot)
+    return Buffer.byteLength(JSON.stringify(snapshot), "utf8");
+  let total = 2;
+  let members = 0;
+  for (const key of Object.keys(snapshot)) {
+    const value = (snapshot as Record<string, unknown>)[key];
+    let bytes: number | undefined;
+    if (key === "instructions" || key === "layers" || key === "tools" || key === "skills") {
+      bytes = cache.fieldJsonBytes(key, value);
+    } else if (key === "providerRequest" && isBodyCarrier(value)) {
+      bytes =
+        Buffer.byteLength(JSON.stringify({ ...value, body: null }), "utf8") -
+        4 +
+        cache.bodyJsonBytes(value.body);
+    }
+    if (bytes === undefined) {
+      const encoded = JSON.stringify(value);
+      if (encoded === undefined) continue;
+      bytes = Buffer.byteLength(encoded, "utf8");
+    }
+    total += Buffer.byteLength(JSON.stringify(key), "utf8") + 1 + bytes;
+    members += 1;
+  }
+  return total + Math.max(0, members - 1);
+}
+
+function isBodyCarrier(value: unknown): value is Record<string, unknown> & { body: string } {
+  return (
+    !!value &&
+    typeof value === "object" &&
+    Object.getPrototypeOf(value) === Object.prototype &&
+    typeof (value as { body?: unknown }).body === "string" &&
+    !("toJSON" in value)
+  );
+}
+
 type BlobWriter = Pick<Database, "select" | "insert" | "execute">;
 const BLOB_STATEMENT_BATCH = 500;
 
