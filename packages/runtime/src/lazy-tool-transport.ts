@@ -281,6 +281,7 @@ type ConnectableIntegrations = {
 export type DiscoveryCardSkipReason =
   | "several_named"
   | "not_distinctive"
+  | "connected_alternative"
   | "lookup_timed_out"
   | "lookup_failed"
   | "no_card_tool";
@@ -331,12 +332,14 @@ export type ConnectCardRequest = (
 
 /**
  * A catalog integration the person can connect from a card in this chat, and
- * its vendor domain when the catalog names one.
+ * its vendor domain and catalog category (the kind of need it serves) when
+ * the catalog names them.
  */
 export type ConnectableIntegration = {
   capabilityId: string;
   name: string;
   providerDomain?: string;
+  category?: string;
 };
 
 /**
@@ -630,6 +633,9 @@ export function connectableIntegrationsFromCatalogResult(
         ...(typeof match.providerDomain === "string" && match.providerDomain
           ? { providerDomain: match.providerDomain }
           : {}),
+        ...(typeof match.category === "string" && match.category
+          ? { category: match.category }
+          : {}),
       });
     }
   }
@@ -638,6 +644,11 @@ export function connectableIntegrationsFromCatalogResult(
 
 /** Bounded so a slow catalog read never holds a search result back for long. */
 const CONNECTABLE_LOOKUP_TIMEOUT_MS = 2_000;
+/**
+ * Catalog categories that name no particular need (see connectedAccountKind
+ * in core): a connected account of one is no alternative to anything.
+ */
+const GENERIC_CATALOG_CATEGORIES: ReadonlySet<string> = new Set(["integrations", "custom"]);
 /**
  * How long a search that strongly matched installed tools waits for the
  * catalog: above a typical read (about half a second on staging, rarely over
@@ -1882,6 +1893,13 @@ export class LazyToolRuntime {
           distinctive.some((integration) => integration.capabilityId === named[0]!.capabilityId))
           ? named[0]
           : undefined;
+      // A search names an integration in the model's words, not necessarily
+      // the person's. When the person already has a connected account of the
+      // same kind in this turn, its tools may do the task, so the search does
+      // not show the card by itself; the result still names the integration
+      // and the model can request its card.
+      if (clearlyNamed && this.connectedAlternativeTo(clearlyNamed))
+        return { named, skipped: "connected_alternative" };
       if (clearlyNamed) return { named, clearlyNamed };
       if (named.length) {
         const skipped = named.length > 1 ? "several_named" : "not_distinctive";
@@ -1902,6 +1920,26 @@ export class LazyToolRuntime {
         (error instanceof Error && error.name === "TimeoutError");
       return { named: [], skipped: timedOut ? "lookup_timed_out" : "lookup_failed" };
     }
+  }
+
+  /**
+   * Whether this turn has a connected account of another integration that
+   * serves the same kind of need as the given one (the same specific catalog
+   * category, such as "communication"): Outlook Mail beside an unconnected
+   * Gmail. Generic categories say nothing about the need and never count.
+   */
+  private connectedAlternativeTo(integration: ConnectableIntegration): boolean {
+    const kind = integration.category;
+    if (!kind || GENERIC_CATALOG_CATEGORIES.has(kind)) return false;
+    for (const account of this.connectedAccounts?.().values() ?? []) {
+      if (account.kind !== kind) continue;
+      const owner: IntegrationOwner = {
+        name: account.connector,
+        ...(account.providerDomain ? { providerDomain: account.providerDomain } : {}),
+      };
+      if (!ownsIntegration(owner, integration)) return true;
+    }
+    return false;
   }
 
   /**
