@@ -137,6 +137,39 @@ export async function readEffectiveNangoIntegrations(
 }
 
 // ---------------------------------------------------------------------------
+// One person's Nango connections
+// ---------------------------------------------------------------------------
+
+/**
+ * Serializes, deployment-wide, every change to which Nango connection one
+ * person's rows of one Nango integration stand for: storing a connect,
+ * sharing it across organizations, and deciding that a Nango connection is
+ * no longer used and may be deleted. Holds a transaction-scoped advisory lock
+ * on the caller's open transaction.
+ */
+export async function lockNangoPersonIntegration(
+  tx: Database,
+  input: { subjectId: string; providerConfigKey: string },
+): Promise<void> {
+  await tx.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`nango-person:${input.providerConfigKey}:${input.subjectId}`}, 0))`,
+  );
+}
+
+/** `fn` in one transaction that holds `lockNangoPersonIntegration`. */
+export async function withNangoPersonIntegrationLock<T>(
+  db: Database,
+  input: { subjectId: string; providerConfigKey: string },
+  fn: (tx: Database) => Promise<T>,
+): Promise<T> {
+  return await db.transaction(async (tx) => {
+    const scoped = tx as unknown as Database;
+    await lockNangoPersonIntegration(scoped, input);
+    return await fn(scoped);
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Usage events
 // ---------------------------------------------------------------------------
 

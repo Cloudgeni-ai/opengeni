@@ -155,6 +155,7 @@ export const maintainBrowserStateArtifacts = defaultControlActivities.maintainBr
 export const reconcileRecentModelCallFacts = defaultControlActivities.reconcileRecentModelCallFacts;
 export const recordRecentTurnTimingProfiles =
   defaultControlActivities.recordRecentTurnTimingProfiles;
+export const sweepUnusedNangoConnections = defaultControlActivities.sweepUnusedNangoConnections;
 export const maintainSiteAuthConnections = defaultControlActivities.maintainSiteAuthConnections;
 export const dispatchSessionWorkflowWakes = defaultControlActivities.dispatchSessionWorkflowWakes;
 export const maintainSessionWorkflowWakes = defaultControlActivities.maintainSessionWorkflowWakes;

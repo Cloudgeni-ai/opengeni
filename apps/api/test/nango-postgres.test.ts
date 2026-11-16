@@ -4,8 +4,11 @@
  * account reuses its row and deletes the replaced Nango connection, while a
  * different account is a new row; the signed webhook marks a connection as
  * needing reconnection only when Nango still reports the failure, and revokes
- * it on deletion; disconnecting deletes the Nango connection; and the usage
- * API refuses another organization.
+ * it on deletion; disconnecting deletes the Nango connection; the same
+ * account in several organizations shares one Nango connection, deleted only
+ * with its last row; the sweep deletes what no row stands for, duplicates and
+ * connections Nango can no longer refresh; and the usage API refuses another
+ * organization.
  */
 import { createHmac, randomBytes } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -17,7 +20,14 @@ import {
   type IntegrationBackendSetting,
   type Permission,
 } from "@opengeni/contracts";
-import { bootstrapWorkspace, createDb, getConnectionMetadata, type DbClient } from "@opengeni/db";
+import { sweepNangoConnections } from "@opengeni/core";
+import {
+  bootstrapWorkspace,
+  createDb,
+  getConnectionMetadata,
+  revokeConnection,
+  type DbClient,
+} from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
@@ -73,7 +83,8 @@ afterAll(async () => {
 
 type Owner = { accountId: string; workspaceId: string; subjectId: string };
 
-async function owner(name: string): Promise<Owner> {
+/** A new organization and workspace; `subjectId` makes the same person a member of another one. */
+async function owner(name: string, subjectId?: string): Promise<Owner> {
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "test",
@@ -82,7 +93,7 @@ async function owner(name: string): Promise<Owner> {
     workspaceExternalSource: "test",
     workspaceExternalId: suffix,
     workspaceName: `${name} workspace`,
-    subjectId: `user:${suffix}`,
+    subjectId: subjectId ?? `user:${suffix}`,
   });
   const grant = access.workspaceGrants[0]!;
   // A member of the organization, as every person connecting an account is.
@@ -107,8 +118,11 @@ function fakeNango() {
     authErrors: number;
     /** GET /connections/{id} refreshes the token; Nango answers 424 when that fails. */
     refreshFails?: boolean;
+    created?: string;
   };
   const remote: Remote[] = [];
+  /** Nango connection ids whose deletion fails. */
+  const failDeletes = new Set<string>();
   const requests: Array<{ method: string; url: URL }> = [];
   const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(String(input));
@@ -131,7 +145,7 @@ function fakeNango() {
             connection_id: entry.connectionId,
             provider_config_key: "google-mail",
             provider: "google-mail",
-            created: "2026-11-13T00:00:00.000Z",
+            created: entry.created ?? "2026-11-13T00:00:00.000Z",
             tags: entry.tags,
             errors: Array.from({ length: entry.authErrors }, () => ({ type: "auth" })),
           })),
@@ -157,7 +171,12 @@ function fakeNango() {
           })
         : new Response("", { status: 404 });
     }
-    if (single && method === "DELETE") return new Response(null, { status: 204 });
+    if (single && method === "DELETE") {
+      if (failDeletes.has(single[1]!)) return new Response("unavailable", { status: 503 });
+      const index = remote.findIndex((candidate) => candidate.connectionId === single[1]);
+      if (index >= 0) remote.splice(index, 1);
+      return new Response(null, { status: 204 });
+    }
     if (url.pathname === "/proxy/gmail/v1/users/me/profile") {
       const entry = remote.find(
         (candidate) => candidate.connectionId === headers.get("connection-id"),
@@ -168,7 +187,12 @@ function fakeNango() {
     }
     return new Response("not found", { status: 404 });
   }) as typeof fetch;
-  return { remote, requests, fetchImpl };
+  const deleted = (connectionId: string) =>
+    requests.some(
+      (request) =>
+        request.method === "DELETE" && request.url.pathname === `/connections/${connectionId}`,
+    );
+  return { remote, requests, failDeletes, deleted, fetchImpl };
 }
 
 async function signedState(target: Owner): Promise<string> {
@@ -240,6 +264,40 @@ function webhook(target: Owner, connectionId: string, body: Record<string, unkno
     signature: createHmac("sha256", SIGNING_KEY).update(rawBody).digest("hex"),
   };
 }
+
+/** As the disconnect route: revoke the row, then delete its Nango connection. */
+async function disconnect(
+  target: Owner,
+  connectionId: string,
+  nango: ReturnType<typeof fakeNango>,
+) {
+  const connection = await getConnectionMetadata(
+    client.db,
+    target.workspaceId,
+    connectionId,
+    target.subjectId,
+  );
+  expect(connection).not.toBeNull();
+  expect(
+    await revokeConnection(
+      client.db,
+      target.workspaceId,
+      connectionId,
+      target.subjectId,
+      connection!.version,
+    ),
+  ).not.toBeNull();
+  await deleteNangoConnectionFor(
+    { db: client.db, settings, fetchImpl: nango.fetchImpl },
+    connection!,
+  );
+}
+
+function sweepDeps(nango: ReturnType<typeof fakeNango>) {
+  return { db: client.db, settings, fetchImpl: nango.fetchImpl };
+}
+
+const HOUR = 60 * 60 * 1000;
 
 describe("Nango connections in PostgreSQL", () => {
   test("completion stores reported scopes; same account reuses, another account adds", async () => {
@@ -407,13 +465,6 @@ describe("Nango connections in PostgreSQL", () => {
       fetchImpl: nango.fetchImpl,
       nangoBackends: async () => backends,
     };
-    // The backup finalizer ignores it.
-    expect(
-      await handleNangoWebhook(
-        deps,
-        webhook(target, "nx-1", { operation: "creation", success: true, tags }),
-      ),
-    ).toBe("unknown_connection");
     // The page's completion refuses it and stops its Nango billing.
     await expect(
       completeNangoConnect(deps, {
@@ -422,11 +473,29 @@ describe("Nango connections in PostgreSQL", () => {
       }),
     ).rejects.toMatchObject({ status: 422 });
     expect(await nangoRows(target)).toHaveLength(0);
+    expect(nango.deleted("nx-1")).toBe(true);
+    // The backup finalizer does not store it either, and stops its billing too.
+    const closedTags = nangoAttemptTags({
+      ...target,
+      attemptId: "closed",
+      integrationKey: "gmail",
+    });
+    nango.remote.push({
+      connectionId: "nx-2",
+      tags: closedTags,
+      email: "stale@example.com",
+      scope: "https://mail.google.com/",
+      authErrors: 1,
+      refreshFails: true,
+    });
     expect(
-      nango.requests.some(
-        (request) => request.method === "DELETE" && request.url.pathname === "/connections/nx-1",
+      await handleNangoWebhook(
+        deps,
+        webhook(target, "nx-2", { operation: "creation", success: true, tags: closedTags }),
       ),
-    ).toBe(true);
+    ).toBe("unknown_connection");
+    expect(await nangoRows(target)).toHaveLength(0);
+    expect(nango.deleted("nx-2")).toBe(true);
   });
 
   test("disconnecting deletes the connection in Nango", async () => {
@@ -435,22 +504,267 @@ describe("Nango connections in PostgreSQL", () => {
     const nango = fakeNango();
     await connect(target, nango, "nd-1", "bye@example.com");
     const [row] = await nangoRows(target);
-    const connection = await getConnectionMetadata(
-      client.db,
-      target.workspaceId,
-      row!.id,
-      target.subjectId,
-    );
-    expect(connection).not.toBeNull();
-    await deleteNangoConnectionFor(
-      { db: client.db, settings, fetchImpl: nango.fetchImpl },
-      connection!,
-    );
-    expect(
-      nango.requests.some(
-        (request) => request.method === "DELETE" && request.url.pathname === "/connections/nd-1",
+    await disconnect(target, row!.id, nango);
+    expect(nango.deleted("nd-1")).toBe(true);
+  });
+
+  test("a refused finalize stops the connection's billing", async () => {
+    if (!shared) return;
+    const target = await owner("nango refused");
+    // Not a member of the workspace the tags name: never stored.
+    const stranger = { ...target, subjectId: `user:${crypto.randomUUID()}` };
+    const nango = fakeNango();
+    const tags = nangoAttemptTags({ ...stranger, attemptId: "refused", integrationKey: "gmail" });
+    nango.remote.push({
+      connectionId: "nr-1",
+      tags,
+      email: "stranger@example.com",
+      scope: "https://mail.google.com/",
+      authErrors: 0,
+    });
+    await expect(
+      handleNangoWebhook(
+        {
+          db: client.db,
+          settings,
+          fetchImpl: nango.fetchImpl,
+          nangoBackends: async () => backends,
+        },
+        webhook(stranger, "nr-1", { operation: "creation", success: true, tags }),
       ),
-    ).toBe(true);
+    ).rejects.toMatchObject({ status: 403 });
+    expect(await nangoRows(target)).toHaveLength(0);
+    expect(nango.deleted("nr-1")).toBe(true);
+  });
+
+  test("the same account in two organizations shares one Nango connection", async () => {
+    if (!shared) return;
+    const first = await owner("nango share first");
+    const second = await owner("nango share second", first.subjectId);
+    const nango = fakeNango();
+    await connect(first, nango, "ns-1", "shared@example.com");
+    // The same person connects the same account in another organization: its
+    // own row there, but the first organization's row now stands for the new
+    // Nango connection too, and the old one is deleted.
+    await connect(second, nango, "ns-2", "shared@example.com", "https://mail.google.com/");
+    const [firstRow] = await nangoRows(first);
+    const [secondRow] = await nangoRows(second);
+    expect(firstRow).toMatchObject({
+      status: "active",
+      nango_connection_id: "ns-2",
+      granted_scopes: ["https://mail.google.com/"],
+    });
+    expect(secondRow).toMatchObject({ status: "active", nango_connection_id: "ns-2" });
+    expect(nango.deleted("ns-1")).toBe(true);
+    expect(nango.remote.map((entry) => entry.connectionId)).toEqual(["ns-2"]);
+    // The stored credential names the shared connection, not only the metadata.
+    const [credential] = await shared!.admin<Array<{ credential_encrypted: string }>>`
+      select credential_encrypted from connections where id = ${firstRow!.id}`;
+    const { decryptEnvironmentValue } = await import("@opengeni/db");
+    const { environmentsEncryptionKeyBytes } = await import("@opengeni/config");
+    expect(
+      JSON.parse(
+        decryptEnvironmentValue(
+          environmentsEncryptionKeyBytes(settings)!,
+          credential!.credential_encrypted,
+        ),
+      ),
+    ).toMatchObject({ type: "nango", nangoConnectionId: "ns-2" });
+
+    // Another account of the same person is never merged.
+    await connect(second, nango, "ns-3", "other@example.com");
+    expect((await nangoRows(first)).map((row) => row.nango_connection_id)).toEqual(["ns-2"]);
+    expect(nango.deleted("ns-3")).toBe(false);
+
+    // A refresh failure reaches every organization's row.
+    nango.remote.find((entry) => entry.connectionId === "ns-2")!.authErrors = 1;
+    const deps = {
+      db: client.db,
+      settings,
+      fetchImpl: nango.fetchImpl,
+      nangoBackends: async () => backends,
+    };
+    expect(
+      await handleNangoWebhook(
+        deps,
+        webhook(second, "ns-2", { operation: "refresh", success: false }),
+      ),
+    ).toBe("needs_reauth");
+    expect((await nangoRows(first))[0]!.status).toBe("needs_reauth");
+    expect((await nangoRows(second))[0]!.status).toBe("needs_reauth");
+    nango.remote.find((entry) => entry.connectionId === "ns-2")!.authErrors = 0;
+    expect(
+      await handleNangoWebhook(
+        deps,
+        webhook(second, "ns-2", { operation: "refresh", success: true }),
+      ),
+    ).toBe("recovered");
+    expect((await nangoRows(first))[0]!.status).toBe("active");
+
+    // Disconnecting in one organization keeps the connection the other uses;
+    // the last disconnect deletes it.
+    await disconnect(first, firstRow!.id, nango);
+    expect(nango.deleted("ns-2")).toBe(false);
+    expect((await nangoRows(second))[0]).toMatchObject({
+      status: "active",
+      nango_connection_id: "ns-2",
+    });
+    await disconnect(second, secondRow!.id, nango);
+    expect(nango.deleted("ns-2")).toBe(true);
+  });
+
+  test("the sweep deletes what no row stands for, and nothing else", async () => {
+    if (!shared) return;
+    const target = await owner("nango sweep orphans");
+    const nango = fakeNango();
+    const now = Date.now();
+    const old = new Date(now - 3 * HOUR).toISOString();
+    const tags = (attemptId: string) =>
+      nangoAttemptTags({ ...target, attemptId, integrationKey: "gmail" });
+    await connect(target, nango, "nso-live", "live@example.com");
+    // Abandoned connects: one past any connect attempt, one still in progress.
+    nango.remote.push(
+      {
+        connectionId: "nso-abandoned",
+        tags: tags("a"),
+        email: "x@example.com",
+        scope: "",
+        authErrors: 0,
+        created: old,
+      },
+      {
+        connectionId: "nso-young",
+        tags: tags("b"),
+        email: "y@example.com",
+        scope: "",
+        authErrors: 0,
+        created: new Date(now).toISOString(),
+      },
+      // Made outside Opengeni: left to the operator.
+      {
+        connectionId: "nso-untagged",
+        tags: {},
+        email: "z@example.com",
+        scope: "",
+        authErrors: 0,
+        created: old,
+      },
+    );
+    // A row removed by an SQL cascade (workspace, organization or member removal).
+    await connect(target, nango, "nso-cascaded", "cascaded@example.com");
+    await shared!.admin`delete from connections
+      where workspace_id = ${target.workspaceId} and metadata->>'nangoConnectionId' = 'nso-cascaded'`;
+    // A replaced connection whose deletion failed at reconnect time.
+    await connect(target, nango, "nso-replaced", "again@example.com");
+    nango.failDeletes.add("nso-replaced");
+    await connect(target, nango, "nso-replacement", "again@example.com");
+    expect(nango.remote.some((entry) => entry.connectionId === "nso-replaced")).toBe(true);
+    nango.failDeletes.clear();
+
+    const result = await sweepNangoConnections(sweepDeps(nango), { now });
+    expect(result?.deletedOrphans.sort()).toEqual([
+      "nso-abandoned",
+      "nso-cascaded",
+      "nso-replaced",
+    ]);
+    expect(result?.orphanBreakerTripped).toBe(false);
+    expect(nango.remote.map((entry) => entry.connectionId).sort()).toEqual([
+      "nso-live",
+      "nso-replacement",
+      "nso-untagged",
+      "nso-young",
+    ]);
+    expect((await nangoRows(target)).map((row) => row.status)).toEqual(["active", "active"]);
+  });
+
+  test("the sweep stops billing for a connection Nango can no longer refresh", async () => {
+    if (!shared) return;
+    const target = await owner("nango sweep broken");
+    const nango = fakeNango();
+    await connect(target, nango, "nsb-1", "broken@example.com");
+    nango.remote[0]!.authErrors = 1;
+    const deps = {
+      db: client.db,
+      settings,
+      fetchImpl: nango.fetchImpl,
+      nangoBackends: async () => backends,
+    };
+    expect(
+      await handleNangoWebhook(
+        deps,
+        webhook(target, "nsb-1", { operation: "refresh", success: false }),
+      ),
+    ).toBe("needs_reauth");
+    // Within the grace period Nango may still recover it.
+    expect((await sweepNangoConnections(sweepDeps(nango)))?.deletedBroken).toEqual([]);
+    const later = Date.now() + 25 * HOUR;
+    expect((await sweepNangoConnections(sweepDeps(nango), { now: later }))?.deletedBroken).toEqual([
+      "nsb-1",
+    ]);
+    // The row keeps asking to reconnect, also when Nango reports the deletion.
+    expect(
+      await handleNangoWebhook(
+        deps,
+        webhook(target, "nsb-1", { operation: "deletion", success: true }),
+      ),
+    ).toBe("ignored");
+    expect((await nangoRows(target))[0]).toMatchObject({ status: "needs_reauth" });
+    // Reconnecting the account brings it back on a new Nango connection.
+    await connect(target, nango, "nsb-2", "broken@example.com");
+    expect((await nangoRows(target))[0]).toMatchObject({
+      status: "active",
+      nango_connection_id: "nsb-2",
+    });
+  });
+
+  test("the sweep's breaker keeps everything when most connections look unused", async () => {
+    if (!shared) return;
+    const nango = fakeNango();
+    for (let index = 0; index < 12; index += 1) {
+      const person = await owner(`nango sweep breaker ${index}`);
+      nango.remote.push({
+        connectionId: `nsk-${index}`,
+        tags: nangoAttemptTags({ ...person, attemptId: "gone", integrationKey: "gmail" }),
+        email: `breaker-${index}@example.com`,
+        scope: "",
+        authErrors: 0,
+        created: "2026-11-01T00:00:00.000Z",
+      });
+    }
+    const result = await sweepNangoConnections(sweepDeps(nango));
+    expect(result).toMatchObject({ orphanBreakerTripped: true, deletedOrphans: [] });
+    expect(nango.requests.some((request) => request.method === "DELETE")).toBe(false);
+  });
+
+  test("the sweep shares duplicates of one account an older release left", async () => {
+    if (!shared) return;
+    const first = await owner("nango sweep duplicates first");
+    const second = await owner("nango sweep duplicates second", first.subjectId);
+    const nango = fakeNango();
+    await connect(first, nango, "nsd-1", "dup@example.com");
+    await connect(second, nango, "nsd-2", "dup@example.com");
+    // As an older release left it: each organization on its own connection.
+    nango.remote.push({
+      connectionId: "nsd-1",
+      tags: nangoAttemptTags({ ...first, attemptId: "older", integrationKey: "gmail" }),
+      email: "dup@example.com",
+      scope: "",
+      authErrors: 0,
+      created: "2026-11-01T00:00:00.000Z",
+    });
+    nango.remote.find((entry) => entry.connectionId === "nsd-2")!.created =
+      "2026-11-14T00:00:00.000Z";
+    await shared!.admin`update connections
+      set metadata = jsonb_set(metadata, '{nangoConnectionId}', '"nsd-1"')
+      where workspace_id = ${first.workspaceId} and provider_domain = 'nango:gmail'`;
+    const result = await sweepNangoConnections(sweepDeps(nango));
+    expect(result).toMatchObject({
+      repointed: 1,
+      deletedDuplicates: ["nsd-1"],
+      deletedOrphans: [],
+    });
+    expect((await nangoRows(first))[0]).toMatchObject({ nango_connection_id: "nsd-2" });
+    expect(nango.remote.map((entry) => entry.connectionId)).toEqual(["nsd-2"]);
   });
 
   test("the usage API reads one's own organization and refuses another", async () => {

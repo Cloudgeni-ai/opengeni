@@ -24,9 +24,14 @@ import {
 import {
   connectSetupPermission,
   listOwnConnectionMetadata,
+  listPersonNangoConnections,
   nangoBackendsFor,
+  nangoAccountLabelOf,
+  nangoConnectionIdOf,
+  releaseNangoConnections,
   requireConnectOwnerAuthority,
   requireEnvironmentEncryption,
+  shareNangoConnection,
   turnOnOwnLoginHere,
 } from "@opengeni/core";
 import {
@@ -35,6 +40,7 @@ import {
   encryptEnvironmentValue,
   getConnectAttempt,
   listConnectionsMetadata,
+  lockNangoPersonIntegration,
   recordNangoUsageEvent,
   revokeConnection,
   setConnectionStatus,
@@ -567,6 +573,12 @@ async function persistNangoConnection(
   replacedNangoConnectionId: string | null;
 }> {
   const ownerSubjectId = input.ownership === "personal" ? input.subjectId : null;
+  // One writer at a time per person and integration, deployment-wide: the
+  // same account connected twice at once still ends in one row here.
+  await lockNangoPersonIntegration(db, {
+    subjectId: input.subjectId,
+    providerConfigKey: input.integration.providerConfigKey,
+  });
   const existing = await ownerConnections(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId, subjectId: ownerSubjectId },
@@ -653,6 +665,11 @@ function absoluteRedirect(settings: Settings, redirectTo: string, exact: boolean
   return new URL(redirectTo, settings.webBaseUrl).toString();
 }
 
+/** A refusal that retrying the same attempt cannot change (authority, policy). */
+function refusal(error: unknown): boolean {
+  return error instanceof HTTPException && [401, 403, 422].includes(error.status);
+}
+
 export async function completeNangoConnect(
   deps: NangoDeps,
   input: { state: string; browser: OAuthCallbackBrowser },
@@ -728,79 +745,95 @@ export async function completeNangoConnect(
     });
     return outcome.connection;
   };
-  if (state.connectAttemptId) {
-    const stored = await getConnectAttempt(deps.db, state, state.connectAttemptId);
-    if (stored.attempt.ownership !== state.ownership || stored.returnUrl !== state.returnUrl)
-      throw new HTTPException(403, { message: "connection attempt mismatch" });
-    const permission = connectSetupPermission(stored.attempt);
-    const operation = {
-      attemptId: state.connectAttemptId,
-      operationId: `nango:${state.nonce}`,
-      inputDigest: createHash("sha256").update(input.state).digest("hex"),
-    };
-    const authorize = (tx: Database, _attempt: unknown, origin: ExternalActorContinuation | null) =>
-      requireConnectOwnerAuthority(tx, state, permission, origin);
-    const claim = await claimOAuthAcquisition(
-      deps.db,
-      state,
-      { ...operation, expectedRevision: stored.attempt.revision, authorize },
-      integration.integrationKey,
-    );
-    if (claim.status === "replayed")
-      return { status: "complete", redirectTo: stored.returnUrl!, exactReturn: true };
-    await finishOAuthAcquisition(
-      deps.db,
-      state,
-      {
-        ...operation,
-        authorize,
-        commit: async (tx, current) => {
-          const connection = await persist(tx);
-          return {
-            ...current,
-            revision: current.revision + 1,
-            state: "complete",
-            completionRequirement: "connection",
-            credentialsCommitted: true,
-            nextAction: { type: "none" },
-            account: {
-              id: connection.id,
-              version: connection.version,
-              providerId: current.providerId,
-              label: identity.label ?? integration.integrationKey,
-              ownership: current.ownership,
-              status: "connected",
-            },
-          };
+  try {
+    if (state.connectAttemptId) {
+      const stored = await getConnectAttempt(deps.db, state, state.connectAttemptId);
+      if (stored.attempt.ownership !== state.ownership || stored.returnUrl !== state.returnUrl)
+        throw new HTTPException(403, { message: "connection attempt mismatch" });
+      const permission = connectSetupPermission(stored.attempt);
+      const operation = {
+        attemptId: state.connectAttemptId,
+        operationId: `nango:${state.nonce}`,
+        inputDigest: createHash("sha256").update(input.state).digest("hex"),
+      };
+      const authorize = (
+        tx: Database,
+        _attempt: unknown,
+        origin: ExternalActorContinuation | null,
+      ) => requireConnectOwnerAuthority(tx, state, permission, origin);
+      const claim = await claimOAuthAcquisition(
+        deps.db,
+        state,
+        { ...operation, expectedRevision: stored.attempt.revision, authorize },
+        integration.integrationKey,
+      );
+      if (claim.status === "replayed")
+        return { status: "complete", redirectTo: stored.returnUrl!, exactReturn: true };
+      await finishOAuthAcquisition(
+        deps.db,
+        state,
+        {
+          ...operation,
+          authorize,
+          commit: async (tx, current) => {
+            const connection = await persist(tx);
+            return {
+              ...current,
+              revision: current.revision + 1,
+              state: "complete",
+              completionRequirement: "connection",
+              credentialsCommitted: true,
+              nextAction: { type: "none" },
+              account: {
+                id: connection.id,
+                version: connection.version,
+                providerId: current.providerId,
+                label: identity.label ?? integration.integrationKey,
+                ownership: current.ownership,
+                status: "connected",
+              },
+            };
+          },
         },
-      },
-      integration.integrationKey,
-    );
-  } else {
-    await withOrganizationIntegrationAcquisition(
-      deps.db,
-      state,
-      [integration.integrationKey],
-      async (tx) => {
-        await requireConnectOwnerAuthority(
-          tx,
-          state,
-          state.ownership === "personal" ? "connections:personal" : "connections:write",
-        );
-        const done = await persist(tx);
-        // One stored connection per verified attempt; a replay reuses it.
-        if ((outcome as { created: boolean } | null)?.created)
-          await consumeIntegrationOAuthStateNonce(tx, {
-            accountId: state.accountId,
-            workspaceId: state.workspaceId,
-            subjectId: state.subjectId,
-            nonce: state.nonce,
-            expiresAt: new Date(state.iat * 1000 + 60 * 60 * 1000),
-            now: new Date(),
-          });
-        return done;
-      },
-    );
+        integration.integrationKey,
+      );
+    } else {
+      await withOrganizationIntegrationAcquisition(
+        deps.db,
+        state,
+        [integration.integrationKey],
+        async (tx) => {
+          await requireConnectOwnerAuthority(
+            tx,
+            state,
+            state.ownership === "personal" ? "connections:personal" : "connections:write",
+          );
+          const done = await persist(tx);
+          // One stored connection per verified attempt; a replay reuses it.
+          if ((outcome as { created: boolean } | null)?.created)
+            await consumeIntegrationOAuthStateNonce(tx, {
+              accountId: state.accountId,
+              workspaceId: state.workspaceId,
+              subjectId: state.subjectId,
+              nonce: state.nonce,
+              expiresAt: new Date(state.iat * 1000 + 60 * 60 * 1000),
+              now: new Date(),
+            });
+          return done;
+        },
+      );
+    }
+  } catch (error) {
+    // Refused for good (authority or policy): this attempt's Nango connection
+    // is never stored here, so stop its billing unless some row stands for it.
+    if (refusal(error))
+      await releaseNangoConnections(deps, {
+        subjectId: state.subjectId,
+        providerConfigKey: state.providerConfigKey,
+        nangoConnectionIds: [match.connectionId],
+        knownWorkspaceIds: [state.workspaceId],
+      }).catch(() => undefined);
+    throw error;
   }
   const result = outcome as Awaited<ReturnType<typeof persistNangoConnection>> | null;
   if (!result) throw new HTTPException(409, { message: "connection changed; try again" });
@@ -831,23 +864,42 @@ async function afterNangoConnectionStored(
       nangoConnectionId,
       kind: result.created ? "connection_created" : "connection_reconnected",
     });
-  if (result.replacedNangoConnectionId && result.replacedNangoConnectionId !== nangoConnectionId) {
-    const replaced = result.replacedNangoConnectionId;
-    await nangoClient(deps)
-      .deleteConnection(replaced, integration.providerConfigKey)
-      .then(() =>
-        recordNangoUsageEvent(deps.db, {
-          accountId: owner.accountId,
-          workspaceId: result.connection.workspaceId,
-          subjectId: owner.subjectId,
-          integrationKey: integration.integrationKey,
-          providerConfigKey: integration.providerConfigKey,
-          connectionId: result.connection.id,
-          nangoConnectionId: replaced,
-          kind: "connection_deleted",
-        }),
-      )
-      .catch(() => undefined);
+  const knownWorkspaceIds = [owner.workspaceId, result.connection.workspaceId];
+  // The same account's rows in the person's other organizations now stand
+  // for this connection too, and the ones they stood for are deleted. A
+  // failure here is repaired by the sweep.
+  await shareNangoConnection(deps, {
+    subjectId: owner.subjectId,
+    providerConfigKey: integration.providerConfigKey,
+    accountLabel: nangoAccountLabelOf(result.connection),
+    nangoConnectionId,
+    grantedScopes: result.connection.grantedScopes,
+    knownWorkspaceIds,
+  }).catch((error: unknown) =>
+    console.warn("[nango] sharing a connection failed; the sweep retries it", {
+      connectionId: result.connection.id,
+      error: error instanceof Error ? error.message : String(error),
+    }),
+  );
+  const replaced = result.replacedNangoConnectionId;
+  if (replaced && replaced !== nangoConnectionId) {
+    recordNangoUsageEvent(deps.db, {
+      accountId: owner.accountId,
+      workspaceId: result.connection.workspaceId,
+      subjectId: owner.subjectId,
+      integrationKey: integration.integrationKey,
+      providerConfigKey: integration.providerConfigKey,
+      connectionId: result.connection.id,
+      nangoConnectionId: replaced,
+      kind: "connection_deleted",
+    });
+    // Deleted in Nango unless another row still stands for it.
+    await releaseNangoConnections(deps, {
+      subjectId: owner.subjectId,
+      providerConfigKey: integration.providerConfigKey,
+      nangoConnectionIds: [replaced],
+      knownWorkspaceIds,
+    }).catch(() => undefined);
   }
   if (owner.ownership === "personal" && result.connection.authorityId)
     await turnOnOwnLoginHere(deps.db, {
@@ -862,7 +914,11 @@ async function afterNangoConnectionStored(
 // Disconnect
 // ---------------------------------------------------------------------------
 
-/** After an Opengeni Nango connection is removed: delete it in Nango so billing stops. */
+/**
+ * After an Opengeni Nango connection is removed: delete it in Nango so
+ * billing stops, unless the same person's row in another organization still
+ * stands for it (then the last one to go deletes it).
+ */
 export async function deleteNangoConnectionFor(
   deps: NangoDeps,
   connection: ConnectionMetadata,
@@ -874,28 +930,33 @@ export async function deleteNangoConnectionFor(
     connection.metadata.integrationBackend !== "nango" ||
     typeof nangoConnectionId !== "string" ||
     typeof providerConfigKey !== "string" ||
+    !connection.subjectId ||
     !deps.settings.nangoSecretKey
   )
     return;
-  try {
-    await nangoClient(deps).deleteConnection(nangoConnectionId, providerConfigKey);
-    recordNangoUsageEvent(deps.db, {
-      accountId: connection.accountId,
-      workspaceId: connection.workspaceId,
-      subjectId: connection.subjectId,
-      integrationKey: typeof integrationKey === "string" ? integrationKey : "unknown",
-      providerConfigKey,
-      connectionId: connection.id,
-      nangoConnectionId,
-      kind: "connection_deleted",
-    });
-  } catch (error) {
-    // The Opengeni connection is gone either way; the operator cleanup lists leftovers.
-    console.warn("[nango] connection deletion failed; it remains billable until cleaned up", {
+  // This organization stops using it either way.
+  recordNangoUsageEvent(deps.db, {
+    accountId: connection.accountId,
+    workspaceId: connection.workspaceId,
+    subjectId: connection.subjectId,
+    integrationKey: typeof integrationKey === "string" ? integrationKey : "unknown",
+    providerConfigKey,
+    connectionId: connection.id,
+    nangoConnectionId,
+    kind: "connection_deleted",
+  });
+  // A failed deletion is retried by the sweep: nothing stands for it any more.
+  await releaseNangoConnections(deps, {
+    subjectId: connection.subjectId,
+    providerConfigKey,
+    nangoConnectionIds: [nangoConnectionId],
+    knownWorkspaceIds: [connection.workspaceId],
+  }).catch((error: unknown) =>
+    console.warn("[nango] connection release failed; the sweep retries it", {
       connectionId: connection.id,
       error: error instanceof Error ? error.message : String(error),
-    });
-  }
+    }),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -939,21 +1000,21 @@ export async function handleNangoWebhook(
   // this owner (nangoConnectPage), so they carry that verification.
   const owner = { accountId, workspaceId, subjectId, personalOwnerVerified: true };
   const ownership = integration ? integrationOwnership(integration) : "personal";
-  const domain = integration?.providerDomain ?? `nango:${integrationKey}`;
-  const connections = await ownerConnections(
-    deps.db,
-    { ...owner, subjectId: ownership === "personal" ? subjectId : null },
-    domain,
-  ).catch(() => [] as ConnectionMetadata[]);
-  const stored = connections.find(
-    (connection) => connection.metadata.nangoConnectionId === event.connectionId,
-  );
+  // Every live row of this person, in any organization, that stands for the
+  // Nango connection: rows in several organizations may share one.
+  const standing = (
+    await listPersonNangoConnections(deps.db, {
+      subjectId,
+      providerConfigKey: event.providerConfigKey,
+      knownWorkspaceIds: [workspaceId],
+    }).catch(() => ({ rows: [] as ConnectionMetadata[], complete: false }))
+  ).rows.filter((connection) => nangoConnectionIdOf(connection) === event.connectionId);
   const usage = (
+    stored: ConnectionMetadata,
     kind: "connection_needs_reauth" | "connection_deleted" | "connection_reconnected",
   ) =>
-    stored &&
     recordNangoUsageEvent(deps.db, {
-      accountId,
+      accountId: stored.accountId,
       workspaceId: stored.workspaceId,
       subjectId,
       integrationKey,
@@ -965,8 +1026,8 @@ export async function handleNangoWebhook(
   switch (event.operation) {
     case "creation":
     case "override": {
-      if (stored || !event.success || !integration)
-        return stored ? "ignored" : "unknown_connection";
+      if (standing.length > 0) return "ignored";
+      if (!event.success || !integration) return "unknown_connection";
       if (integration.providerConfigKey !== event.providerConfigKey) return "ignored";
       // Backup finalizer: the page did not finish (closed early). The tags
       // were set by this server for one signed, verified attempt.
@@ -974,34 +1035,64 @@ export async function handleNangoWebhook(
       const current = await client.getConnection(event.connectionId, integration.providerConfigKey);
       // The webhook's tags are signed by Nango; tags the connection reports
       // now must match too when Nango returns them.
-      // A connection whose token Nango cannot refresh (424) is not stored;
-      // the user connects again.
-      const verified =
-        current &&
-        !current.refreshFailed &&
+      const tagsMatch =
+        current !== null &&
         nangoTagsMatchAttempt(event.tags, { ...owner, attemptId, integrationKey }) &&
         (current.tags === null ||
           nangoTagsMatchAttempt(current.tags, { ...owner, attemptId, integrationKey }));
-      if (!verified) return "unknown_connection";
-      const identity = await readConnectionIdentity(client, integration, event.connectionId);
+      if (!current || !tagsMatch) return "unknown_connection";
+      // A connection whose token Nango cannot refresh (424) is not stored;
+      // the user connects again. Its billing stops now, as on the page.
+      if (current.refreshFailed) {
+        await client
+          .deleteConnection(event.connectionId, integration.providerConfigKey)
+          .catch(() => undefined);
+        return "unknown_connection";
+      }
+      let identity: ConnectionIdentity;
+      try {
+        identity = await readConnectionIdentity(client, integration, event.connectionId);
+      } catch (error) {
+        // An account we cannot name is never stored; stop its Nango billing too.
+        await client
+          .deleteConnection(event.connectionId, integration.providerConfigKey)
+          .catch(() => undefined);
+        throw error;
+      }
       const grantedScopes = current.scopes;
       let outcome: Awaited<ReturnType<typeof persistNangoConnection>> | null = null;
-      await withOrganizationIntegrationAcquisition(deps.db, owner, [integrationKey], async (tx) => {
-        await requireConnectOwnerAuthority(
-          tx,
+      try {
+        await withOrganizationIntegrationAcquisition(
+          deps.db,
           owner,
-          ownership === "personal" ? "connections:personal" : "connections:write",
+          [integrationKey],
+          async (tx) => {
+            await requireConnectOwnerAuthority(
+              tx,
+              owner,
+              ownership === "personal" ? "connections:personal" : "connections:write",
+            );
+            outcome = await persistNangoConnection(tx, deps.settings, {
+              ...owner,
+              ownership,
+              integration,
+              mcpUrl: connectMcpUrl(integration),
+              nangoConnectionId: event.connectionId,
+              identity,
+              grantedScopes,
+            });
+          },
         );
-        outcome = await persistNangoConnection(tx, deps.settings, {
-          ...owner,
-          ownership,
-          integration,
-          mcpUrl: connectMcpUrl(integration),
-          nangoConnectionId: event.connectionId,
-          identity,
-          grantedScopes,
-        });
-      });
+      } catch (error) {
+        if (refusal(error))
+          await releaseNangoConnections(deps, {
+            subjectId,
+            providerConfigKey: integration.providerConfigKey,
+            nangoConnectionIds: [event.connectionId],
+            knownWorkspaceIds: [workspaceId],
+          }).catch(() => undefined);
+        throw error;
+      }
       const result = outcome as Awaited<ReturnType<typeof persistNangoConnection>> | null;
       if (result)
         await afterNangoConnectionStored(
@@ -1014,7 +1105,7 @@ export async function handleNangoWebhook(
       return "finalized";
     }
     case "refresh": {
-      if (!stored) return "unknown_connection";
+      if (standing.length === 0) return "unknown_connection";
       // A signed webhook can still be replayed or arrive late: act only on
       // what Nango reports now. The list read returns errors without
       // refreshing (GET /connections/{id} would refresh and answer 424).
@@ -1027,37 +1118,46 @@ export async function handleNangoWebhook(
       );
       if (!current) return "ignored";
       const failing = current.authErrors > 0;
-      if (!event.success && failing && stored.status === "active") {
-        await setConnectionStatus(
-          deps.db,
-          stored.workspaceId,
-          "needs_reauth",
-          "nango_refresh_failed",
-          {
-            id: stored.id,
-            version: stored.version,
-            subjectId: stored.subjectId,
-          },
-        );
-        usage("connection_needs_reauth");
-        return "needs_reauth";
+      let outcome: NangoWebhookOutcome = "ignored";
+      for (const stored of standing) {
+        if (!event.success && failing && stored.status === "active") {
+          if (
+            await setConnectionStatus(
+              deps.db,
+              stored.workspaceId,
+              "needs_reauth",
+              "nango_refresh_failed",
+              { id: stored.id, version: stored.version, subjectId: stored.subjectId },
+            )
+          )
+            usage(stored, "connection_needs_reauth");
+          outcome = "needs_reauth";
+        } else if (event.success && !failing && stored.status === "needs_reauth") {
+          if (
+            await setConnectionStatus(deps.db, stored.workspaceId, "active", null, {
+              id: stored.id,
+              version: stored.version,
+              subjectId: stored.subjectId,
+            })
+          )
+            usage(stored, "connection_reconnected");
+          outcome = "recovered";
+        }
       }
-      if (event.success && !failing && stored.status === "needs_reauth") {
-        await setConnectionStatus(deps.db, stored.workspaceId, "active", null, {
-          id: stored.id,
-          version: stored.version,
-          subjectId: stored.subjectId,
-        });
-        usage("connection_reconnected");
-        return "recovered";
-      }
-      return "ignored";
+      return outcome;
     }
     case "deletion": {
-      if (!stored) return "unknown_connection";
-      await revokeConnection(deps.db, stored.workspaceId, stored.id, subjectId, stored.version);
-      usage("connection_deleted");
-      return "deleted";
+      if (standing.length === 0) return "unknown_connection";
+      // Rows already asking to reconnect keep asking: their connection was
+      // deleted because Nango could no longer refresh it.
+      let outcome: NangoWebhookOutcome = "ignored";
+      for (const stored of standing) {
+        if (stored.status === "needs_reauth") continue;
+        await revokeConnection(deps.db, stored.workspaceId, stored.id, subjectId, stored.version);
+        usage(stored, "connection_deleted");
+        outcome = "deleted";
+      }
+      return outcome;
     }
     default:
       return "ignored";
