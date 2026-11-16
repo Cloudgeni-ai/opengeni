@@ -14,10 +14,13 @@ import {
   bm25Arm,
   bm25FileArm,
   clearIndexCache,
+  denseArm,
   densePool,
   hybridArm,
+  hybridDenseArm,
   jevRerankArm,
   repoMapArm,
+  type DenseScores,
 } from "./harness/arms";
 import { BudgetLedger, BudgetStop } from "./harness/budget";
 import { codeSearchArm } from "./harness/code-search-arm";
@@ -66,6 +69,7 @@ const { values } = parseArgs({
     "token-ledger": { type: "string" },
     "dm-model": { type: "string", default: "s1-pro" },
     "dump-pool": { type: "string" },
+    "dense-scores": { type: "string" },
     "allow-live": { type: "boolean", default: false },
     baseline: { type: "string", default: "bm25" },
     "calibrate-on": { type: "string" },
@@ -139,6 +143,15 @@ const currentTask = {
 
 async function buildArms(): Promise<Arm[]> {
   const names = values.arms!.split(",").map((s) => s.trim());
+  let denseScores: DenseScores | undefined;
+  if (values["dense-scores"]) {
+    denseScores = new Map();
+    for (const row of await readJsonl<{
+      taskId: string;
+      chunks: DenseScores extends Map<string, infer V> ? V : never;
+    }>(values["dense-scores"]))
+      denseScores.set(row.taskId, row.chunks);
+  }
   const gatewayArms = names.filter(
     (n) => n === "jev-rerank" || n === "code-search",
   );
@@ -186,6 +199,12 @@ async function buildArms(): Promise<Arm[]> {
       return jevRerankArm(dmModel!, { name: "dm-rerank" });
     if (name === "dm-code-search")
       return codeSearchArm(dmModel!, "dm-code-search");
+    if (name === "dense" || name === "hybrid-dense") {
+      if (!denseScores) throw new Error(`${name} needs --dense-scores`);
+      return name === "dense"
+        ? denseArm(denseScores)
+        : hybridDenseArm(denseScores);
+    }
     throw new Error(
       `unknown arm ${name}; agent and subagent arms import through trajectory.ts`,
     );

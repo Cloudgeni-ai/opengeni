@@ -11,6 +11,10 @@ import {
   bm25FileArm,
   budgetSpans,
   clearIndexCache,
+  denseArm,
+  densePool,
+  hybridDenseArm,
+  type DenseScores,
   hybridArm,
   jevRerankArm,
   queryKeywords,
@@ -536,6 +540,29 @@ describe("arms on a real checkout", () => {
       if (arm !== bm25FileArm)
         expect(scoreTask(t(), prediction).lineRecall).toBe(1);
     }
+  });
+
+  test("dense pool covers the oracle and dense arms rank by stored similarity", async () => {
+    const pool = await densePool(t(), repo);
+    expect(pool.some((c) => c.file === "core/scheduler.py")).toBe(true);
+    expect(pool[0]!.text.startsWith(`${pool[0]!.file}\n`)).toBe(true);
+    const scores: DenseScores = new Map([
+      [
+        t().id,
+        pool.map((c) => ({
+          file: c.file,
+          start: c.start,
+          end: c.end,
+          score: c.file === "core/scheduler.py" ? 0.9 : 0.1,
+        })),
+      ],
+    ]);
+    for (const arm of [denseArm(scores), hybridDenseArm(scores)]) {
+      const { prediction } = await arm.run(t(), ctx());
+      expect(prediction.files[0]).toBe("core/scheduler.py");
+      expect(scoreTask(t(), prediction).lineRecall).toBe(1);
+    }
+    await expect(denseArm(new Map()).run(t(), ctx())).rejects.toThrow();
   });
 
   test("jev rerank keeps files the decision model accepts", async () => {

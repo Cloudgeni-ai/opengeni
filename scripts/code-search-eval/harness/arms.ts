@@ -101,10 +101,21 @@ export async function densePool(
 ) {
   const { bm25, files: texts } = await repoIndex(repoDir);
   const { files } = await hybridCandidates(task, repoDir, topFiles);
+  const wanted = new Set(files);
+  // Per file: its query-matching chunks in BM25 order, then the rest in file order.
+  const ranked = new Map<string, Chunk[]>();
+  for (const h of bm25.search(task.query, 5_000))
+    if (wanted.has(h.chunk.file))
+      ranked.set(h.chunk.file, [...(ranked.get(h.chunk.file) ?? []), h.chunk]);
   const pool: (Span & { text: string })[] = [];
   for (const file of files) {
     const lines = (texts.get(file) ?? "").split("\n");
-    const chunks = bm25.docs.filter((c) => c.file === file).slice(0, perFile);
+    const first = ranked.get(file) ?? [];
+    const seen = new Set(first.map((c) => c.start));
+    const chunks = [
+      ...first,
+      ...bm25.docs.filter((c) => c.file === file && !seen.has(c.start)),
+    ].slice(0, perFile);
     for (const c of chunks)
       pool.push({
         file,
@@ -114,6 +125,65 @@ export async function densePool(
       });
   }
   return pool.slice(0, max);
+}
+
+/** Per-task chunk similarities computed offline by a local embedding model (embed_pools.py). */
+export type DenseScores = Map<string, (Span & { score: number })[]>;
+
+function denseRanking(scores: DenseScores, task: Task) {
+  const chunks = [...(scores.get(task.id) ?? [])].sort(
+    (a, b) => b.score - a.score,
+  );
+  const files: string[] = [];
+  for (const c of chunks) if (!files.includes(c.file)) files.push(c.file);
+  return { chunks: chunks.map(strip), files };
+}
+
+/** Dense re-ranking of the candidate pool: files by their best chunk, spans by similarity. */
+export function denseArm(scores: DenseScores): Arm {
+  return {
+    name: "dense",
+    live: false,
+    async run(task) {
+      if (!scores.has(task.id)) throw new Error("no dense scores for task");
+      const { chunks, files } = denseRanking(scores, task);
+      return {
+        prediction: { files: files.slice(0, 20), spans: budgetSpans(chunks) },
+        usage: zeroUsage(),
+      };
+    },
+  };
+}
+
+/** BM25, repo map and dense fused by reciprocal rank; spans from the dense order within fused files. */
+export function hybridDenseArm(scores: DenseScores): Arm {
+  return {
+    name: "hybrid-dense",
+    live: false,
+    async run(task, { repoDir }) {
+      if (!scores.has(task.id)) throw new Error("no dense scores for task");
+      const { bm25, map } = await repoIndex(repoDir);
+      const dense = denseRanking(scores, task);
+      const { spansOf } = await hybridCandidates(task, repoDir);
+      const top = reciprocalRankFusion([
+        filesFromChunks(bm25.search(task.query, 300)),
+        map.rank(task.query).map((r) => r.file),
+        dense.files,
+      ]).slice(0, 20);
+      const byFile = (f: string) => {
+        const own = dense.chunks.filter((c) => c.file === f);
+        return own.length ? own : spansOf(f);
+      };
+      const spans = [
+        ...top.map((f) => byFile(f)[0]),
+        ...top.map((f) => byFile(f)[1]),
+      ].filter((s): s is Span => !!s);
+      return {
+        prediction: { files: top, spans: budgetSpans(spans) },
+        usage: zeroUsage(),
+      };
+    },
+  };
 }
 
 export const bm25Arm: Arm = {
