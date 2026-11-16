@@ -3226,7 +3226,8 @@ export type ToolAuthNeededPayload = {
     | "personal_authority_unavailable"
     | "unsupported_auth"
     | "resource_scope_unavailable"
-    | "designated_credential_unavailable";
+    | "designated_credential_unavailable"
+    | "account_scope_fixed";
   hostReason?:
     | "missing_connection"
     | "expired"
@@ -3236,7 +3237,14 @@ export type ToolAuthNeededPayload = {
     | "unsupported_auth"
     | "resource_scope_unavailable"
     | "designated_credential_unavailable"
+    | "account_scope_fixed"
     | undefined;
+  /**
+   * Exact account reason beside the legacy-safe `unsupported_auth`: the
+   * connected account cannot get the access this tool needs (`scopes`), so no
+   * step-up is offered.
+   */
+  accountReason?: "account_scope_fixed" | undefined;
   scopes?: string[] | undefined;
   resource?: string | undefined;
   selectedResources?: Array<{ id: string; kind: "repository" }> | undefined;
@@ -8835,7 +8843,8 @@ export type ScheduledTaskAccessFailureReason =
   | "personal_authority_unavailable"
   | "unsupported_auth"
   | "resource_scope_unavailable"
-  | "designated_credential_unavailable";
+  | "designated_credential_unavailable"
+  | "account_scope_fixed";
 
 /** A connector a scheduled run's own turn could not use (a `tool.auth_needed` fact). */
 export type ScheduledTaskRunAccessFailure = {

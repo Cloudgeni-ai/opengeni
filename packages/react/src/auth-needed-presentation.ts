@@ -34,6 +34,7 @@ const UNAVAILABLE_REASONS = new Set<AuthNeededItem["reason"]>([
   "personal_authority_unavailable",
   "unsupported_auth",
   "resource_scope_unavailable",
+  "account_scope_fixed",
 ]);
 
 /** Plain words for access a reviewed connector asks for later (incremental consent). */
@@ -119,11 +120,13 @@ export function authNeededPresentation(
             : t("messageTimeline.enableProvider", { provider })
       : item.setupRequest
         ? t("messageTimeline.setUpProvider", { provider })
-        : unavailable
-          ? t("messageTimeline.providerToolsUnavailable", { provider })
-          : moreAccess
-            ? t("messageTimeline.giveProviderMoreAccess", { provider })
-            : `${actionLabel} ${provider}`;
+        : item.reason === "account_scope_fixed"
+          ? t("messageTimeline.providerCantDoThisWithAccount", { provider })
+          : unavailable
+            ? t("messageTimeline.providerToolsUnavailable", { provider })
+            : moreAccess
+              ? t("messageTimeline.giveProviderMoreAccess", { provider })
+              : `${actionLabel} ${provider}`;
   const reasonLine =
     recommendation?.rationale ??
     item.setupRequest?.rationale ??
@@ -215,6 +218,8 @@ export function authReasonLine(t: OpenGeniText, reason: AuthNeededItem["reason"]
       return t("messageTimeline.thisConnectionCannotAuthenticateThe");
     case "resource_scope_unavailable":
       return t("messageTimeline.thisToolEndpointCannotEnforce");
+    case "account_scope_fixed":
+      return t("messageTimeline.connectedAccountLacksThisAccess");
     default:
       return t("messageTimeline.itsConnectionNeedsAttention");
   }

@@ -9271,6 +9271,8 @@ function mcpSetupAuthNeededReason(reason: ToolAuthNeededPayload["reason"]): stri
       return "the account this workspace designated for it cannot be used right now; whoever manages this workspace's connectors can reconnect it";
     case "unsupported_auth":
       return "it uses a sign-in method that is not supported; it needs to be connected again";
+    case "account_scope_fixed":
+      return "the connected account does not include the access these tools need, and it cannot be added here";
   }
 }
 

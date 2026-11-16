@@ -3,9 +3,11 @@
 // for a reviewed catalog service (Google Calendar) or for a server someone
 // added by hand. Catalog and connection state come from a synthetic client,
 // so nothing reaches an API or the service.
-//   ?service=calendar|added|gmail-step-up   ?theme=light|dark
+//   ?service=calendar|added|gmail-step-up|gmail-fixed   ?theme=light|dark
 // gmail-step-up: a connected account that needs more access for one tool, as
 // the session renders it (the stock "Allow" row for that exact account).
+// gmail-fixed: the same tool on an account whose access is fixed (for example
+// managed by an integration platform): the stock row, with no action.
 // Open the card's setup dialog with its button to see the dialog.
 import { useEffect, useMemo } from "react";
 import { createRoot } from "react-dom/client";
@@ -30,7 +32,9 @@ const SESSION_ID = "session-connect";
 const params = new URLSearchParams(window.location.search);
 const serviceParam = params.get("service");
 const service =
-  serviceParam === "added" || serviceParam === "gmail-step-up" ? serviceParam : "calendar";
+  serviceParam === "added" || serviceParam === "gmail-step-up" || serviceParam === "gmail-fixed"
+    ? serviceParam
+    : "calendar";
 const dark = params.get("theme") === "dark";
 
 const CALENDAR = {
@@ -133,7 +137,8 @@ class PreviewClient extends MockOpenGeniClient {
 function events(): SessionEvent[] {
   const log = new EventLog();
   const turn = "turn-connect";
-  if (service === "gmail-step-up") {
+  if (service === "gmail-step-up" || service === "gmail-fixed") {
+    const fixed = service === "gmail-fixed";
     log.push("user.message", { text: "Draft a reply to Ola about Friday." });
     log.push(
       "tool.auth_needed",
@@ -142,14 +147,20 @@ function events(): SessionEvent[] {
         toolName: "create_draft",
         providerDomain: "gmail.googleapis.com",
         connectionId: "conn-gmail-1",
-        reason: "insufficient_scope",
+        ...(fixed
+          ? { reason: "unsupported_auth", accountReason: "account_scope_fixed" }
+          : { reason: "insufficient_scope" }),
         scopes: ["https://www.googleapis.com/auth/gmail.compose"],
       },
       turn,
     );
     log.push(
       "agent.message.completed",
-      { text: "Allow Gmail to write drafts and I'll carry on." },
+      {
+        text: fixed
+          ? "The connected Gmail account can't create drafts, so I couldn't draft the reply."
+          : "Allow Gmail to write drafts and I'll carry on.",
+      },
       turn,
     );
     log.push("turn.completed", {}, turn);

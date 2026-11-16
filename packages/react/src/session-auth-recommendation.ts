@@ -12,7 +12,8 @@ export function sessionAuthRecommendation(
   if (
     item.authoritySource === "host" ||
     item.reason === "unsupported_auth" ||
-    item.reason === "resource_scope_unavailable"
+    item.reason === "resource_scope_unavailable" ||
+    item.reason === "account_scope_fixed"
   )
     return undefined;
   if (item.capability) return item;

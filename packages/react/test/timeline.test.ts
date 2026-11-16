@@ -4242,6 +4242,27 @@ describe("buildTimeline", () => {
     });
   });
 
+  test("a fixed-access account's notice carries its exact account reason", () => {
+    reset();
+    const items = buildTimeline(englishText, [
+      event("tool.auth_needed", {
+        serverId: "gmail",
+        toolName: "create_draft",
+        providerDomain: "gmailmcp.googleapis.com",
+        connectionId: "conn-nango",
+        reason: "unsupported_auth",
+        accountReason: "account_scope_fixed",
+        scopes: ["https://www.googleapis.com/auth/gmail.compose"],
+      }),
+    ]);
+    expect(items[0]).toMatchObject({
+      kind: "auth-needed",
+      reason: "account_scope_fixed",
+      connectionId: "conn-nango",
+      toolName: "create_draft",
+    });
+  });
+
   test("agent capability recommendations stay explicit human authorization requests", () => {
     reset();
     const items = buildTimeline(englishText, [

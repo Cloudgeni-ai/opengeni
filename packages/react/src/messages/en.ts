@@ -3331,6 +3331,8 @@ export const englishMessages = {
     "It needs your permission to {access}. Everything it can already do stays the same.",
   "messageTimeline.itsAccessExpired": "Its access expired.",
   "messageTimeline.itsConnectionNeedsAttention": "Its connection needs attention.",
+  "messageTimeline.connectedAccountLacksThisAccess":
+    "The connected account doesn't include this access, and it can't be added here.",
   "messageTimeline.jumpingToStart": "Jumping to start…",
   "messageTimeline.jumpToLatest": "Jump to latest",
   "messageTimeline.jumpToStart": "Jump to start",
@@ -3351,6 +3353,8 @@ export const englishMessages = {
   "messageTimeline.pausedBecause": "Paused because",
   "messageTimeline.providerProviderdomain": "Provider: {providerDomain}",
   "messageTimeline.providerToolsUnavailable": "{provider} tools unavailable",
+  "messageTimeline.providerCantDoThisWithAccount":
+    "{provider} can't do this with the connected account",
   "messageTimeline.pluginSetupUnavailableHere":
     "Installing {provider} needs permission to manage this workspace's plugins. Ask a workspace admin to install it.",
   "messageTimeline.providerTryAgain": "{provider}. Try again.",

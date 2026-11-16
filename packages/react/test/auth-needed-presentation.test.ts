@@ -163,6 +163,33 @@ describe("authNeededPresentation", () => {
     expect(generic.title).toBe("Give Linear more access");
     expect(generic.reasonLine).toBe("It needs additional access to continue.");
   });
+
+  test("a fixed-access account says it can't do this, with no step-up or other action", () => {
+    const view = authNeededPresentation(
+      t,
+      item({
+        providerDomain: "gmailmcp.googleapis.com",
+        connectionId: "conn-nango",
+        reason: "account_scope_fixed",
+        scopes: ["https://www.googleapis.com/auth/gmail.compose"],
+        toolName: "create_draft",
+      }),
+    );
+    expect(view.title).toBe("Gmail can't do this with the connected account");
+    expect(view.reasonLine).toBe(
+      "The connected account doesn't include this access, and it can't be added here.",
+    );
+    expect(view.unavailable).toBe(true);
+    expect(view.canRecover).toBe(false);
+    expect(view.footnote).toBeNull();
+    expect(view.authorizationUrl).toBeNull();
+    // The legacy-safe reason older clients read is unavailable too.
+    const legacy = authNeededPresentation(
+      t,
+      item({ connectionId: "conn-nango", reason: "unsupported_auth" }),
+    );
+    expect(legacy.canRecover).toBe(false);
+  });
 });
 
 describe("approval review model", () => {

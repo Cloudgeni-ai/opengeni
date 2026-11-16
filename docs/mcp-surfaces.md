@@ -421,6 +421,14 @@ the first-party bridge's own rule for what each tool needs
 Nango-held one) reads `unavailable` with `unavailableReason: "account"` instead. `POST tools/site-allowances/reset` removes the caller's own "Always
 allow" choices on one Site (people only).
 
+In a chat, the same bridge rule decides the `tool.auth_needed` notice for a
+tool the account lacks access for: `insufficient_scope` with `scopes` (the
+"Give {provider} more access" step-up) when the account can be given more, or,
+for a fixed-access account, the legacy-safe `unsupported_auth` with
+`accountReason: "account_scope_fixed"` and `scopes`. Older clients show that as
+unavailable tools with no action; newer ones say the provider can't do this
+with the connected account.
+
 A gateway call whose MCP server could not be reached before anything was sent
 (connection refused, DNS failure, a tunnel that is gone) answers 503 `upstream_unavailable`
 with `details.code` `tool_server_unreachable`, `retryable: true` and
