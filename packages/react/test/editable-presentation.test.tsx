@@ -24,6 +24,7 @@ const {
   composePresentationEditorProjection,
   EditablePresentationArtifactSurface,
   flattenPresentationRichText,
+  presentationNodeDeletionCommands,
   replacePresentationRichText,
 } = await import("../src/components/artifacts/editable-presentation");
 
@@ -83,6 +84,13 @@ class FakePresentationSession {
       }),
     };
     for (const listener of this.listeners) listener(this.view);
+  }
+  /** A collaborator's committed slide deletion arriving from the server. */
+  removeSlideRemotely(slideId: string): void {
+    this.slides = this.slides
+      .filter((candidate) => candidate.id !== slideId)
+      .map((candidate, index) => ({ ...candidate, index }));
+    this.refreshProjection();
   }
   refreshProjection(): void {
     this.revision += 1n;
@@ -499,6 +507,28 @@ describe("SDK-backed editable presentation", () => {
     }
   });
 
+  test("an open confirmation closes, deleting nothing, when its slide is removed meanwhile", async () => {
+    const fake = new FakePresentationSession();
+    const rendered = await renderComponent(
+      <EditablePresentationArtifactSurface
+        session={fake as unknown as EditableArtifactSession}
+        title="Deck"
+      />,
+    );
+    try {
+      await flush(30);
+      await actRun(() => deleteControl(rendered.container).click());
+      await flush();
+      expect(document.body.querySelector('[role="alertdialog"], [role="dialog"]')).not.toBeNull();
+      await actRun(() => fake.removeSlideRemotely(SLIDE_ID));
+      await flush(40);
+      expect(document.body.querySelector('[role="alertdialog"], [role="dialog"]')).toBeNull();
+      expect(fake.commands).toHaveLength(0);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
   test("adds and removes an editable text box through canonical node commands", async () => {
     const fake = new FakePresentationSession();
     const rendered = await renderComponent(
@@ -610,6 +640,98 @@ describe("SDK-backed editable presentation", () => {
       id: SHAPE_ID,
     });
     await rendered.unmount();
+  });
+
+  test("node deletion order: connectors and children first, outside connectors detached", () => {
+    const owner = { kind: "slide" as const, id: SLIDE_ID };
+    const base = makeNodes()[0]!;
+    const node = (
+      id: string,
+      parentId: string | null,
+      content: PresentationArtifactEditorSceneNode["content"] = base.content,
+      inherited = false,
+    ): PresentationArtifactEditorSceneNode => ({
+      ...base,
+      id,
+      parentId,
+      inherited,
+      source: inherited ? { kind: "master", id: MASTER_ID } : owner,
+      content,
+    });
+    const connector = (from: string | null, to: string | null) =>
+      ({
+        kind: "connector",
+        connectorKind: "straight",
+        start: { nodeId: from, x: 0, y: 0 },
+        end: { nodeId: to, x: 1, y: 1 },
+        line: { fill: { kind: "none" }, width: 1, dash: "solid" },
+      }) as PresentationArtifactEditorSceneNode["content"];
+    const group = {
+      kind: "group",
+      childOffsetX: 0,
+      childOffsetY: 0,
+      childExtentWidth: 1,
+      childExtentHeight: 1,
+      children: [],
+    } as unknown as PresentationArtifactEditorSceneNode["content"];
+    const nodes = [
+      node("outer", null, group),
+      node("inner", "outer", group),
+      node("leaf", "inner"),
+      node("other", null),
+      node("inside-link", "outer", connector("leaf", "inner")),
+      node("outside-link", null, connector("leaf", "other")),
+      node("master", null, base.content, true),
+    ];
+    const order = (commands: ReturnType<typeof presentationNodeDeletionCommands>) =>
+      commands.map((command) => `${command.kind}:${"id" in command ? command.id : ""}`);
+    const subtree = presentationNodeDeletionCommands(nodes, SLIDE_ID, "outer");
+    expect(order(subtree)).toEqual([
+      "node.content.set:outside-link",
+      "node.delete:inside-link",
+      "node.delete:leaf",
+      "node.delete:inner",
+      "node.delete:outer",
+    ]);
+    expect(subtree[0]).toMatchObject({
+      content: { start: { nodeId: null }, end: { nodeId: "other" } },
+    });
+    const everything = order(presentationNodeDeletionCommands(nodes, SLIDE_ID, null));
+    expect(everything).not.toContain("node.delete:master");
+    expect(everything.filter((entry) => entry.startsWith("node.content.set"))).toEqual([]);
+    for (const [before, after] of [
+      ["inside-link", "leaf"],
+      ["outside-link", "leaf"],
+      ["outside-link", "other"],
+      ["leaf", "inner"],
+      ["inner", "outer"],
+    ]) {
+      expect(everything.indexOf(`node.delete:${before}`)).toBeLessThan(
+        everything.indexOf(`node.delete:${after}`),
+      );
+    }
+    // A cycle cannot be ordered; every node is still emitted for the kernel to judge.
+    const cyclic = [node("a", null, connector("b", null)), node("b", null, connector("a", null))];
+    expect(presentationNodeDeletionCommands(cyclic, SLIDE_ID, null)).toHaveLength(2);
+    // Unknown root falls back to a plain delete.
+    expect(presentationNodeDeletionCommands(nodes, SLIDE_ID, "missing")).toEqual([
+      { kind: "node.delete", id: "missing" },
+    ]);
+  });
+
+  test("node deletion order stays fast on a slide at the interactive node limit", () => {
+    const base = makeNodes()[0]!;
+    const nodes: PresentationArtifactEditorSceneNode[] = [];
+    // Groups listed before their children, the worst case for a rescanning order.
+    for (let index = 0; index < 16_384; index += 1) {
+      nodes.push({ ...base, id: `n${index}`, parentId: index === 0 ? null : `n${index - 1}` });
+    }
+    const started = performance.now();
+    const commands = presentationNodeDeletionCommands(nodes, SLIDE_ID, null);
+    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(commands).toHaveLength(16_384);
+    expect(commands[0]).toEqual({ kind: "node.delete", id: "n16383" });
+    expect(commands.at(-1)).toEqual({ kind: "node.delete", id: "n0" });
   });
 
   test("rich-text replacement preserves unaffected styles and paragraph alignment", () => {

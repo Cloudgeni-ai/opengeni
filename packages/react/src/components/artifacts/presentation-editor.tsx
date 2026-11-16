@@ -1011,17 +1011,16 @@ function PresentationEditorCore({
     submit();
   }, [activeIndex, mutationsBlocked, runCommit, slides.length]);
 
-  const deleteSlide = useCallback(() => {
-    if (mutationsBlocked || !activeSlide) return;
-    const command: PresentationCommit = {
-      kind: "slide-delete",
-      slideId: activeSlide.id,
-      index: activeIndex,
-    };
-    const submit = () =>
-      runCommit(`slide-delete:${activeSlide.id}`, command, () => undefined, submit);
-    submit();
-  }, [activeIndex, activeSlide, mutationsBlocked, runCommit]);
+  const deleteSlide = useCallback(
+    (slideId: string) => {
+      const index = slides.findIndex((slide) => slide.id === slideId);
+      if (mutationsBlocked || index < 0) return;
+      const command: PresentationCommit = { kind: "slide-delete", slideId, index };
+      const submit = () => runCommit(`slide-delete:${slideId}`, command, () => undefined, submit);
+      submit();
+    },
+    [mutationsBlocked, runCommit, slides],
+  );
 
   const insertTextBox = useCallback(() => {
     if (mutationsBlocked || !activeSlide) return;
@@ -1048,31 +1047,59 @@ function PresentationEditorCore({
     submit();
   }, [activeSlide, objects, presentation.slideSize, mutationsBlocked, runCommit]);
 
-  const deleteObject = useCallback(() => {
-    if (mutationsBlocked || !activeSlide || !selected || selected.readOnly) return;
-    const command: PresentationCommit = {
-      kind: "object-delete",
-      slideId: activeSlide.id,
-      objectId: selected.id,
-    };
-    const submit = () =>
-      runCommit(`object-delete:${activeSlide.id}:${selected.id}`, command, () => undefined, submit);
-    submit();
-  }, [activeSlide, mutationsBlocked, runCommit, selected]);
+  const deleteObject = useCallback(
+    (slideId: string, objectId: string) => {
+      const entry = activeSlide?.id === slideId ? objectById.get(objectId) : undefined;
+      if (mutationsBlocked || !entry || entry.readOnly) return;
+      const command: PresentationCommit = { kind: "object-delete", slideId, objectId };
+      const submit = () =>
+        runCommit(`object-delete:${slideId}:${objectId}`, command, () => undefined, submit);
+      submit();
+    },
+    [activeSlide, mutationsBlocked, objectById, runCommit],
+  );
 
-  // One delete control: it acts on the selected object, otherwise on the
-  // current slide, names its target, and always asks before deleting.
+  // One delete control: it acts on the selected editable object, otherwise on
+  // the current slide, names its target, and always asks before deleting. The
+  // dialog keeps the target it was opened for, so a collaborator's change
+  // while it is open never redirects the deletion.
   const deleteTriggerRef = useRef<HTMLButtonElement>(null);
-  const [confirmingDelete, setConfirmingDelete] = useState<"slide" | "object" | null>(null);
-  const deleteTarget: "slide" | "object" = selected ? "object" : "slide";
-  const deleteEnabled = !mutationsBlocked && (selected ? !selected.readOnly : activeSlide !== null);
+  const addSlideRef = useRef<HTMLButtonElement>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState<PresentationDeleteTarget | null>(null);
+  const deleteTarget: PresentationDeleteTarget | null =
+    selected && !selected.readOnly && activeSlide
+      ? {
+          kind: "object",
+          slideId: activeSlide.id,
+          objectId: selected.id,
+          name: objectLabel(t, selected),
+        }
+      : activeSlide
+        ? { kind: "slide", slideId: activeSlide.id, index: activeIndex }
+        : null;
+  const deleteEnabled = !mutationsBlocked && deleteTarget !== null;
+  const deleteKind = deleteTarget?.kind ?? "slide";
   const deleteLabel =
-    deleteTarget === "object"
+    deleteKind === "object"
       ? t("artifacts.presentationEditor.deleteObject")
       : t("artifacts.presentationEditor.deleteSlide");
+  const confirmingTargetExists =
+    confirmingDelete === null
+      ? false
+      : confirmingDelete.kind === "slide"
+        ? slides.some((slide) => slide.id === confirmingDelete.slideId)
+        : activeSlide?.id === confirmingDelete.slideId && objectById.has(confirmingDelete.objectId);
+  useEffect(() => {
+    if (confirmingDelete !== null && (mutationsBlocked || !confirmingTargetExists)) {
+      setConfirmingDelete(null);
+    }
+  }, [confirmingDelete, confirmingTargetExists, mutationsBlocked]);
   const confirmDelete = useCallback(() => {
-    if (confirmingDelete === "object") deleteObject();
-    else if (confirmingDelete === "slide") deleteSlide();
+    if (confirmingDelete?.kind === "object") {
+      deleteObject(confirmingDelete.slideId, confirmingDelete.objectId);
+    } else if (confirmingDelete?.kind === "slide") {
+      deleteSlide(confirmingDelete.slideId);
+    }
   }, [confirmingDelete, deleteObject, deleteSlide]);
 
   const startTextEdit = useCallback(
@@ -1435,6 +1462,7 @@ function PresentationEditorCore({
           </button>
           <button
             type="button"
+            ref={addSlideRef}
             aria-label={t("artifacts.presentationEditor.addSlide")}
             disabled={mutationsBlocked}
             onClick={insertSlide}
@@ -1487,7 +1515,7 @@ function PresentationEditorCore({
                 <button
                   ref={deleteTriggerRef}
                   type="button"
-                  data-og-presentation-delete={deleteTarget}
+                  data-og-presentation-delete={deleteKind}
                   disabled={!deleteEnabled}
                   onClick={() => setConfirmingDelete(deleteTarget)}
                   className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-og-sm px-2 text-og-xs text-og-fg-muted hover:bg-og-surface-3 hover:text-og-status-failed disabled:opacity-35 [&>svg]:size-3.5"
@@ -1497,7 +1525,7 @@ function PresentationEditorCore({
                 </button>
               </TooltipTrigger>
               <TooltipContent side="bottom">
-                {deleteTarget === "object"
+                {deleteKind === "object"
                   ? t("artifacts.presentationEditor.deleteObjectHint")
                   : t("artifacts.presentationEditor.deleteSlideHint")}
               </TooltipContent>
@@ -1899,23 +1927,24 @@ function PresentationEditorCore({
           if (!open) setConfirmingDelete(null);
         }}
         title={
-          confirmingDelete === "object" && selected
-            ? t("artifacts.presentationEditor.deleteObjectTitle", {
-                name: objectLabel(t, selected),
+          confirmingDelete?.kind === "object"
+            ? t("artifacts.presentationEditor.deleteObjectTitle", { name: confirmingDelete.name })
+            : t("artifacts.presentationEditor.deleteSlideTitle", {
+                index: (confirmingDelete?.index ?? activeIndex) + 1,
               })
-            : t("artifacts.presentationEditor.deleteSlideTitle", { index: activeIndex + 1 })
         }
         description={
-          confirmingDelete === "object"
+          confirmingDelete?.kind === "object"
             ? t("artifacts.presentationEditor.deleteObjectDescription")
             : t("artifacts.presentationEditor.deleteSlideDescription")
         }
         confirmLabel={
-          confirmingDelete === "object"
+          confirmingDelete?.kind === "object"
             ? t("artifacts.presentationEditor.deleteObject")
             : t("artifacts.presentationEditor.deleteSlide")
         }
         restoreFocusRef={deleteTriggerRef}
+        restoreFocusFallbackRef={addSlideRef}
         onConfirm={confirmDelete}
       />
     </div>
@@ -3286,6 +3315,10 @@ function objectRotation(entry: DisplayObject): number {
   if (entry.kind === "group") return finite((entry.object as PresentationGroup).rotation, 0);
   return 0;
 }
+
+type PresentationDeleteTarget =
+  | { kind: "slide"; slideId: string; index: number }
+  | { kind: "object"; slideId: string; objectId: string; name: string };
 
 function objectLabel(t: OpenGeniText, entry: DisplayObject): string {
   const object = entry.object;

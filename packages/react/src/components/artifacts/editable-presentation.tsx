@@ -388,13 +388,13 @@ function EditablePresentationArtifactSurfaceSession({
   );
 }
 
-/** Builds a deterministic, bounded catalog + editor-slide projection at one revision. */
 /**
  * Commands that delete slide-owned scene nodes in an order the kernel
  * accepts: group children before their group, connectors before the nodes
  * they attach to, and connectors that stay behind detached from deleted nodes.
  * `rootId` null deletes everything the slide owns (inherited layout and master
  * objects are untouched); otherwise it deletes that node and its descendants.
+ * Linear in the slide's node count.
  */
 export function presentationNodeDeletionCommands(
   nodes: readonly PresentationArtifactEditorSceneNode[],
@@ -407,13 +407,24 @@ export function presentationNodeDeletionCommands(
   if (rootId !== null && !owned.some((node) => node.id === rootId)) {
     return [{ kind: "node.delete", id: rootId }];
   }
-  const targets = new Set<string>(rootId === null ? owned.map((node) => node.id) : [rootId]);
-  for (let grew = true; grew;) {
-    grew = false;
+  let targets: Set<string>;
+  if (rootId === null) {
+    targets = new Set(owned.map((node) => node.id));
+  } else {
+    const children = new Map<string, string[]>();
     for (const node of owned) {
-      if (node.parentId !== null && targets.has(node.parentId) && !targets.has(node.id)) {
-        targets.add(node.id);
-        grew = true;
+      if (node.parentId === null) continue;
+      const siblings = children.get(node.parentId);
+      if (siblings) siblings.push(node.id);
+      else children.set(node.parentId, [node.id]);
+    }
+    targets = new Set([rootId]);
+    const stack = [rootId];
+    while (stack.length > 0) {
+      for (const child of children.get(stack.pop()!) ?? []) {
+        if (targets.has(child)) continue;
+        targets.add(child);
+        stack.push(child);
       }
     }
   }
@@ -434,26 +445,46 @@ export function presentationNodeDeletionCommands(
       },
     });
   }
-  const remaining = owned.filter((node) => targets.has(node.id));
-  while (remaining.length > 0) {
-    const index = remaining.findIndex(
-      (candidate) =>
-        !remaining.some(
-          (other) =>
-            other !== candidate &&
-            (other.parentId === candidate.id ||
-              (other.content.kind === "connector" &&
-                (other.content.start.nodeId === candidate.id ||
-                  other.content.end.nodeId === candidate.id))),
-        ),
-    );
-    // A reference cycle cannot be ordered; let the kernel report it.
-    const [next] = remaining.splice(index < 0 ? 0 : index, 1);
-    commands.push({ kind: "node.delete", id: next!.id });
+  // A node can be deleted once nothing still present refers to it: no child
+  // names it as parent and no connector attaches to it.
+  const doomed = owned.filter((node) => targets.has(node.id));
+  const referencedBy = (node: PresentationArtifactEditorSceneNode): Set<string> => {
+    const referenced = new Set<string>();
+    if (node.parentId !== null && targets.has(node.parentId)) referenced.add(node.parentId);
+    if (node.content.kind === "connector") {
+      for (const endpoint of [node.content.start.nodeId, node.content.end.nodeId]) {
+        if (endpoint !== null && endpoint !== node.id && targets.has(endpoint)) {
+          referenced.add(endpoint);
+        }
+      }
+    }
+    return referenced;
+  };
+  const references = new Map(doomed.map((node) => [node.id, referencedBy(node)]));
+  const blockers = new Map(doomed.map((node) => [node.id, 0]));
+  for (const referenced of references.values()) {
+    for (const id of referenced) blockers.set(id, blockers.get(id)! + 1);
+  }
+  const ready = doomed.filter((node) => blockers.get(node.id) === 0).map((node) => node.id);
+  const deleted = new Set<string>();
+  for (let index = 0; index < ready.length; index += 1) {
+    const id = ready[index]!;
+    deleted.add(id);
+    commands.push({ kind: "node.delete", id });
+    for (const referenced of references.get(id)!) {
+      const left = blockers.get(referenced)! - 1;
+      blockers.set(referenced, left);
+      if (left === 0) ready.push(referenced);
+    }
+  }
+  // A reference cycle cannot be ordered; let the kernel report it.
+  for (const node of doomed) {
+    if (!deleted.has(node.id)) commands.push({ kind: "node.delete", id: node.id });
   }
   return commands;
 }
 
+/** Builds a deterministic, bounded catalog + editor-slide projection at one revision. */
 export async function composePresentationEditorProjection(
   t: OpenGeniText,
   session: EditableArtifactSession,

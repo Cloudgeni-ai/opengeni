@@ -785,6 +785,76 @@ describe("rejected serialized edits never brick an artifact", () => {
     });
   }
 
+  test("keeps a valid earlier edit and drops a rejected edit with its successor", async () => {
+    const adapter = await loadRealAdapter("presentation");
+    const snapshot = await createSlideWithContentSnapshot(adapter);
+    const storage = new MemoryEditableArtifactStorage();
+    const rename = (title: string): PresentationArtifactCommandBatch => ({
+      version: PRESENTATION_ARTIFACT_COMMAND_VERSION,
+      commands: [{ kind: "slide.title.set", id: SLIDE_ID, title }],
+    });
+    const chain = [
+      { clientTransactionId: "retained.valid", batch: rename("Kept") },
+      { clientTransactionId: "retained.rejected", batch: deleteNonEmptySlide },
+      { clientTransactionId: "retained.successor", batch: rename("Dropped") },
+    ];
+    // Each entry is authored over the head its predecessors produced; the
+    // successor was authored over the (never valid) head that counted R.
+    const head = adapter.open(snapshot.bytes);
+    const revisions: EditableArtifactSerializedSnapshot["nativeRevision"][] = [];
+    try {
+      revisions.push(head.nativeRevision());
+      head.applyCommands(encodePresentationArtifactCommandBatch(chain[0]!.batch));
+      revisions.push(head.nativeRevision(), head.nativeRevision());
+    } finally {
+      head.dispose();
+    }
+    for (const [index, entry] of chain.entries()) {
+      await storage.putPending(
+        scope,
+        retainedPresentationPending(adapter, snapshot, entry.batch, WRITER_REPLICA_ID, {
+          clientTransactionId: entry.clientTransactionId,
+          replicaCounter: index + 1,
+          previousLocalTransactionId: chain[index - 1]?.clientTransactionId ?? null,
+          observedNativeRevision: revisions[index]!,
+          observedHeadSequence: index,
+        }),
+      );
+    }
+    const session = createSession(
+      "presentation",
+      adapter,
+      storage,
+      new SerializedTransport(
+        bootstrap(
+          "presentation",
+          adapter,
+          snapshot,
+          0,
+          snapshot.stateHash,
+          snapshot.nativeRevision,
+        ),
+        [],
+        () => new Promise<never>(() => undefined),
+      ),
+    );
+    try {
+      await session.whenReady();
+      await eventually(() => session.getView().pendingTransactions === 1);
+      expect((await storage.listPending(scope)).map((entry) => entry.clientTransactionId)).toEqual([
+        "retained.valid",
+      ]);
+      expect(session.getView().blockedPending).toEqual([]);
+      const next = await session.applyPresentationCommands(rename("Next"));
+      expect(next).toMatchObject({
+        replicaCounter: 2,
+        previousLocalTransactionId: "retained.valid",
+      });
+    } finally {
+      await session.close();
+    }
+  });
+
   async function createSlideWithContentSnapshot(
     adapter: ArtifactWorkerKernelAdapter,
   ): Promise<EditableArtifactSerializedSnapshot> {
@@ -814,15 +884,29 @@ describe("rejected serialized edits never brick an artifact", () => {
     snapshot: EditableArtifactSerializedSnapshot,
     batch: PresentationArtifactCommandBatch,
     replicaId: string,
-  ): EditableArtifactPendingTransaction {
-    const commandBytes = encodePresentationArtifactCommandBatch(batch);
-    const identity = {
-      artifactId: ARTIFACT_ID,
+    chain: Readonly<{
+      clientTransactionId: string;
+      replicaCounter: number;
+      previousLocalTransactionId: string | null;
+      observedNativeRevision?: EditableArtifactSerializedSnapshot["nativeRevision"];
+      observedHeadSequence?: number;
+    }> = {
       clientTransactionId: "retained.rejected.slide.delete",
-      replicaId,
       replicaCounter: 1,
       previousLocalTransactionId: null,
-      observedHeadSequence: 0,
+    },
+  ): EditableArtifactPendingTransaction {
+    const commandBytes = encodePresentationArtifactCommandBatch(batch);
+    const {
+      observedNativeRevision = snapshot.nativeRevision,
+      observedHeadSequence = 0,
+      ...links
+    } = chain;
+    const identity = {
+      artifactId: ARTIFACT_ID,
+      ...links,
+      replicaId,
+      observedHeadSequence,
     } as const;
     const authored = hashEditableArtifactMutationIntent({
       envelopeVersion: EDITABLE_ARTIFACT_INTENT_VERSION,
@@ -844,7 +928,7 @@ describe("rejected serialized edits never brick an artifact", () => {
       commandBytes,
       intentBytes: authored.bytes,
       createdAt: Date.now(),
-      observedNativeRevision: snapshot.nativeRevision,
+      observedNativeRevision,
     };
   }
 });

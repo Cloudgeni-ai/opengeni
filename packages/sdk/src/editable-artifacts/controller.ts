@@ -1370,13 +1370,16 @@ class EditableArtifactSyncControllerImpl implements EditableArtifactSyncControll
       if (this.connectionReady) {
         const reconciled = await this.kernel.reconcileCommitted(transaction, remainingPending);
         this.setBlockedPending(reconciled.blockedPending);
-        if (await this.discardRejectedPending(reconciled.blockedPending)) {
-          // Rebuild the Worker overlay over the same remaining set, minus what
-          // was discarded, so its speculative head matches the controller's.
+        // Rebuild the Worker overlay over the same remaining set, minus what
+        // was discarded, until nothing more is rejected, so its speculative
+        // head matches the controller's.
+        let blocked = reconciled.blockedPending;
+        while (await this.discardRejectedPending(blocked)) {
           const projection = await this.kernel.replacePending(
             remainingPending.filter((pending) => this.pending.has(pending.clientTransactionId)),
           );
           this.setBlockedPending(projection.blockedPending);
+          blocked = projection.blockedPending;
         }
         applied = reconciled;
       } else {
