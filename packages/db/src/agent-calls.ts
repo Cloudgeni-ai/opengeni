@@ -316,6 +316,7 @@ export async function settleAgentCall(
       if (!target) return null;
       // Match realtime promotion's session -> mode -> call lock order.
       await lockSessionEventWriteRows(scoped, {
+        rowProjection: "event",
         workspaceId: input.workspaceId,
         controlLock: "share",
         sessionIds: [target.sessionId],

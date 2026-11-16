@@ -175,6 +175,7 @@ export async function prepareImageGenerationOperation(
         // catalog history. Take the lifecycle prefix before operation locks so
         // reservation cannot invert a concurrent turn -> attempt writer.
         await lockSessionEventWriteRows(tx, {
+          rowProjection: "event",
           workspaceId: input.workspaceId,
           controlLock: "none",
           sessionIds: input.sessionId ? [input.sessionId] : [],
@@ -475,6 +476,7 @@ export async function prepareGeneratedImageArtifact(
         // reservation. Acquire parents before either file rows or settlement
         // locks, following the canonical lifecycle order rather than FK order.
         await lockSessionEventWriteRows(tx, {
+          rowProjection: "event",
           workspaceId: input.workspaceId,
           controlLock: "none",
           sessionIds: [input.sessionId],

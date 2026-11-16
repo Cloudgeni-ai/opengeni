@@ -280,6 +280,7 @@ export async function completeSessionTitleOperation<T>(
     );
     if (!identity) return { completed: false };
     await lockSessionEventWriteRows(tx, {
+      rowProjection: "event",
       workspaceId: input.workspaceId,
       sessionIds: [input.sessionId],
       controlLock: "none",

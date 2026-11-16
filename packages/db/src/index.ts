@@ -31986,6 +31986,7 @@ async function runConnectorActionLedgerTransaction<T>(
           if (locked === key) return;
           if (locked) throw new Error("connector ledger transaction spans two attempts");
           await lockSessionEventWriteRows(tx, {
+            rowProjection: "event",
             workspaceId: input.workspaceId,
             controlLock: "none",
             sessionLock: "key_share",
@@ -52734,6 +52735,7 @@ async function applySandboxWorkspaceRecoveryTx(
     }
   }
   await lockSessionEventWriteRows(tx, {
+    rowProjection: "event",
     workspaceId: input.workspaceId,
     controlLock: "none",
     sessionIds: members.map((member) => member.id),
@@ -54707,6 +54709,7 @@ export async function deliverPendingSandboxRestoreNotice(
               .orderBy(asc(schema.sessions.id))
           ).map((session) => session.id);
           await lockSessionEventWriteRows(tx, {
+            rowProjection: "event",
             workspaceId: input.workspaceId,
             controlLock: "none",
             sessionIds,
@@ -56746,6 +56749,7 @@ async function lockLostProviderCommandSessionsTx(
   const toLock = [...new Set([...sessionIds, ...alsoLockSessionIds])];
   if (toLock.length) {
     await lockSessionEventWriteRows(tx, {
+      rowProjection: "event",
       workspaceId: input.workspaceId,
       controlLock: "share",
       sessionIds: toLock,
@@ -78054,6 +78058,7 @@ export async function initializeSessionStartAtomically(
           ]);
         }
         await lockSessionEventWriteRows(tx as unknown as Database, {
+          rowProjection: "event",
           workspaceId: input.workspaceId,
           controlLock: "already_locked",
           workspaceLock: "already_locked",
@@ -94312,6 +94317,7 @@ function backgroundCommandTerminalMutation(input: {
     wakes,
     prepare: async (tx: SessionActivityDatabase): Promise<void> => {
       const locks = await lockSessionEventWriteRows(tx, {
+        rowProjection: "event",
         workspaceId: input.workspaceId,
         controlLock: "share",
         sessionIds: [input.sessionId],
@@ -97040,6 +97046,7 @@ export async function appendSessionEventToSandboxGroup(
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
         await lockSessionEventWriteRows(tx as unknown as Database, {
+          rowProjection: "event",
           workspaceId,
           controlLock: "none",
         });
@@ -97371,6 +97378,7 @@ export async function appendSessionEventsWithLockedSessionUpdate(
           return [];
         }
         await lockSessionEventWriteRows(tx as unknown as Database, {
+          rowProjection: "event",
           workspaceId,
           controlLock: "already_locked",
           workspaceLock: "already_locked",

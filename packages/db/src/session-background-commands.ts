@@ -119,6 +119,20 @@ function connectedOutputIdentityWhere(input: ConnectedCommandOutputIdentity) {
  * inventory answer that stores a command's output. */
 export const CONNECTED_COMMAND_CLAIM_TTL_MS = 5 * 60_000;
 
+/*
+ * Output custody bookkeeping (consumption receipt, collection claim, release
+ * and retry settlement) changes only the exact exited command row. It appends
+ * no event, reads no session or control state, and never runs on a `running`
+ * row, which is the only state Pause/Stop cancellation touches. So it locks
+ * just that row, like the reconciliation proof and defer writers below, and
+ * does not take the session event-write prefix (workspace-control share,
+ * session NO KEY UPDATE, cursor FOR UPDATE). A transaction that holds one row
+ * lock and requests no other cannot close a deadlock cycle; every prefix
+ * holder that touches the same row locks it FOR UPDATE after its prefix. The
+ * sweep retries this bookkeeping for every unreleased output, so the prefix
+ * made it queue behind, and block, the session's own event appends.
+ */
+
 /** Record full output custody only after the caller's verified, awaited capture.
  * Terminal observation is insufficient. The persisted receipt is the retry
  * obligation even when the capturing worker disappears before publishing ACK. */
@@ -134,11 +148,6 @@ export async function recordConnectedCommandOutputConsumption(
       throw new Error("Connected command output receipt has an invalid frontier");
   }
   await withSessionActivityRlsContext(db, input, async (tx) => {
-    await lockSessionEventWriteRows(tx, {
-      workspaceId: input.workspaceId,
-      controlLock: "share",
-      sessionIds: [input.sessionId],
-    });
     const command = schema.sessionBackgroundCommands;
     const [current] = await tx
       .select()
@@ -236,11 +245,6 @@ export async function claimConnectedCommandOutputCollection(
   input: ConnectedCommandOutputIdentity & { claimId: string },
 ): Promise<boolean> {
   return await withSessionActivityRlsContext(db, input, async (tx) => {
-    await lockSessionEventWriteRows(tx, {
-      workspaceId: input.workspaceId,
-      controlLock: "share",
-      sessionIds: [input.sessionId],
-    });
     const command = schema.sessionBackgroundCommands;
     const rows = await tx
       .update(command)
@@ -269,11 +273,6 @@ export async function returnConnectedCommandOutputCollection(
   input: ConnectedCommandOutputIdentity & { claimId: string },
 ): Promise<void> {
   await withSessionActivityRlsContext(db, input, async (tx) => {
-    await lockSessionEventWriteRows(tx, {
-      workspaceId: input.workspaceId,
-      controlLock: "share",
-      sessionIds: [input.sessionId],
-    });
     const command = schema.sessionBackgroundCommands;
     await tx
       .update(command)
@@ -293,11 +292,6 @@ export async function recordConnectedCommandOutputRelease(
   input: ConnectedCommandOutputIdentity & { exitSeq: string },
 ): Promise<boolean> {
   return await withSessionActivityRlsContext(db, input, async (tx) => {
-    await lockSessionEventWriteRows(tx, {
-      workspaceId: input.workspaceId,
-      controlLock: "share",
-      sessionIds: [input.sessionId],
-    });
     const command = schema.sessionBackgroundCommands;
     const rows = await tx
       .update(command)
@@ -394,11 +388,6 @@ async function settleConnectedCommandOutputClaim(
     throw new Error("Connected command output retry delay is invalid");
   const released = input.outcome === "not_retained";
   return await withSessionActivityRlsContext(db, input.claim, async (tx) => {
-    await lockSessionEventWriteRows(tx, {
-      workspaceId: input.claim.workspaceId,
-      controlLock: "share",
-      sessionIds: [input.claim.sessionId],
-    });
     const command = schema.sessionBackgroundCommands;
     const retryAt = new Date(Date.now() + input.retryAfterMs);
     // Evaluated on the row being updated, against the database clock. The
@@ -1762,6 +1751,7 @@ export async function observeSessionBackgroundCommandCompletion(
 ): Promise<SessionBackgroundCommand | null> {
   return await withSessionActivityRlsContext(db, input, async (tx) => {
     const locks = await lockSessionEventWriteRows(tx, {
+      rowProjection: "event",
       workspaceId: input.workspaceId,
       controlLock: "share",
       sessionIds: [input.sessionId],
@@ -2420,6 +2410,7 @@ export async function claimPendingBackgroundCommandResults(
   if (probe.length === 0) return [];
   return await withSessionActivityRlsContext(db, input, async (tx) => {
     const locks = await lockSessionEventWriteRows(tx, {
+      rowProjection: "event",
       workspaceId: input.workspaceId,
       controlLock: "share",
       sessionIds: [input.sessionId],

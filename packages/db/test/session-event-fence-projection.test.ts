@@ -10,6 +10,7 @@ import {
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
+  createEnrollment,
   createSession,
   getSession,
   listTurnOpenSuffixToolCalls,
@@ -22,6 +23,14 @@ import {
   withWorkspaceRls,
   withWorkspaceSessionActivityRls,
 } from "../src/index";
+import {
+  claimConnectedCommandOutputCollection,
+  claimConnectedCommandOutputReleases,
+  recordConnectedCommandOutputConsumption,
+  recordConnectedCommandOutputRelease,
+  returnConnectedCommandOutputCollection,
+  settleConnectedCommandOutputReleaseClaim,
+} from "../src/session-background-commands";
 import { submitTestHumanPrompt } from "../../../test/integration/helpers/session-control";
 import type { SessionEventMutation } from "../src/index";
 
@@ -322,6 +331,228 @@ test("identity-only mutations use the narrow fence and still reject a replaced a
   } finally {
     driver.options.debug = false;
   }
+});
+
+test("connected-command output custody writers lock only their exact command row", async () => {
+  const input = await fixture();
+  const enrollment = await createEnrollment(client.db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    pubkey: `ed25519:${crypto.randomUUID()}`,
+  });
+  await shared.admin`update enrollments set connection_instance_id = 'launch',
+    connection_lease_expires_at = now() + interval '1 hour' where id = ${enrollment.id}`;
+  const opId = crypto.randomUUID();
+  const [inserted] = await shared.admin<{ id: string }[]>`
+    insert into session_background_commands (account_id, workspace_id, session_id, provider, state,
+      control_workspace_id, enrollment_id, connection_instance_id, op_id, exit_code,
+      settlement_reason, settled_at, reconcile_after)
+    values (${input.accountId}, ${input.workspaceId}, ${input.sessionId}, 'connected_machine',
+      'exited', ${input.workspaceId}, ${enrollment.id}, 'launch', ${opId}, 0, 'op_exit', now(),
+      '2000-01-01T00:00:00Z'::timestamptz)
+    returning id`;
+  const identity = {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    commandId: inserted!.id,
+    controlWorkspaceId: input.workspaceId,
+    enrollmentId: enrollment.id,
+    connectionInstanceId: "launch",
+    opId,
+  };
+  const driver = (client.db as unknown as { $client: postgres.Sql }).$client;
+  const queries: string[] = [];
+  driver.options.debug = (_connection, query) => queries.push(query);
+  try {
+    const collectionClaim = crypto.randomUUID();
+    expect(
+      await claimConnectedCommandOutputCollection(client.db, {
+        ...identity,
+        claimId: collectionClaim,
+      }),
+    ).toBe(true);
+    expect(
+      await claimConnectedCommandOutputCollection(client.db, {
+        ...identity,
+        claimId: crypto.randomUUID(),
+      }),
+    ).toBe(false);
+    await returnConnectedCommandOutputCollection(client.db, {
+      ...identity,
+      claimId: collectionClaim,
+    });
+    await recordConnectedCommandOutputConsumption(client.db, {
+      ...identity,
+      receipt: { exitSeq: "7", attachGeneration: "3" },
+      exitCode: 0,
+    });
+    const [claim] = await claimConnectedCommandOutputReleases(client.db, {
+      claimId: crypto.randomUUID(),
+      limit: 1,
+      claimTtlMs: 60_000,
+    });
+    expect(claim?.commandId).toBe(identity.commandId);
+    expect(claim?.receipt).toEqual({ exitSeq: "7", attachGeneration: "3" });
+    expect(
+      await settleConnectedCommandOutputReleaseClaim(client.db, {
+        claim: claim!,
+        outcome: "published",
+        retryAfterMs: 30_000,
+      }),
+    ).toBe(true);
+    // The claim is gone once settled: the same claim cannot settle twice.
+    expect(
+      await settleConnectedCommandOutputReleaseClaim(client.db, {
+        claim: claim!,
+        outcome: "published",
+        retryAfterMs: 30_000,
+      }),
+    ).toBe(false);
+    expect(
+      await recordConnectedCommandOutputRelease(client.db, { ...identity, exitSeq: "8" }),
+    ).toBe(false);
+    expect(
+      await recordConnectedCommandOutputRelease(client.db, { ...identity, exitSeq: "7" }),
+    ).toBe(true);
+    expect(
+      await recordConnectedCommandOutputRelease(client.db, { ...identity, exitSeq: "7" }),
+    ).toBe(false);
+
+    // Custody bookkeeping touches only its exact exited command row: no
+    // session, cursor or workspace row lock and no workspace-control fence.
+    const prefixLocks = queries.filter(
+      (query) =>
+        /from "(?:sessions|session_event_cursors|workspaces|workspace_inference_controls)"/.test(
+          query,
+        ) && /for (?:key share|share|no key update|update)/.test(query),
+    );
+    expect(prefixLocks).toEqual([]);
+    // The workspace-control and Site admission fences are standalone advisory
+    // statements; the scope's own tenancy setup statement is unchanged.
+    expect(queries.filter((query) => /^\s*select pg_advisory_xact_lock/i.test(query))).toEqual([]);
+  } finally {
+    driver.options.debug = false;
+  }
+  const [row] = await shared.admin<
+    {
+      output_exit_seq: string;
+      output_release_observed_at: Date | null;
+      reconcile_claim_id: string | null;
+      last_reconcile_outcome: string;
+    }[]
+  >`select output_exit_seq, output_release_observed_at, reconcile_claim_id, last_reconcile_outcome
+    from session_background_commands where id = ${identity.commandId}`;
+  expect(row?.output_exit_seq).toBe("7");
+  expect(row?.output_release_observed_at).not.toBeNull();
+  expect(row?.reconcile_claim_id).toBeNull();
+  expect(row?.last_reconcile_outcome).toBe("output_released");
+});
+
+test("custody bookkeeping does not queue behind a session's event writer or a control mutation, and stays exactly-once", async () => {
+  const input = await fixture();
+  const enrollment = await createEnrollment(client.db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    pubkey: `ed25519:${crypto.randomUUID()}`,
+  });
+  await shared.admin`update enrollments set connection_instance_id = 'launch',
+    connection_lease_expires_at = now() + interval '1 hour' where id = ${enrollment.id}`;
+  const opId = crypto.randomUUID();
+  const [inserted] = await shared.admin<{ id: string }[]>`
+    insert into session_background_commands (account_id, workspace_id, session_id, provider, state,
+      control_workspace_id, enrollment_id, connection_instance_id, op_id, exit_code,
+      settlement_reason, settled_at, reconcile_after)
+    values (${input.accountId}, ${input.workspaceId}, ${input.sessionId}, 'connected_machine',
+      'exited', ${input.workspaceId}, ${enrollment.id}, 'launch', ${opId}, 0, 'op_exit', now(),
+      '2000-01-01T00:00:00Z'::timestamptz)
+    returning id`;
+  const identity = {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    commandId: inserted!.id,
+    controlWorkspaceId: input.workspaceId,
+    enrollmentId: enrollment.id,
+    connectionInstanceId: "launch",
+    opId,
+  };
+  const pool = createDb(shared.appUrl, { max: 8 });
+  let release!: () => void;
+  const released = new Promise<void>((done) => (release = done));
+  let held!: () => void;
+  const holding = new Promise<void>((done) => (held = done));
+  // A Pause-shaped holder: exclusive workspace control plus the session's
+  // semantic event-write rows, held open while custody bookkeeping runs.
+  const holder = shared.admin.begin(async (sql) => {
+    await sql`select pg_advisory_xact_lock(hashtextextended(${`workspace-control:${input.workspaceId}`}, 0))`;
+    await sql`select id from sessions where id = ${input.sessionId} for no key update`;
+    await sql`select session_id from session_event_cursors where session_id = ${input.sessionId} for update`;
+    held();
+    await released;
+  });
+  try {
+    await holding;
+    const within = <T>(work: Promise<T>) =>
+      Promise.race([
+        work,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("custody write queued behind the session")), 15_000),
+        ),
+      ]);
+    // Racing collection claims on the same output: exactly one owner.
+    const claims = await within(
+      Promise.all(
+        Array.from({ length: 6 }, () =>
+          claimConnectedCommandOutputCollection(pool.db, {
+            ...identity,
+            claimId: crypto.randomUUID(),
+          }),
+        ),
+      ),
+    );
+    expect(claims.filter(Boolean)).toHaveLength(1);
+    await within(
+      recordConnectedCommandOutputConsumption(pool.db, {
+        ...identity,
+        receipt: { exitSeq: "11", attachGeneration: "2" },
+        exitCode: 0,
+      }),
+    );
+    // Idempotent retry of the same receipt; a changed frontier is refused.
+    await within(
+      recordConnectedCommandOutputConsumption(pool.db, {
+        ...identity,
+        receipt: { exitSeq: "11", attachGeneration: "2" },
+        exitCode: 0,
+      }),
+    );
+    await expect(
+      recordConnectedCommandOutputConsumption(pool.db, {
+        ...identity,
+        receipt: { exitSeq: "12", attachGeneration: "2" },
+        exitCode: 0,
+      }),
+    ).rejects.toThrow("changed its durable exit frontier");
+    const releases = await within(
+      Promise.all(
+        Array.from({ length: 6 }, () =>
+          recordConnectedCommandOutputRelease(pool.db, { ...identity, exitSeq: "11" }),
+        ),
+      ),
+    );
+    expect(releases.filter(Boolean)).toHaveLength(1);
+  } finally {
+    release();
+    await holder;
+    await pool.close();
+  }
+  const [row] = await shared.admin<
+    { output_exit_seq: string; output_release_observed_at: Date | null }[]
+  >`select output_exit_seq, output_release_observed_at
+    from session_background_commands where id = ${identity.commandId}`;
+  expect(row?.output_exit_seq).toBe("11");
+  expect(row?.output_release_observed_at).not.toBeNull();
 });
 
 test("generic event writers retain payloads, sequence and explicit updates without reading frozen inputs", async () => {
