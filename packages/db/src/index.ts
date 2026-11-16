@@ -1459,6 +1459,8 @@ export * from "./insights";
 export * from "./insights-model-bundle";
 export * from "./insights-usage-bundle";
 export * from "./insights-unified";
+export * from "./sandbox-viewer-only-drain";
+import { VIEWER_ONLY_OPEN_SESSION_STATUSES } from "./sandbox-viewer-only-drain";
 export * from "./organization-membership-lifecycle";
 import {
   assertActiveManagedHumanOrganizationMembership,
@@ -49248,6 +49250,18 @@ export interface AcquireLeaseInput {
    * limit is refused (non-turn holders) or capacity-blocked (turns). Omitted =
    * no organization limits. */
   sandboxPlanLimits?: SandboxPlanLimits;
+  /** Viewer holders only: for this long after the reaper released a box's
+   * viewers for the viewer idle window, refuse (`viewer_idle`) an attach to
+   * it unless the attach reports interaction after that release or a turn
+   * used the session since. After it, any attach is admitted, so an older
+   * client or another person can warm the box again. The person-facing attach
+   * route sets it to the idle window when the idle drain is on; 0 or omitted
+   * never refuses. */
+  viewerIdleReattachRefusalMs?: number;
+  /** Viewer holders only: how long ago the attaching page last saw real user
+   * interaction, when the client reports it (see
+   * normalizeViewerInteractionAgeMs). Recorded on the holder. */
+  viewerInteractionAgeMs?: number | null;
 }
 
 export type AcquireLeaseResult =
@@ -49639,12 +49653,14 @@ export class SandboxViewerAdmissionBlockedError extends Error {
   constructor(
     public readonly workspaceId: string,
     public readonly sandboxGroupId: string,
-    public readonly reason: SandboxViewerForceDrainReason,
+    public readonly reason: SandboxViewerForceDrainReason | "viewer_idle",
   ) {
     super(
       reason === "balance"
         ? "Sandbox viewer admission is blocked because the workspace has no managed credits"
-        : "Sandbox viewer admission is blocked because the workspace warm allowance is exhausted",
+        : reason === "viewer_idle"
+          ? "Sandbox viewer admission is blocked because the sandbox was stopped after its page went unused; interact with the page to resume it"
+          : "Sandbox viewer admission is blocked because the workspace warm allowance is exhausted",
     );
   }
 }
@@ -49695,39 +49711,122 @@ export class SandboxOrganizationBoxLimitError extends Error {
 export const ORGANIZATION_WARM_SANDBOX_COUNTS_ROUTINE =
   "opengeni_private.organization_warm_sandbox_counts_v1(uuid, text, uuid)";
 
+/** The tier of a host-provisioned organization (a configured deployment, an
+ * embedding host or the SDK bootstrap); unbounded unless configured. See
+ * resolveSandboxPlanTier. */
+export const SANDBOX_EMBEDDED_PLAN_TIER = "embedded";
+
+/** Tiers outside the per-workspace viewer-only limit
+ * (`OPENGENI_SANDBOX_MAX_VIEWER_ONLY_BOXES_PER_WORKSPACE`) and the reaper's
+ * viewer-only drains: host-provisioned organizations and the `enterprise`
+ * plan, which operators assign to organizations that must not be bounded.
+ * Their plan-limit table entries still apply at admission. */
+export function sandboxPlanTierExemptFromViewerOnlyBounds(tier: string): boolean {
+  return tier === SANDBOX_EMBEDDED_PLAN_TIER || tier === "enterprise";
+}
+
+/** The tier of a young Free self-serve organization, while the
+ * `new` tier sets `organizationsYoungerThanMs`. */
+export const SANDBOX_NEW_PLAN_TIER = "new";
+
+/** managed_accounts.external_source values of self-serve organizations: a
+ * person's signup and an additional organization they create. Any other
+ * source is a host's. A guard test fails when a new account-creating path
+ * introduces a source that is in neither this list nor its known host list. */
+export const SELF_SERVE_ACCOUNT_SOURCES: readonly string[] = [
+  "better-auth:user",
+  "opengeni:additional-organization",
+];
+
 /**
- * The plan tier whose sandbox limits apply to an organization: its plan key
- * (a paid plan only while active, trialing or past due), `none` without a
- * plan row, and `restricted` for a Free or plan-less organization whose
- * promotion decision is `held` or `denied`. Reads only the caller's own
- * organization's rows under the current account context.
+ * The plan tier whose sandbox limits apply to an organization:
+ *
+ * - `embedded` for an organization a host provisioned: its external source is
+ *   not a self-serve one (a configured or local deployment, an embedding
+ *   host or the SDK bootstrap). Nobody self-serve can set it, unlike a
+ *   workspace's external source, which never counts. Operators put any other
+ *   organization that must not be bounded on the `enterprise` plan.
+ * - otherwise its plan key (a paid plan only while active, trialing or past
+ *   due), `none` without a plan row;
+ * - `restricted` for a Free or plan-less organization whose promotion
+ *   decision is `held` or `denied`, while promotion enforcement is on;
+ * - `new` for any other Free organization created less than the `new` tier's
+ *   `organizationsYoungerThanMs` ago (only when `limits` is given and sets it).
+ *
+ * The tier is the organization's, whatever credential the caller holds
+ * (browser session, API key, native token or service).
+ *
+ * Reads only the caller's own organization's rows under the current account
+ * context.
  */
-export async function resolveSandboxPlanTier(tx: Database, accountId: string): Promise<string> {
+export async function resolveSandboxPlanTier(
+  tx: Database,
+  accountId: string,
+  limits?: SandboxPlanLimits,
+): Promise<string> {
+  const newTierAgeMs = limits
+    ? (sandboxPlanLimitFor(limits, SANDBOX_NEW_PLAN_TIER).organizationsYoungerThanMs ?? 0)
+    : 0;
   const [row] = await rawRows<{
     plan_key: string | null;
     status: string | null;
     decision: string | null;
+    enforcement: boolean | null;
+    hosted_account: boolean | null;
+    young: boolean | null;
   }>(
     tx,
-    sql`select plan.plan_key, plan.status, decision.decision
+    sql`select plan.plan_key, plan.status, decision.decision,
+        (select enforcement.enabled from promotion_enforcement enforcement
+          where enforcement.singleton) as enforcement,
+        (${newTierAgeMs}::bigint > 0 and exists (select 1 from managed_accounts account
+          where account.id = organization.account_id
+            and account.created_at > now() - (${newTierAgeMs}::bigint * interval '1 millisecond')
+        )) as young,
+        exists (select 1 from managed_accounts account
+          where account.id = organization.account_id
+            and account.external_source is not null
+            and account.external_source not in (${sql.join(
+              SELF_SERVE_ACCOUNT_SOURCES.map((source) => sql`${source}`),
+              sql`, `,
+            )})) as hosted_account
       from (select ${accountId}::uuid as account_id) organization
       left join organization_plans plan on plan.account_id = organization.account_id
       left join promotion_decisions decision on decision.account_id = organization.account_id`,
   );
+  if (row?.hosted_account === true) return SANDBOX_EMBEDDED_PLAN_TIER;
   const planKey = row?.plan_key ?? null;
   let tier: string;
   if (planKey === null) tier = "none";
   else if (planKey === "free" || planKey === "enterprise") tier = planKey;
   else if (["active", "trialing", "past_due"].includes(row?.status ?? "")) tier = planKey;
   else tier = "free";
-  if ((tier === "free" || tier === "none") && ["held", "denied"].includes(row?.decision ?? "")) {
+  if (
+    (tier === "free" || tier === "none") &&
+    row?.enforcement === true &&
+    ["held", "denied"].includes(row?.decision ?? "")
+  ) {
     return "restricted";
   }
+  if (tier === "free" && row?.young === true) return SANDBOX_NEW_PLAN_TIER;
   return tier;
 }
 
-function sandboxPlanLimitFor(limits: SandboxPlanLimits, tier: string): SandboxPlanLimit {
+export function sandboxPlanLimitFor(limits: SandboxPlanLimits, tier: string): SandboxPlanLimit {
   return Object.hasOwn(limits, tier) ? (limits[tier] ?? {}) : {};
+}
+
+/** resolveSandboxPlanTier for maintenance callers, in the RLS context of one
+ * of the organization's workspaces. */
+export async function resolveSandboxPlanTierInWorkspace(
+  db: Database,
+  input: { accountId: string; workspaceId: string; limits?: SandboxPlanLimits },
+): Promise<string> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => await resolveSandboxPlanTier(scopedDb, input.accountId, input.limits),
+  );
 }
 
 type OrganizationWarmSandboxCounts = {
@@ -51001,19 +51100,29 @@ async function upsertLeaseHolder(
   viewerAuthority: {
     subjectId: string | null;
     authorityEpoch: number | null;
+    /** Viewer holders only: the attaching page's reported interaction age. */
+    interactionAgeMs?: number | null;
   } = {
     subjectId: null,
     authorityEpoch: null,
   },
 ): Promise<void> {
+  const interactionAgeMs =
+    kind === "viewer" ? normalizeViewerInteractionAgeMs(viewerAuthority.interactionAgeMs) : null;
+  const lastInteractionAt =
+    interactionAgeMs === null
+      ? sql`null::timestamptz`
+      : sql`now() - (${String(interactionAgeMs)} || ' milliseconds')::interval`;
   await tx.execute(sql`
     insert into sandbox_lease_holders
       (account_id, workspace_id, lease_id, kind, holder_id, subject_id,
-       viewer_subject_id, viewer_authority_epoch, last_heartbeat_at)
+       viewer_subject_id, viewer_authority_epoch, last_heartbeat_at, last_interaction_at)
     values (${accountId}, ${workspaceId}, ${leaseId}, ${kind}, ${holderId}, ${subjectId},
-      ${viewerAuthority.subjectId}, ${viewerAuthority.authorityEpoch}, now())
+      ${viewerAuthority.subjectId}, ${viewerAuthority.authorityEpoch}, now(), ${lastInteractionAt})
     on conflict (lease_id, kind, holder_id)
       do update set last_heartbeat_at = now(),
+        last_interaction_at = greatest(
+          sandbox_lease_holders.last_interaction_at, excluded.last_interaction_at),
         viewer_subject_id = coalesce(excluded.viewer_subject_id,
           sandbox_lease_holders.viewer_subject_id),
         -- The recorded (subject, epoch) pair stays coherent. Same subject (or
@@ -51254,15 +51363,24 @@ async function acquireLeaseOnce(
         // A viewer alone can start a box and keep it warm for as long as it
         // heartbeats, with no task and no model spend. Bound how many such
         // boxes one workspace, one organization and one member keep warm.
-        // Joining a box that a turn or another viewer already keeps warm adds
-        // no compute and is always admitted, as is replaying this exact holder.
-        const viewerOnlyBoxLimit = input.viewerOnlyBoxLimit ?? 0;
-        const planLimit = input.sandboxPlanLimits
-          ? sandboxPlanLimitFor(
-              input.sandboxPlanLimits,
-              await resolveSandboxPlanTier(tx, accountId),
-            )
-          : {};
+        // Joining a box that a turn, another viewer, a live process or a
+        // Browser/ComputerSession already keeps warm adds no compute and is
+        // always admitted, as is replaying this exact holder. A
+        // host-provisioned (`embedded`) or `enterprise` organization is
+        // outside the per-workspace limit as well as the plan limits its tier
+        // does not set.
+        const planTier =
+          input.sandboxPlanLimits || (input.viewerOnlyBoxLimit ?? 0) > 0
+            ? await resolveSandboxPlanTier(tx, accountId, input.sandboxPlanLimits)
+            : null;
+        const viewerOnlyBoxLimit =
+          planTier !== null && sandboxPlanTierExemptFromViewerOnlyBounds(planTier)
+            ? 0
+            : (input.viewerOnlyBoxLimit ?? 0);
+        const planLimit =
+          input.sandboxPlanLimits && planTier !== null
+            ? sandboxPlanLimitFor(input.sandboxPlanLimits, planTier)
+            : {};
         const organizationViewerLimit = planLimit.viewerOnlyBoxesPerOrganization;
         const memberViewerLimit = input.viewerSubjectId
           ? planLimit.viewerOnlyBoxesPerMember
@@ -51274,14 +51392,15 @@ async function acquireLeaseOnce(
             organizationViewerLimit !== undefined ||
             memberViewerLimit !== undefined)
         ) {
-          const current = await tx.execute<{ held: boolean; joins_viewer_box: boolean }>(sql`
+          const current = await tx.execute<{ held: boolean; joins_live_box: boolean }>(sql`
             select
               exists (select 1 from sandbox_lease_holders
                 where lease_id = ${row.id} and kind = 'viewer' and holder_id = ${holderId}) as held,
               (${liveness}::text in ('warming', 'warm') and exists (select 1 from sandbox_lease_holders
-                where lease_id = ${row.id} and kind = 'viewer')) as joins_viewer_box
+                where lease_id = ${row.id}
+                  and kind in ('viewer', 'process', 'interaction'))) as joins_live_box
           `);
-          if (!current[0]?.held && !current[0]?.joins_viewer_box) {
+          if (!current[0]?.held && !current[0]?.joins_live_box) {
             // Two viewers on different groups each hold only their own group
             // lock. The organization key serializes their counts so every
             // limit is exact.
@@ -51346,6 +51465,73 @@ async function acquireLeaseOnce(
               }
             }
           }
+        }
+
+        const viewerInteractionAgeMs =
+          kind === "viewer" ? normalizeViewerInteractionAgeMs(input.viewerInteractionAgeMs) : null;
+
+        // Viewer-only idle drain: the reaper released this box's viewers
+        // because nobody used the page. For one more idle window, an attach
+        // that reports no interaction since then (an unattended page or an
+        // older client re-attaching on its own) must not warm it again and
+        // reset the idle clock. A person who interacts, a turn in the session,
+        // a box someone else already holds, or any attach after that window
+        // (a person returning on an older client) admits it as usual.
+        const viewerIdleDrainedAt = (row as { viewer_idle_drained_at?: Date | string | null })
+          .viewer_idle_drained_at;
+        if (
+          kind === "viewer" &&
+          (input.viewerIdleReattachRefusalMs ?? 0) > 0 &&
+          viewerIdleDrainedAt !== null &&
+          viewerIdleDrainedAt !== undefined &&
+          Number(row.turn_holders) === 0
+        ) {
+          const idleRows = await tx.execute<{ refuse: boolean }>(sql`
+            select (
+              ${viewerIdleDrainedAt}::timestamptz > now() - (${String(
+                Math.floor(input.viewerIdleReattachRefusalMs ?? 0),
+              )} || ' milliseconds')::interval
+              and not exists (
+                select 1 from sandbox_lease_holders holder where holder.lease_id = ${row.id}
+              )
+              and ${
+                viewerInteractionAgeMs === null
+                  ? sql`true`
+                  : sql`now() - (${String(viewerInteractionAgeMs)} || ' milliseconds')::interval
+                      <= ${viewerIdleDrainedAt}::timestamptz`
+              }
+              and not exists (
+                select 1 from sessions chat
+                where chat.workspace_id = ${workspaceId}
+                  and chat.sandbox_group_id = ${sandboxGroupId}
+                  and (
+                    chat.status in (${sql.raw(
+                      VIEWER_ONLY_OPEN_SESSION_STATUSES.map((status) => `'${status}'`).join(", "),
+                    )})
+                    or exists (
+                      select 1 from session_turns turn
+                      where turn.workspace_id = chat.workspace_id
+                        and turn.session_id = chat.id
+                        and (
+                          turn.created_at > ${viewerIdleDrainedAt}::timestamptz
+                          or turn.finished_at > ${viewerIdleDrainedAt}::timestamptz
+                        )
+                    )
+                  )
+              )
+            ) as refuse
+          `);
+          if (idleRows[0]?.refuse === true) {
+            throw new SandboxViewerAdmissionBlockedError(
+              workspaceId,
+              sandboxGroupId,
+              "viewer_idle",
+            );
+          }
+          // Admitted: the session is in use again; the marker has done its job.
+          await tx.execute(sql`
+            update sandbox_leases set viewer_idle_drained_at = null where id = ${row.id}
+          `);
         }
 
         // Provider-native capture may temporarily pause the box. Do not attach
@@ -51504,6 +51690,7 @@ async function acquireLeaseOnce(
           await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId, {
             subjectId: input.viewerSubjectId ?? null,
             authorityEpoch: input.viewerAuthorityEpoch ?? null,
+            interactionAgeMs: viewerInteractionAgeMs,
           });
           const updated = await recomputeAndStampLease(tx, row.id, input.leaseTtlMs, "warm");
           return { role: "rearmed" as const, lease: mapLeaseRow(updated) };
@@ -51599,6 +51786,7 @@ async function acquireLeaseOnce(
           await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId, {
             subjectId: input.viewerSubjectId ?? null,
             authorityEpoch: input.viewerAuthorityEpoch ?? null,
+            interactionAgeMs: viewerInteractionAgeMs,
           });
           const updated = await recomputeAndStampLease(tx, row.id, warmingLeaseTtlMs, null);
           // casRows.length === 0 cannot happen under the held row lock (defensive):
@@ -51643,6 +51831,7 @@ async function acquireLeaseOnce(
         await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId, {
           subjectId: input.viewerSubjectId ?? null,
           authorityEpoch: input.viewerAuthorityEpoch ?? null,
+          interactionAgeMs: viewerInteractionAgeMs,
         });
         const attachTtlMs = liveness === "warming" ? warmingLeaseTtlMs : input.leaseTtlMs;
         const updated = await recomputeAndStampLease(tx, row.id, attachTtlMs, null);
@@ -58766,10 +58955,23 @@ async function touchLiveLeaseHolder(
     sandboxGroupId: string;
     kind: LeaseHolderKind;
     holderId: string;
+    /** Viewer holders only: how long ago the viewer last saw real user
+     * interaction. Moves `last_interaction_at` forward, never back. */
+    interactionAgeMs?: number | null | undefined;
   },
 ): Promise<boolean> {
+  const interactionAgeMs =
+    input.kind === "viewer" ? normalizeViewerInteractionAgeMs(input.interactionAgeMs) : null;
   const updated = await tx.execute<{ id: string }>(sql`
     update sandbox_lease_holders as holder set last_heartbeat_at = now()
+      ${
+        interactionAgeMs === null
+          ? sql``
+          : sql`, last_interaction_at = greatest(
+              holder.last_interaction_at,
+              now() - (${String(interactionAgeMs)} || ' milliseconds')::interval
+            )`
+      }
     where holder.lease_id = (
       select id from sandbox_leases
       where workspace_id = ${input.workspaceId}
@@ -58781,6 +58983,15 @@ async function touchLiveLeaseHolder(
     returning holder.id
   `);
   return updated.length > 0;
+}
+
+/** A viewer's reported interaction age, made safe for SQL: a finite,
+ * non-negative whole number of milliseconds, at most 30 days. Anything else
+ * (an older client, a malformed value) records nothing, so the reaper falls
+ * back to the attach time and session activity. */
+export function normalizeViewerInteractionAgeMs(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return null;
+  return Math.min(Math.floor(value), 30 * 24 * 60 * 60 * 1000);
 }
 
 // §4.5 — heartbeat. EPOCH-FENCED (the C1b fix — the real split-brain bug, on the
@@ -58842,6 +59053,9 @@ export async function heartbeatLeaseHolderStatus(
     leaseTtlMs: number;
     expectedEpoch: number;
     billingMode?: "usage_only" | "shadow" | "credits";
+    /** Viewer holders only: how long ago the viewer last saw real user
+     * interaction (see normalizeViewerInteractionAgeMs). */
+    interactionAgeMs?: number | null | undefined;
   },
 ): Promise<LeaseHolderHeartbeatStatus> {
   if (input.kind === "process") {
@@ -58896,6 +59110,7 @@ export async function heartbeatLeaseHolderStatus(
           sandboxGroupId: input.sandboxGroupId,
           kind: input.kind,
           holderId: input.holderId,
+          interactionAgeMs: input.interactionAgeMs,
         });
         if (!holderAlive) {
           // reaped or no longer the exact active attempt

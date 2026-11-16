@@ -89,8 +89,10 @@ import {
   providerSettingsForSessionSandboxRuntime,
   relayConfigFromSettings,
   resolveSessionSandboxRuntime,
+  verifiedDelegatedHumanAuthorizationForRequest,
 } from "@opengeni/core";
 import { establishApiSandboxSpawner } from "./rematerialize";
+import { ApiHttpError } from "../http/api-error";
 import { establishCachedChannelAHandle } from "./channel-a";
 import { errorMessage } from "@opengeni/contracts/values";
 
@@ -123,6 +125,9 @@ export type ViewerAttachResult = {
   // The viewer heartbeat cadence the client must beat at to keep the holder
   // alive (shorter than the viewer-holder TTL the reaper enforces).
   viewerHeartbeatIntervalMs: number;
+  // How long a viewer may go without reporting interaction before a box held
+  // only by viewers may be drained (null: the idle drain is off).
+  viewerIdleDrainMs: number | null;
   // The desktop pixel tunnel URL the viewer connects to directly. Null in P1.4
   // (the mint is P4); surfaced here so the shape is stable.
   dataPlaneUrl: string | null;
@@ -207,6 +212,11 @@ export async function attachViewer(
      * readiness), not a watching viewer. It cannot keep a box warm on its own,
      * so the viewer-only box limit does not apply. */
     operationScoped?: boolean;
+    /** How long ago the attaching page last saw user interaction, when the
+     * client reports it. A person-facing attach (not operation-scoped) to a
+     * box stopped because its page went unused is refused unless this shows
+     * interaction since, or the session was used again. */
+    interactionAgeMs?: number;
   },
 ): Promise<ViewerAttachResult> {
   const { db, settings } = services;
@@ -285,35 +295,42 @@ export async function attachViewer(
         ? runningLimitsOnly(sandboxPlanLimits(settings))
         : sandboxPlanLimits(settings),
       ...(input.waitSignal ? { waitSignal: input.waitSignal } : {}),
+      ...(!input.operationScoped && settings.sandboxViewerIdleDrainMs > 0
+        ? { viewerIdleReattachRefusalMs: settings.sandboxViewerIdleDrainMs }
+        : {}),
+      ...(input.interactionAgeMs !== undefined
+        ? { viewerInteractionAgeMs: input.interactionAgeMs }
+        : {}),
     });
   } catch (error) {
     if (error instanceof SandboxViewerBoxLimitError) {
       // 429 is the client's existing "viewer cap reached" signal: the surface
       // degrades instead of retrying into the limit.
-      throw new HTTPException(429, {
-        message: viewerBoxLimitMessage(error),
-        cause: error,
-      });
+      throw viewerRefusal(viewerBoxLimitMessage(error), "computer_limit");
     }
     if (error instanceof SandboxOrganizationBoxLimitError) {
-      throw new HTTPException(429, {
-        message:
-          `your organization already runs ${error.limit} computers, the most its plan allows; ` +
+      throw viewerRefusal(
+        `your organization already runs ${error.limit} computers, the most its plan allows; ` +
           "close one or wait for a task to finish",
-        cause: error,
-      });
+        "computer_limit",
+      );
     }
     if (error instanceof SandboxPaidComputeAdmissionError) {
       throw new HTTPException(402, { message: error.message, cause: error });
     }
     if (error instanceof SandboxViewerAdmissionBlockedError) {
-      throw new HTTPException(error.reason === "balance" ? 402 : 429, {
-        message:
-          error.reason === "balance"
-            ? "insufficient workspace credits for an idle sandbox viewer"
-            : "workspace sandbox warm allowance exhausted",
-        cause: error,
-      });
+      if (error.reason === "balance") {
+        throw new HTTPException(402, {
+          message: "insufficient workspace credits for an idle sandbox viewer",
+          cause: error,
+        });
+      }
+      throw error.reason === "viewer_idle"
+        ? viewerRefusal(
+            "the sandbox was stopped because its page went unused; interact with the page to resume it",
+            "viewer_idle",
+          )
+        : viewerRefusal("workspace sandbox warm allowance exhausted", "warm_allowance");
     }
     throw error;
   }
@@ -392,6 +409,7 @@ export async function attachViewer(
         archiveComplete: result.lease.archiveComplete,
         sandboxGroupId,
         viewerHeartbeatIntervalMs: viewerHeartbeatIntervalMs(settings),
+        viewerIdleDrainMs: viewerIdleDrainMs(settings),
         dataPlaneUrl: result.lease.dataPlaneUrl,
       };
     } catch (error) {
@@ -503,6 +521,7 @@ export async function attachViewer(
       archiveComplete: ready.lease.archiveComplete,
       sandboxGroupId,
       viewerHeartbeatIntervalMs: viewerHeartbeatIntervalMs(settings),
+      viewerIdleDrainMs: viewerIdleDrainMs(settings),
       dataPlaneUrl: ready.lease.dataPlaneUrl,
     };
   } catch (error) {
@@ -588,6 +607,9 @@ export async function heartbeatViewer(
     sandboxGroupId: string;
     viewerId: string;
     expectedEpoch: number;
+    /** How long ago the viewer last saw real user interaction, when the
+     * client reports it. Recorded for the viewer-only idle drain. */
+    interactionAgeMs?: number;
   },
 ): Promise<boolean> {
   const status = await heartbeatLeaseHolderStatus(services.db, {
@@ -599,6 +621,7 @@ export async function heartbeatViewer(
     leaseTtlMs: services.settings.sandboxLeaseTtlMs,
     expectedEpoch: input.expectedEpoch,
     billingMode: services.settings.sandboxWarmBillingMode,
+    ...(input.interactionAgeMs !== undefined ? { interactionAgeMs: input.interactionAgeMs } : {}),
   });
   // An exhausted monthly warm allowance ends a viewer-only hold: release this
   // viewer so the box can drain. Its re-attach meets the warm-cap gate.
@@ -664,6 +687,13 @@ export async function readGroupLease(
 // single missed beat never reaps a live viewer (two beats fit inside the TTL).
 export function viewerHeartbeatIntervalMs(settings: Settings): number {
   return Math.max(5_000, Math.floor(settings.sandboxViewerHolderTtlMs / 2));
+}
+
+// The viewer idle-drain window echoed to clients (null when disabled), so a
+// page that the server released while its person was away waits for them to
+// come back before re-attaching instead of re-warming the box at once.
+export function viewerIdleDrainMs(settings: Settings): number | null {
+  return settings.sandboxViewerIdleDrainMs > 0 ? settings.sandboxViewerIdleDrainMs : null;
 }
 
 // Drop a transiently-established, NON-OWNED handle. The box is owned by the LEASE
@@ -1641,4 +1671,43 @@ function runningLimitsOnly(limits: Readonly<Record<string, SandboxPlanLimit>>) {
         : { runningBoxesPerOrganization: limit.runningBoxesPerOrganization },
     ]),
   );
+}
+
+/**
+ * Viewer interaction a client reports (`lastInteractionAgeMs`) may extend a
+ * viewer-only hold past the idle window (docs/run-lifecycle.md, "Boxes held
+ * only by viewers"). Only a person's own interactive session can report it:
+ * an API key (workspace, organization or personal), a delegated or service
+ * principal or an agent reports nothing a person did, so its viewer is bounded
+ * by the activity the server observes. The field is ignored, never refused.
+ */
+export function viewerInteractionAgeFor(
+  request: Request,
+  grant: AccessGrant,
+  lastInteractionAgeMs: number | undefined,
+): { interactionAgeMs: number } | Record<string, never> {
+  if (lastInteractionAgeMs === undefined) return {};
+  if (
+    grant.principalKind !== "human_session" ||
+    grant.metadata?.delegated === true ||
+    grant.serviceInitiator ||
+    verifiedDelegatedHumanAuthorizationForRequest(request) !== null
+  ) {
+    return {};
+  }
+  return { interactionAgeMs: lastInteractionAgeMs };
+}
+
+/** Why a viewer attach was refused with 429, in `error.details.viewerRefusal`:
+ * clients branch on it, never on the message. */
+export type ViewerRefusalReason = "viewer_idle" | "computer_limit" | "warm_allowance";
+
+function viewerRefusal(message: string, reason: ViewerRefusalReason): ApiHttpError {
+  return new ApiHttpError(429, {
+    code: "limit_exceeded",
+    message,
+    retryable: false,
+    outcomeUnknown: false,
+    details: { viewerRefusal: reason },
+  });
 }

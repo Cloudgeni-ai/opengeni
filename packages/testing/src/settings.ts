@@ -481,6 +481,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     agentUpdatePublicKey: undefined,
     sandboxLeaseReaperPeriodMs: 30_000,
     sandboxViewerHolderTtlMs: 90_000,
+    sandboxViewerIdleDrainMs: 1_800_000,
     sandboxInteractionHolderTtlMs: 180_000,
     sandboxIdleGraceMs: 900_000,
     sandboxIdleCommandContainmentMs: 1_800_000,
