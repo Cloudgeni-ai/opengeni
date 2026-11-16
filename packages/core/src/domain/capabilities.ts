@@ -32,6 +32,8 @@ import {
   CapabilityCatalogItem,
   capabilityCatalogItemIsTrustedForExposure,
   nangoToolsMcpUrl,
+  nativeNangoIntegrationForMcpUrl,
+  NANGO_REPLACEABLE_NATIVE_SOCIAL_PROVIDERS,
   type EffectiveNangoIntegration,
   FIKEN_PROVIDER_DOMAIN,
   FIRST_PARTY_MCP_TOOL_NAMES,
@@ -282,9 +284,11 @@ export async function buildCapabilityCatalog(input: {
           }
         : projected;
     return applyCapabilityLifecycle(
-      applyGoogleConnectorSetupAvailability(
-        applyOperatorOAuthClientRequirement(runtimeProjected, operatorOAuthClientConfigured),
+      applyConnectorSetupGates(
+        runtimeProjected,
         input.settings,
+        operatorOAuthClientConfigured,
+        nangoBackends,
       ),
     );
   });
@@ -455,6 +459,24 @@ function operatorOAuthClientResolver(settings: Settings): (issuer: string) => bo
   return (issuer) =>
     (issuer !== "https://accounts.google.com" || settings.googleConnectorSetupEnabled) &&
     findIntegrationsOauthClient(configured, [issuer]) !== null;
+}
+
+/**
+ * Whether this deployment can start a new connection to the item: its
+ * operator OAuth client and Google setup gates. A Google connector Nango
+ * serves signs in through Nango's own app, so neither gate applies to it.
+ */
+export function applyConnectorSetupGates(
+  item: CapabilityCatalogItem,
+  settings: Settings,
+  operatorOAuthClientConfigured: (issuer: string) => boolean,
+  nangoBackends: NangoBackends,
+): CapabilityCatalogItem {
+  if (servedByNango(item, nangoBackends)) return item;
+  return applyGoogleConnectorSetupAvailability(
+    applyOperatorOAuthClientRequirement(item, operatorOAuthClientConfigured),
+    settings,
+  );
 }
 
 export function applyGoogleConnectorSetupAvailability(
@@ -2499,6 +2521,7 @@ function nangoConfiguredCatalogItem(
 ): CapabilityCatalogItem {
   if (!integration) return item;
   const definition = integration.definition;
+  const serviceDomain = nangoServiceDomain(integration);
   return CapabilityCatalogItem.parse({
     ...item,
     name: definition.displayName ?? item.name,
@@ -2517,9 +2540,38 @@ function nangoConfiguredCatalogItem(
       integrationBackend: "nango",
       nangoIntegrationKey: integration.integrationKey,
       personalOnly: true,
+      ...(serviceDomain ? { serviceDomain } : {}),
       ...(definition.logoUrl ? { logoUrl: definition.logoUrl } : {}),
     },
   });
+}
+
+/**
+ * The provider domain of the service a config-only Nango integration
+ * connects, so a registry entry for that service is known to duplicate it:
+ * the native connector's domain when Nango replaces one (X), else the host of
+ * the read-only call that names the connected account.
+ */
+function nangoServiceDomain(integration: EffectiveNangoIntegration): string | null {
+  const replaced = NANGO_REPLACEABLE_NATIVE_SOCIAL_PROVIDERS[integration.integrationKey];
+  const social = SOCIAL_PROVIDER_INTEGRATIONS.find(
+    (definition) => definition.provider === replaced,
+  );
+  if (social) return social.providerDomain;
+  const identityUrl = integration.definition.accountIdentity?.url;
+  if (!identityUrl) return null;
+  try {
+    return registrableHostDomain(new URL(identityUrl).hostname);
+  } catch {
+    return null;
+  }
+}
+
+/** Whether Nango serves this reviewed Google connector here (docs/nango.md). */
+function servedByNango(item: CapabilityCatalogItem, nangoBackends: NangoBackends): boolean {
+  if (item.kind !== "mcp") return false;
+  const native = nativeNangoIntegrationForMcpUrl(item.mcpUrl ?? item.endpointUrl);
+  return !!native && nangoBackends.has(native.integrationKey);
 }
 
 export function withoutNangoReplacedSocialItems(
