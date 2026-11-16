@@ -488,6 +488,81 @@ describe("a request that opens with an integration's name as its label", () => {
   });
 });
 
+describe("a connected account of the same kind keeps the search from showing a card", () => {
+  const OUTLOOK_SEND = "mcp_outlook__send_mail";
+  const GMAIL_MAIL = { ...GMAIL, category: "communication" };
+  const account = (connector: string, kind?: string): ConnectedToolAccount => ({
+    source: connector.toLowerCase(),
+    label: connector,
+    connector,
+    ...(kind ? { kind } : {}),
+  });
+  // A query a model wrote for "Did I get an email saying when the Kestrel
+  // failover drill was moved to?" while Outlook Mail was connected and Gmail
+  // had no signed-in account.
+  const query = "Search the user's Gmail mailbox for an email about the Kestrel failover drill";
+
+  for (const transport of TRANSPORTS) {
+    test(`${transport}: Outlook Mail connected: Gmail is named, its card is not shown`, async () => {
+      const { requested, request } = cardTool();
+      const events: DiscoveryCardEvent[] = [];
+      const runtime = runtimeWith(transport, {
+        matches: [GMAIL_MAIL],
+        request,
+        accounts: new Map([[OUTLOOK_SEND, account("Outlook Mail", "communication")]]),
+      });
+      runtime.setDiscoveryCardSink((event) => {
+        events.push(event);
+      });
+      const result = await runtime.prepareSearch({ query });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(requested).toEqual([]);
+      expect(outputOf(result).notConnected).toBe(
+        `Not connected yet: Gmail (capabilityId "api:gmail"). If the task needs it, call capability_authorization_request with that capabilityId and a short rationale to show the person its Connect card. No card is shown until you do.`,
+      );
+      expect(outputOf(result).connectCard).toEqual({ shown: false });
+      // The card tool stays loaded, so the model can still show it.
+      expect(loaded(result)).toContain(CARD);
+      expect(events).toEqual([
+        {
+          source: "tool_search",
+          outcome: "skipped",
+          reason: "connected_alternative",
+          query,
+          integrations: [{ capabilityId: GMAIL.capabilityId, name: "Gmail" }],
+        },
+      ]);
+    });
+  }
+
+  test("a connected account of another kind, a generic kind, or no kind does not stop the card", async () => {
+    for (const accounts of [
+      new Map([["mcp_onedrive__list_files", account("OneDrive", "productivity")]]),
+      new Map([["mcp_custom__send", account("Acme Mail", "custom")]]),
+      new Map([["mcp_acme__send", account("Acme Mail")]]),
+    ]) {
+      const { requested, request } = cardTool();
+      const result = await runtimeWith("generic_dispatch", {
+        matches: [GMAIL_MAIL],
+        request,
+        accounts,
+      }).prepareSearch({ query });
+      expect(requested).toEqual([GMAIL_MAIL]);
+      expect(outputOf(result).connectCard).toMatchObject({ shown: true });
+    }
+  });
+
+  test("an integration without a catalog category keeps its card", async () => {
+    const { requested, request } = cardTool();
+    await runtimeWith("generic_dispatch", {
+      matches: [GMAIL],
+      request,
+      accounts: new Map([[OUTLOOK_SEND, account("Outlook Mail", "communication")]]),
+    }).prepareSearch({ query });
+    expect(requested).toEqual([GMAIL]);
+  });
+});
+
 describe("discovery records why no card was newly shown", () => {
   const recording = (
     transport: Transport,
