@@ -51,6 +51,8 @@ const STEER_SUMMARY: Record<AgentSteerReadAt, string> = {
     "Steered: the target session will read this at its next step, after its current tool calls finish. It replaces what the session is doing now.",
   after_compaction:
     "Steered: the target session is compacting its context and will read this as soon as that finishes. It replaces what the session is doing now.",
+  replaces_waiting_turn:
+    "Steered: the target session's turn was waiting (for an approval, an answer or capacity); this replaces it now and cancels its open questions and approvals, and the target starts a new turn with your instruction.",
   starts_next_turn:
     "Steered: the target session had no turn running, so this starts its next turn now.",
 };

@@ -459,10 +459,16 @@ export type AgentMessageReadAt =
 
 /**
  * When the target reads an Agent Steer: at its `next_step`, `after_compaction`
- * when a context compaction is in flight, or `starts_next_turn` when no turn
- * is running.
+ * when a context compaction is in flight, `replaces_waiting_turn` when its turn
+ * had no live attempt (waiting for an approval, an answer or capacity) and the
+ * steer superseded it now, cancelling its open questions and approvals, or
+ * `starts_next_turn` when it had no turn at all.
  */
-export type AgentSteerReadAt = "starts_next_turn" | "next_step" | "after_compaction";
+export type AgentSteerReadAt =
+  | "starts_next_turn"
+  | "next_step"
+  | "after_compaction"
+  | "replaces_waiting_turn";
 
 function storedReadAt<ReadAt extends string>(
   value: unknown,
@@ -3995,6 +4001,7 @@ export async function steerAgentSessionInTransaction(
           "starts_next_turn",
           "next_step",
           "after_compaction",
+          "replaces_waiting_turn",
         ]) ?? "next_step",
       eventIds: Array.isArray(reserved.receipt.result.eventIds)
         ? reserved.receipt.result.eventIds.filter((id): id is string => typeof id === "string")
@@ -4323,12 +4330,15 @@ export async function steerAgentSessionInTransaction(
   );
   const eventIds = insertedEvents.map((event) => event.id);
   // Steer: a live turn reads it at its next model step (after a compaction in
-  // flight); with no live turn it starts the next one.
+  // flight). A turn with no live attempt was superseded just now, its open
+  // questions and approvals cancelled; with no turn at all it starts the next.
   const readAt: AgentSteerReadAt = supersession.deferredUntilCompaction
     ? "after_compaction"
     : supersession.liveCurrentTurnId !== null
       ? "next_step"
-      : "starts_next_turn";
+      : supersession.replacedTurn !== null
+        ? "replaces_waiting_turn"
+        : "starts_next_turn";
   const receipt = await updateSessionCommandReceiptResult(db, reserved.receipt.id, {
     controlRevision: resumed.revision,
     result: {

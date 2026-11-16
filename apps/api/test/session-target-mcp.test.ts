@@ -8,6 +8,8 @@ import {
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  getSessionHumanInputRequest,
+  getSessionTurn,
   initializeSessionStartAtomically,
   listOutstandingSessionSystemUpdates,
   mutateSessionControlInTransaction,
@@ -476,4 +478,83 @@ test("Steer to a running worker says it is read at the next step and replaces it
     summary: "Not read yet: the target reads this steer at its next step.",
     delivery: "pending",
   });
+});
+
+test("Steer to a worker waiting on a question says it replaces that waiting turn and cancels the question", async () => {
+  const f = await fixture();
+  const running = await startTargetTurn(f);
+  // The attempt ends while its turn waits for an answer: the turn stays
+  // active with no live attempt.
+  const requestId = crypto.randomUUID();
+  const question = {
+    id: "environment",
+    kind: "single_select" as const,
+    prompt: "Which environment?",
+    options: [
+      { id: "staging", label: "Staging" },
+      { id: "production", label: "Production" },
+    ],
+    required: true,
+    allowOther: false,
+  };
+  const settlement = await applySessionTurnSettlement(client.db, f.owner.workspaceId, {
+    sessionId: f.target.id,
+    turnId: running.turn.id,
+    triggerEventId: running.turn.triggerEventId,
+    attemptId: running.turn.activeAttemptId!,
+    turnStatus: "requires_action",
+    sessionStatus: "requires_action",
+    activeTurnId: running.turn.id,
+    runState: {
+      serializedRunState: JSON.stringify({ version: 1, interrupted: true }),
+      pendingApprovals: [],
+      humanInputRequests: [
+        {
+          id: requestId,
+          toolCallId: "question-call-1",
+          questions: [question],
+          allowSkip: false,
+          expiresAt: null,
+        },
+      ],
+    },
+    events: [
+      {
+        type: "session.humanInput.requested" as const,
+        payload: {
+          request: { id: requestId, questions: [question], allowSkip: false, expiresAt: null },
+        },
+      },
+      { type: "session.status.changed", payload: { status: "requires_action" } },
+    ],
+  });
+  expect(settlement.action).toBe("settled");
+  const steered = await f.call("session_steer", {
+    sessionId: f.target.id,
+    instruction: "Skip that question and use staging",
+    idempotencyKey: crypto.randomUUID(),
+  });
+  // Not "had no turn running": the waiting turn was replaced and its open
+  // question cancelled, and the receipt says so.
+  expect(steered).toMatchObject({
+    operation: "session_steer",
+    outcome: "steered",
+    summary:
+      "Steered: the target session's turn was waiting (for an approval, an answer or capacity); this replaces it now and cancels its open questions and approvals, and the target starts a new turn with your instruction.",
+    resource: { type: "session_system_update", id: steered.updateId, state: "pending" },
+  });
+  expect(await getSessionTurn(client.db, f.owner.workspaceId, running.turn.id)).toMatchObject({
+    status: "superseded",
+  });
+  expect(
+    await getSessionHumanInputRequest(client.db, f.owner.workspaceId, f.target.id, requestId),
+  ).toMatchObject({ status: "cancelled" });
+  const next = await f.claim(f.target.id);
+  expect(next.turn.id).not.toBe(running.turn.id);
+  expect(
+    await f.call("session_message_status", {
+      sessionId: f.target.id,
+      updateId: steered.updateId,
+    }),
+  ).toMatchObject({ delivery: "delivered", turnId: next.turn.id });
 });
