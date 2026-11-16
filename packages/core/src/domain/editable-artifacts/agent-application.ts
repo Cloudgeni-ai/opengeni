@@ -568,11 +568,14 @@ export class EditableArtifactAgentApplication {
   > {
     const context = agentContext(input);
     const artifactId = editableArtifactId(input.artifactId);
-    const artifact = await this.dependencies.domain.getArtifact({
-      scope: context.scope,
-      actor: context.actor,
-      artifactId,
-    });
+    // A deleted artifact's export never turns into a new workspace file.
+    const artifact = requireActive(
+      await this.dependencies.domain.getArtifact({
+        scope: context.scope,
+        actor: context.actor,
+        artifactId,
+      }),
+    );
     const job = await this.dependencies.exports.getMaterialization({
       scope: context.scope,
       actor: context.actor,

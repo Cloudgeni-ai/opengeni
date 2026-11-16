@@ -531,6 +531,9 @@ describe("editable artifact agent application", () => {
     await expect(
       application.startExport({ ...context, idempotencyKey: "export", format: "docx" } as never),
     ).rejects.toMatchObject({ code: "not_found" });
+    await expect(
+      application.exportStatus({ ...context, versionId: "v", jobId: "j" } as never),
+    ).rejects.toMatchObject({ code: "not_found" });
   });
 
   test("pins one immutable head, materializes it, and promotes the result as a workspace file", async () => {
