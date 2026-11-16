@@ -5,6 +5,7 @@ import { testSettings } from "@opengeni/testing/settings";
 
 import {
   createManagedAuth,
+  managedAuthConsoleOrigins,
   managedAuthPublicBaseUrls,
   managedAuthPublicOrigins,
   managedAuthRequestBaseUrl,
@@ -147,5 +148,28 @@ describe("managed auth on Opengeni Console's host", () => {
     expect(origins).toContain("https://app.opengeni.test");
     expect(origins).toContain("https://console.opengeni.test");
     expect(origins).not.toContain("https://attacker.test");
+  });
+
+  test("the sign-in handoff knows only the configured Console origins", () => {
+    expect(
+      managedAuthConsoleOrigins(
+        testSettings({
+          publicBaseUrl: "https://app.opengeni.test",
+          betterAuthAllowedHosts:
+            "app.opengeni.test,console.opengeni.test,staging.console.opengeni.test,consolex.opengeni.test,docs.opengeni.test",
+          betterAuthTrustedOrigins:
+            "https://app.opengeni.test,https://Console.Opengeni.test,https://console.partner.test,not a url,*.console.opengeni.test",
+        }),
+      ).sort(),
+    ).toEqual([
+      "https://console.opengeni.test",
+      "https://console.partner.test",
+      "https://staging.console.opengeni.test",
+    ]);
+    // An app host that is itself named console is never a handoff target.
+    expect(
+      managedAuthConsoleOrigins(testSettings({ publicBaseUrl: "https://console.opengeni.test" })),
+    ).toEqual([]);
+    expect(managedAuthConsoleOrigins(testSettings({ betterAuthAllowedHosts: "" }))).toEqual([]);
   });
 });

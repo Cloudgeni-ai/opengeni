@@ -21,9 +21,11 @@ Console host:
   Insights → Usage and billing, Developer → API keys, General → Settings), and
   workspaces or chats open Overview. Sign-in returns, password reset, account
   setup, shared chats and other fixed public pages keep their path.
-- sign-in, sign-up, password reset and email verification use Console's own
-  sign-in page, and post-sign-in, Google sign-in and invitation
-  links return to the Console host.
+- signing in continues with the person's Opengeni account on the app host
+  (see [Signing in](#signing-in)); Console's own email and Google sign-in,
+  sign-up, password reset and email verification stay available as a fallback,
+  and post-sign-in, Google sign-in and invitation links return to the Console
+  host.
 - Members (invite, roles, remove), Usage and billing (top-ups, plans, budgets,
   Stripe returns), API keys and the organization name work inside Console with
   the app's organization settings pages. End users (`external_user:`) are
@@ -52,8 +54,51 @@ its Content-Security-Policy uses `'self'`, so no other change is needed there.
 Passkeys are bound to the hostname they were made on: a passkey made on the
 app host does not sign in on the Console host (one made there does, with the
 Console origin in `OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS`). A GitHub OAuth app
-has a single callback host, so the Console host offers Google and email
-sign-in, not GitHub.
+has a single callback host, so Console's own sign-in offers Google and email,
+not GitHub. Signing in through the app host (below) covers every method,
+GitHub and app-host passkeys included.
+
+## Signing in
+
+With host-only cookies (`OPENGENI_BETTER_AUTH_COOKIE_DOMAIN` unset), Console
+keeps its own session but never asks for a second sign-in. A person signed out
+on a Console host goes to the app host (`OPENGENI_PUBLIC_BASE_URL`) and back:
+
+1. Console's `GET /v1/console-sign-in/start?return=<console path>` keeps a
+   random verifier in a host-only `HttpOnly` cookie
+   (`__Host-<cookie prefix>.console_sign_in`, ten minutes) and redirects to the
+   app's `/console-sign-in` page with the verifier's S256 challenge.
+2. On the app host, the app's ordinary sign-in runs first when needed (email,
+   Google, GitHub, passkeys). Signed in, the page calls
+   `POST /v1/console-sign-in/authorize` (same-origin, cookie only), which
+   issues a single-use code bound to the person, the app session, the
+   challenge, the Console origin and the return path. Only a hash of the code
+   is stored (Better Auth's verification table), for sixty seconds.
+3. The browser lands on Console's `GET /v1/console-sign-in/callback?code=`,
+   which consumes the code atomically, checks the cookie's verifier against
+   the challenge and the Console origin it reached, requires the approving app
+   session to still be live, and creates Console's own Better Auth session
+   through the ordinary session hook (allowed addresses, canonical identity
+   and login-binding status). It carries over the app session's passkey
+   confirmation for admin step-up, since a passkey made on the app host can't
+   confirm on the Console host. Then it returns to the Console page, `?org=`
+   included.
+
+Codes only go to Console origins: trusted origins and allowed hosts whose
+host is a Console host, never the app's own. Return paths are relative
+`/console` paths; anything else returns Overview. Every completed or refused
+redemption is written to `audit_events` as `auth.console_sign_in_handoff`
+(no organization or workspace; the outcome, the reason for a refusal, the
+Console origin and both session ids, never a code or token).
+
+Console's Sign out ends only Console's session and opens Console's signed-out
+page, which waits for Continue instead of signing straight back in. A handoff
+that fails comes back with `?console_sign_in=failed`, and a signed-out page
+reached again within a minute of a handoff waits for Continue too, so sign-in
+can't loop. To sign out everywhere, sign out of the app as well. An invitation
+being accepted, a Console sign-in result (`?error=`) and deployments using
+browser login session sets (`dual` or `broker`, `?console_sign_in=unavailable`)
+show Console's own sign-in.
 
 ## Managed workspaces
 
@@ -161,7 +206,7 @@ workspaces and sets `truncated: true` when there are more.
 
 ## Not yet
 
-GitHub sign-in and passkeys shared between the app and Console hosts, a Console-specific
+A Console-specific
 onboarding for someone who has no organization yet (they get the app's
 organization setup, then land in Console), and Insights inside Console.
 Organization-level agents shared across managed workspaces, end-user opt-out,
