@@ -101,8 +101,11 @@ export function createDecisionModelsDecisionModel(options: {
     baseUrl: options.baseUrl ?? DECISION_MODELS_BASE_URL,
     model: options.model,
     timeoutMs: 30_000,
-    maxRetries: 2,
-    concurrency: options.concurrency ?? 8,
+    // A batch run, not an interactive tool: wait out rate limits (429) instead of failing the task.
+    maxRetries: 6,
+    maxRetryAfterMs: 20_000,
+    retryBaseDelayMs: 1_000,
+    concurrency: options.concurrency ?? 4,
     ...(options.fetch ? { fetch: options.fetch } : {}),
   });
   const inner = createJevDecisionModel(client);
