@@ -1,5 +1,44 @@
 # @opengeni/core
 
+## 6.25.0
+
+### Patch Changes
+
+- e126cb5: Documents, spreadsheets and presentations can now be deleted from the Artifacts list. Their ⋯ menu has **Delete…**, which asks first. Deleting archives the artifact: it leaves the Artifacts list and the chat's artifact panel and no longer opens. The new `POST /v1/workspaces/:workspaceId/editable-artifacts/:artifactId/archive` route and `client.archiveEditableArtifact` do the same and need `artifacts:publish`.
+- f99f940: The agent offers each service's Connect card once. When the deployment has its own integration for a service (Gmail, Google Calendar, Google Drive, Slack, X, Reddit, or one served through Nango), a public-registry entry for the same service is no longer listed beside it, and a card requested for that entry is the built-in's card. When the organization's integration policy turns a built-in integration off, the agent gets no card for it or its registry duplicate and is told the integration is turned off for the organization. The same applies to a marketplace plugin that adds nothing but such an integration's own MCP endpoint (for example the Gmail plugin). Signing in to Gmail's, Google Calendar's, Google Drive's or Slack's own MCP endpoint as a custom MCP server is refused the same way while the organization has that integration turned off. Google connectors served through Nango can be connected even when this deployment's own Google sign-in setup is unavailable. Registry entries for other services, entries already turned on in a workspace, and deployments without the built-in integration are unchanged.
+- 81570f9: Several connections to the same tool server can now be told apart by people and agents. A connection has an optional `label`, a name its owner sets when connecting (`label` on create, an optional Name field in the key form and Connect's credential step) and changes or clears later (`PATCH .../connections/{id}` with `{ "label": … }`, or Rename on the connector page). Labels follow one rule everywhere: the provider's verified identity, else the person's name, else `<domain> account`; when two accounts with the same scope would still read the same, agents and account lists add when each was connected (then the time, then a short ID). A rename is display only: it changes neither the connection's version nor its authority, and reaches agents from the next turn.
+- f99f940: Connecting an integration no longer gets stuck on a sign-in client the provider has forgotten. Opengeni reuses the OAuth client it registered with a provider such as Supabase, and when that provider has since deleted it, Connect ended on the provider's "Unrecognized client_id" page every time. Opengeni now checks that the provider still knows the client before reusing it, and registers a new one when the provider says it doesn't.
+
+  A connection this deployment can't connect, because the provider only accepts apps it has approved (Dropbox, for one) and no client is registered with it here, now shows up when you search Capabilities for it. It's marked Unavailable and its page says why, instead of the search saying nothing matches. Other listings of the same provider, such as a server a plugin brings, are marked the same way and no longer offer a Connect that can't finish, and a provider that refuses to let apps register now gets a plain explanation instead of "dynamic client registration failed with HTTP 403".
+
+- 43435d5: A tool call the model asks for is saved before its tool starts, so a worker that stops mid-step can always recover it: the call is closed as interrupted instead of being lost and run again. The response's usage is saved in the same write as its tool calls, before any of them runs; its billing runs alongside the tools, and the next model request still waits for it. If the worker stops, is replaced or its billing fails before billing finishes, recovery, the attempt's failure handling or the session's next idle point finishes it exactly once, at the price recorded with the usage. Recovery only looks at responses whose billing is still unfinished.
+- Updated dependencies [e126cb5]
+- Updated dependencies [43435d5]
+- Updated dependencies [61abc98]
+- Updated dependencies [81570f9]
+- Updated dependencies [f99f940]
+- Updated dependencies [bb55e5d]
+- Updated dependencies [43435d5]
+- Updated dependencies [7f09ad6]
+- Updated dependencies [f99f940]
+- Updated dependencies [f99f940]
+- Updated dependencies [43435d5]
+- Updated dependencies [bfd2970]
+  - @opengeni/contracts@6.25.0
+  - @opengeni/db@6.25.0
+  - @opengeni/capabilities@6.25.0
+  - @opengeni/config@6.25.0
+  - @opengeni/runtime@6.25.0
+  - @opengeni/codex@6.25.0
+  - @opengeni/documents@6.25.0
+  - @opengeni/events@6.25.0
+  - @opengeni/observability@6.25.0
+  - @opengeni/storage@6.25.0
+  - @opengeni/tool-gateway@6.25.0
+  - @opengeni/vaults@6.25.0
+  - @opengeni/network@6.25.0
+  - @opengeni/xai-subscription@6.25.0
+
 ## 6.24.1
 
 ### Patch Changes
