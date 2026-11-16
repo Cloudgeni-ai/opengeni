@@ -3,6 +3,7 @@
 // React Native row say the same thing; no DOM here.
 import type { OpenGeniText } from "./messages/runtime";
 import type { AuthNeededItem } from "./timeline/types";
+import { connectorProviderDomain } from "@opengeni/contracts/nango";
 
 export type AuthNeededPresentation = {
   /** A calm human name: the agent's capability name or the provider's. */
@@ -186,8 +187,10 @@ export function authNeededPresentation(
 /** "linear.app" -> "Linear": the first domain label, capitalized. A calm human
     name for the provider — never the raw domain shown as a label. */
 export function providerLabel(t: OpenGeniText, domain: string): string {
+  // An integration platform's domain ("nango:gmail") names the connector it
+  // serves ("gmailmcp.googleapis.com").
   const host =
-    domain
+    connectorProviderDomain(domain)
       .trim()
       .replace(/^https?:\/\//, "")
       .replace(/^www\./, "")

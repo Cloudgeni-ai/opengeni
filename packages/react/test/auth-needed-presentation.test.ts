@@ -168,7 +168,7 @@ describe("authNeededPresentation", () => {
     const view = authNeededPresentation(
       t,
       item({
-        providerDomain: "gmailmcp.googleapis.com",
+        providerDomain: "nango:gmail",
         connectionId: "conn-nango",
         reason: "account_scope_fixed",
         scopes: ["https://www.googleapis.com/auth/gmail.compose"],
