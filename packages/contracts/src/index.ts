@@ -24301,7 +24301,7 @@ export * from "./console";
 
 export type { PluginDiscoveryItem, PluginDiscoveryPage } from "./plugin-discovery";
 export { mcpEndpointIdentity } from "./mcp-endpoint";
-export { pluginMcpUnavailableReason } from "./mcp-endpoint";
+export { mcpHostsDeploymentCannotConnect, pluginMcpUnavailableReason } from "./mcp-endpoint";
 export * from "./connector-tool-permissions";
 export * from "./session-mcp-tool-permissions";
 export * from "./mcp-catalog-limits";

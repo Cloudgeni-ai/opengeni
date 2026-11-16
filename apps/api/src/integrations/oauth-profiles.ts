@@ -732,23 +732,100 @@ const ASANA_IDENTITY: AccountIdentityVerifier = {
   },
 };
 
-/** Stripe's MCP get_stripe_account_info returns the connected Account object. */
+const STRIPE_ACCOUNT_ID = /^acct_[A-Za-z0-9]{1,64}$/u;
+
+/**
+ * Stripe's MCP get_stripe_account_info answers `{ account_id, display_name }`
+ * (older servers returned the Account object, `id`). The optional GetAccount read
+ * returns the Account object with the email and business name; it only labels
+ * the account when it names the same acct_ id.
+ */
 const STRIPE_IDENTITY: AccountIdentityVerifier = {
   kind: "mcp_tool",
-  calls: [{ toolName: "get_stripe_account_info", arguments: {} }],
+  calls: [
+    { toolName: "get_stripe_account_info", arguments: {} },
+    {
+      toolName: "stripe_api_read",
+      arguments: { stripe_api_operation_id: "GetAccount", parameters: {} },
+      optional: true,
+    },
+  ],
   identityKeys: ["stripeAccountId"],
-  validateIdentity: ([payload]) => {
-    const account = record(payload);
-    if (!nonEmpty(account.id) || !/^acct_[A-Za-z0-9]{1,64}$/u.test(account.id))
+  validateIdentity: ([info, details]) => {
+    const summary = record(info);
+    const accountId = nonEmpty(summary.account_id) ? summary.account_id : summary.id;
+    if (!nonEmpty(accountId) || !STRIPE_ACCOUNT_ID.test(accountId))
       throw new Error("Stripe account verification failed");
-    const displayName = record(record(account.settings).dashboard).display_name;
+    const account = [summary, record(details)].find((candidate) => candidate.id === accountId);
+    const dashboardName = record(record(account?.settings).dashboard).display_name;
     return {
-      stripeAccountId: account.id,
+      stripeAccountId: accountId,
       ...labels({
-        stripeEmail: account.email,
-        stripeAccountName: nonEmpty(displayName)
-          ? displayName
-          : record(account.business_profile).name,
+        stripeEmail: account?.email,
+        stripeAccountName: [
+          summary.display_name,
+          dashboardName,
+          record(account?.business_profile).name,
+        ].find(nonEmpty),
+      }),
+    };
+  },
+};
+
+/**
+ * Sentry's MCP whoami returns the signed-in user (`{ user: { id, name, email },
+ * sessionConstraints }`). Sentry user ids are global, so the user id alone
+ * identifies the account. The organization names it: the one the connection is
+ * limited to, else the only one find_organizations lists.
+ */
+const SENTRY_IDENTITY: AccountIdentityVerifier = {
+  kind: "mcp_tool",
+  calls: [
+    { toolName: "whoami", arguments: {} },
+    { toolName: "find_organizations", arguments: {}, optional: true },
+  ],
+  identityKeys: ["sentryUserId"],
+  validateIdentity: ([payload, organizations]) => {
+    const body = record(payload);
+    const user = nonEmpty(body.id) ? body : record(body.user);
+    if (!nonEmpty(user.id) || !/^\d{1,32}$/u.test(user.id))
+      throw new Error("Sentry account verification failed");
+    const listed = record(organizations);
+    const orgs = Array.isArray(listed.organizations) ? listed.organizations : [];
+    const onlyOrg = orgs.length === 1 && listed.hasMore !== true ? record(orgs[0]).slug : undefined;
+    const constrained = record(body.sessionConstraints).organizationSlug;
+    return {
+      sentryUserId: user.id,
+      ...labels({
+        sentryEmail: user.email,
+        sentryName: user.name,
+        sentryOrganizationName: nonEmpty(constrained) ? constrained : onlyOrg,
+      }),
+    };
+  },
+};
+
+/**
+ * Apollo's MCP exposes its current-user profile endpoint (`GET
+ * /api/v1/users/api_profile`, default `read_user_profile` scope) as
+ * apollo_users_api_profile: `{ id, team_id, first_name, last_name, email }`.
+ * Apollo user ids are global, so the user id alone identifies the account.
+ */
+const APOLLO_IDENTITY: AccountIdentityVerifier = {
+  kind: "mcp_tool",
+  calls: [{ toolName: "apollo_users_api_profile", arguments: {} }],
+  identityKeys: ["apolloUserId"],
+  validateIdentity: ([payload]) => {
+    const body = record(payload);
+    const user = nonEmpty(body.id) ? body : record(body.user);
+    if (!nonEmpty(user.id) || !/^[A-Za-z0-9_-]{1,64}$/u.test(user.id))
+      throw new Error("Apollo account verification failed");
+    const name = [user.first_name, user.last_name].filter(nonEmpty).join(" ");
+    return {
+      apolloUserId: user.id,
+      ...labels({
+        apolloEmail: user.email,
+        apolloName: nonEmpty(name) ? name : user.name,
       }),
     };
   },
@@ -768,6 +845,8 @@ const ACCOUNT_IDENTITY_VERIFIERS: ReadonlyMap<string, AccountIdentityVerifier> =
   ["https://mcp.asana.com/v2/mcp", ASANA_IDENTITY],
   ["https://mcp.stripe.com/", STRIPE_IDENTITY],
   ["https://mcp.stripe.com", STRIPE_IDENTITY],
+  ["https://mcp.sentry.dev/mcp", SENTRY_IDENTITY],
+  ["https://mcp.apollo.io/mcp", APOLLO_IDENTITY],
 ]);
 
 /** The reviewed identity check for an exact MCP URL, when its profile has none. */

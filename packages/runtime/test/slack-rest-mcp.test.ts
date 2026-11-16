@@ -1064,3 +1064,80 @@ describe("Slack file download", () => {
     expect(fetched).toEqual([]);
   });
 });
+
+describe("who a message was posted as", () => {
+  // The shapes Slack returns for a user-token post made through the Opengeni
+  // OAuth app: the person is the sender, and Slack tags the app it went through.
+  const personalPost = {
+    ok: true,
+    channel: "C0LAUNCH",
+    ts: "1793623408.608009",
+    message: {
+      type: "message",
+      user: "U123",
+      text: "Copperleaf Dental: booking widget shows the wrong time zone.",
+      ts: "1793623408.608009",
+      bot_id: "B0PERSONAL",
+      app_id: "A0OPENGENI",
+      bot_profile: { id: "B0PERSONAL", name: "Opengeni", app_id: "A0OPENGENI" },
+    },
+  };
+  function personalServer(response: Record<string, unknown>) {
+    return server({
+      fetchImpl: async (url) => {
+        const name = method(url);
+        if (name === "auth.test") return Response.json({ ...identity, user: "ada" });
+        return Response.json(response);
+      },
+    });
+  }
+
+  test("a send says it was posted as the person's own account, not by the app's bot", async () => {
+    const result = await personalServer(personalPost).callToolResult("slack_send_message", {
+      channel: "C0LAUNCH",
+      text: "Copperleaf Dental: booking widget shows the wrong time zone.",
+    });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toEqual({
+      channel: "C0LAUNCH",
+      ts: "1793623408.608009",
+      postedAs: {
+        identity: "personal_slack_account",
+        userId: "U123",
+        userName: "ada",
+        sentThroughApp: { name: "Opengeni", id: "A0OPENGENI" },
+        summary:
+          "Posted as ada (<@U123>), the person's own connected Slack account, not as a bot. Slack shows the person as the sender; Opengeni is only the app the message was sent through.",
+      },
+      message: {
+        type: "message",
+        user: "U123",
+        text: "Copperleaf Dental: booking widget shows the wrong time zone.",
+        ts: "1793623408.608009",
+      },
+    });
+    // The text the model reads carries the same statement.
+    expect(result.content[0].text).toContain('"identity":"personal_slack_account"');
+    expect(result.content[0].text).not.toContain("bot_profile");
+  });
+
+  test("reads mark the connected account's own posts", async () => {
+    const result = await personalServer({
+      ok: true,
+      messages: [
+        personalPost.message,
+        { type: "message", user: "U999", text: "hello", ts: "1.1" },
+        {
+          type: "message",
+          subtype: "bot_message",
+          bot_id: "B0OTHER",
+          username: "Deploys",
+          text: "deployed",
+          ts: "1.2",
+        },
+      ],
+    }).callToolResult("slack_read_channel", { channel: "C0LAUNCH" });
+    const messages = (result.structuredContent as { messages: Record<string, unknown>[] }).messages;
+    expect(messages.map((message) => message.postedByYou ?? false)).toEqual([true, false, false]);
+  });
+});

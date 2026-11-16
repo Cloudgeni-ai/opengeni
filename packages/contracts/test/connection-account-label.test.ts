@@ -19,6 +19,8 @@ test("uses the authenticated email across provider metadata shapes", () => {
     "notionEmail",
     "asanaEmail",
     "stripeEmail",
+    "sentryEmail",
+    "apolloEmail",
     "oidcEmail",
   ]) {
     expect(
@@ -43,6 +45,18 @@ test("uses real workspace names without displaying provider IDs", () => {
       "Linear account",
     ),
   ).toBe("user@example.test · Acme");
+  expect(
+    connectionAccountIdentityLabel(
+      { sentryUserId: "1", sentryName: "User", sentryOrganizationName: "halcyon" },
+      "Sentry account",
+    ),
+  ).toBe("User · halcyon");
+  expect(
+    connectionAccountIdentityLabel(
+      { apolloUserId: "a1", apolloName: "John Doe" },
+      "Apollo.io account",
+    ),
+  ).toBe("John Doe");
   expect(
     connectionAccountIdentityLabel({ oidcName: "User", oidcSubject: "sub-1" }, "Account"),
   ).toBe("User");

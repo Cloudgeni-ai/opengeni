@@ -52,6 +52,15 @@ flight finishes on the credential it already resolved.
   by its definition.
 - When `x` is Nango-backed, the native X social card and the first-party
   `x_*` tools are hidden, and calls to them are refused at call time.
+- Agent catalog search leaves out a public-registry entry that duplicates a
+  built-in integration the deployment offers (by the reviewed endpoint's policy
+  key, or the service's provider domain), and a card requested for it is the
+  built-in's. A built-in whose organization policy key is not allowed gets no
+  card; the agent is told it is turned off for the organization
+  (`packages/core/src/domain/built-in-integration-duplicates.ts`).
+- A Google connector Nango serves is not gated by this deployment's own Google
+  sign-in setup (`OPENGENI_GOOGLE_CONNECTOR_SETUP_ENABLED`, operator OAuth
+  client): it signs in through Nango's app.
 
 ### Connections
 

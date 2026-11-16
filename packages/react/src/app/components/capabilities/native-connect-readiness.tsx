@@ -91,6 +91,11 @@ export function operatorOAuthClientMissing(
   return deploymentCannotConnect(item);
 }
 
+/** A catalog connection that is listed but cannot be connected from here. */
+export function nativeCatalogItemCannotConnect(item: CapabilityCatalogItem): boolean {
+  return restrictedStockFigma(item) || operatorOAuthClientMissing(item);
+}
+
 export type NativeConnectionFacts = {
   connections: ConnectionMetadata[] | null;
   socialConnections: SocialConnection[];
@@ -137,6 +142,12 @@ export function nativeCatalogItemNotice(
       description:
         "Figma's hosted MCP server only accepts approved clients. Opengeni isn't currently listed, so this catalog connection is unavailable.",
     };
+  if (operatorOAuthClientMissing(item))
+    return {
+      tone: "muted",
+      title: "This connection isn't available here",
+      description: `${item.name} only works with apps it has approved, and this deployment hasn't registered one with it yet.`,
+    };
   const providerId = nativeCatalogProviderId(item);
   if (!providerId || item.enabled) return undefined;
   if (providerId === "fiken-token" && nativeProviderAvailable(catalog, "fiken-oauth"))
@@ -148,6 +159,10 @@ export function nativeCatalogItemVisible(
   item: CapabilityCatalogItem,
   catalog: NativeConnectCatalog,
   facts?: NativeConnectionFacts,
+  /** Someone looking for this connection by name: show it, marked
+   * unavailable, rather than answer that nothing matches. Browsing and
+   * Featured still leave it out. */
+  options?: { searching?: boolean },
 ): boolean {
   if (hasCatalogAccount(item, facts)) return true;
   // An unavailable metadata read cannot prove that a previous account vanished.
@@ -158,7 +173,8 @@ export function nativeCatalogItemVisible(
       operatorOAuthClientMissing(item))
   )
     return true;
-  if (restrictedStockFigma(item) || operatorOAuthClientMissing(item)) return false;
+  if (restrictedStockFigma(item) || operatorOAuthClientMissing(item))
+    return options?.searching === true;
   const providerId = nativeCatalogProviderId(item);
   return (
     !providerId ||

@@ -267,6 +267,10 @@ import {
   connectionsNeedingReconnectFor,
   listConnectionsNeedingReconnect,
   nangoBackendsFor,
+  builtInIntegrationDuplicated,
+  builtInIntegrationPolicyApplies,
+  builtInIntegrationTurnedOffDetail,
+  withoutBuiltInIntegrationDuplicates,
   nangoReplacedSocialProviders,
   type ConnectionNeedingReconnect,
   type ResolvedSessionAuthorization,
@@ -635,7 +639,10 @@ import {
   deploymentCannotConnect,
   inChatCapabilitySetup,
 } from "@opengeni/contracts/personal-integration-setup";
-import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
+import {
+  readOrganizationIntegrationPolicyForServing,
+  withOrganizationIntegrationPolicyFence,
+} from "@opengeni/db/organization-integration-policy";
 import { registerEditableArtifactAgentTools } from "./editable-artifacts";
 import { registerCompanyProfileAgentAdminTools } from "./company-profile-agent-admin";
 import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
@@ -7879,7 +7886,28 @@ function registerCapabilityDiscoveryTools(
   // Installation is workspace metadata; an enabled personal MCP is usable only
   // when its tools actually made it into this caller's immutable attempt catalog.
   // This is a readiness projection, never credential resolution or a new grant.
+  // A built-in integration the organization's policy leaves out has no card:
+  // its connection would be refused, so the agent says it is turned off.
   const projectSetups = async (
+    items: CapabilityCatalogItem[],
+  ): Promise<CapabilitySetupProjection[]> => {
+    const [setups, policy] = await Promise.all([
+      projectSetupsAllowed(items),
+      items.some(builtInIntegrationPolicyApplies)
+        ? readOrganizationIntegrationPolicyForServing(deps.db, {
+            accountId: grant.accountId,
+          }).catch(() => null)
+        : null,
+    ]);
+    if (!policy) return setups;
+    return setups.map((setup, index) => {
+      const turnedOff = builtInIntegrationTurnedOffDetail(items[index]!, policy);
+      return turnedOff && setup.status !== "ready"
+        ? { status: "unavailable", action: null, detail: turnedOff }
+        : setup;
+    });
+  };
+  const projectSetupsAllowed = async (
     items: CapabilityCatalogItem[],
   ): Promise<CapabilitySetupProjection[]> => {
     const availableServerIds = new Set<string>();
@@ -7991,7 +8019,13 @@ function registerCapabilityDiscoveryTools(
     async ({ query, limit }) => {
       await authorize();
       const [current, pluginItems] = await Promise.all([catalog(), plugins()]);
-      const candidates = [...current.items, ...recommendations(), ...pluginItems];
+      // One service is offered once: a registry entry that duplicates a
+      // built-in integration this deployment offers is left out.
+      const candidates = withoutBuiltInIntegrationDuplicates([
+        ...current.items,
+        ...recommendations(),
+        ...pluginItems,
+      ]);
       const ranked = searchCapabilityCatalogItems(candidates, query, limit ?? 8);
       // A plugin installs for the whole workspace. When the catalogue also
       // offers one of its MCP servers as a connection, its setup names that
@@ -8026,7 +8060,10 @@ function registerCapabilityDiscoveryTools(
         (_, index) => projected[ranked.length + index]!.status !== "unavailable",
       );
       for (const [index, { item }] of ranked.entries()) {
-        if (item.kind !== "plugin" || item.enabled) continue;
+        // A plugin that is only a built-in the organization turned off keeps
+        // that answer: it has no card.
+        if (item.kind !== "plugin" || item.enabled || setups[index]!.status === "unavailable")
+          continue;
         const endpoints = new Set(pluginMcpEndpointKeys(item));
         setups[index] = pluginCapabilitySetup(
           item,
@@ -8142,13 +8179,16 @@ function registerCapabilityDiscoveryTools(
       // The agent's inputs name a connection not here yet: the card asks for
       // it even when another connection of the entry is ready.
       let anotherConnection = false;
+      const listed = [...current.items, ...recommendations()];
       let item =
-        [...current.items, ...recommendations()].find(
-          (candidate) => candidate.id === capabilityId,
-        ) ?? (await marketplacePluginCapabilityItem(deps.db, grant.workspaceId, capabilityId));
+        listed.find((candidate) => candidate.id === capabilityId) ??
+        (await marketplacePluginCapabilityItem(deps.db, grant.workspaceId, capabilityId));
       if (!item || !capabilityCatalogItemIsTrustedForExposure(item)) {
         throw new ToolArgumentError("Unknown or untrusted capability; search the catalog again.");
       }
+      // A registry entry for a service this deployment connects through its
+      // built-in integration gets the built-in's card.
+      item = builtInIntegrationDuplicated(item, listed) ?? item;
       // Each Dynamics connection is one customer environment. An environment
       // already here answers for the generic entry: ready when this caller can
       // use it, else its own card (which needs no address) when it is the only
