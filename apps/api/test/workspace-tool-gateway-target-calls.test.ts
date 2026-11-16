@@ -180,6 +180,7 @@ const {
   prepareAttestedWorkspaceToolGateway,
   prepareWorkspaceToolGatewayForGrant,
   prepareWorkspaceToolGateway,
+  ToolReviewAuthNeededError,
   workspaceToolGatewayAttestationScope,
   workspaceToolGatewayServerTiming,
 } = await import("../src/workspace-tool-gateway");
@@ -2084,14 +2085,15 @@ describe("Site tool consent", () => {
         contentSha256: "a".repeat(64),
         attachments: [{ name: "a.pdf", mediaType: "application/pdf", bytes: 3 }],
       };
-      let fail = false;
+      let fail: unknown = false;
       const reviewing = targetOptions({
         readSiteVersion: siteVersion([canonical]),
         prepare: async (deps, authorization, options = {}) => ({
           ...(await prepareWorkspaceToolGateway(deps, authorization, options)),
           review: async (identity, args) => {
             reviewed.push({ identity, args });
-            if (fail) throw new Error("the draft is gone");
+            if (fail === true) throw new Error("the draft is gone");
+            if (fail) throw fail;
             return { protectedFields: ["raw"], email };
           },
         }),
@@ -2148,6 +2150,52 @@ describe("Site tool consent", () => {
         422,
         "site_tool_review_unavailable",
       );
+      expect(f.grafana.calls).toHaveLength(0);
+      // The connector's own report says what the account needs: more access,
+      // or signing in again. A refusal for this account says it isn't available.
+      const refusal = async (error: unknown) => {
+        fail = error;
+        return (await describeWorkspaceSiteToolConsent(
+          f.deps,
+          targetAuthorization(),
+          { ...site, identity: canonical, arguments: args },
+          reviewing,
+        ).then(
+          () => null,
+          (caught: unknown) => caught,
+        )) as { status?: number; details?: Record<string, unknown> } | null;
+      };
+      const report = {
+        serverId: f.identity(f.personal).serverId,
+        toolName: canonical.toolName,
+        providerDomain: "127.0.0.1",
+        connectionId: f.personal.id,
+      };
+      expect(
+        await refusal(
+          new ToolReviewAuthNeededError({
+            ...report,
+            reason: "insufficient_scope",
+            scopes: ["https://example.test/compose"],
+          }),
+        ),
+      ).toMatchObject({
+        status: 409,
+        details: {
+          code: "tool_connection_needs_more_access",
+          connectionId: f.personal.id,
+          scopes: ["https://example.test/compose"],
+        },
+      });
+      expect(
+        await refusal(new ToolReviewAuthNeededError({ ...report, reason: "expired" })),
+      ).toMatchObject({
+        status: 409,
+        details: { code: "tool_connection_needs_attention", connectionId: f.personal.id },
+      });
+      expect(
+        await refusal(Object.assign(new Error("not for this account"), { code: "access_denied" })),
+      ).toMatchObject({ status: 403, details: { code: "tool_unavailable_for_account" } });
       expect(f.grafana.calls).toHaveLength(0);
     } finally {
       f.close();

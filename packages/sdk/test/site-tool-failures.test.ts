@@ -436,6 +436,45 @@ describe("typed answers and readiness", () => {
     });
   });
 
+  test("an account that must allow more access, or can't do this at all, is a typed answer", async () => {
+    const moreAccess = harness([
+      apiError(409, {
+        code: "conflict",
+        message: "Give this account more access in Opengeni, then try again.",
+        retryable: false,
+        outcomeUnknown: false,
+        details: {
+          code: "tool_connection_needs_more_access",
+          connectionId: "c1",
+          scopes: ["https://example.test/compose"],
+        },
+      }),
+    ]);
+    await moreAccess.invoke().catch(() => undefined);
+    expect(moreAccess.prompts[0]?.failure).toMatchObject({
+      code: "site_tool_grant_required",
+      retryable: false,
+      message: "Give Microsoft Dynamics more access to continue.",
+      sourceCode: "tool_connection_needs_more_access",
+    });
+    const denied = harness(
+      [
+        apiError(403, {
+          code: "forbidden",
+          message: "This action isn't available for this account.",
+          retryable: false,
+          outcomeUnknown: false,
+          details: { code: "tool_unavailable_for_account" },
+        }),
+      ],
+      { host: false },
+    );
+    expect(await denied.invoke().catch((reason: unknown) => reason)).toMatchObject({
+      code: "site_tool_permission_denied",
+      retryable: false,
+    });
+  });
+
   test("readiness asks the host for the pinned Site and passes on the host's change events", async () => {
     const bodies: unknown[] = [];
     const hostListeners = new Set<() => void>();

@@ -240,7 +240,8 @@ access limitation. Missing publishing access itself still blocks publication.
    is still checked, so keep handling its errors. A host without readiness
    rejects with `readiness_unsupported`; then just call the tool.
 7. A stopped call reaches Site code as a typed `code`:
-   `site_tool_reconnect_required`, `site_tool_permission_denied`,
+   `site_tool_reconnect_required`, `site_tool_grant_required` (the account must
+   allow more access), `site_tool_permission_denied`,
    `site_tool_not_available_for_viewer`, `site_tool_blocked` (tool permissions
    block it), `site_tool_open_in_opengeni`, `site_tool_upstream_unavailable`
    (the tool's server couldn't be reached and nothing was sent; `retryable` is

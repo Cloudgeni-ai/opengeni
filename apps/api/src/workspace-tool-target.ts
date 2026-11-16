@@ -62,6 +62,7 @@ import {
   requireWorkspaceToolGatewayAuthorization,
   throwWorkspaceToolGatewayHttpError,
   toolServerUnreachableError,
+  ToolReviewAuthNeededError,
   type PreparedWorkspaceToolGateway,
   type WorkspaceSiteVersionResolver,
   type WorkspaceToolGatewayAuthorization,
@@ -148,6 +149,55 @@ async function siteVersionReader(
 type DirectSiteRouting = Extract<SiteToolRouting, { kind: "direct" }>;
 /** What the Site request is for: a resolve may use any of the viewer's accounts. */
 type SiteTargetMode = "resolve" | "invoke" | "approve";
+
+/**
+ * A provider review that stopped before anything ran, as the typed answer the
+ * Site's viewer can act on, or null when the review failed for another reason.
+ * The connector's own auth-needed report says whether the account must allow
+ * more access or sign in again; a provider refusal for this account (for
+ * example a connection whose access can't grow) says it isn't available to it.
+ */
+function siteToolReviewRefusal(error: unknown): ApiHttpError | null {
+  if (error instanceof ToolReviewAuthNeededError) {
+    const { payload } = error;
+    if (payload.reason === "insufficient_scope" && payload.connectionId)
+      return new ApiHttpError(409, {
+        code: "conflict",
+        message: "Give this account more access in Opengeni, then try again.",
+        retryable: false,
+        outcomeUnknown: false,
+        details: {
+          code: "tool_connection_needs_more_access",
+          connectionId: payload.connectionId,
+          scopes: payload.scopes ?? [],
+        },
+      });
+    return new ApiHttpError(409, {
+      code: "conflict",
+      message: "Reconnect this account in Opengeni, then try again.",
+      retryable: false,
+      outcomeUnknown: false,
+      details: {
+        code: "tool_connection_needs_attention",
+        reason: payload.reason,
+        ...(payload.connectionId ? { connectionId: payload.connectionId } : {}),
+      },
+    });
+  }
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { code?: unknown }).code === "access_denied"
+  )
+    return new ApiHttpError(403, {
+      code: "forbidden",
+      message: "This action isn't available for this account.",
+      retryable: false,
+      outcomeUnknown: false,
+      details: { code: "tool_unavailable_for_account" },
+    });
+  return null;
+}
 
 /** A Site call that needs the person in the Opengeni frame (consent, account or connection). */
 function siteConsentError(
@@ -997,6 +1047,8 @@ async function reviewSiteToolCall(
           : {};
       } catch (error) {
         if (error instanceof ApiHttpError || error instanceof HTTPException) throw error;
+        const typed = siteToolReviewRefusal(error);
+        if (typed) throw typed;
         throw new ApiHttpError(422, {
           code: "validation_failed",
           message: "Opengeni couldn't read what this action would do, so it was not run.",

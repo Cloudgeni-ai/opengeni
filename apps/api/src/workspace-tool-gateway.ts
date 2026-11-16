@@ -27,6 +27,7 @@ import {
   toolPolicyActionName,
   isSecretReferenceError,
   type AccessGrant,
+  type ToolAuthNeededPayload,
   type ToolGatewayIdentity,
   type ToolReviewContext,
   type ToolRef,
@@ -149,6 +150,18 @@ export type PreparedWorkspaceToolGateway = Pick<
     args: Record<string, unknown>,
   ) => Promise<Partial<ToolReviewContext>>;
 };
+
+/**
+ * A provider review that stopped because the account must first sign in again
+ * or allow more access. `payload` is the connector's own typed auth-needed
+ * report for that exact tool, raised while reading the review; nothing ran.
+ */
+export class ToolReviewAuthNeededError extends Error {
+  constructor(readonly payload: ToolAuthNeededPayload) {
+    super("tool review needs the account's sign-in or more access");
+    this.name = "ToolReviewAuthNeededError";
+  }
+}
 
 type WorkspaceSiteToolContext = {
   siteArtifactId: string;
@@ -927,6 +940,30 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
       : gatewaySettings;
   const deps = { ...routeDeps, catalogSourceSettings, settings: firstPartySettings };
   const nativeResolveConnection = buildConnectionTokenResolver(routeDeps.db, gatewaySettings);
+  // A person's own account may live in the workspace it was added in and be
+  // turned on here ("Use it here"). Its credential is read where it lives,
+  // exactly as an accepted turn reads it. Only the caller's own routed
+  // accounts qualify: the bindings above are the caller's turned-on logins,
+  // and the fence re-reads them before every provider request.
+  const ownAccountHomes = new Map(
+    accountBindings
+      .filter(
+        (binding) =>
+          binding.subjectScope === "subject" &&
+          binding.ownerSubjectId === grant.subjectId &&
+          binding.originWorkspaceId !== grant.workspaceId,
+      )
+      .map((binding) => [binding.connectionId, binding.originWorkspaceId]),
+  );
+  const callerConnectionRequest = (
+    input: ResolveConnectionCredentialInput,
+  ): ResolveConnectionCredentialInput => {
+    if (input.connectionRef.subjectScope !== "subject") return input;
+    const home = input.connectionRef.connectionId
+      ? ownAccountHomes.get(input.connectionRef.connectionId)
+      : undefined;
+    return { ...input, subjectId: grant.subjectId, ...(home ? { workspaceId: home } : {}) };
+  };
   const resolveConnection = fence
     ? withTargetFenceConnectionAuthorization(nativeResolveConnection, fence, {
         preflight: options.target !== undefined,
@@ -946,10 +983,7 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
   const resolveCredential = async (
     input: ResolveConnectionCredentialInput,
   ): Promise<ResolveConnectionCredentialResult> =>
-    await resolveConnection({
-      ...input,
-      ...(input.connectionRef.subjectScope === "subject" ? { subjectId: grant.subjectId } : {}),
-    });
+    await resolveConnection(callerConnectionRequest(input));
   // Read once per gateway request: a backend flip reaches the next request.
   const nangoBackends = await nangoBackendsFor(routeDeps.db, routeDeps.settings);
   const firstPartyServers = await Promise.all([
@@ -1000,11 +1034,7 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
       workspaceId: grant.workspaceId,
       initiatingSubjectId: grant.subjectId,
     },
-    resolveCredential: async (input) =>
-      await resolveConnection({
-        ...input,
-        ...(input.connectionRef.subjectScope === "subject" ? { subjectId: grant.subjectId } : {}),
-      }),
+    resolveCredential: async (input) => await resolveConnection(callerConnectionRequest(input)),
   });
   // Legacy designation without a Codex cutover row; the core designation
   // (rechecked by the database on every request) with an enabled cutover;
@@ -1051,6 +1081,9 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
     ),
   );
   const recommendations = new Map<string, "allow" | "ask">();
+  // Connectors report "sign in again" or "allow more access" through their
+  // typed auth-needed hook; a review that stops on one says which.
+  const authNeeded: ToolAuthNeededPayload[] = [];
   const prepared = await prepareWorkspaceToolGatewayTools(
     gatewaySettings,
     allGatewayToolRefs(gatewaySettings),
@@ -1058,6 +1091,9 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       subjectId: grant.subjectId,
+      onAuthNeeded: (payload) => {
+        authNeeded.push(payload);
+      },
       ...(options.signal ? { requestSignal: options.signal } : {}),
       ...(authorizeTransportRequest ? { authorizeProviderRequest: authorizeTransportRequest } : {}),
       // A person may confirm an approval-required connection tool here, so
@@ -1218,9 +1254,20 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
       // The route's own server is always prepared here; failing to find it
       // must not read as "this provider has no review".
       if (!server) throw new Error("tool review server unavailable");
-      return typeof server.reviewContext === "function"
-        ? await server.reviewContext(identity.toolName, args)
-        : {};
+      if (typeof server.reviewContext !== "function") return {};
+      const before = authNeeded.length;
+      try {
+        return await server.reviewContext(identity.toolName, args);
+      } catch (error) {
+        const reported = authNeeded
+          .slice(before)
+          .find(
+            (payload) =>
+              payload.serverId === identity.serverId && payload.toolName === identity.toolName,
+          );
+        if (reported) throw new ToolReviewAuthNeededError(reported);
+        throw error;
+      }
     },
   };
 }

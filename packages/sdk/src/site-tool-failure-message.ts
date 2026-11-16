@@ -9,6 +9,8 @@
  * Site code reads the same `code` on the error (or on the result's
  * `structuredContent.error` for a provider's refusal).
  * - `site_tool_reconnect_required`: the viewer's connection must sign in again.
+ * - `site_tool_grant_required`: the viewer's connection must allow more access
+ *   for this action (the server's `details` name the connection and scopes).
  * - `site_tool_permission_denied`: the provider refused it for the viewer's account.
  * - `site_tool_not_available_for_viewer`: the Site's tool can't run for this viewer.
  * - `site_tool_blocked`: tool permissions block it on the viewer's account.
@@ -21,6 +23,7 @@
  */
 export type SiteToolFailureCode =
   | "site_tool_reconnect_required"
+  | "site_tool_grant_required"
   | "site_tool_permission_denied"
   | "site_tool_not_available_for_viewer"
   | "site_tool_blocked"
@@ -36,6 +39,8 @@ export const SITE_TOOL_TYPED_ANSWERS: Readonly<
   Record<string, { code: SiteToolFailureCode; retryable: boolean }>
 > = Object.freeze({
   tool_blocked: { code: "site_tool_blocked", retryable: false },
+  tool_connection_needs_more_access: { code: "site_tool_grant_required", retryable: false },
+  tool_unavailable_for_account: { code: "site_tool_permission_denied", retryable: false },
   site_tool_consent_requires_opengeni: { code: "site_tool_open_in_opengeni", retryable: false },
   // Retryable only while the server says nothing was sent (outcomeUnknown false).
   tool_server_unreachable: { code: "site_tool_upstream_unavailable", retryable: true },
@@ -46,6 +51,10 @@ export function siteToolFailureMessage(code: SiteToolFailureCode, system: string
   switch (code) {
     case "site_tool_reconnect_required":
       return system ? `Sign in to ${system} again to continue.` : "Sign in again to continue.";
+    case "site_tool_grant_required":
+      return system
+        ? `Give ${system} more access to continue.`
+        : "Give this account more access to continue.";
     case "site_tool_permission_denied":
       return system
         ? `${system} didn't allow this for your account.`

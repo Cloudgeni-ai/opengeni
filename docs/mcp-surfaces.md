@@ -400,7 +400,7 @@ operation. A declared Site tool the viewer can neither use nor connect answers
 the publisher's own account routes with their connector so other viewers get
 their own account or the connect card instead. Every other way a Site call
 stops reaches the viewer as a plain state and the Site as a typed `code`
-(`site_tool_reconnect_required`, `site_tool_permission_denied`,
+(`site_tool_reconnect_required`, `site_tool_grant_required`, `site_tool_permission_denied`,
 `site_tool_not_available_for_viewer`, `site_tool_blocked`,
 `site_tool_open_in_opengeni`, `site_tool_upstream_unavailable`,
 `site_tool_outcome_unknown`, `site_tool_unavailable`); see "Failures" in the
