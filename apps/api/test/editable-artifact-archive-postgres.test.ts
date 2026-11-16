@@ -213,7 +213,9 @@ test("archiving removes a presentation from Artifacts, is idempotent and needs t
   const managerHeaders = { authorization: `Bearer ${manager}`, "content-type": "application/json" };
   const job = "2".repeat(32);
   for (const path of [`materializations/${job}`, `materializations/${job}/download`]) {
-    const response = await app.request(`${deletedItem}/${path}`, { headers: managerHeaders });
+    const response = await app.request(`${deletedItem}/${path}?replicaId=aaaaaaaaaaaaaaaa`, {
+      headers: managerHeaders,
+    });
     expect(response.status).toBe(404);
   }
   const visibility = await app.request(`${deletedItem}/visibility`, {
