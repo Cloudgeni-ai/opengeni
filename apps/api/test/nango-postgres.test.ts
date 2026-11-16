@@ -534,7 +534,8 @@ describe("Nango connections in PostgreSQL", () => {
         expect.objectContaining({
           id: nangoRow!.id,
           providerId: "gmail",
-          label: "gmailmcp.googleapis.com",
+          // Named by the account it signed in as.
+          label: "lists@example.com",
           ownership: "personal",
           status: "connected",
           // Marked, so no Connect UI starts a native reconnect for it.
