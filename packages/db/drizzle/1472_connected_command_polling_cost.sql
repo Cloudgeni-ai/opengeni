@@ -19,7 +19,9 @@
 -- attempts, outcome and custody are unchanged, so nothing is released,
 -- dropped or expired by this, and the due probe still ignores such rows. At
 -- most 200 such rows move per call (each move is a fenced row write), so one
--- call stays short; the rest move in later calls.
+-- call stays short; the rest move in later calls. Past that cap the walk
+-- still claims every row it can (it only stops deferring), so output behind
+-- a long offline backlog is released in the same call.
 --
 -- classify_connected_command_ops first asks the private command projection
 -- (1471) whether the runner process has a row for any of
@@ -133,14 +135,18 @@ CREATE OR REPLACE FUNCTION opengeni_private.maintenance_claim_output_release_inn
       LOOP
         IF candidate.eligible THEN
           claim_ids := pg_catalog.array_append(claim_ids, candidate.id);
-        ELSE
+        ELSIF pg_catalog.cardinality(defer_ids) < defer_limit THEN
           defer_ids := pg_catalog.array_append(defer_ids, candidate.id);
+        ELSE
+          -- Past the deferral cap the walk only looks for rows it can claim,
+          -- so claimable output behind a long offline backlog is not held
+          -- back; a later call moves the rest.
+          CONTINUE;
         END IF;
         IF NOT candidate.workspace_id = ANY(workspace_ids) THEN
           workspace_ids := pg_catalog.array_append(workspace_ids, candidate.workspace_id);
         END IF;
-        EXIT WHEN pg_catalog.cardinality(claim_ids) >= p_limit
-          OR pg_catalog.cardinality(defer_ids) >= defer_limit;
+        EXIT WHEN pg_catalog.cardinality(claim_ids) >= p_limit;
       END LOOP;
       FOR workspace_value IN
         SELECT fenced.id FROM pg_catalog.unnest(workspace_ids) AS fenced(id) ORDER BY fenced.id

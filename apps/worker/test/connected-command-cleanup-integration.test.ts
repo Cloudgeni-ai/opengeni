@@ -1635,6 +1635,43 @@ test("rows whose runner is offline are pushed back once, not reread by every cla
   }
 });
 
+test("output behind more offline rows than one claim defers is still claimed in that sweep", async () => {
+  // 250 offline rows ahead of 30 claimable ones: more than one claim defers.
+  const offline = await exitedBacklog(250, "1999-01-01T00:00:00Z", "2 hours");
+  const live = await exitedBacklog(30, "2000-01-01T00:00:00Z", "1 hour");
+  await shared.admin`update enrollments set connection_lease_expires_at=now()-interval '1 minute'
+    where id=${offline.enrollmentId}`;
+  const claim = async () =>
+    await claimConnectedCommandOutputReleases(client.db, {
+      claimId: crypto.randomUUID(),
+      limit: 20,
+      claimTtlMs: 300_000,
+    });
+  const offlineDue = async () =>
+    (
+      await shared.admin`select count(*)::int n from session_background_commands
+        where session_id=${offline.sessionId} and reconcile_after <= now()
+          and reconcile_claim_id is null`
+    )[0]!.n as number;
+  try {
+    // A sweep claims until a claim comes back short of its limit, so these
+    // two claims are one sweep: every claimable row is claimed in it.
+    const first = await claim();
+    expect(first).toHaveLength(20);
+    expect(first.every((row) => row.sessionId === live.sessionId)).toBe(true);
+    // Only the deferral cap moved; the rest stay due, untouched.
+    expect(await offlineDue()).toBe(50);
+    const second = await claim();
+    expect(second).toHaveLength(10);
+    expect(second.every((row) => row.sessionId === live.sessionId)).toBe(true);
+    expect(new Set([...first, ...second].map((row) => row.commandId)).size).toBe(30);
+    expect(await offlineDue()).toBe(0);
+    expect(await claim()).toEqual([]);
+  } finally {
+    for (const backlog of [offline, live]) await parkSession(backlog.sessionId);
+  }
+});
+
 test("a final ACK the runner keeps answering as retained backs off, and is still retried", async () => {
   const fixture = await terminalOutputFixture();
   try {
