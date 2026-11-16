@@ -11,6 +11,10 @@ import {
 import {
   bootstrapWorkspace,
   createDb,
+  createSession,
+  listEditableArtifactIdsForSession,
+  touchEditableArtifactSessionLink,
+  withSessionRlsActorContext,
   listArtifactCatalogCandidates,
   PostgresEditableArtifactStore,
   type DbClient,
@@ -42,7 +46,7 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-test("archiving a presentation moves it to Archived, is idempotent and needs the artifact's managers", async () => {
+test("archiving removes a presentation from Artifacts, is idempotent and needs the artifact's managers", async () => {
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "archive-test",
@@ -83,6 +87,26 @@ test("archiving a presentation moves it to Archived, is idempotent and needs the
     modality: "presentation",
     title: "Disposable deck",
   });
+  const source = await createSession(client.db, {
+    ...scope,
+    initialMessage: "Archive fixture",
+    resources: [],
+    metadata: {},
+    model: "fixture",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: "none",
+    createdBy: { kind: "subject", subjectId: grant.subjectId },
+    createdByContext: {},
+  });
+  await withSessionRlsActorContext({ subjectId: grant.subjectId }, () =>
+    touchEditableArtifactSessionLink(client.db, scope, source.id, artifact.id),
+  );
+  const sessionArtifacts = async () =>
+    await withSessionRlsActorContext({ subjectId: grant.subjectId }, () =>
+      listEditableArtifactIdsForSession(client.db, scope, source.id, 64),
+    );
+  expect(await sessionArtifacts()).toEqual([artifact.id]);
   const secret = "editable-artifact-archive-test-secret";
   const app = new Hono();
   registerEditableArtifactRoutes(app, {
@@ -130,10 +154,22 @@ test("archiving a presentation moves it to Archived, is idempotent and needs the
   // An unknown artifact reads as missing.
   expect((await archive(manager, "f".repeat(32))).status).toBe(404);
 
-  // It still opens, and the Artifacts list shows it under Archived only.
-  expect(
-    (await application.readArtifact({ scope, actor, artifactId: artifact.id })).lifecycle,
-  ).toBe("archived");
+  // It is removed: it no longer opens and leaves the Artifacts list.
+  await expect(
+    application.mintLiveTicket({
+      scope,
+      actor,
+      artifactId: artifact.id,
+      modality: "presentation",
+      liveProtocolVersion: 1,
+      kernelVersion: "test",
+      modelSchemaVersion: 1,
+      snapshotVersion: 1,
+      commandProtocolVersion: 1,
+      committedTransactionProtocolVersion: 1,
+      allowEdit: true,
+    } as never),
+  ).rejects.toMatchObject({ code: "not_found" });
   const listed = async (status: "active" | "archived") =>
     (
       await listArtifactCatalogCandidates(client.db, scope, {
@@ -145,5 +181,7 @@ test("archiving a presentation moves it to Archived, is idempotent and needs the
       })
     ).map((item) => item.id);
   expect(await listed("active")).not.toContain(artifact.id);
-  expect(await listed("archived")).toContain(artifact.id);
+  expect(await listed("archived")).not.toContain(artifact.id);
+  // The chat's artifact panel drops it too.
+  expect(await sessionArtifacts()).toEqual([]);
 }, 60_000);

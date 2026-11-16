@@ -52,7 +52,7 @@ const site: ArtifactCatalogItem = {
   updatedAt: "2026-09-02T00:00:00Z",
   versionId: "v1",
 };
-test("Archive… is offered for active documents, spreadsheets and presentations and asks first", async () => {
+test("Delete… is offered for active documents, spreadsheets and presentations and asks first", async () => {
   localStorage.setItem("opengeni:artifact-library:view:v1", "list");
   const deck: ArtifactCatalogItem = {
     id: "c".repeat(32),
@@ -70,7 +70,7 @@ test("Archive… is offered for active documents, spreadsheets and presentations
     title: "Old deck",
     status: "archived",
   };
-  const archived: ArtifactCatalogItem[] = [];
+  const archived: string[] = [];
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
@@ -109,21 +109,21 @@ test("Archive… is offered for active documents, spreadsheets and presentations
       />
     ));
     const label = (entries: HTMLElement[]) => entries.map((entry) => entry.textContent?.trim());
-    expect(label(await openMenu("Old deck"))).not.toContain("Archive…");
+    expect(label(await openMenu("Old deck"))).not.toContain("Delete…");
     await closeMenu();
-    expect(label(await openMenu("Status board"))).not.toContain("Archive…");
+    expect(label(await openMenu("Status board"))).not.toContain("Delete…");
     await closeMenu();
     const entries = await openMenu("Disposable deck");
-    const archive = entries.find((entry) => entry.textContent?.trim() === "Archive…")!;
-    expect(archive).toBeDefined();
-    await act(async () => archive.click());
+    const remove = entries.find((entry) => entry.textContent?.trim() === "Delete…")!;
+    expect(remove).toBeDefined();
+    await act(async () => remove.click());
     // Nothing happens until the person confirms.
     expect(archived).toEqual([]);
     const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
-    expect(dialog.textContent).toContain("Archive Disposable deck?");
-    expect(dialog.textContent).toContain("can't be edited");
+    expect(dialog.textContent).toContain("Delete Disposable deck?");
+    expect(dialog.textContent).toContain("can't be opened again");
     const confirm = [...dialog.querySelectorAll<HTMLButtonElement>("button")].find(
-      (button) => button.textContent === "Archive presentation",
+      (button) => button.textContent === "Delete presentation",
     )!;
     await act(async () => confirm.click());
     expect(archived).toEqual([deck.id]);

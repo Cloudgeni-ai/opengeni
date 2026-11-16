@@ -1,7 +1,6 @@
 import { useNavigate, useStringifySearch } from "../../lib/navigation";
 import type { ArtifactCatalogItem } from "@opengeni/sdk";
 import {
-  ArchiveIcon,
   CopyIcon,
   ImageIcon,
   LayoutGridIcon,
@@ -14,6 +13,7 @@ import {
   PanelsTopLeftIcon,
   PinIcon,
   PinOffIcon,
+  Trash2Icon,
   UsersIcon,
 } from "lucide-react";
 import {
@@ -103,7 +103,10 @@ const ArtifactViewer = lazy(() =>
 const IMAGE_GLYPH = <ImageIcon className="size-4 text-fg-subtle" aria-hidden />;
 
 export type ArtifactPinAction = (item: ArtifactCatalogItem, pinned: boolean) => Promise<void>;
-/** Archives a document, spreadsheet or presentation, then refreshes the list. */
+/**
+ * Deletes a document, spreadsheet or presentation (archives it, so it leaves
+ * the list and no longer opens), then refreshes the list.
+ */
 export type ArtifactArchiveAction = (item: ArtifactCatalogItem) => Promise<void>;
 
 function PinnedMarker() {
@@ -335,15 +338,25 @@ function useArtifactOpen({
   const [pinning, setPinning] = useState(false);
   const pinInFlight = useRef(false);
   const [confirmingArchive, setConfirmingArchive] = useState(false);
+  const deleted = useRef(false);
+  // A deleted item leaves the list with its menu, so focus moves to the search.
+  const focusAfterDelete = {
+    get current() {
+      return deleted.current
+        ? document.querySelector<HTMLElement>('input[aria-label="Search artifacts by title"]')
+        : null;
+    },
+  };
   const canArchive = Boolean(onArchive && isEditableKind(item.kind) && item.status === "active");
   const archive = async () => {
     if (!onArchive) return false;
     try {
       await onArchive(item);
-      toast(`Archived ${item.title}`);
+      deleted.current = true;
+      toast(`Deleted ${item.title}`);
       return true;
     } catch (error) {
-      toast.error("Couldn't archive", { description: userErrorText(error) });
+      toast.error("Couldn't delete", { description: userErrorText(error) });
       return false;
     }
   };
@@ -426,8 +439,8 @@ function useArtifactOpen({
         <>
           <DropdownMenuSeparator />
           <DropdownMenuItem variant="destructive" onSelect={() => setConfirmingArchive(true)}>
-            <ArchiveIcon />
-            Archive…
+            <Trash2Icon />
+            Delete…
           </DropdownMenuItem>
         </>
       ) : null}
@@ -437,10 +450,11 @@ function useArtifactOpen({
     <ConfirmDialog
       open={confirmingArchive}
       onOpenChange={setConfirmingArchive}
-      title={`Archive ${item.title}?`}
-      description="It moves to Archived, where it still opens but can't be edited. This can't be undone."
-      confirmLabel={`Archive ${artifactKindLabel[item.kind].toLowerCase()}`}
-      pendingLabel="Archiving…"
+      title={`Delete ${item.title}?`}
+      description="It's removed from Artifacts and can't be opened again."
+      confirmLabel={`Delete ${artifactKindLabel[item.kind].toLowerCase()}`}
+      pendingLabel="Deleting…"
+      restoreFocusFallbackRef={focusAfterDelete}
       onConfirm={archive}
     />
   ) : null;

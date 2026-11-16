@@ -10244,8 +10244,8 @@ export class OpenGeniClient {
   }
 
   /**
-   * Archive a document, spreadsheet or presentation. It leaves the active
-   * Artifacts list, still opens, and can no longer be edited. One-way.
+   * Delete a document, spreadsheet or presentation by archiving it: it
+   * leaves the Artifacts list and no longer opens or takes edits. One-way.
    */
   async archiveEditableArtifact(
     workspaceId: string,

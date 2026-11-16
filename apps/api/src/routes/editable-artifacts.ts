@@ -620,8 +620,8 @@ export function registerEditableArtifactRoutes(
     );
   });
 
-  // Archive: it leaves the active Artifacts list, still opens, and takes no
-  // more edits. One-way; archiving an archived artifact returns it unchanged.
+  // Archive (the app's Delete): it leaves the Artifacts list and no longer
+  // opens or takes edits. One-way; archiving again returns it unchanged.
   app.post(`${item}/archive`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
     const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:publish");
