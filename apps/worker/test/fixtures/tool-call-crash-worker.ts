@@ -41,7 +41,7 @@ let latestStep: ModelStep | null = null;
 let latestResponseId: string | null = null;
 let call1Returned = false;
 const app = createDb(appUrl, { searchPath: schema });
-const sql = adminSql(appUrl, schema);
+const sql = adminSql(env("TOOL_CRASH_ADMIN_URL"), schema);
 const model = new HistoryScriptedModel({
   beforeResponse: (step) => {
     if (point === "next_dispatch" && step === "final") crash();

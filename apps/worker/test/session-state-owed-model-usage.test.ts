@@ -8,11 +8,14 @@ import {
 // can end an attempt or a session's work finishes any still owed, and a
 // failure there never blocks the boundary itself.
 
-function activitiesWith(settle: (scope: Record<string, unknown>) => Promise<number>) {
+function activitiesWith(
+  settle: (scope: Record<string, unknown>) => Promise<number>,
+  services?: Record<string, unknown>,
+) {
   const warnings: string[] = [];
   const activities = createSessionStateActivities(
     async () =>
-      ({
+      (services ?? {
         db: {},
         bus: { publish: async () => undefined },
         settings: { sessionHistorySource: "items", openaiReasoningEffort: "medium" },
@@ -77,4 +80,16 @@ test("a failed settlement is logged and never blocks the boundary", async () => 
     "recorded model usage settlement failed",
     "recorded model usage settlement failed",
   ]);
+});
+
+test("a failed idle settlement resolves even when its services cannot log", async () => {
+  const { activities } = activitiesWith(
+    async () => {
+      throw new Error("session not visible");
+    },
+    { db: {} },
+  );
+  await expect(
+    activities.markSessionIdle({ workspaceId: ids.workspaceId, sessionId: ids.sessionId }),
+  ).resolves.toBeUndefined();
 });

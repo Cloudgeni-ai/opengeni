@@ -190,13 +190,17 @@ export function createSessionStateActivities(
         observability: activityServices.observability,
       });
     } catch (error) {
-      activityServices.observability.warn?.("recorded model usage settlement failed", {
-        boundary,
-        workspaceId: scope.workspaceId,
-        sessionId: scope.sessionId,
-        ...(scope.attemptId ? { attemptId: scope.attemptId } : {}),
-        errorName: error instanceof Error ? error.name : "unknown",
-      });
+      try {
+        activityServices.observability?.warn?.("recorded model usage settlement failed", {
+          boundary,
+          workspaceId: scope.workspaceId,
+          sessionId: scope.sessionId,
+          ...(scope.attemptId ? { attemptId: scope.attemptId } : {}),
+          errorName: error instanceof Error ? error.name : "unknown",
+        });
+      } catch {
+        // Logging is best-effort; the boundary's own settlement proceeds.
+      }
     }
   }
 

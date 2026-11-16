@@ -52,7 +52,7 @@ beforeAll(async () => {
   if (!acquired) throw new Error("Native PostgreSQL required");
   shared = acquired;
   app = createDb(shared.appUrl, { searchPath: shared.schema });
-  sql = adminSql(shared.appUrl, shared.schema);
+  sql = adminSql(shared.adminUrl, shared.schema);
   scratch = mkdtempSync(join(tmpdir(), "tool-call-crash-"));
 }, 600_000);
 afterAll(async () => {
@@ -254,6 +254,7 @@ async function runCrashedAttempt(ctx: Ctx, sessionId: string, point: string, log
     env: {
       ...process.env,
       TOOL_CRASH_APP_URL: shared.appUrl,
+      TOOL_CRASH_ADMIN_URL: shared.adminUrl,
       TOOL_CRASH_SCHEMA: shared.schema,
       TOOL_CRASH_LOG: logFile,
       TOOL_CRASH_POINT: point,

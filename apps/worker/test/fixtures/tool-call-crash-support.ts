@@ -156,13 +156,12 @@ export function scriptedRuntime(
   };
 }
 
-/** Superuser connection to the restricted test schema, for durable-state reads. */
-export function adminSql(appUrl: string, schema: string): postgres.Sql {
-  const url = new URL(appUrl);
-  const base = new URL(process.env.OPENGENI_TEST_PG_URL ?? "postgres://postgres@127.0.0.1:5432/postgres");
-  url.username = base.username;
-  url.password = base.password;
-  return postgres(url.toString(), {
+/**
+ * Superuser connection to the restricted test schema, for durable-state reads.
+ * `adminUrl` is the shared harness's superuser URL for the test database.
+ */
+export function adminSql(adminUrl: string, schema: string): postgres.Sql {
+  return postgres(adminUrl, {
     max: 2,
     onnotice: () => undefined,
     connection: { search_path: schema },
