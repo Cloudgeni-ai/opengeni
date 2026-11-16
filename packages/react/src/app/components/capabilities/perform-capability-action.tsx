@@ -19,6 +19,7 @@ import {
 import { beginDriveConnect, DRIVE_MCP_URL } from "../../lib/drive-connect-return";
 import { startMcpOAuthWithTimeout } from "../../lib/mcp-oauth";
 import { toast } from "../../lib/toast";
+import { turnOnOwnLoginHere } from "./own-login-turned-on";
 
 type PerformCapabilityActionOptions = Parameters<typeof performCapabilityActionUntracked>[0];
 
@@ -409,6 +410,16 @@ async function performCapabilityActionUntracked(
     onRuntimeChanged();
     await onComplete();
     toast.success(`Removed the ${item.name} account`);
+    return;
+  }
+
+  if (action.type === "turn_on_here") {
+    // The same standing grant as the account list's switch; the API checks
+    // that the account is the caller's own.
+    await turnOnOwnLoginHere(client, workspaceId, action.connection);
+    await refresh();
+    onRuntimeChanged();
+    await onComplete();
     return;
   }
 

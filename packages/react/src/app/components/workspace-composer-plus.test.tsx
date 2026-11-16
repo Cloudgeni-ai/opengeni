@@ -102,7 +102,7 @@ test("same-client grant loss masks composer status before old responses; restora
     context.accessContext = allowed;
     context.client = {
       listCapabilities: async () => ({ items: [entry] }),
-      listConnections: () => {
+      listOwnConnectionAccounts: () => {
         reads++;
         return reads === 1
           ? Promise.resolve([cached])
@@ -170,7 +170,7 @@ test("composer treats bootstrapping as unknown and accepts an admin read grant",
   context.accessContext = null;
   context.client = {
     listCapabilities: async () => ({ items: [] }),
-    listConnections: async () => {
+    listOwnConnectionAccounts: async () => {
       reads++;
       return [];
     },
@@ -223,7 +223,7 @@ test("a catalog failure and connection 403 mask cached composer account status",
       if (failure !== "none") throw new Error("Catalog unavailable");
       return { items: [entry] };
     },
-    listConnections: async () => {
+    listOwnConnectionAccounts: async () => {
       if (failure === "transient") throw new Error("Connections unavailable");
       if (failure === "denied") throw { status: 403 };
       return [connection];
@@ -290,7 +290,7 @@ async function concurrentComposerReads(order: "late-denial" | "later-success" | 
         throw new Error("Catalog unavailable");
       return { items: [entry] };
     },
-    listConnections: async () => {
+    listOwnConnectionAccounts: async () => {
       calls++;
       return calls === 1
         ? [connection]
@@ -406,12 +406,12 @@ test("a late denial from a replaced client cannot mask the current composer", as
   } as ConnectionMetadata;
   const oldClient = {
     listCapabilities: async () => ({ items: [entry] }),
-    listConnections: async () => stale.promise,
+    listOwnConnectionAccounts: async () => stale.promise,
     catalogAssetUrl: () => null,
   } as unknown as ChatClient<OpenGeniBrowserClient>;
   const newClient = {
     listCapabilities: async () => ({ items: [entry] }),
-    listConnections: async () => [connection],
+    listOwnConnectionAccounts: async () => [connection],
     catalogAssetUrl: () => null,
   } as unknown as ChatClient<OpenGeniBrowserClient>;
   const props = {
@@ -461,7 +461,7 @@ test("A -> B -> A masks cached composer status before the new A read and fences 
   let aReads = 0;
   const clientA = {
     listCapabilities: async () => ({ items: [entry] }),
-    listConnections: async () => {
+    listOwnConnectionAccounts: async () => {
       aReads++;
       return aReads === 1 ? [connection] : aReads === 2 ? staleA.promise : freshA.promise;
     },
@@ -469,7 +469,7 @@ test("A -> B -> A masks cached composer status before the new A read and fences 
   } as unknown as ChatClient<OpenGeniBrowserClient>;
   const clientB = {
     listCapabilities: async () => ({ items: [entry] }),
-    listConnections: async () => staleB.promise,
+    listOwnConnectionAccounts: async () => staleB.promise,
     catalogAssetUrl: () => null,
   } as unknown as ChatClient<OpenGeniBrowserClient>;
   const props = {
@@ -515,14 +515,14 @@ test("A -> B -> A masks cached composer status before the new A read and fences 
 test("a new identity's transient connection failure does not inherit another identity's denial", async () => {
   const clientA = {
     listCapabilities: async () => ({ items: [] }),
-    listConnections: async () => {
+    listOwnConnectionAccounts: async () => {
       throw { status: 403 };
     },
     catalogAssetUrl: () => null,
   } as unknown as ChatClient<OpenGeniBrowserClient>;
   const clientB = {
     listCapabilities: async () => ({ items: [] }),
-    listConnections: async () => {
+    listOwnConnectionAccounts: async () => {
       throw { status: 503 };
     },
     catalogAssetUrl: () => null,
@@ -576,7 +576,7 @@ test("a pending OAuth start cannot redirect after a connection 403, even after a
   let starts = 0;
   context.client = {
     listCapabilities: async () => ({ items: [entry] }),
-    listConnections: async () => {
+    listOwnConnectionAccounts: async () => {
       reads++;
       if (reads === 2) throw { status: 403 };
       return [connection];
@@ -650,7 +650,7 @@ test("a failed connector OAuth return explains an expired link and strips the ca
   toastErrors.length = 0;
   context.client = {
     listCapabilities: async () => ({ items: [] }),
-    listConnections: async () => [],
+    listOwnConnectionAccounts: async () => [],
     catalogAssetUrl: () => null,
   } as unknown as ChatClient<OpenGeniBrowserClient>;
   const props = {
@@ -697,7 +697,7 @@ test("a composer that mounts again opens Connectors from the last rows, refreshi
   let reads = 0;
   const client = {
     listCapabilities: async () => ({ items: [entry] }),
-    listConnections: async () => (++reads === 1 ? [connection] : second.promise),
+    listOwnConnectionAccounts: async () => (++reads === 1 ? [connection] : second.promise),
     catalogAssetUrl: () => null,
   } as unknown as ChatClient<OpenGeniBrowserClient>;
   const props = {

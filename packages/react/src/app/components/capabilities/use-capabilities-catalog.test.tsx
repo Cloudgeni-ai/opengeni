@@ -348,6 +348,71 @@ describe("useCapabilitiesCatalog", () => {
     context.accessContext = readGrant;
   });
 
+  test("health reads the account inventory; its failure stays unverified, never empty", async () => {
+    const elsewhere = {
+      id: "own-elsewhere",
+      workspaceId: "workspace-b",
+      subjectId: "member",
+      turnedOnHere: true,
+    } as ConnectionMetadata;
+    let inventoryFails = false;
+    const inventoryReads: unknown[] = [];
+    context.accessContext = readGrant;
+    context.client = {
+      ...fakeClient(Promise.resolve({ definitions: [] })),
+      listConnections: async () => [],
+      listOwnConnectionAccounts: async (workspaceId: string, options: unknown) => {
+        inventoryReads.push([workspaceId, options]);
+        if (inventoryFails) throw { status: 503 };
+        return [elsewhere];
+      },
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
+    let latest: ReturnType<typeof useCapabilitiesCatalog> | null = null;
+    function Harness() {
+      latest = useCapabilitiesCatalog("workspace-a");
+      return null;
+    }
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<Harness />));
+    expect(latest!.accounts).toBeNull();
+    await act(async () => await latest!.refresh());
+    // The own account homed in another workspace is in the health source.
+    expect(latest!.accounts).toEqual([elsewhere]);
+    expect(latest!.connections).toEqual([]);
+    expect(inventoryReads).toEqual([["workspace-a", { includeInactive: true }]]);
+    inventoryFails = true;
+    await act(async () => await latest!.refresh());
+    // A transient inventory failure keeps the last read.
+    expect(latest!.accounts).toEqual([elsewhere]);
+    await act(async () => root.unmount());
+    container.remove();
+
+    // Without any successful read, health stays unverified (null), not empty.
+    context.client = {
+      ...fakeClient(Promise.resolve({ definitions: [] })),
+      listConnections: async () => [],
+      listOwnConnectionAccounts: async () => {
+        throw { status: 503 };
+      },
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
+    let fresh: ReturnType<typeof useCapabilitiesCatalog> | null = null;
+    function FreshHarness() {
+      fresh = useCapabilitiesCatalog("workspace-a");
+      return null;
+    }
+    const freshContainer = document.createElement("div");
+    document.body.appendChild(freshContainer);
+    const freshRoot = createRoot(freshContainer);
+    await act(async () => freshRoot.render(<FreshHarness />));
+    await act(async () => await fresh!.refresh());
+    expect(fresh!.connections).toEqual([]);
+    expect(fresh!.accounts).toBeNull();
+    await act(async () => freshRoot.unmount());
+    freshContainer.remove();
+  });
+
   test("same workspace refreshes on client change", async () => {
     const personal = { id: "personal-a" } as ConnectionMetadata;
     let bReads = 0;

@@ -82,7 +82,11 @@ function connection(): ConnectionMetadata {
 }
 
 const CONNECTED: ConnectionHealth = { state: "connected", connection: connection() };
-const ATTENTION: ConnectionHealth = { state: "attention", connection: connection() };
+const ATTENTION: ConnectionHealth = {
+  state: "attention",
+  connection: connection(),
+  reason: "signed_out",
+};
 
 async function render(node: React.ReactNode) {
   const container = document.createElement("div");
@@ -235,5 +239,57 @@ describe("FeaturedConnectorTile", () => {
     } finally {
       await rendered.unmount();
     }
+  });
+});
+
+describe("connectorRowHealth", () => {
+  test("a row needing attention names the reason and runs the one repair", async () => {
+    const { connectorRowHealth } = await import("./connector-row-health");
+    const onRepair = mock(() => {});
+    const enabled = item({ enabled: true });
+    const row = connectorRowHealth({
+      item: enabled,
+      health: ATTENTION,
+      chip: { label: "Needs attention", tone: "warn" },
+      repairable: true,
+      busy: false,
+      onRepair,
+    });
+    expect(row.status).toBe("Signed out");
+    expect(row.state).toBe("attention");
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<>{row.action}</>));
+    const button = container.querySelector("button")!;
+    expect(button.textContent).toBe("Reconnect");
+    await act(async () => button.click());
+    expect(onRepair).toHaveBeenCalledTimes(1);
+    await act(async () => root.unmount());
+    container.remove();
+
+    // Without access to act on it, the row keeps the plain chip and no action.
+    const blocked = connectorRowHealth({
+      item: enabled,
+      health: ATTENTION,
+      chip: { label: "Needs attention", tone: "warn" },
+      repairable: false,
+      busy: false,
+      onRepair,
+    });
+    expect(blocked).toEqual({ status: "Needs attention", state: "attention" });
+  });
+
+  test("a working account keeps the Connected chip and offers nothing", async () => {
+    const { connectorRowHealth } = await import("./connector-row-health");
+    const row = connectorRowHealth({
+      item: item({ enabled: true }),
+      health: { state: "connected", connection: connection() },
+      chip: { label: "Connected", tone: "ok" },
+      repairable: true,
+      busy: false,
+      onRepair: () => {},
+    });
+    expect(row).toEqual({ status: "Connected", state: "added" });
   });
 });

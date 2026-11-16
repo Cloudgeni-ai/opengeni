@@ -683,7 +683,7 @@ function SessionCapabilitySetup({
   const ownsActionRow =
     !catalog.loadError && item && !item.enabled && (item.kind === "skill" || item.kind === "mcp");
   const health = item
-    ? connectionHealth(item, catalog.connections ?? [], catalog.connections !== null)
+    ? connectionHealth(item, catalog.accounts ?? [], catalog.accounts !== null)
     : null;
   return (
     <div className="p-6 sm:p-8">
@@ -717,7 +717,7 @@ function SessionCapabilitySetup({
           showIdentity={false}
           onCancel={ownsActionRow ? onClose : undefined}
           item={item}
-          health={connectionHealth(item, catalog.connections ?? [], catalog.connections !== null)}
+          health={connectionHealth(item, catalog.accounts ?? [], catalog.accounts !== null)}
           logoSrc={capabilityLogoSource(item, (path) => context.client.catalogAssetUrl(path))}
           busy={busy}
           errorMessage={error}

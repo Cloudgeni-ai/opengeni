@@ -4,6 +4,7 @@ import {
   ExternalLinkIcon,
   Loader2Icon,
   PlugIcon,
+  PowerIcon,
   RefreshCwIcon,
   SparklesIcon,
   TrashIcon,
@@ -49,6 +50,8 @@ import {
   capabilityConnectPlan,
   capabilityItemKindLabel,
   capabilityReconnectPlan,
+  connectionAttentionLabel,
+  connectionRepairLabel,
   defaultCapabilityConnectionOwnership,
   capabilitySourceLabel,
   curatedSkillProvenance,
@@ -137,6 +140,12 @@ export type ConnectAction =
       type: "remove_connection";
       item: CapabilityCatalogItem;
       connection: Pick<ConnectionMetadata, "id" | "workspaceId">;
+    }
+  // Turn on here your own working account connected in another workspace.
+  | {
+      type: "turn_on_here";
+      item: CapabilityCatalogItem;
+      connection: Pick<ConnectionMetadata, "authorityId">;
     }
   | {
       type: "reconnect_api_key";
@@ -517,7 +526,20 @@ export function DetailBody({
               <ConnectionStatus item={item} health={health} />
               {/* Reconnect is the primary repair action when the connection broke;
                 Disable drops to secondary. Healthy items show only Disable. */}
-              {reconnect ? (
+              {health.state === "attention" && health.reason === "off_here" && health.connection ? (
+                <Button
+                  type="button"
+                  className="w-full"
+                  disabled={busy}
+                  onClick={() =>
+                    health.connection &&
+                    onAction({ type: "turn_on_here", item, connection: health.connection })
+                  }
+                >
+                  {busy ? <Loader2Icon className="animate-spin" /> : <PowerIcon />}
+                  {connectionRepairLabel("turn_on_here", item.name)}
+                </Button>
+              ) : reconnect ? (
                 reconnect.kind === "oauth" ? (
                   <Button
                     type="button"
@@ -529,6 +551,9 @@ export function DetailBody({
                         item,
                         connectionId: reconnect.connectionId,
                         ownership: reconnect.ownership,
+                        ...(reconnect.connectionWorkspaceId
+                          ? { connectionWorkspaceId: reconnect.connectionWorkspaceId }
+                          : {}),
                       })
                     }
                   >
@@ -1338,11 +1363,11 @@ export function ConnectionStatus({
         <span
           className={cn("size-2 rounded-full", attention ? "bg-status-waiting" : "bg-status-idle")}
         />
-        {attention ? "Needs attention" : "Connected"}
+        {attention ? connectionAttentionLabel(health.reason) : "Connected"}
       </div>
       <p className="text-xs text-fg-subtle">
         {attention
-          ? `${personal ? "Personal" : "Workspace"} connection needs to be reconnected.`
+          ? `${personal ? "Personal" : "Workspace"} connection.`
           : personal
             ? `Personal connection to ${health.connection.providerDomain}. Your messages and personal automations can use this account.`
             : `Workspace connection to ${health.connection.providerDomain}. Shared with agents and automations here.`}
