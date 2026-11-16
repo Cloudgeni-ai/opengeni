@@ -280,6 +280,47 @@ describe("connectorRowHealth", () => {
     expect(blocked).toEqual({ status: "Needs attention", state: "attention" });
   });
 
+  test("Turn on here stays on the row while new setup is blocked", async () => {
+    const { connectorRowHealth, connectorRowRepairAction } = await import("./connector-row-health");
+    const enabled = item({
+      enabled: true,
+      connectionRef: { providerDomain: "linear.app", kind: "oauth2", subjectScope: "subject" },
+    });
+    const own = { ...connection(), subjectId: "me", turnedOnHere: false } as ConnectionMetadata;
+    const offHere: ConnectionHealth = { state: "attention", connection: own, reason: "off_here" };
+    const row = connectorRowHealth({
+      item: enabled,
+      health: offHere,
+      chip: { label: "Needs attention", tone: "warn" },
+      repairable: true,
+      busy: false,
+      onRepair: () => {},
+    });
+    expect(row.status).toBe("Off in this workspace");
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<>{row.action}</>));
+    expect(container.querySelector("button")?.textContent).toBe("Turn on here");
+    await act(async () => root.unmount());
+    container.remove();
+    expect(connectorRowRepairAction(enabled, offHere, { setupUnavailable: true })).toEqual({
+      type: "turn_on_here",
+      item: enabled,
+      connection: own,
+    });
+    // A new sign-in is setup: while it is blocked the row opens the page instead.
+    const signedOut: ConnectionHealth = {
+      state: "attention",
+      connection: { ...own, status: "needs_reauth", turnedOnHere: true },
+      reason: "signed_out",
+    };
+    expect(connectorRowRepairAction(enabled, signedOut, { setupUnavailable: true })).toBeNull();
+    expect(connectorRowRepairAction(enabled, signedOut, { setupUnavailable: false })).toMatchObject(
+      { type: "reconnect_oauth", connectionId: "connection-1" },
+    );
+  });
+
   test("a working account keeps the Connected chip and offers nothing", async () => {
     const { connectorRowHealth } = await import("./connector-row-health");
     const row = connectorRowHealth({

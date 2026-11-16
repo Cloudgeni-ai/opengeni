@@ -893,6 +893,16 @@ describe("connectionHealth", () => {
       expect(connectionHealth(binding, [], false)).toEqual({ state: "unverified" });
     });
 
+    test("signed out and off here, it is Signed out with Reconnect, not a new sign-in", () => {
+      const account = own({ status: "needs_reauth", turnedOnHere: false });
+      const health = connectionHealth(binding, [account], true);
+      expect(health).toEqual({ state: "attention", connection: account, reason: "signed_out" });
+      expect(connectionRepair(health)).toBe("reconnect");
+      expect(capabilityReconnectPlan(binding, health)).toMatchObject({
+        connectionId: "own-gmail",
+        connectionWorkspaceId: "integration-tests",
+      });
+    });
   });
 
   describe("a connector served through Nango", () => {

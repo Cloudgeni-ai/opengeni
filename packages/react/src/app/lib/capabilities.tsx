@@ -793,6 +793,10 @@ export function connectionHealth(
     );
     if (offHere) return attention(offHere, "off_here");
     if (connection) return attention(connection);
+    // An own account from elsewhere that stopped working: reconnecting it is
+    // the repair, never a duplicate sign-in.
+    const elsewhere = healthiestConnection(matching.filter((candidate) => !usableHere(candidate)));
+    if (elsewhere) return attention(elsewhere);
     return attention(
       null,
       matching.some((candidate) => candidate.status === "revoked") ? "removed" : "not_connected",

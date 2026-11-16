@@ -38,7 +38,10 @@ import {
   OWNERSHIP_HELP,
 } from "@/components/capabilities/capability-copy";
 import { ConnectionAccessNotice } from "@/components/capabilities/connection-access-notice";
-import { connectorRowHealth } from "@/components/capabilities/connector-row-health";
+import {
+  connectorRowHealth,
+  connectorRowRepairAction,
+} from "@/components/capabilities/connector-row-health";
 import {
   catalogServiceIdentity,
   collapseConnectionService,
@@ -157,9 +160,7 @@ import {
   capabilityConnectPlan,
   capabilityErrorToast,
   capabilityInputFromForm,
-  capabilityReconnectPlan,
   connectionHealth,
-  connectionRepair,
   isConnectorCatalogItem,
   isMissingCredentialsError,
   oauthConnectionRef,
@@ -1232,34 +1233,11 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
     return await runAction(selectedItem, selected.registry, action);
   }
 
-  /**
-   * The one repair a list row offers for an item that needs attention. Turning
-   * an own account on here and an OAuth sign-in run from the row; anything that
-   * needs a form (an API key) opens the item, whose page offers the same repair.
-   */
-  function listRepairAction(
-    item: CapabilityCatalogItem,
-    health: ConnectionHealth,
-  ): ConnectAction | null {
-    const repair = connectionRepair(health);
-    if (!repair || health.state !== "attention") return null;
-    if (repair === "turn_on_here")
-      return health.connection
-        ? { type: "turn_on_here", item, connection: health.connection }
-        : null;
-    const plan = capabilityReconnectPlan(item, health);
-    if (plan?.kind !== "oauth" || setupUnavailableFor(item)) return null;
-    return {
-      type: "reconnect_oauth",
-      item,
-      connectionId: plan.connectionId,
-      ownership: plan.ownership,
-      ...(plan.connectionWorkspaceId ? { connectionWorkspaceId: plan.connectionWorkspaceId } : {}),
-    };
-  }
-
+  /** A list row's one repair; without one the item's page opens and offers it. */
   function repairFromList(item: CapabilityCatalogItem, health: ConnectionHealth) {
-    const action = listRepairAction(item, health);
+    const action = connectorRowRepairAction(item, health, {
+      setupUnavailable: setupUnavailableFor(item) !== undefined,
+    });
     if (action) void runAction(item, false, action);
     else openItem(item);
   }
