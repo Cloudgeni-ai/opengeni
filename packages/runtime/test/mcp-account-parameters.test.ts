@@ -168,7 +168,7 @@ describe("account choices", () => {
       { name: "no id" },
     ];
     const expected = [
-      { value: "a", label: "Acme" },
+      { value: "a", label: "Acme", details: ["https://acme.example"] },
       { value: "b", label: "https://beta.example" },
     ];
     expect(accountChoicesFromResult(SITE, { content: textResult(sites) })).toEqual(expected);
@@ -196,6 +196,18 @@ describe("account choices", () => {
     expect(text).toContain("site-24");
     expect(text).not.toContain("site-25,");
     expect(text).toContain("and 5 more.");
+  });
+
+  test("the choice text names each value with its other label fields, such as the site URL", () => {
+    const choices = accountChoicesFromResult(SITE, {
+      content: textResult([
+        { id: "site-1", name: "Acme", url: "https://acme.atlassian.net" },
+        { id: "site-2", name: "Beta", url: "https://beta.atlassian.net" },
+      ]),
+    });
+    expect(accountParameterChoiceText("siteId", choices)).toBe(
+      'The tool was not called: the connected account has several values for siteId. Call it again with siteId set to the id of the one you mean: "Acme", https://acme.atlassian.net (site-1), "Beta", https://beta.atlassian.net (site-2).',
+    );
   });
 
   test("an error result or an unknown shape offers nothing", () => {
