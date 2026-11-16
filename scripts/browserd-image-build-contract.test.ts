@@ -141,7 +141,7 @@ describe("browser controller image build contract", () => {
 
     expect(dockerfile).toContain("FROM scratch AS chrome-assets");
     expect(dockerfile).toContain(
-      "ADD --checksum=sha256:92148bd14dc05823a64061c2fafcf20d4d82b3fc56f5831206f16d2ac9ee3f79 https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_157.0.8103.50-1_amd64.deb /google-chrome-stable.deb",
+      "ADD --checksum=sha256:4d740636b5c96f687798602c5aad6a5a270f44dd02e48db0638ae77aa4867b1b https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_157.0.8103.78-1_amd64.deb /google-chrome-stable.deb",
     );
     expect(dockerfile).toContain("/tmp/google-chrome-stable.deb");
     expect(dockerfile).not.toContain("google-chrome-stable=${OPENGENI_GOOGLE_CHROME_VERSION}");
