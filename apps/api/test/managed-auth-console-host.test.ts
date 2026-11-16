@@ -170,6 +170,23 @@ describe("managed auth on Opengeni Console's host", () => {
     expect(
       managedAuthConsoleOrigins(testSettings({ publicBaseUrl: "https://console.opengeni.test" })),
     ).toEqual([]);
+    // An https deployment never hands a code to a plain-http Console origin.
+    expect(
+      managedAuthConsoleOrigins(
+        testSettings({
+          publicBaseUrl: "https://app.opengeni.test",
+          betterAuthTrustedOrigins: "http://console.opengeni.test",
+        }),
+      ),
+    ).toEqual([]);
+    expect(
+      managedAuthConsoleOrigins(
+        testSettings({
+          publicBaseUrl: "http://app.localhost:3000",
+          betterAuthTrustedOrigins: "http://console.localhost:3000",
+        }),
+      ),
+    ).toEqual(["http://console.localhost:3000"]);
     expect(managedAuthConsoleOrigins(testSettings({ betterAuthAllowedHosts: "" }))).toEqual([]);
   });
 });

@@ -79,13 +79,16 @@ on a Console host goes to the app host (`OPENGENI_PUBLIC_BASE_URL`) and back:
    the challenge and the Console origin it reached, requires the approving app
    session to still be live, and creates Console's own Better Auth session
    through the ordinary session hook (allowed addresses, canonical identity
-   and login-binding status). It carries over the app session's passkey
+   and login-binding status). Console's session keeps the app session's sign-in
+   time, so changes that ask for a recent sign-in still do, and its passkey
    confirmation for admin step-up, since a passkey made on the app host can't
-   confirm on the Console host. Then it returns to the Console page, `?org=`
+   confirm on the Console host. A Console session the browser already had is
+   ended. Then it returns to the Console page, `?org=`
    included.
 
 Codes only go to Console origins: trusted origins and allowed hosts whose
-host is a Console host, never the app's own. Return paths are relative
+host is a Console host, never the app's own, and only over https when the app
+is https. Only the app host issues codes, at most twenty a minute per person. Return paths are relative
 `/console` paths; anything else returns Overview. Every completed or refused
 redemption is written to `audit_events` as `auth.console_sign_in_handoff`
 (no organization or workspace; the outcome, the reason for a refusal, the

@@ -52,6 +52,8 @@ import { admitManagedSignInMutation } from "./managed-sign-in-methods";
 export const CONSOLE_SIGN_IN_CODE_TTL_MS = 60 * 1_000;
 /** How long the Console host waits for the person to sign in on the app host. */
 export const CONSOLE_SIGN_IN_STATE_TTL_SECONDS = 10 * 60;
+/** Codes one person may mint per minute (each one is a stored row). */
+export const CONSOLE_SIGN_IN_CODES_PER_MINUTE = 20;
 const CODE_IDENTIFIER_PREFIX = "opengeni-console-sign-in-code:";
 const CODE = /^[A-Za-z0-9_-]{43}$/u;
 const VERIFIER = /^[A-Za-z0-9_-]{43}$/u;
@@ -181,6 +183,9 @@ export function registerConsoleSignInRoutes(app: Hono, deps: ApiRouteDeps): void
       });
     }
     await admitManagedSignInMutation(context, deps);
+    // Codes are minted on the app host only: a Console session can't renew
+    // itself through the handoff.
+    if (requestConsoleOrigin(deps.settings, context.req.raw)) throw new HTTPException(404);
     const actor = await requireCanonicalHumanRequestIdentity(context, {
       db: deps.db,
       managedAuth: auth,
@@ -219,6 +224,24 @@ export function registerConsoleSignInRoutes(app: Hono, deps: ApiRouteDeps): void
         code: "conflict",
         message: "Sign in to Opengeni again, then open Console",
         retryable: false,
+      });
+    }
+    // Per-human, cross-replica admission: each code is a stored row.
+    const [limit] = await rows<{ count: number }>(
+      deps,
+      sql`
+      insert into auth_rate_limits(id,key,count,last_request)
+      values(${`console-sign-in:${actor.authUserId}`},${`console-sign-in:${actor.authUserId}`},1,(extract(epoch from clock_timestamp())*1000)::bigint)
+      on conflict(key) do update set
+        count=case when auth_rate_limits.last_request < (extract(epoch from clock_timestamp())*1000)::bigint-60000 then 1 else least(auth_rate_limits.count+1,${CONSOLE_SIGN_IN_CODES_PER_MINUTE + 1}) end,
+        last_request=case when auth_rate_limits.last_request < (extract(epoch from clock_timestamp())*1000)::bigint-60000 then (extract(epoch from clock_timestamp())*1000)::bigint else auth_rate_limits.last_request end
+      returning count`,
+    );
+    if (!limit || Number(limit.count) > CONSOLE_SIGN_IN_CODES_PER_MINUTE) {
+      throw new ApiHttpError(429, {
+        code: "limit_exceeded",
+        message: "Too many Console sign-in attempts; try again in one minute",
+        retryable: true,
       });
     }
     const code = randomBytes(32).toString("base64url");
@@ -266,7 +289,8 @@ export function registerConsoleSignInRoutes(app: Hono, deps: ApiRouteDeps): void
       );
     }
     let returnPath = CONSOLE_SIGN_IN_DEFAULT_RETURN;
-    const refuse = async (reason: string, grant?: StoredGrant) => {
+    let grant: StoredGrant | undefined;
+    const refuse = async (reason: string) => {
       await recordConsoleSignInHandoff(deps.db, {
         outcome: "refused",
         reason,
@@ -288,62 +312,76 @@ export function registerConsoleSignInRoutes(app: Hono, deps: ApiRouteDeps): void
         codeIdentifier(code),
       );
       if (!stored) return await refuse("invalid_grant");
-      let grant: StoredGrant;
       try {
         grant = StoredGrant.parse(JSON.parse(stored.value));
       } catch {
         return await refuse("invalid_grant");
       }
-      returnPath = consoleSignInReturnPath(grant.returnPath);
+      const handoff = grant;
+      returnPath = consoleSignInReturnPath(handoff.returnPath);
       if (
         !verifier ||
         !VERIFIER.test(verifier) ||
-        !sameText(grant.codeChallenge, consoleSignInChallenge(verifier))
+        !sameText(handoff.codeChallenge, consoleSignInChallenge(verifier))
       ) {
-        return await refuse("state_mismatch", grant);
+        return await refuse("state_mismatch");
       }
-      if (grant.consoleOrigin !== consoleOrigin) return await refuse("origin_mismatch", grant);
+      if (handoff.consoleOrigin !== consoleOrigin) return await refuse("origin_mismatch");
       // The app session that approved the handoff must still be live: signing
       // out of the app in the meantime cancels it.
-      const [source] = await rows<{ mfaVerified: boolean }>(
+      const [source] = await rows<{ live: boolean }>(
         deps,
-        sql`select mfa_verified_at is not null as "mfaVerified" from auth_sessions
-            where id = ${grant.sourceSessionId} and user_id = ${grant.userId}
+        sql`select true as live from auth_sessions
+            where id = ${handoff.sourceSessionId} and user_id = ${handoff.userId}
               and expires_at > clock_timestamp()`,
       );
-      if (!source) return await refuse("source_session_ended", grant);
+      if (!source) return await refuse("source_session_ended");
       // A refusal from the session hook (the account may no longer sign in) is
       // a denial, not a server failure.
       const userAgent = context.req.header("user-agent")?.slice(0, 512) ?? "";
-      const session = await runManagedAuthProvider(grant.providerId, () =>
-        authContext.internalAdapter.createSession(grant.userId, false, { userAgent }),
+      const session = await runManagedAuthProvider(handoff.providerId, () =>
+        authContext.internalAdapter.createSession(handoff.userId, false, { userAgent }),
       ).catch((error: unknown) => {
         if (managedAuthRefusal(error)) return null;
         throw error;
       });
+      if (session?.id) createdSessionId = session.id;
       if (!session?.token || new Date(session.expiresAt).getTime() <= Date.now()) {
-        return await refuse("access_denied", grant);
+        if (createdSessionId) await deleteSession(deps, createdSessionId);
+        createdSessionId = null;
+        return await refuse("access_denied");
       }
-      createdSessionId = session.id;
-      // A passkey confirmation (admin step-up) on the app session carries over:
-      // the same person proved it in this browser moments ago, and a passkey
-      // made on the app host can't confirm again on the Console host.
-      if (source.mfaVerified) {
-        await deps.db.execute(
-          sql`update auth_sessions as console set mfa_verified_at = app.mfa_verified_at
-              from auth_sessions as app
-              where console.id = ${session.id} and console.user_id = ${grant.userId}
-                and app.id = ${grant.sourceSessionId} and app.user_id = ${grant.userId}`,
-        );
-      }
+      // Console's session inherits the app session's sign-in time and passkey
+      // confirmation (admin step-up), never fresher ones: the handoff is not a
+      // sign-in, so re-authentication checks that read `created_at` still see
+      // when the person last signed in. A passkey made on the app host can't
+      // confirm again on the Console host, so step-up has to carry over.
+      const inherited = await rows<{ id: string }>(
+        deps,
+        sql`update auth_sessions as console
+            set created_at = least(console.created_at, app.created_at),
+                mfa_verified_at = app.mfa_verified_at
+            from auth_sessions as app
+            where console.id = ${session.id} and console.user_id = ${handoff.userId}
+              and app.id = ${handoff.sourceSessionId} and app.user_id = ${handoff.userId}
+            returning console.id`,
+      );
+      if (inherited.length === 0) throw new Error("Console session could not inherit sign-in");
+      // A Console session this browser already had is replaced, not orphaned.
+      const previous = await deps.managedAuthSessionAdapter
+        ?.resolveAmbientSession(context.req.raw.headers)
+        .catch(() => null);
+      const previousId = previous?.session?.id;
+      if (previousId && previousId !== session.id && previousId !== handoff.sourceSessionId)
+        await deleteSession(deps, previousId);
       await recordConsoleSignInHandoff(deps.db, {
         outcome: "signed_in",
         reason: null,
         consoleOrigin,
-        authUserId: grant.userId,
+        authUserId: handoff.userId,
         authSessionId: session.id,
-        sourceAuthSessionId: grant.sourceSessionId,
-        providerId: grant.providerId,
+        sourceAuthSessionId: handoff.sourceSessionId,
+        providerId: handoff.providerId,
       });
       for (const value of await managedAuthSessionCookieHeaders(
         auth,
@@ -357,12 +395,12 @@ export function registerConsoleSignInRoutes(app: Hono, deps: ApiRouteDeps): void
       // A failure after the code is spent leaves Console signed out with a
       // reason, never a raw error page or a retry loop.
       deps.observability?.error("Console sign-in handoff failed", { error });
-      if (createdSessionId) {
-        await deps.db
-          .execute(sql`delete from auth_sessions where id = ${createdSessionId}`)
-          .catch(() => undefined);
-      }
+      if (createdSessionId) await deleteSession(deps, createdSessionId).catch(() => undefined);
       return await refuse("server_error");
     }
   });
+}
+
+async function deleteSession(deps: ApiRouteDeps, id: string): Promise<void> {
+  await deps.db.execute(sql`delete from auth_sessions where id = ${id}`);
 }

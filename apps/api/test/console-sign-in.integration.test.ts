@@ -12,7 +12,12 @@ import { testSettings } from "@opengeni/testing/settings";
 import { createManagedAuth } from "../src/auth/managed-auth";
 import { createBetterAuthSessionAdapter } from "../src/auth/managed-auth-session-adapter";
 import { createApp } from "../src/app";
-import { consoleSignInChallenge, consoleSignInStateCookie } from "../src/routes/console-sign-in";
+import {
+  CONSOLE_SIGN_IN_CODES_PER_MINUTE,
+  consoleSignInChallenge,
+  consoleSignInStateCookie,
+} from "../src/routes/console-sign-in";
+import { hasRecentManagedSignIn } from "../src/routes/managed-sign-in-methods";
 
 // Opengeni Console's sign-in handoff end to end against PostgreSQL: Console's
 // host starts it, the app host's signed-in browser authorizes it, and Console
@@ -275,6 +280,75 @@ describe("Console sign-in handoff", () => {
       select mfa_verified_at is not null as verified from auth_sessions
       where user_id = ${browser.userId} and id <> ${browser.sessionId}`;
     expect(row?.verified).toBe(false);
+  }, 120_000);
+
+  test("the handoff is not a fresh sign-in: Console keeps the app session's sign-in time", async () => {
+    const rt = runtime();
+    const browser = await signedInAppBrowser(rt);
+    await admin`update auth_sessions set created_at = now() - interval '1 hour' where id = ${browser.sessionId}`;
+    const { started, redirectUrl } = await handoff(rt, browser.cookie, "/console");
+    expect((await callback(rt, redirectUrl, started.stateCookie)).status).toBe(302);
+    const [consoleRow] = await admin<{ id: string; inherited: boolean }[]>`
+      select console.id, console.created_at = app.created_at as inherited
+      from auth_sessions console, auth_sessions app
+      where console.user_id = ${browser.userId} and console.id <> ${browser.sessionId}
+        and app.id = ${browser.sessionId}`;
+    expect(consoleRow?.inherited).toBe(true);
+    // Re-authentication-gated changes on Console still ask for a real sign-in.
+    expect(
+      await hasRecentManagedSignIn(
+        { db: client.db },
+        { authSessionId: consoleRow!.id, authUserId: browser.userId },
+      ),
+    ).toBe(false);
+  }, 120_000);
+
+  test("Console can't mint codes for itself, and a new handoff replaces Console's old session", async () => {
+    const rt = runtime();
+    const browser = await signedInAppBrowser(rt);
+    const first = await handoff(rt, browser.cookie, "/console");
+    const firstConsole = cookies(await callback(rt, first.redirectUrl, first.started.stateCookie));
+    const fromConsole = await rt.app.request("/v1/console-sign-in/authorize", {
+      method: "POST",
+      headers: onHost("console.opengeni.test", {
+        cookie: firstConsole,
+        origin: CONSOLE,
+        "sec-fetch-site": "same-origin",
+        "content-type": "application/json",
+      }),
+      body: JSON.stringify({
+        consoleOrigin: CONSOLE,
+        returnPath: "/console",
+        codeChallenge: consoleSignInChallenge(randomBytes(32).toString("base64url")),
+      }),
+    });
+    expect(fromConsole.status).toBe(404);
+
+    const second = await handoff(rt, browser.cookie, "/console");
+    const redeemed = await callback(
+      rt,
+      second.redirectUrl,
+      `${second.started.stateCookie}; ${firstConsole}`,
+    );
+    expect(redeemed.status).toBe(302);
+    const sessions = await admin`select 1 from auth_sessions where user_id = ${browser.userId}`;
+    expect(sessions).toHaveLength(2);
+    expect((await consoleSession(rt, firstConsole))?.user).toBeUndefined();
+    expect((await consoleSession(rt, cookies(redeemed)))?.user?.id).toBe(browser.userId);
+  }, 120_000);
+
+  test("asking for codes is rate limited per person", async () => {
+    const rt = runtime();
+    const browser = await signedInAppBrowser(rt);
+    const body = {
+      consoleOrigin: CONSOLE,
+      returnPath: "/console",
+      codeChallenge: consoleSignInChallenge(randomBytes(32).toString("base64url")),
+    };
+    for (let attempt = 0; attempt < CONSOLE_SIGN_IN_CODES_PER_MINUTE; attempt += 1) {
+      expect((await authorize(rt, browser.cookie, body)).status).toBe(200);
+    }
+    expect((await authorize(rt, browser.cookie, body)).status).toBe(429);
   }, 120_000);
 
   test("a code works once", async () => {

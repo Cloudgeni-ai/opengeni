@@ -1237,6 +1237,7 @@ export function managedAuthPublicOrigins(settings: Settings): string[] {
 export function managedAuthConsoleOrigins(settings: Settings): string[] {
   if (!settings.publicBaseUrl) return [];
   const appOrigin = new URL(settings.publicBaseUrl).origin;
+  const appIsHttps = new URL(settings.publicBaseUrl).protocol === "https:";
   const origins = new Set<string>();
   for (const candidate of managedAuthPublicOrigins(settings)) {
     let url: URL;
@@ -1246,6 +1247,8 @@ export function managedAuthConsoleOrigins(settings: Settings): string[] {
       continue;
     }
     if (url.protocol !== "https:" && url.protocol !== "http:") continue;
+    // Handoff codes never travel over plain http from an https deployment.
+    if (appIsHttps && url.protocol !== "https:") continue;
     if (url.origin === appOrigin || !isConsoleHostname(url.hostname)) continue;
     origins.add(url.origin);
   }
