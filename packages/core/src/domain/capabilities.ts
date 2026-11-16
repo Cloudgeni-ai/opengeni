@@ -246,7 +246,7 @@ export async function buildCapabilityCatalog(input: {
   const codexApps = input.settings.codexConnectedAppsEnabled
     ? codexAppsCatalogItem(codexAppsDesignation !== null)
     : null;
-  const ownItems = dedupeCatalogItems([
+  const mergedItems = dedupeCatalogItems([
     ...builtIns,
     ...persistedItems.filter(
       (item) =>
@@ -258,7 +258,9 @@ export async function buildCapabilityCatalog(input: {
     // Keep the reserved, server-derived item authoritative over any stale
     // legacy catalog row with the same id.
     ...(codexApps ? [codexApps] : []),
-  ]).map((item) => {
+  ]);
+  const requirementsByHost = oauthClientRequirementsByHost(mergedItems);
+  const ownItems = mergedItems.map((item) => {
     const projected =
       item.kind === "skill"
         ? applyInstalledSkillEnablement(item, installedSkillById.get(item.id))
@@ -283,7 +285,11 @@ export async function buildCapabilityCatalog(input: {
         : projected;
     return applyCapabilityLifecycle(
       applyGoogleConnectorSetupAvailability(
-        applyOperatorOAuthClientRequirement(runtimeProjected, operatorOAuthClientConfigured),
+        applyOperatorOAuthClientRequirement(
+          runtimeProjected,
+          operatorOAuthClientConfigured,
+          requirementsByHost,
+        ),
         input.settings,
       ),
     );
@@ -484,17 +490,55 @@ export function applyGoogleConnectorSetupAvailability(
   };
 }
 
-export function applyOperatorOAuthClientRequirement(
-  item: CapabilityCatalogItem,
-  configured: (issuer: string) => boolean,
-): CapabilityCatalogItem {
-  if (item.kind !== "mcp") return item;
+function oauthClientRequirementIssuer(item: CapabilityCatalogItem): string | null {
   const requirement = item.metadata.oauthClientRequirement;
   const issuer =
     requirement && typeof requirement === "object" && !Array.isArray(requirement)
       ? (requirement as Record<string, unknown>).issuer
       : undefined;
-  if (typeof issuer !== "string" || !issuer) return item;
+  return typeof issuer === "string" && issuer ? issuer : null;
+}
+
+function mcpHost(item: Pick<CapabilityCatalogItem, "mcpUrl" | "endpointUrl">): string | null {
+  const url = item.mcpUrl ?? item.endpointUrl;
+  if (!url) return null;
+  try {
+    return new URL(url).host.toLowerCase() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The issuer each MCP host's catalog row records an operator-client
+ * requirement for. The requirement is a fact about the provider's
+ * authorization server, not about one URL: the same provider is often listed
+ * again under another path (a plugin's bundled server, a registry duplicate),
+ * and those rows refuse self-registration just the same.
+ */
+export function oauthClientRequirementsByHost(
+  items: readonly CapabilityCatalogItem[],
+): ReadonlyMap<string, string> {
+  const byHost = new Map<string, string>();
+  for (const item of items) {
+    if (item.kind !== "mcp") continue;
+    const issuer = oauthClientRequirementIssuer(item);
+    const host = issuer ? mcpHost(item) : null;
+    if (issuer && host && !byHost.has(host)) byHost.set(host, issuer);
+  }
+  return byHost;
+}
+
+export function applyOperatorOAuthClientRequirement(
+  item: CapabilityCatalogItem,
+  configured: (issuer: string) => boolean,
+  requirementsByHost?: ReadonlyMap<string, string>,
+): CapabilityCatalogItem {
+  if (item.kind !== "mcp") return item;
+  const host = mcpHost(item);
+  const issuer =
+    oauthClientRequirementIssuer(item) ?? (host ? requirementsByHost?.get(host) : undefined);
+  if (!issuer) return item;
   const isConfigured = configured(issuer);
   // An installed row keeps its own status note; the setup note is for rows
   // that are not on yet.

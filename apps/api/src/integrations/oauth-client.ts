@@ -67,6 +67,7 @@ import {
   parseMcpOAuthChallenge,
   pinnedFetch,
   readResponseJsonBounded,
+  readResponseTextBounded,
   resolveMcpOAuthDiscovery,
   validateHttpUrl,
   type McpAuthorizationServerMetadata,
@@ -2093,7 +2094,20 @@ async function getOrCreateDynamicClientRegistration(
   acquisition: Pick<OAuthStartContext, "accountId" | "workspaceId" | "integrationKey">,
 ): Promise<OAuthClientRegistration> {
   const storedClient = await loadIntegrationOAuthClient(db, settings, as.issuer);
-  if (storedClient && storedDcrClientSatisfiesPolicy(storedClient, as, redirectUri, scopes)) {
+  if (
+    storedClient &&
+    storedDcrClientSatisfiesPolicy(storedClient, as, redirectUri, scopes) &&
+    // A provider can delete a client it registered (Supabase does), and then
+    // every new Connect would end on its "unknown client" page. Register again
+    // instead, replacing exactly this stored client below.
+    !(await authorizationServerForgotClient(settings, {
+      authorizationEndpoint: as.authorizationEndpoint,
+      clientId: storedClient.clientId,
+      redirectUri,
+      scopes,
+      signal,
+    }))
+  ) {
     return {
       method: "dcr",
       issuer: storedClient.issuer,
@@ -2348,6 +2362,93 @@ function normalizedIssuerKey(value: string): string {
   return value.replace(/\/+$/, "");
 }
 
+/** Text a provider uses to say it does not know a client_id. */
+const UNKNOWN_CLIENT_TEXT =
+  /\b(?:invalid_client|unknown_client(?:_id)?|unrecognized_client(?:_id)?)\b|\b(?:unknown|unrecognized|unrecognised|unregistered|invalid)\s+client(?:[\s_]?id)?\b|\bclient(?:[\s_]?id)?\s+(?:is\s+)?(?:unknown|unrecognized|unrecognised|not\s+found|not\s+registered|does\s+not\s+exist)\b|\bno\s+such\s+client\b/iu;
+const AUTHORIZE_PROBE_MAX_BYTES = 16 * 1024;
+
+/**
+ * Whether the authorization server says it no longer knows a client it
+ * registered for this deployment. Asks its authorize endpoint the way a
+ * browser would, without following redirects or sending any credential. Only
+ * an explicit "unknown client" answer counts: a 4xx whose body says so, or a
+ * redirect to an error page whose URL says so. A sign-in page, a redirect to
+ * the provider's consent screen, a network failure or any other answer keeps
+ * the stored client, so a provider that cannot be probed is never
+ * re-registered on every Connect. Exported for tests.
+ */
+export async function authorizationServerForgotClient(
+  settings: Settings,
+  input: {
+    authorizationEndpoint: string;
+    clientId: string;
+    redirectUri: string;
+    scopes: string[];
+    signal: AbortSignal;
+  },
+): Promise<boolean> {
+  let response: Response;
+  try {
+    const url = new URL(
+      oauthEndpointUrl(input.authorizationEndpoint, settings, "OAuth authorization endpoint"),
+    );
+    url.searchParams.set("response_type", "code");
+    url.searchParams.set("client_id", input.clientId);
+    url.searchParams.set("redirect_uri", input.redirectUri);
+    url.searchParams.set("state", randomUUID());
+    url.searchParams.set("code_challenge_method", "S256");
+    url.searchParams.set("code_challenge", pkceChallenge(randomPkceVerifier()));
+    if (input.scopes.length > 0) url.searchParams.set("scope", input.scopes.join(" "));
+    response = await pinnedFetch(
+      url.toString(),
+      { method: "GET", headers: { accept: "application/json, text/html" }, signal: input.signal },
+      settings,
+      { label: "OAuth client check", requireHttpsOutsideLocalTest: true },
+    );
+  } catch (error) {
+    if (input.signal.aborted) throw error;
+    return false;
+  }
+  if (response.status >= 300 && response.status < 400) {
+    await cancelResponseBody(response);
+    const location = response.headers.get("location") ?? "";
+    let target: URL;
+    try {
+      target = new URL(location, input.authorizationEndpoint);
+    } catch {
+      return false;
+    }
+    // An error sent back to our own callback is about this request, and only
+    // invalid_client there means the client itself is gone.
+    if (target.origin + target.pathname === input.redirectUri) {
+      return target.searchParams.get("error") === "invalid_client";
+    }
+    return UNKNOWN_CLIENT_TEXT.test(safeDecodeUriComponent(target.search));
+  }
+  if (response.status < 400 || response.status >= 500 || response.status === 429) {
+    await cancelResponseBody(response);
+    return false;
+  }
+  const body = await readResponseTextBounded(
+    response,
+    AUTHORIZE_PROBE_MAX_BYTES,
+    "OAuth client check response",
+    { signal: input.signal },
+  ).catch((error: unknown) => {
+    if (input.signal.aborted) throw error;
+    return "";
+  });
+  return UNKNOWN_CLIENT_TEXT.test(body);
+}
+
+function safeDecodeUriComponent(value: string): string {
+  try {
+    return decodeURIComponent(value.replaceAll("+", " "));
+  } catch {
+    return value;
+  }
+}
+
 async function dynamicClientRegistration(
   settings: Settings,
   as: AuthorizationServerMetadata,
@@ -2375,6 +2476,13 @@ async function dynamicClientRegistration(
   });
   if (!response.ok) {
     await cancelResponseBody(response);
+    if (response.status === 401 || response.status === 403) {
+      // The provider admits only clients it has approved (Dropbox, for one).
+      // Retrying cannot help; the deployment needs a client registered with it.
+      throw new HTTPException(422, {
+        message: `${new URL(as.issuer).host} doesn't let apps register themselves for sign-in. This deployment needs an OAuth client registered with ${new URL(as.issuer).host} before you can connect.`,
+      });
+    }
     throw new HTTPException(422, {
       message: `dynamic client registration failed with HTTP ${response.status}`,
     });
