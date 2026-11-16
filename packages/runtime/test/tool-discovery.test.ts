@@ -41,7 +41,7 @@ import {
   type ConnectedToolAccount,
 } from "../src/lazy-tool-transport";
 import { baseModelInputFilterForSettings } from "../src/model-input";
-import { prefixedMcpToolName } from "../src/mcp-model-tool-name";
+import { mcpServerNamespace, mcpWireToolNames } from "../src/mcp-model-tool-name";
 import { projectHistoryForProvider, TOOL_DISCLOSURE_KEY } from "../src/provider-history-adapter";
 import {
   createToolSelector,
@@ -2819,9 +2819,9 @@ describe("searches that reach one of several connected accounts", () => {
 });
 
 describe("plain tool names and unloaded candidates on every route", () => {
-  // A hyphenated registry ID and dotted tool names make every model name a
-  // digest alias, as for a large API integration.
-  const REGISTRY = "records-api-0a1b2c";
+  // A connected account's route ID and dotted tool names, as for a large API
+  // integration bound to one account.
+  const REGISTRY = `account-0a1b2c${"9".repeat(58)}`;
   const RECORDS: [string, string][] = [
     ["projects.search", "Search projects by name or project number."],
     ["projects.list", "List projects in the organization, one page at a time."],
@@ -2835,8 +2835,29 @@ describe("plain tool names and unloaded candidates on every route", () => {
     ["billing_plans.update_payment_schedule_series", "Rename a payment schedule series."],
     ["billing_plans.update_payment_schedule_terms", "Change the terms of a payment schedule."],
   ];
-  const model = (original: string) => prefixedMcpToolName(REGISTRY, original);
-  const runtimeWith = (transport: "generic_dispatch" | "openai_native" | "codex_native") => {
+  const NAMESPACE = mcpServerNamespace(REGISTRY, "Records API");
+  const WIRE = mcpWireToolNames(
+    REGISTRY,
+    NAMESPACE.namespace,
+    RECORDS.map(([original]) => original),
+  );
+  const model = (original: string) => WIRE.get(original)!;
+  const references = new Map(
+    RECORDS.map(([original]) => [
+      model(original),
+      {
+        wireName: model(original),
+        namespace: NAMESPACE.namespace,
+        namespaceBase: NAMESPACE.base,
+        registryId: REGISTRY,
+        toolName: original,
+      },
+    ]),
+  );
+  const runtimeWith = (
+    transport: "generic_dispatch" | "openai_native" | "codex_native",
+    decisionModel?: ToolSelector,
+  ) => {
     const tools = RECORDS.map(([original, description]) => candidate(model(original), description));
     const mapping = new Map(tools.map((t) => [(t as Tool & { name: string }).name, REGISTRY]));
     const runtime = new LazyToolRuntime(
@@ -2846,6 +2867,17 @@ describe("plain tool names and unloaded candidates on every route", () => {
       new Set([REGISTRY]),
       new Set(),
       () => mapping,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      decisionModel,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => references,
     );
     runtime.refresh([
       ...tools,
@@ -2856,13 +2888,14 @@ describe("plain tool names and unloaded candidates on every route", () => {
   const loaded = (result: { tools?: { name?: unknown }[] }) =>
     result.tools?.map((t) => t.name) ?? [];
 
-  test("names are digest aliases whose part is sanitized and shortened", () => {
-    expect(model("projects.search")).toMatch(/^mcp_[0-9a-f]{24}__projects_search$/);
-    expect(model("billing_plans.update_payment_schedule_terms")).toEndWith(
-      "__billing_plans_update_payment_sched",
+  test("names share one readable prefix per account, without a per-tool hash", () => {
+    expect(NAMESPACE).toEqual({ namespace: "records_api_0a1b2c", base: "records_api" });
+    expect(model("projects.search")).toBe("records_api_0a1b2c__projects_search");
+    expect(model("billing_plans.update_payment_schedule_terms")).toBe(
+      "records_api_0a1b2c__billing_plans_update_payment_schedule_terms",
     );
-    expect(model("billing_plans.update_payment_schedule_series")).toEndWith(
-      "__billing_plans_update_payment_sched",
+    expect(model("billing_plans.update_payment_schedule_series")).toBe(
+      "records_api_0a1b2c__billing_plans_update_payment_schedule_series",
     );
   });
 
@@ -2873,8 +2906,10 @@ describe("plain tool names and unloaded candidates on every route", () => {
         ["projects.search", model("projects.search")],
         ["projects_search", model("projects.search")],
         ["projects-search", model("projects.search")],
+        ["records_api.projects.search", model("projects.search")],
+        ["records_api__projects_search", model("projects.search")],
+        [`${REGISTRY}.projects.search`, model("projects.search")],
         ["opengeni.goal_complete", "opengeni__goal_complete"],
-        // The shortened parts are equal; the exact published name decides.
         [
           "billing_plans.update_payment_schedule_terms",
           model("billing_plans.update_payment_schedule_terms"),
@@ -2885,7 +2920,7 @@ describe("plain tool names and unloaded candidates on every route", () => {
         ],
       ] as const) {
         const result = await runtime.prepareSearch({ query: "", names: [name] });
-        expect(loaded(result)).toEqual([expected]);
+        expect({ name, loaded: loaded(result) }).toEqual({ name, loaded: [expected] });
         expect(JSON.parse(result.output).unavailable).toEqual([]);
         expect(result.notice).toBeUndefined();
       }
@@ -2899,6 +2934,20 @@ describe("plain tool names and unloaded candidates on every route", () => {
       expect(loaded(result)).toEqual([model("projects.list"), model("projects.list_history")]);
       expect(result.notice).toBeUndefined();
     });
+
+    test(`${transport}: every tool a search names is loaded, whatever its limit`, async () => {
+      const named = ["projects.list", "organizations.get", "incidents.get_events"];
+      const expected = named.map(model);
+      for (const args of [
+        { query: "", names: named, limit: 1 },
+        { query: named.join(", "), limit: 2 },
+        { query: `use ${named.map((name) => `records_api.${name}`).join(" and ")}`, limit: 1 },
+      ]) {
+        expect(new Set(loaded(await runtimeWith(transport).prepareSearch(args)))).toEqual(
+          new Set(expected),
+        );
+      }
+    });
   }
 
   test("a dotted token that names nothing as a whole still names its underscored part", async () => {
@@ -2907,86 +2956,28 @@ describe("plain tool names and unloaded candidates on every route", () => {
     expect(loaded(result)).toEqual(["opengeni__goal_complete"]);
   });
 
-  test("a shortened name resolves by the spelling the agent used, never to its look-alikes", async () => {
-    const terms = model("billing_plans.update_payment_schedule_terms");
-    const series = model("billing_plans.update_payment_schedule_series");
-    for (const transport of ["generic_dispatch", "codex_native"] as const) {
-      // The server spells it with a dot; agents also write it with underscores.
-      for (const name of [
-        "billing_plans_update_payment_schedule_terms",
-        "billing_plans-update_payment_schedule_terms",
-      ]) {
-        expect(loaded(await runtimeWith(transport).prepareSearch({ query: name }))).toEqual([
-          terms,
-        ]);
-        expect(
-          loaded(await runtimeWith(transport).prepareSearch({ query: "", names: [name] })),
-        ).toEqual([terms]);
-      }
-      // A name both shortened tools begin, but neither is, picks neither by name.
-      const ambiguous = await runtimeWith(transport).prepareSearch({
-        query: "billing_plans_update_payment_schedule",
-      });
-      expect(loaded(ambiguous)).not.toEqual([series, terms]);
-      expect(loaded(ambiguous)).not.toEqual([terms, series]);
-    }
-
-    // The server spells it with underscores; agents also write a dot.
-    const REQUESTS = "requests-api-3c4d5e";
-    const forms = ["ticket", "order", "quote"].map((kind) =>
-      prefixedMcpToolName(REQUESTS, `customer_request_drafts_convert_to_${kind}`),
+  test("a names load that misses suggests the closest tools", async () => {
+    const result = await runtimeWith("generic_dispatch").prepareSearch({
+      query: "",
+      names: ["records_api.projects_find"],
+    });
+    const output = JSON.parse(result.output);
+    expect(loaded(result)).toEqual([]);
+    expect(output.unavailable).toEqual(["records_api.projects_find"]);
+    expect(output.suggestions.map((t: { name: string }) => t.name)).toContain(
+      model("projects.search"),
     );
-    expect(new Set(forms.map((name) => name.split("__")[1])).size).toBe(1);
-    const runtime = new LazyToolRuntime(
-      "codex_native",
-      new Set([REQUESTS]),
-      undefined,
-      new Set([REQUESTS]),
-      new Set(),
-      () => new Map(forms.map((name) => [name, REQUESTS])),
-    );
-    runtime.refresh(forms.map((name) => candidate(name, "Convert a customer request draft.")));
-    for (const query of [
-      "customer_request_drafts.convert_to_ticket",
-      "customer_request_drafts_convert_to_ticket",
-    ])
-      expect(loaded(await runtime.prepareSearch({ query }))).toEqual([forms[0]!]);
+  });
 
-    // The decision model reads each shortened sibling's full published name.
+  test("the decision model reads a tool's published name beside its wire name", async () => {
     const seen: ToolDecisionInput[] = [];
-    const published = new Map(
-      ["ticket", "order", "quote"].map(
-        (kind, i) => [forms[i]!, `customer_request_drafts_convert_to_${kind}`] as const,
-      ),
-    );
-    const deciding = new LazyToolRuntime(
+    const runtime = runtimeWith(
       "codex_native",
-      new Set([REQUESTS]),
-      undefined,
-      new Set([REQUESTS]),
-      new Set(),
-      () => new Map(forms.map((name) => [name, REQUESTS])),
-      false,
-      false,
-      undefined,
-      undefined,
-      undefined,
-      judge({ [forms[1]!]: 0.9 }, seen),
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      () => published,
+      judge({ [model("organizations.list_activity")]: 0.9 }, seen),
     );
-    deciding.refresh(forms.map((name) => candidate(name, "Convert a customer request draft.")));
-    expect(
-      loaded(
-        await deciding.prepareSearch({ query: "turn the customer request draft into an order" }),
-      ),
-    ).toEqual([forms[1]!]);
-    expect(Object.fromEntries(seen[0]!.candidates.map((c) => [c.name, c.fullName]))).toEqual(
-      Object.fromEntries(published),
-    );
+    await runtime.prepareSearch({ query: "what changed across the company recently" });
+    const fullNames = Object.fromEntries(seen[0]!.candidates.map((c) => [c.name, c.fullName]));
+    expect(fullNames[model("organizations.list_activity")]).toBe("organizations.list_activity");
   });
 
   test("native routes say which close candidates an uncertain search did not load", async () => {
@@ -3041,7 +3032,7 @@ describe("plain tool names and unloaded candidates on every route", () => {
     expect(result.notice).toBeUndefined();
   });
 
-  test("tool_list prefixes match the published name part, listed alphabetically", async () => {
+  test("tool_list prefixes match the published name part and the server, listed alphabetically", async () => {
     const runtime = runtimeWith("generic_dispatch");
     const list = runtime.controlTools.find((t) => t.type === "function" && t.name === "tool_list");
     if (!list || list.type !== "function") throw new Error("missing list");
@@ -3057,21 +3048,12 @@ describe("plain tool names and unloaded candidates on every route", () => {
         expected,
       );
     const all = (await invoke({ limit: 40 })).tools.map((t: { name: string }) => t.name);
-    // The two billing tools share one shortened name part, so their order is open.
-    expect(new Set(all.slice(0, 2))).toEqual(
-      new Set([
-        model("billing_plans.update_payment_schedule_series"),
-        model("billing_plans.update_payment_schedule_terms"),
-      ]),
+    expect(all).toEqual([...all].sort());
+    expect(new Set(all)).toEqual(
+      new Set([...RECORDS.map(([original]) => model(original)), "opengeni__goal_complete"]),
     );
-    expect(all.slice(2, 8)).toEqual([
-      model("incidents.get_events"),
-      model("organizations.get"),
-      model("organizations.list_activity"),
-      ...expected,
-    ]);
-    expect(all.at(-1)).toBe("opengeni__goal_complete");
-    expect((await invoke({ namePrefix: "mcp_" })).total).toBe(RECORDS.length);
+    for (const namePrefix of ["records_api.", "records_api__"])
+      expect((await invoke({ namePrefix })).total).toBe(RECORDS.length);
   });
 
   test.each(["codex_native", "openai_native"] as const)(

@@ -2,6 +2,7 @@ import { boundModelToolOutputItem } from "@opengeni/codex";
 import type { AttemptToolDefinition, AttemptToolExecutionContext } from "@opengeni/codemode";
 import {
   SKILL_USE_META_KEY,
+  skillDeclaredTools,
   SkillUse,
   type AttemptToolResult,
   type SkillReadKind,
@@ -211,6 +212,17 @@ export function createSkillReadAttemptToolDefinition(input: {
     },
     source: "opengeni",
     approval: "none",
+    // A full read (no paths, no listing) loads the tools the Skill's
+    // frontmatter declares, like a tool_search load of those names.
+    discloses: async (args) => {
+      if (typeof args.skill !== "string" || !args.skill) return [];
+      if (args.paths !== undefined || args.listFiles === true) return [];
+      await input.authorize();
+      const loaded = await input.load(args.skill);
+      const files = "files" in loaded ? loaded.files : loaded;
+      const skillMd = files.find((file) => file.path === "SKILL.md");
+      return skillMd ? skillDeclaredTools(skillMd.content) : [];
+    },
     execute: async (args, context) => {
       if (
         typeof args.skill !== "string" ||

@@ -47,7 +47,13 @@ import { toolDescriptor, toolGroup, toolGroups } from "./tool-discovery-catalog"
 import { toolDisclosureItem } from "./provider-history-adapter";
 import { isProviderToolName, providerValidCallName } from "./provider-tool-names";
 import { restoreDeferredToolArgumentTypes } from "./deferred-tool-arguments";
-import { isAliasedMcpToolName, prefixedMcpToolName } from "./mcp-model-tool-name";
+import {
+  isFormerMcpToolName,
+  looseToolName,
+  mcpToolReferenceMatches,
+  wireNamePart,
+  type McpToolReference,
+} from "./mcp-model-tool-name";
 import {
   beforeModelRequest,
   modelResponseSettlement,
@@ -107,11 +113,22 @@ function interleave(rankings: readonly (readonly string[])[]): string[] {
     for (const ranking of rankings) if (ranking[rank] !== undefined) out.add(ranking[rank]!);
   return [...out];
 }
-/** A tool's name after its server prefix, lowercased: `projects_search` for `mcp_<id>__projects_search`. */
+/** A tool's name after its server prefix, lowercased: `projects_search` for `records__projects_search`. */
 const shortToolName = (name: string) => {
   const separator = name.indexOf("__");
   return (separator >= 0 ? name.slice(separator + 2) : name).toLowerCase();
 };
+/**
+ * The words of a tool name, for ranking tools near it: separators become
+ * spaces and digests drop out (`mcp_<digest>__orders_swap_item` is
+ * "orders swap item").
+ */
+function toolNameWords(name: string): string {
+  return name
+    .split(/[^A-Za-z0-9]+/)
+    .filter((word) => word && word !== "mcp" && !/^[0-9a-f]{6,}$/i.test(word))
+    .join(" ");
+}
 /**
  * Base runtime tools that stay in the first request on every transport. These
  * have no MCP connection to prepare, so "eager" here means schema visibility
@@ -642,9 +659,6 @@ const CONNECTABLE_LOOKUP_TIMEOUT_MS = 2_000;
  */
 const BESIDE_STRONG_MATCHES_LOOKUP_TIMEOUT_MS = 1_500;
 
-/** A tool-name prefix that is an aliased MCP tool's digest, or a start of one. */
-const ALIASED_MCP_DIGEST_PREFIX = /^mcp_[0-9a-f]{4,24}_{0,2}$/;
-
 /**
  * The words a tool_list filter writes, for finding an integration it names:
  * the name prefix and group with digests, `mcp_` and `connection/` keys and
@@ -854,15 +868,21 @@ function modelVisibleToolDefinition(tool: Tool): Record<string, unknown> | null 
   };
 }
 
-function unavailableToolResult(input: unknown): string {
+function unavailableToolResult(
+  input: unknown,
+  currentName?: (name: string) => string | undefined,
+): string {
   const name = isRecord(input) && typeof input.name === "string" ? input.name : null;
+  const renamed = name ? currentName?.(name) : undefined;
   return JSON.stringify({
     ok: false,
     error: {
-      code: name ? "tool_unavailable" : "invalid_tool_invoke",
-      message: name
-        ? `Tool ${JSON.stringify(name)} is not currently authorized or available. Search again before retrying.`
-        : "tool_invoke requires an exact tool name and a nested arguments object.",
+      code: renamed ? "tool_renamed" : name ? "tool_unavailable" : "invalid_tool_invoke",
+      message: renamed
+        ? `Nothing ran: ${JSON.stringify(name)} is this tool's former name. Call it as ${JSON.stringify(renamed)}.`
+        : name
+          ? `Tool ${JSON.stringify(name)} is not currently authorized or available. Search again before retrying.`
+          : "tool_invoke requires an exact tool name and a nested arguments object.",
     },
   });
 }
@@ -872,6 +892,14 @@ export class LazyToolRuntime {
   readonly wrappedAgents = new WeakSet<object>();
   readonly wrappedModels = new WeakMap<Model, Model>();
   private currentTools: Tool[] = [];
+  /**
+   * The disclosure hook of a tool whose model call makes other tools
+   * available (AttemptToolDefinition.discloses, such as a Skill read loading
+   * the tools the Skill declares). Set by the agent builder.
+   */
+  callDisclosure?: (
+    toolName: string,
+  ) => ((args: Record<string, unknown>) => Promise<readonly string[]>) | undefined;
   private readonly functionTools = new Map<string, Tool>();
   private readonly searchableToolNames = new Set<string>();
   private readonly originalToolLoaders = new WeakMap<
@@ -926,11 +954,11 @@ export class LazyToolRuntime {
     /** Ranks tools by meaning alongside keywords; absent means keywords alone. */
     private readonly meaningRanker?: ToolMeaningRanker,
     /**
-     * Each MCP tool's name as its server publishes it, by model tool name.
-     * A shortened model name (`mcp_<digest>__…`) can hide which of several
-     * siblings a tool is; the decision model reads the full name instead.
+     * Each MCP tool's server, namespace and name as its server publishes it,
+     * by model tool name: what a reference name (`server.tool`) resolves by.
      */
-    private readonly mcpToolNames: () => ReadonlyMap<string, string> = () => new Map(),
+    private readonly mcpToolReferences: () => ReadonlyMap<string, McpToolReference> = () =>
+      new Map(),
     /**
      * False when the host proved nothing this attempt attaches is deferred: a
      * pending preparation then exposes no router on its own. Tools that turn
@@ -1326,10 +1354,11 @@ export class LazyToolRuntime {
     const offered = new Set(
       request.tools.flatMap((tool) => (tool.type === "function" ? [tool.name] : [])),
     );
+    const resolve = this.referenceResolver();
     const names = [
       ...new Set(
-        this.openingToolNames.flatMap((name) =>
-          toolsWithExactName(pool, name).map((tool) => tool.name),
+        this.openingToolNames.flatMap(
+          (name) => resolve(name) ?? toolsWithExactName(pool, name).map((tool) => tool.name),
         ),
       ),
     ].filter((name) => !offered.has(name));
@@ -1446,12 +1475,39 @@ export class LazyToolRuntime {
       .filter((definition): definition is Record<string, unknown> => definition !== null);
   }
 
-  /** Model-visible schemas an entry-tool call discloses, or [] for any other tool. */
-  familyDisclosure(toolName: string): Record<string, unknown>[] {
-    if (!isInteractionEntryToolName(toolName)) return [];
-    return interactionEntryCompanions(toolName, this.searchableTools(this.currentTools))
-      .map((tool) => modelVisibleToolDefinition(tool))
-      .filter((definition): definition is Record<string, unknown> => definition !== null);
+  /**
+   * Model-visible schemas a call discloses: an entry tool's companions, or
+   * the tools a call's own disclosure hook names (see callDisclosure),
+   * loaded as a names search loads them. [] for any other call.
+   */
+  async familyDisclosure(
+    toolName: string,
+    rawArguments?: unknown,
+  ): Promise<Record<string, unknown>[]> {
+    if (isInteractionEntryToolName(toolName)) {
+      return interactionEntryCompanions(toolName, this.searchableTools(this.currentTools))
+        .map((tool) => modelVisibleToolDefinition(tool))
+        .filter((definition): definition is Record<string, unknown> => definition !== null);
+    }
+    const discloses = this.callDisclosure?.(toolName);
+    if (!discloses) return [];
+    const args =
+      typeof rawArguments === "string"
+        ? parseJsonObject(rawArguments)
+        : isRecord(rawArguments)
+          ? rawArguments
+          : null;
+    if (!args) return [];
+    // A disclosure only adds tools: if it cannot be read, the call runs
+    // without one.
+    const names = await discloses(args).catch(() => [] as readonly string[]);
+    if (names.length === 0) return [];
+    await this.ensurePrepared();
+    const resolve = this.referenceResolver();
+    return this.searchDisclosure({
+      query: "",
+      names: [...new Set(names.flatMap((name) => resolve(name) ?? [name]))],
+    });
   }
 
   genericSearchOutput(rawArguments: unknown): string {
@@ -1473,9 +1529,11 @@ export class LazyToolRuntime {
         ...(names ?? [])
           .flatMap((name) => shortNameAlternatives(pool, name))
           .filter((tool) => !tools.includes(tool)),
-        ...(unavailable.length
-          ? this.matches({ query: unavailable.join(" "), limit }).filter(isFunctionTool)
-          : []),
+        // The closest tools to each missing name, by its words: a guessed
+        // or outdated name still finds the tool it meant.
+        ...unavailable.flatMap((name) =>
+          this.matches({ query: toolNameWords(name), limit }).filter(isFunctionTool),
+        ),
       ]),
     ];
     return JSON.stringify({
@@ -1549,8 +1607,11 @@ export class LazyToolRuntime {
     const parsed = parseSearchArgs(rawArguments);
     const { query, limit } = parsed;
     if (parsed.names !== undefined) {
-      const resolve = this.exactMcpNameResolver();
-      const exact = { ...parsed, names: parsed.names.map((name) => resolve(name) ?? name) };
+      const resolve = this.referenceResolver();
+      const exact = {
+        ...parsed,
+        names: [...new Set(parsed.names.flatMap((name) => resolve(name) ?? [name]))],
+      };
       const result = this.withCandidatesNotice({
         version: 2,
         output: this.genericSearchOutput(exact),
@@ -1672,10 +1733,10 @@ export class LazyToolRuntime {
     pool: (Tool & { name: string })[],
     query: string,
   ): { named: string[]; near: string[]; onlyNames: boolean } {
-    const resolve = this.exactMcpNameResolver();
+    const resolve = this.referenceResolver();
     const lookup = (token: string) => {
       const exact = resolve(token);
-      if (exact) return [exact];
+      if (exact) return exact;
       const matches = toolsNamedInQuery(pool, token).map((tool) => tool.name);
       // Shortened tool names (`…__request_drafts_convert_to` for convert_to_ticket
       // and convert_to_order alike) can each begin the longer name a query
@@ -1740,7 +1801,7 @@ export class LazyToolRuntime {
     candidates: readonly Tool[],
     max: number,
   ): Tool[] {
-    const resolve = this.exactMcpNameResolver();
+    const resolve = this.referenceResolver();
     const present = new Set(candidates.map((tool) => (tool as { name: string }).name));
     const byName = new Map(pool.map((tool) => [tool.name, tool]));
     const added: Tool[] = [];
@@ -1750,8 +1811,7 @@ export class LazyToolRuntime {
       for (const raw of description.split(/[^A-Za-z0-9_.\-/:]+/)) {
         const token = raw.replace(/^[_.\-/:]+|[_.\-/:]+$/g, "");
         if (!/[_.]/.test(token) || !/[a-z]/i.test(token)) continue;
-        const exact = resolve(token);
-        const names = exact ? [exact] : toolsWithExactName(pool, token).map((tool) => tool.name);
+        const names = resolve(token) ?? toolsWithExactName(pool, token).map((tool) => tool.name);
         for (const name of names) {
           const tool = byName.get(name);
           if (!tool || present.has(name) || added.length >= max) continue;
@@ -1960,30 +2020,31 @@ export class LazyToolRuntime {
   }
 
   /**
-   * Resolves a name to the model name of the tool an MCP server publishes
-   * under exactly that name (`projects.search`), when its model name is a
-   * digest alias that a lookup by plain name cannot otherwise tell apart from
-   * a similar, shortened one. Undefined for any other name.
+   * Resolves a reference name (mcpToolReferenceMatches) to the model names of
+   * the searchable MCP tools it refers to: `server.tool`, `server__tool` or
+   * the published tool name, whatever the tool's model name is. A server
+   * shared by several accounts refers to each account's tool; a plain tool
+   * name several servers publish is left to toolsWithExactName, which loads
+   * one and names the others. Undefined for a model name itself and for a
+   * name no tool answers to.
    */
-  private exactMcpNameResolver(): (name: string) => string | undefined {
-    const pool = new Set(this.searchableTools(this.currentTools).map((tool) => tool.name));
-    const registries = [...new Set(this.modelMcpServerIds().values())];
+  private referenceResolver(): (name: string) => string[] | undefined {
+    const pool = new Set(
+      this.searchableTools(this.currentTools)
+        .filter(isFunctionTool)
+        .map((tool) => tool.name),
+    );
+    const references = [...this.mcpToolReferences()]
+      .filter(([model]) => pool.has(model))
+      .map(([, reference]) => reference);
     return (name) => {
-      if (!name || name.includes("__") || pool.has(name)) return undefined;
-      // A shortened alias encodes the server's own spelling, and agents write
-      // `projects.search`, `projects_search` and `projects-search` alike: the
-      // name as written, all underscores, and each single underscore as the
-      // server's dot are tried.
-      const plain = name.replace(/[.-]/g, "_");
-      const spellings = new Set([name, plain]);
-      for (let at = plain.indexOf("_"); at > 0; at = plain.indexOf("_", at + 1))
-        spellings.add(`${plain.slice(0, at)}.${plain.slice(at + 1)}`);
-      for (const spelling of spellings)
-        for (const registryId of registries) {
-          const model = prefixedMcpToolName(registryId, spelling);
-          if (isAliasedMcpToolName(model) && pool.has(model)) return model;
-        }
-      return undefined;
+      if (!name || pool.has(name)) return undefined;
+      const matches = references.filter((reference) => mcpToolReferenceMatches(reference, name));
+      if (matches.length === 0) return undefined;
+      const plain = matches.every(
+        (reference) => looseToolName(name) === looseToolName(reference.toolName),
+      );
+      return plain && matches.length > 1 ? undefined : matches.map((match) => match.wireName);
     };
   }
 
@@ -2078,11 +2139,20 @@ export class LazyToolRuntime {
             .filter((name) => !chosen.includes(name))
             .slice(0, limit)
         : true;
+    // Every tool the query names loads: `limit` bounds ranked results and
+    // suggestions, not the tools a search asked for by name.
+    const namedLimit = named.length ? MAX_SEARCH_LIMIT : undefined;
     if (onlyNames || !this.decisionModel) {
       const chosen = lexical();
       const companions = await setupFor(chosen);
       return chosen.length || companions.length
-        ? this.selectedSearch(chosen, rawArguments, onlyNames || unselected(chosen), companions)
+        ? this.selectedSearch(
+            chosen,
+            rawArguments,
+            onlyNames || unselected(chosen),
+            companions,
+            namedLimit,
+          )
         : {
             version: 2,
             output: this.genericSearchOutput(rawArguments),
@@ -2125,16 +2195,17 @@ export class LazyToolRuntime {
       // A selection that has not answered by the deadline falls back to keywords
       // like any other selector failure; the turn's own cancellation still wins.
       const deadline = AbortSignal.timeout(TOOL_SELECTION_POLICY.deadlineMs);
-      const published = this.mcpToolNames();
+      const references = this.mcpToolReferences();
+      // The decision model reads a tool's published name where its model
+      // name spells it differently (`server__tool`, punctuation, shortened).
+      const published = (name: string) => {
+        const toolName = references.get(name)?.toolName;
+        return toolName !== undefined && toolName !== name ? toolName : undefined;
+      };
       const judgments = await this.decisionModel({
         query,
         ...(units.length > 1 ? { requests: units.map((unit) => unit.text.trim()) } : {}),
-        candidates: candidates.map((tool) =>
-          decisionCandidate(
-            tool,
-            isAliasedMcpToolName(String(tool.name)) ? published.get(String(tool.name)) : undefined,
-          ),
-        ),
+        candidates: candidates.map((tool) => decisionCandidate(tool, published(String(tool.name)))),
         ...(this.loadedThisTurn.size ? { loadedEarlier: [...this.loadedThisTurn] } : {}),
         signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
       });
@@ -2173,6 +2244,7 @@ export class LazyToolRuntime {
               rawArguments,
               unselected(fallbackChosen),
               companions,
+              namedLimit,
             )
           : {
               version: 2 as const,
@@ -2359,51 +2431,47 @@ export class LazyToolRuntime {
     const args = isRecord(input) ? input : {};
     const prefix = typeof args.namePrefix === "string" ? args.namePrefix : "";
     const group = typeof args.group === "string" ? args.group : undefined;
-    const serverIds = this.modelMcpServerIds();
+    const references = this.mcpToolReferences();
+    // Groups are keyed by each MCP tool's readable server namespace.
+    const serverIds = new Map(
+      [...this.modelMcpServerIds()].map(([name, serverId]) => [
+        name,
+        references.get(name)?.namespace ?? serverId,
+      ]),
+    );
     const cursor = typeof args.cursor === "string" ? args.cursor : undefined;
     const limit =
       typeof args.limit === "number" && Number.isFinite(args.limit)
         ? Math.max(1, Math.min(40, Math.floor(args.limit)))
         : 20;
-    // Digest aliases sort by their readable name part, so one connection's
-    // tools page alphabetically rather than in digest order.
-    const sortKey = (name: string) =>
-      isAliasedMcpToolName(name) ? `mcp__${name.slice(name.indexOf("__") + 2)}\u0000${name}` : name;
     const authorizedTools = [...new Set(this.searchableTools(this.currentTools))]
       .filter(isFunctionTool)
-      .map((tool) => ({ tool, key: sortKey(tool.name) }))
-      .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
-      .map(({ tool }) => tool);
-    // A prefix also matches the name after the server separator, in the
-    // form a server publishes it (`projects.` or `projects_`).
-    const shortPrefix = prefix.includes("__") ? null : prefix.replace(/[^A-Za-z0-9_]/g, "_");
-    const hasPrefix = (name: string) =>
-      name.startsWith(prefix) ||
-      (shortPrefix !== null &&
-        name.includes("__") &&
-        name.slice(name.lastIndexOf("__") + 2).startsWith(shortPrefix));
+      .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    // A prefix also matches the name after the server separator and the
+    // name a server publishes (`projects.` or `projects_`), and a server
+    // with its separator (`slack.` or `slack__`) matches that server's tools.
+    const shortPrefix = prefix.includes("__") ? null : prefix.replace(/[^A-Za-z0-9_-]/g, "_");
+    const serverPrefix = /^(.+?)(?:\.|__)$/.exec(prefix)?.[1];
+    const hasPrefix = (name: string) => {
+      if (name.startsWith(prefix)) return true;
+      const reference = references.get(name);
+      if (
+        serverPrefix !== undefined &&
+        reference &&
+        [reference.namespace, reference.namespaceBase, reference.registryId].includes(serverPrefix)
+      ) {
+        return true;
+      }
+      if (shortPrefix === null) return false;
+      const own = name.includes("__") ? name.slice(name.lastIndexOf("__") + 2) : name;
+      return (
+        own.startsWith(shortPrefix) ||
+        (reference !== undefined && wireNamePart(reference.toolName).startsWith(shortPrefix))
+      );
+    };
     const inGroup = (tool: Tool & { name: string }) =>
       group === undefined || toolGroup(tool.name, serverIds) === group;
-    let tools = authorizedTools.filter((tool) => hasPrefix(tool.name) && inGroup(tool));
-    // An aliased tool's digest (`mcp_<digest>`) is that one tool's own, not
-    // its connection's: such a prefix lists every tool of the connection the
-    // tools it matches belong to.
-    const connectionPrefix =
-      ALIASED_MCP_DIGEST_PREFIX.test(prefix) &&
-      tools.length > 0 &&
-      tools.every((tool) => serverIds.has(tool.name));
-    if (connectionPrefix) {
-      const servers = new Set(tools.map((tool) => serverIds.get(tool.name)));
-      tools = authorizedTools.filter(
-        (tool) => servers.has(serverIds.get(tool.name)) && inGroup(tool),
-      );
-    }
-    const connectionNote = connectionPrefix
-      ? {
-          message:
-            "namePrefix is one tool's own digest, so this lists every tool of that tool's connection.",
-        }
-      : {};
+    const tools = authorizedTools.filter((tool) => hasPrefix(tool.name) && inGroup(tool));
     if (args.view === "groups") {
       const groups = toolGroups(tools, serverIds);
       const cursorIndex =
@@ -2440,7 +2508,6 @@ export class LazyToolRuntime {
         groups: page,
         total: groups.length,
         nextCursor: index < groups.length ? page.at(-1)!.group : null,
-        ...connectionNote,
         ...(cursor === undefined ? this.unavailableSources() : {}),
       });
     }
@@ -2476,7 +2543,6 @@ export class LazyToolRuntime {
       tools: descriptors,
       total: tools.length,
       nextCursor: index < tools.length ? descriptors.at(-1)!.name : null,
-      ...connectionNote,
       ...(cursor === undefined ? this.unavailableSources() : {}),
     };
     if (!prefix || tools.length > 0 || group !== undefined) return JSON.stringify(result);
@@ -2571,8 +2637,24 @@ export class LazyToolRuntime {
       // Reaching this executor therefore means the requested tool is absent or
       // the dispatcher arguments were malformed; never bypass approval/guardrails
       // by invoking a real tool from inside this control tool.
-      execute: (input: unknown) => unavailableToolResult(input),
+      execute: (input: unknown) =>
+        unavailableToolResult(input, (name) => this.currentNameOfFormerTool(name)),
     }) as unknown as Tool;
+  }
+
+  /**
+   * The model name of the authorized MCP tool whose former name
+   * (isFormerMcpToolName) is `name`, when exactly one had it.
+   */
+  currentNameOfFormerTool(name: string): string | undefined {
+    if (this.functionTools.has(name)) return undefined;
+    const matches = [...this.mcpToolReferences().values()].filter(
+      (reference) =>
+        reference.wireName !== name &&
+        this.functionTools.has(reference.wireName) &&
+        isFormerMcpToolName(reference.registryId, reference.toolName, name),
+    );
+    return matches.length === 1 ? matches[0]!.wireName : undefined;
   }
 }
 
@@ -2626,7 +2708,7 @@ export function installLazyToolRuntime(
   connectableLookup?: ConnectableIntegrationLookup,
   connectedAccounts?: () => ReadonlyMap<string, ConnectedToolAccount>,
   meaningRanker?: ToolMeaningRanker,
-  mcpToolNames?: () => ReadonlyMap<string, string>,
+  mcpToolReferences?: () => ReadonlyMap<string, McpToolReference>,
   pendingPreparationDefers = true,
   connectCardRequest?: ConnectCardRequest,
 ): LazyToolRuntime {
@@ -2647,7 +2729,7 @@ export function installLazyToolRuntime(
     connectableLookup,
     connectedAccounts,
     meaningRanker,
-    mcpToolNames,
+    mcpToolReferences,
     pendingPreparationDefers,
     connectCardRequest,
   );
@@ -2930,7 +3012,7 @@ async function transformResponseItem(
   }
   if (runtime.transport !== "generic_dispatch") {
     return [
-      withFamilyDisclosure(
+      await withFamilyDisclosure(
         isRecord(item) && item.type === "function_call"
           ? restoreDirectDeferredCallArgumentTypes(item, runtime)
           : item,
@@ -2948,7 +3030,7 @@ async function transformResponseItem(
     runtime,
     search ? await runtime.prepareSearch(item.arguments, signal, decided?.take(item)) : undefined,
   );
-  return items.map((candidate) => withFamilyDisclosure(candidate, runtime));
+  return Promise.all(items.map((candidate) => withFamilyDisclosure(candidate, runtime)));
 }
 
 /**
@@ -3055,14 +3137,20 @@ function earlySearchKey(item: Record<string, unknown>): string | null {
  * expandInteractionFamilyDisclosures), so the model's next step can observe
  * and act without first searching for the tools.
  */
-function withFamilyDisclosure(candidate: unknown, runtime: LazyToolRuntime): unknown {
+async function withFamilyDisclosure(
+  candidate: unknown,
+  runtime: LazyToolRuntime,
+): Promise<unknown> {
   if (!isRecord(candidate) || candidate.type !== "function_call") return candidate;
-  if (typeof candidate.name !== "string" || !isInteractionEntryToolName(candidate.name)) {
+  if (
+    typeof candidate.name !== "string" ||
+    !(isInteractionEntryToolName(candidate.name) || runtime.callDisclosure?.(candidate.name))
+  ) {
     return candidate;
   }
   const providerData = isRecord(candidate.providerData) ? candidate.providerData : {};
   if (FAMILY_DISCLOSURE_MARKER_KEY in providerData) return candidate;
-  const tools = runtime.familyDisclosure(candidate.name);
+  const tools = await runtime.familyDisclosure(candidate.name, candidate.arguments);
   if (tools.length === 0) return candidate;
   return {
     ...candidate,

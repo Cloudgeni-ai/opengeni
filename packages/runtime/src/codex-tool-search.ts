@@ -2,7 +2,6 @@
 import { type Tool } from "@openai/agents";
 import { HARNESS_CONTROL_FIRST_PARTY_TOOLS } from "@opengeni/contracts";
 import { ToolSearchIndex } from "./tool-discovery-ranking";
-import { ALIASED_MCP_TOOL_LEAF_LENGTH, isAliasedMcpToolName } from "./mcp-model-tool-name";
 import {
   MCP_MAX_TOOL_DEFINITION_BYTES,
   MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES,
@@ -315,22 +314,14 @@ function toolShortName(name: string): string {
 
 /**
  * Whether a plain name an agent uses denotes this model tool by its name after
- * the server separator: exactly, as the name its server publishes
- * (`projects.search` or `projects-search` for `…__projects_search`), or, for an
- * aliased MCP name whose part was shortened, a longer name that part begins.
- * Skills, descriptions and other tools' results often name tools that way.
+ * the server separator: exactly, or as the name its server publishes
+ * (`projects.search` for `…__projects_search`). Skills, descriptions and
+ * other tools' results often name tools that way.
  */
 function shortNameMatches(toolName: string, name: string): boolean {
   const short = toolShortName(toolName);
   if (short === name) return true;
-  const plain = name.replace(/[^A-Za-z0-9_]/g, "_");
-  if (short === plain) return true;
-  return (
-    isAliasedMcpToolName(toolName) &&
-    short.length === ALIASED_MCP_TOOL_LEAF_LENGTH &&
-    plain.length > short.length &&
-    plain.startsWith(short)
-  );
+  return short === name.replace(/[^A-Za-z0-9_-]/g, "_");
 }
 
 /**
@@ -366,8 +357,8 @@ function toolsWithShortName<T extends Tool & { name: string }>(
  * name or its dotted form, or else one tool whose name after its server
  * separator that name denotes (see shortNameMatches). Agents often load a
  * tool by the name it has in a description, a Skill or another tool's result
- * (`sandboxes_list` for `opengeni__sandboxes_list`, `projects.search` for an
- * aliased `mcp_<digest>__projects_search`), and a lookup that matched only
+ * (`sandboxes_list` for `opengeni__sandboxes_list`, `projects.search` for
+ * `records__projects_search`), and a lookup that matched only
  * full names returned nothing for it. When several servers share the short
  * name, Opengeni's own tool (else the first) is the one loaded;
  * shortNameAlternatives names the others.

@@ -645,7 +645,6 @@ describe("ogtool CLI", () => {
       ["list", "--unknown"],
       ["list", "extra"],
       ["show"],
-      ["show", "docs.search", "extra"],
       ["show", "--full"],
       ["show", "docs.search", "--json"],
       ["list", "--full", "--offset", "0"],
@@ -728,6 +727,55 @@ describe("ogtool CLI", () => {
       mock.server.stop(true);
     }
   }, 30_000);
+
+  test("show resolves several tools by path, server__tool or own name in one call", async () => {
+    const mock = codemodeServer();
+    const environment = { OPENGENI_CODEMODE_URL: mock.url, OPENGENI_CODEMODE_TOKEN: "test" };
+    try {
+      const entry = mock.catalog.entries[0]!;
+      mock.catalog.entries.push(
+        {
+          ...entry,
+          identity: { serverId: "account-0123abcd", toolName: "records_get-line" },
+          modelName: "records_0123ab__records_get_line",
+          codemodePath: ["records_0123ab", "records_get_line_9f00aa11"],
+        },
+        {
+          ...entry,
+          identity: { serverId: "account-0123abcd", toolName: "records_swap" },
+          modelName: "records_0123ab__records_swap",
+          codemodePath: ["records_0123ab", "records_swap"],
+        },
+      );
+      const shown = await run(
+        ["show", "docs.search", "records_0123ab.records_get-line", "records_swap"],
+        environment,
+      );
+      expect(shown.stderr).toBe("");
+      expect(shown.exitCode).toBe(0);
+      expect(
+        (JSON.parse(shown.stdout) as Array<{ path: string }>).map((tool) => tool.path),
+      ).toEqual([
+        "docs.search",
+        "records_0123ab.records_get_line_9f00aa11",
+        "records_0123ab.records_swap",
+      ]);
+      const viaServer = await run(["show", "records_0123ab__records_swap"], environment);
+      expect(JSON.parse(viaServer.stdout).path).toBe("records_0123ab.records_swap");
+      const miss = await run(["show", "records_swap_line"], environment);
+      expect(miss.exitCode).toBe(1);
+      expect(miss.stderr).toContain("Closest: ");
+      expect(miss.stderr).toContain("records_0123ab.records_swap");
+      // A call names the tool's server: the own name alone runs nothing and names the path.
+      const plainCall = await run(["call", "records_swap", "{}"], environment);
+      expect(plainCall.exitCode).toBe(1);
+      expect(plainCall.stderr).toContain(
+        "Call a tool by its path, not its own name alone: records_0123ab.records_swap.",
+      );
+    } finally {
+      mock.server.stop(true);
+    }
+  });
 
   test("show rejects unknown or ambiguous names and preserves large schemas", async () => {
     const mock = codemodeServer();

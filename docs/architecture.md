@@ -2396,7 +2396,14 @@ colliding paths get identity-suffixed paths, and invalid definitions are
 skipped, each with a structured `tool_catalog_degraded` warning. Runtime MCP
 listing also collapses repeated tool names per server.
 Event metadata preserves identity and approvals. Local tools use the
-final combined attempt environment.
+final combined attempt environment. Agent Codemode paths are
+`[namespace, tool]` with the same readable server namespace as model wire names
+([MCP surfaces](mcp-surfaces.md#tool-names-the-name-to-call-and-the-name-to-ask-by));
+the workspace gateway behind Sites keeps `[serverId, tool]`. Codemode clients
+resolve reference names with `resolveCatalogTool` (`@opengeni/codemode`), and
+the native client mirrors it. A definition's in-process `discloses` hook names
+tools a model call makes available (a Skill's `tools:`); the lazy transport
+freezes them on the call like an entry tool's companions.
 
 First-party contract projection, opacity checks, omission preservation:
 `apps/api/src/mcp/contract-input.ts`. Union diagnostics:

@@ -1,3 +1,4 @@
+import { resolveCatalogTool } from "./tool-reference";
 import { Buffer } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -66,6 +67,12 @@ export type AttemptToolDefinition = Omit<AttemptToolCatalogEntryValue, "codemode
   codemodePath?: readonly string[];
   /** In-process execution lifecycle shared by model MCP and Codemode. */
   lifecycle?: ToolGatewayCallLifecycle;
+  /**
+   * Reference names of tools a model call with these arguments makes
+   * available, such as the tools a Skill declares. The runtime loads them
+   * after the call's result, like a tool_search load. In-process only.
+   */
+  discloses?: (args: Record<string, unknown>) => Promise<readonly string[]>;
   execute: (
     args: Record<string, unknown>,
     context: AttemptToolExecutionContext,
@@ -969,12 +976,10 @@ function catalogEntryForPath(
   catalog: AttemptToolCatalogValue,
   path: readonly string[],
 ): AttemptToolCatalogEntryValue | null {
-  const matches = catalog.entries.filter(
-    (entry) =>
-      entry.codemodePath.length === path.length &&
-      entry.codemodePath.every((segment, index) => segment === path[index]),
-  );
-  return matches.length === 1 ? matches[0]! : null;
+  // A two-part path may name the tool by its own published name
+  // (`tools.mail["send-message"]`); a plain name is never a path.
+  const resolved = resolveCatalogTool(catalog, path.join("."), { allowPlainName: false });
+  return "entry" in resolved ? resolved.entry : null;
 }
 
 function parseCodemodeApiError(input: unknown): {
@@ -1094,5 +1099,6 @@ export * from "./artifacts";
 export * from "./structured";
 export * from "./declarations";
 export * from "./site";
+export * from "./tool-reference";
 
 export * from "./pagination";

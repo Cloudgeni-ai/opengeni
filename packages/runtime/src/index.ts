@@ -319,7 +319,14 @@ import {
   type ConnectedToolAccount,
   type LazyToolTransport,
 } from "./lazy-tool-transport";
-import { legacyMcpToolDigest, prefixedMcpToolName } from "./mcp-model-tool-name";
+import {
+  isFormerMcpToolName,
+  keepsServerPrefixedToolNames,
+  mcpServerNamespace,
+  mcpWireToolNames,
+  prefixedMcpToolName,
+  type McpToolReference,
+} from "./mcp-model-tool-name";
 import { uniqueListedMcpTools, withoutRedundantUuidPatterns } from "./mcp-listed-tools";
 export { prefixedMcpToolName } from "./mcp-model-tool-name";
 import { createToolSelector } from "./tool-discovery-decision";
@@ -507,6 +514,7 @@ import {
   defineToolInputGuardrail,
   type AgentInputItem,
   type CallModelInputFilter,
+  type FunctionTool,
   type MCPServer,
   type MCPToolErrorFunction,
   type Model,
@@ -2601,9 +2609,12 @@ export class ConnectorActionExecutionError extends Error {
   }
 }
 
-/** Exact private binding for one attempt-local model tool backed by a connector action. */
+/**
+ * Exact private binding for one attempt-local model tool backed by a connector
+ * action, keyed by the tool's stable identity rather than its model name.
+ */
 export type AttemptConnectorActionBinding = {
-  modelName: string;
+  identity: { serverId: string; toolName: string };
   call: (approvalId: string, arguments_: unknown) => ConnectorActionToolCall;
   /** Trusted in-process result classifier; remote connectors must not set this. */
   resultOutcome?: (output: unknown) => "not_executed" | "uncertain" | null;
@@ -4603,21 +4614,27 @@ function maybeInstallLazyToolTransport(
     },
     options.toolSearchMeaningRanker,
     () => {
-      // The decision model reads a shortened model name's full published name.
-      const published = new Map<string, string>();
+      // What reference names (`server.tool`) resolve by, by model name.
+      const references = new Map<string, McpToolReference>();
       for (const server of mcpServers) {
         if (!(server instanceof PrefixedMcpServer || server instanceof DeferredPreparedMcpServer))
           continue;
         for (const name of server.modelToolNames()) {
-          const toolName = server.toolDisplayMetadata(name)?.toolName;
-          if (toolName) published.set(name, toolName);
+          const reference = server.toolReference(name);
+          if (reference && !references.has(name)) references.set(name, reference);
         }
       }
-      return published;
+      return references;
     },
     options.toolRouterExpected !== false,
     harnessControlServer ? catalogConnectCardRequest(harnessControlServer) : undefined,
   );
+  const attemptTools = mcpServers.find(
+    (server): server is AttemptDefinitionMcpServer => server instanceof AttemptDefinitionMcpServer,
+  );
+  if (attemptTools) {
+    lazyRuntime.callDisclosure = (toolName) => attemptTools.callDisclosure(toolName);
+  }
   if (options.openingToolNames?.length) lazyRuntime.loadAtOpening(options.openingToolNames);
 }
 
@@ -5276,6 +5293,54 @@ function installMcpApprovalPolicy(
   }
 }
 
+function toolIdentityKey(identity: { serverId: string; toolName: string }): string {
+  return `${identity.serverId}\u0000${identity.toolName}`;
+}
+
+function connectorActionBindingsByIdentity(
+  bindings: readonly AttemptConnectorActionBinding[],
+): Map<string, AttemptConnectorActionBinding> {
+  const byIdentity = new Map<string, AttemptConnectorActionBinding>();
+  for (const binding of bindings) {
+    const key = toolIdentityKey(binding.identity);
+    if (byIdentity.has(key)) {
+      throw new Error(
+        `Duplicate attempt connector action binding: ${binding.identity.serverId}.${binding.identity.toolName}`,
+      );
+    }
+    byIdentity.set(key, binding);
+  }
+  return byIdentity;
+}
+
+/**
+ * The (server, tool) identity behind one model-visible MCP tool name, read
+ * from already-prepared servers only.
+ */
+function modelToolIdentity(
+  servers: readonly MCPServer[],
+  name: string,
+): { serverId: string; toolName: string } | undefined {
+  for (const server of servers) {
+    if (server instanceof AttemptDefinitionMcpServer) {
+      const identity = server.toolCatalogIdentity(name)?.identity;
+      if (identity) return identity;
+      continue;
+    }
+    if (
+      (server instanceof PrefixedMcpServer || server instanceof DeferredPreparedMcpServer) &&
+      preparedServerHasModelToolName(server, name)
+    ) {
+      const toolName =
+        server instanceof PrefixedMcpServer
+          ? server.unprefixedToolName(name)
+          : server.toolDisplayMetadata(name)?.toolName;
+      return toolName === undefined ? undefined : { serverId: server.registryId, toolName };
+    }
+  }
+  return undefined;
+}
+
 /**
  * Project connector Ask into the model SDK approval protocol for exact-name,
  * attempt-local tools. The gateway owns prepare/begin/complete; this wrapper
@@ -5290,19 +5355,14 @@ function installAttemptConnectorActionPolicy(
   if (bindings.length === 0) return;
   const approvalRequiredCallIds = new Set<string>();
   const preparations = new Map<string, ConnectorActionPolicyPreparation>();
-  const byModelName = new Map<string, AttemptConnectorActionBinding>();
-  for (const binding of bindings) {
-    if (byModelName.has(binding.modelName)) {
-      throw new Error(`Duplicate attempt connector action binding: ${binding.modelName}`);
-    }
-    byModelName.set(binding.modelName, binding);
-  }
+  const byIdentity = connectorActionBindingsByIdentity(bindings);
   const listMcpTools = agent.getMcpTools.bind(agent);
   agent.getMcpTools = async (resolutionContext: unknown) => {
     const tools = await listMcpTools(resolutionContext);
     return tools.map((tool) => {
       if (tool.type !== "function") return tool;
-      const binding = byModelName.get(tool.name);
+      const identity = modelToolIdentity(agent.mcpServers ?? [], tool.name);
+      const binding = identity ? byIdentity.get(toolIdentityKey(identity)) : undefined;
       if (!binding) return tool;
       const originalNeedsApproval = tool.needsApproval.bind(tool);
       const originalInvoke = tool.invoke.bind(tool);
@@ -6545,6 +6605,10 @@ class DeferredPreparedMcpServer implements MCPServer {
     return this.preparedTarget?.toolDisplayMetadata(name);
   }
 
+  toolReference(name: string): McpToolReference | undefined {
+    return this.preparedTarget?.toolReference(name);
+  }
+
   /** The connected account this server reaches, once prepared. */
   connectedAccountRoute(): McpAccountRouteLabel | undefined {
     return this.preparedTarget?.connectedAccountRoute();
@@ -7574,6 +7638,7 @@ async function prepareAttemptToolEnvironment(
     },
     options.sessionAttachedRemoteMcpTargets,
     options.runMcpCredentials,
+    true,
   );
   const serversByRegistryId = new Map(
     prepared.servers.map(({ server }) => [server.registryId, server]),
@@ -7583,23 +7648,31 @@ async function prepareAttemptToolEnvironment(
       options.modelToolOutputTruncationTokens?.() ?? defaultModelToolOutputTruncationTokens,
     ),
   });
+  // A built-in tool keeps its identity: a connector tool claiming the same
+  // identity under another name is left out, rather than both being refused.
+  const builtInIdentities = new Set(
+    (options.attemptToolDefinitions ?? []).map(({ identity }) => toolIdentityKey(identity)),
+  );
   const definitions = installAttemptConnectorActionGatewayLifecycle(
     [
-      ...prepared.definitions.map((definition) => {
-        const server = serversByRegistryId.get(definition.identity.serverId);
-        const toolName = definition.identity.toolName;
-        return {
-          ...definition,
-          execute: wrapAttemptToolExecute(
-            async (argumentsValue, context) => await definition.execute(argumentsValue, context),
-            options.spillOversizedModelToolResult,
-            definition.identity,
-            server?.hasModelToolResultProjection()
-              ? (result) => server.projectModelToolResult(toolName, result, modelToolOutputBudget())
-              : undefined,
-          ),
-        };
-      }),
+      ...prepared.definitions
+        .filter(({ identity }) => !builtInIdentities.has(toolIdentityKey(identity)))
+        .map((definition) => {
+          const server = serversByRegistryId.get(definition.identity.serverId);
+          const toolName = definition.identity.toolName;
+          return {
+            ...definition,
+            execute: wrapAttemptToolExecute(
+              async (argumentsValue, context) => await definition.execute(argumentsValue, context),
+              options.spillOversizedModelToolResult,
+              definition.identity,
+              server?.hasModelToolResultProjection()
+                ? (result) =>
+                    server.projectModelToolResult(toolName, result, modelToolOutputBudget())
+                : undefined,
+            ),
+          };
+        }),
       ...wrapAttemptToolDefinitions(
         options.attemptToolDefinitions ?? [],
         options.spillOversizedModelToolResult,
@@ -7707,15 +7780,9 @@ function installAttemptConnectorActionGatewayLifecycle(
   accountLabels?: ReadonlyMap<string, McpAccountRouteLabel>,
   reviewReaders?: ReadonlyMap<string, ToolReviewReader>,
 ): AttemptToolDefinition[] {
-  const byModelName = new Map<string, AttemptConnectorActionBinding>();
-  for (const binding of bindings) {
-    if (byModelName.has(binding.modelName)) {
-      throw new Error(`Duplicate attempt connector action binding: ${binding.modelName}`);
-    }
-    byModelName.set(binding.modelName, binding);
-  }
+  const byIdentity = connectorActionBindingsByIdentity(bindings);
   return definitions.map((definition) => {
-    const binding = byModelName.get(definition.modelName);
+    const binding = byIdentity.get(toolIdentityKey(definition.identity));
     const config = registry.get(definition.identity.serverId);
     const legacyMcpApproval =
       Boolean(config) && !config!.connectionRef && definition.approval === "human";
@@ -8016,6 +8083,8 @@ async function prepareToolGatewayDefinitionsFromServers(
   callIdentity?: McpCallIdentity,
   externalIdentityTargets: readonly { id: string; url: string }[] = [],
   runMcpCredentials?: RunMcpCredentials,
+  /** Codemode paths use each server's readable namespace (an agent attempt), not its id. */
+  readablePaths = false,
 ): Promise<{
   servers: { server: PrefixedMcpServer; config: Settings["mcpServers"][number] }[];
   definitions: ToolGatewayDefinition[];
@@ -8068,7 +8137,14 @@ async function prepareToolGatewayDefinitionsFromServers(
         return {
           identity: { serverId: server.registryId, toolName },
           modelName: tool.name,
-          codemodePath: attemptToolCodemodePath(server.registryId, toolName),
+          // Agents call a tool by its readable `server.tool` path. Published
+          // Sites address workspace tools by `[server id, tool]` paths derived
+          // from identity alone (workspace-tool-target), so those stay as they are.
+          codemodePath: attemptToolCodemodePath(
+            server.registryId,
+            toolName,
+            readablePaths ? server.namespace : server.registryId,
+          ),
           ...(tool.title ? { title: tool.title } : {}),
           ...(tool.description ? { description: tool.description } : {}),
           inputSchema: tool.inputSchema,
@@ -8196,7 +8272,12 @@ export function attemptToolCallMeta(
   };
 }
 
-function attemptToolCodemodePath(serverId: string, toolName: string): readonly string[] {
+/** `[server, tool]`, where server is the server's namespace (mcpServerNamespace). */
+function attemptToolCodemodePath(
+  serverId: string,
+  toolName: string,
+  namespace = serverId,
+): readonly string[] {
   if (serverId === "opengeni") {
     const path =
       EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS[
@@ -8204,7 +8285,7 @@ function attemptToolCodemodePath(serverId: string, toolName: string): readonly s
       ];
     if (path) return path;
   }
-  return [serverId, toolName];
+  return [namespace, toolName];
 }
 
 type PreparedMcpOperationRecovery = {
@@ -10226,6 +10307,7 @@ class AttemptDefinitionMcpServer implements MCPServer {
   readonly name = "opengeni-attempt-local-tools";
   private readonly tools: RuntimeMcpTool[];
   private readonly catalogIdentities = new Map<string, ToolCallCatalogIdentity>();
+  private readonly disclosures = new Map<string, NonNullable<AttemptToolDefinition["discloses"]>>();
   private environment: AttemptToolEnvironment | null = null;
   private environmentProvider: (() => Promise<AttemptToolEnvironment>) | null = null;
   private closed = false;
@@ -10260,6 +10342,7 @@ class AttemptDefinitionMcpServer implements MCPServer {
         identity: definition.identity,
         source: definition.source,
       });
+      if (definition.discloses) this.disclosures.set(definition.modelName, definition.discloses);
     }
     if (fitted.dropped.length > 0) {
       console.warn("[mcp] built-in tools left out of this turn's tool list", {
@@ -10276,6 +10359,11 @@ class AttemptDefinitionMcpServer implements MCPServer {
   /** Canonical identity behind one model-visible name, for analytics only. */
   toolCatalogIdentity(modelName: string): ToolCallCatalogIdentity | undefined {
     return this.catalogIdentities.get(modelName);
+  }
+
+  /** The tools a model call of this tool makes available (see AttemptToolDefinition.discloses). */
+  callDisclosure(modelName: string): AttemptToolDefinition["discloses"] {
+    return this.disclosures.get(modelName);
   }
 
   bindAttemptToolEnvironment(environment: AttemptToolEnvironment): void {
@@ -10373,6 +10461,14 @@ export class PrefixedMcpServer implements MCPServer {
   readonly name: string;
   readonly prefix: string;
   readonly registryId: string;
+  /**
+   * This server's namespace (mcpServerNamespace): the `server` in its tools'
+   * `<server>__<tool>` wire names and Codemode paths. It depends only on the
+   * server's identity.
+   */
+  readonly namespace: string;
+  /** The namespace without its identity tag, one way to ask for its tools. */
+  readonly namespaceBase: string;
   private readonly allowedTools: Set<string> | undefined;
   // Best-effort servers (optional refs, connectionRef-backed capability MCPs,
   // codex_apps) must never fail a turn: a tools/list throw degrades to zero
@@ -10412,6 +10508,20 @@ export class PrefixedMcpServer implements MCPServer {
 
   toolDisplayMetadata(name: string): ToolDisplayMetadata | undefined {
     return this.displayMetadata.get(name);
+  }
+
+  /** What a listed tool's reference names resolve by (mcpToolReferenceMatches). */
+  toolReference(name: string): McpToolReference | undefined {
+    const toolName = this.originalToolNames.get(name);
+    return toolName === undefined
+      ? undefined
+      : {
+          wireName: name,
+          namespace: this.namespace,
+          namespaceBase: this.namespaceBase,
+          registryId: this.registryId,
+          toolName,
+        };
   }
 
   /** The connected account this server reaches, when it is an account route. */
@@ -10477,6 +10587,9 @@ export class PrefixedMcpServer implements MCPServer {
     // headers, provider bodies, or other credential-bearing data.
     this.name = `${MCP_SDK_LIFECYCLE_NAME}:${safeMcpServerIdentity(registryId)}`;
     this.prefix = prefixedMcpToolName(registryId, "");
+    const own = mcpServerNamespace(registryId, accountLabel?.connector);
+    this.namespace = own.namespace;
+    this.namespaceBase = own.base;
     // This wrapper already freezes one exact tools/list promise per prepared
     // attempt. The Agents SDK process-global cache is keyed by this stable
     // registry name and therefore cannot represent attempt-scoped allowlists.
@@ -10742,8 +10855,15 @@ export class PrefixedMcpServer implements MCPServer {
               listedNames.has(parameter.resolver.toolName),
             );
       this.accountParameterTools.clear();
-      const exposed = uniqueListedMcpTools(this.registryId, tools)
-        .filter((tool) => this.isAllowed(tool.name))
+      const allowed = uniqueListedMcpTools(this.registryId, tools).filter((tool) =>
+        this.isAllowed(tool.name),
+      );
+      const wireNames = mcpWireToolNames(
+        this.registryId,
+        this.namespace,
+        allowed.map((tool) => tool.name),
+      );
+      const exposed = allowed
         .map((tool) => {
           // Opengeni's own server validates every UUID itself; the model needs
           // only `format: "uuid"`, not the regular expression repeating it.
@@ -10758,7 +10878,7 @@ export class PrefixedMcpServer implements MCPServer {
             this.accountParameterTools.set(tool.name, defaults.filled);
             tool = { ...tool, inputSchema: defaults.inputSchema as RuntimeMcpTool["inputSchema"] };
           }
-          const name = prefixedMcpToolName(this.registryId, tool.name);
+          const name = wireNames.get(tool.name) ?? prefixedMcpToolName(this.registryId, tool.name);
           const prior = this.originalToolNames.get(name);
           if (prior !== undefined && prior !== tool.name) {
             // Two different names would share one model name and so one
@@ -10786,7 +10906,6 @@ export class PrefixedMcpServer implements MCPServer {
               : {}),
           };
           this.displayMetadata.set(name, display);
-          this.displayMetadata.set(legacyMcpToolDigest(this.registryId, tool.name), display);
           return {
             ...tool,
             name,
@@ -10946,6 +11065,9 @@ export class PrefixedMcpServer implements MCPServer {
     // A tool this server listed but left out of this turn (over a limit, or
     // its name is another server's) is unavailable here, never rerouted.
     if (this.omittedModelNames.has(toolName)) throw new ToolGatewayToolNotFoundError();
+    // A model name is defined by this turn's listing, so a call that arrives
+    // first (a deferred server's first demand) waits for it.
+    if (!this.originalToolNames.has(toolName)) await this.listTools();
     const unprefixed = this.unprefixToolName(toolName);
     if (!this.isAllowed(unprefixed)) {
       throw new Error(`MCP tool ${unprefixed} is not allowed for server ${this.registryId}`);
@@ -11447,14 +11569,16 @@ export class PrefixedMcpServer implements MCPServer {
     const rawPrefix = sharedPrefixedMcpToolName(this.registryId, "");
     if (toolName.startsWith(rawPrefix)) {
       const candidate = toolName.slice(rawPrefix.length);
-      if (
-        this.originalToolNames.get(prefixedMcpToolName(this.registryId, candidate)) === candidate
-      ) {
+      if ([...this.originalToolNames.values()].includes(candidate)) {
         return candidate;
       }
     }
-    if (!this.prefix.endsWith("__") || !toolName.startsWith(this.prefix)) {
-      throw new Error(`MCP tool ${toolName} is missing expected ${this.registryId} prefix`);
+    if (
+      !keepsServerPrefixedToolNames(this.registryId) ||
+      !this.prefix.endsWith("__") ||
+      !toolName.startsWith(this.prefix)
+    ) {
+      throw new Error(`MCP tool ${toolName} is not one of the tools ${this.registryId} lists`);
     }
     return toolName.slice(this.prefix.length);
   }
@@ -11487,7 +11611,8 @@ export async function restoreInterruptedRunState(
     clientToolSearchRehydration: "preserve_history",
     resolveMissingFunctionTool: commandCompletionToolResolver(
       agent,
-      repeatGuardedToolResolver(agent, mcpToolResolverForAgent(agent)),
+      // A call that awaited approval under a tool's former name runs that tool.
+      repeatGuardedToolResolver(agent, mcpToolResolverForAgent(agent, "bind")),
     ),
   });
 }
@@ -12640,9 +12765,62 @@ function warnMcpModelNameCollision(modelName: string, keptOwner: string, skipped
   });
 }
 
-/** Old hashes are aliases only for an exact tool in the current authorized
- * catalog. Never recover tools from history, labels, URLs, or a different account. */
-function mcpToolResolverForAgent(agent: Agent<any, any>) {
+/**
+ * The current model name of the listed tool whose former name
+ * (isFormerMcpToolName) is `name`, or undefined when no listed tool, or more
+ * than one, had it. Only an exact tool in the current authorized catalog
+ * qualifies: never one recovered from history, labels, URLs or another account.
+ */
+async function currentNameOfFormerMcpTool(
+  agent: Agent<any, any>,
+  name: string,
+): Promise<string | undefined> {
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(name)) return undefined;
+  let current: string | undefined;
+  for (const server of agent.mcpServers) {
+    if (!(server instanceof PrefixedMcpServer || server instanceof DeferredPreparedMcpServer))
+      continue;
+    for (const descriptor of await server.listTools()) {
+      if (descriptor.name === name) return undefined;
+      const rawName = await server.unprefixedToolName(descriptor.name);
+      if (!isFormerMcpToolName(server.registryId, rawName, name)) continue;
+      if (current !== undefined && current !== descriptor.name) {
+        // One former name, two tools: resolve to neither rather than guess.
+        warnMcpModelNameCollision(name, current, descriptor.name);
+        return undefined;
+      }
+      current = descriptor.name;
+    }
+  }
+  return current;
+}
+
+/**
+ * The result of calling a tool by its former name: which name to call now.
+ * Nothing runs; the model calls the tool again by its current name.
+ */
+function renamedToolNotice(formerName: string, currentName: string) {
+  return agentTool({
+    name: formerName,
+    description: `Former name of ${currentName}.`,
+    parameters: { type: "object", properties: {}, required: [], additionalProperties: true },
+    strict: false,
+    execute: async () =>
+      `Nothing ran: ${formerName} is this tool's former name. Call it as ${currentName}.`,
+  });
+}
+
+/**
+ * Resolves a call to a name the agent does not list: a remembered deferred
+ * tool, a first-party tool by its bare name, or a tool's former name. A call
+ * stored under a former name (one awaiting approval when tools were renamed)
+ * binds to the same tool when `formerNames` is "bind"; a new call by a former
+ * name runs nothing and returns the current name ("explain").
+ */
+function mcpToolResolverForAgent(
+  agent: Agent<any, any>,
+  formerNames: "bind" | "explain" = "explain",
+) {
   const lazyRuntime = lazyToolRuntimeForAgent(agent);
   const resolveCurrent = lazyRuntime ? createResolveMissingFunctionTool(lazyRuntime) : null;
   return async (input: { name: string; toolCall?: unknown }) => {
@@ -12650,26 +12828,22 @@ function mcpToolResolverForAgent(agent: Agent<any, any>) {
     if (current) return current;
     const bare = await resolveBareFirstPartyToolCall(agent, input, resolveCurrent);
     if (bare) return bare;
-    if (!/^[a-f0-9]{64}$/.test(input.name)) return null;
-    const tools = await agent.getMcpTools(new RunContext());
-    let resolvedName: string | undefined;
-    for (const server of agent.mcpServers) {
-      if (!(server instanceof PrefixedMcpServer || server instanceof DeferredPreparedMcpServer))
-        continue;
-      for (const descriptor of await server.listTools()) {
-        const rawName = await server.unprefixedToolName(descriptor.name);
-        if (legacyMcpToolDigest(server.registryId, rawName) !== input.name) continue;
-        if (resolvedName !== undefined && resolvedName !== descriptor.name) {
-          // Ambiguous old alias: resolve to no tool rather than guess one.
-          warnMcpModelNameCollision(input.name, resolvedName, descriptor.name);
-          return null;
-        }
-        resolvedName = descriptor.name;
-      }
+    let renamed: string | undefined;
+    try {
+      renamed = await currentNameOfFormerMcpTool(agent, input.name);
+    } catch {
+      // Without every catalog the former name cannot be proven; keep not-found.
+      return null;
     }
-    const tool = tools.find(
-      (candidate) => candidate.type === "function" && candidate.name === resolvedName,
-    );
+    if (renamed === undefined) return null;
+    if (formerNames === "explain") {
+      return renamedToolNotice(input.name, renamed) as unknown as FunctionTool<any, any, any>;
+    }
+    const tool = resolveCurrent
+      ? await resolveCurrent({ name: renamed })
+      : (await agent.getMcpTools(new RunContext())).find(
+          (candidate) => candidate.type === "function" && candidate.name === renamed,
+        );
     return tool?.type === "function" ? { ...tool, name: input.name } : null;
   };
 }

@@ -8,7 +8,6 @@ import { createTurnContext } from "../src/activities/agent-turn/turn-context";
 import {
   buildOpenGeniAgent,
   type ConnectorActionPolicyHooks,
-  prefixedMcpToolName,
   prepareAgentTools,
   restoreInterruptedRunState,
   runAgentStream,
@@ -177,7 +176,15 @@ test.each(["approve", "reject", "legacy approve", "legacy reject"] as const)(
         },
       );
     let prepared = await prepare();
+    // A connected account's tool carries its connector and an account tag (no
+    // connector label here, so `account`): `<namespace>__search_documents`.
+    const currentName = () =>
+      prepared.attemptToolCatalog!.entries.find(
+        (entry) =>
+          entry.identity.serverId === serverId && entry.identity.toolName === "search_documents",
+      )!.modelName;
     try {
+      expect(currentName()).toBe("account_aaaaaa__search_documents");
       const settings = canonical;
       const callId = "account-call";
       const agent = await buildWorkerAgent(
@@ -187,17 +194,7 @@ test.each(["approve", "reject", "legacy approve", "legacy reject"] as const)(
         hooks,
         new ScriptedModel([
           {
-            output: [
-              functionCall(
-                decision.startsWith("legacy")
-                  ? createHash("sha256")
-                      .update(JSON.stringify([serverId, "search_documents"]))
-                      .digest("hex")
-                  : prefixedMcpToolName(serverId, "search_documents"),
-                { query: "example" },
-                callId,
-              ),
-            ],
+            output: [functionCall(currentName(), { query: "example" }, callId)],
           },
           { outputText: "done" },
         ]),
@@ -211,12 +208,21 @@ test.each(["approve", "reject", "legacy approve", "legacy reject"] as const)(
       expect(result.interruptions).toHaveLength(1);
       expect(otherMcp.calls).toHaveLength(0);
       // Rebuild both the gateway and agent: no in-memory approval Set survives.
-      const serialized = result.state.toString();
+      // A legacy call was stored before readable names, under the tool's
+      // former digest name: restoring it still binds the same account's tool.
+      const serialized = decision.startsWith("legacy")
+        ? result.state.toString().replaceAll(
+            currentName(),
+            createHash("sha256")
+              .update(JSON.stringify([serverId, "search_documents"]))
+              .digest("hex"),
+          )
+        : result.state.toString();
       await prepared.close();
       prepared = await prepare();
       await expect(
         prepared.attemptToolEnvironment!.callModel({
-          modelName: prefixedMcpToolName(serverId, "search_documents"),
+          modelName: currentName(),
           arguments: { query: "example" },
           subjectId: "worker:mcp-model",
         }),
