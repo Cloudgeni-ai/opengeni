@@ -1,11 +1,18 @@
-import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";
+import {
+  CONNECTION_LABEL_MAX_LENGTH,
+  connectionAccountIdentityLabel,
+  connectionAccountLabel,
+  normalizeConnectionLabel,
+} from "@opengeni/contracts/connection-account-label";
 import type { ConnectionMetadata } from "@opengeni/sdk";
-import { PlusIcon, RefreshCwIcon, TrashIcon } from "lucide-react";
-import { useState } from "react";
+import { PencilIcon, PlusIcon, RefreshCwIcon, TrashIcon } from "lucide-react";
+import { useEffect, useState } from "react";
 
 import { Button } from "@opengeni/react/ui/button";
 import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { Field, TextInput } from "@opengeni/react/ui/field";
+import { FormDialog } from "@opengeni/react/ui/form-dialog";
 import { MetaChip } from "@opengeni/react/ui/meta-chip";
 import { Notice } from "@opengeni/react/ui/notice";
 import { StatusBadge, type ProductStatus } from "@opengeni/react/ui/status-badge";
@@ -53,6 +60,10 @@ export type CatalogConnectedAccountsManagement = {
   onReconnect?: (account: ConnectionMetadata) => void;
   /** Disconnect exactly this account. Resolve false to keep the dialog open. */
   onRemove: (account: ConnectionMetadata) => Promise<boolean | void>;
+  /** Name exactly this account, or clear its name with null. Offered only for
+   * accounts whose service doesn't say who they are. Resolve false to keep
+   * the dialog open. */
+  onRename?: (account: ConnectionMetadata, label: string | null) => Promise<boolean | void>;
   /** Sign in a further account; omit when the connector holds a single account. */
   onAdd?: () => void;
   /** Who a further account would belong to, so Add follows the account rule. */
@@ -179,6 +190,7 @@ export function CatalogConnectedAccounts({
     label: string;
     origin: string | null;
   } | null>(null);
+  const [renameTarget, setRenameTarget] = useState<ConnectionMetadata | null>(null);
   if (
     item.kind !== "mcp" ||
     item.surfaceType === "codex_apps" ||
@@ -302,6 +314,7 @@ export function CatalogConnectedAccounts({
                   ? management.onReconnect
                   : null;
               const removable = canRemoveConnectedAccount(account, management, workspaceId);
+              const renamable = canRenameConnectedAccount(account, management, workspaceId);
               return (
                 <li
                   key={account.id}
@@ -320,7 +333,7 @@ export function CatalogConnectedAccounts({
                   ) : (
                     <StatusBadge status={ACCOUNT_STATUS[account.status]} variant="dot" />
                   )}
-                  {reconnect || removable ? (
+                  {reconnect || renamable || removable ? (
                     <div className="flex shrink-0 items-center gap-2">
                       {reconnect ? (
                         <Button
@@ -334,6 +347,20 @@ export function CatalogConnectedAccounts({
                         >
                           <RefreshCwIcon aria-hidden="true" />
                           Reconnect
+                        </Button>
+                      ) : null}
+                      {renamable ? (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="min-h-9 text-fg-muted"
+                          disabled={busy}
+                          aria-label={`Rename ${label}`}
+                          onClick={() => setRenameTarget(account)}
+                        >
+                          <PencilIcon aria-hidden="true" />
+                          Rename
                         </Button>
                       ) : null}
                       {removable ? (
@@ -384,11 +411,101 @@ export function CatalogConnectedAccounts({
           }
         />
       ) : null}
+      {management?.onRename ? (
+        <RenameAccountDialog
+          open={renameTarget !== null}
+          onOpenChange={(open) => {
+            if (!open) setRenameTarget(null);
+          }}
+          serviceName={item.name}
+          current={renameTarget?.label ?? null}
+          onRename={async (label) =>
+            renameTarget && management.onRename
+              ? await management.onRename(renameTarget, label)
+              : undefined
+          }
+        />
+      ) : null}
     </DetailSection>
+  );
+}
+
+/** Whether to offer naming this account: the viewer could sign it in again,
+ * and its service doesn't say who it is (a name never replaces a verified
+ * identity). */
+export function canRenameConnectedAccount(
+  account: ConnectionMetadata,
+  management:
+    | Pick<
+        CatalogConnectedAccountsManagement,
+        "viewerSubjectId" | "canWrite" | "canReconnectOwnIn" | "onRename"
+      >
+    | undefined,
+  workspaceId: string | undefined,
+): boolean {
+  return (
+    management?.onRename !== undefined &&
+    connectionAccountIdentityLabel(account.metadata, "") === "" &&
+    canReconnectConnectedAccount(account, management, workspaceId)
+  );
+}
+
+function RenameAccountDialog({
+  open,
+  onOpenChange,
+  serviceName,
+  current,
+  onRename,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  serviceName: string;
+  current: string | null;
+  onRename: (label: string | null) => Promise<boolean | void>;
+}) {
+  const [name, setName] = useState(current ?? "");
+  const [error, setError] = useState<string | undefined>();
+  useEffect(() => {
+    if (open) {
+      setName(current ?? "");
+      setError(undefined);
+    }
+  }, [current, open]);
+  return (
+    <FormDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      size="sm"
+      title="Name this account"
+      description={`${serviceName} doesn't say which account a key belongs to. A name tells it apart for you and your agents.`}
+      submitLabel="Save name"
+      pendingLabel="Saving…"
+      onSubmit={async () => {
+        if (Array.from(name.trim()).length > CONNECTION_LABEL_MAX_LENGTH) {
+          setError(`Keep the name under ${CONNECTION_LABEL_MAX_LENGTH} characters.`);
+          return false;
+        }
+        const label = normalizeConnectionLabel(name);
+        if (label === normalizeConnectionLabel(current)) return true;
+        return (await onRename(label)) !== false;
+      }}
+    >
+      <Field label="Name" hint="Leave it empty to remove the name." error={error}>
+        <TextInput
+          value={name}
+          placeholder="Team inbox"
+          onChange={(event) => {
+            setName(event.target.value);
+            if (error) setError(undefined);
+          }}
+          suppressAutofill
+        />
+      </Field>
+    </FormDialog>
   );
 }
 
 function connectionSignInLabel(account: ConnectionMetadata, itemName: string): string {
   if (connectedAccountSignInUnfinished(account)) return `${itemName} account`;
-  return connectionAccountIdentityLabel(account.metadata, `${itemName} account`);
+  return connectionAccountLabel(account, `${itemName} account`);
 }

@@ -1,4 +1,7 @@
-import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";
+import {
+  connectionAccountLabel,
+  distinctConnectionAccountLabels,
+} from "@opengeni/contracts/connection-account-label";
 import { createHash } from "node:crypto";
 import type { McpServerConfig } from "@opengeni/config";
 import {
@@ -18,14 +21,42 @@ export function mcpAccountRouteId(serverId: string, connectionId: string): strin
     .digest("hex")}`;
 }
 
-function accountLabel(connection: ConnectionMetadata): string {
-  const identity = connectionAccountIdentityLabel(
-    connection.metadata,
-    `${connection.providerDomain} account`,
+// "Yours" is the person the agent acts for; "Shared" is everyone in the workspace.
+function accountScope(connection: ConnectionMetadata): "Yours" | "Shared" {
+  return connection.subjectId === null ? "Shared" : "Yours";
+}
+
+/** "Connected Oct 25" (and "Connected Oct 25 14:05 UTC"), in UTC so every
+ * worker words the same account the same way. */
+function connectedOn(createdAt: string, withTime: boolean): string | null {
+  const date = new Date(createdAt);
+  if (Number.isNaN(date.getTime())) return null;
+  const day = date.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+  return withTime ? `Connected ${day} ${date.toISOString().slice(11, 16)} UTC` : `Connected ${day}`;
+}
+
+/**
+ * Each account's label among one connector's accounts: who it is (identity,
+ * else the name its owner gave it, else "<domain> account"), made distinct by
+ * when it was connected when two would read the same, then who can use it.
+ * People see the same rule in account lists (`connectionAccountRows`).
+ */
+function accountLabels(connections: readonly ConnectionMetadata[]): Map<string, string> {
+  const distinct = distinctConnectionAccountLabels(
+    connections.map((connection) => ({
+      id: connection.id,
+      label: connectionAccountLabel(connection, `${connection.providerDomain} account`),
+      scope: accountScope(connection),
+      createdAt: connection.createdAt,
+    })),
+    connectedOn,
   );
-  // "Yours" is the person the agent acts for; "Shared" is everyone in the workspace.
-  const scope = connection.subjectId === null ? "Shared" : "Yours";
-  return `${identity} · ${scope}`;
+  return new Map(
+    connections.map((connection) => [
+      connection.id,
+      `${distinct.get(connection.id)!} · ${accountScope(connection)}`,
+    ]),
+  );
 }
 
 function canonicalResource(value: string): string {
@@ -65,26 +96,33 @@ export function mcpAccountBindingsFromVisibleConnections(input: {
       (selection) => selection.serverId === server.id,
     );
     const selectedIds = new Set(selections.map((selection) => selection.connectionId));
-    for (const connection of input.connections) {
+    // Every account of this server the turn could use, whichever are chosen.
+    const usable = input.connections.filter((connection) => {
       if (
         connection.accountId !== input.accountId ||
         connection.status !== "active" ||
         connection.providerDomain.toLowerCase() !== ref.providerDomain.toLowerCase() ||
         (ref.kind && connection.kind !== ref.kind) ||
-        (ref.connectionId !== undefined && ref.connectionId !== connection.id) ||
         (ref.resource &&
           (typeof connection.metadata.resource !== "string" ||
-            canonicalResource(connection.metadata.resource) !== canonicalResource(ref.resource))) ||
-        (selectedIds.size > 0 && !selectedIds.has(connection.id))
+            canonicalResource(connection.metadata.resource) !== canonicalResource(ref.resource)))
       )
-        continue;
+        return false;
+      return connection.subjectId !== null
+        ? !!input.subjectId && connection.subjectId === input.subjectId && !!connection.authorityId
+        : connection.workspaceId === input.workspaceId;
+    });
+    // Labelled among all of them, so an account reads the same whichever
+    // accounts a turn attaches, and two that would read the same differ for
+    // the agent as they do in the UI.
+    const labels = accountLabels(usable);
+    const eligible = usable.filter(
+      (connection) =>
+        (ref.connectionId === undefined || ref.connectionId === connection.id) &&
+        (selectedIds.size === 0 || selectedIds.has(connection.id)),
+    );
+    for (const connection of eligible) {
       const personal = connection.subjectId !== null;
-      if (
-        personal
-          ? !input.subjectId || connection.subjectId !== input.subjectId || !connection.authorityId
-          : connection.workspaceId !== input.workspaceId
-      )
-        continue;
       remaining.delete(JSON.stringify([server.id, connection.id]));
       bindings.push({
         serverId: mcpAccountRouteId(server.id, connection.id),
@@ -93,7 +131,7 @@ export function mcpAccountBindingsFromVisibleConnections(input: {
         originWorkspaceId: connection.workspaceId,
         subjectScope: personal ? "subject" : "workspace",
         ownerSubjectId: connection.subjectId,
-        accountLabel: accountLabel(connection),
+        accountLabel: labels.get(connection.id)!,
         providerDomain: connection.providerDomain,
         kind: connection.kind,
         connectionRef: {

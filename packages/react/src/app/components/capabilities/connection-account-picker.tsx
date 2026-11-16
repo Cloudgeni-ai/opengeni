@@ -1,4 +1,4 @@
-import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";
+import { connectionAccountLabel as accountLabel } from "@opengeni/contracts/connection-account-label";
 import type { ConnectionMetadata } from "@opengeni/sdk";
 import { useOptionalAppContext } from "../../app-context";
 import { DropdownMenuItem } from "../../../ui/dropdown-menu";
@@ -11,7 +11,7 @@ import type {
 } from "./session-connection-accounts";
 
 export function connectionAccountLabel(account: ConnectionMetadata, fallback: string): string {
-  return connectionAccountIdentityLabel(account.metadata, fallback);
+  return accountLabel(account, fallback);
 }
 
 export type ConnectionAccountPickerProps = {

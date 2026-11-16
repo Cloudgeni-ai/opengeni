@@ -39,6 +39,45 @@ mock.module("@opengeni/react/ui/confirm-dialog", () => ({
     ) : null,
 }));
 
+// Same for the form dialog: render its fields and submit inline.
+mock.module("@opengeni/react/ui/form-dialog", () => ({
+  FormDialog: ({
+    open,
+    title,
+    description,
+    submitLabel,
+    children,
+    onOpenChange,
+    onSubmit,
+  }: {
+    open: boolean;
+    title: ReactNode;
+    description?: ReactNode;
+    submitLabel: ReactNode;
+    children?: ReactNode;
+    onOpenChange: (open: boolean) => void;
+    onSubmit: () => Promise<boolean | void>;
+  }) =>
+    open ? (
+      <div role="dialog">
+        <p>{title}</p>
+        {description ? <p>{description}</p> : null}
+        {children}
+        <button
+          type="button"
+          onClick={() => {
+            void (async () => {
+              const result = await onSubmit();
+              if (result !== false) onOpenChange(false);
+            })();
+          }}
+        >
+          {submitLabel}
+        </button>
+      </div>
+    ) : null,
+}));
+
 const { CatalogConnectedAccounts } = await import("./catalog-connected-accounts");
 const { catalogAddAccountOwnership } = await import("./catalog-item-page");
 type CatalogConnectedAccountsManagement =
@@ -516,6 +555,138 @@ describe("catalog connected accounts", () => {
       );
       expect(buttons(view.container)).toEqual(["Remove mine@example.test"]);
       await view.unmount();
+    });
+
+    describe("naming an account", () => {
+      const keyItem = {
+        ...item,
+        name: "Example MCP",
+        authKind: "api_key",
+        mcpUrl: "https://mcp.example.test/mcp",
+        connectionRef: { providerDomain: "mcp.example.test", kind: "api_key" },
+      } as CapabilityCatalogItem;
+      const key = (overrides: Partial<ConnectionMetadata> = {}) =>
+        account({
+          providerDomain: "mcp.example.test",
+          kind: "api_key",
+          metadata: { mcpUrl: keyItem.mcpUrl, resource: keyItem.mcpUrl },
+          ...overrides,
+        });
+      async function type(input: HTMLInputElement, value: string) {
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+        await act(async () => {
+          input.focus();
+          setter.call(input, value);
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          // React DOM loaded before the DOM shim here, so it watches the
+          // focused field's keys instead of input events.
+          input.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true }));
+        });
+      }
+
+      test("a named key shows its name; unnamed keys say when each was connected", async () => {
+        const view = await render(
+          <CatalogConnectedAccounts
+            item={keyItem}
+            connections={[
+              key({ label: "Team inbox" }),
+              key({ createdAt: "2026-10-01T09:00:00Z" }),
+              key({ createdAt: "2026-10-20T09:00:00Z" }),
+            ]}
+          />,
+        );
+        const labels = [...view.container.querySelectorAll("li p")].map((node) => node.textContent);
+        expect(labels[0]).toBe("Team inbox");
+        expect(new Set(labels).size).toBe(3);
+        for (const label of labels.slice(1))
+          expect(label).toMatch(/^Example MCP account · Connected /);
+        await view.unmount();
+      });
+
+      test("Rename is offered only where the service doesn't say who the account is", async () => {
+        const identified = account({ metadata: { email: "known@example.test" } });
+        const unnamed = key();
+        const others = key({ subjectId: "someone-else" });
+        const view = await render(
+          <CatalogConnectedAccounts
+            item={keyItem}
+            connections={[unnamed, others]}
+            management={management({ onRename: mock(async () => true) })}
+          />,
+        );
+        // Your own unnamed key can be named; another person's key is theirs to name.
+        const renames = buttons(view.container).filter((label) => label?.startsWith("Rename"));
+        expect(renames).toHaveLength(1);
+        expect(renames[0]).toStartWith("Rename Example MCP account");
+        await view.unmount();
+        const oauth = await render(
+          <CatalogConnectedAccounts
+            item={item}
+            connections={[identified]}
+            management={management({ onRename: mock(async () => true) })}
+          />,
+        );
+        expect(buttons(oauth.container)).not.toContain("Rename known@example.test");
+        await oauth.unmount();
+        const withoutRename = await render(
+          <CatalogConnectedAccounts
+            item={keyItem}
+            connections={[unnamed]}
+            management={management()}
+          />,
+        );
+        expect(buttons(withoutRename.container).some((label) => label?.startsWith("Rename"))).toBe(
+          false,
+        );
+        await withoutRename.unmount();
+      });
+
+      test("Rename saves a trimmed name for exactly that account; blank removes it", async () => {
+        const target = key({ label: "Old name" });
+        const onRename = mock(async () => true);
+        const view = await render(
+          <CatalogConnectedAccounts
+            item={keyItem}
+            connections={[key(), target]}
+            management={management({ onRename })}
+          />,
+        );
+        const open = async () =>
+          act(async () =>
+            (
+              view.container.querySelector(
+                'button[aria-label="Rename Old name"]',
+              ) as HTMLButtonElement
+            ).click(),
+          );
+        const save = async () => {
+          const dialog = document.querySelector('[role="dialog"]')!;
+          const button = [...dialog.querySelectorAll("button")].find(
+            (candidate) => candidate.textContent === "Save name",
+          )!;
+          await act(async () => button.click());
+        };
+        await open();
+        const dialog = document.querySelector('[role="dialog"]')!;
+        expect(dialog.textContent).toContain("Name this account");
+        const input = dialog.querySelector("input") as HTMLInputElement;
+        expect(input.value).toBe("Old name");
+        // Unchanged: nothing to save.
+        await save();
+        expect(onRename).not.toHaveBeenCalled();
+        await open();
+        await type(
+          document.querySelector('[role="dialog"] input') as HTMLInputElement,
+          "  Team inbox ",
+        );
+        await save();
+        expect(onRename).toHaveBeenCalledWith(target, "Team inbox");
+        await open();
+        await type(document.querySelector('[role="dialog"] input') as HTMLInputElement, "   ");
+        await save();
+        expect(onRename).toHaveBeenLastCalledWith(target, null);
+        await view.unmount();
+      });
     });
 
     test("accounts that would read the same say when each was connected", async () => {

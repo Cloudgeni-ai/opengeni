@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import type { ConnectionMetadata } from "@opengeni/contracts";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mcpAccountRouteId, type McpCapabilityProbeInput } from "@opengeni/core";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
@@ -994,7 +995,11 @@ describe("connections routes", () => {
       expect(attempt.ownership).toBe(ownership);
       expect(attempt.nextAction).toEqual({
         type: "credentials",
-        fields: [{ name: "key", label: "API key", required: true, secret: true }],
+        fields: [
+          { name: "key", label: "API key", required: true, secret: true },
+          // The optional name is not a requested secret.
+          { name: "connection-label", label: "Name (optional)", required: false, secret: false },
+        ],
       });
       expect(await (await begin()).json()).toEqual(attempt);
       expect(await (await api.request(`${base}/${attempt.id}`, { headers })).json()).toEqual(
@@ -1610,6 +1615,100 @@ describe("connections routes", () => {
     expect(((await revoked.json()) as { connection: { status: string } }).connection.status).toBe(
       "revoked",
     );
+  });
+
+  test("a connection's name is set on create and renamed on its own without a new version", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const writer = {
+      authorization: await bearer(workspace, "subject-a", [
+        "connections:read",
+        "connections:write",
+      ]),
+      "content-type": "application/json",
+    };
+    const base = `/v1/workspaces/${workspace.workspaceId}/connections`;
+    const create = async (label?: string) => {
+      const response = await app().request(base, {
+        method: "POST",
+        headers: writer,
+        body: JSON.stringify({
+          providerDomain: "mcp.example.com",
+          kind: "api_key",
+          ownership: "personal",
+          credential: { headers: { authorization: `Bearer ${randomUUID()}` } },
+          metadata: { mcpUrl: "https://mcp.example.com/mcp" },
+          ...(label === undefined ? {} : { label }),
+        }),
+      });
+      expect(response.status).toBe(201);
+      return ((await response.json()) as { connection: ConnectionMetadata }).connection;
+    };
+    const rename = (id: string, body: Record<string, unknown>, headers = writer) =>
+      app().request(`${base}/${id}`, { method: "PATCH", headers, body: JSON.stringify(body) });
+
+    const named = await create("  Team\ninbox ");
+    expect(named.label).toBe("Team inbox");
+    const unnamed = await create();
+    expect(unnamed.label).toBeUndefined();
+    expect((await create("   ")).label).toBeUndefined();
+
+    const renamed = await rename(unnamed.id, {
+      label: "Read-only key",
+      expectedVersion: unnamed.version,
+    });
+    expect(renamed.status).toBe(200);
+    const renamedBody = ((await renamed.json()) as { connection: ConnectionMetadata }).connection;
+    expect(renamedBody.label).toBe("Read-only key");
+    // Display only: the credential's version (and authority) stay as they were.
+    expect(renamedBody.version).toBe(unnamed.version);
+    const [authority] = await shared!.admin<{ authority_generation: string }[]>`
+      select authority_generation::text from connections where id = ${unnamed.id}::uuid`;
+    expect(authority?.authority_generation).toBe("1");
+    const listed = (await (await app().request(base, { headers: writer })).json()) as {
+      connections: ConnectionMetadata[];
+    };
+    expect(listed.connections.find((connection) => connection.id === unnamed.id)?.label).toBe(
+      "Read-only key",
+    );
+
+    // null removes the name.
+    const cleared = await rename(unnamed.id, { label: null });
+    expect(cleared.status).toBe(200);
+    expect(
+      ((await cleared.json()) as { connection: ConnectionMetadata }).connection.label,
+    ).toBeUndefined();
+
+    // A rename never rides along with another change.
+    expect(
+      (await rename(named.id, { label: "Other", metadata: { mcpUrl: "https://x.example.com" } }))
+        .status,
+    ).toBe(422);
+    // Too long is refused, not cut silently.
+    expect((await rename(named.id, { label: "x".repeat(81) })).status).toBe(400);
+    // A stale version is refused; a missing connection is not found.
+    expect(
+      (await rename(named.id, { label: "Other", expectedVersion: named.version + 5 })).status,
+    ).toBe(409);
+    expect((await rename(randomUUID(), { label: "Other" })).status).toBe(404);
+    // Another person's own connection is not theirs to name.
+    const other = {
+      authorization: await bearer(workspace, "subject-b", [
+        "connections:read",
+        "connections:write",
+      ]),
+      "content-type": "application/json",
+    };
+    expect((await rename(named.id, { label: "Mine now" }, other)).status).toBe(404);
+    // Reading needs no more than before; renaming needs connections:write.
+    const reader = {
+      authorization: await bearer(workspace, "subject-a", ["connections:read"]),
+      "content-type": "application/json",
+    };
+    expect((await rename(named.id, { label: "Other" }, reader)).status).toBe(403);
+    const [stored] = await shared!.admin<{ label: string | null }[]>`
+      select label from connections where id = ${named.id}::uuid`;
+    expect(stored?.label).toBe("Team inbox");
   });
 
   test("Gateway creates converge and disconnect revokes every legacy active duplicate", async () => {
@@ -3280,6 +3379,13 @@ describe("connections routes", () => {
         required: true,
         secret: true,
       });
+      // A key doesn't say which account it is, so the person may name it.
+      expect(manual.nextAction.fields).toContainEqual({
+        name: "connection-label",
+        label: "Name (optional)",
+        required: false,
+        secret: false,
+      });
       const manualInput = {
         expectedRevision: manual.revision,
         idempotencyKey: randomUUID(),
@@ -3288,6 +3394,7 @@ describe("connections routes", () => {
           values: {
             mcpUrl: "https://mcp.fixture.invalid/tools",
             token: "synthetic-bearer-never-echoed",
+            "connection-label": "  Team inbox ",
           },
         },
       };
@@ -3303,6 +3410,7 @@ describe("connections routes", () => {
       expect(manualResult.state).toBe("complete");
       expect(manualResult.credentialsCommitted).toBe(true);
       expect(manualResult.integrationInstalled).toBe(false);
+      expect(manualResult.account.label).toBe("Team inbox");
       expect(JSON.stringify(manualResult)).not.toContain("synthetic-bearer-never-echoed");
       const replayedManual = await submitManual();
       expect(replayedManual.status).toBe(200);
@@ -3327,6 +3435,12 @@ describe("connections routes", () => {
       });
       expect(reconnectManual.status).toBe(200);
       const manualAgain = await reconnectManual.json();
+      expect(manualAgain.nextAction.fields).toContainEqual({
+        name: "connection-label",
+        label: "Name (optional, keeps the current one)",
+        required: false,
+        secret: false,
+      });
       for (const url of [
         "http://mcp.fixture.invalid/tools",
         "https://secret@mcp.fixture.invalid/tools",
@@ -3352,7 +3466,11 @@ describe("connections routes", () => {
           idempotencyKey: randomUUID(),
           action: {
             type: "credentials",
-            values: { mcpUrl: "https://mcp.fixture.invalid/tools", token: "synthetic-new-token" },
+            values: {
+              mcpUrl: "https://mcp.fixture.invalid/tools",
+              token: "synthetic-new-token",
+              "connection-label": " ",
+            },
           },
         }),
       });
@@ -3360,6 +3478,8 @@ describe("connections routes", () => {
       const replacedManual = await replaceManual.json();
       expect(replacedManual.account.id).toBe(manualResult.account.id);
       expect(replacedManual.account.version).toBeGreaterThan(manualResult.account.version);
+      // Replacing the key with the name left blank keeps the name.
+      expect(replacedManual.account.label).toBe("Team inbox");
     } finally {
       as.close();
       await mcp.close();

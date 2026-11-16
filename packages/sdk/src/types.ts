@@ -1120,6 +1120,12 @@ export type ConnectionMetadata = {
   verifiedInstallVersion?: number | null;
   metadata: Record<string, unknown>;
   /**
+   * The name the person gave this connection. Shown when the provider doesn't
+   * say which account it is (an API key); a provider identity such as an
+   * email always comes first. Absent when unnamed and from older servers.
+   */
+  label?: string | null | undefined;
+  /**
    * Whether this OAuth MCP account can be told apart from another account of
    * the same service: `verified` (its account is known), `reconnect` (sign in
    * again once before adding another), or `single` (the service doesn't say
@@ -1190,6 +1196,8 @@ type CreateConnectionRequestBase = {
   operationId?: string | undefined;
   /** Direct OpenAI/Azure keys only: verify the provider/model before saving. */
   verifyModelAccess?: boolean | undefined;
+  /** A name for the connection (at most 80 characters), shown when the provider gives no account identity. */
+  label?: string | null | undefined;
 };
 
 export type CreateConnectionRequest = CreateConnectionRequestBase &
@@ -1648,6 +1656,12 @@ export type UpdateConnectionRequest = {
   grantedScopes?: string[] | undefined;
   expiresAt?: string | null | undefined;
   metadata?: Record<string, unknown> | undefined;
+  /**
+   * Rename the connection (at most 80 characters); null or blank removes the
+   * name. Send it on its own: a rename never changes the credential, its
+   * version or the account already-accepted work uses.
+   */
+  label?: string | null | undefined;
   expectedVersion?: number | undefined;
   operationId?: string | undefined;
 };
