@@ -306,6 +306,9 @@ type FakeAuthorizationServer = {
   tokenRequests: URLSearchParams[];
   tokenRequestAuthHeaders: Array<string | null>;
   registrations: Record<string, unknown>[];
+  authorizeRequests: URLSearchParams[];
+  /** The provider deletes every client it registered so far. */
+  forgetRegisteredClients: () => void;
   close: () => void;
 };
 
@@ -322,12 +325,16 @@ function startFakeAuthorizationServer(
     tokenError?: string;
     tokenResponseStalls?: boolean;
     onTokenRequest?: (body: URLSearchParams) => void | Promise<void>;
+    /** Answer /authorize like Supabase: unknown client_id is HTTP 422. */
+    authorizeKnownClientsOnly?: boolean;
   } = {},
 ): FakeAuthorizationServer {
   const tokenRequests: URLSearchParams[] = [];
   const tokenRequestAuthHeaders: Array<string | null> = [];
   const registrations: Record<string, unknown>[] = [];
   const issuerRootRequests: string[] = [];
+  const authorizeRequests: URLSearchParams[] = [];
+  const forgotten = new Set<string>();
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -337,6 +344,14 @@ function startFakeAuthorizationServer(
       if (url.pathname === "/") {
         issuerRootRequests.push(url.toString());
         return new Response("human documentation", { status: 200 });
+      }
+      if (url.pathname === "/authorize" && options.authorizeKnownClientsOnly) {
+        authorizeRequests.push(url.searchParams);
+        const clientId = url.searchParams.get("client_id") ?? "";
+        const registered = Number(clientId.split("/registered-client/")[1] ?? "0");
+        return registered >= 1 && registered <= registrations.length && !forgotten.has(clientId)
+          ? new Response(null, { status: 303, headers: { location: `${origin}/consent` } })
+          : Response.json({ message: "Unrecognized client_id" }, { status: 422 });
       }
       if (url.pathname === "/.well-known/oauth-protected-resource") {
         return Response.json({
@@ -423,6 +438,11 @@ function startFakeAuthorizationServer(
     tokenRequests,
     tokenRequestAuthHeaders,
     registrations,
+    authorizeRequests,
+    forgetRegisteredClients: () => {
+      for (let index = 1; index <= registrations.length; index += 1)
+        forgotten.add(`http://127.0.0.1:${server.port}/registered-client/${index}`);
+    },
     close: () => server.stop(true),
   };
 }
@@ -4878,6 +4898,65 @@ describe("connections routes", () => {
       expect(as.tokenRequests[0]!.has("client_secret")).toBe(false);
       expect(as.tokenRequestAuthHeaders[0]).toBeNull();
       expect(as.tokenRequests[0]!.get("resource")).toBe("urn:test:mcp");
+    } finally {
+      mcp.close();
+      as.close();
+    }
+  });
+
+  test("oauth start registers again when the provider forgot its stored DCR client", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const issuer = "https://forgetful-issuer.example.test";
+    const as = startFakeAuthorizationServer({
+      issuer,
+      clientIdMetadataDocumentSupported: false,
+      dcr: true,
+      scopesSupported: ["read"],
+      authorizeKnownClientsOnly: true,
+    });
+    const mcp = startTestMcpServer({
+      requiredAuthorization: "Bearer mcp-access-token",
+      unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource", scope="read"`,
+    });
+    const start = async () => {
+      const response = await app().request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
+        {
+          method: "POST",
+          headers: {
+            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ providerDomain: "forgetful.example.com", mcpUrl: mcp.url }),
+        },
+      );
+      const text = await response.clone().text();
+      expect(response.status, text).toBe(200);
+      const body = (await response.json()) as { authorizationUrl: string };
+      return new URL(body.authorizationUrl).searchParams.get("client_id");
+    };
+    try {
+      expect(await start()).toBe(`${as.url}/registered-client/1`);
+      // A client the provider still knows is reused, not registered again.
+      expect(await start()).toBe(`${as.url}/registered-client/1`);
+      expect(as.registrations).toHaveLength(1);
+      expect(as.authorizeRequests.map((request) => request.get("client_id"))).toEqual([
+        `${as.url}/registered-client/1`,
+      ]);
+
+      as.forgetRegisteredClients();
+      expect(await start()).toBe(`${as.url}/registered-client/2`);
+      expect(as.registrations).toHaveLength(2);
+      const stored = await loadIntegrationOAuthClient(
+        client.db,
+        settings,
+        new URL(issuer).toString(),
+      );
+      expect(stored?.clientId).toBe(`${as.url}/registered-client/2`);
+      // The new client is the one reused next time.
+      expect(await start()).toBe(`${as.url}/registered-client/2`);
+      expect(as.registrations).toHaveLength(2);
     } finally {
       mcp.close();
       as.close();
