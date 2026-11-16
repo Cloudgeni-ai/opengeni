@@ -662,6 +662,277 @@ describe("serialized document/presentation SDK integration", () => {
   }
 });
 
+describe("rejected serialized edits never brick an artifact", () => {
+  const SLIDE_ID = "0123456789abcdef0000000000000002";
+  const NODE_ID = "0123456789abcdef0000000000000003";
+  const deleteNonEmptySlide: PresentationArtifactCommandBatch = {
+    version: PRESENTATION_ARTIFACT_COMMAND_VERSION,
+    commands: [{ kind: "slide.delete", id: SLIDE_ID }],
+  };
+  const scope = {
+    namespace: editableArtifactCacheNamespace(STORAGE_AUTHORITY),
+    artifactId: ARTIFACT_ID,
+    modality: "presentation",
+  } as const;
+
+  test("refuses a kernel-rejected presentation edit before it reaches the WAL", async () => {
+    const adapter = await loadRealAdapter("presentation");
+    const snapshot = await createSlideWithContentSnapshot(adapter);
+    const storage = new MemoryEditableArtifactStorage();
+    const session = createSession(
+      "presentation",
+      adapter,
+      storage,
+      new SerializedTransport(
+        bootstrap(
+          "presentation",
+          adapter,
+          snapshot,
+          0,
+          snapshot.stateHash,
+          snapshot.nativeRevision,
+        ),
+        [],
+      ),
+    );
+    try {
+      await session.whenReady();
+      await expect(
+        session.applyPresentationCommands(deleteNonEmptySlide, {
+          clientTransactionId: "rejected.slide.delete.1",
+        }),
+      ).rejects.toThrow("presentation scene is not empty");
+      expect(await storage.listPending(scope)).toEqual([]);
+      expect(session.getView()).toMatchObject({ pendingTransactions: 0, blockedPending: [] });
+      expect(session.getView().authoringBlockedReason).toBeUndefined();
+
+      // The same intent expressed validly (empty the slide, then delete it) applies.
+      await session.applyPresentationCommands({
+        version: PRESENTATION_ARTIFACT_COMMAND_VERSION,
+        commands: [{ kind: "node.delete", id: NODE_ID }],
+      });
+      await session.applyPresentationCommands({
+        version: PRESENTATION_ARTIFACT_COMMAND_VERSION,
+        commands: [{ kind: "slide.delete", id: SLIDE_ID }],
+      });
+      const catalog = await session.queryPresentationSlideCatalog({
+        kind: "slide-catalog",
+        startSlide: 0,
+        maxSlides: 8,
+        maxTextBytes: 1_024,
+        maxBytes: 8_192,
+      });
+      expect(catalog.slides).toEqual([]);
+    } finally {
+      await session.close();
+    }
+  });
+
+  for (const replicaId of [WRITER_REPLICA_ID, REMOTE_REPLICA_ID]) {
+    test(`opens a presentation whose retained WAL holds a rejected edit (replica ${replicaId})`, async () => {
+      const adapter = await loadRealAdapter("presentation");
+      const snapshot = await createSlideWithContentSnapshot(adapter);
+      const storage = new MemoryEditableArtifactStorage();
+      // A WAL record written by an older client that persisted before validating.
+      await storage.putPending(
+        scope,
+        retainedPresentationPending(adapter, snapshot, deleteNonEmptySlide, replicaId),
+      );
+      const session = createSession(
+        "presentation",
+        adapter,
+        storage,
+        new SerializedTransport(
+          bootstrap(
+            "presentation",
+            adapter,
+            snapshot,
+            0,
+            snapshot.stateHash,
+            snapshot.nativeRevision,
+          ),
+          [],
+        ),
+      );
+      try {
+        await session.whenReady();
+        await eventually(() => session.getView().pendingTransactions === 0);
+        expect(session.getView()).toMatchObject({ blockedPending: [] });
+        expect(session.getView().authoringBlockedReason).toBeUndefined();
+        expect(await storage.listPending(scope)).toEqual([]);
+        const catalog = await session.queryPresentationSlideCatalog({
+          kind: "slide-catalog",
+          startSlide: 0,
+          maxSlides: 8,
+          maxTextBytes: 1_024,
+          maxBytes: 8_192,
+        });
+        expect(catalog.slides).toMatchObject([{ id: SLIDE_ID }]);
+
+        // Authoring continues from the discarded intent's predecessor.
+        const next = await session.applyPresentationCommands({
+          version: PRESENTATION_ARTIFACT_COMMAND_VERSION,
+          commands: [{ kind: "slide.title.set", id: SLIDE_ID, title: "Renamed" }],
+        });
+        expect(next).toMatchObject({
+          replicaCounter: 1,
+          previousLocalTransactionId: null,
+          observedHeadSequence: 0,
+        });
+      } finally {
+        await session.close();
+      }
+    });
+  }
+
+  test("keeps a valid earlier edit and drops a rejected edit with its successor", async () => {
+    const adapter = await loadRealAdapter("presentation");
+    const snapshot = await createSlideWithContentSnapshot(adapter);
+    const storage = new MemoryEditableArtifactStorage();
+    const rename = (title: string): PresentationArtifactCommandBatch => ({
+      version: PRESENTATION_ARTIFACT_COMMAND_VERSION,
+      commands: [{ kind: "slide.title.set", id: SLIDE_ID, title }],
+    });
+    const chain = [
+      { clientTransactionId: "retained.valid", batch: rename("Kept") },
+      { clientTransactionId: "retained.rejected", batch: deleteNonEmptySlide },
+      { clientTransactionId: "retained.successor", batch: rename("Dropped") },
+    ];
+    // Each entry is authored over the head its predecessors produced; the
+    // successor was authored over the (never valid) head that counted R.
+    const head = adapter.open(snapshot.bytes);
+    const revisions: EditableArtifactSerializedSnapshot["nativeRevision"][] = [];
+    try {
+      revisions.push(head.nativeRevision());
+      head.applyCommands(encodePresentationArtifactCommandBatch(chain[0]!.batch));
+      revisions.push(head.nativeRevision(), head.nativeRevision());
+    } finally {
+      head.dispose();
+    }
+    for (const [index, entry] of chain.entries()) {
+      await storage.putPending(
+        scope,
+        retainedPresentationPending(adapter, snapshot, entry.batch, WRITER_REPLICA_ID, {
+          clientTransactionId: entry.clientTransactionId,
+          replicaCounter: index + 1,
+          previousLocalTransactionId: chain[index - 1]?.clientTransactionId ?? null,
+          observedNativeRevision: revisions[index]!,
+          observedHeadSequence: index,
+        }),
+      );
+    }
+    const session = createSession(
+      "presentation",
+      adapter,
+      storage,
+      new SerializedTransport(
+        bootstrap(
+          "presentation",
+          adapter,
+          snapshot,
+          0,
+          snapshot.stateHash,
+          snapshot.nativeRevision,
+        ),
+        [],
+        () => new Promise<never>(() => undefined),
+      ),
+    );
+    try {
+      await session.whenReady();
+      await eventually(() => session.getView().pendingTransactions === 1);
+      expect((await storage.listPending(scope)).map((entry) => entry.clientTransactionId)).toEqual([
+        "retained.valid",
+      ]);
+      expect(session.getView().blockedPending).toEqual([]);
+      const next = await session.applyPresentationCommands(rename("Next"));
+      expect(next).toMatchObject({
+        replicaCounter: 2,
+        previousLocalTransactionId: "retained.valid",
+      });
+    } finally {
+      await session.close();
+    }
+  });
+
+  async function createSlideWithContentSnapshot(
+    adapter: ArtifactWorkerKernelAdapter,
+  ): Promise<EditableArtifactSerializedSnapshot> {
+    const initial = await createInitialSnapshot("presentation", adapter);
+    const session = adapter.open(initial.bytes);
+    try {
+      session.applyCommands(
+        encodePresentationArtifactCommandBatch(
+          SCENARIOS[1]!.localBatch as PresentationArtifactCommandBatch,
+        ),
+      );
+      const bytes = session.snapshot();
+      return {
+        ...initial,
+        stateHash: await session.stateHash(),
+        digest: await sha256Hex(bytes),
+        nativeRevision: session.nativeRevision(),
+        bytes,
+      };
+    } finally {
+      session.dispose();
+    }
+  }
+
+  function retainedPresentationPending(
+    adapter: ArtifactWorkerKernelAdapter,
+    snapshot: EditableArtifactSerializedSnapshot,
+    batch: PresentationArtifactCommandBatch,
+    replicaId: string,
+    chain: Readonly<{
+      clientTransactionId: string;
+      replicaCounter: number;
+      previousLocalTransactionId: string | null;
+      observedNativeRevision?: EditableArtifactSerializedSnapshot["nativeRevision"];
+      observedHeadSequence?: number;
+    }> = {
+      clientTransactionId: "retained.rejected.slide.delete",
+      replicaCounter: 1,
+      previousLocalTransactionId: null,
+    },
+  ): EditableArtifactPendingTransaction {
+    const commandBytes = encodePresentationArtifactCommandBatch(batch);
+    const {
+      observedNativeRevision = snapshot.nativeRevision,
+      observedHeadSequence = 0,
+      ...links
+    } = chain;
+    const identity = {
+      artifactId: ARTIFACT_ID,
+      ...links,
+      replicaId,
+      observedHeadSequence,
+    } as const;
+    const authored = hashEditableArtifactMutationIntent({
+      envelopeVersion: EDITABLE_ARTIFACT_INTENT_VERSION,
+      protocolVersion: adapter.protocolVersion,
+      modelSchemaVersion: adapter.modelSchemaVersion,
+      commandProtocolVersion: adapter.commandVersion,
+      ...identity,
+      causalBase: [],
+      selectiveUndoOperationIds: [],
+      commandBytes,
+    });
+    return {
+      ...identity,
+      modality: "presentation",
+      requestHash: authored.requestHash,
+      protocolVersion: adapter.protocolVersion,
+      modelSchemaVersion: adapter.modelSchemaVersion,
+      commandVersion: adapter.commandVersion,
+      commandBytes,
+      intentBytes: authored.bytes,
+      createdAt: Date.now(),
+      observedNativeRevision,
+    };
+  }
+});
+
 function createSession(
   modality: EditableArtifactSerializedModality,
   adapter: ArtifactWorkerKernelAdapter,
