@@ -765,6 +765,7 @@ export function registerEditableArtifactRoutes(
     const body = await parseBoundedVersionRequest(context);
     const scope = editableArtifactScope({ accountId: grant.accountId, workspaceId });
     const actor = editableArtifactActorForGrant(grant, body.replicaId);
+    await requireActiveArtifact(deps, { scope, actor, artifactId });
     try {
       const result = await requireEditableArtifactExports(deps).pinVersion({
         scope,
@@ -791,6 +792,7 @@ export function registerEditableArtifactRoutes(
     const body = await parseBoundedMaterializationRequest(context);
     const scope = editableArtifactScope({ accountId: grant.accountId, workspaceId });
     const actor = editableArtifactActorForGrant(grant, body.replicaId);
+    await requireActiveArtifact(deps, { scope, actor, artifactId });
     // Without a materializer workload the job would stay queued forever.
     if (!deps.settings.artifactMaterializerDeployed) {
       throw new ApiHttpError(503, {
@@ -910,6 +912,20 @@ function requireEditableArtifactApplication(
     throw editableArtifactHttpError(new EditableArtifactApplicationError("unavailable"));
   }
   return deps.editableArtifacts;
+}
+
+// A deleted (archived) artifact reads as missing, so it can't be exported either.
+async function requireActiveArtifact(
+  deps: EditableArtifactRouteDependencies,
+  input: Parameters<EditableArtifactApplicationPort["readArtifact"]>[0],
+): Promise<void> {
+  let artifact: EditableArtifact;
+  try {
+    artifact = await requireEditableArtifactApplication(deps).readArtifact(input);
+  } catch (error) {
+    throw editableArtifactHttpError(error);
+  }
+  if (artifact.lifecycle !== "active") throw applicationHttpError("not_found");
 }
 
 function requireEditableArtifactExports(

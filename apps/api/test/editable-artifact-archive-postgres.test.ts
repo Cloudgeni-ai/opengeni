@@ -190,6 +190,24 @@ test("archiving removes a presentation from Artifacts, is idempotent and needs t
 
   // It is removed: it no longer opens and leaves the Artifacts list.
   expect((await open(manager)).status).toBe(404);
+  // Nor can it be exported.
+  const exportRequest = async (path: string, fields: Record<string, unknown>) =>
+    await app.request(
+      `/v1/workspaces/${scope.workspaceId}/editable-artifacts/${artifact.id}/${path}`,
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${manager}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          replicaId: "aaaaaaaaaaaaaaaa",
+          idempotencyKey: "export-1",
+          ...body,
+        }),
+      },
+    );
+  expect((await exportRequest("versions", { name: "Deleted" })).status).toBe(404);
+  expect(
+    (await exportRequest("materializations", { versionId: "1".repeat(32), format: "pptx" })).status,
+  ).toBe(404);
   await expect(
     application.mintLiveTicket({
       scope,

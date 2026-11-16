@@ -287,7 +287,8 @@ function ArtifactListRoute({
                 ? async (item) => {
                     await context.client.archiveEditableArtifact(workspaceId, item.id);
                     invalidateAfterMutation();
-                    await catalog.refresh();
+                    // The delete already succeeded; a failed refresh must not report it failed.
+                    void catalog.refresh().catch(() => undefined);
                   }
                 : undefined
             }
