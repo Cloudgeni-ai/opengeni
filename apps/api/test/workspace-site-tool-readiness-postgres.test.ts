@@ -53,7 +53,18 @@ const unreachableUrl = "http://127.0.0.1:9/mcp";
 const canonical = { serverId: "grafana", toolName: "search_documents" };
 const human: TargetGatewayOptions = { reauthorize: async () => undefined };
 
-async function fixture() {
+/** A connector (and the one account serving it) other than the default. */
+type FixtureConnector = {
+  server: ReturnType<typeof testSettings>["mcpServers"][number];
+  tool: typeof canonical;
+  providerDomain: string;
+  kind: "api_key" | "oauth2";
+  grantedScopes?: string[];
+  metadata: Record<string, unknown>;
+};
+
+async function fixture(connector?: FixtureConnector) {
+  const tool = connector?.tool ?? canonical;
   const db = client!.db;
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(db, {
@@ -70,7 +81,7 @@ async function fixture() {
     productAccessMode: "configured",
     environmentsEncryptionKey: encryptionKey,
     mcpServers: [
-      {
+      connector?.server ?? {
         id: "grafana",
         url: unreachableUrl,
         cacheToolsList: false,
@@ -86,13 +97,14 @@ async function fixture() {
   const connection = await createConnection(db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
-    providerDomain: "127.0.0.1",
-    kind: "api_key",
+    providerDomain: connector?.providerDomain ?? "127.0.0.1",
+    kind: connector?.kind ?? "api_key",
+    ...(connector?.grantedScopes ? { grantedScopes: connector.grantedScopes } : {}),
     credentialEncrypted: encryptEnvironmentValue(
       environmentsEncryptionKeyBytes(settings)!,
       JSON.stringify({ headers: { authorization: "Bearer readiness-token" } }),
     ),
-    metadata: { displayName: "Shared Grafana" },
+    metadata: connector?.metadata ?? { displayName: "Shared Grafana" },
     createdBySubjectId: grant.subjectId,
   });
   const artifactId = crypto.randomUUID();
@@ -111,7 +123,7 @@ async function fixture() {
     sourceKey: null,
     sourceSha256: null,
     sourceSizeBytes: null,
-    requestedTools: [canonical],
+    requestedTools: [tool],
     operationKey: `readiness-site-${artifactId}`,
     actorSubjectId: grant.subjectId,
     sourceSessionId: null,
@@ -131,7 +143,7 @@ async function fixture() {
       await describeWorkspaceSiteToolReadiness(
         deps,
         authorization,
-        { ...site, targets: [{ identity: canonical }] },
+        { ...site, targets: [{ identity: tool }] },
         human,
       )
     ).tools[0]!;
@@ -139,14 +151,45 @@ async function fixture() {
     updateConnectorToolPermissionPolicies(db, {
       ...grant,
       connectionId: connection.id,
-      serverId: "grafana",
-      toolNames: ["search_documents"],
+      serverId: tool.serverId,
+      toolNames: [tool.toolName],
       policy,
     });
   return { db, grant, settings, connection, site, deps, authorization, readiness, setPolicy };
 }
 
 describe("Site tool readiness on PostgreSQL", () => {
+  test("an account whose access is fixed reports a tool it lacks access for as unavailable for it", async () => {
+    if (!client) return;
+    // A connector served by a first-party bridge that gates tools on the
+    // account's recorded grants, with an account allowed to read only.
+    const gmail = (metadata: Record<string, unknown>): FixtureConnector => ({
+      server: {
+        id: "gmail",
+        url: "https://gmailmcp.googleapis.com/mcp/v1",
+        cacheToolsList: false,
+        allowedTools: ["create_draft"],
+        connectionRef: {
+          providerDomain: "gmailmcp.googleapis.com",
+          kind: "oauth2",
+          accountSelection: "all_eligible",
+        },
+      },
+      tool: { serverId: "gmail", toolName: "create_draft" },
+      providerDomain: "gmailmcp.googleapis.com",
+      kind: "oauth2",
+      grantedScopes: ["https://www.googleapis.com/auth/gmail.readonly"],
+      metadata,
+    });
+    const native = await fixture(gmail({ displayName: "Mail" }));
+    const grant = await native.readiness();
+    expect(grant).toMatchObject({ state: "grant" });
+    expect(grant.scopes?.length).toBeGreaterThan(0);
+    const nango = await fixture(gmail({ displayName: "Mail", integrationBackend: "nango" }));
+    const fixed = await nango.readiness();
+    expect(fixed).toMatchObject({ state: "unavailable", unavailableReason: "account" });
+    expect(fixed.scopes).toBeUndefined();
+  });
   test("follows saved permissions, Always allow and its reset without reaching the provider", async () => {
     if (!shared) return;
     const f = await fixture();

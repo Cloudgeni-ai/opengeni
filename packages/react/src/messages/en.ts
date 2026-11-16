@@ -1435,6 +1435,7 @@ export const englishMessages = {
   "connectAccounts.reconnectLabel": "Reconnect {label}",
   "connectAccounts.reconnectNeeded": "Reconnect needed",
   "connectAccounts.reloadAccounts": "Reload accounts",
+  "connectAccounts.signInFromConnector": "Sign in again from its connector",
   "connectAccounts.thisRemovesLocalOpengeniAccess":
     "This removes local {product} access. It does not revoke consent at the provider.",
   "connectAccounts.yourConnections": "Your connections",

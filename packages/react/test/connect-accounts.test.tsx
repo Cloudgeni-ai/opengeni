@@ -88,12 +88,11 @@ function button(container: HTMLElement, text: string) {
   if (!result) throw new Error(`Missing button ${text}`);
   return result;
 }
-test("an integration platform's account that needs sign-in reconnects through its connector", async () => {
-  let submitted: Record<string, unknown> | undefined;
+function nangoController(onBegin: () => void) {
   const unused = async (): Promise<never> => {
     throw new Error("Unexpected operation");
   };
-  const source = new ConnectController(
+  return new ConnectController(
     {
       accounts: async () => [{ ...account, status: "auth_needed", backend: "nango" }],
       catalog: unused,
@@ -102,36 +101,45 @@ test("an integration platform's account that needs sign-in reconnects through it
       advance: unused,
       cancel: unused,
       disconnect: unused,
-      begin: async (workspaceId, input) => {
-        submitted = input as unknown as Record<string, unknown>;
-        return {
-          id: "connect",
-          workspaceId,
-          providerId: input.providerId,
-          ownership: input.ownership,
-          revision: 1,
-          state: "requires_user_action",
-          credentialsCommitted: false,
-          integrationInstalled: false,
-          completionRequirement: "connection",
-          nextAction: { type: "none" },
-          expiresAt: "2030-01-01T00:00:00Z",
-        };
+      begin: async () => {
+        onBegin();
+        throw new Error("Unexpected native attempt");
       },
     },
     "workspace",
   );
+}
+test("an integration platform's account reconnects only through the host's connector", async () => {
+  let begun = 0;
+  const reconnected: ConnectAccount[] = [];
+  const source = nangoController(() => begun++);
+  const view = await renderComponent(
+    <ConnectAccounts
+      controller={source}
+      returnUrl="https://host.example/done"
+      onReconnectViaConnector={(row) => reconnected.push(row)}
+    />,
+  );
+  try {
+    await actRun(() => button(view.container, "Reconnect My account").click());
+    expect(reconnected.map((row) => row.id)).toEqual(["account"]);
+    expect(begun).toBe(0);
+  } finally {
+    await view.unmount();
+    source.dispose();
+  }
+});
+test("without the host's connector an integration platform's account only says where to sign in", async () => {
+  let begun = 0;
+  const source = nangoController(() => begun++);
   const view = await renderComponent(
     <ConnectAccounts controller={source} returnUrl="https://host.example/done" />,
   );
   try {
-    await actRun(() => button(view.container, "Reconnect My account").click());
-    expect(submitted).toMatchObject({
-      providerId: account.providerId,
-      ownership: account.ownership,
-      returnUrl: "https://host.example/done",
-    });
-    expect(submitted && "reconnectAccountId" in submitted).toBe(false);
+    expect(view.container.querySelector("summary")?.textContent).toContain("My account");
+    expect(() => button(view.container, "Reconnect My account")).toThrow();
+    expect(view.container.textContent).toContain("Sign in again from its connector");
+    expect(begun).toBe(0);
   } finally {
     await view.unmount();
     source.dispose();

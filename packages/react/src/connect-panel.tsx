@@ -1,4 +1,4 @@
-import { ConnectAccounts } from "./connect-accounts";
+import { ConnectAccounts, type ConnectAccountsProps } from "./connect-accounts";
 import type { ChatClient } from "@opengeni/sdk";
 import { ConnectChooser } from "./connect-chooser";
 import { ConnectSetup, adminApprovalLink, type ConnectSetupProps } from "./connect-setup";
@@ -29,6 +29,8 @@ export type ConnectPanelProps = ConnectSetupProps & {
    * Leave unset when sign-in redirects the whole page.
    */
   finishInPopup?: boolean;
+  /** Opens the connector's own Connect for an integration platform's account. */
+  onReconnectViaConnector?: ConnectAccountsProps["onReconnectViaConnector"];
 };
 
 /** Setup that has ended; the panel goes back to its service list. */
@@ -47,6 +49,7 @@ export function ConnectPanel({
   className,
   client,
   finishInPopup = false,
+  onReconnectViaConnector,
   ...setup
 }: ConnectPanelProps) {
   const t = useOpenGeniText();
@@ -97,6 +100,7 @@ export function ConnectPanel({
           finishInPopup={finishInPopup}
           client={client}
           onDisconnected={() => setInventoryRevision((value) => value + 1)}
+          onReconnectViaConnector={onReconnectViaConnector}
         />
       )}
       {!activeSetup &&
