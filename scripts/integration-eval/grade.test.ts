@@ -69,6 +69,50 @@ describe("gradeCase", () => {
     });
   });
 
+  test("account rows may be answered from the account line tool search showed", () => {
+    const accountRow: EvalCase = {
+      id: "outlook_calendar.read.account.test",
+      integration: "outlook_calendar",
+      kind: "read",
+      prompt: "Whose account is my Outlook Calendar connection signed in as?",
+      expectAnswer: [/iris\.tenley@opengenitest2026/i],
+      answerFromAccountLine: true,
+    };
+    const notice =
+      "Close candidates this search did not load:\n- mcp_a__me_calendarview: Account: Outlook Calendar — bendik@opengenitest2026.onmicrosoft.com · Shared. Get events\n- mcp_b__me_calendarview: Account: Outlook Calendar — iris.tenley@opengenitest2026.onmicrosoft.com · Yours. Get events";
+    const search = (lines: string) =>
+      events(
+        {
+          type: "agent.toolCall.created",
+          payload: {
+            id: "s1",
+            name: "tool_search",
+            arguments: { query: "Outlook Calendar account" },
+            toolFamily: "tool_search",
+            raw: { providerData: { opengeni: { lazy_search: { notice: lines } } } },
+          },
+        },
+        { type: "agent.toolCall.output", payload: { id: "s1", output: "Disclosed tools: none" } },
+        {
+          type: "agent.message.completed",
+          payload: { text: "It is signed in as iris.tenley@opengenitest2026.onmicrosoft.com." },
+        },
+      );
+    expect(gradeCase(accountRow, parseReceipts(search(notice)))).toMatchObject({ pass: true });
+    // Without the line in this chat, the same answer has no receipt.
+    expect(gradeCase(accountRow, parseReceipts(search("no accounts")))).toMatchObject({
+      pass: false,
+      category: "hallucinated_result",
+    });
+    // Another integration's line doesn't count.
+    expect(
+      gradeCase(
+        accountRow,
+        parseReceipts(search(notice.replaceAll("Outlook Calendar", "Outlook Mail"))),
+      ),
+    ).toMatchObject({ pass: false });
+  });
+
   test("reports no_tool when nothing ran", () => {
     const receipts = parseReceipts(
       events({ type: "agent.message.completed", payload: { text: "I can't tell." } }),
