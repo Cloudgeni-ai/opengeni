@@ -2384,7 +2384,7 @@ single value `external` for every connector, API-integration, Codex Apps, and
 custom tool. Server, raw tool, tenant, request, error, and content values are
 deliberately absent from labels.
 
-First-party `session_create` and `session_send_message` failures return an MCP
+First-party `session_create` and `session_queue_message` failures return an MCP
 `isError` result with a bounded structured `{ error: { code, message } }`
 projection. The durable tool-output event retains that raw MCP result, and the
 React timeline promotes the two calls to worker rows that display the safe code
@@ -2902,7 +2902,7 @@ bounded, independently useful work with a defined integration point. Parent
 work must stay disjoint from the delegated implementation. Independent review
 or comparison can examine the same subject with a distinct deliverable.
 Delegation has setup and coordination overhead, so the default prefers a direct
-answer for small work and a `session_send_message` follow-up to an existing child
+answer for small work and a `session_queue_message` follow-up to an existing child
 over another spawn. Explicit user requests and applicable Skill guidance for
 delegation, independent review, or fresh workers override that default within
 existing authority. For

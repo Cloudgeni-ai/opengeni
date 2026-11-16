@@ -52,7 +52,7 @@ const SESSION_TOOLS = [
   "session_get",
   "session_events",
   "session_wait",
-  "session_send_message",
+  "session_queue_message",
   "session_steer",
   "session_pause",
   "session_resume",

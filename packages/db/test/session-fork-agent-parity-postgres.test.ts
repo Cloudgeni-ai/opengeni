@@ -308,7 +308,7 @@ type Org = Awaited<ReturnType<typeof organization>>;
 
 const firstPartyTools: FirstPartyMcpToolName[] = [
   "sessions_list",
-  "session_send_message",
+  "session_queue_message",
   "session_events",
   "knowledge_search",
 ];

@@ -4419,6 +4419,7 @@ export type FirstPartyMcpToolName =
   | "command_read"
   | "command_wait"
   | "session_create"
+  | "session_queue_message"
   | "session_send_message"
   | "session_message_status"
   | "session_target_get"

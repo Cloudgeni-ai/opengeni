@@ -2223,7 +2223,7 @@ describe("machine input after a terminal context compaction failure", () => {
     const grant = await fixture();
     const workspaceId = grant.workspaceId!;
     // Staging shape: a coordinator parent with an active goal and a CI-watch
-    // worker that keeps messaging it through session_send_message.
+    // worker that keeps messaging it through session_queue_message.
     const watcher = await activeAgent(grant);
     const parent = await makeSession(grant, watcher.session.id);
     await createSessionGoal(client.db, {

@@ -2039,7 +2039,7 @@ export async function requireQueuedTurnForApi(
  * Appends a `user.message` to an existing session and enqueues the resulting
  * turn, merging requested resources/tools into the session and waking the
  * workflow. Shared by the public events route and the first-party MCP
- * `session_send_message` tool so the two surfaces cannot drift. Callers own
+ * `session_queue_message` tool so the two surfaces cannot drift. Callers own
  * resource/tool validation and the per-message usage limit before calling.
  */
 type PostUserMessageTurnResult = {
@@ -4610,7 +4610,7 @@ function sessionPromptBoundaryRequestHash(input: {
 
 /**
  * Full accept-user-message flow shared by the `user.message` branch of
- * `POST /sessions/:id/events` and the first-party MCP `session_send_message`
+ * `POST /sessions/:id/events` and the first-party MCP `session_queue_message`
  * tool: resource/tool validation, usage limits, the locked append + turn
  * enqueue, and usage recording. `toolsProvided: false` durably preserves an
  * Tool selection is durable session state and never rides a follow-up prompt.

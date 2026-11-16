@@ -1164,6 +1164,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "command_wait",
   "command_read",
   "session_create",
+  "session_queue_message",
   "session_send_message",
   "session_message_status",
   "session_target_get",
@@ -1398,13 +1399,29 @@ export const RETIRED_SECRET_TOOL_NAMES = [
   "environment_set_variable",
 ] as const satisfies readonly FirstPartyMcpToolName[];
 const retiredSecretTools = new Set<FirstPartyMcpToolName>(RETIRED_SECRET_TOOL_NAMES);
-const RETIRED_SECRET_TOOL_SUCCESSORS = {
+
+/**
+ * Session tools renamed so an agent's two ways of messaging a session read
+ * like a person's Queue and Steer. Stored tool selections naming the old name
+ * still parse and select its successor; the remote server never registers the
+ * old name, so it is not an alias a model can call.
+ */
+export const RETIRED_SESSION_TOOL_NAMES = [
+  "session_send_message",
+] as const satisfies readonly FirstPartyMcpToolName[];
+const retiredSessionTools = new Set<FirstPartyMcpToolName>(RETIRED_SESSION_TOOL_NAMES);
+
+const RETIRED_TOOL_SUCCESSORS = {
   variable_set_list: "secret_search",
   environment_list: "secret_search",
   variable_set_get_variable: "secret_get",
   variable_set_set_variable: "secret_save",
   environment_set_variable: "secret_save",
-} as const satisfies Record<(typeof RETIRED_SECRET_TOOL_NAMES)[number], FirstPartyMcpToolName>;
+  session_send_message: "session_queue_message",
+} as const satisfies Record<
+  (typeof RETIRED_SECRET_TOOL_NAMES)[number] | (typeof RETIRED_SESSION_TOOL_NAMES)[number],
+  FirstPartyMcpToolName
+>;
 
 /** Runtime interpretation only: never rewrite accepted conversation/tool receipts. */
 export function currentAgentLearningToolSelection(
@@ -1428,7 +1445,7 @@ export function currentAgentLearningToolSelection(
     selected.add("instruction_policy_save");
     selected.add("instruction_policy_get");
   }
-  for (const [retired, successor] of Object.entries(RETIRED_SECRET_TOOL_SUCCESSORS)) {
+  for (const [retired, successor] of Object.entries(RETIRED_TOOL_SUCCESSORS)) {
     if (selected.has(retired as FirstPartyMcpToolName)) selected.add(successor);
   }
   // Only already-selected legacy confirmations survive for paused turn recovery.
@@ -1436,7 +1453,9 @@ export function currentAgentLearningToolSelection(
   return [...selected].filter(
     (name) =>
       name === "remember_confirm" ||
-      (!retiredLearningTools.has(name) && !retiredSecretTools.has(name)),
+      (!retiredLearningTools.has(name) &&
+        !retiredSecretTools.has(name) &&
+        !retiredSessionTools.has(name)),
   );
 }
 
@@ -1448,6 +1467,7 @@ const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAMES = [
   "atlassian_get",
   ...RETIRED_AGENT_LEARNING_TOOL_NAMES,
   ...RETIRED_SECRET_TOOL_NAMES,
+  ...RETIRED_SESSION_TOOL_NAMES,
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
 const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAME_SET = new Set<FirstPartyMcpToolName>(
@@ -1521,6 +1541,7 @@ export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
   (name) =>
     !retiredLearningTools.has(name) &&
     !retiredSecretTools.has(name) &&
+    !retiredSessionTools.has(name) &&
     !name.startsWith("social_") &&
     !name.startsWith("x_") &&
     !name.startsWith("reddit_") &&

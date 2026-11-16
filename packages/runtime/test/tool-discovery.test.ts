@@ -540,12 +540,12 @@ describe("decision selection", () => {
         "Spawn a new agent session (a worker) for a concrete, bounded subtask that can run independently.",
       ),
       candidate(
-        "workspace__session_send_message",
-        "Send a message to a session. To continue related work, message a worker you already spawned instead of spawning a new one.",
+        "workspace__session_queue_message",
+        "Send a message to another session in Queue mode. To continue related work, queue a follow-up to a worker you already spawned instead of spawning a new one.",
       ),
       candidate(
         "workspace__session_message_status",
-        "Follow the exact update ID returned by session_send_message. Returns delivery state and the consuming turn.",
+        "Follow the exact update ID returned by session_queue_message. Returns delivery state and the consuming turn.",
       ),
       candidate("workspace__sessions_list", "Discover sessions in this workspace."),
       candidate("calendar__create_event", "Create a calendar event."),
@@ -553,12 +553,12 @@ describe("decision selection", () => {
     const index = new ToolSearchIndex(sessions);
     const loaded = names(
       index.strongestMatches(
-        "Create a separate worker session, then send a follow-up message to that same session",
+        "Create a separate worker session, then queue a follow-up message to that same session",
         3,
       ),
     );
     expect(loaded).toContain("workspace__session_create");
-    expect(loaded).toContain("workspace__session_send_message");
+    expect(loaded).toContain("workspace__session_queue_message");
     expect(loaded).not.toContain("calendar__create_event");
     const accounts = new ToolSearchIndex([
       candidate("mail_home__search_messages", "Search email messages in the mailbox."),

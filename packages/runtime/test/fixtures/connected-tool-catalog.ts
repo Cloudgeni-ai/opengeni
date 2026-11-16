@@ -200,7 +200,7 @@ export const CONNECTED_TOOL_CATALOG: CatalogTool[] = [
     ["schedule_list", "List this workspace's scheduled tasks."],
     ["schedule_pause", "Pause a scheduled task."],
     ["session_list", "List recent sessions in this workspace."],
-    ["session_send_message", "Send a message to another agent session."],
+    ["session_queue_message", "Send a message to another agent session."],
     ["secret_search", "Find saved secrets and their ready references."],
     ["generate_image", "Generate or edit an image from a prompt."],
     ["site_publish", "Publish a Site from the workspace."],

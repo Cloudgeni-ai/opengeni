@@ -93,7 +93,7 @@ async function fixture() {
         "session_target_get",
         "session_target_set",
         "session_message_status",
-        "session_send_message",
+        "session_queue_message",
         "session_steer",
         "session_events",
         "session_get",
@@ -243,9 +243,23 @@ test.each([false, true])(
       text: "Check the requested work",
       idempotencyKey: crypto.randomUUID(),
     };
-    const sent = await f.call("session_send_message", request);
-    const replay = await f.call("session_send_message", request);
+    const sent = await f.call("session_queue_message", request);
+    // The target has no turn running, so the message starts its next one.
+    expect(sent).toMatchObject({
+      operation: "session_queue_message",
+      outcome: "queued",
+      summary: "Queued: the target session was idle, so this message starts its next turn now.",
+      resource: { type: "session_system_update", state: "pending" },
+      updateId: sent.resource.id,
+      nextAction: {
+        tool: "session_message_status",
+        arguments: { sessionId: f.target.id, updateId: sent.resource.id },
+      },
+    });
+    const replay = await f.call("session_queue_message", request);
     expect(replay.resource.id).toBe(sent.resource.id);
+    expect(replay).toMatchObject({ outcome: "replayed", updateId: sent.resource.id });
+    expect(replay.summary).toStartWith("Nothing new was sent:");
     const statusRequest = { sessionId: f.target.id, updateId: sent.resource.id };
     expect(await f.call("session_message_status", statusRequest)).toMatchObject({
       delivery: "pending",
@@ -253,11 +267,16 @@ test.each([false, true])(
       outcome: null,
     });
     const claimed = await f.claim(f.target.id);
-    expect(await f.call("session_message_status", statusRequest)).toMatchObject({
+    const read = await f.call("session_message_status", statusRequest);
+    expect(read).toMatchObject({
       delivery: "delivered",
       turnId: claimed.turn.id,
       outcome: null,
     });
+    expect(read.summary).toStartWith("Read by the target at ");
+    expect(read.summary).toEndWith(
+      "; turnId is the turn that read it. That turn has no result yet.",
+    );
     await f.settle(claimed, "Exact requested outcome", failed);
     const status = await f.call("session_message_status", statusRequest);
     expect(status).toMatchObject({
@@ -284,7 +303,7 @@ test.each(["cancelled", "superseded"] as const)(
       { type, payload: { reason: "Unrelated interruption" } },
     ];
     await appendSessionEvents(client.db, f.owner.workspaceId, f.target.id, unrelated);
-    const sent = await f.call("session_send_message", {
+    const sent = await f.call("session_queue_message", {
       sessionId: f.target.id,
       text: "Check the requested work",
       idempotencyKey: crypto.randomUUID(),
@@ -348,12 +367,16 @@ test("paused Send stays pending without implicit resume; explicit Steer uses the
       action: "pause",
     }),
   );
-  const sent = await f.call("session_send_message", {
+  const sent = await f.call("session_queue_message", {
     sessionId: f.target.id,
     text: "Later",
     idempotencyKey: crypto.randomUUID(),
   });
-  expect(sent.facts.resumeRequired).toBe(true);
+  expect(sent).toMatchObject({
+    outcome: "queued",
+    summary: "Queued: the target session is paused and will read this only after it is resumed.",
+  });
+  expect(sent.facts).toBeUndefined();
   expect(
     await f.call("session_message_status", { sessionId: f.target.id, updateId: sent.resource.id }),
   ).toMatchObject({ delivery: "pending", outcome: null });
@@ -369,4 +392,88 @@ test("paused Send stays pending without implicit resume; explicit Steer uses the
       updateId: steered.resource.id,
     }),
   ).toMatchObject({ delivery: "delivered", turnId: claimed.turn.id });
+});
+
+async function startTargetTurn(f: Awaited<ReturnType<typeof fixture>>) {
+  await initializeSessionStartAtomically(client.db, {
+    accountId: f.owner.accountId,
+    workspaceId: f.owner.workspaceId,
+    sessionId: f.target.id,
+    reasoningEffortFallback: "medium",
+    createdEventPayload: {},
+  });
+  return await f.claim(f.target.id);
+}
+
+test("Queue to a mid-turn worker says it waits for that turn to end; only the next turn reads it", async () => {
+  const f = await fixture();
+  const running = await startTargetTurn(f);
+  const sent = await f.call("session_queue_message", {
+    sessionId: f.target.id,
+    text: "Also note the new constraint",
+    idempotencyKey: crypto.randomUUID(),
+  });
+  // Nothing in the receipt reads as "delivered": it is queued, pending, and
+  // says when the target reads it and how to change its direction now.
+  expect(sent).toMatchObject({
+    operation: "session_queue_message",
+    outcome: "queued",
+    summary:
+      "Queued: the target session is mid-turn and will read this after its current turn ends. It does not change what it is doing now; use session_steer to change its direction now.",
+    resource: { type: "session_system_update", id: sent.updateId, state: "pending" },
+    nextAction: { tool: "session_message_status" },
+  });
+  expect(sent.facts).toBeUndefined();
+  expect(JSON.stringify(sent)).not.toContain("coalesced_internal_update");
+  expect(JSON.stringify(sent)).not.toContain("wakeRequested");
+  const statusRequest = { sessionId: f.target.id, updateId: sent.updateId };
+  expect(await f.call("session_message_status", statusRequest)).toMatchObject({
+    summary:
+      "Not read yet: a queued message is read after the target's current turn ends, or when its next turn starts. It does not change what the target is doing now; use session_steer for that.",
+    delivery: "pending",
+    turnId: null,
+  });
+  // Delivery timing is unchanged: the running turn ends without reading it,
+  // and the next turn the target claims does.
+  await f.settle(running, "Finished the earlier direction");
+  expect(await f.call("session_message_status", statusRequest)).toMatchObject({
+    delivery: "pending",
+  });
+  const next = await f.claim(f.target.id);
+  expect(next.turn.id).not.toBe(running.turn.id);
+  expect(await f.call("session_message_status", statusRequest)).toMatchObject({
+    delivery: "delivered",
+    turnId: next.turn.id,
+  });
+});
+
+test("Steer to a running worker says it is read at the next step and replaces its direction", async () => {
+  const f = await fixture();
+  await startTargetTurn(f);
+  const steered = await f.call("session_steer", {
+    sessionId: f.target.id,
+    instruction: "Stop and use the new design",
+    idempotencyKey: crypto.randomUUID(),
+  });
+  expect(steered).toMatchObject({
+    operation: "session_steer",
+    outcome: "steered",
+    summary:
+      "Steered: the target session will read this at its next step, after its current tool calls finish. It replaces what the session is doing now.",
+    resource: { type: "session_system_update", id: steered.updateId, state: "pending" },
+    nextAction: {
+      tool: "session_message_status",
+      arguments: { sessionId: f.target.id, updateId: steered.updateId },
+    },
+  });
+  expect(steered.facts).toBeUndefined();
+  expect(
+    await f.call("session_message_status", {
+      sessionId: f.target.id,
+      updateId: steered.updateId,
+    }),
+  ).toMatchObject({
+    summary: "Not read yet: the target reads this steer at its next step.",
+    delivery: "pending",
+  });
 });

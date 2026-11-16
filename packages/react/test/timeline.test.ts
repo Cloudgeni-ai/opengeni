@@ -2390,20 +2390,24 @@ describe("buildTimeline", () => {
     });
   });
 
-  test("session_send_message becomes a worker message item targeting the session in the arguments", () => {
-    reset();
-    const items = buildTimeline(englishText, [
-      event("agent.toolCall.created", {
-        id: "call-1",
-        name: "session_send_message",
-        arguments: { sessionId: "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d", message: "Status?" },
-      }),
-    ]);
-    const item = items[0] as WorkerItem;
-    expect(item.action).toBe("message");
-    expect(item.workerSessionId).toBe("7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d");
-    expect(item.prompt).toBe("Status?");
-  });
+  // The earlier name stays in older sessions' history and renders the same way.
+  for (const name of ["opengeni__session_queue_message", "session_send_message"]) {
+    test(`${name} becomes a worker message item targeting the session in the arguments`, () => {
+      reset();
+      const items = buildTimeline(englishText, [
+        event("agent.toolCall.created", {
+          id: "call-1",
+          name,
+          arguments: { sessionId: "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d", text: "Status?" },
+        }),
+      ]);
+      const item = items[0] as WorkerItem;
+      expect(item.kind).toBe("worker");
+      expect(item.action).toBe("message");
+      expect(item.workerSessionId).toBe("7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d");
+      expect(item.prompt).toBe("Status?");
+    });
+  }
 
   test("groups sandbox operations by name and appends command output deltas", () => {
     reset();

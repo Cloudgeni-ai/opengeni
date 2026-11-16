@@ -85,15 +85,15 @@ export const subagentsModule: AgentPromptModule = {
         "When you mention another session to the user in chat, link it as [its title](session:<sessionId>); their app opens that chat in place. These links work only in this chat, so never put them in email, Slack, GitHub or other messages sent elsewhere.",
       sessionEvents &&
         toolsAvailable(context, ["session_target_get", "session_target_set"]) &&
-        "For a conversation about another session, use session_target_get/set to remember or clear the selected target; selection is context, not permission to mutate. Discover with sessions_list and inspect with session_events; keep voice in this session. Send only when asked, and use Steer only for an explicit change of direction.",
+        "For a conversation about another session, use session_target_get/set to remember or clear the selected target; selection is context, not permission to mutate. Discover with sessions_list and inspect with session_events; keep voice in this session. Queue a message only when asked, and use Steer only for an explicit change of direction.",
       toolAvailable(context, "session_message_status") &&
-        "After Send or Steer, use session_message_status with the returned update ID to follow its exact consuming turn and read the indicated result before relaying it. Do not resend pending work or mistake acceptance for completion.",
+        "After Queue or Steer, use session_message_status with the returned update ID to follow its exact consuming turn and read the indicated result before relaying it. Do not resend pending work or mistake acceptance for completion.",
       sentences(
         spawn &&
           "Create a child worker only for a concrete, bounded subtask that can run independently and whose result has a clear integration point in the current request.",
         spawn &&
-          (toolAvailable(context, "session_send_message")
-            ? "Delegation has setup and coordination overhead: by default, answer directly when the work takes only a few steps, and send a related follow-up to a child you already spawned with `session_send_message` instead of spawning another."
+          (toolAvailable(context, "session_queue_message")
+            ? "Delegation has setup and coordination overhead: by default, answer directly when the work takes only a few steps, and queue a related follow-up to a child you already spawned with `session_queue_message` instead of spawning another."
             : "Delegation has setup and coordination overhead: by default, answer directly when the work takes only a few steps."),
         spawn &&
           "Explicit user requests and applicable Skill guidance for delegation, independent review, or fresh workers override that default within existing authority.",

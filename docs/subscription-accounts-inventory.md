@@ -635,7 +635,7 @@ Background facts:
   - every other actor (`operator`, `service`, `agent_attempt`) → hard-coded **workspace** snapshot.
 - Finding: an agent attempt that posts through this path (it is supported: locks at `:1831-1835`, auto-resume at `:1971`) does **not** inherit its originating turn's scope, unlike `sendAgentMessageInTransaction` (EP-S21). An API-key/service send to a session that has been running on a personal or organization pool is accepted as workspace scope. Either is a concrete way for a later turn to "carry the wrong scope". Not reproduced; code-path finding only.
 
-##### EP-S21 — Agent-to-agent message and steer (session_send_message / steer)
+##### EP-S21 — Agent-to-agent message and steer (session_queue_message / steer)
 - `sendAgentMessageInTransaction` (`session-queue-commands.ts:2642`, snapshot at `:2720-2721`) and `steerAgentSessionInTransaction` (`:2911`, `:2992-2993`) copy the **caller's** turn snapshot via `subscriptionAuthorityForAgentActor` (`:421`) into the `session_system_updates` row; lineage carries `xai/claudeAuthoritySubjectId` (`:2779-2781`).
 - Minor: `subscriptionAuthorityForAgentActor` returns a subject for any scope, while `subscriptionExecutionAuthorityFromTurn` only for `user`; the lineage therefore carries a subject id even for workspace scope.
 

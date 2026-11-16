@@ -6,7 +6,9 @@ import {
   FIRST_PARTY_MCP_TOOL_NAMES,
   RETIRED_AGENT_LEARNING_TOOL_NAMES,
   RETIRED_SECRET_TOOL_NAMES,
+  RETIRED_SESSION_TOOL_NAMES,
   SESSION_APP_ACTION_TOOL_NAMES,
+  currentAgentLearningToolSelection,
 } from "../src";
 
 const EXPLICIT_ONLY_CONNECTOR_TOOLS = [
@@ -94,9 +96,19 @@ describe("first-party MCP tool-name contract", () => {
         (name) =>
           !DEFAULT_FIRST_PARTY_MCP_TOOLS.includes(name) &&
           !(RETIRED_AGENT_LEARNING_TOOL_NAMES as readonly string[]).includes(name) &&
-          !(RETIRED_SECRET_TOOL_NAMES as readonly string[]).includes(name),
+          !(RETIRED_SECRET_TOOL_NAMES as readonly string[]).includes(name) &&
+          !(RETIRED_SESSION_TOOL_NAMES as readonly string[]).includes(name),
       ),
     ).toEqual([...EXPLICIT_ONLY_CONNECTOR_TOOLS]);
+  });
+
+  test("maps a stored session_send_message selection to session_queue_message without keeping the old name", () => {
+    expect(DEFAULT_FIRST_PARTY_MCP_TOOLS).toContain("session_queue_message");
+    expect(DEFAULT_FIRST_PARTY_MCP_TOOLS).not.toContain("session_send_message");
+    expect(currentAgentLearningToolSelection(["session_send_message", "session_steer"])).toEqual([
+      "session_steer",
+      "session_queue_message",
+    ]);
   });
 
   test("selects the app-action tools by default, so every chat a person started has them", () => {

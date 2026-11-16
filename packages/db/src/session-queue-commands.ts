@@ -445,9 +445,40 @@ export async function replaySubmittedHumanPromptFromBoundaryReceipt(
   return await loadSubmittedHumanPromptReplay(db, { ...input, receipt });
 }
 
-export type AgentInternalUpdateCommandResult = {
+/**
+ * When the target reads an Agent message, as known when it was accepted. A
+ * message is Queue: `starts_next_turn` (the target was idle, so it wakes now),
+ * `after_current_turn` (mid-turn: read once that turn ends), `after_resume`
+ * (paused) or `when_next_turn_starts` (it cannot start a turn right now).
+ */
+export type AgentMessageReadAt =
+  | "starts_next_turn"
+  | "after_current_turn"
+  | "after_resume"
+  | "when_next_turn_starts";
+
+/**
+ * When the target reads an Agent Steer: at its `next_step`, `after_compaction`
+ * when a context compaction is in flight, or `starts_next_turn` when no turn
+ * is running.
+ */
+export type AgentSteerReadAt = "starts_next_turn" | "next_step" | "after_compaction";
+
+function storedReadAt<ReadAt extends string>(
+  value: unknown,
+  allowed: readonly ReadAt[],
+): ReadAt | null {
+  return typeof value === "string" && (allowed as readonly string[]).includes(value)
+    ? (value as ReadAt)
+    : null;
+}
+
+export type AgentInternalUpdateCommandResult<
+  ReadAt extends AgentMessageReadAt | AgentSteerReadAt = AgentMessageReadAt | AgentSteerReadAt,
+> = {
   receipt: SessionCommandReceiptRow;
   updateId: string;
+  readAt: ReadAt;
   eventIds: string[];
   wakeRevision: number | null;
   shouldSignal: boolean;
@@ -3596,7 +3627,7 @@ export async function sendAgentMessageInTransaction(
      */
     controlLockTimeoutMs?: number;
   },
-): Promise<AgentInternalUpdateCommandResult> {
+): Promise<AgentInternalUpdateCommandResult<AgentMessageReadAt>> {
   const workspaceControl = await lockWorkspaceInferenceControl(db, input.workspaceId, "share", {
     ...(input.controlLockTimeoutMs !== undefined
       ? { lockTimeoutMs: input.controlLockTimeoutMs }
@@ -3627,19 +3658,36 @@ export async function sendAgentMessageInTransaction(
     if (!updateId || !workflowId) {
       throw new SessionControlInvariantError("Replayed Agent message receipt is incomplete");
     }
+    const wakeRevision =
+      typeof reserved.receipt.result.wakeRevision === "number"
+        ? reserved.receipt.result.wakeRevision
+        : null;
+    const effectiveState =
+      reserved.receipt.result.effectiveState === "paused" ? "paused" : "active";
     return {
       receipt: reserved.receipt,
       updateId,
+      // Receipts written before `readAt` was stored: a wake means the target
+      // was idle; otherwise it was paused or busy.
+      readAt:
+        storedReadAt<AgentMessageReadAt>(reserved.receipt.result.readAt, [
+          "starts_next_turn",
+          "after_current_turn",
+          "after_resume",
+          "when_next_turn_starts",
+        ]) ??
+        (wakeRevision !== null
+          ? "starts_next_turn"
+          : effectiveState === "paused"
+            ? "after_resume"
+            : "after_current_turn"),
       eventIds: Array.isArray(reserved.receipt.result.eventIds)
         ? reserved.receipt.result.eventIds.filter((id): id is string => typeof id === "string")
         : [],
-      wakeRevision:
-        typeof reserved.receipt.result.wakeRevision === "number"
-          ? reserved.receipt.result.wakeRevision
-          : null,
+      wakeRevision,
       shouldSignal: false,
       workflowId,
-      effectiveState: reserved.receipt.result.effectiveState === "paused" ? "paused" : "active",
+      effectiveState,
       interruptionCount: 0,
       workspaceControlEventId: null,
       replay: true,
@@ -3818,6 +3866,15 @@ export async function sendAgentMessageInTransaction(
     !realtimeActive &&
     session.activeTurnId === null &&
     effective.state === "active";
+  // Queue: an idle target wakes for this message; a busy one reads it with
+  // the next turn it claims, never inside the turn already running.
+  const readAt: AgentMessageReadAt = runnable
+    ? "starts_next_turn"
+    : effective.state === "paused"
+      ? "after_resume"
+      : session.activeTurnId !== null
+        ? "after_current_turn"
+        : "when_next_turn_starts";
   const wake = runnable
     ? await registerInternalUpdateWakeInTransaction(db, {
         accountId: input.accountId,
@@ -3862,11 +3919,13 @@ export async function sendAgentMessageInTransaction(
       wakeRevision: wake?.wakeRevision ?? null,
       workflowId,
       effectiveState: effective.state,
+      readAt,
     },
   });
   return {
     receipt,
     updateId: update.id,
+    readAt,
     eventIds,
     wakeRevision: wake?.wakeRevision ?? null,
     shouldSignal: wake !== null,
@@ -3892,7 +3951,7 @@ export async function steerAgentSessionInTransaction(
     /** Request-scoped callers bound the control prefix wait; lifecycle callers omit it. */
     controlLockTimeoutMs?: number;
   },
-): Promise<AgentInternalUpdateCommandResult> {
+): Promise<AgentInternalUpdateCommandResult<AgentSteerReadAt>> {
   const admission = await lockWorkspaceInferenceControlForAdmission(db, {
     workspaceId: input.workspaceId,
     sessionId: input.targetSessionId,
@@ -3931,6 +3990,12 @@ export async function steerAgentSessionInTransaction(
     return {
       receipt: reserved.receipt,
       updateId,
+      readAt:
+        storedReadAt<AgentSteerReadAt>(reserved.receipt.result.readAt, [
+          "starts_next_turn",
+          "next_step",
+          "after_compaction",
+        ]) ?? "next_step",
       eventIds: Array.isArray(reserved.receipt.result.eventIds)
         ? reserved.receipt.result.eventIds.filter((id): id is string => typeof id === "string")
         : [],
@@ -4257,6 +4322,13 @@ export async function steerAgentSessionInTransaction(
     ),
   );
   const eventIds = insertedEvents.map((event) => event.id);
+  // Steer: a live turn reads it at its next model step (after a compaction in
+  // flight); with no live turn it starts the next one.
+  const readAt: AgentSteerReadAt = supersession.deferredUntilCompaction
+    ? "after_compaction"
+    : supersession.liveCurrentTurnId !== null
+      ? "next_step"
+      : "starts_next_turn";
   const receipt = await updateSessionCommandReceiptResult(db, reserved.receipt.id, {
     controlRevision: resumed.revision,
     result: {
@@ -4267,11 +4339,13 @@ export async function steerAgentSessionInTransaction(
       interruptionCount: supersession.interruptionCount,
       deferredUntilCompaction: supersession.deferredUntilCompaction,
       deferredUntilModelStep: supersession.deferredUntilModelStep,
+      readAt,
     },
   });
   return {
     receipt,
     updateId: update.id,
+    readAt,
     eventIds,
     wakeRevision,
     shouldSignal: true,
