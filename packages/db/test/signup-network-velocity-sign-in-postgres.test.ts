@@ -422,6 +422,23 @@ test("the sign-in leg follows its own setting; the signup network rule does not 
       signInGroupSize: 3,
       signInNetworkMode: "observe",
     });
+    // Signup network observed, sign-in leg enforcing: the hold names the sign-in rule.
+    await configure({ mode: "observe", signInNetworkMode: "enforce" });
+    const ip2 = address();
+    const shared2 = rotating();
+    const both = [
+      await legacyOwner([ip2], shared2),
+      await legacyOwner([ip2], shared2),
+      await legacyOwner([ip2], shared2),
+    ];
+    expect(await decision(both[2]!.accountId)).toMatchObject(HELD);
+    expect(await lastHistory(both[2]!.accountId)).toMatchObject({
+      rule_id: "ip-velocity-sign-in-v1",
+    });
+    expect(await observation(both[2]!.accountId)).toMatchObject({
+      exactGroupSize: 3,
+      signInGroupSize: 3,
+    });
   } finally {
     await reset();
   }

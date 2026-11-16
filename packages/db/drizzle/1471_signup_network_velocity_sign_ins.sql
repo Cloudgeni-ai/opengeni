@@ -282,8 +282,11 @@ BEGIN
   hold := (velocity_mode = 'enforce' AND (exact_match OR prefix_match))
     OR (sign_in_mode = 'enforce' AND sign_in_match);
   facts := jsonb_build_object(
-    'ruleId', CASE WHEN exact_match THEN 'ip-velocity-exact-v1'
-      WHEN prefix_match AND velocity_mode = 'enforce' THEN 'ip-velocity-prefix-v1'
+    -- The rule that holds first, then the observed ones.
+    'ruleId', CASE WHEN velocity_mode = 'enforce' AND exact_match THEN 'ip-velocity-exact-v1'
+      WHEN velocity_mode = 'enforce' AND prefix_match THEN 'ip-velocity-prefix-v1'
+      WHEN sign_in_mode = 'enforce' AND sign_in_match THEN 'ip-velocity-sign-in-v1'
+      WHEN exact_match THEN 'ip-velocity-exact-v1'
       WHEN sign_in_match THEN 'ip-velocity-sign-in-v1'
       WHEN prefix_match THEN 'ip-velocity-prefix-v1'
       ELSE 'ip-velocity-observed-v1' END,
