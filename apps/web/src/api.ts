@@ -29,6 +29,10 @@ import { noteClientRequestFailure } from "@opengeni/react/app/lib/client-signals
 import { signupAttribution, signupReturnPath } from "./lib/signup-attribution";
 import { askForPasskey, createPasskey, type PasskeyCeremony } from "./lib/passkeys";
 import { PASSKEY_STEP_UP_HANDOFF_PATH } from "@opengeni/contracts/managed-sign-in-methods";
+import {
+  CONSOLE_SIGN_IN_API_PATH,
+  CONSOLE_SIGN_IN_APP_PATH,
+} from "@opengeni/contracts/console-sign-in";
 import { withAdminStepUp } from "./lib/admin-step-up";
 import { browserAccountBridgeBlockersSnapshot } from "@opengeni/react/app/lib/browser-account-bridge";
 import {
@@ -1174,6 +1178,7 @@ function authReturnBase(): string {
   if (organizationSecurity) return organizationSecurity;
   return window.location.pathname === "/connect-agent" ||
     window.location.pathname === "/native-sign-in" ||
+    window.location.pathname === CONSOLE_SIGN_IN_APP_PATH ||
     window.location.pathname === PASSKEY_STEP_UP_HANDOFF_PATH ||
     window.location.pathname === "/site-auth/authorize"
     ? `${window.location.pathname}${window.location.search}`
@@ -1241,6 +1246,22 @@ async function managedBrowserMutation<T>(path: string, body: unknown): Promise<T
     throw apiErrorFromResponseBody(response.status, await response.text());
   }
   return (await response.json()) as T;
+}
+
+/**
+ * Opengeni Console's sign-in handoff, on the app host: a one-time code for the
+ * Console origin, returned as the Console callback to go to. Cookie-only, like
+ * every sign-in mutation.
+ */
+export async function authorizeConsoleSignIn(input: {
+  consoleOrigin: string;
+  returnPath: string;
+  codeChallenge: string;
+}): Promise<{ redirectUrl: string }> {
+  return await managedBrowserMutation<{ redirectUrl: string }>(
+    `${CONSOLE_SIGN_IN_API_PATH}/authorize`,
+    input,
+  );
 }
 
 export type CodexResetRedemptionPreparation = {

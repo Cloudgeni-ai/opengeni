@@ -116,6 +116,7 @@ import {
   parseConsoleSessionsSearch,
   parseConsoleUsageSearch,
 } from "@/lib/console-route";
+import { parseConsoleSignInSearch } from "@/lib/console-sign-in";
 import { isNativeAppPlatform, type NativeSignInSearch } from "@/lib/native-sign-in-context";
 import { siteAuthSearch } from "@/lib/site-auth";
 import {
@@ -231,6 +232,10 @@ const LazyConfirmPasskeyRoute = lazyRouteComponent(
 const LazyNativeSignInRoute = lazyRouteComponent(
   () => import("@/routes/native-sign-in"),
   "NativeSignInRoute",
+);
+const LazyConsoleSignInRoute = lazyRouteComponent(
+  () => import("@/routes/console-sign-in"),
+  "ConsoleSignInRoute",
 );
 const LazySiteAuthorizeRoute = lazyRouteComponent(
   () => import("@/routes/site-auth"),
@@ -561,6 +566,14 @@ const nativeSignInRoute = createRoute({
     };
   },
   component: NativeSignIn,
+});
+// Where Opengeni Console, on its own host, sends a signed-out person: sign in
+// here if needed, then go back to Console with a one-time code (code + PKCE).
+const consoleSignInRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "console-sign-in",
+  validateSearch: parseConsoleSignInSearch,
+  component: ConsoleSignIn,
 });
 // Where a published Site's gateway sends a viewer to sign in: confirm the
 // Site and account, then hand the gateway a one-time code (code + PKCE).
@@ -1242,6 +1255,7 @@ const routeTree = rootRoute.addChildren([
   personalSecurityRoute,
   confirmPasskeyRoute,
   nativeSignInRoute,
+  consoleSignInRoute,
   siteAuthorizeRoute,
   ...(import.meta.env.DEV
     ? [
@@ -1892,6 +1906,11 @@ function Device() {
 function NativeSignIn() {
   const search = nativeSignInRoute.useSearch();
   return <LazyNativeSignInRoute search={search} />;
+}
+
+function ConsoleSignIn() {
+  const search = consoleSignInRoute.useSearch();
+  return <LazyConsoleSignInRoute search={search} />;
 }
 
 function SiteAuthorize() {

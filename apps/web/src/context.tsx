@@ -13,6 +13,12 @@ import { userErrorText } from "@opengeni/react/ui/api-error";
 // `useAppContext`.
 import { DESKTOP_APP_RETURN_PATH } from "@opengeni/contracts";
 import { onConsoleHost, socialProvidersForHost } from "@/lib/console-route";
+import {
+  consoleSignInReturnFor,
+  consoleSignInStartUrl,
+  readConsoleSignInMemory,
+  rememberConsoleSignInStarted,
+} from "@/lib/console-sign-in";
 import { EXCEL_ADDIN_PATH } from "@/lib/excel-addin";
 import { Outlet, useRouterState } from "@tanstack/react-router";
 import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
@@ -21,6 +27,7 @@ import { lazy, Suspense, useMemo, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import {
+  apiBaseUrl,
   clearStoredAccessKey,
   configureManagedActorEpoch,
   createOpenGeniClient,
@@ -118,6 +125,23 @@ const ManagedAuthPanel = lazy(() =>
   })),
 );
 
+const ConsoleSignedOutPanel = lazy(() =>
+  import("@/components/console-signed-out-panel").then((module) => ({
+    default: module.ConsoleSignedOutPanel,
+  })),
+);
+
+/** Console's sign-in handoff: on to the app host's sign-in, back to this page. */
+function startConsoleSignIn(): void {
+  rememberConsoleSignInStarted();
+  window.location.assign(
+    consoleSignInStartUrl(
+      apiBaseUrl,
+      consoleSignInReturnFor(window.location.pathname, window.location.search),
+    ),
+  );
+}
+
 const SignedOutPage = lazy(() =>
   import("@/components/signed-out-page").then((module) => ({
     default: module.SignedOutPage,
@@ -208,7 +232,7 @@ export function RootRouteComponent() {
       /^\/native-sign-in\/?$/.test(state.location.pathname) &&
       new URLSearchParams(state.location.searchStr).get("platform") === "office"
         ? "excel"
-        : onConsoleHost()
+        : onConsoleHost() || /^\/console-sign-in\/?$/.test(state.location.pathname)
           ? "console"
           : "general",
   });
@@ -355,6 +379,36 @@ export function RootRouteComponent() {
                 ) : undefined
               }
             />
+          ) : onConsoleHost() && !organizationInvitationContinuation ? (
+            // Console's own host signs in with the person's Opengeni account
+            // on the app host; its own email and Google sign-in stay below.
+            <ConsoleSignedOutPanel
+              search={window.location.search}
+              {...readConsoleSignInMemory()}
+              onContinue={startConsoleSignIn}
+              fallback={
+                <ManagedAuthPanel
+                  presentation="embedded"
+                  search={window.location.search}
+                  onSubmit={handleManagedAuth}
+                  emailVerificationRequired={managedEmailVerificationRequired}
+                  newSignupsEnabled={managedNewSignupsEnabled}
+                  signupChallengeSiteKey={
+                    clientConfig?.auth.mode === "managedSession"
+                      ? clientConfig.auth.signupChallengeSiteKey
+                      : undefined
+                  }
+                  socialProviders={socialProvidersForHost(
+                    window.location.hostname,
+                    managedSocialProviders,
+                  )}
+                  onSocialSubmit={handleManagedSocialAuth}
+                  passkeySignIn={managedPasskeySignIn && !passkeysNeedBrowser()}
+                  passkeySignUp={managedPasskeySignUp && !passkeysNeedBrowser()}
+                  onPasskeySubmit={handleManagedPasskeyAuth}
+                />
+              }
+            />
           ) : (
             <ManagedAuthPanel
               presentation="embedded"
@@ -383,7 +437,7 @@ export function RootRouteComponent() {
         </SignedOutPage>
       </Suspense>
     </DesktopSignedOutRecovery>
-  ) : /^\/(?:native-sign-in|site-auth\/authorize)\/?$/.test(pathname) &&
+  ) : /^\/(?:native-sign-in|console-sign-in|site-auth\/authorize)\/?$/.test(pathname) &&
     managedAuthRequired &&
     authSession &&
     clientConfig ? (

@@ -1485,11 +1485,15 @@ Opengeni Console can be served on its own host (`console.opengeni.ai`,
 host to `OPENGENI_BETTER_AUTH_ALLOWED_HOSTS` and its origin to
 `OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS`, optionally share the session with
 `OPENGENI_BETTER_AUTH_COOKIE_DOMAIN` (unset, the Console host has its own
-sign-in), and register its Google sign-in callback (the Console host offers
-no GitHub sign-in). `OPENGENI_BETTER_AUTH_COOKIE_PREFIX` optionally renames the
+sign-in, reached through the app host's sign-in with a one-time code), and
+register its Google sign-in callback for Console's own fallback sign-in (which
+offers no GitHub). `OPENGENI_BETTER_AUTH_COOKIE_PREFIX` optionally renames the
 auth cookies (for example to keep staging and production apart on one parent
 domain); changing it signs everyone out, and leaving it unset keeps Better
-Auth's default names. See [`opengeni-console.md`](opengeni-console.md#its-own-host).
+Auth's default names. The sign-in handoff needs no other setting: its Console
+origins are the allowed hosts and trusted origins whose host is a Console host,
+and it is off in the `dual` and `broker` session-set modes. See
+[`opengeni-console.md`](opengeni-console.md#its-own-host).
 
 ### Managed passkey sign-in
 

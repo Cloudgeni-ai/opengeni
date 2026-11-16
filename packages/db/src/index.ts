@@ -45,6 +45,7 @@ import { isGitHubGatewayApprovalId } from "./github-gateway";
 export * from "./active-session-history";
 import type { ActiveSessionHistoryFootprint } from "./active-session-history";
 export * from "./session-search-records";
+export * from "./console-sign-in-audit";
 export * from "./model-call-timing";
 export * from "./sandbox-stop-notice";
 export * from "./turn-timing-profile";
