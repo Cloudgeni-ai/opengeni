@@ -181,6 +181,29 @@ describe("registry entries that duplicate a built-in integration", () => {
     );
   });
 
+  test("a Nango integration whose account is named on a shared API host claims no service domain", () => {
+    const backends = effectiveNangoIntegrations(
+      [
+        setting("outlook-mail", {
+          displayName: "Outlook Mail",
+          tools: { source: "nango" },
+          accountIdentity: { url: "https://graph.microsoft.com/v1.0/me", field: "id" },
+        }),
+      ],
+      true,
+    );
+    const settings = applyNangoBackendsToSettings(testSettings({ mcpServers: [] }), backends);
+    const outlook = configuredMcpCatalogItems(settings, backends)[0]!;
+    expect(outlook.metadata.serviceDomain).toBeUndefined();
+    const learn = item({
+      id: "mcp:integrations-sh:learn-microsoft-com-0",
+      name: "Microsoft Learn",
+      providerDomain: "learn.microsoft.com",
+      endpointUrl: "https://learn.microsoft.com/api/mcp",
+    });
+    expect(builtInIntegrationDuplicated(learn, [outlook, learn])).toBeNull();
+  });
+
   test("a registry entry turned on in this workspace stays listed", () => {
     const installed = { ...registryGmail, enabled: true };
     expect(builtInIntegrationDuplicated(installed, [configuredGmail, installed])).toBeNull();

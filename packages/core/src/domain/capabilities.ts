@@ -2591,8 +2591,9 @@ function nangoConfiguredCatalogItem(
 /**
  * The provider domain of the service a config-only Nango integration
  * connects, so a registry entry for that service is known to duplicate it:
- * the native connector's domain when Nango replaces one (X), else the host of
- * the read-only call that names the connected account.
+ * the native connector's domain when Nango replaces one (X), else the domain
+ * of the read-only call that names the connected account when that call goes
+ * to the domain itself or its api. host; null otherwise.
  */
 function nangoServiceDomain(integration: EffectiveNangoIntegration): string | null {
   const replaced = NANGO_REPLACEABLE_NATIVE_SOCIAL_PROVIDERS[integration.integrationKey];
@@ -2603,7 +2604,12 @@ function nangoServiceDomain(integration: EffectiveNangoIntegration): string | nu
   const identityUrl = integration.definition.accountIdentity?.url;
   if (!identityUrl) return null;
   try {
-    return registrableHostDomain(new URL(identityUrl).hostname);
+    const host = new URL(identityUrl).hostname.toLowerCase();
+    const domain = registrableHostDomain(host);
+    // Only a host that is the service's own domain, or its api. host, names
+    // the service: shared API hosts (graph.microsoft.com, www.googleapis.com)
+    // serve many unrelated products under one domain.
+    return domain && (host === domain || host === `api.${domain}`) ? domain : null;
   } catch {
     return null;
   }

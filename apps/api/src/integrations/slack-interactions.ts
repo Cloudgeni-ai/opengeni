@@ -659,7 +659,7 @@ function slackAppThreadContextEntry(
   if (!content) return null;
   const appName = slackMessageBotName(event);
   const label = event.user
-    ? `[posted through the app ${appName || boundedString(event.bot_id, 64) || "unknown"}]`
+    ? `[sent with the app ${appName || boundedString(event.bot_id, 64) || "unknown"}]`
     : `[posted by the app ${appName || "unnamed"}]`;
   return {
     providerEventId: eventId,

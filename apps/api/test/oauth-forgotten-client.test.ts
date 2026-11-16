@@ -59,6 +59,8 @@ beforeAll(() => {
           return Response.json({ error: "invalid_client" }, { status: 429 });
         case "/down/authorize":
           return new Response("unknown client", { status: 503 });
+        case "/hang/authorize":
+          return new Promise<Response>(() => {});
         default:
           return new Response("not found", { status: 404 });
       }
@@ -113,5 +115,24 @@ describe("authorizationServerForgotClient", () => {
         signal: new AbortController().signal,
       }),
     ).toBe(false);
+  });
+
+  test("keeps the client when the provider does not answer in time", async () => {
+    const started = Date.now();
+    expect(await forgot("/hang/authorize")).toBe(false);
+    expect(Date.now() - started).toBeLessThan(10_000);
+  }, 15_000);
+
+  test("still stops when the Connect itself is aborted", async () => {
+    const connect = new AbortController();
+    const probe = authorizationServerForgotClient(testSettings({ environment: "test" }), {
+      authorizationEndpoint: `${origin}/hang/authorize`,
+      clientId: "forgotten-client",
+      redirectUri,
+      scopes: [],
+      signal: connect.signal,
+    });
+    connect.abort();
+    await expect(probe).rejects.toBeDefined();
   });
 });

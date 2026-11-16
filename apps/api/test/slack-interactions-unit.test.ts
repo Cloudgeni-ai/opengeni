@@ -1087,8 +1087,28 @@ describe("app and bot posts in Slack mention context", () => {
     ).toMatchObject({
       slackUserId: "U_ADA",
       triggerKind: "thread_reply",
-      text: "[posted through the app Opengeni] Launch moved to 1 December",
+      text: "[sent with the app Opengeni] Launch moved to 1 December",
     });
+  });
+
+  test("an app's bot-token post, which also carries the app's bot user, is labelled without claiming a person", () => {
+    const entry = slackEventInboxEntry(
+      envelope({
+        ...inThread,
+        user: "U_DEPLOYS_BOT",
+        bot_id: "B_DEPLOYS",
+        bot_profile: { id: "B_DEPLOYS", name: "Deploys", app_id: "A_DEPLOYS" },
+        ts: "1.4",
+        text: "Deploy 43 passed",
+      }),
+      bot,
+    );
+    expect(entry).toMatchObject({
+      slackUserId: "U_DEPLOYS_BOT",
+      triggerKind: "thread_reply",
+      text: "[sent with the app Deploys] Deploy 43 passed",
+    });
+    expect(entry?.text).not.toContain("person");
   });
 
   test("Opengeni's own posts, edits, top-level app posts and DMs are not recorded", () => {

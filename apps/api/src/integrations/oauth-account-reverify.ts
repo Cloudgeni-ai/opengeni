@@ -32,15 +32,18 @@ export async function reverifyLoginsBlockingNewAccount(
 ): Promise<number> {
   const blocking = unverifiedLoginsBlockingNewAccount(input.decision);
   if (!blocking.length || blocking.length > MAX_REVERIFIED_LOGINS) return 0;
-  let confirmed = 0;
-  for (const login of blocking) {
-    try {
-      const identity = await input.verify(login);
-      if (!identity || !identityConfirmsAccount(identity, input.decision.identityKeys)) continue;
-      if (await input.save(login, identity)) confirmed += 1;
-    } catch (error) {
-      input.onFailure?.(login, error);
-    }
-  }
-  return confirmed;
+  const results = await Promise.all(
+    blocking.map(async (login) => {
+      try {
+        const identity = await input.verify(login);
+        if (!identity || !identityConfirmsAccount(identity, input.decision.identityKeys))
+          return false;
+        return await input.save(login, identity);
+      } catch (error) {
+        input.onFailure?.(login, error);
+        return false;
+      }
+    }),
+  );
+  return results.filter(Boolean).length;
 }

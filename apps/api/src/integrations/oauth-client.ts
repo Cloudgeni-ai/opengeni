@@ -307,6 +307,7 @@ type OAuthCallbackStage =
   | "client_lookup"
   | "token_exchange"
   | "tools_list"
+  | "reverify"
   | "persist";
 
 export const OAUTH_START_DEADLINE_MS = 15_000;
@@ -2428,6 +2429,7 @@ function normalizedIssuerKey(value: string): string {
 /** Text a provider uses to say it does not know a client_id. */
 const UNKNOWN_CLIENT_TEXT =
   /\b(?:invalid_client|unknown_client(?:_id)?|unrecognized_client(?:_id)?)\b|\b(?:unknown|unrecognized|unrecognised|unregistered|invalid)\s+client(?:[\s_]?id)?\b|\bclient(?:[\s_]?id)?\s+(?:is\s+)?(?:unknown|unrecognized|unrecognised|not\s+found|not\s+registered|does\s+not\s+exist)\b|\bno\s+such\s+client\b/iu;
+const AUTHORIZE_PROBE_TIMEOUT_MS = 3_000;
 const AUTHORIZE_PROBE_MAX_BYTES = 16 * 1024;
 
 /**
@@ -2450,6 +2452,10 @@ export async function authorizationServerForgotClient(
     signal: AbortSignal;
   },
 ): Promise<boolean> {
+  // The probe gets its own short budget so a slow authorize endpoint keeps the
+  // stored client instead of using up the whole Connect deadline.
+  const outer = input.signal;
+  const signal = AbortSignal.any([outer, AbortSignal.timeout(AUTHORIZE_PROBE_TIMEOUT_MS)]);
   let response: Response;
   try {
     const url = new URL(
@@ -2464,12 +2470,12 @@ export async function authorizationServerForgotClient(
     if (input.scopes.length > 0) url.searchParams.set("scope", input.scopes.join(" "));
     response = await pinnedFetch(
       url.toString(),
-      { method: "GET", headers: { accept: "application/json, text/html" }, signal: input.signal },
+      { method: "GET", headers: { accept: "application/json, text/html" }, signal },
       settings,
       { label: "OAuth client check", requireHttpsOutsideLocalTest: true },
     );
   } catch (error) {
-    if (input.signal.aborted) throw error;
+    if (outer.aborted) throw error;
     return false;
   }
   if (response.status >= 300 && response.status < 400) {
@@ -2496,9 +2502,9 @@ export async function authorizationServerForgotClient(
     response,
     AUTHORIZE_PROBE_MAX_BYTES,
     "OAuth client check response",
-    { signal: input.signal },
+    { signal },
   ).catch((error: unknown) => {
-    if (input.signal.aborted) throw error;
+    if (outer.aborted) throw error;
     return "";
   });
   return UNKNOWN_CLIENT_TEXT.test(body);
@@ -3130,7 +3136,7 @@ async function exchangeAuthorizationCode(
 
 async function runCallbackDatabaseStage<T>(
   deadline: OAuthCallbackDeadline,
-  stage: "state_verify" | "client_lookup" | "persist",
+  stage: "state_verify" | "client_lookup" | "reverify" | "persist",
   db: Database,
   fn: (db: Database) => Promise<T>,
 ): Promise<T> {
@@ -3194,6 +3200,8 @@ function oauthCallbackFailureReason(stage: OAuthCallbackStage, error: unknown): 
       return "token_exchange_failed";
     case "tools_list":
       return "tools_list_failed";
+    case "reverify":
+      return "reverify_failed";
     case "persist":
       return "persist_failed";
   }
@@ -3661,7 +3669,7 @@ async function storedLoginAccountIdentity(
   login: ConnectionMetadata,
   budgetMs: () => number,
   outer: AbortSignal,
-): Promise<Record<string, string> | undefined> {
+): Promise<{ identity: Record<string, string> | undefined; version: number } | undefined> {
   const mcpUrl = login.metadata.mcpUrl;
   if (typeof mcpUrl !== "string" || !mcpUrl) return undefined;
   const identity = accountIdentityVerifierFor(mcpUrl);
@@ -3698,6 +3706,10 @@ async function storedLoginAccountIdentity(
     ([name]) => name.toLowerCase() === "authorization",
   )?.[1];
   if (!authorization) return undefined;
+  // The row as it stands with the credentials just resolved (after any token
+  // refresh): the account is recorded only while the row is still this one.
+  const checked = await getConnectionMetadata(db, login.workspaceId, login.id, login.subjectId);
+  if (!checked || checked.status !== "active") return undefined;
   const context: AccountIdentityContext = { tokenResponse: {} };
   const check =
     identity.kind === "http"
@@ -3740,7 +3752,7 @@ async function storedLoginAccountIdentity(
             );
           },
         );
-  return check.identity;
+  return { identity: check.identity, version: checked.version };
 }
 
 /**
@@ -3759,7 +3771,7 @@ async function reverifyLoginsBeforeDecision(
   decision: Omit<Parameters<typeof decideOAuthAccountConnection>[0], "accounts">,
 ): Promise<void> {
   try {
-    const accounts = await runCallbackDatabaseStage(deadline, "persist", db, async (scopedDb) => {
+    const accounts = await runCallbackDatabaseStage(deadline, "reverify", db, async (scopedDb) => {
       const byId = new Map<string, ConnectionMetadata>(
         (await listConnectionsMetadata(scopedDb, state.workspaceId, state.subjectId)).map(
           (connection) => [connection.id, connection] as const,
@@ -3777,13 +3789,24 @@ async function reverifyLoginsBeforeDecision(
     });
     const identityBudgetMs = () =>
       Math.min(IDENTITY_MAX_MS, deadline.remainingMs() - IDENTITY_RESERVE_MS);
+    const checkedVersions = new Map<string, number>();
     const confirmed = await reverifyLoginsBlockingNewAccount({
       decision: { ...decision, accounts },
-      verify: (login) =>
-        storedLoginAccountIdentity(db, settings, login, identityBudgetMs, deadline.signal),
+      verify: async (login) => {
+        const checked = await storedLoginAccountIdentity(
+          db,
+          settings,
+          login,
+          identityBudgetMs,
+          deadline.signal,
+        );
+        if (checked) checkedVersions.set(login.id, checked.version);
+        return checked?.identity;
+      },
       save: async (login, identity) => {
-        // The read may have refreshed the login's token, so record the account
-        // on its current version, never over a change made meanwhile.
+        // Record the account only on the row version whose credentials were
+        // checked, so a reconnect to another account meanwhile is never
+        // labelled with the earlier account.
         const current = await getConnectionMetadata(
           db,
           login.workspaceId,
@@ -3791,6 +3814,7 @@ async function reverifyLoginsBeforeDecision(
           login.subjectId,
         );
         if (!current || current.status !== "active") return false;
+        if (current.version !== checkedVersions.get(login.id)) return false;
         return !!(await transitionConnectionState(db, {
           workspaceId: current.workspaceId,
           connectionId: current.id,
