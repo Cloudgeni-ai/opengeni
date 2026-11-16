@@ -852,3 +852,88 @@ describe("helpers and report", () => {
     expect(text).toContain("Paired differences against bm25");
   });
 });
+
+describe("opengeni session adapter", () => {
+  test("busy rule, final answer, usage and network commands", async () => {
+    const {
+      sessionBusy,
+      finalAnswer,
+      usageFromEvents,
+      networkCommands,
+      findCodeInstruction,
+      OpengeniApi,
+    } = await import("./opengeni-session");
+    expect(sessionBusy({ status: "running" })).toBe(true);
+    expect(sessionBusy({ status: "idle", activeTurnId: "t" })).toBe(true);
+    expect(
+      sessionBusy({
+        status: "idle",
+        activeTurnId: "t",
+        effectiveControl: { state: "paused", settlement: null },
+      }),
+    ).toBe(false);
+    expect(sessionBusy({ status: "completed" })).toBe(false);
+    const events = [
+      { type: "agent.message.completed", payload: { text: "first" } },
+      {
+        type: "agent.model.usage",
+        payload: {
+          inputTokens: 1000,
+          cachedTokens: 800,
+          outputTokens: 50,
+          estimatedProviderCostMicros: 2500,
+          purpose: "main",
+          model: "gpt-6.1-sol",
+        },
+      },
+      {
+        type: "agent.toolCall.created",
+        payload: {
+          name: "exec_command",
+          arguments: '{"cmd":"git fetch origin"}',
+        },
+      },
+      {
+        type: "agent.message.completed",
+        payload: { content: [{ text: "core/a.py:1-9\n" }] },
+      },
+    ];
+    expect(finalAnswer(events)).toBe("core/a.py:1-9\n");
+    const usage = usageFromEvents(events);
+    expect(usage.inputTokens).toBe(1000);
+    expect(usage.cachedInputTokens).toBe(800);
+    expect(usage.apiEquivalentUsd).toBeCloseTo(0.0025);
+    expect(usage.modelCalls).toBe(1);
+    expect(usage.toolCalls).toBe(1);
+    expect(usage.purposes).toEqual({ main: 1 });
+    expect(networkCommands(events)).toHaveLength(1);
+    expect(findCodeInstruction(task({ query: "Bug X" }))).toContain("Bug X");
+    // Paging follows the has-more header and the contract header is sent after init.
+    const seen: string[] = [];
+    const api = new OpengeniApi("http://x", (async (
+      url: string,
+      init: RequestInit,
+    ) => {
+      seen.push(
+        String(
+          (init.headers as Record<string, string>)["x-opengeni-api-contract"] ??
+            "",
+        ),
+      );
+      if (url.endsWith("/v1/config/client"))
+        return new Response(JSON.stringify({ apiContractRevision: "c1" }));
+      const after = Number(new URL(url).searchParams.get("after"));
+      const batch =
+        after === 0
+          ? [{ type: "a", sequence: 1 }]
+          : [{ type: "b", sequence: 2 }];
+      return new Response(JSON.stringify(batch), {
+        headers: { "x-opengeni-has-more": after === 0 ? "true" : "false" },
+      });
+    }) as unknown as typeof fetch);
+    await api.init();
+    const got = await api.events("w", "s");
+    expect(got.map((e) => e.type)).toEqual(["a", "b"]);
+    expect(seen.slice(1)).toEqual(["c1", "c1"]);
+  });
+});
