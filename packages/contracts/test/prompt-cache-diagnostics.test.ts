@@ -118,6 +118,49 @@ describe("prompt-cache warm-miss classification", () => {
     ).toMatchObject({ class: "context_replaced" });
   });
 
+  test("a steady thinking drop does not hide the real cause", () => {
+    const dropping = (count: number, extra: Record<string, number> = {}) => ({
+      request: fingerprint(100),
+      thinkingBlocksDropped: { prefix_binding_mismatch: count, ...extra },
+    });
+    const warm = sample({ sourceKey: "previous", observation: dropping(8) });
+    const miss = (observation: ReturnType<typeof dropping>, minutes: number) =>
+      sample({
+        sourceKey: "current",
+        inputTokens: 201_000,
+        cachedTokens: 0,
+        occurredAt: new Date(at(0).getTime() + minutes * 60_000),
+        observation: { ...observation, request: fingerprint(104) },
+      });
+    expect(classifyPromptCacheWarmMiss(warm, miss(dropping(8), 7))).toMatchObject({
+      class: "idle_gap",
+    });
+    expect(classifyPromptCacheWarmMiss(warm, miss(dropping(8), 18 * 60))).toMatchObject({
+      class: "idle_gap",
+    });
+    expect(
+      classifyPromptCacheWarmMiss(
+        { ...warm, connectionId: "a" },
+        { ...miss(dropping(8), 1), connectionId: "b" },
+      ),
+    ).toMatchObject({ class: "account_changed" });
+    expect(classifyPromptCacheWarmMiss(warm, miss(dropping(8), 1))).toMatchObject({
+      class: "unexplained",
+    });
+    expect(classifyPromptCacheWarmMiss(warm, miss(dropping(9), 7))).toMatchObject({
+      class: "thinking_dropped",
+    });
+    expect(
+      classifyPromptCacheWarmMiss(warm, miss(dropping(8, { model_binding_mismatch: 1 }), 1)),
+    ).toMatchObject({ class: "thinking_dropped" });
+    expect(
+      classifyPromptCacheWarmMiss(
+        { ...warm, observation: { request: fingerprint(100) } },
+        miss(dropping(8), 7),
+      ),
+    ).toMatchObject({ class: "thinking_dropped" });
+  });
+
   test("only shared checkpoints are compared", () => {
     const longer = fingerprint(300);
     expect(firstDivergentHistoryCheckpoint(fingerprint(100), longer)).toBeNull();

@@ -186,13 +186,15 @@ export function providerRecoverySubject(t: OpenGeniText, facts: ProviderRecovery
       return t("lib.providerRecovery.theSandboxReachedItsMaximum");
     case "sandbox_lifecycle_transition":
     case "sandbox_lease_superseded":
-      return facts.sandboxTransition === "capture_in_progress"
-        ? t("lib.providerRecovery.opengeniIsSavingTheSandbox")
-        : facts.sandboxTransition === "provider_recovery_in_progress"
-          ? t("lib.providerRecovery.opengeniIsRecoveringTheSandbox")
-          : facts.sandboxTransition === "rotation_in_progress"
-            ? t("lib.providerRecovery.opengeniIsMovingTheWorkspace")
-            : t("lib.providerRecovery.opengeniIsPreparingTheSandbox");
+      return facts.sandboxTransition === "organization_sandbox_capacity"
+        ? t("lib.providerRecovery.yourPlanSRunningComputerLimit")
+        : facts.sandboxTransition === "capture_in_progress"
+          ? t("lib.providerRecovery.opengeniIsSavingTheSandbox")
+          : facts.sandboxTransition === "provider_recovery_in_progress"
+            ? t("lib.providerRecovery.opengeniIsRecoveringTheSandbox")
+            : facts.sandboxTransition === "rotation_in_progress"
+              ? t("lib.providerRecovery.opengeniIsMovingTheWorkspace")
+              : t("lib.providerRecovery.opengeniIsPreparingTheSandbox");
     default:
       return t("lib.providerRecovery.aServiceThisTurnDepends");
   }

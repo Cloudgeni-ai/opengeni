@@ -21,6 +21,12 @@ const JOB_ID = "5".repeat(32);
 const RESULT_ID = "6".repeat(32);
 const NOW = "2026-08-08T12:00:00.000Z";
 const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+// Exports first check that the artifact is still active (not deleted).
+const activeArtifacts = {
+  async readArtifact() {
+    return { lifecycle: "active" };
+  },
+} as never;
 
 describe("editable artifact durable export routes", () => {
   test("pins, enqueues, polls, and streams a bounded authorized result", async () => {
@@ -104,6 +110,7 @@ describe("editable artifact durable export routes", () => {
       settings: testSettings({ productAccessMode: "managed", delegationSecret: SECRET }),
       db: {} as never,
       managedAuth: null,
+      editableArtifacts: activeArtifacts,
       editableArtifactExports: exports,
     });
     const authorization = await bearer();
@@ -172,6 +179,7 @@ describe("editable artifact durable export routes", () => {
       }),
       db: {} as never,
       managedAuth: null,
+      editableArtifacts: activeArtifacts,
       editableArtifactExports: {
         async enqueueMaterialization() {
           enqueued += 1;

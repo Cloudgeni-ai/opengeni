@@ -10,6 +10,7 @@ import {
 } from "@opengeni/contracts";
 import {
   isStoredVerbatimAsLosslessJsonString,
+  listOwedModelUsageSettlements,
   recordModelCallFact,
   setSessionLastInputTokensInTransaction,
   type AppendEventInput,
@@ -59,12 +60,16 @@ import {
   releaseHeldSessionUsageReceiptMeteredByEvent,
 } from "./session-usage-custody";
 import {
+  planModelUsageSettlement,
   sanitizedModelUsageInput,
   sessionUsageMeterAmountMicros,
   settleModelUsage,
   settleHostedWebSearchUsage,
   type ModelUsageBillingRecord,
+  type ModelUsageSettlementCharges,
+  type ModelUsageSettlementInput,
 } from "@opengeni/core";
+import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 
 export function modelUsageSourceKey(input: {
   responseId?: string | null | undefined;
@@ -374,6 +379,14 @@ export async function processModelResponseTerminalEvent(input: {
   promptCacheRequest?: () => Promise<PromptCacheRequestFingerprint | null> | null;
   /** Processing residency of the route that served the call (see `servedRouteProcessingResidency`). */
   processingResidency: ModelCallProcessingResidencyV1;
+  /** Called synchronously once this event is claimed as a new response, before any await. */
+  onClaimed?: () => void;
+  /**
+   * The claimed response's own items (messages, reasoning, tool-call records
+   * and their pending-call receipts). Resolves once the consumer has read
+   * them; they commit in the same transaction as the response's usage.
+   */
+  responseItems?: () => Promise<ResponseItemsCommit | null>;
 }): Promise<
   | { status: "not_response" }
   | { status: "duplicate"; sourceKey: string }
@@ -409,6 +422,29 @@ export async function processModelResponseTerminalEvent(input: {
   }
   input.state.claimedSourceKeys.add(sourceKey);
   input.state.responseCount = responseOrdinal;
+  input.onClaimed?.();
+  // The response's own items, once the consumer has read them; taken once.
+  let responseItems: ResponseItemsCommit | null | undefined;
+  let responseItemsCommitted = false;
+  const takeResponseItems = async (): Promise<ResponseItemsCommit | null> => {
+    if (responseItems === undefined) responseItems = (await input.responseItems?.()) ?? null;
+    return responseItems;
+  };
+  const markResponseItemsCommitted = () => {
+    if (responseItemsCommitted || !responseItems) return;
+    responseItemsCommitted = true;
+    responseItems.committed();
+  };
+  // Without a usage event to ride on, the items still commit as one append.
+  const commitResponseItemsAlone = async () => {
+    const items = await takeResponseItems();
+    if (!items || responseItemsCommitted) return;
+    if (items.events.length > 0) {
+      if (!input.publish) throw new Error("Response items cannot be recorded without a publisher");
+      await input.publish(items.events, true, items.mutate);
+    }
+    markResponseItemsCommitted();
+  };
   const timing = input.responseTiming?.() ?? null;
   const promptCacheRequest = input.promptCacheRequest?.() ?? null;
 
@@ -451,6 +487,7 @@ export async function processModelResponseTerminalEvent(input: {
     leaseLostMessage: input.leaseLostMessage,
     recordUsage: async () => {
       if (!responseUsage) {
+        await commitResponseItemsAlone();
         // No usage means no token debit here, but the provider still ran
         // these searches. Each response settles its own under its own source
         // key, so a stream that mixes responses with and without usage
@@ -461,33 +498,38 @@ export async function processModelResponseTerminalEvent(input: {
         });
         return;
       }
-      const billing = await timedUsagePhase("response_usage_billing", () =>
-        recordModelUsageAndDebitCredits(input.settings, input.db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: input.turnId,
-          turnAttemptId: input.turnAttemptId,
-          model: input.model,
-          creditPolicyRevision: input.creditPolicyRevision,
-          externallyBilled: input.externallyBilled,
-          ...(input.byok !== undefined ? { byok: input.byok } : {}),
-          ...(input.chargesOpenGeniCredits !== undefined
-            ? { chargesOpenGeniCredits: input.chargesOpenGeniCredits }
-            : {}),
-          ...(input.countsTowardTokenCap !== undefined
-            ? { countsTowardTokenCap: input.countsTowardTokenCap }
-            : {}),
-          usage: responseUsage.usage,
-          normalizedUsage,
-          gatewayBilling: responseUsage.gatewayBilling,
-          webSearchRequests: responseUsage.webSearchRequests,
-          sourceKey,
-          ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
-          observability: input.observability,
-          metricProvider: input.provider,
-        }),
-      );
+      const settlementInput: Parameters<typeof recordModelUsageAndDebitCredits>[2] = {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        turnAttemptId: input.turnAttemptId,
+        model: input.model,
+        creditPolicyRevision: input.creditPolicyRevision,
+        externallyBilled: input.externallyBilled,
+        ...(input.byok !== undefined ? { byok: input.byok } : {}),
+        ...(input.chargesOpenGeniCredits !== undefined
+          ? { chargesOpenGeniCredits: input.chargesOpenGeniCredits }
+          : {}),
+        ...(input.countsTowardTokenCap !== undefined
+          ? { countsTowardTokenCap: input.countsTowardTokenCap }
+          : {}),
+        usage: responseUsage.usage,
+        normalizedUsage,
+        gatewayBilling: responseUsage.gatewayBilling,
+        webSearchRequests: responseUsage.webSearchRequests,
+        sourceKey,
+        ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
+        observability: input.observability,
+        metricProvider: input.provider,
+      };
+      // Price first: it fails exactly where the ledger writes would, before
+      // anything is durable. The ledger writes themselves run after the
+      // response's usage is durable (below), alongside its tools, and charge
+      // exactly the amounts recorded with it, as recovery would.
+      const plan = planRecordedModelUsage(input.settings, settlementInput);
+      const billing = plan?.record ?? null;
+      if (plan) settlementInput.recordedCharges = plan.charges;
       const recordFact = (factDb: ActivityServices["db"]) =>
         billing
           ? recordAuthoritativeModelCallFact({
@@ -517,58 +559,135 @@ export async function processModelResponseTerminalEvent(input: {
       );
       const commitUsage = async (history?: SessionEventMutation<"event">) => {
         const completionEvents = input.completionEvents?.() ?? [];
-        authoritative = await emitModelCallUsage({
-          observability: input.observability,
-          publish: input.publish,
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: input.turnId,
-          provider: input.provider,
-          providerApi: input.providerApi,
-          model: input.model,
-          purpose: "main",
-          sourceKey,
-          usage: responseUsage,
-          normalizedUsage,
-          ...(billing ? { billingPath: billing.billingPath } : {}),
-          ...(billing ? { billingSnapshot: billing } : {}),
-          ...(billing?.upstreamProvider ? { upstreamProvider: billing.upstreamProvider } : {}),
-          servingAccountHash: accountContext.servingAccountHash,
-          accountChangedFromPrevCall: accountContext.accountChangedFromPrevCall,
-          emittedSourceKeys: input.emittedSourceKeys,
-          timing,
-          processingResidency: input.processingResidency,
-          additionalEvents: completionEvents,
-          ...(input.checkpoint
-            ? {
-                project: async (tx, fence, events) => {
-                  signalsCommitted = false;
-                  // A replayed provider response cannot replace context signals.
-                  if (!fence.allowed || !isCanonicalModelUsage(events, sourceKey)) return;
-                  // The fact remains best-effort in its own savepoint, but completes
-                  // before the same lost-lease checkpoint as the standalone path.
-                  await recordFact(tx);
-                  if (input.leaseLost()) return;
-                  await setSessionLastInputTokensInTransaction(tx, fence, lastInputTokens);
-                  if (history) await history(tx, fence);
-                  signalsCommitted = true;
-                },
-              }
-            : {}),
-        });
+        // The response's own items (messages, reasoning, tool-call records)
+        // commit in this same transaction, so usage and the calls recovery
+        // resolves become durable together, before any of the tools runs.
+        const items = await takeResponseItems();
+        const alreadyEmitted = input.emittedSourceKeys.has(sourceKey);
+        const emitUsage = (withItems: boolean) =>
+          emitModelCallUsage({
+            observability: input.observability,
+            publish: input.publish,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            provider: input.provider,
+            providerApi: input.providerApi,
+            model: input.model,
+            purpose: "main",
+            sourceKey,
+            usage: responseUsage,
+            normalizedUsage,
+            ...(billing ? { billingPath: billing.billingPath } : {}),
+            ...(billing ? { billingSnapshot: billing } : {}),
+            ...(billing?.upstreamProvider ? { upstreamProvider: billing.upstreamProvider } : {}),
+            servingAccountHash: accountContext.servingAccountHash,
+            accountChangedFromPrevCall: accountContext.accountChangedFromPrevCall,
+            emittedSourceKeys: input.emittedSourceKeys,
+            timing,
+            processingResidency: input.processingResidency,
+            additionalEvents: [...completionEvents, ...(withItems ? (items?.events ?? []) : [])],
+            ...(withItems && items?.mutate ? { mutate: items.mutate } : {}),
+            ...(plan
+              ? { settlement: recordedModelUsageSettlement(settlementInput, plan.charges) }
+              : {}),
+            ...(input.checkpoint
+              ? {
+                  project: async (tx, fence, events) => {
+                    signalsCommitted = false;
+                    // A replayed provider response cannot replace context signals.
+                    if (!fence.allowed || !isCanonicalModelUsage(events, sourceKey)) return;
+                    if (input.leaseLost()) return;
+                    await setSessionLastInputTokensInTransaction(tx, fence, lastInputTokens);
+                    if (history) await history(tx, fence);
+                    signalsCommitted = true;
+                  },
+                }
+              : {}),
+          });
+        let fenced: TurnAttemptFencedError | null = null;
+        try {
+          authoritative = await emitUsage(true);
+        } catch (error) {
+          // A fenced attempt may not record tool calls: that write refuses it
+          // and rolls the whole append back. The response's usage was still
+          // incurred, so record it alone (as the fenced attempt's audit row),
+          // keeping its deferred ledger writes recoverable; no tool of it
+          // runs and the attempt ends.
+          if (
+            !(error instanceof TurnAttemptFencedError) ||
+            !items ||
+            input.emittedSourceKeys.has(sourceKey)
+          ) {
+            throw error;
+          }
+          fenced = error;
+          authoritative = await emitUsage(false);
+        }
+        // The usage is durable once its source key is emitted, by this append or
+        // an earlier one; the items rode along only on this append.
+        usageDurable = input.emittedSourceKeys.has(sourceKey);
+        if (fenced) throw fenced;
+        if (items) {
+          if (usageDurable && !alreadyEmitted) markResponseItemsCommitted();
+          else await commitResponseItemsAlone();
+        }
         if (completionEvents.length > 0) input.onCompletionCommitted?.();
         // Already-incurred usage commits even when the credential was lost.
         // Do not acknowledge a prepared history checkpoint in that case.
         if (input.checkpoint && input.leaseLost()) throw new Error(input.leaseLostMessage);
         return authoritative && signalsCommitted;
       };
-      await timedUsagePhase("response_usage_checkpoint", async () => {
-        if (input.checkpoint && !input.leaseLost()) await input.checkpoint(commitUsage);
-        else await commitUsage();
-      });
+      let usageDurable = false;
+      let afterCommitFailure: { error: unknown } | null = null;
+      try {
+        await timedUsagePhase("response_usage_checkpoint", async () => {
+          if (input.checkpoint && !input.leaseLost()) await input.checkpoint(commitUsage);
+          else await commitUsage();
+        });
+      } catch (error) {
+        // Before the usage commit nothing of this response is durable and no
+        // tool of it has run: the attempt fails and the model is asked again.
+        // The provider already charged for the response, so its ledger writes
+        // still land (idempotent per source) before the failure propagates.
+        if (!usageDurable) {
+          await timedUsagePhase("response_usage_billing", () =>
+            recordModelUsageAndDebitCredits(input.settings, input.db, settlementInput),
+          );
+          throw error;
+        }
+        afterCommitFailure = { error };
+      }
+      // The response's usage is durable. Its ledger writes (usage events,
+      // credit debit, platform fee, hosted searches) are idempotent per source
+      // and run here, alongside the tools; the next model request waits for
+      // them. If this worker dies first, recovery settles the recorded usage
+      // (settleRecordedModelUsage) exactly once.
+      // The best-effort call fact (analytics only; it catches its own
+      // failures) is written alongside them, off the commit the tools wait on.
+      await Promise.all([
+        timedUsagePhase("response_usage_billing", () =>
+          recordModelUsageAndDebitCredits(input.settings, input.db, settlementInput),
+        ),
+        authoritative ? recordFact(input.db) : undefined,
+      ]);
+      // The committed usage event metered the task usage receipt in its own
+      // transaction, so a receipt the deferred settlement could not write
+      // (and handed to custody) is already recorded; release it.
+      if (authoritative) {
+        releaseReceiptMeteredByCommittedEvent(
+          {
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            sourceKey,
+            ...(billing ? { billingSnapshot: billing } : {}),
+          },
+          normalizedUsage.telemetry,
+        );
+      }
+      if (afterCommitFailure) throw afterCommitFailure.error;
       if (authoritative && billing) {
-        if (!input.checkpoint) await recordFact(input.db);
         recordAuthoritativeModelUsageMetrics({
           observability: input.observability,
           settings: input.settings,
@@ -859,6 +978,13 @@ export async function emitModelCallUsage(input: {
    * event so a fact rebuilt from it keeps the route's recorded region.
    */
   processingResidency: ModelCallProcessingResidencyV1;
+  /**
+   * What recovery needs to settle this response's ledger again when the
+   * event commits before its billing writes (see `settleRecordedModelUsage`).
+   */
+  settlement?: RecordedModelUsageSettlementV1;
+  /** Committed in the same transaction as the event, before `project`. */
+  mutate?: SessionEventMutation<"event">;
 }): Promise<boolean> {
   const usage =
     input.usage && typeof input.usage === "object" && "usage" in input.usage
@@ -900,12 +1026,13 @@ export async function emitModelCallUsage(input: {
           ...(input.timing ? { timing: input.timing } : {}),
           processingResidency: modelCallProcessingResidencyClaim(input.processingResidency),
           ...telemetry,
+          ...(input.settlement ? { settlement: input.settlement } : {}),
         },
       },
       ...(input.additionalEvents ?? []),
     ],
     true,
-    undefined,
+    input.mutate,
     input.project,
   );
   input.emittedSourceKeys?.add(input.sourceKey);
@@ -975,9 +1102,28 @@ const MAX_METERED_SOURCE_KEY_BYTES = 1024;
  * never counts as metered here: the hold stays and fails closed.
  */
 function releaseReceiptMeteredByCommittedEvent(
-  input: {
+  input: Parameters<typeof receiptMeteredByCommittedEvent>[0] & {
     sessionId: string;
     turnId: string;
+  },
+  telemetry: Parameters<typeof receiptMeteredByCommittedEvent>[1],
+): void {
+  const metered = receiptMeteredByCommittedEvent(input, telemetry);
+  if (!metered) return;
+  releaseHeldSessionUsageReceiptMeteredByEvent({
+    sessionId: input.sessionId,
+    sourceId: `${input.turnId}:${input.sourceKey}`,
+    ...metered,
+  });
+}
+
+/**
+ * The receipt a committed, current `agent.model.usage` event metered through
+ * its database trigger, or null when the trigger cannot have metered this
+ * identity (see `releaseReceiptMeteredByCommittedEvent`).
+ */
+function receiptMeteredByCommittedEvent(
+  input: {
     sourceKey: string;
     billingSnapshot?: Pick<
       ModelUsageBillingRecord,
@@ -985,10 +1131,10 @@ function releaseReceiptMeteredByCommittedEvent(
     >;
   },
   telemetry: { inputTokens?: number | null; outputTokens?: number | null },
-): void {
-  if (!isStoredVerbatimAsLosslessJsonString(input.sourceKey)) return;
+): { amountMicros: number | null; pricingSource: string | null } | null {
+  if (!isStoredVerbatimAsLosslessJsonString(input.sourceKey)) return null;
   const keyBytes = new TextEncoder().encode(input.sourceKey).byteLength;
-  if (keyBytes < 1 || keyBytes > MAX_METERED_SOURCE_KEY_BYTES) return;
+  if (keyBytes < 1 || keyBytes > MAX_METERED_SOURCE_KEY_BYTES) return null;
   const estimated = input.billingSnapshot?.estimatedProviderCostMicros ?? null;
   const pricingSource = input.billingSnapshot?.pricingSource ?? null;
   const tokens = (value: number | null | undefined) =>
@@ -1009,12 +1155,7 @@ function releaseReceiptMeteredByCommittedEvent(
           outputTokens: tokens(telemetry.outputTokens),
         })
       : null;
-  releaseHeldSessionUsageReceiptMeteredByEvent({
-    sessionId: input.sessionId,
-    sourceId: `${input.turnId}:${input.sourceKey}`,
-    amountMicros: eventAmount,
-    pricingSource: eventAmount === null ? null : pricingSource,
-  });
+  return { amountMicros: eventAmount, pricingSource: eventAmount === null ? null : pricingSource };
 }
 
 /**
@@ -1047,6 +1188,268 @@ export function applyCodexCacheTelemetry(
 export type { ModelUsageBillingRecord };
 export { sanitizedModelUsageInput };
 
+/** A response's own items, committed with its usage in one append. */
+export type ResponseItemsCommit = {
+  events: Parameters<TurnEventPublisher>[0];
+  mutate?: SessionEventMutation<"event">;
+  /** The append carrying the items committed. */
+  committed: () => void;
+};
+
+/**
+ * The billing inputs of one response, stored on its `agent.model.usage`
+ * event. The event commits before the response's ledger writes, so recovery
+ * can settle them later from durable truth alone (settleRecordedModelUsage).
+ */
+export type RecordedModelUsageSettlementV1 = {
+  version: 1;
+  chargesOpenGeniCredits: boolean;
+  countsTowardTokenCap: boolean;
+  byok?: boolean;
+  creditPolicyRevision?: number;
+  latencyMode?: LatencyMode;
+  gatewayBilling?: ModelResponseUsage["gatewayBilling"];
+  webSearchRequests?: number;
+  normalizedUsage: ModelCallUsageNormalization;
+  /** The charges priced at record time, and the key of their last ledger write. */
+  charges: ModelUsageSettlementCharges;
+};
+
+type RecordedModelUsageInput = Parameters<typeof recordModelUsageAndDebitCredits>[2];
+
+function modelUsageSettlementInput(
+  settings: Settings,
+  input: RecordedModelUsageInput & { usage: NonNullable<RecordedModelUsageInput["usage"]> },
+): ModelUsageSettlementInput {
+  return {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    model: input.model,
+    chargesOpenGeniCredits: input.chargesOpenGeniCredits ?? !input.externallyBilled,
+    countsTowardTokenCap: input.countsTowardTokenCap ?? !input.externallyBilled,
+    ...(input.byok !== undefined ? { byok: input.byok } : {}),
+    creditPolicyRevision: input.creditPolicyRevision,
+    ...(input.gatewayBilling ? { gatewayBilling: input.gatewayBilling } : {}),
+    ...(input.webSearchRequests ? { hostedWebSearchRequests: input.webSearchRequests } : {}),
+    normalizedUsage: input.normalizedUsage ?? normalizeModelCallUsage(input.usage),
+    sourceId: `${input.turnId}:${input.sourceKey}`,
+    sessionId: input.sessionId,
+    turnId: input.turnId,
+    turnAttemptId: input.turnAttemptId,
+    usageLimitMetrics: input.observability ?? null,
+    // A failed task-usage receipt write never loses or replays the response:
+    // custody writes it before the next model request or turn completion.
+    receiptCustody: input.atomicReceiptPersistence
+      ? null
+      : (receipt) =>
+          holdSessionUsageReceipt(
+            { accountId: input.accountId, workspaceId: input.workspaceId },
+            receipt,
+          ),
+    ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
+    ...(input.recordedCharges ? { recordedCharges: input.recordedCharges } : {}),
+    ...(input.receiptMeteredByEvent !== undefined
+      ? { receiptMeteredByEvent: input.receiptMeteredByEvent }
+      : {}),
+    debitMetadata: {
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      sourceKey: input.sourceKey,
+    },
+    onCreditsDebited: (result) => {
+      recordCreditMicros(input.observability, "usage", result.debitedMicros);
+      recordModelCreditsCharged(input.observability, {
+        provider: input.metricProvider ?? "unknown",
+        model: modelMetricProductId(settings, input.metricProvider, input.model),
+        debitedMicros: result.debitedMicros,
+        grantDebitedMicros: result.grantDebitedMicros,
+      });
+    },
+  };
+}
+
+/**
+ * The billing record `recordModelUsageAndDebitCredits` would return and the
+ * charges it would make, without writing.
+ */
+export function planRecordedModelUsage(
+  settings: Settings,
+  input: RecordedModelUsageInput,
+): { record: ModelUsageBillingRecord; charges: ModelUsageSettlementCharges } | null {
+  if (!input.usage) return null;
+  return planModelUsageSettlement(
+    settings,
+    modelUsageSettlementInput(settings, { ...input, usage: input.usage }),
+  );
+}
+
+/** The recovery record stored with a response's usage event. */
+export function recordedModelUsageSettlement(
+  input: RecordedModelUsageInput,
+  charges: ModelUsageSettlementCharges,
+): RecordedModelUsageSettlementV1 {
+  const settlement: RecordedModelUsageSettlementV1 = {
+    version: 1,
+    chargesOpenGeniCredits: input.chargesOpenGeniCredits ?? !input.externallyBilled,
+    countsTowardTokenCap: input.countsTowardTokenCap ?? !input.externallyBilled,
+    normalizedUsage: input.normalizedUsage ?? normalizeModelCallUsage(input.usage!),
+    charges,
+  };
+  if (input.byok !== undefined) settlement.byok = input.byok;
+  if (input.creditPolicyRevision !== undefined)
+    settlement.creditPolicyRevision = input.creditPolicyRevision;
+  if (input.latencyMode) settlement.latencyMode = input.latencyMode;
+  if (input.gatewayBilling) settlement.gatewayBilling = input.gatewayBilling;
+  if (input.webSearchRequests) settlement.webSearchRequests = input.webSearchRequests;
+  return settlement;
+}
+
+function isRecordedCharges(value: unknown): value is ModelUsageSettlementCharges {
+  if (!value || typeof value !== "object") return false;
+  const charges = value as Partial<ModelUsageSettlementCharges>;
+  const amount = (micros: unknown) => Number.isSafeInteger(micros) && (micros as number) >= 0;
+  const hosted = charges.hostedWebSearch;
+  return (
+    typeof charges.debits === "boolean" &&
+    amount(charges.creditCostMicros) &&
+    amount(charges.byokPlatformFeeMicros) &&
+    (charges.completionKey === null || typeof charges.completionKey === "string") &&
+    (hosted === null ||
+      (!!hosted &&
+        typeof hosted === "object" &&
+        amount(hosted.requests) &&
+        amount(hosted.providerMicros) &&
+        amount(hosted.creditMicros) &&
+        Number.isSafeInteger(hosted.marginBps)))
+  );
+}
+
+function parseRecordedModelUsageSettlement(payload: unknown): {
+  model: string;
+  sourceKey: string;
+  settlement: RecordedModelUsageSettlementV1;
+} | null {
+  if (!payload || typeof payload !== "object") return null;
+  const { model, sourceKey, settlement } = payload as {
+    model?: unknown;
+    sourceKey?: unknown;
+    settlement?: unknown;
+  };
+  if (typeof model !== "string" || typeof sourceKey !== "string") return null;
+  if (!settlement || typeof settlement !== "object") return null;
+  const recorded = settlement as Partial<RecordedModelUsageSettlementV1>;
+  if (
+    recorded.version !== 1 ||
+    typeof recorded.chargesOpenGeniCredits !== "boolean" ||
+    typeof recorded.countsTowardTokenCap !== "boolean" ||
+    !recorded.normalizedUsage ||
+    typeof recorded.normalizedUsage !== "object" ||
+    !isRecordedCharges(recorded.charges)
+  ) {
+    return null;
+  }
+  return { model, sourceKey, settlement: recorded as RecordedModelUsageSettlementV1 };
+}
+
+/**
+ * Finish the ledger writes of every recorded model response of a session (or
+ * of one turn, one attempt, or a recent window) that are still owed. A
+ * response's usage commits (as its `agent.model.usage` event, or as the
+ * `turn.event.rejected_late` audit row of a fenced attempt) before its ledger
+ * writes, so a worker that dies or fails in between leaves them owed. Only
+ * owed responses are listed (one query), and each is settled with the
+ * charges recorded with it. Every write is idempotent per source
+ * (`<turnId>:<sourceKey>`), so none is charged twice.
+ */
+export async function settleRecordedModelUsage(
+  settings: Settings,
+  db: ActivityServices["db"],
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    turnId?: string;
+    attemptId?: string;
+    /** Only responses recorded since then. */
+    since?: Date;
+    /** Skip this attempt's own responses (it settles them itself). */
+    excludeAttemptId?: string;
+    observability?: ActivityServices["observability"];
+  },
+): Promise<number> {
+  const events = await listOwedModelUsageSettlements(db, input.workspaceId, {
+    sessionId: input.sessionId,
+    ...(input.turnId ? { turnId: input.turnId } : {}),
+    ...(input.attemptId ? { attemptId: input.attemptId } : {}),
+    ...(input.since ? { since: input.since } : {}),
+  });
+  let settled = 0;
+  const sources = new Set<string>();
+  for (const event of events) {
+    const recorded = parseRecordedModelUsageSettlement(event.payload);
+    if (!recorded || !event.turnId || !event.turnAttemptId) continue;
+    if (event.turnAttemptId === input.excludeAttemptId) continue;
+    // A fenced attempt may have recorded the same response more than once.
+    const sourceId = `${event.turnId}:${recorded.sourceKey}`;
+    if (sources.has(sourceId)) continue;
+    sources.add(sourceId);
+    const { settlement } = recorded;
+    await recordModelUsageAndDebitCredits(settings, db, {
+      accountId: event.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: event.turnId,
+      turnAttemptId: event.turnAttemptId,
+      model: recorded.model,
+      externallyBilled: !settlement.chargesOpenGeniCredits,
+      chargesOpenGeniCredits: settlement.chargesOpenGeniCredits,
+      countsTowardTokenCap: settlement.countsTowardTokenCap,
+      ...(settlement.byok !== undefined ? { byok: settlement.byok } : {}),
+      creditPolicyRevision: settlement.creditPolicyRevision,
+      ...(settlement.gatewayBilling ? { gatewayBilling: settlement.gatewayBilling } : {}),
+      ...(settlement.webSearchRequests ? { webSearchRequests: settlement.webSearchRequests } : {}),
+      // Pricing reads only the normalized usage; the raw form is not retained.
+      usage: {},
+      normalizedUsage: settlement.normalizedUsage,
+      sourceKey: recorded.sourceKey,
+      ...(settlement.latencyMode ? { latencyMode: settlement.latencyMode } : {}),
+      ...(input.observability ? { observability: input.observability } : {}),
+      recordedCharges: settlement.charges,
+      // A current usage event metered its receipt when it committed; a fenced
+      // attempt's audit row did not, so its receipt is written here.
+      ...(event.rejected ? {} : { receiptMeteredByEvent: meteredByUsageEvent(event, recorded) }),
+      // The receipt write is idempotent per source; a failure here leaves the
+      // response owed for the next recovery instead of held in custody.
+      atomicReceiptPersistence: true,
+    });
+    settled += 1;
+  }
+  return settled;
+}
+
+function meteredByUsageEvent(
+  event: { payload: unknown },
+  recorded: { sourceKey: string; settlement: RecordedModelUsageSettlementV1 },
+): { amountMicros: number | null; pricingSource: string | null } | null {
+  const payload = event.payload as Record<string, unknown>;
+  const estimated = payload.estimatedProviderCostMicros;
+  const pricingSource = payload.pricingSource;
+  return receiptMeteredByCommittedEvent(
+    {
+      sourceKey: recorded.sourceKey,
+      billingSnapshot: {
+        estimatedProviderCostMicros: typeof estimated === "number" ? estimated : null,
+        pricingSource: (typeof pricingSource === "string"
+          ? pricingSource
+          : null) as ModelUsageBillingRecord["pricingSource"],
+      },
+    },
+    {
+      inputTokens: typeof payload.inputTokens === "number" ? payload.inputTokens : null,
+      outputTokens: typeof payload.outputTokens === "number" ? payload.outputTokens : null,
+    },
+  );
+}
+
 // Exported for unit testing the external-billing bypass; not part of the activity surface.
 export async function recordModelUsageAndDebitCredits(
   settings: Settings,
@@ -1076,52 +1479,20 @@ export async function recordModelUsageAndDebitCredits(
     metricProvider?: string;
     /** The caller retains the response durably and retries the whole transaction. */
     atomicReceiptPersistence?: boolean;
+    /** The charges recorded with the response's usage; settled instead of repriced. */
+    recordedCharges?: ModelUsageSettlementCharges;
+    /** The task usage receipt the committed usage event's trigger already metered. */
+    receiptMeteredByEvent?: { amountMicros: number | null; pricingSource: string | null } | null;
   },
 ): Promise<ModelUsageBillingRecord | null> {
   if (!input.usage) {
     return null;
   }
-  return await settleModelUsage(settings, db, {
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    model: input.model,
-    chargesOpenGeniCredits: input.chargesOpenGeniCredits ?? !input.externallyBilled,
-    countsTowardTokenCap: input.countsTowardTokenCap ?? !input.externallyBilled,
-    ...(input.byok !== undefined ? { byok: input.byok } : {}),
-    creditPolicyRevision: input.creditPolicyRevision,
-    ...(input.gatewayBilling ? { gatewayBilling: input.gatewayBilling } : {}),
-    ...(input.webSearchRequests ? { hostedWebSearchRequests: input.webSearchRequests } : {}),
-    normalizedUsage: input.normalizedUsage ?? normalizeModelCallUsage(input.usage),
-    sourceId: `${input.turnId}:${input.sourceKey}`,
-    sessionId: input.sessionId,
-    turnId: input.turnId,
-    turnAttemptId: input.turnAttemptId,
-    usageLimitMetrics: input.observability ?? null,
-    // A failed task-usage receipt write never loses or replays the response:
-    // custody writes it before the next model request or turn completion.
-    receiptCustody: input.atomicReceiptPersistence
-      ? null
-      : (receipt) =>
-          holdSessionUsageReceipt(
-            { accountId: input.accountId, workspaceId: input.workspaceId },
-            receipt,
-          ),
-    ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
-    debitMetadata: {
-      sessionId: input.sessionId,
-      turnId: input.turnId,
-      sourceKey: input.sourceKey,
-    },
-    onCreditsDebited: (result) => {
-      recordCreditMicros(input.observability, "usage", result.debitedMicros);
-      recordModelCreditsCharged(input.observability, {
-        provider: input.metricProvider ?? "unknown",
-        model: modelMetricProductId(settings, input.metricProvider, input.model),
-        debitedMicros: result.debitedMicros,
-        grantDebitedMicros: result.grantDebitedMicros,
-      });
-    },
-  });
+  return await settleModelUsage(
+    settings,
+    db,
+    modelUsageSettlementInput(settings, { ...input, usage: input.usage }),
+  );
 }
 
 const modelMetricProductIds = new WeakMap<Settings, Map<string, string>>();

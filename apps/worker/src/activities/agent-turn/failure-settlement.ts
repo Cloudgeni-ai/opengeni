@@ -102,6 +102,7 @@ import { waitForTurnFinalizerStep, turnFinalizerCancellationSignal } from "./qui
 import {
   SandboxDeadlineRotationError,
   turnOperationCancellationFailure,
+  ORGANIZATION_SANDBOX_CAPACITY_RETRY_MS,
   sandboxDeadlineRotationRecoveryDelayMs,
 } from "./sandbox-provision";
 import type {
@@ -382,7 +383,9 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
         : undefined;
       const transitionRetryAfterMs =
         transitionPending && !sandboxLifecycleWait
-          ? sandboxDeadlineRotationRecoveryDelayMs(settings)
+          ? lifecycleTransition?.reason === "organization_sandbox_capacity"
+            ? ORGANIZATION_SANDBOX_CAPACITY_RETRY_MS
+            : sandboxDeadlineRotationRecoveryDelayMs(settings)
           : undefined;
       const notStartedToolCallIds = commandCallsNotStarted();
       const recovery = await requestTurnRecovery(db, input.workspaceId, {
@@ -406,6 +409,9 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
                     }
                   : {}),
                 ...(lifecycleTransition ? { transitionReason: lifecycleTransition.reason } : {}),
+                ...(lifecycleTransition?.organizationBoxLimit !== undefined
+                  ? { organizationBoxLimit: lifecycleTransition.organizationBoxLimit }
+                  : {}),
               },
             }
           : {}),

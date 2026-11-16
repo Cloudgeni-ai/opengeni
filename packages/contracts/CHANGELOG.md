@@ -1,5 +1,19 @@
 # @opengeni/contracts
 
+## 6.24.1
+
+### Patch Changes
+
+- 5fd2c21: Prompt-cache warm-miss diagnostics no longer label a miss `thinking_dropped` just because Claude dropped signed thinking blocks. A long conversation can drop the same old blocks on every request, including warm hits, which leaves the prompt unchanged; such misses were hiding plain cache expiries. The class now needs more blocks dropped than for the previous call, so a steady drop count falls through to `account_changed`, `idle_gap` or `unexplained`.
+
+## 6.24.0
+
+### Patch Changes
+
+- c0248a5: A `git commit` or `git push` run through `exec_command` or `run_on` that would carry a secret value Opengeni filled in for a reference earlier in that sandbox is no longer run. The result names the file and line (and commit) and says how to write the reference literally instead. Matching is exact against a keyed ledger of resolved values kept in the sandbox; files that are not committed never block, and the command runs if the check itself fails. See "Keeping values out of commits" in `docs/secrets.md`.
+
+  The prompt, the `secrets` Skill and secret-resolution hints now say the backslash escape keeps a reference as literal text in files as well as commands. `apply_patch` resolves references only in added lines, so context and removed lines match files that hold a literal reference.
+
 ## 6.23.0
 
 ### Minor Changes

@@ -10992,6 +10992,10 @@ export const sandboxLeases = pgTable(
     rotationReason: text("rotation_reason", {
       enum: ["provider_deadline", "operator", "teardown_claim"],
     }),
+    // The reaper released this box's viewers because nobody used the page for
+    // the viewer idle window (1477). A viewer attach that reports no newer
+    // interaction is refused until a person or a turn uses the session again.
+    viewerIdleDrainedAt: timestamp("viewer_idle_drained_at", { withTimezone: true }),
     // A chat or workspace deletion ended this compute lease's group: its
     // sandbox is deleted without a workspace capture (0861).
     groupEndRequestedAt: timestamp("group_end_requested_at", { withTimezone: true }),
@@ -11170,6 +11174,9 @@ export const sandboxLeaseHolders = pgTable(
     viewerSubjectId: text("viewer_subject_id"),
     viewerAuthorityEpoch: integer("viewer_authority_epoch"),
     lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }).notNull().defaultNow(),
+    // Viewer holders only (1476): the last real user interaction the viewer
+    // reported on a heartbeat. Null when never reported (older clients).
+    lastInteractionAt: timestamp("last_interaction_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({

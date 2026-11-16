@@ -1130,7 +1130,13 @@ export function isWorkerShutdownCancellation(error: unknown): boolean {
 export type SandboxLifecycleTransitionDiagnostic = {
   sandboxGroupId: string;
   leaseEpoch: number;
-  reason: "capture_in_progress" | "rotation_in_progress" | "provider_recovery_in_progress";
+  reason:
+    | "capture_in_progress"
+    | "rotation_in_progress"
+    | "provider_recovery_in_progress"
+    | "organization_sandbox_capacity";
+  /** organization_sandbox_capacity only: the plan's running-box limit. */
+  organizationBoxLimit?: number;
 };
 
 /**
@@ -1165,12 +1171,20 @@ export function sandboxLifecycleTransitionDiagnostic(
         record.leaseEpoch >= 0 &&
         (reason === "capture_in_progress" ||
           reason === "rotation_in_progress" ||
-          reason === "provider_recovery_in_progress")
+          reason === "provider_recovery_in_progress" ||
+          reason === "organization_sandbox_capacity")
       ) {
+        const limit = record.organizationBoxLimit;
         return {
           sandboxGroupId: record.sandboxGroupId,
           leaseEpoch: record.leaseEpoch,
           reason,
+          ...(reason === "organization_sandbox_capacity" &&
+          typeof limit === "number" &&
+          Number.isSafeInteger(limit) &&
+          limit >= 0
+            ? { organizationBoxLimit: limit }
+            : {}),
         };
       }
 

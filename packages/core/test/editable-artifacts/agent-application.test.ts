@@ -505,6 +505,37 @@ describe("editable artifact agent application", () => {
     expect(touched).toEqual([created.id, imported.id, imported.id, imported.id]);
   });
 
+  test("a deleted (archived) artifact reads as missing to agents", async () => {
+    const fixture = await artifactFixture();
+    const artifact = await fixture.store.getArtifact(scope, artifactId);
+    if (!artifact) throw new Error("missing fixture artifact");
+    const archived = { ...artifact, lifecycle: "archived" as const };
+    fixture.service.getArtifact = async () => archived;
+    fixture.service.readCurrentKernelState = async () =>
+      ({ modality: archived.modality, artifact: archived }) as never;
+    const application = applicationFor(fixture.service, {
+      listArtifactIds: async () => [],
+      touch: async () => undefined,
+    });
+    const context = { scope, actor: agentActor, sessionId, artifactId: artifactId as never };
+    await expect(application.get(context)).rejects.toMatchObject({ code: "not_found" });
+    await expect(
+      application.inspect({
+        ...context,
+        request: {
+          modality: archived.modality,
+          query: { kind: "workbook-metadata", query: { maxSheets: 1, maxBytes: 1024 } },
+        } as never,
+      }),
+    ).rejects.toMatchObject({ code: "not_found" });
+    await expect(
+      application.startExport({ ...context, idempotencyKey: "export", format: "docx" } as never),
+    ).rejects.toMatchObject({ code: "not_found" });
+    await expect(
+      application.exportStatus({ ...context, versionId: "v", jobId: "j" } as never),
+    ).rejects.toMatchObject({ code: "not_found" });
+  });
+
   test("pins one immutable head, materializes it, and promotes the result as a workspace file", async () => {
     const fixture = await artifactFixture();
     const versionId = stableHex(0x88, 1);

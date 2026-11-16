@@ -91,6 +91,22 @@ caller's own, and are reversible: archive keeps the source and full version
 history, restore republishes an archived Site, and rollback restores an earlier
 version without discarding the current one.
 
+Documents, spreadsheets and presentations are deleted from their Artifacts
+menu (**Delete…**, after a confirmation), which archives them with
+`POST /v1/workspaces/:workspaceId/editable-artifacts/:artifactId/archive`
+(`client.archiveEditableArtifact`). It needs `artifacts:publish` and the
+artifact's `manage` permission; someone else's Only me artifact reads as
+missing. An archived artifact is removed: it leaves the Artifacts list and the
+chat's artifact panel, a live ticket for it is refused as not found, and it
+takes no more edits. Its rows stay in the database, but nothing restores it
+(the `editable_artifacts` update guard refuses reactivation). An editor
+already open on it keeps its view, and its next change is refused. A goal
+report document that is archived can no longer be delivered.
+As with a Site, anyone who can manage a shared artifact can delete it, not
+only its owner. Agents get the same answer: `editable_artifact_get`, inspect
+and export treat a deleted artifact as missing, and so do the item, `versions`,
+`materializations` and `visibility` routes.
+
 Sites are shared work too. Since migration 0865 anyone with `artifacts:publish`
 who can see a Site manages it like its owner: Site Data and Site SQL,
 publication settings, abuse reports, and taking it down or restoring it. Only an

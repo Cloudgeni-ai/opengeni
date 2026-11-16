@@ -1,5 +1,21 @@
 # @opengeni/vaults-keeper
 
+## 6.24.1
+
+### Patch Changes
+
+- Updated dependencies [5fd2c21]
+  - @opengeni/contracts@6.24.1
+  - @opengeni/vaults@6.24.1
+
+## 6.24.0
+
+### Patch Changes
+
+- Updated dependencies [c0248a5]
+  - @opengeni/contracts@6.24.0
+  - @opengeni/vaults@6.24.0
+
 ## 6.23.0
 
 ### Patch Changes

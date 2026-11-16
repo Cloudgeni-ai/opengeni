@@ -4233,6 +4233,7 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
     "vault_items",
     "slack_agent_update_settings",
     "sandbox_leases",
+    "sandbox_lease_holders",
   ];
   // Private tables runtime definers own (RUNTIME_DEFINER_ROUTINE_TABLES names them with their schema).
   const definerPrivateTables = [
@@ -4313,6 +4314,7 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "session_content_garbage_candidates_v1(integer)",
       "collect_session_content_garbage_v1(uuid, uuid, integer)",
       "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
+      "organization_warm_sandbox_counts_v1(uuid, text, uuid)",
       "nango_connections_in_use_v1(text[])",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
@@ -4325,6 +4327,7 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "session_content_garbage_candidates_v1(integer)",
       "collect_session_content_garbage_v1(uuid, uuid, integer)",
       "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
+      "organization_warm_sandbox_counts_v1(uuid, text, uuid)",
       "nango_connections_in_use_v1(text[])",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
@@ -4410,6 +4413,7 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "session_content_garbage_candidates_v1(integer)",
       "collect_session_content_garbage_v1(uuid, uuid, integer)",
       "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
+      "organization_warm_sandbox_counts_v1(uuid, text, uuid)",
       "nango_connections_in_use_v1(text[])",
     ]) {
       const posture = eventPosture(false);
