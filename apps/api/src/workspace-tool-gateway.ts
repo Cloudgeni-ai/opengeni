@@ -945,16 +945,7 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
   // exactly as an accepted turn reads it. Only the caller's own routed
   // accounts qualify: the bindings above are the caller's turned-on logins,
   // and the fence re-reads them before every provider request.
-  const ownAccountHomes = new Map(
-    accountBindings
-      .filter(
-        (binding) =>
-          binding.subjectScope === "subject" &&
-          binding.ownerSubjectId === grant.subjectId &&
-          binding.originWorkspaceId !== grant.workspaceId,
-      )
-      .map((binding) => [binding.connectionId, binding.originWorkspaceId]),
-  );
+  const ownAccountHomes = ownAccountHomeWorkspaces(accountBindings, grant);
   const callerConnectionRequest = (
     input: ResolveConnectionCredentialInput,
   ): ResolveConnectionCredentialInput => {
@@ -1876,4 +1867,28 @@ export function workspaceToolGatewayDeclarations(
     moduleSpecifier,
     source: generateToolGatewayDeclarations(prepared.toolGatewayCatalog, { moduleSpecifier }),
   });
+}
+
+/** The other workspaces the caller's own turned-on accounts live in, by
+ * connection id. Only accounts the caller owns qualify; a colleague's or a
+ * shared account never redirects a credential read to another workspace. */
+export function ownAccountHomeWorkspaces(
+  bindings: readonly {
+    connectionId: string;
+    subjectScope: string;
+    ownerSubjectId?: string | null;
+    originWorkspaceId: string;
+  }[],
+  caller: { subjectId: string; workspaceId: string },
+): Map<string, string> {
+  return new Map(
+    bindings
+      .filter(
+        (binding) =>
+          binding.subjectScope === "subject" &&
+          binding.ownerSubjectId === caller.subjectId &&
+          binding.originWorkspaceId !== caller.workspaceId,
+      )
+      .map((binding) => [binding.connectionId, binding.originWorkspaceId]),
+  );
 }

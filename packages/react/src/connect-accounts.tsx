@@ -124,7 +124,9 @@ function ScopedAccounts({
       await controller.begin({
         providerId: account.providerId,
         ownership: account.ownership,
-        reconnectAccountId: account.id,
+        // An integration platform's account signs in again through its
+        // connector's own Connect; only native accounts reconnect in place.
+        ...(account.backend ? {} : { reconnectAccountId: account.id }),
         returnUrl,
         ...(finishInPopup ? { finishInPopup: true as const } : {}),
         idempotencyKey: crypto.randomUUID(),
@@ -176,8 +178,7 @@ function ScopedAccounts({
                   </svg>
                 </summary>
                 <div className="og-connect-account-actions">
-                  {/* An integration platform's account signs in again through its connector. */}
-                  {returnUrl && account.status === "auth_needed" && !account.backend && (
+                  {returnUrl && account.status === "auth_needed" && (
                     <button
                       type="button"
                       aria-label={t("connectAccounts.reconnectLabel", { label: account.label })}

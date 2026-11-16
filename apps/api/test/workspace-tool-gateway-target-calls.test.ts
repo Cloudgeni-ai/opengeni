@@ -2203,6 +2203,18 @@ describe("Site tool consent", () => {
         status: 409,
         details: { code: "tool_connection_needs_attention", connectionId: f.personal.id },
       });
+      // A fixed-access account short of access: unavailable to it, never a
+      // reconnect that cannot help.
+      expect(
+        await refusal(
+          new ToolReviewAuthNeededError({
+            ...report,
+            reason: "unsupported_auth",
+            accountReason: "account_scope_fixed",
+            scopes: ["https://example.test/compose"],
+          }),
+        ),
+      ).toMatchObject({ status: 403, details: { code: "tool_unavailable_for_account" } });
       expect(
         await refusal(Object.assign(new Error("not for this account"), { code: "access_denied" })),
       ).toMatchObject({ status: 403, details: { code: "tool_unavailable_for_account" } });

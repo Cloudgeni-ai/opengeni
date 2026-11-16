@@ -88,14 +88,50 @@ function button(container: HTMLElement, text: string) {
   if (!result) throw new Error(`Missing button ${text}`);
   return result;
 }
-test("an integration platform's account that needs sign-in offers no native reconnect", async () => {
-  const source = controller(async () => [{ ...account, status: "auth_needed", backend: "nango" }]);
+test("an integration platform's account that needs sign-in reconnects through its connector", async () => {
+  let submitted: Record<string, unknown> | undefined;
+  const unused = async (): Promise<never> => {
+    throw new Error("Unexpected operation");
+  };
+  const source = new ConnectController(
+    {
+      accounts: async () => [{ ...account, status: "auth_needed", backend: "nango" }],
+      catalog: unused,
+      pending: unused,
+      get: unused,
+      advance: unused,
+      cancel: unused,
+      disconnect: unused,
+      begin: async (workspaceId, input) => {
+        submitted = input as unknown as Record<string, unknown>;
+        return {
+          id: "connect",
+          workspaceId,
+          providerId: input.providerId,
+          ownership: input.ownership,
+          revision: 1,
+          state: "requires_user_action",
+          credentialsCommitted: false,
+          integrationInstalled: false,
+          completionRequirement: "connection",
+          nextAction: { type: "none" },
+          expiresAt: "2030-01-01T00:00:00Z",
+        };
+      },
+    },
+    "workspace",
+  );
   const view = await renderComponent(
     <ConnectAccounts controller={source} returnUrl="https://host.example/done" />,
   );
   try {
-    expect(view.container.querySelector("summary")?.textContent).toContain("My account");
-    expect(() => button(view.container, "Reconnect My account")).toThrow();
+    await actRun(() => button(view.container, "Reconnect My account").click());
+    expect(submitted).toMatchObject({
+      providerId: account.providerId,
+      ownership: account.ownership,
+      returnUrl: "https://host.example/done",
+    });
+    expect(submitted && "reconnectAccountId" in submitted).toBe(false);
   } finally {
     await view.unmount();
     source.dispose();

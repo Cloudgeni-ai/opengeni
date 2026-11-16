@@ -161,6 +161,9 @@ type SiteTargetMode = "resolve" | "invoke" | "approve";
 function siteToolReviewRefusal(error: unknown): ApiHttpError | null {
   if (error instanceof ToolReviewAuthNeededError) {
     const { payload } = error;
+    // An account whose access is fixed can't be given more, and signing in
+    // again would not help: the action isn't available to it.
+    if (payload.accountReason === "account_scope_fixed") return unavailableForAccount();
     if (payload.reason === "insufficient_scope" && payload.connectionId)
       return new ApiHttpError(409, {
         code: "conflict",
@@ -190,14 +193,18 @@ function siteToolReviewRefusal(error: unknown): ApiHttpError | null {
     error !== null &&
     (error as { code?: unknown }).code === "access_denied"
   )
-    return new ApiHttpError(403, {
-      code: "forbidden",
-      message: "This action isn't available for this account.",
-      retryable: false,
-      outcomeUnknown: false,
-      details: { code: "tool_unavailable_for_account" },
-    });
+    return unavailableForAccount();
   return null;
+}
+
+function unavailableForAccount(): ApiHttpError {
+  return new ApiHttpError(403, {
+    code: "forbidden",
+    message: "This action isn't available for this account.",
+    retryable: false,
+    outcomeUnknown: false,
+    details: { code: "tool_unavailable_for_account" },
+  });
 }
 
 /** A Site call that needs the person in the Opengeni frame (consent, account or connection). */
