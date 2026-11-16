@@ -186,7 +186,9 @@ export async function nangoConnectionsInUseAvailable(db: Database): Promise<bool
 /**
  * The ids among `nangoConnectionIds` that some live (not revoked) Nango-backed
  * connection row still stands for, in any organization; null while the check
- * is withheld (see nangoConnectionsInUseAvailable).
+ * is withheld (see nangoConnectionsInUseAvailable). The check opens and
+ * closes a one-transaction capability, so call it from a read-write
+ * transaction (every caller holds the person lock in one).
  */
 export async function nangoConnectionsInUse(
   db: Database,

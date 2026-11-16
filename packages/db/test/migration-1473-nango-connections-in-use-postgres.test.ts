@@ -106,4 +106,33 @@ describe("migration 1473: Nango connections in use", () => {
     );
     expect(visible?.count).toBe("0");
   }, 120_000);
+
+  test("it closes only the window it opened, and works twice in one transaction", async () => {
+    if (!owned) return;
+    await nangoRow("in-use-window");
+    const windows = `select count(*)::text as count
+      from opengeni_private.organization_tenancy_inventory_capabilities
+      where backend_pid = pg_backend_pid() and transaction_id = pg_current_xact_id()`;
+    const call = `select nango_connection_id
+      from opengeni_private.nango_connections_in_use_v1(array['in-use-window'])`;
+    await owned.admin.begin(async (tx) => {
+      // Called twice in one transaction, it opens and closes its own window each time.
+      expect((await tx.unsafe(call)).map((row) => row.nango_connection_id)).toEqual([
+        "in-use-window",
+      ]);
+      expect((await tx.unsafe(call)).map((row) => row.nango_connection_id)).toEqual([
+        "in-use-window",
+      ]);
+      expect((await tx.unsafe(windows))[0]?.count).toBe("0");
+      // A window the caller opened before stays open afterwards.
+      await tx.unsafe(`insert into opengeni_private.organization_tenancy_inventory_capabilities
+        (backend_pid, transaction_id) values (pg_backend_pid(), pg_current_xact_id())`);
+      expect((await tx.unsafe(call)).map((row) => row.nango_connection_id)).toEqual([
+        "in-use-window",
+      ]);
+      expect((await tx.unsafe(windows))[0]?.count).toBe("1");
+      await tx.unsafe(`delete from opengeni_private.organization_tenancy_inventory_capabilities
+        where backend_pid = pg_backend_pid() and transaction_id = pg_current_xact_id()`);
+    });
+  }, 120_000);
 });

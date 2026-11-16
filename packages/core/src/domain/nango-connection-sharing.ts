@@ -433,7 +433,7 @@ export async function shareNangoConnection(
   const stored = input.nangoConnectionId;
   const plan = await withNangoPersonIntegrationLock(deps.db, input, async (tx) => {
     const person = await listPersonNangoConnections(tx, input);
-    const nothing = { written: [], deleted: [] as string[] };
+    const nothing = { written: [], release: [] as string[] };
     if (!person.rows.some((row) => nangoConnectionIdOf(row) === stored))
       return { superseded: true, ...nothing };
     if (!input.accountLabel) return { superseded: false, ...nothing };
@@ -476,19 +476,37 @@ export async function shareNangoConnection(
     );
     const previous = new Set(others.flatMap((row) => nangoConnectionIdOf(row) ?? []));
     const release = await unusedNangoConnections(tx, previous, { ...person, rows: after });
-    return {
-      superseded: false,
-      written,
-      deleted: await deleteInNango(client, release, input.providerConfigKey),
-    };
+    return { superseded: false, written, release: [...release] };
   });
   // Committed: the repointed rows now stand for the shared connection.
   recordRepointUsage(deps, plan.written);
   return {
     superseded: plan.superseded,
     repointed: plan.written.map((entry) => entry.after),
-    deleted: plan.deleted,
+    deleted: await releaseCommitted(deps, input, plan.release),
   };
+}
+
+/**
+ * Delete connections a committed repoint left unused. Deleting before the
+ * commit could leave rows on a deleted connection if the commit failed, so
+ * this checks again under the person lock, in a transaction that writes
+ * nothing, and deletes there.
+ */
+async function releaseCommitted(
+  deps: NangoSharingDeps,
+  input: { subjectId: string; providerConfigKey: string; knownWorkspaceIds?: readonly string[] },
+  nangoConnectionIds: readonly string[],
+): Promise<string[]> {
+  if (nangoConnectionIds.length === 0) return [];
+  return (
+    await releaseNangoConnections(deps, {
+      subjectId: input.subjectId,
+      providerConfigKey: input.providerConfigKey,
+      nangoConnectionIds,
+      ...(input.knownWorkspaceIds ? { knownWorkspaceIds: input.knownWorkspaceIds } : {}),
+    })
+  ).deleted;
 }
 
 /**
@@ -662,9 +680,10 @@ export async function sweepNangoConnections(
       const outcome = await withNangoPersonIntegrationLock(deps.db, group, async (tx) => {
         const plan = await planGroup(deps, tx, group, planOptions);
         if (!plan) return null;
+        // Broken connections are the ones rows still stand for, unmoved, so
+        // a failed commit changes nothing about them.
         return {
           ...plan,
-          deletedDuplicates: await deleteInNango(client, plan.duplicates, group.providerConfigKey),
           deletedBroken: await deleteInNango(client, plan.broken, group.providerConfigKey),
         };
       });
@@ -674,7 +693,20 @@ export async function sweepNangoConnections(
       }
       recordRepointUsage(deps, outcome.written);
       result.repointed += outcome.written.length;
-      result.deletedDuplicates.push(...outcome.deletedDuplicates);
+      // Duplicates are deleted only once their rows' repoint is committed.
+      result.deletedDuplicates.push(
+        ...(await releaseCommitted(
+          deps,
+          {
+            subjectId: group.subjectId,
+            providerConfigKey: group.providerConfigKey,
+            knownWorkspaceIds: group.remote.flatMap(
+              (connection) => connection.tags[NANGO_TAG.workspaceId] ?? [],
+            ),
+          },
+          outcome.duplicates,
+        )),
+      );
       result.deletedBroken.push(...outcome.deletedBroken);
       if (outcome.orphans.length) {
         withOrphans.push(group);

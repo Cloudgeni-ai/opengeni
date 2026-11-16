@@ -11,4 +11,4 @@ Opengeni also no longer pays for two Nango connections for the same account. Whe
 
 Reconnecting the same verified account no longer breaks running turns: the connection keeps its authority generation when the new grant includes every scope it had, so tool calls in a turn accepted before the reconnect no longer fail with "Authentication required". A different account, fewer scopes, a revoke or a status change still end that authority.
 
-While a release rolls out, pods of the previous release still delete a replaced Nango connection directly; a connection shared by this release can then be revoked in another organization and must be reconnected there.
+While a release rolls out, or after a rollback to an older release, pods of the older release still delete a replaced Nango connection directly; a connection shared by this release can then be revoked in another organization and must be reconnected there.

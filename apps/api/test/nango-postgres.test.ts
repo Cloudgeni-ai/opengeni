@@ -136,6 +136,8 @@ function fakeNango() {
   const remote: Remote[] = [];
   /** Nango connection ids whose deletion fails. */
   const failDeletes = new Set<string>();
+  /** Runs before each delete, for example to read what other sessions see then. */
+  const beforeDelete: Array<(connectionId: string) => Promise<void>> = [];
   const requests: Array<{ method: string; url: URL }> = [];
   const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(String(input));
@@ -185,6 +187,7 @@ function fakeNango() {
         : new Response("", { status: 404 });
     }
     if (single && method === "DELETE") {
+      for (const hook of beforeDelete) await hook(single[1]!);
       if (failDeletes.has(single[1]!)) return new Response("unavailable", { status: 503 });
       const index = remote.findIndex((candidate) => candidate.connectionId === single[1]);
       if (index >= 0) remote.splice(index, 1);
@@ -206,7 +209,19 @@ function fakeNango() {
       (request) =>
         request.method === "DELETE" && request.url.pathname === `/connections/${connectionId}`,
     );
-  return { remote, requests, failDeletes, deleted, fetchImpl };
+  return { remote, requests, failDeletes, beforeDelete, deleted, fetchImpl };
+}
+
+/** What another session sees each row of `target` stand for when a delete starts. */
+function committedAtDelete(nango: ReturnType<typeof fakeNango>, target: Owner) {
+  const seen: Record<string, Array<string | null>> = {};
+  nango.beforeDelete.push(async (connectionId) => {
+    const rows = await shared!.admin<Array<{ id: string | null }>>`
+      select metadata ->> 'nangoConnectionId' as id from connections
+      where workspace_id = ${target.workspaceId} and provider_domain = 'nango:gmail'`;
+    seen[connectionId] = rows.map((row) => row.id);
+  });
+  return seen;
 }
 
 async function signedState(target: Owner): Promise<string> {
@@ -564,6 +579,7 @@ describe("Nango connections in PostgreSQL", () => {
     const second = await owner("nango share second", first.subjectId);
     const nango = fakeNango();
     await connect(first, nango, "ns-1", "shared@example.com");
+    const seen = committedAtDelete(nango, first);
     // The same person connects the same account in another organization: its
     // own row there, but the first organization's row now stands for the new
     // Nango connection too, and the old one is deleted.
@@ -584,6 +600,8 @@ describe("Nango connections in PostgreSQL", () => {
     });
     expect(secondRow).toMatchObject({ status: "active", nango_connection_id: "ns-2" });
     expect(nango.deleted("ns-1")).toBe(true);
+    // Deleted only after the repoint was committed.
+    expect(seen["ns-1"]).toEqual(["ns-2"]);
     expect(nango.remote.map((entry) => entry.connectionId)).toEqual(["ns-2"]);
     // The stored credential names the shared connection, not only the metadata.
     const [credential] = await shared!.admin<Array<{ credential_encrypted: string }>>`
@@ -809,7 +827,10 @@ describe("Nango connections in PostgreSQL", () => {
       set metadata = jsonb_set(metadata, '{nangoConnectionId}', '"nsd-1"'),
         credential_encrypted = ${olderCredential}
       where workspace_id = ${first.workspaceId} and provider_domain = 'nango:gmail'`;
+    const seen = committedAtDelete(nango, first);
     const result = await sweepNangoConnections(sweepDeps(nango));
+    // Deleted only after the repoint was committed.
+    expect(seen["nsd-1"]).toEqual(["nsd-2"]);
     expect(result).toMatchObject({
       repointed: 1,
       deletedDuplicates: ["nsd-1"],
