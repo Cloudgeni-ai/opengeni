@@ -51,6 +51,7 @@ import {
 import {
   isMcpRequestNotSentError,
   isMcpServerUnreachableError,
+  mcpToolScopeNeed,
   sessionMcpApprovalConnectionId,
 } from "@opengeni/runtime/workspace-tool-gateway";
 import { HTTPException } from "hono/http-exception";
@@ -1180,6 +1181,8 @@ export async function describeWorkspaceSiteToolReadiness(
       confirm: rest.confirm ?? "maybe",
       runsAs: rest.runsAs ?? null,
       connector: rest.connector ?? null,
+      ...(rest.scopes ? { scopes: rest.scopes } : {}),
+      ...(rest.unavailableReason ? { unavailableReason: rest.unavailableReason } : {}),
     });
     let routed: SiteToolRouting;
     try {
@@ -1254,6 +1257,39 @@ export async function describeWorkspaceSiteToolReadiness(
       );
     if (permission === "block") {
       tools.push(entry("blocked", { confirm: "never", runsAs, connector }));
+      continue;
+    }
+    // Access the account must allow first, from the grants it records (the
+    // provider is never asked here). An account whose access is fixed can't
+    // be given more, so the tool is not available on it.
+    const missingScopes =
+      account?.grantedScopes && settingsServer?.url
+        ? mcpToolScopeNeed(
+            {
+              url: settingsServer.url,
+              ...(settingsServer.connectionRef
+                ? { connectionRef: settingsServer.connectionRef }
+                : {}),
+            },
+            routing.identity.toolName,
+            account.grantedScopes,
+          )
+        : null;
+    if (missingScopes) {
+      tools.push(
+        account?.fixedAccess
+          ? entry("unavailable", {
+              confirm: "never",
+              runsAs,
+              connector,
+              unavailableReason: "account",
+            })
+          : entry(published ? "open_in_opengeni" : "grant", {
+              runsAs,
+              connector,
+              scopes: [...missingScopes],
+            }),
+      );
       continue;
     }
     // "Always allow for this Site" answers any question this call would ask.

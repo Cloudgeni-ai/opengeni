@@ -75,7 +75,7 @@ export type OpenGeniWorkspaceTools<
     /**
      * What the current viewer can do with each of a Site's declared tools
      * before anything runs: `ready`, `confirm`, `choose_account`, `connect`,
-     * `reconnect`, `blocked`, `open_in_opengeni` or `unavailable`, with the
+     * `reconnect`, `grant`, `blocked`, `open_in_opengeni` or `unavailable`, with the
      * account it runs as. Advisory: every call is still checked in full. In
      * Site code the host supplies the Site; elsewhere pass `siteArtifactId`
      * and `siteVersionId`.

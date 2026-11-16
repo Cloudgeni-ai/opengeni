@@ -3,6 +3,7 @@ import { expect, test } from "bun:test";
 import type { AuthNeededItem } from "../../../session";
 import type { CapabilityCatalogItem } from "../../types";
 import { sessionAuthRecommendation } from "../../../session-auth-recommendation";
+import { authNeededPresentation } from "../../../auth-needed-presentation";
 const event = {
   serverId: "example",
   connectionId: "connection",
@@ -63,4 +64,24 @@ test("missing personal access opens the exact integration's consent flow without
       { ...personal, connectionRef: { ...personal.connectionRef!, authoritySource: "host" } },
     ]),
   ).toBeUndefined();
+});
+
+test("an account that needs more access keeps the notice's own step-up for that account", () => {
+  const moreAccess = {
+    ...event,
+    reason: "insufficient_scope",
+    providerDomain: "gmailmcp.googleapis.com",
+    scopes: ["https://www.googleapis.com/auth/gmail.compose"],
+  } as unknown as AuthNeededItem;
+  // No connect card that would read as already connected.
+  expect(sessionAuthRecommendation(t, moreAccess, [item])).toBeUndefined();
+  const presented = authNeededPresentation(t, moreAccess);
+  expect(presented.title).toBe("Give Gmail more access");
+  expect(presented.actionLabel).toBe("Allow");
+  expect(presented.canRecover).toBe(true);
+  // Without an exact account there is nothing to step up: the catalog card stays.
+  expect(
+    sessionAuthRecommendation(t, { ...moreAccess, connectionId: null } as AuthNeededItem, [item])
+      ?.capability?.id,
+  ).toBe("catalog-example");
 });

@@ -723,6 +723,8 @@ export const ToolGatewaySiteReadinessState = /* @__PURE__ */ defineSchema(() =>
     "connect",
     // The viewer's account for it must sign in again.
     "reconnect",
+    // The viewer's account must allow more access first (see `scopes`).
+    "grant",
     // Its tool permissions block it on this account.
     "blocked",
     // It needs the viewer in Opengeni (a published address has no frame).
@@ -756,6 +758,14 @@ export const ToolGatewaySiteReadinessTool = /* @__PURE__ */ defineSchema(() =>
         .nullable(),
       /** The connector it uses ("Gmail"), when it uses one. */
       connector: primitives.string.max(200).nullable(),
+      /** The access a `grant` asks the account for. */
+      scopes: z.array(primitives.string.max(512)).max(32).optional(),
+      /**
+       * Why it is `unavailable` when that is the account: `account` means the
+       * connected account can't run it (its access is fixed), so no sign-in
+       * changes that.
+       */
+      unavailableReason: z.enum(["account"]).optional(),
     })
     .strict(),
 );

@@ -63,7 +63,7 @@ for (const tool of tools) draw(tool.state, tool.runsAs, tool.connector);
 site.tools.$onReadinessChange(redraw); // after a connect, a reconnect or "Always allow"
 ```
 
-`state` is `ready`, `confirm` (Opengeni asks first), `choose_account`, `connect`, `reconnect`, `blocked` (tool permissions block it), `open_in_opengeni` (it needs a confirmation that only Opengeni can show) or `unavailable`. `runsAs` names the account the tool runs as and whether the workspace shares it. Readiness is advice: every call is still checked. When a call stops, its error's `code` says why, for example `site_tool_blocked`, `site_tool_open_in_opengeni`, or `site_tool_upstream_unavailable` (the service couldn't be reached and nothing was sent, so trying again is safe).
+`state` is `ready`, `confirm` (Opengeni asks first), `choose_account`, `connect`, `reconnect`, `grant` (the account must allow more access, listed in `scopes`), `blocked` (tool permissions block it), `open_in_opengeni` (it needs a confirmation that only Opengeni can show) or `unavailable` (`unavailableReason: "account"` when the connected account can't run it). `runsAs` names the account the tool runs as and whether the workspace shares it. Readiness is advice: every call is still checked. When a call stops, its error's `code` says why, for example `site_tool_blocked`, `site_tool_open_in_opengeni`, or `site_tool_upstream_unavailable` (the service couldn't be reached and nothing was sent, so trying again is safe).
 
 ## Guests and Site Data
 

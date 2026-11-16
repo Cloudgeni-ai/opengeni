@@ -9,6 +9,8 @@ export {
   // A server that could not be reached / a request that provably never left.
   isMcpRequestNotSentError,
   isMcpServerUnreachableError,
+  // The access a first-party bridge's tool needs beyond an account's grants.
+  mcpToolScopeNeed,
   prepareAgentTools as prepareWorkspaceToolGatewayTools,
   type LocalMcpServerRegistration,
   type PreparedAgentTools as PreparedWorkspaceToolGatewayTools,

@@ -410,12 +410,15 @@ same design. See
 `POST tools/readiness` (`{siteArtifactId, siteVersionId, targets}`, 1–128
 targets) tells a Site what each declared tool needs for this viewer before a
 click: `state` (`ready`, `confirm`, `choose_account`, `connect`, `reconnect`,
-`blocked`, `open_in_opengeni`, `unavailable`), `confirm`
+`grant`, `blocked`, `open_in_opengeni`, `unavailable`), `confirm`
 (`never`/`always`/`remembered`/`maybe`), `runsAs` and `connector`. It reads the
 same authority as invoke (the Site's declarations, the viewer's accounts and
 routing, saved tool permissions, "Always allow on this Site" and connection
 status) and never prepares a provider or calls one; invoke still enforces
-everything. `POST tools/site-allowances/reset` removes the caller's own "Always
+everything. `grant` (with `scopes`) comes from the account's recorded grants and
+the first-party bridge's own rule for what each tool needs
+(`LocalMcpBridgeAdapter.toolScopeNeed`); an account whose access is fixed (a
+Nango-held one) reads `unavailable` with `unavailableReason: "account"` instead. `POST tools/site-allowances/reset` removes the caller's own "Always
 allow" choices on one Site (people only).
 
 A gateway call whose MCP server could not be reached before anything was sent

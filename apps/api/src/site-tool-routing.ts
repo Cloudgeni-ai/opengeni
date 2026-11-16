@@ -1,6 +1,7 @@
 import {
   WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX,
   type AccessGrant,
+  type McpServerConnectionRef,
   type ToolGatewayIdentity,
 } from "@opengeni/contracts";
 import {
@@ -45,6 +46,10 @@ export type SiteToolAccount = {
   connectionId: string;
   /** The connection is shared with the workspace rather than the viewer's own. */
   shared?: boolean;
+  /** The access the connection was granted, when it records it. */
+  grantedScopes?: readonly string[];
+  /** Its access is fixed by the service that holds it; asking for more changes nothing. */
+  fixedAccess?: boolean;
 };
 
 export type SiteToolConnect = {
@@ -128,6 +133,8 @@ export type SiteToolServerApproval = {
   /** A fixed connection the server is bound to, when it has one. */
   connectionId?: string;
   requireApproval?: boolean | readonly string[];
+  /** How the server reaches its accounts (selects a first-party bridge). */
+  connectionRef?: McpServerConnectionRef;
 };
 
 /** "ada@example.com · Yours" -> "ada@example.com" */
@@ -155,6 +162,12 @@ export async function readSiteToolAccountInventory(
           subjectId: grant.subjectId,
         };
   const tools = allGatewayToolRefs(settings);
+  const connections = await visibleMcpAccountConnections(deps.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    source,
+  });
+  const connectionsById = new Map(connections.map((connection) => [connection.id, connection]));
   const bindings = await availableMcpAccountBindings({
     db: deps.db,
     accountId: grant.accountId,
@@ -162,6 +175,7 @@ export async function readSiteToolAccountInventory(
     settings,
     tools,
     source,
+    connections,
   });
   const routes = expandMcpAccountRoutes({ settings, tools, bindings });
   const canonical = new Map<string, SiteToolConnect>();
@@ -174,6 +188,7 @@ export async function readSiteToolAccountInventory(
         ? { connectionId: server.connectionRef.connectionId }
         : {}),
       ...(server.requireApproval === undefined ? {} : { requireApproval: server.requireApproval }),
+      ...(server.connectionRef ? { connectionRef: server.connectionRef } : {}),
     });
     const ref = server.connectionRef;
     if (!ref || ref.authoritySource === "host") {
@@ -192,6 +207,7 @@ export async function readSiteToolAccountInventory(
     const label = routes.accountLabels.get(binding.serverId);
     if (!label || !canonical.has(binding.canonicalServerId)) return [];
     const account = accountName(binding.accountLabel);
+    const connection = connectionsById.get(binding.connectionId);
     return [
       {
         serverId: binding.serverId,
@@ -200,6 +216,9 @@ export async function readSiteToolAccountInventory(
         canonicalServerId: binding.canonicalServerId,
         connectionId: binding.connectionId,
         shared: binding.subjectScope === "workspace",
+        ...(connection ? { grantedScopes: connection.grantedScopes } : {}),
+        // A Nango-held account keeps the scopes of the managed app.
+        ...(connection?.metadata.integrationBackend === "nango" ? { fixedAccess: true } : {}),
       },
     ];
   });

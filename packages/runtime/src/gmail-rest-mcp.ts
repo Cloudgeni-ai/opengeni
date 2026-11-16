@@ -1927,6 +1927,8 @@ export const GMAIL_REST_MCP_BRIDGE_ADAPTER: LocalMcpBridgeAdapter<
       connectionRef: config.connectionRef,
     });
   },
+  toolScopeNeed: (toolName: string, grantedScopes: readonly string[]) =>
+    gmailToolSupportsScopes(toolName, grantedScopes) ? null : [gmailToolRequiredScope(toolName)],
 });
 
 const MESSAGE_HEADERS = ["Subject", "From", "To", "Cc", "Bcc", "Date", "Message-ID"];

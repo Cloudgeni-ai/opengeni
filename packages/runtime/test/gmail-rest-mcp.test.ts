@@ -700,3 +700,15 @@ describe("Gmail REST MCP adapter", () => {
     ).toBe(true);
   });
 });
+
+describe("Gmail bridge grant needs", () => {
+  test("names the access a tool lacks from the recorded grants, without the provider", () => {
+    const need = GMAIL_REST_MCP_BRIDGE_ADAPTER.toolScopeNeed!;
+    const readonly = "https://www.googleapis.com/auth/gmail.readonly";
+    const compose = "https://www.googleapis.com/auth/gmail.compose";
+    expect(need("create_draft", [readonly])).toEqual([compose]);
+    expect(need("create_draft", [readonly, compose])).toBeNull();
+    expect(need("search_messages", [readonly])).toBeNull();
+    expect(need("search_messages", [])).toEqual([readonly]);
+  });
+});

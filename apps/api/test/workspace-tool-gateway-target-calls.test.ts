@@ -26,6 +26,7 @@ const real = {
   settingsWithEnabledCapabilityMcpServersForTargets:
     core.settingsWithEnabledCapabilityMcpServersForTargets,
   visibleMcpAccountConnectionsByIds: core.visibleMcpAccountConnectionsByIds,
+  visibleMcpAccountConnections: core.visibleMcpAccountConnections,
   availableMcpAccountBindings: core.availableMcpAccountBindings,
   siteViewerForGrant: core.siteViewerForGrant,
   buildConnectionTokenResolver: dbModule.buildConnectionTokenResolver,
@@ -89,6 +90,14 @@ mock.module("@opengeni/core", () => ({
           connection.status === "active" &&
           input.personalConnectionIds.includes(connection.id),
     );
+  },
+  // The viewer's visible accounts: the fixture's, as the account inventory reads them.
+  visibleMcpAccountConnections: async (
+    ...args: Parameters<typeof real.visibleMcpAccountConnections>
+  ) => {
+    const fixture = fixtures.get(args[0]);
+    if (!fixture) return real.visibleMcpAccountConnections(...args);
+    return fixture.connections;
   },
   availableMcpAccountBindings: async (
     input: Parameters<typeof real.availableMcpAccountBindings>[0],
@@ -195,7 +204,8 @@ const {
   resolveWorkspaceToolTarget,
   resolveWorkspaceToolManifest,
 } = await import("../src/workspace-tool-target");
-const { declareSiteToolsForEveryViewer } = await import("../src/site-tool-routing");
+const { declareSiteToolsForEveryViewer, readSiteToolAccountInventory } =
+  await import("../src/site-tool-routing");
 import type { TargetGatewayOptions } from "../src/workspace-tool-target";
 
 afterAll(() => mock.restore());
@@ -2415,6 +2425,50 @@ describe("Site tool readiness and typed failures", () => {
         state: "reconnect",
         runsAs: { account: "ada@example.test", shared: false },
       });
+    } finally {
+      f.close();
+    }
+  });
+
+  test("an account that must allow more access is grant; a fixed-access one is unavailable for it", async () => {
+    const f = createFixture();
+    try {
+      f.state.connections = [f.personal, f.foreign];
+      // The connector served by a first-party bridge that gates tools on the
+      // account's recorded grants (Gmail's), with the account's grants.
+      const asGmail = (account: { grantedScopes: string[]; fixedAccess?: boolean }) => ({
+        readAccounts: async (...args: Parameters<typeof readSiteToolAccountInventory>) => {
+          const inventory = await readSiteToolAccountInventory(...args);
+          const servers = new Map(inventory.servers);
+          for (const [id, server] of servers)
+            servers.set(id, {
+              ...server,
+              url: "https://gmailmcp.googleapis.com/mcp/v1",
+              connectionRef: { providerDomain: "gmailmcp.googleapis.com", kind: "oauth2" as const },
+            });
+          return {
+            ...inventory,
+            servers,
+            accounts: inventory.accounts.map((entry) => ({ ...entry, ...account })),
+          };
+        },
+      });
+      const readOnly = "https://www.googleapis.com/auth/gmail.readonly";
+      const [grant] = await readiness(f, asGmail({ grantedScopes: [] }));
+      expect(grant).toMatchObject({
+        state: "grant",
+        scopes: [readOnly],
+        runsAs: { shared: false },
+      });
+      expect((await readiness(f, asGmail({ grantedScopes: [readOnly] })))[0]).toMatchObject({
+        state: "ready",
+      });
+      const [fixed] = await readiness(f, asGmail({ grantedScopes: [], fixedAccess: true }));
+      expect(fixed).toMatchObject({ state: "unavailable", unavailableReason: "account" });
+      expect(fixed!.scopes).toBeUndefined();
+      // Nothing was prepared or sent to find this out.
+      expect(f.grafana.requests).toHaveLength(0);
+      expect(preparations).toHaveLength(0);
     } finally {
       f.close();
     }

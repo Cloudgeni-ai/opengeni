@@ -67,6 +67,22 @@ function sample(connected: boolean): ToolGatewaySiteReadinessTool[] {
       connector: "Mail",
     },
     {
+      target: target("draft_reply"),
+      state: "grant",
+      confirm: "maybe",
+      runsAs: own,
+      connector: "Mail",
+      scopes: ["mail.compose"],
+    },
+    {
+      target: target("archive_thread"),
+      state: "unavailable",
+      confirm: "never",
+      runsAs: own,
+      connector: "Mail",
+      unavailableReason: "account",
+    },
+    {
       target: target("delete_record"),
       state: "blocked",
       confirm: "never",
@@ -108,7 +124,8 @@ const SITE = `<!doctype html>
 <script>
   const site = createOpenGeniSiteClient();
   const labels = { list_records: "List records", update_record: "Update record", assign_record: "Assign record",
-    create_invoice: "Create invoice", send_reminder: "Send reminder", delete_record: "Delete record",
+    create_invoice: "Create invoice", send_reminder: "Send reminder", draft_reply: "Draft reply",
+    archive_thread: "Archive thread", delete_record: "Delete record",
     approve_quote: "Approve quote", export_all: "Export everything" };
   const targets = Object.keys(labels).map((toolName) => ({ identity: { serverId: "crm", toolName } }));
   function view(tool) {
@@ -119,9 +136,10 @@ const SITE = `<!doctype html>
       case "choose_account": return { button: "Run", note: "Choose an account" };
       case "connect": return { button: "Connect " + tool.connector, note: "" };
       case "reconnect": return { button: "Sign in to " + tool.connector + " again", note: as };
+      case "grant": return { button: "Run", note: as + " · Needs more " + tool.connector + " access" };
       case "blocked": return { button: "Run", disabled: true, note: "Blocked by your tool permissions" };
       case "open_in_opengeni": return { button: "Open in Opengeni", note: "Confirm there" };
-      default: return { button: "Run", disabled: true, note: "Not available to you" };
+      default: return { button: "Run", disabled: true, note: tool.unavailableReason === "account" ? "Not available for " + as : "Not available to you" };
     }
   }
   async function draw() {

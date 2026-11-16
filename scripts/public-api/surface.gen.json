@@ -32767,7 +32767,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"blocked\\\"\",\"\\\"choose_account\\\"\",\"\\\"confirm\\\"\",\"\\\"connect\\\"\",\"\\\"open_in_opengeni\\\"\",\"\\\"ready\\\"\",\"\\\"reconnect\\\"\",\"\\\"unavailable\\\"\"]"
+        "$": "enum=[\"\\\"blocked\\\"\",\"\\\"choose_account\\\"\",\"\\\"confirm\\\"\",\"\\\"connect\\\"\",\"\\\"grant\\\"\",\"\\\"open_in_opengeni\\\"\",\"\\\"ready\\\"\",\"\\\"reconnect\\\"\",\"\\\"unavailable\\\"\"]"
       }
     },
     "ToolGatewaySiteReadinessTool": {
@@ -32782,8 +32782,11 @@
         "$.runsAs.account": "string!",
         "$.runsAs.connector": "string!",
         "$.runsAs.shared": "boolean!",
+        "$.scopes": "array?",
+        "$.scopes[]": "string",
         "$.state": "ref(ToolGatewaySiteReadinessState)!",
-        "$.target": "ref(ToolGatewayTarget)!"
+        "$.target": "ref(ToolGatewayTarget)!",
+        "$.unavailableReason": "enum?=[\"\\\"account\\\"\"]"
       }
     },
     "ToolGatewayTarget": {

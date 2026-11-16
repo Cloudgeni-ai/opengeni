@@ -232,8 +232,10 @@ access limitation. Missing publishing access itself still blocks publication.
 6. Before drawing action buttons, ask what each declared tool needs for this
    viewer: `const { tools } = await site.tools.$readiness([{ identity }, ...])`.
    Each answer has a `state` (`ready`, `confirm`, `choose_account`, `connect`,
-   `reconnect`, `blocked`, `open_in_opengeni`, `unavailable`), `runsAs` (the
-   account and whether the workspace shares it) and `connector`. Show "Connect
+   `reconnect`, `grant` (the account must allow more access, `scopes`), `blocked`,
+   `open_in_opengeni`, `unavailable`; `unavailableReason: "account"` means the
+   connected account can't run it), `runsAs` (the account and whether the
+   workspace shares it) and `connector`. Show "Connect
    {connector}" or a disabled button with its reason instead of letting the click
    fail, and redraw on `site.tools.$onReadinessChange(listener)` (after a
    connect, reconnect, "Always allow" or reset). Readiness is advice: the call

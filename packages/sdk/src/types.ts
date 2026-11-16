@@ -358,9 +358,11 @@ export type ToolGatewaySiteConsentResponse = {
  * - `choose_account`: the viewer picks one of several accounts in the frame.
  * - `connect`: the viewer has no account for it yet; the frame offers Connect.
  * - `reconnect`: the viewer's account for it must sign in again.
+ * - `grant`: the viewer's account must allow more access (`scopes`) first.
  * - `blocked`: tool permissions block it on this account.
  * - `open_in_opengeni`: it needs the viewer in Opengeni (a published address has no frame).
- * - `unavailable`: it can't run for this viewer on this Site.
+ * - `unavailable`: it can't run for this viewer on this Site; `unavailableReason`
+ *   `account` means the connected account can't run it, whatever it signs in with.
  */
 export type ToolGatewaySiteReadinessState =
   | "ready"
@@ -368,6 +370,7 @@ export type ToolGatewaySiteReadinessState =
   | "choose_account"
   | "connect"
   | "reconnect"
+  | "grant"
   | "blocked"
   | "open_in_opengeni"
   | "unavailable";
@@ -385,6 +388,10 @@ export type ToolGatewaySiteReadinessTool = {
   runsAs: { connector: string; account: string; shared: boolean } | null;
   /** The connector it uses ("Gmail"), when it uses one. */
   connector: string | null;
+  /** The access a `grant` asks the account for. */
+  scopes?: string[];
+  /** `account`: the connected account can't run it (its access is fixed). */
+  unavailableReason?: "account";
 };
 export type ToolGatewaySiteReadinessRequest = {
   targets: ToolGatewayTarget[];

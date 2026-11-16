@@ -169,6 +169,7 @@ export {
 } from "./skill-catalog";
 import {
   createLocalMcpBridgeFromAdapters,
+  localMcpBridgeToolScopeNeed,
   DISPLAY_TITLE_META_KEY,
   IntegrationInvocationError,
   isLocalMcpBridgeServer,
@@ -1234,6 +1235,19 @@ const BUILT_IN_MCP_BRIDGE_ADAPTERS: readonly LocalMcpBridgeAdapter<
   DRIVE_MCP_BRIDGE_ADAPTER,
   NANGO_TOOLS_MCP_BRIDGE_ADAPTER,
 ]);
+
+/**
+ * The access a tool of a first-party bridge needs beyond the account's
+ * recorded grants, or null when nothing is missing or the server is not such
+ * a bridge. Never contacts the provider; the bridge still decides each call.
+ */
+export function mcpToolScopeNeed(
+  config: GmailRestMcpBridgeConfig,
+  toolName: string,
+  grantedScopes: readonly string[],
+): readonly string[] | null {
+  return localMcpBridgeToolScopeNeed(BUILT_IN_MCP_BRIDGE_ADAPTERS, config, toolName, grantedScopes);
+}
 const SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS = 120_000;
 
 /**
