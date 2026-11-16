@@ -11,7 +11,10 @@ import { types } from "node:util";
  * array, Proxy, function, symbol, sparse array, an array with extra
  * properties, a `__proto__` own key) it discards its partial copy and returns
  * `structuredClone(value)`, so the result and any thrown error are always
- * those of `structuredClone`. Getters run once, in property order, either way.
+ * those of `structuredClone`. On the fast path each getter runs once, in
+ * property order. On the fallback path, getters the fast path already read
+ * run again inside `structuredClone`, so a getter with side effects can run
+ * twice; model request data is plain values and has none.
  */
 export function cloneRequestValue<T>(value: T): T {
   if (typeof value !== "object" || value === null) return structuredClone(value);

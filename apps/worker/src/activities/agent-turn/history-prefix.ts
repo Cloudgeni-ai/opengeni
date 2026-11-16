@@ -8,10 +8,25 @@ import { normalizeProtocolJsonValue, sanitizeHistoryItemsForModel } from "@openg
  * identities are equal exactly when their `JSON.stringify` forms are equal,
  * which compares by structure without serializing or hashing the whole history
  * on every model call.
+ *
+ * Retained trees hold new object and array shells but reuse the item's own
+ * strings, so they cost roughly the history's structure, not its text (about
+ * 24 KB for a 466 KB history, against 14 KB for per-item SHA-256 digests).
+ * Strings the identity rewrites (a truncated tool output, a converted value)
+ * are its own copies. Hashing instead would cost several times more CPU on
+ * every call, because every item must still be keyed on every call.
  */
 export type HistoryPrefixKey = unknown;
 
-/** A position is an append cursor only while the items before it stay identical. */
+/**
+ * A position is an append cursor only while the items before it stay identical.
+ *
+ * Each `verify` sanitizes and canonicalizes the whole current history (as the
+ * stored rows would be written) and compares every item of the durable prefix
+ * structurally with the identity retained at the last `seed`/`acknowledge`.
+ * The identities it returns become the retained ones on `acknowledge`, so they
+ * keep referencing the live history's strings.
+ */
 export class HistoryPrefixGuard {
   private persisted: HistoryPrefixKey[] = [];
 
