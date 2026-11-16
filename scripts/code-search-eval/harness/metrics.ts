@@ -11,6 +11,8 @@ export type TaskScore = {
   /** Reciprocal rank of the first oracle file in the ranked list, 0 when absent. */
   mrr: number;
   recallAt: Record<number, number>;
+  /** 1 when every oracle file is in the top k (the Acc@k of LocAgent and similar papers). */
+  allAt: Record<number, number>;
   /** Lines of predicted context, the cost side of line precision. */
   predictedLines: number;
 };
@@ -44,6 +46,12 @@ export function scoreTask(
   const filePrecision = ranked.length ? hits / ranked.length : 0;
   const firstHit = ranked.findIndex((f) => oracleFiles.has(f));
   const recallAt: Record<number, number> = {};
+  const allAt: Record<number, number> = {};
+  for (const k of ks) {
+    const top = new Set(ranked.slice(0, k));
+    allAt[k] =
+      oracleFiles.size && [...oracleFiles].every((f) => top.has(f)) ? 1 : 0;
+  }
   for (const k of ks)
     recallAt[k] = oracleFiles.size
       ? ranked.slice(0, k).filter((f) => oracleFiles.has(f)).length /
@@ -65,6 +73,7 @@ export function scoreTask(
     lineF1: f1(linePrecision, lineRecall),
     mrr: firstHit < 0 ? 0 : 1 / (firstHit + 1),
     recallAt,
+    allAt,
     predictedLines,
   };
 }

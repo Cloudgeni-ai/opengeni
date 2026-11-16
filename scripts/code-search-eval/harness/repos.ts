@@ -48,7 +48,7 @@ export class RepoCache {
     try {
       git(["cat-file", "-e", `${commit}^{commit}`], mirror);
     } catch {
-      git(["fetch", "--quiet", "--filter=blob:none", "origin", commit], mirror);
+      git(["fetch", "--quiet", "origin", commit], mirror);
     }
     git(["worktree", "add", "--quiet", "--detach", path, commit], mirror);
     return path;

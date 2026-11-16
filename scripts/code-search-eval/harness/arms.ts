@@ -4,6 +4,7 @@ import {
   filesFromChunks,
   loadRepo,
   reciprocalRankFusion,
+  tokenize,
   type Chunk,
 } from "./index-lexical";
 import { RepoMap } from "./index-repomap";
@@ -57,6 +58,63 @@ export function repoIndex(repoDir: string): Promise<RepoIndex> {
 export const clearIndexCache = () => indexCache.clear();
 
 const strip = ({ file, start, end }: Span): Span => ({ file, start, end });
+
+/** File-level BM25 (whole files as documents), the baseline published localization papers report. */
+const fileBm25Cache = new Map<string, Bm25>();
+export const bm25FileArm: Arm = {
+  name: "bm25-file",
+  live: false,
+  async run(task, { repoDir }) {
+    const { files } = await repoIndex(repoDir);
+    let index = fileBm25Cache.get(repoDir);
+    if (!index) {
+      index = new Bm25(
+        [...files].map(([file, text]) => ({
+          file,
+          start: 1,
+          end: text.split("\n").length,
+          tokens: tokenize(`${file}\n${text}`),
+        })),
+      );
+      fileBm25Cache.clear();
+      fileBm25Cache.set(repoDir, index);
+    }
+    const hits = index.search(task.query, 20);
+    return {
+      prediction: { files: hits.map((h) => h.chunk.file), spans: [] },
+      usage: zeroUsage(),
+    };
+  },
+};
+
+/**
+ * The candidate pool the dense arm embeds: the best chunks of the top hybrid files. Embedding a
+ * whole repository at every commit on CPU is out of reach, so dense retrieval re-ranks this pool;
+ * its recall ceiling is the pool's recall, which the report states.
+ */
+export async function densePool(
+  task: Task,
+  repoDir: string,
+  topFiles = 20,
+  perFile = 10,
+  max = 200,
+) {
+  const { bm25, files: texts } = await repoIndex(repoDir);
+  const { files } = await hybridCandidates(task, repoDir, topFiles);
+  const pool: (Span & { text: string })[] = [];
+  for (const file of files) {
+    const lines = (texts.get(file) ?? "").split("\n");
+    const chunks = bm25.docs.filter((c) => c.file === file).slice(0, perFile);
+    for (const c of chunks)
+      pool.push({
+        file,
+        start: c.start,
+        end: c.end,
+        text: `${file}\n${lines.slice(c.start - 1, c.end).join("\n")}`,
+      });
+  }
+  return pool.slice(0, max);
+}
 
 export const bm25Arm: Arm = {
   name: "bm25",
@@ -153,13 +211,20 @@ function excerpt(text: string, span: Span, maxLines = 40): string {
  */
 export function jevRerankArm(
   decisionModel: DecisionModel,
-  options: { candidates?: number; batch?: number; threshold?: number } = {},
+  options: {
+    candidates?: number;
+    batch?: number;
+    threshold?: number;
+    name?: string;
+  } = {},
 ): Arm {
   const candidates = options.candidates ?? 30;
   const batch = options.batch ?? 6;
-  const threshold = options.threshold ?? 0.2;
+  // 0 keeps every candidate, ranked by probability; a cut is chosen on dev and applied afterwards
+  // from the stored per-file probabilities (see thresholdVariant), so no threshold is tuned on test.
+  const threshold = options.threshold ?? 0;
   return {
-    name: "jev-rerank",
+    name: options.name ?? "jev-rerank",
     live: true,
     async run(task, { repoDir, signal }) {
       const { files: index } = await repoIndex(repoDir);
@@ -221,6 +286,7 @@ export function jevRerankArm(
         prediction: {
           files: ordered,
           spans: budgetSpans(ordered.flatMap((f) => spansOf(f))),
+          fileScores: Object.fromEntries(ranked.map((r) => [r.file, r.p])),
         },
         usage,
       };

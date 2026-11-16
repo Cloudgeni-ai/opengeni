@@ -20,6 +20,8 @@ export type Task = {
 export type Prediction = {
   files: string[];
   spans: Span[];
+  /** Per-file relevance from a scoring arm, kept so a cut chosen on dev can be applied afterwards. */
+  fileScores?: Record<string, number>;
 };
 
 export type Usage = {

@@ -80,9 +80,12 @@ export function localWorkspace(
 }
 
 /** Opengeni's existing code_search pipeline (rg recall, Jev triage and verification) with Jev via Gateway. */
-export function codeSearchArm(decisionModel: DecisionModel): Arm {
+export function codeSearchArm(
+  decisionModel: DecisionModel,
+  name = "code-search",
+): Arm {
   return {
-    name: "code-search",
+    name,
     live: true,
     async run(task, { repoDir, signal }) {
       const usage = zeroUsage();

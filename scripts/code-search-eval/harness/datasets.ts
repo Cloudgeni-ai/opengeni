@@ -88,6 +88,28 @@ export function contextBenchTask(row: ContextBenchRow): Task {
   };
 }
 
+/** SWE-bench-style row (SWE-bench Lite, Loc-Bench): the oracle is the set of files the gold patch edits. */
+export type SweBenchRow = {
+  instance_id: string;
+  repo: string;
+  base_commit: string;
+  problem_statement: string;
+  patch: string;
+};
+
+export function sweBenchTask(row: SweBenchRow, source = "swebench"): Task {
+  return {
+    id: row.instance_id,
+    repo: row.repo,
+    repoUrl: `https://github.com/${row.repo}.git`,
+    commit: row.base_commit,
+    language: "python",
+    source,
+    query: row.problem_statement,
+    oracle: { files: patchFiles(row.patch), spans: [] },
+  };
+}
+
 /**
  * Deterministic dev/test split by repository: a repository is dev when a hash of its name falls
  * below the fraction, so tuning never sees test repositories. Stable across dataset versions.

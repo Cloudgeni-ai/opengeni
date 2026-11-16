@@ -8,6 +8,7 @@ import type {
 } from "../../../packages/decisions/src/types";
 import {
   bm25Arm,
+  bm25FileArm,
   budgetSpans,
   clearIndexCache,
   hybridArm,
@@ -25,7 +26,12 @@ import {
   repoRelativePath,
   splitByRepo,
   stratifiedSample,
+  sweBenchTask,
 } from "./datasets";
+import {
+  createDecisionModelsDecisionModel,
+  TokenLedger,
+} from "./decision-models";
 import {
   createGatewayDecisionModel,
   toGatewayQuestion,
@@ -44,7 +50,12 @@ import {
   pairedSampleSize,
   scoreTask,
 } from "./metrics";
-import { renderReport, scoreRuns } from "./report";
+import {
+  calibrateCut,
+  renderReport,
+  scoreRuns,
+  thresholdVariant,
+} from "./report";
 import { subagentArm, type SubagentModel } from "./subagent";
 import {
   clipToLineCounts,
@@ -519,10 +530,11 @@ describe("arms on a real checkout", () => {
   const ctx = () => ({ repoDir: repo, signal: AbortSignal.timeout(20_000) });
 
   test("model-free arms find the oracle file", async () => {
-    for (const arm of [bm25Arm, repoMapArm, hybridArm]) {
+    for (const arm of [bm25Arm, bm25FileArm, repoMapArm, hybridArm]) {
       const { prediction } = await arm.run(t(), ctx());
       expect(prediction.files[0]).toBe("core/scheduler.py");
-      expect(scoreTask(t(), prediction).lineRecall).toBe(1);
+      if (arm !== bm25FileArm)
+        expect(scoreTask(t(), prediction).lineRecall).toBe(1);
     }
   });
 
@@ -554,7 +566,14 @@ describe("arms on a real checkout", () => {
         };
       },
     };
-    const { prediction, usage } = await jevRerankArm(fake).run(t(), ctx());
+    const { prediction, usage } = await jevRerankArm(fake, {
+      threshold: 0.2,
+    }).run(t(), ctx());
+    expect(
+      (await jevRerankArm(fake).run(t(), ctx())).prediction.fileScores?.[
+        "ui/view.py"
+      ],
+    ).toBe(0.9);
     expect(prediction.files).toEqual(["ui/view.py"]);
     expect(usage.cashUsd).toBeGreaterThan(0);
   });
@@ -634,7 +653,124 @@ describe("arms on a real checkout", () => {
   });
 });
 
+describe("decision models", () => {
+  const reply = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), { status });
+  const questions = {
+    p: { type: "predicate", instructions: "Is it?" },
+  } satisfies Record<string, DecisionQuestion>;
+  test("native System One shape, token ledger settles reported usage", async () => {
+    const ledger = new TokenLedger(1_000_000);
+    let sent: Record<string, unknown> = {};
+    const model = createDecisionModelsDecisionModel({
+      apiKey: "k",
+      model: "s1-pro",
+      ledger,
+      arm: "dm",
+      taskId: () => "t",
+      fetch: async (url, init) => {
+        expect(url).toBe("https://api.decisionmodels.io/v1/systemone");
+        sent = JSON.parse(String(init.body));
+        return reply({
+          model: "s1-pro-x",
+          answers: { p: { type: "noul", noul: 0.7 } },
+          usage: { input_tokens: 321 },
+        });
+      },
+    });
+    const result = await model.decide({ s: 1 }, questions);
+    expect(sent.model).toBe("s1-pro");
+    expect((sent.questions as Record<string, { type: string }>).p.type).toBe(
+      "noul",
+    );
+    expect(result.answers.p).toEqual({ type: "predicate", probability: 0.7 });
+    expect(ledger.usedTokens).toBe(321);
+  });
+  test("402 halts every later call; 400 is a miss that is not billed", async () => {
+    const ledger = new TokenLedger(1_000_000);
+    let status = 400;
+    let calls = 0;
+    const model = createDecisionModelsDecisionModel({
+      apiKey: "k",
+      model: "s1-pro",
+      ledger,
+      arm: "dm",
+      taskId: () => "t",
+      fetch: async () => (calls++, reply({ error: { message: "x" } }, status)),
+    });
+    await expect(model.decide({}, questions)).rejects.toThrow();
+    expect(ledger.usedTokens).toBe(0);
+    expect(ledger.stop).toBeNull();
+    status = 402;
+    await expect(model.decide({}, questions)).rejects.toBeInstanceOf(
+      BudgetStop,
+    );
+    const before = calls;
+    await expect(model.decide({}, questions)).rejects.toBeInstanceOf(
+      BudgetStop,
+    );
+    expect(calls).toBe(before);
+  });
+  test("token cap refuses a call that could exceed it", async () => {
+    const ledger = new TokenLedger(500);
+    const model = createDecisionModelsDecisionModel({
+      apiKey: "k",
+      model: "s1-pro",
+      ledger,
+      arm: "dm",
+      taskId: () => "t",
+      fetch: async () => reply({}),
+    });
+    await expect(
+      model.decide({ big: "x".repeat(4000) }, questions),
+    ).rejects.toBeInstanceOf(BudgetStop);
+  });
+});
+
 describe("helpers and report", () => {
+  test("thresholds are applied from stored scores and calibrated on given tasks", () => {
+    const usage = {
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+      cashUsd: 0,
+      apiEquivalentUsd: 0,
+      modelCalls: 0,
+      toolCalls: 0,
+    };
+    const runs = [
+      {
+        taskId: "t1",
+        arm: "r",
+        usage,
+        latencyMs: 1,
+        prediction: {
+          files: ["a.py", "c.py", "b.py"],
+          spans: [],
+          fileScores: { "a.py": 0.9, "c.py": 0.5, "b.py": 0.3 },
+        },
+      },
+    ];
+    expect(thresholdVariant(runs, "r", 0.4)[0]!.prediction.files).toEqual([
+      "a.py",
+      "c.py",
+    ]);
+    expect(calibrateCut([task()], runs, "r", [0.2, 0.6])).toBe(0.2);
+  });
+  test("file-level BM25 and Acc@k", async () => {
+    expect(
+      scoreTask(task(), { files: ["b.py", "x", "a.py"], spans: [] }).allAt,
+    ).toMatchObject({ 1: 0, 3: 1 });
+    expect(
+      sweBenchTask({
+        instance_id: "i",
+        repo: "o/r",
+        base_commit: "c",
+        problem_statement: "q",
+        patch: "--- a/x.py\n+++ b/x.py\n",
+      }).oracle.files,
+    ).toEqual(["x.py"]);
+  });
   test("budget spans stop at the token budget", () => {
     expect(
       budgetSpans(
