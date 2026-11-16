@@ -1175,6 +1175,7 @@ import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-
 import {
   fromPostgresLosslessJson,
   fromPostgresLosslessText,
+  isStoredVerbatimAsLosslessJsonString,
   LOSSLESS_CONTENT_CODEC_VERSION,
   toPostgresLosslessText,
   withLosslessContentWriteVersion,
@@ -42576,7 +42577,7 @@ export async function listOwedModelUsageSettlements(
     if (input.turnId) filters.push(eq(events.turnId, input.turnId));
     if (input.attemptId) filters.push(eq(events.turnAttemptId, input.attemptId));
     if (input.since) filters.push(gte(events.createdAt, input.since));
-    return await scopedDb
+    const rows = await scopedDb
       .select({
         id: events.id,
         accountId: events.accountId,
@@ -42584,11 +42585,56 @@ export async function listOwedModelUsageSettlements(
         turnAttemptId: events.turnAttemptId,
         rejected: sql<boolean>`(${events.type} <> 'agent.model.usage')`,
         payload: sql<unknown>`${usagePayload}`,
+        payloadCodecVersion: events.payloadCodecVersion,
       })
       .from(events)
       .where(and(...filters))
       .orderBy(asc(events.sequence));
+    // The payload is read through SQL, so restore the logical values here: a
+    // source key the codec stored encoded must reach settlement as the
+    // original key, or its receipt identity is encoded a second time.
+    const decoded = rows.map(({ payloadCodecVersion, ...row }) => ({
+      ...row,
+      payload: fromPostgresLosslessJson(row.payload, payloadCodecVersion),
+    }));
+    // Such a key's completion key is encoded in the payload but written to the
+    // ledger as given, so the anti-join above cannot see its ledger row.
+    // Check those few keys as written.
+    const encodedKeys = new Map<(typeof decoded)[number], string>();
+    for (const row of decoded) {
+      const key = owedCompletionKey(row.payload);
+      if (key !== null && !isStoredVerbatimAsLosslessJsonString(key)) encodedKeys.set(row, key);
+    }
+    if (encodedKeys.size === 0) return decoded;
+    const keys = [...new Set(encodedKeys.values())];
+    const settled = new Set(
+      [
+        ...(await scopedDb
+          .select({ key: schema.usageEvents.idempotencyKey })
+          .from(schema.usageEvents)
+          .where(inArray(schema.usageEvents.idempotencyKey, keys))),
+        ...(await scopedDb
+          .select({ key: schema.creditLedgerEntries.idempotencyKey })
+          .from(schema.creditLedgerEntries)
+          .where(inArray(schema.creditLedgerEntries.idempotencyKey, keys))),
+      ].map((row) => row.key),
+    );
+    if (settled.size === 0) return decoded;
+    // Compare as the database stored both sides.
+    const stored = (key: string) => Buffer.from(key, "utf8").toString("utf8");
+    const settledStored = new Set([...settled].map(stored));
+    return decoded.filter((row) => {
+      const key = encodedKeys.get(row);
+      return key === undefined || !settledStored.has(stored(key));
+    });
   });
+}
+
+function owedCompletionKey(payload: unknown): string | null {
+  const settlement = (payload as { settlement?: { charges?: { completionKey?: unknown } } } | null)
+    ?.settlement;
+  const key = settlement?.charges?.completionKey;
+  return typeof key === "string" ? key : null;
 }
 
 function normalizeEventSequence(value: number | undefined, fallback: number): number {

@@ -29,6 +29,7 @@ import {
 import { DrizzleQueryError } from "drizzle-orm";
 import { createProductionAgentRuntime, type OpenGeniRuntime } from "@opengeni/runtime";
 import { createActivityTestHarness } from "../src/activities";
+import { settleRecordedModelUsage } from "../src/activities/agent-turn/model-usage";
 import { POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE } from "../src/activities/types";
 import type { ControlActivityServices } from "../src/activities/types";
 import { createGoalActivities } from "../src/activities/goals";
@@ -787,6 +788,127 @@ test("F1/AC13: a persistent receipt failure stops before the next request, the r
     coverage: "complete",
   });
 });
+
+/**
+ * Response ids the lossless codec stores encoded: the codec's own prefix, a
+ * NUL and a lone surrogate. The trigger cannot meter them, so their receipt
+ * is held, carried through the post-claim recovery detail, and written by
+ * the recovery lane and by the turn's owed-usage settlement.
+ */
+const ENCODED_RESPONSE_IDS = {
+  "codec prefix": (marker: string) => `opengeni_lossless_json_string_v2_81f06e15:${marker}`,
+  NUL: (marker: string) => `nul-\u0000-${marker}`,
+  "lone surrogate": (marker: string) => `surrogate-\ud800-${marker}`,
+} as const;
+
+for (const [label, responseId] of Object.entries(ENCODED_RESPONSE_IDS)) {
+  test(`a held receipt for a ${label} response id written by the recovery lane is recorded once`, async () => {
+    resetSessionUsageReceiptCustodyForTests();
+    const ctx = await fixture();
+    const session = await startSession(ctx);
+    await setLimit(ctx, session.id, 1_000_000);
+    const scripted = new ScriptedModel([
+      paidToolCall(responseId(session.id)),
+      { inputTokens: 100, output: [assistantMessage("done")] },
+      { inputTokens: 100, output: [assistantMessage("must never be requested")] },
+    ]);
+    const activities = createActivityTestHarness({
+      settings: settingsFor("priced"),
+      db: app.db,
+      bus: new MemoryEventBus(),
+      runtime: scriptedRuntime(scripted),
+    });
+    // Every direct receipt write for this session fails: the receipt stays
+    // held and the attempt stops for post-claim database recovery.
+    const original = opengeniDb.settleSessionUsageReceipt;
+    const settle = spyOn(opengeniDb, "settleSessionUsageReceipt").mockImplementation(
+      async (db, input) => {
+        if (input.sessionId === session.id) throw connectionClosed();
+        return await original(db, input);
+      },
+    );
+    // The same outage fails the response's first ledger write, so the turn's
+    // owed-usage settlement also writes its receipt during recovery.
+    const originalUsage = opengeniDb.recordUsageEvent;
+    let usageFailures = 0;
+    const usageWrite = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
+      async (db, input) => {
+        if (input.sessionId === session.id && usageFailures === 0) {
+          usageFailures++;
+          throw connectionClosed();
+        }
+        return await originalUsage(db, input);
+      },
+    );
+    const attemptId = crypto.randomUUID();
+    let thrown: unknown;
+    try {
+      await activities.runAgentTurn({
+        accountId: ctx.accountId,
+        workspaceId: ctx.workspaceId,
+        sessionId: session.id,
+        workflowId: `session-${session.id}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId,
+        trigger: { kind: "next" },
+      });
+    } catch (error) {
+      thrown = error;
+    } finally {
+      settle.mockRestore();
+      usageWrite.mockRestore();
+    }
+    expect(usageFailures).toBe(1);
+    expect(scripted.calls).toBe(1);
+    expect((thrown as { type?: string } | undefined)?.type).toBe(
+      POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE,
+    );
+    const detail = (thrown as { details?: unknown[] }).details?.[0] as {
+      sessionUsageReceipts?: Array<{ sourceId: string }>;
+    };
+    expect(detail.sessionUsageReceipts).toHaveLength(1);
+    // Recovery in another worker process, then the replacement attempt.
+    resetSessionUsageReceiptCustodyForTests();
+    await activities.failSessionAttempt({
+      accountId: ctx.accountId,
+      workspaceId: ctx.workspaceId,
+      sessionId: session.id,
+      attemptId,
+      workflowId: `session-${session.id}`,
+      retryDelayMs: 1_000,
+      postClaimDatabaseRecovery: detail as never,
+      trigger: { kind: "next" },
+      error: "post-claim database recovery",
+    });
+    await activities.runAgentTurn({
+      accountId: ctx.accountId,
+      workspaceId: ctx.workspaceId,
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(scripted.calls).toBe(2);
+    // The held response and the final one: one receipt each, under the
+    // identity the held receipt carried.
+    const rows = await receipts(session.id);
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => row.source_id)).toContain(detail.sessionUsageReceipts![0]!.sourceId);
+    expect(await usage(ctx, session.id)).toMatchObject({
+      usedMicros: 200,
+      pricedCalls: 2,
+      coverage: "complete",
+    });
+    // Its ledger is settled under the original key: nothing is owed anymore.
+    expect(
+      await settleRecordedModelUsage(settingsFor("priced"), app.db, {
+        workspaceId: ctx.workspaceId,
+        sessionId: session.id,
+      }),
+    ).toBe(0);
+  });
+}
 
 test("re-review N3: a final response completes once without a direct receipt write; its committed usage event already recorded the exact receipt", async () => {
   resetSessionUsageReceiptCustodyForTests();
