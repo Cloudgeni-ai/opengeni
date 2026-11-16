@@ -367,7 +367,14 @@ function integrationNamedIn(
     query,
     integration,
     sharedDomains ? { sharedDomains } : {},
-  ).filter((mention) => !(mention.kind === "domain" && vendorWord && isOperationWord(vendorWord)));
+  ).filter(
+    (mention) =>
+      !(
+        (mention.kind === "domain" || mention.kind === "product_word") &&
+        vendorWord &&
+        isOperationWord(vendorWord)
+      ),
+  );
   return (
     mentions.length > 0 &&
     (!distinctive ||
@@ -1837,9 +1844,16 @@ export class LazyToolRuntime {
       // its vendor domain is shared, then without the strong matches' own.
       const notOwned = (integration: ConnectableIntegration) =>
         !owners.some((owner) => ownsIntegration(owner, integration));
-      const named = connectableIntegrationsNamedIn(query, matches, besideStrongMatches).filter(
+      const anyNamed = connectableIntegrationsNamedIn(query, matches, besideStrongMatches).filter(
         notOwned,
       );
+      const distinctive = besideStrongMatches
+        ? anyNamed
+        : connectableIntegrationsNamedIn(query, matches, true).filter(notOwned);
+      // A name written distinctively outweighs names that are only ordinary
+      // words of the same request ("Dynamics 365 ... close date" names
+      // Microsoft Dynamics, not Close). A listing filter names on purpose.
+      const named = !literal && distinctive.length ? distinctive : anyNamed;
       // Clearly named: the only one named, and named distinctively (which
       // beside strong matches every named integration already is) or in a
       // listing filter.
@@ -1847,9 +1861,7 @@ export class LazyToolRuntime {
         named.length === 1 &&
         (besideStrongMatches ||
           literal ||
-          connectableIntegrationsNamedIn(query, matches, true).some(
-            (integration) => integration.capabilityId === named[0]!.capabilityId,
-          ))
+          distinctive.some((integration) => integration.capabilityId === named[0]!.capabilityId))
           ? named[0]
           : undefined;
       if (clearlyNamed) return { named, clearlyNamed };
