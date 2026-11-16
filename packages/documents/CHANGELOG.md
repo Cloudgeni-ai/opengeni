@@ -1,5 +1,22 @@
 # @opengeni/documents
 
+## 6.24.0
+
+### Patch Changes
+
+- Updated dependencies [0ad29b9]
+- Updated dependencies [8924854]
+- Updated dependencies [e6c9e45]
+- Updated dependencies [8924854]
+- Updated dependencies [c0248a5]
+- Updated dependencies [1b544b0]
+- Updated dependencies [477f1db]
+  - @opengeni/db@6.24.0
+  - @opengeni/contracts@6.24.0
+  - @opengeni/config@6.24.0
+  - @opengeni/storage@6.24.0
+  - @opengeni/network@6.24.0
+
 ## 6.23.0
 
 ### Patch Changes

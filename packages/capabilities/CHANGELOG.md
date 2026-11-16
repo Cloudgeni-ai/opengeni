@@ -1,5 +1,24 @@
 # @opengeni/capabilities
 
+## 6.24.0
+
+### Minor Changes
+
+- 8924854: Outlook Mail, Outlook Calendar, Outlook Contacts and OneDrive now offer a reviewed set of tools with hand-written names and descriptions (25, 20, 13 and 19 operations, down from 150, 177, 76 and 452), instead of every Graph operation under their path prefixes. Retained operations keep their tool ids. When an install moves to a new revision (including other people's instances moved by someone else's install), one that had every tool gets every tool of the new revision, and one whose chosen tools left the set gets the generic tools so those operations stay reachable; other choices are kept as they were. Free/busy schedules no longer need approval (they only read).
+
+  A reviewed definition can opt in to `genericPathScope`: a find tool searches the reviewed document's operations under its prefixes, and a read tool (GET) and a change tool (other methods, Ask by default) call one of them by its concrete path, which must match an in-scope operation segment by segment. The four Graph definitions above opt in with their earlier prefixes, so rare operations stay reachable.
+
+  Reviewed allowlist entries accept `put` and `delete`, a reviewed `summary` and `operationId`, and a `requestPath` naming other path parameters than the provider's (unnamed ones are dropped, new ones described with `pathParameterDescriptions`).
+
+  Every Microsoft Graph definition now reads a commit-pinned Graph OpenAPI document checked against its SHA-256 (`source.pinned`), not msgraph-metadata's moving master branch, so upstream changes no longer create new revisions on their own. `bun scripts/graph-openapi-pin.ts --diff <commit>` shows the operation changes before the pin is moved.
+
+### Patch Changes
+
+- b9baad4: A query names a multi-word integration by the word of its name that is also its own domain's word ("Dynamics 365" names Microsoft Dynamics at dynamics.com); written with a capital mid-sentence it names it distinctively, so tool search shows its Connect card. When a search names one integration distinctively, integrations named only by ordinary words of the same request ("close date" for Close) no longer stop the card. The repeated-call guard now compares command results without the per-call metadata the runtime adds (output receipt ids, chunk ids, wall times), so a command that prints the same output every time is recognised as repeating.
+- Updated dependencies [c0248a5]
+  - @opengeni/contracts@6.24.0
+  - @opengeni/network@6.24.0
+
 ## 6.23.0
 
 ### Patch Changes

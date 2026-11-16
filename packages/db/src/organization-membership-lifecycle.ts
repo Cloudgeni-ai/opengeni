@@ -51,6 +51,11 @@ import {
   withRlsContext,
 } from "./database";
 import { nestedPostgresSqlState } from "./persistence-errors";
+import {
+  readSignupNetworkEvaluateAccounts,
+  setSignupNetworkSourceForSetup,
+  type SignupNetworkSource,
+} from "./managed-user-setup";
 import { lockSessionEventWriteRows } from "./session-control";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
 import * as schema from "./schema";
@@ -66,6 +71,29 @@ export async function createManagedOrganization(
     trialCreditModelIds?: string[] | undefined;
   },
 ): Promise<CreateOrganizationResponseType> {
+  return (await createManagedOrganizationWithSignupNetwork(db, input)).organization;
+}
+
+/**
+ * {@link createManagedOrganization} that also hands the setup receipt
+ * trigger the signup network (migration 1354), exactly like organization
+ * onboarding: this legacy route writes the same self-serve setup receipt and
+ * Free eligibility, so it must be recorded, rate limited (SQLSTATE OG429)
+ * and evaluated the same way. `evaluateAccountIds` lists the accounts to
+ * evaluate after commit.
+ */
+export async function createManagedOrganizationWithSignupNetwork(
+  db: Database,
+  input: {
+    subjectId: string;
+    subjectLabel: string;
+    name: string;
+    operationId: string;
+    trialCreditsEnabled?: boolean;
+    trialCreditModelIds?: string[] | undefined;
+    signupNetwork?: SignupNetworkSource | null;
+  },
+): Promise<{ organization: CreateOrganizationResponseType; evaluateAccountIds: string[] }> {
   return await db.transaction(async (tx) => {
     await setSubjectRlsContext(tx as unknown as Database, input.subjectId);
     // This legacy first-organization route delegates to the same self-service
@@ -85,6 +113,7 @@ export async function createManagedOrganization(
       ${input.trialCreditModelIds ? JSON.stringify(input.trialCreditModelIds) : ""}, true
     )`,
     );
+    await setSignupNetworkSourceForSetup(tx as unknown as Database, input.signupNetwork);
     const [row] = await rawRows<{ result: unknown }>(
       tx,
       sql`select create_managed_organization(
@@ -94,7 +123,10 @@ export async function createManagedOrganization(
         ${input.operationId}::uuid
       ) as result`,
     );
-    return CreateOrganizationResponse.parse(row?.result);
+    return {
+      organization: CreateOrganizationResponse.parse(row?.result),
+      evaluateAccountIds: await readSignupNetworkEvaluateAccounts(tx as unknown as Database),
+    };
   });
 }
 
