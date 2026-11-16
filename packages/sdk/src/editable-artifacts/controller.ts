@@ -15,7 +15,7 @@ import { editableArtifactCodecFor } from "@opengeni/contracts/editable-artifact-
 import { EDITABLE_ARTIFACT_LIVE_WIRE_VERSION } from "@opengeni/contracts/editable-artifact-live";
 import { decodeEditableArtifactSerializedCommit } from "@opengeni/contracts/editable-artifact-serialized-commit";
 import { SPREADSHEET_COLLABORATION_SNAPSHOT_VERSION } from "@opengeni/contracts/editable-artifact-versions";
-import { EditableArtifactSyncError } from "./errors";
+import { EDITABLE_ARTIFACT_COMMAND_REJECTED, EditableArtifactSyncError } from "./errors";
 import {
   classifyEditableArtifactOpenFailure,
   type EditableArtifactOpenFailureReporter,
@@ -1370,6 +1370,14 @@ class EditableArtifactSyncControllerImpl implements EditableArtifactSyncControll
       if (this.connectionReady) {
         const reconciled = await this.kernel.reconcileCommitted(transaction, remainingPending);
         this.setBlockedPending(reconciled.blockedPending);
+        if (await this.discardRejectedPending(reconciled.blockedPending)) {
+          // Rebuild the Worker overlay over the same remaining set, minus what
+          // was discarded, so its speculative head matches the controller's.
+          const projection = await this.kernel.replacePending(
+            remainingPending.filter((pending) => this.pending.has(pending.clientTransactionId)),
+          );
+          this.setBlockedPending(projection.blockedPending);
+        }
         applied = reconciled;
       } else {
         applied = await this.kernel.applyRecovered(transaction);
@@ -1755,8 +1763,65 @@ class EditableArtifactSyncControllerImpl implements EditableArtifactSyncControll
   }
 
   private async replacePendingOverlay(): Promise<void> {
-    const projection = await this.kernel.replacePending(this.orderedPending());
-    this.setBlockedPending(projection.blockedPending);
+    for (;;) {
+      const projection = await this.kernel.replacePending(this.orderedPending());
+      this.setBlockedPending(projection.blockedPending);
+      if (!(await this.discardRejectedPending(projection.blockedPending))) return;
+    }
+  }
+
+  /**
+   * A serialized intent that the kernel rejects over its own authored head can
+   * never commit anywhere (the server replays it with the same kernel). Remove
+   * it, and local successors authored on top of it, from the WAL so one invalid
+   * edit cannot block authoring or reopening the artifact forever. Returns true
+   * when something was discarded and the overlay must be rebuilt.
+   */
+  private async discardRejectedPending(
+    blocked: readonly EditableArtifactBlockedPending[],
+  ): Promise<boolean> {
+    if (this.modality === "spreadsheet") return false;
+    const rejected = new Set(
+      blocked
+        .filter((entry) => entry.code === EDITABLE_ARTIFACT_COMMAND_REJECTED)
+        .map((entry) => entry.clientTransactionId),
+    );
+    if (rejected.size === 0) return false;
+    const discarded = new Set<string>();
+    let earliestOwn: EditableArtifactPendingTransaction | null = null;
+    for (const transaction of this.orderedPending()) {
+      const predecessor = transaction.previousLocalTransactionId;
+      if (
+        !rejected.has(transaction.clientTransactionId) &&
+        !(predecessor !== null && discarded.has(predecessor))
+      ) {
+        continue;
+      }
+      discarded.add(transaction.clientTransactionId);
+      if (
+        transaction.replicaId === this.writerReplicaId &&
+        (earliestOwn === null || transaction.replicaCounter < earliestOwn.replicaCounter)
+      ) {
+        earliestOwn = transaction;
+      }
+    }
+    for (const clientTransactionId of discarded) {
+      await this.storage.deletePending(this.storageScope, clientTransactionId);
+      this.pending.delete(clientTransactionId);
+      this.submittedEpoch.delete(clientTransactionId);
+      this.submitBlockedPending.delete(clientTransactionId);
+    }
+    if (earliestOwn !== null) {
+      // The server requires contiguous writer counters; the discarded intents
+      // were never committed, so the next edit continues from their predecessor.
+      this.lastLocalTransactionId = earliestOwn.previousLocalTransactionId;
+      this.lastLocalReplicaCounter = earliestOwn.replicaCounter - 1;
+    }
+    this.blockedPending = this.blockedPending.filter((entry) =>
+      this.pending.has(entry.clientTransactionId),
+    );
+    this.emit();
+    return true;
   }
 
   private pendingIsBlocked(clientTransactionId: string): boolean {

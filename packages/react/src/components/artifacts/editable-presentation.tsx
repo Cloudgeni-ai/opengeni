@@ -191,6 +191,20 @@ function EditablePresentationArtifactSurfaceSession({
         return;
       }
       if (commit.kind === "slide-delete") {
+        // The kernel deletes only empty slides, and cannot delete a slide in
+        // the same batch that edits its objects. Empty it first, then delete
+        // it; each edit is validated before it is saved.
+        const contents = presentationNodeDeletionCommands(
+          [...sceneNodes.current.values()],
+          commit.slideId,
+          null,
+        );
+        if (contents.length > 0) {
+          await session.applyPresentationCommands({
+            version: PRESENTATION_ARTIFACT_COMMAND_VERSION,
+            commands: contents,
+          });
+        }
         await session.applyPresentationCommands({
           version: PRESENTATION_ARTIFACT_COMMAND_VERSION,
           commands: [{ kind: "slide.delete", id: commit.slideId }],
@@ -237,7 +251,11 @@ function EditablePresentationArtifactSurfaceSession({
       if (commit.kind === "object-delete") {
         await session.applyPresentationCommands({
           version: PRESENTATION_ARTIFACT_COMMAND_VERSION,
-          commands: [{ kind: "node.delete", id: commit.objectId }],
+          commands: presentationNodeDeletionCommands(
+            [...sceneNodes.current.values()],
+            commit.slideId,
+            commit.objectId,
+          ),
         });
         notifyPresentationCommit(t, onCommit, onCommandError, commit);
         refresh();
@@ -371,6 +389,71 @@ function EditablePresentationArtifactSurfaceSession({
 }
 
 /** Builds a deterministic, bounded catalog + editor-slide projection at one revision. */
+/**
+ * Commands that delete slide-owned scene nodes in an order the kernel
+ * accepts: group children before their group, connectors before the nodes
+ * they attach to, and connectors that stay behind detached from deleted nodes.
+ * `rootId` null deletes everything the slide owns (inherited layout and master
+ * objects are untouched); otherwise it deletes that node and its descendants.
+ */
+export function presentationNodeDeletionCommands(
+  nodes: readonly PresentationArtifactEditorSceneNode[],
+  slideId: string,
+  rootId: string | null,
+): PresentationArtifactCommand[] {
+  const owned = nodes.filter(
+    (node) => !node.inherited && node.source.kind === "slide" && node.source.id === slideId,
+  );
+  if (rootId !== null && !owned.some((node) => node.id === rootId)) {
+    return [{ kind: "node.delete", id: rootId }];
+  }
+  const targets = new Set<string>(rootId === null ? owned.map((node) => node.id) : [rootId]);
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const node of owned) {
+      if (node.parentId !== null && targets.has(node.parentId) && !targets.has(node.id)) {
+        targets.add(node.id);
+        grew = true;
+      }
+    }
+  }
+  const commands: PresentationArtifactCommand[] = [];
+  for (const node of owned) {
+    if (targets.has(node.id) || node.content.kind !== "connector") continue;
+    const { start, end } = node.content;
+    const detachStart = start.nodeId !== null && targets.has(start.nodeId);
+    const detachEnd = end.nodeId !== null && targets.has(end.nodeId);
+    if (!detachStart && !detachEnd) continue;
+    commands.push({
+      kind: "node.content.set",
+      id: node.id,
+      content: {
+        ...node.content,
+        start: detachStart ? { ...start, nodeId: null } : start,
+        end: detachEnd ? { ...end, nodeId: null } : end,
+      },
+    });
+  }
+  const remaining = owned.filter((node) => targets.has(node.id));
+  while (remaining.length > 0) {
+    const index = remaining.findIndex(
+      (candidate) =>
+        !remaining.some(
+          (other) =>
+            other !== candidate &&
+            (other.parentId === candidate.id ||
+              (other.content.kind === "connector" &&
+                (other.content.start.nodeId === candidate.id ||
+                  other.content.end.nodeId === candidate.id))),
+        ),
+    );
+    // A reference cycle cannot be ordered; let the kernel report it.
+    const [next] = remaining.splice(index < 0 ? 0 : index, 1);
+    commands.push({ kind: "node.delete", id: next!.id });
+  }
+  return commands;
+}
+
 export async function composePresentationEditorProjection(
   t: OpenGeniText,
   session: EditableArtifactSession,

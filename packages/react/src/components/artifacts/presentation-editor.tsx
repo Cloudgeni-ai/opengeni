@@ -37,6 +37,8 @@ import type {
 } from "@opengeni/artifact-tool/reference";
 
 import { cn } from "../../lib/cn";
+import { ConfirmDialog } from "../../ui/confirm-dialog";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../../ui/tooltip";
 import { ArtifactSurface } from "./artifact-surface";
 import { useOpenGeniText, type OpenGeniText } from "../../messages/runtime";
 
@@ -1058,6 +1060,21 @@ function PresentationEditorCore({
     submit();
   }, [activeSlide, mutationsBlocked, runCommit, selected]);
 
+  // One delete control: it acts on the selected object, otherwise on the
+  // current slide, names its target, and always asks before deleting.
+  const deleteTriggerRef = useRef<HTMLButtonElement>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState<"slide" | "object" | null>(null);
+  const deleteTarget: "slide" | "object" = selected ? "object" : "slide";
+  const deleteEnabled = !mutationsBlocked && (selected ? !selected.readOnly : activeSlide !== null);
+  const deleteLabel =
+    deleteTarget === "object"
+      ? t("artifacts.presentationEditor.deleteObject")
+      : t("artifacts.presentationEditor.deleteSlide");
+  const confirmDelete = useCallback(() => {
+    if (confirmingDelete === "object") deleteObject();
+    else if (confirmingDelete === "slide") deleteSlide();
+  }, [confirmingDelete, deleteObject, deleteSlide]);
+
   const startTextEdit = useCallback(
     (entry: DisplayObject | null) => {
       if (mutationsBlocked || !entry || entry.readOnly || entry.kind !== "shape") return;
@@ -1425,15 +1442,6 @@ function PresentationEditorCore({
           >
             <FilePlus2Icon />
           </button>
-          <button
-            type="button"
-            aria-label={t("artifacts.presentationEditor.deleteSlide")}
-            disabled={mutationsBlocked || !activeSlide}
-            onClick={deleteSlide}
-            className="grid size-7 shrink-0 place-items-center rounded-og-sm text-og-fg-muted hover:bg-og-surface-3 hover:text-og-status-failed disabled:opacity-35 [&>svg]:size-3.5"
-          >
-            <Trash2Icon />
-          </button>
           <span className="mx-1 h-4 w-px shrink-0 bg-og-border" />
           <button
             type="button"
@@ -1472,15 +1480,29 @@ function PresentationEditorCore({
           >
             <TypeIcon />
           </button>
-          <button
-            type="button"
-            aria-label={t("artifacts.presentationEditor.deleteSelectedObject")}
-            disabled={mutationsBlocked || !selected || selected.readOnly}
-            onClick={deleteObject}
-            className="grid size-7 shrink-0 place-items-center rounded-og-sm text-og-fg-muted hover:bg-og-surface-3 hover:text-og-status-failed disabled:opacity-35 [&>svg]:size-3.5"
-          >
-            <Trash2Icon />
-          </button>
+          <span className="mx-1 h-4 w-px shrink-0 bg-og-border" />
+          <TooltipProvider delayDuration={300}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  ref={deleteTriggerRef}
+                  type="button"
+                  data-og-presentation-delete={deleteTarget}
+                  disabled={!deleteEnabled}
+                  onClick={() => setConfirmingDelete(deleteTarget)}
+                  className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-og-sm px-2 text-og-xs text-og-fg-muted hover:bg-og-surface-3 hover:text-og-status-failed disabled:opacity-35 [&>svg]:size-3.5"
+                >
+                  <Trash2Icon aria-hidden />
+                  <span>{deleteLabel}</span>
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">
+                {deleteTarget === "object"
+                  ? t("artifacts.presentationEditor.deleteObjectHint")
+                  : t("artifacts.presentationEditor.deleteSlideHint")}
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
         </div>
         <span
           className="hidden max-w-44 shrink-0 truncate border-l border-og-border px-2 text-og-xs text-og-fg-subtle sm:block"
@@ -1871,6 +1893,31 @@ function PresentationEditorCore({
           )}
         </div>
       </div>
+      <ConfirmDialog
+        open={confirmingDelete !== null}
+        onOpenChange={(open) => {
+          if (!open) setConfirmingDelete(null);
+        }}
+        title={
+          confirmingDelete === "object" && selected
+            ? t("artifacts.presentationEditor.deleteObjectTitle", {
+                name: objectLabel(t, selected),
+              })
+            : t("artifacts.presentationEditor.deleteSlideTitle", { index: activeIndex + 1 })
+        }
+        description={
+          confirmingDelete === "object"
+            ? t("artifacts.presentationEditor.deleteObjectDescription")
+            : t("artifacts.presentationEditor.deleteSlideDescription")
+        }
+        confirmLabel={
+          confirmingDelete === "object"
+            ? t("artifacts.presentationEditor.deleteObject")
+            : t("artifacts.presentationEditor.deleteSlide")
+        }
+        restoreFocusRef={deleteTriggerRef}
+        onConfirm={confirmDelete}
+      />
     </div>
   );
 }

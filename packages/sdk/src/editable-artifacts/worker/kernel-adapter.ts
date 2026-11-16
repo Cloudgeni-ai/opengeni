@@ -17,6 +17,7 @@ import {
 } from "@opengeni/contracts/editable-artifact-committed-transaction";
 import type { ArtifactWorkerInitializeInput } from "./wire-codec";
 import type { EditableArtifactModality } from "../types";
+import { EDITABLE_ARTIFACT_COMMAND_REJECTED } from "../errors";
 import { ArtifactWorkerProtocolError } from "./rpc-protocol";
 
 export type ArtifactWorkerKernelSession = {
@@ -48,6 +49,23 @@ export class ArtifactWorkerPendingProjectionError extends Error {
     this.name = "ArtifactWorkerPendingProjectionError";
     this.code = requireErrorCode(code, "pending projection code");
   }
+}
+
+/** Blocked-pending code for a serialized command the kernel rejects at its own base. */
+export const SERIALIZED_COMMAND_REJECTED = EDITABLE_ARTIFACT_COMMAND_REJECTED;
+
+/**
+ * True when a document/presentation kernel rejected a command batch's content
+ * (for example deleting a slide that still has objects). Batch application is
+ * atomic, so the session is unchanged; limits, codec and closed-session errors
+ * are not included.
+ */
+export function isSerializedCommandRejection(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : "";
+  return (
+    message.startsWith("[ARTIFACT_PRESENTATION_BATCH_REJECTED]") ||
+    message.startsWith("[ARTIFACT_KERNEL_ERROR] document batch:")
+  );
 }
 
 /** Entirely Worker-owned adapter over one compatible collaboration WASM build. */

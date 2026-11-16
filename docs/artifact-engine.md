@@ -403,6 +403,13 @@ methods rather than whole-buffer reads.
   that barrier to clear while slide selection, browsing, and zoom remain usable.
   Existing drafts survive the wait; cancellation and permission loss still clear
   them. Exact receipt settlement remains the controller's authority.
+- A document or presentation edit must apply over the speculative head before
+  the Worker authors its intent, so a kernel-rejected batch fails the call and
+  never reaches the IndexedDB WAL. A retained intent the kernel rejects over its
+  own authored head (blocked code `command_rejected`, from older clients) can
+  never commit; the controller discards it and its local successors on open
+  instead of failing the artifact, and the next edit continues from its
+  predecessor's writer counter.
 - WASM/worker asset URLs are configurable for CSP, CDN, and self-hosting. Kernel
   payloads split by model/calc, layout/render, and modality codec rather than
   one mandatory download.
