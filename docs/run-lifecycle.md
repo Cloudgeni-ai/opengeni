@@ -4339,8 +4339,8 @@ with open work (`queued`, `running`, `requires_action`, `recovering`,
 `waiting_capacity`). A box with a turn, process, Browser/ComputerSession or
 direct operation is never counted or drained by them. Compute and selfhosted
 boxes are exempt, and so is every box of an organization in the `embedded`
-plan tier (not self-serve; see [deployment](deployment.md)), whose host may
-hold viewers without reporting interaction.
+(host-provisioned) or `enterprise` plan tier ([deployment](deployment.md)),
+whose host may hold viewers without reporting interaction.
 
 - Idle drain (`OPENGENI_SANDBOX_VIEWER_IDLE_DRAIN_MS`, default 30 minutes, `0`
   disables). The server bounds the hold by what it observes: the viewers'

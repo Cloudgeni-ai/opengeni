@@ -2036,8 +2036,8 @@ const SettingsSchema = z.object({
   // releases those viewers and drains the box through the ordinary drain
   // (workspace saved, box stopped). A viewer that comes back re-attaches and
   // the box resumes. Clients that do not report interaction fall back to the
-  // attach time and session activity. Organizations that are not self-serve
-  // (the `embedded` plan tier) are exempt. Default 30min; 0 disables.
+  // attach time and session activity. Host-provisioned (`embedded`) and
+  // `enterprise` organizations are exempt. Default 30min; 0 disables.
   // Knob: OPENGENI_SANDBOX_VIEWER_IDLE_DRAIN_MS.
   sandboxViewerIdleDrainMs: z.coerce.number().int().nonnegative().default(1_800_000),
   // A BrowserSession controller refreshes its durable resource and exact
@@ -12318,8 +12318,8 @@ export type SandboxPlanLimit = {
  * organization whose promotion decision is `held` or `denied` while promotion
  * enforcement is on, `new` for a Free self-serve organization
  * younger than the `new` tier's `organizationsYoungerThanMs`, and `embedded`
- * for an organization that is not self-serve (it, or one of its workspaces,
- * has an external source). A tier absent from the table is unbounded.
+ * for an organization a host provisioned (its own external source is not a
+ * signup one). A tier absent from the table is unbounded.
  */
 export type SandboxPlanLimits = Readonly<Record<string, SandboxPlanLimit>>;
 
@@ -12358,8 +12358,9 @@ export const DEFAULT_SANDBOX_PLAN_LIMITS: SandboxPlanLimits = {
     viewerOnlyBoxesPerMember: 5,
     runningBoxesPerOrganization: 50,
   },
-  // An organization that is not self-serve (an embedding host, the SDK or a
-  // federation provisions it): unbounded unless an operator sets limits.
+  // An organization a host provisioned (a configured deployment, an
+  // embedding host or the SDK bootstrap): unbounded unless an operator sets
+  // limits.
   embedded: {},
 };
 

@@ -18,7 +18,7 @@
 //      nobody used for VIEWER_ONLY_LIMIT_QUIET_MS: a box in use is never
 //      evicted, and admission keeps new boxes within the limits.
 //
-// An organization that is not self-serve (the `embedded` tier) is outside both
+// A host-provisioned (`embedded`) or `enterprise` organization is outside both
 // bounds: its host may hold viewers without reporting interaction.
 //
 // Drains use the ordinary path (viewers released, lease warm -> draining), so
@@ -28,7 +28,7 @@ import {
   drainViewerOnlyLease,
   listViewerOnlyWarmLeases,
   resolveSandboxPlanTierInWorkspace,
-  SANDBOX_EMBEDDED_PLAN_TIER,
+  sandboxPlanTierExemptFromViewerOnlyBounds,
   sandboxPlanLimitFor,
   VIEWER_ONLY_EXEMPT_BACKENDS,
   VIEWER_ONLY_LIMIT_QUIET_MS,
@@ -138,7 +138,8 @@ export function planViewerOnlyLimitDrains(
 export type ViewerOnlyBoundsResult = {
   inspected: number;
   drained: Record<SandboxViewerOnlyDrainReason, number>;
-  /** Organizations outside both bounds this pass (embedded, or tier unknown). */
+  /** Organizations outside both bounds this pass (embedded, enterprise, or
+   * tier unknown). */
   exemptOrganizations: number;
 };
 
@@ -179,8 +180,9 @@ export async function boundViewerOnlyWarmBoxes(
   result.inspected = inventory.length;
   if (inventory.length === 0) return result;
 
-  // Each organization's plan tier, once. An embedded organization, or one
-  // whose tier could not be read, is left alone this pass.
+  // Each organization's plan tier, once. An embedded or enterprise
+  // organization, or one whose tier could not be read, is left alone this
+  // pass.
   const accounts = new Map<string, string>();
   for (const lease of inventory) {
     if (!accounts.has(lease.accountId)) accounts.set(lease.accountId, lease.workspaceId);
@@ -194,7 +196,7 @@ export async function boundViewerOnlyWarmBoxes(
         workspaceId,
         limits: planLimits,
       });
-      if (tier === SANDBOX_EMBEDDED_PLAN_TIER) {
+      if (sandboxPlanTierExemptFromViewerOnlyBounds(tier)) {
         exempt.add(accountId);
         return;
       }

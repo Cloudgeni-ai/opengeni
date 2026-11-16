@@ -32,8 +32,9 @@ import {
 //     and session activity;
 //   - after an idle release, a re-attach without newer interaction or session
 //     activity is refused;
-//   - an organization that is not self-serve resolves to the unbounded
-//     `embedded` tier, and joining a box a process or Browser/ComputerSession
+//   - only a host-provisioned organization resolves to the unbounded
+//     `embedded` tier (never a member-created workspace source); embedded
+//     and enterprise organizations are outside the workspace limit; joining a box a process or Browser/ComputerSession
 //     already keeps warm is never refused as one more viewer-only box.
 
 const acquireLease: typeof acquireLeaseUnscoped = (database, input) =>
@@ -492,7 +493,7 @@ describe("viewer-only warm box bounds (real packages/db + RLS)", () => {
     expect(back.role).toBe("spawner");
     expect((await readLease(ids, groupId)).holders).toBe(1);
   }, 180_000);
-  test("a free self-serve organization is capped, with its Personal workspace; one an embedding product keeps is not", async () => {
+  test("a free self-serve organization is capped whatever workspaces it has; host-provisioned and enterprise ones are not", async () => {
     if (!available) return;
     const limits = DEFAULT_SANDBOX_PLAN_LIMITS;
     const viewer = (ids: Ids, holderId: string) =>
@@ -528,48 +529,43 @@ describe("viewer-only warm box bounds (real packages/db + RLS)", () => {
     expect(await tierOf(selfServe)).toBe("free");
     await expect(viewer(selfServe, "c")).rejects.toBeInstanceOf(SandboxViewerBoxLimitError);
 
-    // Free organization that owns a workspace an embedding product keeps:
-    // `embedded`, outside the workspace and plan limits.
-    const embedded = await freshWorkspace();
+    // A member can create a workspace with any external source, so one never
+    // makes the organization embedded, at any age.
+    const memberSource = await freshWorkspace();
     await admin`update managed_accounts set created_at = now() - interval '10 days'
-      where id = ${embedded.accountId}`;
+      where id = ${memberSource.accountId}`;
     await admin`insert into organization_plans (account_id, plan_key, status)
-      values (${embedded.accountId}, 'free', 'active')`;
+      values (${memberSource.accountId}, 'free', 'active')`;
     await admin`insert into workspaces (account_id, name, external_source)
-      values (${embedded.accountId}, 'host', 'federation:test-host')`;
-    expect(await tierOf(embedded)).toBe(SANDBOX_EMBEDDED_PLAN_TIER);
-    for (const holderId of ["a", "b", "c", "d"]) {
-      expect((await viewer(embedded, holderId)).role).toBe("spawner");
-    }
-
-    // A member can create such a workspace, so it never lifts the `new` or
-    // `restricted` tier.
-    const young = await freshWorkspace();
-    await admin`insert into organization_plans (account_id, plan_key, status)
-      values (${young.accountId}, 'free', 'active')`;
-    await admin`insert into workspaces (account_id, name, external_source)
-      values (${young.accountId}, 'mine', 'opengeni-sdk:mine')`;
-    expect(await resolveSandboxPlanTierInWorkspace(db, { ...young, limits })).toBe("new");
-    await admin`update managed_accounts set created_at = now() - interval '10 days'
-      where id = ${young.accountId}`;
-    await admin`insert into promotion_enforcement (singleton, enabled) values (true, true)
-      on conflict (singleton) do update set enabled = excluded.enabled`;
-    await admin`insert into promotion_decisions (account_id, decision, revision, actor)
-      values (${young.accountId}, 'denied', 1, 'test')`;
-    try {
-      expect(await tierOf(young)).toBe("restricted");
-    } finally {
-      await admin`update promotion_enforcement set enabled = false`;
-    }
+      values (${memberSource.accountId}, 'mine', 'federation:looks-like-a-host')`;
+    expect(await resolveSandboxPlanTierInWorkspace(db, { ...memberSource, limits })).toBe("free");
+    expect((await viewer(memberSource, "a")).role).toBe("spawner");
+    await expect(viewer(memberSource, "b")).rejects.toBeInstanceOf(SandboxViewerBoxLimitError);
 
     // An organization a host provisioned (its own external source is not a
-    // self-serve one) is embedded from the start, whatever else holds.
+    // signup one) is embedded from the start, even on Free and young, and is
+    // outside the workspace limit.
     const external = await freshWorkspace();
     await admin`update managed_accounts set external_source = 'opengeni-sdk:test'
       where id = ${external.accountId}`;
+    await admin`insert into organization_plans (account_id, plan_key, status)
+      values (${external.accountId}, 'free', 'active')`;
     expect(await resolveSandboxPlanTierInWorkspace(db, { ...external, limits })).toBe(
       SANDBOX_EMBEDDED_PLAN_TIER,
     );
+    for (const holderId of ["a", "b", "c", "d"]) {
+      expect((await viewer(external, holderId)).role).toBe("spawner");
+    }
+
+    // An enterprise organization (how operators exempt any other
+    // organization) is outside the workspace limit too.
+    const enterprise = await freshWorkspace();
+    await admin`insert into organization_plans (account_id, plan_key, status)
+      values (${enterprise.accountId}, 'enterprise', 'active')`;
+    expect(await tierOf(enterprise)).toBe("enterprise");
+    for (const holderId of ["a", "b", "c"]) {
+      expect((await viewer(enterprise, holderId)).role).toBe("spawner");
+    }
   }, 180_000);
 
   test("joining a box a process or Browser/ComputerSession keeps warm is not one more viewer-only box", async () => {

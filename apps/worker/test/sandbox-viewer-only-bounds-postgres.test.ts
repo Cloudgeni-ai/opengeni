@@ -369,15 +369,23 @@ describe("boundViewerOnlyWarmBoxes (real PostgreSQL)", () => {
     expect(await liveness(ids.workspaceId, newer.groupId)).toBe("warm");
   }, 180_000);
 
-  test("a free organization with an external-source workspace is outside both bounds", async () => {
+  test("host-provisioned and enterprise organizations are outside both bounds", async () => {
+    for (const exemption of ["host", "enterprise"] as const) {
+      await assertOutsideBounds(exemption);
+    }
+  }, 180_000);
+
+  async function assertOutsideBounds(exemption: "host" | "enterprise") {
     const ids = await workspace();
-    await admin`insert into organization_plans (account_id, plan_key, status)
-      values (${ids.accountId}, 'free', 'active')`;
-    // Past the `new` tier, which a member-created workspace never lifts.
-    await admin`update managed_accounts set created_at = now() - interval '10 days'
-      where id = ${ids.accountId}`;
-    await admin`insert into workspaces (account_id, name, external_source)
-      values (${ids.accountId}, 'host', 'federation:test-host')`;
+    if (exemption === "host") {
+      await admin`update managed_accounts set external_source = 'opengeni-sdk:test-host'
+        where id = ${ids.accountId}`;
+      await admin`insert into organization_plans (account_id, plan_key, status)
+        values (${ids.accountId}, 'free', 'active')`;
+    } else {
+      await admin`insert into organization_plans (account_id, plan_key, status)
+        values (${ids.accountId}, 'enterprise', 'active')`;
+    }
     const boxes = [
       await warmViewerBox(ids, 120),
       await warmViewerBox(ids, 60),
@@ -405,7 +413,7 @@ describe("boundViewerOnlyWarmBoxes (real PostgreSQL)", () => {
       viewer_organization_limit: 0,
     });
     for (const box of boxes) expect(await liveness(ids.workspaceId, box.groupId)).toBe("warm");
-  }, 180_000);
+  }
 
   test("both bounds off leaves every box alone", async () => {
     const ids = await workspace();

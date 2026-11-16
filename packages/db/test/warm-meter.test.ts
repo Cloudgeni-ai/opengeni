@@ -68,8 +68,8 @@ async function workspaceOf(accountId: string): Promise<{ accountId: string; work
   return { accountId, workspaceId: w!.id };
 }
 
-// Migration 1475 created the definer withheld and 1478 grants it; granting it
-// again here is harmless and keeps these tests independent of that order.
+// Migration 1475 withholds the runtime grant for one release; grant it here so
+// the organization-wide counts can be exercised.
 // The restricted tier applies only while promotion enforcement is on.
 async function setPromotionEnforcement(enabled: boolean): Promise<void> {
   await admin`insert into promotion_enforcement (singleton, enabled) values (true, ${enabled})
@@ -1343,7 +1343,7 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
       values (${paid.accountId}, 'pro', 'active')`;
     expect(await tierOf(paid.accountId, paid.workspaceId)).toBe("pro");
 
-    // A young organization that is not self-serve stays embedded.
+    // A young organization a host provisioned stays embedded.
     const embedded = await freshWorkspace();
     await admin`update managed_accounts set external_source = 'opengeni-sdk:young'
       where id = ${embedded.accountId}`;

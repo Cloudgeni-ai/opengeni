@@ -1483,7 +1483,6 @@ import { managedPersonalWorkspacePermissions } from "./personal-workspace-permis
 import {
   joinedWorkspaceIsNotPersonal,
   membershipOutsidePersonalWorkspace,
-  PERSONAL_WORKSPACE_EXTERNAL_SOURCE,
 } from "./personal-workspace-membership";
 export { PERSONAL_WORKSPACE_EXTERNAL_SOURCE } from "./personal-workspace-membership";
 export { memoryTextForStorage } from "./memory-domain";
@@ -49647,14 +49646,23 @@ export class SandboxOrganizationBoxLimitError extends Error {
   }
 }
 
-/** The organization-wide count definer (1475, granted by 1478). */
+/** The organization-wide count definer (1475); withheld for one release. */
 export const ORGANIZATION_WARM_SANDBOX_COUNTS_ROUTINE =
   "opengeni_private.organization_warm_sandbox_counts_v1(uuid, text, uuid)";
 
-/** The tier of an organization that is not self-serve (an embedding host,
- * SDK or federated organization); unbounded unless configured. See
+/** The tier of a host-provisioned organization (a configured deployment, an
+ * embedding host or the SDK bootstrap); unbounded unless configured. See
  * resolveSandboxPlanTier. */
 export const SANDBOX_EMBEDDED_PLAN_TIER = "embedded";
+
+/** Tiers outside the per-workspace viewer-only limit
+ * (`OPENGENI_SANDBOX_MAX_VIEWER_ONLY_BOXES_PER_WORKSPACE`) and the reaper's
+ * viewer-only drains: host-provisioned organizations and the `enterprise`
+ * plan, which operators assign to organizations that must not be bounded.
+ * Their plan-limit table entries still apply at admission. */
+export function sandboxPlanTierExemptFromViewerOnlyBounds(tier: string): boolean {
+  return tier === SANDBOX_EMBEDDED_PLAN_TIER || tier === "enterprise";
+}
 
 /** The tier of a young Free self-serve organization, while the
  * `new` tier sets `organizationsYoungerThanMs`. */
@@ -49664,26 +49672,20 @@ export const SANDBOX_NEW_PLAN_TIER = "new";
  * person's signup and an additional organization they create. */
 const SELF_SERVE_ACCOUNT_SOURCES = ["better-auth:user", "opengeni:additional-organization"];
 
-/** workspaces.external_source values every self-serve organization has: a
- * member's Personal workspace and the legacy signup workspace. */
-const SELF_SERVE_WORKSPACE_SOURCES = [PERSONAL_WORKSPACE_EXTERNAL_SOURCE, "better-auth:user"];
-
 /**
  * The plan tier whose sandbox limits apply to an organization:
  *
  * - `embedded` for an organization a host provisioned: its external source is
  *   not a self-serve one (a configured or local deployment, an embedding
- *   host or the SDK bootstrap). Nobody self-serve can set it.
+ *   host or the SDK bootstrap). Nobody self-serve can set it, unlike a
+ *   workspace's external source, which never counts. Operators put any other
+ *   organization that must not be bounded on the `enterprise` plan.
  * - otherwise its plan key (a paid plan only while active, trialing or past
  *   due), `none` without a plan row;
  * - `restricted` for a Free or plan-less organization whose promotion
  *   decision is `held` or `denied`, while promotion enforcement is on;
  * - `new` for any other Free organization created less than the `new` tier's
- *   `organizationsYoungerThanMs` ago (only when `limits` is given and sets it);
- * - `embedded` for any other organization that owns a workspace an embedding
- *   product keeps (one with an external source other than the Personal and
- *   legacy signup workspaces). A member can create such a workspace, so it
- *   never lifts `restricted` or `new`.
+ *   `organizationsYoungerThanMs` ago (only when `limits` is given and sets it).
  *
  * The tier is the organization's, whatever credential the caller holds
  * (browser session, API key, native token or service).
@@ -49705,7 +49707,6 @@ export async function resolveSandboxPlanTier(
     decision: string | null;
     enforcement: boolean | null;
     hosted_account: boolean | null;
-    hosted_workspace: boolean | null;
     young: boolean | null;
   }>(
     tx,
@@ -49722,14 +49723,7 @@ export async function resolveSandboxPlanTier(
             and account.external_source not in (${sql.join(
               SELF_SERVE_ACCOUNT_SOURCES.map((source) => sql`${source}`),
               sql`, `,
-            )})) as hosted_account,
-        exists (select 1 from workspaces workspace
-          where workspace.account_id = organization.account_id
-            and workspace.external_source is not null
-            and workspace.external_source not in (${sql.join(
-              SELF_SERVE_WORKSPACE_SOURCES.map((source) => sql`${source}`),
-              sql`, `,
-            )})) as hosted_workspace
+            )})) as hosted_account
       from (select ${accountId}::uuid as account_id) organization
       left join organization_plans plan on plan.account_id = organization.account_id
       left join promotion_decisions decision on decision.account_id = organization.account_id`,
@@ -49749,7 +49743,6 @@ export async function resolveSandboxPlanTier(
     return "restricted";
   }
   if (tier === "free" && row?.young === true) return SANDBOX_NEW_PLAN_TIER;
-  if (row?.hosted_workspace === true) return SANDBOX_EMBEDDED_PLAN_TIER;
   return tier;
 }
 
@@ -49776,12 +49769,17 @@ type OrganizationWarmSandboxCounts = {
   runningBoxes: number;
 };
 
-/** 1475 created the definer withheld; 1478 grants it and readiness requires
- * it. */
+/** Null while the deployment's database withholds the definer (1475). */
 async function organizationWarmSandboxCounts(
   tx: Database,
   input: { accountId: string; subjectId: string | null; excludeLeaseId: string },
-): Promise<OrganizationWarmSandboxCounts> {
+): Promise<OrganizationWarmSandboxCounts | null> {
+  const [granted] = await rawRows<{ granted: boolean | null }>(
+    tx,
+    sql`select has_function_privilege(
+      to_regprocedure(${ORGANIZATION_WARM_SANDBOX_COUNTS_ROUTINE})::oid, 'EXECUTE') as granted`,
+  );
+  if (granted?.granted !== true) return null;
   const [row] = await rawRows<{
     viewer_only_boxes: number;
     subject_viewer_only_boxes: number;
@@ -51301,15 +51299,18 @@ async function acquireLeaseOnce(
         // boxes one workspace, one organization and one member keep warm.
         // Joining a box that a turn, another viewer, a live process or a
         // Browser/ComputerSession already keeps warm adds no compute and is
-        // always admitted, as is replaying this exact holder. An organization
-        // that is not self-serve (the `embedded` tier) is outside the
-        // per-workspace limit as well as the plan limits it does not set.
+        // always admitted, as is replaying this exact holder. A
+        // host-provisioned (`embedded`) or `enterprise` organization is
+        // outside the per-workspace limit as well as the plan limits its tier
+        // does not set.
         const planTier =
           input.sandboxPlanLimits || (input.viewerOnlyBoxLimit ?? 0) > 0
             ? await resolveSandboxPlanTier(tx, accountId, input.sandboxPlanLimits)
             : null;
         const viewerOnlyBoxLimit =
-          planTier === SANDBOX_EMBEDDED_PLAN_TIER ? 0 : (input.viewerOnlyBoxLimit ?? 0);
+          planTier !== null && sandboxPlanTierExemptFromViewerOnlyBounds(planTier)
+            ? 0
+            : (input.viewerOnlyBoxLimit ?? 0);
         const planLimit =
           input.sandboxPlanLimits && planTier !== null
             ? sandboxPlanLimitFor(input.sandboxPlanLimits, planTier)
@@ -51365,12 +51366,15 @@ async function acquireLeaseOnce(
               }
             }
             if (organizationViewerLimit !== undefined || memberViewerLimit !== undefined) {
+              // Until 1475's definer is granted only the workspace limit and
+              // the zero limits above apply.
               const counts = await organizationWarmSandboxCounts(tx, {
                 accountId,
                 subjectId: input.viewerSubjectId ?? null,
                 excludeLeaseId: row.id,
               });
               if (
+                counts &&
                 organizationViewerLimit !== undefined &&
                 counts.viewerOnlyBoxes >= organizationViewerLimit
               ) {
@@ -51382,6 +51386,7 @@ async function acquireLeaseOnce(
                 );
               }
               if (
+                counts &&
                 memberViewerLimit !== undefined &&
                 counts.subjectViewerOnlyBoxes >= memberViewerLimit
               ) {
@@ -51665,6 +51670,7 @@ async function acquireLeaseOnce(
             backend === "selfhosted" ? undefined : planLimit.runningBoxesPerOrganization;
           if (runningBoxLimit !== undefined) {
             await lockOrganizationSandboxLimit(tx, accountId);
+            // Until 1475's definer is granted only a zero limit applies.
             const counts =
               runningBoxLimit === 0
                 ? null

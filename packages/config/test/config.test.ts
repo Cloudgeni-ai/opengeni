@@ -2994,7 +2994,7 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
     expect(off.sandboxViewerIdleDrainMs).toBe(0);
   });
 
-  test("organizations that are not self-serve have an unbounded embedded plan tier", () => {
+  test("host-provisioned organizations have an unbounded embedded plan tier", () => {
     expect(DEFAULT_SANDBOX_PLAN_LIMITS.embedded).toEqual({});
     expect(
       parseSandboxPlanLimitsJson('{"embedded":{"viewerOnlyBoxesPerOrganization":40}}').embedded,

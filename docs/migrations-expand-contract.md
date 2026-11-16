@@ -287,10 +287,7 @@ production still ran `6327db2c`, which predates 1240 and rejects the grant.
 1283 withholds it again and the caller check is back; 1283 takes the free
 ordinal after 1282 so a database that has not applied 1282 runs the two back
 to back. 1361 grants it again and removes the check, now that a release containing
-1283 is the pinned previous production binary. 1475 created the organization-wide
-sandbox counts withheld, with the same caller check, and 1478 granted them and
-removed the check; 1478 ships in the release after the one that contains 1475.
-Pin only the binary production really runs
+1283 is the pinned previous production binary. Pin only the binary production really runs
 (its healthz `deploymentRevision`), never one that merely reached staging.
 
 **If `migrate` stops anywhere between 0929 and 0937, fix it and rerun it
