@@ -33,12 +33,13 @@ import {
   releaseNangoConnections,
   requireConnectOwnerAuthority,
   requireEnvironmentEncryption,
+  nangoAccountIdentityKey,
+  nangoAccountName,
   shareNangoConnection,
   turnOnOwnLoginHere,
 } from "@opengeni/core";
 import {
   consumeIntegrationOAuthStateNonce,
-  connectionAccountIdentityKey,
   createConnection,
   encryptEnvironmentValue,
   getConnectAttempt,
@@ -639,6 +640,9 @@ async function persistNangoConnection(
     input.nangoConnectionId,
     input.identity,
   );
+  // Without Nango's report the stored scopes are the app's defaults; sharing
+  // never treats them as a grant that covers another organization's row.
+  if (input.grantedScopes === null) metadata.nangoScopesUnconfirmed = true;
   const credentialEncrypted = encryptedNangoCredential(
     settings,
     input.integration,
@@ -656,43 +660,51 @@ async function persistNangoConnection(
   // The same account connected again keeps its connection, settings and
   // grants. Without a verified account identity every connection is a new
   // account: nothing is ever merged on a guess.
-  const sameAccount = input.identity.label
-    ? existing.find((connection) =>
+  const sameAccounts = input.identity.label
+    ? existing.filter((connection) =>
         Object.values(input.identity.metadata).some(
           (value) =>
-            value === connection.metadata.accountEmail ||
-            value === connection.metadata.accountLabel,
+            typeof value === "string" &&
+            nangoAccountName(value) === nangoAccountLabelOf(connection),
         ),
       )
-    : undefined;
+    : [];
   // One live row per owner and verified account, held by the database too.
   const accountIdentityKey = input.identity.label
-    ? connectionAccountIdentityKey([
-        "nango",
-        input.integration.providerConfigKey,
-        input.identity.label,
-      ])
+    ? nangoAccountIdentityKey(input.integration.providerConfigKey, input.identity.label)
     : null;
-  if (sameAccount) {
-    const updated = await updateConnection(db, {
-      workspaceId: sameAccount.workspaceId,
-      connectionId: sameAccount.id,
-      visibleToSubjectId: input.subjectId,
-      expectedVersion: sameAccount.version,
-      subjectId: ownerSubjectId,
-      providerDomain: input.integration.providerDomain,
-      kind: "oauth2",
-      status: "active",
-      credentialEncrypted,
-      grantedScopes,
-      expiresAt: null,
-      metadata,
-      accountIdentityKey,
-      // Matched on the verified account: a row saved before keys existed is
-      // the same account, so accepted work keeps using it.
-      previousAccountIdentityKey: accountIdentityKey,
-      updatedBySubjectId: input.subjectId,
-    }).catch(alreadyConnected);
+  // Legacy duplicates of one account (saved before keys) may match several
+  // rows; the one already holding the key is the one the database accepts.
+  for (const [index, sameAccount] of sameAccounts.entries()) {
+    const last = index === sameAccounts.length - 1;
+    const update = (savepoint: Database) =>
+      updateConnection(savepoint, {
+        workspaceId: sameAccount.workspaceId,
+        connectionId: sameAccount.id,
+        visibleToSubjectId: input.subjectId,
+        expectedVersion: sameAccount.version,
+        subjectId: ownerSubjectId,
+        providerDomain: input.integration.providerDomain,
+        kind: "oauth2",
+        status: "active",
+        credentialEncrypted,
+        grantedScopes,
+        expiresAt: null,
+        metadata,
+        accountIdentityKey,
+        // Matched on the verified account: a row saved before keys existed is
+        // the same account, so accepted work keeps using it.
+        previousAccountIdentityKey: accountIdentityKey,
+        updatedBySubjectId: input.subjectId,
+      });
+    let updated: Awaited<ReturnType<typeof update>>;
+    try {
+      // A savepoint, so a conflict on one duplicate leaves the lock intact.
+      updated = await db.transaction(async (savepoint) => update(savepoint as unknown as Database));
+    } catch (error) {
+      if (!last && isConnectionAccountIdentityConflict(error)) continue;
+      alreadyConnected(error);
+    }
     if (!updated) throw new HTTPException(409, { message: "connection changed; try again" });
     const previous = sameAccount.metadata.nangoConnectionId;
     return {

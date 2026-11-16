@@ -13780,7 +13780,7 @@ export class ConnectionAccountAlreadyConnectedError extends Error {
   }
 }
 
-/** Whether an error is the live-account uniqueness check (migration 1472). */
+/** Whether an error is the live-account uniqueness check (migration 1479). */
 export function isConnectionAccountIdentityConflict(error: unknown): boolean {
   if (error instanceof ConnectionAccountAlreadyConnectedError) return true;
   return (

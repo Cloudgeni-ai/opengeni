@@ -1,5 +1,5 @@
 /**
- * Migration 1473: opengeni_private.nango_connections_in_use_v1 answers which
+ * Migration 1480: opengeni_private.nango_connections_in_use_v1 answers which
  * Nango connections a live row still stands for, deployment-wide. It runs as
  * the table owner, which FORCE ROW LEVEL SECURITY binds too, so it must read
  * through the one-transaction tenancy inventory window when migrated by a role
@@ -75,7 +75,7 @@ async function nangoRow(nangoConnectionId: string) {
   return { grant, connection };
 }
 
-describe("migration 1473: Nango connections in use", () => {
+describe("migration 1480: Nango connections in use", () => {
   test("the owner-run check sees every live row; the runtime grant is withheld", async () => {
     if (!owned) return;
     await nangoRow("in-use-live");

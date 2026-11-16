@@ -46,6 +46,10 @@ BEGIN
     AS $body$
     DECLARE opened integer;
     BEGIN
+      -- More ids than one call answers would read as "not in use".
+      IF coalesce(pg_catalog.cardinality(p_nango_connection_ids), 0) > 1000 THEN
+        RAISE EXCEPTION 'at most 1000 Nango connection ids per call' USING ERRCODE = '22023';
+      END IF;
       INSERT INTO opengeni_private.organization_tenancy_inventory_capabilities (
         backend_pid, transaction_id
       ) VALUES (pg_catalog.pg_backend_pid(), pg_catalog.pg_current_xact_id())
@@ -55,7 +59,7 @@ BEGIN
         SELECT DISTINCT connection.metadata ->> 'nangoConnectionId'
         FROM connections connection
         WHERE connection.metadata ->> 'integrationBackend' = 'nango'
-          AND connection.metadata ->> 'nangoConnectionId' = ANY (p_nango_connection_ids[1:1000])
+          AND connection.metadata ->> 'nangoConnectionId' = ANY (p_nango_connection_ids)
           AND connection.status <> 'revoked';
       IF opened > 0 THEN
         DELETE FROM opengeni_private.organization_tenancy_inventory_capabilities

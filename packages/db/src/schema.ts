@@ -2006,7 +2006,7 @@ export const connections = pgTable(
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     // Opaque key of the integration and verified provider account behind this
     // connection (see connectionAccountIdentityKey); null when unverified. At
-    // most one live row per organization, owner and key (migration 1472).
+    // most one live row per organization, owner and key (migration 1479).
     accountIdentityKey: text("account_identity_key"),
     // A workspace's own OpenAI, Azure OpenAI or OpenAI-compatible model key
     // only: what its model's usage costs, for usage estimates and spend limits

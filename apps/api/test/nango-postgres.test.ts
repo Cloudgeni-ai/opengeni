@@ -132,6 +132,8 @@ function fakeNango() {
     created?: string;
     /** The status the account-identity read answers with instead of the profile. */
     identityStatus?: number;
+    /** The status GET /connections/{id} (the scope read) answers with instead. */
+    scopeStatus?: number;
   };
   const remote: Remote[] = [];
   /** Nango connection ids whose deletion fails. */
@@ -169,6 +171,7 @@ function fakeNango() {
     const single = /^\/connections\/([^/]+)$/u.exec(url.pathname);
     if (single && method === "GET") {
       const entry = remote.find((candidate) => candidate.connectionId === single[1]);
+      if (entry?.scopeStatus) return new Response("", { status: entry.scopeStatus });
       if (entry?.refreshFails)
         return Response.json(
           { error: { code: "refresh_exhausted", message: "Connection refresh exhausted" } },
@@ -789,6 +792,71 @@ describe("Nango connections in PostgreSQL", () => {
     const result = await sweepNangoConnections(sweepDeps(nango));
     expect(result).toMatchObject({ orphanBreakerTripped: true, deletedOrphans: [] });
     expect(nango.requests.some((request) => request.method === "DELETE")).toBe(false);
+  });
+
+  test("a connection whose scopes Nango did not report never replaces a confirmed one", async () => {
+    if (!shared) return;
+    const first = await owner("nango unconfirmed first");
+    const second = await owner("nango unconfirmed second", first.subjectId);
+    const nango = fakeNango();
+    await connect(first, nango, "fb-1", "fallback@example.com", "https://mail.google.com/");
+    // The same account in another organization, granted read-only there, but
+    // Nango's scope read fails: that row records the app's defaults (full
+    // mail), which are not a grant and must not replace the first's.
+    const token = await signedState(second);
+    const state = readNangoConnectState(settings, token);
+    nango.remote.push({
+      connectionId: "fb-2",
+      tags: attemptTags(second, state.nonce),
+      email: "fallback@example.com",
+      scope: "https://www.googleapis.com/auth/gmail.readonly",
+      authErrors: 0,
+      scopeStatus: 503,
+    });
+    await completeNangoConnect(
+      { db: client.db, settings, fetchImpl: nango.fetchImpl, nangoBackends: async () => backends },
+      { state: token, browser: { bindingDigests: [], signedInSubjectId: null } },
+    );
+    // The first organization keeps the connection that really holds its grant.
+    expect((await nangoRows(first))[0]).toMatchObject({
+      status: "active",
+      nango_connection_id: "fb-1",
+    });
+    expect(nango.deleted("fb-1")).toBe(false);
+    expect(nango.remote.some((entry) => entry.connectionId === "fb-1")).toBe(true);
+  });
+
+  test("an email that changed only in case is the same account", async () => {
+    if (!shared) return;
+    const target = await owner("nango email case");
+    const nango = fakeNango();
+    await connect(target, nango, "ec-1", "case@example.com");
+    await connect(target, nango, "ec-2", "Case@Example.com");
+    const rows = await nangoRows(target);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ status: "active", nango_connection_id: "ec-2" });
+    expect(nango.deleted("ec-1")).toBe(true);
+  });
+
+  test("legacy duplicate rows of one owner end on one Nango connection", async () => {
+    if (!shared) return;
+    const target = await owner("nango legacy duplicates");
+    const nango = fakeNango();
+    await connect(target, nango, "ld-1", "legacy@example.com");
+    await connect(target, nango, "ld-2", "other@example.com");
+    // As saved before keys: a second, unkeyed row of the same owner and account.
+    await shared!.admin`update connections
+      set metadata = jsonb_set(metadata, '{accountEmail}', '"legacy@example.com"'),
+        account_identity_key = null
+      where workspace_id = ${target.workspaceId} and provider_domain = 'nango:gmail'
+        and metadata ->> 'nangoConnectionId' = 'ld-2'`;
+    // Reconnecting that account succeeds and leaves one billed connection.
+    await connect(target, nango, "ld-3", "legacy@example.com");
+    const rows = await nangoRows(target);
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => row.nango_connection_id)).toEqual(["ld-3", "ld-3"]);
+    expect(rows.every((row) => row.status === "active")).toBe(true);
+    expect(nango.remote.map((entry) => entry.connectionId)).toEqual(["ld-3"]);
   });
 
   test("the sweep shares duplicates of one account an older release left", async () => {

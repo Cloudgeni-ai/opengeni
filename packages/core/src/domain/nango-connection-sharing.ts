@@ -15,6 +15,7 @@ import {
 import {
   connectionAccountIdentityKey,
   encryptEnvironmentValue,
+  isConnectionAccountIdentityConflict,
   listConnectionsMetadata,
   listSelfOrganizationMemberships,
   nangoConnectionsInUse,
@@ -80,9 +81,28 @@ function providerConfigKeyOf(connection: ConnectionMetadata): string | null {
 }
 
 /** The verified account a Nango row stands for (its email or label), if any. */
+/**
+ * The account identity key of a Nango connection: the Nango integration and
+ * the verified account, with email addresses compared case-insensitively.
+ */
+export function nangoAccountIdentityKey(providerConfigKey: string, label: string): string {
+  return connectionAccountIdentityKey(["nango", providerConfigKey, nangoAccountName(label)]);
+}
+
+/** One account, however the provider capitalized its email address. */
+export function nangoAccountName(label: string): string {
+  return label.includes("@") ? label.toLowerCase() : label;
+}
+
+/** The row's scopes are the app's defaults because Nango reported none. */
+export function nangoScopesUnconfirmed(connection: ConnectionMetadata): boolean {
+  return connection.metadata.nangoScopesUnconfirmed === true;
+}
+
+/** The row's verified account, emails compared case-insensitively. */
 export function nangoAccountLabelOf(connection: ConnectionMetadata): string | null {
   for (const value of [connection.metadata.accountEmail, connection.metadata.accountLabel])
-    if (typeof value === "string" && value) return value;
+    if (typeof value === "string" && value) return nangoAccountName(value);
   return null;
 }
 
@@ -207,10 +227,10 @@ async function repointRows(
     if (!allowed.has(policyKey))
       allowed.set(policyKey, await integrationAllowed(tx, row.accountId, integrationKey));
     if (!allowed.get(policyKey)) continue;
-    let after: ConnectionMetadata | null = null;
-    try {
+    const key = nangoAccountIdentityKey(providerConfigKey, label);
+    const repoint = (keyed: boolean) =>
       // A savepoint: one row that fails leaves the others and the lock intact.
-      after = await tx.transaction(async (savepoint) =>
+      tx.transaction(async (savepoint) =>
         updateConnection(savepoint as unknown as Database, {
           workspaceId: row.workspaceId,
           connectionId: row.id,
@@ -231,16 +251,19 @@ async function repointRows(
           grantedScopes: [...row.grantedScopes],
           expiresAt: null,
           metadata: { ...row.metadata, nangoConnectionId: input.target },
-          // The same account: accepted work keeps using the row.
-          accountIdentityKey: connectionAccountIdentityKey(["nango", providerConfigKey, label]),
-          previousAccountIdentityKey: connectionAccountIdentityKey([
-            "nango",
-            providerConfigKey,
-            label,
-          ]),
+          // The same account: accepted work keeps using the row. A legacy
+          // duplicate of a row of the same owner that already holds the key
+          // shares the connection without it, so it is billed once.
+          ...(keyed ? { accountIdentityKey: key, previousAccountIdentityKey: key } : {}),
           updatedBySubjectId: input.subjectId,
         }),
       );
+    let after: ConnectionMetadata | null = null;
+    try {
+      after = await repoint(true).catch(async (error: unknown) => {
+        if (!isConnectionAccountIdentityConflict(error)) throw error;
+        return await repoint(false);
+      });
     } catch (error) {
       console.warn("[nango] could not point a row at the shared connection; it keeps its own", {
         connectionId: row.id,
@@ -267,7 +290,9 @@ function sharedTarget(
     const id = nangoConnectionIdOf(row);
     if (!id) continue;
     const grant = grants.get(id) ?? new Set<string>();
-    for (const scope of row.grantedScopes) grant.add(scope);
+    // Scopes Nango never confirmed are the app's defaults, not a grant: they
+    // must not move another organization's row onto this connection.
+    if (!nangoScopesUnconfirmed(row)) for (const scope of row.grantedScopes) grant.add(scope);
     grants.set(id, grant);
   }
   if (extraGrant) {
@@ -346,7 +371,7 @@ function unreferenced(
  * The ids of `candidates` nothing stands for any more, decided under the
  * person lock: no row in `rows` (the person's reads, including writes this
  * transaction made) and, deployment-wide, no live row in any organization.
- * Until that check is granted (migration 1473) only a complete read of every
+ * Until that check is granted (migration 1480) only a complete read of every
  * organization of the person may decide; otherwise nothing is unused.
  */
 async function unusedNangoConnections(
@@ -461,10 +486,15 @@ export async function shareNangoConnection(
       const [summary] = await client.listConnections({ connectionId: id }).catch(() => []);
       if (summary && summary.authErrors === 0) confirmed.push(id);
     }
-    const { target, grant } = sharedTarget([stored, ...confirmed], accountRows, {
-      id: stored,
-      scopes: input.grantedScopes,
-    });
+    // A grant Nango did not report (the app's defaults) covers nobody else.
+    const storedConfirmed = !accountRows.some(
+      (row) => nangoConnectionIdOf(row) === stored && nangoScopesUnconfirmed(row),
+    );
+    const { target, grant } = sharedTarget(
+      [stored, ...confirmed],
+      accountRows,
+      storedConfirmed ? { id: stored, scopes: input.grantedScopes } : null,
+    );
     const others = accountRows.filter((row) => nangoConnectionIdOf(row) !== target);
     const written = await repointRows(deps, tx, {
       subjectId: input.subjectId,

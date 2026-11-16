@@ -113,11 +113,11 @@ connections; that is not a duplicate.
   deployment-wide lock per person and integration, so concurrent connects,
   disconnects and the sweep converge; deletes happen under that lock.
   Whether a Nango connection is still used is decided deployment-wide by
-  `opengeni_private.nango_connections_in_use_v1` (migration 1473: any
+  `opengeni_private.nango_connections_in_use_v1` (migration 1480: any
   non-revoked Nango row that names it, whatever its membership or authority
   state; it opens the one-transaction tenancy inventory window for its own
   query only, since `connections` forces row-level security on its owner
-  too). 1473 withholds its runtime grant (the previous release rejects a
+  too). 1480 withholds its runtime grant (the previous release rejects a
   grant on a definer it does not know); until a later migration grants it,
   the person's own reads decide, and a membership that is not active or an
   organization that cannot be read means nothing is deleted. Those reads
@@ -128,6 +128,12 @@ connections; that is not a duplicate.
   last two hours and no readable row names (never after a failed read).
   An existing connection replaces a fresh one only while Nango reports it
   without auth errors.
+- When Nango reports no scopes for a connection, its row records the app's
+  default scopes and is marked `nangoScopesUnconfirmed`. Those defaults are
+  not a grant: no other organization's row is moved onto that connection on
+  their strength. Email accounts are compared case-insensitively.
+- A legacy duplicate row of the same owner and account (saved before account
+  keys) shares the connection without the key, so it is billed once.
 - Connections without a verified account are never merged. Config-only
   integrations (LinkedIn, X) without an `accountIdentity` therefore add a
   Nango connection on each connect, and each stays billed until its row is
