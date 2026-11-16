@@ -297,10 +297,12 @@ import {
   assertMcpServerSelectionWithinBounds,
   boundedParallelMap,
   cancelMcpResponseBody,
+  carryMcpRequestNotSentMark,
   describeMcpToolListDrops,
   fitMcpToolListWithinBounds,
   guardedMcpFetch,
   isMcpPayloadTooLargeError,
+  isMcpRequestNotSentMark,
   mcpJsonRpcErrorPayloadForRequest,
   mcpOuterConnectTimeoutMs,
   mcpRequestReplayInfo,
@@ -6892,8 +6894,10 @@ export async function prepareAgentTools(
             if (!options.runMcpCredentials?.has(config.id)) throw error;
             // Transport failures may echo request headers in their message or
             // cause chain. This exception can reach required-tool history.
+            const redacted = new Error("MCP credentialed transport request failed");
+            carryMcpRequestNotSentMark(error, redacted);
             // eslint-disable-next-line preserve-caught-error -- the raw cause can expose credentials
-            throw new Error("MCP credentialed transport request failed");
+            throw redacted;
           }
           if (!response.ok && options.runMcpCredentials?.has(config.id)) {
             await response.body?.cancel().catch(() => undefined);
@@ -9344,20 +9348,6 @@ const MCP_CONNECTIVITY_ERROR_CODES = new Set([
   "ECONNREFUSED",
   "EPIPE",
 ]);
-// Socket and DNS failures that happen before a request can leave the process,
-// so the server cannot have received (or acted on) anything.
-const MCP_REQUEST_NOT_SENT_ERROR_CODES = new Set([
-  "ECONNREFUSED",
-  "ENOTFOUND",
-  "EAI_AGAIN",
-  "EAI_NONAME",
-  "EHOSTUNREACH",
-  "ENETUNREACH",
-  // Bun's fetch
-  "CONNECTIONREFUSED",
-  "FAILEDTOOPENSOCKET",
-]);
-const DESTINATION_NOT_SENT_REASONS = new Set(["dns_failed", "dns_empty"]);
 const MCP_REQUEST_TIMEOUT_MESSAGES = new Set([
   "Request timed out",
   "MCP error -32001: Request timed out",
@@ -9416,11 +9406,7 @@ function inspectMcpTransportError(
     let code: unknown;
     let failureKind: unknown;
     let message: unknown;
-    let reason: unknown;
-    let name: unknown;
     try {
-      reason = record.reason;
-      name = record.name;
       const status = record.status;
       const statusCode = record.statusCode;
       code = record.code;
@@ -9455,14 +9441,9 @@ function inspectMcpTransportError(
     if (failureKind === "connectivity_unavailable") {
       hasConnectivityMarker = true;
     }
-    if (
-      (typeof code === "string" && MCP_REQUEST_NOT_SENT_ERROR_CODES.has(code.toUpperCase())) ||
-      (name === "DestinationPolicyError" &&
-        typeof reason === "string" &&
-        DESTINATION_NOT_SENT_REASONS.has(reason))
-    ) {
-      hasNotSentCode = true;
-    }
+    // Only the exact error the physical MCP request rejected with (see
+    // guardedMcpFetch); never another error carrying the same code.
+    if (isMcpRequestNotSentMark(current.value)) hasNotSentCode = true;
     if (
       code === -32_000 &&
       typeof message === "string" &&
@@ -9607,10 +9588,10 @@ export function isMcpServerUnreachableError(error: unknown): boolean {
 }
 
 /**
- * A failure that proves the request never left: the whole error chain was
- * inspected, no HTTP response or timeout is involved, and it carries a typed
- * socket/DNS code that only occurs before anything is sent. A caller may say
- * the outcome is known (nothing happened) and that retrying is safe.
+ * A failure that proves the request never left: its chain holds the exact
+ * error a physical MCP POST rejected with while connecting (marked by
+ * guardedMcpFetch), with no HTTP response, timeout or closed connection. A
+ * caller may say the outcome is known (nothing happened) and retrying is safe.
  */
 export function isMcpRequestNotSentError(error: unknown): boolean {
   try {

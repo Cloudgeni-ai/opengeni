@@ -1663,9 +1663,8 @@ export function throwWorkspaceToolGatewayHttpError(error: unknown): never {
 }
 
 /**
- * The tool's server could not be reached (connection refused, DNS failure,
- * a tunnel that is gone, or a timeout while connecting), and the call itself
- * was never sent. Safe to retry.
+ * The tool's server could not be reached (connection refused, DNS failure, a
+ * tunnel that is gone), and the call itself was never sent. Safe to retry.
  */
 export function toolServerUnreachableError(): ApiHttpError {
   return new ApiHttpError(503, {

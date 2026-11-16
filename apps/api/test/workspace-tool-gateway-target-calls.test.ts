@@ -2492,6 +2492,100 @@ describe("Site tool readiness and typed failures", () => {
     }
   });
 
+  test("after admission only the transport's own refused request is not-sent; other connection errors stay unknown", async () => {
+    const f = createFixture();
+    try {
+      f.state.connections = [f.personal, f.foreign];
+      // A database refusing a connection inside the call, and a read on an
+      // already-open socket: both carry not-sent-looking codes, neither proves
+      // the provider received nothing.
+      const thrown = [
+        Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:5432"), {
+          code: "ECONNREFUSED",
+          syscall: "connect",
+          port: 5432,
+        }),
+        Object.assign(new TypeError("fetch failed"), {
+          cause: { code: "EHOSTUNREACH", syscall: "read" },
+        }),
+      ];
+      let executed = 0;
+      const invoke = (options: TargetGatewayOptions) =>
+        invokeWorkspaceToolTarget(
+          f.deps,
+          targetAuthorization(),
+          {
+            ...site,
+            target: { identity: canonical },
+            operationId: crypto.randomUUID(),
+            arguments: {},
+          },
+          options,
+        ).then(
+          () => null,
+          (reason: unknown) => reason,
+        );
+      /** The real preparation, with the admitted call's execution replaced. */
+      const executing = (run: (send: () => Promise<unknown>) => Promise<unknown>) =>
+        targetOptions({
+          readSiteVersion: siteVersion([canonical]),
+          prepare: async (deps, authorization, options = {}) => {
+            const prepared = await prepareWorkspaceToolGateway(deps, authorization, options);
+            const prepareCall = prepared.toolGateway.prepareCall.bind(prepared.toolGateway);
+            return {
+              ...prepared,
+              toolGateway: {
+                ...prepared.toolGateway,
+                prepareCall: async (...args: Parameters<typeof prepareCall>) => {
+                  const admitted = await prepareCall(...args);
+                  return {
+                    ...admitted,
+                    execute: async () => {
+                      executed++;
+                      return (await run(() => admitted.execute())) as never;
+                    },
+                  };
+                },
+              } as typeof prepared.toolGateway,
+            };
+          },
+        });
+      for (const error of thrown) {
+        expect(
+          await invoke(
+            executing(async () => {
+              throw error;
+            }),
+          ),
+        ).toMatchObject({
+          status: 502,
+          retryable: false,
+          outcomeUnknown: true,
+          details: { code: "tool_outcome_unknown" },
+        });
+      }
+      expect(executed).toBe(2);
+      // The server goes away after the call was admitted: the transport's own
+      // refused request is the only proof that nothing was sent.
+      expect(
+        await invoke(
+          executing(async (send) => {
+            f.grafana.close();
+            return await send();
+          }),
+        ),
+      ).toMatchObject({
+        status: 503,
+        retryable: true,
+        outcomeUnknown: false,
+        details: { code: "tool_server_unreachable" },
+      });
+      expect(executed).toBe(3);
+    } finally {
+      f.close();
+    }
+  });
+
   test("reset removes only this person's choices on this Site, and only for a person", async () => {
     const f = createFixture();
     try {

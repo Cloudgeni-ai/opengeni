@@ -242,9 +242,9 @@ export async function readSiteToolReconnectAccounts(
     workspaceId: grant.workspaceId,
     source,
   });
-  const stale = connections.filter(
-    (connection) => connection.status === "needs_reauth" || connection.status === "error",
-  );
+  // Only a sign-in that must be renewed; `error` is any other failure, which
+  // signing in again would not fix.
+  const stale = connections.filter((connection) => connection.status === "needs_reauth");
   if (stale.length === 0) return [];
   const base = deps.catalogSourceSettings ?? deps.settings;
   const settings = await settingsWithEnabledCapabilityMcpServers(deps.db, grant.workspaceId, base, {

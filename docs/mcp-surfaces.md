@@ -419,11 +419,14 @@ everything. `POST tools/site-allowances/reset` removes the caller's own "Always
 allow" choices on one Site (people only).
 
 A gateway call whose MCP server could not be reached before anything was sent
-(connection refused, DNS failure, a tunnel that is gone; proven by the typed
-socket/DNS code, never from message text) answers 503 `upstream_unavailable`
+(connection refused, DNS failure, a tunnel that is gone) answers 503 `upstream_unavailable`
 with `details.code` `tool_server_unreachable`, `retryable: true` and
-`outcomeUnknown: false`, for every gateway caller. Any other transport failure
-during execution stays 502 `tool_outcome_unknown`. A tool set to Block answers
+`outcomeUnknown: false`, for every gateway caller. Only the MCP transport's own
+POST decides this: its fetch rejected while connecting (a refusal, a DNS
+failure, or an unreachable host or network during `connect`), and that exact
+error is marked. The same code from anywhere else (a read on an open socket, a
+database inside the call) and any other transport failure during execution
+stay 502 `tool_outcome_unknown`. A tool set to Block answers
 403 with `details.code` `tool_blocked`.
 
 `POST tools/target-approvals` issues a version-2 binding over the existing
