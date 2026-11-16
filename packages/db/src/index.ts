@@ -49630,7 +49630,7 @@ export class SandboxOrganizationBoxLimitError extends Error {
   }
 }
 
-/** The organization-wide count definer (1471); withheld for one release. */
+/** The organization-wide count definer (1475); withheld for one release. */
 export const ORGANIZATION_WARM_SANDBOX_COUNTS_ROUTINE =
   "opengeni_private.organization_warm_sandbox_counts_v1(uuid, text, uuid)";
 
@@ -49675,7 +49675,7 @@ type OrganizationWarmSandboxCounts = {
   runningBoxes: number;
 };
 
-/** Null while the deployment's database withholds the definer (1471). */
+/** Null while the deployment's database withholds the definer (1475). */
 async function organizationWarmSandboxCounts(
   tx: Database,
   input: { accountId: string; subjectId: string | null; excludeLeaseId: string },
@@ -51252,7 +51252,7 @@ async function acquireLeaseOnce(
               }
             }
             if (organizationViewerLimit !== undefined || memberViewerLimit !== undefined) {
-              // Until 1471's definer is granted only the workspace limit and
+              // Until 1475's definer is granted only the workspace limit and
               // the zero limits above apply.
               const counts = await organizationWarmSandboxCounts(tx, {
                 accountId,
@@ -51488,7 +51488,7 @@ async function acquireLeaseOnce(
             backend === "selfhosted" ? undefined : planLimit.runningBoxesPerOrganization;
           if (runningBoxLimit !== undefined) {
             await lockOrganizationSandboxLimit(tx, accountId);
-            // Until 1471's definer is granted only a zero limit applies.
+            // Until 1475's definer is granted only a zero limit applies.
             const counts =
               runningBoxLimit === 0
                 ? null

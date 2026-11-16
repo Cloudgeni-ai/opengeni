@@ -67,7 +67,7 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * content to collect and its collector of unreferenced content blobs (1359),
  * and the sandbox reaper's inventory of cold sandboxes whose chats are all
  * archived (1404), and the organization-wide sandbox counts behind
- * plan-tiered sandbox limits (1471).
+ * plan-tiered sandbox limits (1475).
  * Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
@@ -144,7 +144,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * 1404 withholds the inventory of cold sandboxes whose chats are all
  * archived; until it is granted, such a non-compute sandbox keeps its saved
  * workspace until its chats are deleted (as before).
- * 1471 withholds the organization-wide sandbox counts; until they are
+ * 1475 withholds the organization-wide sandbox counts; until they are
  * granted, only the per-workspace viewer limit is enforced (as before).
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [

@@ -68,7 +68,7 @@ async function workspaceOf(accountId: string): Promise<{ accountId: string; work
   return { accountId, workspaceId: w!.id };
 }
 
-// Migration 1471 withholds the runtime grant for one release; grant it here so
+// Migration 1475 withholds the runtime grant for one release; grant it here so
 // the organization-wide counts can be exercised.
 async function grantOrganizationCounts(): Promise<void> {
   await admin.unsafe(
