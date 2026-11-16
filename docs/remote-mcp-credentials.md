@@ -272,7 +272,9 @@ that would add a second live row for the account fails as
 `account_already_connected` instead. Connections whose account is not verified
 (API keys, Fiken, vaults, auto-connected logins) have no key and keep their
 per-writer rules. Rows saved before the key get it when they are next
-connected or reconnected.
+connected or reconnected, and a credential replaced by a writer that sets no
+key (a pasted token, an auto-connect) loses it, so it neither keeps the
+account's slot nor vouches for that account later.
 
 Reconnecting the same account into its row is not an authority change: when
 the update carries the row's own key and its new grant includes every scope

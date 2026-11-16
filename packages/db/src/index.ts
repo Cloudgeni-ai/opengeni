@@ -8038,7 +8038,10 @@ export type UpdateConnectionInput = {
   verifiedInstallAt?: Date | null;
   verifiedInstallVersion?: number | null;
   metadata?: Record<string, unknown>;
-  /** See connectionAccountIdentityKey; undefined keeps the stored key. */
+  /**
+   * See connectionAccountIdentityKey. Undefined keeps the stored key, unless
+   * the update replaces the credential: then the key is cleared.
+   */
   accountIdentityKey?: string | null;
   /**
    * The key the writer derives from the stored row's own verified account,
@@ -14586,9 +14589,13 @@ async function updateConnectionInScope(
       ? { verifiedInstallVersion: input.verifiedInstallVersion }
       : {}),
     ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+    // A credential replaced by a writer that verified no account no longer
+    // vouches for the stored one: it loses the key (and its unique slot).
     ...(input.accountIdentityKey !== undefined
       ? { accountIdentityKey: input.accountIdentityKey }
-      : {}),
+      : input.credentialEncrypted !== undefined
+        ? { accountIdentityKey: null }
+        : {}),
     ...(input.updatedBySubjectId !== undefined
       ? { updatedBySubjectId: input.updatedBySubjectId }
       : {}),

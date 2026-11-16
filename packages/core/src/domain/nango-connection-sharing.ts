@@ -91,6 +91,11 @@ export type PersonNangoConnections = {
   rows: ConnectionMetadata[];
   /** False when some organization of the person could not be read in full. */
   complete: boolean;
+  /**
+   * True when a read failed (not merely a membership that is not active), so
+   * even rows the person can normally see may be missing.
+   */
+  readFailed?: boolean;
 };
 
 /**
@@ -108,6 +113,11 @@ export async function listPersonNangoConnections(
   },
 ): Promise<PersonNangoConnections> {
   let complete = true;
+  let readFailed = false;
+  const failed = () => {
+    complete = false;
+    readFailed = true;
+  };
   const byId = new Map<string, ConnectionMetadata>();
   const add = (rows: readonly ConnectionMetadata[]) => {
     for (const row of rows) {
@@ -121,7 +131,7 @@ export async function listPersonNangoConnections(
   try {
     memberships = await listSelfOrganizationMemberships(db, input.subjectId);
   } catch {
-    complete = false;
+    failed();
   }
   for (const membership of memberships) {
     // A suspended or provisioning membership may still hold rows this read
@@ -145,17 +155,17 @@ export async function listPersonNangoConnections(
         }),
       );
     } catch {
-      complete = false;
+      failed();
     }
   }
   for (const workspaceId of new Set(input.knownWorkspaceIds ?? [])) {
     try {
       add(await listConnectionsMetadata(db, workspaceId, input.subjectId));
     } catch {
-      complete = false;
+      failed();
     }
   }
-  return { rows: [...byId.values()], complete };
+  return { rows: [...byId.values()], complete, readFailed };
 }
 
 function encryptedCredential(
@@ -443,7 +453,14 @@ export async function shareNangoConnection(
           .flatMap((row) => nangoConnectionIdOf(row) ?? []),
       ),
     ].filter((id) => id !== stored && healthy(id));
-    const { target, grant } = sharedTarget([stored, ...existing], accountRows, {
+    // Only one Nango still reports without auth errors may replace a fresh
+    // reconnect; otherwise the stored connection stays the target.
+    const confirmed: string[] = [];
+    for (const id of existing) {
+      const [summary] = await client.listConnections({ connectionId: id }).catch(() => []);
+      if (summary && summary.authErrors === 0) confirmed.push(id);
+    }
+    const { target, grant } = sharedTarget([stored, ...confirmed], accountRows, {
       id: stored,
       scopes: input.grantedScopes,
     });
@@ -506,6 +523,7 @@ export async function releaseNangoConnections(
     if (
       input.freshAttempt &&
       !person.complete &&
+      !person.readFailed &&
       release.size === 0 &&
       !(await nangoConnectionsInUseAvailable(tx))
     )

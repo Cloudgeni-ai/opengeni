@@ -1,0 +1,103 @@
+/**
+ * Migration 1473: opengeni_private.nango_connections_in_use_v1 answers which
+ * Nango connections a live row still stands for, deployment-wide. It runs as
+ * the table owner, which FORCE ROW LEVEL SECURITY binds too, so it must read
+ * through its owner-only policy when migrated by a role without BYPASSRLS
+ * (as in production), and the runtime role must still see only its own rows.
+ */
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import {
+  acquireOwnerMigratedTestDatabase,
+  type OwnerMigratedTestDatabase,
+} from "@opengeni/testing/shared-pg";
+import {
+  bootstrapWorkspace,
+  createConnection,
+  createDb,
+  nangoConnectionsInUse,
+  revokeConnection,
+  type DbClient,
+} from "../src/index";
+import { sql } from "drizzle-orm";
+import { rawRows } from "../src/database";
+import { migrate } from "../src/migrate";
+import { provisionRoles } from "../src/provision-roles";
+
+const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
+
+setDefaultTimeout(60_000);
+
+let owned: OwnerMigratedTestDatabase | null = null;
+let client: DbClient | null = null;
+
+beforeAll(async () => {
+  owned = await acquireOwnerMigratedTestDatabase("nango-connections-in-use");
+  if (!owned) {
+    if (requireRealDatabase) throw new Error("owner-migrated PostgreSQL fixture is unavailable");
+    return;
+  }
+  await migrate(owned.ownerUrl);
+  await provisionRoles(owned.adminUrl, { appPassword: owned.appPassword, rlsStrategy: "force" });
+  const appUrl = new URL(owned.ownerUrl);
+  appUrl.username = "opengeni_app";
+  appUrl.password = owned.appPassword;
+  client = createDb(appUrl.toString(), { max: 4, rlsStrategy: "force" });
+}, 900_000);
+
+afterAll(async () => {
+  await client?.close();
+  await owned?.release();
+}, 60_000);
+
+async function nangoRow(nangoConnectionId: string) {
+  const suffix = crypto.randomUUID();
+  const access = await bootstrapWorkspace(client!.db, {
+    accountExternalSource: "test",
+    accountExternalId: `in-use-${suffix}`,
+    accountName: "In use",
+    workspaceExternalSource: "test",
+    workspaceExternalId: `in-use-${suffix}`,
+    workspaceName: "In use workspace",
+    subjectId: `user:in-use-${suffix}`,
+  });
+  const grant = access.workspaceGrants[0]!;
+  const connection = await createConnection(client!.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId!,
+    subjectId: grant.subjectId,
+    providerDomain: "nango:gmail",
+    kind: "oauth2",
+    credentialEncrypted: "test-encrypted",
+    metadata: { integrationBackend: "nango", nangoConnectionId },
+    createdBySubjectId: grant.subjectId,
+  });
+  return { grant, connection };
+}
+
+describe("migration 1473: Nango connections in use", () => {
+  test("the owner-run check sees every live row; the runtime grant is withheld", async () => {
+    if (!owned) return;
+    await nangoRow("in-use-live");
+    const revoked = await nangoRow("in-use-revoked");
+    await revokeConnection(
+      client!.db,
+      revoked.grant.workspaceId!,
+      revoked.connection.id,
+      revoked.grant.subjectId,
+    );
+    const ids = ["in-use-live", "in-use-revoked", "in-use-unknown"];
+    // Withheld until a later migration grants it.
+    expect(await nangoConnectionsInUse(client!.db, ids)).toBeNull();
+    await owned.admin.unsafe(
+      "GRANT EXECUTE ON FUNCTION opengeni_private.nango_connections_in_use_v1(text[]) TO opengeni_app",
+    );
+    // Without any workspace context, as the sweep and disconnect call it.
+    expect([...(await nangoConnectionsInUse(client!.db, ids))!]).toEqual(["in-use-live"]);
+    // The owner-only policy never widens what the runtime role reads itself.
+    const [visible] = await rawRows<{ count: string }>(
+      client!.db,
+      sql`select count(*)::text as count from connections`,
+    );
+    expect(visible?.count).toBe("0");
+  }, 120_000);
+});

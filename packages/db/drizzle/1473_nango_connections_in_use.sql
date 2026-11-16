@@ -17,8 +17,26 @@
 -- person's own reads as before, and treats any organization it cannot fully
 -- read as a reason to delete nothing.
 --
--- Rolling: one read-only definer the previous release never calls.
+-- connections forces row-level security on its owner too, and the definer
+-- runs as that owner with no workspace context, so it reads through an
+-- owner-only policy limited to Nango-backed rows (the runtime role never
+-- matches it, as in 1153 and 1406).
+--
+-- Rolling: one owner-only read policy and one read-only definer the
+-- previous release never calls.
 SET LOCAL lock_timeout = '5s';
+
+DO $nango_connections_in_use_read$
+DECLARE
+  owner_name text := current_user;
+BEGIN
+  EXECUTE pg_catalog.format(
+    'CREATE POLICY nango_connections_in_use_read ON connections FOR SELECT TO %I '
+      'USING (metadata ->> ''integrationBackend'' = ''nango'')',
+    owner_name
+  );
+END
+$nango_connections_in_use_read$;
 
 DO $nango_connections_in_use$
 DECLARE

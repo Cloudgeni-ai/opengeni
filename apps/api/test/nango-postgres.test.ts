@@ -931,6 +931,13 @@ describe("Nango connections in PostgreSQL", () => {
     expect(nango.deleted("nrp-1")).toBe(false);
     expect(nango.deleted("nrp-2")).toBe(true);
 
+    // A broader connection Nango reports failing never replaces a fresh one.
+    const third = await owner("nango repoint third", broad.subjectId);
+    nango.remote.find((entry) => entry.connectionId === "nrp-1")!.authErrors = 1;
+    await connect(third, nango, "nrp-5", "repoint@example.com");
+    expect((await nangoRows(third))[0]).toMatchObject({ nango_connection_id: "nrp-5" });
+    expect(nango.deleted("nrp-5")).toBe(false);
+
     // An organization that has since disallowed Gmail keeps its own row as it is.
     const restricted = await owner("nango repoint restricted");
     const elsewhere = await owner("nango repoint elsewhere", restricted.subjectId);

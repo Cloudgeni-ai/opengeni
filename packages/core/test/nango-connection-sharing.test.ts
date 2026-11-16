@@ -59,7 +59,7 @@ describe("one Nango connection per person and account", () => {
       subjectId: owner.subjectId,
       knownWorkspaceIds: [owner.workspaceId],
     });
-    expect(person).toEqual({ rows: [], complete: false });
+    expect(person).toEqual({ rows: [], complete: false, readFailed: true });
   });
 
   test("nothing is deleted for a person whose rows cannot all be read", async () => {
@@ -86,6 +86,16 @@ describe("one Nango connection per person and account", () => {
         subjectId: owner.subjectId,
         providerConfigKey: "google-mail",
         nangoConnectionIds: ["old-unused"],
+      }),
+    ).toEqual({ deleted: [], kept: ["old-unused"] });
+    // A failed read is not a membership merely not active: even a fresh
+    // attempt's connection is kept, since its own store may be unreadable.
+    expect(
+      await releaseNangoConnections(deps, {
+        subjectId: owner.subjectId,
+        providerConfigKey: "google-mail",
+        nangoConnectionIds: ["old-unused"],
+        freshAttempt: true,
       }),
     ).toEqual({ deleted: [], kept: ["old-unused"] });
     expect(nango.deletes).toEqual([]);

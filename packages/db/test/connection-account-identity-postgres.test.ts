@@ -236,4 +236,20 @@ describe("one live connection per owner and verified account", () => {
     await revokeConnection(client.db, workspace.workspaceId, older.id, workspace.subjectId);
     expect((await persist())?.id).toBe(newer.id);
   }, 60_000);
+
+  test("a credential replaced without a verified account loses the key", async () => {
+    const workspace = await organization();
+    const keyed = await connect(workspace, { personal: true, accountIdentityKey: KEY });
+    await updateConnection(client.db, {
+      workspaceId: workspace.workspaceId,
+      connectionId: keyed.id,
+      visibleToSubjectId: workspace.subjectId,
+      credentialEncrypted: "pasted",
+    });
+    const [row] = await shared.admin<Array<{ account_identity_key: string | null }>>`
+      select account_identity_key from connections where id = ${keyed.id}`;
+    expect(row!.account_identity_key).toBeNull();
+    // The account's slot is free again.
+    await connect(workspace, { personal: true, accountIdentityKey: KEY });
+  }, 60_000);
 });
