@@ -367,13 +367,6 @@ export function registerConsoleSignInRoutes(app: Hono, deps: ApiRouteDeps): void
             returning console.id`,
       );
       if (inherited.length === 0) throw new Error("Console session could not inherit sign-in");
-      // A Console session this browser already had is replaced, not orphaned.
-      const previous = await deps.managedAuthSessionAdapter
-        ?.resolveAmbientSession(context.req.raw.headers)
-        .catch(() => null);
-      const previousId = previous?.session?.id;
-      if (previousId && previousId !== session.id && previousId !== handoff.sourceSessionId)
-        await deleteSession(deps, previousId);
       await recordConsoleSignInHandoff(deps.db, {
         outcome: "signed_in",
         reason: null,
@@ -383,13 +376,20 @@ export function registerConsoleSignInRoutes(app: Hono, deps: ApiRouteDeps): void
         sourceAuthSessionId: handoff.sourceSessionId,
         providerId: handoff.providerId,
       });
-      for (const value of await managedAuthSessionCookieHeaders(
+      const sessionCookies = await managedAuthSessionCookieHeaders(
         auth,
         session.token,
         context.req.header("cookie") ?? null,
-      )) {
-        context.header("set-cookie", value, { append: true });
-      }
+      );
+      // A Console session this browser already had is replaced, not orphaned,
+      // once the new one is ready to take its place.
+      const previous = await deps.managedAuthSessionAdapter
+        ?.resolveAmbientSession(context.req.raw.headers)
+        .catch(() => null);
+      const previousId = previous?.session?.id;
+      if (previousId && previousId !== session.id && previousId !== handoff.sourceSessionId)
+        await deleteSession(deps, previousId);
+      for (const value of sessionCookies) context.header("set-cookie", value, { append: true });
       return context.redirect(new URL(returnPath, consoleOrigin).toString(), 302);
     } catch (error) {
       // A failure after the code is spent leaves Console signed out with a
