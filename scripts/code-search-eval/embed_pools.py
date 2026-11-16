@@ -6,10 +6,11 @@ Reads pools written by `run.ts --dump-pool` and writes `--dense-scores` input fo
 Needs `pip install fastembed numpy`. Chunk texts are deduplicated across tasks before embedding.
 
   python3 embed_pools.py --pools 'res/pools-*.jsonl' --out res/dense-scores.jsonl \
-    --model jinaai/jina-embeddings-v2-base-code --workers 4 --threads 8
+    --model jinaai/jina-embeddings-v2-base-code --threads 4
 """
 
 import argparse
+import gc
 import glob
 import hashlib
 import json
@@ -24,11 +25,13 @@ def main() -> None:
     ap.add_argument("--pools", required=True, help="glob of pool JSONL files")
     ap.add_argument("--out", required=True)
     ap.add_argument("--model", default="jinaai/jina-embeddings-v2-base-code")
-    ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--threads", type=int, default=8)
     ap.add_argument("--batch", type=int, default=16)
     ap.add_argument("--max-length", type=int, default=512)
     ap.add_argument("--cache-dir", default=None)
+    ap.add_argument("--segment", type=int, default=1000, help="chunks per fresh model session")
+    ap.add_argument("--work-dir", default=None, help="finished segments (default: <out>.parts)")
     args = ap.parse_args()
 
     tasks = []
@@ -45,23 +48,48 @@ def main() -> None:
     from fastembed import TextEmbedding
 
     os.environ.setdefault("OMP_NUM_THREADS", str(args.threads))
-    model = TextEmbedding(
-        args.model,
-        max_length=args.max_length,
-        threads=args.threads,
-        cache_dir=args.cache_dir,
-    )
+
+    def load():
+        return TextEmbedding(
+            args.model,
+            max_length=args.max_length,
+            threads=args.threads,
+            cache_dir=args.cache_dir,
+        )
+
+    # ONNX Runtime's arena grows with every new input shape and never shrinks, so a long run on
+    # variable-length chunks exhausts memory. Embed length-sorted segments with a fresh session each
+    # and keep every finished segment on disk, so memory stays bounded and a rerun resumes.
+    keys.sort(key=lambda k: len(texts[k]))
+    work = args.work_dir or args.out + ".parts"
+    os.makedirs(work, exist_ok=True)
     t0 = time.time()
-    passages = np.asarray(
-        list(
-            model.passage_embed(
-                [texts[k] for k in keys],
-                batch_size=args.batch,
-                parallel=args.workers if args.workers > 1 else None,
+    parts = []
+    for i in range(0, len(keys), args.segment):
+        seg = keys[i : i + args.segment]
+        path = os.path.join(
+            work, hashlib.sha1((args.model + "".join(seg)).encode()).hexdigest()[:16] + ".npy"
+        )
+        if not os.path.exists(path):
+            model = load()
+            vectors = np.asarray(
+                list(
+                    model.passage_embed(
+                        [texts[k] for k in seg],
+                        batch_size=args.batch,
+                        parallel=args.workers if args.workers > 1 else None,
+                    )
+                ),
+                dtype=np.float32,
             )
-        ),
-        dtype=np.float32,
-    )
+            del model
+            gc.collect()
+            np.save(path + ".tmp.npy", vectors)
+            os.replace(path + ".tmp.npy", path)
+        parts.append(np.load(path))
+        print(f"{min(i + args.segment, len(keys))}/{len(keys)} chunks, {time.time() - t0:.0f}s", flush=True)
+    passages = np.concatenate(parts) if parts else np.zeros((0, 1), dtype=np.float32)
+    model = load()
     queries = np.asarray(
         list(model.query_embed([t["query"] for t in tasks], batch_size=args.batch)),
         dtype=np.float32,
