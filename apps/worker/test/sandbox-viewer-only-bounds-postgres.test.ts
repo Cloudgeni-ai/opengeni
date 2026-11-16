@@ -255,6 +255,9 @@ describe("boundViewerOnlyWarmBoxes (real PostgreSQL)", () => {
     const second = await workspace(first.accountId);
     await admin`insert into organization_plans (account_id, plan_key, status)
       values (${first.accountId}, 'free', 'active')`;
+    // Older than the `new` tier's three days: plain Free.
+    await admin`update managed_accounts set created_at = now() - interval '10 days'
+      where id = ${first.accountId}`;
 
     // Old client, attached 2 hours ago, never reported interaction: idle.
     const idle = await warmViewerBox(first, 120);
@@ -323,6 +326,47 @@ describe("boundViewerOnlyWarmBoxes (real PostgreSQL)", () => {
       reason: "viewer_organization_limit",
       limit: 2,
     });
+  }, 180_000);
+
+  test("a young free organization keeps one viewer-only box, whatever credential renews it", async () => {
+    const ids = await workspace();
+    await admin`insert into organization_plans (account_id, plan_key, status)
+      values (${ids.accountId}, 'free', 'active')`;
+    // Two quiet boxes whose viewers keep heartbeating without reporting
+    // interaction (an API key's report is dropped by the route).
+    const older = await warmViewerBox(ids, 20);
+    const newer = await warmViewerBox(ids, 10);
+    for (const box of [older, newer]) {
+      await heartbeatLeaseHolderStatus(db, {
+        ...ids,
+        sandboxGroupId: box.groupId,
+        kind: "viewer",
+        holderId: box.holderId,
+        leaseTtlMs: 90_000,
+        expectedEpoch: box.epoch,
+      });
+    }
+    const settings = testSettings({
+      sandboxBackend: "modal",
+      sandboxViewerIdleDrainMs: 30 * MINUTE,
+      sandboxMaxViewerOnlyBoxesPerWorkspace: 3,
+      sandboxPlanLimitsJson: "",
+    }) satisfies Settings;
+    const { observability } = recordingObservability();
+    const warm = (await listMeterableWarmLeases(db)).filter(
+      (row) => row.accountId === ids.accountId,
+    );
+    const result = await boundViewerOnlyWarmBoxes(
+      { db, settings, observability: observability as never },
+      warm,
+    );
+    expect(result.drained).toEqual({
+      viewer_idle: 0,
+      viewer_workspace_limit: 0,
+      viewer_organization_limit: 1,
+    });
+    expect(await liveness(ids.workspaceId, older.groupId)).toBe("draining");
+    expect(await liveness(ids.workspaceId, newer.groupId)).toBe("warm");
   }, 180_000);
 
   test("a free organization with an external-source workspace is outside both bounds", async () => {

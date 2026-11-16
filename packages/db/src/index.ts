@@ -49651,6 +49651,10 @@ export const ORGANIZATION_WARM_SANDBOX_COUNTS_ROUTINE =
  * SDK or federated organization); unbounded unless configured. */
 export const SANDBOX_EMBEDDED_PLAN_TIER = "embedded";
 
+/** The tier of a young Free self-serve organization, while the
+ * `new` tier sets `organizationsYoungerThanMs`. */
+export const SANDBOX_NEW_PLAN_TIER = "new";
+
 /**
  * The plan tier whose sandbox limits apply to an organization:
  *
@@ -49661,23 +49665,41 @@ export const SANDBOX_EMBEDDED_PLAN_TIER = "embedded";
  * - otherwise its plan key (a paid plan only while active, trialing or past
  *   due), `none` without a plan row;
  * - `restricted` for a Free or plan-less organization whose promotion
- *   decision is `held` or `denied`, while promotion enforcement is on.
+ *   decision is `held` or `denied`, while promotion enforcement is on;
+ * - `new` for any other Free organization created less than the
+ *   `new` tier's `organizationsYoungerThanMs` ago (only when `limits` is
+ *   given and sets it).
+ *
+ * The tier is the organization's, whatever credential the caller holds
+ * (browser session, API key, native token or service).
  *
  * Reads only the caller's own organization's rows under the current account
  * context.
  */
-export async function resolveSandboxPlanTier(tx: Database, accountId: string): Promise<string> {
+export async function resolveSandboxPlanTier(
+  tx: Database,
+  accountId: string,
+  limits?: SandboxPlanLimits,
+): Promise<string> {
+  const newTierAgeMs = limits
+    ? (sandboxPlanLimitFor(limits, SANDBOX_NEW_PLAN_TIER).organizationsYoungerThanMs ?? 0)
+    : 0;
   const [row] = await rawRows<{
     plan_key: string | null;
     status: string | null;
     decision: string | null;
     enforcement: boolean | null;
     embedded: boolean | null;
+    young: boolean | null;
   }>(
     tx,
     sql`select plan.plan_key, plan.status, decision.decision,
         (select enforcement.enabled from promotion_enforcement enforcement
           where enforcement.singleton) as enforcement,
+        (${newTierAgeMs}::bigint > 0 and exists (select 1 from managed_accounts account
+          where account.id = organization.account_id
+            and account.created_at > now() - (${newTierAgeMs}::bigint * interval '1 millisecond')
+        )) as young,
         (
           exists (select 1 from managed_accounts account
             where account.id = organization.account_id and account.external_source is not null)
@@ -49703,6 +49725,7 @@ export async function resolveSandboxPlanTier(tx: Database, accountId: string): P
   ) {
     return "restricted";
   }
+  if (tier === "free" && row?.young === true) return SANDBOX_NEW_PLAN_TIER;
   return tier;
 }
 
@@ -49714,12 +49737,12 @@ export function sandboxPlanLimitFor(limits: SandboxPlanLimits, tier: string): Sa
  * of the organization's workspaces. */
 export async function resolveSandboxPlanTierInWorkspace(
   db: Database,
-  input: { accountId: string; workspaceId: string },
+  input: { accountId: string; workspaceId: string; limits?: SandboxPlanLimits },
 ): Promise<string> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => await resolveSandboxPlanTier(scopedDb, input.accountId),
+    async (scopedDb) => await resolveSandboxPlanTier(scopedDb, input.accountId, input.limits),
   );
 }
 
@@ -51259,7 +51282,7 @@ async function acquireLeaseOnce(
         // per-workspace limit as well as the plan limits it does not set.
         const planTier =
           input.sandboxPlanLimits || (input.viewerOnlyBoxLimit ?? 0) > 0
-            ? await resolveSandboxPlanTier(tx, accountId)
+            ? await resolveSandboxPlanTier(tx, accountId, input.sandboxPlanLimits)
             : null;
         const viewerOnlyBoxLimit =
           planTier === SANDBOX_EMBEDDED_PLAN_TIER ? 0 : (input.viewerOnlyBoxLimit ?? 0);

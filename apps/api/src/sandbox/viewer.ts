@@ -89,6 +89,7 @@ import {
   providerSettingsForSessionSandboxRuntime,
   relayConfigFromSettings,
   resolveSessionSandboxRuntime,
+  verifiedDelegatedHumanAuthorizationForRequest,
 } from "@opengeni/core";
 import { establishApiSandboxSpawner } from "./rematerialize";
 import { establishCachedChannelAHandle } from "./channel-a";
@@ -1670,4 +1671,29 @@ function runningLimitsOnly(limits: Readonly<Record<string, SandboxPlanLimit>>) {
         : { runningBoxesPerOrganization: limit.runningBoxesPerOrganization },
     ]),
   );
+}
+
+/**
+ * Viewer interaction a client reports (`lastInteractionAgeMs`) may extend a
+ * viewer-only hold past the idle window (docs/run-lifecycle.md, "Boxes held
+ * only by viewers"). Only a person's own interactive session can report it:
+ * an API key (workspace, organization or personal), a delegated or service
+ * principal or an agent reports nothing a person did, so its viewer is bounded
+ * by the activity the server observes. The field is ignored, never refused.
+ */
+export function viewerInteractionAgeFor(
+  request: Request,
+  grant: AccessGrant,
+  lastInteractionAgeMs: number | undefined,
+): { interactionAgeMs: number } | Record<string, never> {
+  if (lastInteractionAgeMs === undefined) return {};
+  if (
+    grant.principalKind !== "human_session" ||
+    grant.metadata?.delegated === true ||
+    grant.serviceInitiator ||
+    verifiedDelegatedHumanAuthorizationForRequest(request) !== null
+  ) {
+    return {};
+  }
+  return { interactionAgeMs: lastInteractionAgeMs };
 }

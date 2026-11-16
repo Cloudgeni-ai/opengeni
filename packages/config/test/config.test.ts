@@ -3001,6 +3001,18 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
     ).toEqual({ viewerOnlyBoxesPerOrganization: 40 });
   });
 
+  test("young Free self-serve organizations have a new plan tier with one viewer-only box", () => {
+    expect(DEFAULT_SANDBOX_PLAN_LIMITS.new).toEqual({
+      organizationsYoungerThanMs: 259_200_000,
+      viewerOnlyBoxesPerOrganization: 1,
+      viewerOnlyBoxesPerMember: 1,
+      runningBoxesPerOrganization: 3,
+    });
+    expect(
+      parseSandboxPlanLimitsJson('{"new":{"organizationsYoungerThanMs":3600000}}').new,
+    ).toEqual({ organizationsYoungerThanMs: 3_600_000 });
+  });
+
   test("idle command containment defaults to 30 minutes between idle grace and rotation lead", () => {
     const settings = withEnv({}, () => getSettings());
     expect(settings.sandboxIdleCommandContainmentMs).toBe(1_800_000);

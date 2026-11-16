@@ -1258,6 +1258,98 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
     expect(turn.role).toBe("spawner");
   }, 60_000);
 
+  test("(6j) a restricted organization's viewer is refused whatever credential keeps it alive", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    await admin`insert into organization_plans (account_id, plan_key, status)
+      values (${ws.accountId}, 'free', 'active')`;
+    await admin`insert into promotion_decisions (account_id, decision, revision, actor)
+      values (${ws.accountId}, 'held', 1, 'test')`;
+    await setPromotionEnforcement(true);
+    // A browser session and a personal API key name the person; a workspace
+    // or organization API key names the key, or nobody. The tier belongs to
+    // the organization, so each is refused the same way.
+    for (const viewerSubjectId of ["user:held", "api_key:held-key", undefined]) {
+      let refused: unknown;
+      try {
+        await acquireLease(db, {
+          accountId: ws.accountId,
+          workspaceId: ws.workspaceId,
+          sandboxGroupId: crypto.randomUUID(),
+          kind: "viewer",
+          holderId: `v-${viewerSubjectId ?? "none"}`,
+          ...(viewerSubjectId ? { viewerSubjectId } : {}),
+          backend: "modal",
+          leaseTtlMs: 90_000,
+          sandboxPlanLimits: DEFAULT_SANDBOX_PLAN_LIMITS,
+        });
+      } catch (error) {
+        refused = error;
+      }
+      expect(refused).toBeInstanceOf(SandboxViewerBoxLimitError);
+    }
+  }, 60_000);
+
+  test("(6k) a young Free self-serve organization is on the new tier until it ages out", async () => {
+    if (!available) return;
+    const tierOf = async (
+      accountId: string,
+      workspaceId: string,
+      limits = DEFAULT_SANDBOX_PLAN_LIMITS,
+    ) =>
+      withRlsContext(db, { accountId, workspaceId }, (scoped) =>
+        resolveSandboxPlanTier(scoped, accountId, limits),
+      );
+    const ws = await freshWorkspace();
+    await admin`insert into organization_plans (account_id, plan_key, status)
+      values (${ws.accountId}, 'free', 'active')`;
+    expect(await tierOf(ws.accountId, ws.workspaceId)).toBe("new");
+    // Without the plan-limit table, or with a `new` tier that sets no age, it is Free.
+    expect(
+      await withRlsContext(db, ws, (scoped) => resolveSandboxPlanTier(scoped, ws.accountId)),
+    ).toBe("free");
+    expect(await tierOf(ws.accountId, ws.workspaceId, { free: {}, new: {} })).toBe("free");
+
+    // One viewer-only box, whatever credential keeps it alive.
+    const viewer = (holderId: string, viewerSubjectId?: string) =>
+      acquireLease(db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        sandboxGroupId: crypto.randomUUID(),
+        kind: "viewer",
+        holderId,
+        ...(viewerSubjectId ? { viewerSubjectId } : {}),
+        backend: "modal",
+        leaseTtlMs: 90_000,
+        sandboxPlanLimits: DEFAULT_SANDBOX_PLAN_LIMITS,
+      });
+    await grantOrganizationCounts();
+    expect((await viewer("first", "user:new-owner")).role).toBe("spawner");
+    await expect(viewer("second")).rejects.toBeInstanceOf(SandboxViewerBoxLimitError);
+
+    // A held decision still restricts a young organization.
+    await admin`insert into promotion_decisions (account_id, decision, revision, actor)
+      values (${ws.accountId}, 'held', 1, 'test')`;
+    await setPromotionEnforcement(true);
+    expect(await tierOf(ws.accountId, ws.workspaceId)).toBe("restricted");
+    await admin`delete from promotion_decisions where account_id = ${ws.accountId}`;
+
+    // Paid and older organizations are not new.
+    await admin`update managed_accounts set created_at = now() - interval '4 days'
+      where id = ${ws.accountId}`;
+    expect(await tierOf(ws.accountId, ws.workspaceId)).toBe("free");
+    const paid = await freshWorkspace();
+    await admin`insert into organization_plans (account_id, plan_key, status)
+      values (${paid.accountId}, 'pro', 'active')`;
+    expect(await tierOf(paid.accountId, paid.workspaceId)).toBe("pro");
+
+    // A young organization that is not self-serve stays embedded.
+    const embedded = await freshWorkspace();
+    await admin`update managed_accounts set external_source = 'opengeni-sdk:young'
+      where id = ${embedded.accountId}`;
+    expect(await tierOf(embedded.accountId, embedded.workspaceId)).toBe("embedded");
+  }, 60_000);
+
   test("(6h) organization and member viewer limits count every workspace of the organization", async () => {
     if (!available) return;
     await grantOrganizationCounts();

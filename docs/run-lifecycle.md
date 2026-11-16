@@ -4348,7 +4348,10 @@ source), whose host may hold viewers without reporting interaction.
   client may extend it by reporting, on every attach and heartbeat, how long
   ago the person last used the page (`lastInteractionAgeMs`: pointer,
   keyboard, wheel, touch, window focus or the page becoming visible); the API
-  keeps the newest as the holder's `last_interaction_at`. A viewer's activity
+  keeps the newest as the holder's `last_interaction_at`. Only a person's own
+  signed-in session can report it: the API ignores the field from an API key
+  (workspace, organization or personal), a delegated or service caller, so
+  such a viewer is bounded by what the server observes. A viewer's activity
   is its last reported interaction, otherwise its attach time; a box's
   activity is the newest of its viewers' activity and its sessions' turns.
   When nothing happened for the window, the reaper deletes the viewer

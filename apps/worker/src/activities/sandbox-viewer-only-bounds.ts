@@ -189,7 +189,11 @@ export async function boundViewerOnlyWarmBoxes(
   const exempt = new Set<string>();
   await forEachLimited([...accounts], concurrency, async ([accountId, workspaceId]) => {
     try {
-      const tier = await resolveSandboxPlanTierInWorkspace(db, { accountId, workspaceId });
+      const tier = await resolveSandboxPlanTierInWorkspace(db, {
+        accountId,
+        workspaceId,
+        limits: planLimits,
+      });
       if (tier === SANDBOX_EMBEDDED_PLAN_TIER) {
         exempt.add(accountId);
         return;

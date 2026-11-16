@@ -188,6 +188,18 @@ describe("viewer-only warm box bounds (real packages/db + RLS)", () => {
     const { groupId, epoch } = await warmGroup(ids, [{ kind: "viewer", holderId: "tab-a" }]);
     await sessionOnBox(ids, groupId, { minutesAgo: 120 });
     await backdateHolders(ids, groupId, 90);
+    // The viewer keeps heartbeating without reporting interaction (an old
+    // client, or an API key whose report the route drops): heartbeats keep
+    // the hold alive but are not activity.
+    const beat = await heartbeatLeaseHolderStatus(db, {
+      ...ids,
+      sandboxGroupId: groupId,
+      kind: "viewer",
+      holderId: "tab-a",
+      leaseTtlMs: 90_000,
+      expectedEpoch: epoch,
+    });
+    expect(beat.holderAlive).toBe(true);
 
     const [lease] = await listViewerOnlyWarmLeases(db, ids);
     expect(lease).toMatchObject({

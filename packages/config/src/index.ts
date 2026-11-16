@@ -12300,11 +12300,15 @@ export function parseSandboxWarmRateJson(raw: string): Record<string, number> {
  * - `runningBoxesPerOrganization`: every running managed box (warming, warm or
  *   draining; Connected Machines never count), including boxes agent turns
  *   hold. A new box beyond it waits for a slot instead of starting.
+ * - `organizationsYoungerThanMs`: only for the `new` tier, which applies to a
+ *   Free self-serve organization created less than this long
+ *   ago. Omitted or 0 turns the `new` tier off.
  */
 export type SandboxPlanLimit = {
   viewerOnlyBoxesPerOrganization?: number;
   viewerOnlyBoxesPerMember?: number;
   runningBoxesPerOrganization?: number;
+  organizationsYoungerThanMs?: number;
 };
 
 /**
@@ -12312,9 +12316,10 @@ export type SandboxPlanLimit = {
  * `enterprise`, or any operator-defined key), plus `none` for an organization
  * with no plan row (plans disabled), `restricted` for a Free or plan-less
  * organization whose promotion decision is `held` or `denied` while promotion
- * enforcement is on, and `embedded` for an organization that is not
- * self-serve (it, or one of its workspaces, has an external source). A tier
- * absent from the table is unbounded.
+ * enforcement is on, `new` for a Free self-serve organization
+ * younger than the `new` tier's `organizationsYoungerThanMs`, and `embedded`
+ * for an organization that is not self-serve (it, or one of its workspaces,
+ * has an external source). A tier absent from the table is unbounded.
  */
 export type SandboxPlanLimits = Readonly<Record<string, SandboxPlanLimit>>;
 
@@ -12322,11 +12327,19 @@ const SANDBOX_PLAN_LIMIT_FIELDS = [
   "viewerOnlyBoxesPerOrganization",
   "viewerOnlyBoxesPerMember",
   "runningBoxesPerOrganization",
+  "organizationsYoungerThanMs",
 ] as const;
 
 export const DEFAULT_SANDBOX_PLAN_LIMITS: SandboxPlanLimits = {
   free: {
     viewerOnlyBoxesPerOrganization: 2,
+    viewerOnlyBoxesPerMember: 1,
+    runningBoxesPerOrganization: 3,
+  },
+  // A Free self-serve organization in its first three days.
+  new: {
+    organizationsYoungerThanMs: 3 * 24 * 60 * 60 * 1000,
+    viewerOnlyBoxesPerOrganization: 1,
     viewerOnlyBoxesPerMember: 1,
     runningBoxesPerOrganization: 3,
   },
