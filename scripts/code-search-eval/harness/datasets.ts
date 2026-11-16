@@ -13,7 +13,7 @@ export type ContextBenchRow = {
   language: string;
   base_commit: string;
   source: string;
-  problem_statement: string;
+  problem_statement: string | null;
   patch?: string;
   gold_context: { file: string; start_line: number; end_line: number }[];
 };
@@ -83,7 +83,8 @@ export function contextBenchTask(row: ContextBenchRow): Task {
     commit: row.base_commit,
     language: row.language,
     source: row.source,
-    query: row.problem_statement,
+    // A few upstream rows have no problem statement; keep them (stable shards) with an empty query.
+    query: row.problem_statement ?? "",
     oracle: { files: [...new Set(spans.map((s) => s.file))], spans },
   };
 }
@@ -93,7 +94,7 @@ export type SweBenchRow = {
   instance_id: string;
   repo: string;
   base_commit: string;
-  problem_statement: string;
+  problem_statement: string | null;
   patch: string;
 };
 
@@ -105,7 +106,8 @@ export function sweBenchTask(row: SweBenchRow, source = "swebench"): Task {
     commit: row.base_commit,
     language: "python",
     source,
-    query: row.problem_statement,
+    // A few upstream rows have no problem statement; keep them (stable shards) with an empty query.
+    query: row.problem_statement ?? "",
     oracle: { files: patchFiles(row.patch), spans: [] },
   };
 }
