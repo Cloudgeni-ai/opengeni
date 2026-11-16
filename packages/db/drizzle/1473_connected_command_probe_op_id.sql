@@ -3,23 +3,23 @@
 -- The private command projection records each connected command's op id.
 --
 -- classify_connected_command_ops looks up the command rows of the operations
--- one runner process reports: on every completion notice (1472) and every
+-- one runner process reports: on every completion notice (1474) and every
 -- inventory page. Almost every completion notice is foreground work, which
 -- has no command row, yet each lookup opened a session-tenancy fence
 -- inventory, a capability row written and deleted in its own transaction.
--- 1472 first asks this projection, which the definer can read without that
+-- 1474 first asks this projection, which the definer can read without that
 -- capability, whether the runner process has any row for those operations.
 --
 -- New and changed rows carry their op id from here on. Rows written before
 -- this migration (and by a writer still running the previous trigger body
--- while it commits) keep a NULL op id, which 1472 treats as "may match", so
+-- while it commits) keep a NULL op id, which 1474 treats as "may match", so
 -- their runner process keeps the full lookup. Nothing is backfilled: the
 -- answer stays exact, and the saving applies to runner processes whose rows
 -- all carry their op id.
 --
 -- Rolling: the projection is private and nothing in the previous release
 -- reads it. The sync routine keeps its signature, owner and grants. The
--- index serves 1472's lookup: one runner process's rows for a set of op ids,
+-- index serves 1474's lookup: one runner process's rows for a set of op ids,
 -- or any of its rows without one.
 SET LOCAL lock_timeout = '5s';
 

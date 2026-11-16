@@ -24,8 +24,8 @@
 -- a long offline backlog is released in the same call.
 --
 -- classify_connected_command_ops first asks the private command projection
--- (1471) whether the runner process has a row for any of
--- the operations, or a row older than 1471. Without one it returns nothing,
+-- (1473) whether the runner process has a row for any of
+-- the operations, or a row older than 1473. Without one it returns nothing,
 -- which is what the full lookup returns, and never opens the fence
 -- inventory, so a foreground completion notice writes nothing.
 --
@@ -45,7 +45,7 @@ CREATE OR REPLACE FUNCTION opengeni_private.classify_connected_command_ops(p_con
     DECLARE inventory_id uuid;
     BEGIN
       -- Read-only and exact: every command row is projected in its own
-      -- transaction, and a NULL op id (a row from before 1471) may match.
+      -- transaction, and a NULL op id (a row from before 1473) may match.
       IF NOT EXISTS (
         SELECT 1 FROM opengeni_private.maintenance_probe_session_background_commands probe
         WHERE probe.provider = 'connected_machine'
