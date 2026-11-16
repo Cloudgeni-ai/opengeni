@@ -289,19 +289,22 @@ describe("plugins that are only a built-in integration", () => {
   const restricted = { mode: "restricted" as const, allowedIntegrationKeys: ["custom:mcp"] };
 
   test("a plugin of only Gmail's reviewed endpoint is turned off with Gmail", () => {
-    const item = plugin({ skills: [], mcpEndpoints: [gmail] });
-    expect(pluginBuiltInIntegrationKeys(item)).toEqual(["gmail"]);
-    expect(builtInIntegrationTurnedOffDetail(item, restricted)).toContain(
+    const mailPlugin = plugin({ skills: [], mcpEndpoints: [gmail] });
+    expect(pluginBuiltInIntegrationKeys(mailPlugin)).toEqual(["gmail"]);
+    expect(builtInIntegrationTurnedOffDetail(mailPlugin, restricted)).toContain(
       "Mail plugin is turned off for this organization",
     );
     expect(
-      builtInIntegrationTurnedOffDetail(item, {
+      builtInIntegrationTurnedOffDetail(mailPlugin, {
         mode: "restricted",
         allowedIntegrationKeys: ["gmail"],
       }),
     ).toBeNull();
     expect(
-      builtInIntegrationTurnedOffDetail(item, { mode: "unrestricted", allowedIntegrationKeys: [] }),
+      builtInIntegrationTurnedOffDetail(mailPlugin, {
+        mode: "unrestricted",
+        allowedIntegrationKeys: [],
+      }),
     ).toBeNull();
   });
 
