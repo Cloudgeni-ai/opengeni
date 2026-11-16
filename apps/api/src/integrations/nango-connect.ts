@@ -939,7 +939,7 @@ async function afterNangoConnectionStored(
     grantedScopes: result.connection.grantedScopes,
     knownWorkspaceIds,
   }).catch((error: unknown) =>
-    console.warn("[nango] sharing a connection failed; the sweep retries it", {
+    console.warn("[nango] sharing a connection failed; the sweep retries tagged connections", {
       connectionId: result.connection.id,
       error: error instanceof Error ? error.message : String(error),
     }),
@@ -1008,14 +1008,15 @@ export async function deleteNangoConnectionFor(
     nangoConnectionId,
     kind: "connection_deleted",
   });
-  // A failed deletion is retried by the sweep: nothing stands for it any more.
+  // A failed deletion of a deployment-tagged connection is retried by the
+  // sweep; an untagged (pre-tag) one needs `integrations:nango orphans`.
   await releaseNangoConnections(deps, {
     subjectId: connection.subjectId,
     providerConfigKey,
     nangoConnectionIds: [nangoConnectionId],
     knownWorkspaceIds: [connection.workspaceId],
   }).catch((error: unknown) =>
-    console.warn("[nango] connection release failed; the sweep retries it", {
+    console.warn("[nango] connection release failed; the sweep retries tagged connections", {
       connectionId: connection.id,
       error: error instanceof Error ? error.message : String(error),
     }),

@@ -390,8 +390,9 @@ async function deleteInNango(
       await client.deleteConnection(id, providerConfigKey);
       deleted.push(id);
     } catch (error) {
-      // The sweep deletes it later: nothing stands for it any more.
-      console.warn("[nango] connection deletion failed; the sweep retries it", {
+      // The sweep deletes it later if it carries this deployment's tag;
+      // an untagged one needs `integrations:nango orphans`.
+      console.warn("[nango] connection deletion failed; the sweep retries tagged connections", {
         nangoConnectionId: id,
         error: error instanceof Error ? error.message : String(error),
       });
@@ -693,7 +694,8 @@ export async function sweepNangoConnections(
       }
       recordRepointUsage(deps, outcome.written);
       result.repointed += outcome.written.length;
-      // Duplicates are deleted only once their rows' repoint is committed.
+      // Duplicates are deleted only once their rows' repoint is committed; a
+      // failure here keeps what this person's pass already did.
       result.deletedDuplicates.push(
         ...(await releaseCommitted(
           deps,
@@ -705,7 +707,12 @@ export async function sweepNangoConnections(
             ),
           },
           outcome.duplicates,
-        )),
+        ).catch((error: unknown) => {
+          console.warn("[nango] sweep kept one person's replaced connections", {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return [] as string[];
+        })),
       );
       result.deletedBroken.push(...outcome.deletedBroken);
       if (outcome.orphans.length) {

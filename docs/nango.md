@@ -178,7 +178,9 @@ URL, so deployments sharing one Nango environment never sweep each other's):
   reconnect stores a new connection.
 
 Connections made outside Opengeni or before the deployment tag (untagged)
-are left to the operator's `integrations:nango orphans` command. A pass stops
+are left to the operator's `integrations:nango orphans` command; that
+includes duplicates and failed deletions of such connections, which are
+otherwise merged only when the person connects that account again. A pass stops
 starting people after three minutes (the rest wait for the next pass, in
 shuffled order) and heartbeats its activity. A connect refused for good
 (authority, policy or an account already connected), a connection whose

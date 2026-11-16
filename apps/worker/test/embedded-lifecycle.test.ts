@@ -844,6 +844,18 @@ describe("embedded worker lifecycle contract", () => {
             has_dependents: false,
             configuration: ["search_path=pg_catalog, public, pg_temp"],
           })),
+          // Migration 1473: the deployment-wide Nango in-use check, created
+          // without runtime EXECUTE until a later migration grants it.
+          {
+            name: "nango_connections_in_use_v1(text[])",
+            owner: "opengeni_migrator",
+            can_execute: false,
+            public_execute: false,
+            security_definer: true,
+            trigger_callable: false,
+            has_dependents: false,
+            configuration: ["search_path=pg_catalog, public, pg_temp"],
+          },
           // Migration 1103: the subscription account-administrator grant,
           // created without runtime EXECUTE; 1149 granted it.
           {
