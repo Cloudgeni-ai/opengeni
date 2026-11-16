@@ -12799,6 +12799,7 @@
         "$.transport": "enum! null=[\"\\\"relay-frames\\\"\",\"\\\"vnc-ws\\\"\"]",
         "$.viewerHeartbeatIntervalMs": "integer!",
         "$.viewerId": "string!",
+        "$.viewerIdleDrainMs": "integer? null",
         "$.workspaceGeneration": "integer! null"
       }
     },
@@ -34772,6 +34773,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.lastInteractionAgeMs": "number?",
         "$.leaseEpoch": "integer!"
       }
     },

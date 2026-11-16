@@ -229,6 +229,7 @@ import { CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES } from "../concurrency";
 import { browserCheckpointPrerequisites } from "./browser-deadline-checkpoint";
 import { assertSandboxDrainInputTiming, sandboxDrainTiming } from "../sandbox-reaper-timeout";
 import type { ControlActivityServices as ActivityServices } from "./types";
+import { boundViewerOnlyWarmBoxes } from "./sandbox-viewer-only-bounds";
 import { reconcilePendingParentSystemUpdates } from "./parent-wake";
 import {
   recordActiveUserGauges,
@@ -1412,6 +1413,22 @@ export function createSandboxLeaseActivities(
         forceDrainWorkspaceIds,
         observability,
       );
+
+      // Boxes kept warm only by open session pages: drain the idle ones and
+      // hold each account to its viewer-only warm box cap. Drained boxes get
+      // their provider child on a following sweep, as any other drain.
+      try {
+        const bounds = await boundViewerOnlyWarmBoxes(
+          { db, settings, observability },
+          meterResult.leases,
+          { concurrency: SANDBOX_MAINTENANCE_ITEM_CONCURRENCY },
+        );
+        forceDrained += bounds.drained.viewer_idle + bounds.drained.viewer_account_cap;
+      } catch (error) {
+        observability.warn("sandbox reaper: viewer-only box bounds failed", {
+          error: errorMessage(error),
+        });
+      }
 
       // Terminal-owner process reconciliation is ancillary to lease dispatch.
       // Exact provider proof is durably checkpointed before settlement; every
@@ -3966,7 +3983,11 @@ async function accrueWarmTick(
   db: ActivityServices["db"],
   settings: ActivityServices["settings"],
   observability: ActivityServices["observability"],
-): Promise<{ accrued: number; workspaceIds: Set<string> }> {
+): Promise<{
+  accrued: number;
+  workspaceIds: Set<string>;
+  leases: MeterableWarmLease[];
+}> {
   const workspaceIds = new Set<string>();
   let accrued = 0;
   let leases: MeterableWarmLease[] = [];
@@ -3976,7 +3997,7 @@ async function accrueWarmTick(
     observability.warn("sandbox reaper: warm-lease read failed", {
       error: errorMessage(error),
     });
-    return { accrued, workspaceIds };
+    return { accrued, workspaceIds, leases };
   }
   for (const lease of leases) {
     workspaceIds.add(lease.workspaceId);
@@ -4010,7 +4031,7 @@ async function accrueWarmTick(
       });
     }
   });
-  return { accrued, workspaceIds };
+  return { accrued, workspaceIds, leases };
 }
 
 /**

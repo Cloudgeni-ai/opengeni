@@ -116,6 +116,58 @@ function desktopAttachable(cell: SessionCapabilities["DesktopStream"]): boolean 
   return cell.reason === "lease_cold" || cell.reason === "not_provisioned" || cell.reason === null;
 }
 
+/** Events that mean a person is at the page. Captured on the window so a
+ * canvas or terminal that stops propagation still counts. */
+const VIEWER_INTERACTION_EVENTS = [
+  "pointerdown",
+  "pointermove",
+  "keydown",
+  "wheel",
+  "touchstart",
+] as const;
+
+/**
+ * Track when the person last interacted with the page, for the viewer
+ * heartbeat (`lastInteractionAgeMs`). Page load, pointer, keyboard, wheel,
+ * touch, window focus and the page becoming visible all count. `onInteraction`
+ * runs after each recorded interaction.
+ */
+function useViewerInteractionClock(onInteraction: () => void): {
+  current: number;
+} {
+  const lastInteractionRef = useRef(Date.now());
+  const onInteractionRef = useRef(onInteraction);
+  onInteractionRef.current = onInteraction;
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const record = () => {
+      lastInteractionRef.current = Date.now();
+      onInteractionRef.current();
+    };
+    const onVisibility = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "visible") record();
+    };
+    const listenerOptions = { capture: true, passive: true } as const;
+    for (const type of VIEWER_INTERACTION_EVENTS) {
+      window.addEventListener(type, record, listenerOptions);
+    }
+    window.addEventListener("focus", record, listenerOptions);
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", onVisibility);
+    }
+    return () => {
+      for (const type of VIEWER_INTERACTION_EVENTS) {
+        window.removeEventListener(type, record, listenerOptions);
+      }
+      window.removeEventListener("focus", record, listenerOptions);
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", onVisibility);
+      }
+    };
+  }, []);
+  return lastInteractionRef;
+}
+
 /**
  * Whether warming the box for the interactive terminal (pty-ws) is worth it.
  * A real-PTY descriptor is attachable when already routed as `pty-ws`, or while
@@ -181,6 +233,16 @@ export function useSessionCapabilities(
     setNonce((n) => n + 1);
   }, []);
 
+  // Set when the server released this page's viewer while the person was away
+  // (the idle drain): the box is re-acquired on their next interaction rather
+  // than re-warmed at once for an empty room.
+  const resumeOnInteractionRef = useRef(false);
+  const lastInteractionRef = useViewerInteractionClock(() => {
+    if (!resumeOnInteractionRef.current) return;
+    resumeOnInteractionRef.current = false;
+    setNonce((n) => n + 1);
+  });
+
   // ── Negotiation + viewer lifecycle ──────────────────────────────────────────
   useEffect(() => {
     const identityChanged = previousIdentityRef.current !== identityKey;
@@ -208,7 +270,10 @@ export function useSessionCapabilities(
     // the replacement grant degrades.
     viewerIdRef.current = null;
     setViewerId(null);
+    resumeOnInteractionRef.current = false;
     let cancelled = false;
+    // The server's viewer idle window from the attach (null: off or unknown).
+    let idleDrainMs: number | null = null;
     let pollTimer: ReturnType<typeof setTimeout> | null = null;
     let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
     let localViewerId: string | null = null;
@@ -229,6 +294,23 @@ export function useSessionCapabilities(
       setError(null);
     };
 
+    // The holder is gone (reaped, idle-released or fenced by a new epoch).
+    // When the person has been away at least the server's idle window, the
+    // server released it on purpose: stop beating and re-attach on their next
+    // interaction. Otherwise re-negotiate now.
+    const reacquire = () => {
+      if (cancelled) return;
+      if (idleDrainMs !== null && Date.now() - lastInteractionRef.current >= idleDrainMs) {
+        localViewerId = null;
+        viewerIdRef.current = null;
+        setViewerId(null);
+        setState("on-demand");
+        resumeOnInteractionRef.current = true;
+        return;
+      }
+      renegotiate();
+    };
+
     const startHeartbeat = (caps: SessionCapabilities) => {
       if (!localViewerId || heartbeatTimer !== null) return;
       const intervalMs =
@@ -241,12 +323,13 @@ export function useSessionCapabilities(
           void client
             .heartbeatViewer(workspaceId, sessionId, localViewerId, {
               leaseEpoch: epochRef.current,
+              lastInteractionAgeMs: Math.max(0, Date.now() - lastInteractionRef.current),
             })
             .then((res) => {
               // alive:false ⇒ the holder was reaped or the epoch moved under us;
               // re-negotiate to re-acquire against the new owner.
               if (!res.alive && !cancelled) {
-                renegotiate();
+                reacquire();
               }
             })
             .catch((cause) => {
@@ -255,7 +338,7 @@ export function useSessionCapabilities(
                 cause instanceof OpenGeniApiError &&
                 (cause.status === 409 || cause.status === 410)
               ) {
-                renegotiate();
+                reacquire();
               }
             })
             .finally(schedule);
@@ -368,6 +451,10 @@ export function useSessionCapabilities(
             }
             localViewerId = holder.viewerId;
             viewerIdRef.current = holder.viewerId;
+            idleDrainMs =
+              typeof holder.viewerIdleDrainMs === "number" && holder.viewerIdleDrainMs > 0
+                ? holder.viewerIdleDrainMs
+                : null;
             setViewerId(holder.viewerId);
             epochRef.current = holder.leaseEpoch;
             // Fold the freshly-minted live address(es) into the doc the components

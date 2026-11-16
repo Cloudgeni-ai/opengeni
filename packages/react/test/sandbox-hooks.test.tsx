@@ -1874,3 +1874,110 @@ describe("useSandboxGit", () => {
     await hook.unmount();
   });
 });
+
+describe("useSessionCapabilities viewer interaction reporting", () => {
+  const beatingCapabilities = () => fakeCapabilities({ viewerHeartbeatIntervalMs: 15 });
+
+  test("each viewer heartbeat reports how long ago the person last interacted", async () => {
+    const beats: { leaseEpoch: number; lastInteractionAgeMs?: number }[] = [];
+    const client = fakeClient({
+      getStreamCapabilities: async () => beatingCapabilities(),
+      attachViewer: async () => fakeAttachResponse({ viewerIdleDrainMs: 1_800_000 }),
+      heartbeatViewer: async (_workspaceId, _sessionId, _viewerId, body) => {
+        beats.push(body as { leaseEpoch: number; lastInteractionAgeMs?: number });
+        return { alive: true };
+      },
+      detachViewer: async () => {},
+    });
+    const hook = await renderHook(
+      () =>
+        useSessionCapabilities(SESSION_ID, {
+          ...ctx,
+          client,
+          attachDesktop: true,
+        }),
+      undefined,
+    );
+    await flush(60);
+    expect(beats.length).toBeGreaterThan(0);
+    for (const beat of beats) {
+      expect(typeof beat.lastInteractionAgeMs).toBe("number");
+      expect(beat.lastInteractionAgeMs).toBeGreaterThanOrEqual(0);
+    }
+    await hook.unmount();
+  });
+
+  test("a viewer released while the person was away re-attaches on their next interaction", async () => {
+    let attaches = 0;
+    let alive = true;
+    const client = fakeClient({
+      getStreamCapabilities: async () => beatingCapabilities(),
+      attachViewer: async () => {
+        attaches += 1;
+        // A tiny idle window: the person counts as away almost at once.
+        return fakeAttachResponse({ viewerIdleDrainMs: 1 });
+      },
+      heartbeatViewer: async () => ({ alive }),
+      detachViewer: async () => {},
+    });
+    const hook = await renderHook(
+      () =>
+        useSessionCapabilities(SESSION_ID, {
+          ...ctx,
+          client,
+          attachDesktop: true,
+        }),
+      undefined,
+    );
+    await flush(30);
+    expect(attaches).toBe(1);
+    // The server's idle drain released the holder.
+    alive = false;
+    await flush(80);
+    expect(hook.result.current.state).toBe("on-demand");
+    expect(hook.result.current.viewerId).toBeNull();
+    expect(attaches).toBe(1);
+    // The person comes back: the page re-attaches and resumes the box.
+    alive = true;
+    await actRun(() => {
+      window.dispatchEvent(new Event("keydown"));
+    });
+    await flush(30);
+    expect(attaches).toBe(2);
+    expect(hook.result.current.state).toBe("ready");
+    await hook.unmount();
+  });
+
+  test("without an idle window from the server (older API) a lost holder re-attaches at once", async () => {
+    let attaches = 0;
+    let alive = true;
+    const client = fakeClient({
+      getStreamCapabilities: async () => beatingCapabilities(),
+      attachViewer: async () => {
+        attaches += 1;
+        return fakeAttachResponse();
+      },
+      heartbeatViewer: async () => {
+        const result = { alive };
+        alive = true;
+        return result;
+      },
+      detachViewer: async () => {},
+    });
+    const hook = await renderHook(
+      () =>
+        useSessionCapabilities(SESSION_ID, {
+          ...ctx,
+          client,
+          attachDesktop: true,
+        }),
+      undefined,
+    );
+    await flush(30);
+    expect(attaches).toBe(1);
+    alive = false;
+    await flush(80);
+    expect(attaches).toBeGreaterThanOrEqual(2);
+    await hook.unmount();
+  });
+});

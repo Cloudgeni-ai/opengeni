@@ -238,6 +238,13 @@ export const workspaces = pgTable(
     sandboxViewerForceDrainRequestedAt: timestamp("sandbox_viewer_force_drain_requested_at", {
       withTimezone: true,
     }),
+    // Viewer-only warm box cap gate (migration 1473): while in the future, a
+    // viewer attach that would warm another box held only by viewers is
+    // refused. Stamped with a short expiry by the reaper while the account is
+    // at its cap; it lapses by itself.
+    sandboxViewerOnlyCapUntil: timestamp("sandbox_viewer_only_cap_until", {
+      withTimezone: true,
+    }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -11155,6 +11162,9 @@ export const sandboxLeaseHolders = pgTable(
     viewerSubjectId: text("viewer_subject_id"),
     viewerAuthorityEpoch: integer("viewer_authority_epoch"),
     lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }).notNull().defaultNow(),
+    // Viewer holders only (1472): the last real user interaction the viewer
+    // reported on a heartbeat. Null when never reported (older clients).
+    lastInteractionAt: timestamp("last_interaction_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({

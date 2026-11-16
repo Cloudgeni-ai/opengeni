@@ -1219,6 +1219,85 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
     });
   }, 60_000);
 
+  test("the person-facing attach reports the idle window, records reported interaction and enforces the viewer-only cap", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const { sandboxGroupId, sessionId } = await seedWarmBox(accountId, workspaceId);
+    const session = await getSession(db, workspaceId, sessionId);
+    const capSettings = testSettings({
+      ...localDeploymentSettings,
+      sandboxViewerIdleDrainMs: 1_800_000,
+      sandboxMaxViewerOnlyWarmPerAccount: 1,
+    });
+
+    // Joining the warm box is allowed and advertises the idle window.
+    const attached = await attachViewer(
+      { db, settings: capSettings },
+      {
+        accountId,
+        workspaceId,
+        session: session!,
+        enforceViewerOnlyWarmCap: true,
+      },
+    );
+    expect(attached.liveness).toBe("warm");
+    expect(attached.viewerIdleDrainMs).toBe(1_800_000);
+
+    // The heartbeat records the interaction the client reports.
+    const alive = await heartbeatViewer(
+      { db, settings: capSettings },
+      {
+        accountId,
+        workspaceId,
+        sandboxGroupId,
+        viewerId: attached.viewerId,
+        expectedEpoch: attached.leaseEpoch,
+        interactionAgeMs: 4_000,
+      },
+    );
+    expect(alive).toBe(true);
+    const [holder] = await admin<{ age_ms: number }[]>`
+      select (extract(epoch from now() - holder.last_interaction_at) * 1000)::int as age_ms
+      from sandbox_lease_holders holder
+      join sandbox_leases lease on lease.id = holder.lease_id
+      where lease.workspace_id = ${workspaceId} and lease.sandbox_group_id = ${sandboxGroupId}
+        and holder.kind = 'viewer'`;
+    expect(holder!.age_ms).toBeGreaterThanOrEqual(3_000);
+    expect(holder!.age_ms).toBeLessThan(60_000);
+
+    // Warming a second viewer-only box in the organization is refused with
+    // the typed limit; the session itself is untouched.
+    const other = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "second",
+      resources: [],
+      metadata: {},
+      model: "m",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "local",
+    });
+    let blocked: unknown;
+    try {
+      await attachViewer(
+        { db, settings: capSettings },
+        {
+          accountId,
+          workspaceId,
+          session: other,
+          enforceViewerOnlyWarmCap: true,
+        },
+      );
+    } catch (error) {
+      blocked = error;
+    }
+    expect(blocked).toBeInstanceOf(HTTPException);
+    expect((blocked as HTTPException).status).toBe(429);
+    expect((blocked as Error).message).toContain("kept warm for viewers only");
+    expect(await getSession(db, workspaceId, other.id)).toBeTruthy();
+  }, 60_000);
+
   test("fleet readiness returns a live viewer hold until its route owner releases it", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();

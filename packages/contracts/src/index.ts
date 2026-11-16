@@ -22256,6 +22256,11 @@ export const ViewerHolder = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
     // The desktop pixel tunnel URL the viewer connects to directly; null until
     // a viewer grant is minted (gated until then).
     dataPlaneUrl: primitives.nullableString,
+    // How long a viewer may go without reporting interaction on its heartbeat
+    // (`lastInteractionAgeMs`) before the server may release it and drain a box
+    // held only by viewers. Null when the deployment disables the idle drain.
+    // Absent from older servers.
+    viewerIdleDrainMs: z.number().int().nonnegative().nullable().optional(),
   }),
 );
 export type ViewerHolder = z.infer<typeof ViewerHolder>;
@@ -22309,9 +22314,14 @@ export type AcknowledgeStreamResponse = z.infer<typeof AcknowledgeStreamResponse
 
 // POST .../viewers/:viewerId/heartbeat — refresh the holder TTL. Epoch-fenced:
 // a stale-epoch beat (a box re-established under a newer epoch) is rejected.
+// `lastInteractionAgeMs` (optional) is how long ago the person last interacted
+// with the page (pointer, keyboard, touch, focus). A box held only by viewers
+// that reported no interaction for the server's idle window is drained; older
+// clients that omit it fall back to the attach time and session activity.
 export const ViewerHeartbeatRequest = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
   z.object({
     leaseEpoch: primitives.nonnegativeInteger,
+    lastInteractionAgeMs: z.number().finite().nonnegative().optional(),
   }),
 );
 export type ViewerHeartbeatRequest = z.infer<typeof ViewerHeartbeatRequest>;

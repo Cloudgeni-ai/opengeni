@@ -4311,6 +4311,46 @@ counts inspections (`checkpointing` when browser saves were prepared,
 `inspection_failed`). A person returning exactly as the box is being released
 may see the browser `suspending`, then resume it.
 
+**Boxes held only by viewers.** A viewer holder (an open session page using
+the desktop, terminal or files plane) keeps its box warm for as long as its
+heartbeats arrive. Two bounds stop such boxes from being held indefinitely or
+without limit. Both apply only to warm boxes whose every holder is a viewer,
+with no turn holder and no session of the sandbox group with open work
+(`queued`, `running`, `requires_action`, `recovering`, `waiting_capacity`).
+A box with a turn, process, Browser/ComputerSession or direct operation is
+never counted or drained by them. Compute and selfhosted boxes are exempt.
+
+- Idle drain (`OPENGENI_SANDBOX_VIEWER_IDLE_DRAIN_MS`, default 30 minutes, `0`
+  disables). The web client reports on every heartbeat how long ago the person
+  last used the page (`lastInteractionAgeMs`: pointer, keyboard, wheel, touch,
+  window focus or the page becoming visible); the API keeps the newest as the
+  holder's `last_interaction_at`. A box's activity is the newest viewer attach,
+  reported interaction, or turn created or finished in its sessions. Clients
+  that do not report interaction therefore fall back to the attach time and
+  session activity. When nothing happened for the window, the reaper deletes
+  the viewer holders and moves the lease to draining with the ordinary idle
+  grace, so the workspace is saved and the box stops as when the last tab
+  closes. The page's next heartbeat answers `alive: false`; a page that knows
+  the window (`viewerIdleDrainMs` on the attach response) waits for the
+  person's next interaction and then re-attaches, which resumes the box.
+- Per-account cap (`OPENGENI_SANDBOX_MAX_VIEWER_ONLY_WARM_PER_ACCOUNT`,
+  default 10, `0` disables). The reaper counts such boxes per account
+  (organization, across its workspaces) and drains the least recently active
+  ones over the cap. While an account is at the cap, each of its workspaces
+  that holds such a box is stamped (`workspaces.sandbox_viewer_only_cap_until`,
+  three reaper periods, at least two minutes), and a person-facing viewer
+  attach that would warm another viewer-only box is refused with 429; joining
+  a box that is already warm is not. The in-workspace count is also checked at
+  attach time, so the cap holds exactly within one workspace and within one
+  reaper pass across workspaces. The session still loads without a live box.
+
+Every decision is rechecked under the lease lock, so a viewer that reported
+interaction, an attach or a turn after the reaper's read keeps the box. Drains
+log `sandbox reaper: drained viewer-only box` with the reason, inactivity and
+whether the client reported interaction, and count
+`opengeni_sandbox_viewer_only_drains_total{reason}` (`viewer_idle`,
+`viewer_account_cap`).
+
 **Browsers and desktops on a retired instance.** A browser or desktop
 controller runs inside one exact provider instance (`placement_instance_id`),
 and nothing rebinds it to a successor. When its lease no longer runs that

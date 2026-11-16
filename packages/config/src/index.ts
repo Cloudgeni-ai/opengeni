@@ -2028,6 +2028,25 @@ const SettingsSchema = z.object({
   // snapshotted before the box dies (sandbox-file-persistence).
   sandboxLeaseReaperPeriodMs: z.coerce.number().int().positive().default(30_000),
   sandboxViewerHolderTtlMs: z.coerce.number().int().positive().default(90_000),
+  // Viewer-only idle drain. A viewer holder (an open session page heartbeating
+  // the desktop/terminal/files planes) keeps its box warm for as long as
+  // heartbeats arrive. When every holder of a warm box is a viewer, no session
+  // of its sandbox group has an open turn, and for this long there was no
+  // reported viewer interaction, viewer attach, message or turn, the reaper
+  // releases those viewers and drains the box through the ordinary drain
+  // (workspace saved, box stopped). A viewer that comes back re-attaches and
+  // the box resumes. Clients that do not report interaction fall back to the
+  // attach time and session activity. Default 30min; 0 disables.
+  // Knob: OPENGENI_SANDBOX_VIEWER_IDLE_DRAIN_MS.
+  sandboxViewerIdleDrainMs: z.coerce.number().int().nonnegative().default(1_800_000),
+  // Per-account (organization, across all its workspaces) cap on warm boxes
+  // held only by viewers. Over the cap the reaper drains the least recently
+  // active ones, and a viewer attach that would warm another viewer-only box
+  // is refused with 429 (the session still loads, without a live box). Boxes
+  // with a turn, process, browser/computer session or direct operation are
+  // never counted or drained by it. Default 10; 0 disables.
+  // Knob: OPENGENI_SANDBOX_MAX_VIEWER_ONLY_WARM_PER_ACCOUNT.
+  sandboxMaxViewerOnlyWarmPerAccount: z.coerce.number().int().nonnegative().default(10),
   // A BrowserSession controller refreshes its durable resource and exact
   // interaction lease holder together. This longer crash horizon tolerates API
   // replacement while still releasing a placement whose controller died.
@@ -6558,6 +6577,10 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     sandboxSelfhostedControlTimeoutMs: optional("OPENGENI_SANDBOX_SELFHOSTED_CONTROL_TIMEOUT_MS"),
     sandboxLeaseReaperPeriodMs: optional("OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS"),
     sandboxViewerHolderTtlMs: optional("OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS"),
+    sandboxViewerIdleDrainMs: optional("OPENGENI_SANDBOX_VIEWER_IDLE_DRAIN_MS"),
+    sandboxMaxViewerOnlyWarmPerAccount: optional(
+      "OPENGENI_SANDBOX_MAX_VIEWER_ONLY_WARM_PER_ACCOUNT",
+    ),
     sandboxInteractionHolderTtlMs: optional("OPENGENI_SANDBOX_INTERACTION_HOLDER_TTL_MS"),
     sandboxIdleGraceMs: optional("OPENGENI_SANDBOX_IDLE_GRACE_MS"),
     sandboxIdleCommandContainmentMs: optional("OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS"),

@@ -2983,6 +2983,30 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
     expect(settings.sandboxRotationLeadMs).toBe(290_001);
   });
 
+  test("viewer-only warm box bounds default on and 0 disables each", () => {
+    const defaults = withEnv({}, () => getSettings());
+    expect(defaults.sandboxViewerIdleDrainMs).toBe(1_800_000);
+    expect(defaults.sandboxMaxViewerOnlyWarmPerAccount).toBe(10);
+    const tuned = withEnv(
+      {
+        OPENGENI_SANDBOX_VIEWER_IDLE_DRAIN_MS: "600000",
+        OPENGENI_SANDBOX_MAX_VIEWER_ONLY_WARM_PER_ACCOUNT: "3",
+      },
+      () => getSettings(),
+    );
+    expect(tuned.sandboxViewerIdleDrainMs).toBe(600_000);
+    expect(tuned.sandboxMaxViewerOnlyWarmPerAccount).toBe(3);
+    const off = withEnv(
+      {
+        OPENGENI_SANDBOX_VIEWER_IDLE_DRAIN_MS: "0",
+        OPENGENI_SANDBOX_MAX_VIEWER_ONLY_WARM_PER_ACCOUNT: "0",
+      },
+      () => getSettings(),
+    );
+    expect(off.sandboxViewerIdleDrainMs).toBe(0);
+    expect(off.sandboxMaxViewerOnlyWarmPerAccount).toBe(0);
+  });
+
   test("idle command containment defaults to 30 minutes between idle grace and rotation lead", () => {
     const settings = withEnv({}, () => getSettings());
     expect(settings.sandboxIdleCommandContainmentMs).toBe(1_800_000);

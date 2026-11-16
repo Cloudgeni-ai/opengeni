@@ -761,6 +761,10 @@ export type ViewerHolder = {
   archiveComplete: boolean;
   viewerHeartbeatIntervalMs: number;
   dataPlaneUrl: string | null;
+  /** How long the viewer may go without reporting interaction on its
+   * heartbeat before a box held only by viewers may be drained. Null when the
+   * idle drain is disabled; absent from older servers. */
+  viewerIdleDrainMs?: number | null | undefined;
 };
 export type AttachViewerResponse = ViewerHolder & {
   // The scoped desktop-stream address minted for THIS holder (P4.2). Null when
@@ -797,7 +801,12 @@ export type AcknowledgeStreamResponse = {
 // Mirror of `@opengeni/contracts` ViewerHeartbeatRequest/Response — the
 // Channel-A viewer-liveness ping, epoch-fenced (a stale-epoch beat → alive:false
 // → the client re-attaches).
-export type ViewerHeartbeatRequest = { leaseEpoch: number };
+// `lastInteractionAgeMs`: how long ago the person last interacted with the
+// page; omit it when unknown.
+export type ViewerHeartbeatRequest = {
+  leaseEpoch: number;
+  lastInteractionAgeMs?: number | undefined;
+};
 export type ViewerHeartbeatResponse = { alive: boolean };
 
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
