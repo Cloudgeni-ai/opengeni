@@ -479,6 +479,7 @@ import {
   registerManagedPasskeyRoutes,
 } from "./routes/managed-passkeys";
 import { registerNativeAppAuthRoutes } from "./routes/native-app-auth";
+import { registerConsoleSignInRoutes } from "./routes/console-sign-in";
 import { registerOfficeWorkbookRoutes } from "./routes/office-workbooks";
 import {
   DISPLAY_IDENTITY_PATH,
@@ -1370,6 +1371,7 @@ export function createAppComposition(
   registerManagedSignInMethodRoutes(app, routeDeps);
   registerManagedPasskeyRoutes(app, routeDeps, { newSignupsGate: managedAuthNewSignupsGate });
   registerNativeAppAuthRoutes(app, routeDeps);
+  registerConsoleSignInRoutes(app, routeDeps);
   if (managedAuth) {
     app.on(["GET", "POST"], "/v1/auth/*", async (c) => {
       const pathname = new URL(c.req.url).pathname;

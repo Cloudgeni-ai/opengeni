@@ -121,6 +121,7 @@ import {
   useFinishUnfinishedConnectSetups,
 } from "@/components/capabilities/use-api-integration-accounts";
 import {
+  nativeCatalogItemCannotConnect,
   nativeCatalogItemNotice,
   nativeCatalogItemVisible,
   nativeIntegrationModel,
@@ -512,9 +513,11 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
       items.filter(
         (item) =>
           isConnectorCatalogItem(item) &&
-          nativeCatalogItemVisible(item, nativeConnectCatalog, nativeConnectionFacts),
+          nativeCatalogItemVisible(item, nativeConnectCatalog, nativeConnectionFacts, {
+            searching: hasQuery,
+          }),
       ),
-    [items, nativeConnectCatalog, nativeConnectionFacts],
+    [items, nativeConnectCatalog, nativeConnectionFacts, hasQuery],
   );
   // The Featured strip shows curated connectors when nothing narrows the list;
   // the grid then carries the long tail. A search or a non-MCP filter hides the
@@ -649,10 +652,12 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
     ),
   }));
   const connectorChip = (item: CapabilityCatalogItem) =>
-    connectionAccessChip(
-      capabilityStateChip(item, connectionHealth(item, accounts ?? [], accounts !== null)),
-      connectionsAccessDenied,
-    );
+    !item.enabled && nativeCatalogItemCannotConnect(item)
+      ? { label: "Unavailable" as const, tone: "plain" as const }
+      : connectionAccessChip(
+          capabilityStateChip(item, connectionHealth(item, accounts ?? [], accounts !== null)),
+          connectionsAccessDenied,
+        );
   // One state source with the item page: the reason names what needs fixing
   // and the row offers that page's one repair.
   const connectorRowStatus = (item: CapabilityCatalogItem) => {

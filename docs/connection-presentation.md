@@ -124,7 +124,9 @@ Identity comes from the first of these that applies to the connection:
   | Linear | `get_user` with `query: "me"`; optional `get_workspace` | `linearUserId` | email, name, workspace |
   | Notion | token response `workspace_id` and `user_id`; else a person from `notion-get-self` | `notionWorkspaceId`, `notionUserId` | email, name, workspace |
   | Asana (`/v2/mcp`) | `get_me` tool | `asanaUserId` | email, name |
-  | Stripe | `get_stripe_account_info` tool | `stripeAccountId` | email, account name |
+  | Stripe | `get_stripe_account_info` tool (`account_id`, `display_name`; older `id` Account shape too); optional `stripe_api_read` `GetAccount` for the same account | `stripeAccountId` | email, account name |
+  | Sentry (`mcp.sentry.dev/mcp`) | `whoami` tool; optional `find_organizations` | `sentryUserId` | email, name, organization (the session's, else the only one listed) |
+  | Apollo (`mcp.apollo.io/mcp`) | `apollo_users_api_profile` tool (current-user profile) | `apolloUserId` | email, name |
 
 - Generic OpenID Connect, when nothing above applies and the authorization
   server advertises `openid` in its `scopes_supported`. The sign-in then asks
@@ -158,7 +160,7 @@ of them count as the same resource for duplicates and share one lock.
 
 ### One account per person when a service can't identify accounts
 
-Services with no identity source (HubSpot, Sentry and Apollo among the
+Services with no identity source (HubSpot among the
 catalog's, and any custom MCP without OpenID Connect) follow a one-account
 rule, enforced in `decideOAuthAccountConnection`:
 
