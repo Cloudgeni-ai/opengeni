@@ -565,7 +565,7 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
     refresh,
     onRuntimeChanged,
   });
-  const github = useGitHubIntegration({ workspaceId });
+  const github = useGitHubIntegration({ workspaceId, pageOpen: openIntegration === "github" });
   // Outlook Mail/Calendar/Contacts and OneDrive: one row per provider, folding
   // every connected account into that row's Connected accounts block. Every
   // curated definition here is oauth2-only, so a single shared effect (below)

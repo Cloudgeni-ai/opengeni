@@ -81135,14 +81135,29 @@ export async function claimSessionWorkForAttempt(
               }
             }
           }
-          const connectorPolicyRows = await connectorActionPolicySnapshotForTurn(
-            tx as unknown as Database,
-            {
+          // Re-entering an attempt that is already claimed (attaching pending
+          // updates to a running attempt, or replaying its claim) keeps the
+          // connector policies it froze when first claimed. A tool the attempt
+          // ran since can change those policies, for example an approved
+          // GitHub action policy update; the change applies from the next
+          // attempt, as every later policy change does.
+          const [claimedAttempt] = await tx
+            .select({ connectorActionPolicies: schema.sessionTurnAttempts.connectorActionPolicies })
+            .from(schema.sessionTurnAttempts)
+            .where(
+              and(
+                eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
+                eq(schema.sessionTurnAttempts.id, input.attemptId),
+              ),
+            )
+            .limit(1);
+          const connectorPolicyRows =
+            claimedAttempt?.connectorActionPolicies ??
+            (await connectorActionPolicySnapshotForTurn(tx as unknown as Database, {
               accountId: session.accountId,
               workspaceId,
               bindings: turn.mcpAccountBindings,
-            },
-          );
+            }));
           // New queued, compaction, and internal-update executions are born
           // while the locked session still has no active-turn pointer. Publish
           // that ownership edge before freezing governance so the database

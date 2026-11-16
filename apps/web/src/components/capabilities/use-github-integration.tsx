@@ -168,7 +168,14 @@ export function githubInstallationAttention(installation: GitHubInstallationBind
  * context (the repository picker uses the same data), so this adapter reads
  * from there instead of fetching again.
  */
-export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): IntegrationAdapter {
+export function useGitHubIntegration({
+  workspaceId,
+  pageOpen = false,
+}: {
+  workspaceId: string;
+  /** The GitHub page is showing: its approvals are read again when it opens or regains focus. */
+  pageOpen?: boolean;
+}): IntegrationAdapter {
   const context = useAppContext();
   const connectTransport = useMemo(() => context.client.connectTransport(), [context.client]);
   const [connectRequest, setConnectRequest] = useState<NativeConnectRequest | null>(null);
@@ -284,19 +291,29 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
     personalConnection ? `personal:${personalConnection.id}` : "",
   ].join("|");
 
-  const refreshActionPolicies = useCallback(async () => {
-    const request = ++actionPolicyRequest.current;
-    setActionPolicyFailed(false);
-    try {
-      const policies = await context.client.getGitHubActionPolicies(workspaceId);
-      if (actionPolicyRequest.current !== request) return;
-      setActionPolicies(policies);
-    } catch {
-      if (actionPolicyRequest.current !== request) return;
-      setActionPolicies(null);
-      setActionPolicyFailed(true);
-    }
-  }, [context.client, workspaceId]);
+  /**
+   * Reads the approvals. A `background` read (the page opened again, or the
+   * window regained focus) keeps what is shown if it fails, and never
+   * interrupts a save: the save's own result is newer.
+   */
+  const refreshActionPolicies = useCallback(
+    async ({ background = false }: { background?: boolean } = {}) => {
+      if (background && actionPolicyMutation.current !== null) return;
+      const request = ++actionPolicyRequest.current;
+      if (!background) setActionPolicyFailed(false);
+      try {
+        const policies = await context.client.getGitHubActionPolicies(workspaceId);
+        if (actionPolicyRequest.current !== request) return;
+        setActionPolicies(policies);
+        setActionPolicyFailed(false);
+      } catch {
+        if (actionPolicyRequest.current !== request || background) return;
+        setActionPolicies(null);
+        setActionPolicyFailed(true);
+      }
+    },
+    [context.client, workspaceId],
+  );
 
   useEffect(() => {
     setActionPolicies(null);
@@ -308,6 +325,27 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
       actionPolicyMutation.current = null;
     };
   }, [actionPolicyActorKey, refreshActionPolicies]);
+
+  // The same approvals change from elsewhere too: an agent's approved
+  // update, another tab, another device. This adapter outlives the page, so
+  // read them again each time the page opens and when the window regains
+  // focus while it shows.
+  const pageWasOpen = useRef(pageOpen);
+  useEffect(() => {
+    const opened = pageOpen && !pageWasOpen.current;
+    pageWasOpen.current = pageOpen;
+    if (!pageOpen) return;
+    if (opened) void refreshActionPolicies({ background: true });
+    const refresh = () => {
+      if (document.visibilityState === "visible") void refreshActionPolicies({ background: true });
+    };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [pageOpen, refreshActionPolicies]);
 
   /**
    * Saves one or more actor/group decisions in order. The endpoint returns the

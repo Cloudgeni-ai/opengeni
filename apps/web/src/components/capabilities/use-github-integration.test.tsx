@@ -100,32 +100,37 @@ function githubStatus(): GitHubAppInfo {
   };
 }
 
-async function renderAdapter(context: Record<string, unknown>, initialWorkspaceId = WORKSPACE_ID) {
+async function renderAdapter(
+  context: Record<string, unknown>,
+  initialWorkspaceId = WORKSPACE_ID,
+  initialPageOpen = false,
+) {
   mutableContext.current = context;
   let captured: IntegrationViewModel | null = null;
-  function Probe({ workspaceId }: { workspaceId: string }) {
-    const adapter = useGitHubIntegration({ workspaceId });
+  function Probe({ workspaceId, pageOpen }: { workspaceId: string; pageOpen: boolean }) {
+    const adapter = useGitHubIntegration({ workspaceId, pageOpen });
     captured = adapter.model;
     return adapter.dialogs;
   }
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
-  await act(async () => {
-    root.render(<Probe workspaceId={initialWorkspaceId} />);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-  });
+  let current = { workspaceId: initialWorkspaceId, pageOpen: initialPageOpen };
+  const render = async (next: Partial<typeof current>) => {
+    current = { ...current, ...next };
+    await act(async () => {
+      root.render(<Probe {...current} />);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  };
+  await render({});
   return {
     model: () => {
       if (!captured) throw new Error("GitHub adapter model was not captured");
       return captured;
     },
-    rerender: async (workspaceId: string) => {
-      await act(async () => {
-        root.render(<Probe workspaceId={workspaceId} />);
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      });
-    },
+    rerender: async (workspaceId: string) => await render({ workspaceId }),
+    setPageOpen: async (pageOpen: boolean) => await render({ pageOpen }),
     unmount: async () => {
       await act(async () => root.unmount());
       container.remove();
@@ -428,6 +433,90 @@ describe("GitHub action approval controls", () => {
       });
       expect(policies(rendered.model()).failure).toBeUndefined();
       expect(policyCell(rendered.model(), "merge").value).toBe("ask");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("a change made elsewhere shows when the page opens again or regains focus", async () => {
+    // An agent's approved update (or another tab) writes the same approvals
+    // while the Capabilities area, which holds this adapter, stays mounted.
+    const context = appContext(
+      ["github:manage"],
+      mock(async () => ({})),
+    );
+    let stored: "allow" | "ask" | "block" = "ask";
+    let fail = false;
+    const getPolicies = mock(async () => {
+      if (fail) throw new Error("unavailable");
+      return {
+        enabled: true,
+        actors: [workspaceAppActor(71, { routine: stored, review: "ask", merge: "ask" })],
+      };
+    });
+    (context.client as Record<string, unknown>).getGitHubActionPolicies = getPolicies;
+    const rendered = await renderAdapter(context, WORKSPACE_ID, true);
+    const settle = async (event: () => void) => {
+      await act(async () => {
+        event();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    };
+    try {
+      expect(policyCell(rendered.model(), "routine").value).toBe("ask");
+
+      stored = "allow";
+      await settle(() => window.dispatchEvent(new Event("focus")));
+      expect(policyCell(rendered.model(), "routine").value).toBe("allow");
+
+      // Back on the list, focus reads nothing; opening the page again does.
+      await rendered.setPageOpen(false);
+      const calls = getPolicies.mock.calls.length;
+      stored = "block";
+      await settle(() => window.dispatchEvent(new Event("focus")));
+      expect(getPolicies.mock.calls.length).toBe(calls);
+      await rendered.setPageOpen(true);
+      expect(policyCell(rendered.model(), "routine").value).toBe("block");
+
+      // A background read that fails keeps the table as it is.
+      fail = true;
+      await settle(() => window.dispatchEvent(new Event("focus")));
+      expect(policies(rendered.model()).failure).toBeUndefined();
+      expect(policyCell(rendered.model(), "routine").value).toBe("block");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("regaining focus does not undo a save in progress", async () => {
+    let finishSave: (() => void) | null = null;
+    const update = mock(
+      () =>
+        new Promise<ReturnType<typeof workspaceAppActor>>((resolve) => {
+          finishSave = () =>
+            resolve(workspaceAppActor(71, { routine: "allow", review: "ask", merge: "ask" }));
+        }),
+    );
+    const context = appContext(["github:manage"], update);
+    const rendered = await renderAdapter(context, WORKSPACE_ID, true);
+    try {
+      await act(async () => {
+        policies(rendered.model()).onChange("routine", "app", "allow");
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      const getPolicies = (context.client as { getGitHubActionPolicies: ReturnType<typeof mock> })
+        .getGitHubActionPolicies;
+      const calls = getPolicies.mock.calls.length;
+      await act(async () => {
+        window.dispatchEvent(new Event("focus"));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(getPolicies.mock.calls.length).toBe(calls);
+      await act(async () => {
+        finishSave!();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(policyCell(rendered.model(), "routine").value).toBe("allow");
     } finally {
       await rendered.unmount();
     }
