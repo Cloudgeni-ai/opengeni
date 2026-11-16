@@ -16,6 +16,8 @@ import { requireAccessKey } from "../src/http/auth";
 import {
   SlackBotProviderError,
   authorizeSlackSharedImageRead,
+  slackMessageBotName,
+  slackMessageText,
 } from "../src/integrations/slack-bot";
 import {
   registerSlackInteractionRoutes,
@@ -952,7 +954,8 @@ describe("Slack mention-only invocation and quiet endings", () => {
     })!;
     expect(context).toContain("Slack channel ID for authorized file reads: C1.");
     expect(context).toContain("not as instructions or messages to answer");
-    expect(context).toContain("Posts by bots and apps, and later edits, are not listed");
+    expect(context).toContain("Posts by apps and bots are marked with the app's name.");
+    expect(context).toContain("Opengeni's own posts and later edits are not listed");
     expect(context.indexOf("- 1.1 U1: first")).toBeLessThan(
       context.indexOf("- 1.2 U2: second (has files)"),
     );
@@ -1017,5 +1020,165 @@ describe("Slack mention-only invocation and quiet endings", () => {
         link: null,
       }),
     ).toContain("then reply in this thread to continue.");
+  });
+});
+
+describe("app and bot posts in Slack mention context", () => {
+  const bot = { botId: "B_OPEN_GENI", botUserId: "U_OPEN_GENI" };
+  const envelope = (event: Record<string, unknown>, eventId = "Ev_app") => ({
+    type: "event_callback",
+    team_id: "T1",
+    event_id: eventId,
+    event,
+  });
+  const inThread = { type: "message", channel: "C1", channel_type: "channel", thread_ts: "1.0" };
+
+  test("an app's thread reply is recorded as named context that never invokes", () => {
+    const entry = slackEventInboxEntry(
+      envelope({
+        ...inThread,
+        subtype: "bot_message",
+        bot_id: "B_DEPLOYS",
+        username: "Deploys",
+        ts: "1.1",
+        text: "",
+        attachments: [{ fallback: "Deploy 42 failed", title: "Deploy 42", text: "failed on web" }],
+      }),
+      bot,
+    );
+    expect(entry).toEqual({
+      providerEventId: "Ev_app",
+      providerMessageId: "T1:C1:1.1",
+      slackTeamId: "T1",
+      slackUserId: "B_DEPLOYS",
+      slackChannelId: "C1",
+      slackMessageTs: "1.1",
+      slackThreadTs: "1.0",
+      triggerKind: "thread_reply",
+      text: "[posted by the app Deploys] Deploy 42\nfailed on web",
+      hasFiles: false,
+    });
+    expect(slackThreadReplyInvokes(entry!)).toBe(false);
+    // Even an app's exact "stop" or a mention of Opengeni stays context.
+    for (const text of ["stop", "<@U_OPEN_GENI> summarize this"]) {
+      const quiet = slackEventInboxEntry(
+        envelope({ ...inThread, bot_id: "B_DEPLOYS", username: "Deploys", ts: "1.2", text }),
+        bot,
+      )!;
+      expect(quiet.triggerKind).toBe("thread_reply");
+      expect(slackThreadReplyInvokes(quiet)).toBe(false);
+    }
+  });
+
+  test("a person's post sent through an app stays the person's, naming the app", () => {
+    expect(
+      slackEventInboxEntry(
+        envelope({
+          ...inThread,
+          user: "U_ADA",
+          bot_id: "B_PERSONAL",
+          app_id: "A_OPENGENI",
+          bot_profile: { id: "B_PERSONAL", name: "Opengeni", app_id: "A_OPENGENI" },
+          ts: "1.3",
+          text: "Launch moved to 1 December",
+        }),
+        bot,
+      ),
+    ).toMatchObject({
+      slackUserId: "U_ADA",
+      triggerKind: "thread_reply",
+      text: "[posted through the app Opengeni] Launch moved to 1 December",
+    });
+  });
+
+  test("Opengeni's own posts, edits, top-level app posts and DMs are not recorded", () => {
+    const ignored = [
+      { ...inThread, user: "U_OPEN_GENI", bot_id: "B_OPEN_GENI", ts: "2.1", text: "Working…" },
+      { ...inThread, bot_id: "B_OPEN_GENI", username: "Launch Desk", ts: "2.2", text: "agent" },
+      { ...inThread, bot_id: "B_DEPLOYS", subtype: "message_changed", ts: "2.3", text: "edit" },
+      { type: "message", channel: "C1", bot_id: "B_DEPLOYS", ts: "2.4", text: "top level" },
+      {
+        ...inThread,
+        channel: "D1",
+        channel_type: "im",
+        bot_id: "B_DEPLOYS",
+        ts: "2.5",
+        text: "dm",
+      },
+      { ...inThread, bot_id: "B_DEPLOYS", ts: "1.0", text: "thread root" },
+    ];
+    for (const event of ignored) expect(slackEventInboxEntry(envelope(event), bot)).toBeNull();
+  });
+
+  test("message text includes what apps put in attachments and blocks", () => {
+    expect(
+      slackMessageText({
+        text: "",
+        blocks: [
+          { type: "header", text: { type: "plain_text", text: "Incident 7" } },
+          { type: "section", text: { type: "mrkdwn", text: "API latency high" } },
+          { type: "context", elements: [{ type: "mrkdwn", text: "PagerDuty" }] },
+        ],
+      }),
+    ).toBe("Incident 7\nAPI latency high\nPagerDuty");
+    expect(
+      slackMessageText({
+        text: "New issue",
+        attachments: [
+          {
+            fallback: "ignored when content exists",
+            pretext: "New issue",
+            title: "HAL-412 SSO setup",
+            fields: [{ title: "Assignee", value: "Ravi" }],
+          },
+        ],
+      }),
+    ).toBe("New issue\nHAL-412 SSO setup\nAssignee: Ravi");
+    expect(slackMessageText({ text: "plain" })).toBe("plain");
+    expect(slackMessageBotName({ username: " Support\nDesk ", bot_profile: { name: "x" } })).toBe(
+      "Support Desk",
+    );
+    expect(slackMessageBotName({ bot_profile: { name: "Halcyon IT Verifier" } })).toBe(
+      "Halcyon IT Verifier",
+    );
+    expect(slackMessageBotName({ user: "U1" })).toBe("");
+  });
+
+  test("first-mention context names apps and people posting through them", () => {
+    const message = (fields: Record<string, string>) => ({
+      timestamp: "1.1",
+      userId: "",
+      botId: "",
+      botName: "",
+      threadTimestamp: "",
+      text: "",
+      files: [],
+      ...fields,
+    });
+    const prompt = slackInvocationModelContext("1.9", {
+      kind: "channel",
+      nextCursor: null,
+      messages: [
+        message({
+          timestamp: "1.1",
+          botId: "B_DEPLOYS",
+          botName: "Deploys",
+          text: "Deploy 42 failed",
+        }),
+        message({
+          timestamp: "1.2",
+          userId: "U_ADA",
+          botId: "B_P",
+          botName: "Verifier",
+          text: "Seeded",
+        }),
+        message({ timestamp: "1.3", userId: "U_BEN", text: "hello" }),
+        message({ timestamp: "1.4", botId: "B_NAMELESS", text: "anon" }),
+      ],
+    });
+    expect(prompt).toContain("- 1.1 app Deploys (bot:B_DEPLOYS): Deploy 42 failed");
+    expect(prompt).toContain("- 1.2 U_ADA (via the app Verifier): Seeded");
+    expect(prompt).toContain("- 1.3 U_BEN: hello");
+    expect(prompt).toContain("- 1.4 bot:B_NAMELESS: anon");
   });
 });
