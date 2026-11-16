@@ -70,7 +70,7 @@ import {
   bindPendingOrganizationInvitationsForVerifiedEmail,
   claimOrganizationUserSetupDelivery,
   createAdditionalManagedOrganization,
-  createManagedOrganization,
+  createManagedOrganizationWithSignupNetwork,
   createOrganizationWorkspace,
   createOrganizationInvitation,
   ensureManagedAccessForUserWithOrganizationMemberships,
@@ -99,6 +99,7 @@ import {
   settleOrganizationUserSetupDelivery,
   putOrganizationWorkspaceMember,
   revokeOrganizationWorkspaceMember,
+  SIGNUP_NETWORK_RATE_LIMIT_SQLSTATE,
   updateOrganizationWorkspace,
   updateOrganizationSharedWorkspaceSettings,
   updateOrganizationMember,
@@ -128,6 +129,11 @@ import {
   assertOrganizationUserSetupDeliveryConfigured,
   resolveOrganizationUserSetupDeliveryEmail,
 } from "../auth/organization-user-setup";
+import {
+  evaluateSignupNetworkAccountsAfterSetup,
+  requestSignupNetworkSource,
+  signupNetworkRateLimitError,
+} from "../auth/signup-network";
 import { parseRequestBody, parseRequestQuery, readRequestJson } from "../http/request-body";
 
 const OrganizationId = z.string().uuid();
@@ -503,24 +509,31 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
   app.post("/v1/organizations", async (context) => {
     const { session, subjectId } = await requireManagedHuman(context, deps);
     const payload = await parseBody(context, CreateOrganizationRequest);
+    // This legacy first-organization route writes the same self-serve setup
+    // receipt and Free eligibility as organization onboarding, so it records
+    // the signup network, applies its rate limit and evaluates the new
+    // organization the same way (migration 1354).
+    let created: Awaited<ReturnType<typeof createManagedOrganizationWithSignupNetwork>>;
     try {
-      return context.json(
-        CreateOrganizationResponse.parse(
-          await createManagedOrganization(deps.db, {
-            subjectId,
-            subjectLabel: accountContactEmail(session.user.email) || session.user.name,
-            ...payload,
-            trialCreditModelIds: signupCreditModelIds(deps.settings),
-            trialCreditsEnabled:
-              deps.settings.productAccessMode === "managed" &&
-              deps.settings.verifiedSignupTrialCreditsEnabled,
-          }),
-        ),
-        201,
-      );
+      created = await createManagedOrganizationWithSignupNetwork(deps.db, {
+        subjectId,
+        subjectLabel: accountContactEmail(session.user.email) || session.user.name,
+        ...payload,
+        trialCreditModelIds: signupCreditModelIds(deps.settings),
+        trialCreditsEnabled:
+          deps.settings.productAccessMode === "managed" &&
+          deps.settings.verifiedSignupTrialCreditsEnabled,
+        signupNetwork: requestSignupNetworkSource(context, deps.settings),
+      });
     } catch (error) {
+      if (nestedPostgresSqlState(error) === SIGNUP_NETWORK_RATE_LIMIT_SQLSTATE) {
+        throw signupNetworkRateLimitError();
+      }
       return await rethrowMembershipErrorWithPlans(context, deps, error);
     }
+    const organization = CreateOrganizationResponse.parse(created.organization);
+    await evaluateSignupNetworkAccountsAfterSetup(deps.db, created.evaluateAccountIds);
+    return context.json(organization, 201);
   });
 
   app.post("/v1/organizations/additional", async (context) => {

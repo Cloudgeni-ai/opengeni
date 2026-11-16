@@ -79,7 +79,9 @@ new organizations per hour and 21 per day from one address; real groups sharing 
 address were at most three or four organizations.
 
 **Record.** A new self-serve owner is a `self_service_organization_setup_receipts`
-row, created by `POST /v1/auth/organization-onboarding`. When that receipt is
+row, created by `POST /v1/auth/organization-onboarding` or the older first
+organization route `POST /v1/organizations` (both write the same receipt and
+both pass the signup network since `1471`). When that receipt is
 written, the existing setup trigger records one
 `opengeni_private.signup_network_sources` row: the account, the owner user, the
 setup time and two keyed hashes. The API derives the HMAC key from the existing
@@ -125,6 +127,31 @@ holds the account as `service:promotion-detector`. It never overwrites a manual
 decision and never re-holds an account an operator released. The rule does not
 wait for Free credit to be consumed. Groups are read with a bound of 501; a
 larger group still meets any threshold.
+
+**Sign-in networks (`1471`).** The signup address alone misses setups whose
+request carried no signup network (before `1471`, every `POST /v1/organizations`
+setup) and farms that rotate the setup address. Since `1368` the database records
+every new owner's sign-in networks (keyed hashes of `auth_sessions` addresses,
+owners only), and `1471` counts them in the same rule: for each exact network the
+owner signed in from within the window of the setup (newest 20), the new
+self-serve organizations set up within the window whose owners signed in from that
+network within the window of their own setup, including this one. When the
+largest such group reaches `exactHoldThreshold`, enforce holds with rule
+`ip-velocity-sign-in-v1`. Evidence adds `signInGroupSize`, `signInGroup` (a short
+reference under the database key, never comparable with `addressGroup`) and
+`signInGroupSetupTimes`. Before counting, the owner's newer sign-ins are recorded,
+so a sign-in after setup counts too. An organization without a signup network is
+evaluated from its recorded setup time (kept 15 days). Loopback, unspecified and
+link-local session addresses are never recorded as networks. The setup trigger
+also lists up to 50 recent same-sign-in-network organizations for the
+after-commit evaluation. Every read is bounded (1000 candidates per network, 501
+per group) and failures are skipped, as above. The mode, window, threshold, manual
+decision and release rules are the same; prefixes still never hold on their own.
+
+Incident (15 Nov 2026): 665 owners created organizations through
+`POST /v1/organizations` from about 50 addresses in under four hours. That route
+did not pass the signup network, so the rate limit and this rule never saw them,
+and none was held.
 
 After a new setup commits, the API also evaluates the other recent same-address
 organizations, sequentially and each in its own account transaction, so reserve
@@ -184,6 +211,7 @@ bun scripts/operator/promotion-decisions.ts --network-release-holds \
 
 `--network-holds` lists, per held account: decision and revision, signup and
 setup times, email domain, exact and prefix group sizes, chats and sessions,
+sign-in group size and reference,
 direct model API spend versus in-app spend, Free credit granted and used, and the
 current held balance; per group: recent organizations and held accounts. The same
 operations are available through the opengeni-ops `promotion-decisions` workflow
@@ -200,6 +228,7 @@ These apply to people and to agent reviewers using the JSON output.
   product, not only direct model API calls.
 - Deny clear farm groups: large same-address groups whose accounts have zero chats,
   spend only through the direct model API and use throwaway domains.
+  `ip-velocity-sign-in-v1` groups are judged the same way.
 - Leave anything unclear held for a human.
 - Always use the current revision and give a reason.
 - Never act on prefix-only evidence.

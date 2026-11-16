@@ -136,6 +136,13 @@ export type SignupNetworkHoldAccount = {
   prefixGroup: string | null;
   exactGroupSize: number | null;
   prefixGroupSize: number | null;
+  /**
+   * Migration 1471: the largest group of new organizations whose owners
+   * signed in from one exact network around their setup, and its 16-hex
+   * reference (the database's key, not comparable with addressGroup).
+   */
+  signInGroup: string | null;
+  signInGroupSize: number | null;
   /** denied-network-v1 evidence; null for ip-velocity-v1 holds. */
   deniedNetwork: {
     deniedAccounts: number | null;
@@ -424,6 +431,8 @@ async function readHoldAccount(
     prefixGroup: typeof hold.prefix_hash === "string" ? hold.prefix_hash.slice(0, 16) : null,
     exactGroupSize: num(evidence.exactGroupSize),
     prefixGroupSize: num(evidence.prefixGroupSize),
+    signInGroup: typeof evidence.signInGroup === "string" ? evidence.signInGroup : null,
+    signInGroupSize: num(evidence.signInGroupSize),
     deniedNetwork: deniedNetwork
       ? {
           deniedAccounts: num(evidence.deniedAccounts),
