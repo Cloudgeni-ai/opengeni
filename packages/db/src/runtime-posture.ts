@@ -66,7 +66,8 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * compact (1240), and the session storage pass's inventory of sessions with
  * content to collect and its collector of unreferenced content blobs (1359),
  * and the sandbox reaper's inventory of cold sandboxes whose chats are all
- * archived (1404).
+ * archived (1404), and the deployment-wide check of which Nango connections
+ * a live connection still stands for (1473).
  * Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
@@ -103,6 +104,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "session_content_garbage_candidates_v1(integer)",
   "collect_session_content_garbage_v1(uuid, uuid, integer)",
   "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
+  "nango_connections_in_use_v1(text[])",
 ] as const;
 
 /**
@@ -142,6 +144,10 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * 1404 withholds the inventory of cold sandboxes whose chats are all
  * archived; until it is granted, such a non-compute sandbox keeps its saved
  * workspace until its chats are deleted (as before).
+ * 1473 withholds the check of which Nango connections a live connection
+ * stands for; until it is granted, deleting a Nango connection is decided
+ * from the person's own reads, and nothing is deleted when one of their
+ * organizations cannot be fully read.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -153,6 +159,7 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_content_garbage_candidates_v1(integer)",
   "collect_session_content_garbage_v1(uuid, uuid, integer)",
   "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
+  "nango_connections_in_use_v1(text[])",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -273,6 +280,7 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "sandbox_leases",
     "sessions",
   ],
+  "nango_connections_in_use_v1(text[])": ["connections"],
 };
 
 export const SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE =

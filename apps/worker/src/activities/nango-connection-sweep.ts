@@ -1,3 +1,4 @@
+import { Context } from "@temporalio/activity";
 import { sweepNangoConnections } from "@opengeni/core";
 import type { ControlActivityServices } from "./types";
 
@@ -7,8 +8,17 @@ export type SweepNangoConnectionsActivityResult = {
   deleted: number;
   repointed: number;
   skippedPeople: number;
+  deferredPeople: number;
   orphanBreakerTripped: boolean;
 };
+
+function heartbeat(): void {
+  try {
+    Context.current().heartbeat();
+  } catch {
+    // Called outside a Temporal activity (tests, embedded calls).
+  }
+}
 
 /**
  * The automatic Nango cleanup (docs/nango.md): deletes Nango connections no
@@ -26,7 +36,9 @@ export function createNangoConnectionSweepActivities(
       const { db, settings, observability } = await services();
       let result: Awaited<ReturnType<typeof sweep>> = null;
       try {
-        result = settings.nangoSecretKey ? await sweep({ db, settings }) : null;
+        result = settings.nangoSecretKey
+          ? await sweep({ db, settings }, { onProgress: heartbeat })
+          : null;
       } catch (error) {
         // Nango or the database was unreachable: the next run retries.
         observability.warn("Nango connection sweep failed", {
@@ -40,6 +52,7 @@ export function createNangoConnectionSweepActivities(
           deleted: 0,
           repointed: 0,
           skippedPeople: 0,
+          deferredPeople: 0,
           orphanBreakerTripped: false,
         };
       const summary = {
@@ -51,8 +64,15 @@ export function createNangoConnectionSweepActivities(
           result.deletedBroken.length,
         repointed: result.repointed,
         skippedPeople: result.skippedPeople,
+        deferredPeople: result.deferredPeople,
         orphanBreakerTripped: result.orphanBreakerTripped,
       };
+      // People whose rows could not all be read keep their connections; say so.
+      if (summary.skippedPeople > 0 || summary.deferredPeople > 0)
+        observability.warn("Nango connection sweep left people for a later pass", {
+          skippedPeople: summary.skippedPeople,
+          deferredPeople: summary.deferredPeople,
+        });
       if (summary.deleted > 0 || summary.repointed > 0 || summary.orphanBreakerTripped)
         observability.info("Nango connection sweep", {
           ...summary,

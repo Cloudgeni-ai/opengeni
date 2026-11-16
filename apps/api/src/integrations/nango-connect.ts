@@ -15,6 +15,8 @@ import {
 } from "@opengeni/capabilities";
 import {
   NANGO_DEFAULT_API_BASE_URL,
+  NANGO_DEPLOYMENT_TAG,
+  nangoDeploymentTag,
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
   OAuthStartResponse,
@@ -36,9 +38,11 @@ import {
 } from "@opengeni/core";
 import {
   consumeIntegrationOAuthStateNonce,
+  connectionAccountIdentityKey,
   createConnection,
   encryptEnvironmentValue,
   getConnectAttempt,
+  isConnectionAccountIdentityConflict,
   listConnectionsMetadata,
   lockNangoPersonIntegration,
   recordNangoUsageEvent,
@@ -211,6 +215,11 @@ export function readNangoConnectState(settings: Settings, token: string): NangoC
     iat: typeof payload.iat === "number" ? payload.iat : 0,
     ...(binding ?? {}),
   };
+}
+
+function withDeploymentTag(settings: Settings): Record<string, string> {
+  const deployment = nangoDeploymentTag(settings);
+  return deployment ? { [NANGO_DEPLOYMENT_TAG]: deployment } : {};
 }
 
 function attemptTags(state: NangoConnectState) {
@@ -397,7 +406,11 @@ export async function nangoConnectPage(
       message: "This integration is no longer connected through Nango",
     });
   const session = await nangoClient(deps).createConnectSession({
-    tags: nangoAttemptTags(attemptTags(state)),
+    tags: {
+      ...nangoAttemptTags(attemptTags(state)),
+      // Only this deployment's sweep may delete the connection.
+      ...withDeploymentTag(deps.settings),
+    },
     allowedIntegrations: [state.providerConfigKey],
   });
   if (!session.connectLink)
@@ -453,6 +466,30 @@ export type NangoConnectCompletion =
 
 type ConnectionIdentity = { label: string | null; metadata: Record<string, unknown> };
 
+/** The account could not be read this time; nothing is decided about it. */
+class IdentityReadRetryable extends HTTPException {
+  constructor() {
+    super(503, { message: "The connected account could not be verified yet. Try again." });
+  }
+}
+
+/**
+ * Stop billing for an attempt's connection that will not be stored, unless a
+ * row already stands for it (a replayed page, or the webhook finishing first).
+ */
+async function releaseAttemptConnection(
+  deps: NangoDeps,
+  input: { subjectId: string; workspaceId: string; providerConfigKey: string },
+  nangoConnectionId: string,
+): Promise<void> {
+  await releaseNangoConnections(deps, {
+    subjectId: input.subjectId,
+    providerConfigKey: input.providerConfigKey,
+    nangoConnectionIds: [nangoConnectionId],
+    knownWorkspaceIds: [input.workspaceId],
+  }).catch(() => undefined);
+}
+
 async function readConnectionIdentity(
   client: NangoClient,
   integration: EffectiveNangoIntegration,
@@ -460,11 +497,18 @@ async function readConnectionIdentity(
 ): Promise<ConnectionIdentity> {
   const identity = integration.native?.accountIdentity ?? integration.definition.accountIdentity;
   if (!identity) return { label: null, metadata: {} };
-  const response = await client.proxyGet({
-    url: identity.url,
-    nangoConnectionId,
-    providerConfigKey: integration.providerConfigKey,
-  });
+  // A network error, rate limit or server error says nothing about the
+  // account: the attempt is retried and its connection is kept meanwhile.
+  const response = await client
+    .proxyGet({
+      url: identity.url,
+      nangoConnectionId,
+      providerConfigKey: integration.providerConfigKey,
+    })
+    .catch(() => {
+      throw new IdentityReadRetryable();
+    });
+  if (response.status === 429 || response.status >= 500) throw new IdentityReadRetryable();
   if (response.status < 200 || response.status >= 300)
     throw new HTTPException(502, { message: "The connected account could not be verified" });
   const label = readIdentityField(response.body, identity.field);
@@ -620,6 +664,14 @@ async function persistNangoConnection(
         ),
       )
     : undefined;
+  // One live row per owner and verified account, held by the database too.
+  const accountIdentityKey = input.identity.label
+    ? connectionAccountIdentityKey([
+        "nango",
+        input.integration.providerConfigKey,
+        input.identity.label,
+      ])
+    : null;
   if (sameAccount) {
     const updated = await updateConnection(db, {
       workspaceId: sameAccount.workspaceId,
@@ -634,8 +686,9 @@ async function persistNangoConnection(
       grantedScopes,
       expiresAt: null,
       metadata,
+      accountIdentityKey,
       updatedBySubjectId: input.subjectId,
-    });
+    }).catch(alreadyConnected);
     if (!updated) throw new HTTPException(409, { message: "connection changed; try again" });
     const previous = sameAccount.metadata.nangoConnectionId;
     return {
@@ -655,8 +708,9 @@ async function persistNangoConnection(
     grantedScopes,
     expiresAt: null,
     metadata,
+    accountIdentityKey,
     createdBySubjectId: input.subjectId,
-  });
+  }).catch(alreadyConnected);
   return { connection, created: true, replacedNangoConnectionId: null };
 }
 
@@ -668,6 +722,13 @@ function absoluteRedirect(settings: Settings, redirectTo: string, exact: boolean
 /** A refusal that retrying the same attempt cannot change (authority, policy). */
 function refusal(error: unknown): boolean {
   return error instanceof HTTPException && [401, 403, 422].includes(error.status);
+}
+
+/** Another live connection of this owner already holds the account. */
+function alreadyConnected(error: unknown): never {
+  if (isConnectionAccountIdentityConflict(error))
+    throw new HTTPException(422, { message: "This account is already connected" });
+  throw error;
 }
 
 export async function completeNangoConnect(
@@ -699,17 +760,14 @@ export async function completeNangoConnect(
     identity = await readConnectionIdentity(client, integration, match.connectionId);
   } catch (error) {
     // An account we cannot name is never stored; stop its Nango billing too.
-    await client
-      .deleteConnection(match.connectionId, state.providerConfigKey)
-      .catch(() => undefined);
+    if (!(error instanceof IdentityReadRetryable))
+      await releaseAttemptConnection(deps, state, match.connectionId);
     throw error;
   }
   const granted = await readGrantedScopes(client, integration, match.connectionId);
   if (granted.refreshFailed) {
     // Nango cannot refresh this connection: never store it as active.
-    await client
-      .deleteConnection(match.connectionId, state.providerConfigKey)
-      .catch(() => undefined);
+    await releaseAttemptConnection(deps, state, match.connectionId);
     throw new HTTPException(422, { message: "The account could not be verified. Connect again." });
   }
   const grantedScopes = granted.scopes;
@@ -1043,10 +1101,13 @@ export async function handleNangoWebhook(
       if (!current || !tagsMatch) return "unknown_connection";
       // A connection whose token Nango cannot refresh (424) is not stored;
       // the user connects again. Its billing stops now, as on the page.
+      const attempt = {
+        subjectId,
+        workspaceId,
+        providerConfigKey: integration.providerConfigKey,
+      };
       if (current.refreshFailed) {
-        await client
-          .deleteConnection(event.connectionId, integration.providerConfigKey)
-          .catch(() => undefined);
+        await releaseAttemptConnection(deps, attempt, event.connectionId);
         return "unknown_connection";
       }
       let identity: ConnectionIdentity;
@@ -1054,9 +1115,8 @@ export async function handleNangoWebhook(
         identity = await readConnectionIdentity(client, integration, event.connectionId);
       } catch (error) {
         // An account we cannot name is never stored; stop its Nango billing too.
-        await client
-          .deleteConnection(event.connectionId, integration.providerConfigKey)
-          .catch(() => undefined);
+        if (!(error instanceof IdentityReadRetryable))
+          await releaseAttemptConnection(deps, attempt, event.connectionId);
         throw error;
       }
       const grantedScopes = current.scopes;

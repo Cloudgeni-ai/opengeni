@@ -6,16 +6,25 @@ import {
   type NangoConnectionCredential,
   type NangoConnectionSummary,
 } from "@opengeni/capabilities";
-import type { ConnectionMetadata } from "@opengeni/contracts";
 import {
+  assertOrganizationIntegrationAllowed,
+  NANGO_DEPLOYMENT_TAG,
+  nangoDeploymentTag,
+  type ConnectionMetadata,
+} from "@opengeni/contracts";
+import {
+  connectionAccountIdentityKey,
   encryptEnvironmentValue,
   listConnectionsMetadata,
   listSelfOrganizationMemberships,
+  nangoConnectionsInUse,
+  nangoConnectionsInUseAvailable,
   recordNangoUsageEvent,
   updateConnection,
   withNangoPersonIntegrationLock,
   type Database,
 } from "@opengeni/db";
+import { readOrganizationIntegrationPolicyForServing } from "@opengeni/db/organization-integration-policy";
 import { requireEnvironmentEncryption } from "./encryption-key";
 import { listOwnConnectionMetadata } from "./personal-connection-delegations";
 
@@ -80,7 +89,7 @@ export function nangoAccountLabelOf(connection: ConnectionMetadata): string | nu
 export type PersonNangoConnections = {
   /** Live (not revoked) Nango-backed rows of the person. */
   rows: ConnectionMetadata[];
-  /** False when some organization of the person could not be read. */
+  /** False when some organization of the person could not be read in full. */
   complete: boolean;
 };
 
@@ -115,7 +124,12 @@ export async function listPersonNangoConnections(
     complete = false;
   }
   for (const membership of memberships) {
-    if (membership.status !== "active") continue;
+    // A suspended or provisioning membership may still hold rows this read
+    // cannot see: without the deployment-wide check, never delete for it.
+    if (membership.status !== "active") {
+      complete = false;
+      continue;
+    }
     if (!membership.personalWorkspaceId) {
       complete = false;
       continue;
@@ -156,7 +170,10 @@ function encryptedCredential(
 
 /**
  * Point `rows` at `target` (inside the caller's person lock). Returns the
- * rows written; a row that changed meanwhile is left for the next sweep.
+ * rows written. A row is left on its own connection (which then stays in
+ * use) when the target's grant lacks a scope the row has, so no organization
+ * loses access, or when its organization no longer allows the integration.
+ * A row that changed meanwhile is left for the next sweep.
  */
 async function repointRows(
   deps: NangoSharingDeps,
@@ -169,41 +186,77 @@ async function repointRows(
   },
 ): Promise<Array<{ before: ConnectionMetadata; after: ConnectionMetadata }>> {
   const written: Array<{ before: ConnectionMetadata; after: ConnectionMetadata }> = [];
+  const allowed = new Map<string, boolean>();
   for (const row of input.rows) {
     const providerConfigKey = providerConfigKeyOf(row);
     const integrationKey = row.metadata.nangoIntegrationKey;
-    if (!providerConfigKey || typeof integrationKey !== "string") continue;
-    const after = await updateConnection(tx, {
-      workspaceId: row.workspaceId,
-      connectionId: row.id,
-      visibleToSubjectId: input.subjectId,
-      expectedVersion: row.version,
-      subjectId: input.subjectId,
-      providerDomain: row.providerDomain,
-      kind: "oauth2",
-      status: "active",
-      credentialEncrypted: encryptedCredential(deps.settings, {
-        type: "nango",
-        nangoConnectionId: input.target,
-        providerConfigKey,
-        integrationKey,
-      }),
-      grantedScopes: [...input.grantedScopes],
-      expiresAt: null,
-      metadata: { ...row.metadata, nangoConnectionId: input.target },
-      updatedBySubjectId: input.subjectId,
-    }).catch(() => null);
+    const label = nangoAccountLabelOf(row);
+    if (!providerConfigKey || typeof integrationKey !== "string" || !label) continue;
+    if (!row.grantedScopes.every((scope) => input.grantedScopes.includes(scope))) continue;
+    const policyKey = `${row.accountId}:${integrationKey}`;
+    if (!allowed.has(policyKey))
+      allowed.set(policyKey, await integrationAllowed(tx, row.accountId, integrationKey));
+    if (!allowed.get(policyKey)) continue;
+    let after: ConnectionMetadata | null = null;
+    try {
+      // A savepoint: one row that fails leaves the others and the lock intact.
+      after = await tx.transaction(async (savepoint) =>
+        updateConnection(savepoint as unknown as Database, {
+          workspaceId: row.workspaceId,
+          connectionId: row.id,
+          visibleToSubjectId: input.subjectId,
+          expectedVersion: row.version,
+          subjectId: input.subjectId,
+          providerDomain: row.providerDomain,
+          kind: "oauth2",
+          status: "active",
+          credentialEncrypted: encryptedCredential(deps.settings, {
+            type: "nango",
+            nangoConnectionId: input.target,
+            providerConfigKey,
+            integrationKey,
+          }),
+          grantedScopes: [...input.grantedScopes],
+          expiresAt: null,
+          metadata: { ...row.metadata, nangoConnectionId: input.target },
+          // The same account: accepted work keeps using the row.
+          accountIdentityKey: connectionAccountIdentityKey(["nango", providerConfigKey, label]),
+          updatedBySubjectId: input.subjectId,
+        }),
+      );
+    } catch (error) {
+      console.warn("[nango] could not point a row at the shared connection; it keeps its own", {
+        connectionId: row.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
     if (after) written.push({ before: row, after });
   }
   return written;
 }
 
+/** Whether the row's organization still allows the integration. */
+async function integrationAllowed(
+  tx: Database,
+  accountId: string,
+  integrationKey: string,
+): Promise<boolean> {
+  try {
+    const policy = await readOrganizationIntegrationPolicyForServing(tx, { accountId });
+    assertOrganizationIntegrationAllowed(policy, integrationKey);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Usage events for committed repoints; call only after their transaction committed. */
 function recordRepointUsage(
   deps: NangoSharingDeps,
   written: ReadonlyArray<{ before: ConnectionMetadata; after: ConnectionMetadata }>,
-  target: string,
 ): void {
   for (const { before, after } of written) {
+    const target = nangoConnectionIdOf(after) ?? "unknown";
     const previous = nangoConnectionIdOf(before);
     const providerConfigKey = providerConfigKeyOf(after) ?? "unknown";
     const integrationKey =
@@ -241,6 +294,28 @@ function unreferenced(
   return new Set([...candidates].filter((id) => !used.has(id)));
 }
 
+/**
+ * The ids of `candidates` nothing stands for any more, decided under the
+ * person lock: no row in `rows` (the person's reads, including writes this
+ * transaction made) and, deployment-wide, no live row in any organization.
+ * Until that check is granted (migration 1473) only a complete read of every
+ * organization of the person may decide; otherwise nothing is unused.
+ */
+async function unusedNangoConnections(
+  tx: Database,
+  candidates: Iterable<string>,
+  person: PersonNangoConnections,
+): Promise<Set<string>> {
+  const local = unreferenced(candidates, person.rows);
+  const anywhere = await nangoConnectionsInUse(tx, [...local]);
+  if (anywhere === null) return person.complete ? local : new Set();
+  return new Set([...local].filter((id) => !anywhere.has(id)));
+}
+
+/**
+ * Delete in Nango, holding the person lock so no connect can start standing
+ * for one meanwhile. A failed delete is logged and left for the sweep.
+ */
 async function deleteInNango(
   client: NangoClient,
   ids: Iterable<string>,
@@ -295,9 +370,10 @@ export async function shareNangoConnection(
   const target = input.nangoConnectionId;
   const plan = await withNangoPersonIntegrationLock(deps.db, input, async (tx) => {
     const person = await listPersonNangoConnections(tx, input);
+    const nothing = { written: [], deleted: [] as string[] };
     if (!person.rows.some((row) => nangoConnectionIdOf(row) === target))
-      return { superseded: true, written: [], release: new Set<string>() };
-    if (!input.accountLabel) return { superseded: false, written: [], release: new Set<string>() };
+      return { superseded: true, ...nothing };
+    if (!input.accountLabel) return { superseded: false, ...nothing };
     const others = person.rows.filter(
       (row) =>
         nangoAccountLabelOf(row) === input.accountLabel && nangoConnectionIdOf(row) !== target,
@@ -312,18 +388,19 @@ export async function shareNangoConnection(
       (row) => written.find((entry) => entry.before.id === row.id)?.after ?? row,
     );
     const previous = new Set(others.flatMap((row) => nangoConnectionIdOf(row) ?? []));
-    // An organization we could not read may still stand for one of them.
+    const release = await unusedNangoConnections(tx, previous, { ...person, rows: after });
     return {
       superseded: false,
       written,
-      release: person.complete ? unreferenced(previous, after) : new Set<string>(),
+      deleted: await deleteInNango(client, release, input.providerConfigKey),
     };
   });
-  recordRepointUsage(deps, plan.written, target);
+  // Committed: the repointed rows now stand for the shared connection.
+  recordRepointUsage(deps, plan.written);
   return {
     superseded: plan.superseded,
     repointed: plan.written.map((entry) => entry.after),
-    deleted: await deleteInNango(client, plan.release, input.providerConfigKey),
+    deleted: plan.deleted,
   };
 }
 
@@ -344,13 +421,11 @@ export async function releaseNangoConnections(
   const client = nangoSharingClient(deps);
   if (!client || input.nangoConnectionIds.length === 0)
     return { deleted: [], kept: [...input.nangoConnectionIds] };
-  const release = await withNangoPersonIntegrationLock(deps.db, input, async (tx) => {
+  const deleted = await withNangoPersonIntegrationLock(deps.db, input, async (tx) => {
     const person = await listPersonNangoConnections(tx, input);
-    return person.complete
-      ? unreferenced(input.nangoConnectionIds, person.rows)
-      : new Set<string>();
+    const release = await unusedNangoConnections(tx, input.nangoConnectionIds, person);
+    return await deleteInNango(client, release, input.providerConfigKey);
   });
-  const deleted = await deleteInNango(client, release, input.providerConfigKey);
   return {
     deleted,
     kept: input.nangoConnectionIds.filter((id) => !deleted.includes(id)),
@@ -374,6 +449,8 @@ export type NangoSweepResult = {
   skippedPeople: number;
   /** Too many orphans at once to trust; none were deleted. */
   orphanBreakerTripped: boolean;
+  /** The pass ran out of time; the people left wait for the next pass. */
+  deferredPeople: number;
 };
 
 type SweepGroup = {
@@ -382,9 +459,25 @@ type SweepGroup = {
   remote: NangoConnectionSummary[];
 };
 
+export type NangoSweepOptions = {
+  now?: number;
+  minAgeMs?: number;
+  brokenGraceMs?: number;
+  /** Stop starting people after this many milliseconds (default 3 minutes). */
+  budgetMs?: number;
+  /** Called between people, for example to heartbeat an activity. */
+  onProgress?: () => void;
+  /** Wall clock for the budget; tests pass their own. */
+  clock?: () => number;
+};
+
+/** A pass stops starting new people after this long, well inside its activity timeout. */
+export const NANGO_SWEEP_BUDGET_MS = 3 * 60 * 1000;
+
 /**
  * The automatic cleanup: lists every Nango connection, and for each person
- * and integration among the ones Opengeni made (attempt-tagged):
+ * and integration among the ones this deployment made (attempt- and
+ * deployment-tagged), holding that person's lock:
  *
  * - shares duplicate connections of one verified account (rows left by an
  *   older release or a failed share) and deletes the extra ones;
@@ -395,22 +488,35 @@ type SweepGroup = {
  *   Nango could not refresh them for `brokenGraceMs`, while Nango still
  *   reports the failure. Their rows keep asking to reconnect.
  *
- * Untagged connections (made outside Opengeni) are left to the operator.
+ * Connections without this deployment's tag (made outside Opengeni, by
+ * another deployment sharing the Nango environment, or before the tag) are
+ * left to the operator. People are visited in random order within a time
+ * budget, so a large environment is covered over several passes.
  */
 export async function sweepNangoConnections(
   deps: NangoSharingDeps,
-  options: { now?: number; minAgeMs?: number; brokenGraceMs?: number } = {},
+  options: NangoSweepOptions = {},
 ): Promise<NangoSweepResult | null> {
   const client = nangoSharingClient(deps);
   if (!client) return null;
-  const now = options.now ?? Date.now();
+  const deployment = nangoDeploymentTag(deps.settings);
+  if (!deployment) {
+    console.warn("[nango] sweep skipped: no public base URL names this deployment's connections");
+    return null;
+  }
+  const clock = options.clock ?? Date.now;
+  const started = clock();
+  const now = options.now ?? started;
+  const budgetMs = options.budgetMs ?? NANGO_SWEEP_BUDGET_MS;
   const minAgeMs = Math.max(options.minAgeMs ?? NANGO_ORPHAN_MIN_AGE_MS, NANGO_ORPHAN_MIN_AGE_MS);
   const brokenGraceMs = options.brokenGraceMs ?? NANGO_BROKEN_CONNECTION_GRACE_MS;
+  const planOptions = { now, minAgeMs, brokenGraceMs };
   const remote = await client.listAllConnections();
   const groups = new Map<string, SweepGroup>();
   for (const connection of remote) {
     const subjectId = connection.tags[NANGO_TAG.endUserId];
     if (!connection.tags[NANGO_TAG.attemptId] || !subjectId) continue;
+    if (connection.tags[NANGO_DEPLOYMENT_TAG] !== deployment) continue;
     const key = JSON.stringify([subjectId, connection.providerConfigKey]);
     let group = groups.get(key);
     if (!group) {
@@ -427,54 +533,94 @@ export async function sweepNangoConnections(
     repointed: 0,
     skippedPeople: 0,
     orphanBreakerTripped: false,
+    deferredPeople: 0,
   };
-  const orphans: Array<{ id: string; providerConfigKey: string }> = [];
-  let tagged = 0;
-  for (const group of groups.values()) {
-    tagged += group.remote.length;
+  const order = shuffled([...groups.values()]);
+  const tagged = order.reduce((sum, group) => sum + group.remote.length, 0);
+  const withOrphans: SweepGroup[] = [];
+  let orphanCount = 0;
+  const outOfTime = () => clock() - started >= budgetMs;
+  for (const [index, group] of order.entries()) {
+    if (outOfTime()) {
+      result.deferredPeople = order.length - index;
+      break;
+    }
+    options.onProgress?.();
     if (group.subjectId.length >= NANGO_TAG_MAX_LENGTH) {
       result.skippedPeople += 1;
       continue;
     }
-    let plan: Awaited<ReturnType<typeof planGroup>>;
     try {
-      plan = await withNangoPersonIntegrationLock(deps.db, group, (tx) =>
-        planGroup(deps, tx, group, { now, minAgeMs, brokenGraceMs }),
-      );
+      const outcome = await withNangoPersonIntegrationLock(deps.db, group, async (tx) => {
+        const plan = await planGroup(deps, tx, group, planOptions);
+        if (!plan) return null;
+        return {
+          ...plan,
+          deletedDuplicates: await deleteInNango(client, plan.duplicates, group.providerConfigKey),
+          deletedBroken: await deleteInNango(client, plan.broken, group.providerConfigKey),
+        };
+      });
+      if (!outcome) {
+        result.skippedPeople += 1;
+        continue;
+      }
+      recordRepointUsage(deps, outcome.written);
+      result.repointed += outcome.written.length;
+      result.deletedDuplicates.push(...outcome.deletedDuplicates);
+      result.deletedBroken.push(...outcome.deletedBroken);
+      if (outcome.orphans.length) {
+        withOrphans.push(group);
+        orphanCount += outcome.orphans.length;
+      }
     } catch (error) {
       console.warn("[nango] sweep skipped one person", {
         error: error instanceof Error ? error.message : String(error),
       });
       result.skippedPeople += 1;
-      continue;
     }
-    if (!plan) {
-      result.skippedPeople += 1;
-      continue;
-    }
-    result.repointed += plan.repointed;
-    result.deletedDuplicates.push(
-      ...(await deleteInNango(client, plan.duplicates, group.providerConfigKey)),
-    );
-    result.deletedBroken.push(
-      ...(await deleteInNango(client, plan.broken, group.providerConfigKey)),
-    );
-    for (const id of plan.orphans) orphans.push({ id, providerConfigKey: group.providerConfigKey });
   }
+  if (result.skippedPeople > 0)
+    console.warn("[nango] sweep could not decide for some people; their connections were kept", {
+      skippedPeople: result.skippedPeople,
+    });
   // A broken read must never delete everyone's connections.
-  if (orphans.length > Math.max(10, Math.floor(tagged / 2))) {
+  if (orphanCount > Math.max(10, Math.floor(tagged / 2))) {
     result.orphanBreakerTripped = true;
     console.warn("[nango] sweep found too many unused connections; none deleted", {
-      orphans: orphans.length,
+      orphans: orphanCount,
       tagged,
     });
     return result;
   }
-  for (const orphan of orphans)
-    result.deletedOrphans.push(
-      ...(await deleteInNango(client, [orphan.id], orphan.providerConfigKey)),
-    );
+  // Each person's orphans are checked again under their lock before deletion.
+  for (const group of withOrphans) {
+    if (outOfTime()) {
+      result.deferredPeople += 1;
+      continue;
+    }
+    options.onProgress?.();
+    try {
+      result.deletedOrphans.push(
+        ...(await withNangoPersonIntegrationLock(deps.db, group, async (tx) => {
+          const plan = await planGroup(deps, tx, group, planOptions, { orphansOnly: true });
+          return plan ? await deleteInNango(client, plan.orphans, group.providerConfigKey) : [];
+        })),
+      );
+    } catch (error) {
+      console.warn("[nango] sweep kept one person's unused connections", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
   return result;
+}
+
+function shuffled<T>(items: T[]): T[] {
+  for (let index = items.length - 1; index > 0; index -= 1) {
+    const other = Math.floor(Math.random() * (index + 1));
+    [items[index], items[other]] = [items[other]!, items[index]!];
+  }
+  return items;
 }
 
 async function planGroup(
@@ -482,8 +628,9 @@ async function planGroup(
   tx: Database,
   group: SweepGroup,
   options: { now: number; minAgeMs: number; brokenGraceMs: number },
+  mode: { orphansOnly?: boolean } = {},
 ): Promise<{
-  repointed: number;
+  written: Array<{ before: ConnectionMetadata; after: ConnectionMetadata }>;
   duplicates: string[];
   broken: string[];
   orphans: string[];
@@ -496,7 +643,8 @@ async function planGroup(
     providerConfigKey: group.providerConfigKey,
     knownWorkspaceIds,
   });
-  if (!person.complete) return null;
+  // Without the deployment-wide check, only a complete read may decide.
+  if (!person.complete && !(await nangoConnectionsInUseAvailable(tx))) return null;
   const remoteById = new Map(
     group.remote.map((connection) => [connection.connectionId, connection]),
   );
@@ -505,57 +653,64 @@ async function planGroup(
     const time = value ? Date.parse(value) : Number.NaN;
     return Number.isFinite(time) ? time : Number.NEGATIVE_INFINITY;
   };
-  // 1. Duplicates: one verified account standing for several connections.
   let rows = person.rows;
-  let repointed = 0;
+  const written: Array<{ before: ConnectionMetadata; after: ConnectionMetadata }> = [];
   const duplicates = new Set<string>();
-  const byAccount = new Map<string, ConnectionMetadata[]>();
-  for (const row of rows) {
-    const label = nangoAccountLabelOf(row);
-    if (label) byAccount.set(label, [...(byAccount.get(label) ?? []), row]);
-  }
-  for (const accountRows of byAccount.values()) {
-    const ids = [...new Set(accountRows.flatMap((row) => nangoConnectionIdOf(row) ?? []))];
-    // Only a healthy connection Nango still has can stand for the others.
-    const healthy = ids.filter((id) => (remoteById.get(id)?.authErrors ?? 1) === 0);
-    if (ids.length < 2 || healthy.length === 0) continue;
-    const target = healthy.sort((a, b) => created(b) - created(a) || a.localeCompare(b))[0]!;
-    const source = accountRows.find((row) => nangoConnectionIdOf(row) === target)!;
-    const written = await repointRows(deps, tx, {
-      subjectId: group.subjectId,
-      rows: accountRows.filter((row) => nangoConnectionIdOf(row) !== target),
-      target,
-      grantedScopes: source.grantedScopes,
-    });
-    recordRepointUsage(deps, written, target);
-    repointed += written.length;
-    rows = rows.map((row) => written.find((entry) => entry.before.id === row.id)?.after ?? row);
-    for (const id of unreferenced(
-      ids.filter((candidate) => candidate !== target),
-      rows,
-    ))
-      duplicates.add(id);
+  if (!mode.orphansOnly) {
+    // 1. Duplicates: one verified account standing for several connections.
+    const byAccount = new Map<string, ConnectionMetadata[]>();
+    for (const row of rows) {
+      const label = nangoAccountLabelOf(row);
+      if (label) byAccount.set(label, [...(byAccount.get(label) ?? []), row]);
+    }
+    for (const accountRows of byAccount.values()) {
+      const ids = [...new Set(accountRows.flatMap((row) => nangoConnectionIdOf(row) ?? []))];
+      // Only a healthy connection Nango still has can stand for the others.
+      const healthy = ids.filter((id) => (remoteById.get(id)?.authErrors ?? 1) === 0);
+      if (ids.length < 2 || healthy.length === 0) continue;
+      const target = healthy.sort((a, b) => created(b) - created(a) || a.localeCompare(b))[0]!;
+      const source = accountRows.find((row) => nangoConnectionIdOf(row) === target)!;
+      const repointed = await repointRows(deps, tx, {
+        subjectId: group.subjectId,
+        rows: accountRows.filter((row) => nangoConnectionIdOf(row) !== target),
+        target,
+        grantedScopes: source.grantedScopes,
+      });
+      written.push(...repointed);
+      rows = rows.map((row) => repointed.find((entry) => entry.before.id === row.id)?.after ?? row);
+      for (const id of await unusedNangoConnections(
+        tx,
+        ids.filter((candidate) => candidate !== target),
+        { ...person, rows },
+      ))
+        duplicates.add(id);
+    }
   }
   // 2. Orphans: Opengeni made them, nothing stands for them, past any connect.
-  const used = new Set(rows.flatMap((row) => nangoConnectionIdOf(row) ?? []));
-  const orphans = group.remote
-    .filter((connection) => !used.has(connection.connectionId))
+  const old = group.remote
     .filter((connection) => !duplicates.has(connection.connectionId))
     .filter((connection) => {
       const time = connection.createdAt ? Date.parse(connection.createdAt) : Number.NaN;
       return Number.isFinite(time) && options.now - time >= options.minAgeMs;
     })
     .map((connection) => connection.connectionId);
+  const orphans = [...(await unusedNangoConnections(tx, old, { ...person, rows }))];
   // 3. Broken: every row asks to reconnect because Nango could not refresh it.
-  const broken = [...used].filter((id) => {
-    if ((remoteById.get(id)?.authErrors ?? 0) === 0) return false;
-    const standing = rows.filter((row) => nangoConnectionIdOf(row) === id);
-    return standing.every(
-      (row) =>
-        row.status === "needs_reauth" &&
-        row.lastError === "nango_refresh_failed" &&
-        options.now - Date.parse(row.updatedAt) >= options.brokenGraceMs,
-    );
-  });
-  return { repointed, duplicates: [...duplicates], broken, orphans };
+  const used = new Set(rows.flatMap((row) => nangoConnectionIdOf(row) ?? []));
+  const broken = mode.orphansOnly
+    ? []
+    : [...used].filter((id) => {
+        if ((remoteById.get(id)?.authErrors ?? 0) === 0) return false;
+        const standing = rows.filter((row) => nangoConnectionIdOf(row) === id);
+        return (
+          person.complete &&
+          standing.every(
+            (row) =>
+              row.status === "needs_reauth" &&
+              row.lastError === "nango_refresh_failed" &&
+              options.now - Date.parse(row.updatedAt) >= options.brokenGraceMs,
+          )
+        );
+      });
+  return { written, duplicates: [...duplicates], broken, orphans };
 }

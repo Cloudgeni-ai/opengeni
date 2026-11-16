@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { nangoAttemptTags, type ConnectionMetadata } from "@opengeni/contracts";
+import {
+  NANGO_DEPLOYMENT_TAG,
+  nangoAttemptTags,
+  nangoDeploymentTag,
+  type ConnectionMetadata,
+} from "@opengeni/contracts";
 import type { Database } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing/settings";
 import {
@@ -63,7 +68,10 @@ describe("one Nango connection per person and account", () => {
         connection_id: "old-unused",
         provider_config_key: "google-mail",
         created: "2026-11-01T00:00:00.000Z",
-        tags: nangoAttemptTags({ ...owner, attemptId: "attempt", integrationKey: "gmail" }),
+        tags: {
+          ...nangoAttemptTags({ ...owner, attemptId: "attempt", integrationKey: "gmail" }),
+          [NANGO_DEPLOYMENT_TAG]: nangoDeploymentTag(settings)!,
+        },
         errors: [],
       },
     ]);

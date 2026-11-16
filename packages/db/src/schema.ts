@@ -2004,6 +2004,10 @@ export const connections = pgTable(
     verifiedInstallAt: timestamp("verified_install_at", { withTimezone: true }),
     verifiedInstallVersion: integer("verified_install_version"),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    // Opaque key of the integration and verified provider account behind this
+    // connection (see connectionAccountIdentityKey); null when unverified. At
+    // most one live row per organization, owner and key (migration 1472).
+    accountIdentityKey: text("account_identity_key"),
     // A workspace's own OpenAI, Azure OpenAI or OpenAI-compatible model key
     // only: what its model's usage costs, for usage estimates and spend limits
     // (see organizationModelProviderCustomModels). The catalogue model whose
@@ -2055,6 +2059,17 @@ export const connections = pgTable(
     workspaceExpires: index("connections_workspace_expires_idx").on(
       table.workspaceId,
       table.expiresAt,
+    ),
+    liveAccountIdentity: uniqueIndex("connections_live_account_identity_uq")
+      .on(
+        table.accountId,
+        sql`coalesce(${table.subjectId}, ${table.workspaceId}::text)`,
+        table.accountIdentityKey,
+      )
+      .where(sql`${table.accountIdentityKey} is not null and ${table.status} <> 'revoked'`),
+    accountIdentityKeyValid: check(
+      "connections_account_identity_key_check",
+      sql`${table.accountIdentityKey} is null or ${table.accountIdentityKey} ~ '^[0-9a-f]{64}$'`,
     ),
     authorityIdentity: uniqueIndex("connections_authority_identity_uq")
       .on(table.accountId, table.authorityId)

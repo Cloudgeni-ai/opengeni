@@ -169,6 +169,43 @@ export async function withNangoPersonIntegrationLock<T>(
   });
 }
 
+/** Migration 1473's check, withheld from the runtime for one release. */
+export const NANGO_CONNECTIONS_IN_USE_ROUTINE =
+  "opengeni_private.nango_connections_in_use_v1(text[])";
+
+/** False while the deployment's database withholds the check (1473). */
+export async function nangoConnectionsInUseAvailable(db: Database): Promise<boolean> {
+  const [row] = await rawRows<{ granted: boolean | null }>(
+    db,
+    sql`select has_function_privilege(
+      to_regprocedure(${NANGO_CONNECTIONS_IN_USE_ROUTINE})::oid, 'EXECUTE') as granted`,
+  );
+  return row?.granted === true;
+}
+
+/**
+ * The ids among `nangoConnectionIds` that some live (not revoked) Nango-backed
+ * connection row still stands for, in any organization; null while the check
+ * is withheld (see nangoConnectionsInUseAvailable).
+ */
+export async function nangoConnectionsInUse(
+  db: Database,
+  nangoConnectionIds: readonly string[],
+): Promise<Set<string> | null> {
+  if (nangoConnectionIds.length === 0) return new Set();
+  if (!(await nangoConnectionsInUseAvailable(db))) return null;
+  const used = new Set<string>();
+  for (let start = 0; start < nangoConnectionIds.length; start += 1000) {
+    const rows = await rawRows<{ nango_connection_id: string }>(
+      db,
+      sql`select nango_connection_id from opengeni_private.nango_connections_in_use_v1(
+        ${sql.param(nangoConnectionIds.slice(start, start + 1000))}::text[])`,
+    );
+    for (const row of rows) used.add(row.nango_connection_id);
+  }
+  return used;
+}
+
 // ---------------------------------------------------------------------------
 // Usage events
 // ---------------------------------------------------------------------------

@@ -45,6 +45,7 @@ import {
   encryptEnvironmentValue,
   getConnectionMetadata,
   getGlobalCatalogOAuthProfile,
+  isConnectionAccountIdentityConflict,
   listConnectionsMetadata,
   loadIntegrationOAuthClient,
   loadIntegrationOAuthPendingState,
@@ -122,6 +123,7 @@ import { microsoftAdminConsentUrl } from "@opengeni/contracts/connect";
 import {
   ACCOUNT_FAILURES,
   decideOAuthAccountConnection,
+  oauthAccountIdentityKey,
   oauthAccountFailureMessage,
   type AccountFailure,
 } from "./oauth-account-identity";
@@ -1295,6 +1297,12 @@ async function completeMcpOAuthCallbackWithinDeadline(
         includeInactive: true,
       }))
         accounts.set(connection.id, connection);
+      const identityKeys = accountIdentityKeysFor(
+        profile,
+        state.mcpUrl,
+        verification.identityMethod === "oidc",
+      );
+      const subjectKey = stableAccountSubjectKeyFor(state.mcpUrl);
       const decision = decideOAuthAccountConnection({
         accounts: [...accounts.values()],
         ownerSubjectId,
@@ -1303,12 +1311,8 @@ async function completeMcpOAuthCallbackWithinDeadline(
         mcpUrl: state.mcpUrl,
         metadata,
         grantedScopes: scopes,
-        identityKeys: accountIdentityKeysFor(
-          profile,
-          state.mcpUrl,
-          verification.identityMethod === "oidc",
-        ),
-        subjectKey: stableAccountSubjectKeyFor(state.mcpUrl),
+        identityKeys,
+        subjectKey,
         requestedConnectionId: state.connectionId,
       });
       if (decision.kind === "reject") {
@@ -1321,8 +1325,17 @@ async function completeMcpOAuthCallbackWithinDeadline(
       // A repeated Add is a successful no-op. Do not rotate credentials, reset
       // approvals or invalidate accepted work just because OAuth ran again.
       if (decision.kind === "reuse") return decision.connection;
-      return state!.connectionId
-        ? await updateConnection(scopedDb, {
+      // The database holds one live row per owner and verified account, so a
+      // concurrent or legacy duplicate is refused here too.
+      const accountIdentityKey = oauthAccountIdentityKey({
+        providerDomain: state.providerDomain,
+        mcpUrl: state.mcpUrl,
+        metadata,
+        identityKeys,
+        subjectKey,
+      });
+      const write = state!.connectionId
+        ? updateConnection(scopedDb, {
             workspaceId: state.workspaceId,
             connectionId: state.connectionId,
             visibleToSubjectId: state.subjectId,
@@ -1335,9 +1348,10 @@ async function completeMcpOAuthCallbackWithinDeadline(
             grantedScopes: scopes,
             expiresAt: token.expiresAt,
             metadata,
+            accountIdentityKey,
             updatedBySubjectId: state.subjectId,
           })
-        : await createConnection(scopedDb, {
+        : createConnection(scopedDb, {
             accountId: state.accountId,
             workspaceId: state.workspaceId,
             subjectId: ownerSubjectId,
@@ -1348,8 +1362,17 @@ async function completeMcpOAuthCallbackWithinDeadline(
             grantedScopes: scopes,
             expiresAt: token.expiresAt,
             metadata,
+            accountIdentityKey,
             createdBySubjectId: state.subjectId,
           });
+      return await write.catch((error: unknown) => {
+        if (!isConnectionAccountIdentityConflict(error)) throw error;
+        throw new OAuthCallbackStageError(
+          "persist",
+          "account_already_connected",
+          new Error(oauthAccountFailureMessage("account_already_connected")),
+        );
+      });
     };
     if (connectOperation) {
       await runCallbackDatabaseStage(deadline, "persist", db, (scopedDb) =>

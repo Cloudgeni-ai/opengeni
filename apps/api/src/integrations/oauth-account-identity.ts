@@ -1,4 +1,5 @@
 import type { ConnectionMetadata } from "@opengeni/contracts";
+import { connectionAccountIdentityKey } from "@opengeni/db";
 import {
   accountIdentityKeysFor,
   accountMcpUrlGroup,
@@ -73,6 +74,32 @@ function sameVerifiedAccount(
   if (storedSubject && incomingSubject) return storedSubject === incomingSubject;
   const expected = verifiedIdentity(stored, keys);
   return !!expected && expected === verifiedIdentity(incoming, keys);
+}
+
+/**
+ * The stored key of a verified OAuth MCP account (see
+ * connectionAccountIdentityKey): its provider, account namespace (issuer) and
+ * resource group, then its stable account ID when the service has one, else
+ * its identity tuple. Null when the account is not verified, so nothing is
+ * deduplicated on a guess.
+ */
+export function oauthAccountIdentityKey(input: {
+  providerDomain: string;
+  mcpUrl: string;
+  metadata: Record<string, unknown>;
+  identityKeys?: readonly string[] | undefined;
+  subjectKey?: string | undefined;
+}): string | null {
+  const identity = verifiedIdentity(input.metadata, input.identityKeys);
+  if (!identity) return null;
+  const subject = input.subjectKey ? text(input.metadata[input.subjectKey]) : null;
+  return connectionAccountIdentityKey([
+    "oauth2",
+    input.providerDomain.toLowerCase(),
+    text(input.metadata.authorizationServerIssuer) ?? "-",
+    accountMcpUrlGroup(input.mcpUrl),
+    subject ? `subject:${subject}` : `identity:${identity}`,
+  ]);
 }
 
 /** Call under the shared owner/resource transaction lock. Unknown identity is

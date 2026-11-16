@@ -21,6 +21,7 @@ const SKIPPED = {
   deleted: 0,
   repointed: 0,
   skippedPeople: 0,
+  deferredPeople: 0,
   orphanBreakerTripped: false,
 };
 
@@ -47,6 +48,7 @@ describe("the Nango connection sweep activity", () => {
         deletedBroken: ["c"],
         repointed: 1,
         skippedPeople: 0,
+        deferredPeople: 0,
         orphanBreakerTripped: false,
       }),
     });
@@ -56,9 +58,37 @@ describe("the Nango connection sweep activity", () => {
       deleted: 3,
       repointed: 1,
       skippedPeople: 0,
+      deferredPeople: 0,
       orphanBreakerTripped: false,
     });
     expect(logs).toEqual(["info:Nango connection sweep"]);
+  });
+
+  test("warns when people were left for a later pass, and heartbeats between people", async () => {
+    const logs: string[] = [];
+    let progressed = false;
+    const activity = createNangoConnectionSweepActivities(services("key", logs), {
+      sweep: async (_deps, options) => {
+        options?.onProgress?.();
+        progressed = true;
+        return {
+          listed: 4,
+          deletedOrphans: [],
+          deletedDuplicates: [],
+          deletedBroken: [],
+          repointed: 0,
+          skippedPeople: 1,
+          deferredPeople: 2,
+          orphanBreakerTripped: false,
+        };
+      },
+    });
+    expect(await activity.sweepUnusedNangoConnections()).toMatchObject({
+      skippedPeople: 1,
+      deferredPeople: 2,
+    });
+    expect(progressed).toBe(true);
+    expect(logs).toEqual(["warn:Nango connection sweep left people for a later pass"]);
   });
 
   test("a failed sweep does not fail the maintenance workflow", async () => {
