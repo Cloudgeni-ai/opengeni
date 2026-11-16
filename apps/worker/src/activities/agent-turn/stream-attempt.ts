@@ -34,6 +34,7 @@ import {
   hasPendingSteerForTurn,
   nextSessionHistoryPosition,
   persistModelContextSnapshot,
+  ModelContextSnapshotContentCache,
   updateSessionTitleWithEvent,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
@@ -1317,6 +1318,8 @@ export async function runTurnStreamAttempt(
           });
         }
         attempt.modelRequestStarted = true;
+        // Consecutive snapshots of this run repeat nearly all their content.
+        const modelContextContentCache = new ModelContextSnapshotContentCache();
         return await runtime.runStream(agent, runInput!, eventing.modelRunSettings, {
           onCompactionHandover: (error) => {
             compactionHandover = error;
@@ -1371,6 +1374,7 @@ export async function runTurnStreamAttempt(
               attemptId: input.attemptId,
               executionGeneration: attempt.executionGeneration,
               snapshot,
+              contentCache: modelContextContentCache,
             });
           },
           onRuntimeEvent: async (event) => {

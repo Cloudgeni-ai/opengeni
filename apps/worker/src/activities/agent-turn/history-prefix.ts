@@ -1,9 +1,19 @@
-import { createHash } from "node:crypto";
 import { normalizeProtocolJsonValue, sanitizeHistoryItemsForModel } from "@opengeni/runtime";
+
+/**
+ * An item's durable identity: its canonical JSON tree (protocol-normalized,
+ * keys sorted). The tree is built afresh for every item and shares only
+ * immutable primitives with the input, so a retained identity cannot change
+ * when the SDK later mutates or replaces the item it was taken from. Two
+ * identities are equal exactly when their `JSON.stringify` forms are equal,
+ * which compares by structure without serializing or hashing the whole history
+ * on every model call.
+ */
+export type HistoryPrefixKey = unknown;
 
 /** A position is an append cursor only while the items before it stay identical. */
 export class HistoryPrefixGuard {
-  private persisted: string[] = [];
+  private persisted: HistoryPrefixKey[] = [];
 
   seed(items: Array<Record<string, unknown>>, count: number, truncationTokens?: number) {
     const keys = this.keys(items, truncationTokens);
@@ -12,10 +22,10 @@ export class HistoryPrefixGuard {
     this.persisted = keys.slice(0, count);
   }
 
-  verify(items: Array<Record<string, unknown>>, truncationTokens?: number): string[] {
+  verify(items: Array<Record<string, unknown>>, truncationTokens?: number): HistoryPrefixKey[] {
     const keys = this.keys(items, truncationTokens);
     for (let i = 0; i < this.persisted.length; i++) {
-      if (keys[i] !== this.persisted[i]) {
+      if (i >= keys.length || !sameCanonicalJson(keys[i], this.persisted[i])) {
         // No content in diagnostics: this may include private user/tool data.
         throw new Error(
           `Conversation history durable prefix changed at item ${i}; refusing to skip unsaved work`,
@@ -25,17 +35,16 @@ export class HistoryPrefixGuard {
     return keys;
   }
 
-  acknowledge(keys: string[], count: number) {
+  acknowledge(keys: HistoryPrefixKey[], count: number) {
     this.persisted = keys.slice(0, count);
   }
 
-  private keys(items: Array<Record<string, unknown>>, truncationTokens?: number): string[] {
+  private keys(
+    items: Array<Record<string, unknown>>,
+    truncationTokens?: number,
+  ): HistoryPrefixKey[] {
     return sanitizeHistoryItemsForModel(items, truncationTokens).map((item) =>
-      createHash("sha256")
-        .update(
-          JSON.stringify(sorted(normalizeProtocolJsonValue(item, "$", REQUEST_MARKS_OMITTED))),
-        )
-        .digest("hex"),
+      sorted(normalizeProtocolJsonValue(item, "$", REQUEST_MARKS_OMITTED)),
     );
   }
 }
@@ -60,4 +69,43 @@ function sorted(value: unknown): unknown {
     );
   }
   return value;
+}
+
+/**
+ * `JSON.stringify(left) === JSON.stringify(right)` for canonical trees, without
+ * serializing. Canonical trees are protocol-normalized JSON (plain objects and
+ * arrays, strings, booleans, null, finite numbers), where serialization is
+ * injective: equal output means the same key sequence at every object and the
+ * same value at every position. `0 === -0` matches their shared "0" form.
+ */
+export function sameCanonicalJson(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  const leftObject = typeof left === "object" && left !== null;
+  const rightObject = typeof right === "object" && right !== null;
+  // Normalized trees hold only finite numbers, so distinct primitives always
+  // differ; printing them keeps the rule exact for any primitive JSON would
+  // print alike (a non-finite number and null).
+  if (!leftObject || !rightObject)
+    return !leftObject && !rightObject && JSON.stringify(left) === JSON.stringify(right);
+  if (Array.isArray(left)) {
+    if (!Array.isArray(right) || left.length !== right.length) return false;
+    for (let i = 0; i < left.length; i++) if (!sameCanonicalJson(left[i], right[i])) return false;
+    return true;
+  }
+  if (Array.isArray(right)) return false;
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  if (leftKeys.length !== rightKeys.length) return false;
+  for (let i = 0; i < leftKeys.length; i++) {
+    const key = leftKeys[i]!;
+    if (key !== rightKeys[i]) return false;
+    if (
+      !sameCanonicalJson(
+        (left as Record<string, unknown>)[key],
+        (right as Record<string, unknown>)[key],
+      )
+    )
+      return false;
+  }
+  return true;
 }
