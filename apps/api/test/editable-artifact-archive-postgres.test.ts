@@ -131,6 +131,25 @@ test("archiving removes a presentation from Artifacts, is idempotent and needs t
   const lifecycle = async () =>
     (await application.readArtifact({ scope, actor, artifactId: artifact.id })).lifecycle;
 
+  const listed = async (status: "active" | "archived") =>
+    (
+      await listArtifactCatalogCandidates(client.db, scope, {
+        query: { kind: "presentation", sort: "updated", status, limit: 20 },
+        kinds: ["presentation"],
+        siteViewer: { subjectId: grant.subjectId },
+        snapshotAt: new Date(Date.now() + 1000).toISOString(),
+        limit: 20,
+      })
+    ).map((item) => item.id);
+  expect(await listed("active")).toContain(artifact.id);
+  const open = async (bearer: string) =>
+    await app.request(
+      `/v1/workspaces/${scope.workspaceId}/editable-artifacts/${artifact.id}?replicaId=aaaaaaaaaaaaaaaa`,
+      {
+        headers: { authorization: `Bearer ${bearer}` },
+      },
+    );
+
   // Reading alone is not enough to archive.
   const reader = await archive(await token(grant.subjectId, ["artifacts:read"]));
   expect(reader.status).toBe(403);
@@ -142,6 +161,7 @@ test("archiving removes a presentation from Artifacts, is idempotent and needs t
   expect(await lifecycle()).toBe("active");
 
   const manager = await token(grant.subjectId, ["artifacts:read", "artifacts:publish"]);
+  expect((await open(manager)).status).toBe(200);
   const first = await archive(manager);
   const body = await first.json();
   expect(first.status, JSON.stringify(body)).toBe(200);
@@ -153,8 +173,23 @@ test("archiving removes a presentation from Artifacts, is idempotent and needs t
   expect(await again.json()).toMatchObject({ id: artifact.id, lifecycle: "archived" });
   // An unknown artifact reads as missing.
   expect((await archive(manager, "f".repeat(32))).status).toBe(404);
+  // Someone else's Only me artifact reads as missing too.
+  const privateDeck = await application.createArtifact({
+    scope,
+    actor,
+    idempotencyKey: `archive-private:${suffix}` as never,
+    modality: "presentation",
+    title: "Private deck",
+    audience: { visibility: "user_private", ownerSubjectId: grant.subjectId },
+  });
+  const colleague = await token("user:colleague", ["artifacts:read", "artifacts:publish"]);
+  expect((await archive(colleague, privateDeck.id)).status).toBe(404);
+  expect(
+    (await application.readArtifact({ scope, actor, artifactId: privateDeck.id })).lifecycle,
+  ).toBe("active");
 
   // It is removed: it no longer opens and leaves the Artifacts list.
+  expect((await open(manager)).status).toBe(404);
   await expect(
     application.mintLiveTicket({
       scope,
@@ -170,18 +205,8 @@ test("archiving removes a presentation from Artifacts, is idempotent and needs t
       allowEdit: true,
     } as never),
   ).rejects.toMatchObject({ code: "not_found" });
-  const listed = async (status: "active" | "archived") =>
-    (
-      await listArtifactCatalogCandidates(client.db, scope, {
-        query: { kind: "presentation", sort: "updated", status, limit: 20 },
-        kinds: ["presentation"],
-        siteViewer: { subjectId: grant.subjectId },
-        snapshotAt: new Date(Date.now() + 1000).toISOString(),
-        limit: 20,
-      })
-    ).map((item) => item.id);
   expect(await listed("active")).not.toContain(artifact.id);
   expect(await listed("archived")).not.toContain(artifact.id);
-  // The chat's artifact panel drops it too.
+  // The session's artifact list (agents, SDK) drops it too.
   expect(await sessionArtifacts()).toEqual([]);
 }, 60_000);

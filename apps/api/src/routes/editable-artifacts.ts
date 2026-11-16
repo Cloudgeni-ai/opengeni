@@ -550,6 +550,8 @@ export function registerEditableArtifactRoutes(
     } catch (error) {
       throw editableArtifactHttpError(error);
     }
+    // A deleted (archived) artifact no longer opens.
+    if (artifact.lifecycle !== "active") throw applicationHttpError("not_found");
     context.header("cache-control", "private, no-store");
     const [result] = await projectWithAudiences(grant, scope, [artifact]);
     return context.json(result, 200);
