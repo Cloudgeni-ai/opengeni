@@ -21,6 +21,10 @@
       "sha256": "f6c70651a4623b3d5404e6dc7d740ebc5f85b844f4f9f622e9359f5ee7c798b9"
     },
     {
+      "path": ".github/workflows/bot-pin-pr-queue.yml",
+      "sha256": "80d282d107ea578bfc7b6a7b3d11769d6f02d9e2baff1e71678a6712ee01305e"
+    },
+    {
       "path": ".github/workflows/browser-engine-pins.yml",
       "sha256": "decc84aa96743f1a79ba1621ee7b00b62ab9b21a0a375139b1fa7006ecc5b8c1"
     },
@@ -644,6 +648,12 @@
       "job": "wasm",
       "step": "Verify exact source",
       "sha256": "7c01541f3dc7c536488a007902ea1453cd191ebb6c348edcbac345077c0dcb25"
+    },
+    {
+      "workflow": ".github/workflows/bot-pin-pr-queue.yml",
+      "job": "queue",
+      "step": "Queue them",
+      "sha256": "ef7582791cdc5a3bb9c410e2878c26f5a5a4152aed8b97a408f692885501f391"
     },
     {
       "workflow": ".github/workflows/browser-engine-pins.yml",
