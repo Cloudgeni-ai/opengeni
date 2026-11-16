@@ -1,6 +1,13 @@
 import { assertGoogleConnectorSetupEnabled } from "./google-connector-availability";
 import { sql } from "drizzle-orm";
 import { safeReturnPath } from "./oauth-return-path";
+import { buildConnectionTokenResolver, transitionConnectionState } from "@opengeni/db";
+import { reverifyLoginsBlockingNewAccount } from "./oauth-account-reverify";
+import {
+  builtInIntegrationDuplicatedByEndpoint,
+  builtInIntegrationTurnedOffMessage,
+} from "@opengeni/core";
+import { OrganizationIntegrationDeniedError } from "@opengeni/contracts";
 import {
   OAUTH_BROWSER_MISMATCH_MESSAGE,
   oauthCallbackBrowserAccepted,
@@ -474,6 +481,29 @@ export async function finishOAuthAcquisition(
   );
 }
 
+/**
+ * Refuses a custom sign-in to a built-in integration's own endpoint (Gmail's,
+ * for example) while the organization turned that built-in off, with the same
+ * message the capability catalog gives. Every other endpoint is unaffected.
+ * Exported for tests.
+ */
+export async function assertDuplicatedBuiltInIntegrationAllowed(
+  db: Database,
+  scope: Parameters<typeof withOrganizationIntegrationAcquisition>[1],
+  mcpUrl: string | null | undefined,
+  integrationKey: string | null | undefined,
+  acquire: typeof withOrganizationIntegrationAcquisition = withOrganizationIntegrationAcquisition,
+): Promise<void> {
+  const duplicated = builtInIntegrationDuplicatedByEndpoint(mcpUrl, integrationKey);
+  if (!duplicated) return;
+  try {
+    await acquire(db, scope, [duplicated.key], async () => {});
+  } catch (error) {
+    if (!(error instanceof OrganizationIntegrationDeniedError)) throw error;
+    throw new HTTPException(403, { message: builtInIntegrationTurnedOffMessage(duplicated.label) });
+  }
+}
+
 export async function startMcpOAuth(
   deps: OAuthClientDeps,
   context: OAuthStartContext,
@@ -494,6 +524,12 @@ export async function startMcpOAuth(
   assertGoogleMcpSetupEnabled(
     deps.settings,
     builtInOAuthProfileFor({ mcpUrl: startTarget }) ?? DEFAULT_OAUTH_PROFILE,
+  );
+  await assertDuplicatedBuiltInIntegrationAllowed(
+    deps.db,
+    context,
+    startTarget,
+    context.integrationKey,
   );
   await withOrganizationIntegrationAcquisition(
     deps.db,
@@ -1066,6 +1102,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
           : { stage: "state_verify", reason: "missing_code" },
       );
     }
+    await assertDuplicatedBuiltInIntegrationAllowed(db, state, state.mcpUrl, integrationKey);
     await withOrganizationIntegrationAcquisition(db, state, [integrationKey], async () => {});
     const consumed = await runCallbackDatabaseStage(
       deadline,
@@ -1233,6 +1270,24 @@ async function completeMcpOAuthCallbackWithinDeadline(
       ...(verification.tools ? { mcpTools: verification.tools } : {}),
     };
     const credentialEncrypted = encryptEnvironmentValue(key, JSON.stringify(credential));
+    // A new account is refused while an earlier login of this service was
+    // never confirmed; check those logins again first, so persisting decides
+    // from what they actually are.
+    if (!state.connectionId && verification.providerIdentity)
+      await reverifyLoginsBeforeDecision(observability, db, settings, state, deadline, {
+        ownerSubjectId,
+        requesterSubjectId: state.subjectId,
+        providerDomain: state.providerDomain,
+        mcpUrl: state.mcpUrl,
+        metadata,
+        grantedScopes: scopes,
+        identityKeys: accountIdentityKeysFor(
+          profile,
+          state.mcpUrl,
+          verification.identityMethod === "oidc",
+        ),
+        subjectKey: stableAccountSubjectKeyFor(state.mcpUrl),
+      });
     // The personal login this callback saved, to turn on where it was connected.
     let persisted: ConnectionMetadata | null = null;
     const persist = async (scopedDb: Database) => {
@@ -1390,8 +1445,16 @@ async function completeMcpOAuthCallbackWithinDeadline(
       await turnOnPersistedLoginHere();
       return { redirectTo: state.returnUrl!, exactReturn: true };
     }
+    // A custom sign-in to a built-in's endpoint follows that built-in's policy
+    // too, which may have changed while the person signed in.
+    const duplicated = builtInIntegrationDuplicatedByEndpoint(state.mcpUrl, integrationKey);
     const connection = await runCallbackDatabaseStage(deadline, "persist", db, (scopedDb) =>
-      withOrganizationIntegrationAcquisition(scopedDb, state!, [integrationKey], persist),
+      withOrganizationIntegrationAcquisition(
+        scopedDb,
+        state!,
+        [integrationKey, ...(duplicated ? [duplicated.key] : [])],
+        persist,
+      ),
     );
     if (!connection) {
       throw new HTTPException(409, {
@@ -3216,13 +3279,18 @@ async function verifyMcpToolsList(
       // Identity only labels and de-duplicates accounts: a failure leaves it unknown.
       const toolIdentity =
         identity?.kind === "mcp_tool"
-          ? await mcpToolAccountIdentity(
-              client,
-              identity,
-              toolsResult.tools.map((tool) => tool.name),
-              identityBudgetMs(),
+          ? await accountIdentityWithRetry(
+              (budgetMs) =>
+                mcpToolAccountIdentity(
+                  client,
+                  identity,
+                  toolsResult.tools.map((tool) => tool.name),
+                  budgetMs,
+                  signal,
+                  { tokenResponse: token.raw },
+                ),
+              identityBudgetMs,
               signal,
-              { tokenResponse: token.raw },
             )
           : undefined;
       return { listed: toolsResult, identityCheck: toolIdentity };
@@ -3245,6 +3313,38 @@ type AccountIdentityCheck =
 /** Keep time for persisting the connection: identity never consumes the callback deadline. */
 const IDENTITY_MAX_MS = 5_000;
 const IDENTITY_RESERVE_MS = 5_000;
+
+/** Identity failures that a second read can fix: a slow or briefly failing service. */
+function transientIdentityFailure(failure: string): boolean {
+  return (
+    failure === "timeout" ||
+    failure === "request_failed" ||
+    failure === "tool_error" ||
+    failure === "http_429" ||
+    /^http_5\d\d$/u.test(failure)
+  );
+}
+
+/**
+ * Reads an account's identity, and once more when the first read failed in a
+ * way a second can fix. An account saved without its identity can't be told
+ * apart from the next one connected, so one slow answer shouldn't decide that.
+ * Each read gets what `budgetMs` allows when it starts, which keeps the
+ * callback's reserve; nothing is retried after the request was aborted.
+ * Exported for tests.
+ */
+export async function accountIdentityWithRetry(
+  read: (budgetMs: number) => Promise<AccountIdentityCheck>,
+  budgetMs: () => number,
+  signal: AbortSignal,
+): Promise<AccountIdentityCheck> {
+  const first = await read(budgetMs());
+  if (!first.failure || !transientIdentityFailure(first.failure) || signal.aborted) return first;
+  const remaining = budgetMs();
+  if (remaining <= 0) return first;
+  const second = await read(remaining);
+  return second.failure ? first : second;
+}
 
 /** Exported for tests. */
 export async function mcpToolAccountIdentity(
@@ -3412,7 +3512,8 @@ export async function stableAccountIdentity(
 async function verifyHttpAccountIdentity(
   settings: Settings,
   identity: Extract<AccountIdentityVerifier, { kind: "http" }>,
-  token: TokenResponse,
+  authorization: string,
+  context: AccountIdentityContext,
   budgetMs: number,
   outer: AbortSignal,
 ): Promise<AccountIdentityCheck> {
@@ -3422,9 +3523,7 @@ async function verifyHttpAccountIdentity(
     const response = await fetchOAuth(identity.url, settings, {
       method: "GET",
       signal,
-      headers: {
-        authorization: `${normalizeBearerScheme(token.tokenType)} ${token.accessToken}`,
-      },
+      headers: { authorization },
     });
     if (!response.ok) {
       await cancelResponseBody(response);
@@ -3436,9 +3535,175 @@ async function verifyHttpAccountIdentity(
       "Connector account verification",
       { signal },
     );
-    return { identity: identity.validateIdentity([payload], { tokenResponse: token.raw }) };
+    return { identity: identity.validateIdentity([payload], context) };
   } catch (error) {
     return { failure: identityFailureReason(error) };
+  }
+}
+
+/**
+ * The account a stored login belongs to, read with its own stored credentials
+ * through the service's reviewed identity verifier, as a new sign-in's account
+ * is read. Undefined when the service has no verifier, the credentials can't
+ * be used, or the read fails; never throws for an unusable login.
+ */
+async function storedLoginAccountIdentity(
+  db: Database,
+  settings: Settings,
+  login: ConnectionMetadata,
+  budgetMs: () => number,
+  outer: AbortSignal,
+): Promise<Record<string, string> | undefined> {
+  const mcpUrl = login.metadata.mcpUrl;
+  if (typeof mcpUrl !== "string" || !mcpUrl) return undefined;
+  const identity = accountIdentityVerifierFor(mcpUrl);
+  if (!identity) return undefined;
+  const startBudget = budgetMs();
+  if (startBudget <= 0) return undefined;
+  const signal = AbortSignal.any([outer, AbortSignal.timeout(startBudget)]);
+  const abandoned = new Promise<never>((_resolve, reject) => {
+    if (signal.aborted) reject(signal.reason);
+    signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+  });
+  abandoned.catch(() => {});
+  const resolved = await Promise.race([
+    buildConnectionTokenResolver(
+      db,
+      settings,
+    )({
+      workspaceId: login.workspaceId,
+      ...(login.subjectId ? { subjectId: login.subjectId } : {}),
+      serverId: `account-identity:${login.id}`,
+      toolName: "tools/list",
+      connectionRef: {
+        providerDomain: login.providerDomain,
+        kind: "oauth2",
+        connectionId: login.id,
+        subjectScope: login.subjectId ? "subject" : "workspace",
+      },
+      destinationUrl: mcpUrl,
+    }),
+    abandoned,
+  ]);
+  if (resolved.status !== "ok") return undefined;
+  const authorization = Object.entries(resolved.headers).find(
+    ([name]) => name.toLowerCase() === "authorization",
+  )?.[1];
+  if (!authorization) return undefined;
+  const context: AccountIdentityContext = { tokenResponse: {} };
+  const check =
+    identity.kind === "http"
+      ? await accountIdentityWithRetry(
+          (ms) => verifyHttpAccountIdentity(settings, identity, authorization, context, ms, signal),
+          budgetMs,
+          signal,
+        )
+      : await withMcpStreamableHttpClient(
+          {
+            url: mcpUrl,
+            clientName: "opengeni-integration-verify",
+            clientVersion: "0.1.0",
+            timeoutMs: startBudget,
+            requestInit: { headers: { authorization } },
+            fetch: (url, init) =>
+              fetchOAuth(url.toString(), settings, {
+                ...init,
+                signal: init?.signal ? AbortSignal.any([signal, init.signal]) : signal,
+              }),
+          },
+          async (client) => {
+            const listed = await client.listTools(undefined, {
+              timeout: startBudget,
+              maxTotalTimeout: startBudget,
+              signal,
+            });
+            return await accountIdentityWithRetry(
+              (ms) =>
+                mcpToolAccountIdentity(
+                  client,
+                  identity,
+                  listed.tools.map((tool) => tool.name),
+                  ms,
+                  signal,
+                  context,
+                ),
+              budgetMs,
+              signal,
+            );
+          },
+        );
+  return check.identity;
+}
+
+/**
+ * Before a new, verified account is decided, check again the person's earlier
+ * logins of this service that were never confirmed, which would otherwise make
+ * it read as account_reconnect_required (see oauth-account-reverify.ts). Best
+ * effort: any failure leaves the stored logins, and so today's decision, as
+ * they were.
+ */
+async function reverifyLoginsBeforeDecision(
+  observability: Observability | undefined,
+  db: Database,
+  settings: Settings,
+  state: OAuthStatePayload,
+  deadline: OAuthCallbackDeadline,
+  decision: Omit<Parameters<typeof decideOAuthAccountConnection>[0], "accounts">,
+): Promise<void> {
+  try {
+    const accounts = await runCallbackDatabaseStage(deadline, "persist", db, async (scopedDb) => {
+      const byId = new Map<string, ConnectionMetadata>(
+        (await listConnectionsMetadata(scopedDb, state.workspaceId, state.subjectId)).map(
+          (connection) => [connection.id, connection] as const,
+        ),
+      );
+      for (const connection of await listOwnConnectionMetadata(scopedDb, {
+        accountId: state.accountId,
+        workspaceId: state.workspaceId,
+        subjectId: state.subjectId,
+        reach: "anywhere",
+        includeInactive: true,
+      }))
+        byId.set(connection.id, connection);
+      return [...byId.values()];
+    });
+    const identityBudgetMs = () =>
+      Math.min(IDENTITY_MAX_MS, deadline.remainingMs() - IDENTITY_RESERVE_MS);
+    const confirmed = await reverifyLoginsBlockingNewAccount({
+      decision: { ...decision, accounts },
+      verify: (login) =>
+        storedLoginAccountIdentity(db, settings, login, identityBudgetMs, deadline.signal),
+      save: async (login, identity) => {
+        // The read may have refreshed the login's token, so record the account
+        // on its current version, never over a change made meanwhile.
+        const current = await getConnectionMetadata(
+          db,
+          login.workspaceId,
+          login.id,
+          login.subjectId,
+        );
+        if (!current || current.status !== "active") return false;
+        return !!(await transitionConnectionState(db, {
+          workspaceId: current.workspaceId,
+          connectionId: current.id,
+          visibleToSubjectId: current.subjectId,
+          expectedVersion: current.version,
+          metadata: { ...current.metadata, ...identity },
+        }));
+      },
+      onFailure: (_login, error) =>
+        observability?.warn("MCP OAuth earlier login stayed unconfirmed", {
+          reason: identityFailureReason(error),
+        }),
+    });
+    if (confirmed)
+      observability?.info("MCP OAuth confirmed earlier logins before adding an account", {
+        confirmed,
+      });
+  } catch (error) {
+    observability?.warn("MCP OAuth earlier logins were not checked again", {
+      reason: identityFailureReason(error),
+    });
   }
 }
 
@@ -3714,7 +3979,19 @@ async function verifyMcpToolsListNonFatal(
         );
         const identityCheck =
           identity?.kind === "http"
-            ? await verifyHttpAccountIdentity(settings, identity, token, identityBudgetMs(), signal)
+            ? await accountIdentityWithRetry(
+                (budgetMs) =>
+                  verifyHttpAccountIdentity(
+                    settings,
+                    identity,
+                    `${normalizeBearerScheme(token.tokenType)} ${token.accessToken}`,
+                    { tokenResponse: token.raw },
+                    budgetMs,
+                    signal,
+                  ),
+                identityBudgetMs,
+                signal,
+              )
             : oidc
               ? await oidcAccountIdentity(settings, state, token, identityBudgetMs(), signal)
               : verified.identityCheck;
