@@ -816,6 +816,63 @@ export async function setEditableArtifactAudience(
   });
 }
 
+/**
+ * Archive an artifact: it leaves the active Artifacts list, still opens, and
+ * never accepts another edit. Archiving is one-way (the update guard refuses
+ * reactivation). The row lock serializes it with commits, which re-check the
+ * lifecycle under the same lock. Someone else's Only me artifact reads as
+ * missing. Archiving an archived artifact is a no-op.
+ */
+export async function archiveEditableArtifact(
+  db: Database,
+  scopeInput: PersistedEditableArtifactScope,
+  input: Readonly<{ artifactId: string; actor: PersistedEditableArtifactActor }>,
+): Promise<Readonly<{ lifecycle: "archived"; changed: boolean }>> {
+  const scope = validateScope(scopeInput);
+  const artifactId = validateStableId(input.artifactId, "artifact id");
+  const actor = input.actor;
+  validateIdentity(actor.subjectId, "archiving subject id");
+  return await withRlsContext(db, scope, async (tx) => {
+    const [row] = await rawRows<{
+      visibility: string;
+      owner_subject_id: string | null;
+      lifecycle_state: string;
+    }>(
+      tx,
+      sql`select visibility, owner_subject_id, lifecycle_state
+        from editable_artifacts
+        where account_id = ${scope.accountId}::uuid
+          and workspace_id = ${scope.workspaceId}::uuid
+          and id = ${artifactId}
+        for update`,
+    );
+    if (!row || (row.visibility === "user_private" && row.owner_subject_id !== actor.subjectId))
+      throw new EditableArtifactPersistenceError("not_found", "Editable artifact was not found");
+    const decision = await transactionallyAuthorizeEditableArtifactActor(tx, {
+      scope,
+      artifactId,
+      actor,
+      permission: "manage",
+    });
+    if (!decision.allowed) throw new EditableArtifactArchiveForbiddenError();
+    if (row.lifecycle_state === "archived")
+      return Object.freeze({ lifecycle: "archived" as const, changed: false });
+    await tx.execute(sql`update editable_artifacts
+      set lifecycle_state = 'archived', updated_at = greatest(now(), updated_at)
+      where account_id = ${scope.accountId}::uuid
+        and workspace_id = ${scope.workspaceId}::uuid
+        and id = ${artifactId}`);
+    return Object.freeze({ lifecycle: "archived" as const, changed: true });
+  });
+}
+
+export class EditableArtifactArchiveForbiddenError extends Error {
+  constructor() {
+    super("You do not have permission to archive this artifact");
+    this.name = "EditableArtifactArchiveForbiddenError";
+  }
+}
+
 function audienceFromRow(row: {
   visibility: string;
   owner_subject_id: string | null;

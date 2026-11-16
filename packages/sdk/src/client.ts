@@ -10243,6 +10243,24 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Archive a document, spreadsheet or presentation. It leaves the active
+   * Artifacts list, still opens, and can no longer be edited. One-way.
+   */
+  async archiveEditableArtifact(
+    workspaceId: string,
+    artifactId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<EditableArtifactResource> {
+    return await this.requestJson<EditableArtifactResource>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/editable-artifacts/${encodeURIComponent(artifactId)}/archive`,
+      {},
+      undefined,
+      options,
+    );
+  }
+
   /** A Site's data collections, usage and limits. Needs a manager of the Site. */
   async getSiteData(
     workspaceId: string,

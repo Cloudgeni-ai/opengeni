@@ -29,7 +29,12 @@ import {
   type EditableArtifactPinnedVersion,
   type EditableArtifactModality,
 } from "@opengeni/core";
-import { hasEditableArtifactSessionLink, listEditableArtifactIdsForSession } from "@opengeni/db";
+import {
+  archiveEditableArtifact,
+  EditableArtifactArchiveForbiddenError,
+  hasEditableArtifactSessionLink,
+  listEditableArtifactIdsForSession,
+} from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { z } from "zod";
 
@@ -613,6 +618,38 @@ export function registerEditableArtifactRoutes(
       ),
       200,
     );
+  });
+
+  // Archive: it leaves the active Artifacts list, still opens, and takes no
+  // more edits. One-way; archiving an archived artifact returns it unchanged.
+  app.post(`${item}/archive`, async (context) => {
+    const workspaceId = context.req.param("workspaceId");
+    const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:publish");
+    const artifactId = editableArtifactId(parseArtifactId(context.req.param("artifactId")));
+    const scope = editableArtifactScope({ accountId: grant.accountId, workspaceId });
+    const actor = editableArtifactActorForGrant(grant, AUDIENCE_READ_REPLICA_ID);
+    try {
+      await archiveEditableArtifact(deps.db, scope, { artifactId, actor });
+    } catch (error) {
+      if (error instanceof EditableArtifactArchiveForbiddenError)
+        throw new ApiHttpError(403, { code: "forbidden", message: error.message });
+      if (error instanceof EditableArtifactPersistenceError && error.code === "not_found")
+        throw applicationHttpError("not_found");
+      throw error;
+    }
+    let artifact: EditableArtifact;
+    try {
+      artifact = await requireEditableArtifactApplication(deps).readArtifact({
+        scope,
+        actor,
+        artifactId,
+      });
+    } catch (error) {
+      throw editableArtifactHttpError(error);
+    }
+    context.header("cache-control", "private, no-store");
+    const [result] = await projectWithAudiences(grant, scope, [artifact]);
+    return context.json(result, 200);
   });
 
   app.post(`${item}/live-ticket`, async (context) => {

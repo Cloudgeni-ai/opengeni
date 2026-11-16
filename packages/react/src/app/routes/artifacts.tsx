@@ -282,6 +282,15 @@ function ArtifactListRoute({
                   }
                 : undefined
             }
+            onArchive={
+              canPin
+                ? async (item) => {
+                    await context.client.archiveEditableArtifact(workspaceId, item.id);
+                    invalidateAfterMutation();
+                    await catalog.refresh();
+                  }
+                : undefined
+            }
           />
         </LineTabsContent>
       </LineTabs>

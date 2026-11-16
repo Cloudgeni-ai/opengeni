@@ -91,6 +91,15 @@ caller's own, and are reversible: archive keeps the source and full version
 history, restore republishes an archived Site, and rollback restores an earlier
 version without discarding the current one.
 
+Documents, spreadsheets and presentations are archived from their Artifacts
+menu (**Archive…**, after a confirmation) or with
+`POST /v1/workspaces/:workspaceId/editable-artifacts/:artifactId/archive`
+(`client.archiveEditableArtifact`). It needs `artifacts:publish` and the
+artifact's `manage` permission; someone else's Only me artifact reads as
+missing. An archived one leaves the active list, still opens under the
+Archived filter, and takes no more edits. Unlike a Site's, this archive is
+one-way: the `editable_artifacts` update guard refuses reactivation.
+
 Sites are shared work too. Since migration 0865 anyone with `artifacts:publish`
 who can see a Site manages it like its owner: Site Data and Site SQL,
 publication settings, abuse reports, and taking it down or restoring it. Only an
