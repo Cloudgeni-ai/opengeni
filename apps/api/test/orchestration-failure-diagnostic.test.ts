@@ -28,7 +28,7 @@ function failure() {
 
 test("all orchestration phases retain bounded safe cause evidence without a sink", () => {
   const deps = { settings: testSettings() } as ApiRouteDeps;
-  for (const tool of ["session_create", "session_send_message", "session_steer"] as const) {
+  for (const tool of ["session_create", "session_queue_message", "session_steer"] as const) {
     const error = failure();
     const result = orchestrationFailureDiagnostic(deps, tool, error, caller);
     expect(result.diagnosticExport).toBe("disabled");

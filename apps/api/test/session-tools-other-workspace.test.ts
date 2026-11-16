@@ -37,7 +37,7 @@ const SESSION_TOOLS = [
   "session_get",
   "session_events",
   "session_wait",
-  "session_send_message",
+  "session_queue_message",
   "session_steer",
   "session_pause",
   "session_resume",
@@ -277,13 +277,13 @@ describe("session tools on a chat in another workspace", () => {
     expect(localMiss.isError).toBe(true);
     expect(localMiss.text).toContain("Session not found or access denied");
     expect(localMiss.text).toContain("needs this session to have full access");
-    const localMissSend = await call(withoutFullAccess(), "session_send_message", {
+    const localMissSend = await call(withoutFullAccess(), "session_queue_message", {
       sessionId: target,
       text: "hello",
       idempotencyKey: crypto.randomUUID(),
     });
     expect(localMissSend.isError).toBe(true);
-    expect(localMissSend.text).toContain("session_send_message_not_found_or_denied");
+    expect(localMissSend.text).toContain("session_queue_message_not_found_or_denied");
     expect(localMissSend.text).toContain("needs this session to have full access");
     // It also says a private chat of another person is out of reach, and that
     // a turn woken by another person's message acts for them.
@@ -336,7 +336,7 @@ describe("session tools on a chat in another workspace", () => {
 
     // Message it: the person's prompt, sent by this session for them.
     const idempotencyKey = crypto.randomUUID();
-    const sent = await call(withFullAccess(), "session_send_message", {
+    const sent = await call(withFullAccess(), "session_queue_message", {
       sessionId: target,
       workspaceId: other,
       text: "What went wrong here?",
@@ -376,7 +376,7 @@ describe("session tools on a chat in another workspace", () => {
       where t.session_id = ${target}`;
     expect(turnGrants.filter((grant) => grant.changes === "confirm")).toEqual([]);
     // Retrying with the same key replays, never duplicates.
-    const replayed = await call(withFullAccess(), "session_send_message", {
+    const replayed = await call(withFullAccess(), "session_queue_message", {
       sessionId: target,
       workspaceId: other,
       text: "What went wrong here?",
@@ -432,7 +432,7 @@ describe("session tools on a chat in another workspace", () => {
     expect(missingChat.isError).toBe(true);
     expect(missingChat.text).toContain("Session not found or access denied");
     expect(missingWorkspace).toEqual(missingChat);
-    const missingMessage = await call(withFullAccess(), "session_send_message", {
+    const missingMessage = await call(withFullAccess(), "session_queue_message", {
       sessionId: crypto.randomUUID(),
       workspaceId: other,
       text: "hello",

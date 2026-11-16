@@ -153,7 +153,7 @@ function Harness() {
 
             <Section
               title="Sub-agent workers & goal landmarks"
-              hint="session_create / session_send_message → worker cards; goal_* → landmark pills."
+              hint="session_create / session_queue_message → worker cards; goal_* → landmark pills."
             >
               <RawRail events={workerGoalEvents()} />
             </Section>

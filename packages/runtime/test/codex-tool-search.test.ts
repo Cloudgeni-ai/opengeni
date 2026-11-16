@@ -124,7 +124,7 @@ describe("searchToolPool named tools", () => {
       "goal_complete",
       "Finish the current objective after verifying every requirement, recording evidence, summarizing outcomes and notifying the requester about what changed in the workspace",
     ),
-    opengeniTool("session_send_message", "Send a message to another session"),
+    opengeniTool("session_queue_message", "Send a message to another session"),
     opengeniTool("session_events", "Read events"),
   ];
   const names = (tools: Tool[]) => tools.map((tool) => (tool as { name: string }).name);

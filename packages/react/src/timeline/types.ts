@@ -236,7 +236,7 @@ export type WorkerItem = {
   title?: string | null | undefined;
   /** The target/spawned worker session id, when parseable from args/output. */
   workerSessionId: string | null;
-  /** Bounded structured failure retained from session_create/session_send_message. */
+  /** Bounded structured failure retained from session_create/session_queue_message. */
   failure: { code: string; message: string } | null;
   status: "running" | "complete" | "failed" | "cancelled";
   occurredAt: string;

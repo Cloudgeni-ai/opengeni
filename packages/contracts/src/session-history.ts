@@ -95,6 +95,8 @@ export const SESSION_EVENT_PRESENTED_TOOL_LEAVES = [
   "task_note_promote_knowledge",
   "remember_confirm",
   "session_create",
+  "session_queue_message",
+  // Its earlier name, still in older sessions' history.
   "session_send_message",
 ] as const;
 
