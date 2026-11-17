@@ -364,7 +364,8 @@ function SwipeRow(props: {
     extrapolateRight: "clamp",
   });
   const snoozeOpacity = x.interpolate({
-    inputRange: [-SWIPE_FULL, -SWIPE_ACTION * 2 - 24, 0],
+    // Fully shown up to the Dismiss threshold, gone 24pt past it (ranges must increase).
+    inputRange: [-SWIPE_FULL - 24, -SWIPE_FULL, 0],
     outputRange: [0, 1, 1],
     extrapolate: "clamp",
   });
