@@ -74,6 +74,8 @@ const { values } = parseArgs({
     "code-search": { type: "boolean", default: false },
     /** A file of task ids, one per line: run only these (a paired subset shared by every arm). */
     "task-ids": { type: "string" },
+    /** Install this file as /usr/local/bin/cg in each task container (code_grep from the shell). */
+    "install-cg": { type: "string" },
   },
 });
 
@@ -199,6 +201,10 @@ async function attempt(task: Task, repos: RepoCache) {
       "sleep",
       "infinity",
     ]);
+    if (values["install-cg"]) {
+      sh(["docker", "cp", resolve(values["install-cg"]), `${name}:/usr/local/bin/cg`]);
+      sh(["docker", "exec", name, "chmod", "755", "/usr/local/bin/cg"]);
+    }
     const minted = (await api.call(
       "POST",
       `/v1/workspaces/${workspace}/enrollments/token`,
