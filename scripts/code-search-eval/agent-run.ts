@@ -68,6 +68,8 @@ const { values } = parseArgs({
     concurrency: { type: "string", default: "4" },
     "timeout-sec": { type: "string", default: "1200" },
     smoke: { type: "boolean", default: false },
+    /** Replace the task instruction (diagnostics, for example listing the tools offered). */
+    message: { type: "string" },
     /** Enable the deployment's code-search tool in each attempt workspace (the tool arms). */
     "code-search": { type: "boolean", default: false },
     /** A file of task ids, one per line: run only these (a paired subset shared by every arm). */
@@ -247,9 +249,11 @@ async function attempt(task: Task, repos: RepoCache) {
       "POST",
       `/v1/workspaces/${workspace}/sessions`,
       {
-        initialMessage: values.smoke
-          ? "Run `command -v rg && rg --version | head -1` in /app and report the output verbatim."
-          : findCodeInstruction(task),
+        initialMessage: values.message
+          ? values.message
+          : values.smoke
+            ? "Run `command -v rg && rg --version | head -1` in /app and report the output verbatim."
+            : findCodeInstruction(task),
         model: values.model,
         reasoningEffort: values.effort,
         latencyMode: "standard",
