@@ -96,6 +96,12 @@ export function createDecisionModelsDecisionModel(options: {
   concurrency?: number;
   /** The provider's per-request question cap (GET /v1/models max_questions; s1-pro: 3). */
   maxQuestions?: number;
+  /**
+   * When a question map is split over several requests, send each request only the entries of per-item
+   * maps in the input (objects keyed by the question ids, or by the id after "kind::") that its own
+   * questions refer to. Without it every split request repeats the whole batch.
+   */
+  projectSplitInput?: boolean;
   /** Append one JSON line per HTTP attempt (status, ms, questions, split) and per failed decision. */
   tracePath?: string;
   /** Test transport. */
@@ -226,7 +232,12 @@ export function createDecisionModelsDecisionModel(options: {
         );
       const results = await Promise.all(
         parts.map((q, index) =>
-          single(input, q, decideOptions, { index, of: parts.length }),
+          single(
+            options.projectSplitInput ? projectInput(input, ids, Object.keys(q)) : input,
+            q,
+            decideOptions,
+            { index, of: parts.length },
+          ),
         ),
       );
       const sum = (pick: (u: DecisionUsage) => number | null) =>
@@ -244,4 +255,30 @@ export function createDecisionModelsDecisionModel(options: {
       } as never;
     },
   };
+}
+
+const itemIdOf = (questionId: string) => {
+  const parts = questionId.split("::");
+  return parts.length > 1 ? parts[1]! : questionId;
+};
+
+/** Keeps, in each top-level per-item map of the input, only the items the given questions refer to. */
+export function projectInput(
+  input: unknown,
+  allQuestionIds: string[],
+  partQuestionIds: string[],
+): unknown {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return input;
+  const all = new Set(allQuestionIds.map(itemIdOf));
+  const keep = new Set(partQuestionIds.map(itemIdOf));
+  return Object.fromEntries(
+    Object.entries(input as Record<string, unknown>).map(([key, value]) => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return [key, value];
+      const keys = Object.keys(value);
+      const perItem = keys.length > 1 && keys.every((k) => all.has(k));
+      return perItem
+        ? [key, Object.fromEntries(Object.entries(value).filter(([k]) => keep.has(k)))]
+        : [key, value];
+    }),
+  );
 }

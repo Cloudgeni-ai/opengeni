@@ -823,6 +823,43 @@ describe("decision models", () => {
     expect(result.usage.inputTokens).toBe(200);
     expect(ledger.usedTokens).toBe(200);
   });
+  test("split requests carry only their own items when projection is on", async () => {
+    const seen: string[][] = [];
+    const model = createDecisionModelsDecisionModel({
+      apiKey: "k",
+      model: "s1-pro",
+      ledger: new TokenLedger(1_000_000),
+      arm: "dm",
+      taskId: () => "t",
+      maxQuestions: 2,
+      projectSplitInput: true,
+      fetch: async (_url, init) => {
+        const body = JSON.parse(String(init.body)) as {
+          state?: { passages: object; question: string };
+          input?: { passages: object; question: string };
+          questions: object;
+        };
+        const state = body.state ?? body.input!;
+        expect(state.question).toBe("q");
+        seen.push(Object.keys(state.passages));
+        return reply({
+          model: "s1-pro-x",
+          answers: Object.fromEntries(
+            Object.keys(body.questions).map((id) => [id, { type: "noul", noul: 0.5 }]),
+          ),
+          usage: { input_tokens: 10 },
+        });
+      },
+    });
+    const qs = Object.fromEntries(
+      ["a", "b", "c"].map((id) => [`rel::${id}`, questions.p]),
+    );
+    await model.decide(
+      { question: "q", passages: { a: "A", b: "B", c: "C" } },
+      qs,
+    );
+    expect(seen.map((k) => k.join(",")).sort()).toEqual(["a,b", "c"]);
+  });
   test("the request trace records every HTTP attempt, splits and failures", async () => {
     const dir = mkdtempSync(join(tmpdir(), "cse-trace-"));
     const tracePath = join(dir, "trace.jsonl");
