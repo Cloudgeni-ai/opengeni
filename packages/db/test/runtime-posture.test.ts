@@ -366,6 +366,27 @@ function organizationPrivateSessionAuthorityTables(): RuntimeTablePosture[] {
   }));
 }
 
+/** Tables the turn hold summary (0988, 1485) reads as their owner. */
+function turnHoldSummaryTables(): RuntimeTablePosture[] {
+  return ["session_goals", "subscription_capacity_waiters"].map((name) => ({
+    name,
+    owner: "opengeni_migrator",
+    rlsEnabled: false,
+    rlsForced: false,
+    rlsActive: false,
+    policyCount: 0,
+    artifactOutboxDispatcherPolicy: false,
+    artifactMaterializerPolicy: false,
+    select: false,
+    insert: false,
+    update: false,
+    delete: false,
+    truncate: false,
+    references: false,
+    trigger: false,
+  }));
+}
+
 function xaiAuthorityTables(): RuntimeTablePosture[] {
   return ["workspace_memberships", "xai_subscription_credentials"].map((name) => ({
     name,
@@ -454,6 +475,7 @@ function safePosture(): RuntimeDatabasePosture {
       ...organizationMembershipLifecycleAuthorityTables(),
       ...organizationPrivateSessionAuthorityTables(),
       ...xaiAuthorityTables(),
+      ...turnHoldSummaryTables(),
       ...[
         "usage_allowance_attribution_receipts",
         "workspace_usage_allowances",
@@ -3774,6 +3796,7 @@ describe("runtime database posture evaluator", () => {
       ...organizationRecoveryAuthorityTables(),
       ...companyBrainPreferenceAuthorityTables(),
       ...companyProfileAgentAdminAuthorityTables(),
+      ...turnHoldSummaryTables(),
     ];
     const inertOptions: RuntimeDatabasePostureOptions = {
       ...options,
@@ -3967,6 +3990,7 @@ describe("runtime database posture evaluator", () => {
       ...companyBrainPreferenceAuthorityTables(),
       ...companyProfileAgentAdminAuthorityTables(),
       ...organizationMembershipLifecycleAuthorityTables(),
+      ...turnHoldSummaryTables(),
     ];
     for (const name of [
       "claim_editable_artifact_materializations(text, integer, integer, name)",
@@ -4243,6 +4267,8 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
   ];
   function eventPosture(execute: boolean): RuntimeDatabasePosture {
     const posture = safePosture();
+    // The event fixture's version of a table replaces the safe posture's.
+    posture.tables = posture.tables.filter((table) => !deferredTables.includes(table.name));
     posture.tables.push(...deferredTables.map((name) => eventTable(name, true)));
     posture.privateTables.push(
       ...definerPrivateTables.map((name) => ({ ...eventTable(name, false), policyCount: 0 })),

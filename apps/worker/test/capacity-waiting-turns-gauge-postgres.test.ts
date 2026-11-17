@@ -95,7 +95,7 @@ test("the reaper pass publishes a parked turn by provider as the runtime role", 
   expect(sample("opengeni_turns_waiting_capacity", "codex")).toBe(1);
   expect(sample("opengeni_turns_waiting_capacity", "claude")).toBe(0);
   expect(sample("opengeni_turns_waiting_capacity", "xai")).toBe(0);
-  expect(sample("opengeni_turns_waiting_capacity_oldest_age_seconds", "codex")).toBeGreaterThanOrEqual(
-    600,
-  );
+  expect(
+    sample("opengeni_turns_waiting_capacity_oldest_age_seconds", "codex"),
+  ).toBeGreaterThanOrEqual(600);
 });

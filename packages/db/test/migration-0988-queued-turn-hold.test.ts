@@ -10,6 +10,7 @@ import {
   initializeSessionStartAtomically,
   mutateSessionControlInTransaction,
   mutateWorkspaceControlInTransaction,
+  CAPACITY_WAITING_TURN_PROVIDERS,
   QUEUED_TURN_HOLDS,
   summarizeQueuedTurnsByHold,
   withWorkspaceSessionActivityRls as withWorkspaceRls,
@@ -340,6 +341,13 @@ describe("queued turns classified by what holds them (migration 0988)", () => {
     const rows = await shared.admin<{ hold: string }[]>`
       select hold from opengeni_private.summarize_queued_turns_by_hold()
     `;
-    expect(rows.map((row) => row.hold)).toEqual([...QUEUED_TURN_HOLDS].sort());
+    // The seven queued classes, plus one parked capacity class per provider
+    // since 1485 (an earlier worker reads only the seven).
+    expect(rows.map((row) => row.hold).sort()).toEqual(
+      [
+        ...QUEUED_TURN_HOLDS,
+        ...CAPACITY_WAITING_TURN_PROVIDERS.map((provider) => `capacity_wait:${provider}`),
+      ].sort(),
+    );
   }, 60_000);
 });
