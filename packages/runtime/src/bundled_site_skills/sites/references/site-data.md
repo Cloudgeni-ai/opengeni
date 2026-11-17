@@ -82,6 +82,12 @@ it whole and use `"me"` instead of building one. Files accept images, PDF,
 text, CSV, JSON, audio, video, Office and zip files up to 10 MB;
 `private` files are visible only to the uploader and managers.
 
+Collections that grow over time (daily measurements, logs, history) have no
+fixed size. Load only what a view shows: filter, sort newest first and page with
+`limit` and `nextCursor`, and use `count` for totals. Never fail the whole page
+once a collection passes a fixed number of records; show what loaded and say
+that older records are not shown.
+
 Media for the page itself can live in files instead of the HTML. Every viewer
 can open `shared` files, including anonymous guests of a public Site; guests
 cannot upload or delete files or see `private` ones. Upload each file (at most 10 MB) from a
