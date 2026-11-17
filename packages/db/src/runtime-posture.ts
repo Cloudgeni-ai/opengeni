@@ -70,7 +70,7 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * archived (1404), the organization-wide sandbox counts behind
  * plan-tiered sandbox limits (1475), and the deployment-wide check of
  * which Nango connections a live connection still stands for (1482), and
- * the unpaid sandbox fleet counts behind the fleet limits (1485).
+ * the unpaid sandbox fleet counts behind the fleet limits (1486).
  * Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
@@ -154,7 +154,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * stands for; until it is granted, deleting a Nango connection is decided
  * from the person's own reads, and nothing is deleted when one of their
  * organizations cannot be fully read.
- * 1485 withholds the unpaid sandbox fleet counts; until they are granted, the
+ * 1486 withholds the unpaid sandbox fleet counts; until they are granted, the
  * unpaid fleet running cap and box-time budget are inactive (fleet pressure
  * and the young-organization limit still apply).
  */

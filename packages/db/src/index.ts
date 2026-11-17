@@ -50763,7 +50763,7 @@ async function enforceSandboxFleetLimits(
     reportSandboxComputeStandingFallback(input.onFallback, error, "fleet");
     return refuse("fleet_busy", cap);
   }
-  // Not granted yet (1485 withholds it): the running cap waits for its grant.
+  // Not granted yet (1486 withholds it): the running cap waits for its grant.
   if (counts === null) return;
   if (counts.runningBoxes >= cap) refuse("fleet_busy", cap);
 }

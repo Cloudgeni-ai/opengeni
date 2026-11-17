@@ -5,7 +5,7 @@
 // unbounded fleet:
 //
 // - the unpaid running boxes and today's unpaid box time, read through the
-//   cross-tenant definer opengeni_private.sandbox_unpaid_fleet_v1 (1485) over
+//   cross-tenant definer opengeni_private.sandbox_unpaid_fleet_v1 (1486) over
 //   the boxes admission stamped `compute_unpaid`;
 // - fleet pressure: the warm count of every plan (the warm-fleet alert's own
 //   source, count_sandbox_leases_by_liveness) with hysteresis, kept per
@@ -187,7 +187,7 @@ const unpaidFleetRoutine: { available: { value: boolean; at: number } | null } =
 const UNPAID_FLEET_ROUTINE_RECHECK_MS = 60_000;
 
 /**
- * Whether this database lets the runtime call the unpaid-fleet definer. 1485
+ * Whether this database lets the runtime call the unpaid-fleet definer. 1486
  * creates it with EXECUTE withheld, because the previous release rejects a
  * runtime grant on a definer it doesn't know; a later migration grants it.
  * Until then the unpaid running cap and fleet box-time budget are inactive.

@@ -272,7 +272,7 @@ export function unpaidSandboxFleetState(
  * running boxes and today's unpaid box time. Admission enforces the limits;
  * this records them (a page fires while the day's unpaid box time is
  * exhausted) and logs while the fleet is not normal. Until the fleet definer
- * is granted (1485) only pressure is observed.
+ * is granted (1486) only pressure is observed.
  */
 export async function observeUnpaidSandboxFleet(
   services: Pick<ActivityServices, "db" | "settings" | "observability">,
