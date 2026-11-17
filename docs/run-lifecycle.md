@@ -2195,7 +2195,7 @@ write. Once `session.context.compacted` or
 `session.context.compaction.skipped` is durable, a waiting human/API or Agent
 Steer cooperatively settles the ordinary turn as `superseded` before another
 model request. A claimed standalone compaction instead completes its maintenance
-turn, then the queue runs on to the waiting Steer. Pause and Cancel remain immediate
+turn, then the waiting Steer is first to claim. Pause and Cancel remain immediate
 interruption fences.
 A compaction cut short by its own attempt's cancellation (graceful worker
 shutdown during a deploy, or any other Temporal activity cancellation) is not a
@@ -2816,9 +2816,8 @@ terminal event on a unique contiguous durable sequence. The operator output is
 limited to safe IDs, event counts, sequences, and model name; credentials and
 event payloads are never printed.
 Pause closes the exact live attempt as `interrupted_recoverable` and leaves its
-logical turn `recovering`; Steer normally closes it as `superseded`, lets the
-queue run on to the steered human prompt (messages sent before it are read
-first, never skipped), and does not revive the old turn. The exact exception
+logical turn `recovering`; Steer normally closes it as `superseded`, makes the
+steered human prompt first, and does not revive the old turn. The exact exception
 is active compaction: while the latest exact-attempt landmark is
 `session.context.compaction.started`, and for the whole lifetime of a claimed
 standalone compaction turn, Steer records durable waiting work but inserts no

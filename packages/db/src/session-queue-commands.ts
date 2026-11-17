@@ -962,9 +962,9 @@ export type WaitingSteerResolution = {
  * a structured question or a capacity wait), there is no next model step to
  * hand over at, so the waiting Steer replaces the wait now, exactly as a Steer
  * accepted after the wait began would: unexecuted approvals and questions are
- * closed and the queue runs on to the Steer. The worker calls this right after it
+ * closed and the Steer runs next. The worker calls this right after it
  * settles such a wait. Returns null when no Steer is waiting, the turn moved
- * on, or the session is paused (the Steer then stays queued).
+ * on, or the session is paused (the Steer then stays first in line).
  */
 export async function resolveWaitingSteerInTransaction(
   db: SessionActivityDatabase,
@@ -1170,16 +1170,68 @@ async function loadQueuedTurns(
   return rows.map((row) => byId.get(row.id)).filter((row): row is QueuedTurnRow => Boolean(row));
 }
 
-/*
- * Steer and queue order. A Steer asks the agent to read a message as soon as
- * it can, never to answer it before messages sent earlier, so it never moves a
- * message ahead of the queue. A Steered prompt joins the end of the queue, and
- * Steering a queued row leaves it where it is. The running turn, and then each
- * message still waiting ahead of the Steer, hands over to it at its first model
- * step (`hasPendingSteerForTurn`), so the agent reads every message up to the
- * Steer, in order, before it answers. A leading run of plain Steers is still
- * claimed together. Only an explicit queue Move changes the order.
+/**
+ * Queue order for a newly Steered row. Steers waiting for the live turn's next
+ * boundary are read in the order they were sent, so a later waiting Steer joins
+ * the end of that leading run; an interrupting Steer (and any Steer with nothing
+ * live to wait for) goes first. Queued Sends always stay behind every Steer.
  */
+function steerQueueOrder(
+  target: QueuedTurnRow,
+  others: QueuedTurnRow[],
+  supersession: Pick<
+    SteerSupersessionResult,
+    "liveCurrentTurnId" | "deferredUntilCompaction" | "deferredUntilModelStep"
+  >,
+): QueuedTurnRow[] {
+  if (!supersession.liveCurrentTurnId || !steerSupersessionIsDeferred(supersession)) {
+    return [target, ...others];
+  }
+  let waiting = 0;
+  while (waiting < others.length) {
+    const metadata = others[waiting]!.metadata as Record<string, unknown> | null;
+    const waitingSteer =
+      metadata?.delivery === "steer" &&
+      (metadata.deferredUntilModelStep === true || metadata.deferredUntilCompaction === true);
+    if (!waitingSteer) break;
+    waiting += 1;
+  }
+  return [...others.slice(0, waiting), target, ...others.slice(waiting)];
+}
+
+/**
+ * Queue order for a `steer_or_send` message that steers a turn about to start
+ * (accepted, not yet claimed). It goes right behind that turn and the Steers
+ * already waiting for it, in the order they were sent, and ahead of later
+ * Sends. The starting turn claims first and, finding this Steer pending,
+ * hands over to it before its first model request, so the agent reads both
+ * messages together; a leading Steer is claimed together with it.
+ */
+function steerStartingTurnOrder(
+  target: QueuedTurnRow,
+  others: QueuedTurnRow[],
+  machineOwner: string | null,
+): QueuedTurnRow[] {
+  // Messages waiting for a personal machine's owner never start by themselves
+  // (`machine-owner-wait.ts`), so the starting turn is the first other row.
+  const waits = (row: QueuedTurnRow): boolean => {
+    if (machineOwner === null || row.startedAt !== null) return false;
+    const causal =
+      row.initiatingHumanSubjectId?.trim() ||
+      (row.initiatorKind === "subject" ? row.initiatorSubjectId?.trim() : "") ||
+      null;
+    return causal !== machineOwner;
+  };
+  const starting = others.findIndex((row) => !waits(row));
+  let behind = starting < 0 ? others.length : starting + 1;
+  while (behind < others.length) {
+    const row = others[behind]!;
+    const metadata = row.metadata as Record<string, unknown> | null;
+    if (metadata?.delivery !== "steer" || waits(row)) break;
+    behind += 1;
+  }
+  return [...others.slice(0, behind), target, ...others.slice(behind)];
+}
 
 async function normalizeQueuePositions(
   db: SessionActivityDatabase,
@@ -2054,8 +2106,8 @@ export async function steerQueuedTurnInTransaction(
   const deferredUntilCompaction = supersession.deferredUntilCompaction;
   const deferredUntilModelStep = supersession.deferredUntilModelStep;
 
-  // The Steered row keeps its place (see "Steer and queue order").
-  const ordered = rows;
+  const withoutTarget = rows.filter((row) => row.id !== target.id);
+  const ordered = steerQueueOrder(target, withoutTarget, supersession);
   await normalizeQueuePositions(
     db,
     input.workspaceId,
@@ -3014,7 +3066,7 @@ export async function submitHumanPromptInTransaction(
           surface: sessionTurnSurfaceOrNull(editedSourceTurn?.surface) ?? input.surface ?? null,
           billingOrigin: input.billingOrigin ?? null,
           promptRouting: routing,
-          position: existingQueued.length + 1,
+          position: effectiveDelivery === "steer" ? 0 : existingQueued.length + 1,
           prompt: input.text,
           annotations,
           modelContext: effectiveModelContext,
@@ -3298,8 +3350,12 @@ export async function submitHumanPromptInTransaction(
     });
   }
 
-  // Sent and Steered prompts alike join the end (see "Steer and queue order").
-  const ordered = [...existingQueued, turn];
+  const ordered =
+    effectiveDelivery !== "steer"
+      ? [...existingQueued, turn]
+      : steersStartingTurn
+        ? steerStartingTurnOrder(turn, existingQueued, machineOwner)
+        : steerQueueOrder(turn, existingQueued, supersession);
   await normalizeQueuePositions(
     db,
     input.workspaceId,

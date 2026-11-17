@@ -44,7 +44,6 @@ import {
   getBillingBalance,
   getActiveSessionHistoryItems,
   hasPendingSteerAfterContextCompaction,
-  hasPendingSteerForTurn,
   getSession,
   getSessionGoal,
   getSessionSystemUpdateOutboxByDedupeKey,
@@ -5337,7 +5336,7 @@ describe("clean session control plane", () => {
     ).toMatchObject([{ id: missingOrigin.update.id, state: "pending" }]);
 
     const agentSteerFixture = await acceptedOriginFixture();
-    const olderSend = await send(
+    await send(
       agentSteerFixture.grant,
       agentSteerFixture.session.id,
       "Older queued send",
@@ -5379,56 +5378,6 @@ describe("clean session control plane", () => {
       "steer",
       "scripted-model",
     );
-    // The human Steer outranks the Agent Steer but never skips the message
-    // sent before it: that message claims first, with nothing attached (only a
-    // human Steer can carry an Agent Steer), and hands over before its first
-    // model request. The human Steer then claims and carries the Agent Steer.
-    expect(
-      await getSessionQueueSnapshot(
-        client.db,
-        agentSteerFixture.grant.workspaceId!,
-        agentSteerFixture.session.id,
-      ),
-    ).toMatchObject({ pendingInputAttachment: null });
-    const olderClaim = await claimTestSessionWork(
-      client.db,
-      agentSteerFixture.grant.workspaceId!,
-      agentSteerFixture.session.id,
-      `session-${agentSteerFixture.session.id}`,
-    );
-    expect(olderClaim?.id).toBe(olderSend.turn.id);
-    expect(
-      await listSessionSystemUpdatesForTurn(
-        client.db,
-        agentSteerFixture.grant.workspaceId!,
-        agentSteerFixture.session.id,
-        olderSend.turn.id,
-      ),
-    ).toEqual([]);
-    expect(
-      await hasPendingSteerForTurn(client.db, {
-        accountId: agentSteerFixture.grant.accountId,
-        workspaceId: agentSteerFixture.grant.workspaceId!,
-        sessionId: agentSteerFixture.session.id,
-        turnId: olderSend.turn.id,
-      }),
-    ).toBe(true);
-    expect(
-      await applySessionTurnSettlement(client.db, agentSteerFixture.grant.workspaceId!, {
-        sessionId: agentSteerFixture.session.id,
-        turnId: olderClaim!.id,
-        triggerEventId: olderClaim!.triggerEventId,
-        attemptId: olderClaim!.activeAttemptId!,
-        turnStatus: "superseded",
-        sessionStatus: "queued",
-        activeTurnId: null,
-        requirePendingSteer: true,
-        events: [
-          { type: "turn.superseded", payload: { reason: "steer", atModelStep: true } },
-          { type: "session.status.changed", payload: { status: "queued" } },
-        ],
-      }),
-    ).toMatchObject({ action: "settled" });
     expect(
       await getSessionQueueSnapshot(
         client.db,
