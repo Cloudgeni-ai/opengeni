@@ -299,7 +299,7 @@ function PaneAccount(props: {
         >
           {groups.length > 1
             ? groups.map((group) => (
-                <optgroup key={group.label} label={group.label}>
+                <optgroup key={group.accountId} label={group.label}>
                   {group.workspaces.map(option)}
                 </optgroup>
               ))
@@ -537,7 +537,9 @@ void office()
   .then(({ platform }) => {
     // Office for Mac floats its add-in info button over the pane's top-right
     // corner; pane.css keeps the header's buttons clear of it.
-    if (platform) document.documentElement.dataset.officePlatform = platform;
+    const context = office().context;
+    const host = platform ?? context.diagnostics?.platform ?? context.platform;
+    if (host) document.documentElement.dataset.officePlatform = host;
     createRoot(document.getElementById("root")!).render(
       <StrictMode>
         <App />

@@ -2,7 +2,7 @@ import type { AccessContext, Workspace } from "@opengeni/sdk";
 import { t } from "@opengeni/react/app/lib/console-text";
 import { orgLabel, workspacesByOrganization } from "@opengeni/react/organization-model";
 
-export type WorkspaceGroup = { label: string; workspaces: Workspace[] };
+export type WorkspaceGroup = { accountId: string; label: string; workspaces: Workspace[] };
 
 /**
  * The pane's workspace picker, grouped by organization in the console
@@ -15,6 +15,7 @@ export function workspaceGroups(
 ): WorkspaceGroup[] {
   if (access) {
     return workspacesByOrganization(t, access, workspaces).map((group) => ({
+      accountId: group.org.accountId,
       label: group.org.label,
       workspaces: group.workspaces,
     }));
@@ -24,6 +25,7 @@ export function workspaceGroups(
     groups.set(workspace.accountId, [...(groups.get(workspace.accountId) ?? []), workspace]);
   }
   return [...groups].map(([accountId, members]) => ({
+    accountId,
     label: orgLabel(t, accountId, []),
     workspaces: members,
   }));

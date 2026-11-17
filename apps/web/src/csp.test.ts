@@ -182,7 +182,7 @@ describe("console Content-Security-Policy", () => {
       const script = directives(pane.headers.get("content-security-policy")!).get("script-src");
       for (const source of OFFICE_RUN_SCRIPT_SOURCES) expect(script).toContain(source);
     }
-    for (const path of ["/", "/sign-in", "/office/auth-callback.html"]) {
+    for (const path of ["/", "/sign-in", "/office", "/office/auth-callback.html"]) {
       const page = await handler(new Request(`https://app.opengeni.ai${path}`));
       expect(page.headers.get("content-type")).toContain("text/html");
       const script = directives(page.headers.get("content-security-policy")!).get("script-src");
