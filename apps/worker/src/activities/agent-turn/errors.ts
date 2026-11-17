@@ -620,6 +620,8 @@ export type McpConnectorAccountNeedingReconnect = {
 /** Connectors listed by name in the notice; the rest are counted. */
 const UNAVAILABLE_MCP_NOTICE_MAX_LISTED = 8;
 const UNAVAILABLE_MCP_NAME_MAX_CHARS = 80;
+/** Connected connectors named beside the unavailable ones; the rest are counted. */
+const CONNECTED_MCP_NOTICE_MAX_LISTED = 16;
 
 /**
  * The plain reason, and what the person can do. Shared by the turn notice and
@@ -638,14 +640,20 @@ export function unavailableMcpConnectorReasonText(reason: UnavailableMcpConnecto
   }
 }
 
-function displayConnector(connector: UnavailableMcpConnector): string {
+function cleanConnectorName(name: string | undefined): string {
   // Workspace-configured text: one bounded line, never instructions.
-  const name = (connector.name ?? "")
-    // oxlint-disable-next-line no-control-regex -- strip control characters
-    .replace(/[\u0000-\u001f\u007f\u2028\u2029]+/gu, " ")
-    .replace(/\s+/gu, " ")
-    .trim()
-    .slice(0, UNAVAILABLE_MCP_NAME_MAX_CHARS);
+  return (
+    (name ?? "")
+      // oxlint-disable-next-line no-control-regex -- strip control characters
+      .replace(/[\u0000-\u001f\u007f\u2028\u2029]+/gu, " ")
+      .replace(/\s+/gu, " ")
+      .trim()
+      .slice(0, UNAVAILABLE_MCP_NAME_MAX_CHARS)
+  );
+}
+
+function displayConnector(connector: UnavailableMcpConnector): string {
+  const name = cleanConnectorName(connector.name);
   return name && name !== connector.id
     ? `${JSON.stringify(name)} (${connector.id})`
     : JSON.stringify(connector.id);
@@ -667,10 +675,37 @@ export function unavailableMcpOperationalContext(input: {
   omittedCount?: number;
   /** Accounts of this chat's connectors that stopped working and need reconnecting. */
   needsReconnect?: readonly McpConnectorAccountNeedingReconnect[];
+  /**
+   * Names of this chat's connectors that this turn does have tools for. Named
+   * only beside an unavailable or broken one, so a missing connector is never
+   * the only connector the model hears about: their tools may be deferred
+   * behind tool search, and a similarly named unavailable connector must not
+   * read as the one the person asked for.
+   */
+  connected?: readonly string[];
 }): string | undefined {
   const unavailable = unavailableMcpConnectorsNotice(input);
   const reconnect = mcpAccountsNeedingReconnectNotice(input.needsReconnect ?? []);
-  return unavailable && reconnect ? `${unavailable}\n${reconnect}` : (unavailable ?? reconnect);
+  const notice =
+    unavailable && reconnect ? `${unavailable}\n${reconnect}` : (unavailable ?? reconnect);
+  if (!notice) return undefined;
+  const connected = connectedMcpConnectorsLine(input.connected ?? []);
+  return connected ? `${notice}\n${connected}` : notice;
+}
+
+/** One line naming the connectors this turn can use, deduplicated and sorted. */
+function connectedMcpConnectorsLine(names: readonly string[]): string | undefined {
+  const unique = [...new Set(names.map(cleanConnectorName).filter(Boolean))].sort((left, right) =>
+    left < right ? -1 : left > right ? 1 : 0,
+  );
+  if (unique.length === 0) return undefined;
+  const listed = unique.slice(0, CONNECTED_MCP_NOTICE_MAX_LISTED);
+  const more = unique.length - listed.length;
+  return `Connected this turn, with tools available (tool search finds any not listed): ${listed
+    .map((name) => JSON.stringify(name))
+    .join(
+      ", ",
+    )}${more > 0 ? ` and ${more} more` : ""}. A connector the person names may be one of these rather than a similarly named one above.`;
 }
 
 /**

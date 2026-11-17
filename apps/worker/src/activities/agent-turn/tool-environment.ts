@@ -389,6 +389,34 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
 const BUILT_IN_SESSION_MCP_SERVER_IDS = new Set(["opengeni", "files", "docs"]);
 
 /**
+ * Names of the connectors this turn has tools for: selected MCP connectors
+ * that were not left out, and the API integrations whose accounts this turn
+ * routes. The availability notice names them beside the connectors it runs
+ * without, so a connector whose tools wait behind tool search is not taken
+ * for an unavailable one with a similar name.
+ */
+export function connectedMcpConnectorNames(input: {
+  servers: readonly { id: string; name?: string | null | undefined }[];
+  toolIds: readonly string[];
+  unavailableIds: readonly string[];
+  apiIntegrations: readonly { name: string }[];
+}): string[] {
+  const selected = new Set(input.toolIds);
+  const unavailable = new Set(input.unavailableIds);
+  return [
+    ...input.servers
+      .filter(
+        (server) =>
+          selected.has(server.id) &&
+          !unavailable.has(server.id) &&
+          !BUILT_IN_SESSION_MCP_SERVER_IDS.has(server.id),
+      )
+      .map((server) => server.name ?? server.id),
+    ...input.apiIntegrations.map((integration) => integration.name),
+  ];
+}
+
+/**
  * Configured connectors the tool policy leaves out of this turn because they
  * are not in its registry: a selected connector that is gone (`droppedIds`),
  * and a workspace default (or a scheduled run's frozen connector) that this
@@ -549,10 +577,21 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
             return [];
           }),
         );
+  const apiIntegrations = expandApiIntegrationAccountRoutes({
+    integrations: installedApiIntegrations,
+    bindings: turn.mcpAccountBindings,
+    tools: turnTools,
+  });
   const mcpAvailabilityNote = unavailableMcpOperationalContext({
     connectors: unavailableMcpConnectors,
     omittedCount: deps.unavailableMcpConnectors.omittedCount,
     needsReconnect,
+    connected: connectedMcpConnectorNames({
+      servers: canonicalRunSettings.mcpServers,
+      toolIds: canonicalTurnTools.map((tool) => tool.id),
+      unavailableIds: unavailableMcpConnectors.map((connector) => connector.id),
+      apiIntegrations,
+    }),
   });
   // Tool discovery reports the same connectors beside runtime failures.
   const preparationUnavailableMcpServers = new Map(
@@ -635,11 +674,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   };
   const apiIntegrationMcpServers = buildApiIntegrationMcpServers({
     settings: runSettings,
-    integrations: expandApiIntegrationAccountRoutes({
-      integrations: installedApiIntegrations,
-      bindings: turn.mcpAccountBindings,
-      tools: turnTools,
-    }),
+    integrations: apiIntegrations,
     authority: {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
