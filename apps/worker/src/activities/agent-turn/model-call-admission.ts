@@ -43,6 +43,18 @@ export function responseSettlementOverlaps(event: { type: string }): boolean {
   );
 }
 
+/**
+ * Whether an event needs only the previous response's usage commit, not its
+ * whole settlement: a result of one of the response's own tools, which can
+ * only have run after that commit. It is recorded while the response's
+ * ledger writes finish; the next model request still waits for them.
+ */
+export function followsResponseUsageCommit(event: { type: string }): boolean {
+  return (
+    event.type === "run_item_stream_event" && (event as { name?: unknown }).name === "tool_output"
+  );
+}
+
 // The run-item event the SDK streams for each kind of response item.
 const RESPONSE_ITEM_EVENT_NAME_BY_TYPE: Record<string, string> = {
   message_output_item: "message_output_created",
