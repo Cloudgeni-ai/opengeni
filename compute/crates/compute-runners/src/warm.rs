@@ -3,7 +3,8 @@
 //!
 //! A refresh starts a sandbox from the base template, clones the
 //! repository at the branch's head where `actions/checkout` will look for
-//! it, runs the prepare command there as the runner's user, and saves the
+//! it, with as much history as the pool's workflows check out (their
+//! `fetch-depth`), runs the prepare command there as the runner's user, and saves the
 //! sandbox as a template named `<pool>-<seconds>-<commit>`, where `<pool>`
 //! is the pool's key ([`crate::pool::key`]): its name and scale set. New
 //! runners start from the newest; the pool's older templates are deleted
@@ -72,6 +73,11 @@ pub struct Settings {
     pub user: String,
     /// The runners' work folder: the clone goes to `<work>/<repo>/<repo>`.
     pub work: String,
+    /// How many commits of history the clone keeps, as the workflows'
+    /// `actions/checkout` `fetch-depth`: 0 is every branch and tag with
+    /// all their history, which a checkout of depth 0 then only brings up
+    /// to date instead of fetching all of it again.
+    pub fetch_depth: u32,
     /// GitHub's web address, which the repository is cloned from.
     pub web: String,
     /// At most one refresh in this long.
@@ -125,8 +131,19 @@ fn now_s() -> u64 {
         .map_or(0, |since| since.as_secs())
 }
 
-/// The shell script that clones `repo` at `commit` into `dir`.
-fn clone_script(web: &str, repo: &str, commit: &str, dir: &str) -> String {
+/// The shell script that clones `repo` at `commit` into `dir`, keeping
+/// `depth` commits of history, or with 0 every branch and tag in full
+/// under the refs `actions/checkout` fetches them to.
+fn clone_script(web: &str, repo: &str, commit: &str, dir: &str, depth: u32) -> String {
+    let fetch = if depth == 0 {
+        format!(
+            "git fetch -q --prune --no-recurse-submodules origin \
+             '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'\n\
+             git cat-file -e '{commit}^{{commit}}' 2>/dev/null || git fetch -q --no-tags origin {commit}\n"
+        )
+    } else {
+        format!("git fetch -q --no-tags --depth={depth} origin {commit}\n")
+    };
     format!(
         "set -euo pipefail\n\
          rm -rf '{dir}'\n\
@@ -134,7 +151,7 @@ fn clone_script(web: &str, repo: &str, commit: &str, dir: &str) -> String {
          cd '{dir}'\n\
          git init -q\n\
          git remote add origin '{web}/{repo}'\n\
-         git fetch -q --no-tags --depth=1 origin {commit}\n\
+         {fetch}\
          git checkout -q --detach {commit}\n"
     )
 }
@@ -428,7 +445,7 @@ async fn prepare(
         .run(
             builder,
             &settings.user,
-            &clone_script(web, &settings.repo, commit, &dir),
+            &clone_script(web, &settings.repo, commit, &dir, settings.fetch_depth),
             &secret_env,
             settings.within,
         )
@@ -540,10 +557,37 @@ mod tests {
             "acme/web",
             &"a".repeat(40),
             "/home/runner/_work/web/web",
+            1,
         );
         assert!(script.contains("git remote add origin 'https://github.com/acme/web'"));
         assert!(script.contains(&format!("--depth=1 origin {}", "a".repeat(40))));
         assert!(!script.to_lowercase().contains("token"));
         assert!(!script.contains("config "));
+    }
+
+    #[test]
+    fn a_clone_of_depth_0_keeps_every_branch_and_tag_where_checkout_fetches_them() {
+        let commit = "a".repeat(40);
+        let script = clone_script(
+            "https://github.com",
+            "acme/web",
+            &commit,
+            "/home/runner/_work/web/web",
+            0,
+        );
+        assert!(!script.contains("--depth"));
+        assert!(script.contains(
+            "fetch -q --prune --no-recurse-submodules origin \
+             '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'"
+        ));
+        assert!(script.contains(&format!("git cat-file -e '{commit}^{{commit}}'")));
+        assert!(script.ends_with(&format!("git checkout -q --detach {commit}\n")));
+        assert!(!script.to_lowercase().contains("token"));
+    }
+
+    #[test]
+    fn a_clone_keeps_the_depth_it_is_given() {
+        let script = clone_script("https://github.com", "acme/web", &"b".repeat(40), "/w", 50);
+        assert!(script.contains(&format!("--no-tags --depth=50 origin {}", "b".repeat(40))));
     }
 }

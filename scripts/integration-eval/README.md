@@ -63,6 +63,13 @@ export OPENGENI_EVAL_WORKSPACE_API_KEY=...
 export VERIFY_LINEAR_API_KEY=...
 ```
 
+Production testing runs in the shared "Opengeni Integration Tests" org:
+"All integrations" (`16b48a95-…`, every integration connected with test
+accounts) and "Nothing connected" (`7593433e-…`, for the not_connected and
+Connect-card rows). When the two workspace variables are unset and the
+caller can open these workspaces, the harness uses them; set the variables to
+use other workspaces.
+
 ## Fixtures
 
 Everything is fictional: the company Halcyon Labs, customers Bluefin

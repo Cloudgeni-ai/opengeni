@@ -2265,6 +2265,113 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
     }
   }, 60_000);
 
+  test("a connected service of the same kind comes before an unconnected alternative unless the query names it", async () => {
+    if (!shared) throw new Error("Real PostgreSQL fixture required");
+    const services = [
+      { name: "Quillmail", serverId: "quillmail-order-test" },
+      { name: "Zephmail", serverId: "zephmail-order-test" },
+    ];
+    for (const { name, serverId } of services) {
+      const capabilityId = `mcp:${serverId}`;
+      await upsertCapabilityCatalogItem(client.db, {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        id: capabilityId,
+        kind: "mcp",
+        source: "manual",
+        name,
+        category: "mail-order-test",
+        description: "Read and send email in the person's mailbox.",
+        endpointUrl: `https://${serverId}.example.com/mcp`,
+        authModel: "credential_ref",
+        metadata: { mcpServerId: serverId },
+      });
+      await enableCapabilityInstallation(client.db, {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        capabilityId,
+        kind: "mcp",
+        metadata: { mcpConnectivity: { status: "ok" } },
+        config: {
+          connectionRef: {
+            providerDomain: `${serverId}.example.com`,
+            kind: "oauth2",
+            subjectScope: "subject",
+          },
+        },
+      });
+    }
+    // Quillmail has no account for this turn; Zephmail's tools are loaded.
+    const attempt = await seedAttempt(true, undefined, undefined, {
+      mode: "workspace_default",
+      inheritedFromSessionId: null,
+    });
+    await persistAttemptToolCatalog(
+      client.db,
+      createAttemptToolEnvironment({
+        scope: { ...attempt, accountId: workspace.accountId, workspaceId: workspace.workspaceId },
+        generation: 1,
+        definitions: [
+          {
+            identity: { serverId: "zephmail-order-test", toolName: "send_email" },
+            modelName: "zephmail-order-test__send_email",
+            description: "Send an email",
+            inputSchema: { type: "object" },
+            source: "mcp",
+            approval: "none",
+            execute: async () => ({ content: [] }),
+          },
+        ],
+      }).catalog,
+    );
+    const server = buildOpenGeniMcpServer(
+      { settings: testSettings(), db: client.db, bus: new MemoryEventBus() } as ApiRouteDeps,
+      {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        subjectId: "worker:first-party-mcp",
+        permissions: ["workspace:read"],
+        principalKind: "agent_attempt",
+        metadata: {
+          ...attempt,
+          firstPartyMcpTools: ["capability_catalog_search", "capability_authorization_request"],
+        },
+      },
+    );
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const mcp = new Client({ name: "connected-first-order-test", version: "1" });
+    await server.connect(st);
+    await mcp.connect(ct);
+    const search = async (query: string) => {
+      const result = await mcp.callTool({
+        name: "capability_catalog_search",
+        arguments: { query },
+      });
+      expect(result.isError).not.toBe(true);
+      return (
+        mcpJson(result) as {
+          matches: Array<{ name: string; setup: { status: string } }>;
+        }
+      ).matches
+        .filter((match) => match.name === "Quillmail" || match.name === "Zephmail")
+        .map((match) => [match.name, match.setup.status]);
+    };
+    try {
+      // Both match equally; by name Quillmail would come first.
+      expect(await search("send email from my mailbox")).toEqual([
+        ["Zephmail", "ready"],
+        ["Quillmail", "authorization_required"],
+      ]);
+      // Asking for Quillmail by name still finds it first.
+      expect((await search("send email with Quillmail"))[0]).toEqual([
+        "Quillmail",
+        "authorization_required",
+      ]);
+    } finally {
+      await Promise.all([mcp.close(), server.close()]);
+    }
+  }, 60_000);
+
   test("names an account that stopped working and posts a card that reconnects that same account", async () => {
     if (!shared) throw new Error("Real PostgreSQL fixture required");
     const capabilityId = "mcp:mail-reconnect-test";

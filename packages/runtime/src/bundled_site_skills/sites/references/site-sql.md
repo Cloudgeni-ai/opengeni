@@ -86,7 +86,8 @@ NULL, CHECK and foreign-key failures),
 `site_sql_unsupported` (a host or local preview without Site SQL; test the
 published Site). Results stop at the query's row cap (1,000 rows and 1 MB by
 default) with `truncated: true`; page with `LIMIT :limit OFFSET :offset` or a
-keyset.
+keyset. Tables that grow will pass any fixed cap, so treat `truncated: true` as
+more rows to page or narrow, not as a failure of the whole page.
 
 Owner tools: `site_sql_inspect` (tables, migrations, pending migrations,
 queries, usage, limits), `site_sql_query` (one read-only statement),

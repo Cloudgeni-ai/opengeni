@@ -87,6 +87,19 @@ describe("Sites skill single-file path", () => {
     expect(web).toContain("`public_sign_in_required`");
     expect(web).toContain("not a broken link");
   });
+
+  test("tells Sites to page growing data instead of failing at a fixed size", () => {
+    const normalize = (text: string) => text.replace(/\s+/gu, " ");
+    expect(normalize(reference("site-data.md"))).toContain(
+      "Never fail the whole page once a collection passes a fixed number of records",
+    );
+    expect(normalize(reference("site-sql.md"))).toContain(
+      "treat `truncated: true` as more rows to page or narrow, not as a failure of the whole page",
+    );
+    expect(normalize(reference("build-and-preview.md"))).toContain(
+      "never fail the whole page once a result passes a fixed size",
+    );
+  });
 });
 
 describe("Sites skill host-bridge rule", () => {

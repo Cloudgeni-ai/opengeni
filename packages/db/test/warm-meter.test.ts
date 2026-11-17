@@ -68,14 +68,14 @@ async function workspaceOf(accountId: string): Promise<{ accountId: string; work
   return { accountId, workspaceId: w!.id };
 }
 
-// Migration 1475 withholds the runtime grant for one release; grant it here so
-// the organization-wide counts can be exercised.
 // The restricted tier applies only while promotion enforcement is on.
 async function setPromotionEnforcement(enabled: boolean): Promise<void> {
   await admin`insert into promotion_enforcement (singleton, enabled) values (true, ${enabled})
     on conflict (singleton) do update set enabled = excluded.enabled`;
 }
 
+// Migration 1475 created the definer withheld and 1479 grants it; granting it
+// again here is harmless and keeps these tests independent of that order.
 async function grantOrganizationCounts(): Promise<void> {
   await admin.unsafe(
     "grant execute on function opengeni_private.organization_warm_sandbox_counts_v1(uuid, text, uuid) to opengeni_app",

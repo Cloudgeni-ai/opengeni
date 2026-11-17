@@ -1,5 +1,26 @@
 # @opengeni/artifact-tool
 
+## 6.26.0
+
+### Patch Changes
+
+- Updated dependencies [6d7ea1e]
+- Updated dependencies [8fae328]
+  - @opengeni/contracts@6.26.0
+
+## 6.25.0
+
+### Patch Changes
+
+- e126cb5: Deleting a slide that has objects is now one atomic edit. The presentation kernel rejected a batch that deleted a slide's objects and then the slide with "unknown presentation slide", so the editor saved two separate edits. The kernel now applies such a batch, and the same for layouts and masters deleted together with their objects; a rejected batch also restores the deleted slide's hit-testing index. The editor deletes a slide and its objects in a single batch. Presentations edited this way need this kernel or newer, so don't roll the API back below this release.
+- Updated dependencies [e126cb5]
+- Updated dependencies [61abc98]
+- Updated dependencies [81570f9]
+- Updated dependencies [f99f940]
+- Updated dependencies [f99f940]
+- Updated dependencies [bfd2970]
+  - @opengeni/contracts@6.25.0
+
 ## 6.24.1
 
 ### Patch Changes

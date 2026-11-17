@@ -166,6 +166,7 @@ import { createModelCheckpointMemoryCollector } from "../../model-checkpoint-mem
 import {
   createModelCallAdmission,
   createResponseItemBundle,
+  followsResponseUsageCommit,
   responseSettlementOverlaps,
   settlesAlongsideResponseItems,
   type ResponseItemBundle,
@@ -1630,10 +1631,17 @@ export async function runTurnStreamAttempt(
     // A response's settlement runs while the consumer reads that response's
     // own items (its tool calls above all): it commits the response's usage,
     // history and items in one transaction, releases the response's tools,
-    // then writes the usage ledger alongside them. Every other event, the
-    // stream end and failure handling wait for the settlement first; the
-    // producer's next model request already waits for it through admission.
-    type ResponseSettlement = { settled: Promise<void>; failed: Promise<never> };
+    // then writes the usage ledger alongside them. A result of those tools
+    // waits only for that commit, so it is recorded while the ledger writes
+    // finish. Every other event, the stream end and failure handling wait
+    // for the whole settlement; the producer's next model request already
+    // waits for it through admission.
+    type ResponseSettlement = {
+      settled: Promise<void>;
+      failed: Promise<never>;
+      /** The response's usage and items are durable (or the settlement ended). */
+      committed: Promise<void>;
+    };
     let responseSettlement: ResponseSettlement | null = null;
     const awaitResponseSettlement = async () => {
       const inFlight = responseSettlement;
@@ -1666,7 +1674,8 @@ export async function runTurnStreamAttempt(
             : null;
         if (!responseItems) closeResponseItems();
         if (responseSettlement && !responseSettlementOverlaps(next.value)) {
-          await awaitResponseSettlement();
+          if (followsResponseUsageCommit(next.value)) await responseSettlement.committed;
+          else await awaitResponseSettlement();
         }
         if (next.value.type === "raw_model_stream_event")
           openingToolLoadInFlight = isOpeningToolLoadResponse(next.value.data);
@@ -1703,6 +1712,10 @@ export async function runTurnStreamAttempt(
         const collectsResponseItems =
           settlesAlongsideResponseItems(next.value) && responseLatencyFailure === undefined;
         let claimedResponseItems = null as CollectedResponseItems | null;
+        let markUsageCommitted = () => {};
+        const usageCommitted = new Promise<void>((resolve) => {
+          markUsageCommitted = resolve;
+        });
         const responseProcessing = processModelResponseTerminalEvent({
           creditPolicyRevision,
           event: next.value,
@@ -1739,6 +1752,7 @@ export async function runTurnStreamAttempt(
             fallbackProviderRequestLifecycleStartedAt = null;
             attempt.providerRecoveryCount = 0;
           },
+          onUsageCommitted: () => markUsageCommitted(),
           ...(responseLatencyFailure === undefined
             ? {
                 checkpoint: (persist) =>
@@ -1806,14 +1820,23 @@ export async function runTurnStreamAttempt(
         });
         const settledEvent = next.value;
         const settledStream = eventing.stream;
+        // Release once the response's usage, ledger and completion audit are
+        // settled. The producer checks fresh admission before its next
+        // request; a final response keeps the revision it ran under. The
+        // response's history checkpoint finishes after the release: the next
+        // request's dispatch checkpoint makes the history durable first.
+        let admissionReleased = false;
+        const releaseAdmission = () => {
+          if (admissionReleased) return;
+          admissionReleased = true;
+          modelCallAdmission.settle(settledEvent);
+        };
         const settleResponse = async () => {
           const responseResult = await responseProcessing;
           if (responseResult.status === "processed") {
             await completeResponseSettlement(responseResult);
           }
-          // Release after settlement. The producer checks fresh admission before
-          // its next request; a final response keeps the revision it ran under.
-          modelCallAdmission.settle(settledEvent);
+          releaseAdmission();
         };
         const completeResponseSettlement = async (responseResult: { usageReported: boolean }) => {
           const responseUsageSettledAt = performance.now();
@@ -1846,14 +1869,27 @@ export async function runTurnStreamAttempt(
           if (Array.isArray(rawStreamHistory)) {
             // The completed image item is normally retained from its own
             // run-item event above. Scan once at the terminal response as
-            // a compatibility backstop before reconciliation can persist
-            // provider bytes. Never rescan history for every token delta.
+            // a compatibility backstop. Every history checkpoint (including
+            // one a tool result may reach before this scan) retains images
+            // itself before persisting, so provider bytes are never stored.
+            // Never rescan history for every token delta.
             await media.retainNativeGeneratedImagesFromHistory(
               rawStreamHistory as Array<Record<string, unknown>>,
             );
           }
           streamSawPerResponseUsage ||= responseResult.usageReported;
-          await historySink.reconcileConversationTruth();
+          releaseAdmission();
+          // The next model request may already be in flight: this checkpoint
+          // must never fail the settlement, which would abort that request
+          // before its usage is recorded. It is best-effort; the next
+          // request's dispatch checkpoint and every turn-ending checkpoint
+          // require durable history and retry it.
+          await historySink.reconcileConversationTruth().catch((error: unknown) => {
+            console.error(
+              "response history checkpoint failed; the next durable checkpoint retries it",
+              safeErrorDiagnostic(error),
+            );
+          });
           const responseSettledAt = performance.now();
           recordModelStepPhase(observability, {
             provider: streamProvider,
@@ -1878,6 +1914,7 @@ export async function runTurnStreamAttempt(
           const settled = settleResponse();
           const inFlight: ResponseSettlement = {
             settled,
+            committed: Promise.race([usageCommitted, settled]),
             failed: settled.then(
               () => {
                 if (responseSettlement === inFlight) responseSettlement = null;
@@ -1891,6 +1928,7 @@ export async function runTurnStreamAttempt(
             ),
           };
           void inFlight.failed.catch(() => undefined);
+          void inFlight.committed.catch(() => undefined);
           responseSettlement = inFlight;
         } else {
           await settleResponse();

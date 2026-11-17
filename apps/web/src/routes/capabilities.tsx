@@ -922,11 +922,13 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
         description:
           reason === "provider_denied"
             ? "The Fiken authorization was declined."
-            : reason === "no_api_company"
-              ? "The Fiken account has API access to no company. Order API module access in Fiken first."
-              : // An expired or reused link is not a reason to switch to a token.
-                (oauthCallbackReasonMessage(reason) ??
-                "Try again, or connect with a personal API token instead."),
+            : reason === "provider_error"
+              ? "Fiken refused the connection. Your Fiken user may not be approved for this app yet."
+              : reason === "no_api_company"
+                ? "The Fiken account has API access to no company. Order API module access in Fiken first."
+                : // An expired or reused link is not a reason to switch to a token.
+                  (oauthCallbackReasonMessage(reason) ??
+                  "Try again, or connect with a personal API token instead."),
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

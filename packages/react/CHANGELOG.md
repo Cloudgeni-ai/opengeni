@@ -1,5 +1,47 @@
 # @opengeni/react
 
+## 6.26.0
+
+### Patch Changes
+
+- 6d7ea1e: A context checkpoint that failed before any provider answer, including one refused because the sandbox moved to another machine just before it was sent, now retries the same turn instead of failing it. When a checkpoint does fail for good, a goal's continuation reports `blocked` with the new reason `compaction_failed`, and the goal pill says a message or Compact continues it, rather than claiming the goal will continue automatically.
+- Updated dependencies [6d7ea1e]
+- Updated dependencies [8fae328]
+- Updated dependencies [c8efcb0]
+- Updated dependencies [20e4937]
+  - @opengeni/contracts@6.26.0
+  - @opengeni/sdk@6.26.0
+  - @opengeni/connect@6.26.0
+
+## 6.25.0
+
+### Minor Changes
+
+- 81570f9: Several connections to the same tool server can now be told apart by people and agents. A connection has an optional `label`, a name its owner sets when connecting (`label` on create, an optional Name field in the key form and Connect's credential step) and changes or clears later (`PATCH .../connections/{id}` with `{ "label": … }`, or Rename on the connector page). Labels follow one rule everywhere: the provider's verified identity, else the person's name, else `<domain> account`; when two accounts with the same scope would still read the same, agents and account lists add when each was connected (then the time, then a short ID). A rename is display only: it changes neither the connection's version nor its authority, and reaches agents from the next turn.
+
+### Patch Changes
+
+- e126cb5: Documents, spreadsheets and presentations can now be deleted from the Artifacts list. Their ⋯ menu has **Delete…**, which asks first. Deleting archives the artifact: it leaves the Artifacts list and the chat's artifact panel and no longer opens. The new `POST /v1/workspaces/:workspaceId/editable-artifacts/:artifactId/archive` route and `client.archiveEditableArtifact` do the same and need `artifacts:publish`.
+- f99f940: Connecting an integration no longer gets stuck on a sign-in client the provider has forgotten. Opengeni reuses the OAuth client it registered with a provider such as Supabase, and when that provider has since deleted it, Connect ended on the provider's "Unrecognized client_id" page every time. Opengeni now checks that the provider still knows the client before reusing it, and registers a new one when the provider says it doesn't.
+
+  A connection this deployment can't connect, because the provider only accepts apps it has approved (Dropbox, for one) and no client is registered with it here, now shows up when you search Capabilities for it. It's marked Unavailable and its page says why, instead of the search saying nothing matches. Other listings of the same provider, such as a server a plugin brings, are marked the same way and no longer offer a Connect that can't finish, and a provider that refuses to let apps register now gets a plain explanation instead of "dynamic client registration failed with HTTP 403".
+
+- e126cb5: Deleting a slide that has objects is now one atomic edit. The presentation kernel rejected a batch that deleted a slide's objects and then the slide with "unknown presentation slide", so the editor saved two separate edits. The kernel now applies such a batch, and the same for layouts and masters deleted together with their objects; a rejected batch also restores the deleted slide's hit-testing index. The editor deletes a slide and its objects in a single batch. Presentations edited this way need this kernel or newer, so don't roll the API back below this release.
+- f99f940: Sentry and Apollo connections now show the signed-in account (email or name, plus the Sentry organization when there is only one) instead of a generic "Sentry account" or "Apollo.io account", and you can connect more than one account of each. Stripe connections are recognised again with Stripe's current account answer and are labelled with the account's email and business name when it has them. When an Atlassian tool needs a site and several are available, the message the agent gets now lists each site's URL next to its name and cloud ID.
+- bfd2970: Boxes kept warm only by open session pages are now also bounded after admission. A box a turn, process or readiness hold kept warm becomes viewer-only when that holder leaves, and a viewer-only hold had no end. The sandbox reaper now drains a warm box whose every holder is a viewer and whose sessions have no open work after 30 minutes without use (`OPENGENI_SANDBOX_VIEWER_IDLE_DRAIN_MS`, `0` disables): the server measures use from viewer attaches and turns, and the web client extends it by reporting on each attach and heartbeat how long ago the person last used the page (`lastInteractionAgeMs`), so an active person with an open tab keeps their box. Only a person's own signed-in session can report interaction; the API ignores it from API keys (including personal ones) and delegated or service callers, so their viewers are bounded by server-observed activity. For one more idle window after an idle drain, a re-attach without newer interaction or session activity is refused, so an unattended page cannot keep a box warm; the person's next interaction re-attaches and the box resumes from its saved workspace. The reaper also drains the least recently active viewer-only boxes over `OPENGENI_SANDBOX_MAX_VIEWER_ONLY_BOXES_PER_WORKSPACE` or the plan tier's `viewerOnlyBoxesPerOrganization`, taking only boxes nobody used for five minutes. Drains are logged with their reason and counted in `opengeni_sandbox_viewer_only_drains_total{reason}`.
+
+  Organizations a host provisioned (the organization's own external source is set and is not a signup one; a workspace's external source never counts, since members can set it) resolve to a new `embedded` plan tier, unbounded by default and configurable in `OPENGENI_SANDBOX_PLAN_LIMITS_JSON`. `embedded` and `enterprise` organizations are also outside the per-workspace viewer-only limit and the reaper's drains; operators put other organizations that must not be bounded on `enterprise`. The `restricted` tier now applies only while promotion enforcement is on. A new `new` tier covers Free self-serve organizations in their first three days (`organizationsYoungerThanMs` in the tier; 1 viewer-only box per organization and per member, 3 running boxes), and tiers apply whatever credential the caller uses. Joining a box that a live process or Browser/ComputerSession keeps warm no longer counts as one more viewer-only box, and a 429 for a computer limit gets its own message in the web client instead of the viewer-limit one. Viewer attach refusals (429) now carry a machine-readable `details.viewerRefusal` (`viewer_idle`, `computer_limit`, `warm_allowance`), which the web client uses instead of the message.
+
+- Updated dependencies [e126cb5]
+- Updated dependencies [61abc98]
+- Updated dependencies [81570f9]
+- Updated dependencies [f99f940]
+- Updated dependencies [f99f940]
+- Updated dependencies [bfd2970]
+  - @opengeni/contracts@6.25.0
+  - @opengeni/sdk@6.25.0
+  - @opengeni/connect@6.25.0
+
 ## 6.24.1
 
 ### Patch Changes

@@ -47,6 +47,7 @@ import {
   persistProviderOAuthConnection,
   getConnectAttempt,
   finishConnectOperation,
+  isConnectionAccountIdentityConflict,
 } from "@opengeni/db";
 import { createSignedState, readSignedState } from "@opengeni/github";
 import {
@@ -544,8 +545,13 @@ export async function completeApiIntegrationProviderOAuth(
           }
         : {}),
     };
+    // Another live row already holds this account: a conflict, not a crash.
     const persist = (database: import("@opengeni/db").Database) =>
-      persistProviderOAuthConnection(database, persistenceInput);
+      persistProviderOAuthConnection(database, persistenceInput).catch((error: unknown) => {
+        if (isConnectionAccountIdentityConflict(error))
+          throw new ProviderOAuthCallbackError("connection_conflict");
+        throw error;
+      });
     if (connectOperation) {
       // Null (unreadable in time) saves the account and finishes it later.
       const owner = state;
@@ -649,7 +655,11 @@ export async function completeApiIntegrationProviderOAuth(
     const reason = providerOAuthFailureReason(error);
     // An unreadable state carries no return path; an authentic but aged one
     // still names its workspace and is reported as expired.
-    const failure = state ? null : oauthStateFailureReturn(deps.settings, input.state);
+    const failure = state
+      ? null
+      : oauthStateFailureReturn(deps.settings, input.state, {
+          providerError: input.error,
+        });
     return {
       redirectTo: providerOAuthReturnUrl(
         returnBaseUrl,

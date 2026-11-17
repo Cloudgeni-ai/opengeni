@@ -4746,6 +4746,8 @@ export const englishMessages = {
   "sessionChrome.commands_one": "{count} command",
   "sessionChrome.commands_other": "{count} commands",
   "sessionChrome.commands2": "Commands",
+  "sessionChrome.compactionFailedGoalHeld":
+    "Stopped because the conversation history could not be compacted. Send a message or run Compact to continue.",
   "sessionChrome.continuesAtClocktime": "Continues at {clockTime}.",
   "sessionChrome.createdElapsedAgo": "· Created {elapsed} ago",
   "sessionChrome.currentWorkStopping": "Current work stopping",

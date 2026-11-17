@@ -1,5 +1,71 @@
 # @opengeni/runtime
 
+## 6.26.0
+
+### Patch Changes
+
+- 8fae328: Connected tools that can do a task now win over a Connect card for an unconnected alternative. Tool search no longer shows an integration's Connect card by itself when the chat already has a connected account of the same kind (Outlook Mail beside an unconnected Gmail); the search result still names the integration, and the agent can show its card when the person asked for it. In the agent's integration catalog search, a service the person can already use in the chat comes before a same-category service they would still have to connect, unless the request names the unconnected service. The per-turn connector availability notice now says that a configured but unavailable connector is needed only when the person named it or no loaded tool can do the task.
+- 8fae328: When a chat can use several accounts of one connector or integration, the person's own account is now the default for writes. When several accounts' copies of a tool match a search equally, the default's copy loads, every account's tools say which account is the default and why, and the agent asks only when no account is a clear default (several of the person's own, or only shared ones).
+- c8efcb0: Tools of a connector or integration with only one connected account now say which account they use (for example "Account: Outlook Calendar — iris@example.com · Yours. Use only this account."), as tools of a connector with several accounts already did. The agent no longer has to guess whose account a connector is signed in as.
+- 33dd6da: Sites guidance: page or cap data that grows over time (Site Data, Site SQL and workspace tool results) instead of failing the whole page once it passes a fixed size.
+- c8efcb0: A tool call whose arguments do not match the tool's input schema no longer asks anyone to approve it. Connector and other approval-gated tool calls are now checked against the schema before the approval check, so the model gets the usual "not called, correct the arguments" error at once instead of a person getting an Ask card for a call that could never run. When string-encoded arguments are repaired, the approval card and its action fingerprint now show the repaired arguments, which are the ones the call runs with. The tool gateway gains `admitModelArguments`, which runs the same argument check as a model call without calling the tool.
+- Updated dependencies [6d7ea1e]
+- Updated dependencies [8fae328]
+- Updated dependencies [c8efcb0]
+- Updated dependencies [20e4937]
+- Updated dependencies [c8efcb0]
+- Updated dependencies [e1199c0]
+  - @opengeni/contracts@6.26.0
+  - @opengeni/sdk@6.26.0
+  - @opengeni/tool-gateway@6.26.0
+  - @opengeni/codemode@6.26.0
+  - @opengeni/xai-subscription@6.26.0
+  - @opengeni/capabilities@6.26.0
+  - @opengeni/codex@6.26.0
+  - @opengeni/config@6.26.0
+  - @opengeni/decisions@6.26.0
+  - @opengeni/interaction@6.26.0
+  - @opengeni/observability@6.26.0
+  - @opengeni/vaults@6.26.0
+  - @opengeni/jev@6.26.0
+  - @opengeni/agent-proto@6.26.0
+  - @opengeni/network@6.26.0
+
+## 6.25.0
+
+### Patch Changes
+
+- 43435d5: Agent turns with long histories use less worker CPU per model request. The history prefix check compares canonical items instead of hashing the whole history, model context snapshots reuse unchanged content from the previous request, request copies avoid `structuredClone` for plain data, model provider and pricing settings are parsed once per value, and the row-level security scope statement is built once per shape. Outputs, stored snapshots and history rejections are unchanged.
+- f99f940: Sentry and Apollo connections now show the signed-in account (email or name, plus the Sentry organization when there is only one) instead of a generic "Sentry account" or "Apollo.io account", and you can connect more than one account of each. Stripe connections are recognised again with Stripe's current account answer and are labelled with the account's email and business name when it has them. When an Atlassian tool needs a site and several are available, the message the agent gets now lists each site's URL next to its name and cloud ID.
+- f99f940: Opengeni now says correctly who sent a Slack message. A message sent with your own Slack account is posted under your name, but Slack also marks the Opengeni app it went through, so Opengeni sometimes said the bot had sent it. The send result now says which account a message was posted as (`postedAs`: your own account, naming the app only as the route it went through, or the Opengeni Slack bot). Channel and thread reads with your own account mark your own messages with `postedByYou`.
+
+  When you mention Opengeni, it now sees messages that apps and bots posted. The surrounding channel or thread messages, and the `slack_bot_*` history reads, name the app that posted each message and include text an app put in attachments or blocks. Replies that apps post in a thread, and posts people send through an app, are kept as context for the next mention in that thread. They never start or stop a task, and Opengeni's own posts are still left out.
+
+- 43435d5: A tool call the model asks for is saved before its tool starts, so a worker that stops mid-step can always recover it: the call is closed as interrupted instead of being lost and run again. The response's usage is saved in the same write as its tool calls, before any of them runs; its billing runs alongside the tools, and the next model request still waits for it. If the worker stops, is replaced or its billing fails before billing finishes, recovery, the attempt's failure handling or the session's next idle point finishes it exactly once, at the price recorded with the usage. Recovery only looks at responses whose billing is still unfinished.
+- Updated dependencies [e126cb5]
+- Updated dependencies [61abc98]
+- Updated dependencies [81570f9]
+- Updated dependencies [f99f940]
+- Updated dependencies [bb55e5d]
+- Updated dependencies [43435d5]
+- Updated dependencies [f99f940]
+- Updated dependencies [bfd2970]
+  - @opengeni/contracts@6.25.0
+  - @opengeni/sdk@6.25.0
+  - @opengeni/capabilities@6.25.0
+  - @opengeni/config@6.25.0
+  - @opengeni/codemode@6.25.0
+  - @opengeni/codex@6.25.0
+  - @opengeni/decisions@6.25.0
+  - @opengeni/interaction@6.25.0
+  - @opengeni/observability@6.25.0
+  - @opengeni/tool-gateway@6.25.0
+  - @opengeni/vaults@6.25.0
+  - @opengeni/jev@6.25.0
+  - @opengeni/agent-proto@6.25.0
+  - @opengeni/network@6.25.0
+  - @opengeni/xai-subscription@6.25.0
+
 ## 6.24.1
 
 ### Patch Changes

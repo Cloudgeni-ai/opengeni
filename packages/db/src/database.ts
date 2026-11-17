@@ -672,6 +672,101 @@ function abortableQuery<T extends postgres.Row[]>(
 }
 
 /**
+ * Postgres refuses to reuse a prepared statement whose result columns changed
+ * since it was prepared: SQLSTATE 0A000, "cached plan must not change result
+ * type", raised from `RevalidateCachedQuery` before the statement runs. A
+ * rolling migration that adds a column causes it for every statement that
+ * expands the table's row (`select *`, `table.*`, `returning *`, a CTE or
+ * function over that row) on connections the running release prepared earlier.
+ * Found directly or through a wrapping error's `cause` (Drizzle wraps query
+ * failures). Other 0A000 errors are unrelated features and do not match.
+ */
+export function isStalePreparedResultError(error: unknown): boolean {
+  let current = error;
+  for (let depth = 0; depth < 5 && current && typeof current === "object"; depth += 1) {
+    const candidate = current as { code?: unknown; routine?: unknown; message?: unknown };
+    if (
+      candidate.code === "0A000" &&
+      (candidate.routine === "RevalidateCachedQuery" ||
+        (typeof candidate.message === "string" &&
+          candidate.message.includes("cached plan must not change result type")))
+    ) {
+      return true;
+    }
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+/** Whether a statement in one transaction attempt was refused as stale. */
+type StaleResultRefusals = { refused: boolean };
+
+/**
+ * Note a transaction's stale-result refusal even when the caller never sees it:
+ * with statements in flight together (`Promise.all`), a sibling's "current
+ * transaction is aborted" (25P02) can reject first and become the callback's
+ * error, while the refusal that aborted the transaction settles later.
+ */
+function observingStaleRefusal<T extends postgres.Row[]>(
+  query: postgres.PendingQuery<T>,
+  refusals: StaleResultRefusals,
+): postgres.PendingQuery<T> {
+  const observe = query.then.bind(query);
+  Object.defineProperty(query, "then", {
+    configurable: true,
+    writable: true,
+    value: (...[onFulfilled, onRejected]: Parameters<Promise<unknown>["then"]>) =>
+      observe(onFulfilled as never, (error: unknown) => {
+        if (isStalePreparedResultError(error)) refusals.refused = true;
+        if (onRejected) return onRejected(error);
+        throw error;
+      }),
+  });
+  return query;
+}
+
+/**
+ * Run a pool transaction again when it failed only because a statement in it
+ * was prepared against an older row type (see {@link isStalePreparedResultError}).
+ *
+ * Outside a transaction postgres.js re-prepares and repeats such a statement
+ * (our patch keeps that working with other statements in flight). Inside one
+ * the refusal aborts the transaction, so only the whole transaction can be
+ * repeated. That is safe for its database work: the refused statement never
+ * ran and the transaction rolled back, so nothing it wrote remains. As with any
+ * repeated attempt (an activity retry, a client retry), work the callback does
+ * outside the database runs again.
+ *
+ * The attempt is repeated when its error is the refusal, or when any statement
+ * in it was refused (see {@link observingStaleRefusal}): the transaction was
+ * aborted by then, so every later error in it follows from the refusal.
+ *
+ * Our postgres.js patch makes a connection forget every statement it prepared
+ * on its first such refusal, not just the refused one, so each connection
+ * refuses at most once per schema change. One attempt per pool connection
+ * plus one is therefore enough for any transaction to reach a refreshed
+ * connection; another schema change in the meantime can only add a refusal,
+ * which surfaces unchanged once the attempts are spent.
+ */
+async function retryingStalePreparedResults<T>(
+  attempts: number,
+  run: (refusals: StaleResultRefusals) => Promise<T>,
+): Promise<T> {
+  for (let attempt = 1; ; attempt += 1) {
+    const refusals: StaleResultRefusals = { refused: false };
+    try {
+      return await run(refusals);
+    } catch (error) {
+      if (attempt >= attempts || !(refusals.refused || isStalePreparedResultError(error))) {
+        throw error;
+      }
+      // A maintenance stop that arrived meanwhile ends the retries.
+      databaseQuerySignal.getStore()?.throwIfAborted();
+    }
+  }
+}
+
+/**
  * Drizzle sends every query through `sql.unsafe(text, params)`, and postgres-js
  * never prepares `unsafe` queries unless asked per call, whatever the pool's
  * `prepare` option says. Ask on every call, including inside transactions and
@@ -692,14 +787,16 @@ function preparingUnsafe<T extends PostgresSql>(
   prepare = true,
   reserved = false,
   credential?: RotatingDatabasePassword,
+  staleResultAttempts = 1,
+  staleRefusals?: StaleResultRefusals,
 ): T {
-  const wrapScoped = (args: unknown[]) =>
+  const wrapScoped = (args: unknown[], refusals: StaleResultRefusals | undefined) =>
     args.map((arg) =>
       typeof arg === "function"
         ? async (scoped: postgres.TransactionSql) => {
             databaseQuerySignal.getStore()?.throwIfAborted();
             const result = await (arg as (scoped: postgres.TransactionSql) => unknown)(
-              preparingUnsafe(scoped, prepare, true),
+              preparingUnsafe(scoped, prepare, true, undefined, 1, refusals),
             );
             databaseQuerySignal.getStore()?.throwIfAborted();
             return result;
@@ -716,41 +813,53 @@ function preparingUnsafe<T extends PostgresSql>(
             traceQuery(base.unsafe(query, parameters as never, { prepare, ...options }), query);
           const pending =
             credential && !reserved ? retryingAuthentication(send(), send, credential) : send();
-          return signal ? abortableQuery(pending, signal) : pending;
+          const observed = staleRefusals ? observingStaleRefusal(pending, staleRefusals) : pending;
+          return signal ? abortableQuery(observed, signal) : observed;
         };
       }
       if (property === "begin" || property === "savepoint") {
         const method = Reflect.get(base, property) as unknown;
         if (typeof method !== "function") return method;
+        // Only the pool's own BEGIN repeats a transaction; a savepoint's
+        // failure belongs to its enclosing transaction, which it reports to.
+        const repeatable = (run: (refusals: StaleResultRefusals | undefined) => Promise<unknown>) =>
+          property === "begin" && !reserved && staleResultAttempts > 1
+            ? retryingStalePreparedResults(staleResultAttempts, run)
+            : run(staleRefusals);
         if (property === "begin" && credential && !reserved) {
           return (...args: unknown[]) =>
-            traceTransaction("transaction", async () => {
-              let entered = false;
-              const tracked = args.map((arg) =>
-                typeof arg === "function"
-                  ? (scoped: unknown) => {
-                      entered = true;
-                      return (arg as (scoped: unknown) => unknown)(scoped);
-                    }
-                  : arg,
-              );
-              // Only BEGIN's own connection attempt can be repeated: once the
-              // callback ran, its work is the caller's to judge.
-              let attempts = 0;
-              return withDatabaseAuthenticationRetry(
-                credential,
-                () => {
-                  // A maintenance stop that arrived meanwhile ends the retries.
-                  if (attempts++ > 0) databaseQuerySignal.getStore()?.throwIfAborted();
-                  return method.apply(base, wrapScoped(tracked)) as Promise<unknown>;
-                },
-                () => !entered,
-              );
-            });
+            repeatable((refusals) =>
+              traceTransaction("transaction", async () => {
+                let entered = false;
+                const tracked = args.map((arg) =>
+                  typeof arg === "function"
+                    ? (scoped: unknown) => {
+                        entered = true;
+                        return (arg as (scoped: unknown) => unknown)(scoped);
+                      }
+                    : arg,
+                );
+                // Only BEGIN's own connection attempt can be repeated for
+                // authentication: once the callback ran, its work is the
+                // caller's to judge.
+                let attempts = 0;
+                return withDatabaseAuthenticationRetry(
+                  credential,
+                  () => {
+                    // A maintenance stop that arrived meanwhile ends the retries.
+                    if (attempts++ > 0) databaseQuerySignal.getStore()?.throwIfAborted();
+                    return method.apply(base, wrapScoped(tracked, refusals)) as Promise<unknown>;
+                  },
+                  () => !entered,
+                );
+              }),
+            );
         }
         return (...args: unknown[]) =>
-          traceTransaction(property === "begin" ? "transaction" : "savepoint", () =>
-            method.apply(base, wrapScoped(args)),
+          repeatable((refusals) =>
+            traceTransaction(property === "begin" ? "transaction" : "savepoint", () =>
+              method.apply(base, wrapScoped(args, refusals)),
+            ),
           );
       }
       return Reflect.get(base, property);
@@ -827,7 +936,10 @@ export function createDb(databaseUrl: string, options: CreateDbOptions = {}): Db
   });
   // Registering the full schema eagerly allocates one relational query builder
   // per table on every transaction/savepoint, even for a single raw SQL query.
-  const db = drizzle(preparingUnsafe(client, preparedStatements, false, credential));
+  // One attempt per pool connection plus one: see retryingStalePreparedResults.
+  const db = drizzle(
+    preparingUnsafe(client, preparedStatements, false, credential, (options.max ?? 10) + 1),
+  );
   const notificationDatabaseUrl = options.notificationDatabaseUrl;
   // The LISTEN connection is its own pool with its own sticky candidate. The
   // files hold one login's password, so they apply only to that same login.

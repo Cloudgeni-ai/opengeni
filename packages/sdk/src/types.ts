@@ -7687,6 +7687,37 @@ export type NativeAppAuthorizeInput = {
   deviceName?: string;
 };
 
+/**
+ * A sign-in for an app that can't receive a redirect (the Excel add-in on
+ * desktop Office). The app shows `confirmationCode`, opens
+ * `/native-sign-in?relay=<relayId>` in the person's browser, and polls with
+ * its verifier until the browser approves.
+ */
+export type NativeAppRelayInput = {
+  redirectUri: string;
+  codeChallenge: string;
+  codeChallengeMethod: "S256";
+  platform: NativeAppPlatform;
+  deviceName?: string;
+};
+
+export type NativeAppRelay = {
+  relayId: string;
+  /** Shown in the app; the person types it on the approval page. */
+  confirmationCode: string;
+  expiresAt: string;
+};
+
+/**
+ * `approved` hands out the one-time code once (redeem it with
+ * `exchangeNativeAppCode`); `gone` means expired, already taken or unknown.
+ */
+export type NativeAppRelayPoll =
+  | { status: "pending" }
+  | { status: "approved"; code: string }
+  | { status: "refused" }
+  | { status: "gone" };
+
 export type NativeAppTokenInput = {
   code: string;
   codeVerifier: string;
@@ -7986,6 +8017,7 @@ export type SessionGoalContinuationReason =
   | "system_work_pending"
   | "held_for_input"
   | "backoff_pending"
+  | "compaction_failed"
   | "missing_obligation";
 
 export type SessionGoalContinuation = {

@@ -182,23 +182,59 @@ function fieldOf(tokens: readonly string[]): Field {
   return { frequencies, length: tokens.length };
 }
 
-const ACCOUNT_LINE_GUIDANCE =
-  "Use only this account; if the intended account for a write is unclear, ask before calling.";
+/** The guidance on the account line of a connector's only account in a turn. */
+const ONLY_ACCOUNT_GUIDANCE = "Use only this account.";
+const ACCOUNT_LINE_GUIDANCE = `${ONLY_ACCOUNT_GUIDANCE} When the request does not say which account to write to, use the default; ask only if there is none.`;
+
+/** The connector's accounts this route belongs among, as its label names them. */
+export type AccountLineLabel = Readonly<{
+  model: string;
+  defaultAccount?: string | undefined;
+  /**
+   * The connector's only account in the turn: its line names the account and
+   * keeps to it, with nothing to choose between.
+   */
+  only?: boolean | undefined;
+}>;
 
 /**
- * A connected-account tool's description when the turn has several accounts
- * of its connector: a first line naming the account, then the tool's own text.
+ * The account a description names: the route's model label, and whether it
+ * is the connector's default for writes and why, or which account is.
  */
-export function withAccountLine(account: string, description: string | undefined): string {
-  return `Account: ${account}. ${ACCOUNT_LINE_GUIDANCE}\n${description ?? ""}`.trimEnd();
+export function accountLineName(label: AccountLineLabel): string {
+  if (!label.defaultAccount) return label.model;
+  if (label.defaultAccount === label.model)
+    return `${label.model} (the default: the person's own account)`;
+  // Name the default by its account alone: the connector is this line's own.
+  const separator = label.defaultAccount.indexOf(" — ");
+  const account =
+    separator >= 0 ? label.defaultAccount.slice(separator + " — ".length) : label.defaultAccount;
+  return `${label.model} (not the default; the default is the person's own account, ${account})`;
+}
+
+/**
+ * A connected-account tool's description: a first line naming the account,
+ * then the tool's own text. A connector's only account in the turn gets the
+ * line's first sentence alone, so the model knows whose account it is.
+ */
+export function withAccountLine(
+  account: string | AccountLineLabel,
+  description: string | undefined,
+): string {
+  const name = typeof account === "string" ? account : accountLineName(account);
+  const guidance =
+    typeof account !== "string" && account.only ? ONLY_ACCOUNT_GUIDANCE : ACCOUNT_LINE_GUIDANCE;
+  return `Account: ${name}. ${guidance}\n${description ?? ""}`.trimEnd();
 }
 
 /** The account a withAccountLine description names, and the tool's own text. */
 function splitAccountLine(description: string): { account?: string; own: string } {
   const lineEnd = description.indexOf("\n");
   const line = lineEnd < 0 ? description : description.slice(0, lineEnd);
-  const suffix = `. ${ACCOUNT_LINE_GUIDANCE}`;
-  if (!line.startsWith("Account: ") || !line.endsWith(suffix)) return { own: description };
+  const suffix = [`. ${ACCOUNT_LINE_GUIDANCE}`, `. ${ONLY_ACCOUNT_GUIDANCE}`].find((candidate) =>
+    line.endsWith(candidate),
+  );
+  if (!line.startsWith("Account: ") || !suffix) return { own: description };
   return {
     account: line.slice("Account: ".length, -suffix.length),
     own: lineEnd < 0 ? "" : description.slice(lineEnd + 1),

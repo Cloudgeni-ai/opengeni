@@ -181,6 +181,9 @@ There are two client surfaces:
 - `site.tools.*` calls workspace tools. Published direct calls must appear in
   `requestedTools` and are checked against the viewer's live tool access.
   Preview calls use your attempt's available tool catalog.
+  Tool results can stop at row or byte limits. When data grows, page with a
+  keyset or a narrower query instead of a fixed `LIMIT`, and never fail the
+  whole page once a result passes a fixed size.
 - `site.client.*` calls the ordinary Opengeni REST SDK, including the React
   conversation components. These calls are not entries in `requestedTools`.
   Published calls use the viewer's authorization; sandbox previews use your

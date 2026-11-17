@@ -368,6 +368,11 @@ export async function processModelResponseTerminalEvent(input: {
   setLastInputTokens: (tokens: number | null) => Promise<void>;
   completionEvents?: () => Parameters<TurnEventPublisher>[0];
   onCompletionCommitted?: () => void;
+  /**
+   * Called once the response's usage (with its items) is durable, before its
+   * deferred ledger writes run. Not called when the usage commit failed.
+   */
+  onUsageCommitted?: () => void;
   /** Prepare stable history, then commit it with canonical usage and token signals. */
   checkpoint?: (
     persist: (history: SessionEventMutation<"event">) => Promise<boolean>,
@@ -658,6 +663,16 @@ export async function processModelResponseTerminalEvent(input: {
           throw error;
         }
         afterCommitFailure = { error };
+      }
+      if (usageDurable && !afterCommitFailure) input.onUsageCommitted?.();
+      // This append's usage event metered the task usage receipt in its own
+      // transaction (its database trigger); the deferred settlement does not
+      // write the same receipt again. Any other amount is still written.
+      if (authoritative) {
+        settlementInput.receiptMeteredByEvent = receiptMeteredByCommittedEvent(
+          { sourceKey, ...(billing ? { billingSnapshot: billing } : {}) },
+          normalizedUsage.telemetry,
+        );
       }
       // The response's usage is durable. Its ledger writes (usage events,
       // credit debit, platform fee, hosted searches) are idempotent per source

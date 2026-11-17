@@ -161,13 +161,17 @@ describe("Nango Connect", () => {
     expect(session.headers.get("authorization")).toBe("Bearer nango-secret-test");
     const state = readNangoConnectState(settings, token);
     expect(session.body).toEqual({
-      tags: nangoAttemptTags({
-        accountId: ACCOUNT,
-        workspaceId: WORKSPACE,
-        subjectId: SUBJECT,
-        attemptId: state.nonce,
-        integrationKey: "gmail",
-      }),
+      tags: {
+        ...nangoAttemptTags({
+          accountId: ACCOUNT,
+          workspaceId: WORKSPACE,
+          subjectId: SUBJECT,
+          attemptId: state.nonce,
+          integrationKey: "gmail",
+        }),
+        // Only this deployment's sweep may delete it.
+        opengeni_deployment: "https://api.opengeni.test",
+      },
       allowed_integrations: ["google-mail"],
     });
     const html = await response.text();
@@ -227,7 +231,7 @@ describe("Nango Connect", () => {
     ).toEqual({ status: "pending" });
   });
 
-  test("an account Nango cannot name is never stored and is deleted in Nango", async () => {
+  test("an account Nango cannot name is never stored; it is deleted only once its references are read", async () => {
     const token = await startedState();
     const state = readNangoConnectState(settings, token);
     const nango = fakeNango(
@@ -262,12 +266,14 @@ describe("Nango Connect", () => {
     expect(identity.headers.get("base-url-override")).toBe("https://gmail.googleapis.com");
     expect(identity.headers.get("connection-id")).toBe("nango-conn-1");
     expect(identity.headers.get("provider-config-key")).toBe("google-mail");
+    // A replayed completion may already stand for it: with the database
+    // unreachable nothing is deleted, and the sweep decides later.
     expect(
       nango.requests.some(
         (request) =>
           request.method === "DELETE" && request.url.includes("/connections/nango-conn-1"),
       ),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   test("a completion from another browser is refused", async () => {
@@ -322,5 +328,30 @@ describe("Nango webhook", () => {
         { rawBody: body, signature: sign(body) },
       ),
     ).toBe("ignored");
+  });
+
+  test("asks Nango to retry when the person's connections cannot be read", async () => {
+    for (const operation of ["refresh", "deletion"]) {
+      const event = JSON.stringify({
+        type: "auth",
+        operation,
+        connectionId: "nango-conn",
+        providerConfigKey: "google-mail",
+        success: operation !== "refresh",
+        tags: {
+          organization_id: "00000000-0000-4000-8000-000000000001",
+          opengeni_workspace_id: "00000000-0000-4000-8000-000000000002",
+          end_user_id: "user:00000000-0000-4000-8000-000000000003",
+          opengeni_integration: "gmail",
+          opengeni_attempt_id: "attempt",
+        },
+      });
+      await expect(
+        handleNangoWebhook(
+          { db: unreachableDb, settings, nangoBackends: async () => backends },
+          { rawBody: event, signature: sign(event) },
+        ),
+      ).rejects.toMatchObject({ status: 503 });
+    }
   });
 });

@@ -15,7 +15,11 @@ import OpenAI from "openai";
 import { testSettings } from "@opengeni/testing";
 import { createHttpDecisionModel } from "@opengeni/decisions";
 import { MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION } from "@opengeni/capabilities";
-import { ToolSearchIndex } from "../src/tool-discovery-ranking";
+import {
+  descriptionPreview,
+  ToolSearchIndex,
+  withAccountLine,
+} from "../src/tool-discovery-ranking";
 import { toolDescriptor } from "../src/tool-discovery-catalog";
 import { rankToolPool } from "../src/codex-tool-search";
 import {
@@ -304,6 +308,36 @@ describe("tool discovery ranking", () => {
     // A word the tool uses whole is never split.
     expect(index.rank("calendar", 3)).toEqual([]);
   });
+  test("an account line says which of a connector's accounts is the default for writes", () => {
+    const own = "Calendar — Iris · Yours";
+    const ownAccount = "Iris · Yours";
+    const shared = "Calendar — team@example.com · Shared";
+    const guidance =
+      "Use only this account. When the request does not say which account to write to, use the default; ask only if there is none.";
+    expect(withAccountLine({ model: own, defaultAccount: own }, "Create an event.")).toBe(
+      `Account: ${own} (the default: the person's own account). ${guidance}\nCreate an event.`,
+    );
+    expect(withAccountLine({ model: shared, defaultAccount: own }, "Create an event.")).toBe(
+      `Account: ${shared} (not the default; the default is the person's own account, ${ownAccount}). ${guidance}\nCreate an event.`,
+    );
+    // No clear default: the account alone, and the guidance says to ask.
+    expect(withAccountLine({ model: shared }, "Create an event.")).toBe(
+      `Account: ${shared}. ${guidance}\nCreate an event.`,
+    );
+    // A connector's only account: the line names it and keeps to it.
+    expect(withAccountLine({ model: own, only: true }, "Create an event.")).toBe(
+      `Account: ${own}. Use only this account.\nCreate an event.`,
+    );
+    expect(descriptionPreview(withAccountLine({ model: own, only: true }, "Create."), 500)).toBe(
+      `Account: ${own}. Create.`,
+    );
+    // A preview keeps the account and its default, then the tool's own text.
+    expect(
+      descriptionPreview(withAccountLine({ model: shared, defaultAccount: own }, "Create."), 500),
+    ).toBe(
+      `Account: ${shared} (not the default; the default is the person's own account, ${ownAccount}). Create.`,
+    );
+  });
   test("ranks a connected account's tools past their account line", () => {
     // With several accounts of one connector every description starts with
     // the same account line; it must not stand in for the capability sentence.
@@ -312,7 +346,7 @@ describe("tool discovery ranking", () => {
       t.source === "mcp__gmail" ? withAccount([t], t.source, "Gmail (a@example.com)")[0]! : t,
     ).map(catalogTool);
     expect((lined[0] as { description: string }).description).toStartWith(
-      "Account: Gmail (a@example.com). Use only this account;",
+      "Account: Gmail (a@example.com). Use only this account.",
     );
     for (const query of [
       "Search and read user's email inbox recent unread emails",
@@ -324,6 +358,24 @@ describe("tool discovery ranking", () => {
         names(new ToolSearchIndex(plain).rank(query, 8)),
       );
       expect(names(new ToolSearchIndex(lined).strongestMatches(query, 3))).toEqual(
+        names(new ToolSearchIndex(plain).strongestMatches(query, 3)),
+      );
+      // A connector's only account carries the shorter line, also read past.
+      const only = CONNECTED_TOOL_CATALOG.map((t) =>
+        t.source === "mcp__gmail"
+          ? {
+              ...t,
+              description: withAccountLine(
+                { model: "Gmail — a@example.com · Yours", only: true },
+                t.description,
+              ),
+            }
+          : t,
+      ).map(catalogTool);
+      expect(names(new ToolSearchIndex(only).rank(query, 8))).toEqual(
+        names(new ToolSearchIndex(plain).rank(query, 8)),
+      );
+      expect(names(new ToolSearchIndex(only).strongestMatches(query, 3))).toEqual(
         names(new ToolSearchIndex(plain).strongestMatches(query, 3)),
       );
     }

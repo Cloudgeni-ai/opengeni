@@ -781,14 +781,17 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           );
         }
       }
-      const reason = slackInstallErrorReason(error);
+      // A provider refusal can arrive without state; report the refusal.
+      const failure = state
+        ? null
+        : oauthStateFailureReturn(settings, c.req.query("state"), {
+            providerError: c.req.query("error"),
+          });
+      const reason = failure?.reason.startsWith("provider_")
+        ? failure.reason
+        : slackInstallErrorReason(error);
       return c.redirect(
-        slackInstallReturnUrl(
-          baseUrl,
-          state?.returnPath ?? oauthStateFailureReturn(settings, c.req.query("state")).returnPath,
-          "error",
-          reason,
-        ),
+        slackInstallReturnUrl(baseUrl, state?.returnPath ?? failure!.returnPath, "error", reason),
         302,
       );
     }
