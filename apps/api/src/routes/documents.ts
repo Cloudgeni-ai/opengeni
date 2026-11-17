@@ -820,6 +820,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
             "documents:search",
           ),
           settings: deps.settings,
+          observability: deps.observability,
         },
       );
       await server.connect(transport);

@@ -17,7 +17,6 @@ import {
   createDb,
   createSession,
   endSessionRealtimeInTransaction,
-  hasPendingSteerForTurn,
   isSessionCompactionRequested,
   listOutstandingSessionSystemUpdates,
   mutateSessionControlInTransaction,
@@ -685,20 +684,10 @@ describe("session realtime lifecycle (real PostgreSQL)", () => {
       ),
     );
     expect(replacement.queueVersion).toBeGreaterThan(first.queueVersion);
-    // The Steer never skips the message sent before it: that message starts
-    // first and hands over to the Steer before its first model request.
     await expect(claim(value)).resolves.toMatchObject({
       action: "claimed",
-      turn: { id: first.turnId, prompt: "first direction" },
+      turn: { id: replacement.turnId, prompt: "replacement direction" },
     });
-    expect(
-      await hasPendingSteerForTurn(client.db, {
-        accountId: value.grant.accountId,
-        workspaceId: value.grant.workspaceId,
-        sessionId: value.session.id,
-        turnId: first.turnId,
-      }),
-    ).toBe(true);
   });
 
   test("claim and realtime admission serialize but both succeed", async () => {

@@ -1,5 +1,39 @@
 # @opengeni/api-router
 
+## 6.27.1
+
+### Patch Changes
+
+- afcb2d6: `goal_update` with the goal's own text, success criteria and policy is now an idempotent no-op: it writes no revision, proposal or event and returns `outcome: "unchanged"` with a plain message, instead of failing on the objective-revision trigger. The files and Knowledge MCP surfaces now share the first-party guard that turns raw database errors into typed tool results, which name the kind of refusal (conflict, missing reference, broken data rule, value too long, not allowed) and log the error server-side only.
+- d9fe279: `github_repository_attach` no longer refuses a repository that has commits as "empty". It decided emptiness from GitHub's repository `size`, which GitHub computes lazily and can report as 0 long after the first push, so a freshly pushed repository could not be attached for a long time. A repository now counts as empty only when GitHub lists no branch for it; when the branch list cannot be read, the repository is attached as before. Slack tasks likewise no longer skip a repository from the person's new-chat form because GitHub reports its size as 0; an empty one is kept, as a new chat in the app keeps it, and the sandbox starts it on an unborn branch.
+- Updated dependencies [afcb2d6]
+- Updated dependencies [02804ec]
+  - @opengeni/db@6.27.1
+  - @opengeni/contracts@6.27.1
+  - @opengeni/core@6.27.1
+  - @opengeni/documents@6.27.1
+  - @opengeni/events@6.27.1
+  - @opengeni/artifact-tool@6.27.1
+  - @opengeni/capabilities@6.27.1
+  - @opengeni/codemode@6.27.1
+  - @opengeni/codex@6.27.1
+  - @opengeni/config@6.27.1
+  - @opengeni/decisions@6.27.1
+  - @opengeni/github@6.27.1
+  - @opengeni/interaction@6.27.1
+  - @opengeni/observability@6.27.1
+  - @opengeni/runtime@6.27.1
+  - @opengeni/storage@6.27.1
+  - @opengeni/tool-gateway@6.27.1
+  - @opengeni/vaults@6.27.1
+  - @opengeni/vaults-bitwarden@6.27.1
+  - @opengeni/vaults-keeper@6.27.1
+  - @opengeni/vaults-onepassword@6.27.1
+  - @opengeni/vaults-protonpass@6.27.1
+  - @opengeni/agent-proto@6.27.1
+  - @opengeni/network@6.27.1
+  - @opengeni/xai-subscription@6.27.1
+
 ## 6.27.0
 
 ### Minor Changes

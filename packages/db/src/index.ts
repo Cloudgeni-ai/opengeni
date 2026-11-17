@@ -76399,7 +76399,8 @@ export async function updateSessionGoalWithEvent(
   events: SessionEvent[];
   operationId: string | null;
   replay: boolean;
-  outcome: "applied" | "proposed";
+  /** `unchanged`: the requested content already is the goal; nothing was written. */
+  outcome: "applied" | "proposed" | "unchanged";
   proposalId: string | null;
 }> {
   if (input.text !== undefined) {
@@ -76463,11 +76464,13 @@ export async function updateSessionGoalWithEvent(
         const parsed = SessionGoalContract.safeParse(reserved.receipt.result.goal);
         const goalVersion = reserved.receipt.result.goalVersion;
         const eventId = reserved.receipt.result.eventId;
+        const outcome = reserved.receipt.result.outcome;
+        // An unchanged update wrote no event, so its receipt holds none.
         if (
           !parsed.success ||
           !Number.isSafeInteger(goalVersion) ||
           parsed.data.version !== goalVersion ||
-          typeof eventId !== "string"
+          (outcome === "unchanged" ? eventId !== null : typeof eventId !== "string")
         ) {
           throw new SessionControlInvariantError(
             `Goal update receipt ${reserved.receipt.id} has no valid committed result`,
@@ -76478,7 +76481,7 @@ export async function updateSessionGoalWithEvent(
           events: [],
           operationId: reserved.receipt.id,
           replay: true,
-          outcome: reserved.receipt.result.outcome === "proposed" ? "proposed" : "applied",
+          outcome: outcome === "proposed" || outcome === "unchanged" ? outcome : "applied",
           proposalId:
             typeof reserved.receipt.result.proposalId === "string"
               ? reserved.receipt.result.proposalId
@@ -76511,13 +76514,13 @@ export async function updateSessionGoalWithEvent(
       if (existing.status === "completed") {
         throw new Error("session goal is completed; use goal_set to start a new goal");
       }
-      const semanticChangeRequested =
+      const contentSupplied =
         input.text !== undefined ||
         input.successCriteria !== undefined ||
         input.mutationPolicy !== undefined;
       if (
         input.actor === "agent" &&
-        semanticChangeRequested &&
+        contentSupplied &&
         (!input.changeKind ||
           !input.rationale?.trim() ||
           input.expectedObjectiveRevision === undefined)
@@ -76539,7 +76542,30 @@ export async function updateSessionGoalWithEvent(
       const nextSuccessCriteria =
         input.successCriteria !== undefined ? input.successCriteria : existing.successCriteria;
       const nextMutationPolicy = input.mutationPolicy ?? existing.mutationPolicy;
-      if (!semanticChangeRequested) {
+      // The objective revision counts semantic changes, and the revision
+      // trigger refuses to advance it for content that did not change. Content
+      // equal to the current goal is therefore not a rewrite at all.
+      const semanticChange =
+        nextText !== existing.text ||
+        nextSuccessCriteria !== existing.successCriteria ||
+        nextMutationPolicy !== existing.mutationPolicy;
+      if (!semanticChange && contentSupplied && !input.progressNote) {
+        const goal = mapSessionGoal(existing);
+        if (reserved) {
+          await updateSessionCommandReceiptResult(tx, reserved.receipt.id, {
+            result: { goal, goalVersion: goal.version, eventId: null, outcome: "unchanged" },
+          });
+        }
+        return {
+          goal,
+          events: [],
+          operationId: reserved?.receipt.id ?? null,
+          replay: false,
+          outcome: "unchanged",
+          proposalId: null,
+        };
+      }
+      if (!semanticChange) {
         if (!input.progressNote) {
           throw new Error("goal_update requires semantic content or a progress note");
         }
@@ -81721,23 +81747,16 @@ async function selectQueuedSessionClaimBatch(
   // ordinary head). A long queue of later Sends must not inflate claim memory.
   // Waiting messages break that run, and only those sent before the head are
   // taken in with it.
-  // A pending Agent Steer runs ahead of queued human Sends. A runnable human
-  // Steer outranks it, but it still reads every message queued ahead of it
-  // first, so the whole human queue is then eligible and the Agent Steer is
-  // carried as context on the turn that claims.
   const previews = await rawRows<{ id: string; version: number; waits: boolean }>(
     tx,
     sql`
-    with queued as (
+    with candidates as (
       select id, version, position, created_at, ${waits} as waits,
         metadata->>'delivery' is distinct from 'steer' as send
       from session_turns
       where workspace_id = ${session.workspaceId} and session_id = ${session.id}
         and status = 'queued' and source in ('user', 'api')
-    ), candidates as (
-      select * from queued
-      where ${pendingAgentSteer} = false
-        or exists (select 1 from queued steer where not steer.send and not steer.waits)
+        and (${pendingAgentSteer} = false or metadata->>'delivery' = 'steer')
     ), ordered as (
       select id, version, position, created_at, waits,
         count(*) filter (where not waits) over run as runnable,
@@ -83189,11 +83208,10 @@ export async function claimSessionWorkForAttempt(
           )
           .limit(1)
           .for("update");
-        // A human/API Steer is the newest explicit replacement direction. It,
-        // after the human messages queued ahead of it, must claim next even
-        // when an older Agent Steer is pending; the internal instruction is
-        // delivered as context on the claiming human turn instead of
-        // manufacturing another system inference ahead of it.
+        // A human/API Steer is the newest explicit replacement direction. It
+        // must claim next even when an older Agent Steer is pending; the
+        // internal instruction is delivered as context on that same human turn
+        // instead of manufacturing another system inference ahead of it.
         // Ordinary queued sends retain the established Agent-Steer priority.
         const { batch: queuedBatch, waiting: waitingMessages } =
           await selectQueuedSessionClaimBatch(
@@ -93162,12 +93180,9 @@ export async function getSessionQueueSnapshot(
     const hasPendingAgentSteer = pendingInputs.some(
       (update) => update.kind === "agent_steer_instruction",
     );
-    // Mirrors the claim: a pending Agent Steer runs ahead of queued Sends, but
-    // once a human Steer is queued the queue head claims and carries it.
-    const attachmentTurn =
-      hasPendingAgentSteer && !physicalItems.some((turn) => turn.metadata.delivery === "steer")
-        ? undefined
-        : physicalItems[0];
+    const attachmentTurn = hasPendingAgentSteer
+      ? physicalItems.find((turn) => turn.metadata.delivery === "steer")
+      : physicalItems[0];
     const attachmentRow = attachmentTurn
       ? rows.find((row) => row.id === attachmentTurn.id)
       : undefined;

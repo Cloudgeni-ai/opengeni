@@ -1533,14 +1533,7 @@ frozen start boundary. Pause blocks
 admission without pretending that physical execution has already stopped.
 Cancel fences a session subtree and is terminal for the affected sessions.
 
-Steer replaces the current direction but never reorders the queue: a Steered
-prompt joins the end, and Steering a queued row leaves it in place, so a
-message is never answered before one sent earlier. Every turn that starts
-while a Steer waits behind it, including each queued message ahead of the
-Steer, hands over before its first model request, so the agent reads all of
-them in order before answering. Only an explicit queue Move changes the order.
-A pending Agent Steer still runs ahead of queued Sends unless a human Steer is
-queued; then the human queue claims in order and carries it as context.
+Steer inserts ahead of every queued Send and replaces the current direction.
 An ownerless current turn (approval, human input, recovery or capacity wait) is
 superseded at once. A live running attempt is not interrupted: Steer writes no
 `session_attempt_interruptions` row, records `deferredUntilModelStep` on the
@@ -1637,8 +1630,8 @@ for a person; it hands over at the first model step after the wait resumes.
 `steerQueueItem` with `interrupt: true` (an API option on the Steer's turn as
 `steerMessage` returned it; the web and React Native surfaces no longer offer
 it)
-keeps the earlier behaviour: it inserts the interruption row and stops the live
-attempt now, including tool calls in flight; the row keeps its queue place. The
+keeps the earlier behaviour: it inserts the interruption row, moves the row to
+the head and stops the live attempt now, including tool calls in flight. The
 workspace setting `busySend` (`queue` by default) and the composer's `busySend`
 option only choose which of the two an ordinary Send uses while a turn runs.
 Under `busySend: "steer"` the composer does not decide from its own copy of the
@@ -1646,9 +1639,10 @@ session: it submits `delivery: "steer_or_send"` (on the Steer route or a draft
 submit), and `submitHumanPromptInTransaction` resolves it under the same branch
 and queue locks that start and settle turns. It becomes a Steer when the branch
 is active, not admission-blocked, the message is not waiting for a machine owner,
-and either a turn is active or a runnable queued turn is about to start; like
-every Steer it joins the end of the queue, so the turns ahead of it claim first
-and hand over at their first model step. Otherwise it is a plain Send: an idle session starts a turn and a
+and either a turn is active or a runnable queued turn is about to start; in that
+"just starting" case the Steer is ordered behind the first runnable turn (and any
+Steers already behind it) so that turn claims first and hands over at its first
+model step. Otherwise it is a plain Send: an idle session starts a turn and a
 paused one queues without being resumed. Only the resolved `steer` or `send` is
 recorded on the event, turn and routing; the request hash keeps `steer_or_send`,
 so an exact retry replays the first decision and the same key with another

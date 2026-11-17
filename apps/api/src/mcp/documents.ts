@@ -8,8 +8,10 @@ import {
   type KnowledgeContext,
   type Database,
 } from "@opengeni/db";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { Observability } from "@opengeni/observability";
 import * as z from "zod/v4";
+import { FirstPartyMcpServer } from "./database-tool-failure";
 
 /** The docs endpoint is a transport for canonical Knowledge retrieval. Legacy
  * chunk/base retrieval is retired: it cannot bypass pending Knowledge review. */
@@ -18,12 +20,19 @@ export function buildDocumentsMcpServer(
   accountId: string,
   workspaceId: string,
   documentServices: DocumentServices,
-  options: { knowledge: KnowledgeContext; settings?: Settings },
+  options: {
+    knowledge: KnowledgeContext;
+    settings?: Settings;
+    observability?: Pick<Observability, "error"> | undefined;
+  },
 ): McpServer {
   const context = options.knowledge;
   if (context.accountId !== accountId || context.workspaceId !== workspaceId)
     throw new Error("Knowledge gateway authority mismatch");
-  const server = new McpServer({ name: "opengeni-knowledge", version: "2.0.0" });
+  const server = new FirstPartyMcpServer(
+    { name: "opengeni-knowledge", version: "2.0.0" },
+    options.observability,
+  );
   server.registerTool(
     "knowledge_search",
     {

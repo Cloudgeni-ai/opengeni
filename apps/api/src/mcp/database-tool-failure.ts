@@ -11,6 +11,14 @@ import {
   type TaskNoteOperation,
   type TaskNoteRefusedError,
 } from "@opengeni/db";
+import type { Observability } from "@opengeni/observability";
+import {
+  McpServer,
+  type RegisteredTool,
+  type ToolCallback,
+} from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { AnySchema, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/server/zod-compat.js";
+import type { Implementation, ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { readOnlySessionRefusal } from "../routes/session-history-imports";
 import { markToolArgumentRejection } from "./tool-argument-error";
 
@@ -127,6 +135,29 @@ function echoesDatabaseError(error: unknown): boolean {
 const TRANSIENT_SQLSTATES = new Set(["40001", "40P01", "55P03"]);
 
 /**
+ * Why the database refused a call, by SQLSTATE, in words the caller can act on.
+ * Only the class of refusal is named: never which table, column or value.
+ */
+function refusalReason(sqlState: string | null): string {
+  switch (sqlState) {
+    case "23505":
+      return " because it conflicts with something that already exists";
+    case "23503":
+      return " because it refers to something that does not exist or is still in use";
+    case "23502":
+    case "23514":
+    case "23P01":
+      return " because the change breaks a rule the stored data must follow";
+    case "22001":
+      return " because a value is too long";
+    case "42501":
+      return " because this caller is not allowed to make it";
+    default:
+      return "";
+  }
+}
+
+/**
  * The tool result for a first-party tool that failed with a raw database
  * error, or null when the error's own message is safe to show. It says what
  * kind of failure happened (read-only session, brief outage, refusal with its
@@ -154,8 +185,58 @@ export function databaseToolFailureResult(toolName: string, error: unknown) {
   }
   return toolFailureResult({
     code: `${toolName}_failed`,
-    message: `The workspace database refused this call${sqlState ? ` (SQLSTATE ${sqlState})` : ""}, so the tool failed. Retrying the identical call is unlikely to help.`,
+    message: `The workspace database refused this call${refusalReason(sqlState)}${sqlState ? ` (SQLSTATE ${sqlState})` : ""}, so the tool failed. Retrying the identical call is unlikely to help.`,
     retryable: false,
     ...(sqlState ? { sqlState } : {}),
   });
+}
+
+/**
+ * The MCP server every first-party tool surface is built on. The SDK returns a
+ * thrown error's message verbatim, and a database error's message is its query
+ * and every parameter, so a tool that fails with one returns
+ * {@link databaseToolFailureResult} instead; the error itself goes only to the
+ * server log. Any other thrown error behaves exactly as with the SDK.
+ */
+export class FirstPartyMcpServer extends McpServer {
+  constructor(
+    serverInfo: Implementation,
+    private readonly failureLog: Pick<Observability, "error"> | undefined,
+  ) {
+    super(serverInfo);
+  }
+
+  override registerTool<
+    OutputArgs extends ZodRawShapeCompat | AnySchema,
+    InputArgs extends undefined | ZodRawShapeCompat | AnySchema = undefined,
+  >(
+    name: string,
+    config: {
+      title?: string;
+      description?: string;
+      inputSchema?: InputArgs;
+      outputSchema?: OutputArgs;
+      annotations?: ToolAnnotations;
+      _meta?: Record<string, unknown>;
+    },
+    cb: ToolCallback<InputArgs>,
+  ): RegisteredTool {
+    const handler = cb as (...args: unknown[]) => unknown;
+    return super.registerTool(name, config, (async (...args: unknown[]) => {
+      try {
+        return await handler(...args);
+      } catch (error) {
+        const databaseFailure = databaseToolFailureResult(name, error);
+        if (!databaseFailure) throw error;
+        try {
+          this.failureLog?.error(`First-party tool ${name} failed with a database error`, {
+            error,
+          });
+        } catch {
+          // The log is an observer; it never changes the tool result.
+        }
+        return databaseFailure;
+      }
+    }) as ToolCallback<InputArgs>);
+  }
 }

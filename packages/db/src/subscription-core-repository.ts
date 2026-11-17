@@ -707,12 +707,16 @@ export type SubscriptionTurnLease = SubscriptionTurnLeaseIdentity & {
 
 /**
  * Whether a turn lease row still holds its turn: unexpired, and its holder
- * generation's attempt has not written its quiescence receipt. A quiesced
- * attempt has lost inference authority for good, so a crashed or force-stopped
- * worker that never ran its own release must not keep a newer generation of
- * the same turn waiting for the TTL. Renew, assert and usage finalization keep
- * the plain expiry fence: the holder may still finish usage accounting after
- * its receipt, but a newer generation can take the turn over meanwhile.
+ * generation's attempt has neither written its quiescence receipt nor been
+ * closed for worker death (`lease_lost_recoverable`: the activity stopped
+ * heartbeating for its whole heartbeat timeout and the turn was redispatched).
+ * Either way that attempt has lost inference authority for good, so a crashed
+ * or force-stopped worker that never ran its own release must not keep a newer
+ * generation of the same turn waiting for the TTL. Renew, assert and usage
+ * finalization keep the plain expiry fence: the holder may still finish usage
+ * accounting after its receipt, but a newer generation can take the turn over
+ * meanwhile, and a holder that was only partitioned loses its lease at its next
+ * renewal once the newer generation replaced the row.
  */
 export function subscriptionTurnLeaseHeldSql(table = "subscription_leases"): SQL {
   const lease = sql.identifier(table);
@@ -723,7 +727,8 @@ export function subscriptionTurnLeaseHeldSql(table = "subscription_leases"): SQL
       and holder.session_id = ${lease}.session_id
       and holder.turn_id = ${lease}.turn_id
       and holder.execution_generation = ${lease}.generation
-      and holder.quiesced_at is not null))`;
+      and (holder.quiesced_at is not null
+        or (holder.state = 'closed' and holder.outcome = 'lease_lost_recoverable'))))`;
 }
 
 /**
@@ -731,7 +736,8 @@ export function subscriptionTurnLeaseHeldSql(table = "subscription_leases"): SQL
  * current eligibility. Replays by the same holder/connection/generation are
  * idempotent. A stale holder can be replaced only by a strictly newer
  * generation for the same turn and session, and only after the lease expired
- * or the holder generation's attempt wrote its quiescence receipt.
+ * or the holder generation's attempt wrote its quiescence receipt or was closed
+ * for worker death.
  */
 export async function acquireSubscriptionTurnLease(
   db: Database,

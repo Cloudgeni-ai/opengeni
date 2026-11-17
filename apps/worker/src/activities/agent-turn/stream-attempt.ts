@@ -36,6 +36,7 @@ import {
   persistModelContextSnapshot,
   ModelContextSnapshotContentCache,
   updateSessionTitleWithEvent,
+  withDatabaseQueryCancellation,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import { handOverWaitToSteer } from "./waiting-steer";
@@ -111,6 +112,7 @@ import {
   recordContextCompaction,
   recordModelInputTokens,
   recordModelPreparationPhase,
+  measureTurnStartupPhase,
   recordModelStepPhase,
   recordTurnStartupPhase,
   recordTurnWorkerPreparationTotal,
@@ -1050,15 +1052,32 @@ export async function runTurnStreamAttempt(
     // committed but before its ledger writes. Finish them (idempotently)
     // before this attempt's first model request can be admitted. A failed
     // read or write is retried at this attempt's next stream boundary.
+    // The read runs under the turn's cancellation, which cancels its
+    // statement in PostgreSQL: a slow or blocked settlement must never hold a
+    // cancelled or draining turn out of sight of its abort.
     if (!ledgerRecoveredAttempts.has(attempt)) {
       try {
-        await settleRecordedModelUsage(settings, db, {
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: activeTurnId,
-          excludeAttemptId: input.attemptId,
+        await measureTurnStartupPhase(
           observability,
-        });
+          {
+            phase: "earlier_attempt_usage_settlement",
+            provider: turnExecutionPolicy.providerId,
+            backend: activeSandboxBackend ?? groupBoxBackend,
+          },
+          async () =>
+            await withDatabaseQueryCancellation(
+              db,
+              runtimeCancellationSignal,
+              async () =>
+                await settleRecordedModelUsage(settings, db, {
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  turnId: activeTurnId,
+                  excludeAttemptId: input.attemptId,
+                  observability,
+                }),
+            ),
+        );
         ledgerRecoveredAttempts.add(attempt);
       } catch (error) {
         observability.warn?.("recorded model usage settlement failed before model admission", {

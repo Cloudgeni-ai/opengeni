@@ -568,6 +568,20 @@ const nativeSignInRoute = createRoute({
   },
   component: NativeSignIn,
 });
+// The Opengeni phone app's in-app viewers for a Site and for a document,
+// spreadsheet or presentation: the Site or editor alone, without the web app's
+// rail or header (the app draws its own). The app signs its web view in with
+// the device session.
+const nativeSiteViewRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "native-view/workspaces/$workspaceId/sites/$siteId",
+  component: NativeSiteView,
+});
+const nativeEditableArtifactViewRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "native-view/workspaces/$workspaceId/artifacts/editable/$artifactId",
+  component: NativeEditableArtifactView,
+});
 // Where Opengeni Console, on its own host, sends a signed-out person: sign in
 // here if needed, then go back to Console with a one-time code (code + PKCE).
 const consoleSignInRoute = createRoute({
@@ -1256,6 +1270,8 @@ const routeTree = rootRoute.addChildren([
   personalSecurityRoute,
   confirmPasskeyRoute,
   nativeSignInRoute,
+  nativeSiteViewRoute,
+  nativeEditableArtifactViewRoute,
   consoleSignInRoute,
   siteAuthorizeRoute,
   ...(import.meta.env.DEV
@@ -1805,6 +1821,29 @@ function EditableArtifact() {
   const params = workspaceEditableArtifactRoute.useParams();
   const { fromSession } = workspaceEditableArtifactRoute.useSearch();
   return <LazyEditableArtifactRoute {...params} fromSession={fromSession} />;
+}
+
+function NativeSiteView() {
+  const { workspaceId, siteId } = nativeSiteViewRoute.useParams();
+  return (
+    <div className="h-dvh w-dvw overflow-hidden bg-og-bg">
+      <LazySiteViewRoute
+        key={`${workspaceId}:${siteId}`}
+        workspaceId={workspaceId}
+        siteId={siteId}
+        embedded
+      />
+    </div>
+  );
+}
+
+function NativeEditableArtifactView() {
+  const params = nativeEditableArtifactViewRoute.useParams();
+  return (
+    <div className="h-dvh w-dvw overflow-hidden bg-og-bg">
+      <LazyEditableArtifactRoute {...params} embedded />
+    </div>
+  );
 }
 
 function RetainedArtifact() {

@@ -56,6 +56,8 @@ import { useComposerVoice } from "@/voice";
 import { openLinkFromApp } from "@/app-link-registry";
 import { appSessionPath } from "@/app-links";
 import { openOnWeb, webPaths, webUrl } from "@/web-links";
+import { ArtifactLinkCard } from "@/artifact-link-card";
+import { viewerParamsForLink, viewerPath } from "@/artifacts";
 import { voiceCommandForSession } from "@/voice-command-model";
 import { useVoiceCommands } from "@/voice-commands";
 
@@ -267,7 +269,7 @@ function LiveSession(props: {
   );
   const { account } = useAccount();
   const webBaseUrl = account?.baseUrl ?? null;
-  // Agent images and previews resolve through this workspace; artifacts and Sites open on web.
+  // Agent images and previews resolve through this workspace; artifacts and Sites open in the app.
   const renderMarkdown = useMemo(() => {
     const openResolvedLink = (target: OpenGeniLinkTarget) => {
       // Another chat opens here in the app, in the workspace the link names (or this one).
@@ -277,23 +279,9 @@ function LiveSession(props: {
         );
         return;
       }
-      if (!webBaseUrl) return;
-      const workspace = encodeURIComponent(props.workspaceId);
-      if (target.kind === "site")
-        openOnWeb(
-          webBaseUrl,
-          `/workspaces/${workspace}/artifacts/${encodeURIComponent(target.artifactId)}`,
-        );
-      else if (target.kind === "file")
-        openOnWeb(
-          webBaseUrl,
-          `/workspaces/${workspace}/artifacts/files/${encodeURIComponent(target.fileId)}`,
-        );
-      else if (target.kind === "editable-artifact")
-        openOnWeb(
-          webBaseUrl,
-          `/workspaces/${workspace}/artifacts/editable/${encodeURIComponent(target.artifactId)}`,
-        );
+      // Artifacts, Sites and files open in the app's viewer.
+      const viewer = viewerParamsForLink(target, props.workspaceId);
+      if (viewer) router.push(viewerPath({ ...viewer, from: props.sessionId }));
     };
     const openLink = (target: OpenGeniLinkTarget) => {
       void resolveOpenGeniLinkTarget(props.client, target, props.workspaceId, {
@@ -315,13 +303,25 @@ function LiveSession(props: {
       },
       onCopy: (text) => void copyText(text),
       onOpenGeniLink: openLink,
+      // An artifact linked on its own line is a card that opens it.
+      renderOpenGeniLink: ({ target, children }) =>
+        viewerParamsForLink(target, props.workspaceId) ? (
+          <ArtifactLinkCard
+            client={props.client}
+            workspaceId={props.workspaceId}
+            target={target}
+            onOpen={() => openLink(target)}
+          >
+            {children}
+          </ArtifactLinkCard>
+        ) : undefined,
       ...createNativePreviewRenderers(t, {
         client: props.client,
         workspaceId: props.workspaceId,
         onOpenLink: openLink,
       }),
     });
-  }, [props.client, props.workspaceId, props.sessionId, webBaseUrl, t]);
+  }, [props.client, props.workspaceId, props.sessionId, t]);
   const catalog = useWorkspaceModelCatalog(props.workspaceId);
   const computeLabel = useSessionComputeLabel(props.workspaceId, props.sessionId);
   const [pickerOpen, setPickerOpen] = useState(false);

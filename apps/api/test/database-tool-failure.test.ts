@@ -14,6 +14,8 @@ import { HTTPException } from "hono/http-exception";
 import * as z4 from "zod/v4";
 
 import { taskNoteRefusalResult } from "../src/mcp/database-tool-failure";
+import { buildDocumentsMcpServer } from "../src/mcp/documents";
+import { buildFilesMcpServer } from "../src/mcp/files";
 import { PolicyMcpServer } from "../src/mcp/server";
 
 const grant: AccessGrant = {
@@ -126,6 +128,89 @@ describe("first-party tools never echo a raw database error", () => {
       expect(error.message.length).toBeGreaterThan(20);
       expect(result.structuredContent).toEqual({ error });
     }
+  });
+
+  test("a known refusal says what kind of rule it broke, never which one", async () => {
+    const policy = await connect(new PolicyMcpServer(grant, crypto.randomUUID(), null));
+    const result = await policy.callTool({
+      name: "sandbox_file_publish",
+      arguments: { path: "driver" },
+    });
+    expect(JSON.parse(textOf(result))).toEqual({
+      error: {
+        code: "sandbox_file_publish_failed",
+        message:
+          "The workspace database refused this call because the change breaks a rule the stored data must follow (SQLSTATE 23514), so the tool failed. Retrying the identical call is unlikely to help.",
+        retryable: false,
+        sqlState: "23514",
+      },
+    });
+  });
+
+  test("the error goes to the server log, not to the caller", async () => {
+    const logged: Array<{ message: string; error: unknown }> = [];
+    const log = {
+      error: (message: string, attributes: Record<string, unknown> = {}) => {
+        logged.push({ message, error: attributes.error });
+      },
+    };
+    const policy = await connect(new PolicyMcpServer(grant, crypto.randomUUID(), null, null, log));
+    await policy.callTool({ name: "sandbox_file_publish", arguments: { path: "refused" } });
+    await policy.callTool({ name: "sandbox_file_publish", arguments: { path: "plain" } });
+    expect(logged).toHaveLength(1);
+    expect(logged[0]!.message).toBe(
+      "First-party tool sandbox_file_publish failed with a database error",
+    );
+    expect(logged[0]!.error).toBeInstanceOf(DrizzleQueryError);
+  });
+
+  test("the files and Knowledge surfaces never echo a raw database error either", async () => {
+    const logged: string[] = [];
+    const observability = { error: (message: string) => void logged.push(message) };
+    const surfaces = {
+      files: buildFilesMcpServer({ db: {}, observability } as never, {
+        ...grant,
+        permissions: ["files:read"],
+      }),
+      knowledge: buildDocumentsMcpServer(
+        {} as never,
+        grant.accountId,
+        grant.workspaceId,
+        {} as never,
+        {
+          knowledge: {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            actor: { kind: "agent" } as never,
+          },
+          observability,
+        },
+      ),
+    };
+    for (const [surface, server] of Object.entries(surfaces)) {
+      // A tool on this surface whose query the database refuses.
+      const client = await connect(server);
+      const result = await client.callTool({
+        name: "sandbox_file_publish",
+        arguments: { path: "refused" },
+      });
+      expect(result.isError).toBe(true);
+      const text = textOf(result);
+      expectNoLeak(text);
+      expect(JSON.parse(text), surface).toEqual({
+        error: {
+          code: "sandbox_file_publish_failed",
+          message:
+            "The workspace database refused this call (SQLSTATE 54000), so the tool failed. Retrying the identical call is unlikely to help.",
+          retryable: false,
+          sqlState: "54000",
+        },
+      });
+    }
+    expect(logged).toEqual([
+      "First-party tool sandbox_file_publish failed with a database error",
+      "First-party tool sandbox_file_publish failed with a database error",
+    ]);
   });
 
   test("errors with their own safe message are returned exactly as the SDK would", async () => {
