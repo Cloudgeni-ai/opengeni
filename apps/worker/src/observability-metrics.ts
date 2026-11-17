@@ -563,6 +563,17 @@ export function turnLifecycleMetricsFor(observability: Observability): TurnLifec
   return tracker;
 }
 
+const UNPAID_SANDBOX_FLEET_STATES: readonly UnpaidSandboxFleetState[] = [
+  "normal",
+  "pressure",
+  "daily_budget_exhausted",
+];
+
+const UNPAID_SANDBOX_FLEET_CHECKS_METRIC = {
+  name: "opengeni_sandbox_unpaid_fleet_checks_total",
+  help: "Sandbox reaper passes by the unpaid fleet's state (normal, fleet pressure engaged, or today's unpaid box time exhausted).",
+} as const;
+
 export function initializeWorkerOutcomeMetrics(observability: Observability): void {
   for (const outcome of TURN_OUTCOMES) {
     observability.incrementCounter({
@@ -574,6 +585,15 @@ export function initializeWorkerOutcomeMetrics(observability: Observability): vo
   }
   for (const cause of TURN_RECOVERY_CAUSES) {
     observability.incrementCounter({ ...TURN_RECOVERIES_METRIC, labels: { cause }, amount: 0 });
+  }
+  // Every unpaid fleet state exists from start, so an alert on its increase
+  // fires on the first pass in that state.
+  for (const state of UNPAID_SANDBOX_FLEET_STATES) {
+    observability.incrementCounter({
+      ...UNPAID_SANDBOX_FLEET_CHECKS_METRIC,
+      labels: { state },
+      amount: 0,
+    });
   }
   observability.incrementCounter({
     name: "opengeni_turns_total",
@@ -1823,6 +1843,46 @@ export function recordSandboxComputeBoundsDrain(
     help: "Warm boxes no turn holds that the reaper drained or stopped under the plan's compute bounds, by fixed reason and mode.",
     labels: { reason, mode },
   });
+}
+
+/** The unpaid sandbox fleet as one reaper pass saw it (docs/deployment.md,
+ * "Unpaid fleet limits"). `state` counts passes, so an alert on its increase
+ * stops on its own when the reaper moves to another replica. */
+export type UnpaidSandboxFleetState = "normal" | "pressure" | "daily_budget_exhausted";
+
+export function recordUnpaidSandboxFleet(
+  observability: Observability,
+  input: {
+    state: UnpaidSandboxFleetState;
+    warmBoxes: number | null;
+    unpaidRunningBoxes: number | null;
+    unpaidBoxSecondsToday: number | null;
+  },
+): void {
+  observability.incrementCounter({
+    ...UNPAID_SANDBOX_FLEET_CHECKS_METRIC,
+    labels: { state: input.state },
+  });
+  const gauges: Array<[string, string, number | null]> = [
+    [
+      "opengeni_sandbox_fleet_warm_boxes",
+      "Boxes of every plan starting or warm, as fleet pressure reads them.",
+      input.warmBoxes,
+    ],
+    [
+      "opengeni_sandbox_unpaid_fleet_running_boxes",
+      "Boxes of unpaid organizations starting or warm.",
+      input.unpaidRunningBoxes,
+    ],
+    [
+      "opengeni_sandbox_unpaid_fleet_box_seconds_today",
+      "Metered box seconds of unpaid organizations since 00:00 UTC.",
+      input.unpaidBoxSecondsToday,
+    ],
+  ];
+  for (const [name, help, value] of gauges) {
+    if (value !== null) observability.setGauge({ name, help, value });
+  }
 }
 
 /** Only call after the exact draining->cold commit reports wentCold. The

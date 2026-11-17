@@ -2239,6 +2239,9 @@ const SettingsSchema = z.object({
   // Organization-wide sandbox limits by subscription plan (see
   // parseSandboxPlanLimitsJson). Empty = DEFAULT_SANDBOX_PLAN_LIMITS; "{}" = none.
   sandboxPlanLimitsJson: z.string().default(""),
+  // Fleet-wide bounds on unpaid sandbox compute (see
+  // parseSandboxFleetLimitsJson). Empty = DEFAULT_SANDBOX_FLEET_LIMITS.
+  sandboxFleetLimitsJson: z.string().default(""),
   sandboxPreparationProfiles: z.string().default("none"),
   sandboxEnvAllowlist: z.string().default(""),
   // Comma-separated image references a workspace may select as its default
@@ -6738,6 +6741,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
       "OPENGENI_SANDBOX_MAX_VIEWER_ONLY_BOXES_PER_WORKSPACE",
     ),
     sandboxPlanLimitsJson: optional("OPENGENI_SANDBOX_PLAN_LIMITS_JSON"),
+    sandboxFleetLimitsJson: optional("OPENGENI_SANDBOX_FLEET_LIMITS_JSON"),
     sandboxPreparationProfiles: optional("OPENGENI_SANDBOX_PREPARATION_PROFILES"),
     sandboxEnvAllowlist: optional("OPENGENI_SANDBOX_ENV_ALLOWLIST"),
     sandboxImageAllowlist: optional("OPENGENI_SANDBOX_IMAGE_ALLOWLIST"),
@@ -12613,6 +12617,128 @@ export function parseSandboxPlanLimitsJson(raw: string): SandboxPlanLimits {
 
 export function sandboxPlanLimits(settings: Settings): SandboxPlanLimits {
   return parseSandboxPlanLimitsJson(settings.sandboxPlanLimitsJson);
+}
+
+/**
+ * Fleet-wide bounds on the sandbox compute of unpaid organizations (tiers
+ * `free`, `new`, `none` and `restricted` with no bought credit and no paid
+ * subscription), on top of the per-organization and per-person plan limits.
+ * Paid plans, `enterprise` and `embedded` are never counted or limited. An
+ * absent field is unbounded.
+ *
+ * - `unpaidRunningBoxes`: the most boxes all unpaid organizations together
+ *   keep running (warming or warm). A new unpaid box past it is refused
+ *   (`sandbox_capacity_unpaid_busy`); joining a running box is not.
+ * - `unpaidBoxSecondsPerDay`: metered box seconds of all unpaid organizations
+ *   since 00:00 UTC. Past it no unpaid box starts until the next UTC day.
+ * - `youngOrganizationAgeMs` / `youngOrganizationRunningBoxes` /
+ *   `youngOrganizationBoxSeconds`: an unpaid organization younger than the
+ *   age runs at most that many boxes, and once it has used that many metered
+ *   box seconds since it was created it gets no box until it is older (like
+ *   a spent daily budget).
+ * - `pressureEngageWarmBoxes` / `pressureReleaseWarmBoxes` /
+ *   `pressureReleaseAfterMs` / `pressureUnpaidRunningBoxes`: when more than
+ *   `pressureEngageWarmBoxes` boxes of every plan are warm, the unpaid cap
+ *   drops to `pressureUnpaidRunningBoxes` (0: no new unpaid box) until the
+ *   warm count has stayed below `pressureReleaseWarmBoxes` for
+ *   `pressureReleaseAfterMs`.
+ */
+export type SandboxFleetLimits = {
+  unpaidRunningBoxes?: number;
+  unpaidBoxSecondsPerDay?: number;
+  youngOrganizationAgeMs?: number;
+  youngOrganizationRunningBoxes?: number;
+  youngOrganizationBoxSeconds?: number;
+  pressureEngageWarmBoxes?: number;
+  pressureReleaseWarmBoxes?: number;
+  pressureReleaseAfterMs?: number;
+  pressureUnpaidRunningBoxes?: number;
+};
+
+const SANDBOX_FLEET_LIMIT_FIELDS = [
+  "unpaidRunningBoxes",
+  "unpaidBoxSecondsPerDay",
+  "youngOrganizationAgeMs",
+  "youngOrganizationRunningBoxes",
+  "youngOrganizationBoxSeconds",
+  "pressureEngageWarmBoxes",
+  "pressureReleaseWarmBoxes",
+  "pressureReleaseAfterMs",
+  "pressureUnpaidRunningBoxes",
+] as const satisfies readonly (keyof SandboxFleetLimits)[];
+
+/** Sized from hosted production's unpaid traffic: legitimate Free use peaked
+ * at 15 concurrent boxes and 112 box-hours a day, and new organizations'
+ * first day at a p90 of under two box-hours. Pressure engages at the same 50
+ * warm boxes as the warm-fleet page. */
+export const DEFAULT_SANDBOX_FLEET_LIMITS: SandboxFleetLimits = {
+  unpaidRunningBoxes: 40,
+  unpaidBoxSecondsPerDay: 300 * 60 * 60,
+  youngOrganizationAgeMs: 24 * 60 * 60 * 1000,
+  youngOrganizationRunningBoxes: 1,
+  youngOrganizationBoxSeconds: 6 * 60 * 60,
+  pressureEngageWarmBoxes: 50,
+  pressureReleaseWarmBoxes: 40,
+  pressureReleaseAfterMs: 15 * 60 * 1000,
+  pressureUnpaidRunningBoxes: 15,
+};
+
+/**
+ * Parse OPENGENI_SANDBOX_FLEET_LIMITS_JSON over DEFAULT_SANDBOX_FLEET_LIMITS:
+ * blank keeps the defaults, a field set to null removes that bound. It never
+ * throws, so a typo cannot stop a deployment: unknown fields (for example
+ * ones a newer release added) are ignored, and malformed JSON or a malformed
+ * value keeps the default, each reported in `issues`.
+ */
+export function parseSandboxFleetLimitsJson(raw: string): {
+  limits: SandboxFleetLimits;
+  issues: string[];
+} {
+  const limits: SandboxFleetLimits = { ...DEFAULT_SANDBOX_FLEET_LIMITS };
+  const issues: string[] = [];
+  if (!raw.trim()) return { limits, issues };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    issues.push(`OPENGENI_SANDBOX_FLEET_LIMITS_JSON is not valid JSON: ${errorMessage(error)}`);
+    return { limits, issues };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    issues.push("OPENGENI_SANDBOX_FLEET_LIMITS_JSON must be a JSON object");
+    return { limits, issues };
+  }
+  for (const [field, amount] of Object.entries(parsed)) {
+    if (!(SANDBOX_FLEET_LIMIT_FIELDS as readonly string[]).includes(field)) {
+      issues.push(`OPENGENI_SANDBOX_FLEET_LIMITS_JSON field ${field} is not known and is ignored`);
+      continue;
+    }
+    const key = field as (typeof SANDBOX_FLEET_LIMIT_FIELDS)[number];
+    if (amount === null) {
+      delete limits[key];
+      continue;
+    }
+    if (typeof amount !== "number" || !Number.isSafeInteger(amount) || amount < 0) {
+      issues.push(
+        `OPENGENI_SANDBOX_FLEET_LIMITS_JSON ${field} must be a non-negative integer or null; the default applies`,
+      );
+      continue;
+    }
+    limits[key] = amount;
+  }
+  return { limits, issues };
+}
+
+let reportedSandboxFleetLimitIssues: string | null = null;
+
+/** The fleet limits of `settings`; parse issues are logged once per value. */
+export function sandboxFleetLimits(settings: Pick<Settings, "sandboxFleetLimitsJson">) {
+  const { limits, issues } = parseSandboxFleetLimitsJson(settings.sandboxFleetLimitsJson);
+  if (issues.length > 0 && reportedSandboxFleetLimitIssues !== settings.sandboxFleetLimitsJson) {
+    reportedSandboxFleetLimitIssues = settings.sandboxFleetLimitsJson;
+    console.warn("sandbox fleet limits: configuration issues", { issues });
+  }
+  return limits;
 }
 
 /** Plan tiers whose organization has not paid: Free, a young Free, no plan

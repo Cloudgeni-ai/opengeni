@@ -364,6 +364,35 @@ The backfill never advances an acknowledgement cursor. Meaningful frontier deriv
 backfill over event history. Optional bounded historical consumption repair is
 dry-run by default; see [session monitoring](session-monitoring-mcp.md#child-unread-and-consumption).
 
+## Unpaid fleet limits
+
+The free compute bounds (`OPENGENI_SANDBOX_PLAN_LIMITS_JSON`) limit each
+unpaid organization and person; fleet limits bound every unpaid organization
+together, so many fresh accounts cannot add up to a large fleet.
+`OPENGENI_SANDBOX_FLEET_LIMITS_JSON` (separate from the plan limits, so it can
+change during a rolling deploy: unknown fields are ignored and a malformed
+value keeps its default) overrides these defaults; `null` removes one bound:
+
+| Field | Default | Effect |
+| --- | --- | --- |
+| `unpaidRunningBoxes` | 40 | Starting or warm boxes of all unpaid organizations together. |
+| `unpaidBoxSecondsPerDay` | 1080000 (300 box-hours) | Metered `sandbox.warm_seconds` of unpaid organizations since 00:00 UTC; past it no new unpaid box starts until the next UTC day. |
+| `youngOrganizationAgeMs` / `youngOrganizationRunningBoxes` | 86400000 (24 h) / 1 | An unpaid organization younger than the age runs at most this many boxes (chat, terminal and browser share one box). |
+| `youngOrganizationBoxSeconds` | 21600 (6 box-hours) | Metered box time a young unpaid organization gets since it was created; past it, like a spent daily budget, no box starts and only a box a turn holds stays usable until the organization is older. |
+| `pressureEngageWarmBoxes` / `pressureReleaseWarmBoxes` / `pressureReleaseAfterMs` / `pressureUnpaidRunningBoxes` | 50 / 40 / 900000 (15 min) / 15 | When more boxes of every plan are warm than the engage level, the unpaid cap drops to the pressure cap until every reading for the release window is below the release level. |
+
+Unpaid means the free compute bounds' rule: tiers `free`, `new`, `none` and
+`restricted` with no `credit_topup` and no Stripe subscription. Paid,
+Enterprise, host-provisioned and credit-buying organizations are never counted
+or limited, and self-hosted backends are exempt.
+
+- Admission checks the fleet only when it elects a new box (cold to warming), for every holder kind; joining a running box, so a turn already on a warm box, is never refused. A refusal is `sandbox_capacity_unpaid_busy` (HTTP 429 for terminals, viewers and Browser/ComputerSessions); an agent turn fails with the same message instead of retrying. The young-organization running limit is the organization's running limit, so a turn beyond it waits for its box like any running-box limit; a spent young box time fails the turn with its reason (`sandbox_compute_unavailable`).
+- The running cap counts under one transaction advisory lock, so concurrent admissions cannot overshoot it. Boxes are marked unpaid (`sandbox_leases.compute_unpaid`) when elected.
+- Pressure reads the live warm-lease count (`opengeni_private.count_sandbox_leases_by_liveness()`, the source of `opengeni:sandbox_leases:fresh_max` and the warm-fleet page) at most every 15 seconds per process. Modal spend is watched outside the application, so the warm count is the in-application proxy for it.
+- Unpaid admissions fail closed: if the warm count cannot be read for two minutes, or the unpaid count or today's box time cannot be read, a new unpaid box is refused and `opengeni_sandbox_compute_standing_fallbacks_total{part="fleet"}` counts it. Paid admissions never read the fleet.
+- The unpaid count and today's box time come from the `SECURITY DEFINER` function `opengeni_private.sandbox_unpaid_fleet_v1` (migration 1486), which ships without a runtime grant and is granted by a later migration. Until then the running cap, the daily budget and a non-zero pressure cap (which needs the unpaid count) are not enforced; a pressure cap of 0 and the young-organization limits are.
+- Each reaper pass records `opengeni_sandbox_unpaid_fleet_checks_total{state}` (`normal`, `pressure`, `daily_budget_exhausted`) and the gauges `opengeni_sandbox_fleet_warm_boxes`, `opengeni_sandbox_unpaid_fleet_running_boxes` and `opengeni_sandbox_unpaid_fleet_box_seconds_today`. `OpenGeniUnpaidSandboxDailyBudgetExhausted` pages while the budget is spent; `OpenGeniSandboxFleetPressureEngaged` warns while pressure holds. The daily breaker stops new boxes only: running boxes keep their organizations' own bounds.
+
 ## Consented sandbox recovery (0495)
 
 Fresh bootstrap may migrate before runtime roles exist. Migration 0495 grants

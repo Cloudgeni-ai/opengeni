@@ -230,7 +230,7 @@ import { browserCheckpointPrerequisites } from "./browser-deadline-checkpoint";
 import { assertSandboxDrainInputTiming, sandboxDrainTiming } from "../sandbox-reaper-timeout";
 import type { ControlActivityServices as ActivityServices } from "./types";
 import { boundViewerOnlyWarmBoxes } from "./sandbox-viewer-only-bounds";
-import { boundComputeBoundedWarmBoxes } from "./sandbox-compute-bounds";
+import { boundComputeBoundedWarmBoxes, observeUnpaidSandboxFleet } from "./sandbox-compute-bounds";
 import { reconcilePendingParentSystemUpdates } from "./parent-wake";
 import {
   recordActiveUserGauges,
@@ -1451,6 +1451,15 @@ export function createSandboxLeaseActivities(
           bounds.drained.compute_idle;
       } catch (error) {
         observability.warn("sandbox reaper: compute bounds failed", {
+          error: errorMessage(error),
+        });
+      }
+      // The unpaid fleet's pressure and box time (fleet limits), recorded for
+      // alerting; admission enforces them.
+      try {
+        await observeUnpaidSandboxFleet({ db, settings, observability });
+      } catch (error) {
+        observability.warn("sandbox reaper: unpaid fleet observation failed", {
           error: errorMessage(error),
         });
       }
