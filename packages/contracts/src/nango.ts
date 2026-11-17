@@ -429,6 +429,26 @@ export const NANGO_TAG = Object.freeze({
   integrationKey: "opengeni_integration",
 });
 
+/**
+ * Names the deployment that made a connection, so a deployment's automatic
+ * cleanup acts only on its own connections even when several deployments
+ * (staging, a developer's machine) share one Nango environment. Not part of
+ * an attempt's proof (see nangoTagsMatchAttempt).
+ */
+export const NANGO_DEPLOYMENT_TAG = "opengeni_deployment";
+
+/** This deployment's tag value: its public origin, or null when it has none. */
+export function nangoDeploymentTag(settings: {
+  publicBaseUrl?: string | undefined;
+}): string | null {
+  if (!settings.publicBaseUrl) return null;
+  try {
+    return new URL(settings.publicBaseUrl).origin.toLowerCase().slice(0, 255);
+  } catch {
+    return null;
+  }
+}
+
 export type NangoAttemptTags = {
   accountId: string;
   workspaceId: string;

@@ -7976,6 +7976,8 @@ export type CreateConnectionInput = {
   verifiedInstallAt?: Date | null;
   verifiedInstallVersion?: number | null;
   metadata?: Record<string, unknown>;
+  /** See connectionAccountIdentityKey; omit when the account is unverified. */
+  accountIdentityKey?: string | null;
   /** The person's own name for the connection (already normalized). */
   label?: string | null;
   createdBySubjectId?: string | null;
@@ -8044,6 +8046,17 @@ export type UpdateConnectionInput = {
   verifiedInstallAt?: Date | null;
   verifiedInstallVersion?: number | null;
   metadata?: Record<string, unknown>;
+  /**
+   * See connectionAccountIdentityKey. Undefined keeps the stored key, unless
+   * the update replaces the credential: then the key is cleared.
+   */
+  accountIdentityKey?: string | null;
+  /**
+   * The key the writer derives from the stored row's own verified account,
+   * for a row saved before keys existed. With `accountIdentityKey` equal to
+   * it (and no scope lost) the reconnect keeps `authorityGeneration`.
+   */
+  previousAccountIdentityKey?: string | null;
   /** Rename: display only, so it changes neither `version` nor authority. */
   label?: string | null;
   updatedBySubjectId?: string | null;
@@ -13640,11 +13653,13 @@ async function createConnectionInScope(
       verifiedInstallAt: input.verifiedInstallAt ?? null,
       verifiedInstallVersion: input.verifiedInstallVersion ?? null,
       metadata: input.metadata ?? {},
+      accountIdentityKey: input.accountIdentityKey ?? null,
       label: input.label ?? null,
       createdBySubjectId: input.createdBySubjectId ?? null,
       updatedBySubjectId: input.updatedBySubjectId ?? input.createdBySubjectId ?? null,
     })
-    .returning(connectionMetadataColumns);
+    .returning(connectionMetadataColumns)
+    .catch(rethrowAccountIdentityConflict);
   if (!row) {
     throw new Error("Failed to create connection");
   }
@@ -13747,6 +13762,44 @@ export async function createConnectionIdempotently(
       return connection;
     },
   );
+}
+
+/**
+ * The key that makes a connection one verified provider account of one
+ * integration: `parts` name the integration (backend, provider, resource) and
+ * then the account as the provider identifies it. Each owner (a person within
+ * an organization, or a workspace) holds at most one live connection per key;
+ * a second insert or reactivation fails with ConnectionAccountAlreadyConnectedError.
+ * Writers stamp it only for an account they verified: an unknown account is
+ * never deduplicated on a guess.
+ */
+export function connectionAccountIdentityKey(parts: readonly string[]): string {
+  if (parts.length < 2 || parts.some((part) => typeof part !== "string" || !part))
+    throw new Error("A connection account identity needs its integration and account");
+  return createHash("sha256").update(JSON.stringify(parts)).digest("hex");
+}
+
+/** Another live connection of the same owner already holds this account. */
+export class ConnectionAccountAlreadyConnectedError extends Error {
+  constructor() {
+    super("This account is already connected");
+    this.name = "ConnectionAccountAlreadyConnectedError";
+  }
+}
+
+/** Whether an error is the live-account uniqueness check (migration 1481). */
+export function isConnectionAccountIdentityConflict(error: unknown): boolean {
+  if (error instanceof ConnectionAccountAlreadyConnectedError) return true;
+  return (
+    nestedPostgresSqlState(error) === "23505" &&
+    safeDatabaseErrorFacts(error).constraint === "connections_live_account_identity_uq"
+  );
+}
+
+function rethrowAccountIdentityConflict(error: unknown): never {
+  throw isConnectionAccountIdentityConflict(error)
+    ? new ConnectionAccountAlreadyConnectedError()
+    : error;
 }
 
 export async function createConnection(
@@ -14224,6 +14277,15 @@ export async function persistProviderOAuthConnection(
           sql`select pg_advisory_xact_lock(hashtextextended(${`provider-oauth-connection:${input.workspaceId}:${ownerKey}:${input.providerDomain}:${input.providerFamily}:${input.providerPrincipalId}`}, 0))`,
         );
         const exactOwner = connectionExactSubject(input.subjectId ?? null);
+        // One live connection per owner, workspace and provider principal.
+        const accountIdentityKey = connectionAccountIdentityKey([
+          "provider-oauth",
+          input.workspaceId,
+          input.providerDomain,
+          input.providerFamily,
+          input.credentialRole,
+          input.providerPrincipalId,
+        ]);
         const requested = input.requestedConnectionId
           ? (
               await tx
@@ -14269,12 +14331,18 @@ export async function persistProviderOAuthConnection(
                   sql`${schema.connections.metadata} ->> 'providerPrincipalId' = ${input.providerPrincipalId}`,
                 ),
               )
-              .orderBy(desc(schema.connections.updatedAt), desc(schema.connections.id))
+              // A live row first: reactivating a revoked duplicate would
+              // collide with the live row that holds the account.
+              .orderBy(
+                sql`${schema.connections.status} = 'revoked'`,
+                desc(schema.connections.updatedAt),
+                desc(schema.connections.id),
+              )
               .for("update")
               .limit(1)
           )[0];
         if (!existing) {
-          const created = await createConnectionInScope(tx, input);
+          const created = await createConnectionInScope(tx, { ...input, accountIdentityKey });
           if (input.requireLiveUserAuthority && !created.authorityId) {
             throw new Error("Connection owner authority was not bound");
           }
@@ -14313,6 +14381,9 @@ export async function persistProviderOAuthConnection(
           credentialEncrypted: input.credentialEncrypted,
           grantedScopes: input.grantedScopes ?? [],
           expiresAt: input.expiresAt ?? null,
+          accountIdentityKey,
+          // Matched on the same provider principal: the same account.
+          previousAccountIdentityKey: accountIdentityKey,
           metadata: {
             ...existing.metadata,
             ...(input.metadata ?? {}),
@@ -14473,6 +14544,35 @@ export async function verifyPersonalGitHubRepositorySelections(
   return await mutatePersonalGitHubRepositorySelections(db, input, true);
 }
 
+/**
+ * A new credential advances the connection's authority generation, so work
+ * accepted with the old one stops using it, unless it is the same verified
+ * account signing in again: the stored row already holds this account's key,
+ * and the new grant keeps every scope the row had. Then it is a fresh token
+ * for the same authority, and accepted turns keep working through the
+ * reconnect. A different account, a narrower grant, an unverified account, a
+ * status change (the connections trigger advances it) or an owner change
+ * (immutable) still advance it.
+ */
+function sameAccountReconnectGeneration(input: UpdateConnectionInput) {
+  const next = sql`${schema.connections.authorityGeneration} + 1`;
+  if (!input.accountIdentityKey) return next;
+  // A row saved before keys existed carries none; the writer then vouches
+  // for the stored row's account with the key it derives from that row.
+  const stored = input.previousAccountIdentityKey
+    ? sql`coalesce(${schema.connections.accountIdentityKey}, ${input.previousAccountIdentityKey})`
+    : sql`${schema.connections.accountIdentityKey}`;
+  const keepsScopes =
+    input.grantedScopes === undefined
+      ? sql`true`
+      : sql`${JSON.stringify(input.grantedScopes)}::jsonb @> ${schema.connections.grantedScopes}`;
+  return sql`case
+    when ${stored} = ${input.accountIdentityKey} and ${keepsScopes}
+      then ${schema.connections.authorityGeneration}
+    else ${next}
+  end`;
+}
+
 async function updateConnectionInScope(
   db: Database,
   input: UpdateConnectionInput,
@@ -14487,7 +14587,7 @@ async function updateConnectionInScope(
       ? {
           credentialEncrypted: input.credentialEncrypted,
           version: sql`${schema.connections.version} + 1`,
-          authorityGeneration: sql`${schema.connections.authorityGeneration} + 1`,
+          authorityGeneration: sameAccountReconnectGeneration(input),
           lastError: null,
         }
       : {}),
@@ -14500,6 +14600,13 @@ async function updateConnectionInScope(
       ? { verifiedInstallVersion: input.verifiedInstallVersion }
       : {}),
     ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+    // A credential replaced by a writer that verified no account no longer
+    // vouches for the stored one: it loses the key (and its unique slot).
+    ...(input.accountIdentityKey !== undefined
+      ? { accountIdentityKey: input.accountIdentityKey }
+      : input.credentialEncrypted !== undefined
+        ? { accountIdentityKey: null }
+        : {}),
     ...(input.label !== undefined ? { label: input.label } : {}),
     ...(input.updatedBySubjectId !== undefined
       ? { updatedBySubjectId: input.updatedBySubjectId }
@@ -14518,7 +14625,8 @@ async function updateConnectionInScope(
           : []),
       ),
     )
-    .returning(connectionMetadataColumns);
+    .returning(connectionMetadataColumns)
+    .catch(rethrowAccountIdentityConflict);
   return row ? mapConnectionMetadata(row) : null;
 }
 
