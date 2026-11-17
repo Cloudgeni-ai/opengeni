@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import {
   NANGO_DEPLOYMENT_TAG,
   nangoAttemptTags,
@@ -108,6 +108,39 @@ describe("one Nango connection per person and account", () => {
         settings: testSettings({ nangoSecretKey: undefined }),
       }),
     ).toBeNull();
+  });
+
+  test("a worker whose tag matches none of the connections says so once", async () => {
+    const nango = fakeNango([
+      {
+        connection_id: "elsewhere",
+        provider_config_key: "google-mail",
+        created: "2026-11-01T00:00:00.000Z",
+        tags: {
+          ...nangoAttemptTags({ ...owner, attemptId: "attempt", integrationKey: "gmail" }),
+          // As when the API's public base URL differs from the worker's.
+          [NANGO_DEPLOYMENT_TAG]: "https://api.elsewhere.test",
+        },
+        errors: [],
+      },
+    ]);
+    const warn = spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const deps = { db: unreadableDb(), settings, fetchImpl: nango.fetchImpl };
+      expect(await sweepNangoConnections(deps)).toMatchObject({ listed: 1, skippedPeople: 0 });
+      await sweepNangoConnections(deps);
+      const mismatch = warn.mock.calls.filter(([message]) =>
+        String(message).includes("no connections tagged for this deployment"),
+      );
+      expect(mismatch).toHaveLength(1);
+      expect(mismatch[0]![1]).toEqual({
+        deployment: nangoDeploymentTag(settings),
+        taggedForOtherDeployments: 1,
+      });
+    } finally {
+      warn.mockRestore();
+    }
+    expect(nango.deletes).toEqual([]);
   });
 
   test("a row's Nango connection and verified account", () => {

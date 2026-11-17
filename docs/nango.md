@@ -137,12 +137,16 @@ connections; that is not a duplicate.
   last two hours and no readable row names (never after a failed read).
   An existing connection replaces a fresh one only while Nango reports it
   without auth errors.
-- When Nango reports no scopes for a connection, its row records the app's
-  default scopes and is marked `nangoScopesUnconfirmed`. Those defaults are
-  not a grant: no other organization's row is moved onto that connection on
-  their strength. Email accounts are compared case-insensitively.
+- A row's scopes count as a grant only when its metadata carries
+  `nangoScopesConfirmed`: Nango reported them at connect time, or the row was
+  moved onto a connection whose confirmed grant covers them. When Nango
+  reports no scopes the row records the app's default scopes without the
+  marker, and so does every row saved before the marker existed. No other
+  organization's row is moved onto a connection on the strength of unmarked
+  scopes. Email accounts are compared case-insensitively.
 - A legacy duplicate row of the same owner and account (saved before account
-  keys) shares the connection without the key, so it is billed once.
+  keys) shares the connection without the key, so it is billed once. It is
+  the same verified account, so its `authority_generation` is kept too.
 - Connections without a verified account are never merged. Config-only
   integrations (LinkedIn, X) without an `accountIdentity` therefore add a
   Nango connection on each connect, and each stays billed until its row is
@@ -190,7 +194,20 @@ URL, so deployments sharing one Nango environment never sweep each other's):
 - deletes connections whose rows have all needed reconnection because Nango
   could not refresh them (`nango_refresh_failed`) for 24 hours, while Nango
   still reports the failure. Those rows keep asking to reconnect, and a
-  reconnect stores a new connection.
+  reconnect stores a new connection;
+- marks active rows whose Nango connection Nango no longer has
+  (`nango_connection_missing`, for example deleted by an older release during
+  a rollout or rollback) as needing reconnection, after Nango confirms the
+  connection is gone. A row with a healthy connection of the same account
+  that covers its scopes is moved onto that one instead. Only people with at
+  least one connection this deployment tagged are visited (the sweep finds
+  people through Nango's tags).
+
+Repoints are committed first. Every deletion in Nango, and the confirmation
+before marking a row, happens afterwards under the person's lock, in a
+transaction that writes nothing, after the rows are read again. A worker
+whose public base URL tags none of the listed connections while others carry
+another deployment's tag logs that once, since it then cleans up nothing.
 
 Connections made outside Opengeni or before the deployment tag (untagged)
 are left to the operator's `integrations:nango orphans` command; that

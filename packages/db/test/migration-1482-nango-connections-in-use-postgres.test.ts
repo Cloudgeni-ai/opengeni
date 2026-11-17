@@ -135,4 +135,24 @@ describe("migration 1482: Nango connections in use", () => {
         where backend_pid = pg_backend_pid() and transaction_id = pg_current_xact_id()`);
     });
   }, 120_000);
+
+  test("more ids than one call answers are refused, never read as unused", async () => {
+    if (!owned) return;
+    await nangoRow("in-use-limit-0");
+    const ids = (count: number) =>
+      Array.from({ length: count }, (_, index) => `in-use-limit-${index}`);
+    const call = (count: number) =>
+      owned!.admin.unsafe(
+        `select nango_connection_id
+          from opengeni_private.nango_connections_in_use_v1($1::text[])`,
+        [ids(count)],
+      );
+    expect((await call(1000)).map((row) => row.nango_connection_id)).toEqual(["in-use-limit-0"]);
+    const refused = await call(1001).then(
+      () => null,
+      (error: unknown) => error as { code?: string; message?: string },
+    );
+    expect(refused?.code).toBe("22023");
+    expect(refused?.message).toContain("at most 1000 Nango connection ids per call");
+  }, 120_000);
 });

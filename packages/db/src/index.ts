@@ -8057,6 +8057,13 @@ export type UpdateConnectionInput = {
    * it (and no scope lost) the reconnect keeps `authorityGeneration`.
    */
   previousAccountIdentityKey?: string | null;
+  /**
+   * The new credential's verified account key, when the writer cannot store
+   * it on this row (another live row of the same owner already holds it, as
+   * for a legacy duplicate). It counts like `accountIdentityKey` for keeping
+   * `authorityGeneration`, but the row stays without a key.
+   */
+  vouchedAccountIdentityKey?: string | null;
   /** Rename: display only, so it changes neither `version` nor authority. */
   label?: string | null;
   updatedBySubjectId?: string | null;
@@ -14556,7 +14563,8 @@ export async function verifyPersonalGitHubRepositorySelections(
  */
 function sameAccountReconnectGeneration(input: UpdateConnectionInput) {
   const next = sql`${schema.connections.authorityGeneration} + 1`;
-  if (!input.accountIdentityKey) return next;
+  const incoming = input.accountIdentityKey ?? input.vouchedAccountIdentityKey;
+  if (!incoming) return next;
   // A row saved before keys existed carries none; the writer then vouches
   // for the stored row's account with the key it derives from that row.
   const stored = input.previousAccountIdentityKey
@@ -14567,7 +14575,7 @@ function sameAccountReconnectGeneration(input: UpdateConnectionInput) {
       ? sql`true`
       : sql`${JSON.stringify(input.grantedScopes)}::jsonb @> ${schema.connections.grantedScopes}`;
   return sql`case
-    when ${stored} = ${input.accountIdentityKey} and ${keepsScopes}
+    when ${stored} = ${incoming} and ${keepsScopes}
       then ${schema.connections.authorityGeneration}
     else ${next}
   end`;

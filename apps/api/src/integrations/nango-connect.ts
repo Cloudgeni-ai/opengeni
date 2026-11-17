@@ -640,9 +640,10 @@ async function persistNangoConnection(
     input.nangoConnectionId,
     input.identity,
   );
-  // Without Nango's report the stored scopes are the app's defaults; sharing
-  // never treats them as a grant that covers another organization's row.
-  if (input.grantedScopes === null) metadata.nangoScopesUnconfirmed = true;
+  // Only scopes Nango reported are a grant; without the report the stored
+  // scopes are the app's defaults, and sharing never treats them as a grant
+  // that covers another organization's row.
+  if (input.grantedScopes !== null) metadata.nangoScopesConfirmed = true;
   const credentialEncrypted = encryptedNangoCredential(
     settings,
     input.integration,
