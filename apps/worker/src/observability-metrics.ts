@@ -1825,6 +1825,47 @@ export function recordSandboxComputeBoundsDrain(
   });
 }
 
+/** The unpaid sandbox fleet as one reaper pass saw it (docs/deployment.md,
+ * "Unpaid fleet limits"). `state` counts passes, so an alert on its increase
+ * stops on its own when the reaper moves to another replica. */
+export type UnpaidSandboxFleetState = "normal" | "pressure" | "daily_budget_exhausted";
+
+export function recordUnpaidSandboxFleet(
+  observability: Observability,
+  input: {
+    state: UnpaidSandboxFleetState;
+    warmBoxes: number | null;
+    unpaidRunningBoxes: number | null;
+    unpaidBoxSecondsToday: number | null;
+  },
+): void {
+  observability.incrementCounter({
+    name: "opengeni_sandbox_unpaid_fleet_checks_total",
+    help: "Sandbox reaper passes by the unpaid fleet's state (normal, fleet pressure engaged, or today's unpaid box time exhausted).",
+    labels: { state: input.state },
+  });
+  const gauges: Array<[string, string, number | null]> = [
+    [
+      "opengeni_sandbox_fleet_warm_boxes",
+      "Boxes of every plan starting or warm, as fleet pressure reads them.",
+      input.warmBoxes,
+    ],
+    [
+      "opengeni_sandbox_unpaid_fleet_running_boxes",
+      "Boxes of unpaid organizations starting or warm.",
+      input.unpaidRunningBoxes,
+    ],
+    [
+      "opengeni_sandbox_unpaid_fleet_box_seconds_today",
+      "Metered box seconds of unpaid organizations since 00:00 UTC.",
+      input.unpaidBoxSecondsToday,
+    ],
+  ];
+  for (const [name, help, value] of gauges) {
+    if (value !== null) observability.setGauge({ name, help, value });
+  }
+}
+
 /** Only call after the exact draining->cold commit reports wentCold. The
  * backend is validated against the closed contract so provider IDs and other
  * per-sandbox values can never become metric labels. */

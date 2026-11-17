@@ -21,14 +21,23 @@ import {
   drainNoTurnLeaseForComputeBounds,
   listNoTurnWarmLeases,
   readOrganizationBoxSecondsToday,
+  readSandboxFleetPressure,
+  readSandboxUnpaidFleet,
   resolveSandboxPlanStandingInWorkspace,
   sandboxPlanLimitFor,
 } from "@opengeni/db";
-import { paidSandboxPlanLimit, sandboxPlanLimits } from "@opengeni/config";
+import {
+  paidSandboxPlanLimit,
+  sandboxFleetLimits,
+  sandboxPlanLimits,
+  type SandboxFleetLimits,
+} from "@opengeni/config";
 import { errorMessage } from "@opengeni/contracts/values";
 import {
   recordSandboxComputeBoundsDrain,
+  recordUnpaidSandboxFleet,
   type SandboxComputeBoundsDrainReason,
+  type UnpaidSandboxFleetState,
 } from "../observability-metrics";
 import type { ControlActivityServices as ActivityServices } from "./types";
 
@@ -241,4 +250,65 @@ async function forEachLimited<T>(
       }
     }),
   );
+}
+
+/** The unpaid fleet's state from one pass's readings (see SandboxFleetLimits). */
+export function unpaidSandboxFleetState(
+  limits: SandboxFleetLimits,
+  input: { pressureEngaged: boolean; unpaidBoxSecondsToday: number | null },
+): UnpaidSandboxFleetState {
+  if (
+    limits.unpaidBoxSecondsPerDay !== undefined &&
+    input.unpaidBoxSecondsToday !== null &&
+    input.unpaidBoxSecondsToday >= limits.unpaidBoxSecondsPerDay
+  ) {
+    return "daily_budget_exhausted";
+  }
+  return input.pressureEngaged ? "pressure" : "normal";
+}
+
+/**
+ * Observe the unpaid fleet once per reaper pass: fleet pressure, the unpaid
+ * running boxes and today's unpaid box time. Admission enforces the limits;
+ * this records them (a page fires while the day's unpaid box time is
+ * exhausted) and logs while the fleet is not normal. Until the fleet definer
+ * is granted (1485) only pressure is observed.
+ */
+export async function observeUnpaidSandboxFleet(
+  services: Pick<ActivityServices, "db" | "settings" | "observability">,
+): Promise<UnpaidSandboxFleetState> {
+  const { db, settings, observability } = services;
+  const limits = sandboxFleetLimits(settings);
+  const pressure = await readSandboxFleetPressure(db, limits, {
+    onReadFailure: (error) =>
+      observability.warn("sandbox reaper: fleet warm count read failed", {
+        error: errorMessage(error),
+      }),
+  });
+  let unpaid: Awaited<ReturnType<typeof readSandboxUnpaidFleet>> = null;
+  try {
+    unpaid = await readSandboxUnpaidFleet(db, { excludeLeaseId: null, withBoxSeconds: true });
+  } catch (error) {
+    observability.warn("sandbox reaper: unpaid fleet read failed", { error: errorMessage(error) });
+  }
+  const state = unpaidSandboxFleetState(limits, {
+    pressureEngaged: pressure.engaged,
+    unpaidBoxSecondsToday: unpaid?.boxSecondsToday ?? null,
+  });
+  recordUnpaidSandboxFleet(observability, {
+    state,
+    warmBoxes: pressure.warmBoxes,
+    unpaidRunningBoxes: unpaid?.runningBoxes ?? null,
+    unpaidBoxSecondsToday: unpaid?.boxSecondsToday ?? null,
+  });
+  if (state !== "normal") {
+    observability.warn("sandbox reaper: unpaid sandbox fleet limited", {
+      state,
+      warmBoxes: pressure.warmBoxes,
+      unpaidRunningBoxes: unpaid?.runningBoxes ?? null,
+      unpaidBoxSecondsToday: unpaid?.boxSecondsToday ?? null,
+      unpaidBoxSecondsPerDay: limits.unpaidBoxSecondsPerDay ?? null,
+    });
+  }
+  return state;
 }

@@ -7,6 +7,7 @@ import { isLazySandboxProvisionRetryable } from "../src/activities/agent-turn/sa
 import {
   organizationHasComputeBounds,
   planComputeBoundsDrains,
+  unpaidSandboxFleetState,
 } from "../src/activities/sandbox-compute-bounds";
 
 const observedAt = new Date("2026-11-17T12:00:00.000Z");
@@ -175,5 +176,42 @@ describe("free compute bounds: turns refused by the plan", () => {
       2,
     );
     expect(isLazySandboxProvisionRetryable(fenced)).toBe(false);
+  });
+});
+
+describe("unpaid fleet limits", () => {
+  test("a fleet refusal fails the turn as busy shared capacity, without waiting", () => {
+    for (const reason of ["fleet_busy", "fleet_daily_budget"] as const) {
+      const refusal = new SandboxOrganizationBoxLimitError("ws", "group", 40, reason);
+      expect(refusal.code).toBe("sandbox_capacity_unpaid_busy");
+      const wrapped = new Error("sandbox establishment failed", { cause: refusal });
+      const payload = agentRunFailurePayload(wrapped);
+      expect(payload.code).toBe("sandbox_capacity_unpaid_busy");
+      expect(payload.retryable).toBe(false);
+      expect(payload.error).toBe(refusal.message);
+      expect(isLazySandboxProvisionRetryable(wrapped)).toBe(false);
+    }
+    expect(new SandboxOrganizationBoxLimitError("ws", "group", 1, "young_running").code).toBe(
+      "sandbox_compute_unavailable",
+    );
+  });
+
+  test("the reaper reports a spent day before pressure", () => {
+    const limits = { unpaidBoxSecondsPerDay: 100 };
+    expect(
+      unpaidSandboxFleetState(limits, { pressureEngaged: false, unpaidBoxSecondsToday: 99 }),
+    ).toBe("normal");
+    expect(
+      unpaidSandboxFleetState(limits, { pressureEngaged: true, unpaidBoxSecondsToday: 99 }),
+    ).toBe("pressure");
+    expect(
+      unpaidSandboxFleetState(limits, { pressureEngaged: true, unpaidBoxSecondsToday: 100 }),
+    ).toBe("daily_budget_exhausted");
+    expect(
+      unpaidSandboxFleetState({}, { pressureEngaged: false, unpaidBoxSecondsToday: 1e9 }),
+    ).toBe("normal");
+    expect(
+      unpaidSandboxFleetState(limits, { pressureEngaged: false, unpaidBoxSecondsToday: null }),
+    ).toBe("normal");
   });
 });

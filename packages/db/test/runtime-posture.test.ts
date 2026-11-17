@@ -4258,12 +4258,14 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
     "slack_agent_update_settings",
     "sandbox_leases",
     "sandbox_lease_holders",
+    "usage_events",
   ];
   // Private tables runtime definers own (RUNTIME_DEFINER_ROUTINE_TABLES names them with their schema).
   const definerPrivateTables = [
     "native_push_devices",
     "native_push_deliveries",
     "session_content_collections",
+    "modal_inventory_read_capabilities",
   ];
   function eventPosture(execute: boolean): RuntimeDatabasePosture {
     const posture = safePosture();
@@ -4280,6 +4282,12 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
     posture.privateRoutines.push(
       ...runtimePosture.RUNTIME_DEFINER_ROUTINES.map((name) => routine(name, execute)),
     );
+    // The Modal inventory capability (a definer's table) is checked with its
+    // own granted inventory definer.
+    posture.privateRoutines.push({
+      ...routine("list_live_modal_sandbox_leases()", true),
+      configuration: ["search_path=pg_catalog"],
+    });
     return posture;
   }
   const eventOptions: RuntimeDatabasePostureOptions = {
@@ -4342,6 +4350,7 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
       "organization_warm_sandbox_counts_v1(uuid, text, uuid)",
       "nango_connections_in_use_v1(text[])",
+      "sandbox_unpaid_fleet_v1(uuid, boolean)",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -4354,6 +4363,7 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "collect_session_content_garbage_v1(uuid, uuid, integer)",
       "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
       "nango_connections_in_use_v1(text[])",
+      "sandbox_unpaid_fleet_v1(uuid, boolean)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(

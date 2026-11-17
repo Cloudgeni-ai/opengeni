@@ -10852,6 +10852,9 @@ export const sandboxLeases = pgTable(
     refcount: integer("refcount").notNull().default(0),
     turnHolders: integer("turn_holders").notNull().default(0),
     viewerHolders: integer("viewer_holders").notNull().default(0),
+    // Admission elected this box for an unpaid organization (unpaid tier, no
+    // paid history): it counts toward the fleet limits (1485).
+    computeUnpaid: boolean("compute_unpaid"),
 
     instanceId: text("instance_id"),
     backend: text("backend").notNull(),
