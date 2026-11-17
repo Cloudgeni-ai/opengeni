@@ -371,7 +371,7 @@ function unreferenced(
  * The ids of `candidates` nothing stands for any more, decided under the
  * person lock: no row in `rows` (the person's reads, including writes this
  * transaction made) and, deployment-wide, no live row in any organization.
- * Until that check is granted (migration 1481) only a complete read of every
+ * Until that check is granted (migration 1482) only a complete read of every
  * organization of the person may decide; otherwise nothing is unused.
  */
 async function unusedNangoConnections(

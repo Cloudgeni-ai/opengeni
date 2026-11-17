@@ -677,6 +677,7 @@ export const CASES: readonly EvalCase[] = [
     kind: "read",
     prompt: "Which email address is my connected Outlook mailbox?",
     expectAnswer: [i("iris\\.tenley@opengenitest2026")],
+    answerFromAccountLine: true,
     note: "Account identity: the connected test mailbox is Iris Tenley's.",
   },
   ...notConnected("outlook_calendar", [
@@ -710,6 +711,7 @@ export const CASES: readonly EvalCase[] = [
     prompt:
       "Whose Microsoft account is my own Outlook Calendar connection signed in as? Give the email address.",
     expectAnswer: [i("iris\\.tenley@opengenitest2026")],
+    answerFromAccountLine: true,
   },
 
   // ── Outlook Contacts ─────────────────────────────────────────────────────
@@ -775,7 +777,7 @@ export const CASES: readonly EvalCase[] = [
     integration: "sharepoint",
     kind: "write",
     prompt:
-      'On our SharePoint site Halcyon Ops, create a text file named "Halcyon eval {RUN}.txt" in the "Eval uploads" folder of the Documents library, containing the text "Eval upload content."',
+      'On our SharePoint site Opengeni acceptance lab, create a text file named "Halcyon eval {RUN}.txt" in the "Eval uploads" folder of its document library, containing the text "Eval upload content."',
     verify: "sharepoint_file_correct",
     servedBy: ["onedrive"],
   },

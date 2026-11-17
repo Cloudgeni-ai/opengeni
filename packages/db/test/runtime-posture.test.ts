@@ -618,7 +618,7 @@ function safePosture(): RuntimeDatabasePosture {
         hasDependents: false,
         configuration: ["search_path=pg_catalog, public, pg_temp"],
       },
-      // 1481 reads only connections, present in every current posture, and
+      // 1482 reads only connections, present in every current posture, and
       // withholds its runtime grant.
       {
         name: "nango_connections_in_use_v1(text[])",
@@ -4327,7 +4327,6 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "session_content_garbage_candidates_v1(integer)",
       "collect_session_content_garbage_v1(uuid, uuid, integer)",
       "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
-      "organization_warm_sandbox_counts_v1(uuid, text, uuid)",
       "nango_connections_in_use_v1(text[])",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);

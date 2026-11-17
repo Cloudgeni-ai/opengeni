@@ -271,7 +271,7 @@ and added again.
 The database holds the same rule for every backend. A writer that verified
 which provider account a connection is stores `connections.account_identity_key`
 (`connectionAccountIdentityKey`: SHA-256 of the integration and the account),
-and migration 1480 allows one live (not revoked) row per organization, owner (a
+and migration 1481 allows one live (not revoked) row per organization, owner (a
 person, or a workspace for a shared connection) and key. OAuth MCP logins use
 the provider, issuer, resource group and Google's account ID when recorded,
 else the verified identity; Nango connections use the Nango integration and

@@ -169,11 +169,11 @@ export async function withNangoPersonIntegrationLock<T>(
   });
 }
 
-/** Migration 1481's check, withheld from the runtime for one release. */
+/** Migration 1482's check, withheld from the runtime for one release. */
 export const NANGO_CONNECTIONS_IN_USE_ROUTINE =
   "opengeni_private.nango_connections_in_use_v1(text[])";
 
-/** False while the deployment's database withholds the check (1481). */
+/** False while the deployment's database withholds the check (1482). */
 export async function nangoConnectionsInUseAvailable(db: Database): Promise<boolean> {
   const [row] = await rawRows<{ granted: boolean | null }>(
     db,

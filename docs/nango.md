@@ -122,11 +122,11 @@ connections; that is not a duplicate.
   deployment-wide lock per person and integration, so concurrent connects,
   disconnects and the sweep converge; deletes happen under that lock.
   Whether a Nango connection is still used is decided deployment-wide by
-  `opengeni_private.nango_connections_in_use_v1` (migration 1481: any
+  `opengeni_private.nango_connections_in_use_v1` (migration 1482: any
   non-revoked Nango row that names it, whatever its membership or authority
   state; it opens the one-transaction tenancy inventory window for its own
   query only, since `connections` forces row-level security on its owner
-  too). 1481 withholds its runtime grant (the previous release rejects a
+  too). 1482 withholds its runtime grant (the previous release rejects a
   grant on a definer it does not know); until a later migration grants it,
   the person's own reads decide, and a membership that is not active or an
   organization that cannot be read means nothing is deleted. Those reads
