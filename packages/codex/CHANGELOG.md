@@ -1,5 +1,14 @@
 # @opengeni/codex
 
+## 6.28.0
+
+### Patch Changes
+
+- Updated dependencies [d5cadac]
+- Updated dependencies [515bc72]
+  - @opengeni/contracts@6.28.0
+  - @opengeni/network@6.28.0
+
 ## 6.27.1
 
 ### Patch Changes

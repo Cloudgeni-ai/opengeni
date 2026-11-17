@@ -1,5 +1,15 @@
 # @opengeni/contracts
 
+## 6.28.0
+
+### Patch Changes
+
+- d5cadac: Artifacts in the phone app. A bottom bar moves between Chats, Artifacts, Meetings and Inbox (with a count of what waits on you; Automations stays in the chats menu), and on iOS a swipe right from the left edge opens the chats menu. Artifacts lists the workspace's Sites, documents, presentations, spreadsheets, images and files as cards with a still, with search and type chips; a card opens a full-screen viewer with Share and the web library's menu (Open chat, Pin, Duplicate, Copy link, Download, Delete…). An artifact linked on its own line in a chat is a card that opens the same viewer.
+
+  `createWebMarkdownRenderer` takes `renderOpenGeniLink` to draw a standalone Opengeni object link as a block. The native icon set adds `presentation`, `share` and `link`. `SiteViewRoute` takes `embedded` to show the Site alone, without its toolbar or chat. The inbox row's snooze fade no longer crashes dev builds with a non-increasing range, and `useNativeInbox` starts empty when its client changes (another account) instead of showing the last account's items, and takes `enabled` to read nothing while signed out. The client page list adds `native-view`.
+
+- 515bc72: Connector tools have readable names: `<connector>_<account tag>__<tool>` (a configured server's readable id instead of the connector), decided by the tool's identity alone, instead of a name with a different hash per tool. Every tool of one server shares a guessable prefix, and a name never comes to mean another account's or connector's tool. Codemode paths use the same namespace. `tool_search` names, `ogtool show` and Codemode accept a tool's published `server.tool` or its own name, while a call needs a name carrying its server; a query naming several tools loads all of them whatever its limit, and a miss suggests the closest tools. `ogtool show` and the native client's `codemode show` accept several names. A Skill can list the tools it uses in a `tools:` frontmatter key, and reading it loads them. A call to a tool's former name runs nothing and returns its current name; approvals stay keyed by the tool's identity.
+
 ## 6.27.1
 
 ### Patch Changes

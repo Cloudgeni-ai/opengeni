@@ -1,5 +1,12 @@
 # @opengeni/desktop
 
+## 6.28.0
+
+### Patch Changes
+
+- @opengeni/sdk@6.28.0
+- @opengeni/agent-host@6.28.0
+
 ## 6.27.1
 
 ### Patch Changes
