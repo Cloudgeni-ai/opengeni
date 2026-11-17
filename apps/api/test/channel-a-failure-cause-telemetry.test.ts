@@ -4,11 +4,16 @@
 import { describe, expect, test } from "bun:test";
 import { HTTPException } from "hono/http-exception";
 import { createObservability } from "@opengeni/observability";
+import { SandboxOrganizationBoxLimitError, SandboxPaidComputeAdmissionError } from "@opengeni/db";
 import {
   BrowserControlRequestError,
   SynchronousCommandOutcomeUnknownError,
 } from "@opengeni/runtime/sandbox";
-import { observeChannelAOperationFailure, type ChannelAServices } from "../src/sandbox/channel-a";
+import {
+  mapChannelAError,
+  observeChannelAOperationFailure,
+  type ChannelAServices,
+} from "../src/sandbox/channel-a";
 
 function observedLines(
   error: unknown,
@@ -52,7 +57,33 @@ function observedWarnings(error: unknown, operation = "browser.resume"): Record<
   return observedLines(error, operation).warnings;
 }
 
+async function failureSeries(error: unknown, operation: string): Promise<string[]> {
+  const { warnings, metrics } = observedLines(error, operation);
+  expect(warnings).toEqual([]);
+  return (await metrics())
+    .split("\n")
+    .filter((line) => line.startsWith("opengeni_channel_a_operation_failures_total{"));
+}
+
 describe("Channel-A failure cause telemetry", () => {
+  test("a compute admission refusal is counted as rejected with the status the route returns", async () => {
+    const refusals: [unknown, number][] = [
+      [new SandboxOrganizationBoxLimitError("workspace", "group", 3, "running"), 429],
+      [new SandboxOrganizationBoxLimitError("workspace", "group", 0, "closed"), 403],
+      [new SandboxPaidComputeAdmissionError("workspace", "group"), 402],
+    ];
+    for (const [refusal, status] of refusals) {
+      const mapped = mapChannelAError(refusal);
+      expect(mapped).toBeInstanceOf(HTTPException);
+      expect((mapped as HTTPException).status).toBe(status);
+      const failures = await failureSeries(refusal, "terminal.exec");
+      expect(failures).toHaveLength(1);
+      expect(failures[0]).toContain(
+        `backend="selfhosted",op="terminal.exec",reason="request_rejected",status="${status}"`,
+      );
+    }
+  });
+
   test("a controller's own 4xx refusal is counted as rejected, not as an unexpected 500", async () => {
     const stale = new BrowserControlRequestError(409, {
       code: "target_stale",
