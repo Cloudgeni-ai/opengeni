@@ -63,17 +63,58 @@ export function assertBaselineAdvanceScope(
   }
 }
 
+/** The branch production deploys from; pull requests into it promote main. */
+export const PRODUCTION_PROMOTION_BASE_REF = "production";
+
+/**
+ * A promotion pull request (main into production) carries many already-merged
+ * pull requests at once, so its whole diff always mixes a pin advance with
+ * source changes. The rule still holds per change: every commit in it that
+ * moves the pin must have landed on main, where the whole-diff rule already
+ * checked its pull request, and must itself be pin-only.
+ */
+export function assertPromotionBaselineAdvanceScope(
+  commits: readonly { sha: string; changedPaths: readonly string[]; onMain: boolean }[],
+  alreadyPinned: boolean,
+) {
+  for (const commit of commits) {
+    if (!commit.onMain) {
+      throw new Error(
+        `Commit ${commit.sha} advances the production baseline but is not on main: advance it on main in a pin-only PR, then promote`,
+      );
+    }
+    try {
+      assertBaselineAdvanceScope(commit.changedPaths, alreadyPinned);
+    } catch (error) {
+      throw new Error(`Commit ${commit.sha}: ${(error as Error).message}`, { cause: error });
+    }
+  }
+}
+
+function gitLines(root: string, args: string[]): string[] {
+  return execFileSync("git", args, { cwd: root, encoding: "utf8" })
+    .split("\n")
+    .filter((line) => line.length > 0);
+}
+
+function isAncestor(root: string, commit: string, ref: string): boolean {
+  try {
+    execFileSync("git", ["merge-base", "--is-ancestor", commit, ref], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 if (import.meta.main) {
   const base = process.argv[2];
   if (!base || !/^[a-f0-9]{40}$/.test(base))
-    throw new Error("usage: bun scripts/runtime-posture-baseline.ts <base-sha>");
+    throw new Error("usage: bun scripts/runtime-posture-baseline.ts <base-sha> [base-ref]");
+  const baseRef = process.argv[3] ?? "";
   const root = process.cwd();
-  const paths = execFileSync("git", ["diff", "--name-only", `${base}...HEAD`], {
-    cwd: root,
-    encoding: "utf8",
-  })
-    .trim()
-    .split("\n");
   let alreadyPinned = false;
   try {
     execFileSync("git", ["cat-file", "-e", `${base}:scripts/runtime-posture-baseline.json`], {
@@ -87,7 +128,29 @@ if (import.meta.main) {
   const pin = await readRuntimePostureBaseline(root);
   if (!alreadyPinned && pin.status !== "bootstrap")
     throw new Error("The first baseline must explicitly declare bootstrap status");
-  assertBaselineAdvanceScope(paths, alreadyPinned);
+  if (baseRef === PRODUCTION_PROMOTION_BASE_REF) {
+    // The checkout fetches every branch; tests point this at a local branch.
+    const mainRef = process.env.RUNTIME_POSTURE_MAIN_REF || "origin/main";
+    gitLines(root, ["rev-parse", "--verify", `${mainRef}^{commit}`]);
+    const commits = gitLines(root, [
+      "rev-list",
+      "--no-merges",
+      "--full-history",
+      `${base}..HEAD`,
+      "--",
+      "scripts/runtime-posture-baseline.json",
+    ]).map((sha) => ({
+      sha,
+      changedPaths: gitLines(root, ["diff-tree", "--no-commit-id", "--name-only", "-r", sha]),
+      onMain: isAncestor(root, sha, mainRef),
+    }));
+    assertPromotionBaselineAdvanceScope(commits, alreadyPinned);
+  } else {
+    assertBaselineAdvanceScope(
+      gitLines(root, ["diff", "--name-only", `${base}...HEAD`]),
+      alreadyPinned,
+    );
+  }
   console.log(`Validated ${pin.status} runtime posture baseline ${pin.sourceCommit}`);
 }
 
