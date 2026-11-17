@@ -777,7 +777,7 @@ export async function sweepNangoConnections(
   }
   // People whose live rows all stand for connections Nango no longer lists
   // (deleted outside reference counting) have nothing listed to be found
-  // by; the deployment-wide listing (1484, once granted) finds them too.
+  // by; the deployment-wide listing (1485, once granted) finds them too.
   // Nothing listed for this deployment at all (another's tags, or an empty
   // environment, as with a wrong Nango key): nobody is taken for missing.
   const owners =

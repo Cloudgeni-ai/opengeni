@@ -1,5 +1,5 @@
 /**
- * Migration 1484: opengeni_private.nango_live_connection_owners_v1 pages
+ * Migration 1485: opengeni_private.nango_live_connection_owners_v1 pages
  * through every active Nango row's owner, integration and Nango connection
  * id, deployment-wide. Like 1482 it runs as the table owner, which FORCE ROW
  * LEVEL SECURITY binds too, so it must read through the one-transaction
@@ -82,7 +82,7 @@ async function nangoRow(nangoConnectionId: string, providerConfigKey = "google-m
   return { grant, connection };
 }
 
-describe("migration 1484: live Nango connection owners", () => {
+describe("migration 1485: live Nango connection owners", () => {
   test("the owner-run listing pages through active rows only; the runtime grant is withheld", async () => {
     if (!owned) return;
     const live = await nangoRow("owners-live");
