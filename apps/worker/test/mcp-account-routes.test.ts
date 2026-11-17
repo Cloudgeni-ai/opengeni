@@ -147,12 +147,14 @@ test("simultaneous routes retain canonical restrictions and distinct exact accou
     connector: "mail",
     providerDomain: "example.test",
     account: "alice@example.test",
+    defaultAccount: "mail — alice@example.test · Yours",
   });
   expect(result.accountLabels.get(workspace.serverId)).toEqual({
     model: "mail — Team inbox · Shared",
     connector: "mail",
     providerDomain: "example.test",
     account: "Team inbox",
+    defaultAccount: "mail — alice@example.test · Yours",
   });
   expect(original.mcpServers[0]?.id).toBe("mail");
 });
@@ -196,6 +198,60 @@ test("people see a connector's account only when there are several to tell apart
   });
   expect(distinct.accountLabels.get(personal.serverId)?.account).toBe("alice@example.test");
   expect(distinct.accountLabels.get(workspace.serverId)?.account).toBe("team@example.test");
+});
+
+test("the person's own account is a connector's default and comes first; ambiguity has none", () => {
+  // Accepted bindings are sorted by route id, so a shared account can come first.
+  const sharedFirst = expandMcpAccountRoutes({
+    settings: settings(),
+    tools: [{ kind: "mcp", id: "mail" }],
+    bindings: [workspace, personal],
+  });
+  expect(sharedFirst.tools.map((tool) => tool.id)).toEqual([personal.serverId, workspace.serverId]);
+  expect(sharedFirst.settings.mcpServers.map((server) => server.id)).toEqual([
+    personal.serverId,
+    workspace.serverId,
+  ]);
+  for (const binding of [personal, workspace]) {
+    expect(sharedFirst.accountLabels.get(binding.serverId)?.defaultAccount).toBe(
+      "mail — alice@example.test · Yours",
+    );
+  }
+
+  // Several of the person's own accounts, or only shared ones, have no default.
+  const secondPersonal: McpConnectionAccountBinding = {
+    ...personal,
+    serverId: "mail-account-personal-2",
+    connectionId: "44444444-4444-4444-8444-444444444444",
+    accountLabel: "alice@work.example.test",
+    connectionRef: {
+      ...personal.connectionRef,
+      connectionId: "44444444-4444-4444-8444-444444444444",
+    },
+  };
+  const secondShared: McpConnectionAccountBinding = {
+    ...workspace,
+    serverId: "mail-account-workspace-2",
+    connectionId: "55555555-5555-4555-8555-555555555555",
+    accountLabel: "Support inbox",
+    connectionRef: {
+      ...workspace.connectionRef,
+      connectionId: "55555555-5555-4555-8555-555555555555",
+    },
+  };
+  for (const bindings of [
+    [personal, secondPersonal, workspace],
+    [workspace, secondShared],
+    [personal],
+  ]) {
+    const result = expandMcpAccountRoutes({
+      settings: settings(),
+      tools: [{ kind: "mcp", id: "mail" }],
+      bindings,
+    });
+    for (const label of result.accountLabels.values())
+      expect(label).not.toHaveProperty("defaultAccount");
+  }
 });
 
 test("empty accepted bindings remove authenticated defaults while null keeps historical behavior", () => {
