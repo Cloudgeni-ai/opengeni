@@ -2856,8 +2856,13 @@ describe("Temporal workflow integration", () => {
         "applyRecordingRetention",
         "reconcileRecentModelCallFacts",
       ];
-      // The turn timing sweep is a patched step after the existing ones.
-      const currentExpected = [...legacyExpected, "recordRecentTurnTimingProfiles"];
+      // The turn timing and Nango connection sweeps are patched steps after
+      // the existing ones.
+      const currentExpected = [
+        ...legacyExpected,
+        "recordRecentTurnTimingProfiles",
+        "sweepUnusedNangoConnections",
+      ];
       const execute = async (workflowsPath: string, expected: string[]) => {
         const taskQueue = `reaper-retirement-${crypto.randomUUID()}`;
         const calls: string[] = [];
