@@ -609,6 +609,7 @@ export const AGENT_FUNCTION_TOOL_CAPABILITIES = {
   view_image: "sandbox",
   repository_skill_read: "sandbox",
   code_search: "sandbox",
+  code_grep: "sandbox",
   // Derived runtime mechanics: search router, operation recovery and credential
   // renewal.
   tool_search: "runtime",

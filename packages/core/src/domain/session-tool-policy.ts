@@ -557,7 +557,11 @@ export function sessionEffectiveToolProjectionInput(
           context?.workspaceSettings,
           codeSearchDeploymentPolicy(context!.settings),
         ) && session.sandboxOs !== "windows"
-          ? ["code_search" as const]
+          ? [
+              context!.settings.codeSearchEngine === "grep"
+                ? ("code_grep" as const)
+                : ("code_search" as const),
+            ]
           : []),
       ]
     : [];

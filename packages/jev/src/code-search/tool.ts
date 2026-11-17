@@ -139,7 +139,7 @@ export function parseCodeSearchArguments(args: Record<string, unknown>): CodeSea
   return { question, keywords, subQuestions, paths };
 }
 
-function stringList(value: unknown, name: string, required: boolean): string[] {
+export function stringList(value: unknown, name: string, required: boolean): string[] {
   if (value === undefined || value === null) {
     if (required)
       throw new CodeSearchArgumentError(`${name} is required and must be an array of strings`);
@@ -151,7 +151,7 @@ function stringList(value: unknown, name: string, required: boolean): string[] {
   return [...new Set((value as string[]).map((v) => v.trim()).filter(Boolean))];
 }
 
-function normalizePath(raw: string): string {
+export function normalizePath(raw: string): string {
   if (raw.length > L.pathMaxChars)
     throw new CodeSearchArgumentError(`each path must be at most ${L.pathMaxChars} characters`);
   if (raw.startsWith("/") || raw.startsWith("~") || /^[A-Za-z]:[\\/]/.test(raw)) {

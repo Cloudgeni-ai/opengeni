@@ -11,7 +11,12 @@ import { sharedAzureEntraAccessTokenSource } from "@opengeni/network/azure-entra
 import { sideFeatureRouteFetch, sideFeatureRouteRunnable } from "./inference-residency";
 
 export type WorkerDecisionSettings = DecisionModelSettings &
-  Partial<Pick<Settings, "jevApiKey" | "jevBaseUrl" | "jevModel" | "jevRequestTimeoutMs">>;
+  Partial<
+    Pick<
+      Settings,
+      "jevApiKey" | "jevBaseUrl" | "jevModel" | "jevRequestTimeoutMs" | "jevMaxQuestionsPerRequest"
+    >
+  >;
 
 /**
  * One deployment-owned category, consumed by code search and tool discovery.
@@ -44,6 +49,9 @@ export function configuredDecisionModel(
             ...(config.baseUrl ? { baseUrl: config.baseUrl } : {}),
             ...(settings.jevRequestTimeoutMs !== undefined
               ? { timeoutMs: settings.jevRequestTimeoutMs }
+              : {}),
+            ...(settings.jevMaxQuestionsPerRequest !== undefined
+              ? { limits: { maxQuestionsPerRequest: settings.jevMaxQuestionsPerRequest } }
               : {}),
             fetch: routeFetch,
           }),

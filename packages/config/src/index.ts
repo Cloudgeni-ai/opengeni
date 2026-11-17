@@ -1579,12 +1579,21 @@ const SettingsSchema = z.object({
   jevBaseUrl: z.string().url().default("https://api.typesafe.ai"),
   jevModel: z.string().trim().min(1).max(128).default("jev-latest"),
   jevRequestTimeoutMs: z.coerce.number().int().positive().max(120_000).default(10_000),
+  // Question cap per request for a Jev-compatible provider with a smaller cap than Jev's.
+  jevMaxQuestionsPerRequest: z.coerce.number().int().min(1).max(256).optional(),
   // Jev-backed `code_search` agent tool. `off` never offers it, `opt_in` offers
   // it only where workspace settings enable it, `default_on` offers it
   // everywhere except workspaces that disable it, and `experiment` gives it to
   // a fixed half of sessions in workspaces without their own setting, for
   // comparison. It also needs jevApiKey.
   codeSearchMode: z.enum(["off", "opt_in", "default_on", "experiment"]).default("off"),
+  // Which tool the code-search setting offers: `search` (code_search: the tool
+  // picks keywords from a question) or `grep` (code_grep: the model's own
+  // ripgrep patterns, run in parallel and filtered by the decision model).
+  codeSearchEngine: z.enum(["search", "grep"]).default("search"),
+  // `off` runs code_grep without the decision model: the same excerpts in
+  // match order, cut to the same size.
+  codeGrepJudge: z.enum(["on", "off"]).default("on"),
   // Deployment-default agent persona template (the white-label surface). The
   // runtime resolves the effective template per turn as
   // per-session-override > per-workspace override > this default, substitutes
@@ -6528,7 +6537,10 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     jevBaseUrl: optional("OPENGENI_JEV_BASE_URL"),
     jevModel: optional("OPENGENI_JEV_MODEL"),
     jevRequestTimeoutMs: optional("OPENGENI_JEV_REQUEST_TIMEOUT_MS"),
+    jevMaxQuestionsPerRequest: optional("OPENGENI_JEV_MAX_QUESTIONS_PER_REQUEST"),
     codeSearchMode: optional("OPENGENI_CODE_SEARCH_MODE"),
+    codeSearchEngine: optional("OPENGENI_CODE_SEARCH_ENGINE"),
+    codeGrepJudge: optional("OPENGENI_CODE_GREP_JUDGE"),
     agentInstructionsTemplate: optional("OPENGENI_AGENT_INSTRUCTIONS_TEMPLATE"),
     deploymentAgentInstructions: optional("OPENGENI_DEPLOYMENT_AGENT_INSTRUCTIONS"),
     experimentKnowledgeRetrievalGuidance: optional(

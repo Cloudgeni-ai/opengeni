@@ -35,6 +35,11 @@ export interface DecisionModel {
   ): Promise<DecisionResult<Q>>;
   /** Optional provider preparation; existing code-search behavior, not required by callers. */
   warmUp?(connections: number): void;
+  /**
+   * The provider's question cap per request, when it is small. Callers that judge many items can batch
+   * to it, so each request carries only its own items instead of the adapter repeating a large input.
+   */
+  readonly maxQuestionsPerRequest?: number;
 }
 
 export function predicate(

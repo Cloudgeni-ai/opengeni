@@ -2,15 +2,21 @@ import type { AttemptToolDefinition } from "@opengeni/codemode";
 import { decisionModelConfiguration, decisionModelTarget, type Settings } from "@opengeni/config";
 import { DecisionUnavailableError, DecisionRequestError } from "@opengeni/decisions";
 import {
+  CODE_GREP_TOOL_DESCRIPTION,
+  CODE_GREP_TOOL_NAME,
   CODE_SEARCH_TOOL_DESCRIPTION,
   CODE_SEARCH_TOOL_NAME,
   CodeSearchArgumentError,
   CodeSearchRipgrepMissingError,
   CodeSearchWorkspaceError,
   JevCircuitBreaker,
+  codeGrepInputSchema,
   codeSearchInputSchema,
+  parseCodeGrepArguments,
   parseCodeSearchArguments,
+  renderCodeGrepError,
   renderCodeSearchError,
+  runCodeGrep,
   runCodeSearch,
   type CodeSearchWorkspace,
   type JevCircuitLease,
@@ -269,6 +275,147 @@ export function createCodeSearchAttemptToolDefinition(input: {
 }
 
 /**
+ * The model-facing `code_grep` tool: the model's own ripgrep patterns run in
+ * parallel in the sandbox, hits widen to excerpts, and the decision model keeps
+ * the relevant ones. A judge failure or an open breaker never fails the call: it
+ * returns the same excerpts in match order, cut to the same size.
+ */
+export function createCodeGrepAttemptToolDefinition(input: {
+  settings: WorkerDecisionSettings;
+  /** `off` never calls the decision model. */
+  judge: "on" | "off";
+  workspace: () => Promise<CodeSearchWorkspace>;
+  observability: Observability;
+  recordUsage?: (usage: CodeSearchUsage) => Promise<void>;
+  breaker?: JevCircuitBreaker;
+  fetch?: typeof fetch;
+}): AttemptToolDefinition {
+  const breaker = input.breaker ?? codeSearchCircuitBreaker;
+  const configured =
+    input.judge === "on"
+      ? configuredDecisionModel(input.settings, {
+          allowLegacyCodeSearch: true,
+          ...(input.fetch ? { fetch: input.fetch } : {}),
+        })
+      : undefined;
+  return {
+    identity: { serverId: "opengeni", toolName: CODE_GREP_TOOL_NAME },
+    modelName: CODE_GREP_TOOL_NAME,
+    codemodePath: ["opengeni", CODE_GREP_TOOL_NAME],
+    title: "Search code",
+    description: CODE_GREP_TOOL_DESCRIPTION,
+    inputSchema: codeGrepInputSchema,
+    annotations: {
+      title: "Search code",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    source: "opengeni",
+    approval: "none",
+    execute: async (args, context) => {
+      const startedAt = performance.now();
+      let outcome: CodeSearchCallOutcome = "failed";
+      let decisionRequests = 0;
+      let decisionCostUsd: number | null = 0;
+      let decisionInputTokens: number | null = 0;
+      let decisionModel: string | null = null,
+        decisionProvider: string | null = null;
+      const costSources = new Set<"provider-reported" | "estimate" | "unknown">();
+      let lease: JevCircuitLease | null = null;
+      try {
+        const request = parseCodeGrepArguments(args);
+        // An open breaker only skips judging; the search still runs.
+        lease = configured ? breaker.tryAcquire(Date.now()) : null;
+        const workspace = await input.workspace();
+        const result = await runCodeGrep({
+          question: request.question,
+          patterns: request.patterns,
+          ...(request.paths.length ? { paths: request.paths } : {}),
+          ...(request.globs.length ? { globs: request.globs } : {}),
+          ...(request.ignoreCase !== undefined ? { ignoreCase: request.ignoreCase } : {}),
+          workspace,
+          decisionModel: lease && configured ? configured.model : null,
+          onDecisionUsage: (usage) => {
+            decisionRequests += usage.requests;
+            decisionInputTokens =
+              decisionInputTokens === null || usage.inputTokens === null
+                ? null
+                : decisionInputTokens + usage.inputTokens;
+            decisionCostUsd =
+              decisionCostUsd === null || usage.costUsd === null
+                ? null
+                : decisionCostUsd + usage.costUsd;
+            decisionModel = usage.model;
+            decisionProvider = usage.provider;
+            costSources.add(usage.costSource);
+          },
+          ...(context.signal ? { signal: context.signal } : {}),
+        });
+        if (lease) {
+          const held = lease;
+          lease = null;
+          if (result.judgeError instanceof DecisionUnavailableError)
+            breaker.recordFailure(result.judgeError, Date.now(), held);
+          else if (result.stats.decision.requests > 0) breaker.recordSuccess(held);
+          else breaker.release(held);
+        }
+        outcome = "completed";
+        return textResult(result.text, false);
+      } catch (error) {
+        if (context.signal?.aborted) {
+          outcome = "cancelled";
+          throw error;
+        }
+        if (error instanceof CodeSearchArgumentError) {
+          outcome = "invalid_arguments";
+          return textResult(renderCodeGrepError(error), true);
+        }
+        if (error instanceof CodeSearchWorkspaceError) {
+          outcome = "workspace_unavailable";
+          return textResult(renderCodeGrepError(error), true);
+        }
+        if (
+          error instanceof ChannelAUnavailableError ||
+          error instanceof ChannelAUnsupportedError ||
+          error instanceof ChannelAValidationError
+        ) {
+          outcome = "workspace_unavailable";
+          return textResult(renderCodeGrepError(new CodeSearchWorkspaceError(error.message)), true);
+        }
+        throw error;
+      } finally {
+        if (lease) breaker.release(lease);
+        if (input.recordUsage && decisionRequests > 0) {
+          await input
+            .recordUsage({
+              operationId: context.operationId,
+              decisionRequests,
+              decisionInputTokens,
+              decisionCostUsd,
+              model: decisionModel,
+              provider: decisionProvider,
+              costSources: [...costSources],
+            })
+            .catch((error: unknown) => {
+              input.observability.warn("code_grep usage record failed", {
+                error: errorMessage(error),
+              });
+            });
+        }
+        recordCodeSearchCall(input.observability, {
+          outcome,
+          durationSeconds: (performance.now() - startedAt) / 1_000,
+          decisionRequests,
+          decisionCostUsd,
+        });
+      }
+    },
+  };
+}
+
+/**
  * The `code_search` definition for one turn, or none. It is offered only when
  * the session's frozen decision and the deployment enable it, a usable typed model
  * exists, and the turn has compute that can run its POSIX shell commands (not
@@ -279,6 +426,9 @@ export function createCodeSearchAttemptToolDefinition(input: {
 export function codeSearchToolDefinitions(input: {
   enabled: boolean;
   settings: WorkerDecisionSettings;
+  /** `grep` offers code_grep in place of code_search. */
+  engine?: "search" | "grep";
+  grepJudge?: "on" | "off";
   backend: Settings["sandboxBackend"];
   /** The turn's Connected Machine workspace root, when a machine is primary. */
   machineWorkspaceRoot?: string | null;
@@ -294,6 +444,18 @@ export function codeSearchToolDefinitions(input: {
   if (!sideFeatureRouteRunnable(input.settings, decisionModelTarget(config))) return [];
   if (input.machineWorkspaceRoot && isWindowsConnectedMachinePath(input.machineWorkspaceRoot)) {
     return [];
+  }
+  if (input.engine === "grep") {
+    return [
+      createCodeGrepAttemptToolDefinition({
+        settings: input.settings,
+        judge: input.grepJudge ?? "on",
+        workspace: input.workspace,
+        observability: input.observability,
+        ...(input.recordUsage ? { recordUsage: input.recordUsage } : {}),
+        breaker,
+      }),
+    ];
   }
   return [
     createCodeSearchAttemptToolDefinition({

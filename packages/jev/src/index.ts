@@ -71,3 +71,21 @@ export {
   type CodeSearchArguments,
   type CodeSearchJsonValue,
 } from "./code-search/tool";
+export {
+  CODE_GREP_DEFAULT_LIMITS,
+  runCodeGrep,
+  type CodeGrepExcerpt,
+  type CodeGrepInput,
+  type CodeGrepLimits,
+  type CodeGrepResult,
+  type CodeGrepStats,
+} from "./code-search/grep";
+export {
+  CODE_GREP_LIMITS,
+  CODE_GREP_TOOL_DESCRIPTION,
+  CODE_GREP_TOOL_NAME,
+  codeGrepInputSchema,
+  parseCodeGrepArguments,
+  renderCodeGrepError,
+  type CodeGrepArguments,
+} from "./code-search/grep-tool";

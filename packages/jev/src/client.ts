@@ -261,6 +261,8 @@ export interface JevClientOptions {
   concurrency?: number | undefined;
   /** First backoff delay; doubles per attempt up to maxRetryAfterMs. */
   retryBaseDelayMs?: number | undefined;
+  /** Request limits of a Jev-compatible provider with smaller caps than Jev's own. */
+  limits?: Partial<JevLimits> | undefined;
   fetch?: JevFetch | undefined;
 }
 
@@ -281,6 +283,7 @@ export class JevClient {
   private readonly retryBaseDelayMs: number;
   private readonly fetchImpl: JevFetch;
   private readonly limiter: JevLimiter;
+  readonly limits: JevLimits;
   private lastActivityAt = -Infinity;
 
   constructor(options: JevClientOptions) {
@@ -293,6 +296,7 @@ export class JevClient {
     this.maxRetryAfterMs = Math.max(0, options.maxRetryAfterMs ?? 2_000);
     this.retryBaseDelayMs = Math.max(0, options.retryBaseDelayMs ?? 250);
     this.limiter = new JevLimiter(Math.max(1, options.concurrency ?? 16));
+    this.limits = { ...JEV_DEFAULT_LIMITS, ...options.limits };
     this.fetchImpl = options.fetch ?? ((url, init) => fetch(url, init));
   }
 
@@ -313,6 +317,7 @@ export class JevClient {
     const chunks = planChunks(
       stateTokens,
       ids.map((id) => [id, estimateJevTokens(questions[id])] as const),
+      this.limits,
     );
     const label = options.tag ? `${options.tag}: ` : "";
     const results = await Promise.all(

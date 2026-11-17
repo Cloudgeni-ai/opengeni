@@ -6,12 +6,21 @@ import {
   type DecisionQuestion,
   type DecisionUsage,
 } from "@opengeni/decisions";
-import { JevClient, JevRequestError, JevUnavailableError, type JevQuestion } from "./client";
+import {
+  JEV_DEFAULT_LIMITS,
+  JevClient,
+  JevRequestError,
+  JevUnavailableError,
+  type JevQuestion,
+} from "./client";
 
 /** Adapt the existing typed client without duplicating its transport/chunking policy. */
 export function createJevDecisionModel(client: JevClient): DecisionModel {
   return {
     warmUp: (connections) => client.warmUp(connections),
+    ...(client.limits.maxQuestionsPerRequest < JEV_DEFAULT_LIMITS.maxQuestionsPerRequest
+      ? { maxQuestionsPerRequest: client.limits.maxQuestionsPerRequest }
+      : {}),
     async decide(input, questions, options = {}) {
       const translated = Object.fromEntries(
         Object.entries(questions).map(([name, question]: [string, DecisionQuestion]) => [

@@ -1077,6 +1077,8 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   const codeSearchTools = codeSearchToolDefinitions({
     enabled: codeSearchEnabled,
     settings: runSettings,
+    engine: runSettings.codeSearchEngine,
+    grepJudge: runSettings.codeGrepJudge,
     backend: activeSandboxBackend ?? groupBoxBackend,
     machineWorkspaceRoot: sandboxState.machinePrimarySession?.workspaceRoot ?? null,
     observability,

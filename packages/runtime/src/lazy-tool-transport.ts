@@ -136,6 +136,7 @@ const ALWAYS_VISIBLE_BASE_TOOL_NAMES: ReadonlySet<string> = new Set([
   // enable it; hiding it behind search would spend a model round trip to find
   // the tool that exists to save round trips.
   "code_search",
+  "code_grep",
   // Provider web search, offered where the model has no hosted search. Hosted
   // search is never deferred, so neither is its replacement.
   "web_search",

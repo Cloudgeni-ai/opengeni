@@ -19,6 +19,7 @@ import { testSettings } from "@opengeni/testing/settings";
 import {
   codeSearchToolDefinitions,
   codeSearchWorkspaceFromChannel,
+  createCodeGrepAttemptToolDefinition,
   createCodeSearchAttemptToolDefinition,
   type CodeSearchUsage,
 } from "../src/activities/agent-turn/code-search";
@@ -665,5 +666,112 @@ describe("credential directories", () => {
   test("the engine and the sandbox channel exclude the same directories", () => {
     // @opengeni/jev is published standalone, so it keeps its own copy of the list
     expect(CODE_SEARCH_CREDENTIAL_DIRS).toEqual(CHANNEL_CREDENTIAL_DIRS);
+  });
+});
+
+describe("code_grep tool", () => {
+  const grepArgs = {
+    question: "Where is the GitHub approval policy resolved?",
+    patterns: ["resolveGithubApprovalPolicy", "approvalMode"],
+  };
+  const base = {
+    enabled: true,
+    settings: jevSettings,
+    engine: "grep" as const,
+    backend: "docker" as const,
+    observability,
+    workspace: async () => fixtureWorkspace(),
+  };
+  /** A Jev endpoint that answers every question with the same probability. */
+  function jevFetch(probability: number, calls: { count: number }) {
+    return (async (_url: string, init?: RequestInit) => {
+      calls.count += 1;
+      const body = JSON.parse(String(init?.body)) as { questions: Record<string, unknown> };
+      return Response.json({
+        answers: Object.fromEntries(
+          Object.keys(body.questions).map((id) => [id, { type: "noul", noul: probability }]),
+        ),
+        usage: { input_tokens: 50 },
+      });
+    }) as typeof fetch;
+  }
+
+  test("the grep engine offers code_grep in place of code_search", () => {
+    const definitions = codeSearchToolDefinitions({ ...base, breaker: new JevCircuitBreaker() });
+    expect(definitions.map((d) => d.modelName)).toEqual(["code_grep"]);
+    expect(definitions[0]?.annotations?.readOnlyHint).toBe(true);
+    expect(definitions[0]?.approval).toBe("none");
+    expect(
+      codeSearchToolDefinitions({
+        ...base,
+        engine: "search",
+        breaker: new JevCircuitBreaker(),
+      }).map((d) => d.modelName),
+    ).toEqual(["code_search"]);
+  });
+
+  test.skipIf(!hasRipgrep)(
+    "judges excerpts found through the sandbox channel and records usage",
+    async () => {
+      const calls = { count: 0 };
+      const usage: CodeSearchUsage[] = [];
+      const definition = createCodeGrepAttemptToolDefinition({
+        settings: jevSettings,
+        judge: "on",
+        workspace: base.workspace,
+        observability,
+        breaker: new JevCircuitBreaker(),
+        recordUsage: async (u) => {
+          usage.push(u);
+        },
+        fetch: jevFetch(0.9, calls),
+      });
+      const result = await definition.execute(grepArgs, context);
+      expect(result.isError).toBe(false);
+      const text = JSON.stringify(result.content);
+      expect(text).toContain("src/approval-policy.ts:");
+      expect(text).toContain("relevance 0.90");
+      expect(calls.count).toBeGreaterThan(0);
+      expect(usage).toHaveLength(1);
+    },
+  );
+
+  test.skipIf(!hasRipgrep)(
+    "judge off and an open breaker both return match-order excerpts without calling the model",
+    async () => {
+      const tripped = new JevCircuitBreaker({ failureThreshold: 1, cooldownMs: 60_000 });
+      tripped.recordFailure(new JevUnavailableError("down"), Date.now());
+      for (const variant of [
+        { judge: "off" as const, breaker: new JevCircuitBreaker() },
+        { judge: "on" as const, breaker: tripped },
+      ]) {
+        const calls = { count: 0 };
+        const definition = createCodeGrepAttemptToolDefinition({
+          settings: jevSettings,
+          workspace: base.workspace,
+          observability,
+          fetch: jevFetch(0.9, calls),
+          ...variant,
+        });
+        const result = await definition.execute(grepArgs, context);
+        expect(result.isError).toBe(false);
+        const text = JSON.stringify(result.content);
+        expect(text).toContain("src/approval-policy.ts:");
+        expect(text).toContain("match order");
+        expect(calls.count).toBe(0);
+      }
+    },
+  );
+
+  test("invalid arguments are a model-facing error", async () => {
+    const definition = createCodeGrepAttemptToolDefinition({
+      settings: jevSettings,
+      judge: "off",
+      workspace: base.workspace,
+      observability,
+    });
+    const result = await definition.execute({ question: "where?", keywords: ["a"] }, context);
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain("code_grep: invalid arguments");
   });
 });
