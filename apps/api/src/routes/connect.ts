@@ -1934,7 +1934,11 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                       "google-calendar",
                     ].includes(input.providerId)
                   ? existing.kind !== "oauth2" ||
-                    !existing.metadata.oauthDiscovery ||
+                    // A Nango-backed account has no OAuth discovery of its own;
+                    // its reconnect goes through the Nango connect path that
+                    // startMcpOAuth picks from the stored MCP URL.
+                    (!existing.metadata.oauthDiscovery &&
+                      existing.metadata.integrationBackend !== "nango") ||
                     (input.providerId === "slack-personal" &&
                       existing.metadata.mcpUrl !== OPENGENI_PERSONAL_SLACK_MCP_URL) ||
                     (input.providerId === "gmail" &&

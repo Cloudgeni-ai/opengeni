@@ -1555,4 +1555,61 @@ describe("Nango connections in PostgreSQL", () => {
     expect(await own.json()).toMatchObject({ rows: [], totals: { proxyRequests: 0 } });
     expect((await read(theirs.accountId)).status).toBe(403);
   });
+
+  // Last in the file: it switches Gmail to Nango for this database.
+  test("a Nango-backed account reconnects through a connect attempt", async () => {
+    if (!shared) return;
+    const target = await owner("nango reconnect attempt");
+    const nango = fakeNango();
+    await connect(target, nango, "nra-1", "reconnect@example.com");
+    const [row] = await nangoRows(target);
+    await shared.admin`insert into integration_backend_revisions
+        (integration_key, backend, nango_provider_config_key, enabled, changed_by, reason)
+      values ('gmail', 'nango', 'google-mail', true, 'test', 'reconnect attempt test')`;
+    const { integrationBackendSettingsCache } = await import("@opengeni/db");
+    integrationBackendSettingsCache.invalidate();
+    const app = createApp({
+      settings,
+      db: client.db,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    } as never);
+    const token = await signDelegatedAccessToken(delegationSecret, {
+      ...target,
+      permissions: ["workspace:read", "connections:read", "connections:write"],
+      principalKind: "human_session",
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+    const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+    const base = `/v1/workspaces/${target.workspaceId}/connect/attempts`;
+    const begun = await app.request(base, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        providerId: "gmail",
+        ownership: "personal",
+        returnUrl: "https://app.opengeni.test/integrations",
+        reconnectAccountId: row!.id,
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(begun.status).toBe(200);
+    const attempt = await begun.json();
+    expect(attempt.account?.id).toBe(row!.id);
+    const advanced = await app.request(`${base}/${attempt.id}/advance`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        expectedRevision: attempt.revision,
+        idempotencyKey: crypto.randomUUID(),
+        action: { type: "credentials", values: {} },
+      }),
+    });
+    expect(advanced.status).toBe(200);
+    const ready = await advanced.json();
+    expect(ready.state).toBe("requires_user_action");
+    // The reconnect goes through the Nango connect page, not a native sign-in.
+    expect(new URL(ready.nextAction.url).pathname).toBe("/v1/integrations/nango/connect");
+  });
 });
