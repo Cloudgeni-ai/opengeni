@@ -1084,7 +1084,8 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         ? { relevantFloor: runSettings.codeGrepRelevantFloor }
         : {}),
       ...(runSettings.codeGrepStopFloor !== undefined
-        ? { stopFloor: runSettings.codeGrepStopFloor }
+        ? // A stop floor turns early stop on.
+          { stopFloor: runSettings.codeGrepStopFloor, earlyStop: true }
         : {}),
       ...(runSettings.codeGrepWaveSize !== undefined
         ? { waveSize: runSettings.codeGrepWaveSize }

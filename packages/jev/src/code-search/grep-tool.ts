@@ -17,8 +17,10 @@ export const CODE_GREP_TOOL_DESCRIPTION =
   "excerpts that matter. Pass the question you are answering and the patterns you would otherwise grep for " +
   "(identifiers, strings, regular expressions). The patterns run in parallel; each hit is widened to its enclosing " +
   "function or block; a fast relevance model keeps the excerpts that bear on the question and stops once they " +
-  "suffice. Returns those excerpts with paths and line numbers, then the other matching files it did not show. " +
-  "Follow up with another search or a file read when something is missing.";
+  "suffice. Returns those excerpts with paths and line numbers, the locations of further relevant excerpts, then " +
+  "the other matching files it did not show. Follow up with another search or a file read when something is " +
+  "missing. It can run in the same step as other independent tool calls, such as reading files you already know " +
+  "you need.";
 
 export const CODE_GREP_LIMITS = {
   questionMinChars: 3,

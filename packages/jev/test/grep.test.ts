@@ -165,7 +165,7 @@ describeWithRipgrep("runCodeGrep", () => {
       patterns: ["token"],
       workspace: ws,
       decisionModel: model,
-      limits: { waveSize: 8 },
+      limits: { waveSize: 8, earlyStop: true },
     });
     expect(r.stats.excerpts).toBeGreaterThan(8);
     expect(r.stats.waves).toBeLessThan(Math.ceil(r.stats.excerpts / 8));
@@ -182,11 +182,27 @@ describeWithRipgrep("runCodeGrep", () => {
       patterns: ["token"],
       workspace: ws,
       decisionModel: model,
-      limits: { waveSize: 8 },
+      limits: { waveSize: 8, earlyStop: true },
     });
     expect(model.calls.some((c) => c.stop)).toBe(false);
     expect(r.stats.stoppedEarly).toBe(false);
     expect(r.stats.relevant).toBe(0);
+  });
+
+  test("by default every excerpt is judged in one parallel pass, without a stop question", async () => {
+    const ws = new LocalCodeSearchWorkspace(repo());
+    const model = fakeModel({ relevant: (p) => p.includes("noise/file1"), stop: 0.95 });
+    const r = await runCodeGrep({
+      question: "token constants",
+      patterns: ["token"],
+      workspace: ws,
+      decisionModel: model,
+      limits: { waveSize: 8 },
+    });
+    expect(r.stats.excerpts).toBeGreaterThan(8);
+    expect(r.stats.waves).toBe(1);
+    expect(r.stats.judged).toBe(Math.min(r.stats.excerpts, 8 * 4));
+    expect(model.calls.some((c) => c.stop)).toBe(false);
   });
 
   test("a judge failure falls back to match order and reports the error", async () => {

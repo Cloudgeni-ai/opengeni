@@ -62,6 +62,12 @@ export interface CodeGrepLimits {
   /** Excerpt text shown in the result. */
   shownExcerptChars: number;
   relevantFloor: number;
+  /**
+   * Judge in waves and ask after each whether the relevant excerpts already answer the question. Off by
+   * default: every excerpt (up to waveSize x maxWaves) is judged in one parallel pass, which costs one
+   * judge round trip instead of a sequential wave-plus-stop chain.
+   */
+  earlyStop: boolean;
   stopFloor: number;
   judgeDeadlineMs: number;
   otherFilesListed: number;
@@ -80,6 +86,7 @@ export const CODE_GREP_DEFAULT_LIMITS: Readonly<CodeGrepLimits> = Object.freeze(
   judgeExcerptChars: 1600,
   shownExcerptChars: 3000,
   relevantFloor: 0.5,
+  earlyStop: false,
   stopFloor: 0.8,
   judgeDeadlineMs: 20_000,
   otherFilesListed: 40,
@@ -342,9 +349,11 @@ export async function runCodeGrep(input: CodeGrepInput): Promise<CodeGrepResult>
     );
     const deadline = performance.now() + L.judgeDeadlineMs;
     try {
-      for (let start = 0; start < excerpts.length && waves < L.maxWaves; start += L.waveSize) {
+      const waveSize = L.earlyStop ? L.waveSize : L.waveSize * L.maxWaves;
+      const maxWaves = L.earlyStop ? L.maxWaves : 1;
+      for (let start = 0; start < excerpts.length && waves < maxWaves; start += waveSize) {
         if (performance.now() > deadline) break;
-        const wave = excerpts.slice(start, start + L.waveSize);
+        const wave = excerpts.slice(start, start + waveSize);
         const batches: CodeGrepExcerpt[][] = [];
         for (let i = 0; i < wave.length; i += perRequest)
           batches.push(wave.slice(i, i + perRequest));
@@ -379,8 +388,8 @@ export async function runCodeGrep(input: CodeGrepInput): Promise<CodeGrepResult>
           relevant: wave.filter((e) => (e.p ?? 0) >= L.relevantFloor).length,
         });
         const relevant = excerpts.filter((e) => (e.p ?? 0) >= L.relevantFloor);
-        const more = start + L.waveSize < excerpts.length && waves < L.maxWaves;
-        if (!relevant.length || !more) continue;
+        const more = start + waveSize < excerpts.length && waves < maxWaves;
+        if (!L.earlyStop || !relevant.length || !more) continue;
         const best = [...relevant].sort((a, b) => b.p! - a.p!).slice(0, 8);
         const r = await model.decide(
           {
