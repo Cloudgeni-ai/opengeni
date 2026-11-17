@@ -173,12 +173,18 @@ export function workspaceIntegrationsPathForUntrusted(candidate: unknown): strin
  * tampered, or signed with another secret returns to
  * {@link INTEGRATIONS_FALLBACK_PATH}. Display routing only: nothing here
  * authorizes, resumes, or replays the callback.
+ *
+ * A provider that refuses authorization may redirect with only `error` and
+ * no `state` (Fiken does when the user is not approved for the app). That
+ * callback failed at the provider, not because the link was stale, so the
+ * provider's refusal is reported instead of a state reason.
  */
 export function oauthStateFailureReturn(
   settings: Settings,
   rawState: string | undefined,
-  nowMs = Date.now(),
-): { returnPath: string; reason: "state_expired" | "state_invalid" } {
+  options: { providerError?: string | undefined; nowMs?: number } = {},
+): { returnPath: string; reason: OAuthStateFailureReason } {
+  const nowMs = options.nowMs ?? Date.now();
   let payload: ReturnType<typeof inspectSignedState> = null;
   try {
     payload = rawState
@@ -187,15 +193,25 @@ export function oauthStateFailureReturn(
   } catch {
     payload = null;
   }
+  const providerError = options.providerError?.trim();
   return {
     returnPath:
       workspaceIntegrationsPathForUntrusted(payload?.workspaceId) ?? INTEGRATIONS_FALLBACK_PATH,
-    reason:
-      payload !== null && nowMs - payload.iat * 1000 > oauthStateTtlMs
+    reason: providerError
+      ? providerError === "access_denied"
+        ? "provider_denied"
+        : "provider_error"
+      : payload !== null && nowMs - payload.iat * 1000 > oauthStateTtlMs
         ? "state_expired"
         : "state_invalid",
   };
 }
+
+export type OAuthStateFailureReason =
+  | "state_expired"
+  | "state_invalid"
+  | "provider_denied"
+  | "provider_error";
 export {
   OFFICIAL_GMAIL_MCP_SCOPES,
   OFFICIAL_GMAIL_MCP_URL,
@@ -989,7 +1005,8 @@ async function completeMcpOAuthCallbackWithinDeadline(
     return {
       redirectTo: callbackReturnPath(INTEGRATIONS_FALLBACK_PATH, "error", {
         stage: error.stage,
-        reason: error.reason,
+        // A provider refusal can arrive without state; report the refusal.
+        reason: oauthStateFailureReturn(settings, undefined, { providerError: input.error }).reason,
       }),
     };
   }
@@ -1147,7 +1164,9 @@ async function completeMcpOAuthCallbackWithinDeadline(
     if (!state) {
       // The state itself could not be resolved, so it carries no return path.
       // An authentic but aged state still names its workspace and "expired".
-      const failure = oauthStateFailureReturn(settings, input.state);
+      const failure = oauthStateFailureReturn(settings, input.state, {
+        providerError: input.error,
+      });
       return {
         redirectTo: callbackReturnPath(failure.returnPath, "error", {
           stage: staged.stage,

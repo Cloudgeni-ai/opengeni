@@ -74,6 +74,8 @@ export function personalGitHubOAuthFailureMessage(reason: string | null): string
   switch (reason) {
     case "provider_denied":
       return "GitHub authorization was cancelled.";
+    case "provider_error":
+      return "GitHub didn't approve the connection.";
     case "account_mismatch":
       return "Reconnect with the same GitHub account, or disconnect it first.";
     case "not_authorized":

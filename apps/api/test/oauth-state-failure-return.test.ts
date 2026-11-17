@@ -22,7 +22,7 @@ describe("OAuth state failure return", () => {
       { workspaceId, accountId: "account" },
       nowSeconds - oauthStateTtlMs / 1000 - 1,
     );
-    expect(oauthStateFailureReturn(settings, aged, nowMs)).toEqual({
+    expect(oauthStateFailureReturn(settings, aged, { nowMs })).toEqual({
       returnPath: `/workspaces/${workspaceId}/plugins`,
       reason: "state_expired",
     });
@@ -30,7 +30,7 @@ describe("OAuth state failure return", () => {
 
   test("an authentic fresh state that failed is invalid (for example already used)", () => {
     const fresh = createSignedState(secret, { workspaceId }, nowSeconds - 5);
-    expect(oauthStateFailureReturn(settings, fresh, nowMs)).toEqual({
+    expect(oauthStateFailureReturn(settings, fresh, { nowMs })).toEqual({
       returnPath: workspaceIntegrationsPath(workspaceId),
       reason: "state_invalid",
     });
@@ -51,7 +51,7 @@ describe("OAuth state failure return", () => {
       `${encoded}.${signature}x`,
       `${tamperedPayload}.${signature}`,
     ]) {
-      expect(oauthStateFailureReturn(settings, raw, nowMs)).toEqual({
+      expect(oauthStateFailureReturn(settings, raw, { nowMs })).toEqual({
         returnPath: INTEGRATIONS_FALLBACK_PATH,
         reason: "state_invalid",
       });
@@ -60,7 +60,7 @@ describe("OAuth state failure return", () => {
 
   test("a signed workspace that is not a UUID never becomes a path", () => {
     const traversal = createSignedState(secret, { workspaceId: "../../admin" }, nowSeconds - 3600);
-    expect(oauthStateFailureReturn(settings, traversal, nowMs)).toEqual({
+    expect(oauthStateFailureReturn(settings, traversal, { nowMs })).toEqual({
       returnPath: INTEGRATIONS_FALLBACK_PATH,
       reason: "state_expired",
     });
@@ -69,7 +69,26 @@ describe("OAuth state failure return", () => {
   test("no configured state secret falls back without throwing", () => {
     const aged = createSignedState(secret, { workspaceId }, nowSeconds - 3600);
     const unconfigured = testSettings({ integrationsStateSecret: undefined }) as Settings;
-    expect(oauthStateFailureReturn(unconfigured, aged, nowMs)).toEqual({
+    expect(oauthStateFailureReturn(unconfigured, aged, { nowMs })).toEqual({
+      returnPath: INTEGRATIONS_FALLBACK_PATH,
+      reason: "state_invalid",
+    });
+  });
+
+  test("a provider refusal without state reports the refusal, not a stale link", () => {
+    // Fiken redirects with only `error=error&error_description=…&iss=…` when
+    // the user is not approved for the app; the state is dropped.
+    expect(oauthStateFailureReturn(settings, undefined, { providerError: "error", nowMs })).toEqual(
+      { returnPath: INTEGRATIONS_FALLBACK_PATH, reason: "provider_error" },
+    );
+    expect(
+      oauthStateFailureReturn(settings, undefined, { providerError: "access_denied", nowMs }),
+    ).toEqual({ returnPath: INTEGRATIONS_FALLBACK_PATH, reason: "provider_denied" });
+    const aged = createSignedState(secret, { workspaceId }, nowSeconds - 3600);
+    expect(
+      oauthStateFailureReturn(settings, aged, { providerError: "server_error", nowMs }),
+    ).toEqual({ returnPath: workspaceIntegrationsPath(workspaceId), reason: "provider_error" });
+    expect(oauthStateFailureReturn(settings, undefined, { providerError: " ", nowMs })).toEqual({
       returnPath: INTEGRATIONS_FALLBACK_PATH,
       reason: "state_invalid",
     });
