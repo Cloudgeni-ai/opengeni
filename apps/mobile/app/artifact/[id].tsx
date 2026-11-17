@@ -30,6 +30,7 @@ import {
   artifactMenu,
   artifactWebUrl,
   deleteConfirmation,
+  fileOpensInline,
   nativeViewPath,
   viewerKeepsNavigation,
   viewerMode,
@@ -233,7 +234,7 @@ function ArtifactViewer() {
                     type: "button" as const,
                     label: "Share",
                     accessibilityLabel: "Share",
-                    icon: { type: "sfSymbol" as const, name: "square.and.arrow.up" },
+                    icon: { type: "sfSymbol" as const, name: "square.and.arrow.up" as const },
                     onPress: share,
                   },
                   ...(menu.length > 0
@@ -242,7 +243,7 @@ function ArtifactViewer() {
                           type: "menu" as const,
                           label: "More",
                           accessibilityLabel: "More",
-                          icon: { type: "sfSymbol" as const, name: "ellipsis" },
+                          icon: { type: "sfSymbol" as const, name: "ellipsis" as const },
                           menu: { items: iosMenuItems(menu, press) },
                         },
                       ]
@@ -503,14 +504,18 @@ function ImageView({ workspaceId, item }: { workspaceId: string; item: ArtifactC
   );
 }
 
-/** Any other file: drawn by the system's viewer on iOS, opened outside on Android. */
+/**
+ * Any other file: a passive type (PDF, text, media) is drawn in place on iOS,
+ * without scripts and without leaving its own URL; markup and other types,
+ * and every file on Android, open outside.
+ */
 function FileView({ workspaceId, item }: { workspaceId: string; item: ArtifactCatalogItem }) {
   const theme = useNativeTimelineTheme();
   const link = useDownloadUrl(workspaceId, item);
   if (!link)
     return <ActivityIndicator style={{ marginTop: 48 }} color={theme.colors["fg-muted"]} />;
   if ("failed" in link) return <Problem message="This file couldn't load." />;
-  if (Platform.OS !== "ios")
+  if (Platform.OS !== "ios" || !fileOpensInline(item.contentType))
     return (
       <Problem
         message={item.filename ?? item.title}
@@ -521,6 +526,8 @@ function FileView({ workspaceId, item }: { workspaceId: string; item: ArtifactCa
     <WebView
       source={{ uri: link.url }}
       originWhitelist={["https://*"]}
+      javaScriptEnabled={false}
+      onShouldStartLoadWithRequest={(request) => request.url === link.url}
       style={{ flex: 1, backgroundColor: theme.colors.bg }}
     />
   );

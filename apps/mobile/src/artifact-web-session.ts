@@ -9,16 +9,23 @@ import { webUrl } from "@/web-links";
  */
 
 const SIGNED_IN_FOR_MS = 20 * 60_000;
-const signedIn = new Map<string, { at: number; request: Promise<boolean> }>();
+/*
+ * One web sign-in cookie per server: each sign-in replaces the last, whichever
+ * account made it. So the cache is per server and remembers who signed in
+ * (account and token); another account, or a new token after signing in
+ * again, signs in afresh.
+ */
+const signedIn = new Map<string, { at: number; who: string; request: Promise<boolean> }>();
 
 /** Sign the account's web views in; false when this server can't (or the app is signed out). */
-export function signInWebViews(account: { id: string; baseUrl: string }): Promise<boolean> {
-  const key = `${account.id}:${account.baseUrl}`;
+export async function signInWebViews(account: { id: string; baseUrl: string }): Promise<boolean> {
+  const token = await readAccountToken(account.id).catch(() => null);
+  if (!token) return false;
+  const key = webUrl(account.baseUrl, "/");
+  const who = `${account.id}\n${token}`;
   const known = signedIn.get(key);
-  if (known && Date.now() - known.at < SIGNED_IN_FOR_MS) return known.request;
+  if (known && known.who === who && Date.now() - known.at < SIGNED_IN_FOR_MS) return known.request;
   const request = (async () => {
-    const token = await readAccountToken(account.id);
-    if (!token) return false;
     const response = await fetch(webUrl(account.baseUrl, "/v1/native-app/web-session"), {
       method: "POST",
       headers: { authorization: `Bearer ${token}` },
@@ -26,9 +33,10 @@ export function signInWebViews(account: { id: string; baseUrl: string }): Promis
     });
     return response.ok;
   })().catch(() => false);
-  signedIn.set(key, { at: Date.now(), request });
+  const entry = { at: Date.now(), who, request };
+  signedIn.set(key, entry);
   void request.then((ok) => {
-    if (!ok) signedIn.delete(key);
+    if (!ok && signedIn.get(key) === entry) signedIn.delete(key);
   });
   return request;
 }

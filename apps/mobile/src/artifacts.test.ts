@@ -9,6 +9,7 @@ import {
   downloadFormat,
   editedLabel,
   emptyListWords,
+  fileOpensInline,
   nativeViewPath,
   siteStillDocument,
   viewerKeepsNavigation,
@@ -60,14 +61,26 @@ test("a presentation's menu: Open chat, Pin, Copy link, then Delete… for a pub
   expect(menu.at(-1)).toMatchObject({ title: "Delete…", destructive: true, section: "danger" });
 });
 
-test("a reader gets no Delete, and no Open chat back into the chat it came from", () => {
+test("a reader gets no Pin or Delete, and no Open chat back into the chat it came from", () => {
   const menu = artifactMenu(item({ pinned: true }), {
     accessContext: access(["artifacts:read"]),
     workspaceId: "work",
     fromSessionId: "s1",
     pinKnown: true,
   });
-  expect(ids(menu)).toEqual(["unpin", "copy-link"]);
+  expect(ids(menu)).toEqual(["copy-link"]);
+});
+
+test("only passive files are drawn in place; markup opens outside", () => {
+  expect(fileOpensInline("application/pdf")).toBe(true);
+  expect(fileOpensInline("text/plain; charset=utf-8")).toBe(true);
+  expect(fileOpensInline("image/png")).toBe(true);
+  expect(fileOpensInline("video/mp4")).toBe(true);
+  expect(fileOpensInline("text/html")).toBe(false);
+  expect(fileOpensInline("image/svg+xml")).toBe(false);
+  expect(fileOpensInline("application/xhtml+xml")).toBe(false);
+  expect(fileOpensInline("application/zip")).toBe(false);
+  expect(fileOpensInline(undefined)).toBe(false);
 });
 
 test("a Site can be duplicated and downloaded; Sites, images and files have no Delete", () => {

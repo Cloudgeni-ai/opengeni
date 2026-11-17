@@ -1,8 +1,4 @@
-import {
-  NativeInboxList,
-  useNativeInbox,
-  useNativeTimelineTheme,
-} from "@opengeni/react-native/timeline";
+import { NativeInboxList, useNativeTimelineTheme } from "@opengeni/react-native/timeline";
 import type { InboxItem } from "@opengeni/sdk";
 import * as Haptics from "expo-haptics";
 import { Stack, router, useFocusEffect } from "expo-router";
@@ -10,6 +6,7 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react
 import { RefreshControl, ScrollView } from "react-native";
 import { useAccount } from "@/account";
 import { TabScreen, tabHeaderOptions } from "@/app-tab-bar";
+import { useAppInbox } from "@/inbox-store";
 import { syncInboxBadge } from "@/notifications";
 import { AppThemeProvider } from "@/theme";
 
@@ -31,7 +28,8 @@ function Inbox() {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const { client, workspaces, workspaceId, setWorkspaceId } = useAccount();
-  const inbox = useNativeInbox(client, { pollMs: 10_000 });
+  // The same inbox as the bar's badge, so both change together.
+  const inbox = useAppInbox();
   const refreshInbox = inbox.refresh;
   const [pulling, setPulling] = useState(false);
   const workspaceNames = useMemo(
@@ -42,6 +40,9 @@ function Inbox() {
   useFocusEffect(
     useCallback(() => {
       void refreshInbox();
+      // Re-read more often while the list is on screen.
+      const timer = setInterval(() => void refreshInbox(), 10_000);
+      return () => clearInterval(timer);
     }, [refreshInbox]),
   );
   // The app badge and delivered notifications follow what is still open.

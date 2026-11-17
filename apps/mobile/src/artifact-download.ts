@@ -6,7 +6,7 @@ import type {
 } from "@opengeni/sdk";
 import * as Crypto from "expo-crypto";
 import { Directory, File, Paths } from "expo-file-system";
-import { Platform, Share } from "react-native";
+import { Alert, Platform, Share } from "react-native";
 import { newReplicaId } from "@/artifact-library";
 import { downloadFormat } from "@/artifacts";
 
@@ -75,9 +75,16 @@ async function hand(file: File, mimeType: string): Promise<void> {
     await Share.share({ url: file.uri });
     return;
   }
-  const target = await Directory.pickDirectoryAsync();
+  let target: Directory;
+  try {
+    target = await Directory.pickDirectoryAsync();
+  } catch {
+    // The person closed the folder picker: nothing to save, nothing went wrong.
+    return;
+  }
   const saved = target.createFile(file.name, mimeType);
   saved.write(await file.bytes());
+  Alert.alert("Saved", file.name);
 }
 
 async function exportSpreadsheet(

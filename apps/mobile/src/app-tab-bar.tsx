@@ -3,7 +3,6 @@ import {
   fontStyle,
   Icon,
   nativeInboxAttentionCount,
-  useNativeInbox,
   useNativeTimelineTheme,
 } from "@opengeni/react-native/timeline";
 import * as Haptics from "expo-haptics";
@@ -25,7 +24,7 @@ import {
   tabNavigation,
   type AppTab,
 } from "@/app-tabs";
-import { useAccount } from "@/account";
+import { useAppInbox } from "@/inbox-store";
 import { isCapturing, useMeetingRecorder } from "@/meetings";
 import { dismissToHome } from "@/navigation";
 
@@ -61,6 +60,8 @@ export function TabScreen({ tab, children }: { tab: AppTab; children: ReactNode 
   // The pan may only start at the left edge and must move sideways first, so
   // taps and vertical scrolls everywhere else go to the screen as before.
   const edgeSwipe = Gesture.Pan()
+    // iOS only: on Android the system's back gesture owns the left edge.
+    .enabled(Platform.OS === "ios")
     .runOnJS(true)
     .hitSlop({ left: 0, width: EDGE_SWIPE_WIDTH })
     .activeOffsetX(12)
@@ -99,8 +100,7 @@ export function AppTabBar({ current }: { current: AppTab }) {
   const c = theme.colors;
   const insets = useSafeAreaInsets();
   const recording = isCapturing(useMeetingRecorder());
-  const { client } = useAccount();
-  const inbox = useNativeInbox(client);
+  const inbox = useAppInbox();
   const refreshInbox = inbox.refresh;
   useFocusEffect(
     useCallback(() => {
@@ -263,7 +263,7 @@ export function tabHeaderOptions(renderThemed: (node: ReactNode) => ReactNode) {
               type: "button" as const,
               label: "Chats",
               accessibilityLabel: "Open chats",
-              icon: { type: "sfSymbol" as const, name: "line.3.horizontal" },
+              icon: { type: "sfSymbol" as const, name: "line.3.horizontal" as const },
               onPress: openChatsMenu,
             },
           ],

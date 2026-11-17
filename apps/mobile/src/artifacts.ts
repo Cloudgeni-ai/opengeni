@@ -9,6 +9,7 @@ import {
 } from "@opengeni/sdk";
 import { HTML_FRAME_STILL_POLICY } from "@opengeni/contracts/html-frame-host";
 import { permissionSetCovers } from "@opengeni/contracts/personal-integration-setup";
+import type { SFSymbol } from "sf-symbols-typescript";
 
 /*
  * The Artifacts screen and viewer in words and rules, shared with the web
@@ -203,6 +204,18 @@ export function downloadFormat(item: Pick<ArtifactCatalogItem, "kind" | "version
   }
 }
 
+/**
+ * Whether the file viewer may draw a file in place: only passive types (PDF,
+ * plain text, images, audio, video). Markup the server serves as an
+ * attachment (HTML, SVG, XML) and anything unknown opens outside instead.
+ */
+export function fileOpensInline(contentType: string | null | undefined): boolean {
+  const essence = (contentType ?? "").split(";")[0]!.trim().toLowerCase();
+  if (essence === "application/pdf" || essence === "text/plain") return true;
+  if (essence === "image/svg+xml") return false;
+  return /^(image|audio|video)\/[a-z0-9.+-]+$/u.test(essence);
+}
+
 export type ArtifactMenuAction =
   | "open-chat"
   | "pin"
@@ -216,7 +229,7 @@ export type ArtifactMenuItem = {
   id: ArtifactMenuAction;
   title: string;
   /** SF Symbol for the iOS menu. */
-  symbol: string;
+  symbol: SFSymbol;
   destructive?: boolean;
   /** Starts a new group (a divider before it). */
   section: "open" | "share" | "danger";
@@ -252,7 +265,8 @@ export function artifactMenu(
   const menu: ArtifactMenuItem[] = [];
   if (item.sourceSessionId && item.sourceSessionId !== options.fromSessionId)
     menu.push({ id: "open-chat", title: "Open chat", symbol: "bubble.left", section: "open" });
-  if (options.pinKnown && active && can("artifacts:read"))
+  // Pinning changes the workspace's library, so it needs publish, as on the web.
+  if (options.pinKnown && active && can("artifacts:publish"))
     menu.push(
       item.pinned
         ? { id: "unpin", title: "Unpin", symbol: "pin.slash", section: "open" }
