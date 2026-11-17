@@ -158,6 +158,7 @@ import {
 } from "../src/activities/agent-turn/credential-leases";
 import { preemptSandboxTurnForDeadlineRotation } from "../src/activities/agent-turn/sandbox-runtime";
 import {
+  connectedMcpConnectorNames,
   mcpAccountsNeedingReconnect,
   unavailableMcpConnectorsForPolicy,
 } from "../src/activities/agent-turn/tool-environment";
@@ -513,6 +514,70 @@ describe("unavailable connector operational context", () => {
     expect(unavailableMcpOperationalContext({ connectors })).toBe(
       unavailableMcpOperationalContext({ connectors: [...connectors].reverse() }),
     );
+  });
+
+  test("names the connected connectors beside the unavailable ones", () => {
+    // A connected calendar whose tools wait behind tool search must not be
+    // the one connector the notice is silent about while an unavailable
+    // calendar of another provider is named.
+    const notice = unavailableMcpOperationalContext({
+      connectors: [{ id: "cap-other-calendar", name: "Other Calendar", reason: "no_account" }],
+      connected: ["Acme Calendar", "Tickets", "Acme Calendar", "Line\nbreak"],
+    })!;
+    const lines = notice.split("\n");
+    expect(lines[0]!.startsWith("Connector availability for this turn:")).toBe(true);
+    expect(lines.at(-1)).toBe(
+      'Connected this turn, with tools available (tool search finds any not listed): "Acme Calendar", "Line break", "Tickets". A connector the person names may be one of these rather than a similarly named one above.',
+    );
+    // Beside accounts that stopped working too.
+    expect(
+      unavailableMcpOperationalContext({
+        connectors: [],
+        needsReconnect: [
+          {
+            connector: { id: "mail", name: "Mail" },
+            account: "ada@example.test",
+            ownership: "personal",
+            stoppedWorkingOn: "2026-10-29",
+            reconnectHere: true,
+          },
+        ],
+        connected: ["Tickets"],
+      })!.endsWith(
+        '\nConnected this turn, with tools available (tool search finds any not listed): "Tickets". A connector the person names may be one of these rather than a similarly named one above.',
+      ),
+    ).toBe(true);
+  });
+
+  test("says nothing about connected connectors when none is unavailable, and bounds the list", () => {
+    expect(
+      unavailableMcpOperationalContext({ connectors: [], connected: ["Tickets"] }),
+    ).toBeUndefined();
+    const notice = unavailableMcpOperationalContext({
+      connectors: [{ id: "a", reason: "no_account" }],
+      connected: Array.from({ length: 20 }, (_, index) => `C${String(index).padStart(2, "0")}`),
+    })!;
+    expect(notice).toContain('"C15" and 4 more.');
+    expect(notice).not.toContain('"C16"');
+  });
+});
+
+describe("connectors a turn has tools for", () => {
+  test("selected connectors not left out, and routed API integrations, by name", () => {
+    expect(
+      connectedMcpConnectorNames({
+        servers: [
+          { id: "opengeni", name: "Opengeni" },
+          { id: "cap-tickets", name: "Tickets" },
+          { id: "cap-mail", name: "Mail" },
+          { id: "cap-unselected", name: "Unselected" },
+          { id: "cap-unnamed" },
+        ],
+        toolIds: ["opengeni", "cap-tickets", "cap-mail", "cap-unnamed", "api_calendar"],
+        unavailableIds: ["cap-mail"],
+        apiIntegrations: [{ name: "Acme Calendar" }, { name: "Acme Calendar" }],
+      }),
+    ).toEqual(["Tickets", "cap-unnamed", "Acme Calendar", "Acme Calendar"]);
   });
 });
 
