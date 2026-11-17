@@ -219,6 +219,7 @@ import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS,
   FIRST_PARTY_MCP_CALLER_META_KEY,
+  FIRST_PARTY_MCP_MODEL_CALL_ID_META_KEY,
   FIRST_PARTY_TOOL_ARGUMENT_REJECTED_META_KEY,
   assertUniqueResourceMountPaths,
   gitCredentialBindingIdForRepository,
@@ -8311,24 +8312,33 @@ async function prepareToolGatewayDefinitionsFromServers(
 /**
  * MCP `_meta` for one gateway call. The first-party server also learns which
  * attempt surface issued it, so it can tell a read whose output reached the
- * model from one a Codemode script kept to itself. Set last, so transport
- * metadata can never claim another caller. Third-party servers never see it.
+ * model from one a Codemode script kept to itself, and for a model call the
+ * model's own call id, which names that output in conversation history. Set
+ * last, so transport metadata can never claim another caller or call. Third-
+ * party servers never see either.
  */
 export function attemptToolCallMeta(
   serverId: string,
   context: {
     operationId: string;
     caller: Pick<ToolGatewayCaller, "kind">;
+    sourceCallId?: string;
     transportMeta?: Record<string, unknown> | null;
   },
   callIdentity?: McpCallIdentity,
 ): Record<string, unknown> {
-  const { [FIRST_PARTY_MCP_CALLER_META_KEY]: _ignored, ...transportMeta } =
-    context.transportMeta ?? {};
+  const {
+    [FIRST_PARTY_MCP_CALLER_META_KEY]: _ignoredCaller,
+    [FIRST_PARTY_MCP_MODEL_CALL_ID_META_KEY]: _ignoredCallId,
+    ...transportMeta
+  } = context.transportMeta ?? {};
   return {
     ...transportMeta,
     opengeniOperationId: context.operationId,
     ...(serverId === "opengeni" ? { [FIRST_PARTY_MCP_CALLER_META_KEY]: context.caller.kind } : {}),
+    ...(serverId === "opengeni" && context.caller.kind === "model" && context.sourceCallId
+      ? { [FIRST_PARTY_MCP_MODEL_CALL_ID_META_KEY]: context.sourceCallId }
+      : {}),
     // Trusted worker scope; spread after transport metadata so a caller cannot spoof it.
     ...(callIdentity
       ? {

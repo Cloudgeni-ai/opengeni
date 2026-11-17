@@ -231,6 +231,15 @@ export type ToolGatewayCaller = z.infer<typeof ToolGatewayCaller>;
 export const FIRST_PARTY_MCP_CALLER_META_KEY = "opengeniCaller";
 
 /**
+ * MCP request `_meta` key carrying the model's own id for a direct model tool
+ * call to the first-party server: the `callId` of the function call and of the
+ * result item that conversation history stores for it. Like
+ * `FIRST_PARTY_MCP_CALLER_META_KEY`, only the worker's tool gateway sets it, and
+ * only for a `model` call to the first-party server.
+ */
+export const FIRST_PARTY_MCP_MODEL_CALL_ID_META_KEY = "opengeniModelCallId";
+
+/**
  * MCP request `_meta` key the worker's tool discovery sets (to `true`) when a
  * search that clearly names one integration the person can connect shows its
  * Connect card through `capability_authorization_request`. Such a call reuses
