@@ -175,7 +175,7 @@ describe("connection ownership UI", () => {
         workspaceId="33333333-3333-4333-8333-333333333333"
         item={capability}
         inline
-        health={{ state: "attention", connection: null }}
+        health={{ state: "attention", connection: null, reason: "removed" }}
         logoSrc={null}
         busy={false}
         errorMessage={null}
@@ -305,7 +305,7 @@ describe("connection ownership UI", () => {
   });
 
   test("a deleted workspace row is not misreported as personal", async () => {
-    const health: ConnectionHealth = { state: "attention", connection: null };
+    const health: ConnectionHealth = { state: "attention", connection: null, reason: "removed" };
     const rendered = await render(
       <ConnectionStatus
         item={item({
@@ -318,9 +318,8 @@ describe("connection ownership UI", () => {
       />,
     );
     try {
-      expect(rendered.container.textContent).toContain(
-        "Workspace connection needs to be reconnected.",
-      );
+      expect(rendered.container.textContent).toContain("Account removed");
+      expect(rendered.container.textContent).toContain("Workspace connection.");
       expect(rendered.container.textContent).not.toContain("Personal connection");
     } finally {
       await rendered.unmount();

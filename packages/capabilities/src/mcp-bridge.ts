@@ -58,6 +58,29 @@ export interface LocalMcpBridgeAdapter<TConfig, TContext> {
   readonly adapterId: string;
   matches(config: TConfig): boolean;
   create(config: TConfig, context: TContext): LocalMcpBridgeServer;
+  /**
+   * For a bridge that gates its tools on the account's recorded grants: the
+   * access a tool needs that `grantedScopes` lacks, or null when they are
+   * enough. Read without contacting the provider; the bridge still decides
+   * every call.
+   */
+  toolScopeNeed?(toolName: string, grantedScopes: readonly string[]): readonly string[] | null;
+}
+
+/**
+ * The access a tool of the one bridge matching `config` needs beyond
+ * `grantedScopes`, or null when nothing is missing, no bridge matches or the
+ * bridge does not gate on grants.
+ */
+export function localMcpBridgeToolScopeNeed<TConfig, TContext>(
+  adapters: readonly LocalMcpBridgeAdapter<TConfig, TContext>[],
+  config: TConfig,
+  toolName: string,
+  grantedScopes: readonly string[],
+): readonly string[] | null {
+  const matches = adapters.filter((adapter) => adapter.matches(config));
+  if (matches.length !== 1) return null;
+  return matches[0]!.toolScopeNeed?.(toolName, grantedScopes) ?? null;
 }
 
 export function defineLocalMcpBridgeDescriptor(

@@ -12,10 +12,15 @@ export function sessionAuthRecommendation(
   if (
     item.authoritySource === "host" ||
     item.reason === "unsupported_auth" ||
-    item.reason === "resource_scope_unavailable"
+    item.reason === "resource_scope_unavailable" ||
+    item.reason === "account_scope_fixed"
   )
     return undefined;
   if (item.capability) return item;
+  // A connected account that needs more access keeps the notice's own
+  // "Allow access" step-up for that exact account; a connect card would read
+  // as already connected and offer nothing.
+  if (item.reason === "insufficient_scope" && item.connectionId) return undefined;
   const recoveryServerId = item.canonicalServerId ?? item.serverId;
   const matches = catalog.filter(
     (candidate) =>

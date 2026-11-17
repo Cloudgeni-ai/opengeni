@@ -353,3 +353,198 @@ describe("Site tool failures reach the viewer as clear states", () => {
     expect(requests[1]?.operationId).toBe(requests[0]?.operationId);
   });
 });
+
+describe("typed answers and readiness", () => {
+  test("a blocked tool is site_tool_blocked and is not retried", async () => {
+    const h = harness([
+      apiError(403, {
+        code: "forbidden",
+        message: "tool_blocked",
+        details: { code: "tool_blocked" },
+      }),
+      ok,
+    ]);
+    const error = await h.invoke().catch((reason: unknown) => reason);
+    expect(error).toMatchObject({
+      code: "site_tool_blocked",
+      retryable: false,
+      outcomeUnknown: false,
+      message: "Your Microsoft Dynamics tool permissions don't allow this.",
+    });
+    expect(h.invokes).toHaveLength(1);
+  });
+
+  test("a confirmation a published address can't show is site_tool_open_in_opengeni", async () => {
+    const h = harness(
+      [
+        apiError(409, {
+          code: "conflict",
+          message: "site_tool_consent_requires_opengeni",
+          details: { code: "site_tool_consent_requires_opengeni" },
+        }),
+      ],
+      { host: false },
+    );
+    const error = await h.invoke().catch((reason: unknown) => reason);
+    expect(error).toMatchObject({
+      code: "site_tool_open_in_opengeni",
+      retryable: false,
+      message: "Open this Site in Opengeni to do this.",
+    });
+  });
+
+  test("an unreachable server is retryable and runs again as a new operation", async () => {
+    const h = harness([
+      apiError(503, {
+        code: "upstream_unavailable",
+        message: "The tool's server couldn't be reached. Nothing was sent.",
+        retryable: true,
+        outcomeUnknown: false,
+        details: { code: "tool_server_unreachable" },
+      }),
+      ok,
+    ]);
+    expect((await h.invoke()).result).toEqual(ok);
+    expect(h.prompts[0]?.failure).toMatchObject({
+      code: "site_tool_upstream_unavailable",
+      retryable: true,
+      message: "Couldn't reach Microsoft Dynamics. Nothing was sent.",
+    });
+    const [first, second] = h.invokes.map((request) => request.operationId);
+    expect(first).toBe("op-1");
+    expect(second).not.toBe("op-1");
+  });
+
+  test("an unreachable server without host UI is a typed error the Site can retry", async () => {
+    const h = harness(
+      [
+        apiError(503, {
+          code: "upstream_unavailable",
+          message: "unreachable",
+          retryable: true,
+          outcomeUnknown: false,
+          details: { code: "tool_server_unreachable" },
+        }),
+      ],
+      { host: false },
+    );
+    const error = await h.invoke().catch((reason: unknown) => reason);
+    expect(error).toMatchObject({
+      code: "site_tool_upstream_unavailable",
+      retryable: true,
+      outcomeUnknown: false,
+    });
+  });
+
+  test("an account that must allow more access, or can't do this at all, is a typed answer", async () => {
+    const moreAccess = harness([
+      apiError(409, {
+        code: "conflict",
+        message: "Give this account more access in Opengeni, then try again.",
+        retryable: false,
+        outcomeUnknown: false,
+        details: {
+          code: "tool_connection_needs_more_access",
+          connectionId: "c1",
+          scopes: ["https://example.test/compose"],
+        },
+      }),
+    ]);
+    await moreAccess.invoke().catch(() => undefined);
+    expect(moreAccess.prompts[0]?.failure).toMatchObject({
+      code: "site_tool_grant_required",
+      retryable: false,
+      message: "Give Microsoft Dynamics more access to continue.",
+      sourceCode: "tool_connection_needs_more_access",
+    });
+    const denied = harness(
+      [
+        apiError(403, {
+          code: "forbidden",
+          message: "This action isn't available for this account.",
+          retryable: false,
+          outcomeUnknown: false,
+          details: { code: "tool_unavailable_for_account" },
+        }),
+      ],
+      { host: false },
+    );
+    expect(await denied.invoke().catch((reason: unknown) => reason)).toMatchObject({
+      code: "site_tool_permission_denied",
+      retryable: false,
+    });
+  });
+
+  test("readiness asks the host for the pinned Site and passes on the host's change events", async () => {
+    const bodies: unknown[] = [];
+    const hostListeners = new Set<() => void>();
+    const bridge = createSiteToolBridge({
+      workspaceId: "workspace",
+      artifactId: "site",
+      siteVersionId: "version",
+      requestedTools: [declared],
+      workspaceTools: {
+        $targetProtocol: 1,
+        $catalog: async () => {
+          throw new Error("unused");
+        },
+        $resolve: async () => tool,
+        $invoke: async () => {
+          throw new Error("unused");
+        },
+      },
+      fetchResponse: async (path, init) => {
+        if (path.endsWith("/tools/readiness")) {
+          bodies.push(JSON.parse(String(init?.body)));
+          return Response.json({
+            version: 1,
+            tools: [
+              {
+                target: { identity: declared },
+                state: "confirm",
+                confirm: "always",
+                runsAs: { connector: "CRM", account: "ada@example.com", shared: false },
+                connector: "CRM",
+              },
+            ],
+          });
+        }
+        return new Response("unexpected", { status: 500 });
+      },
+      readinessChanges: (listener) => {
+        hostListeners.add(listener);
+        return () => hostListeners.delete(listener);
+      },
+      callTool: async () => {
+        throw new Error("unused");
+      },
+    });
+    const answer = await bridge.readiness!(
+      { targets: [{ identity: declared }] },
+      { signal: new AbortController().signal },
+    );
+    expect(answer.tools[0]).toMatchObject({ state: "confirm", runsAs: { shared: false } });
+    expect(bodies).toEqual([
+      { targets: [{ identity: declared }], siteArtifactId: "site", siteVersionId: "version" },
+    ]);
+    let heard = 0;
+    const stop = bridge.subscribeReadiness!(() => heard++);
+    for (const listener of hostListeners) listener();
+    expect(heard).toBe(1);
+    stop();
+    expect(hostListeners.size).toBe(0);
+  });
+
+  test("an unpinned host offers no readiness", () => {
+    const bridge = createSiteToolBridge({
+      workspaceId: "workspace",
+      workspaceTools: { $catalog: async () => ({}) as never },
+      fetchResponse: async () => new Response("ok"),
+      callTool: async () => {
+        throw new Error("unused");
+      },
+    });
+    expect(bridge.readiness).toBeUndefined();
+    expect(bridge.subscribeReadiness).toBeUndefined();
+  });
+});

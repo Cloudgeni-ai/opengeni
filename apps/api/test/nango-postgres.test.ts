@@ -21,18 +21,24 @@ import {
   type IntegrationBackendSetting,
   type Permission,
 } from "@opengeni/contracts";
-import { sweepNangoConnections } from "@opengeni/core";
 import {
   bootstrapWorkspace,
   connectionAccountIdentityKey,
+  createConnection,
   createDb,
   getConnectionMetadata,
+  integrationBackendSettingsCache,
   loadConnectionCredentialForBroker,
   revokeConnection,
   type DbClient,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
+import {
+  listOwnConnectionMetadata,
+  projectConnectionsForBackends,
+  sweepNangoConnections,
+} from "@opengeni/core";
 import { createApp } from "../src/app";
 import {
   completeNangoConnect,
@@ -272,11 +278,12 @@ async function nangoRows(target: Owner) {
         id: string;
         status: string;
         granted_scopes: string[];
+        provider_domain: string;
         nango_connection_id: string;
         email: string;
         account_identity_key: string | null;
       }>
-    >`select id, status, granted_scopes, metadata->>'nangoConnectionId' as nango_connection_id,
+    >`select id, status, granted_scopes, provider_domain, metadata->>'nangoConnectionId' as nango_connection_id,
         metadata->>'accountEmail' as email, account_identity_key
       from connections
       where workspace_id = ${target.workspaceId} and provider_domain = 'nango:gmail'
@@ -1094,6 +1101,133 @@ describe("Nango connections in PostgreSQL", () => {
       await shared!.admin.unsafe(
         "REVOKE EXECUTE ON FUNCTION opengeni_private.nango_connections_in_use_v1(text[]) FROM opengeni_app",
       );
+    }
+  });
+
+  test("an active Nango account is the connector's account in the account lists", async () => {
+    if (!shared) return;
+    const target = await owner("nango account lists");
+    const nango = fakeNango();
+    await connect(target, nango, "na-1", "lists@example.com");
+    const [nangoRow] = await nangoRows(target);
+    // The native account the Nango one replaced.
+    const native = await createConnection(client.db, {
+      accountId: target.accountId,
+      workspaceId: target.workspaceId,
+      subjectId: target.subjectId,
+      providerDomain: "gmailmcp.googleapis.com",
+      kind: "oauth2",
+      status: "active",
+      credentialEncrypted: "unused",
+      metadata: { oauthDiscovery: true, mcpUrl: "https://gmailmcp.googleapis.com/mcp/v1" },
+      createdBySubjectId: target.subjectId,
+    });
+    // A workspace-shared Nango Gmail account, and one that needs sign-in.
+    const sharedNango = await createConnection(client.db, {
+      accountId: target.accountId,
+      workspaceId: target.workspaceId,
+      subjectId: null,
+      providerDomain: nangoRow!.provider_domain,
+      kind: "oauth2",
+      status: "active",
+      credentialEncrypted: "unused",
+      metadata: { integrationBackend: "nango", mcpUrl: "https://gmailmcp.googleapis.com/mcp/v1" },
+      createdBySubjectId: target.subjectId,
+    });
+    const signedOutNango = await createConnection(client.db, {
+      accountId: target.accountId,
+      workspaceId: target.workspaceId,
+      subjectId: null,
+      providerDomain: nangoRow!.provider_domain,
+      kind: "oauth2",
+      status: "needs_reauth",
+      credentialEncrypted: "unused",
+      metadata: { integrationBackend: "nango", mcpUrl: "https://gmailmcp.googleapis.com/mcp/v1" },
+      createdBySubjectId: target.subjectId,
+    });
+    // This deployment serves Gmail through Nango.
+    await shared!.admin`insert into integration_backend_revisions
+        (integration_key, backend, nango_provider_config_key, enabled, changed_by, reason)
+      values ('gmail', 'nango', 'google-mail', true, 'test', 'nango account lists test')`;
+    integrationBackendSettingsCache.invalidate();
+    try {
+      const app = createApp({
+        settings,
+        db: client.db,
+        bus: {} as never,
+        workflowClient: {} as never,
+        managedAuth: null,
+      } as never);
+      const token = await signDelegatedAccessToken(delegationSecret, {
+        ...target,
+        permissions: ["workspace:read", "connections:read"],
+        principalKind: "human_session",
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      });
+      const read = async (path: string) => {
+        const response = await app.request(`/v1/workspaces/${target.workspaceId}${path}`, {
+          headers: { authorization: `Bearer ${token}` },
+        });
+        expect(response.status).toBe(200);
+        return await response.json();
+      };
+      const accounts = await read("/connect/accounts");
+      expect(accounts).toContainEqual(
+        expect.objectContaining({
+          id: nangoRow!.id,
+          providerId: "gmail",
+          // Named by the account it signed in as.
+          label: "lists@example.com",
+          ownership: "personal",
+          status: "connected",
+          // Marked, so no Connect UI starts a native reconnect for it.
+          backend: "nango",
+        }),
+      );
+      // A shared Nango Google account is usable; only a native shared Google
+      // sign-in is not.
+      expect(accounts).toContainEqual(
+        expect.objectContaining({
+          id: sharedNango.id,
+          ownership: "workspace",
+          status: "connected",
+          backend: "nango",
+        }),
+      );
+      expect(accounts).toContainEqual(
+        expect.objectContaining({
+          id: signedOutNango.id,
+          status: "auth_needed",
+          backend: "nango",
+        }),
+      );
+      // The replaced native account cannot be used while Nango serves Gmail.
+      const nativeRow = (accounts as Array<Record<string, unknown>>).find(
+        (account) => account.id === native.id,
+      );
+      expect(nativeRow).toMatchObject({ providerId: "gmail", status: "auth_needed" });
+      expect(nativeRow).not.toHaveProperty("backend");
+      // The inventory the runtime and health read (a delegated token is never
+      // a personal-account source, so read it as the person's own session).
+      const inventory = projectConnectionsForBackends(
+        await listOwnConnectionMetadata(client.db, {
+          ...target,
+          reach: "anywhere",
+          includeInactive: true,
+        }),
+        backends,
+      );
+      expect(inventory.map((connection) => [connection.id, connection.status])).toEqual(
+        expect.arrayContaining([
+          [nangoRow!.id, "active"],
+          [native.id, "needs_reauth"],
+        ]),
+      );
+    } finally {
+      await shared!.admin`insert into integration_backend_revisions
+          (integration_key, backend, nango_provider_config_key, enabled, changed_by, reason)
+        values ('gmail', 'native', null, true, 'test', 'nango account lists test done')`;
+      integrationBackendSettingsCache.invalidate();
     }
   });
 

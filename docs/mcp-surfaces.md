@@ -400,10 +400,45 @@ operation. A declared Site tool the viewer can neither use nor connect answers
 the publisher's own account routes with their connector so other viewers get
 their own account or the connect card instead. Every other way a Site call
 stops reaches the viewer as a plain state and the Site as a typed `code`
-(`site_tool_reconnect_required`, `site_tool_permission_denied`,
-`site_tool_not_available_for_viewer`, `site_tool_outcome_unknown`,
-`site_tool_unavailable`); see "Failures" in the same design. See
+(`site_tool_reconnect_required`, `site_tool_grant_required`, `site_tool_permission_denied`,
+`site_tool_not_available_for_viewer`, `site_tool_blocked`,
+`site_tool_open_in_opengeni`, `site_tool_upstream_unavailable`,
+`site_tool_outcome_unknown`, `site_tool_unavailable`); see "Failures" in the
+same design. See
 "Host-native consent" in `docs/design/workspace-html-sites-2026-09-01.md`.
+
+`POST tools/readiness` (`{siteArtifactId, siteVersionId, targets}`, 1–128
+targets) tells a Site what each declared tool needs for this viewer before a
+click: `state` (`ready`, `confirm`, `choose_account`, `connect`, `reconnect`,
+`grant`, `blocked`, `open_in_opengeni`, `unavailable`), `confirm`
+(`never`/`always`/`remembered`/`maybe`), `runsAs` and `connector`. It reads the
+same authority as invoke (the Site's declarations, the viewer's accounts and
+routing, saved tool permissions, "Always allow on this Site" and connection
+status) and never prepares a provider or calls one; invoke still enforces
+everything. `grant` (with `scopes`) comes from the account's recorded grants and
+the first-party bridge's own rule for what each tool needs
+(`LocalMcpBridgeAdapter.toolScopeNeed`); an account whose access is fixed (a
+Nango-held one) reads `unavailable` with `unavailableReason: "account"` instead. `POST tools/site-allowances/reset` removes the caller's own "Always
+allow" choices on one Site (people only).
+
+In a chat, the same bridge rule decides the `tool.auth_needed` notice for a
+tool the account lacks access for: `insufficient_scope` with `scopes` (the
+"Give {provider} more access" step-up) when the account can be given more, or,
+for a fixed-access account, the legacy-safe `unsupported_auth` with
+`accountReason: "account_scope_fixed"` and `scopes`. Older clients show that as
+unavailable tools with no action; newer ones say the provider can't do this
+with the connected account.
+
+A gateway call whose MCP server could not be reached before anything was sent
+(connection refused, DNS failure, a tunnel that is gone) answers 503 `upstream_unavailable`
+with `details.code` `tool_server_unreachable`, `retryable: true` and
+`outcomeUnknown: false`, for every gateway caller. Only the MCP transport's own
+POST decides this: its fetch rejected while connecting (a refusal, a DNS
+failure, or an unreachable host or network during `connect`), and that exact
+error is marked. The same code from anywhere else (a read on an open socket, a
+database inside the call) and any other transport failure during execution
+stay 502 `tool_outcome_unknown`. A tool set to Block answers
+403 with `details.code` `tool_blocked`.
 
 `POST tools/target-approvals` issues a version-2 binding over the existing
 executable effect digest and Site tuple. Exact caller, identity, arguments and

@@ -92,6 +92,7 @@ import {
   SessionEvent,
   compactSessionEventResult,
   ToolAuthNeededPayload,
+  toolScopeShortfallReason,
   CredentialAuthNeededPayload,
   defaultRepositoryMountPath,
   CodexCredentialPolicySnapshotV1,
@@ -794,6 +795,25 @@ describe("contracts", () => {
         reason: "missing_connection",
       }).connectionId,
     ).toBe("host:cloud:7");
+  });
+
+  test("a fixed-access account's notice pairs its account reason with the legacy-safe reason", () => {
+    const notice = {
+      serverId: "gmail",
+      toolName: "create_draft",
+      providerDomain: "gmailmcp.googleapis.com",
+      connectionId: "conn-nango",
+      ...toolScopeShortfallReason(true),
+      scopes: ["https://www.googleapis.com/auth/gmail.compose"],
+    };
+    expect(ToolAuthNeededPayload.parse(notice)).toMatchObject({
+      reason: "unsupported_auth",
+      accountReason: "account_scope_fixed",
+    });
+    expect(toolScopeShortfallReason(false)).toEqual({ reason: "insufficient_scope" });
+    expect(
+      ToolAuthNeededPayload.safeParse({ ...notice, reason: "insufficient_scope" }).success,
+    ).toBe(false);
   });
 
   test("auth-needed events keep capability recommendations secret-free and bounded", () => {

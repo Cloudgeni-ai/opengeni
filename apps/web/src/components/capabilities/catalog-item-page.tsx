@@ -60,10 +60,14 @@ import { DetailSection } from "@opengeni/react/ui/detail-sheet";
 import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
 import { MetaChip } from "@opengeni/react/ui/meta-chip";
 import { Notice } from "@opengeni/react/ui/notice";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import {
   capabilityCategoryLabel,
   capabilityConnectPlan,
   capabilityReconnectPlan,
+  connectionAttentionLabel,
+  connectionRepair,
+  connectionRepairLabel,
   capabilitySourceLabel,
   capabilityStateChip,
   curatedSkillProvenance,
@@ -180,6 +184,7 @@ export function CatalogItemPage({
     ),
   ].slice(0, 4);
   const reconnect = capabilityReconnectPlan(item, health);
+  const repair = connectionRepair(health);
   const missingPersonalAccount =
     item.enabled &&
     health.state === "attention" &&
@@ -193,37 +198,53 @@ export function CatalogItemPage({
     item.kind === "mcp" && item.authKind === "oauth2" && !item.enabled && onConnectAccount;
   const keyPageUrl = item.installUrl ?? item.homepageUrl;
   const chip = capabilityStateChip(item, health);
-  const status = missingPersonalAccount
-    ? "Not connected"
-    : isSkill
-      ? item.enabled
-        ? item.metadata.updateAvailable === true
-          ? "Update available"
-          : "Installed"
-        : undefined
-      : item.surfaceType === "codex_apps"
-        ? item.runtime.available
-          ? "Connected"
-          : "Unavailable"
-        : plan.mode === "social_oauth"
-          ? socialConnections.some(
-              (connection) =>
-                connection.provider === plan.provider && connection.status === "needs_reauth",
-            )
-            ? "Needs attention"
-            : socialConnections.some(
-                  (connection) =>
-                    connection.provider === plan.provider && connection.status === "connected",
-                )
-              ? "Connected"
-              : undefined
-          : plan.mode === "fiken_api_token"
-            ? health.state === "connected"
-              ? "Connected"
-              : health.state === "attention"
-                ? "Needs attention"
-                : undefined
-            : chip.label;
+  // The same reason the catalog row shows, from the same health.
+  const status =
+    item.enabled &&
+    !isSkill &&
+    item.surfaceType !== "codex_apps" &&
+    plan.mode !== "social_oauth" &&
+    health.state === "attention" ? (
+      <StatusBadge status="needs_reconnect" variant="outline">
+        {connectionAttentionLabel(health.reason)}
+      </StatusBadge>
+    ) : missingPersonalAccount ? (
+      "Not connected"
+    ) : isSkill ? (
+      item.enabled ? (
+        item.metadata.updateAvailable === true ? (
+          "Update available"
+        ) : (
+          "Installed"
+        )
+      ) : undefined
+    ) : item.surfaceType === "codex_apps" ? (
+      item.runtime.available ? (
+        "Connected"
+      ) : (
+        "Unavailable"
+      )
+    ) : plan.mode === "social_oauth" ? (
+      socialConnections.some(
+        (connection) =>
+          connection.provider === plan.provider && connection.status === "needs_reauth",
+      ) ? (
+        "Needs attention"
+      ) : socialConnections.some(
+          (connection) =>
+            connection.provider === plan.provider && connection.status === "connected",
+        ) ? (
+        "Connected"
+      ) : undefined
+    ) : plan.mode === "fiken_api_token" ? (
+      health.state === "connected" ? (
+        "Connected"
+      ) : health.state === "attention" ? (
+        "Needs attention"
+      ) : undefined
+    ) : (
+      chip.label
+    );
   const spinner = <Loader2Icon className="animate-spin" aria-hidden="true" />;
   const socialAccounts =
     plan.mode === "social_oauth"
@@ -300,7 +321,21 @@ export function CatalogItemPage({
       </Button>
     ) : null;
   } else if (item.enabled) {
-    if (reconnect?.kind === "oauth") {
+    if (repair === "turn_on_here" && health.state === "attention" && health.connection) {
+      const account = health.connection;
+      primary = (
+        <Button
+          type="button"
+          size="sm"
+          className={buttonClass}
+          disabled={busy}
+          onClick={() => onAction({ type: "turn_on_here", item, connection: account })}
+        >
+          {busy ? spinner : <PowerIcon aria-hidden="true" />}
+          {connectionRepairLabel(repair, title)}
+        </Button>
+      );
+    } else if (reconnect?.kind === "oauth") {
       primary = (
         <Button
           type="button"
@@ -313,6 +348,9 @@ export function CatalogItemPage({
               item,
               connectionId: reconnect.connectionId,
               ownership: reconnect.ownership,
+              ...(reconnect.connectionWorkspaceId
+                ? { connectionWorkspaceId: reconnect.connectionWorkspaceId }
+                : {}),
             })
           }
         >

@@ -333,6 +333,7 @@ import {
 } from "../lib/session-tools";
 import { resolveWorkspaceBusySend, stableJson } from "@opengeni/contracts";
 import { connectProviderAcceptsRequestedScopes } from "@opengeni/contracts/connect";
+import { findConnectRecoveryTarget } from "../lib/connect-recovery-account";
 import { useFollowUpRepositories } from "../lib/use-follow-up-repositories";
 import type { ChatSendContext } from "../components/capabilities/session-github-repositories";
 import { githubAppConnectRequest } from "../lib/github-app-connect";
@@ -1191,13 +1192,28 @@ export function SessionRoute({
       }
       if (item.connectionId) {
         const { findConnectRecoveryAccount } = await import("@opengeni/connect");
-        const account = findConnectRecoveryAccount(
-          await reconnectTransport.accounts(workspaceId),
-          item.connectionId,
-        );
-        if (account) {
+        // The exact account, in the workspace that owns it: an own account
+        // turned on here from another workspace reconnects there.
+        const target = await findConnectRecoveryTarget({
+          workspaceId,
+          connectionId: item.connectionId,
+          accounts: (id) => reconnectTransport.accounts(id),
+          ownAccounts: () =>
+            context.client.listOwnConnectionAccounts(workspaceId, { includeInactive: true }),
+          find: findConnectRecoveryAccount,
+        });
+        if (target?.via === "connector") {
+          // An integration platform's account signs in again through its
+          // connector's own Connect, never a native reconnect attempt.
+          page.assign(
+            `/workspaces/${encodeURIComponent(target.workspaceId)}/capabilities?reconnect_domain=${encodeURIComponent(item.providerDomain)}`,
+          );
+          return;
+        }
+        if (target) {
+          const { account } = target;
           const request: NativeConnectRequest = {
-            scope: { workspaceId, transport: reconnectTransport },
+            scope: { workspaceId: target.workspaceId, transport: reconnectTransport },
             providerId: account.providerId,
             ownership: account.ownership,
             reconnectAccountId: account.id,

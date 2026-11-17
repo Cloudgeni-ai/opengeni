@@ -10610,6 +10610,7 @@
         "ToolGatewayCatalog",
         "ToolGatewayDeclarationsResponse",
         "ToolGatewaySiteConsentResponse",
+        "ToolGatewaySiteReadinessResponse",
         "ToolGatewayTargetApprovalResponse"
       ]
     },
@@ -10628,6 +10629,7 @@
         "ToolGatewayCatalog",
         "ToolGatewayDeclarationsResponse",
         "ToolGatewaySiteConsentResponse",
+        "ToolGatewaySiteReadinessResponse",
         "ToolGatewayTargetApprovalResponse"
       ]
     },
@@ -10672,6 +10674,7 @@
         "ToolGatewayManifestResponse",
         "ToolGatewayResolvedTool",
         "ToolGatewaySiteConsentResponse",
+        "ToolGatewaySiteReadinessResponse",
         "ToolGatewayTargetApprovalResponse"
       ]
     },
@@ -10688,6 +10691,20 @@
         "ToolGatewayManifestResponse",
         "ToolGatewayResolvedTool",
         "ToolGatewaySiteConsentResponse",
+        "ToolGatewaySiteReadinessResponse",
+        "ToolGatewayTargetApprovalResponse"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/tools/readiness",
+      "sdk": [
+        "createSiteToolBridge"
+      ],
+      "request": [],
+      "response": [
+        "ToolGatewaySiteConsentResponse",
+        "ToolGatewaySiteReadinessResponse",
         "ToolGatewayTargetApprovalResponse"
       ]
     },
@@ -10704,6 +10721,7 @@
         "ToolGatewayManifestResponse",
         "ToolGatewayResolvedTool",
         "ToolGatewaySiteConsentResponse",
+        "ToolGatewaySiteReadinessResponse",
         "ToolGatewayTargetApprovalResponse"
       ]
     },
@@ -10716,6 +10734,7 @@
       "request": [],
       "response": [
         "ToolGatewaySiteConsentResponse",
+        "ToolGatewaySiteReadinessResponse",
         "ToolGatewayTargetApprovalResponse"
       ]
     },
@@ -10732,6 +10751,7 @@
         "ToolGatewayManifestResponse",
         "ToolGatewayResolvedTool",
         "ToolGatewaySiteConsentResponse",
+        "ToolGatewaySiteReadinessResponse",
         "ToolGatewayTargetApprovalResponse"
       ]
     },
@@ -16235,6 +16255,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.backend": "const?=[\"\\\"nango\\\"\"]",
         "$.id": "string!",
         "$.label": "string!",
         "$.ownership": "ref(ConnectOwnership)!",
@@ -32176,7 +32197,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"designated_credential_unavailable\\\"\",\"\\\"expired\\\"\",\"\\\"insufficient_scope\\\"\",\"\\\"missing_connection\\\"\",\"\\\"personal_authority_unavailable\\\"\",\"\\\"refresh_failed\\\"\",\"\\\"resource_scope_unavailable\\\"\",\"\\\"unsupported_auth\\\"\"]"
+        "$": "enum=[\"\\\"account_scope_fixed\\\"\",\"\\\"designated_credential_unavailable\\\"\",\"\\\"expired\\\"\",\"\\\"insufficient_scope\\\"\",\"\\\"missing_connection\\\"\",\"\\\"personal_authority_unavailable\\\"\",\"\\\"refresh_failed\\\"\",\"\\\"resource_scope_unavailable\\\"\",\"\\\"unsupported_auth\\\"\"]"
       }
     },
     "ToolGatewayApprovalResponse": {
@@ -32769,6 +32790,57 @@
         "$.email.subject": "string!",
         "$.email.to": "string!",
         "$.kind": "enum!=[\"\\\"generic\\\"\",\"\\\"gmail\\\"\"]"
+      }
+    },
+    "ToolGatewaySiteReadinessResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.tools": "array!",
+        "$.tools[]": "ref(ToolGatewaySiteReadinessTool)",
+        "$.version": "const!=[\"1\"]"
+      }
+    },
+    "ToolGatewaySiteReadinessState": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"blocked\\\"\",\"\\\"choose_account\\\"\",\"\\\"confirm\\\"\",\"\\\"connect\\\"\",\"\\\"grant\\\"\",\"\\\"open_in_opengeni\\\"\",\"\\\"ready\\\"\",\"\\\"reconnect\\\"\",\"\\\"unavailable\\\"\"]"
+      }
+    },
+    "ToolGatewaySiteReadinessTool": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.confirm": "enum!=[\"\\\"always\\\"\",\"\\\"maybe\\\"\",\"\\\"never\\\"\",\"\\\"remembered\\\"\"]",
+        "$.connector": "string! null",
+        "$.runsAs": "object! null",
+        "$.runsAs.account": "string!",
+        "$.runsAs.connector": "string!",
+        "$.runsAs.shared": "boolean!",
+        "$.scopes": "array?",
+        "$.scopes[]": "string",
+        "$.state": "ref(ToolGatewaySiteReadinessState)!",
+        "$.target": "ref(ToolGatewayTarget)!",
+        "$.unavailableReason": "enum?=[\"\\\"account\\\"\"]"
+      }
+    },
+    "ToolGatewayTarget": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "union=[\"0\",\"1\"]",
+        "$|0": "object",
+        "$|0.identity": "ref(AttemptToolIdentity)!",
+        "$|1": "object",
+        "$|1.path": "array!",
+        "$|1.path[]": "string"
       }
     },
     "ToolGatewayTargetApprovalResponse": {
@@ -38436,10 +38508,16 @@
       "ToolGatewayResolvedTool": "type",
       "ToolGatewayResolveRequest": "type",
       "ToolGatewayResult": "type",
+      "ToolGatewaySiteAllowancesResetRequest": "type",
+      "ToolGatewaySiteAllowancesResetResponse": "type",
       "ToolGatewaySiteConsentAccount": "type",
       "ToolGatewaySiteConsentRequest": "type",
       "ToolGatewaySiteConsentResponse": "type",
       "ToolGatewaySiteConsentReview": "type",
+      "ToolGatewaySiteReadinessRequest": "type",
+      "ToolGatewaySiteReadinessResponse": "type",
+      "ToolGatewaySiteReadinessState": "type",
+      "ToolGatewaySiteReadinessTool": "type",
       "ToolGatewayTarget": "type",
       "ToolGatewayTargetApprovalRequest": "type",
       "ToolGatewayTargetApprovalResponse": "type",
@@ -46579,7 +46657,8 @@
     "SiteBridgeHost": [
       "close",
       "load",
-      "notifyLocation"
+      "notifyLocation",
+      "notifyToolReadiness"
     ],
     "SiteBridgeRequestRegistry": [
       "addPort",
@@ -61087,6 +61166,9 @@
       ],
       "notifyLocation": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniSiteLocationValue\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSVoidKeyword\"}}"
+      ],
+      "notifyToolReadiness": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSVoidKeyword\"}}"
       ]
     },
     "@opengeni/sdk/site-bridge-host:SiteBridgeRequestRegistry": {
