@@ -2566,6 +2566,7 @@ export type TurnStartupPhase =
   | "history_generated_image_materialization"
   | "history_position_load"
   | "owned_sandbox_setup"
+  | "earlier_attempt_usage_settlement"
   | "runtime_stream_initialization"
   | "model_request_preparation"
   | "model_sdk_serialization"
