@@ -6716,7 +6716,7 @@ describe("transient provider error classifier", () => {
   });
 
   test("a route move that refused the checkpoint request recovers like any route transition", () => {
-    const moved = new RoutingWorkspaceRootChangedError("/home/agent", "/Users/agent");
+    const moved = new RoutingWorkspaceRootChangedError("/home/user", "/Users/user");
     const viaSdk = new APIConnectionError({ cause: moved });
     for (const error of [
       moved,

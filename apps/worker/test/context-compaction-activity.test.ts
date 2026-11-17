@@ -3318,7 +3318,7 @@ describe("standalone context compaction execution", () => {
     const run = await runGoalCheckpointThatThrows(
       () =>
         new APIConnectionError({
-          cause: new RoutingWorkspaceRootChangedError("/home/agent", "/Users/agent"),
+          cause: new RoutingWorkspaceRootChangedError("/home/user", "/Users/user"),
         }),
     );
 
