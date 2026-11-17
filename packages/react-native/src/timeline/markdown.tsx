@@ -524,6 +524,18 @@ function webRules(
           return <Fragment key={node.key}>{drawn}</Fragment>;
         }
       }
+      const target =
+        media.renderOpenGeniLink && typeof href === "string" && parseOpenGeniLink(href);
+      if (target) {
+        const group = parent[0];
+        if (group !== undefined && isStandaloneLinkGroup(group, parent[1])) {
+          const drawn = media.renderOpenGeniLink!({ target, children });
+          if (drawn !== undefined) {
+            BLOCK_LINK_GROUPS.add(group);
+            return <Fragment key={node.key}>{drawn}</Fragment>;
+          }
+        }
+      }
       const link = renderRules.link!(node, children, parent, styles, onLinkPress);
       return <PressableMarkdownLink key={node.key} link={link as ReactElement<TextProps>} />;
     },
@@ -709,6 +721,14 @@ export interface MarkdownLinkOptions {
    * `sandbox:`) never reach it; they go to `onOpenGeniLink`.
    */
   renderLink?: ((link: NativeHostLink) => ReactNode | undefined) | undefined;
+  /**
+   * Draw a standalone Opengeni object link (an artifact, Site or file on its
+   * own line) as a block, such as a card that opens it. Return `undefined` to
+   * keep the link. Inline object links stay text.
+   */
+  renderOpenGeniLink?:
+    | ((link: { target: OpenGeniLinkTarget; children: ReactNode }) => ReactNode | undefined)
+    | undefined;
 }
 
 /** Text groups whose only link the host drew as a block, so they render as views. */
@@ -861,6 +881,7 @@ export function createWebMarkdownRenderer(
     renderImage: options.renderImage,
     renderInteractiveBlock: options.renderInteractiveBlock,
     renderLink: options.renderLink,
+    renderOpenGeniLink: options.renderOpenGeniLink,
   };
   return (text, { tone, streaming, textStyle }): ReactNode =>
     text.length > MAX_MARKDOWN_LENGTH || text.trim() ? (

@@ -344,6 +344,7 @@ export const CLIENT_PAGES = [
   "setup-account",
   "account-auth",
   "site-auth",
+  "native-view",
   "personal-security",
   "console",
   "other",

@@ -169,9 +169,15 @@ export function SiteViewRoute({
   startNew = false,
   page,
   artifactsReturn,
+  embedded = false,
 }: {
   workspaceId: string;
   siteId: string;
+  /**
+   * The Site alone, without its toolbar or chat: for a host that draws its
+   * own header around it (the phone app's viewer). Its own moves stay inside.
+   */
+  embedded?: boolean | undefined;
   /** The conversation open in the panel; the newest when omitted. */
   conversation?: string | undefined;
   /** Open with a new conversation in the panel, its composer focused (Edit with Opengeni). */
@@ -270,6 +276,27 @@ export function SiteViewRoute({
   ) : undefined;
   const { layout, update: updateLayout } = useSiteChatPanelLayout(accessContext.subjectId);
   const [relay] = useState(() => new ChatFileDropRelay());
+  if (embedded) {
+    return (
+      <div
+        className="flex h-full min-h-0 min-w-0 flex-col"
+        data-workspace-scroll-owner="self-managed"
+      >
+        <SiteView
+          client={client}
+          workspaceId={workspaceId}
+          siteId={siteId}
+          toolBridge={toolBridge}
+          viewer={viewer}
+          siteLocation={page ?? "/"}
+          showToolbar={false}
+          versionId={artifact ? (artifact.currentVersion?.id ?? null) : undefined}
+          watch={live.watch}
+          archivedMessage="This Site is archived."
+        />
+      </div>
+    );
+  }
   return (
     <div
       className={cn(
