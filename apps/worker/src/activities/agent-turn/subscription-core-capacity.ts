@@ -457,6 +457,23 @@ export async function parkCoreSubscriptionTurn(
   }
   await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, armed.events);
   if (armed.action === "waiting") {
+    // A replayed arm that finds its own wait already in place writes no
+    // events and is not a new wait.
+    if (armed.events.length > 0) {
+      deps.observability.info("Turn started waiting for subscription capacity", {
+        provider: armed.waiter.provider,
+        waitReason: armed.waiter.waitReason,
+        earliestResetAt: armed.waiter.earliestResetAt?.toISOString() ?? null,
+        nextCheckAt: armed.waiter.nextCheckAt.toISOString(),
+        waiterId: armed.waiter.waiterId,
+        generation: armed.waiter.generation,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId,
+        attemptId: input.attemptId,
+      });
+    }
     // A Steer that was waiting for this turn's next model step replaces the
     // capacity wait now (its waiter goes with the superseded turn).
     if (
@@ -467,12 +484,33 @@ export async function parkCoreSubscriptionTurn(
         turnId,
       })
     ) {
+      if (armed.events.length > 0) {
+        deps.observability.info("Turn stopped waiting for subscription capacity", {
+          provider: armed.waiter.provider,
+          outcome: "superseded",
+          reason: "steer",
+          waitReason: armed.waiter.waitReason,
+          waitedSeconds: 0,
+          waiterId: armed.waiter.waiterId,
+          generation: armed.waiter.generation,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId,
+        });
+      }
       control.turnMetricOutcome = "cancelled";
       control.activityStatus = "idle";
       return { exit: claimedResult({ status: "idle" }) };
     }
     const evaluated = await reconcileCoreCapacityWait(
-      { db, bus, signalCodexCapacityWorkflow, settings: deps.settings },
+      {
+        db,
+        bus,
+        signalCodexCapacityWorkflow,
+        settings: deps.settings,
+        observability: deps.observability,
+      },
       waits,
       {
         accountId: input.accountId,

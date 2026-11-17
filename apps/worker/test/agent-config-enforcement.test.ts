@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
 import { sessionWithEffectiveToolPolicy, resolveSessionAgentConfigForCreate } from "@opengeni/core";
@@ -42,7 +43,6 @@ import * as runtimeExports from "@opengeni/runtime";
 import { createObservability } from "@opengeni/observability";
 import {
   buildOpenGeniAgent,
-  prefixedMcpToolName,
   prepareAgentTools,
   resolveTurnModel,
   runAgentStream,
@@ -70,6 +70,19 @@ const SCOPE = {
   attemptId: "55555555-5555-4555-8555-555555555555",
 };
 const SKILL_SENTINEL = "m3-enforcement-installed-skill";
+/**
+ * The product connector's one tool. Its id is not a readable slug, so its
+ * namespace is the slug and 6 hex of the id's digest; Opengeni's `files` and
+ * `docs` servers keep their `server__tool` names.
+ */
+const PRODUCT_TOOL = `customer_product_${createHash("sha256")
+  .update(JSON.stringify(["customer-product", ""]))
+  .digest("hex")
+  .slice(0, 6)}__search_documents`;
+
+function isExternalToolName(name: string): boolean {
+  return name === PRODUCT_TOOL || name.startsWith("files__") || name.startsWith("docs__");
+}
 const SKILL_MANAGEMENT_TOOLS = [
   "skill_search",
   "skill_checkout",
@@ -774,7 +787,7 @@ function assertCapabilitySurface(
   }
   expect(captured.selectedServerIds.includes("files")).toBe(enabled("workspaceFiles"));
   expect(captured.selectedServerIds.includes("docs")).toBe(enabled("knowledge"));
-  expect(captured.names).toContain(prefixedMcpToolName("customer-product", "search_documents"));
+  expect(captured.names).toContain(PRODUCT_TOOL);
   // Waiting follows the families: something must be able to resume the agent.
   expect(captured.names.includes("opengeni__wait_for_input")).toBe(
     resolveAgentToolFamilies(config, { sandboxAttached: false }).waitForInput,
@@ -999,7 +1012,7 @@ describe("agent configuration reaches the production model request", () => {
     // workspace when the turn was accepted (for example right after a
     // membership change), so the turn carries no account for it.
     const captured = await captureWorkerRequest({ productSignInNotAdmitted: true });
-    const productTool = prefixedMcpToolName("customer-product", "search_documents");
+    const productTool = PRODUCT_TOOL;
     expect(captured.names).not.toContain(productTool);
     expect(captured.deferredNames).not.toContain(productTool);
     // The turn's own notice names the connector and the reason category.
@@ -1106,11 +1119,7 @@ describe("agent configuration reaches the production model request", () => {
         } as Parameters<typeof sessionWithEffectiveToolPolicy>[3],
       );
       const known = result.effectiveTools!.tools;
-      const externalNames = captured.names.filter((name) =>
-        ["files", "docs", "customer-product"].some((id) =>
-          name.startsWith(`${prefixedMcpToolName(id, "search_documents").split("__")[0]}__`),
-        ),
-      );
+      const externalNames = captured.names.filter((name) => isExternalToolName(name));
       expect(known.map((tool) => tool.name).sort()).toEqual(
         captured.names.filter((name) => !externalNames.includes(name)),
       );
@@ -1337,12 +1346,7 @@ describe("effective-tools projection agrees with actual model preparation", () =
       },
     );
     const projected = projectAgentEffectiveTools(input);
-    const actualKnownNames = captured.names.filter(
-      (name) =>
-        !["files", "docs", "customer-product"].some((id) =>
-          name.startsWith(`${prefixedMcpToolName(id, "search_documents").split("__")[0]}__`),
-        ),
-    );
+    const actualKnownNames = captured.names.filter((name) => !isExternalToolName(name));
     expect(projected.tools.map((tool) => tool.name).sort()).toEqual(actualKnownNames);
     expect(projected.tools.every((tool) => tool.visibility === "upfront")).toBe(true);
     expect(projected.mcpServers.map((server) => server.id)).toEqual(captured.selectedServerIds);
@@ -1385,10 +1389,9 @@ describe("effective-tools projection agrees with actual model preparation", () =
           },
         ),
       );
-      const product = `${prefixedMcpToolName("customer-product", "search_documents").split("__")[0]}__`;
       const upfront = projected.tools.filter((tool) => tool.visibility === "upfront");
       expect(upfront.map((tool) => tool.name).sort()).toEqual(
-        captured.names.filter((name) => !name.startsWith(product)).sort(),
+        captured.names.filter((name) => name !== PRODUCT_TOOL).sort(),
       );
       for (const entry of projected.tools.filter((tool) => tool.visibility === "search"))
         expect(captured.deferredNames).toContain(entry.name);
@@ -1801,7 +1804,7 @@ async function embeddingFixedPrefix(human = false, extra: FixtureOptions = {}) {
     humanRecipient: human,
     ...extra,
   });
-  const productTool = prefixedMcpToolName("customer-product", "search_documents");
+  const productTool = PRODUCT_TOOL;
   const system = captured.request.systemInstructions ?? "";
   const sections: Record<string, number> = {};
   let heading = "identity";

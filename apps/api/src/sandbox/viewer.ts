@@ -24,6 +24,7 @@ import {
   applyGitAuthPointerEnvironment,
   hasGitCredentialRepositorySelection,
   resolveStreamTokenSecret,
+  sandboxFleetLimits,
   sandboxPlanLimits,
   settingsForSandboxPlanTier,
   sandboxLifecycleTransitionWaitMs,
@@ -295,6 +296,7 @@ export async function attachViewer(
       sandboxPlanLimits: input.operationScoped
         ? runningLimitsOnly(sandboxPlanLimits(settings))
         : sandboxPlanLimits(settings),
+      sandboxFleetLimits: sandboxFleetLimits(settings),
       ...(input.waitSignal ? { waitSignal: input.waitSignal } : {}),
       ...(!input.operationScoped && settings.sandboxViewerIdleDrainMs > 0
         ? { viewerIdleReattachRefusalMs: settings.sandboxViewerIdleDrainMs }

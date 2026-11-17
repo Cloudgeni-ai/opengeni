@@ -6,6 +6,8 @@ export {
   parseLenientSkillFrontmatter,
   parseSkillFrontmatter,
   readSkillMetadata,
+  SKILL_DECLARED_TOOLS_MAX,
+  skillDeclaredTools,
   SkillFrontmatterError,
   type LenientSkillFrontmatter,
 } from "./skill-metadata";

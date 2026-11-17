@@ -139,7 +139,7 @@ async function attemptBindingHarness(inputSchema: Record<string, unknown> = crea
   const { hooks, prepareCalls, beginCalls } = policyRecorder();
   const bindings: AttemptConnectorActionBinding[] = [
     {
-      modelName: "calendar_create_permission",
+      identity: { serverId: "calendar", toolName: "create_permission" },
       call: (approvalId, arguments_) => ({
         approvalId,
         connectionId: "connection-calendar",

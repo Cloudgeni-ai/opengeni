@@ -29,6 +29,7 @@ import {
   sandboxProviderMaxRemainingLifetimeMs,
   sandboxArchiveCaptureTimeoutMs,
   sandboxLifecycleTransitionWaitMs,
+  sandboxFleetLimits,
   sandboxPlanLimits,
   settingsForSandboxPlanTier,
   sandboxWarmRateMicrosPerSecond,
@@ -1452,6 +1453,7 @@ async function resumeBoxForTurnOnce(
     // A new box counts against the organization's running-box limit for its
     // plan; at the limit the turn parks (organization_sandbox_capacity).
     sandboxPlanLimits: sandboxPlanLimits(settings),
+    sandboxFleetLimits: sandboxFleetLimits(settings),
     // The person who started the turn: their other organizations count
     // toward the per-person bounds.
     ...(ids.actingSubjectId ? { actingSubjectId: ids.actingSubjectId } : {}),

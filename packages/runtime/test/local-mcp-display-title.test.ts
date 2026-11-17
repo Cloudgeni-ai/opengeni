@@ -3,12 +3,12 @@ import { RunContext, type MCPServer } from "@openai/agents";
 import { testSettings } from "@opengeni/testing/settings";
 import {
   buildOpenGeniAgent,
-  prefixedMcpToolName,
   prepareAgentTools,
   withMcpToolDisplayMetadata,
   type ConnectorActionPolicyHooks,
   type ConnectorActionToolCall,
 } from "../src/index";
+import { mcpToolWireName } from "../src/mcp-model-tool-name";
 
 // API integration tools are named by a lowercased operation id
 // ("me_mailfolders_createmessages"). Their plain title travels in tool `_meta`
@@ -90,7 +90,7 @@ async function harness() {
 test("an API operation's display title reaches the approval review and activity rows only", async () => {
   const { prepared, prepareCalls, tools } = await harness();
   try {
-    const name = prefixedMcpToolName(serverId, "me_mailfolders_createmessages");
+    const name = mcpToolWireName(serverId, "me_mailfolders_createmessages");
     const tool = tools.find((candidate) => candidate.name === name);
     if (!tool || tool.type !== "function") throw new Error("tool missing");
     expect(
@@ -122,7 +122,7 @@ test("an API operation's display title reaches the approval review and activity 
 test("a tool's own MCP title wins over a display title", async () => {
   const { prepared } = await harness();
   try {
-    const name = prefixedMcpToolName(serverId, "titled_tool");
+    const name = mcpToolWireName(serverId, "titled_tool");
     expect(withMcpToolDisplayMetadata(prepared.mcpServers, { id: "c", name })).toMatchObject({
       display: { title: "Provider title" },
     });

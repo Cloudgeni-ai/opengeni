@@ -366,6 +366,27 @@ function organizationPrivateSessionAuthorityTables(): RuntimeTablePosture[] {
   }));
 }
 
+/** Tables the turn hold summary (0988, 1485) reads as their owner. */
+function turnHoldSummaryTables(): RuntimeTablePosture[] {
+  return ["session_goals", "subscription_capacity_waiters"].map((name) => ({
+    name,
+    owner: "opengeni_migrator",
+    rlsEnabled: false,
+    rlsForced: false,
+    rlsActive: false,
+    policyCount: 0,
+    artifactOutboxDispatcherPolicy: false,
+    artifactMaterializerPolicy: false,
+    select: false,
+    insert: false,
+    update: false,
+    delete: false,
+    truncate: false,
+    references: false,
+    trigger: false,
+  }));
+}
+
 function xaiAuthorityTables(): RuntimeTablePosture[] {
   return ["workspace_memberships", "xai_subscription_credentials"].map((name) => ({
     name,
@@ -454,6 +475,7 @@ function safePosture(): RuntimeDatabasePosture {
       ...organizationMembershipLifecycleAuthorityTables(),
       ...organizationPrivateSessionAuthorityTables(),
       ...xaiAuthorityTables(),
+      ...turnHoldSummaryTables(),
       ...[
         "usage_allowance_attribution_receipts",
         "workspace_usage_allowances",
@@ -3774,6 +3796,7 @@ describe("runtime database posture evaluator", () => {
       ...organizationRecoveryAuthorityTables(),
       ...companyBrainPreferenceAuthorityTables(),
       ...companyProfileAgentAdminAuthorityTables(),
+      ...turnHoldSummaryTables(),
     ];
     const inertOptions: RuntimeDatabasePostureOptions = {
       ...options,
@@ -3967,6 +3990,7 @@ describe("runtime database posture evaluator", () => {
       ...companyBrainPreferenceAuthorityTables(),
       ...companyProfileAgentAdminAuthorityTables(),
       ...organizationMembershipLifecycleAuthorityTables(),
+      ...turnHoldSummaryTables(),
     ];
     for (const name of [
       "claim_editable_artifact_materializations(text, integer, integer, name)",
@@ -4234,15 +4258,19 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
     "slack_agent_update_settings",
     "sandbox_leases",
     "sandbox_lease_holders",
+    "usage_events",
   ];
   // Private tables runtime definers own (RUNTIME_DEFINER_ROUTINE_TABLES names them with their schema).
   const definerPrivateTables = [
     "native_push_devices",
     "native_push_deliveries",
     "session_content_collections",
+    "modal_inventory_read_capabilities",
   ];
   function eventPosture(execute: boolean): RuntimeDatabasePosture {
     const posture = safePosture();
+    // The event fixture's version of a table replaces the safe posture's.
+    posture.tables = posture.tables.filter((table) => !deferredTables.includes(table.name));
     posture.tables.push(...deferredTables.map((name) => eventTable(name, true)));
     posture.privateTables.push(
       ...definerPrivateTables.map((name) => ({ ...eventTable(name, false), policyCount: 0 })),
@@ -4254,6 +4282,12 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
     posture.privateRoutines.push(
       ...runtimePosture.RUNTIME_DEFINER_ROUTINES.map((name) => routine(name, execute)),
     );
+    // The Modal inventory capability (a definer's table) is checked with its
+    // own granted inventory definer.
+    posture.privateRoutines.push({
+      ...routine("list_live_modal_sandbox_leases()", true),
+      configuration: ["search_path=pg_catalog"],
+    });
     return posture;
   }
   const eventOptions: RuntimeDatabasePostureOptions = {
@@ -4316,6 +4350,7 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
       "organization_warm_sandbox_counts_v1(uuid, text, uuid)",
       "nango_connections_in_use_v1(text[])",
+      "sandbox_unpaid_fleet_v1(uuid, boolean)",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -4328,6 +4363,7 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "collect_session_content_garbage_v1(uuid, uuid, integer)",
       "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
       "nango_connections_in_use_v1(text[])",
+      "sandbox_unpaid_fleet_v1(uuid, boolean)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(

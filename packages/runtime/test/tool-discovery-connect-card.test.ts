@@ -13,7 +13,6 @@ import {
   type ConnectedToolAccount,
   type DiscoveryCardEvent,
 } from "../src/lazy-tool-transport";
-import { prefixedMcpToolName } from "../src/mcp-model-tool-name";
 
 // A search that clearly names one integration the person can connect shows its
 // Connect card itself, through the card tool, so the card never depends on the
@@ -869,18 +868,28 @@ describe("tool_list browsing that names an integration not installed", () => {
   });
 });
 
-describe("one connection's tools are browsable from one tool's digest", () => {
-  test("a namePrefix of one aliased tool's digest lists every tool of its connection", async () => {
-    const registry = "slack-workspace";
-    const listChannels = prefixedMcpToolName(registry, "slack_list_channels");
-    const sendMessage = prefixedMcpToolName(registry, "slack_send_message");
-    const other = prefixedMcpToolName("other-server", "other_tool");
-    expect(listChannels.slice(0, 28)).not.toBe(sendMessage.slice(0, 28));
-    const mapping = new Map([
-      [listChannels, registry],
-      [sendMessage, registry],
-      [other, "other-server"],
-    ]);
+describe("one connection's tools are browsable from its server name", () => {
+  test("a namePrefix of server. or server__ lists every tool of that server", async () => {
+    const registry = `account-${"a".repeat(64)}`;
+    const references = new Map(
+      [
+        ["list_channels", registry, "chat"],
+        ["send_message", registry, "chat"],
+        ["other_tool", "other-server", "other"],
+      ].map(([toolName, registryId, namespace]) => [
+        toolName!,
+        {
+          wireName: toolName!,
+          namespace: namespace!,
+          namespaceBase: namespace!,
+          registryId: registryId!,
+          toolName: toolName!,
+        },
+      ]),
+    );
+    const mapping = new Map(
+      [...references].map(([name, reference]) => [name, reference.registryId]),
+    );
     const runtime = new LazyToolRuntime(
       "generic_dispatch",
       new Set(mapping.values()),
@@ -888,38 +897,36 @@ describe("one connection's tools are browsable from one tool's digest", () => {
       new Set(mapping.values()),
       new Set(),
       () => mapping,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => references,
     );
     runtime.refresh([
-      candidate(listChannels, "List Slack channels"),
-      candidate(sendMessage, "Send a Slack message"),
-      candidate(other, "Other tool"),
+      candidate("list_channels", "List chat channels"),
+      candidate("send_message", "Send a chat message"),
+      candidate("other_tool", "Other tool"),
     ]);
     const list = runtime.controlTools.find((t) => t.type === "function" && t.name === "tool_list");
     if (!list || list.type !== "function") throw new Error("missing list");
     const invoke = async (args: unknown) =>
       JSON.parse(String(await list.invoke({} as never, JSON.stringify(args))));
-    for (const namePrefix of [listChannels.slice(0, 28), listChannels.slice(0, 30)]) {
+    for (const namePrefix of ["chat.", "chat__", `${registry}.`]) {
       const output = await invoke({ namePrefix });
-      expect(new Set(output.tools.map((t: { name: string }) => t.name))).toEqual(
-        new Set([listChannels, sendMessage]),
-      );
-      expect(output.message).toBe(
-        "namePrefix is one tool's own digest, so this lists every tool of that tool's connection.",
-      );
+      expect(output.tools.map((t: { name: string }) => t.name)).toEqual([
+        "list_channels",
+        "send_message",
+      ]);
     }
-    // Within a group, only that group's tools of the connection.
-    const grouped = await invoke({ namePrefix: listChannels.slice(0, 28), group: "absent" });
-    expect(grouped.tools).toEqual([]);
-    const inGroup = await invoke({
-      namePrefix: listChannels.slice(0, 28),
-      group: (await invoke({ view: "groups" })).groups.find(
-        (entry: { group: string; count: number }) => entry.count === 2,
-      ).group,
-    });
-    expect(inGroup.tools).toHaveLength(2);
     // The full name still lists that one tool.
-    const exact = await invoke({ namePrefix: listChannels });
-    expect(exact.tools.map((t: { name: string }) => t.name)).toEqual([listChannels]);
-    expect(exact).not.toHaveProperty("message");
+    const exact = await invoke({ namePrefix: "send_message" });
+    expect(exact.tools.map((t: { name: string }) => t.name)).toEqual(["send_message"]);
   });
 });

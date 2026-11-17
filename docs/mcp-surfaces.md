@@ -690,24 +690,53 @@ strong lexical matches skip inference. In generic receipts, `schemasLoaded:true`
 means only `tools` have loaded schemas, not `suggestions`. Exact `names` bypasses both ranking and
 inference. Past results and schema snapshots are frozen and
 never rerun, so catalog changes do not alter any earlier prompt item.
-Exact names and named query tokens resolve a tool by its full model name, its
-dotted form (`server.tool_name`), or the name its server publishes
-(`projects.search` or `projects_search` for a digest-aliased
-`mcp_<digest>__projects_search`); the published name selects the exact tool
-even where aliases shortened two names to the same part.
+#### Tool names: the name to call and the name to ask by
+
+A connector tool has two names (`packages/runtime/src/mcp-model-tool-name.ts`).
+
+- The **wire name** is what the model writes to call it:
+  `<namespace>__<tool>`, valid on every provider (`^[A-Za-z0-9_-]{1,64}$`). It
+  depends only on the tool's identity, never on the rest of the catalog, so a
+  name in history can never come to mean another server's or account's tool.
+  A connected account's namespace is its connector's readable name and the
+  first 6 hex of its route digest (`sha256` of server and connection), such as
+  `mail_3f2a1c`; a replacement account of the same connector gets a new tag. A
+  configured server's namespace is its id when that is a readable slug,
+  otherwise the slug and 6 hex of the id's digest. A name over 64 characters,
+  or one of two names a server lists with one wire spelling (`a.b`, `a_b`), is
+  shortened to end in a digest of the server and tool. The first-party servers
+  (`opengeni`, `files`, `docs`, `codex_apps`) keep `server__tool`. All tools of
+  one server share its namespace, so a model that knows one tool's name can
+  write a sibling's. A call resolves only by its exact wire name.
+- The **reference name** is what the model asks for a tool by, in
+  `tool_search` names, `ogtool show`, Codemode paths and a Skill's `tools:`
+  list: the published `server.tool` (or `server__tool`), where server is the
+  namespace, the connector name without its tag, or the registry id; the wire
+  name; or the tool's own name when only one tool of the turn has it. It has
+  no length limit. Asking by it only loads or shows a tool. A Codemode call
+  (`ogtool call`, the `tools` object) needs a name carrying the tool's server
+  (its path, wire name or `serverId.tool`); a call by the own name alone runs
+  nothing and is told the path.
+
+Exact `names` and named query tokens resolve reference names; a query that
+names several tools loads every one of them, whatever its `limit`. A name that
+resolves to nothing comes back in `unavailable` with the closest tools by its
+words as `suggestions`. A plain name several servers publish loads one and
+lists the others. Calls stored in history keep the name they were made with.
+A call to a tool's former name (the `mcp_<digest>__tool` or
+`account-…__tool` form of earlier releases) does not run: it returns that
+tool's current name, and `tool_invoke` answers it with code `tool_renamed`.
+A call waiting for approval across that rename still binds to its tool.
 `tool_list({view:"groups"})` returns source/resource groups with counts and examples;
 pass an exact returned `group` to browse its tools. The default tools view returns compact
 names and description previews, with a default page of 20, a maximum of 40,
 and a 16 KiB response budget. Follow `nextCursor` until null, preserving the
-view, group and optional `namePrefix` filter, which matches the full name or the
-part after the server separator (`projects.` or `projects_`). Digest aliases sort by
-that readable part. An invalid cursor requires restarting
+view, group and optional `namePrefix` filter, which matches the full name, the
+published name, or the part after a server prefix; `server.` or `server__`
+lists that server's tools. An invalid cursor requires restarting
 the listing against the current pool. Names and prefixes are display/routing
-keys, never authorization identities.
-Each digest-aliased tool has its own digest, so one tool's `mcp_<digest>` is no
-connection prefix; a `namePrefix` that is such a digest (or a start of one of
-at least four hex digits) and matches only MCP tools lists every tool of those
-tools' connections, within any `group`, and says so in `message`.
+keys, never authorization identities: approvals and policies are keyed by the
+`(server, tool)` identity.
 
 Use `tool_search` with `query: ""` and `names: ["exact_name"]` to disclose the
 listed tool's full schema without keyword ranking. Exact lookup cannot admit

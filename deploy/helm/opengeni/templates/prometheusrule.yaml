@@ -1008,6 +1008,32 @@ spec:
             value: '{{ "{{ printf `%.0f` $value }}" }} timeout(s) (15 min)'
             user_impact: 'Some users'' agent turns waited and then failed because their sandbox did not become ready in time.'
             next_step: 'Check the sandbox provider''s capacity and status; occasional timeouts usually clear on their own.'
+        # Unpaid fleet limits (docs/deployment.md, "Unpaid fleet limits"). The
+        # reaper counts its passes by the unpaid fleet's state, so these stop
+        # on their own when the state clears or the reaper moves replicas.
+        - alert: OpenGeniUnpaidSandboxDailyBudgetExhausted
+          expr: sum(increase(opengeni_sandbox_unpaid_fleet_checks_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},state="daily_budget_exhausted"}[10m])) > 0
+          labels:
+            severity: critical
+            notification_policy: page
+          annotations:
+            summary: 'Unpaid organizations used the whole day''s fleet sandbox time; no new Free sandbox starts until 00:00 UTC.'
+            headline: 'Free sandbox fleet budget exhausted'
+            value: '{{ "{{ printf `%.0f` $value }}" }} reaper pass(es) over budget (10 min)'
+            user_impact: 'New Free and plan-less users cannot start sandboxes until midnight UTC; paid, Enterprise and embedded organizations are unaffected.'
+            next_step: 'Find which unpaid organizations used the box time (opengeni_sandbox_unpaid_fleet_box_seconds_today, usage_events sandbox.warm_seconds) and stop abuse; raise unpaidBoxSecondsPerDay in OPENGENI_SANDBOX_FLEET_LIMITS_JSON only if the use is legitimate.'
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/deployment.md#unpaid-fleet-limits
+        - alert: OpenGeniSandboxFleetPressureEngaged
+          expr: sum(increase(opengeni_sandbox_unpaid_fleet_checks_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},state="pressure"}[10m])) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: 'More boxes are warm than the fleet-pressure threshold, so new Free sandboxes are limited automatically.'
+            headline: 'Free sandboxes limited by fleet pressure'
+            value: '{{ "{{ printf `%.0f` $value }}" }} reaper pass(es) under pressure (10 min)'
+            user_impact: 'New Free and plan-less users may be refused a sandbox until the warm count falls; paid organizations are unaffected.'
+            next_step: 'Check which accounts hold the warm boxes (opengeni_sandbox_fleet_warm_boxes); pressure releases on its own below pressureReleaseWarmBoxes.'
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/deployment.md#unpaid-fleet-limits
         {{- if $opensandboxEnabled }}
         - alert: OpenGeniOpenSandboxApiThrottled
           expr: |

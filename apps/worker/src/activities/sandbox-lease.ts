@@ -61,7 +61,7 @@ import {
   deferRetainedProcessReconciliation,
   forceDrainOverLimitViewerOnlyBoxes,
   listCreditBalancesByAccount,
-  summarizeQueuedTurnsByHold,
+  summarizeTurnHolds,
   countActiveUsers,
   readCreditGrantTotals,
   readManagedAuthNewSignupsSwitch,
@@ -230,7 +230,7 @@ import { browserCheckpointPrerequisites } from "./browser-deadline-checkpoint";
 import { assertSandboxDrainInputTiming, sandboxDrainTiming } from "../sandbox-reaper-timeout";
 import type { ControlActivityServices as ActivityServices } from "./types";
 import { boundViewerOnlyWarmBoxes } from "./sandbox-viewer-only-bounds";
-import { boundComputeBoundedWarmBoxes } from "./sandbox-compute-bounds";
+import { boundComputeBoundedWarmBoxes, observeUnpaidSandboxFleet } from "./sandbox-compute-bounds";
 import { reconcilePendingParentSystemUpdates } from "./parent-wake";
 import {
   recordActiveUserGauges,
@@ -263,6 +263,7 @@ import {
   recordSandboxRotationBacklogGauges,
   recordSandboxCheckpointStalenessGauges,
   recordQueuedTurnHoldGauges,
+  recordCapacityWaitingTurnGauges,
   recordTurnsQueuedGauge,
   recordVerifiedSignupTrialDeploymentFlagGauge,
   recordManagedAuthNewSignupsSwitchGauge,
@@ -1450,6 +1451,15 @@ export function createSandboxLeaseActivities(
           bounds.drained.compute_idle;
       } catch (error) {
         observability.warn("sandbox reaper: compute bounds failed", {
+          error: errorMessage(error),
+        });
+      }
+      // The unpaid fleet's pressure and box time (fleet limits), recorded for
+      // alerting; admission enforces them.
+      try {
+        await observeUnpaidSandboxFleet({ db, settings, observability });
+      } catch (error) {
+        observability.warn("sandbox reaper: unpaid fleet observation failed", {
           error: errorMessage(error),
         });
       }
@@ -4126,7 +4136,11 @@ async function refreshQueueLeaseAndCreditGauges(
     })(),
     (async () => {
       try {
-        recordQueuedTurnHoldGauges(observability, await summarizeQueuedTurnsByHold(db));
+        // One summary: the queued-turn hold split and the turns parked
+        // waiting for subscription capacity (1485).
+        const holds = await summarizeTurnHolds(db);
+        recordQueuedTurnHoldGauges(observability, holds.queued);
+        recordCapacityWaitingTurnGauges(observability, holds.capacityWaiting);
       } catch (error) {
         observability.warn("sandbox reaper: queued-turn hold gauge refresh failed", {
           error: error instanceof Error ? error.message : String(error),

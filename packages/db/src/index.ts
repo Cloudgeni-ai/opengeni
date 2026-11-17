@@ -1109,6 +1109,7 @@ import {
   WORKSPACE_OPPER_CONNECTION_ROLE,
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
   VERCEL_AI_GATEWAY_CONNECTION_ROLE,
+  type SandboxFleetLimits,
   type SandboxPlanLimit,
   type SandboxPlanLimits,
   type Settings,
@@ -1463,6 +1464,16 @@ export * from "./insights-model-bundle";
 export * from "./insights-usage-bundle";
 export * from "./insights-unified";
 export * from "./sandbox-viewer-only-drain";
+export * from "./sandbox-fleet-limits";
+import {
+  lockSandboxUnpaidFleet,
+  sandboxUnpaidFleetAvailable,
+  readSandboxFleetPressure,
+  readSandboxUnpaidFleet,
+  readSandboxUnpaidFleetBoxSecondsToday,
+  type SandboxFleetPressure,
+  type SandboxUnpaidFleetCounts,
+} from "./sandbox-fleet-limits";
 import { VIEWER_ONLY_OPEN_SESSION_STATUSES } from "./sandbox-viewer-only-drain";
 export * from "./organization-membership-lifecycle";
 import {
@@ -28300,8 +28311,40 @@ export type SubscriptionCoreCodexWaitEvaluation =
 
 export type ReconcileSubscriptionCoreCodexCapacityWaitResult =
   | { action: "waiting"; waiter: SubscriptionCoreCodexCapacityWait; events: SessionEvent[] }
-  | { action: "resumed" | "superseded"; events: SessionEvent[] }
+  | {
+      action: "resumed";
+      events: SessionEvent[];
+      /** When the turn parked: its waiting attempt's close (null if unknown). */
+      parkedAt: Date | null;
+    }
+  | {
+      action: "superseded";
+      events: SessionEvent[];
+      /** Why, when this call ended the wait (deleted its waiter). */
+      reason?: string;
+      parkedAt?: Date | null;
+    }
   | { action: "paused" | "stale"; events: SessionEvent[] };
+
+/**
+ * When a parked turn's current capacity wait began: the close of its latest
+ * attempt that parked (outcome `waiting_capacity`), as the turn hold
+ * summary (1485) reads it. Null when no such attempt is visible.
+ */
+async function readCapacityWaitParkedAtInTransaction(
+  tx: SessionActivityDatabase,
+  input: { workspaceId: string; sessionId: string; turnId: string },
+): Promise<Date | null> {
+  const [row] = await rawRows<{ parked_at: Date | string | null }>(
+    tx,
+    sql`select max(closed_at) as parked_at from session_turn_attempts
+      where workspace_id = ${input.workspaceId}::uuid
+        and session_id = ${input.sessionId}::uuid
+        and turn_id = ${input.turnId}::uuid
+        and outcome = 'waiting_capacity'`,
+  );
+  return row?.parked_at == null ? null : new Date(row.parked_at);
+}
 
 /**
  * Row-lock and settle one core waiter after the caller evaluated placement
@@ -28835,7 +28878,12 @@ export async function reconcileSubscriptionCoreCapacityWait(
         if (!recoveringSession) {
           throw new Error(`Core ${vocabulary.label} capacity session changed during atomic resume`);
         }
-        return { action: "resumed", events: events.map(mapEvent) } as const;
+        const parkedAt = await readCapacityWaitParkedAtInTransaction(tx, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: blockedTurn.id,
+        });
+        return { action: "resumed", events: events.map(mapEvent), parkedAt } as const;
       }),
   );
 }
@@ -28849,7 +28897,12 @@ async function supersedeSubscriptionCoreCodexCapacityWaitInTransaction(
     reason: string;
     now: Date;
   },
-): Promise<{ action: "superseded"; events: SessionEvent[] }> {
+): Promise<{
+  action: "superseded";
+  events: SessionEvent[];
+  reason?: string;
+  parkedAt?: Date | null;
+}> {
   const vocabulary = subscriptionCoreWaitVocabulary(input.waiter.provider);
   const deleted = await rawRows<{ waiter_id: string }>(
     tx,
@@ -28860,6 +28913,11 @@ async function supersedeSubscriptionCoreCodexCapacityWaitInTransaction(
       returning waiter_id::text as waiter_id`,
   );
   if (deleted.length !== 1) return { action: "superseded", events: [] };
+  const parkedAt = await readCapacityWaitParkedAtInTransaction(tx, {
+    workspaceId: input.session.workspaceId,
+    sessionId: input.session.id,
+    turnId: input.blockedTurn.id,
+  });
   const turnWasCurrent = input.session.activeTurnId === input.blockedTurn.id;
   const terminalTurnStatus = input.session.status === "cancelled" ? "cancelled" : "superseded";
   if (input.blockedTurn.status === "waiting_capacity") {
@@ -28966,7 +29024,7 @@ async function supersedeSubscriptionCoreCodexCapacityWaitInTransaction(
     .returning({ id: schema.sessions.id });
   if (!updatedSession)
     throw new Error(`Core ${vocabulary.label} capacity session changed during supersession`);
-  return { action: "superseded", events: inserted.map(mapEvent) };
+  return { action: "superseded", events: inserted.map(mapEvent), reason: input.reason, parkedAt };
 }
 
 /**
@@ -49443,6 +49501,11 @@ export interface AcquireLeaseInput {
    * limit is refused (non-turn holders) or capacity-blocked (turns). Omitted =
    * no organization limits. */
   sandboxPlanLimits?: SandboxPlanLimits;
+  /** Fleet-wide bounds on unpaid compute (OPENGENI_SANDBOX_FLEET_LIMITS_JSON),
+   * applied with sandboxPlanLimits to a new box of an unpaid organization:
+   * the young-organization running limit, the unpaid running cap and box-time
+   * budget, and fleet pressure. Omitted = none. */
+  sandboxFleetLimits?: SandboxFleetLimits;
   /** The person on whose behalf the box is held (`user:<id>`): the viewer,
    * the terminal or browser user, or the human who started the turn. With
    * sandboxPlanLimits, their other organizations count toward the per-person
@@ -49906,13 +49969,32 @@ export class SandboxViewerBoxLimitError extends Error {
  * - `closed`: the tier allows no sandbox (a held or denied organization that
  *   has not paid);
  * - `daily_budget`: the organization or the acting person used today's box
- *   time (`limit` seconds), until the next UTC day.
+ *   time (`limit` seconds), until the next UTC day;
+ * - `young_running`: an unpaid organization in its first day (fleet limits)
+ *   already runs `limit` boxes;
+ * - `young_box_time`: an unpaid organization in its first day used the box
+ *   time new organizations get (`limit` seconds);
+ * - `fleet_busy`: unpaid organizations together already run as many boxes as
+ *   the fleet allows (`limit`), or the fleet is under pressure;
+ * - `fleet_daily_budget`: unpaid organizations together used today's fleet
+ *   box time (`limit` seconds), until the next UTC day.
  */
 export type SandboxOrganizationBoxLimitReason =
   | "running"
   | "person_running"
   | "closed"
-  | "daily_budget";
+  | "daily_budget"
+  | "young_running"
+  | "young_box_time"
+  | "fleet_busy"
+  | "fleet_daily_budget";
+
+/** Refusals that come from the shared capacity of every unpaid organization
+ * rather than the organization's own limits. */
+export const SANDBOX_FLEET_REFUSAL_REASONS: readonly SandboxOrganizationBoxLimitReason[] = [
+  "fleet_busy",
+  "fleet_daily_budget",
+];
 
 /** The person-facing explanation of a SandboxOrganizationBoxLimitError. */
 export function sandboxOrganizationBoxLimitMessage(
@@ -49930,6 +50012,16 @@ export function sandboxOrganizationBoxLimitMessage(
       return `You already run ${limit} sandboxes across your organizations, the most the Free plan allows; close one or wait for a task to finish`;
     case "running":
       return `Your organization already runs ${limit} sandboxes, the most its plan allows; close one or wait for a task to finish`;
+    case "young_running":
+      return `New organizations on the Free plan run ${limit === 1 ? "one sandbox" : `${limit} sandboxes`} at a time during their first day; close one or wait for a task to finish, or add credit to run more`;
+    case "young_box_time":
+      return `New organizations on the Free plan can use ${Math.round(
+        limit / 3600,
+      )} sandbox hours during their first day, and this one has. Sandboxes start again when it is a day old; add credit or choose a paid plan to keep working now.`;
+    case "fleet_busy":
+      return "Free sandboxes are at capacity right now. Try again in a few minutes, or add credit or choose a paid plan to start one now.";
+    case "fleet_daily_budget":
+      return "Free sandboxes have reached today's limit. They start again after midnight UTC; add credit or choose a paid plan to start one now.";
   }
 }
 
@@ -49943,7 +50035,10 @@ export function sandboxOrganizationBoxLimitMessage(
  */
 export class SandboxOrganizationBoxLimitError extends Error {
   readonly name = "SandboxOrganizationBoxLimitError";
-  readonly code = "sandbox_compute_unavailable";
+  /** `sandbox_capacity_unpaid_busy` for the shared unpaid capacity, which
+   * frees later; `sandbox_compute_unavailable` for the organization's own
+   * bounds. */
+  readonly code: "sandbox_compute_unavailable" | "sandbox_capacity_unpaid_busy";
 
   constructor(
     public readonly workspaceId: string,
@@ -49952,6 +50047,9 @@ export class SandboxOrganizationBoxLimitError extends Error {
     public readonly reason: SandboxOrganizationBoxLimitReason = "running",
   ) {
     super(sandboxOrganizationBoxLimitMessage(reason, limit));
+    this.code = SANDBOX_FLEET_REFUSAL_REASONS.includes(reason)
+      ? "sandbox_capacity_unpaid_busy"
+      : "sandbox_compute_unavailable";
   }
 }
 
@@ -49978,6 +50076,8 @@ export type SandboxComputeStanding = {
   organizationBoxSecondsToday: number;
   /** The same across the unpaid organizations the acting person owns. */
   personBoxSecondsToday: number;
+  /** When the organization was created (null when unknown). */
+  organizationCreatedAt: Date | null;
 };
 
 /** Called when a standing read failed and admission fell back (fails open):
@@ -49985,13 +50085,13 @@ export type SandboxComputeStanding = {
  * organization's own bounds. */
 export type SandboxComputeStandingFallback = (
   error: unknown,
-  part: "organization" | "person",
+  part: "organization" | "person" | "fleet",
 ) => void;
 
 function reportSandboxComputeStandingFallback(
   onFallback: SandboxComputeStandingFallback | undefined,
   error: unknown,
-  part: "organization" | "person",
+  part: "organization" | "person" | "fleet",
 ): void {
   if (onFallback) {
     try {
@@ -50194,6 +50294,7 @@ export async function resolveSandboxComputeStanding(
     personOtherRunningBoxes: 0,
     organizationBoxSecondsToday: own.seconds,
     personBoxSecondsToday: 0,
+    organizationCreatedAt: own.standing.organizationCreatedAt,
   };
   const subjectId = input.actingSubjectId ?? null;
   if (!own.bounded || subjectId === null || !subjectId.startsWith("user:")) return result;
@@ -50411,6 +50512,9 @@ export type SandboxPlanStanding = {
    * only linked): the organization is suspended. See
    * resolveSandboxSuspension. */
   suspended: boolean;
+  /** When the organization was created (null when unknown); the fleet limits
+   * bound a young unpaid organization's running boxes. */
+  organizationCreatedAt: Date | null;
 };
 
 /** resolveSandboxPlanTier with the facts behind it. `linkedRestricted`
@@ -50474,9 +50578,12 @@ export async function resolveSandboxPlanStanding(
     hosted_account: boolean | null;
     young: boolean | null;
     stripe_subscription: boolean | null;
+    created_at: Date | string | null;
   }>(
     tx,
     sql`select plan.plan_key, plan.status, decision.decision,
+        (select account.created_at from managed_accounts account
+          where account.id = organization.account_id) as created_at,
         (select enforcement.enabled from promotion_enforcement enforcement
           where enforcement.singleton) as enforcement,
         (${newTierAgeMs}::bigint > 0 and exists (select 1 from managed_accounts account
@@ -50495,12 +50602,14 @@ export async function resolveSandboxPlanStanding(
       left join organization_plans plan on plan.account_id = organization.account_id
       left join promotion_decisions decision on decision.account_id = organization.account_id`,
   );
+  const organizationCreatedAt = row?.created_at == null ? null : new Date(row.created_at);
   if (row?.hosted_account === true) {
     return {
       tier: SANDBOX_EMBEDDED_PLAN_TIER,
       paidHistory: false,
       ownDecision: null,
       suspended: false,
+      organizationCreatedAt,
     };
   }
   const planKey = row?.plan_key ?? null;
@@ -50525,12 +50634,24 @@ export async function resolveSandboxPlanStanding(
     !paidHistory &&
     (ownDecision !== null || options.linkedRestricted === true)
   ) {
-    return { tier: "restricted", paidHistory, ownDecision, suspended: ownDecision === "denied" };
+    return {
+      tier: "restricted",
+      paidHistory,
+      ownDecision,
+      suspended: ownDecision === "denied",
+      organizationCreatedAt,
+    };
   }
   if (tier === "free" && row?.young === true) {
-    return { tier: SANDBOX_NEW_PLAN_TIER, paidHistory, ownDecision, suspended: false };
+    return {
+      tier: SANDBOX_NEW_PLAN_TIER,
+      paidHistory,
+      ownDecision,
+      suspended: false,
+      organizationCreatedAt,
+    };
   }
-  return { tier, paidHistory, ownDecision, suspended: false };
+  return { tier, paidHistory, ownDecision, suspended: false, organizationCreatedAt };
 }
 
 export function sandboxPlanLimitFor(limits: SandboxPlanLimits, tier: string): SandboxPlanLimit {
@@ -50597,6 +50718,59 @@ async function organizationWarmSandboxCounts(
  * admission, after the lease's own locks; its holder then waits only for its
  * own lease row, so no admission can wait on a lock this one holds.
  */
+async function enforceSandboxFleetLimits(
+  tx: Database,
+  input: {
+    fleet: SandboxFleetAdmission;
+    leaseId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    onFallback: SandboxComputeStandingFallback | undefined;
+  },
+): Promise<void> {
+  const { fleet, workspaceId, sandboxGroupId } = input;
+  const refuse = (reason: "fleet_busy" | "fleet_daily_budget", limit: number): never => {
+    throw new SandboxOrganizationBoxLimitError(workspaceId, sandboxGroupId, limit, reason);
+  };
+  const dailyBudget = fleet.limits.unpaidBoxSecondsPerDay;
+  if (dailyBudget !== undefined) {
+    if (fleet.boxSecondsFailed) refuse("fleet_busy", 0);
+    if (fleet.boxSecondsToday !== null && fleet.boxSecondsToday >= dailyBudget) {
+      refuse("fleet_daily_budget", dailyBudget);
+    }
+  }
+  if (fleet.limits.pressureEngageWarmBoxes !== undefined && fleet.pressure.failed) {
+    refuse("fleet_busy", 0);
+  }
+  const pressureCap =
+    fleet.pressure.engaged && fleet.limits.pressureUnpaidRunningBoxes !== undefined
+      ? fleet.limits.pressureUnpaidRunningBoxes
+      : undefined;
+  const caps = [fleet.limits.unpaidRunningBoxes, pressureCap].filter(
+    (cap): cap is number => cap !== undefined,
+  );
+  if (caps.length === 0) return;
+  const cap = Math.min(...caps);
+  // Under pressure with no new unpaid box allowed, nothing needs counting.
+  if (cap === 0) refuse("fleet_busy", 0);
+  let counts: SandboxUnpaidFleetCounts | null;
+  try {
+    // Not granted yet (1486 withholds it): the running cap waits for its
+    // grant, and no admission takes the fleet lock for nothing.
+    if (!(await sandboxUnpaidFleetAvailable(tx))) return;
+    await lockSandboxUnpaidFleet(tx);
+    counts = await readSandboxUnpaidFleet(tx, {
+      excludeLeaseId: input.leaseId,
+      withBoxSeconds: false,
+    });
+  } catch (error) {
+    reportSandboxComputeStandingFallback(input.onFallback, error, "fleet");
+    return refuse("fleet_busy", cap);
+  }
+  if (counts === null) return;
+  if (counts.runningBoxes >= cap) refuse("fleet_busy", cap);
+}
+
 async function lockOrganizationSandboxLimit(tx: Database, accountId: string): Promise<void> {
   await tx.execute(
     sql`select pg_advisory_xact_lock(hashtextextended(
@@ -51899,6 +52073,7 @@ async function acquireLeaseOnce(
   db: Database,
   input: AcquireLeaseInput,
   standing: SandboxComputeStanding | null = null,
+  fleet: SandboxFleetAdmission | null = null,
 ): Promise<AcquireLeaseResult> {
   if (input.kind === "process") {
     throw new Error("Process lease holders are created only by atomic retained-process promotion");
@@ -52137,7 +52312,9 @@ async function acquireLeaseOnce(
                   standing.bounded &&
                   sandboxDailyBoxTimeSpent(planLimit, standing)
                 ? "daily_budget"
-                : null;
+                : sandboxYoungBoxTimeSpent(fleet)
+                  ? "young_box_time"
+                  : null;
           const turnHeldWarm = row.liveness === "warm" && Number(row.turn_holders) > 0;
           if (refusal !== null && !turnHeldWarm) {
             const inFlightTurn =
@@ -52155,7 +52332,11 @@ async function acquireLeaseOnce(
               throw new SandboxOrganizationBoxLimitError(
                 workspaceId,
                 sandboxGroupId,
-                refusal === "closed" ? 0 : sandboxDailyBoxTimeLimitSeconds(planLimit, standing),
+                refusal === "closed"
+                  ? 0
+                  : refusal === "young_box_time"
+                    ? (fleet?.limits.youngOrganizationBoxSeconds ?? 0)
+                    : sandboxDailyBoxTimeLimitSeconds(planLimit, standing),
                 refusal,
               );
             }
@@ -52511,16 +52692,32 @@ async function acquireLeaseOnce(
           // The acting person's limited organizations share a second budget
           // (runningBoxesPerPerson); their other organizations' boxes were
           // counted before this transaction.
+          // A young unpaid organization runs fewer boxes (fleet limits).
+          // It counts boxes a turn or a person's own work keeps warm, not
+          // boxes only viewers keep warm (the viewer-only limits bound those),
+          // so an open desktop does not park the organization's next chat.
+          const youngLimit =
+            backend !== "selfhosted" &&
+            kind !== "viewer" &&
+            fleet !== null &&
+            fleet.young &&
+            fleet.limits.youngOrganizationRunningBoxes !== undefined
+              ? fleet.limits.youngOrganizationRunningBoxes
+              : undefined;
           const runningBoxLimit =
             backend === "selfhosted" ? undefined : planLimit.runningBoxesPerOrganization;
           const personBoxLimit =
             backend === "selfhosted" || standing === null || !standing.bounded
               ? undefined
               : planLimit.runningBoxesPerPerson;
-          if (runningBoxLimit !== undefined || personBoxLimit !== undefined) {
+          if (
+            runningBoxLimit !== undefined ||
+            personBoxLimit !== undefined ||
+            youngLimit !== undefined
+          ) {
             await lockOrganizationSandboxLimit(tx, accountId);
             const counts =
-              runningBoxLimit === 0 || personBoxLimit === 0
+              runningBoxLimit === 0 || personBoxLimit === 0 || youngLimit === 0
                 ? null
                 : await organizationWarmSandboxCounts(tx, {
                     accountId,
@@ -52531,22 +52728,32 @@ async function acquireLeaseOnce(
               runningBoxLimit !== undefined &&
               (runningBoxLimit === 0 ||
                 (counts !== null && counts.runningBoxes >= runningBoxLimit));
+            const youngFull =
+              !organizationFull &&
+              youngLimit !== undefined &&
+              (youngLimit === 0 ||
+                (counts !== null && counts.runningBoxes - counts.viewerOnlyBoxes >= youngLimit));
             const personFull =
               !organizationFull &&
+              !youngFull &&
               personBoxLimit !== undefined &&
               (personBoxLimit === 0 ||
                 (counts !== null &&
                   (standing?.personOwnsOrganization ? counts.runningBoxes : 0) +
                     (standing?.personOtherRunningBoxes ?? 0) >=
                     personBoxLimit));
-            if (organizationFull || personFull) {
-              const limit = organizationFull ? (runningBoxLimit ?? 0) : (personBoxLimit ?? 0);
+            if (organizationFull || youngFull || personFull) {
+              const limit = organizationFull
+                ? (runningBoxLimit ?? 0)
+                : youngFull
+                  ? (youngLimit ?? 0)
+                  : (personBoxLimit ?? 0);
               if (kind !== "turn") {
                 throw new SandboxOrganizationBoxLimitError(
                   workspaceId,
                   sandboxGroupId,
                   limit,
-                  organizationFull ? "running" : "person_running",
+                  organizationFull ? "running" : youngFull ? "young_running" : "person_running",
                 );
               }
               return {
@@ -52557,10 +52764,26 @@ async function acquireLeaseOnce(
               };
             }
           }
+          // Every unpaid organization together (fleet limits): a new box past
+          // the fleet's box time, its running cap, or while the fleet is
+          // under pressure is refused for every holder kind; a turn fails with
+          // the reason rather than waiting. Joining a running box never gets
+          // here. Reads that fail refuse (fail closed) for unpaid boxes only.
+          const unpaidBox = backend !== "selfhosted" && sandboxFleetBounded(standing);
+          if (unpaidBox && fleet !== null) {
+            await enforceSandboxFleetLimits(tx, {
+              fleet,
+              leaseId: row.id,
+              workspaceId,
+              sandboxGroupId,
+              onFallback: input.onComputeStandingFallback,
+            });
+          }
           const casRows = await tx.execute<{ id: string }>(sql`
           update sandbox_leases set
             liveness = 'warming',
             backend = ${backend},
+            compute_unpaid = ${unpaidBox},
             ${
               input.warmBilling
                 ? sql`resume_state = coalesce(resume_state, '{}'::jsonb) ||
@@ -52697,6 +52920,92 @@ async function stampSandboxCommandHolderActivity(
   );
 }
 
+/** What the fleet limits need for one admission of an unpaid organization,
+ * read before the admission transaction. */
+type SandboxFleetAdmission = {
+  limits: SandboxFleetLimits;
+  pressure: SandboxFleetPressure;
+  /** Today's unpaid box time; null when not readable yet (definer withheld). */
+  boxSecondsToday: number | null;
+  /** The box-time read failed: fail closed for this unpaid organization. */
+  boxSecondsFailed: boolean;
+  /** The organization is younger than `youngOrganizationAgeMs`. */
+  young: boolean;
+  /** A young organization's metered box seconds since it was created; null
+   * when unbounded or unreadable (fails open, like its other own bounds). */
+  youngBoxSeconds: number | null;
+};
+
+function sandboxYoungBoxTimeSpent(fleet: SandboxFleetAdmission | null): boolean {
+  return (
+    fleet !== null &&
+    fleet.young &&
+    fleet.limits.youngOrganizationBoxSeconds !== undefined &&
+    fleet.youngBoxSeconds !== null &&
+    fleet.youngBoxSeconds >= fleet.limits.youngOrganizationBoxSeconds
+  );
+}
+
+async function organizationBoxSecondsSince(
+  db: Database,
+  accountId: string,
+  since: Date,
+): Promise<number> {
+  return await withAccountRls(db, accountId, async (tx) => {
+    const [row] = await rawRows<{ seconds: string | number | null }>(
+      tx,
+      sql`select coalesce(sum(quantity), 0)::bigint as seconds
+        from usage_events
+        where account_id = ${accountId}::uuid
+          and event_type = 'sandbox.warm_seconds'
+          and occurred_at >= ${since.toISOString()}::timestamptz`,
+    );
+    return Number(row?.seconds ?? 0);
+  });
+}
+
+/** An unpaid organization (unpaid tier, no paid history) the fleet limits
+ * apply to; paid, Enterprise and host-provisioned organizations never are. */
+function sandboxFleetBounded(standing: SandboxComputeStanding | null): boolean {
+  return standing !== null && standing.bounded;
+}
+
+async function readSandboxFleetAdmission(
+  db: Database,
+  input: AcquireLeaseInput,
+  standing: SandboxComputeStanding | null,
+): Promise<SandboxFleetAdmission | null> {
+  const limits = input.sandboxFleetLimits;
+  if (!limits || input.backend === "selfhosted" || !sandboxFleetBounded(standing)) return null;
+  const report = (error: unknown) =>
+    reportSandboxComputeStandingFallback(input.onComputeStandingFallback, error, "fleet");
+  const pressure = await readSandboxFleetPressure(db, limits, { onReadFailure: report });
+  let boxSecondsToday: number | null = null;
+  let boxSecondsFailed = false;
+  if (limits.unpaidBoxSecondsPerDay !== undefined) {
+    try {
+      boxSecondsToday = await readSandboxUnpaidFleetBoxSecondsToday(db);
+    } catch (error) {
+      report(error);
+      boxSecondsFailed = true;
+    }
+  }
+  const createdAt = standing?.organizationCreatedAt ?? null;
+  const young =
+    limits.youngOrganizationAgeMs !== undefined &&
+    createdAt !== null &&
+    Date.now() - createdAt.getTime() < limits.youngOrganizationAgeMs;
+  let youngBoxSeconds: number | null = null;
+  if (young && createdAt !== null && limits.youngOrganizationBoxSeconds !== undefined) {
+    try {
+      youngBoxSeconds = await organizationBoxSecondsSince(db, input.accountId, createdAt);
+    } catch (error) {
+      reportSandboxComputeStandingFallback(input.onComputeStandingFallback, error, "organization");
+    }
+  }
+  return { limits, pressure, boxSecondsToday, boxSecondsFailed, young, youngBoxSeconds };
+}
+
 export async function acquireLease(
   db: Database,
   input: AcquireLeaseInput,
@@ -52730,8 +53039,9 @@ export async function acquireLease(
       reportSandboxComputeStandingFallback(input.onComputeStandingFallback, error, "organization");
     }
   }
+  const fleet = await readSandboxFleetAdmission(db, input, standing);
   for (;;) {
-    const result = await acquireLeaseOnce(db, input, standing);
+    const result = await acquireLeaseOnce(db, input, standing, fleet);
     if (
       standing !== null &&
       standing.bounded &&
@@ -62006,9 +62316,58 @@ export type QueuedTurnHoldSummary = {
 export async function summarizeQueuedTurnsByHold(
   db: Database,
 ): Promise<Record<QueuedTurnHold, QueuedTurnHoldSummary>> {
-  const summary = Object.fromEntries(
+  return (await summarizeTurnHolds(db)).queued;
+}
+
+/**
+ * The providers whose turns park on the shared subscription core's capacity
+ * waiter, in the order {@link summarizeTurnHolds} reports them. The same set
+ * as `subscription_capacity_waiters`' provider check.
+ */
+export const CAPACITY_WAITING_TURN_PROVIDERS = [
+  "claude",
+  "codex",
+  "xai",
+] as const satisfies readonly SubscriptionCoreWaiterProvider[];
+
+export type CapacityWaitingTurnProvider = (typeof CAPACITY_WAITING_TURN_PROVIDERS)[number];
+
+export type CapacityWaitingTurnSummary = {
+  /** Turns parked on this provider's capacity that run as soon as it returns. */
+  count: number;
+  /** Seconds since the oldest of them parked; 0 when none is parked. */
+  oldestAgeSeconds: number;
+};
+
+/** The summary's row class for one provider's parked turns (migration 1485). */
+const CAPACITY_WAIT_HOLD_PREFIX = "capacity_wait:";
+
+/**
+ * Content-free cross-workspace turn hold summary for the control worker, one
+ * call to `opengeni_private.summarize_queued_turns_by_hold()`:
+ *
+ * - `queued`: every `queued` turn by what holds it (0988).
+ * - `capacityWaiting`: the turns parked waiting for subscription capacity, by
+ *   provider (1485), counted exactly when the capacity reconcile would resume
+ *   them once capacity returns (live waiter, not paused or stopped, goal
+ *   unchanged). A parked turn is its session's active turn, so the queued
+ *   `waiting_capacity` class never counts it: that class is only the prompts
+ *   queued behind one. Before 1485 the function returns no such rows and every
+ *   provider reads 0.
+ */
+export async function summarizeTurnHolds(db: Database): Promise<{
+  queued: Record<QueuedTurnHold, QueuedTurnHoldSummary>;
+  capacityWaiting: Record<CapacityWaitingTurnProvider, CapacityWaitingTurnSummary>;
+}> {
+  const queued = Object.fromEntries(
     QUEUED_TURN_HOLDS.map((hold) => [hold, { count: 0, oldestAgeSeconds: 0 }]),
   ) as Record<QueuedTurnHold, QueuedTurnHoldSummary>;
+  const capacityWaiting = Object.fromEntries(
+    CAPACITY_WAITING_TURN_PROVIDERS.map((provider) => [
+      provider,
+      { count: 0, oldestAgeSeconds: 0 },
+    ]),
+  ) as Record<CapacityWaitingTurnProvider, CapacityWaitingTurnSummary>;
   const rows = await rawRows<{
     hold: string;
     count: number | string;
@@ -62021,13 +62380,24 @@ export async function summarizeQueuedTurnsByHold(
     `,
   );
   for (const row of rows) {
-    if (!(row.hold in summary)) continue;
-    summary[row.hold as QueuedTurnHold] = {
-      count: Number(row.count),
-      oldestAgeSeconds: Number(row.oldest_age_seconds),
-    };
+    const value = { count: Number(row.count), oldestAgeSeconds: Number(row.oldest_age_seconds) };
+    if (row.hold in queued) {
+      queued[row.hold as QueuedTurnHold] = value;
+    } else if (row.hold.startsWith(CAPACITY_WAIT_HOLD_PREFIX)) {
+      const provider = row.hold.slice(CAPACITY_WAIT_HOLD_PREFIX.length);
+      if (provider in capacityWaiting) {
+        capacityWaiting[provider as CapacityWaitingTurnProvider] = value;
+      }
+    }
   }
-  return summary;
+  return { queued, capacityWaiting };
+}
+
+/** The parked-turn half of {@link summarizeTurnHolds}. */
+export async function summarizeCapacityWaitingTurns(
+  db: Database,
+): Promise<Record<CapacityWaitingTurnProvider, CapacityWaitingTurnSummary>> {
+  return (await summarizeTurnHolds(db)).capacityWaiting;
 }
 
 export type ContextCompactionPendingSummary = {

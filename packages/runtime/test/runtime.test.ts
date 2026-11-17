@@ -134,7 +134,6 @@ import {
   isFirstPartyMcpSetupUnavailableError,
   projectModelInputForCapabilities,
   projectModelInputForImageSupport,
-  prefixedMcpToolName,
   prepareAgentTools,
   runAzureCliLoginHook,
   runBeforeAgentStartHooks,
@@ -164,6 +163,12 @@ import {
   type PrepareToolsOptions,
   type RuntimeMetricsHooks,
 } from "../src/index";
+import {
+  mcpServerNamespace,
+  mcpToolWireName,
+  mcpWireToolNames,
+  prefixedMcpToolName,
+} from "../src/mcp-model-tool-name";
 import { MCP_MAX_TOOL_RESULT_BYTES } from "../src/mcp-network";
 import {
   spilledModelToolResult,
@@ -3467,7 +3472,7 @@ describe("runtime event normalization", () => {
           lazyToolTransport,
         });
         try {
-          const name = prefixedMcpToolName(serverId, "search_documents");
+          const name = mcpToolWireName(serverId, "search_documents");
           const model = new ScriptedModel([
             { output: [scriptedFunctionCall(name, { query: "example" }, "account-model-call")] },
           ]);
@@ -3531,7 +3536,7 @@ describe("runtime event normalization", () => {
     });
 
     test.each([undefined, "codex_native", "generic_dispatch"] as const)(
-      "legacy hash-named approval state resolves only its exact authorized account (%s)",
+      "former names: a live call names the current tool; pending approval binds only its own account (%s)",
       async (lazyToolTransport) => {
         const serverId = `account-${"a".repeat(64)}`;
         const fixture = await connectorPolicyFixture({
@@ -3545,29 +3550,71 @@ describe("runtime event normalization", () => {
           lazyToolTransport,
         });
         try {
-          const legacy = createHash("sha256")
-            .update(JSON.stringify([serverId, "search_documents"]))
-            .digest("hex");
-          const model = new ScriptedModel([
-            { output: [scriptedFunctionCall(legacy, { query: "example" }, "legacy-call")] },
-          ]);
-          const result = await runAgentStream(
-            fixture.agent.clone({ model }),
-            "Search documents",
-            fixture.settings,
-          );
-          for await (const _event of result.toStream()) {
-            /* drain to approval */
+          const current = mcpToolWireName(serverId, "search_documents");
+          for (const former of [
+            prefixedMcpToolName(serverId, "search_documents"),
+            createHash("sha256")
+              .update(JSON.stringify([serverId, "search_documents"]))
+              .digest("hex"),
+          ]) {
+            // A live call by a former name runs nothing and names the current tool.
+            const live = new ScriptedModel([
+              { output: [scriptedFunctionCall(former, { query: "example" }, "former-call")] },
+              { outputText: "done" },
+            ]);
+            const answered = await runAgentStream(
+              fixture.agent.clone({ model: live }),
+              "Search documents",
+              fixture.settings,
+            );
+            for await (const _event of answered.toStream()) {
+              /* drain */
+            }
+            await answered.completed;
+            expect(answered.interruptions).toHaveLength(0);
+            expect(JSON.stringify(live.requests[1]!.input)).toContain(
+              `is this tool's former name. Call it as ${current}.`,
+            );
+            expect(fixture.mcp.calls).toHaveLength(0);
+
+            // A call awaiting approval when the names changed still binds to
+            // its own tool, and only on its own account.
+            const model = new ScriptedModel([
+              {
+                output: [scriptedFunctionCall(current, { query: "example" }, "pending-call")],
+              },
+            ]);
+            const result = await runAgentStream(
+              fixture.agent.clone({ model }),
+              "Search documents",
+              fixture.settings,
+            );
+            for await (const _event of result.toStream()) {
+              /* drain to approval */
+            }
+            await result.completed;
+            expect(result.interruptions).toHaveLength(1);
+            // The state an earlier release stored: every value naming the tool
+            // carries the former name.
+            const renamed = (value: unknown): unknown =>
+              value === current
+                ? former
+                : value === JSON.stringify(["bare", current])
+                  ? JSON.stringify(["bare", former])
+                  : Array.isArray(value)
+                    ? value.map(renamed)
+                    : value && typeof value === "object"
+                      ? Object.fromEntries(
+                          Object.entries(value).map(([key, entry]) => [key, renamed(entry)]),
+                        )
+                      : value;
+            const stored = JSON.stringify(renamed(JSON.parse(result.state.toString())));
+            expect(stored).toContain(former);
+            const restored = await restoreInterruptedRunState(fixture.agent, stored);
+            expect(restored.getInterruptions()).toHaveLength(1);
+            await expect(restoreInterruptedRunState(other.agent, stored)).rejects.toThrow();
+            expect(other.mcp.calls).toHaveLength(0);
           }
-          await result.completed;
-          expect(result.interruptions).toHaveLength(1);
-          expect(fixture.mcp.calls).toHaveLength(0);
-          const restored = await restoreInterruptedRunState(fixture.agent, result.state.toString());
-          expect(restored.getInterruptions()).toHaveLength(1);
-          await expect(
-            restoreInterruptedRunState(other.agent, result.state.toString()),
-          ).rejects.toThrow();
-          expect(other.mcp.calls).toHaveLength(0);
         } finally {
           await fixture.prepared.close();
           fixture.mcp.close();
@@ -3726,7 +3773,7 @@ describe("runtime event normalization", () => {
           ? ["alice", "bob"]
           : ["bob", "alice"];
         expect(searchOutput).toMatch(
-          /\\"suggestions\\":\[\{\\"name\\":\\"mcp_[0-9a-f]+__search_documents/,
+          /\\"suggestions\\":\[\{\\"name\\":\\"documents_[a-z0-9]{6}__search_documents/,
         );
         expect(searchOutput).toContain(
           `These tools reach Documents (${reached[0]}@example.test). Also connected: Documents (${reached[1]}@example.test). If the request could mean those accounts too`,
@@ -3824,7 +3871,7 @@ describe("runtime event normalization", () => {
         accountLabel,
       });
       try {
-        const name = prefixedMcpToolName(serverId, "search_documents");
+        const name = mcpToolWireName(serverId, "search_documents", accountLabel.connector);
         const requestsBefore = fixture.mcp.requests.length;
         const call = { id: "display-call", name, arguments: { query: "example" } };
         // People get the connector and the short account; the model keeps the full one.
@@ -4569,7 +4616,7 @@ describe("runtime event normalization", () => {
       };
       const bindings = [
         {
-          modelName: "drive_publish",
+          identity: { serverId: "drive", toolName: "publish" },
           call: (approvalId: string, arguments_: unknown) => ({
             approvalId,
             connectionId: "connection-drive",
@@ -4688,7 +4735,7 @@ describe("runtime event normalization", () => {
         };
         const bindings = [
           {
-            modelName: "github_app__repository_get",
+            identity: { serverId: "github_app", toolName: "repository_get" },
             call: () => {
               // A schema parse error in a binding (for example Google Drive's)
               // is not a typed rejection, and must not fail the turn either.
@@ -4780,7 +4827,7 @@ describe("runtime event normalization", () => {
       };
       const bindings = [
         {
-          modelName: "github_app__repository_get",
+          identity: { serverId: "github_app", toolName: "repository_get" },
           resultOutcome: (output: unknown) => {
             const row = output as { _meta?: { testConnectorOutcome?: unknown } };
             return row._meta?.testConnectorOutcome === "not_executed"
@@ -4917,7 +4964,7 @@ describe("runtime event normalization", () => {
         };
         const bindings = [
           {
-            modelName: "connector_execute",
+            identity: { serverId: "connector", toolName: "execute" },
             call: (approvalId: string, arguments_: unknown) => ({
               approvalId,
               connectionId: "connection-1",
@@ -8562,8 +8609,8 @@ describe("runtime event normalization", () => {
   });
 
   test("prefixes MCP tool names deterministically", () => {
-    expect(prefixedMcpToolName("docs", "search_documents")).toBe("docs__search_documents");
-    expect(prefixedMcpToolName("files", "files_get_download_url")).toBe(
+    expect(mcpToolWireName("docs", "search_documents")).toBe("docs__search_documents");
+    expect(mcpToolWireName("files", "files_get_download_url")).toBe(
       "files__files_get_download_url",
     );
   });
@@ -8571,15 +8618,17 @@ describe("runtime event normalization", () => {
   test("account-qualified model aliases retain a readable tool leaf within provider limits", () => {
     const first = `account-${"a".repeat(64)}`;
     const second = `account-${"b".repeat(64)}`;
-    const name = prefixedMcpToolName(first, "search_documents");
+    const name = mcpToolWireName(first, "search_documents");
     expect(name).toEndWith("__search_documents");
     expect(name.length).toBeLessThanOrEqual(64);
     expect(name).toMatch(/^[A-Za-z0-9_]+$/);
-    expect(name).not.toBe(prefixedMcpToolName(second, "search_documents"));
-    expect(prefixedMcpToolName(first, "a.b")).not.toBe(prefixedMcpToolName(first, "a-b"));
+    expect(name).not.toBe(mcpToolWireName(second, "search_documents"));
+    // Two names one server lists with one wire spelling stay apart.
+    const spelled = mcpWireToolNames(first, mcpServerNamespace(first).namespace, ["a.b", "a-b"]);
+    expect(spelled.get("a.b")).not.toBe(spelled.get("a-b"));
     const long = "search_" + "documents_".repeat(20);
-    expect(prefixedMcpToolName(first, long).length).toBeLessThanOrEqual(64);
-    expect(prefixedMcpToolName(first, long)).not.toBe(prefixedMcpToolName(first, long + "other"));
+    expect(mcpToolWireName(first, long).length).toBeLessThanOrEqual(64);
+    expect(mcpToolWireName(first, long)).not.toBe(mcpToolWireName(first, long + "other"));
   });
 
   test("PrefixedMcpServer preserves the complete legacy callTool result and callToolResult", async () => {
@@ -10917,7 +10966,7 @@ describe("runtime event normalization", () => {
     try {
       const tools = await prepared.mcpServers[0]!.listTools();
       expect(tools.map((tool) => tool.name)).toContain(
-        prefixedMcpToolName("cap-secure", "search_documents"),
+        mcpToolWireName("cap-secure", "search_documents"),
       );
       const result = await prepared.mcpServers[0]!.callTool("cap-secure__search_documents", {
         query: "headers",
@@ -10968,7 +11017,7 @@ describe("runtime event normalization", () => {
     try {
       const tools = await prepared.mcpServers[0]!.listTools();
       expect(tools.map((tool) => tool.name)).toContain(
-        prefixedMcpToolName("cap-broker", "search_documents"),
+        mcpToolWireName("cap-broker", "search_documents"),
       );
       const result = await prepared.mcpServers[0]!.callTool("cap-broker__search_documents", {
         query: "broker",
@@ -11032,7 +11081,7 @@ describe("runtime event normalization", () => {
     try {
       const tools = await prepared.mcpServers[0]!.listTools();
       expect(tools.map((tool) => tool.name)).toContain(
-        prefixedMcpToolName("cap-refresh", "search_documents"),
+        mcpToolWireName("cap-refresh", "search_documents"),
       );
       expect(resolved.some((input) => input.forceRefresh === true)).toBe(true);
       expect(providerAuthorizations).toBe(mcp.requests.length);
@@ -14359,11 +14408,11 @@ describe("runtime event normalization", () => {
     };
 
     expect(await toolNamesFor(["read_records", "delete_records"])).toEqual([
-      prefixedMcpToolName(registryId, "delete_records"),
-      prefixedMcpToolName(registryId, "read_records"),
+      mcpToolWireName(registryId, "delete_records"),
+      mcpToolWireName(registryId, "read_records"),
     ]);
     expect(await toolNamesFor(["read_records"])).toEqual([
-      prefixedMcpToolName(registryId, "read_records"),
+      mcpToolWireName(registryId, "read_records"),
     ]);
     expect(remoteLists).toBe(2);
   });
