@@ -16,8 +16,11 @@ import {
 } from "@opengeni/contracts";
 import {
   ACTIVE_USER_WINDOWS,
+  CAPACITY_WAITING_TURN_PROVIDERS,
   QUEUED_TURN_HOLDS,
   type ActiveUserWindow,
+  type CapacityWaitingTurnProvider,
+  type CapacityWaitingTurnSummary,
   type CreditGrantTotals,
   type IdleInteractionInspection,
   type ModelCallTiming,
@@ -906,7 +909,7 @@ export function recordQueuedTurnHoldGauges(
     const entry = summary[hold];
     observability.setGauge({
       name: "opengeni_turns_queued_by_hold",
-      help: "Durable queued session turns by what holds them: ready (waiting for dispatch), behind_active_turn, paused, failed (resumes on the next message), requires_action, waiting_capacity or cancelled.",
+      help: "Durable queued session turns by what holds them: ready (waiting for dispatch), behind_active_turn, paused, failed (resumes on the next message), requires_action, waiting_capacity (queued behind a turn parked on capacity; the parked turn itself is opengeni_turns_waiting_capacity) or cancelled.",
       labels: { hold },
       value: nonnegativeFinite(entry?.count ?? 0),
     });
@@ -914,6 +917,35 @@ export function recordQueuedTurnHoldGauges(
       name: "opengeni_turns_queued_oldest_age_seconds",
       help: "Age in seconds of the oldest durable queued session turn in each hold class; 0 when the class is empty.",
       labels: { hold },
+      value: nonnegativeFinite(entry?.oldestAgeSeconds ?? 0),
+    });
+  }
+}
+
+/**
+ * Turns parked waiting for subscription capacity right now that run as soon
+ * as capacity returns, by the provider they wait on: a paused or stopped
+ * chat's wait, or a waiter the reconcile would supersede, is not counted. A
+ * parked turn is its session's active turn, so the queued hold split above
+ * never counts it. Every provider is always published so an emptied provider
+ * drops to 0.
+ */
+export function recordCapacityWaitingTurnGauges(
+  observability: Observability,
+  summary: Record<CapacityWaitingTurnProvider, CapacityWaitingTurnSummary>,
+): void {
+  for (const provider of CAPACITY_WAITING_TURN_PROVIDERS) {
+    const entry = summary[provider];
+    observability.setGauge({
+      name: "opengeni_turns_waiting_capacity",
+      help: "Turns parked right now waiting for subscription capacity (usage limit or no eligible account) that run as soon as it returns, by the provider they wait on. Each is its session's active turn; waits in a paused or stopped chat are not counted.",
+      labels: { provider },
+      value: nonnegativeFinite(entry?.count ?? 0),
+    });
+    observability.setGauge({
+      name: "opengeni_turns_waiting_capacity_oldest_age_seconds",
+      help: "Seconds since the oldest turn now waiting for subscription capacity parked, by provider; 0 when none waits. A resumption that finds no capacity parks again and starts a new wait.",
+      labels: { provider },
       value: nonnegativeFinite(entry?.oldestAgeSeconds ?? 0),
     });
   }

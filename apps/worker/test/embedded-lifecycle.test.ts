@@ -566,11 +566,13 @@ describe("embedded worker lifecycle contract", () => {
           "session_attempt_model_context_snapshots",
           "session_attempt_tool_catalogs",
           "session_content_blobs",
+          "session_goals",
           "session_human_input_requests",
           "session_tenancy_activations",
           "session_turn_attempts",
           "session_turns",
           "sessions",
+          "subscription_capacity_waiters",
           "workspace_memberships",
           "workspaces",
         ].map((name) => ({

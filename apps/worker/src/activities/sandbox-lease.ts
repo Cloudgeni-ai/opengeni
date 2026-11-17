@@ -61,7 +61,7 @@ import {
   deferRetainedProcessReconciliation,
   forceDrainOverLimitViewerOnlyBoxes,
   listCreditBalancesByAccount,
-  summarizeQueuedTurnsByHold,
+  summarizeTurnHolds,
   countActiveUsers,
   readCreditGrantTotals,
   readManagedAuthNewSignupsSwitch,
@@ -263,6 +263,7 @@ import {
   recordSandboxRotationBacklogGauges,
   recordSandboxCheckpointStalenessGauges,
   recordQueuedTurnHoldGauges,
+  recordCapacityWaitingTurnGauges,
   recordTurnsQueuedGauge,
   recordVerifiedSignupTrialDeploymentFlagGauge,
   recordManagedAuthNewSignupsSwitchGauge,
@@ -4126,7 +4127,11 @@ async function refreshQueueLeaseAndCreditGauges(
     })(),
     (async () => {
       try {
-        recordQueuedTurnHoldGauges(observability, await summarizeQueuedTurnsByHold(db));
+        // One summary: the queued-turn hold split and the turns parked
+        // waiting for subscription capacity (1485).
+        const holds = await summarizeTurnHolds(db);
+        recordQueuedTurnHoldGauges(observability, holds.queued);
+        recordCapacityWaitingTurnGauges(observability, holds.capacityWaiting);
       } catch (error) {
         observability.warn("sandbox reaper: queued-turn hold gauge refresh failed", {
           error: error instanceof Error ? error.message : String(error),

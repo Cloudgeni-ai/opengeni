@@ -51,7 +51,8 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * due inventory (0935), the recording retention sweep's due inventory (0946),
  * the lookup of whose personal machine a chat runs on (0978), the re-arm of
  * the running commands a returning runner did not answer for (0984), the
- * control worker's content-free queued-turn hold summary (0988), the API's
+ * control worker's content-free queued-turn hold summary (0988; since 1485
+ * also the turns parked waiting for subscription capacity), the API's
  * inventory of browsers an agent session holds (1002), the only writer of
  * the EU-only inference setting and its history (1060), the secret history
  * scrub's reader and cell writer (1091), the subscription
@@ -190,7 +191,14 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "organization_memberships",
   ],
   "rearm_unanswered_connected_commands(uuid, uuid, text)": ["session_background_commands"],
-  "summarize_queued_turns_by_hold()": ["session_turns", "sessions", "workspace_inference_controls"],
+  "summarize_queued_turns_by_hold()": [
+    "session_turns",
+    "sessions",
+    "workspace_inference_controls",
+    "subscription_capacity_waiters",
+    "session_turn_attempts",
+    "session_goals",
+  ],
   "list_agent_held_browser_sessions(integer, bigint)": [
     "browser_sessions",
     "browser_session_associations",

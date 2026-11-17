@@ -28300,8 +28300,40 @@ export type SubscriptionCoreCodexWaitEvaluation =
 
 export type ReconcileSubscriptionCoreCodexCapacityWaitResult =
   | { action: "waiting"; waiter: SubscriptionCoreCodexCapacityWait; events: SessionEvent[] }
-  | { action: "resumed" | "superseded"; events: SessionEvent[] }
+  | {
+      action: "resumed";
+      events: SessionEvent[];
+      /** When the turn parked: its waiting attempt's close (null if unknown). */
+      parkedAt: Date | null;
+    }
+  | {
+      action: "superseded";
+      events: SessionEvent[];
+      /** Why, when this call ended the wait (deleted its waiter). */
+      reason?: string;
+      parkedAt?: Date | null;
+    }
   | { action: "paused" | "stale"; events: SessionEvent[] };
+
+/**
+ * When a parked turn's current capacity wait began: the close of its latest
+ * attempt that parked (outcome `waiting_capacity`), as the turn hold
+ * summary (1485) reads it. Null when no such attempt is visible.
+ */
+async function readCapacityWaitParkedAtInTransaction(
+  tx: SessionActivityDatabase,
+  input: { workspaceId: string; sessionId: string; turnId: string },
+): Promise<Date | null> {
+  const [row] = await rawRows<{ parked_at: Date | string | null }>(
+    tx,
+    sql`select max(closed_at) as parked_at from session_turn_attempts
+      where workspace_id = ${input.workspaceId}::uuid
+        and session_id = ${input.sessionId}::uuid
+        and turn_id = ${input.turnId}::uuid
+        and outcome = 'waiting_capacity'`,
+  );
+  return row?.parked_at == null ? null : new Date(row.parked_at);
+}
 
 /**
  * Row-lock and settle one core waiter after the caller evaluated placement
@@ -28835,7 +28867,12 @@ export async function reconcileSubscriptionCoreCapacityWait(
         if (!recoveringSession) {
           throw new Error(`Core ${vocabulary.label} capacity session changed during atomic resume`);
         }
-        return { action: "resumed", events: events.map(mapEvent) } as const;
+        const parkedAt = await readCapacityWaitParkedAtInTransaction(tx, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: blockedTurn.id,
+        });
+        return { action: "resumed", events: events.map(mapEvent), parkedAt } as const;
       }),
   );
 }
@@ -28849,7 +28886,12 @@ async function supersedeSubscriptionCoreCodexCapacityWaitInTransaction(
     reason: string;
     now: Date;
   },
-): Promise<{ action: "superseded"; events: SessionEvent[] }> {
+): Promise<{
+  action: "superseded";
+  events: SessionEvent[];
+  reason?: string;
+  parkedAt?: Date | null;
+}> {
   const vocabulary = subscriptionCoreWaitVocabulary(input.waiter.provider);
   const deleted = await rawRows<{ waiter_id: string }>(
     tx,
@@ -28860,6 +28902,11 @@ async function supersedeSubscriptionCoreCodexCapacityWaitInTransaction(
       returning waiter_id::text as waiter_id`,
   );
   if (deleted.length !== 1) return { action: "superseded", events: [] };
+  const parkedAt = await readCapacityWaitParkedAtInTransaction(tx, {
+    workspaceId: input.session.workspaceId,
+    sessionId: input.session.id,
+    turnId: input.blockedTurn.id,
+  });
   const turnWasCurrent = input.session.activeTurnId === input.blockedTurn.id;
   const terminalTurnStatus = input.session.status === "cancelled" ? "cancelled" : "superseded";
   if (input.blockedTurn.status === "waiting_capacity") {
@@ -28966,7 +29013,7 @@ async function supersedeSubscriptionCoreCodexCapacityWaitInTransaction(
     .returning({ id: schema.sessions.id });
   if (!updatedSession)
     throw new Error(`Core ${vocabulary.label} capacity session changed during supersession`);
-  return { action: "superseded", events: inserted.map(mapEvent) };
+  return { action: "superseded", events: inserted.map(mapEvent), reason: input.reason, parkedAt };
 }
 
 /**
@@ -62006,9 +62053,58 @@ export type QueuedTurnHoldSummary = {
 export async function summarizeQueuedTurnsByHold(
   db: Database,
 ): Promise<Record<QueuedTurnHold, QueuedTurnHoldSummary>> {
-  const summary = Object.fromEntries(
+  return (await summarizeTurnHolds(db)).queued;
+}
+
+/**
+ * The providers whose turns park on the shared subscription core's capacity
+ * waiter, in the order {@link summarizeTurnHolds} reports them. The same set
+ * as `subscription_capacity_waiters`' provider check.
+ */
+export const CAPACITY_WAITING_TURN_PROVIDERS = [
+  "claude",
+  "codex",
+  "xai",
+] as const satisfies readonly SubscriptionCoreWaiterProvider[];
+
+export type CapacityWaitingTurnProvider = (typeof CAPACITY_WAITING_TURN_PROVIDERS)[number];
+
+export type CapacityWaitingTurnSummary = {
+  /** Turns parked on this provider's capacity that run as soon as it returns. */
+  count: number;
+  /** Seconds since the oldest of them parked; 0 when none is parked. */
+  oldestAgeSeconds: number;
+};
+
+/** The summary's row class for one provider's parked turns (migration 1485). */
+const CAPACITY_WAIT_HOLD_PREFIX = "capacity_wait:";
+
+/**
+ * Content-free cross-workspace turn hold summary for the control worker, one
+ * call to `opengeni_private.summarize_queued_turns_by_hold()`:
+ *
+ * - `queued`: every `queued` turn by what holds it (0988).
+ * - `capacityWaiting`: the turns parked waiting for subscription capacity, by
+ *   provider (1485), counted exactly when the capacity reconcile would resume
+ *   them once capacity returns (live waiter, not paused or stopped, goal
+ *   unchanged). A parked turn is its session's active turn, so the queued
+ *   `waiting_capacity` class never counts it: that class is only the prompts
+ *   queued behind one. Before 1485 the function returns no such rows and every
+ *   provider reads 0.
+ */
+export async function summarizeTurnHolds(db: Database): Promise<{
+  queued: Record<QueuedTurnHold, QueuedTurnHoldSummary>;
+  capacityWaiting: Record<CapacityWaitingTurnProvider, CapacityWaitingTurnSummary>;
+}> {
+  const queued = Object.fromEntries(
     QUEUED_TURN_HOLDS.map((hold) => [hold, { count: 0, oldestAgeSeconds: 0 }]),
   ) as Record<QueuedTurnHold, QueuedTurnHoldSummary>;
+  const capacityWaiting = Object.fromEntries(
+    CAPACITY_WAITING_TURN_PROVIDERS.map((provider) => [
+      provider,
+      { count: 0, oldestAgeSeconds: 0 },
+    ]),
+  ) as Record<CapacityWaitingTurnProvider, CapacityWaitingTurnSummary>;
   const rows = await rawRows<{
     hold: string;
     count: number | string;
@@ -62021,13 +62117,24 @@ export async function summarizeQueuedTurnsByHold(
     `,
   );
   for (const row of rows) {
-    if (!(row.hold in summary)) continue;
-    summary[row.hold as QueuedTurnHold] = {
-      count: Number(row.count),
-      oldestAgeSeconds: Number(row.oldest_age_seconds),
-    };
+    const value = { count: Number(row.count), oldestAgeSeconds: Number(row.oldest_age_seconds) };
+    if (row.hold in queued) {
+      queued[row.hold as QueuedTurnHold] = value;
+    } else if (row.hold.startsWith(CAPACITY_WAIT_HOLD_PREFIX)) {
+      const provider = row.hold.slice(CAPACITY_WAIT_HOLD_PREFIX.length);
+      if (provider in capacityWaiting) {
+        capacityWaiting[provider as CapacityWaitingTurnProvider] = value;
+      }
+    }
   }
-  return summary;
+  return { queued, capacityWaiting };
+}
+
+/** The parked-turn half of {@link summarizeTurnHolds}. */
+export async function summarizeCapacityWaitingTurns(
+  db: Database,
+): Promise<Record<CapacityWaitingTurnProvider, CapacityWaitingTurnSummary>> {
+  return (await summarizeTurnHolds(db)).capacityWaiting;
 }
 
 export type ContextCompactionPendingSummary = {
