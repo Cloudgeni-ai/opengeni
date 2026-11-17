@@ -7,6 +7,8 @@ import { artifactKey, type ArtifactKindFilter } from "@/artifacts";
  * The Artifacts list's data: one catalog page at a time, the last list for
  * each filter kept in memory so coming back paints at once, and the rows the
  * viewer reads (pin state, source chat) without asking the server again.
+ * Everything kept belongs to the client (account and sign-in) that read it,
+ * so another account never sees the last one's rows.
  */
 
 const PAGE_SIZE = 30;
@@ -14,9 +16,18 @@ const SEARCH_DELAY_MS = 250;
 
 type ListSnapshot = { items: ArtifactCatalogItem[]; nextCursor: string | null };
 
-const lists = new Map<string, ListSnapshot>();
-const items = new Map<string, ArtifactCatalogItem>();
+type Kept = { lists: Map<string, ListSnapshot>; items: Map<string, ArtifactCatalogItem> };
+const keptByClient = new WeakMap<object, Kept>();
 const listeners = new Set<(workspaceId: string) => void>();
+
+function keptFor(client: object): Kept {
+  let store = keptByClient.get(client);
+  if (!store) {
+    store = { lists: new Map(), items: new Map() };
+    keptByClient.set(client, store);
+  }
+  return store;
+}
 
 function listKey(workspaceId: string, kind: ArtifactKindFilter, query: string): string {
   return JSON.stringify([workspaceId, kind, query.trim().toLocaleLowerCase()]);
@@ -26,12 +37,18 @@ function itemKey(workspaceId: string, item: Pick<ArtifactCatalogItem, "kind" | "
   return `${workspaceId}:${artifactKey(item)}`;
 }
 
-export function rememberArtifacts(workspaceId: string, rows: readonly ArtifactCatalogItem[]): void {
+function rememberArtifacts(
+  client: object,
+  workspaceId: string,
+  rows: readonly ArtifactCatalogItem[],
+): void {
+  const { items } = keptFor(client);
   for (const row of rows) items.set(itemKey(workspaceId, row), row);
 }
 
 /** A row the list already holds, so the viewer opens with its title, pin and chat. */
 export function cachedArtifact(
+  client: object,
   workspaceId: string,
   kind: ArtifactCatalogItem["kind"],
   id: string,
@@ -43,6 +60,7 @@ export function cachedArtifact(
       : kind === "file"
         ? ["file", "image"]
         : [kind];
+  const { items } = keptFor(client);
   for (const each of kinds) {
     const row = items.get(itemKey(workspaceId, { kind: each, id }));
     if (row) return row;
@@ -127,7 +145,7 @@ export async function loadArtifactItem(
   } catch {
     // The row only adds pin state and the source chat.
   }
-  rememberArtifacts(workspaceId, [item]);
+  rememberArtifacts(client, workspaceId, [item]);
   return item;
 }
 
@@ -136,10 +154,12 @@ export async function loadArtifactItem(
  * (or drop it with null) everywhere it is kept and let open lists refresh.
  */
 export function artifactChanged(
+  client: object,
   workspaceId: string,
   item: Pick<ArtifactCatalogItem, "kind" | "id">,
   next: ArtifactCatalogItem | null,
 ): void {
+  const { items, lists } = keptFor(client);
   const key = itemKey(workspaceId, item);
   if (next) items.set(key, next);
   else items.delete(key);
@@ -173,6 +193,7 @@ export function useArtifactCatalog(
   kind: ArtifactKindFilter,
   query: string,
 ): ArtifactCatalogState {
+  const { lists } = keptFor(client);
   // Typing settles before it searches; clearing the field shows the list at once.
   const [settledQuery, setSettledQuery] = useState(query);
   useEffect(() => {
@@ -184,13 +205,15 @@ export function useArtifactCatalog(
     return () => clearTimeout(timer);
   }, [query]);
   const key = listKey(workspaceId, kind, settledQuery);
-  const [snapshot, setSnapshot] = useState<{ key: string; value: ListSnapshot | null }>(() => ({
-    key,
-    value: lists.get(key) ?? null,
-  }));
+  const [snapshot, setSnapshot] = useState<{
+    key: string;
+    client: object;
+    value: ListSnapshot | null;
+  }>(() => ({ key, client, value: lists.get(key) ?? null }));
   const [error, setError] = useState<string | null>(null);
   const loadingMore = useRef(false);
-  const current = snapshot.key === key ? snapshot.value : (lists.get(key) ?? null);
+  const current =
+    snapshot.key === key && snapshot.client === client ? snapshot.value : (lists.get(key) ?? null);
 
   const fetchPage = useCallback(
     async (cursor: string | null) => {
@@ -202,7 +225,7 @@ export function useArtifactCatalog(
         ...(settledQuery.trim() ? { q: settledQuery.trim() } : {}),
         ...(cursor ? { cursor } : {}),
       });
-      rememberArtifacts(workspaceId, page.items);
+      rememberArtifacts(client, workspaceId, page.items);
       return page;
     },
     [client, kind, settledQuery, workspaceId],
@@ -213,27 +236,27 @@ export function useArtifactCatalog(
       const page = await fetchPage(null);
       const next = { items: page.items, nextCursor: page.nextCursor };
       lists.set(key, next);
-      setSnapshot({ key, value: next });
+      setSnapshot({ key, client, value: next });
       setError(null);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     }
-  }, [fetchPage, key]);
+  }, [client, fetchPage, key, lists]);
 
   useEffect(() => {
-    setSnapshot({ key, value: lists.get(key) ?? null });
+    setSnapshot({ key, client, value: lists.get(key) ?? null });
     setError(null);
     void refresh();
-  }, [key, refresh]);
+  }, [client, key, lists, refresh]);
 
   // A change made in the viewer shows here without a reload.
   useEffect(() => {
     const listener = (changed: string) => {
-      if (changed === workspaceId) setSnapshot({ key, value: lists.get(key) ?? null });
+      if (changed === workspaceId) setSnapshot({ key, client, value: lists.get(key) ?? null });
     };
     listeners.add(listener);
     return () => void listeners.delete(listener);
-  }, [key, workspaceId]);
+  }, [client, key, lists, workspaceId]);
 
   const loadMore = useCallback(() => {
     const cursor = current?.nextCursor;
@@ -248,13 +271,13 @@ export function useArtifactCatalog(
           nextCursor: page.nextCursor,
         };
         lists.set(key, next);
-        setSnapshot({ key, value: next });
+        setSnapshot({ key, client, value: next });
       })
       .catch(() => undefined)
       .finally(() => {
         loadingMore.current = false;
       });
-  }, [current?.nextCursor, fetchPage, key]);
+  }, [client, current?.nextCursor, fetchPage, key, lists]);
 
   return {
     items: current?.items ?? [],

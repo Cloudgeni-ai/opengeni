@@ -28,7 +28,7 @@ export function ArtifactLinkCard({
   const c = theme.colors;
   const params = viewerParamsForLink(target, workspaceId);
   const [item, setItem] = useState<ArtifactCatalogItem | null>(() =>
-    params ? cachedArtifact(params.workspaceId, params.kind, params.id) : null,
+    params ? cachedArtifact(client, params.workspaceId, params.kind, params.id) : null,
   );
   useEffect(() => {
     if (!params || item) return;

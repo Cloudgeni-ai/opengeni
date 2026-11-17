@@ -33,9 +33,9 @@ const EXPORT_DEADLINE_MS = 120_000;
 export function downloadFilename(title: string, extension: string): string {
   const base = title
     .replace(/[\\/:*?"<>|\u0000-\u001f]+/gu, " ")
+    .replace(/^[\s.]+/u, "")
     .replace(/\s+/gu, " ")
     .trim()
-    .replace(/^\.+/u, "")
     .slice(0, 80);
   const ext = extension.replace(/^\./u, "").toLowerCase();
   if (!ext) return base || "download";

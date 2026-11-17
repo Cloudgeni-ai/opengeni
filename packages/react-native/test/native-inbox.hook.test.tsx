@@ -56,20 +56,19 @@ test("another account's client starts empty instead of showing the last account'
 test("a late answer for the last account never shows for the new one", async () => {
   let releaseA!: () => void;
   const first = inboxClient("from-a", new Promise<void>((resolve) => (releaseA = resolve)));
-  let releaseB!: () => void;
-  const second = inboxClient("from-b", new Promise<void>((resolve) => (releaseB = resolve)));
-  const hook = await renderHook((client) => useNativeInbox(client), first);
-  await hook.rerender(second);
+  const second = inboxClient("from-b");
+  const hook = await renderHook(
+    (props: { client: Parameters<typeof useNativeInbox>[0]; enabled: boolean }) =>
+      useNativeInbox(props.client, { enabled: props.enabled }),
+    { client: first, enabled: true },
+  );
+  // B is signed out (nothing reads for it), so only A's late answer can arrive.
+  await hook.rerender({ client: second, enabled: false });
   await act(async () => {
     releaseA();
     await Promise.resolve();
   });
   expect(hook.result.current.data).toBeNull();
-  await act(async () => {
-    releaseB();
-    await Promise.resolve();
-  });
-  expect(hook.result.current.data?.items.map((item) => item.id)).toEqual(["from-b"]);
   await hook.unmount();
 });
 

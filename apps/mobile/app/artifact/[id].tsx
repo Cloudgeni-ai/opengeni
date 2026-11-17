@@ -81,7 +81,7 @@ function ArtifactViewer() {
   const workspaceId = params.workspaceId || currentWorkspaceId || "";
   const kind = KINDS.find((each) => each === params.kind) ?? "file";
   const [item, setItem] = useState<ArtifactCatalogItem | null>(() =>
-    workspaceId ? cachedArtifact(workspaceId, kind, params.id) : null,
+    workspaceId ? cachedArtifact(client, workspaceId, kind, params.id) : null,
   );
   const [problem, setProblem] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -133,7 +133,7 @@ function ArtifactViewer() {
           await client.updateArtifactPin(workspaceId, item.kind, item.id, pinned);
           const next = { ...item, pinned };
           setItem(next);
-          artifactChanged(workspaceId, item, next);
+          artifactChanged(client, workspaceId, item, next);
           void Haptics.selectionAsync();
           return;
         }
@@ -183,7 +183,7 @@ function ArtifactViewer() {
                 void client
                   .archiveEditableArtifact(workspaceId, item.id)
                   .then(() => {
-                    artifactChanged(workspaceId, item, null);
+                    artifactChanged(client, workspaceId, item, null);
                     router.back();
                   })
                   .catch((caught: unknown) => failed("Couldn't delete", caught)),
