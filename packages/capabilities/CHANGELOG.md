@@ -1,5 +1,18 @@
 # @opengeni/capabilities
 
+## 6.27.0
+
+### Patch Changes
+
+- 5d63995: A connected account that needs more access for a tool now shows "Give {provider} more access" with Allow in the chat instead of a connect card, and Allow finds the account even when it is homed in another workspace. Site tool readiness reports `grant` (with the scopes needed) for such tools, and `unavailable` with reason `account` when the account's access is fixed and cannot be extended.
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+  - @opengeni/contracts@6.27.0
+  - @opengeni/network@6.27.0
+
 ## 6.26.0
 
 ### Patch Changes

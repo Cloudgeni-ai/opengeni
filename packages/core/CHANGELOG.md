@@ -1,5 +1,47 @@
 # @opengeni/core
 
+## 6.27.0
+
+### Patch Changes
+
+- 5d63995: When a tool needs access that a fixed-access account (for example one managed through Nango) cannot be given, the chat now shows "{provider} can't do this with the connected account" with no step-up. The `tool.auth_needed` notice keeps the legacy-safe reason `unsupported_auth`, so older clients show the tools as unavailable, and adds `accountReason: "account_scope_fixed"` with the scopes the tool needs.
+- 8f1f5e2: Free compute is bounded for every kind of sandbox use, not only viewers. A held or denied Free or plan-less organization that has not bought credit or paid for a plan gets no sandbox at all: terminals, commands, background processes, browser and desktop sessions, viewers and new boxes for agent turns are refused, a turn that needs a box fails with a clear message instead of waiting forever, an already running box stays usable only while a turn holds it, and the reaper drains boxes no turn holds. A person who owns or administers such an organization carries the restriction into their other unpaid organizations.
+
+  Free, young Free and plan-less organizations share one running-box budget of 2 across every holder kind, plus 2 running boxes and 12 box-hours per UTC day per organization and per person across their organizations. Past the daily budget no box starts and the reaper drains boxes no turn holds, while an in-flight turn finishes. Boxes that nothing uses drain after the viewer idle window, whatever holds them. All values are plan-limit settings (`OPENGENI_SANDBOX_PLAN_LIMITS_JSON`).
+
+  Every new Modal box carries hard CPU and memory ceilings (2 cores / 4096 MiB for unpaid organizations, 16 cores / 32768 MiB for paid, Enterprise, host-provisioned and credit-buying organizations), and a create without them is refused. Unpaid boxes can be limited to an outbound CIDR/domain allowlist; Modal has no per-port egress rule, so SMTP cannot be blocked by port alone.
+
+  A denied Free organization with no paid history is suspended from sandboxes, Site publishing, invitations, uploads and API keys until the decision is reversed or it buys credit; sign-in keeps working. Creating an additional organization now goes through the signup network checks and rate limit, and inherits its owner's review hold.
+
+  An unpaid organization that bought credit is treated as paying: no per-person, daily or all-holder idle bounds. Paid, Enterprise and host-provisioned organizations are unaffected.
+
+  Rollout: set the new plan-limit fields in `OPENGENI_SANDBOX_PLAN_LIMITS_JSON` only after this release runs everywhere, because older pods reject unknown fields. Defaults for `free`, `new` and `none`: `runningBoxesPerOrganization` 2, `runningBoxesPerPerson` 2, `boxSecondsPerOrganizationPerDay` 43200, `boxSecondsPerPersonPerDay` 43200, `idleDrainAllHolders` true; `restricted` is 0 for every count.
+
+- Updated dependencies [5d63995]
+- Updated dependencies [c3ca657]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [8f1f5e2]
+- Updated dependencies [5d63995]
+- Updated dependencies [d85f57f]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [d51e6e5]
+  - @opengeni/runtime@6.27.0
+  - @opengeni/capabilities@6.27.0
+  - @opengeni/contracts@6.27.0
+  - @opengeni/db@6.27.0
+  - @opengeni/config@6.27.0
+  - @opengeni/codex@6.27.0
+  - @opengeni/documents@6.27.0
+  - @opengeni/events@6.27.0
+  - @opengeni/observability@6.27.0
+  - @opengeni/storage@6.27.0
+  - @opengeni/tool-gateway@6.27.0
+  - @opengeni/vaults@6.27.0
+  - @opengeni/network@6.27.0
+  - @opengeni/xai-subscription@6.27.0
+
 ## 6.26.0
 
 ### Patch Changes

@@ -1,5 +1,18 @@
 # @opengeni/storage
 
+## 6.27.0
+
+### Patch Changes
+
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [8f1f5e2]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+  - @opengeni/contracts@6.27.0
+  - @opengeni/config@6.27.0
+
 ## 6.26.0
 
 ### Patch Changes

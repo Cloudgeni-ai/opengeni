@@ -1,5 +1,30 @@
 # @opengeni/site-gateway
 
+## 0.2.0
+
+### Minor Changes
+
+- 5d63995: Sites can ask what each of their tools needs for the current viewer before a click: `site.tools.$readiness(targets)` (`POST /v1/workspaces/:id/tools/readiness`) answers `ready`, `confirm`, `choose_account`, `connect`, `reconnect`, `blocked`, `open_in_opengeni` or `unavailable`, with the account the tool runs as, and `site.tools.$onReadinessChange` fires after a connect, a reconnect, an "Always allow" or a reset. It reads the same authority as a call and never reaches the provider; calls still enforce everything.
+
+  The Site tool confirmation shows which account the action runs as ("Shared with workspace" for a workspace account, "You" when none is involved). The checkbox now reads "Always allow on this Site from this account". The Site menu has "Reset allowed actions" (`POST /v1/workspaces/:id/tools/site-allowances/reset`).
+
+  Typed failures: a tool set to Block answers 403 with `details.code` `tool_blocked` (Site code: `site_tool_blocked`); a confirmation a published address can't show is `site_tool_open_in_opengeni`. A tool server that couldn't be reached before anything was sent (refused connection, DNS failure, a tunnel that is gone, decided only at the MCP transport's own request) now answers 503 `upstream_unavailable` with `details.code` `tool_server_unreachable`, `retryable: true` and `outcomeUnknown: false` for every gateway caller instead of a 500 (Site code: `site_tool_upstream_unavailable`).
+
+### Patch Changes
+
+- 5d63995: Site tools now run on a person's own account that was added in another workspace and turned on here ("Use it here"), the same account a chat in this workspace uses. Before, the Site's tool gateway read that credential in the current workspace, found nothing, and the call failed with `tool_unavailable`.
+
+  When the provider can't read what an action would do because the account must allow more access, the confirmation now answers 409 with `details.code` `tool_connection_needs_more_access` (with the connection and scopes) instead of a generic 422; signing in again answers `tool_connection_needs_attention`, and a provider refusal for that account answers 403 `tool_unavailable_for_account`. Site code receives the new typed code `site_tool_grant_required`, or `site_tool_reconnect_required` and `site_tool_permission_denied`.
+
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+  - @opengeni/contracts@6.27.0
+  - @opengeni/sdk@6.27.0
+
 ## 0.1.52
 
 ### Patch Changes
