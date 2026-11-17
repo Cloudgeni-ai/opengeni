@@ -1,9 +1,15 @@
-// Sign-in for the add-in: the deployment's own device sign-in page
-// (/native-sign-in) opens in an Office dialog, the person allows the add-in,
-// and the callback page hands the one-time code back to this pane, which
-// redeems it (PKCE) for the add-in's own revocable credential.
-import { OpenGeniClient } from "@opengeni/sdk";
-import { openOfficeDialog } from "@opengeni/sdk/office";
+// Sign-in for the add-in, through the deployment's own device sign-in page
+// (/native-sign-in), redeemed (PKCE) for the add-in's own revocable credential.
+//
+// Excel on the web runs in the person's browser, so the page opens in an
+// Office dialog and its callback page hands the one-time code back. Desktop
+// Excel's dialog is an embedded webview without the person's saved sign-ins,
+// passwords or passkeys, so there the page opens in the system browser
+// instead. That browser can't reach the pane, so the server relays the code:
+// the pane shows a short confirmation code the person types on the page, and
+// polls with its verifier until the browser approves.
+import { OpenGeniClient, type NativeAppRelayPoll } from "@opengeni/sdk";
+import { office, openOfficeDialog } from "@opengeni/sdk/office";
 
 const TOKEN_KEY = "opengeni.office.token";
 export const CALLBACK_PATH = "/office/auth-callback.html";
@@ -47,6 +53,120 @@ export async function prepareSignIn(): Promise<SignInRequest> {
   return { verifier, challenge: await challengeFor(verifier), state: randomText(16) };
 }
 
+/** Mac and Windows Excel sign in through the system browser; the rest in a dialog. */
+export type SignInMode = "browser" | "dialog";
+
+export function signInMode(platform: string | null | undefined): SignInMode {
+  return platform === "Mac" || platform === "PC" ? "browser" : "dialog";
+}
+
+/** `Office.context.platform` (`PC`, `Mac`, `OfficeOnline`, …), or null outside Office. */
+export function officePlatform(): string | null {
+  try {
+    const context = office().context;
+    return context.platform ?? context.diagnostics?.platform ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function keep(token: string): string {
+  try {
+    localStorage.setItem(TOKEN_KEY, token);
+  } catch {
+    // Signed in for this pane only.
+  }
+  return token;
+}
+
+const DEVICE_NAME = "Excel";
+
+type RelayClient = Pick<
+  OpenGeniClient,
+  "createNativeAppRelay" | "pollNativeAppRelay" | "exchangeNativeAppCode"
+>;
+
+/** A browser sign-in in progress: the code to show, and ways to reopen or cancel it. */
+export type BrowserSignIn = {
+  confirmationCode: string;
+  reopen(): void;
+  cancel(): void;
+  /** The credential once the browser approves; rejects on cancel, refusal or expiry. */
+  done: Promise<string>;
+};
+
+export const SIGN_IN_CANCELLED = "Sign-in was cancelled.";
+
+export async function startBrowserSignIn(
+  options: {
+    client: RelayClient;
+    /** The web app's origin, which serves /native-sign-in and the callback page. */
+    webOrigin: string;
+    openBrowser: (url: string) => void;
+    pollMs?: number;
+    now?: () => number;
+    sleep?: (ms: number) => Promise<void>;
+  },
+  request: SignInRequest,
+): Promise<BrowserSignIn> {
+  const { client, webOrigin, openBrowser } = options;
+  const now = options.now ?? Date.now;
+  const sleep =
+    options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const redirectUri = `${webOrigin}${CALLBACK_PATH}`;
+  const relay = await client.createNativeAppRelay({
+    redirectUri,
+    codeChallenge: request.challenge,
+    codeChallengeMethod: "S256",
+    platform: "office",
+    deviceName: DEVICE_NAME,
+  });
+  const url = `${webOrigin}/native-sign-in?${new URLSearchParams({
+    relay: relay.relayId,
+    platform: "office",
+    device_name: DEVICE_NAME,
+  })}`;
+  const expiresAt = new Date(relay.expiresAt).getTime();
+  const signal = { cancelled: false };
+  const done = (async () => {
+    while (!signal.cancelled) {
+      await sleep(options.pollMs ?? 2_000);
+      if (signal.cancelled) break;
+      let result: NativeAppRelayPoll | null = null;
+      try {
+        result = await client.pollNativeAppRelay({
+          relayId: relay.relayId,
+          codeVerifier: request.verifier,
+        });
+      } catch {
+        // A dropped or limited poll: ask again next time.
+      }
+      if (signal.cancelled) break;
+      if (result?.status === "approved") {
+        const token = await client.exchangeNativeAppCode({
+          code: result.code,
+          codeVerifier: request.verifier,
+          redirectUri,
+        });
+        return keep(token.accessToken);
+      }
+      if (result?.status === "refused") throw new Error("Sign-in was refused. Try again.");
+      // `gone` can also be the moment the browser approves; only time ends it.
+      if (now() >= expiresAt) throw new Error("Sign-in timed out. Try again.");
+    }
+    throw new Error(SIGN_IN_CANCELLED);
+  })();
+  openBrowser(url);
+  return {
+    confirmationCode: relay.confirmationCode,
+    reopen: () => openBrowser(url),
+    cancel: () => {
+      signal.cancelled = true;
+    },
+    done,
+  };
+}
+
 export async function signIn(apiBaseUrl: string, request: SignInRequest): Promise<string> {
   const { verifier, state } = request;
   const redirectUri = `${window.location.origin}${CALLBACK_PATH}`;
@@ -67,10 +187,5 @@ export async function signIn(apiBaseUrl: string, request: SignInRequest): Promis
   const token = await new OpenGeniClient({
     baseUrl: apiBaseUrl,
   }).exchangeNativeAppCode({ code, codeVerifier: verifier, redirectUri });
-  try {
-    localStorage.setItem(TOKEN_KEY, token.accessToken);
-  } catch {
-    // Signed in for this pane only.
-  }
-  return token.accessToken;
+  return keep(token.accessToken);
 }

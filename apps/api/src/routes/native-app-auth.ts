@@ -14,7 +14,7 @@ import {
   unregisterNativePushDevice,
 } from "@opengeni/db";
 import { sql } from "drizzle-orm";
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { runManagedAuthProvider } from "../auth/managed-auth-attempt-context";
@@ -24,6 +24,13 @@ import { admitManagedSignInMutation } from "./managed-sign-in-methods";
 import { parseRequestBody } from "../http/request-body";
 import { ApiHttpError } from "../http/api-error";
 import { nativePushConfigured } from "../native-push-dispatch";
+import { trustedRequestSourceRateLimitKey } from "../http/request-source";
+import { TokenBucket } from "./enrollments";
+import {
+  createNativeAppRelays,
+  NATIVE_APP_RELAY_ID,
+  type NativeAppRelayStore,
+} from "./native-app-relay";
 import { NATIVE_PUSH_UNAVAILABLE_DETAIL_CODE } from "@opengeni/contracts";
 
 // Native app sign-in (RFC 8252 shape: authorization code + PKCE over a custom
@@ -78,6 +85,26 @@ const TokenBody = z.object({
   code: z.string().regex(/^[A-Za-z0-9_-]{43}$/u),
   codeVerifier: z.string().regex(PKCE_VERIFIER),
   redirectUri: z.string().min(1).max(512),
+});
+
+// A pane that can't receive a redirect (the Excel add-in on desktop Office)
+// signs in through a relay; see native-app-relay.ts.
+const RelayBody = z.object({
+  redirectUri: z.string().min(1).max(512),
+  codeChallenge: z.string().regex(PKCE_CHALLENGE),
+  codeChallengeMethod: z.literal("S256"),
+  platform: z.enum(NATIVE_APP_PLATFORMS),
+  deviceName: z.string().trim().min(1).max(80).optional(),
+});
+
+const RelayApproveBody = z.object({
+  relayId: z.string().regex(NATIVE_APP_RELAY_ID),
+  confirmationCode: z.string().min(1).max(32),
+});
+
+const RelayPollBody = z.object({
+  relayId: z.string().regex(NATIVE_APP_RELAY_ID),
+  codeVerifier: z.string().regex(PKCE_VERIFIER),
 });
 
 const PushDeviceBody = z.object({
@@ -176,15 +203,36 @@ async function rows<T>(deps: ApiRouteDeps, query: ReturnType<typeof sql>): Promi
   return (Array.isArray(result) ? result : (result as { rows: T[] }).rows) as T[];
 }
 
-export function registerNativeAppAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
+/** Per-source limits on the relay routes, which a signed-out pane can reach. */
+export function nativeAppRelayLimiters() {
+  return {
+    // Each sign-in click makes one relay.
+    create: new TokenBucket({ capacity: 10, refillPerSecond: 0.1 }),
+    // The pane polls every two seconds while the person is in the browser.
+    poll: new TokenBucket({ capacity: 30, refillPerSecond: 1 }),
+    // A person types the code; a few retries cover typos.
+    approve: new TokenBucket({ capacity: 10, refillPerSecond: 0.1 }),
+  };
+}
+
+export function registerNativeAppAuthRoutes(
+  app: Hono,
+  deps: ApiRouteDeps,
+  options: {
+    relayLimiters?: ReturnType<typeof nativeAppRelayLimiters>;
+    relayStore?: NativeAppRelayStore;
+  } = {},
+): void {
   const base = "/v1/native-app";
   app.use(`${base}/*`, async (context, next) => {
     context.header("cache-control", "no-store");
     await next();
   });
 
-  // The signed-in browser approves one device: same-origin, cookie-authenticated.
-  app.post(`${base}/authorize`, async (context) => {
+  // The signed-in person approving in this browser, and the sign-in method
+  // their device session is bound to (the same as the approving browser
+  // session's, so the canonical identity checks treat them alike).
+  const approvingPerson = async (context: Context) => {
     const auth = deps.managedAuth;
     if (!auth) throw new HTTPException(404);
     await admitManagedSignInMutation(context, deps);
@@ -194,24 +242,6 @@ export function registerNativeAppAuthRoutes(app: Hono, deps: ApiRouteDeps): void
       managedAuthSessionAdapter: deps.managedAuthSessionAdapter,
       managedAuthSessionSetMode: deps.settings.managedAuthSessionSetMode,
     });
-    const parsed = parseRequestBody(AuthorizeBody, await context.req.json().catch(() => null), {
-      status: 400,
-      message: "Invalid native sign-in request",
-    });
-    const body = parsed;
-    if (
-      !nativeAppRedirectAllowed(
-        body.redirectUri,
-        deps.settings.nativeAppSchemes,
-        deploymentWebOrigins(deps.settings),
-      )
-    ) {
-      throw new HTTPException(400, {
-        message: unregisteredNativeRedirectMessage(body.redirectUri, excelAddin(deps.settings)),
-      });
-    }
-    // The device session is bound to the same sign-in method as the approving
-    // browser session, so the canonical identity checks treat them alike.
     const [approving] = await rows<{ loginBindingId: string | null }>(
       deps,
       sql`select login_binding_id as "loginBindingId" from auth_sessions
@@ -223,26 +253,136 @@ export function registerNativeAppAuthRoutes(app: Hono, deps: ApiRouteDeps): void
     );
     const providerId = MANAGED_PROVIDERS.find((provider) => provider === binding?.providerId);
     if (!providerId) throw new HTTPException(409, { message: "Sign-in method unavailable" });
+    return { userId: actor.authUserId, providerId };
+  };
+
+  const checkRedirect = (redirectUri: string) => {
+    if (
+      !nativeAppRedirectAllowed(
+        redirectUri,
+        deps.settings.nativeAppSchemes,
+        deploymentWebOrigins(deps.settings),
+      )
+    ) {
+      throw new HTTPException(400, {
+        message: unregisteredNativeRedirectMessage(redirectUri, excelAddin(deps.settings)),
+      });
+    }
+  };
+
+  /** A one-time code bound to the app's PKCE challenge and callback. */
+  const issueCode = async (grant: z.infer<typeof StoredGrant>): Promise<string> => {
+    const auth = deps.managedAuth;
+    if (!auth) throw new HTTPException(404);
     const code = randomBytes(32).toString("base64url");
     const context_ = await auth.$context;
     await context_.internalAdapter.createVerificationValue({
       identifier: codeIdentifier(code),
-      value: JSON.stringify(
-        StoredGrant.parse({
-          userId: actor.authUserId,
-          providerId,
-          redirectUri: body.redirectUri,
-          codeChallenge: body.codeChallenge,
-          platform: body.platform,
-          deviceName: body.deviceName ?? null,
-        }),
-      ),
+      value: JSON.stringify(StoredGrant.parse(grant)),
       expiresAt: new Date(Date.now() + NATIVE_APP_CODE_TTL_MS),
+    });
+    return code;
+  };
+
+  // The signed-in browser approves one device: same-origin, cookie-authenticated.
+  app.post(`${base}/authorize`, async (context) => {
+    const person = await approvingPerson(context);
+    const body = parseRequestBody(AuthorizeBody, await context.req.json().catch(() => null), {
+      status: 400,
+      message: "Invalid native sign-in request",
+    });
+    checkRedirect(body.redirectUri);
+    const code = await issueCode({
+      ...person,
+      redirectUri: body.redirectUri,
+      codeChallenge: body.codeChallenge,
+      platform: body.platform,
+      deviceName: body.deviceName ?? null,
     });
     const redirect = new URL(body.redirectUri);
     redirect.searchParams.set("code", code);
     if (body.state) redirect.searchParams.set("state", body.state);
     return context.json({ redirectUrl: redirect.toString() });
+  });
+
+  // Relays: public to create and poll (the pane isn't signed in yet), so each
+  // route has its own per-source limit, and an approval needs the signed-in
+  // browser plus the confirmation code the pane shows.
+  const limiters = options.relayLimiters ?? nativeAppRelayLimiters();
+  const limit = (context: Context, limiter: TokenBucket) => {
+    if (!limiter.take(trustedRequestSourceRateLimitKey(context, deps.settings))) {
+      throw new HTTPException(429, { message: "Too many sign-in attempts. Wait a moment." });
+    }
+  };
+  const relays = async () => {
+    const auth = deps.managedAuth;
+    if (!auth) throw new HTTPException(404);
+    if (options.relayStore) return createNativeAppRelays(options.relayStore);
+    const adapter = (await auth.$context).internalAdapter;
+    const store: NativeAppRelayStore = {
+      find: (identifier) => adapter.findVerificationValue(identifier),
+      consume: (identifier) => adapter.consumeVerificationValue(identifier),
+      create: (row) => adapter.createVerificationValue(row),
+      update: (identifier, row) => adapter.updateVerificationByIdentifier(identifier, row),
+    };
+    return createNativeAppRelays(store);
+  };
+
+  app.post(`${base}/relays`, async (context) => {
+    limit(context, limiters.create);
+    const body = parseRequestBody(RelayBody, await context.req.json().catch(() => null), {
+      status: 400,
+      message: "Invalid native sign-in request",
+    });
+    checkRedirect(body.redirectUri);
+    const relay = await (
+      await relays()
+    ).create({
+      redirectUri: body.redirectUri,
+      codeChallenge: body.codeChallenge,
+      platform: body.platform,
+      deviceName: body.deviceName ?? null,
+    });
+    return context.json({ ...relay, expiresAt: relay.expiresAt.toISOString() });
+  });
+
+  app.post(`${base}/relays/approve`, async (context) => {
+    limit(context, limiters.approve);
+    const person = await approvingPerson(context);
+    const body = parseRequestBody(RelayApproveBody, await context.req.json().catch(() => null), {
+      status: 400,
+      message: "Enter the code shown in the app.",
+    });
+    const result = await (
+      await relays()
+    ).approve(body.relayId, body.confirmationCode, (request) =>
+      issueCode({
+        ...person,
+        redirectUri: request.redirectUri,
+        codeChallenge: request.codeChallenge,
+        platform: StoredGrant.shape.platform.parse(request.platform),
+        deviceName: request.deviceName,
+      }),
+    );
+    if (result.status === "mismatch") {
+      throw new HTTPException(400, {
+        message: "That code doesn't match the one in the app. Check it and try again.",
+      });
+    }
+    if (result.status === "gone") {
+      throw new HTTPException(410, {
+        message: "This sign-in request has expired. Start again from the app.",
+      });
+    }
+    return context.json({ approved: true });
+  });
+
+  app.post(`${base}/relays/poll`, async (context) => {
+    limit(context, limiters.poll);
+    const parsed = RelayPollBody.safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success) return context.json({ error: "invalid_request" }, 400);
+    const result = await (await relays()).poll(parsed.data.relayId, parsed.data.codeVerifier);
+    return context.json(result);
   });
 
   // The app redeems its single-use code with the PKCE verifier.

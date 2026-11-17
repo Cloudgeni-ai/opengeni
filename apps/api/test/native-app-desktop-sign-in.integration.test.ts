@@ -354,3 +354,117 @@ describe("desktop app sign-in", () => {
     expect(await refusal({ authorization: "Bearer not-a-known-key" })).toBe("credential_invalid");
   }, 120_000);
 });
+
+// The Excel add-in on desktop Office signs in through the system browser and a
+// relay: the pane holds the verifier, the browser approves with the pane's
+// confirmation code, the pane takes the code once and redeems it.
+describe("relayed sign-in", () => {
+  const CALLBACK = `${ORIGIN}/office/auth-callback.html`;
+  const json = (body: unknown, headers: Record<string, string> = {}) => ({
+    method: "POST",
+    headers: { "content-type": "application/json", ...headers },
+    body: JSON.stringify(body),
+  });
+  const browserHeaders = (cookie: string) => ({
+    cookie,
+    origin: ORIGIN,
+    "sec-fetch-site": "same-origin",
+  });
+
+  test("the browser's approval signs the pane in once, only with its verifier and code", async () => {
+    const rt = runtime();
+    const browser = await signedInBrowser(rt);
+    const verifier = randomBytes(48).toString("base64url");
+    const challenge = createHash("sha256").update(verifier).digest("base64url");
+    const created = await rt.app.request(
+      "/v1/native-app/relays",
+      json({
+        redirectUri: CALLBACK,
+        codeChallenge: challenge,
+        codeChallengeMethod: "S256",
+        platform: "office",
+        deviceName: "Excel",
+      }),
+    );
+    expect(created.status).toBe(200);
+    const relay = (await created.json()) as { relayId: string; confirmationCode: string };
+    const poll = async (codeVerifier = verifier) =>
+      (await (
+        await rt.app.request(
+          "/v1/native-app/relays/poll",
+          json({ relayId: relay.relayId, codeVerifier }),
+        )
+      ).json()) as { status: string; code?: string };
+    expect(await poll()).toEqual({ status: "pending" });
+
+    const approve = (confirmationCode: string, cookie = browser.cookie) =>
+      rt.app.request(
+        "/v1/native-app/relays/approve",
+        json({ relayId: relay.relayId, confirmationCode }, browserHeaders(cookie)),
+      );
+    // Signed out, nothing is approved; a wrong code is refused.
+    expect([401, 403]).toContain((await approve(relay.confirmationCode, "")).status);
+    const wrong = relay.confirmationCode === "AAAAAA" ? "BBBBBB" : "AAAAAA";
+    expect((await approve(wrong)).status).toBe(400);
+    expect(await poll()).toEqual({ status: "pending" });
+
+    expect((await approve(relay.confirmationCode.toLowerCase())).status).toBe(200);
+    expect((await approve(relay.confirmationCode)).status).toBe(410);
+    expect(await poll(randomBytes(48).toString("base64url"))).toEqual({ status: "gone" });
+    const approved = await poll();
+    expect(approved.status).toBe("approved");
+    expect(await poll()).toEqual({ status: "gone" });
+
+    const redeem = (codeVerifier: string) =>
+      rt.app.request(
+        "/v1/native-app/token",
+        json({ code: approved.code, codeVerifier, redirectUri: CALLBACK }),
+      );
+    expect((await redeem(randomBytes(48).toString("base64url"))).status).toBe(400);
+    // The wrong verifier above used the code up: codes are single-use.
+    expect((await redeem(verifier)).status).toBe(400);
+  }, 120_000);
+
+  test("the code redeems for the add-in's own device session", async () => {
+    const rt = runtime();
+    const browser = await signedInBrowser(rt);
+    const verifier = randomBytes(48).toString("base64url");
+    const challenge = createHash("sha256").update(verifier).digest("base64url");
+    const relay = (await (
+      await rt.app.request(
+        "/v1/native-app/relays",
+        json({
+          redirectUri: CALLBACK,
+          codeChallenge: challenge,
+          codeChallengeMethod: "S256",
+          platform: "office",
+          deviceName: "Excel",
+        }),
+      )
+    ).json()) as { relayId: string; confirmationCode: string };
+    await rt.app.request(
+      "/v1/native-app/relays/approve",
+      json(
+        { relayId: relay.relayId, confirmationCode: relay.confirmationCode },
+        browserHeaders(browser.cookie),
+      ),
+    );
+    const { code } = (await (
+      await rt.app.request(
+        "/v1/native-app/relays/poll",
+        json({ relayId: relay.relayId, codeVerifier: verifier }),
+      )
+    ).json()) as { code: string };
+    const token = await rt.app.request(
+      "/v1/native-app/token",
+      json({ code, codeVerifier: verifier, redirectUri: CALLBACK }),
+    );
+    expect(token.status).toBe(200);
+    const { accessToken } = (await token.json()) as { accessToken: string };
+    expect(accessToken.startsWith("ogapp_")).toBe(true);
+    const [session] = await admin<{ userAgent: string }[]>`
+      select user_agent as "userAgent" from auth_sessions
+      where user_id = ${browser.userId} and user_agent like 'Opengeni app%'`;
+    expect(session?.userAgent).toBe(nativeAppSessionUserAgent("office", "Excel"));
+  }, 120_000);
+});
