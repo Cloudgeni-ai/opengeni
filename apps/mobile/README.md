@@ -64,8 +64,8 @@ A rounded bar at the bottom (the content ends above it) moves between **Chats** 
 **Meetings** and **Inbox** (with a count of the questions and approvals
 waiting on you). Home stays at the bottom of the stack and
 the other places swap in place above it, so switching never grows the stack.
-The chats menu opens from the header's menu button or with a swipe right from
-the left edge of any of these places.
+The chats menu opens from the header's menu button or, on iOS, with a swipe
+right from the left edge of any of these places.
 
 ## Artifacts
 
@@ -77,8 +77,8 @@ glyph otherwise). Search and type chips filter it; pull down to refresh.
 Tapping a card opens the viewer. Sites and editors show in the web app's
 chromeless pages (`/native-view/…`), signed in from the device session through
 `POST /v1/native-app/web-session`, so a Site's data and the editors work as on
-the web. Images open
-zoomable and other files in the system viewer. The header has Share and the
+the web. Images open zoomable on iOS. On iOS, PDFs, text and media draw in
+place (without scripts); other files open outside the app. The header has Share and the
 web library's menu: Open chat, Pin, Duplicate (Sites), Copy link, Download in
 the original format (HTML, the file itself, XLSX), and Delete… for documents,
 spreadsheets and presentations. An artifact linked on its own line in a chat

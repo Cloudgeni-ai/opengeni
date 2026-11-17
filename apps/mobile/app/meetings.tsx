@@ -2,7 +2,6 @@ import { MeetingsList } from "@opengeni/react-native/meetings";
 import { useNativeTimelineTheme } from "@opengeni/react-native/timeline";
 import { Stack, router, useFocusEffect } from "expo-router";
 import { useCallback, useState } from "react";
-
 import { useAccount } from "@/account";
 import { WorkspaceGate } from "@/meetings";
 import { AppThemeProvider } from "@/theme";
@@ -20,10 +19,10 @@ export default function MeetingsScreen() {
   );
 }
 
-/* The web Meetings page at phone width: the recorder on top, then every
-   meeting the person can see, newest first. */
 const themed = (node: React.ReactNode) => <AppThemeProvider>{node}</AppThemeProvider>;
 
+/* The web Meetings page at phone width: the recorder on top, then every
+   meeting the person can see, newest first. */
 function Meetings({ workspaceId }: { workspaceId: string }) {
   const c = useNativeTimelineTheme().colors;
   const { client } = useAccount();

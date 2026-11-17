@@ -2,7 +2,7 @@ import { useOpenGeniText } from "@opengeni/react/messages";
 import { fontStyle, Icon, useNativeTimelineTheme } from "@opengeni/react-native/timeline";
 import type { ArtifactCatalogItem } from "@opengeni/sdk";
 import { Stack, router, useFocusEffect } from "expo-router";
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
@@ -55,13 +55,13 @@ function Artifacts({ workspaceId }: { workspaceId: string }) {
   const catalog = useArtifactCatalog(client, workspaceId, kind, query);
   const { refresh } = catalog;
   // Fresh each time the screen comes back to the front (after the viewer, too).
-  const [focusedOnce, setFocusedOnce] = useState(false);
+  const focusedOnce = useRef(false);
   useFocusEffect(
     useCallback(() => {
       setNow(new Date());
-      if (focusedOnce) void refresh();
-      else setFocusedOnce(true);
-    }, [focusedOnce, refresh]),
+      if (focusedOnce.current) void refresh();
+      focusedOnce.current = true;
+    }, [refresh]),
   );
   const open = useCallback(
     (item: ArtifactCatalogItem) =>
@@ -156,6 +156,11 @@ function Artifacts({ workspaceId }: { workspaceId: string }) {
         style={{ flex: 1, backgroundColor: c.bg }}
         data={catalog.items}
         keyExtractor={artifactKey}
+        // A Site's still is a small web view: keep only a few screens of
+        // cards mounted so a long library stays light on memory and data.
+        initialNumToRender={5}
+        maxToRenderPerBatch={4}
+        windowSize={5}
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="on-drag"
         ListHeaderComponent={header}
