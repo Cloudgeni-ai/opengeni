@@ -77,9 +77,11 @@ function UseAnotherAccount({ signOut }: { signOut: () => Promise<void> }) {
 
 /**
  * A relayed sign-in (the Excel add-in on desktop Office, which opened this
- * page in the person's browser). The app shows a short code; typing it here
- * proves this browser is approving the app the person is looking at, not a
- * request someone else made and sent them a link to.
+ * page in the person's browser). The app shows a short code and the person
+ * types it here. That makes approving a request from someone else's link a
+ * deliberate step, but it is no proof against phishing: whoever sends the
+ * link can send their code with it. The page says to allow only a sign-in the
+ * person started, and the API keeps relays short-lived and single-use.
  */
 export function NativeRelaySignIn({
   search,
@@ -151,7 +153,8 @@ export function NativeRelaySignIn({
           <dt className="text-fg-muted">Account</dt>
           <dd className="truncate text-fg">{email}</dd>
           <dt className="text-fg-muted">Device</dt>
-          <dd className="truncate text-fg">{nativeDeviceLabel(search)}</dd>
+          {/* Not the link's device_name: whoever made the link chose that text. */}
+          <dd className="truncate text-fg">{nativeDeviceLabel({ platform: search.platform })}</dd>
         </dl>
       </FormPage>
     </ConsentFrame>

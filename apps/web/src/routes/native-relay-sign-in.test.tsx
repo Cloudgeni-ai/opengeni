@@ -36,7 +36,7 @@ test("a relayed sign-in is allowed only with the code shown in Excel", async () 
   await act(async () =>
     root.render(
       <NativeRelaySignIn
-        search={{ platform: "office", device_name: "Excel", relay: "r".repeat(43) }}
+        search={{ platform: "office", device_name: "Bendik's work laptop", relay: "r".repeat(43) }}
         relayId={"r".repeat(43)}
         email="ada@example.test"
         approve={async (input) => {
@@ -49,8 +49,11 @@ test("a relayed sign-in is allowed only with the code shown in Excel", async () 
   const submit = () =>
     [...container.querySelectorAll("button")].find((button) => button.type === "submit")!;
   expect(container.textContent).toContain("Code shown in Excel");
+  // The device row is fixed for the platform, never the link's own text.
+  expect(container.textContent).toContain("the Opengeni add-in in Excel");
   expect(submit().disabled).toBe(true);
 
+  expect(container.textContent).not.toContain("work laptop");
   await type(container.querySelector("input")!, "ab3x7k");
   expect(submit().disabled).toBe(false);
   await act(async () => {

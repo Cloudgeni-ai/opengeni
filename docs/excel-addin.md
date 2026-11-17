@@ -58,7 +58,8 @@ Excel on the web, Windows and Mac.
        challenge (`POST /v1/native-app/relays`). It gets a random 256-bit relay
        id and a six-character confirmation code, shows the code under
        "Continue in your browser", and opens
-       `/native-sign-in?relay=<id>&platform=office`.
+       `/native-sign-in?relay=<id>&platform=office`. The page names the device
+       from the platform, never from text in the link.
     2. The signed-in browser page asks for the code shown in Excel. Allow
        (`POST /v1/native-app/relays/approve`, same-origin and
        cookie-authenticated like `/authorize`) mints the ordinary one-time code
@@ -69,12 +70,17 @@ Excel on the web, Windows and Mac.
        with `exchangeNativeAppCode` as on the web.
 
     Relays are Better Auth verification rows like the codes themselves (no
-    migration): five-minute lifetime, keyed by a hash of the relay id. Each
-    relay route has its own per-source rate limit.
+    migration): five-minute lifetime, keyed by a hash of the relay id. Every
+    state change (a wrong code, the approval, handing out the code) takes the
+    row atomically and writes the next state, so concurrent requests can't
+    undo an approval or undercount wrong codes. Each relay route has its own
+    per-source rate limit; polls are limited per relay and address, with a
+    higher cap for the whole address so many people behind one office address
+    can sign in at once.
 
     | Abuse | How it's closed |
     | --- | --- |
-    | Someone sends a link carrying their own relay, so the victim's Allow would sign the attacker in | Allow needs the code shown in the pane that made the relay. The victim's pane doesn't show it, and the page says to allow only a sign-in they started in Excel. |
+    | Someone sends a link carrying their own relay, so the victim's Allow would sign the attacker in | Allow needs the code shown in the pane that made the relay, so the victim has to type a code that isn't in their own Excel, and the page says to allow only a sign-in they started there. This is friction, not proof: an attacker can send the code along with the link, as with any device-code flow. The relay also lives only five minutes. |
     | Guessing a relay id | 256 random bits, rate-limited polls, five-minute lifetime; and a poll returns nothing without the matching verifier. |
     | Depositing into someone else's relay (signing their pane in to the attacker's account, so the attacker's agents reach their workbook) | Approving needs both the relay id, which only that pane and its person's browser hold, and the code shown only in that pane. Five wrong codes refuse the relay, and the approve route is rate-limited. |
     | Replay | The relay is taken atomically on approval and on the poll that hands out the code; the code itself is single-use with a two-minute lifetime. |

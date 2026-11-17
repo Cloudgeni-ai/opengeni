@@ -10,7 +10,8 @@ import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto
 //
 // The code never passes through the browser, a relay id alone releases
 // nothing (polls need the verifier), and every state lives in short-lived
-// single-use verification rows.
+// single-use verification rows. Each state change takes the row atomically
+// and writes the next state, so concurrent requests can't interleave.
 
 export const NATIVE_APP_RELAY_TTL_MS = 5 * 60 * 1_000;
 /** Wrong confirmation codes a relay accepts before it is refused for good. */
@@ -27,7 +28,6 @@ export type NativeAppRelayStore = {
   /** Atomically takes the row: exactly one concurrent caller gets it. */
   consume(identifier: string): Promise<{ value: string; expiresAt: Date } | null>;
   create(row: { identifier: string; value: string; expiresAt: Date }): Promise<unknown>;
-  update(identifier: string, row: { value: string }): Promise<unknown>;
 };
 
 export type NativeAppRelayRequest = {
@@ -59,6 +59,11 @@ export type NativeAppRelayApproval =
 
 function relayIdentifier(relayId: string): string {
   return `${RELAY_IDENTIFIER_PREFIX}${createHash("sha256").update(relayId, "utf8").digest("hex")}`;
+}
+
+/** A relay's rate-limit key part: its hash, so limiter maps never hold relay ids. */
+export function relayRateLimitScope(relayId: string): string {
+  return createHash("sha256").update(relayId, "utf8").digest("base64url").slice(0, 22);
 }
 
 function sameText(left: string, right: string): boolean {
@@ -102,6 +107,16 @@ export function createNativeAppRelays(store: NativeAppRelayStore, now: () => num
     const state = parseState(row.value);
     return state ? { state, expiresAt: row.expiresAt } : null;
   };
+  /** Atomically takes the live row: exactly one concurrent caller gets it. */
+  const take = async (relayId: string) => {
+    const row = await store.consume(relayIdentifier(relayId));
+    if (!row || row.expiresAt.getTime() <= now()) return null;
+    const state = parseState(row.value);
+    return state ? { state, expiresAt: row.expiresAt } : null;
+  };
+  /** Writes the relay's next state, keeping its original expiry. */
+  const put = (relayId: string, state: RelayState, expiresAt: Date) =>
+    store.create({ identifier: relayIdentifier(relayId), value: JSON.stringify(state), expiresAt });
 
   return {
     async create(
@@ -120,9 +135,10 @@ export function createNativeAppRelays(store: NativeAppRelayStore, now: () => num
     },
 
     /**
-     * The signed-in browser approves with the code the pane shows. `mint`
-     * makes the app's one-time code for this relay's request; it runs only
-     * for the single caller that wins the relay.
+     * The signed-in browser approves with the code the pane shows. Every
+     * decision starts by taking the row atomically, so concurrent approvals
+     * (right or wrong codes) are applied one at a time: `mint` makes the app's
+     * one-time code at most once, and attempts are never undercounted.
      */
     async approve(
       relayId: string,
@@ -131,33 +147,26 @@ export function createNativeAppRelays(store: NativeAppRelayStore, now: () => num
     ): Promise<NativeAppRelayApproval> {
       const found = await live(relayId);
       if (!found || found.state.status !== "pending") return { status: "gone" };
-      const identifier = relayIdentifier(relayId);
-      if (!sameText(normalizeConfirmationCode(typedCode), found.state.confirmationCode)) {
-        const attempts = found.state.attempts + 1;
+      const taken = await take(relayId);
+      if (!taken) return { status: "gone" };
+      if (taken.state.status !== "pending") {
+        await put(relayId, taken.state, taken.expiresAt);
+        return { status: "gone" };
+      }
+      if (!sameText(normalizeConfirmationCode(typedCode), taken.state.confirmationCode)) {
+        const attempts = taken.state.attempts + 1;
         const refused = attempts >= NATIVE_APP_RELAY_MAX_ATTEMPTS;
-        await store.update(identifier, {
-          value: JSON.stringify({
-            ...found.state,
-            attempts,
-            status: refused ? "refused" : "pending",
-          }),
-        });
+        await put(
+          relayId,
+          { ...taken.state, attempts, status: refused ? "refused" : "pending" },
+          taken.expiresAt,
+        );
         return refused
           ? { status: "gone" }
           : { status: "mismatch", attemptsLeft: NATIVE_APP_RELAY_MAX_ATTEMPTS - attempts };
       }
-      // Single use: only the caller that takes the pending row goes on.
-      const taken = await store.consume(identifier);
-      const state = taken ? parseState(taken.value) : null;
-      if (!taken || !state || state.status !== "pending" || taken.expiresAt.getTime() <= now()) {
-        return { status: "gone" };
-      }
-      const code = await mint(state);
-      await store.create({
-        identifier,
-        value: JSON.stringify({ ...state, status: "approved", code }),
-        expiresAt: taken.expiresAt,
-      });
+      const code = await mint(taken.state);
+      await put(relayId, { ...taken.state, status: "approved", code }, taken.expiresAt);
       return { status: "approved" };
     },
 
@@ -169,10 +178,13 @@ export function createNativeAppRelays(store: NativeAppRelayStore, now: () => num
       }
       if (found.state.status === "pending") return { status: "pending" };
       if (found.state.status === "refused") return { status: "refused" };
-      const taken = await store.consume(relayIdentifier(relayId));
-      const state = taken ? parseState(taken.value) : null;
-      if (!state || state.status !== "approved" || !state.code) return { status: "gone" };
-      return { status: "approved", code: state.code };
+      const taken = await take(relayId);
+      if (!taken) return { status: "gone" };
+      if (taken.state.status !== "approved" || !taken.state.code) {
+        await put(relayId, taken.state, taken.expiresAt);
+        return { status: "gone" };
+      }
+      return { status: "approved", code: taken.state.code };
     },
   };
 }

@@ -17,24 +17,29 @@ import {
 // Office). Storage is the same single-use verification rows Better Auth keeps;
 // this in-memory store takes a row atomically, as consumeVerificationValue does.
 
+// Every operation yields first, as a database round trip does, so concurrent
+// requests interleave.
+const roundTrip = () => new Promise((resolve) => setTimeout(resolve, 0));
+
 function memoryStore(): NativeAppRelayStore & {
   rows: Map<string, { value: string; expiresAt: Date }>;
 } {
   const rows = new Map<string, { value: string; expiresAt: Date }>();
   return {
     rows,
-    find: async (identifier) => rows.get(identifier) ?? null,
+    find: async (identifier) => {
+      await roundTrip();
+      return rows.get(identifier) ?? null;
+    },
     consume: async (identifier) => {
+      await roundTrip();
       const row = rows.get(identifier) ?? null;
       rows.delete(identifier);
       return row;
     },
     create: async ({ identifier, value, expiresAt }) => {
+      await roundTrip();
       rows.set(identifier, { value, expiresAt });
-    },
-    update: async (identifier, { value }) => {
-      const row = rows.get(identifier);
-      if (row) rows.set(identifier, { ...row, value });
     },
   };
 }
@@ -104,6 +109,52 @@ describe("native app sign-in relay", () => {
     ]);
     expect(results.map((result) => result.status).sort()).toEqual(["approved", "gone"]);
     expect(minted).toHaveLength(1);
+  });
+
+  test("a wrong code racing the right one never undoes the approval or mints twice", async () => {
+    for (const order of ["wrong first", "right first"] as const) {
+      const { relays, mint, minted } = relaysAt();
+      const { verifier, challenge } = pkce();
+      const relay = await newRelay(relays, challenge);
+      const wrong = relay.confirmationCode === "AAAAAA" ? "BBBBBB" : "AAAAAA";
+      const right = () => relays.approve(relay.relayId, relay.confirmationCode, mint);
+      const mistaken = () => relays.approve(relay.relayId, wrong, mint);
+      const results =
+        order === "wrong first"
+          ? await Promise.all([mistaken(), right()])
+          : await Promise.all([right(), mistaken()]);
+      const approved = results.some((result) => result.status === "approved");
+      expect(minted.length).toBe(approved ? 1 : 0);
+      if (approved) {
+        // The approved state survives the losing request.
+        expect(await relays.poll(relay.relayId, verifier)).toEqual({
+          status: "approved",
+          code: "code-1",
+        });
+      } else {
+        // The right code lost the race to a wrong one: it can simply be tried again.
+        expect(await right()).toEqual({ status: "approved" });
+        expect(minted).toHaveLength(1);
+      }
+    }
+  });
+
+  test("concurrent wrong codes are all counted", async () => {
+    const { relays, mint } = relaysAt();
+    const { verifier, challenge } = pkce();
+    const relay = await newRelay(relays, challenge);
+    const wrong = relay.confirmationCode === "AAAAAA" ? "BBBBBB" : "AAAAAA";
+    const attempt = () => relays.approve(relay.relayId, wrong, mint);
+    const attemptsLeft: number[] = [];
+    for (let round = 0; round < 20; round += 1) {
+      for (const result of await Promise.all([attempt(), attempt()])) {
+        if (result.status === "mismatch") attemptsLeft.push(result.attemptsLeft);
+      }
+      if ((await relays.poll(relay.relayId, verifier)).status === "refused") break;
+    }
+    // Each wrong code counted as its own attempt, none twice.
+    expect(attemptsLeft.sort((left, right) => right - left)).toEqual([4, 3, 2, 1]);
+    expect(await relays.poll(relay.relayId, verifier)).toEqual({ status: "refused" });
   });
 
   test("expires: no approval or poll after its lifetime", async () => {
@@ -241,6 +292,7 @@ describe("relay routes", () => {
     const { post } = routes({
       create: new TokenBucket({ capacity: 2, refillPerSecond: 0.0001 }),
       poll: new TokenBucket({ capacity: 3, refillPerSecond: 0.0001 }),
+      pollAddress: new TokenBucket({ capacity: 5, refillPerSecond: 0.0001 }),
       approve: new TokenBucket({ capacity: 1, refillPerSecond: 0.0001 }),
     });
     const { verifier, challenge } = pkce();
@@ -255,6 +307,15 @@ describe("relay routes", () => {
       expect((await post("relays/poll", { relayId, codeVerifier: verifier })).status).toBe(200);
     }
     expect((await post("relays/poll", { relayId, codeVerifier: verifier })).status).toBe(429);
+    // Another pane behind the same address polls its own relay; the address as
+    // a whole still has a cap.
+    const other = randomBytes(32).toString("base64url");
+    expect((await post("relays/poll", { relayId: other, codeVerifier: verifier })).status).toBe(
+      200,
+    );
+    expect((await post("relays/poll", { relayId: other, codeVerifier: verifier })).status).toBe(
+      429,
+    );
 
     // Approval is limited before it even looks at the browser session.
     await post("relays/approve", { relayId, confirmationCode: "ABCDEF" });

@@ -29,6 +29,7 @@ import { TokenBucket } from "./enrollments";
 import {
   createNativeAppRelays,
   NATIVE_APP_RELAY_ID,
+  relayRateLimitScope,
   type NativeAppRelayStore,
 } from "./native-app-relay";
 import { NATIVE_PUSH_UNAVAILABLE_DETAIL_CODE } from "@opengeni/contracts";
@@ -208,8 +209,11 @@ export function nativeAppRelayLimiters() {
   return {
     // Each sign-in click makes one relay.
     create: new TokenBucket({ capacity: 10, refillPerSecond: 0.1 }),
-    // The pane polls every two seconds while the person is in the browser.
+    // Each pane polls its own relay every two seconds while the person is in
+    // the browser; the address-wide limit leaves room for many people behind
+    // one office address.
     poll: new TokenBucket({ capacity: 30, refillPerSecond: 1 }),
+    pollAddress: new TokenBucket({ capacity: 300, refillPerSecond: 25 }),
     // A person types the code; a few retries cover typos.
     approve: new TokenBucket({ capacity: 10, refillPerSecond: 0.1 }),
   };
@@ -309,8 +313,8 @@ export function registerNativeAppAuthRoutes(
   // route has its own per-source limit, and an approval needs the signed-in
   // browser plus the confirmation code the pane shows.
   const limiters = options.relayLimiters ?? nativeAppRelayLimiters();
-  const limit = (context: Context, limiter: TokenBucket) => {
-    if (!limiter.take(trustedRequestSourceRateLimitKey(context, deps.settings))) {
+  const limit = (context: Context, limiter: TokenBucket, scope = "") => {
+    if (!limiter.take(`${trustedRequestSourceRateLimitKey(context, deps.settings)}${scope}`)) {
       throw new HTTPException(429, { message: "Too many sign-in attempts. Wait a moment." });
     }
   };
@@ -323,7 +327,6 @@ export function registerNativeAppAuthRoutes(
       find: (identifier) => adapter.findVerificationValue(identifier),
       consume: (identifier) => adapter.consumeVerificationValue(identifier),
       create: (row) => adapter.createVerificationValue(row),
-      update: (identifier, row) => adapter.updateVerificationByIdentifier(identifier, row),
     };
     return createNativeAppRelays(store);
   };
@@ -378,9 +381,10 @@ export function registerNativeAppAuthRoutes(
   });
 
   app.post(`${base}/relays/poll`, async (context) => {
-    limit(context, limiters.poll);
+    limit(context, limiters.pollAddress);
     const parsed = RelayPollBody.safeParse(await context.req.json().catch(() => null));
     if (!parsed.success) return context.json({ error: "invalid_request" }, 400);
+    limit(context, limiters.poll, `:${relayRateLimitScope(parsed.data.relayId)}`);
     const result = await (await relays()).poll(parsed.data.relayId, parsed.data.codeVerifier);
     return context.json(result);
   });

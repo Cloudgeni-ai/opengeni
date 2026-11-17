@@ -124,7 +124,6 @@ export async function startBrowserSignIn(
   const url = `${webOrigin}/native-sign-in?${new URLSearchParams({
     relay: relay.relayId,
     platform: "office",
-    device_name: DEVICE_NAME,
   })}`;
   const expiresAt = new Date(relay.expiresAt).getTime();
   const signal = { cancelled: false };

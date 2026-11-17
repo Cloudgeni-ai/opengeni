@@ -81,9 +81,7 @@ describe("browser sign-in", () => {
     );
     expect(started.confirmationCode).toBe("AB3X7K");
     expect(await started.done).toBe("ogapp_token");
-    expect(opened).toEqual([
-      `${WEB}/native-sign-in?relay=${"r".repeat(43)}&platform=office&device_name=Excel`,
-    ]);
+    expect(opened).toEqual([`${WEB}/native-sign-in?relay=${"r".repeat(43)}&platform=office`]);
     expect(calls.created).toEqual([
       {
         redirectUri: `${WEB}/office/auth-callback.html`,
