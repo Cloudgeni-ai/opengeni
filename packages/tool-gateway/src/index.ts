@@ -297,10 +297,12 @@ export class ToolGateway {
     if (!definition) {
       throw new ToolGatewayToolNotFoundError();
     }
+    // Arguments first: a call that can never run is rejected as such, never
+    // reported as needing an approval it could not use.
+    const callArguments = admitInput(definition, request.arguments);
     if (!this.resolveApproval && this.requireApproval?.(definition.entry, caller, context)) {
       throw new ToolGatewayApprovalRequiredError();
     }
-    const callArguments = admitInput(definition, request.arguments);
     if (
       caller.kind === "model" &&
       !this.resolveApproval &&

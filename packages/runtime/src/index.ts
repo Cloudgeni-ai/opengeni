@@ -4967,11 +4967,14 @@ type ModelArgumentAdmittingServer = MCPServer & {
     toolName: string,
     args: Record<string, unknown>,
   ): Promise<Record<string, unknown> | undefined>;
+  /** Whether this server listed `toolName` to the model. Reads no tool list. */
+  ownsModelTool(toolName: string): boolean;
 };
 
 function admitsModelArguments(server: MCPServer): server is ModelArgumentAdmittingServer {
   return (
-    typeof (server as Partial<ModelArgumentAdmittingServer>).admitModelArguments === "function"
+    typeof (server as Partial<ModelArgumentAdmittingServer>).admitModelArguments === "function" &&
+    typeof (server as Partial<ModelArgumentAdmittingServer>).ownsModelTool === "function"
   );
 }
 
@@ -5016,27 +5019,22 @@ function isArgumentRecord(value: unknown): value is Record<string, unknown> {
  * repaired arguments, so the reviewed and fingerprinted call is the one the
  * gateway executes (execution repeats the same deterministic repair).
  *
+ * The owning server is found when a call is checked, from what each server
+ * already listed, so listing tools never reads any server's tool list again.
+ *
  * Installed after every approval wrapper and before unattended refusal and
  * preflight containment, and reinstalled on each clone like them.
  */
 function installModelArgumentAdmission(agent: ApprovalCapableAgent): void {
   const listMcpTools = agent.getMcpTools.bind(agent);
-  agent.getMcpTools = async (resolutionContext: unknown) => {
-    const tools = await listMcpTools(resolutionContext);
-    const gated = (tool: Tool<any>) =>
-      tool.type === "function" && opengeniApprovalHooks.has(tool.needsApproval);
-    if (!tools.some(gated)) return tools;
-    const owners = new Map<string, ModelArgumentAdmittingServer>();
-    for (const server of agent.mcpServers ?? []) {
-      if (!admitsModelArguments(server)) continue;
-      for (const descriptor of await server.listTools()) {
-        if (!owners.has(descriptor.name)) owners.set(descriptor.name, server);
-      }
-    }
-    return tools.map((tool) => {
-      if (tool.type !== "function" || !gated(tool)) return tool;
-      const owner = owners.get(tool.name);
-      if (!owner) return tool;
+  const ownerOf = (toolName: string) =>
+    (agent.mcpServers ?? []).find(
+      (server): server is ModelArgumentAdmittingServer =>
+        admitsModelArguments(server) && server.ownsModelTool(toolName),
+    );
+  agent.getMcpTools = async (resolutionContext: unknown) =>
+    (await listMcpTools(resolutionContext)).map((tool) => {
+      if (tool.type !== "function" || !opengeniApprovalHooks.has(tool.needsApproval)) return tool;
       const needsApproval = tool.needsApproval.bind(tool);
       return {
         ...tool,
@@ -5047,7 +5045,7 @@ function installModelArgumentAdmission(agent: ApprovalCapableAgent): void {
             callId: Parameters<typeof needsApproval>[2],
           ) => {
             const admitted = isArgumentRecord(parsedInput)
-              ? await owner.admitModelArguments(tool.name, parsedInput)
+              ? await ownerOf(tool.name)?.admitModelArguments(tool.name, parsedInput)
               : undefined;
             return await needsApproval(
               runContext,
@@ -5058,7 +5056,6 @@ function installModelArgumentAdmission(agent: ApprovalCapableAgent): void {
         ),
       };
     });
-  };
   const clone = agent.clone?.bind(agent);
   if (clone) {
     agent.clone = (config: unknown) => {
@@ -6695,6 +6692,10 @@ class DeferredPreparedMcpServer implements MCPServer {
     args: Record<string, unknown>,
   ): Promise<Record<string, unknown> | undefined> {
     return await this.preparedTarget?.admitModelArguments(toolName, args);
+  }
+
+  ownsModelTool(toolName: string): boolean {
+    return this.listedModelNames.has(toolName);
   }
 
   async unprefixedToolName(name: string): Promise<string> {
@@ -10414,6 +10415,10 @@ class AttemptDefinitionMcpServer implements MCPServer {
     return this.catalogIdentities.get(modelName);
   }
 
+  ownsModelTool(toolName: string): boolean {
+    return this.catalogIdentities.has(toolName);
+  }
+
   /** The gateway check `callToolResult` runs, without calling the tool. */
   async admitModelArguments(
     toolName: string,
@@ -10818,6 +10823,11 @@ export class PrefixedMcpServer implements MCPServer {
     this.attemptToolSubjectId = subjectId;
   }
 
+  /** Whether this server listed `toolName` to the model this turn. */
+  ownsModelTool(toolName: string): boolean {
+    return this.originalToolNames.has(toolName) && !this.omittedModelNames.has(toolName);
+  }
+
   /**
    * The gateway check `callToolResult` runs, without calling the tool.
    * Without a bound attempt gateway the call does not check arguments here
@@ -10827,7 +10837,7 @@ export class PrefixedMcpServer implements MCPServer {
     toolName: string,
     args: Record<string, unknown>,
   ): Promise<Record<string, unknown> | undefined> {
-    if (!this.attemptToolEnvironment || this.omittedModelNames.has(toolName)) return undefined;
+    if (!this.attemptToolEnvironment || !this.ownsModelTool(toolName)) return undefined;
     const unprefixed = this.unprefixToolName(toolName);
     if (!this.isAllowed(unprefixed)) return undefined;
     return admitGatewayModelArguments(this.attemptToolEnvironment, {

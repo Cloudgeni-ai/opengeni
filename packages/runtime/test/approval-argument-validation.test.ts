@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { RunContext, type MCPServer } from "@openai/agents";
 import { testSettings } from "@opengeni/testing/settings";
+import { digestCanonicalJson } from "@opengeni/tool-gateway";
 import {
   buildOpenGeniAgent,
   prefixedMcpToolName,
@@ -66,7 +67,13 @@ type FunctionTool = Extract<
   { type: "function" }
 >;
 
-async function mcpHarness(options: { approvedToolCallId?: string; unattendedNow?: boolean } = {}) {
+type AgentOptions = {
+  approvedToolCallId?: string;
+  approvedToolCallIds?: readonly string[];
+  unattendedNow?: boolean;
+};
+
+async function mcpHarness(options: AgentOptions & { deferred?: boolean } = {}) {
   const serverId = "calendar";
   const serverConfig = {
     id: serverId,
@@ -95,23 +102,39 @@ async function mcpHarness(options: { approvedToolCallId?: string; unattendedNow?
     ...scope,
     connectorActionPolicy: hooks,
     localMcpServers: [{ id: serverId, server, resolvedConnectionId: "host-connection" }],
+    ...(options.deferred ? { deferNonEagerUntilToolDemand: true } : {}),
   });
-  const agent = buildOpenGeniAgent(settings, [], {
-    mcpServers: prepared.mcpServers,
-    resolvedMcpConnectionIds: prepared.resolvedMcpConnectionIds,
-    connectorActionPolicy: hooks,
-    ...(options.approvedToolCallId ? { approvedToolCallId: options.approvedToolCallId } : {}),
-    ...(options.unattendedNow ? { unattendedNow: true } : {}),
-  });
-  const tools = await agent.getMcpTools(new RunContext());
-  const tool = tools.find(
-    (candidate) => candidate.name === prefixedMcpToolName(serverId, "create_permission"),
-  ) as FunctionTool | undefined;
-  if (!tool || tool.type !== "function") throw new Error("calendar tool missing");
-  return { prepared, tool, executions, prepareCalls, beginCalls };
+  // A deferred server lists its tools once its preparation has finished.
+  if (options.deferred) {
+    expect(
+      prepared.mcpServers.some(
+        (candidate) =>
+          (candidate as { deferredPreparation?: boolean }).deferredPreparation === true,
+      ),
+    ).toBe(true);
+    await prepared.ready;
+  }
+  /** The tool as one agent build (one turn attempt, or a resume) sees it. */
+  const toolFor = async (agentOptions: AgentOptions) => {
+    const agent = buildOpenGeniAgent(settings, [], {
+      mcpServers: prepared.mcpServers,
+      resolvedMcpConnectionIds: prepared.resolvedMcpConnectionIds,
+      connectorActionPolicy: hooks,
+      ...agentOptions,
+    });
+    const tools = await agent.getMcpTools(new RunContext());
+    const tool = tools.find(
+      (candidate) => candidate.name === prefixedMcpToolName(serverId, "create_permission"),
+    ) as FunctionTool | undefined;
+    if (!tool || tool.type !== "function") throw new Error("calendar tool missing");
+    return tool;
+  };
+  const { deferred: _deferred, ...agentOptions } = options;
+  const tool = await toolFor(agentOptions);
+  return { prepared, tool, toolFor, executions, prepareCalls, beginCalls };
 }
 
-async function attemptBindingHarness() {
+async function attemptBindingHarness(inputSchema: Record<string, unknown> = createSchema) {
   const executions: Record<string, unknown>[] = [];
   const { hooks, prepareCalls, beginCalls } = policyRecorder();
   const bindings: AttemptConnectorActionBinding[] = [
@@ -134,7 +157,7 @@ async function attemptBindingHarness() {
       {
         identity: { serverId: "calendar", toolName: "create_permission" },
         modelName: "calendar_create_permission",
-        inputSchema: createSchema,
+        inputSchema,
         source: "mcp",
         approval: "policy",
         execute: async (args) => {
@@ -158,7 +181,8 @@ async function attemptBindingHarness() {
 
 for (const [path, harness] of [
   ["an MCP connector tool", () => mcpHarness()],
-  ["an attempt-local connector action", attemptBindingHarness],
+  ["a deferred MCP connector tool", () => mcpHarness({ deferred: true })],
+  ["an attempt-local connector action", () => attemptBindingHarness()],
 ] as const) {
   test(`${path} with arguments its schema rejects is refused before any approval is asked`, async () => {
     const { prepared, tool, executions, prepareCalls, beginCalls } = await harness();
@@ -234,6 +258,73 @@ test("an unattended session reports the argument error, not a refused approval",
       "The tool was not called because its arguments do not match the tool's input schema",
     );
     expect(text(result)).toContain('missing required property "body"');
+    expect(executions).toEqual([]);
+  } finally {
+    await prepared.close();
+  }
+});
+
+/** What the approval ledger fingerprints for a connector action. */
+const fingerprintInputs = (call: ConnectorActionToolCall) =>
+  digestCanonicalJson({
+    connectionId: call.connectionId,
+    serverId: call.serverId,
+    toolName: call.toolName,
+    actionName: call.actionName ?? null,
+    arguments: call.arguments ?? null,
+  });
+
+test("a resumed approval with string-encoded arguments runs the call the person reviewed", async () => {
+  const callId = "call-encoded-resume";
+  const encoded = { calendarId: "primary", body: JSON.stringify({ role: "write" }) };
+  const repaired = { calendarId: "primary", body: { role: "write" } };
+  const { prepared, tool, toolFor, executions, prepareCalls, beginCalls } = await mcpHarness();
+  try {
+    // The pause: the person is asked about the repaired call.
+    expect(await tool.needsApproval(new RunContext(), encoded, callId)).toBe(true);
+    expect(prepareCalls).toHaveLength(1);
+    expect(prepareCalls[0]!.arguments).toEqual(repaired);
+    // The resume: a fresh agent that only knows the call was approved.
+    const resumed = await toolFor({ approvedToolCallIds: [callId] });
+    const result = await resumed.invoke(new RunContext(), JSON.stringify(encoded), {
+      toolCall: { callId },
+    } as never);
+    expect(result).not.toMatchObject({ isError: true });
+    expect(prepareCalls).toHaveLength(1);
+    expect(beginCalls).toHaveLength(1);
+    expect(beginCalls[0]!.approvalId).toBe(callId);
+    expect(beginCalls[0]!.arguments).toEqual(prepareCalls[0]!.arguments);
+    expect(fingerprintInputs(beginCalls[0]!)).toBe(fingerprintInputs(prepareCalls[0]!));
+    expect(executions).toEqual([{ name: "create_permission", args: repaired }]);
+  } finally {
+    await prepared.close();
+  }
+});
+
+test("a tool whose input schema cannot be compiled asks no one and says the schema is invalid", async () => {
+  const { prepared, tool, executions, prepareCalls, beginCalls } = await attemptBindingHarness({
+    type: "object",
+    properties: { calendarId: { type: "invalid-schema-type" } },
+  });
+  try {
+    const callId = "call-broken-schema";
+    expect(await tool.needsApproval(new RunContext(), { calendarId: "primary" }, callId)).toBe(
+      false,
+    );
+    expect(prepareCalls).toEqual([]);
+    const result = await tool.invoke(new RunContext(), JSON.stringify({ calendarId: "primary" }), {
+      toolCall: { callId },
+    } as never);
+    expect(result).toEqual({
+      isError: true,
+      content: [
+        {
+          type: "text",
+          text: "The tool was not called because its input or output schema is invalid. Changing the arguments will not fix this. Use another tool or report the unavailable tool.",
+        },
+      ],
+    });
+    expect(beginCalls).toEqual([]);
     expect(executions).toEqual([]);
   } finally {
     await prepared.close();

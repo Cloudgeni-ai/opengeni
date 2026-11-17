@@ -253,6 +253,40 @@ describe("ToolGateway", () => {
     ).resolves.toMatchObject({ structuredContent: { ok: true } });
   });
 
+  test("a call with invalid arguments to an always-approve tool reports the arguments, not approval", async () => {
+    let effects = 0;
+    const { catalog, gateway } = createWorkspaceToolGateway({
+      accountId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      generation: 1,
+      definitions: [
+        {
+          ...definition,
+          approval: "human",
+          execute: () => {
+            effects++;
+            return { content: [] };
+          },
+        },
+      ],
+      requireApproval: (entry) => entry.approval === "human",
+    });
+    const call = (argumentsValue: Record<string, unknown>) =>
+      gateway.call({
+        operationId: crypto.randomUUID(),
+        catalogDigest: catalog.digest,
+        identity: definition.identity,
+        arguments: argumentsValue,
+        caller: { kind: "codemode", subjectId: "agent:test" },
+      });
+    // Approving this call could never make it run.
+    await expect(call({})).rejects.toBeInstanceOf(ToolGatewayInputValidationError);
+    await expect(call({ query: 1 })).rejects.toBeInstanceOf(ToolGatewayInputValidationError);
+    // A call that could run still needs its approval.
+    await expect(call({ query: "ok" })).rejects.toBeInstanceOf(ToolGatewayApprovalRequiredError);
+    expect(effects).toBe(0);
+  });
+
   test("owns prepare, execution-boundary begin, and terminal lifecycle settlement", async () => {
     const phases: string[] = [];
     const { catalog, gateway } = createWorkspaceToolGateway({
