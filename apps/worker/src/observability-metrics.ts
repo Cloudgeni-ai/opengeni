@@ -1747,6 +1747,52 @@ export function recordSandboxCommandContainment(
   });
 }
 
+/** Fixed reasons the reaper drains a warm box held only by viewers
+ * (docs/run-lifecycle.md, "Boxes held only by viewers"). */
+export const SANDBOX_VIEWER_ONLY_DRAIN_REASONS = [
+  "viewer_idle",
+  "viewer_workspace_limit",
+  "viewer_organization_limit",
+] as const;
+
+export type SandboxViewerOnlyDrainReason = (typeof SANDBOX_VIEWER_ONLY_DRAIN_REASONS)[number];
+
+/** One drained viewer-only box, by fixed reason. */
+export function recordSandboxViewerOnlyDrain(
+  observability: Observability,
+  reason: SandboxViewerOnlyDrainReason,
+): void {
+  observability.incrementCounter({
+    name: "opengeni_sandbox_viewer_only_drains_total",
+    help: "Warm boxes held only by viewers that the reaper released and drained, by fixed reason.",
+    labels: { reason },
+  });
+}
+
+/** Fixed reasons the reaper drains a warm box no turn holds under the plan's
+ * compute bounds (docs/deployment.md, "Free compute bounds"). */
+export const SANDBOX_COMPUTE_BOUNDS_DRAIN_REASONS = [
+  "compute_closed",
+  "compute_daily_budget",
+  "compute_idle",
+] as const;
+
+export type SandboxComputeBoundsDrainReason = (typeof SANDBOX_COMPUTE_BOUNDS_DRAIN_REASONS)[number];
+
+/** One box drained (`drained`) or asked to stop its commands
+ * (`stop_requested`) under the plan's compute bounds, by fixed reason. */
+export function recordSandboxComputeBoundsDrain(
+  observability: Observability,
+  reason: SandboxComputeBoundsDrainReason,
+  mode: "drained" | "stop_requested",
+): void {
+  observability.incrementCounter({
+    name: "opengeni_sandbox_compute_bounds_drains_total",
+    help: "Warm boxes no turn holds that the reaper drained or stopped under the plan's compute bounds, by fixed reason and mode.",
+    labels: { reason, mode },
+  });
+}
+
 /** Only call after the exact draining->cold commit reports wentCold. The
  * backend is validated against the closed contract so provider IDs and other
  * per-sandbox values can never become metric labels. */

@@ -906,6 +906,7 @@ const ACCESS_FAILURE_REASON: Record<ScheduledTaskRunAccessFailure["reason"], str
   unsupported_auth: "its sign-in is not supported for automation runs",
   resource_scope_unavailable: "the resources it was allowed to use are no longer available",
   designated_credential_unavailable: "the account chosen for it is no longer available",
+  account_scope_fixed: "the connected account doesn't include the access it needs",
 };
 
 /** "Couldn't use Slack: your personal account is not available to this schedule." */

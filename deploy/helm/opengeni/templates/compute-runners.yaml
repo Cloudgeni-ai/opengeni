@@ -112,6 +112,7 @@ spec:
             {{- with .prepare }}
             - --warm-prepare={{ . }}
             {{- end }}
+            - --warm-fetch-depth={{ if hasKey . "fetchDepth" }}{{ int64 .fetchDepth }}{{ else }}1{{ end }}
             - --warm-every-s={{ int64 (.everySeconds | default 3600) }}
             - --warm-within-s={{ int64 (.withinSeconds | default 3600) }}
             {{- end }}

@@ -153,7 +153,7 @@ function scenario(): SessionEvent[] {
   add("turn.started", {}, "turn-3");
   call(
     "message-flake",
-    "opengeni__session_send_message",
+    "opengeni__session_queue_message",
     {
       sessionId: FLAKE,
       text: "Don't raise the timeout. Wait on the confirm event explicitly and run the spec 50 times before reporting back.",

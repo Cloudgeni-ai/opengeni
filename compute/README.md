@@ -461,7 +461,9 @@ which runs Docker for the job, starts the runner only once Docker answers,
 and keeps its sandbox awake while the runner runs. With `--warm-repo` the pool keeps a warm template: a sandbox with
 the repository cloned where `actions/checkout` puts it and a prepare
 command run (dependencies installed, a first build), saved as a template
-whenever the branch moves, at most every `--warm-every-s`. With
+whenever the branch moves, at most every `--warm-every-s`. The clone
+keeps the history the workflows check out (`--warm-fetch-depth`, 0 for
+every branch and tag in full). With
 `--cache-store` it also serves Turborepo's remote cache from object
 storage and gives runners `TURBO_API`, `TURBO_TOKEN` and `TURBO_TEAM`.
 Workflows target a pool by its name (`runs-on: <name>`). The Helm chart

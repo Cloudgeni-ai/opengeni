@@ -26,6 +26,7 @@ import {
   SubmitComposerDraftRequest,
   ToolGatewayCallRequest,
   ToolGatewayResolveRequest,
+  ToolGatewaySiteReadinessTargets,
   ToolGatewayInvokeRequest,
   type Permission,
   type SiteAuthExchangeResponse,
@@ -102,7 +103,11 @@ import {
   requireWorkspaceSiteToolAuthorization,
   workspaceToolGatewayDeclarations,
 } from "../workspace-tool-gateway";
-import { invokeWorkspaceToolTarget, resolveWorkspaceToolTarget } from "../workspace-tool-target";
+import {
+  describeWorkspaceSiteToolReadiness,
+  invokeWorkspaceToolTarget,
+  resolveWorkspaceToolTarget,
+} from "../workspace-tool-target";
 import { withSiteSecretContext } from "../workspace-tool-gateway-secrets";
 import type { Context, Hono } from "hono";
 import { z } from "zod";
@@ -872,6 +877,13 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         deps,
         authorization,
         { ...parseJson(request.body, ToolGatewayResolveRequest), ...site },
+        options,
+      );
+    } else if (method === "readiness") {
+      result = await describeWorkspaceSiteToolReadiness(
+        deps,
+        authorization,
+        { ...parseJson(request.body, ToolGatewaySiteReadinessTargets), ...site },
         options,
       );
     } else if (method === "invoke") {

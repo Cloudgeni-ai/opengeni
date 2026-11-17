@@ -13,14 +13,23 @@ import { userErrorText } from "@opengeni/react/ui/api-error";
 // `useAppContext`.
 import { DESKTOP_APP_RETURN_PATH } from "@opengeni/contracts";
 import { onConsoleHost, socialProvidersForHost } from "@/lib/console-route";
+import {
+  consoleSignInReturnFor,
+  consoleSignInStartUrl,
+  readConsoleSignInMemory,
+  rememberConsoleSignInStarted,
+} from "@/lib/console-sign-in";
 import { EXCEL_ADDIN_PATH } from "@/lib/excel-addin";
-import { Outlet, useRouterState } from "@tanstack/react-router";
+import { leaveOnboardingPathWithoutPage } from "@/lib/onboarding-return";
+import type { OnboardingDestination } from "@/components/onboarding/developer-setup-step";
+import { Outlet, useRouter, useRouterState } from "@tanstack/react-router";
 import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
 import { CheckIcon, LockIcon } from "lucide-react";
 import { lazy, Suspense, useMemo, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import {
+  apiBaseUrl,
   clearStoredAccessKey,
   configureManagedActorEpoch,
   createOpenGeniClient,
@@ -118,6 +127,23 @@ const ManagedAuthPanel = lazy(() =>
   })),
 );
 
+const ConsoleSignedOutPanel = lazy(() =>
+  import("@/components/console-signed-out-panel").then((module) => ({
+    default: module.ConsoleSignedOutPanel,
+  })),
+);
+
+/** Console's sign-in handoff: on to the app host's sign-in, back to this page. */
+function startConsoleSignIn(): void {
+  rememberConsoleSignInStarted();
+  window.location.assign(
+    consoleSignInStartUrl(
+      apiBaseUrl,
+      consoleSignInReturnFor(window.location.pathname, window.location.search),
+    ),
+  );
+}
+
 const SignedOutPage = lazy(() =>
   import("@/components/signed-out-page").then((module) => ({
     default: module.SignedOutPage,
@@ -208,7 +234,7 @@ export function RootRouteComponent() {
       /^\/native-sign-in\/?$/.test(state.location.pathname) &&
       new URLSearchParams(state.location.searchStr).get("platform") === "office"
         ? "excel"
-        : onConsoleHost()
+        : onConsoleHost() || /^\/console-sign-in\/?$/.test(state.location.pathname)
           ? "console"
           : "general",
   });
@@ -275,6 +301,14 @@ export function RootRouteComponent() {
   const [browserActorGeneration, handleRecordedBrowserActorTransition] = useBrowserActorGeneration(
     handleBrowserActorTransition,
   );
+  const router = useRouter();
+  // Onboarding shows on whatever path a signed-out visitor opened. Without a
+  // destination of its own it finishes in place, so leave a path that has no
+  // page first (a `/sign-in` link would otherwise end on Page not found).
+  const finishOrganizationOnboarding = async (destination?: OnboardingDestination) => {
+    if (!destination) await leaveOnboardingPathWithoutPage(router);
+    await completeOrganizationOnboarding(destination);
+  };
   // "Add AI agents to my product" left its developer setup step unfinished
   // (reload, closed tab, another device): show it again until it is done.
   const [developerSetupRevision, setDeveloperSetupRevision] = useState(0);
@@ -355,6 +389,36 @@ export function RootRouteComponent() {
                 ) : undefined
               }
             />
+          ) : onConsoleHost() && !organizationInvitationContinuation ? (
+            // Console's own host signs in with the person's Opengeni account
+            // on the app host; its own email and Google sign-in stay below.
+            <ConsoleSignedOutPanel
+              search={window.location.search}
+              {...readConsoleSignInMemory()}
+              onContinue={startConsoleSignIn}
+              fallback={
+                <ManagedAuthPanel
+                  presentation="embedded"
+                  search={window.location.search}
+                  onSubmit={handleManagedAuth}
+                  emailVerificationRequired={managedEmailVerificationRequired}
+                  newSignupsEnabled={managedNewSignupsEnabled}
+                  signupChallengeSiteKey={
+                    clientConfig?.auth.mode === "managedSession"
+                      ? clientConfig.auth.signupChallengeSiteKey
+                      : undefined
+                  }
+                  socialProviders={socialProvidersForHost(
+                    window.location.hostname,
+                    managedSocialProviders,
+                  )}
+                  onSocialSubmit={handleManagedSocialAuth}
+                  passkeySignIn={managedPasskeySignIn && !passkeysNeedBrowser()}
+                  passkeySignUp={managedPasskeySignUp && !passkeysNeedBrowser()}
+                  onPasskeySubmit={handleManagedPasskeyAuth}
+                />
+              }
+            />
           ) : (
             <ManagedAuthPanel
               presentation="embedded"
@@ -383,7 +447,7 @@ export function RootRouteComponent() {
         </SignedOutPage>
       </Suspense>
     </DesktopSignedOutRecovery>
-  ) : /^\/(?:native-sign-in|site-auth\/authorize)\/?$/.test(pathname) &&
+  ) : /^\/(?:native-sign-in|console-sign-in|site-auth\/authorize)\/?$/.test(pathname) &&
     managedAuthRequired &&
     authSession &&
     clientConfig ? (
@@ -458,7 +522,7 @@ export function RootRouteComponent() {
         activeEmail={authSession?.user.email ?? null}
         activeName={authSession?.user.name ?? null}
         invitation={organizationInvitationContinuation}
-        onComplete={completeOrganizationOnboarding}
+        onComplete={finishOrganizationOnboarding}
       />
     ) : (
       <Suspense fallback={<LoadingPanel />}>
@@ -479,7 +543,7 @@ export function RootRouteComponent() {
             );
           }}
           onSignOut={handleManagedSignOut}
-          onComplete={completeOrganizationOnboarding}
+          onComplete={finishOrganizationOnboarding}
         />
       </Suspense>
     )
@@ -505,7 +569,7 @@ export function RootRouteComponent() {
           clearPendingDeveloperSetup();
           // Reach the destination before the app's routes return: the home
           // route would otherwise redirect to the landing workspace first.
-          void completeOrganizationOnboarding(destination).finally(() =>
+          void finishOrganizationOnboarding(destination).finally(() =>
             setDeveloperSetupRevision((revision) => revision + 1),
           );
         }}

@@ -85,3 +85,26 @@ export function integrationKeyForConnectProvider(providerId: string): string | n
   // Unknown adapter identities do not inherit an allowed provider's authority.
   return null;
 }
+
+/**
+ * Reviewed MCP endpoints a dedicated Connect adapter owns, by host, with the
+ * policy key that adapter checks (see `integrationKeyForConnectProvider`).
+ */
+const DEDICATED_MCP_INTEGRATION_KEYS: Readonly<Record<string, string>> = {
+  "gmailmcp.googleapis.com": "gmail",
+  "drivemcp.googleapis.com": "google-drive",
+  "calendarmcp.googleapis.com": "google-calendar",
+  "mcp.slack.com": "slack-personal",
+};
+
+/** The dedicated adapter's policy key for a reviewed MCP endpoint URL, else null. */
+export function dedicatedMcpIntegrationKey(url: string | null | undefined): string | null {
+  if (!url) return null;
+  let host: string;
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+  return DEDICATED_MCP_INTEGRATION_KEYS[host] ?? null;
+}

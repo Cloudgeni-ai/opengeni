@@ -119,6 +119,14 @@ export type McpAccountRouteLabel = {
   /** Present only when the connector has several accounts in the turn. */
   account?: string | undefined;
   /**
+   * The model label of the connector's default account, when the turn has
+   * several accounts of the connector and exactly one is the person's own.
+   * Set on every route of that connector, so a route that is not the default
+   * still names the one that is. Absent when no account is a clear default
+   * (several of the person's own, or only shared ones).
+   */
+  defaultAccount?: string | undefined;
+  /**
    * The kind of need the connector serves, its catalog category
    * ("communication", "files"), when one is known. Never model-facing.
    */
@@ -221,6 +229,15 @@ export type ToolGatewayCaller = z.infer<typeof ToolGatewayCaller>;
  * `model`; a Codemode script may keep the output to itself.
  */
 export const FIRST_PARTY_MCP_CALLER_META_KEY = "opengeniCaller";
+
+/**
+ * MCP request `_meta` key carrying the model's own id for a direct model tool
+ * call to the first-party server: the `callId` of the function call and of the
+ * result item that conversation history stores for it. Like
+ * `FIRST_PARTY_MCP_CALLER_META_KEY`, only the worker's tool gateway sets it, and
+ * only for a `model` call to the first-party server.
+ */
+export const FIRST_PARTY_MCP_MODEL_CALL_ID_META_KEY = "opengeniModelCallId";
 
 /**
  * MCP request `_meta` key the worker's tool discovery sets (to `true`) when a
@@ -683,6 +700,127 @@ export const ToolGatewaySiteConsentResponse = /* @__PURE__ */ defineSchema(() =>
     .strict(),
 );
 export type ToolGatewaySiteConsentResponse = z.infer<typeof ToolGatewaySiteConsentResponse>;
+
+/** As many targets as a Site version may declare (`WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX`). */
+const SITE_READINESS_TARGETS_MAX = 128;
+/**
+ * What the viewer of a pinned Site can do with its declared tools, asked
+ * before anything runs, so a Site can show "Connect Gmail" or a disabled
+ * button instead of failing on click. Advisory only: it never prepares a
+ * call or contacts a provider, and every call is still checked in full.
+ */
+export const ToolGatewaySiteReadinessRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      targets: z.array(ToolGatewayTarget).min(1).max(SITE_READINESS_TARGETS_MAX),
+      siteArtifactId: primitives.uuid,
+      siteVersionId: primitives.uuid,
+    })
+    .strict(),
+);
+/** What a published page sends; its host supplies the Site and version. */
+export const ToolGatewaySiteReadinessTargets = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      targets: z.array(ToolGatewayTarget).min(1).max(SITE_READINESS_TARGETS_MAX),
+    })
+    .strict(),
+);
+export type ToolGatewaySiteReadinessTargets = z.infer<typeof ToolGatewaySiteReadinessTargets>;
+export type ToolGatewaySiteReadinessRequest = z.infer<typeof ToolGatewaySiteReadinessRequest>;
+export const ToolGatewaySiteReadinessState = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    // It runs when called (it may still ask, see `confirm`).
+    "ready",
+    // It runs after the viewer confirms in the Opengeni frame.
+    "confirm",
+    // The viewer has several accounts for it and picks one in the frame.
+    "choose_account",
+    // The viewer has no account for it yet; the frame offers Connect.
+    "connect",
+    // The viewer's account for it must sign in again.
+    "reconnect",
+    // The viewer's account must allow more access first (see `scopes`).
+    "grant",
+    // Its tool permissions block it on this account.
+    "blocked",
+    // It needs the viewer in Opengeni (a published address has no frame).
+    "open_in_opengeni",
+    // It can't run for this viewer on this Site.
+    "unavailable",
+  ]),
+);
+export type ToolGatewaySiteReadinessState = z.infer<typeof ToolGatewaySiteReadinessState>;
+export const ToolGatewaySiteReadinessTool = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      /** The target as it was asked for. */
+      target: ToolGatewayTarget,
+      state: ToolGatewaySiteReadinessState,
+      /**
+       * Whether a call asks first: `never`, `always`, `remembered` (the viewer
+       * chose "Always allow" for it on this Site) or `maybe` (it depends on
+       * the call or on the provider).
+       */
+      confirm: z.enum(["never", "always", "remembered", "maybe"]),
+      /** The account it runs as, when one is known. */
+      runsAs: z
+        .object({
+          connector: primitives.string.max(200),
+          account: primitives.string.max(320),
+          /** Shared with the workspace rather than the viewer's own. */
+          shared: z.boolean(),
+        })
+        .strict()
+        .nullable(),
+      /** The connector it uses ("Gmail"), when it uses one. */
+      connector: primitives.string.max(200).nullable(),
+      /** The access a `grant` asks the account for. */
+      scopes: z.array(primitives.string.max(512)).max(32).optional(),
+      /**
+       * Why it is `unavailable` when that is the account: `account` means the
+       * connected account can't run it (its access is fixed), so no sign-in
+       * changes that.
+       */
+      unavailableReason: z.enum(["account"]).optional(),
+    })
+    .strict(),
+);
+export type ToolGatewaySiteReadinessTool = z.infer<typeof ToolGatewaySiteReadinessTool>;
+export const ToolGatewaySiteReadinessResponse = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      version: z.literal(1),
+      /** One entry per requested target, in order. */
+      tools: z.array(ToolGatewaySiteReadinessTool).max(SITE_READINESS_TARGETS_MAX),
+    })
+    .strict(),
+);
+export type ToolGatewaySiteReadinessResponse = z.infer<typeof ToolGatewaySiteReadinessResponse>;
+
+/** Remove every "Always allow for this Site" choice the caller made on one Site. */
+export const ToolGatewaySiteAllowancesResetRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      siteArtifactId: primitives.uuid,
+      siteVersionId: primitives.uuid,
+    })
+    .strict(),
+);
+export type ToolGatewaySiteAllowancesResetRequest = z.infer<
+  typeof ToolGatewaySiteAllowancesResetRequest
+>;
+export const ToolGatewaySiteAllowancesResetResponse = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      version: z.literal(1),
+      removed: primitives.nonnegativeInteger,
+    })
+    .strict(),
+);
+export type ToolGatewaySiteAllowancesResetResponse = z.infer<
+  typeof ToolGatewaySiteAllowancesResetResponse
+>;
 
 /** Bounded compatibility manifest, not workspace discovery. */
 export const ToolGatewayManifestRequest = /* @__PURE__ */ defineSchema(() =>

@@ -1,5 +1,40 @@
 # @opengeni/browserd
 
+## 0.4.41
+
+### Patch Changes
+
+- 4befd55: Managed browsers on desktop sandbox images can now be continued after their controller restarts. The image's browser wrapper added its own default profile switch in front of the controller's, so the controller could never identify the browser it launched and every such browser became unusable after a restart. The wrapper now adds its default profile only when the caller names none.
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+  - @opengeni/contracts@6.27.0
+  - @opengeni/interaction@6.27.0
+
+## 0.4.40
+
+### Patch Changes
+
+- Updated dependencies [6d7ea1e]
+- Updated dependencies [8fae328]
+  - @opengeni/contracts@6.26.0
+  - @opengeni/interaction@6.26.0
+
+## 0.4.39
+
+### Patch Changes
+
+- Updated dependencies [e126cb5]
+- Updated dependencies [61abc98]
+- Updated dependencies [81570f9]
+- Updated dependencies [f99f940]
+- Updated dependencies [f99f940]
+- Updated dependencies [bfd2970]
+  - @opengeni/contracts@6.25.0
+  - @opengeni/interaction@6.25.0
+
 ## 0.4.38
 
 ### Patch Changes

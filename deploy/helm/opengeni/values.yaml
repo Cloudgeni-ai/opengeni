@@ -1757,6 +1757,8 @@ computeRunners:
   #     repo: my-org/monorepo
   #     branch: ""              # default: the repository's default branch
   #     prepare: bun install --frozen-lockfile
+  #     fetchDepth: 1           # the workflows' actions/checkout fetch-depth;
+  #                             # 0 clones every branch and tag in full
   #     everySeconds: 3600
   #     withinSeconds: 3600
   #   cache:

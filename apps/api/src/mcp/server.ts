@@ -107,6 +107,7 @@ import {
   type SessionStatus,
   SubmitHumanInputResponseRequest,
   FIRST_PARTY_MCP_CALLER_META_KEY,
+  FIRST_PARTY_MCP_MODEL_CALL_ID_META_KEY,
   TOOL_DISCOVERY_CARD_META_KEY,
 } from "@opengeni/contracts";
 import {
@@ -262,11 +263,16 @@ import {
   SessionAuthorizationUnavailableError,
   dispatchWithSessionAuthorizationReadReuse,
   searchCapabilityCatalogItems,
+  connectedFirstCatalogMatchOrder,
   suggestCapabilityCatalogItems,
   connectionReconnectDay,
   connectionsNeedingReconnectFor,
   listConnectionsNeedingReconnect,
   nangoBackendsFor,
+  builtInIntegrationDuplicated,
+  builtInIntegrationPolicyApplies,
+  builtInIntegrationTurnedOffDetail,
+  withoutBuiltInIntegrationDuplicates,
   nangoReplacedSocialProviders,
   type ConnectionNeedingReconnect,
   type ResolvedSessionAuthorization,
@@ -586,8 +592,11 @@ import {
   type SessionWaitResult,
 } from "./session-wait";
 import {
+  agentSessionInputReceipt,
   mcpMutationReceipt,
+  operatorSessionInputSummary,
   sessionControlMutationReceipt,
+  sessionMessageStatusSummary,
   sessionCreateMutationReceipt,
 } from "./receipts";
 import {
@@ -632,7 +641,10 @@ import {
   deploymentCannotConnect,
   inChatCapabilitySetup,
 } from "@opengeni/contracts/personal-integration-setup";
-import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
+import {
+  readOrganizationIntegrationPolicyForServing,
+  withOrganizationIntegrationPolicyFence,
+} from "@opengeni/db/organization-integration-policy";
 import { registerEditableArtifactAgentTools } from "./editable-artifacts";
 import { registerCompanyProfileAgentAdminTools } from "./company-profile-agent-admin";
 import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
@@ -758,7 +770,7 @@ const ORCHESTRATION_FAILURE_MESSAGE_MAX_UTF8_BYTES = 1_024;
 // API-wide request-body ceiling for this 200-code-point field.
 const MCP_DISCOVERY_QUERY_MAX_UTF16_CODE_UNITS = WORK_DISCOVERY_QUERY_MAX_CHARS * 8;
 
-type OrchestrationToolName = "session_create" | "session_send_message" | "session_steer";
+type OrchestrationToolName = "session_create" | "session_queue_message" | "session_steer";
 
 function boundedOrchestrationFailureMessage(value: string): string {
   const normalized = value.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
@@ -5903,6 +5915,8 @@ function registerWorkspaceOrchestrationTools(
   // answer to its model. Record it on the reading turn: when that attempt
   // completes its turn, a pending terminal result repeating only answers the
   // model already holds is superseded instead of starting another inference.
+  // The model's call id lets a later attempt of the same turn, which resumes
+  // from durable history holding this read's output, count it too.
   // Only a direct model call counts: a Codemode script may keep the output to
   // itself. Best-effort: a failure leaves that result to be delivered.
   const recordConsumedChildResults = async (
@@ -5918,6 +5932,7 @@ function registerWorkspaceOrchestrationTools(
       !children.some((child) => child.sequences.length > 0)
     )
       return;
+    const callId = extra?._meta?.[FIRST_PARTY_MCP_MODEL_CALL_ID_META_KEY];
     try {
       await recordConsumedChildAnswers(deps.db, {
         accountId: grant.accountId,
@@ -5926,6 +5941,7 @@ function registerWorkspaceOrchestrationTools(
         turnId: claims.turnId,
         attemptId: claims.attemptId,
         executionGeneration: claims.executionGeneration,
+        ...(typeof callId === "string" ? { callId } : {}),
         children,
       });
     } catch (error) {
@@ -6011,7 +6027,7 @@ function registerWorkspaceOrchestrationTools(
       "session_message_status",
       {
         description:
-          "Follow the exact update ID returned by session_send_message or session_steer. Returns delivery state, consuming turn and an exact outcome read when present; acceptance or another turn finishing is not completion. Never resends. Use session_wait for changes, then read again. A paused pending target requires an explicitly authorized resume; do not silently steer it.",
+          "Follow the exact update ID returned by session_queue_message or session_steer. Returns a plain summary, delivery state (pending until the target gets it), the turn that read it and an exact outcome read when present; acceptance or another turn finishing is not completion. Never resends. Use session_wait for changes, then read again. A paused pending target requires an explicitly authorized resume; do not silently steer it.",
         inputSchema: { sessionId: z4.string().uuid(), updateId: z4.string().uuid() },
       },
       async ({ sessionId, updateId }) => {
@@ -6043,6 +6059,12 @@ function registerWorkspaceOrchestrationTools(
           : null;
         await authorizeFirstPartySession(deps, grant, sessionId, "session.events.read");
         return json({
+          summary: sessionMessageStatusSummary({
+            kind: update.kind as "agent_message" | "agent_steer_instruction",
+            state: update.state,
+            deliveredAt: update.deliveredAt,
+            hasOutcome: outcome !== null,
+          }),
           sessionId,
           updateId,
           delivery: update.state,
@@ -6963,7 +6985,7 @@ function registerWorkspaceOrchestrationTools(
       "session_create",
       {
         description:
-          "Spawn a new agent session (a worker) only for a concrete, bounded subtask that can run independently and has a defined integration point in your current work. Delegation has setup and coordination overhead: by default, answer directly when the work takes only a few steps, and send a related follow-up to a worker you already spawned with session_send_message instead of spawning another. Explicit user requests and applicable Skill guidance for delegation, independent review, or fresh workers override that default within existing authority. After spawning work that needs minutes, once nothing else can advance, call wait_for_input and end the turn instead of alternating session_wait and session_get; no preliminary short wait or status recheck is required. The worker's terminal result wakes you and carries its final answer (payload.finalAnswer). Do not duplicate a child's implementation; independent review or comparison may intentionally examine the same subject with a distinct deliverable. Track the child and join its actual result before completing dependent work. Give the child a concise semantic title; if omitted, one is derived from its delegated goal or initial message. The child inherits this session's visibility, agent-access scope and end-user label; a private session can only create a same-owner private child, and memoryScope may only narrow this session's selector. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Sandbox Environment or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. Normally omit tools, mcpServers, and firstPartyMcpTools so the worker inherits this session's exact selections; specialize its task through initialMessage rather than a hand-written partial tool list. To create a worker that cannot start, message, or follow other sessions, use agent: { capabilities: { from: 'all', subagents: false } } and keep tool lists omitted; its final answer still reaches you automatically. Explicit tool arrays replace the inherited selection and are only for deliberate restrictions. Do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
+          "Spawn a new agent session (a worker) only for a concrete, bounded subtask that can run independently and has a defined integration point in your current work. Delegation has setup and coordination overhead: by default, answer directly when the work takes only a few steps, and queue a related follow-up to a worker you already spawned with session_queue_message instead of spawning another. Explicit user requests and applicable Skill guidance for delegation, independent review, or fresh workers override that default within existing authority. After spawning work that needs minutes, once nothing else can advance, call wait_for_input and end the turn instead of alternating session_wait and session_get; no preliminary short wait or status recheck is required. The worker's terminal result wakes you and carries its final answer (payload.finalAnswer). Do not duplicate a child's implementation; independent review or comparison may intentionally examine the same subject with a distinct deliverable. Track the child and join its actual result before completing dependent work. Give the child a concise semantic title; if omitted, one is derived from its delegated goal or initial message. The child inherits this session's visibility, agent-access scope and end-user label; a private session can only create a same-owner private child, and memoryScope may only narrow this session's selector. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Sandbox Environment or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. Normally omit tools, mcpServers, and firstPartyMcpTools so the worker inherits this session's exact selections; specialize its task through initialMessage rather than a hand-written partial tool list. To create a worker that cannot start, message, or follow other sessions, use agent: { capabilities: { from: 'all', subagents: false } } and keep tool lists omitted; its final answer still reaches you automatically. Explicit tool arrays replace the inherited selection and are only for deliberate restrictions. Do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
         // `selfhosted` is reached through machineTarget, so it is not offered
         // as a bare backend choice.
         inputSchema: sessionCreateToolInput(
@@ -7019,10 +7041,10 @@ function registerWorkspaceOrchestrationTools(
 
   if (can("sessions:control")) {
     server.registerTool(
-      "session_send_message",
+      "session_queue_message",
       {
         description:
-          "To continue related work, by default message a worker you already spawned instead of spawning a new one; it keeps its context. Acceptance is not execution. Keep resource.id: for agent messages, match that ID in payload.updateIds from session_events view=debug, includeTypes=[system.update.delivered], payloadMode=full; retain the event turnId and read its relevant result. An unrelated in-flight turn completing does not prove delivery. Explicit user requests and applicable Skill guidance for independent review or fresh workers override that default within existing authority. Do not resend an unconsumed message; inspect blockers. Worker messages are coalescible machine input, added to history when claimed. Sessionless operator calls append a human/API prompt and resource.id is its turn ID. Use your last consumed event sequence. Report stalled delivery if it cannot safely progress.",
+          "Send a message to another session or agent: send messages to a worker you spawned, your parent or a peer session. Like a person's Queue in the chat, a session that is mid-turn gets the message only after its current turn ends, and it does not change what that session is doing now; an idle session starts its next turn with it. To change what a session is doing now, use session_steer instead. To continue related work, by default queue a follow-up to a worker you already spawned instead of spawning a new one; it keeps its context. Explicit user requests and applicable Skill guidance for independent review or fresh workers override that default within existing authority. The result's summary says when the target gets it. Queued is not delivered: follow the returned updateId with session_message_status; another of the target's turns finishing does not prove it got your message. Do not send a message again while it is still queued; inspect blockers and report a stalled handoff if it cannot safely progress. Sessionless operator calls append a human/API prompt that queues the same way, and resource.id is its turn ID.",
         inputSchema: {
           sessionId: z4.string().uuid(),
           text: z4.string().min(1),
@@ -7034,7 +7056,7 @@ function registerWorkspaceOrchestrationTools(
         },
       },
       inThisWorkspaceOr(
-        "session_send_message",
+        "session_queue_message",
         async ({ sessionId: targetSessionId, text, idempotencyKey, mcpCredentialUpdates }) => {
           try {
             await authorizeFirstPartySession(deps, grant, targetSessionId, "session.append");
@@ -7050,32 +7072,17 @@ function registerWorkspaceOrchestrationTools(
                 { targetSessionId, text, idempotencyKey },
               );
               return json(
-                mcpMutationReceipt({
-                  operation: "session_send_message",
-                  committed: true,
-                  outcome: result.replay ? "replayed" : "accepted",
-                  changed: !result.replay,
-                  resource: {
-                    type: "session_system_update",
-                    id: result.updateId,
-                    state: result.effectiveState,
-                  },
-                  relatedResources: [{ type: "session", id: targetSessionId }],
+                agentSessionInputReceipt({
+                  operation: "session_queue_message",
+                  targetSessionId,
+                  updateId: result.updateId,
+                  readAt: result.readAt,
+                  replay: result.replay,
                   timestamp: result.receipt.createdAt.toISOString(),
-                  idempotency: { status: result.replay ? "replayed" : "applied" },
-                  facts: {
-                    delivery: "coalesced_internal_update",
-                    wakeRequested: result.wakeRevision !== null,
-                    resumeRequired: result.effectiveState === "paused",
-                  },
-                  nextAction: {
-                    tool: "session_get",
-                    arguments: { sessionId: targetSessionId },
-                  },
                 }),
               );
             }
-            const { accepted, turn, replay, waitsForMachineOwner } =
+            const { accepted, turn, replay, routing, waitsForMachineOwner } =
               await acceptSessionUserMessageWithOutcome(
                 deps,
                 grant,
@@ -7093,10 +7100,11 @@ function registerWorkspaceOrchestrationTools(
               );
             return json(
               mcpMutationReceipt({
-                operation: "session_send_message",
+                operation: "session_queue_message",
                 committed: true,
-                outcome: replay ? "replayed" : "accepted",
+                outcome: replay ? "replayed" : "queued",
                 changed: !replay,
+                summary: operatorSessionInputSummary({ routing, replay }),
                 resource: {
                   type: "session_turn",
                   id: turn.id,
@@ -7122,7 +7130,7 @@ function registerWorkspaceOrchestrationTools(
             );
           } catch (error) {
             return orchestrationFailureResult(
-              "session_send_message",
+              "session_queue_message",
               error,
               deps,
               grant,
@@ -7277,7 +7285,7 @@ function registerWorkspaceOrchestrationTools(
       "session_steer",
       {
         description:
-          "Atomically replace another session's current direction and resume it. The Agent Steer is a typed machine input shown in the target queue/timeline and durably retained in model history; it never impersonates a human prompt. Sessionless operator calls append a human/API steer and resource.id is its turn ID.",
+          "Change what another session or agent (a worker you spawned, your parent or a peer) is doing now. Like a person's Steer in the chat, it gets your instruction at its next step, after its current tool calls finish, and the instruction replaces its current direction. A paused session is resumed; a session with no turn running starts one. To add information without changing what a session is doing now, use session_queue_message instead. A newer steer replaces an older one the target has not received yet. The Agent Steer is a typed machine input shown in the target queue/timeline and durably retained in model history; it never impersonates a human prompt. Follow the returned updateId with session_message_status. Sessionless operator calls append a human/API steer and resource.id is its turn ID.",
         inputSchema: {
           sessionId: z4.string().uuid(),
           instruction: z4.string().min(1),
@@ -7289,7 +7297,7 @@ function registerWorkspaceOrchestrationTools(
         try {
           if (callerSessionId === null) {
             await authorizeFirstPartySession(deps, grant, sessionId, "session.steer");
-            const { accepted, turn, replay, waitsForMachineOwner } =
+            const { accepted, turn, replay, routing, waitsForMachineOwner } =
               await acceptSessionUserMessageWithOutcome(deps, grant, grant.workspaceId, sessionId, {
                 text: instruction,
                 delivery: "steer",
@@ -7300,8 +7308,9 @@ function registerWorkspaceOrchestrationTools(
               mcpMutationReceipt({
                 operation: "session_steer",
                 committed: true,
-                outcome: replay ? "replayed" : "updated",
+                outcome: replay ? "replayed" : "steered",
                 changed: !replay,
+                summary: operatorSessionInputSummary({ routing, replay }),
                 resource: {
                   type: "session_turn",
                   id: turn.id,
@@ -7325,25 +7334,13 @@ function registerWorkspaceOrchestrationTools(
             { targetSessionId: sessionId, instruction, idempotencyKey },
           );
           return json(
-            mcpMutationReceipt({
+            agentSessionInputReceipt({
               operation: "session_steer",
-              committed: true,
-              outcome: result.replay ? "replayed" : "updated",
-              changed: !result.replay,
-              resource: {
-                type: "session_system_update",
-                id: result.updateId,
-                state: result.effectiveState,
-              },
-              relatedResources: [{ type: "session", id: sessionId }],
-              timestamp: result.receipt.createdAt.toISOString(),
-              idempotency: { status: result.replay ? "replayed" : "applied" },
-              facts: {
-                interruptionCount: result.interruptionCount,
-                stoppingPreviousAttempt: result.interruptionCount > 0,
-              },
+              targetSessionId: sessionId,
               updateId: result.updateId,
-              nextAction: { tool: "session_get", arguments: { sessionId } },
+              readAt: result.readAt,
+              replay: result.replay,
+              timestamp: result.receipt.createdAt.toISOString(),
             }),
           );
         } catch (error) {
@@ -7895,7 +7892,28 @@ function registerCapabilityDiscoveryTools(
   // Installation is workspace metadata; an enabled personal MCP is usable only
   // when its tools actually made it into this caller's immutable attempt catalog.
   // This is a readiness projection, never credential resolution or a new grant.
+  // A built-in integration the organization's policy leaves out has no card:
+  // its connection would be refused, so the agent says it is turned off.
   const projectSetups = async (
+    items: CapabilityCatalogItem[],
+  ): Promise<CapabilitySetupProjection[]> => {
+    const [setups, policy] = await Promise.all([
+      projectSetupsAllowed(items),
+      items.some(builtInIntegrationPolicyApplies)
+        ? readOrganizationIntegrationPolicyForServing(deps.db, {
+            accountId: grant.accountId,
+          }).catch(() => null)
+        : null,
+    ]);
+    if (!policy) return setups;
+    return setups.map((setup, index) => {
+      const turnedOff = builtInIntegrationTurnedOffDetail(items[index]!, policy);
+      return turnedOff && setup.status !== "ready"
+        ? { status: "unavailable", action: null, detail: turnedOff }
+        : setup;
+    });
+  };
+  const projectSetupsAllowed = async (
     items: CapabilityCatalogItem[],
   ): Promise<CapabilitySetupProjection[]> => {
     const availableServerIds = new Set<string>();
@@ -8007,7 +8025,13 @@ function registerCapabilityDiscoveryTools(
     async ({ query, limit }) => {
       await authorize();
       const [current, pluginItems] = await Promise.all([catalog(), plugins()]);
-      const candidates = [...current.items, ...recommendations(), ...pluginItems];
+      // One service is offered once: a registry entry that duplicates a
+      // built-in integration this deployment offers is left out.
+      const candidates = withoutBuiltInIntegrationDuplicates([
+        ...current.items,
+        ...recommendations(),
+        ...pluginItems,
+      ]);
       const ranked = searchCapabilityCatalogItems(candidates, query, limit ?? 8);
       // A plugin installs for the whole workspace. When the catalogue also
       // offers one of its MCP servers as a connection, its setup names that
@@ -8042,7 +8066,10 @@ function registerCapabilityDiscoveryTools(
         (_, index) => projected[ranked.length + index]!.status !== "unavailable",
       );
       for (const [index, { item }] of ranked.entries()) {
-        if (item.kind !== "plugin" || item.enabled) continue;
+        // A plugin that is only a built-in the organization turned off keeps
+        // that answer: it has no card.
+        if (item.kind !== "plugin" || item.enabled || setups[index]!.status === "unavailable")
+          continue;
         const endpoints = new Set(pluginMcpEndpointKeys(item));
         setups[index] = pluginCapabilitySetup(
           item,
@@ -8053,7 +8080,14 @@ function registerCapabilityDiscoveryTools(
             .map((connection) => ({ capabilityId: connection.id, name: connection.name })),
         );
       }
-      const matches = ranked.map(({ item, matchedOn, approximate }, index) => {
+      // A service the person can already use comes before a same-category
+      // one they would still have to connect, unless the query names it.
+      const order = connectedFirstCatalogMatchOrder(
+        ranked,
+        setups.map((setup) => setup.status === "ready"),
+      );
+      const matches = order.map((index) => {
+        const { item, matchedOn, approximate } = ranked[index]!;
         const setup = withCapabilityReconnectSetup(
           item,
           setups[index]!,
@@ -8158,13 +8192,16 @@ function registerCapabilityDiscoveryTools(
       // The agent's inputs name a connection not here yet: the card asks for
       // it even when another connection of the entry is ready.
       let anotherConnection = false;
+      const listed = [...current.items, ...recommendations()];
       let item =
-        [...current.items, ...recommendations()].find(
-          (candidate) => candidate.id === capabilityId,
-        ) ?? (await marketplacePluginCapabilityItem(deps.db, grant.workspaceId, capabilityId));
+        listed.find((candidate) => candidate.id === capabilityId) ??
+        (await marketplacePluginCapabilityItem(deps.db, grant.workspaceId, capabilityId));
       if (!item || !capabilityCatalogItemIsTrustedForExposure(item)) {
         throw new ToolArgumentError("Unknown or untrusted capability; search the catalog again.");
       }
+      // A registry entry for a service this deployment connects through its
+      // built-in integration gets the built-in's card.
+      item = builtInIntegrationDuplicated(item, listed) ?? item;
       // Each Dynamics connection is one customer environment. An environment
       // already here answers for the generic entry: ready when this caller can
       // use it, else its own card (which needs no address) when it is the only

@@ -75,8 +75,9 @@ still-pending idle terminal result reporting only answers it received is
 superseded (`consumed_by_parent_read`), so it does not start another inference
 that repeats them; a result that arrives after that completion is inserted
 already consumed, and a pending result for a different answer stays. A read by
-an attempt that then fails or is interrupted suppresses nothing; see
-[`durable-agent-inputs.md`](durable-agent-inputs.md).
+an attempt that then fails or is interrupted suppresses nothing, unless the
+turn's durable history kept that read's tool result and a recovered attempt
+completes the turn; see [`durable-agent-inputs.md`](durable-agent-inputs.md).
 
 An explicit mark-unread records the current raw event position as an intent
 fence. Old answer replay and later housekeeping do not clear it; proven consumption

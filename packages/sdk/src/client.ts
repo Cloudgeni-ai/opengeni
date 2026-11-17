@@ -570,6 +570,9 @@ import type {
   McpConnectionDecision,
   NativeAppAuthorizeInput,
   NativeAppTokenInput,
+  NativeAppRelayInput,
+  NativeAppRelay,
+  NativeAppRelayPoll,
   NativeAppToken,
   InboxItem,
   InboxSettings,
@@ -12316,6 +12319,24 @@ export class OpenGeniClient {
       "/v1/native-app/authorize",
       input,
     );
+  }
+
+  /** Start a sign-in the person approves in their browser (see `NativeAppRelayInput`). */
+  async createNativeAppRelay(input: NativeAppRelayInput): Promise<NativeAppRelay> {
+    return await this.requestJson<NativeAppRelay>("POST", "/v1/native-app/relays", input);
+  }
+
+  /** Approve an app's relayed sign-in from the signed-in browser with the code the app shows. */
+  async approveNativeAppRelay(input: { relayId: string; confirmationCode: string }): Promise<void> {
+    await this.requestJson<unknown>("POST", "/v1/native-app/relays/approve", input);
+  }
+
+  /** Check a relayed sign-in with the app's PKCE verifier. */
+  async pollNativeAppRelay(input: {
+    relayId: string;
+    codeVerifier: string;
+  }): Promise<NativeAppRelayPoll> {
+    return await this.requestJson<NativeAppRelayPoll>("POST", "/v1/native-app/relays/poll", input);
   }
 
   /** Exchange a native app sign-in code and its PKCE verifier for the app's credential. */

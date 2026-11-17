@@ -169,6 +169,7 @@ export {
 } from "./skill-catalog";
 import {
   createLocalMcpBridgeFromAdapters,
+  localMcpBridgeToolScopeNeed,
   DISPLAY_TITLE_META_KEY,
   IntegrationInvocationError,
   isLocalMcpBridgeServer,
@@ -219,6 +220,7 @@ import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS,
   FIRST_PARTY_MCP_CALLER_META_KEY,
+  FIRST_PARTY_MCP_MODEL_CALL_ID_META_KEY,
   FIRST_PARTY_TOOL_ARGUMENT_REJECTED_META_KEY,
   assertUniqueResourceMountPaths,
   gitCredentialBindingIdForRepository,
@@ -297,10 +299,12 @@ import {
   assertMcpServerSelectionWithinBounds,
   boundedParallelMap,
   cancelMcpResponseBody,
+  carryMcpRequestNotSentMark,
   describeMcpToolListDrops,
   fitMcpToolListWithinBounds,
   guardedMcpFetch,
   isMcpPayloadTooLargeError,
+  isMcpRequestNotSentMark,
   mcpJsonRpcErrorPayloadForRequest,
   mcpOuterConnectTimeoutMs,
   mcpRequestReplayInfo,
@@ -341,7 +345,6 @@ import {
   GMAIL_REST_MCP_BRIDGE_ADAPTER,
   gmailRestResultOutcome,
   isOfficialGmailMcpConfig,
-  type GmailRestMcpBridgeConfig,
   type GmailRestMcpBridgeContext,
 } from "./gmail-rest-mcp";
 import {
@@ -1220,6 +1223,12 @@ export type {
 
 ensureReadableStreamFrom();
 
+/** What every built-in bridge adapter matches a configured MCP server on. */
+export type BuiltInMcpBridgeConfig = {
+  readonly url: string;
+  readonly connectionRef?: McpServerConnectionRef;
+};
+
 type BuiltInMcpBridgeContext = GmailRestMcpBridgeContext &
   GoogleCalendarRestMcpBridgeContext &
   SlackRestMcpBridgeContext &
@@ -1229,7 +1238,7 @@ type BuiltInMcpBridgeContext = GmailRestMcpBridgeContext &
   DriveMcpBridgeContext &
   NangoToolsMcpBridgeContext;
 const BUILT_IN_MCP_BRIDGE_ADAPTERS: readonly LocalMcpBridgeAdapter<
-  GmailRestMcpBridgeConfig,
+  BuiltInMcpBridgeConfig,
   BuiltInMcpBridgeContext
 >[] = Object.freeze([
   GMAIL_REST_MCP_BRIDGE_ADAPTER,
@@ -1241,6 +1250,19 @@ const BUILT_IN_MCP_BRIDGE_ADAPTERS: readonly LocalMcpBridgeAdapter<
   DRIVE_MCP_BRIDGE_ADAPTER,
   NANGO_TOOLS_MCP_BRIDGE_ADAPTER,
 ]);
+
+/**
+ * The access a tool of a first-party bridge needs beyond the account's
+ * recorded grants, or null when nothing is missing or the server is not such
+ * a bridge. Never contacts the provider; the bridge still decides each call.
+ */
+export function mcpToolScopeNeed(
+  config: BuiltInMcpBridgeConfig,
+  toolName: string,
+  grantedScopes: readonly string[],
+): readonly string[] | null {
+  return localMcpBridgeToolScopeNeed(BUILT_IN_MCP_BRIDGE_ADAPTERS, config, toolName, grantedScopes);
+}
 const SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS = 120_000;
 
 /**
@@ -4299,6 +4321,7 @@ export function buildOpenGeniAgent(
       approvedToolCallIdsOf(options),
       options.unattendedNow === true,
     );
+    installModelArgumentAdmission(agent as unknown as ApprovalCapableAgent);
     installModelMcpCallIdentity(agent as unknown as ApprovalCapableAgent);
     installRouteMoveOrdering(agent as unknown as ApprovalCapableAgent);
     if (options.unattendedNow) {
@@ -4467,6 +4490,7 @@ export function buildOpenGeniAgent(
     approvedToolCallIdsOf(options),
     options.unattendedNow === true,
   );
+  installModelArgumentAdmission(agent as unknown as ApprovalCapableAgent);
   installModelMcpCallIdentity(agent as unknown as ApprovalCapableAgent);
   installRouteMoveOrdering(agent as unknown as ApprovalCapableAgent);
   if (options.unattendedNow) {
@@ -4603,10 +4627,15 @@ function maybeInstallLazyToolTransport(
         if (!route) continue;
         const account: ConnectedToolAccount = {
           source: server.registryId,
-          label: route.account ? `${route.connector} (${route.account})` : route.connector,
+          // The connector's default account says so, as its tools' account line does.
+          // A connector's only account is named by its model label's account.
+          label: route.account
+            ? `${route.connector} (${route.account}${route.defaultAccount === route.model ? ", the default" : ""})`
+            : `${route.connector} (${onlyAccountName(route)})`,
           connector: route.connector,
           ...(route.kind ? { kind: route.kind } : {}),
           ...(route.providerDomain ? { providerDomain: route.providerDomain } : {}),
+          ...(route.defaultAccount ? { isDefault: route.defaultAccount === route.model } : {}),
         };
         for (const name of server.modelToolNames()) accounts.set(name, account);
       }
@@ -4636,6 +4665,12 @@ function maybeInstallLazyToolTransport(
     lazyRuntime.callDisclosure = (toolName) => attemptTools.callDisclosure(toolName);
   }
   if (options.openingToolNames?.length) lazyRuntime.loadAtOpening(options.openingToolNames);
+}
+
+/** "Gmail — alice@example.com · Yours" → "alice@example.com · Yours". */
+function onlyAccountName(route: McpAccountRouteLabel): string {
+  const prefix = `${route.connector} — `;
+  return route.model.startsWith(prefix) ? route.model.slice(prefix.length) : route.model;
 }
 
 function mcpServerRegistryId(server: MCPServer): string {
@@ -4870,6 +4905,15 @@ export function toolPreflightFailureOutput(error: unknown): {
   if (isMcpAccountParameterChoiceError(error)) {
     return { isError: true, content: [{ type: "text", text: error.message }] };
   }
+  // Rejected arguments and unusable schemas read exactly as when the call
+  // itself rejects them: nothing ran, and the model can correct the call.
+  if (
+    error instanceof ToolGatewayInputValidationError ||
+    error instanceof ToolGatewaySchemaCompilationError
+  ) {
+    const { isError, content } = mcpToolErrorOutput(error);
+    return { isError, content };
+  }
   const message = exactErrorMessage(error);
   const bounded =
     message.length > TOOL_PREFLIGHT_FAILURE_MESSAGE_MAX_CHARS
@@ -4952,6 +4996,117 @@ function installUnattendedApprovalRefusal(
     agent.clone = (config: unknown) => {
       const cloned = clone(config);
       installUnattendedApprovalRefusal(cloned, approvedToolCallIds);
+      return cloned;
+    };
+  }
+}
+
+/** An MCP server whose model calls run through the attempt tool gateway. */
+type ModelArgumentAdmittingServer = MCPServer & {
+  /**
+   * The arguments a call to `toolName` would run with, checked by the same
+   * gateway check the call itself gets. Undefined when this server does not
+   * check them here (no gateway bound, or not its tool): the call path then
+   * decides as before. Throws the gateway's own rejection otherwise.
+   */
+  admitModelArguments(
+    toolName: string,
+    args: Record<string, unknown>,
+  ): Promise<Record<string, unknown> | undefined>;
+  /** Whether this server listed `toolName` to the model. Reads no tool list. */
+  ownsModelTool(toolName: string): boolean;
+};
+
+function admitsModelArguments(server: MCPServer): server is ModelArgumentAdmittingServer {
+  return (
+    typeof (server as Partial<ModelArgumentAdmittingServer>).admitModelArguments === "function" &&
+    typeof (server as Partial<ModelArgumentAdmittingServer>).ownsModelTool === "function"
+  );
+}
+
+/**
+ * Run the gateway's argument check without calling the tool. Only the
+ * rejections the call itself would return to the model propagate; anything
+ * else (for example a tool the catalog does not hold) is left to the call.
+ */
+function admitGatewayModelArguments(
+  environment: AttemptToolEnvironment,
+  input: Parameters<AttemptToolEnvironment["admitModelArguments"]>[0],
+): Record<string, unknown> | undefined {
+  try {
+    return environment.admitModelArguments(input);
+  } catch (error) {
+    if (
+      error instanceof ToolGatewayInputValidationError ||
+      error instanceof ToolGatewaySchemaCompilationError
+    ) {
+      throw error;
+    }
+    return undefined;
+  }
+}
+
+function isArgumentRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Check a call's arguments against the tool's input schema before any
+ * Opengeni approval hook asks a person about it. Without this, approval
+ * preflight (connector policy, review previews, Ask cards) ran first and the
+ * schema check only when the approved call executed, so a person could be
+ * asked to approve a call that can never run. The check is the attempt
+ * gateway's own (`admitModelArguments`), so it accepts and rejects exactly
+ * what execution would. A rejection is thrown and preflight containment
+ * returns it to the model as the usual invalid-arguments tool error; no card
+ * is created.
+ *
+ * When the gateway repairs string-encoded values, the inner hooks receive the
+ * repaired arguments, so the reviewed and fingerprinted call is the one the
+ * gateway executes (execution repeats the same deterministic repair).
+ *
+ * The owning server is found when a call is checked, from what each server
+ * already listed, so listing tools never reads any server's tool list again.
+ *
+ * Installed after every approval wrapper and before unattended refusal and
+ * preflight containment, and reinstalled on each clone like them.
+ */
+function installModelArgumentAdmission(agent: ApprovalCapableAgent): void {
+  const listMcpTools = agent.getMcpTools.bind(agent);
+  const ownerOf = (toolName: string) =>
+    (agent.mcpServers ?? []).find(
+      (server): server is ModelArgumentAdmittingServer =>
+        admitsModelArguments(server) && server.ownsModelTool(toolName),
+    );
+  agent.getMcpTools = async (resolutionContext: unknown) =>
+    (await listMcpTools(resolutionContext)).map((tool) => {
+      if (tool.type !== "function" || !opengeniApprovalHooks.has(tool.needsApproval)) return tool;
+      const needsApproval = tool.needsApproval.bind(tool);
+      return {
+        ...tool,
+        needsApproval: opengeniApprovalHook(
+          async (
+            runContext: Parameters<typeof needsApproval>[0],
+            parsedInput: Parameters<typeof needsApproval>[1],
+            callId: Parameters<typeof needsApproval>[2],
+          ) => {
+            const admitted = isArgumentRecord(parsedInput)
+              ? await ownerOf(tool.name)?.admitModelArguments(tool.name, parsedInput)
+              : undefined;
+            return await needsApproval(
+              runContext,
+              (admitted ?? parsedInput) as typeof parsedInput,
+              callId,
+            );
+          },
+        ),
+      };
+    });
+  const clone = agent.clone?.bind(agent);
+  if (clone) {
+    agent.clone = (config: unknown) => {
+      const cloned = clone(config);
+      installModelArgumentAdmission(cloned);
       return cloned;
     };
   }
@@ -6158,6 +6313,12 @@ export type PreparedAgentTools = {
    */
   unavailableMcpServers: ReadonlyMap<string, string>;
   /**
+   * Live, by-reference: the servers among `unavailableMcpServers` that could
+   * not be reached at all (connection refused, DNS failure, timeout), so a
+   * caller can say "try again" instead of "this tool doesn't exist".
+   */
+  unreachableMcpServers: ReadonlySet<string>;
+  /**
    * Optional completion fence for non-eager MCP discovery. Only session-marked
    * eager servers are connected/listed before this handle is returned. Search,
    * deferred invocation, Codemode activation, and final cleanup may join this
@@ -6625,6 +6786,17 @@ class DeferredPreparedMcpServer implements MCPServer {
     return await this.preparedTarget?.accountParameterChoice(toolName, args);
   }
 
+  async admitModelArguments(
+    toolName: string,
+    args: Record<string, unknown>,
+  ): Promise<Record<string, unknown> | undefined> {
+    return await this.preparedTarget?.admitModelArguments(toolName, args);
+  }
+
+  ownsModelTool(toolName: string): boolean {
+    return this.listedModelNames.has(toolName);
+  }
+
   async unprefixedToolName(name: string): Promise<string> {
     const target = await this.requiredTarget();
     if (!(target instanceof PrefixedMcpServer)) throw new Error("Unknown prepared MCP identity");
@@ -6727,6 +6899,8 @@ export async function prepareAgentTools(
   // sanitizing fetch and the current turn's tool_search description.
   const codexConnectorNamespaces = options.deferredCodexConnectorNamespaces ?? new Set<string>();
   const unavailableMcpServers = new Map<string, string>(options.preparationUnavailableMcpServers);
+  // The best-effort servers among them that could not be reached at all.
+  const unreachableMcpServers = new Set<string>();
   // Why a connection-backed server's setup was refused a credential, by
   // server id, so its connect/list failure says why instead of a bare 401.
   const setupAuthNeededReasons = new Map<string, ToolAuthNeededPayload["reason"]>();
@@ -6949,8 +7123,10 @@ export async function prepareAgentTools(
             if (!options.runMcpCredentials?.has(config.id)) throw error;
             // Transport failures may echo request headers in their message or
             // cause chain. This exception can reach required-tool history.
+            const redacted = new Error("MCP credentialed transport request failed");
+            carryMcpRequestNotSentMark(error, redacted);
             // eslint-disable-next-line preserve-caught-error -- the raw cause can expose credentials
-            throw new Error("MCP credentialed transport request failed");
+            throw redacted;
           }
           if (!response.ok && options.runMcpCredentials?.has(config.id)) {
             await response.body?.cancel().catch(() => undefined);
@@ -7034,7 +7210,7 @@ export async function prepareAgentTools(
         // adapter-owned matchers. Adding another provider extends this registry;
         // generic transport/catalog code never branches on provider identity.
         const bridge = createLocalMcpBridgeFromAdapters<
-          GmailRestMcpBridgeConfig,
+          BuiltInMcpBridgeConfig,
           BuiltInMcpBridgeContext
         >(
           BUILT_IN_MCP_BRIDGE_ADAPTERS,
@@ -7151,6 +7327,7 @@ export async function prepareAgentTools(
     // list, and any server whose list was trimmed to fit this turn.
     if (entry.server instanceof PrefixedMcpServer) {
       entry.server.unavailableSink = unavailableMcpServers;
+      entry.server.unreachableSink = unreachableMcpServers;
       entry.server.setupAuthNeededReasons = setupAuthNeededReasons;
     }
   }
@@ -7197,14 +7374,13 @@ export async function prepareAgentTools(
     for (const failed of connected.failed) {
       if (failed instanceof PrefixedMcpServer) {
         failed.releaseAggregateBudget();
+        const error = connected.errors.get(failed);
         unavailableMcpServers.set(
           failed.registryId,
-          mcpUnavailableReason(
-            connected.errors.get(failed),
-            "connect",
-            setupAuthNeededReasons.get(failed.registryId),
-          ),
+          mcpUnavailableReason(error, "connect", setupAuthNeededReasons.get(failed.registryId)),
         );
+        if (!setupAuthNeededReasons.has(failed.registryId) && isMcpServerUnreachableError(error))
+          unreachableMcpServers.add(failed.registryId);
       }
       if (
         !(failed instanceof PrefixedMcpServer) ||
@@ -7383,6 +7559,7 @@ export async function prepareAgentTools(
         },
         codexConnectorNamespaces,
         unavailableMcpServers,
+        unreachableMcpServers,
       };
     } catch (error) {
       // In deferred mode the eager and in-process servers have already been
@@ -7513,6 +7690,7 @@ export async function prepareAgentTools(
     },
     codexConnectorNamespaces,
     unavailableMcpServers,
+    unreachableMcpServers,
     ready,
     startDeferredPreparation,
   };
@@ -8243,24 +8421,33 @@ async function prepareToolGatewayDefinitionsFromServers(
 /**
  * MCP `_meta` for one gateway call. The first-party server also learns which
  * attempt surface issued it, so it can tell a read whose output reached the
- * model from one a Codemode script kept to itself. Set last, so transport
- * metadata can never claim another caller. Third-party servers never see it.
+ * model from one a Codemode script kept to itself, and for a model call the
+ * model's own call id, which names that output in conversation history. Set
+ * last, so transport metadata can never claim another caller or call. Third-
+ * party servers never see either.
  */
 export function attemptToolCallMeta(
   serverId: string,
   context: {
     operationId: string;
     caller: Pick<ToolGatewayCaller, "kind">;
+    sourceCallId?: string;
     transportMeta?: Record<string, unknown> | null;
   },
   callIdentity?: McpCallIdentity,
 ): Record<string, unknown> {
-  const { [FIRST_PARTY_MCP_CALLER_META_KEY]: _ignored, ...transportMeta } =
-    context.transportMeta ?? {};
+  const {
+    [FIRST_PARTY_MCP_CALLER_META_KEY]: _ignoredCaller,
+    [FIRST_PARTY_MCP_MODEL_CALL_ID_META_KEY]: _ignoredCallId,
+    ...transportMeta
+  } = context.transportMeta ?? {};
   return {
     ...transportMeta,
     opengeniOperationId: context.operationId,
     ...(serverId === "opengeni" ? { [FIRST_PARTY_MCP_CALLER_META_KEY]: context.caller.kind } : {}),
+    ...(serverId === "opengeni" && context.caller.kind === "model" && context.sourceCallId
+      ? { [FIRST_PARTY_MCP_MODEL_CALL_ID_META_KEY]: context.sourceCallId }
+      : {}),
     // Trusted worker scope; spread after transport metadata so a caller cannot spoof it.
     ...(callIdentity
       ? {
@@ -9325,6 +9512,8 @@ function mcpSetupAuthNeededReason(reason: ToolAuthNeededPayload["reason"]): stri
       return "the account this workspace designated for it cannot be used right now; whoever manages this workspace's connectors can reconnect it";
     case "unsupported_auth":
       return "it uses a sign-in method that is not supported; it needs to be connected again";
+    case "account_scope_fixed":
+      return "the connected account does not include the access these tools need, and it cannot be added here";
   }
 }
 
@@ -9444,6 +9633,7 @@ function inspectMcpTransportError(
   hasConnectivityMarker: boolean;
   hasTypedError: boolean;
   hasRequestTimeout: boolean;
+  hasNotSentCode: boolean;
   httpStatuses: number[];
   statuses: number[];
 } {
@@ -9456,6 +9646,7 @@ function inspectMcpTransportError(
   let hasConnectivityMarker = false;
   let hasTypedError = false;
   let hasRequestTimeout = false;
+  let hasNotSentCode = false;
   let inspectedNodes = 0;
   let complete = true;
 
@@ -9507,6 +9698,9 @@ function inspectMcpTransportError(
     if (failureKind === "connectivity_unavailable") {
       hasConnectivityMarker = true;
     }
+    // Only the exact error the physical MCP request rejected with (see
+    // guardedMcpFetch); never another error carrying the same code.
+    if (isMcpRequestNotSentMark(current.value)) hasNotSentCode = true;
     if (
       code === -32_000 &&
       typeof message === "string" &&
@@ -9554,6 +9748,7 @@ function inspectMcpTransportError(
     hasConnectivityMarker,
     hasTypedError,
     hasRequestTimeout,
+    hasNotSentCode,
     httpStatuses,
     statuses,
   };
@@ -9631,6 +9826,44 @@ export function isMcpTransportConnectivityError(error: unknown): boolean {
     typeof error === "object" &&
     mcpTransportFailureKind(error) === "connectivity_unavailable"
   );
+}
+
+/**
+ * An MCP server that could not be reached: its transport failed to connect,
+ * timed out, or carried a typed socket/DNS failure. Used to say "try again"
+ * for a server that dropped out of a preparation, never to retry a call.
+ */
+export function isMcpServerUnreachableError(error: unknown): boolean {
+  try {
+    if (!error || typeof error !== "object") return false;
+    if (isMcpRequestTimeoutError(error) || isMcpTransportConnectivityError(error)) return true;
+    if (isRawMcpTransportConnectivityError(error)) return true;
+    return isMcpRequestNotSentError(error);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A failure that proves the request never left: its chain holds the exact
+ * error a physical MCP POST rejected with while connecting (marked by
+ * guardedMcpFetch), with no HTTP response, timeout or closed connection. A
+ * caller may say the outcome is known (nothing happened) and retrying is safe.
+ */
+export function isMcpRequestNotSentError(error: unknown): boolean {
+  try {
+    if (!error || typeof error !== "object") return false;
+    const inspection = inspectMcpTransportError(error);
+    return (
+      inspection.complete &&
+      inspection.hasNotSentCode &&
+      inspection.httpStatuses.length === 0 &&
+      !inspection.hasConnectionClosed &&
+      !inspection.hasRequestTimeout
+    );
+  } catch {
+    return false;
+  }
 }
 
 /** Only the verified required first-party connect/list boundary may grant this wait. */
@@ -10366,6 +10599,32 @@ class AttemptDefinitionMcpServer implements MCPServer {
     return this.disclosures.get(modelName);
   }
 
+  ownsModelTool(toolName: string): boolean {
+    return this.catalogIdentities.has(toolName);
+  }
+
+  /** The gateway check `callToolResult` runs, without calling the tool. */
+  async admitModelArguments(
+    toolName: string,
+    args: Record<string, unknown>,
+  ): Promise<Record<string, unknown> | undefined> {
+    if (this.closed) return undefined;
+    const expectedIdentity = this.catalogIdentities.get(toolName)?.identity;
+    if (expectedIdentity === undefined) return undefined;
+    let environment: AttemptToolEnvironment;
+    try {
+      environment = await this.requiredAttemptToolEnvironment();
+    } catch {
+      // The call itself reports a missing attempt authority.
+      return undefined;
+    }
+    return admitGatewayModelArguments(environment, {
+      modelName: toolName,
+      expectedIdentity,
+      arguments: args,
+    });
+  }
+
   bindAttemptToolEnvironment(environment: AttemptToolEnvironment): void {
     if (this.environment && this.environment !== environment) {
       throw new Error("local model tool server is already bound to another attempt catalog");
@@ -10478,6 +10737,8 @@ export class PrefixedMcpServer implements MCPServer {
   private loggedListToolsFailure = false;
   /** Where this server records that some or all of its tools are unavailable this attempt. */
   unavailableSink: Map<string, string> | undefined;
+  /** Where this server records that it could not be reached this attempt (see `unreachableMcpServers`). */
+  unreachableSink: Set<string> | undefined;
   /** Why setup was refused a credential, by server id (see connectionBrokerFetch). */
   setupAuthNeededReasons: ReadonlyMap<string, ToolAuthNeededPayload["reason"]> | undefined;
   /** Set by this server's transport when a tools/list response is refused for size. */
@@ -10773,6 +11034,30 @@ export class PrefixedMcpServer implements MCPServer {
     this.attemptToolSubjectId = subjectId;
   }
 
+  /** Whether this server listed `toolName` to the model this turn. */
+  ownsModelTool(toolName: string): boolean {
+    return this.originalToolNames.has(toolName) && !this.omittedModelNames.has(toolName);
+  }
+
+  /**
+   * The gateway check `callToolResult` runs, without calling the tool.
+   * Without a bound attempt gateway the call does not check arguments here
+   * either, so neither does this.
+   */
+  async admitModelArguments(
+    toolName: string,
+    args: Record<string, unknown>,
+  ): Promise<Record<string, unknown> | undefined> {
+    if (!this.attemptToolEnvironment || !this.ownsModelTool(toolName)) return undefined;
+    const unprefixed = this.unprefixToolName(toolName);
+    if (!this.isAllowed(unprefixed)) return undefined;
+    return admitGatewayModelArguments(this.attemptToolEnvironment, {
+      modelName: toolName,
+      expectedIdentity: { serverId: this.registryId, toolName: unprefixed },
+      arguments: args,
+    });
+  }
+
   unprefixedToolName(toolName: string): string {
     return this.unprefixToolName(toolName);
   }
@@ -10909,11 +11194,17 @@ export class PrefixedMcpServer implements MCPServer {
           return {
             ...tool,
             name,
-            // Name the account only when the turn has several accounts of this
-            // connector to tell apart. With one account the line adds nothing
-            // the model can act on, and it would repeat on every tool.
-            ...(this.accountLabel?.account
-              ? { description: withAccountLine(this.accountLabel.model, tool.description) }
+            // Every connected account's tools name the account, so the model
+            // knows whose account it reaches even when it is the connector's
+            // only one. The line follows from the accepted account alone, so
+            // it reads the same on every turn of that selection.
+            ...(this.accountLabel
+              ? {
+                  description: withAccountLine(
+                    { ...this.accountLabel, only: !this.accountLabel.account },
+                    tool.description,
+                  ),
+                }
               : {}),
           };
         })
@@ -10998,6 +11289,12 @@ export class PrefixedMcpServer implements MCPServer {
           ? "connected, but its tool list is larger than one turn can hold, so its tools are unavailable this turn."
           : mcpUnavailableReason(error, "list", this.setupAuthNeededReasons?.get(this.registryId)),
       );
+      if (
+        !tooLarge &&
+        !this.setupAuthNeededReasons?.has(this.registryId) &&
+        isMcpServerUnreachableError(error)
+      )
+        this.unreachableSink?.add(this.registryId);
       this.releaseAggregateBudget();
       return [];
     }

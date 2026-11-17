@@ -3,13 +3,23 @@
 // for a reviewed catalog service (Google Calendar) or for a server someone
 // added by hand. Catalog and connection state come from a synthetic client,
 // so nothing reaches an API or the service.
-//   ?service=calendar|added   ?theme=light|dark
+//   ?service=calendar|added|gmail-step-up|gmail-fixed   ?theme=light|dark
+// gmail-step-up: a connected account that needs more access for one tool, as
+// the session renders it (the stock "Allow" row for that exact account).
+// gmail-fixed: the same tool on an account whose access is fixed (for example
+// managed by an integration platform): the stock row, with no action.
 // Open the card's setup dialog with its button to see the dialog.
 import { useEffect, useMemo } from "react";
 import { createRoot } from "react-dom/client";
 import type { ConnectTransport } from "@opengeni/connect";
 import type { CapabilityCatalogItem, SessionEvent } from "@opengeni/sdk";
-import { MessageTimeline, OpenGeniProvider, type AuthNeededItem } from "@opengeni/react";
+import {
+  MessageTimeline,
+  OpenGeniProvider,
+  sessionAuthRecommendation,
+  useOpenGeniText,
+  type AuthNeededItem,
+} from "@opengeni/react";
 import { AppContext } from "@opengeni/react/app/app-context";
 import { AppHostProvider } from "@opengeni/react/app/lib/app-host";
 import { SessionCapabilityCard } from "@opengeni/react/app/components/capabilities/session-capability-card";
@@ -20,7 +30,11 @@ import "./styles.css";
 const WORKSPACE_ID = "11111111-2222-4333-8444-555555555555";
 const SESSION_ID = "session-connect";
 const params = new URLSearchParams(window.location.search);
-const service = params.get("service") === "added" ? "added" : "calendar";
+const serviceParam = params.get("service");
+const service =
+  serviceParam === "added" || serviceParam === "gmail-step-up" || serviceParam === "gmail-fixed"
+    ? serviceParam
+    : "calendar";
 const dark = params.get("theme") === "dark";
 
 const CALENDAR = {
@@ -123,6 +137,35 @@ class PreviewClient extends MockOpenGeniClient {
 function events(): SessionEvent[] {
   const log = new EventLog();
   const turn = "turn-connect";
+  if (service === "gmail-step-up" || service === "gmail-fixed") {
+    const fixed = service === "gmail-fixed";
+    log.push("user.message", { text: "Draft a reply to Ola about Friday." });
+    log.push(
+      "tool.auth_needed",
+      {
+        serverId: "gmail",
+        toolName: "create_draft",
+        providerDomain: "gmail.googleapis.com",
+        connectionId: "conn-gmail-1",
+        ...(fixed
+          ? { reason: "unsupported_auth", accountReason: "account_scope_fixed" }
+          : { reason: "insufficient_scope" }),
+        scopes: ["https://www.googleapis.com/auth/gmail.compose"],
+      },
+      turn,
+    );
+    log.push(
+      "agent.message.completed",
+      {
+        text: fixed
+          ? "The connected Gmail account can't create drafts, so I couldn't draft the reply."
+          : "Allow Gmail to write drafts and I'll carry on.",
+      },
+      turn,
+    );
+    log.push("turn.completed", {}, turn);
+    return log.events;
+  }
   log.push("user.message", {
     text: service === "added" ? "Close the ticket about the login bug." : "Am I free on Friday?",
   });
@@ -158,6 +201,7 @@ function events(): SessionEvent[] {
 }
 
 function Preview() {
+  const t = useOpenGeniText();
   const client = useMemo(() => new PreviewClient(), []);
   useEffect(() => {
     document.documentElement.setAttribute("data-og-theme", dark ? "dark" : "light");
@@ -199,13 +243,19 @@ function Preview() {
             <main className="mx-auto max-w-[760px] px-4 py-8" data-shot="">
               <MessageTimeline
                 events={events()}
-                renderAuthNeeded={(entry: AuthNeededItem) => (
-                  <SessionCapabilityCard
-                    item={entry}
-                    workspaceId={WORKSPACE_ID}
-                    sessionId={SESSION_ID}
-                  />
-                )}
+                renderAuthNeeded={(entry: AuthNeededItem) => {
+                  // The session's own choice: a recommendation card, or the
+                  // stock row when there is nothing to recommend.
+                  const recommendation = sessionAuthRecommendation(t, entry, [item]);
+                  return recommendation ? (
+                    <SessionCapabilityCard
+                      item={recommendation}
+                      workspaceId={WORKSPACE_ID}
+                      sessionId={SESSION_ID}
+                    />
+                  ) : undefined;
+                }}
+                onReconnect={() => {}}
               />
             </main>
           </div>

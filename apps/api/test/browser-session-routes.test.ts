@@ -738,6 +738,20 @@ test("held browsers are renewed on every pass while their agent sessions work or
         channels: [asPerson],
         viewers: ["synthetic-person"],
         holds: [hold],
+        unavailable: [],
+      },
+      // The person's Chrome profile still reads connected, but its machine
+      // stopped renewing its connection: not held, and since no agent or
+      // person asked for it, not counted as an attached browser refusal.
+      {
+        sweep: "attached-offline",
+        renewal: { listed: 1, held: 0, capped: false },
+        records: ["attached-offline"],
+        leaseReads: [],
+        channels: [],
+        viewers: ["synthetic-person"],
+        holds: [],
+        unavailable: [],
       },
       // The turn ended and nothing waits: nothing is listed or sent.
       {
@@ -748,6 +762,7 @@ test("held browsers are renewed on every pass while their agent sessions work or
         channels: [],
         viewers: [],
         holds: [],
+        unavailable: [],
       },
       // A new turn that never touches the browser: held again.
       {
@@ -758,6 +773,7 @@ test("held browsers are renewed on every pass while their agent sessions work or
         channels: [asPerson],
         viewers: [],
         holds: [hold],
+        unavailable: [],
       },
       // Reaching the controller took minutes (slow routing, or other
       // controllers ahead of it in the pass): the hold still runs five
@@ -770,6 +786,7 @@ test("held browsers are renewed on every pass while their agent sessions work or
         channels: [asPerson],
         viewers: [],
         holds: [hold],
+        unavailable: [],
       },
       // More browsers are held than one pass renews: the pass says so.
       {
@@ -780,6 +797,7 @@ test("held browsers are renewed on every pass while their agent sessions work or
         channels: [],
         viewers: [],
         holds: [],
+        unavailable: [],
       },
       // The task moved to another machine: the browser left behind is not held.
       {
@@ -790,6 +808,7 @@ test("held browsers are renewed on every pass while their agent sessions work or
         channels: [],
         viewers: [],
         holds: [],
+        unavailable: [],
       },
     ]);
   } finally {
@@ -827,6 +846,7 @@ async function holdRenewalFixture() {
     unrouted: machinePlacement,
     "cold-box": { kind: "sandbox_group", sandboxGroupId },
     attached: { kind: "attached_device", deviceId },
+    "attached-offline": { kind: "attached_device", deviceId },
   };
   const ids: Record<string, string> = {};
   const names = new Map<string, string>();
@@ -846,6 +866,8 @@ async function holdRenewalFixture() {
   let channels: Array<Record<string, unknown>> = [];
   let viewers: string[] = [];
   let holds: Array<Record<string, unknown>> = [];
+  let unavailable: string[] = [];
+  let viewedDevice = "attached";
   mock.module(resolveFromApi("@opengeni/db"), () => ({
     ...db,
     listAgentHeldBrowserSessions: async (_db: unknown, input: { limit: number }) =>
@@ -898,8 +920,14 @@ async function holdRenewalFixture() {
     }),
     getAttachedBrowserDevice: async (_db: unknown, input: { subjectId: string }) => {
       viewers.push(input.subjectId);
-      return { id: deviceId, state: "disconnected" };
+      return {
+        id: deviceId,
+        enrollmentId: randomUUID(),
+        state: viewedDevice === "attached" ? "disconnected" : "connected",
+      };
     },
+    // The profile still reads connected, but its machine's runner is gone.
+    getLiveEnrollmentConnection: async () => null,
   }));
   const expectedAdmin = authority.deriveBrowserControllerAdminToken({
     rootSecret,
@@ -965,6 +993,13 @@ async function holdRenewalFixture() {
     settings: fixtureSettings({ delegationSecret: rootSecret }),
     db: {},
     bus: {},
+    observability: {
+      incrementCounter: (counter: { name: string; labels?: Record<string, string> }) => {
+        if (counter.name === "opengeni_attached_browser_unavailable_total") {
+          unavailable.push(counter.labels?.reason ?? "");
+        }
+      },
+    },
   } as never);
   const originalWarn = console.warn;
   console.warn = () => {};
@@ -972,6 +1007,7 @@ async function holdRenewalFixture() {
     const results = [];
     const sweeps: Array<[string, string[]]> = [
       ["working", ["machine", "cold-box", "attached", "unrouted"]],
+      ["attached-offline", ["attached-offline"]],
       ["idle", []],
       ["working-again", ["machine"]],
       ["slow-route", ["machine"]],
@@ -986,6 +1022,8 @@ async function holdRenewalFixture() {
       channels = [];
       viewers = [];
       holds = [];
+      unavailable = [];
+      viewedDevice = held.includes("attached-offline") ? "attached-offline" : "attached";
       const renewal = await renewBrowserHolds();
       results.push({
         sweep: next,
@@ -995,6 +1033,7 @@ async function holdRenewalFixture() {
         channels,
         viewers,
         holds,
+        unavailable,
       });
     }
     console.log(JSON.stringify(results));

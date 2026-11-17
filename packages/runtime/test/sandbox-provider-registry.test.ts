@@ -325,6 +325,41 @@ describe("createSandboxClient — per-backend matrix construction", () => {
     expect(client.options?.regions).toBeUndefined();
   });
 
+  test("every modal box carries CPU and memory ceilings by its organization's resource class", () => {
+    const base = {
+      sandboxBackend: "modal" as const,
+      modalTokenId: "tok-id",
+      modalTokenSecret: "tok-secret",
+    };
+    const standard = createSandboxClient(testSettings(base)) as {
+      options?: Record<string, unknown>;
+    };
+    expect(standard.options).toMatchObject({
+      cpu: 0.125,
+      cpuLimit: 16,
+      memoryMiB: 128,
+      memoryLimitMiB: 32_768,
+    });
+    expect(standard.options?.outboundCidrAllowlist).toBeUndefined();
+    const unpaid = createSandboxClient(
+      testSettings({
+        ...base,
+        sandboxResourceClass: "unpaid",
+        modalUnpaidOutboundDomainAllowlist: "github.com",
+      }),
+    ) as { options?: Record<string, unknown> };
+    expect(unpaid.options).toMatchObject({
+      cpuLimit: 2,
+      memoryLimitMiB: 4096,
+      outboundCidrAllowlist: [],
+      outboundDomainAllowlist: ["github.com"],
+    });
+    // A missing ceiling never builds a client that could create a box.
+    expect(() => createSandboxClient(testSettings({ ...base, modalSandboxCpuLimit: 0 }))).toThrow(
+      "ceilings must be set",
+    );
+  });
+
   test("modal threads configured region placement into physical create options", () => {
     const client = createSandboxClient(
       testSettings({

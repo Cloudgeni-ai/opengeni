@@ -1,5 +1,47 @@
 # @opengeni/codemode
 
+## 6.27.0
+
+### Patch Changes
+
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+  - @opengeni/contracts@6.27.0
+  - @opengeni/sdk@6.27.0
+  - @opengeni/tool-gateway@6.27.0
+
+## 6.26.0
+
+### Patch Changes
+
+- c8efcb0: A tool call whose arguments do not match the tool's input schema no longer asks anyone to approve it. Connector and other approval-gated tool calls are now checked against the schema before the approval check, so the model gets the usual "not called, correct the arguments" error at once instead of a person getting an Ask card for a call that could never run. When string-encoded arguments are repaired, the approval card and its action fingerprint now show the repaired arguments, which are the ones the call runs with. The tool gateway gains `admitModelArguments`, which runs the same argument check as a model call without calling the tool.
+- Updated dependencies [6d7ea1e]
+- Updated dependencies [8fae328]
+- Updated dependencies [c8efcb0]
+- Updated dependencies [20e4937]
+- Updated dependencies [c8efcb0]
+  - @opengeni/contracts@6.26.0
+  - @opengeni/sdk@6.26.0
+  - @opengeni/tool-gateway@6.26.0
+
+## 6.25.0
+
+### Patch Changes
+
+- Updated dependencies [e126cb5]
+- Updated dependencies [61abc98]
+- Updated dependencies [81570f9]
+- Updated dependencies [f99f940]
+- Updated dependencies [f99f940]
+- Updated dependencies [bfd2970]
+  - @opengeni/contracts@6.25.0
+  - @opengeni/sdk@6.25.0
+  - @opengeni/tool-gateway@6.25.0
+
 ## 6.24.1
 
 ### Patch Changes

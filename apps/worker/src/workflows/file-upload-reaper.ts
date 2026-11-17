@@ -13,6 +13,7 @@ const reaperActivity = proxyActivities<
     | "applyRecordingRetention"
     | "reconcileRecentModelCallFacts"
     | "recordRecentTurnTimingProfiles"
+    | "sweepUnusedNangoConnections"
   >
 >({
   startToCloseTimeout: "5 minutes",
@@ -37,5 +38,9 @@ export async function fileUploadReaperWorkflow(): Promise<void> {
   await reaperActivity.reconcileRecentModelCallFacts();
   if (patched("turn-timing-profiles-v1")) {
     await reaperActivity.recordRecentTurnTimingProfiles();
+  }
+  // Nothing stays billed in Nango that no Opengeni connection stands for.
+  if (patched("nango-connection-sweep-v1")) {
+    await reaperActivity.sweepUnusedNangoConnections();
   }
 }

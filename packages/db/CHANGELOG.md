@@ -1,5 +1,106 @@
 # @opengeni/db
 
+## 6.27.0
+
+### Patch Changes
+
+- c3ca657: A parent no longer repeats its final answer when a child's result arrives after the parent already read it in a turn that was recovered from an interrupted attempt. The worker now tells the first-party server the model's call id for each direct tool call, the read record keeps it, and the turn's completion counts the read when its durable history holds that call's output.
+- 8f1f5e2: Free compute is bounded for every kind of sandbox use, not only viewers. A held or denied Free or plan-less organization that has not bought credit or paid for a plan gets no sandbox at all: terminals, commands, background processes, browser and desktop sessions, viewers and new boxes for agent turns are refused, a turn that needs a box fails with a clear message instead of waiting forever, an already running box stays usable only while a turn holds it, and the reaper drains boxes no turn holds. A person who owns or administers such an organization carries the restriction into their other unpaid organizations.
+
+  Free, young Free and plan-less organizations share one running-box budget of 2 across every holder kind, plus 2 running boxes and 12 box-hours per UTC day per organization and per person across their organizations. Past the daily budget no box starts and the reaper drains boxes no turn holds, while an in-flight turn finishes. Boxes that nothing uses drain after the viewer idle window, whatever holds them. All values are plan-limit settings (`OPENGENI_SANDBOX_PLAN_LIMITS_JSON`).
+
+  Every new Modal box carries hard CPU and memory ceilings (2 cores / 4096 MiB for unpaid organizations, 16 cores / 32768 MiB for paid, Enterprise, host-provisioned and credit-buying organizations), and a create without them is refused. Unpaid boxes can be limited to an outbound CIDR/domain allowlist; Modal has no per-port egress rule, so SMTP cannot be blocked by port alone.
+
+  A denied Free organization with no paid history is suspended from sandboxes, Site publishing, invitations, uploads and API keys until the decision is reversed or it buys credit; sign-in keeps working. Creating an additional organization now goes through the signup network checks and rate limit, and inherits its owner's review hold.
+
+  An unpaid organization that bought credit is treated as paying: no per-person, daily or all-holder idle bounds. Paid, Enterprise and host-provisioned organizations are unaffected.
+
+  Rollout: set the new plan-limit fields in `OPENGENI_SANDBOX_PLAN_LIMITS_JSON` only after this release runs everywhere, because older pods reject unknown fields. Defaults for `free`, `new` and `none`: `runningBoxesPerOrganization` 2, `runningBoxesPerPerson` 2, `boxSecondsPerOrganizationPerDay` 43200, `boxSecondsPerPersonPerDay` 43200, `idleDrainAllHolders` true; `restricted` is 0 for every count.
+
+- d85f57f: Finishing owed model-usage ledger writes no longer scans the usage ledger. The check that a recorded response is already settled now looks its completion key up in the ledger's unique index under the runtime role's row-level security, so it costs a few milliseconds per session however large the ledger is. Before, PostgreSQL could not use that index under row-level security and scanned every usage row the tenant could see for each response, which took minutes per idle, failure or worker-death boundary and could occupy every database connection of the control worker, stalling turn starts across the deployment.
+- d51e6e5: A Steer no longer lets a later message be answered before one sent earlier. Steering a queued message, or sending a new message as a Steer, used to move it to the front of the queue. When nothing was running yet, that turn started first and answered without ever seeing the earlier message, which then ran on its own afterwards. A Steer now keeps the order messages were sent in. The running turn, and each message still waiting ahead of the Steer, hands over to it before its first model request, so the agent reads every message up to the Steer, in order, before it answers. A pending Agent Steer still runs ahead of queued messages, but no longer lets a human Steer skip an earlier human message. Only an explicit queue Move changes the order.
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [8f1f5e2]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+  - @opengeni/contracts@6.27.0
+  - @opengeni/config@6.27.0
+  - @opengeni/codemode@6.27.0
+  - @opengeni/codex@6.27.0
+  - @opengeni/observability@6.27.0
+  - @opengeni/network@6.27.0
+  - @opengeni/subscriptions@6.27.0
+  - @opengeni/xai-subscription@6.27.0
+
+## 6.26.0
+
+### Patch Changes
+
+- 6d7ea1e: A context checkpoint that failed before any provider answer, including one refused because the sandbox moved to another machine just before it was sent, now retries the same turn instead of failing it. When a checkpoint does fail for good, a goal's continuation reports `blocked` with the new reason `compaction_failed`, and the goal pill says a message or Compact continues it, rather than claiming the goal will continue automatically.
+- b6b3579: Less waiting between a model response and the next model request. A tool's result is now recorded as soon as its response's usage and tool calls are saved, instead of waiting for that response's billing writes and history checkpoint; the next model request still waits for both. The task usage receipt that the saved usage event already records is no longer written a second time, and the model-call slot is released before the response's history checkpoint, which the next request still makes durable before it is sent.
+
+  Recovery of owed model usage no longer counts a response twice against a task's usage limit when its provider response id is stored encoded (one containing a lone surrogate or starting with the lossless codec's prefix), and such a response is no longer listed as owed again after its ledger is settled.
+
+- 47eb375: One verified account is now one connection, on every backend. Connections record a server-owned `account_identity_key` (the integration and the verified provider account), and the database allows one live connection per organization, owner and key, so a racing or legacy writer can no longer save a second connection to the same account; it fails as "already connected" instead. OAuth MCP logins, Nango connections and provider OAuth connections (personal GitHub and others) set it.
+
+  Opengeni also no longer pays for two Nango connections for the same account. When a person connects the same verified account to the same Nango integration in several organizations, every organization's row now points at one shared Nango connection, and that connection is deleted in Nango only when the last row referencing it is gone. Reconnects, refused or failed connect attempts and disconnects release the replaced connection through the same reference check, and the worker now sweeps Nango every 15 minutes: for connections this release made (tagged with the deployment), it merges leftover duplicates, deletes abandoned and cascade-orphaned connections, and deletes connections whose refresh has failed for 24 hours. Older, untagged connections are left to `integrations:nango orphans`. Disconnecting a Nango-managed Google app still does not revoke the grant at Google, because Nango's OAuth client is shared across the person's connections.
+
+  Email accounts are matched case-insensitively, and scopes Nango could not report never move another organization's connection onto a narrower one.
+
+  Reconnecting the same verified account no longer breaks running turns: the connection keeps its authority generation when the new grant includes every scope it had, so tool calls in a turn accepted before the reconnect no longer fail with "Authentication required". A different account, fewer scopes, a revoke or a status change still end that authority.
+
+  While a release rolls out, or after a rollback to an older release, pods of the older release still delete a replaced Nango connection directly; a connection shared by this release can then be revoked in another organization and must be reconnected there.
+
+- 5e3441a: Adding a column during a rolling deploy no longer fails requests on pods still running the previous release. Postgres refuses a prepared `select *`, `table.*` or `returning *` statement whose row gained a column ("cached plan must not change result type", SQLSTATE 0A000); a transaction refused this way is now repeated, and the refusing connection forgets all of its prepared statements so it is refused at most once. Statements sent together on one connection outside a transaction no longer hang when such a refusal is repeated. During the 6.25.0 rollout this caused about 25 failed requests while migration 1477 added a column to `sandbox_leases`.
+- Updated dependencies [6d7ea1e]
+- Updated dependencies [8fae328]
+- Updated dependencies [c8efcb0]
+- Updated dependencies [e1199c0]
+  - @opengeni/contracts@6.26.0
+  - @opengeni/codemode@6.26.0
+  - @opengeni/xai-subscription@6.26.0
+  - @opengeni/codex@6.26.0
+  - @opengeni/config@6.26.0
+  - @opengeni/observability@6.26.0
+  - @opengeni/network@6.26.0
+  - @opengeni/subscriptions@6.26.0
+
+## 6.25.0
+
+### Minor Changes
+
+- 81570f9: Several connections to the same tool server can now be told apart by people and agents. A connection has an optional `label`, a name its owner sets when connecting (`label` on create, an optional Name field in the key form and Connect's credential step) and changes or clears later (`PATCH .../connections/{id}` with `{ "label": … }`, or Rename on the connector page). Labels follow one rule everywhere: the provider's verified identity, else the person's name, else `<domain> account`; when two accounts with the same scope would still read the same, agents and account lists add when each was connected (then the time, then a short ID). A rename is display only: it changes neither the connection's version nor its authority, and reaches agents from the next turn.
+
+### Patch Changes
+
+- e126cb5: Documents, spreadsheets and presentations can now be deleted from the Artifacts list. Their ⋯ menu has **Delete…**, which asks first. Deleting archives the artifact: it leaves the Artifacts list and the chat's artifact panel and no longer opens. The new `POST /v1/workspaces/:workspaceId/editable-artifacts/:artifactId/archive` route and `client.archiveEditableArtifact` do the same and need `artifacts:publish`.
+- 43435d5: Connected-command output release sweeps no longer reread output that cannot be released yet. When a command's runner is offline, its output is due again after its age since exit (at least 30 seconds, at most 5 minutes) instead of being checked by every claim, and it is still released once the runner returns. A final output acknowledgement that the runner keeps answering as retained now backs off (30 seconds, doubling to 5 minutes) instead of retrying every reaper period. Foreground command completions no longer take the fenced command lookup or write anything; only runner processes with a matching background command (or one recorded before this release) do.
+- 61abc98: Opengeni Console on its own host now signs in with the person's Opengeni account on the app host: signed in to the app, they reach Console without a second sign-in; signed out, the app's sign-in runs first (email, Google, GitHub and passkeys) and brings them back to the Console page and organization they were opening. The app hands Console a single-use code that expires in sixty seconds, is stored only as a hash, and is bound to the person, a verifier in a host-only Console cookie and a configured Console origin; Console redeems it for its own session (`/v1/console-sign-in/start`, `/authorize`, `/callback`) and records each handoff in the audit log as `auth.console_sign_in_handoff`. Console's Sign out waits on a signed-out page with Continue, so it never signs straight back in. Console's own email and Google sign-in stay available as a fallback. No new settings; the handoff is off in the `dual` and `broker` browser session-set modes.
+- 43435d5: Agent turns with long histories use less worker CPU per model request. The history prefix check compares canonical items instead of hashing the whole history, model context snapshots reuse unchanged content from the previous request, request copies avoid `structuredClone` for plain data, model provider and pricing settings are parsed once per value, and the row-level security scope statement is built once per shape. Outputs, stored snapshots and history rejections are unchanged.
+- 7f09ad6: Migration 1479 grants the runtime EXECUTE on the organization-wide sandbox counts that 1475 created withheld, so the per-organization, per-member and running-box plan limits apply at admission. Readiness now requires the grant. It must reach production only in a release after the one that contains 1475: the previous binary rejects an unknown granted definer.
+- 43435d5: A tool call the model asks for is saved before its tool starts, so a worker that stops mid-step can always recover it: the call is closed as interrupted instead of being lost and run again. The response's usage is saved in the same write as its tool calls, before any of them runs; its billing runs alongside the tools, and the next model request still waits for it. If the worker stops, is replaced or its billing fails before billing finishes, recovery, the attempt's failure handling or the session's next idle point finishes it exactly once, at the price recorded with the usage. Recovery only looks at responses whose billing is still unfinished.
+- bfd2970: Boxes kept warm only by open session pages are now also bounded after admission. A box a turn, process or readiness hold kept warm becomes viewer-only when that holder leaves, and a viewer-only hold had no end. The sandbox reaper now drains a warm box whose every holder is a viewer and whose sessions have no open work after 30 minutes without use (`OPENGENI_SANDBOX_VIEWER_IDLE_DRAIN_MS`, `0` disables): the server measures use from viewer attaches and turns, and the web client extends it by reporting on each attach and heartbeat how long ago the person last used the page (`lastInteractionAgeMs`), so an active person with an open tab keeps their box. Only a person's own signed-in session can report interaction; the API ignores it from API keys (including personal ones) and delegated or service callers, so their viewers are bounded by server-observed activity. For one more idle window after an idle drain, a re-attach without newer interaction or session activity is refused, so an unattended page cannot keep a box warm; the person's next interaction re-attaches and the box resumes from its saved workspace. The reaper also drains the least recently active viewer-only boxes over `OPENGENI_SANDBOX_MAX_VIEWER_ONLY_BOXES_PER_WORKSPACE` or the plan tier's `viewerOnlyBoxesPerOrganization`, taking only boxes nobody used for five minutes. Drains are logged with their reason and counted in `opengeni_sandbox_viewer_only_drains_total{reason}`.
+
+  Organizations a host provisioned (the organization's own external source is set and is not a signup one; a workspace's external source never counts, since members can set it) resolve to a new `embedded` plan tier, unbounded by default and configurable in `OPENGENI_SANDBOX_PLAN_LIMITS_JSON`. `embedded` and `enterprise` organizations are also outside the per-workspace viewer-only limit and the reaper's drains; operators put other organizations that must not be bounded on `enterprise`. The `restricted` tier now applies only while promotion enforcement is on. A new `new` tier covers Free self-serve organizations in their first three days (`organizationsYoungerThanMs` in the tier; 1 viewer-only box per organization and per member, 3 running boxes), and tiers apply whatever credential the caller uses. Joining a box that a live process or Browser/ComputerSession keeps warm no longer counts as one more viewer-only box, and a 429 for a computer limit gets its own message in the web client instead of the viewer-limit one. Viewer attach refusals (429) now carry a machine-readable `details.viewerRefusal` (`viewer_idle`, `computer_limit`, `warm_allowance`), which the web client uses instead of the message.
+
+- Updated dependencies [e126cb5]
+- Updated dependencies [61abc98]
+- Updated dependencies [81570f9]
+- Updated dependencies [f99f940]
+- Updated dependencies [43435d5]
+- Updated dependencies [f99f940]
+- Updated dependencies [bfd2970]
+  - @opengeni/contracts@6.25.0
+  - @opengeni/config@6.25.0
+  - @opengeni/codemode@6.25.0
+  - @opengeni/codex@6.25.0
+  - @opengeni/observability@6.25.0
+  - @opengeni/network@6.25.0
+  - @opengeni/subscriptions@6.25.0
+  - @opengeni/xai-subscription@6.25.0
+
 ## 6.24.1
 
 ### Patch Changes

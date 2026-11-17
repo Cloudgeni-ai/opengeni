@@ -19,6 +19,7 @@ import {
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
+import { oauthAccountIdentityKey } from "../src/integrations/oauth-account-identity";
 import {
   OFFICIAL_GMAIL_MCP_SCOPES,
   OFFICIAL_GMAIL_MCP_URL,
@@ -426,6 +427,24 @@ test.each([
       });
       expect(JSON.stringify(saved?.metadata)).not.toContain("private-history");
       expect(saved?.grantedScopes).toEqual([...OFFICIAL_GMAIL_MCP_SCOPES]);
+      // The login carries its verified account's key, so the database refuses a
+      // second live login of this account for the same owner. Google's account
+      // ID decides it, so a changed address keeps the key.
+      const accountKey = async () =>
+        (
+          await fixture.admin<Array<{ key: string | null }>>`
+            select account_identity_key as key from connections
+            where id = ${completed.account.id}::uuid`
+        )[0]?.key;
+      const expectedKey = oauthAccountIdentityKey({
+        providerDomain: "gmailmcp.googleapis.com",
+        mcpUrl: OFFICIAL_GMAIL_MCP_URL,
+        metadata: saved!.metadata,
+        identityKeys: ["gmailEmail"],
+        subjectKey: "googleSubject",
+      });
+      expect(expectedKey).toMatch(/^[0-9a-f]{64}$/u);
+      expect(await accountKey()).toBe(expectedKey);
       const brokerSettings = testSettings({ environmentsEncryptionKey: encryptionKey });
       const credential = await loadConnectionCredentialForBroker(client.db, brokerSettings, {
         workspaceId: identity.personalWorkspaceId,
@@ -553,6 +572,7 @@ test.each([
         gmailEmail: "renamed@example.test",
         googleSubject: "google-account-1001",
       });
+      expect(await accountKey()).toBe(expectedKey);
       // The same address on another Google account is a different account.
       googleAccountId = "google-account-2002";
       const otherAccount = await begin("gmail", completed.account.id);

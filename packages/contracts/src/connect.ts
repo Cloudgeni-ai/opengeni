@@ -9,6 +9,12 @@ export { PreparedMcpSetup, preparedMcpHeaders } from "./prepared-mcp-setup";
 
 const opaqueId = /* @__PURE__ */ defineSchema(() => z.string().min(1).max(512));
 /**
+ * The optional, non-secret field in a key-based MCP credentials step that names
+ * the connection (see `ConnectionMetadata.label`). Its hyphen keeps it apart
+ * from every prepared setup's secret field IDs.
+ */
+export const CONNECT_CONNECTION_LABEL_FIELD = "connection-label";
+/**
  * More provider access asked for when reconnecting an existing account, for
  * example the Gmail permission a later tool call needs. The server bounds it by
  * the reviewed connector's own permission list; it can never widen past it.
@@ -61,6 +67,12 @@ export const ConnectAccount = /* @__PURE__ */ defineSchema(() =>
       label: z.string().max(256),
       ownership: ConnectOwnership,
       status: z.enum(["connected", "auth_needed", "disabled"]),
+      /**
+       * `nango`: the account is held by an integration platform. It is
+       * signed in again through its connector's own Connect, never a native
+       * reconnect attempt, and its access is fixed (no step-up).
+       */
+      backend: z.literal("nango").optional(),
     })
     .strict(),
 );

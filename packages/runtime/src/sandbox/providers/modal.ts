@@ -6,7 +6,7 @@ import {
 } from "@openai/agents-extensions/sandbox/modal";
 import { imageOutputFromBytes } from "@openai/agents-core/sandbox/internal";
 import { posix } from "node:path";
-import { effectiveModalIdleTimeoutSeconds } from "@opengeni/config";
+import { effectiveModalIdleTimeoutSeconds, modalSandboxResourceBounds } from "@opengeni/config";
 import type { Settings } from "@opengeni/config";
 import {
   canonicalModalCheckpointProviderBinding,
@@ -958,11 +958,26 @@ export const modalProvider: ProviderRegistration = {
     // and the reaper — not Modal's idle-reap — governs teardown (and snapshots
     // /workspace first).
     options.idleTimeoutMs = effectiveModalIdleTimeoutSeconds(settings) * 1000;
-    if (settings.modalSandboxCpu !== undefined) {
-      options.cpu = settings.modalSandboxCpu;
+    // Every new box carries hard CPU and memory ceilings (and an unpaid
+    // organization's box its lower ceilings and optional egress allowlists).
+    // Missing or zero ceilings throw here, and the create boundary refuses a
+    // SandboxCreate without them, so no box starts unbounded.
+    let bounds: ReturnType<typeof modalSandboxResourceBounds>;
+    try {
+      bounds = modalSandboxResourceBounds(settings);
+    } catch (error) {
+      throw new SandboxConfigError(
+        "modal",
+        error instanceof Error ? error.message : "Modal sandbox ceilings are invalid",
+      );
     }
-    if (settings.modalSandboxMemoryMiB !== undefined) {
-      options.memoryMiB = settings.modalSandboxMemoryMiB;
+    options.cpu = bounds.cpu;
+    options.cpuLimit = bounds.cpuLimit;
+    options.memoryMiB = bounds.memoryMiB;
+    options.memoryLimitMiB = bounds.memoryLimitMiB;
+    if (bounds.outboundCidrAllowlist || bounds.outboundDomainAllowlist) {
+      options.outboundCidrAllowlist = bounds.outboundCidrAllowlist ?? [];
+      options.outboundDomainAllowlist = bounds.outboundDomainAllowlist ?? [];
     }
     if (settings.modalRegions !== undefined) {
       options.regions = [...settings.modalRegions];

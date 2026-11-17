@@ -1,5 +1,60 @@
 # @opengeni/config
 
+## 6.27.0
+
+### Patch Changes
+
+- 8f1f5e2: Free compute is bounded for every kind of sandbox use, not only viewers. A held or denied Free or plan-less organization that has not bought credit or paid for a plan gets no sandbox at all: terminals, commands, background processes, browser and desktop sessions, viewers and new boxes for agent turns are refused, a turn that needs a box fails with a clear message instead of waiting forever, an already running box stays usable only while a turn holds it, and the reaper drains boxes no turn holds. A person who owns or administers such an organization carries the restriction into their other unpaid organizations.
+
+  Free, young Free and plan-less organizations share one running-box budget of 2 across every holder kind, plus 2 running boxes and 12 box-hours per UTC day per organization and per person across their organizations. Past the daily budget no box starts and the reaper drains boxes no turn holds, while an in-flight turn finishes. Boxes that nothing uses drain after the viewer idle window, whatever holds them. All values are plan-limit settings (`OPENGENI_SANDBOX_PLAN_LIMITS_JSON`).
+
+  Every new Modal box carries hard CPU and memory ceilings (2 cores / 4096 MiB for unpaid organizations, 16 cores / 32768 MiB for paid, Enterprise, host-provisioned and credit-buying organizations), and a create without them is refused. Unpaid boxes can be limited to an outbound CIDR/domain allowlist; Modal has no per-port egress rule, so SMTP cannot be blocked by port alone.
+
+  A denied Free organization with no paid history is suspended from sandboxes, Site publishing, invitations, uploads and API keys until the decision is reversed or it buys credit; sign-in keeps working. Creating an additional organization now goes through the signup network checks and rate limit, and inherits its owner's review hold.
+
+  An unpaid organization that bought credit is treated as paying: no per-person, daily or all-holder idle bounds. Paid, Enterprise and host-provisioned organizations are unaffected.
+
+  Rollout: set the new plan-limit fields in `OPENGENI_SANDBOX_PLAN_LIMITS_JSON` only after this release runs everywhere, because older pods reject unknown fields. Defaults for `free`, `new` and `none`: `runningBoxesPerOrganization` 2, `runningBoxesPerPerson` 2, `boxSecondsPerOrganizationPerDay` 43200, `boxSecondsPerPersonPerDay` 43200, `idleDrainAllHolders` true; `restricted` is 0 for every count.
+
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+  - @opengeni/contracts@6.27.0
+  - @opengeni/codex@6.27.0
+  - @opengeni/xai-subscription@6.27.0
+
+## 6.26.0
+
+### Patch Changes
+
+- Updated dependencies [6d7ea1e]
+- Updated dependencies [8fae328]
+- Updated dependencies [e1199c0]
+  - @opengeni/contracts@6.26.0
+  - @opengeni/xai-subscription@6.26.0
+  - @opengeni/codex@6.26.0
+
+## 6.25.0
+
+### Patch Changes
+
+- 43435d5: Agent turns with long histories use less worker CPU per model request. The history prefix check compares canonical items instead of hashing the whole history, model context snapshots reuse unchanged content from the previous request, request copies avoid `structuredClone` for plain data, model provider and pricing settings are parsed once per value, and the row-level security scope statement is built once per shape. Outputs, stored snapshots and history rejections are unchanged.
+- bfd2970: Boxes kept warm only by open session pages are now also bounded after admission. A box a turn, process or readiness hold kept warm becomes viewer-only when that holder leaves, and a viewer-only hold had no end. The sandbox reaper now drains a warm box whose every holder is a viewer and whose sessions have no open work after 30 minutes without use (`OPENGENI_SANDBOX_VIEWER_IDLE_DRAIN_MS`, `0` disables): the server measures use from viewer attaches and turns, and the web client extends it by reporting on each attach and heartbeat how long ago the person last used the page (`lastInteractionAgeMs`), so an active person with an open tab keeps their box. Only a person's own signed-in session can report interaction; the API ignores it from API keys (including personal ones) and delegated or service callers, so their viewers are bounded by server-observed activity. For one more idle window after an idle drain, a re-attach without newer interaction or session activity is refused, so an unattended page cannot keep a box warm; the person's next interaction re-attaches and the box resumes from its saved workspace. The reaper also drains the least recently active viewer-only boxes over `OPENGENI_SANDBOX_MAX_VIEWER_ONLY_BOXES_PER_WORKSPACE` or the plan tier's `viewerOnlyBoxesPerOrganization`, taking only boxes nobody used for five minutes. Drains are logged with their reason and counted in `opengeni_sandbox_viewer_only_drains_total{reason}`.
+
+  Organizations a host provisioned (the organization's own external source is set and is not a signup one; a workspace's external source never counts, since members can set it) resolve to a new `embedded` plan tier, unbounded by default and configurable in `OPENGENI_SANDBOX_PLAN_LIMITS_JSON`. `embedded` and `enterprise` organizations are also outside the per-workspace viewer-only limit and the reaper's drains; operators put other organizations that must not be bounded on `enterprise`. The `restricted` tier now applies only while promotion enforcement is on. A new `new` tier covers Free self-serve organizations in their first three days (`organizationsYoungerThanMs` in the tier; 1 viewer-only box per organization and per member, 3 running boxes), and tiers apply whatever credential the caller uses. Joining a box that a live process or Browser/ComputerSession keeps warm no longer counts as one more viewer-only box, and a 429 for a computer limit gets its own message in the web client instead of the viewer-limit one. Viewer attach refusals (429) now carry a machine-readable `details.viewerRefusal` (`viewer_idle`, `computer_limit`, `warm_allowance`), which the web client uses instead of the message.
+
+- Updated dependencies [e126cb5]
+- Updated dependencies [61abc98]
+- Updated dependencies [81570f9]
+- Updated dependencies [f99f940]
+- Updated dependencies [f99f940]
+- Updated dependencies [bfd2970]
+  - @opengeni/contracts@6.25.0
+  - @opengeni/codex@6.25.0
+  - @opengeni/xai-subscription@6.25.0
+
 ## 6.24.1
 
 ### Patch Changes

@@ -44,6 +44,7 @@ import {
   type OpenGeniSiteToolCatalog,
 } from "./site";
 import { isSiteHttpRequest, serveSiteHttp, type SiteHttpRequest } from "./site-http";
+import { SITE_TOOL_TYPED_ANSWERS, siteToolFailureMessage } from "./site-tool-failure-message";
 import type {
   ToolGatewayCallRequest,
   ToolGatewayCallResponse,
@@ -52,6 +53,8 @@ import type {
   ToolGatewayInvokeResponse,
   ToolGatewayResolveRequest,
   ToolGatewayResolvedTool,
+  ToolGatewaySiteReadinessResponse,
+  ToolGatewayTarget,
 } from "./types";
 
 export type { SiteHttpRequest } from "./site-http";
@@ -74,6 +77,20 @@ export type SiteBridgeToolHandlers = {
     request: ToolGatewayInvokeRequest,
     options: { signal: AbortSignal },
   ) => Promise<ToolGatewayInvokeResponse>;
+  /**
+   * What the viewer can do with these declared tools before anything runs
+   * (advertised as `toolReadiness: 1`). The host supplies the Site.
+   */
+  readiness?: (
+    request: { targets: ToolGatewayTarget[] },
+    options: { signal: AbortSignal },
+  ) => Promise<ToolGatewaySiteReadinessResponse>;
+  /**
+   * Call `listener` whenever readiness may have changed (a connect, a
+   * reconnect, an "Always allow" choice, a reset). Returns an unsubscribe.
+   * The bridge host tells the Site with a `tool_readiness` event.
+   */
+  subscribeReadiness?: (listener: () => void) => () => void;
   /** Serves the ordinary SDK's HTTP requests (sessions, Site Data) over the Site HTTP channel. */
   fetch?: (request: SiteHttpRequest, signal: AbortSignal) => Promise<Response>;
   /**
@@ -124,6 +141,7 @@ export type SiteBridgeRequestValue =
   | ToolGatewayDeclarationsResponse
   | ToolGatewayResolvedTool
   | ToolGatewayInvokeResponse
+  | ToolGatewaySiteReadinessResponse
   | SiteViewer
   | OpenGeniSiteSignInResult
   | OpenGeniSiteLocationValue;
@@ -138,6 +156,7 @@ export function siteBridgeReadyMessage(
     type: OPENGENI_SITE_BRIDGE_READY,
     version: OPENGENI_SITE_BRIDGE_VERSION,
     ...(bridge?.resolve && bridge?.invoke ? { targetTools: 1 as const } : {}),
+    ...(bridge?.readiness ? { toolReadiness: 1 as const } : {}),
     ...(bridge?.fetch && bridge.siteData ? { siteData: 1 as const } : {}),
     ...(viewer ? { viewer: 1 as const } : {}),
     ...(location ? { location: 1 as const } : {}),
@@ -192,6 +211,8 @@ export type SiteBridgeHostSource = {
 export class SiteBridgeHost {
   private readonly requests = new SiteBridgeRequestRegistry();
   private readonly lease: SiteBridgeDocumentLease;
+  private stopReadiness: (() => void) | null = null;
+  private readinessSource: SiteBridgeToolHandlers["subscribeReadiness"] | null = null;
 
   constructor(
     private readonly source: SiteBridgeHostSource,
@@ -210,19 +231,22 @@ export class SiteBridgeHost {
   }
 
   close(): void {
+    this.stopReadiness?.();
+    this.stopReadiness = null;
+    this.readinessSource = null;
     this.lease.close();
   }
 
-  /** Tell every connected client of the current document that the Site's address changed. */
-  notifyLocation(location: OpenGeniSiteLocationValue): void {
-    const value = openGeniSiteLocationValue(location);
-    if (!value) return;
-    const message: OpenGeniSiteBridgeEventMessage = {
+  /** Tell every connected client of the current document that what the viewer can do may have changed. */
+  notifyToolReadiness(): void {
+    this.post({
       type: OPENGENI_SITE_BRIDGE_EVENT,
       version: OPENGENI_SITE_BRIDGE_VERSION,
-      event: "location",
-      location: value,
-    };
+      event: "tool_readiness",
+    });
+  }
+
+  private post(message: OpenGeniSiteBridgeEventMessage): void {
     for (const port of this.requests.ports()) {
       try {
         port.postMessage(message);
@@ -230,6 +254,27 @@ export class SiteBridgeHost {
         // A port that can no longer post is cleaned up with its document.
       }
     }
+  }
+
+  /** Follow the current handlers' readiness changes (handlers may be swapped). */
+  private followReadiness(tools: SiteBridgeToolHandlers | undefined): void {
+    const subscribe = tools?.subscribeReadiness ?? null;
+    if (subscribe === this.readinessSource) return;
+    this.stopReadiness?.();
+    this.readinessSource = subscribe;
+    this.stopReadiness = subscribe ? subscribe(() => this.notifyToolReadiness()) : null;
+  }
+
+  /** Tell every connected client of the current document that the Site's address changed. */
+  notifyLocation(location: OpenGeniSiteLocationValue): void {
+    const value = openGeniSiteLocationValue(location);
+    if (!value) return;
+    this.post({
+      type: OPENGENI_SITE_BRIDGE_EVENT,
+      version: OPENGENI_SITE_BRIDGE_VERSION,
+      event: "location",
+      location: value,
+    });
   }
 
   private attachToolPort(data: unknown, ports: readonly MessagePort[]): void {
@@ -310,8 +355,10 @@ export class SiteBridgeHost {
     });
     port.addEventListener("messageerror", () => requests.closePort(port));
     port.start();
+    const tools = this.source.tools();
+    this.followReadiness(tools);
     port.postMessage(
-      siteBridgeReadyMessage(this.source.tools(), this.source.viewer?.(), this.source.location?.()),
+      siteBridgeReadyMessage(tools, this.source.viewer?.(), this.source.location?.()),
     );
   }
 }
@@ -463,6 +510,11 @@ export async function handleSiteBridgeRequest(
     if (!bridge.invoke) throw new Error("Targeted Site tools are unavailable");
     return await bridge.invoke(sanitizeOpenGeniSiteToolInvokeRequest(message.payload), { signal });
   }
+  if (message.method === "readiness") {
+    if (!bridge.readiness)
+      throw siteBridgeHostError("readiness_unsupported", "This Site host doesn't report readiness");
+    return await bridge.readiness({ targets: [...message.payload.targets] }, { signal });
+  }
   if (message.method === "catalog") return await bridge.catalog({ signal });
   if (message.method === "declarations") {
     if (!bridge.declarations) throw new Error("Site tool declarations are unavailable");
@@ -506,6 +558,22 @@ export function siteBridgeError(
     (candidate?.code === "catalog_stale" || candidate?.code === "tool_definition_stale");
   const message =
     typeof candidate?.message === "string" ? candidate.message : "Site tool request failed";
+  // A server answer that already says what the viewer can do next reaches
+  // Site code as its typed code, as in the Opengeni frame.
+  const typed =
+    candidate?.name !== "SiteToolCallFailedError" &&
+    typeof nestedCode === "string" &&
+    Object.hasOwn(SITE_TOOL_TYPED_ANSWERS, nestedCode)
+      ? SITE_TOOL_TYPED_ANSWERS[nestedCode]!
+      : null;
+  if (typed && (!typed.retryable || candidate?.outcomeUnknown === false))
+    return {
+      code: typed.code,
+      message: siteToolFailureMessage(typed.code, null),
+      retryable: typed.retryable,
+      outcomeUnknown: false,
+      details: { code: nestedCode as string },
+    };
   return {
     code: stale
       ? (nestedCode as string)

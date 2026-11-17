@@ -200,7 +200,16 @@ export const CONNECTED_TOOL_CATALOG: CatalogTool[] = [
     ["schedule_list", "List this workspace's scheduled tasks."],
     ["schedule_pause", "Pause a scheduled task."],
     ["session_list", "List recent sessions in this workspace."],
-    ["session_send_message", "Send a message to another agent session."],
+    // The first sentences of the registered session_queue_message and
+    // session_steer descriptions; the API policy test pins them to the server.
+    [
+      "session_queue_message",
+      "Send a message to another session or agent: send messages to a worker you spawned, your parent or a peer session. Like a person's Queue in the chat, a session that is mid-turn gets the message only after its current turn ends.",
+    ],
+    [
+      "session_steer",
+      "Change what another session or agent (a worker you spawned, your parent or a peer) is doing now. Like a person's Steer in the chat, it gets your instruction at its next step.",
+    ],
     ["secret_search", "Find saved secrets and their ready references."],
     ["generate_image", "Generate or edit an image from a prompt."],
     ["site_publish", "Publish a Site from the workspace."],

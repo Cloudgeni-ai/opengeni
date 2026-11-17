@@ -492,6 +492,67 @@ export async function invokeOpenApiOperation(
     ? genericPathCall(options.revision, toolBinding, toolArgs)
     : { binding: toolBinding, args: toolArgs };
   assertSearchEntityTypes(binding, args);
+  const searchRequests = separateSearchRequests(binding, args);
+  if (searchRequests) {
+    return invokeSearchRequestsInTurn(options, binding, toolId, args, searchRequests, signal);
+  }
+  return sendReviewedOperation(options, binding, toolId, args, signal);
+}
+
+/**
+ * The entries of a reviewed search body that has more than one. Microsoft
+ * Graph v1.0 refuses a body with several search requests ("Multiple entity
+ * search is not supported in v1.0"), although each entry is valid alone.
+ */
+function separateSearchRequests(
+  binding: OpenApiOperationBinding,
+  args: Record<string, unknown>,
+): readonly unknown[] | null {
+  if (!binding.searchEntityTypes) return null;
+  const body = args.body as { requests?: unknown } | undefined;
+  const requests = body?.requests;
+  return Array.isArray(requests) && requests.length > 1 ? requests : null;
+}
+
+/**
+ * Run each search request of a multi-request body as its own call and answer
+ * with their results in order, as one `value` list, the shape Graph returns
+ * for a body it accepts. The first failure is returned as is.
+ */
+async function invokeSearchRequestsInTurn(
+  options: OpenApiServerOptions,
+  binding: OpenApiOperationBinding,
+  toolId: string,
+  args: Record<string, unknown>,
+  requests: readonly unknown[],
+  signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
+  const value: unknown[] = [];
+  let contentType: unknown;
+  for (const request of requests) {
+    const result = await sendReviewedOperation(
+      options,
+      binding,
+      toolId,
+      { ...args, body: { requests: [request] } },
+      signal,
+    );
+    if (result.ok === false) return result;
+    contentType ??= result.contentType;
+    const data = result.data as { value?: unknown } | undefined;
+    if (Array.isArray(data?.value)) value.push(...data.value);
+    else if (data !== undefined) value.push(data);
+  }
+  return { ok: true, status: 200, contentType: contentType ?? "application/json", data: { value } };
+}
+
+async function sendReviewedOperation(
+  options: OpenApiServerOptions,
+  binding: OpenApiOperationBinding,
+  toolId: string,
+  args: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
   const firstCredential = await resolveOpenApiCredential(options, binding, toolId, args, false);
   let credential = firstCredential;
   // Redirect hops share the deadline of the request that answered with them.

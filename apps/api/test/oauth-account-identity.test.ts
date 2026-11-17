@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import type { ConnectionMetadata } from "@opengeni/contracts";
-import { decideOAuthAccountConnection } from "../src/integrations/oauth-account-identity";
+import {
+  decideOAuthAccountConnection,
+  oauthAccountIdentityKey,
+} from "../src/integrations/oauth-account-identity";
 
 const metadata = {
   mcpUrl: "https://service.test/mcp",
@@ -228,5 +231,47 @@ describe("one account per person when the service can't identify accounts", () =
         accounts: [account({ metadata: { mcpUrl: "https://mcp.stripe.com/" } })],
       }),
     ).toEqual(limit);
+  });
+});
+
+describe("the stored account key", () => {
+  const key = (overrides: Partial<Parameters<typeof oauthAccountIdentityKey>[0]> = {}) =>
+    oauthAccountIdentityKey({
+      providerDomain: "service.test",
+      mcpUrl: metadata.mcpUrl,
+      metadata,
+      identityKeys: ["tenant", "subject"],
+      ...overrides,
+    });
+
+  test("only a verified account has one", () => {
+    expect(key()).toMatch(/^[0-9a-f]{64}$/u);
+    expect(key({ identityKeys: undefined })).toBeNull();
+    expect(key({ metadata: { ...metadata, tenant: "" } })).toBeNull();
+  });
+
+  test("it names the provider, issuer, resource and account", () => {
+    expect(key({ providerDomain: "SERVICE.test" })).toBe(key());
+    for (const other of [
+      key({ providerDomain: "other.test" }),
+      key({ mcpUrl: "https://service.test/other" }),
+      key({ metadata: { ...metadata, authorizationServerIssuer: "https://other.test" } }),
+      key({ metadata: { ...metadata, subject: "someone-else" } }),
+    ])
+      expect(other).not.toBe(key());
+    // URLs that reach the same accounts share it.
+    expect(key({ mcpUrl: "https://mcp.stripe.com" })).toBe(
+      key({ mcpUrl: "https://mcp.stripe.com/" }),
+    );
+  });
+
+  test("a stable account ID decides it over a changed address", () => {
+    const google = (email: string) =>
+      key({
+        metadata: { ...metadata, email, googleSubject: "1001" },
+        identityKeys: ["email"],
+        subjectKey: "googleSubject",
+      });
+    expect(google("a@example.test")).toBe(google("renamed@example.test"));
   });
 });

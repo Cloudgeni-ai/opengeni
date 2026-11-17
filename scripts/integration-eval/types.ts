@@ -131,6 +131,14 @@ export type EvalCase = {
   approvedTool?: RegExp;
   /** Included in the model × effort grid (the core set). */
   core?: boolean;
+  /**
+   * Read: the answer may come from the account line the runtime shows with
+   * the integration's tools ("Account: <label> — <email> · Yours"), e.g.
+   * which account a connection is signed in as. Without a tool call, the
+   * row passes only when such a line for this integration, shown in this
+   * chat, carries the expected facts.
+   */
+  answerFromAccountLine?: boolean;
   /** Free-form note shown in reports. */
   note?: string;
 };
@@ -164,6 +172,13 @@ export type ApprovalReceipt = {
   sequence: number;
 };
 
+/** "Account: <label> — <account> · Yours|Shared", as shown with an integration's tools. */
+export type AccountLine = {
+  integration: IntegrationId;
+  account: string;
+  owner: "yours" | "shared";
+};
+
 export type CardReceipt = {
   capabilityId: string | null;
   capabilityName: string | null;
@@ -176,6 +191,8 @@ export type Receipts = {
   tools: ToolReceipt[];
   approvals: ApprovalReceipt[];
   cards: CardReceipt[];
+  /** Tool account lines shown to the model by tool discovery (search results and notices). */
+  accountLines: AccountLine[];
   humanInputRequests: number;
   finalAnswer: string;
   turnStatuses: string[];

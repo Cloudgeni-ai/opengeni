@@ -9,6 +9,7 @@ import {
   isOfficialGmailMcpConfig,
   type GmailRestMcpServerOptions,
 } from "../src/gmail-rest-mcp";
+import { ToolAuthNeededPayload } from "@opengeni/contracts";
 
 const connectionRef = {
   providerDomain: "gmailmcp.googleapis.com",
@@ -597,6 +598,52 @@ describe("Gmail REST MCP adapter", () => {
     expect(requests).toEqual(["/gmail/v1/users/me/messages/send"]);
   });
 
+  test("a fixed-access (proxy) account says the action is not available for it, never a step-up", async () => {
+    const events: unknown[] = [];
+    const requests: string[] = [];
+    const gmail = server({
+      resolveCredential: async () => ({
+        status: "ok",
+        headers: {},
+        connectionId: "conn_nango",
+        grantedScopes: ["https://www.googleapis.com/auth/gmail.readonly"],
+        proxy: { kind: "nango" } as never,
+      }),
+      onAuthNeeded: (payload) => {
+        events.push(payload);
+      },
+      fetchImpl: async (input) => {
+        requests.push(new URL(input.toString()).pathname);
+        return Response.json({});
+      },
+    });
+    const draft = (await gmail.callToolResult("create_draft", {
+      to: ["user@example.com"],
+      subject: "Hello",
+      body: "Hi",
+    })) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(draft.isError).toBe(true);
+    expect(draft.content[0]!.text).toBe(
+      "This Gmail action is not available for the connected account.",
+    );
+    expect(requests).toEqual([]);
+    // Older clients read the legacy-safe reason (unavailable, no action);
+    // newer ones the exact account reason.
+    expect(events).toEqual([
+      {
+        serverId: "gmail",
+        toolName: "create_draft",
+        providerDomain: "gmailmcp.googleapis.com",
+        reason: "unsupported_auth",
+        accountReason: "account_scope_fixed",
+        connectionId: "conn_nango",
+        scopes: ["https://www.googleapis.com/auth/gmail.compose"],
+        subjectId: "subject-a",
+      },
+    ]);
+    expect(ToolAuthNeededPayload.safeParse(events[0]).success).toBe(true);
+  });
+
   test("never replays send_message or send_draft after a provider 401", async () => {
     for (const [toolName, args] of [
       ["send_message", { to: ["user@example.com"], body: "x" }],
@@ -698,5 +745,17 @@ describe("Gmail REST MCP adapter", () => {
         subjectScope: "workspace",
       }),
     ).toBe(true);
+  });
+});
+
+describe("Gmail bridge grant needs", () => {
+  test("names the access a tool lacks from the recorded grants, without the provider", () => {
+    const need = GMAIL_REST_MCP_BRIDGE_ADAPTER.toolScopeNeed!;
+    const readonly = "https://www.googleapis.com/auth/gmail.readonly";
+    const compose = "https://www.googleapis.com/auth/gmail.compose";
+    expect(need("create_draft", [readonly])).toEqual([compose]);
+    expect(need("create_draft", [readonly, compose])).toBeNull();
+    expect(need("search_messages", [readonly])).toBeNull();
+    expect(need("search_messages", [])).toEqual([readonly]);
   });
 });

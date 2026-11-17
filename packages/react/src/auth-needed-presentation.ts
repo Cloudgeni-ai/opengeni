@@ -3,6 +3,7 @@
 // React Native row say the same thing; no DOM here.
 import type { OpenGeniText } from "./messages/runtime";
 import type { AuthNeededItem } from "./timeline/types";
+import { connectorProviderDomain } from "@opengeni/contracts/nango";
 
 export type AuthNeededPresentation = {
   /** A calm human name: the agent's capability name or the provider's. */
@@ -34,6 +35,7 @@ const UNAVAILABLE_REASONS = new Set<AuthNeededItem["reason"]>([
   "personal_authority_unavailable",
   "unsupported_auth",
   "resource_scope_unavailable",
+  "account_scope_fixed",
 ]);
 
 /** Plain words for access a reviewed connector asks for later (incremental consent). */
@@ -119,11 +121,13 @@ export function authNeededPresentation(
             : t("messageTimeline.enableProvider", { provider })
       : item.setupRequest
         ? t("messageTimeline.setUpProvider", { provider })
-        : unavailable
-          ? t("messageTimeline.providerToolsUnavailable", { provider })
-          : moreAccess
-            ? t("messageTimeline.giveProviderMoreAccess", { provider })
-            : `${actionLabel} ${provider}`;
+        : item.reason === "account_scope_fixed"
+          ? t("messageTimeline.providerCantDoThisWithAccount", { provider })
+          : unavailable
+            ? t("messageTimeline.providerToolsUnavailable", { provider })
+            : moreAccess
+              ? t("messageTimeline.giveProviderMoreAccess", { provider })
+              : `${actionLabel} ${provider}`;
   const reasonLine =
     recommendation?.rationale ??
     item.setupRequest?.rationale ??
@@ -183,8 +187,10 @@ export function authNeededPresentation(
 /** "linear.app" -> "Linear": the first domain label, capitalized. A calm human
     name for the provider — never the raw domain shown as a label. */
 export function providerLabel(t: OpenGeniText, domain: string): string {
+  // An integration platform's domain ("nango:gmail") names the connector it
+  // serves ("gmailmcp.googleapis.com").
   const host =
-    domain
+    connectorProviderDomain(domain)
       .trim()
       .replace(/^https?:\/\//, "")
       .replace(/^www\./, "")
@@ -215,6 +221,8 @@ export function authReasonLine(t: OpenGeniText, reason: AuthNeededItem["reason"]
       return t("messageTimeline.thisConnectionCannotAuthenticateThe");
     case "resource_scope_unavailable":
       return t("messageTimeline.thisToolEndpointCannotEnforce");
+    case "account_scope_fixed":
+      return t("messageTimeline.connectedAccountLacksThisAccess");
     default:
       return t("messageTimeline.itsConnectionNeedsAttention");
   }

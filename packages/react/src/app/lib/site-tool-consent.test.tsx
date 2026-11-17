@@ -173,7 +173,7 @@ describe("Site tool consent dialog", () => {
       expect(document.activeElement?.textContent?.trim()).toBe("Cancel");
       expect(dialog()?.textContent).toContain("work-list@example.test");
       await waitFor(() => !button("Send").disabled, "Send never became available");
-      const from = dialog()!.querySelector<HTMLSelectElement>("select[aria-label=From]")!;
+      const from = dialog()!.querySelector<HTMLSelectElement>('select[aria-label="Runs as"]')!;
       await actRun(() => {
         from.value = from.options[1]!.value;
         from.dispatchEvent(new Event("change", { bubbles: true }));
@@ -214,9 +214,9 @@ describe("Site tool consent dialog", () => {
       expect(text).toContain("Send message");
       expect(text).toContain("bendik@cloudgeni.ai");
       expect(text).toContain("Opengeni newsletter");
-      expect(text).toContain("Always allow for this Site");
+      expect(text).toContain("Always allow on this Site from this account");
       expect(text).not.toContain("never shown");
-      const from = dialog()!.querySelector<HTMLSelectElement>("select[aria-label=From]")!;
+      const from = dialog()!.querySelector<HTMLSelectElement>('select[aria-label="Runs as"]')!;
       expect([...from.options].map((option) => option.textContent)).toEqual([
         "ada@work.example",
         "ada@home.example",
@@ -238,6 +238,53 @@ describe("Site tool consent dialog", () => {
       expect(answers).toBe(1);
     } finally {
       await view.unmount();
+    }
+  });
+
+  test("Runs as names the account, whether the workspace shares it, or You", async () => {
+    const cases: Array<[Partial<SiteToolConsentPrompt>, string, string]> = [
+      [
+        { accounts: [{ identity: work, connector: "Gmail", account: "ada@work.example" }] },
+        "Runs asada@work.example",
+        "Always allow on this Site from this account",
+      ],
+      [
+        {
+          accounts: [
+            { identity: work, connector: "Gmail", account: "ops@example.test", shared: true },
+          ],
+        },
+        "Runs asops@example.test · Shared with workspace",
+        "Always allow on this Site from this account",
+      ],
+      [{ accounts: [], selected: null }, "Runs asYou", "Always allow on this Site"],
+    ];
+    for (const [overrides, runsAs, always] of cases) {
+      const { view, host } = await mount();
+      try {
+        let decision: SiteToolConsentDecision | undefined;
+        await actRun(() => {
+          void host()
+            .confirmToolCall(prompt(overrides))
+            .then((value) => {
+              decision = value ?? undefined;
+            });
+        });
+        await opened();
+        const text = dialog()?.textContent ?? "";
+        expect(text).toContain(runsAs);
+        expect(text).toContain(always);
+        expect(dialog()!.querySelector("select")).toBeNull();
+        await waitFor(() => !button("Send").disabled, "Send never became available");
+        await actRun(async () => {
+          button("Send").click();
+          await Promise.resolve();
+        });
+        await closed();
+        expect(decision).toEqual(overrides.accounts?.length ? { identity: work } : {});
+      } finally {
+        await view.unmount();
+      }
     }
   });
 

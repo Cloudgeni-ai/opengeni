@@ -45,6 +45,7 @@ import { isGitHubGatewayApprovalId } from "./github-gateway";
 export * from "./active-session-history";
 import type { ActiveSessionHistoryFootprint } from "./active-session-history";
 export * from "./session-search-records";
+export * from "./console-sign-in-audit";
 export * from "./model-call-timing";
 export * from "./sandbox-stop-notice";
 export * from "./turn-timing-profile";
@@ -1097,6 +1098,7 @@ import {
 } from "@opengeni/contracts";
 import {
   environmentsEncryptionKeyBytes,
+  paidSandboxPlanLimit,
   SANDBOX_LIFECYCLE_TRANSITION_MAX_WAIT_MS,
   SANDBOX_DEADLINE_COMMAND_STOP_GRACE_MS,
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
@@ -1175,6 +1177,7 @@ import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-
 import {
   fromPostgresLosslessJson,
   fromPostgresLosslessText,
+  isStoredVerbatimAsLosslessJsonString,
   LOSSLESS_CONTENT_CODEC_VERSION,
   toPostgresLosslessText,
   withLosslessContentWriteVersion,
@@ -1459,6 +1462,8 @@ export * from "./insights";
 export * from "./insights-model-bundle";
 export * from "./insights-usage-bundle";
 export * from "./insights-unified";
+export * from "./sandbox-viewer-only-drain";
+import { VIEWER_ONLY_OPEN_SESSION_STATUSES } from "./sandbox-viewer-only-drain";
 export * from "./organization-membership-lifecycle";
 import {
   assertActiveManagedHumanOrganizationMembership,
@@ -7972,6 +7977,10 @@ export type CreateConnectionInput = {
   verifiedInstallAt?: Date | null;
   verifiedInstallVersion?: number | null;
   metadata?: Record<string, unknown>;
+  /** See connectionAccountIdentityKey; omit when the account is unverified. */
+  accountIdentityKey?: string | null;
+  /** The person's own name for the connection (already normalized). */
+  label?: string | null;
   createdBySubjectId?: string | null;
   updatedBySubjectId?: string | null;
 };
@@ -8038,6 +8047,19 @@ export type UpdateConnectionInput = {
   verifiedInstallAt?: Date | null;
   verifiedInstallVersion?: number | null;
   metadata?: Record<string, unknown>;
+  /**
+   * See connectionAccountIdentityKey. Undefined keeps the stored key, unless
+   * the update replaces the credential: then the key is cleared.
+   */
+  accountIdentityKey?: string | null;
+  /**
+   * The key the writer derives from the stored row's own verified account,
+   * for a row saved before keys existed. With `accountIdentityKey` equal to
+   * it (and no scope lost) the reconnect keeps `authorityGeneration`.
+   */
+  previousAccountIdentityKey?: string | null;
+  /** Rename: display only, so it changes neither `version` nor authority. */
+  label?: string | null;
   updatedBySubjectId?: string | null;
 };
 
@@ -13632,10 +13654,13 @@ async function createConnectionInScope(
       verifiedInstallAt: input.verifiedInstallAt ?? null,
       verifiedInstallVersion: input.verifiedInstallVersion ?? null,
       metadata: input.metadata ?? {},
+      accountIdentityKey: input.accountIdentityKey ?? null,
+      label: input.label ?? null,
       createdBySubjectId: input.createdBySubjectId ?? null,
       updatedBySubjectId: input.updatedBySubjectId ?? input.createdBySubjectId ?? null,
     })
-    .returning(connectionMetadataColumns);
+    .returning(connectionMetadataColumns)
+    .catch(rethrowAccountIdentityConflict);
   if (!row) {
     throw new Error("Failed to create connection");
   }
@@ -13738,6 +13763,44 @@ export async function createConnectionIdempotently(
       return connection;
     },
   );
+}
+
+/**
+ * The key that makes a connection one verified provider account of one
+ * integration: `parts` name the integration (backend, provider, resource) and
+ * then the account as the provider identifies it. Each owner (a person within
+ * an organization, or a workspace) holds at most one live connection per key;
+ * a second insert or reactivation fails with ConnectionAccountAlreadyConnectedError.
+ * Writers stamp it only for an account they verified: an unknown account is
+ * never deduplicated on a guess.
+ */
+export function connectionAccountIdentityKey(parts: readonly string[]): string {
+  if (parts.length < 2 || parts.some((part) => typeof part !== "string" || !part))
+    throw new Error("A connection account identity needs its integration and account");
+  return createHash("sha256").update(JSON.stringify(parts)).digest("hex");
+}
+
+/** Another live connection of the same owner already holds this account. */
+export class ConnectionAccountAlreadyConnectedError extends Error {
+  constructor() {
+    super("This account is already connected");
+    this.name = "ConnectionAccountAlreadyConnectedError";
+  }
+}
+
+/** Whether an error is the live-account uniqueness check (migration 1481). */
+export function isConnectionAccountIdentityConflict(error: unknown): boolean {
+  if (error instanceof ConnectionAccountAlreadyConnectedError) return true;
+  return (
+    nestedPostgresSqlState(error) === "23505" &&
+    safeDatabaseErrorFacts(error).constraint === "connections_live_account_identity_uq"
+  );
+}
+
+function rethrowAccountIdentityConflict(error: unknown): never {
+  throw isConnectionAccountIdentityConflict(error)
+    ? new ConnectionAccountAlreadyConnectedError()
+    : error;
 }
 
 export async function createConnection(
@@ -14215,6 +14278,15 @@ export async function persistProviderOAuthConnection(
           sql`select pg_advisory_xact_lock(hashtextextended(${`provider-oauth-connection:${input.workspaceId}:${ownerKey}:${input.providerDomain}:${input.providerFamily}:${input.providerPrincipalId}`}, 0))`,
         );
         const exactOwner = connectionExactSubject(input.subjectId ?? null);
+        // One live connection per owner, workspace and provider principal.
+        const accountIdentityKey = connectionAccountIdentityKey([
+          "provider-oauth",
+          input.workspaceId,
+          input.providerDomain,
+          input.providerFamily,
+          input.credentialRole,
+          input.providerPrincipalId,
+        ]);
         const requested = input.requestedConnectionId
           ? (
               await tx
@@ -14260,12 +14332,18 @@ export async function persistProviderOAuthConnection(
                   sql`${schema.connections.metadata} ->> 'providerPrincipalId' = ${input.providerPrincipalId}`,
                 ),
               )
-              .orderBy(desc(schema.connections.updatedAt), desc(schema.connections.id))
+              // A live row first: reactivating a revoked duplicate would
+              // collide with the live row that holds the account.
+              .orderBy(
+                sql`${schema.connections.status} = 'revoked'`,
+                desc(schema.connections.updatedAt),
+                desc(schema.connections.id),
+              )
               .for("update")
               .limit(1)
           )[0];
         if (!existing) {
-          const created = await createConnectionInScope(tx, input);
+          const created = await createConnectionInScope(tx, { ...input, accountIdentityKey });
           if (input.requireLiveUserAuthority && !created.authorityId) {
             throw new Error("Connection owner authority was not bound");
           }
@@ -14304,6 +14382,9 @@ export async function persistProviderOAuthConnection(
           credentialEncrypted: input.credentialEncrypted,
           grantedScopes: input.grantedScopes ?? [],
           expiresAt: input.expiresAt ?? null,
+          accountIdentityKey,
+          // Matched on the same provider principal: the same account.
+          previousAccountIdentityKey: accountIdentityKey,
           metadata: {
             ...existing.metadata,
             ...(input.metadata ?? {}),
@@ -14464,6 +14545,35 @@ export async function verifyPersonalGitHubRepositorySelections(
   return await mutatePersonalGitHubRepositorySelections(db, input, true);
 }
 
+/**
+ * A new credential advances the connection's authority generation, so work
+ * accepted with the old one stops using it, unless it is the same verified
+ * account signing in again: the stored row already holds this account's key,
+ * and the new grant keeps every scope the row had. Then it is a fresh token
+ * for the same authority, and accepted turns keep working through the
+ * reconnect. A different account, a narrower grant, an unverified account, a
+ * status change (the connections trigger advances it) or an owner change
+ * (immutable) still advance it.
+ */
+function sameAccountReconnectGeneration(input: UpdateConnectionInput) {
+  const next = sql`${schema.connections.authorityGeneration} + 1`;
+  if (!input.accountIdentityKey) return next;
+  // A row saved before keys existed carries none; the writer then vouches
+  // for the stored row's account with the key it derives from that row.
+  const stored = input.previousAccountIdentityKey
+    ? sql`coalesce(${schema.connections.accountIdentityKey}, ${input.previousAccountIdentityKey})`
+    : sql`${schema.connections.accountIdentityKey}`;
+  const keepsScopes =
+    input.grantedScopes === undefined
+      ? sql`true`
+      : sql`${JSON.stringify(input.grantedScopes)}::jsonb @> ${schema.connections.grantedScopes}`;
+  return sql`case
+    when ${stored} = ${input.accountIdentityKey} and ${keepsScopes}
+      then ${schema.connections.authorityGeneration}
+    else ${next}
+  end`;
+}
+
 async function updateConnectionInScope(
   db: Database,
   input: UpdateConnectionInput,
@@ -14478,7 +14588,7 @@ async function updateConnectionInScope(
       ? {
           credentialEncrypted: input.credentialEncrypted,
           version: sql`${schema.connections.version} + 1`,
-          authorityGeneration: sql`${schema.connections.authorityGeneration} + 1`,
+          authorityGeneration: sameAccountReconnectGeneration(input),
           lastError: null,
         }
       : {}),
@@ -14491,6 +14601,14 @@ async function updateConnectionInScope(
       ? { verifiedInstallVersion: input.verifiedInstallVersion }
       : {}),
     ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+    // A credential replaced by a writer that verified no account no longer
+    // vouches for the stored one: it loses the key (and its unique slot).
+    ...(input.accountIdentityKey !== undefined
+      ? { accountIdentityKey: input.accountIdentityKey }
+      : input.credentialEncrypted !== undefined
+        ? { accountIdentityKey: null }
+        : {}),
+    ...(input.label !== undefined ? { label: input.label } : {}),
     ...(input.updatedBySubjectId !== undefined
       ? { updatedBySubjectId: input.updatedBySubjectId }
       : {}),
@@ -14508,7 +14626,8 @@ async function updateConnectionInScope(
           : []),
       ),
     )
-    .returning(connectionMetadataColumns);
+    .returning(connectionMetadataColumns)
+    .catch(rethrowAccountIdentityConflict);
   return row ? mapConnectionMetadata(row) : null;
 }
 
@@ -42538,6 +42657,16 @@ export async function listSessionEvents(
  * the idempotency key of its last ledger write (`completionKey`); a response
  * is owed while no usage or credit ledger row has that key. One query; a
  * settled response costs one index probe per table and no write.
+ *
+ * The candidates, with their completion keys, are a materialized CTE so the
+ * ledger anti-joins compare two plain text columns. Under row-level security
+ * PostgreSQL uses a join clause as an index condition only when it is
+ * leakproof, and the JSON operators that read the key out of the payload are
+ * not: written in the anti-join itself, they turned each probe into a scan of
+ * every usage row the tenant can see, with its row policy, per event. Every
+ * idle, failure and worker-death boundary and every attempt's first model
+ * request runs this read, so its cost must follow the session's own responses,
+ * never the size of the ledger.
  */
 export async function listOwedModelUsageSettlements(
   db: Database,
@@ -42570,25 +42699,91 @@ export async function listOwedModelUsageSettlements(
         ),
       )!,
       sql`${completionKey} is not null`,
-      sql`not exists (select 1 from ${schema.usageEvents} where ${schema.usageEvents.idempotencyKey} = ${completionKey})`,
-      sql`not exists (select 1 from ${schema.creditLedgerEntries} where ${schema.creditLedgerEntries.idempotencyKey} = ${completionKey})`,
     ];
     if (input.turnId) filters.push(eq(events.turnId, input.turnId));
     if (input.attemptId) filters.push(eq(events.turnAttemptId, input.attemptId));
     if (input.since) filters.push(gte(events.createdAt, input.since));
-    return await scopedDb
-      .select({
-        id: events.id,
-        accountId: events.accountId,
-        turnId: events.turnId,
-        turnAttemptId: events.turnAttemptId,
-        rejected: sql<boolean>`(${events.type} <> 'agent.model.usage')`,
-        payload: sql<unknown>`${usagePayload}`,
-      })
-      .from(events)
-      .where(and(...filters))
-      .orderBy(asc(events.sequence));
+    const rows = await rawRows<{
+      id: string;
+      accountId: string;
+      turnId: string | null;
+      turnAttemptId: string | null;
+      rejected: boolean;
+      payload: unknown;
+      payloadCodecVersion: number | null;
+    }>(
+      scopedDb,
+      sql`with candidates as materialized (
+          select ${events.id} as id, ${events.accountId} as account_id,
+            ${events.turnId} as turn_id, ${events.turnAttemptId} as turn_attempt_id,
+            ${events.sequence} as sequence,
+            (${events.type} <> 'agent.model.usage') as rejected,
+            ${usagePayload} as payload,
+            ${events.payloadCodecVersion} as payload_codec_version,
+            ${completionKey} as completion_key
+          from ${events}
+          where ${and(...filters)}
+        )
+        select candidates.id::text as "id", candidates.account_id::text as "accountId",
+          candidates.turn_id::text as "turnId", candidates.turn_attempt_id::text as "turnAttemptId",
+          candidates.rejected as "rejected", candidates.payload as "payload",
+          candidates.payload_codec_version as "payloadCodecVersion"
+        from candidates
+        where not exists (
+            select 1 from ${schema.usageEvents}
+            where ${schema.usageEvents.idempotencyKey} = candidates.completion_key
+          )
+          and not exists (
+            select 1 from ${schema.creditLedgerEntries}
+            where ${schema.creditLedgerEntries.idempotencyKey} = candidates.completion_key
+          )
+        order by candidates.sequence`,
+    );
+    // The payload is read through SQL, so restore the logical values here: a
+    // source key the codec stored encoded must reach settlement as the
+    // original key, or its receipt identity is encoded a second time.
+    const decoded = rows.map(({ payloadCodecVersion, ...row }) => ({
+      ...row,
+      payload: fromPostgresLosslessJson(row.payload, payloadCodecVersion),
+    }));
+    // Such a key's completion key is encoded in the payload but written to the
+    // ledger as given, so the anti-join above cannot see its ledger row.
+    // Check those few keys as written.
+    const encodedKeys = new Map<(typeof decoded)[number], string>();
+    for (const row of decoded) {
+      const key = owedCompletionKey(row.payload);
+      if (key !== null && !isStoredVerbatimAsLosslessJsonString(key)) encodedKeys.set(row, key);
+    }
+    if (encodedKeys.size === 0) return decoded;
+    const keys = [...new Set(encodedKeys.values())];
+    const settled = new Set(
+      [
+        ...(await scopedDb
+          .select({ key: schema.usageEvents.idempotencyKey })
+          .from(schema.usageEvents)
+          .where(inArray(schema.usageEvents.idempotencyKey, keys))),
+        ...(await scopedDb
+          .select({ key: schema.creditLedgerEntries.idempotencyKey })
+          .from(schema.creditLedgerEntries)
+          .where(inArray(schema.creditLedgerEntries.idempotencyKey, keys))),
+      ].map((row) => row.key),
+    );
+    if (settled.size === 0) return decoded;
+    // Compare as the database stored both sides.
+    const stored = (key: string) => Buffer.from(key, "utf8").toString("utf8");
+    const settledStored = new Set([...settled].map(stored));
+    return decoded.filter((row) => {
+      const key = encodedKeys.get(row);
+      return key === undefined || !settledStored.has(stored(key));
+    });
   });
+}
+
+function owedCompletionKey(payload: unknown): string | null {
+  const settlement = (payload as { settlement?: { charges?: { completionKey?: unknown } } } | null)
+    ?.settlement;
+  const key = settlement?.charges?.completionKey;
+  return typeof key === "string" ? key : null;
 }
 
 function normalizeEventSequence(value: number | undefined, fallback: number): number {
@@ -49248,15 +49443,40 @@ export interface AcquireLeaseInput {
    * limit is refused (non-turn holders) or capacity-blocked (turns). Omitted =
    * no organization limits. */
   sandboxPlanLimits?: SandboxPlanLimits;
+  /** The person on whose behalf the box is held (`user:<id>`): the viewer,
+   * the terminal or browser user, or the human who started the turn. With
+   * sandboxPlanLimits, their other organizations count toward the per-person
+   * bounds and a restricted one restricts this organization too
+   * (resolveSandboxComputeStanding). Defaults to viewerSubjectId. */
+  actingSubjectId?: string | null;
+  /** Called when a standing read failed and admission fell back (fails
+   * open); callers record it. Without it the fallback is logged. */
+  onComputeStandingFallback?: SandboxComputeStandingFallback | undefined;
+  /** Viewer holders only: for this long after the reaper released a box's
+   * viewers for the viewer idle window, refuse (`viewer_idle`) an attach to
+   * it unless the attach reports interaction after that release or a turn
+   * used the session since. After it, any attach is admitted, so an older
+   * client or another person can warm the box again. The person-facing attach
+   * route sets it to the idle window when the idle drain is on; 0 or omitted
+   * never refuses. */
+  viewerIdleReattachRefusalMs?: number;
+  /** Viewer holders only: how long ago the attaching page last saw real user
+   * interaction, when the client reports it (see
+   * normalizeViewerInteractionAgeMs). Recorded on the holder. */
+  viewerInteractionAgeMs?: number | null;
 }
 
 export type AcquireLeaseResult =
   // Caller WON the cold->warming CAS: it is the spawner (any pool worker). Must
   // resume-by-id from resume_state, expose the stream port, then call
   // commitWarmingToWarm. No owner process is started.
-  | { role: "spawner"; lease: LeaseSnapshot }
+  //
+  // `sandboxPlanTier` is the organization's plan tier when the admission
+  // resolved it (sandboxPlanLimits given): the spawner creates the box with
+  // that tier's resource ceilings (settingsForSandboxPlanTier).
+  | { role: "spawner"; lease: LeaseSnapshot; sandboxPlanTier?: string; sandboxPaidHistory?: true }
   // Box live or being built by someone else: attach (and, for warming, wait).
-  | { role: "attached"; lease: LeaseSnapshot }
+  | { role: "attached"; lease: LeaseSnapshot; sandboxPlanTier?: string; sandboxPaidHistory?: true }
   // Re-armed a draining lease back to warm (box never torn down).
   | { role: "rearmed"; lease: LeaseSnapshot }
   // Durable recovery truth says this cold group cannot safely materialize. No
@@ -49639,12 +49859,14 @@ export class SandboxViewerAdmissionBlockedError extends Error {
   constructor(
     public readonly workspaceId: string,
     public readonly sandboxGroupId: string,
-    public readonly reason: SandboxViewerForceDrainReason,
+    public readonly reason: SandboxViewerForceDrainReason | "viewer_idle",
   ) {
     super(
       reason === "balance"
         ? "Sandbox viewer admission is blocked because the workspace has no managed credits"
-        : "Sandbox viewer admission is blocked because the workspace warm allowance is exhausted",
+        : reason === "viewer_idle"
+          ? "Sandbox viewer admission is blocked because the sandbox was stopped after its page went unused; interact with the page to resume it"
+          : "Sandbox viewer admission is blocked because the workspace warm allowance is exhausted",
     );
   }
 }
@@ -49675,59 +49897,670 @@ export class SandboxViewerBoxLimitError extends Error {
 }
 
 /**
- * Starting one more box would exceed the organization's running-box limit
- * for its plan. Raised for holders that cannot wait (viewer, direct,
- * interaction); a turn instead parks until a slot frees.
+ * Why a sandbox was refused under the plan's compute bounds:
+ *
+ * - `running`: one more box would exceed the organization's running-box
+ *   limit (`limit` boxes);
+ * - `person_running`: the same across the acting person's limited
+ *   organizations (`limit` boxes);
+ * - `closed`: the tier allows no sandbox (a held or denied organization that
+ *   has not paid);
+ * - `daily_budget`: the organization or the acting person used today's box
+ *   time (`limit` seconds), until the next UTC day.
+ */
+export type SandboxOrganizationBoxLimitReason =
+  | "running"
+  | "person_running"
+  | "closed"
+  | "daily_budget";
+
+/** The person-facing explanation of a SandboxOrganizationBoxLimitError. */
+export function sandboxOrganizationBoxLimitMessage(
+  reason: SandboxOrganizationBoxLimitReason,
+  limit: number,
+): string {
+  switch (reason) {
+    case "closed":
+      return "Sandboxes aren't available for this organization. Add credit or choose a paid plan to use them.";
+    case "daily_budget":
+      return `This organization (or you, across your organizations) has used today's ${Math.round(
+        limit / 3600,
+      )} sandbox hours on the Free plan. Sandboxes start again after midnight UTC; add credit or choose a paid plan to keep working now.`;
+    case "person_running":
+      return `You already run ${limit} sandboxes across your organizations, the most the Free plan allows; close one or wait for a task to finish`;
+    case "running":
+      return `Your organization already runs ${limit} sandboxes, the most its plan allows; close one or wait for a task to finish`;
+  }
+}
+
+/**
+ * A sandbox refused under the plan's compute bounds (see
+ * SandboxOrganizationBoxLimitReason). Raised for holders that cannot wait
+ * (viewer, direct, interaction) and, for `closed` and `daily_budget`, for a
+ * turn that does not already hold the box: those do not free on their own,
+ * so the turn fails with this message. A turn beyond a running-box limit
+ * instead parks until a slot frees.
  */
 export class SandboxOrganizationBoxLimitError extends Error {
   readonly name = "SandboxOrganizationBoxLimitError";
+  readonly code = "sandbox_compute_unavailable";
 
   constructor(
     public readonly workspaceId: string,
     public readonly sandboxGroupId: string,
     public readonly limit: number,
+    public readonly reason: SandboxOrganizationBoxLimitReason = "running",
   ) {
-    super(`The organization already runs ${limit} sandboxes, the most its plan allows`);
+    super(sandboxOrganizationBoxLimitMessage(reason, limit));
   }
 }
 
-/** The organization-wide count definer (1475); withheld for one release. */
+/** An organization's plan standing for one admission plus what the
+ * free-compute bounds need beyond its own lease rows, read once before
+ * admission (resolveSandboxComputeStanding) and reused under the lease lock. */
+export type SandboxComputeStanding = {
+  /** The plan tier admission applies, including a linked restriction. */
+  tier: string;
+  /** Bought credit or had a paid subscription: a paying customer, outside the
+   * unpaid-only bounds and on the standard resource class. */
+  paidHistory: boolean;
+  /** The unpaid-only bounds (per person, daily box time, idle drain) apply. */
+  bounded: boolean;
+  /** The acting person owns or administers this organization and another
+   * unpaid one that its own held or denied decision restricts. */
+  linkedRestricted: boolean;
+  /** The acting person owns this organization, so its boxes and box time are
+   * theirs for the per-person bounds. */
+  personOwnsOrganization: boolean;
+  /** Running boxes in the other unpaid organizations the acting person owns. */
+  personOtherRunningBoxes: number;
+  /** Metered box seconds since the start of the UTC day. */
+  organizationBoxSecondsToday: number;
+  /** The same across the unpaid organizations the acting person owns. */
+  personBoxSecondsToday: number;
+};
+
+/** Called when a standing read failed and admission fell back (fails open):
+ * `organization` to the in-transaction tier only, `person` to the
+ * organization's own bounds. */
+export type SandboxComputeStandingFallback = (
+  error: unknown,
+  part: "organization" | "person",
+) => void;
+
+function reportSandboxComputeStandingFallback(
+  onFallback: SandboxComputeStandingFallback | undefined,
+  error: unknown,
+  part: "organization" | "person",
+): void {
+  if (onFallback) {
+    try {
+      onFallback(error, part);
+    } catch {
+      // Reporting never changes admission.
+    }
+    return;
+  }
+  console.warn("sandbox compute standing read failed; admission falls back", {
+    part,
+    error: error instanceof Error ? error.message : String(error),
+  });
+}
+
+/** The most other organizations of one person the standing reads. */
+const SANDBOX_STANDING_PERSON_ORGANIZATION_LIMIT = 25;
+
+function sandboxDailyBoxTimeSpent(limit: SandboxPlanLimit, standing: SandboxComputeStanding) {
+  return (
+    (limit.boxSecondsPerOrganizationPerDay !== undefined &&
+      standing.organizationBoxSecondsToday >= limit.boxSecondsPerOrganizationPerDay) ||
+    (limit.boxSecondsPerPersonPerDay !== undefined &&
+      standing.personBoxSecondsToday >= limit.boxSecondsPerPersonPerDay)
+  );
+}
+
+function sandboxDailyBoxTimeLimitSeconds(
+  limit: SandboxPlanLimit,
+  standing: SandboxComputeStanding | null,
+): number {
+  if (
+    standing !== null &&
+    limit.boxSecondsPerOrganizationPerDay !== undefined &&
+    standing.organizationBoxSecondsToday >= limit.boxSecondsPerOrganizationPerDay
+  ) {
+    return limit.boxSecondsPerOrganizationPerDay;
+  }
+  return limit.boxSecondsPerPersonPerDay ?? limit.boxSecondsPerOrganizationPerDay ?? 0;
+}
+
+/** Tiers whose boxes count toward a person's bounds across organizations. */
+const SANDBOX_PERSON_BOUNDED_TIERS: readonly string[] = ["free", "new", "none", "restricted"];
+
+/** Metered box seconds of one organization since the start of the UTC day.
+ * Needs the organization's account-only RLS context (no workspace), so every
+ * workspace's meter counts. */
+async function organizationBoxSecondsToday(tx: Database, accountId: string): Promise<number> {
+  const [row] = await rawRows<{ seconds: string | number | null }>(
+    tx,
+    sql`select coalesce(sum(quantity), 0)::bigint as seconds
+      from usage_events
+      where account_id = ${accountId}::uuid
+        and event_type = 'sandbox.warm_seconds'
+        and occurred_at >= (date_trunc('day', now() at time zone 'UTC') at time zone 'UTC')`,
+  );
+  return Number(row?.seconds ?? 0);
+}
+
+/** What a suspended organization is told when a cost path refuses it. */
+export const ORGANIZATION_SUSPENDED_MESSAGE =
+  "This organization is suspended after review, so it can't use paid resources. Add credit or contact support if you think this is a mistake.";
+
+/** Suspension is read on every cost path; reuse it briefly per process. */
+const ORGANIZATION_SUSPENSION_TTL_MS = 30_000;
+const organizationSuspensionCache = new Map<string, { at: number; value: Promise<boolean> }>();
+
+/** Forget cached suspensions (tests). */
+export function resetOrganizationSuspensionCache(): void {
+  organizationSuspensionCache.clear();
+}
+
+/**
+ * Whether an organization is suspended: a Free or plan-less organization with
+ * no paid history (never bought credit, never had a paid subscription) whose
+ * own promotion decision is `denied` while promotion enforcement is on, or one
+ * the acting person (`user:<id>`) owns or administers while they own or
+ * administer such a suspended organization. Derived from the decision, so it
+ * applies as soon as the organization is denied and clears as soon as the
+ * decision is reversed or the organization pays; nothing is deleted and no
+ * ledger is touched. Paid, Enterprise and host-provisioned organizations are
+ * never suspended. A suspended organization's people can still sign in and buy
+ * credit, which lifts it.
+ */
+export async function resolveOrganizationSuspension(
+  db: Database,
+  input: { accountId: string; subjectId?: string | null },
+): Promise<boolean> {
+  const subjectId = input.subjectId?.startsWith("user:") ? input.subjectId : null;
+  const key = `${input.accountId}\u0000${subjectId ?? ""}`;
+  const now = Date.now();
+  const cached = organizationSuspensionCache.get(key);
+  if (cached && now - cached.at < ORGANIZATION_SUSPENSION_TTL_MS) return await cached.value;
+  if (organizationSuspensionCache.size >= SANDBOX_PERSON_STANDING_CACHE_LIMIT) {
+    organizationSuspensionCache.clear();
+  }
+  const value = readOrganizationSuspension(db, { accountId: input.accountId, subjectId });
+  organizationSuspensionCache.set(key, { at: now, value });
+  value.catch(() => organizationSuspensionCache.delete(key));
+  return await value;
+}
+
+async function readOrganizationSuspension(
+  db: Database,
+  input: { accountId: string; subjectId: string | null },
+): Promise<boolean> {
+  const own = await withAccountRls(db, input.accountId, (tx) =>
+    resolveSandboxPlanStanding(tx, input.accountId),
+  );
+  if (own.suspended) return true;
+  if (own.paidHistory || (own.tier !== "free" && own.tier !== "none")) return false;
+  if (input.subjectId === null) return false;
+  const subjectId = input.subjectId;
+  const memberships = await db.transaction(async (tx) => {
+    await setSubjectRlsContext(tx as unknown as Database, subjectId);
+    const [row] = await rawRows<{ result: unknown }>(
+      tx,
+      sql`select list_self_organization_memberships(${subjectId}) as result`,
+    );
+    return Array.isArray(row?.result)
+      ? (row.result as Array<{ organizationId?: unknown; role?: unknown; status?: unknown }>)
+      : [];
+  });
+  const administered = memberships.filter(
+    (membership) =>
+      membership.status === "active" &&
+      (membership.role === "owner" || membership.role === "admin") &&
+      typeof membership.organizationId === "string",
+  );
+  if (!administered.some((membership) => membership.organizationId === input.accountId)) {
+    return false;
+  }
+  for (const organizationId of administered
+    .map((membership) => membership.organizationId as string)
+    .filter((candidate) => candidate !== input.accountId)
+    .sort()
+    .slice(0, SANDBOX_STANDING_PERSON_ORGANIZATION_LIMIT)) {
+    const other = await withAccountRls(db, organizationId, (tx) =>
+      resolveSandboxPlanStanding(tx, organizationId),
+    );
+    if (other.suspended) return true;
+  }
+  return false;
+}
+
+/** Metered box seconds of one organization since the start of the UTC day
+ * (maintenance callers). */
+export async function readOrganizationBoxSecondsToday(
+  db: Database,
+  accountId: string,
+): Promise<number> {
+  return await withAccountRls(db, accountId, (tx) => organizationBoxSecondsToday(tx, accountId));
+}
+
+/**
+ * An organization's standing for one admission (see SandboxComputeStanding):
+ * its plan tier, whether it has paid, its box time today when its tier bounds
+ * that and, for an acting person (`user:<id>`), the organizations they own or
+ * administer. Only an unpaid-tier organization that never paid reads more than
+ * its own tier: paid plans, `enterprise` and `embedded` read no ledger, no box
+ * time and no person.
+ *
+ * The person's other organizations are read each under its own RLS context,
+ * outside the admission transaction, so the cross-organization counts are a
+ * snapshot: two simultaneous admissions in two organizations of one person can
+ * both pass. The per-organization limits stay exact. A failed person read
+ * falls back to the organization's own bounds (reported through
+ * `onFallback`); a failed organization read throws, and acquireLease falls
+ * back to the tier it reads under the lease lock.
+ */
+export async function resolveSandboxComputeStanding(
+  db: Database,
+  input: {
+    accountId: string;
+    limits: SandboxPlanLimits;
+    actingSubjectId?: string | null;
+    onFallback?: SandboxComputeStandingFallback | undefined;
+  },
+): Promise<SandboxComputeStanding> {
+  const own = await withAccountRls(db, input.accountId, async (tx) => {
+    const standing = await resolveSandboxPlanStanding(tx, input.accountId, input.limits);
+    const bounded = SANDBOX_PERSON_BOUNDED_TIERS.includes(standing.tier) && !standing.paidHistory;
+    const limit = sandboxPlanLimitFor(input.limits, standing.tier);
+    const needsSeconds =
+      bounded &&
+      (limit.boxSecondsPerOrganizationPerDay !== undefined ||
+        limit.boxSecondsPerPersonPerDay !== undefined);
+    return {
+      standing,
+      bounded,
+      seconds: needsSeconds ? await organizationBoxSecondsToday(tx, input.accountId) : 0,
+    };
+  });
+  const result: SandboxComputeStanding = {
+    tier: own.standing.tier,
+    paidHistory: own.standing.paidHistory,
+    bounded: own.bounded,
+    linkedRestricted: false,
+    personOwnsOrganization: false,
+    personOtherRunningBoxes: 0,
+    organizationBoxSecondsToday: own.seconds,
+    personBoxSecondsToday: 0,
+  };
+  const subjectId = input.actingSubjectId ?? null;
+  if (!own.bounded || subjectId === null || !subjectId.startsWith("user:")) return result;
+  // A restricted organization needs no person facts: it is already closed.
+  if (own.standing.tier === "restricted") return result;
+  let person: SandboxPersonStanding;
+  try {
+    person = await cachedSandboxPersonStanding(db, {
+      accountId: input.accountId,
+      subjectId,
+      limits: input.limits,
+    });
+  } catch (error) {
+    reportSandboxComputeStandingFallback(input.onFallback, error, "person");
+    return result;
+  }
+  result.linkedRestricted = person.linkedRestricted;
+  if (person.linkedRestricted) result.tier = "restricted";
+  result.personOwnsOrganization = person.ownsOrganization;
+  result.personOtherRunningBoxes = person.otherRunningBoxes;
+  result.personBoxSecondsToday =
+    (person.ownsOrganization ? own.seconds : 0) + person.otherBoxSecondsToday;
+  return result;
+}
+
+type SandboxPersonStanding = {
+  linkedRestricted: boolean;
+  ownsOrganization: boolean;
+  otherRunningBoxes: number;
+  otherBoxSecondsToday: number;
+};
+
+/** A person's standing is read for every admission of their requests, and a
+ * terminal or file browser makes many; reuse it briefly per process. */
+const SANDBOX_PERSON_STANDING_TTL_MS = 15_000;
+const SANDBOX_PERSON_STANDING_CACHE_LIMIT = 2_000;
+const sandboxPersonStandingCache = new Map<
+  string,
+  { at: number; value: Promise<SandboxPersonStanding> }
+>();
+
+/** Forget cached person standings (tests). */
+export function resetSandboxPersonStandingCache(): void {
+  sandboxPersonStandingCache.clear();
+  organizationPurchasedCreditCache.clear();
+}
+
+async function cachedSandboxPersonStanding(
+  db: Database,
+  input: { accountId: string; subjectId: string; limits: SandboxPlanLimits },
+): Promise<SandboxPersonStanding> {
+  const key = `${input.accountId}\u0000${input.subjectId}`;
+  const now = Date.now();
+  const cached = sandboxPersonStandingCache.get(key);
+  if (cached && now - cached.at < SANDBOX_PERSON_STANDING_TTL_MS) return await cached.value;
+  if (sandboxPersonStandingCache.size >= SANDBOX_PERSON_STANDING_CACHE_LIMIT) {
+    sandboxPersonStandingCache.clear();
+  }
+  const value = readSandboxPersonStanding(db, input);
+  sandboxPersonStandingCache.set(key, { at: now, value });
+  value.catch(() => sandboxPersonStandingCache.delete(key));
+  return await value;
+}
+
+/**
+ * The acting person's other organizations. A restriction follows them from
+ * any organization they own or administer into this one, when they also own
+ * or administer this one. Boxes and box time count toward their per-person
+ * bounds only from organizations they own (the ones they created), so an
+ * admin invited into a busy team organization is not bounded by their
+ * teammates' work.
+ */
+async function readSandboxPersonStanding(
+  db: Database,
+  input: { accountId: string; subjectId: string; limits: SandboxPlanLimits },
+): Promise<SandboxPersonStanding> {
+  const subjectId = input.subjectId;
+  const result: SandboxPersonStanding = {
+    linkedRestricted: false,
+    ownsOrganization: false,
+    otherRunningBoxes: 0,
+    otherBoxSecondsToday: 0,
+  };
+  const memberships = await db.transaction(async (tx) => {
+    await setSubjectRlsContext(tx as unknown as Database, subjectId);
+    const [row] = await rawRows<{ result: unknown }>(
+      tx,
+      sql`select list_self_organization_memberships(${subjectId}) as result`,
+    );
+    return Array.isArray(row?.result)
+      ? (row.result as Array<{ organizationId?: unknown; role?: unknown; status?: unknown }>)
+      : [];
+  });
+  const administered = memberships.filter(
+    (membership) =>
+      membership.status === "active" &&
+      (membership.role === "owner" || membership.role === "admin") &&
+      typeof membership.organizationId === "string",
+  );
+  const administersThis = administered.some(
+    (membership) => membership.organizationId === input.accountId,
+  );
+  result.ownsOrganization = administered.some(
+    (membership) => membership.organizationId === input.accountId && membership.role === "owner",
+  );
+  const others = administered
+    .filter((membership) => membership.organizationId !== input.accountId)
+    .sort((left, right) => String(left.organizationId).localeCompare(String(right.organizationId)))
+    .slice(0, SANDBOX_STANDING_PERSON_ORGANIZATION_LIMIT);
+  for (const membership of others) {
+    const organizationId = membership.organizationId as string;
+    const owned = membership.role === "owner";
+    const other = await withAccountRls(db, organizationId, async (tx) => {
+      const standing = await resolveSandboxPlanStanding(tx, organizationId, input.limits);
+      if (!SANDBOX_PERSON_BOUNDED_TIERS.includes(standing.tier) || standing.paidHistory) {
+        return null;
+      }
+      const counts = owned
+        ? await organizationWarmSandboxCounts(tx, {
+            accountId: organizationId,
+            subjectId: null,
+            excludeLeaseId: null,
+          })
+        : null;
+      return {
+        restricted: standing.tier === "restricted" && standing.ownDecision !== null,
+        runningBoxes: counts?.runningBoxes ?? 0,
+        seconds: owned ? await organizationBoxSecondsToday(tx, organizationId) : 0,
+      };
+    });
+    if (other === null) continue;
+    // Only a person who runs this organization carries another one's
+    // restriction into it; a member invited into someone else's organization
+    // does not restrict it.
+    if (other.restricted && administersThis) result.linkedRestricted = true;
+    result.otherRunningBoxes += other.runningBoxes;
+    result.otherBoxSecondsToday += other.seconds;
+  }
+  return result;
+}
+
+/** The organization-wide count definer (1475, granted by 1479). */
 export const ORGANIZATION_WARM_SANDBOX_COUNTS_ROUTINE =
   "opengeni_private.organization_warm_sandbox_counts_v1(uuid, text, uuid)";
 
+/** The tier of a host-provisioned organization (a configured deployment, an
+ * embedding host or the SDK bootstrap); unbounded unless configured. See
+ * resolveSandboxPlanTier. */
+export const SANDBOX_EMBEDDED_PLAN_TIER = "embedded";
+
+/** Tiers outside the per-workspace viewer-only limit
+ * (`OPENGENI_SANDBOX_MAX_VIEWER_ONLY_BOXES_PER_WORKSPACE`) and the reaper's
+ * viewer-only drains: host-provisioned organizations and the `enterprise`
+ * plan, which operators assign to organizations that must not be bounded.
+ * Their plan-limit table entries still apply at admission. */
+export function sandboxPlanTierExemptFromViewerOnlyBounds(tier: string): boolean {
+  return tier === SANDBOX_EMBEDDED_PLAN_TIER || tier === "enterprise";
+}
+
+/** The tier of a young Free self-serve organization, while the
+ * `new` tier sets `organizationsYoungerThanMs`. */
+export const SANDBOX_NEW_PLAN_TIER = "new";
+
+/** managed_accounts.external_source values of self-serve organizations: a
+ * person's signup and an additional organization they create. Any other
+ * source is a host's. A guard test fails when a new account-creating path
+ * introduces a source that is in neither this list nor its known host list. */
+export const SELF_SERVE_ACCOUNT_SOURCES: readonly string[] = [
+  "better-auth:user",
+  "opengeni:additional-organization",
+];
+
 /**
- * The plan tier whose sandbox limits apply to an organization: its plan key
- * (a paid plan only while active, trialing or past due), `none` without a
- * plan row, and `restricted` for a Free or plan-less organization whose
- * promotion decision is `held` or `denied`. Reads only the caller's own
- * organization's rows under the current account context.
+ * The plan tier whose sandbox limits apply to an organization:
+ *
+ * - `embedded` for an organization a host provisioned: its external source is
+ *   not a self-serve one (a configured or local deployment, an embedding
+ *   host or the SDK bootstrap). Nobody self-serve can set it, unlike a
+ *   workspace's external source, which never counts. Operators put any other
+ *   organization that must not be bounded on the `enterprise` plan.
+ * - otherwise its plan key (a paid plan only while active, trialing or past
+ *   due), `none` without a plan row;
+ * - `restricted` for a Free or plan-less organization whose promotion
+ *   decision is `held` or `denied`, while promotion enforcement is on, or
+ *   whose acting person owns or administers such an organization
+ *   (`linkedRestricted`), unless it bought credit (a top-up) or ever had a
+ *   paid subscription;
+ * - `new` for any other Free organization created less than the `new` tier's
+ *   `organizationsYoungerThanMs` ago (only when `limits` is given and sets it).
+ *
+ * The tier is the organization's, whatever credential the caller holds
+ * (browser session, API key, native token or service).
+ *
+ * Reads only the caller's own organization's rows under the current account
+ * context.
  */
-export async function resolveSandboxPlanTier(tx: Database, accountId: string): Promise<string> {
+export async function resolveSandboxPlanTier(
+  tx: Database,
+  accountId: string,
+  limits?: SandboxPlanLimits,
+  options: { linkedRestricted?: boolean } = {},
+): Promise<string> {
+  return (await resolveSandboxPlanStanding(tx, accountId, limits, options)).tier;
+}
+
+/** An organization's plan tier plus the facts the free-compute bounds need. */
+export type SandboxPlanStanding = {
+  tier: string;
+  /** Bought credit (a top-up) or ever had a paid subscription. Never
+   * restricted or suspended. */
+  paidHistory: boolean;
+  /** Its own promotion decision is held or denied while enforcement is on. */
+  ownDecision: "held" | "denied" | null;
+  /** Restricted because its own decision is denied (not only held and not
+   * only linked): the organization is suspended. See
+   * resolveSandboxSuspension. */
+  suspended: boolean;
+};
+
+/** resolveSandboxPlanTier with the facts behind it. `linkedRestricted`
+ * restricts a Free or plan-less organization with no paid history because the
+ * acting person owns or administers another restricted organization. */
+/** Whether an organization ever bought credit is read for unpaid-tier
+ * organizations on admission paths; a purchase never un-happens, so a yes is
+ * kept for the process's life (bounded) and a no for a minute. */
+const ORGANIZATION_PURCHASED_CREDIT_NEGATIVE_TTL_MS = 60_000;
+const ORGANIZATION_PURCHASED_CREDIT_CACHE_LIMIT = 5_000;
+const organizationPurchasedCreditCache = new Map<string, { at: number; value: Promise<boolean> }>();
+
+/** Forget cached purchase facts (tests). */
+export function resetOrganizationPurchasedCreditCache(): void {
+  organizationPurchasedCreditCache.clear();
+}
+
+/** Any positive credit top-up (a purchase, never a grant) in the ledger. Needs
+ * the organization's RLS context. */
+async function organizationPurchasedCredit(tx: Database, accountId: string): Promise<boolean> {
+  const now = Date.now();
+  const cached = organizationPurchasedCreditCache.get(accountId);
+  if (cached) {
+    const value = await cached.value.catch(() => null);
+    if (
+      value === true ||
+      (value === false && now - cached.at < ORGANIZATION_PURCHASED_CREDIT_NEGATIVE_TTL_MS)
+    ) {
+      return value;
+    }
+  }
+  if (organizationPurchasedCreditCache.size >= ORGANIZATION_PURCHASED_CREDIT_CACHE_LIMIT) {
+    organizationPurchasedCreditCache.clear();
+  }
+  const value = rawRows<{ purchased: boolean }>(
+    tx,
+    sql`select exists (select 1 from credit_ledger_entries entry
+      where entry.account_id = ${accountId}::uuid
+        and entry.type = 'credit_topup'
+        and entry.amount_micros > 0) as purchased`,
+  ).then((rows) => rows[0]?.purchased === true);
+  organizationPurchasedCreditCache.set(accountId, { at: now, value });
+  value.catch(() => organizationPurchasedCreditCache.delete(accountId));
+  return await value;
+}
+
+export async function resolveSandboxPlanStanding(
+  tx: Database,
+  accountId: string,
+  limits?: SandboxPlanLimits,
+  options: { linkedRestricted?: boolean } = {},
+): Promise<SandboxPlanStanding> {
+  const newTierAgeMs = limits
+    ? (sandboxPlanLimitFor(limits, SANDBOX_NEW_PLAN_TIER).organizationsYoungerThanMs ?? 0)
+    : 0;
   const [row] = await rawRows<{
     plan_key: string | null;
     status: string | null;
     decision: string | null;
+    enforcement: boolean | null;
+    hosted_account: boolean | null;
+    young: boolean | null;
+    stripe_subscription: boolean | null;
   }>(
     tx,
-    sql`select plan.plan_key, plan.status, decision.decision
+    sql`select plan.plan_key, plan.status, decision.decision,
+        (select enforcement.enabled from promotion_enforcement enforcement
+          where enforcement.singleton) as enforcement,
+        (${newTierAgeMs}::bigint > 0 and exists (select 1 from managed_accounts account
+          where account.id = organization.account_id
+            and account.created_at > now() - (${newTierAgeMs}::bigint * interval '1 millisecond')
+        )) as young,
+        exists (select 1 from managed_accounts account
+          where account.id = organization.account_id
+            and account.external_source is not null
+            and account.external_source not in (${sql.join(
+              SELF_SERVE_ACCOUNT_SOURCES.map((source) => sql`${source}`),
+              sql`, `,
+            )})) as hosted_account,
+        plan.stripe_subscription_id is not null as stripe_subscription
       from (select ${accountId}::uuid as account_id) organization
       left join organization_plans plan on plan.account_id = organization.account_id
       left join promotion_decisions decision on decision.account_id = organization.account_id`,
   );
+  if (row?.hosted_account === true) {
+    return {
+      tier: SANDBOX_EMBEDDED_PLAN_TIER,
+      paidHistory: false,
+      ownDecision: null,
+      suspended: false,
+    };
+  }
   const planKey = row?.plan_key ?? null;
   let tier: string;
   if (planKey === null) tier = "none";
   else if (planKey === "free" || planKey === "enterprise") tier = planKey;
   else if (["active", "trialing", "past_due"].includes(row?.status ?? "")) tier = planKey;
   else tier = "free";
-  if ((tier === "free" || tier === "none") && ["held", "denied"].includes(row?.decision ?? "")) {
-    return "restricted";
+  // Paid history matters only for an unpaid tier; a paid, Enterprise or
+  // host-provisioned organization never reads the ledger here.
+  const paidHistory =
+    row?.stripe_subscription === true ||
+    ((tier === "free" || tier === "none") && (await organizationPurchasedCredit(tx, accountId)));
+  const ownDecision =
+    row?.enforcement === true && (row?.decision === "held" || row?.decision === "denied")
+      ? row.decision
+      : null;
+  // Restricted only without paid history: a person who bought credit or paid
+  // for a plan is never cut off by a review decision.
+  if (
+    (tier === "free" || tier === "none") &&
+    !paidHistory &&
+    (ownDecision !== null || options.linkedRestricted === true)
+  ) {
+    return { tier: "restricted", paidHistory, ownDecision, suspended: ownDecision === "denied" };
   }
-  return tier;
+  if (tier === "free" && row?.young === true) {
+    return { tier: SANDBOX_NEW_PLAN_TIER, paidHistory, ownDecision, suspended: false };
+  }
+  return { tier, paidHistory, ownDecision, suspended: false };
 }
 
-function sandboxPlanLimitFor(limits: SandboxPlanLimits, tier: string): SandboxPlanLimit {
+export function sandboxPlanLimitFor(limits: SandboxPlanLimits, tier: string): SandboxPlanLimit {
   return Object.hasOwn(limits, tier) ? (limits[tier] ?? {}) : {};
+}
+
+/** resolveSandboxPlanTier for maintenance callers, in the RLS context of one
+ * of the organization's workspaces. */
+export async function resolveSandboxPlanTierInWorkspace(
+  db: Database,
+  input: { accountId: string; workspaceId: string; limits?: SandboxPlanLimits },
+): Promise<string> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => await resolveSandboxPlanTier(scopedDb, input.accountId, input.limits),
+  );
+}
+
+/** resolveSandboxPlanStanding for maintenance callers, in the RLS context of
+ * one of the organization's workspaces. */
+export async function resolveSandboxPlanStandingInWorkspace(
+  db: Database,
+  input: { accountId: string; workspaceId: string; limits?: SandboxPlanLimits },
+): Promise<SandboxPlanStanding> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => await resolveSandboxPlanStanding(scopedDb, input.accountId, input.limits),
+  );
 }
 
 type OrganizationWarmSandboxCounts = {
@@ -49736,17 +50569,12 @@ type OrganizationWarmSandboxCounts = {
   runningBoxes: number;
 };
 
-/** Null while the deployment's database withholds the definer (1475). */
+/** 1475 created the definer withheld; 1479 grants it and readiness requires
+ * it. */
 async function organizationWarmSandboxCounts(
   tx: Database,
-  input: { accountId: string; subjectId: string | null; excludeLeaseId: string },
-): Promise<OrganizationWarmSandboxCounts | null> {
-  const [granted] = await rawRows<{ granted: boolean | null }>(
-    tx,
-    sql`select has_function_privilege(
-      to_regprocedure(${ORGANIZATION_WARM_SANDBOX_COUNTS_ROUTINE})::oid, 'EXECUTE') as granted`,
-  );
-  if (granted?.granted !== true) return null;
+  input: { accountId: string; subjectId: string | null; excludeLeaseId: string | null },
+): Promise<OrganizationWarmSandboxCounts> {
   const [row] = await rawRows<{
     viewer_only_boxes: number;
     subject_viewer_only_boxes: number;
@@ -51001,19 +51829,29 @@ async function upsertLeaseHolder(
   viewerAuthority: {
     subjectId: string | null;
     authorityEpoch: number | null;
+    /** Viewer holders only: the attaching page's reported interaction age. */
+    interactionAgeMs?: number | null;
   } = {
     subjectId: null,
     authorityEpoch: null,
   },
 ): Promise<void> {
+  const interactionAgeMs =
+    kind === "viewer" ? normalizeViewerInteractionAgeMs(viewerAuthority.interactionAgeMs) : null;
+  const lastInteractionAt =
+    interactionAgeMs === null
+      ? sql`null::timestamptz`
+      : sql`now() - (${String(interactionAgeMs)} || ' milliseconds')::interval`;
   await tx.execute(sql`
     insert into sandbox_lease_holders
       (account_id, workspace_id, lease_id, kind, holder_id, subject_id,
-       viewer_subject_id, viewer_authority_epoch, last_heartbeat_at)
+       viewer_subject_id, viewer_authority_epoch, last_heartbeat_at, last_interaction_at)
     values (${accountId}, ${workspaceId}, ${leaseId}, ${kind}, ${holderId}, ${subjectId},
-      ${viewerAuthority.subjectId}, ${viewerAuthority.authorityEpoch}, now())
+      ${viewerAuthority.subjectId}, ${viewerAuthority.authorityEpoch}, now(), ${lastInteractionAt})
     on conflict (lease_id, kind, holder_id)
       do update set last_heartbeat_at = now(),
+        last_interaction_at = greatest(
+          sandbox_lease_holders.last_interaction_at, excluded.last_interaction_at),
         viewer_subject_id = coalesce(excluded.viewer_subject_id,
           sandbox_lease_holders.viewer_subject_id),
         -- The recorded (subject, epoch) pair stays coherent. Same subject (or
@@ -51060,6 +51898,7 @@ async function lockSandboxLeaseAdmission(
 async function acquireLeaseOnce(
   db: Database,
   input: AcquireLeaseInput,
+  standing: SandboxComputeStanding | null = null,
 ): Promise<AcquireLeaseResult> {
   if (input.kind === "process") {
     throw new Error("Process lease holders are created only by atomic retained-process promotion");
@@ -51254,15 +52093,74 @@ async function acquireLeaseOnce(
         // A viewer alone can start a box and keep it warm for as long as it
         // heartbeats, with no task and no model spend. Bound how many such
         // boxes one workspace, one organization and one member keep warm.
-        // Joining a box that a turn or another viewer already keeps warm adds
-        // no compute and is always admitted, as is replaying this exact holder.
-        const viewerOnlyBoxLimit = input.viewerOnlyBoxLimit ?? 0;
-        const planLimit = input.sandboxPlanLimits
-          ? sandboxPlanLimitFor(
-              input.sandboxPlanLimits,
-              await resolveSandboxPlanTier(tx, accountId),
-            )
-          : {};
+        // Joining a box that a turn, another viewer, a live process or a
+        // Browser/ComputerSession already keeps warm adds no compute and is
+        // always admitted, as is replaying this exact holder. A
+        // host-provisioned (`embedded`) or `enterprise` organization is
+        // outside the per-workspace limit as well as the plan limits its tier
+        // does not set.
+        // The standing read before this transaction carries the tier (and any
+        // linked restriction); without one (no plan limits, or its read
+        // failed) the tier is read here.
+        const planTier =
+          standing !== null
+            ? standing.tier
+            : input.sandboxPlanLimits || (input.viewerOnlyBoxLimit ?? 0) > 0
+              ? await resolveSandboxPlanTier(tx, accountId, input.sandboxPlanLimits)
+              : null;
+        const viewerOnlyBoxLimit =
+          planTier !== null && sandboxPlanTierExemptFromViewerOnlyBounds(planTier)
+            ? 0
+            : (input.viewerOnlyBoxLimit ?? 0);
+        // An unpaid-tier organization that bought credit or paid for a plan
+        // is a paying customer: none of the unpaid-only bounds apply.
+        const tierLimit =
+          input.sandboxPlanLimits && planTier !== null
+            ? sandboxPlanLimitFor(input.sandboxPlanLimits, planTier)
+            : {};
+        const planLimit = standing?.paidHistory ? paidSandboxPlanLimit(tierLimit) : tierLimit;
+        // Free-compute bounds shared by every holder kind (docs/deployment.md,
+        // "Free compute bounds"). A closed tier (running limit 0) or a spent
+        // daily box-time budget refuses every holder, including a join, a
+        // re-arm or a replayed holder, of a box no turn keeps warm. A warm box
+        // a turn holds admits everything that turn and its people use (the
+        // agent's own requests, its Browser/ComputerSessions, someone
+        // watching), so an in-flight turn finishes; the reaper drains only
+        // boxes no turn holds. Any other turn fails with a clear message
+        // instead of waiting for a slot that will not come. A Connected
+        // Machine never counts.
+        if (backend !== "selfhosted") {
+          const refusal: SandboxOrganizationBoxLimitReason | null =
+            planLimit.runningBoxesPerOrganization === 0
+              ? "closed"
+              : standing !== null &&
+                  standing.bounded &&
+                  sandboxDailyBoxTimeSpent(planLimit, standing)
+                ? "daily_budget"
+                : null;
+          const turnHeldWarm = row.liveness === "warm" && Number(row.turn_holders) > 0;
+          if (refusal !== null && !turnHeldWarm) {
+            const inFlightTurn =
+              kind === "turn" &&
+              Boolean(
+                (
+                  await tx.execute<{ held: boolean }>(sql`
+                    select exists (select 1 from sandbox_lease_holders
+                      where lease_id = ${row.id} and kind = 'turn'
+                        and holder_id = ${holderId}) as held
+                  `)
+                )[0]?.held,
+              );
+            if (!inFlightTurn) {
+              throw new SandboxOrganizationBoxLimitError(
+                workspaceId,
+                sandboxGroupId,
+                refusal === "closed" ? 0 : sandboxDailyBoxTimeLimitSeconds(planLimit, standing),
+                refusal,
+              );
+            }
+          }
+        }
         const organizationViewerLimit = planLimit.viewerOnlyBoxesPerOrganization;
         const memberViewerLimit = input.viewerSubjectId
           ? planLimit.viewerOnlyBoxesPerMember
@@ -51274,14 +52172,15 @@ async function acquireLeaseOnce(
             organizationViewerLimit !== undefined ||
             memberViewerLimit !== undefined)
         ) {
-          const current = await tx.execute<{ held: boolean; joins_viewer_box: boolean }>(sql`
+          const current = await tx.execute<{ held: boolean; joins_live_box: boolean }>(sql`
             select
               exists (select 1 from sandbox_lease_holders
                 where lease_id = ${row.id} and kind = 'viewer' and holder_id = ${holderId}) as held,
               (${liveness}::text in ('warming', 'warm') and exists (select 1 from sandbox_lease_holders
-                where lease_id = ${row.id} and kind = 'viewer')) as joins_viewer_box
+                where lease_id = ${row.id}
+                  and kind in ('viewer', 'process', 'interaction'))) as joins_live_box
           `);
-          if (!current[0]?.held && !current[0]?.joins_viewer_box) {
+          if (!current[0]?.held && !current[0]?.joins_live_box) {
             // Two viewers on different groups each hold only their own group
             // lock. The organization key serializes their counts so every
             // limit is exact.
@@ -51313,15 +52212,12 @@ async function acquireLeaseOnce(
               }
             }
             if (organizationViewerLimit !== undefined || memberViewerLimit !== undefined) {
-              // Until 1475's definer is granted only the workspace limit and
-              // the zero limits above apply.
               const counts = await organizationWarmSandboxCounts(tx, {
                 accountId,
                 subjectId: input.viewerSubjectId ?? null,
                 excludeLeaseId: row.id,
               });
               if (
-                counts &&
                 organizationViewerLimit !== undefined &&
                 counts.viewerOnlyBoxes >= organizationViewerLimit
               ) {
@@ -51333,7 +52229,6 @@ async function acquireLeaseOnce(
                 );
               }
               if (
-                counts &&
                 memberViewerLimit !== undefined &&
                 counts.subjectViewerOnlyBoxes >= memberViewerLimit
               ) {
@@ -51346,6 +52241,73 @@ async function acquireLeaseOnce(
               }
             }
           }
+        }
+
+        const viewerInteractionAgeMs =
+          kind === "viewer" ? normalizeViewerInteractionAgeMs(input.viewerInteractionAgeMs) : null;
+
+        // Viewer-only idle drain: the reaper released this box's viewers
+        // because nobody used the page. For one more idle window, an attach
+        // that reports no interaction since then (an unattended page or an
+        // older client re-attaching on its own) must not warm it again and
+        // reset the idle clock. A person who interacts, a turn in the session,
+        // a box someone else already holds, or any attach after that window
+        // (a person returning on an older client) admits it as usual.
+        const viewerIdleDrainedAt = (row as { viewer_idle_drained_at?: Date | string | null })
+          .viewer_idle_drained_at;
+        if (
+          kind === "viewer" &&
+          (input.viewerIdleReattachRefusalMs ?? 0) > 0 &&
+          viewerIdleDrainedAt !== null &&
+          viewerIdleDrainedAt !== undefined &&
+          Number(row.turn_holders) === 0
+        ) {
+          const idleRows = await tx.execute<{ refuse: boolean }>(sql`
+            select (
+              ${viewerIdleDrainedAt}::timestamptz > now() - (${String(
+                Math.floor(input.viewerIdleReattachRefusalMs ?? 0),
+              )} || ' milliseconds')::interval
+              and not exists (
+                select 1 from sandbox_lease_holders holder where holder.lease_id = ${row.id}
+              )
+              and ${
+                viewerInteractionAgeMs === null
+                  ? sql`true`
+                  : sql`now() - (${String(viewerInteractionAgeMs)} || ' milliseconds')::interval
+                      <= ${viewerIdleDrainedAt}::timestamptz`
+              }
+              and not exists (
+                select 1 from sessions chat
+                where chat.workspace_id = ${workspaceId}
+                  and chat.sandbox_group_id = ${sandboxGroupId}
+                  and (
+                    chat.status in (${sql.raw(
+                      VIEWER_ONLY_OPEN_SESSION_STATUSES.map((status) => `'${status}'`).join(", "),
+                    )})
+                    or exists (
+                      select 1 from session_turns turn
+                      where turn.workspace_id = chat.workspace_id
+                        and turn.session_id = chat.id
+                        and (
+                          turn.created_at > ${viewerIdleDrainedAt}::timestamptz
+                          or turn.finished_at > ${viewerIdleDrainedAt}::timestamptz
+                        )
+                    )
+                  )
+              )
+            ) as refuse
+          `);
+          if (idleRows[0]?.refuse === true) {
+            throw new SandboxViewerAdmissionBlockedError(
+              workspaceId,
+              sandboxGroupId,
+              "viewer_idle",
+            );
+          }
+          // Admitted: the session is in use again; the marker has done its job.
+          await tx.execute(sql`
+            update sandbox_leases set viewer_idle_drained_at = null where id = ${row.id}
+          `);
         }
 
         // Provider-native capture may temporarily pause the box. Do not attach
@@ -51504,6 +52466,7 @@ async function acquireLeaseOnce(
           await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId, {
             subjectId: input.viewerSubjectId ?? null,
             authorityEpoch: input.viewerAuthorityEpoch ?? null,
+            interactionAgeMs: viewerInteractionAgeMs,
           });
           const updated = await recomputeAndStampLease(tx, row.id, input.leaseTtlMs, "warm");
           return { role: "rearmed" as const, lease: mapLeaseRow(updated) };
@@ -51545,32 +52508,52 @@ async function acquireLeaseOnce(
           // A new box counts against the organization's running-box limit for
           // its plan. Attaching to, or re-arming, a box that already runs
           // adds none and never reaches this election.
+          // The acting person's limited organizations share a second budget
+          // (runningBoxesPerPerson); their other organizations' boxes were
+          // counted before this transaction.
           const runningBoxLimit =
             backend === "selfhosted" ? undefined : planLimit.runningBoxesPerOrganization;
-          if (runningBoxLimit !== undefined) {
+          const personBoxLimit =
+            backend === "selfhosted" || standing === null || !standing.bounded
+              ? undefined
+              : planLimit.runningBoxesPerPerson;
+          if (runningBoxLimit !== undefined || personBoxLimit !== undefined) {
             await lockOrganizationSandboxLimit(tx, accountId);
-            // Until 1475's definer is granted only a zero limit applies.
             const counts =
-              runningBoxLimit === 0
+              runningBoxLimit === 0 || personBoxLimit === 0
                 ? null
                 : await organizationWarmSandboxCounts(tx, {
                     accountId,
                     subjectId: null,
                     excludeLeaseId: row.id,
                   });
-            if (runningBoxLimit === 0 || (counts && counts.runningBoxes >= runningBoxLimit)) {
+            const organizationFull =
+              runningBoxLimit !== undefined &&
+              (runningBoxLimit === 0 ||
+                (counts !== null && counts.runningBoxes >= runningBoxLimit));
+            const personFull =
+              !organizationFull &&
+              personBoxLimit !== undefined &&
+              (personBoxLimit === 0 ||
+                (counts !== null &&
+                  (standing?.personOwnsOrganization ? counts.runningBoxes : 0) +
+                    (standing?.personOtherRunningBoxes ?? 0) >=
+                    personBoxLimit));
+            if (organizationFull || personFull) {
+              const limit = organizationFull ? (runningBoxLimit ?? 0) : (personBoxLimit ?? 0);
               if (kind !== "turn") {
                 throw new SandboxOrganizationBoxLimitError(
                   workspaceId,
                   sandboxGroupId,
-                  runningBoxLimit,
+                  limit,
+                  organizationFull ? "running" : "person_running",
                 );
               }
               return {
                 role: "fenced" as const,
                 reason: "organization_sandbox_capacity" as const,
                 lease: mapLeaseRow(row),
-                organizationBoxLimit: runningBoxLimit,
+                organizationBoxLimit: limit,
               };
             }
           }
@@ -51599,6 +52582,7 @@ async function acquireLeaseOnce(
           await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId, {
             subjectId: input.viewerSubjectId ?? null,
             authorityEpoch: input.viewerAuthorityEpoch ?? null,
+            interactionAgeMs: viewerInteractionAgeMs,
           });
           const updated = await recomputeAndStampLease(tx, row.id, warmingLeaseTtlMs, null);
           // casRows.length === 0 cannot happen under the held row lock (defensive):
@@ -51606,6 +52590,8 @@ async function acquireLeaseOnce(
           const role = casRows.length === 0 ? ("attached" as const) : ("spawner" as const);
           return {
             role,
+            ...(planTier !== null ? { sandboxPlanTier: planTier } : {}),
+            ...(standing?.paidHistory ? { sandboxPaidHistory: true } : {}),
             lease: {
               ...mapLeaseRow(updated),
               historicalRecoveryAuthorized:
@@ -51643,6 +52629,7 @@ async function acquireLeaseOnce(
         await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId, {
           subjectId: input.viewerSubjectId ?? null,
           authorityEpoch: input.viewerAuthorityEpoch ?? null,
+          interactionAgeMs: viewerInteractionAgeMs,
         });
         const attachTtlMs = liveness === "warming" ? warmingLeaseTtlMs : input.leaseTtlMs;
         const updated = await recomputeAndStampLease(tx, row.id, attachTtlMs, null);
@@ -51680,6 +52667,36 @@ function waitForSandboxTransition(
   });
 }
 
+/**
+ * A request or Browser/ComputerSession admitted to a box is use of it: move
+ * the box's process and Browser/ComputerSession holders' activity forward, so
+ * the compute-bounds idle drain (listNoTurnWarmLeases) sees a terminal being
+ * typed into or a browser being driven as activity, not only when its process
+ * started. Holder rows only, never the lease row, so it takes no lock an
+ * admission waits on. Best-effort.
+ */
+async function stampSandboxCommandHolderActivity(
+  db: Database,
+  input: Pick<AcquireLeaseInput, "accountId" | "workspaceId" | "sandboxGroupId">,
+): Promise<void> {
+  await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await scopedDb.execute(sql`
+        update sandbox_lease_holders holder set last_interaction_at = now()
+        from sandbox_leases lease
+        where lease.workspace_id = ${input.workspaceId}
+          and lease.sandbox_group_id = ${input.sandboxGroupId}
+          and holder.lease_id = lease.id
+          and holder.kind in ('process', 'interaction')
+          and (holder.last_interaction_at is null
+            or holder.last_interaction_at < now() - interval '30 seconds')
+      `);
+    },
+  );
+}
+
 export async function acquireLease(
   db: Database,
   input: AcquireLeaseInput,
@@ -51697,8 +52714,32 @@ export async function acquireLease(
   const startedAt = performance.now();
   const waitBudget = new SandboxTransitionWaitBudget(captureWaitMs, startedAt);
   let delayMs = 25;
+  // The organization's tier and the facts outside its lease rows (its box
+  // time today and the acting person's other organizations), read once before
+  // admission. A failed read fails open to the tier read under the lease lock.
+  let standing: SandboxComputeStanding | null = null;
+  if (input.sandboxPlanLimits) {
+    try {
+      standing = await resolveSandboxComputeStanding(db, {
+        accountId: input.accountId,
+        limits: input.sandboxPlanLimits,
+        actingSubjectId: input.actingSubjectId ?? input.viewerSubjectId ?? null,
+        onFallback: input.onComputeStandingFallback,
+      });
+    } catch (error) {
+      reportSandboxComputeStandingFallback(input.onComputeStandingFallback, error, "organization");
+    }
+  }
   for (;;) {
-    const result = await acquireLeaseOnce(db, input);
+    const result = await acquireLeaseOnce(db, input, standing);
+    if (
+      standing !== null &&
+      standing.bounded &&
+      (input.kind === "direct" || input.kind === "interaction") &&
+      (result.role === "attached" || result.role === "rearmed")
+    ) {
+      await stampSandboxCommandHolderActivity(db, input).catch(() => undefined);
+    }
     const now = performance.now();
     if (captureWaitMs > 0 && result.role === "fenced" && result.reason === "capture_in_progress") {
       waitBudget.observeCapture(result.captureRemainingMs, now);
@@ -58766,10 +59807,23 @@ async function touchLiveLeaseHolder(
     sandboxGroupId: string;
     kind: LeaseHolderKind;
     holderId: string;
+    /** Viewer holders only: how long ago the viewer last saw real user
+     * interaction. Moves `last_interaction_at` forward, never back. */
+    interactionAgeMs?: number | null | undefined;
   },
 ): Promise<boolean> {
+  const interactionAgeMs =
+    input.kind === "viewer" ? normalizeViewerInteractionAgeMs(input.interactionAgeMs) : null;
   const updated = await tx.execute<{ id: string }>(sql`
     update sandbox_lease_holders as holder set last_heartbeat_at = now()
+      ${
+        interactionAgeMs === null
+          ? sql``
+          : sql`, last_interaction_at = greatest(
+              holder.last_interaction_at,
+              now() - (${String(interactionAgeMs)} || ' milliseconds')::interval
+            )`
+      }
     where holder.lease_id = (
       select id from sandbox_leases
       where workspace_id = ${input.workspaceId}
@@ -58781,6 +59835,15 @@ async function touchLiveLeaseHolder(
     returning holder.id
   `);
   return updated.length > 0;
+}
+
+/** A viewer's reported interaction age, made safe for SQL: a finite,
+ * non-negative whole number of milliseconds, at most 30 days. Anything else
+ * (an older client, a malformed value) records nothing, so the reaper falls
+ * back to the attach time and session activity. */
+export function normalizeViewerInteractionAgeMs(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return null;
+  return Math.min(Math.floor(value), 30 * 24 * 60 * 60 * 1000);
 }
 
 // §4.5 — heartbeat. EPOCH-FENCED (the C1b fix — the real split-brain bug, on the
@@ -58842,6 +59905,9 @@ export async function heartbeatLeaseHolderStatus(
     leaseTtlMs: number;
     expectedEpoch: number;
     billingMode?: "usage_only" | "shadow" | "credits";
+    /** Viewer holders only: how long ago the viewer last saw real user
+     * interaction (see normalizeViewerInteractionAgeMs). */
+    interactionAgeMs?: number | null | undefined;
   },
 ): Promise<LeaseHolderHeartbeatStatus> {
   if (input.kind === "process") {
@@ -58896,6 +59962,7 @@ export async function heartbeatLeaseHolderStatus(
           sandboxGroupId: input.sandboxGroupId,
           kind: input.kind,
           holderId: input.holderId,
+          interactionAgeMs: input.interactionAgeMs,
         });
         if (!holderAlive) {
           // reaped or no longer the exact active attempt
@@ -74088,6 +75155,7 @@ export type SessionGoalContinuationProjection = {
     | "system_work_pending"
     | "held_for_input"
     | "backoff_pending"
+    | "compaction_failed"
     | "missing_obligation";
   wakeRevision: number;
   observedRevision: number;
@@ -74219,6 +75287,17 @@ export async function getSessionGoalWithContinuation(
       // has an active goal. The wait itself remains independent of goal state.
       const sessionWait = await sessionInputWaitStateTx(tx, workspaceId, sessionId, session);
       const currentWaitUntil = sessionWait.disposition === "held" ? session.inputWaitUntil : null;
+      // With no turn in flight, a terminal checkpoint failure holds the input
+      // that was already pending (including this goal's own continuation) until
+      // something newer arrives. Say so rather than "continuing automatically".
+      const heldByCompactionFailure =
+        goal.status === "active" && !turn
+          ? await sessionHeldByCompactionFailureTx(
+              tx as unknown as Database,
+              workspaceId,
+              sessionId,
+            )
+          : false;
 
       const pendingWorkflowWake =
         wake !== undefined && wake.wakeRevision > wake.deliveredRevision ? wake : null;
@@ -74280,6 +75359,12 @@ export async function getSessionGoalWithContinuation(
         continuation = {
           state: turn.status === "running" ? "blocked" : "scheduled",
           reason: "system_work_pending",
+          ...base,
+        };
+      } else if (heldByCompactionFailure) {
+        continuation = {
+          state: "blocked",
+          reason: "compaction_failed",
           ...base,
         };
       } else if (continuationUpdate) {
@@ -79791,18 +80876,26 @@ export async function acknowledgeConsumedChildEvents(
 /**
  * Turn metadata key recording each direct child answer (`turn.completed`
  * sequence) that one exact attempt of the turn returned whole to its model
- * from a read tool. It is bounded, append-only per turn, and only ever
- * suppresses a duplicate: a lost or unproven record delivers the child's
- * result normally.
+ * from a read tool, with the model's call id for that read when known. It is
+ * bounded, append-only per turn, and only ever suppresses a duplicate: a lost
+ * or unproven record delivers the child's result normally.
  */
 export const CONSUMED_CHILD_ANSWERS_METADATA_KEY = "consumedChildAnswers";
 const CONSUMED_CHILD_ANSWERS_MAX = 64;
 const CONSUMED_CHILD_ANSWERS_TURN_WINDOW = 16;
+/** The model call ids a read record keeps; longer ids are not recorded. */
+const CONSUMED_CHILD_ANSWER_CALL_ID_MAX_LENGTH = 512;
 /** Any hex UUID shape, so a stored attempt id is cast only when castable. */
 const UUID_TEXT_PATTERN_SQL =
   "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$";
 
-type ConsumedChildAnswerEntry = { childSessionId: string; sequence: number; attemptId: string };
+type ConsumedChildAnswerEntry = {
+  childSessionId: string;
+  sequence: number;
+  attemptId: string;
+  /** The model's call id of the read whose output carried the answer. */
+  callId?: string;
+};
 
 function consumedChildAnswerEntries(metadata: unknown): ConsumedChildAnswerEntry[] {
   if (metadata === null || typeof metadata !== "object" || Array.isArray(metadata)) return [];
@@ -79846,8 +80939,15 @@ function childTerminalResultAnswerParts(
  * the answer); a record outside that window, like a lost one, only means the
  * result is delivered normally. `attempt` also counts the records one exact
  * attempt made on its own turn: its caller proves that attempt is live, or has
- * just completed its turn in the same transaction. A record of an attempt that
- * failed, was interrupted, or was replaced proves nothing.
+ * just completed its turn in the same transaction.
+ *
+ * A turn can outlive the attempt that read: a provider interruption, worker
+ * restart or Retry continues the same turn in a new attempt, which resumes
+ * from the turn's durable history. A record by such an earlier attempt counts
+ * once that history holds the read's own tool result (by the model's call id):
+ * every later attempt of the turn received it. Without that result in history,
+ * a record of an attempt that failed, was interrupted, or was replaced proves
+ * nothing.
  */
 async function consumedChildAnswerSequencesTx(
   tx: Database,
@@ -79907,7 +81007,14 @@ async function consumedChildAnswerSequencesTx(
           attempt
             ? sql` or (turn.id = ${attempt.turnId}::uuid and attempt.id = ${attempt.attemptId}::uuid)`
             : sql``
-        })`,
+        }
+          or (jsonb_typeof(entry -> 'callId') = 'string' and exists (
+            select 1 from session_history_items carried
+            where carried.workspace_id = ${input.workspaceId}::uuid
+              and carried.session_id = ${input.parentSessionId}::uuid
+              and carried.turn_id = turn.id
+              and carried.item_ordered ->> 'type' = 'function_call_result'
+              and carried.item_ordered ->> 'callId' = entry ->> 'callId')))`,
   );
   for (const row of rows) {
     const sequences = consumed.get(row.childSessionId) ?? new Set<number>();
@@ -79994,12 +81101,14 @@ async function pendingChildResultsConsumedTx(
 }
 
 /**
- * Inside the successful completion settlement of a turn attempt that recorded
- * a consumed child answer: supersede each still-pending idle child result the
- * parent's model has now received whole, before the next claim could start an
- * inference that only repeats it. The tool output that carried each answer is
- * durable history once the attempt completes. The canonical row stays as
- * audit truth; the caller appends the `system.update.cancelled` event.
+ * Inside the successful completion settlement of a turn that recorded a
+ * consumed child answer, by this attempt or an earlier attempt of the same
+ * turn: supersede each still-pending idle child result the parent's model has
+ * now received whole, before the next claim could start an inference that only
+ * repeats it. The tool output that carried each answer is durable history once
+ * the attempt completes (see `consumedChildAnswerSequencesTx`). The canonical
+ * row stays as audit truth; the caller appends the `system.update.cancelled`
+ * event.
  */
 async function supersedeChildResultsConsumedByCompletedAttemptTx(
   tx: Database,
@@ -80011,13 +81120,7 @@ async function supersedeChildResultsConsumedByCompletedAttemptTx(
     turnMetadata: unknown;
   },
 ): Promise<string[]> {
-  if (
-    !consumedChildAnswerEntries(input.turnMetadata).some(
-      (entry) => entry.attemptId === input.attemptId,
-    )
-  ) {
-    return [];
-  }
+  if (consumedChildAnswerEntries(input.turnMetadata).length === 0) return [];
   const consumed = await pendingChildResultsConsumedTx(tx, {
     workspaceId: input.workspaceId,
     parentSessionId: input.sessionId,
@@ -80051,11 +81154,13 @@ async function supersedeChildResultsConsumedByCompletedAttemptTx(
  * The caller proves the read returned whole content to the model; this proves
  * the attempt is still the session's current one and that each sequence is a
  * direct child's result-bearing answer. A read whose answers this attempt
- * already recorded writes nothing. Metadata writes take the canonical session
- * prefix: the archive guard on a turn UPDATE also locks its session, so taking
- * only the turn first would invert claim/settlement and parallel tool writers.
- * It is best effort: a busy ownership row skips it and the result is then
- * delivered normally.
+ * already recorded writes nothing. `callId` is the model's id for the reading
+ * tool call; it lets a later attempt of the same turn, resuming from the
+ * turn's durable history, prove it holds the read's output too. Metadata
+ * writes take the canonical session prefix: the archive guard on a turn UPDATE
+ * also locks its session, so taking only the turn first would invert
+ * claim/settlement and parallel tool writers. It is best effort: a busy
+ * ownership row skips it and the result is then delivered normally.
  */
 export async function recordConsumedChildAnswers(
   db: Database,
@@ -80066,9 +81171,16 @@ export async function recordConsumedChildAnswers(
     turnId: string;
     attemptId: string;
     executionGeneration: number;
+    callId?: string;
     children: readonly { sessionId: string; sequences: readonly number[] }[];
   },
 ): Promise<{ recorded: number }> {
+  const callId =
+    typeof input.callId === "string" &&
+    input.callId.length > 0 &&
+    input.callId.length <= CONSUMED_CHILD_ANSWER_CALL_ID_MAX_LENGTH
+      ? input.callId
+      : undefined;
   const children = input.children
     .map((child) => ({
       sessionId: child.sessionId,
@@ -80202,6 +81314,7 @@ export async function recordConsumedChildAnswers(
           const newlyRecorded = unrecorded(turn.metadata).map((answer) => ({
             ...answer,
             attemptId: input.attemptId,
+            ...(callId ? { callId } : {}),
           }));
           if (newlyRecorded.length === 0) return { recorded: 0 };
           // Under the turn row lock: only this key changes, the rest of the
@@ -80608,16 +81721,23 @@ async function selectQueuedSessionClaimBatch(
   // ordinary head). A long queue of later Sends must not inflate claim memory.
   // Waiting messages break that run, and only those sent before the head are
   // taken in with it.
+  // A pending Agent Steer runs ahead of queued human Sends. A runnable human
+  // Steer outranks it, but it still reads every message queued ahead of it
+  // first, so the whole human queue is then eligible and the Agent Steer is
+  // carried as context on the turn that claims.
   const previews = await rawRows<{ id: string; version: number; waits: boolean }>(
     tx,
     sql`
-    with candidates as (
+    with queued as (
       select id, version, position, created_at, ${waits} as waits,
         metadata->>'delivery' is distinct from 'steer' as send
       from session_turns
       where workspace_id = ${session.workspaceId} and session_id = ${session.id}
         and status = 'queued' and source in ('user', 'api')
-        and (${pendingAgentSteer} = false or metadata->>'delivery' = 'steer')
+    ), candidates as (
+      select * from queued
+      where ${pendingAgentSteer} = false
+        or exists (select 1 from queued steer where not steer.send and not steer.waits)
     ), ordered as (
       select id, version, position, created_at, waits,
         count(*) filter (where not waits) over run as runnable,
@@ -82069,10 +83189,11 @@ export async function claimSessionWorkForAttempt(
           )
           .limit(1)
           .for("update");
-        // A human/API Steer is the newest explicit replacement direction. It
-        // must claim next even when an older Agent Steer is pending; the
-        // internal instruction is delivered as context on that same human turn
-        // instead of manufacturing another system inference ahead of it.
+        // A human/API Steer is the newest explicit replacement direction. It,
+        // after the human messages queued ahead of it, must claim next even
+        // when an older Agent Steer is pending; the internal instruction is
+        // delivered as context on the claiming human turn instead of
+        // manufacturing another system inference ahead of it.
         // Ordinary queued sends retain the established Agent-Steer priority.
         const { batch: queuedBatch, waiting: waitingMessages } =
           await selectQueuedSessionClaimBatch(
@@ -84973,6 +86094,25 @@ async function pendingAgentSteerExistsTx(
     )
     .limit(1);
   return row !== undefined;
+}
+
+/**
+ * Whether the compaction-failure hold (`compactionFailureHoldSequenceTx`) is
+ * what keeps this idle session from running: a hold applies, and neither an
+ * Agent Steer nor any input committed after the failure is pending.
+ */
+async function sessionHeldByCompactionFailureTx(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<boolean> {
+  const holdSequence = await compactionFailureHoldSequenceTx(db, workspaceId, sessionId);
+  if (holdSequence === null) return false;
+  if (await pendingAgentSteerExistsTx(db, workspaceId, sessionId)) return false;
+  const newer = await pendingSystemUpdateWakeClassesTx(db, workspaceId, sessionId, {
+    pendingAfterSequence: holdSequence,
+  });
+  return !newer.immediate && !newer.deferred && !newer.command;
 }
 
 /** Read durable session state without reserving a turn-worker slot or mutating it. */
@@ -92022,9 +93162,12 @@ export async function getSessionQueueSnapshot(
     const hasPendingAgentSteer = pendingInputs.some(
       (update) => update.kind === "agent_steer_instruction",
     );
-    const attachmentTurn = hasPendingAgentSteer
-      ? physicalItems.find((turn) => turn.metadata.delivery === "steer")
-      : physicalItems[0];
+    // Mirrors the claim: a pending Agent Steer runs ahead of queued Sends, but
+    // once a human Steer is queued the queue head claims and carries it.
+    const attachmentTurn =
+      hasPendingAgentSteer && !physicalItems.some((turn) => turn.metadata.delivery === "steer")
+        ? undefined
+        : physicalItems[0];
     const attachmentRow = attachmentTurn
       ? rows.find((row) => row.id === attachmentTurn.id)
       : undefined;

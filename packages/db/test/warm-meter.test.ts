@@ -68,8 +68,14 @@ async function workspaceOf(accountId: string): Promise<{ accountId: string; work
   return { accountId, workspaceId: w!.id };
 }
 
-// Migration 1475 withholds the runtime grant for one release; grant it here so
-// the organization-wide counts can be exercised.
+// The restricted tier applies only while promotion enforcement is on.
+async function setPromotionEnforcement(enabled: boolean): Promise<void> {
+  await admin`insert into promotion_enforcement (singleton, enabled) values (true, ${enabled})
+    on conflict (singleton) do update set enabled = excluded.enabled`;
+}
+
+// Migration 1475 created the definer withheld and 1479 grants it; granting it
+// again here is harmless and keeps these tests independent of that order.
 async function grantOrganizationCounts(): Promise<void> {
   await admin.unsafe(
     "grant execute on function opengeni_private.organization_warm_sandbox_counts_v1(uuid, text, uuid) to opengeni_app",
@@ -1192,6 +1198,10 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
     expect(await tierOf(ws.accountId, ws.workspaceId)).toBe("none");
     await admin`insert into promotion_decisions (account_id, decision, revision, actor)
       values (${ws.accountId}, 'held', 1, 'test')`;
+    // A held decision restricts only while promotion enforcement is on.
+    await setPromotionEnforcement(false);
+    expect(await tierOf(ws.accountId, ws.workspaceId)).toBe("none");
+    await setPromotionEnforcement(true);
     expect(await tierOf(ws.accountId, ws.workspaceId)).toBe("restricted");
     await admin`insert into organization_plans (account_id, plan_key, status)
       values (${ws.accountId}, 'free', 'active')`;
@@ -1208,13 +1218,14 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
     expect(await tierOf(ws.accountId, ws.workspaceId)).toBe("max");
   }, 60_000);
 
-  test("(6g) a restricted organization keeps no task-less box warm even before the count definer is granted", async () => {
+  test("(6g) a restricted organization gets no box of any kind, even before the count definer is granted", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
     await admin`insert into organization_plans (account_id, plan_key, status)
       values (${ws.accountId}, 'free', 'active')`;
     await admin`insert into promotion_decisions (account_id, decision, revision, actor)
       values (${ws.accountId}, 'denied', 1, 'test')`;
+    await setPromotionEnforcement(true);
     let refused: unknown;
     try {
       await acquireLease(db, {
@@ -1231,20 +1242,119 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
     } catch (error) {
       refused = error;
     }
-    expect(refused).toBeInstanceOf(SandboxViewerBoxLimitError);
-    expect((refused as SandboxViewerBoxLimitError).limit).toBe(0);
-    // Agent work in the same organization is not refused by viewer limits.
-    const turn = await acquireLease(db, {
-      accountId: ws.accountId,
-      workspaceId: ws.workspaceId,
-      sandboxGroupId: ws.groupId,
-      kind: "turn",
-      holderId: "t1",
-      backend: "modal",
-      leaseTtlMs: 90_000,
-      sandboxPlanLimits: DEFAULT_SANDBOX_PLAN_LIMITS,
-    });
-    expect(turn.role).toBe("spawner");
+    expect(refused).toBeInstanceOf(SandboxOrganizationBoxLimitError);
+    expect((refused as SandboxOrganizationBoxLimitError).reason).toBe("closed");
+    // Nor does agent work in the same organization start one: the turn fails
+    // with the same message instead of waiting for a slot.
+    let turnRefused: unknown;
+    try {
+      await acquireLease(db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        sandboxGroupId: ws.groupId,
+        kind: "turn",
+        holderId: "t1",
+        backend: "modal",
+        leaseTtlMs: 90_000,
+        sandboxPlanLimits: DEFAULT_SANDBOX_PLAN_LIMITS,
+      });
+    } catch (error) {
+      turnRefused = error;
+    }
+    expect(turnRefused).toBeInstanceOf(SandboxOrganizationBoxLimitError);
+    expect((turnRefused as SandboxOrganizationBoxLimitError).reason).toBe("closed");
+  }, 60_000);
+
+  test("(6j) a restricted organization's viewer is refused whatever credential keeps it alive", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    await admin`insert into organization_plans (account_id, plan_key, status)
+      values (${ws.accountId}, 'free', 'active')`;
+    await admin`insert into promotion_decisions (account_id, decision, revision, actor)
+      values (${ws.accountId}, 'held', 1, 'test')`;
+    await setPromotionEnforcement(true);
+    // A browser session and a personal API key name the person; a workspace
+    // or organization API key names the key, or nobody. The tier belongs to
+    // the organization, so each is refused the same way: it allows no box.
+    for (const viewerSubjectId of ["user:held", "api_key:held-key", undefined]) {
+      let refused: unknown;
+      try {
+        await acquireLease(db, {
+          accountId: ws.accountId,
+          workspaceId: ws.workspaceId,
+          sandboxGroupId: crypto.randomUUID(),
+          kind: "viewer",
+          holderId: `v-${viewerSubjectId ?? "none"}`,
+          ...(viewerSubjectId ? { viewerSubjectId } : {}),
+          backend: "modal",
+          leaseTtlMs: 90_000,
+          sandboxPlanLimits: DEFAULT_SANDBOX_PLAN_LIMITS,
+        });
+      } catch (error) {
+        refused = error;
+      }
+      expect(refused).toBeInstanceOf(SandboxOrganizationBoxLimitError);
+    }
+  }, 60_000);
+
+  test("(6k) a young Free self-serve organization is on the new tier until it ages out", async () => {
+    if (!available) return;
+    const tierOf = async (
+      accountId: string,
+      workspaceId: string,
+      limits = DEFAULT_SANDBOX_PLAN_LIMITS,
+    ) =>
+      withRlsContext(db, { accountId, workspaceId }, (scoped) =>
+        resolveSandboxPlanTier(scoped, accountId, limits),
+      );
+    const ws = await freshWorkspace();
+    await admin`insert into organization_plans (account_id, plan_key, status)
+      values (${ws.accountId}, 'free', 'active')`;
+    expect(await tierOf(ws.accountId, ws.workspaceId)).toBe("new");
+    // Without the plan-limit table, or with a `new` tier that sets no age, it is Free.
+    expect(
+      await withRlsContext(db, ws, (scoped) => resolveSandboxPlanTier(scoped, ws.accountId)),
+    ).toBe("free");
+    expect(await tierOf(ws.accountId, ws.workspaceId, { free: {}, new: {} })).toBe("free");
+
+    // One viewer-only box, whatever credential keeps it alive.
+    const viewer = (holderId: string, viewerSubjectId?: string) =>
+      acquireLease(db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        sandboxGroupId: crypto.randomUUID(),
+        kind: "viewer",
+        holderId,
+        ...(viewerSubjectId ? { viewerSubjectId } : {}),
+        backend: "modal",
+        leaseTtlMs: 90_000,
+        sandboxPlanLimits: DEFAULT_SANDBOX_PLAN_LIMITS,
+      });
+    await grantOrganizationCounts();
+    expect((await viewer("first", "user:new-owner")).role).toBe("spawner");
+    await expect(viewer("second")).rejects.toBeInstanceOf(SandboxViewerBoxLimitError);
+
+    // A held decision still restricts a young organization.
+    await admin`insert into promotion_decisions (account_id, decision, revision, actor)
+      values (${ws.accountId}, 'held', 1, 'test')`;
+    await setPromotionEnforcement(true);
+    expect(await tierOf(ws.accountId, ws.workspaceId)).toBe("restricted");
+    await admin`delete from promotion_decisions where account_id = ${ws.accountId}`;
+
+    // Paid and older organizations are not new.
+    await admin`update managed_accounts set created_at = now() - interval '4 days'
+      where id = ${ws.accountId}`;
+    expect(await tierOf(ws.accountId, ws.workspaceId)).toBe("free");
+    const paid = await freshWorkspace();
+    await admin`insert into organization_plans (account_id, plan_key, status)
+      values (${paid.accountId}, 'pro', 'active')`;
+    expect(await tierOf(paid.accountId, paid.workspaceId)).toBe("pro");
+
+    // A young organization a host provisioned stays embedded.
+    const embedded = await freshWorkspace();
+    await admin`update managed_accounts set external_source = 'opengeni-sdk:young'
+      where id = ${embedded.accountId}`;
+    expect(await tierOf(embedded.accountId, embedded.workspaceId)).toBe("embedded");
   }, 60_000);
 
   test("(6h) organization and member viewer limits count every workspace of the organization", async () => {

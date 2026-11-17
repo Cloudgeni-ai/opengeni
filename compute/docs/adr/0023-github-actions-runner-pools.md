@@ -135,6 +135,13 @@ delivery can be late or missed.
   refresh to end.
   `actions/checkout` cleans untracked files by default, which would delete
   the prepared dependencies: warm workflows check out with `clean: false`.
+  The clone keeps as much history as the workflows check out
+  (`--warm-fetch-depth`, their `fetch-depth`, 1 by default). With 0 it
+  fetches every branch and tag in full, to the refs `actions/checkout`
+  fetches them to. A checkout of depth 0 on a shallow clone fetches the
+  whole history again in every job, while on a full clone it fetches only
+  what is newer than the template. The template's disk holds the history
+  once, and every runner shares it.
 - **A build cache in object storage.** The service serves Turborepo's
   remote cache API, keeping artifacts in a bucket under the pool's key,
   and gives runners its address and a per-pool token in their

@@ -1,5 +1,125 @@
 # @opengeni/runtime
 
+## 6.27.0
+
+### Minor Changes
+
+- 5d63995: Sites can ask what each of their tools needs for the current viewer before a click: `site.tools.$readiness(targets)` (`POST /v1/workspaces/:id/tools/readiness`) answers `ready`, `confirm`, `choose_account`, `connect`, `reconnect`, `blocked`, `open_in_opengeni` or `unavailable`, with the account the tool runs as, and `site.tools.$onReadinessChange` fires after a connect, a reconnect, an "Always allow" or a reset. It reads the same authority as a call and never reaches the provider; calls still enforce everything.
+
+  The Site tool confirmation shows which account the action runs as ("Shared with workspace" for a workspace account, "You" when none is involved). The checkbox now reads "Always allow on this Site from this account". The Site menu has "Reset allowed actions" (`POST /v1/workspaces/:id/tools/site-allowances/reset`).
+
+  Typed failures: a tool set to Block answers 403 with `details.code` `tool_blocked` (Site code: `site_tool_blocked`); a confirmation a published address can't show is `site_tool_open_in_opengeni`. A tool server that couldn't be reached before anything was sent (refused connection, DNS failure, a tunnel that is gone, decided only at the MCP transport's own request) now answers 503 `upstream_unavailable` with `details.code` `tool_server_unreachable`, `retryable: true` and `outcomeUnknown: false` for every gateway caller instead of a 500 (Site code: `site_tool_upstream_unavailable`).
+
+### Patch Changes
+
+- 5d63995: A connected account that needs more access for a tool now shows "Give {provider} more access" with Allow in the chat instead of a connect card, and Allow finds the account even when it is homed in another workspace. Site tool readiness reports `grant` (with the scopes needed) for such tools, and `unavailable` with reason `account` when the account's access is fixed and cannot be extended.
+- 5d63995: When a tool needs access that a fixed-access account (for example one managed through Nango) cannot be given, the chat now shows "{provider} can't do this with the connected account" with no step-up. The `tool.auth_needed` notice keeps the legacy-safe reason `unsupported_auth`, so older clients show the tools as unavailable, and adds `accountReason: "account_scope_fixed"` with the scopes the tool needs.
+- 8f1f5e2: Free compute is bounded for every kind of sandbox use, not only viewers. A held or denied Free or plan-less organization that has not bought credit or paid for a plan gets no sandbox at all: terminals, commands, background processes, browser and desktop sessions, viewers and new boxes for agent turns are refused, a turn that needs a box fails with a clear message instead of waiting forever, an already running box stays usable only while a turn holds it, and the reaper drains boxes no turn holds. A person who owns or administers such an organization carries the restriction into their other unpaid organizations.
+
+  Free, young Free and plan-less organizations share one running-box budget of 2 across every holder kind, plus 2 running boxes and 12 box-hours per UTC day per organization and per person across their organizations. Past the daily budget no box starts and the reaper drains boxes no turn holds, while an in-flight turn finishes. Boxes that nothing uses drain after the viewer idle window, whatever holds them. All values are plan-limit settings (`OPENGENI_SANDBOX_PLAN_LIMITS_JSON`).
+
+  Every new Modal box carries hard CPU and memory ceilings (2 cores / 4096 MiB for unpaid organizations, 16 cores / 32768 MiB for paid, Enterprise, host-provisioned and credit-buying organizations), and a create without them is refused. Unpaid boxes can be limited to an outbound CIDR/domain allowlist; Modal has no per-port egress rule, so SMTP cannot be blocked by port alone.
+
+  A denied Free organization with no paid history is suspended from sandboxes, Site publishing, invitations, uploads and API keys until the decision is reversed or it buys credit; sign-in keeps working. Creating an additional organization now goes through the signup network checks and rate limit, and inherits its owner's review hold.
+
+  An unpaid organization that bought credit is treated as paying: no per-person, daily or all-holder idle bounds. Paid, Enterprise and host-provisioned organizations are unaffected.
+
+  Rollout: set the new plan-limit fields in `OPENGENI_SANDBOX_PLAN_LIMITS_JSON` only after this release runs everywhere, because older pods reject unknown fields. Defaults for `free`, `new` and `none`: `runningBoxesPerOrganization` 2, `runningBoxesPerPerson` 2, `boxSecondsPerOrganizationPerDay` 43200, `boxSecondsPerPersonPerDay` 43200, `idleDrainAllHolders` true; `restricted` is 0 for every count.
+
+- 5d63995: Accounts held by Nango are listed by `GET /connect/accounts` with `backend: "nango"`, and the chat and Settings never start a native reconnect for them; a chat Reconnect opens the connector's own Connect instead. A workspace-shared Nango Google account reads as connected.
+- 5d63995: Site tools now run on a person's own account that was added in another workspace and turned on here ("Use it here"), the same account a chat in this workspace uses. Before, the Site's tool gateway read that credential in the current workspace, found nothing, and the call failed with `tool_unavailable`.
+
+  When the provider can't read what an action would do because the account must allow more access, the confirmation now answers 409 with `details.code` `tool_connection_needs_more_access` (with the connection and scopes) instead of a generic 422; signing in again answers `tool_connection_needs_attention`, and a provider refusal for that account answers 403 `tool_unavailable_for_account`. Site code receives the new typed code `site_tool_grant_required`, or `site_tool_reconnect_required` and `site_tool_permission_denied`.
+
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [8f1f5e2]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+  - @opengeni/capabilities@6.27.0
+  - @opengeni/contracts@6.27.0
+  - @opengeni/sdk@6.27.0
+  - @opengeni/config@6.27.0
+  - @opengeni/codemode@6.27.0
+  - @opengeni/codex@6.27.0
+  - @opengeni/decisions@6.27.0
+  - @opengeni/interaction@6.27.0
+  - @opengeni/observability@6.27.0
+  - @opengeni/tool-gateway@6.27.0
+  - @opengeni/vaults@6.27.0
+  - @opengeni/jev@6.27.0
+  - @opengeni/agent-proto@6.27.0
+  - @opengeni/network@6.27.0
+  - @opengeni/xai-subscription@6.27.0
+
+## 6.26.0
+
+### Patch Changes
+
+- 8fae328: Connected tools that can do a task now win over a Connect card for an unconnected alternative. Tool search no longer shows an integration's Connect card by itself when the chat already has a connected account of the same kind (Outlook Mail beside an unconnected Gmail); the search result still names the integration, and the agent can show its card when the person asked for it. In the agent's integration catalog search, a service the person can already use in the chat comes before a same-category service they would still have to connect, unless the request names the unconnected service. The per-turn connector availability notice now says that a configured but unavailable connector is needed only when the person named it or no loaded tool can do the task.
+- 8fae328: When a chat can use several accounts of one connector or integration, the person's own account is now the default for writes. When several accounts' copies of a tool match a search equally, the default's copy loads, every account's tools say which account is the default and why, and the agent asks only when no account is a clear default (several of the person's own, or only shared ones).
+- c8efcb0: Tools of a connector or integration with only one connected account now say which account they use (for example "Account: Outlook Calendar — iris@example.com · Yours. Use only this account."), as tools of a connector with several accounts already did. The agent no longer has to guess whose account a connector is signed in as.
+- 33dd6da: Sites guidance: page or cap data that grows over time (Site Data, Site SQL and workspace tool results) instead of failing the whole page once it passes a fixed size.
+- c8efcb0: A tool call whose arguments do not match the tool's input schema no longer asks anyone to approve it. Connector and other approval-gated tool calls are now checked against the schema before the approval check, so the model gets the usual "not called, correct the arguments" error at once instead of a person getting an Ask card for a call that could never run. When string-encoded arguments are repaired, the approval card and its action fingerprint now show the repaired arguments, which are the ones the call runs with. The tool gateway gains `admitModelArguments`, which runs the same argument check as a model call without calling the tool.
+- Updated dependencies [6d7ea1e]
+- Updated dependencies [8fae328]
+- Updated dependencies [c8efcb0]
+- Updated dependencies [20e4937]
+- Updated dependencies [c8efcb0]
+- Updated dependencies [e1199c0]
+  - @opengeni/contracts@6.26.0
+  - @opengeni/sdk@6.26.0
+  - @opengeni/tool-gateway@6.26.0
+  - @opengeni/codemode@6.26.0
+  - @opengeni/xai-subscription@6.26.0
+  - @opengeni/capabilities@6.26.0
+  - @opengeni/codex@6.26.0
+  - @opengeni/config@6.26.0
+  - @opengeni/decisions@6.26.0
+  - @opengeni/interaction@6.26.0
+  - @opengeni/observability@6.26.0
+  - @opengeni/vaults@6.26.0
+  - @opengeni/jev@6.26.0
+  - @opengeni/agent-proto@6.26.0
+  - @opengeni/network@6.26.0
+
+## 6.25.0
+
+### Patch Changes
+
+- 43435d5: Agent turns with long histories use less worker CPU per model request. The history prefix check compares canonical items instead of hashing the whole history, model context snapshots reuse unchanged content from the previous request, request copies avoid `structuredClone` for plain data, model provider and pricing settings are parsed once per value, and the row-level security scope statement is built once per shape. Outputs, stored snapshots and history rejections are unchanged.
+- f99f940: Sentry and Apollo connections now show the signed-in account (email or name, plus the Sentry organization when there is only one) instead of a generic "Sentry account" or "Apollo.io account", and you can connect more than one account of each. Stripe connections are recognised again with Stripe's current account answer and are labelled with the account's email and business name when it has them. When an Atlassian tool needs a site and several are available, the message the agent gets now lists each site's URL next to its name and cloud ID.
+- f99f940: Opengeni now says correctly who sent a Slack message. A message sent with your own Slack account is posted under your name, but Slack also marks the Opengeni app it went through, so Opengeni sometimes said the bot had sent it. The send result now says which account a message was posted as (`postedAs`: your own account, naming the app only as the route it went through, or the Opengeni Slack bot). Channel and thread reads with your own account mark your own messages with `postedByYou`.
+
+  When you mention Opengeni, it now sees messages that apps and bots posted. The surrounding channel or thread messages, and the `slack_bot_*` history reads, name the app that posted each message and include text an app put in attachments or blocks. Replies that apps post in a thread, and posts people send through an app, are kept as context for the next mention in that thread. They never start or stop a task, and Opengeni's own posts are still left out.
+
+- 43435d5: A tool call the model asks for is saved before its tool starts, so a worker that stops mid-step can always recover it: the call is closed as interrupted instead of being lost and run again. The response's usage is saved in the same write as its tool calls, before any of them runs; its billing runs alongside the tools, and the next model request still waits for it. If the worker stops, is replaced or its billing fails before billing finishes, recovery, the attempt's failure handling or the session's next idle point finishes it exactly once, at the price recorded with the usage. Recovery only looks at responses whose billing is still unfinished.
+- Updated dependencies [e126cb5]
+- Updated dependencies [61abc98]
+- Updated dependencies [81570f9]
+- Updated dependencies [f99f940]
+- Updated dependencies [bb55e5d]
+- Updated dependencies [43435d5]
+- Updated dependencies [f99f940]
+- Updated dependencies [bfd2970]
+  - @opengeni/contracts@6.25.0
+  - @opengeni/sdk@6.25.0
+  - @opengeni/capabilities@6.25.0
+  - @opengeni/config@6.25.0
+  - @opengeni/codemode@6.25.0
+  - @opengeni/codex@6.25.0
+  - @opengeni/decisions@6.25.0
+  - @opengeni/interaction@6.25.0
+  - @opengeni/observability@6.25.0
+  - @opengeni/tool-gateway@6.25.0
+  - @opengeni/vaults@6.25.0
+  - @opengeni/jev@6.25.0
+  - @opengeni/agent-proto@6.25.0
+  - @opengeni/network@6.25.0
+  - @opengeni/xai-subscription@6.25.0
+
 ## 6.24.1
 
 ### Patch Changes

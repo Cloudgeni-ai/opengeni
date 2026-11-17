@@ -62,7 +62,10 @@ jobs:
         if: ${{ github.event_name == 'pull_request' }}
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: bun scripts/runtime-posture-baseline.ts "$BASE_SHA"
+          # Into production (a promotion of main), each pin advance is checked
+          # as the commit it landed on main as, not mixed into the whole diff.
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: bun scripts/runtime-posture-baseline.ts "$BASE_SHA" "$BASE_REF"
       - name: Fetch the exact pinned source (including the bootstrap PR commit)
         env:
           GH_TOKEN: ${{ github.token }}

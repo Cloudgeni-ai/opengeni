@@ -3,7 +3,7 @@ import {
   type AppActionTarget,
   type AppActionTargets,
 } from "@opengeni/contracts/app-actions";
-import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";
+import { connectionAccountLabel } from "@opengeni/contracts/connection-account-label";
 import { and, eq, isNull, or, sql, type AnyColumn } from "drizzle-orm";
 import {
   rawRows,
@@ -510,6 +510,7 @@ const connectionLookup = workspaceRow(
         status: schema.connections.status,
         subjectId: schema.connections.subjectId,
         metadata: schema.connections.metadata,
+        label: schema.connections.label,
         createdAt: schema.connections.createdAt,
         lastUsedAt: schema.connections.lastUsedAt,
       })
@@ -527,8 +528,8 @@ const connectionLookup = workspaceRow(
     return { ...row, name: await integrationName(db, row.providerDomain) };
   },
   (row) => {
-    const account = connectionAccountIdentityLabel(
-      (row.metadata ?? {}) as Record<string, unknown>,
+    const account = connectionAccountLabel(
+      { metadata: (row.metadata ?? {}) as Record<string, unknown>, label: row.label },
       "",
     );
     return {

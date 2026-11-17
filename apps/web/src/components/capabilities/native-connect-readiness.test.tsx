@@ -9,6 +9,7 @@ import type {
 import { IntegrationPage } from "./integration-page";
 import type { IntegrationViewModel } from "@opengeni/react/app/components/capabilities/integration-view-model";
 import {
+  nativeCatalogItemCannotConnect,
   nativeCatalogItemNotice,
   nativeCatalogItemVisible,
   nativeCatalogProviderId,
@@ -451,5 +452,34 @@ describe("native connection readiness", () => {
         noAccounts,
       ),
     ).toBe(true);
+  });
+
+  test("searching for a connector this deployment cannot connect finds it, marked unavailable", () => {
+    const dropbox = item({
+      name: "Dropbox",
+      mcpUrl: "https://mcp.dropbox.com/chatgpt_app_mcp",
+      source: "registry",
+      metadata: { curation: { curated: true, featured: true } },
+      runtime: { available: true, notes: null, operatorOAuthClient: { configured: false } },
+    });
+    const noAccounts = { connections: [], socialConnections: [] };
+    expect(nativeCatalogItemVisible(dropbox, catalog([]), noAccounts)).toBe(false);
+    expect(nativeCatalogItemVisible(dropbox, catalog([]), noAccounts, { searching: true })).toBe(
+      true,
+    );
+    expect(nativeCatalogItemCannotConnect(dropbox)).toBe(true);
+    // Its page explains why instead of offering a Connect that fails.
+    expect(nativeCatalogItemNotice(dropbox, catalog([]), () => {}, noAccounts)).toEqual({
+      tone: "muted",
+      title: "This connection isn't available here",
+      description:
+        "Dropbox only works with apps it has approved, and this deployment hasn't registered one with it yet.",
+    });
+    const configured = item({
+      ...dropbox,
+      runtime: { available: true, notes: null, operatorOAuthClient: { configured: true } },
+    });
+    expect(nativeCatalogItemCannotConnect(configured)).toBe(false);
+    expect(nativeCatalogItemNotice(configured, catalog([]), () => {}, noAccounts)).toBeUndefined();
   });
 });

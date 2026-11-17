@@ -20,6 +20,8 @@ export type NativeSignInSearch = {
   state?: string;
   platform?: NativeAppPlatform;
   device_name?: string;
+  /** A relayed sign-in (the Excel add-in on desktop Office): approved with the code the app shows. */
+  relay?: string;
 };
 
 const NATIVE_APP_PLATFORM_NAMES: ReadonlySet<unknown> = new Set<NativeAppPlatform>([

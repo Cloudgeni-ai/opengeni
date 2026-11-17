@@ -760,6 +760,16 @@ checkpoint cannot replace, the turn ends with an honest
 `context_compaction_failed` result. Retryable provider failures instead recover the same accepted turn through the
 ordinary provider/capacity path; they do not create another goal continuation,
 and an explicit `/compact` request remains pending for that same-turn retry.
+A checkpoint request that failed before any provider answer (its diagnostics
+carry no HTTP status, response, request id, provider code or type: a dropped
+connection, a fetch that never left, a pre-dispatch check) is one of these
+retryable failures. Nothing was answered and nothing changed, so the next
+request may pass; retries stay bounded by the ordinary provider recovery
+policy, and only an exhausted retry ends the turn. A sandbox route transition
+(another home, workspace root or native capability set, for example after a
+machine swap) that refuses the checkpoint request before dispatch is the same
+route transition an ordinary request recovers from: the same turn continues in
+a fresh attempt on the new route, which checkpoints there.
 The attempt's own cancellation (worker shutdown or another activity
 cancellation) is neither: it records
 `session.context.compaction.skipped(reason="interrupted")` when the attempt can
@@ -827,7 +837,10 @@ forever) nor wakes a session, while a sender's new message after the failure
 always wakes it. A further compaction failure starts a new hold at its own
 sequence, so every retry needs another external input and there is no
 self-sustaining loop. This gate neither creates queue work nor consumes a goal
-continuation counter.
+continuation counter. While it holds an active goal with no turn in flight,
+the goal's continuation projection reports `state="blocked"` with
+`reason="compaction_failed"` (the pill explains that a message or Compact
+continues it) rather than claiming that the goal will continue automatically.
 
 Manual `/compact` sets one durable idempotent request. During active inference,
 the worker observes it at the next model boundary and retries sampling in the

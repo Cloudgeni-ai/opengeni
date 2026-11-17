@@ -32,6 +32,7 @@ fn settings() -> warm::Settings {
         prepare: "bun install && bun run build".into(),
         user: "runner".into(),
         work: "/home/runner/_work".into(),
+        fetch_depth: 1,
         web: "https://github.example".into(),
         every: Duration::ZERO,
         within: Duration::from_secs(60),

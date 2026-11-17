@@ -828,7 +828,7 @@ becoming the chat's next turn:
   cannot interrupt the owner's running turn) and does not count as pending
   work, so the chat stays idle or keeps running the owner's turn. The send
   result reports `waitsForMachineOwner: true`, and the operator
-  `session_send_message` tool returns a warning saying so.
+  `session_queue_message` tool returns a warning saying so.
 - The owner's next own turn takes the waiting messages in, oldest first, as
   history ahead of the owner's prompt, each with a short note that it waited
   for the owner. The agent sees what the other person wrote, and the owner's

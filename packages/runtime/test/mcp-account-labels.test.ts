@@ -48,7 +48,7 @@ test("account routes expose labels with independent tool snapshots and dispatch"
   expect(a?.description).toContain("Account: Personal: Alice.");
   expect(b?.description).toContain("Account: Workspace: Team.");
   expect(a?.description).toContain(
-    "if the intended account for a write is unclear, ask before calling",
+    "When the request does not say which account to write to, use the default; ask only if there is none.",
   );
   expect(a?.description).toContain("Read inbox");
   expect(a?.name).not.toBe(b?.name);

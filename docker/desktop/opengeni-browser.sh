@@ -29,7 +29,9 @@
 #   --disable-gpu           : headless Xvfb has no GPU; avoids GL init churn/spam.
 #   --user-data-dir         : a FIXED, WRITABLE profile dir under /tmp (NOT /workspace)
 #                             so the profile never trips an I/O error on the mounted
-#                             /workspace and survives a HOME with odd perms.
+#                             /workspace and survives a HOME with odd perms. Only a
+#                             default: a caller that names its own profile (the managed
+#                             browser controller does) keeps exactly that one switch.
 #   --no-first-run / --no-default-browser-check : skip first-run UI nags in a kiosk box.
 #
 # OPENGENI_BROWSER_BIN lets the image point this at Google Chrome (amd64) or
@@ -62,8 +64,23 @@ fi
 # A writable, per-box profile/cache root on /tmp (tmpfs/local — never the /workspace
 # mount, which is where the I/O-error dialog came from). Created on every launch so a
 # fresh box with no /tmp state still works; idempotent if it already exists.
-PROFILE_DIR="${OPENGENI_BROWSER_PROFILE:-/tmp/opengeni-browser-profile}"
-mkdir -p "$PROFILE_DIR" 2>/dev/null || true
+#
+# A caller that already names a profile keeps it as the only profile switch. A second
+# --user-data-dir would leave the browser's own profile ambiguous to anything that
+# identifies the process by its command line, such as the managed browser controller,
+# which then cannot prove the browser it launched is still its own.
+PROFILE_ARGS=()
+caller_profile=0
+for argument in "$@"; do
+  case "$argument" in
+    --user-data-dir | --user-data-dir=* | -user-data-dir | -user-data-dir=*) caller_profile=1 ;;
+  esac
+done
+if [ "$caller_profile" -eq 0 ]; then
+  PROFILE_DIR="${OPENGENI_BROWSER_PROFILE:-/tmp/opengeni-browser-profile}"
+  mkdir -p "$PROFILE_DIR" 2>/dev/null || true
+  PROFILE_ARGS=(--user-data-dir="$PROFILE_DIR")
+fi
 
 # Quiet the GTK a11y bus warnings on every launch (org.a11y.Bus not provided).
 export NO_AT_BRIDGE=1
@@ -81,5 +98,5 @@ exec "$BIN" \
   --disable-gpu \
   --no-first-run \
   --no-default-browser-check \
-  --user-data-dir="$PROFILE_DIR" \
+  ${PROFILE_ARGS[@]+"${PROFILE_ARGS[@]}"} \
   "$@"
