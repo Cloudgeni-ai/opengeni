@@ -332,7 +332,7 @@ import {
   type McpToolReference,
 } from "./mcp-model-tool-name";
 import { uniqueListedMcpTools, withoutRedundantUuidPatterns } from "./mcp-listed-tools";
-export { prefixedMcpToolName } from "./mcp-model-tool-name";
+export { mcpToolWireName, prefixedMcpToolName } from "./mcp-model-tool-name";
 import { createToolSelector } from "./tool-discovery-decision";
 import { withAccountLine } from "./tool-discovery-ranking";
 import {

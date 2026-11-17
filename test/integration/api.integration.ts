@@ -89,7 +89,7 @@ import { startTestMcpServer } from "@opengeni/testing/mcp";
 import { startTestServices, type TestServices } from "@opengeni/testing/compose";
 import { testSettings } from "@opengeni/testing/settings";
 import { waitFor } from "@opengeni/testing/process";
-import { prefixedMcpToolName, prepareAgentTools } from "@opengeni/runtime";
+import { mcpToolWireName, prepareAgentTools } from "@opengeni/runtime";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
 import { buildTimeline } from "../../packages/react/src/timeline";
 import { createOpenGeniText } from "../../packages/react/src/messages/runtime";
@@ -3878,7 +3878,7 @@ describe("API component integration", () => {
         const tools = await prepared.mcpServers[0]!.listTools();
         expect(tools.map((tool) => tool.name).sort()).toEqual(
           ["search_documents", "fetch_document"]
-            .map((name) => prefixedMcpToolName(mcpServerId, name))
+            .map((name) => mcpToolWireName(mcpServerId, name))
             .sort(),
         );
       } finally {
@@ -4056,11 +4056,11 @@ describe("API component integration", () => {
         const tools = await prepared.mcpServers[0]!.listTools();
         expect(tools.map((tool) => tool.name).sort()).toEqual(
           ["search_documents", "fetch_document"]
-            .map((name) => prefixedMcpToolName(mcpServerId, name))
+            .map((name) => mcpToolWireName(mcpServerId, name))
             .sort(),
         );
         const result = await prepared.mcpServers[0]!.callTool(
-          prefixedMcpToolName(mcpServerId, "search_documents"),
+          mcpToolWireName(mcpServerId, "search_documents"),
           { query: "broker" },
         );
         expect(JSON.stringify(result)).toContain("found document for broker");
