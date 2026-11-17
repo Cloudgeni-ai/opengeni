@@ -1424,6 +1424,19 @@ const RETIRED_TOOL_SUCCESSORS = {
   FirstPartyMcpToolName
 >;
 
+/**
+ * The current name of a first-party tool that was renamed one-to-one, or
+ * undefined. Clients built against an older contract still send the old name;
+ * it stands for its successor wherever a selection is checked or stored.
+ */
+export function renamedFirstPartyMcpToolSuccessor(
+  name: FirstPartyMcpToolName,
+): FirstPartyMcpToolName | undefined {
+  return Object.hasOwn(RETIRED_TOOL_SUCCESSORS, name)
+    ? RETIRED_TOOL_SUCCESSORS[name as keyof typeof RETIRED_TOOL_SUCCESSORS]
+    : undefined;
+}
+
 /** Runtime interpretation only: never rewrite accepted conversation/tool receipts. */
 export function currentAgentLearningToolSelection(
   names: readonly FirstPartyMcpToolName[],
