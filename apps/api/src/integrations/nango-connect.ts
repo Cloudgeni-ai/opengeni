@@ -43,6 +43,7 @@ import {
   createConnection,
   encryptEnvironmentValue,
   getConnectAttempt,
+  getConnectionMetadata,
   isConnectionAccountIdentityConflict,
   listConnectionsMetadata,
   lockNangoPersonIntegration,
@@ -248,6 +249,27 @@ export async function startNangoConnect(
       message: `${integration.native?.displayName ?? integration.definition.displayName ?? "This integration"} connects only your own account`,
     });
   assertConnectionOwnershipAllowedForPrincipal(ownership, context.personalOwnershipAllowed);
+  // A reconnect names its account: it must be this person's account of this
+  // very integration (its Nango row, or a native sign-in of the same
+  // connector). The completion still matches the account that signs in, as
+  // the connector's own Connect does, so signing in with another account adds
+  // that account instead of replacing the named one.
+  if (context.payload.connectionId && context.payload.newAccount !== true) {
+    const named = await getConnectionMetadata(
+      deps.db,
+      context.workspaceId,
+      context.payload.connectionId,
+      context.subjectId,
+    );
+    if (
+      !named ||
+      named.subjectId !== context.subjectId ||
+      (named.metadata.integrationBackend === "nango"
+        ? named.metadata.nangoIntegrationKey !== integration.integrationKey
+        : named.metadata.mcpUrl !== connectMcpUrl(integration))
+    )
+      throw new HTTPException(404, { message: "connection not found" });
+  }
   await withOrganizationIntegrationAcquisition(
     deps.db,
     context,
