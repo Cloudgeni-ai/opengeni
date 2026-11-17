@@ -170,7 +170,7 @@
     },
     {
       "path": ".github/workflows/runtime-posture-compatibility.yml",
-      "sha256": "fb3a24e017c31895666244bdc070be8f93a9e6bf8cd879c272bba4fb68131e83"
+      "sha256": "80ebf66ec57d4054e2e7e613865905c189530e4fa8e9cc25721ffccaf16d0623"
     },
     {
       "path": ".github/workflows/seal-release-head.yml",
@@ -2393,7 +2393,7 @@
       "workflow": ".github/workflows/runtime-posture-compatibility.yml",
       "job": "compatibility",
       "step": "Validate baseline advancement scope",
-      "sha256": "8405c48a52927764784dc531e96339f791883d9a4c7d217270f83a699ac7ca63"
+      "sha256": "7866e3bacef5b1cfd667d37895b8dcb52434b713c74955da3c277ac767aa48e6"
     },
     {
       "workflow": ".github/workflows/seal-release-head.yml",

@@ -194,7 +194,10 @@ describe("a column added while statements are prepared", () => {
       return tx.transaction(async (inner) => Object.keys((await readOne(inner))[0] ?? {}));
     });
     expect(keys).toContain("added_under_savepoint");
-    expect(runs).toBeGreaterThanOrEqual(1);
+    // Refused at least once (the savepoint's statement was stale), and at most
+    // once per connection of the two-connection pool.
+    expect(runs).toBeGreaterThanOrEqual(2);
+    expect(runs).toBeLessThanOrEqual(3);
   });
 
   test("other failures inside a transaction are not repeated", async () => {
