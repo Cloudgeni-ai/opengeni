@@ -166,6 +166,7 @@ import { dropUnavailableOptionalRepositories } from "./optional-repositories";
 import { buildTurnAgent } from "./agent-build";
 import { assertTurnSandboxBackendServed, shouldDeferRepositorySkillIndex } from "./sandbox-route";
 import { runAuxiliaryProviderDispatch } from "../auxiliary-provider-dispatch";
+import { untilWorkerShutdown } from "./worker-shutdown-handoff";
 
 /**
  * Retain subscription credential/account authority for the title sidecar
@@ -521,7 +522,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       assertRecoveryWindow();
     };
 
-    try {
+    const runClaimedTurn = async (): Promise<RunAgentTurnResult> => {
       const claimed = await claimTurnAttempt({
         input,
         settings,
@@ -2342,6 +2343,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           }
         },
       );
+    };
+    try {
+      // A worker shutdown hands the attempt off even when the run is parked in
+      // a wait that never observes cancellation; see untilWorkerShutdown.
+      return await untilWorkerShutdown(cancellationSignal, runClaimedTurn());
     } catch (error) {
       // Stop new external wait mutations before asynchronous failure
       // persistence. Do not drain here: the original failure/cancellation and
