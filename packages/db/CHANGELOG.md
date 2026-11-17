@@ -1,5 +1,38 @@
 # @opengeni/db
 
+## 6.26.0
+
+### Patch Changes
+
+- 6d7ea1e: A context checkpoint that failed before any provider answer, including one refused because the sandbox moved to another machine just before it was sent, now retries the same turn instead of failing it. When a checkpoint does fail for good, a goal's continuation reports `blocked` with the new reason `compaction_failed`, and the goal pill says a message or Compact continues it, rather than claiming the goal will continue automatically.
+- b6b3579: Less waiting between a model response and the next model request. A tool's result is now recorded as soon as its response's usage and tool calls are saved, instead of waiting for that response's billing writes and history checkpoint; the next model request still waits for both. The task usage receipt that the saved usage event already records is no longer written a second time, and the model-call slot is released before the response's history checkpoint, which the next request still makes durable before it is sent.
+
+  Recovery of owed model usage no longer counts a response twice against a task's usage limit when its provider response id is stored encoded (one containing a lone surrogate or starting with the lossless codec's prefix), and such a response is no longer listed as owed again after its ledger is settled.
+
+- 47eb375: One verified account is now one connection, on every backend. Connections record a server-owned `account_identity_key` (the integration and the verified provider account), and the database allows one live connection per organization, owner and key, so a racing or legacy writer can no longer save a second connection to the same account; it fails as "already connected" instead. OAuth MCP logins, Nango connections and provider OAuth connections (personal GitHub and others) set it.
+
+  Opengeni also no longer pays for two Nango connections for the same account. When a person connects the same verified account to the same Nango integration in several organizations, every organization's row now points at one shared Nango connection, and that connection is deleted in Nango only when the last row referencing it is gone. Reconnects, refused or failed connect attempts and disconnects release the replaced connection through the same reference check, and the worker now sweeps Nango every 15 minutes: for connections this release made (tagged with the deployment), it merges leftover duplicates, deletes abandoned and cascade-orphaned connections, and deletes connections whose refresh has failed for 24 hours. Older, untagged connections are left to `integrations:nango orphans`. Disconnecting a Nango-managed Google app still does not revoke the grant at Google, because Nango's OAuth client is shared across the person's connections.
+
+  Email accounts are matched case-insensitively, and scopes Nango could not report never move another organization's connection onto a narrower one.
+
+  Reconnecting the same verified account no longer breaks running turns: the connection keeps its authority generation when the new grant includes every scope it had, so tool calls in a turn accepted before the reconnect no longer fail with "Authentication required". A different account, fewer scopes, a revoke or a status change still end that authority.
+
+  While a release rolls out, or after a rollback to an older release, pods of the older release still delete a replaced Nango connection directly; a connection shared by this release can then be revoked in another organization and must be reconnected there.
+
+- 5e3441a: Adding a column during a rolling deploy no longer fails requests on pods still running the previous release. Postgres refuses a prepared `select *`, `table.*` or `returning *` statement whose row gained a column ("cached plan must not change result type", SQLSTATE 0A000); a transaction refused this way is now repeated, and the refusing connection forgets all of its prepared statements so it is refused at most once. Statements sent together on one connection outside a transaction no longer hang when such a refusal is repeated. During the 6.25.0 rollout this caused about 25 failed requests while migration 1477 added a column to `sandbox_leases`.
+- Updated dependencies [6d7ea1e]
+- Updated dependencies [8fae328]
+- Updated dependencies [c8efcb0]
+- Updated dependencies [e1199c0]
+  - @opengeni/contracts@6.26.0
+  - @opengeni/codemode@6.26.0
+  - @opengeni/xai-subscription@6.26.0
+  - @opengeni/codex@6.26.0
+  - @opengeni/config@6.26.0
+  - @opengeni/observability@6.26.0
+  - @opengeni/network@6.26.0
+  - @opengeni/subscriptions@6.26.0
+
 ## 6.25.0
 
 ### Minor Changes
