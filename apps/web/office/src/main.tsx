@@ -537,8 +537,8 @@ void office()
   .then(({ platform }) => {
     // Office for Mac floats its add-in info button over the pane's top-right
     // corner; pane.css keeps the header's buttons clear of it.
-    const context = office().context;
-    const host = platform ?? context.diagnostics?.platform ?? context.platform;
+    const context = office().context as Partial<ReturnType<typeof office>["context"]> | undefined;
+    const host = platform ?? context?.diagnostics?.platform ?? context?.platform;
     if (host) document.documentElement.dataset.officePlatform = host;
     createRoot(document.getElementById("root")!).render(
       <StrictMode>
