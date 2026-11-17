@@ -407,4 +407,26 @@ describe("free compute bounds (real PostgreSQL)", () => {
       }),
     ).toMatchObject({ drained: false });
   }, 60_000);
+
+  test("the reaper drains a compute box only when its tier is closed, never for a spent day", async () => {
+    const org = await organization({ plan: "free" });
+    const group = crypto.randomUUID();
+    expect((await acquire(org, "viewer", { group, backend: "compute" })).role).toBe("spawner");
+    const epoch = await warm(org, group);
+    const drain = (reason: "compute_daily_budget" | "compute_closed") =>
+      drainNoTurnLeaseForComputeBounds(db, {
+        ...org,
+        sandboxGroupId: group,
+        expectedEpoch: epoch,
+        reason,
+        quietForMs: 0,
+        idleGraceMs: 60_000,
+      });
+    // Its own disk and memory are its state, which a drain does not save.
+    expect(await drain("compute_daily_budget")).toMatchObject({ drained: false });
+    const [kept] = await admin<{ liveness: string }[]>`select liveness from sandbox_leases
+      where workspace_id = ${org.workspaceId} and sandbox_group_id = ${group}`;
+    expect(kept!.liveness).toBe("warm");
+    expect(await drain("compute_closed")).toMatchObject({ drained: true });
+  }, 60_000);
 });

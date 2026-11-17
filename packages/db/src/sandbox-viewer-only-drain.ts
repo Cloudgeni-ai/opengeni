@@ -437,12 +437,15 @@ export async function drainNoTurnLeaseForComputeBounds(
         ).map(mapNoTurnLease)[0];
         if (!current) return { drained: false, reason: "not_held" };
         if (current.transitioning) return { drained: false, reason: "transitioning" };
-        // A compute box is never idle-drained, and its commands have no
-        // orderly provider-deadline stop: such a box with live processes or
+        // A compute box's own disk and memory are its state, and an ordinary
+        // drain saves only /workspace: it drains only when its tier is
+        // closed, never for being idle or for a spent day (admission still
+        // refuses new holders then). Its commands have no orderly
+        // provider-deadline stop, so one with live processes or
         // Browser/ComputerSessions is left to them.
         if (
           current.backend === "compute" &&
-          (input.reason === "compute_idle" || current.commandHolders > 0)
+          (input.reason !== "compute_closed" || current.commandHolders > 0)
         ) {
           return { drained: false, reason: "compute_commands" };
         }

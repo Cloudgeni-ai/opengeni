@@ -72,6 +72,9 @@ export function planComputeBoundsDrains(
       drains.push({ lease, reason: "compute_closed" });
       continue;
     }
+    // A compute box keeps its state on its own disk and memory, which a drain
+    // does not save: only a closed tier drains it.
+    if (lease.backend === "compute") continue;
     if (
       limit.boxSecondsPerOrganizationPerDay !== undefined &&
       organization.boxSecondsToday >= limit.boxSecondsPerOrganizationPerDay
@@ -81,8 +84,6 @@ export function planComputeBoundsDrains(
     }
     if (
       limit.idleDrainAllHolders === true &&
-      // A compute box is never drained for being idle.
-      lease.backend !== "compute" &&
       options.idleDrainMs > 0 &&
       !lease.openSessionWork &&
       lease.observedAt.getTime() - lease.lastActiveAt.getTime() >= options.idleDrainMs

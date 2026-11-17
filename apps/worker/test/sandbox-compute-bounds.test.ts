@@ -52,6 +52,24 @@ describe("free compute bounds: reaper decisions", () => {
     expect(decisions.map((decision) => decision.reason)).toEqual(["compute_closed"]);
   });
 
+  test("a compute box drains only when its tier is closed, never for a spent day", () => {
+    const box = lease({ backend: "compute", lastActiveAt: observedAt, commandHolders: 0 });
+    expect(
+      planComputeBoundsDrains(
+        [box],
+        new Map([["org-a", { limit: free, boxSecondsToday: 1_000_000 }]]),
+        { idleDrainMs: 1_800_000 },
+      ),
+    ).toEqual([]);
+    expect(
+      planComputeBoundsDrains(
+        [box],
+        new Map([["org-a", { limit: restricted, boxSecondsToday: 0 }]]),
+        { idleDrainMs: 1_800_000 },
+      ).map((decision) => decision.reason),
+    ).toEqual(["compute_closed"]);
+  });
+
   test("a spent day drains active boxes; an unspent day keeps them", () => {
     const active = lease({ lastActiveAt: observedAt });
     expect(
