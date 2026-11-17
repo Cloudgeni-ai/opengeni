@@ -20,6 +20,15 @@ export type RunResult =
 const MAX_LOGS = 200;
 const MAX_LOG_CHARS = 2_000;
 
+/**
+ * Script sources the pane's Content-Security-Policy must allow for
+ * `runOfficeCode`: it compiles the agent's code with the AsyncFunction
+ * constructor, which a policy without `'unsafe-eval'` blocks. The code must
+ * run in the pane's own realm, beside office.js, so it cannot move to a
+ * worker or another document.
+ */
+export const OFFICE_RUN_SCRIPT_SOURCES = ["'unsafe-eval'"] as const;
+
 type AsyncFunctionConstructor = new (...args: string[]) => (...args: unknown[]) => Promise<unknown>;
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as AsyncFunctionConstructor;
 // Strict mode turns silent no-ops into errors, e.g. `range.format.fill = "#fff"`

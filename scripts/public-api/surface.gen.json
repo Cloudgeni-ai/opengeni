@@ -39555,6 +39555,7 @@
       "jsonSafe": "value",
       "office": "value",
       "OFFICE_MANIFEST_PATH": "value",
+      "OFFICE_RUN_SCRIPT_SOURCES": "value",
       "officeAddinId": "value",
       "officeAddinManifest": "value",
       "OfficeAddinManifestOptions": "type",
