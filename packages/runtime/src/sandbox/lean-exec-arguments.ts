@@ -157,7 +157,7 @@ export function canonicalizeLeanExecCommandInput(input: string): string {
  */
 export function withLeanExecCommandArguments(
   tools: Tool<unknown>[],
-  options: { finishFloor?: boolean } = {},
+  options: { finishFloor?: boolean; extraHelp?: string } = {},
 ): Tool<unknown>[] {
   const writeStdin = tools.some((tool) => tool.name === "write_stdin");
   const parameters =
@@ -175,7 +175,9 @@ export function withLeanExecCommandArguments(
     const invoke = capabilityTool.invoke;
     return {
       ...capabilityTool,
-      description: LEAN_EXEC_COMMAND_DESCRIPTION,
+      description: options.extraHelp
+        ? `${LEAN_EXEC_COMMAND_DESCRIPTION} ${options.extraHelp}`
+        : LEAN_EXEC_COMMAND_DESCRIPTION,
       parameters: parameters as unknown as typeof capabilityTool.parameters,
       strict: false,
       invoke: (runContext, input, details) =>

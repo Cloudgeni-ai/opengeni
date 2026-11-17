@@ -6063,11 +6063,19 @@ function buildAgentCapabilitiesFromComposition(
   // schema and cut polling are on.
   if (settings.experimentOutputCost) {
     const finishFloor = settings.experimentCutPolling && toolCancellation !== null;
+    // Sandboxes with the `cg` command (code_grep from the shell) say so in the shell's help.
+    const extraHelp =
+      settings.codeSearchEngine === "grep" && settings.codeGrepShellCommand === "on"
+        ? CODE_GREP_SHELL_HELP
+        : undefined;
     for (const capability of caps) {
       const target = capability as unknown as { tools(): Tool<unknown>[] };
       const original = target.tools;
       target.tools = function () {
-        return withLeanExecCommandArguments(original.call(this), { finishFloor });
+        return withLeanExecCommandArguments(original.call(this), {
+          finishFloor,
+          ...(extraHelp ? { extraHelp } : {}),
+        });
       };
     }
   }
@@ -11803,6 +11811,10 @@ export const CODE_SEARCH_DIRECTIVE =
  */
 export const CODE_GREP_DIRECTIVE =
   "When you would run several rg searches to find code, call `code_grep` once with those patterns instead; it runs them in parallel and returns only the relevant excerpts.";
+
+/** Shell-help line when the sandbox has the `cg` command (code_grep from the shell, through Codemode). */
+export const CODE_GREP_SHELL_HELP =
+  "`cg QUESTION PATTERN... [-- PATH...]` runs code_grep from the shell.";
 
 /** The code-search directive for the deployment's code-search engine. */
 export function codeSearchDirectiveFor(settings: Pick<Settings, "codeSearchEngine">): string {

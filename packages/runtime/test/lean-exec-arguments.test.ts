@@ -178,6 +178,21 @@ describe("composed shell capability", () => {
     );
   });
 
+  test("extra help is appended to the shell description", () => {
+    const exec = {
+      type: "function",
+      name: "exec_command",
+      description: "original",
+      parameters: {},
+      invoke: async () => "ok",
+    } as unknown as Tool<unknown>;
+    const [plain] = withLeanExecCommandArguments([exec]) as FunctionTool[];
+    const [helped] = withLeanExecCommandArguments([exec], {
+      extraHelp: "`cg` runs code_grep from the shell.",
+    }) as FunctionTool[];
+    expect(helped!.description).toBe(`${plain!.description} \`cg\` runs code_grep from the shell.`);
+  });
+
   async function shellTools(
     lean: boolean,
     options: Parameters<typeof buildAgentCapabilities>[2] = {},
