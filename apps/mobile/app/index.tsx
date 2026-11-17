@@ -58,6 +58,8 @@ import { useComposerVoice } from "@/voice";
 import { AccountMenuButton, WorkspaceSwitcherTitle } from "@/workspace-switcher";
 import { openOnWeb, webPaths } from "@/web-links";
 import { rememberPendingPrompt } from "@/pending-prompt";
+import { TabScreen } from "@/app-tab-bar";
+import { tabBarClearance } from "@/app-tabs";
 
 export default function HomeScreen() {
   return (
@@ -426,146 +428,153 @@ function Home() {
             : {}),
         }}
       />
-      <ScrollView
-        style={{ flex: 1, backgroundColor: c.bg }}
-        keyboardShouldPersistTaps="handled"
-        keyboardDismissMode="interactive"
-        refreshControl={
-          <RefreshControl
-            refreshing={pulling}
-            onRefresh={() => {
-              setPulling(true);
-              void reload()
-                .then(load)
-                .finally(() => setPulling(false));
-            }}
-          />
-        }
-        contentContainerStyle={{
-          paddingHorizontal: 16,
-          paddingTop: 40,
-          paddingBottom: Math.max(insets.bottom, 16) + 48,
-        }}
-      >
-        <Text
-          accessibilityRole="header"
-          maxFontSizeMultiplier={HEADING_MAX_FONT_SCALE}
-          style={{
-            ...fontStyle(theme, 600),
-            fontSize: 24,
-            lineHeight: 32,
-            letterSpacing: -0.6,
-            color: c.fg,
-            textAlign: "center",
+      <TabScreen tab="chats">
+        <ScrollView
+          style={{ flex: 1, backgroundColor: c.bg }}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="interactive"
+          refreshControl={
+            <RefreshControl
+              refreshing={pulling}
+              onRefresh={() => {
+                setPulling(true);
+                void reload()
+                  .then(load)
+                  .finally(() => setPulling(false));
+              }}
+            />
+          }
+          contentContainerStyle={{
+            paddingHorizontal: 16,
+            paddingTop: 40,
+            paddingBottom: tabBarClearance(insets.bottom) + 24,
           }}
         >
-          What can I help with?
-        </Text>
-        <View style={{ marginTop: 28 }}>
-          <SessionComposer
-            value={draft}
-            onChangeText={setDraft}
-            onSend={() => void create()}
-            canSend={canCreate}
-            sending={creating}
-            placeholder="Ask anything, or describe what you need..."
-            voice={voice}
-            call={
-              workspaceId
-                ? { onPress: () => void startCall(), busy: calling, disabled: creating }
-                : undefined
-            }
-            onPasteImages={(files) => void attachments.addFiles(files)}
-            renderLeading={() => (
-              <ComposerPlusMenu
-                onTakePhoto={
-                  attachments.takePhoto ? () => void attachments.takePhoto?.() : undefined
-                }
-                onPickImages={() => void attachments.pickImages()}
-                onPickFiles={() => void attachments.pickDocuments()}
-                options={options}
-              />
-            )}
-            header={
-              <>
-                <NewSessionOptionChips options={options} />
-                <AttachmentChips attachments={attachments} />
-              </>
-            }
-            inset={0}
-            liftWithKeyboard={false}
-            bottomInset={0}
-            options={
-              pill ? (
-                <ComposerPill
-                  label={pill.name}
-                  detail={pill.effort}
-                  fast={latencyMode === "fast"}
-                  ultrafast={latencyMode === "ultrafast"}
-                  leading={<ModelMark model={model ?? ""} size={14} color={c.fg} />}
-                  onPress={() => {
-                    catalog.refresh();
-                    setPickerOpen(true);
-                  }}
+          <Text
+            accessibilityRole="header"
+            maxFontSizeMultiplier={HEADING_MAX_FONT_SCALE}
+            style={{
+              ...fontStyle(theme, 600),
+              fontSize: 24,
+              lineHeight: 32,
+              letterSpacing: -0.6,
+              color: c.fg,
+              textAlign: "center",
+            }}
+          >
+            What can I help with?
+          </Text>
+          <View style={{ marginTop: 28 }}>
+            <SessionComposer
+              value={draft}
+              onChangeText={setDraft}
+              onSend={() => void create()}
+              canSend={canCreate}
+              sending={creating}
+              placeholder="Ask anything, or describe what you need..."
+              voice={voice}
+              call={
+                workspaceId
+                  ? { onPress: () => void startCall(), busy: calling, disabled: creating }
+                  : undefined
+              }
+              onPasteImages={(files) => void attachments.addFiles(files)}
+              renderLeading={() => (
+                <ComposerPlusMenu
+                  onTakePhoto={
+                    attachments.takePhoto ? () => void attachments.takePhoto?.() : undefined
+                  }
+                  onPickImages={() => void attachments.pickImages()}
+                  onPickFiles={() => void attachments.pickDocuments()}
+                  options={options}
                 />
-              ) : null
-            }
-          />
-        </View>
-        {accessContext && workspaces.length === 0 && account ? (
-          <View style={{ marginTop: 16, alignItems: "center", gap: 12 }}>
+              )}
+              header={
+                <>
+                  <NewSessionOptionChips options={options} />
+                  <AttachmentChips attachments={attachments} />
+                </>
+              }
+              inset={0}
+              liftWithKeyboard={false}
+              bottomInset={0}
+              options={
+                pill ? (
+                  <ComposerPill
+                    label={pill.name}
+                    detail={pill.effort}
+                    fast={latencyMode === "fast"}
+                    ultrafast={latencyMode === "ultrafast"}
+                    leading={<ModelMark model={model ?? ""} size={14} color={c.fg} />}
+                    onPress={() => {
+                      catalog.refresh();
+                      setPickerOpen(true);
+                    }}
+                  />
+                ) : null
+              }
+            />
+          </View>
+          {accessContext && workspaces.length === 0 && account ? (
+            <View style={{ marginTop: 16, alignItems: "center", gap: 12 }}>
+              <Text
+                style={{
+                  ...fontStyle(theme),
+                  fontSize: 14,
+                  lineHeight: 20,
+                  color: c["fg-muted"],
+                  textAlign: "center",
+                }}
+              >
+                You aren't in a workspace yet. Create an organization on the web, then pull to
+                refresh.
+              </Text>
+              <Button
+                label="Open Opengeni on the web"
+                icon="external-link"
+                onPress={() => openOnWeb(account.baseUrl, webPaths.home())}
+              />
+            </View>
+          ) : null}
+          {problem ? (
             <Text
               style={{
                 ...fontStyle(theme),
-                fontSize: 14,
-                lineHeight: 20,
-                color: c["fg-muted"],
-                textAlign: "center",
+                fontSize: 13,
+                color: c["status-failed"],
+                marginTop: 12,
               }}
             >
-              You aren't in a workspace yet. Create an organization on the web, then pull to
-              refresh.
+              {problem}
             </Text>
-            <Button
-              label="Open Opengeni on the web"
-              icon="external-link"
-              onPress={() => openOnWeb(account.baseUrl, webPaths.home())}
-            />
-          </View>
-        ) : null}
-        {problem ? (
-          <Text
-            style={{ ...fontStyle(theme), fontSize: 13, color: c["status-failed"], marginTop: 12 }}
-          >
-            {problem}
-          </Text>
-        ) : null}
-        {sections.pinned.length > 0 ? (
-          <View style={{ marginTop: 48 }}>
-            <SectionLabel>Pinned</SectionLabel>
-            <SessionRowList
-              sessions={sections.pinned}
-              models={models}
-              avatarClient={client}
-              onOpen={(sessionId) => router.push(`/session/${sessionId}`)}
-              onTogglePin={(session) => void togglePin(session)}
-            />
-          </View>
-        ) : null}
-        {sections.recent.length > 0 ? (
-          <View style={{ marginTop: sections.pinned.length > 0 ? 28 : 48 }}>
-            <SectionLabel>Recent</SectionLabel>
-            <SessionRowList
-              sessions={sections.recent}
-              models={models}
-              avatarClient={client}
-              onOpen={(sessionId) => router.push(`/session/${sessionId}`)}
-              onTogglePin={(session) => void togglePin(session)}
-            />
-          </View>
-        ) : null}
-        {sections.pinned.length + sections.recent.length > 0 ? <AllSessionsRow /> : null}
-      </ScrollView>
+          ) : null}
+          {sections.pinned.length > 0 ? (
+            <View style={{ marginTop: 48 }}>
+              <SectionLabel>Pinned</SectionLabel>
+              <SessionRowList
+                sessions={sections.pinned}
+                models={models}
+                avatarClient={client}
+                onOpen={(sessionId) => router.push(`/session/${sessionId}`)}
+                onTogglePin={(session) => void togglePin(session)}
+              />
+            </View>
+          ) : null}
+          {sections.recent.length > 0 ? (
+            <View style={{ marginTop: sections.pinned.length > 0 ? 28 : 48 }}>
+              <SectionLabel>Recent</SectionLabel>
+              <SessionRowList
+                sessions={sections.recent}
+                models={models}
+                avatarClient={client}
+                onOpen={(sessionId) => router.push(`/session/${sessionId}`)}
+                onTogglePin={(session) => void togglePin(session)}
+              />
+            </View>
+          ) : null}
+          {sections.pinned.length + sections.recent.length > 0 ? <AllSessionsRow /> : null}
+        </ScrollView>
+      </TabScreen>
       <ModelPickerSheet
         open={pickerOpen}
         onClose={() => setPickerOpen(false)}

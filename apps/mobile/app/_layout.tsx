@@ -68,9 +68,22 @@ export default function RootLayout() {
                     }}
                   />
                   <Stack.Screen name="inbox" options={{ title: "Inbox" }} />
-                  <Stack.Screen name="meetings" options={{ title: "Meetings" }} />
+                  {/* The floating bar's places sit above Home and swap in place, like
+                    tabs, so they appear without a slide. */}
+                  <Stack.Screen
+                    name="artifacts"
+                    options={{ title: "Artifacts", animation: "none" }}
+                  />
+                  <Stack.Screen name="artifact/[id]" options={{ title: "" }} />
+                  <Stack.Screen
+                    name="meetings"
+                    options={{ title: "Meetings", animation: "none" }}
+                  />
                   <Stack.Screen name="meeting/[id]" options={{ title: "" }} />
-                  <Stack.Screen name="automations" options={{ title: "Automations" }} />
+                  <Stack.Screen
+                    name="automations"
+                    options={{ title: "Automations", animation: "none" }}
+                  />
                   <Stack.Screen name="automation/[id]" options={{ title: "" }} />
                   <Stack.Screen
                     name="automation-new"

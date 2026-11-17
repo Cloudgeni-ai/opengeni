@@ -146,6 +146,9 @@ const ICONS: Record<string, string> = {
   headset: "HeadsetIcon",
   "pen-tool": "PenToolIcon",
   users: "UsersIcon",
+  presentation: "PresentationIcon",
+  share: "ShareIcon",
+  link: "LinkIcon",
 };
 
 const out: Record<string, Array<[string, Record<string, string | number>]>> = {};

@@ -7,19 +7,25 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAccount } from "@/account";
 import { WorkspaceGate } from "@/meetings";
 import { AppThemeProvider } from "@/theme";
+import { TabScreen, tabHeaderOptions } from "@/app-tab-bar";
+import { TAB_BAR_HEIGHT, tabBarClearance } from "@/app-tabs";
 
 export default function MeetingsScreen() {
   return (
     <AppThemeProvider>
-      <WorkspaceGate title="Meetings">
-        {(workspaceId) => <Meetings workspaceId={workspaceId} />}
-      </WorkspaceGate>
+      <TabScreen tab="meetings">
+        <WorkspaceGate title="Meetings">
+          {(workspaceId) => <Meetings workspaceId={workspaceId} />}
+        </WorkspaceGate>
+      </TabScreen>
     </AppThemeProvider>
   );
 }
 
 /* The web Meetings page at phone width: the recorder on top, then every
    meeting the person can see, newest first. */
+const themed = (node: React.ReactNode) => <AppThemeProvider>{node}</AppThemeProvider>;
+
 function Meetings({ workspaceId }: { workspaceId: string }) {
   const c = useNativeTimelineTheme().colors;
   const insets = useSafeAreaInsets();
@@ -39,14 +45,16 @@ function Meetings({ workspaceId }: { workspaceId: string }) {
           headerStyle: { backgroundColor: c.bg },
           headerTintColor: c.fg,
           headerShadowVisible: false,
+          ...tabHeaderOptions(themed),
         }}
       />
       <MeetingsList
         client={client}
         workspaceId={workspaceId}
         focused={focused}
-        // iOS keeps the list clear of the home indicator by itself.
-        bottomInset={Platform.OS === "ios" ? 0 : insets.bottom}
+        // The list scrolls under the floating bar and ends clear of it (iOS
+        // already keeps it clear of the home indicator).
+        bottomInset={Platform.OS === "ios" ? TAB_BAR_HEIGHT + 16 : tabBarClearance(insets.bottom)}
         onOpen={(id) => router.push(`/meeting/${id}`)}
       />
     </>

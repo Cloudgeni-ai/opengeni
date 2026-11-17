@@ -17,6 +17,9 @@ import { SettingsList } from "@/settings-list";
 import type { SettingsRow, SettingsSection } from "@/settings-model";
 import { AppThemeProvider } from "@/theme";
 import { useAutomationList } from "@/use-automation-list";
+import { TabScreen, tabHeaderOptions } from "@/app-tab-bar";
+import { tabBarClearance } from "@/app-tabs";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 /** How often an open list re-reads, so a run that starts or finishes shows up. */
 const REFRESH_MS = 30_000;
@@ -31,12 +34,16 @@ function NewAutomationButton() {
 export default function AutomationsScreen() {
   return (
     <AppThemeProvider>
-      <WorkspaceGate title="Automations" message="Choose a workspace to see its automations.">
-        {(workspaceId) => <Automations workspaceId={workspaceId} />}
-      </WorkspaceGate>
+      <TabScreen tab="automations">
+        <WorkspaceGate title="Automations" message="Choose a workspace to see its automations.">
+          {(workspaceId) => <Automations workspaceId={workspaceId} />}
+        </WorkspaceGate>
+      </TabScreen>
     </AppThemeProvider>
   );
 }
+
+const themed = (node: React.ReactNode) => <AppThemeProvider>{node}</AppThemeProvider>;
 
 /* The web Automations list at phone width: each automation with when it runs
    and what it last did, a word at the end for one that won't run (Paused,
@@ -44,6 +51,7 @@ export default function AutomationsScreen() {
 function Automations({ workspaceId }: { workspaceId: string }) {
   const t = useOpenGeniText();
   const c = useNativeTimelineTheme().colors;
+  const insets = useSafeAreaInsets();
   const { client, accessContext } = useAccount();
   const { list, error, refresh } = useAutomationList(client, workspaceId);
   const [now, setNow] = useState(() => new Date());
@@ -67,6 +75,7 @@ function Automations({ workspaceId }: { workspaceId: string }) {
         headerStyle: { backgroundColor: c.bg },
         headerTintColor: c.fg,
         headerShadowVisible: false,
+        ...tabHeaderOptions(themed),
         ...(canCreate
           ? Platform.OS === "ios"
             ? {
@@ -115,17 +124,22 @@ function Automations({ workspaceId }: { workspaceId: string }) {
   return (
     <>
       {header}
-      <SettingsList
-        sections={sections}
-        onRefresh={reload}
-        empty={{
-          title: "No automations yet",
-          symbol: "bolt",
-          description: canCreate
-            ? "Automations run a task on a schedule or when something happens. Tap + and say what should happen."
-            : "Automations run a task on a schedule or when something happens. The ones in this workspace show here.",
-        }}
-      />
+      {/* The list ends above the floating bar, so its last row is never under it. */}
+      <View
+        style={{ flex: 1, backgroundColor: c.bg, paddingBottom: tabBarClearance(insets.bottom) }}
+      >
+        <SettingsList
+          sections={sections}
+          onRefresh={reload}
+          empty={{
+            title: "No automations yet",
+            symbol: "bolt",
+            description: canCreate
+              ? "Automations run a task on a schedule or when something happens. Tap + and say what should happen."
+              : "Automations run a task on a schedule or when something happens. The ones in this workspace show here.",
+          }}
+        />
+      </View>
     </>
   );
 }

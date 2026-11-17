@@ -58,9 +58,34 @@ The new-chat and follow-up composers follow the web composer:
 The home header names the current workspace and organization; tapping it opens
 the workspace switcher.
 
+## Navigation
+
+A floating bar at the bottom moves between **Chats** (Home), **Artifacts**,
+**Automations** and **Meetings**. Home stays at the bottom of the stack and
+the other places swap in place above it, so switching never grows the stack.
+The chats menu opens from the header's menu button or with a swipe right from
+the left edge of any of these places.
+
+## Artifacts
+
+**Artifacts** lists the workspace's Sites, documents, presentations,
+spreadsheets, images and files, newest change first, as large cards with a
+still (a Site's page drawn without scripts, an image's own pixels, the type
+glyph otherwise). Search and type chips filter it; pull down to refresh.
+
+Tapping a card opens the viewer. Sites and editors show in the web app's
+chromeless pages (`/native-view/…`), signed in from the device session through
+`POST /v1/native-app/web-session`, so a Site's data and the editors work as on
+the web; a presentation turns one slide at a time with a swipe. Images open
+zoomable and other files in the system viewer. The header has Share and the
+web library's menu: Open chat, Pin, Duplicate (Sites), Copy link, Download in
+the original format (HTML, the file itself, XLSX), and Delete… for documents,
+spreadsheets and presentations. An artifact linked on its own line in a chat
+is a card that opens the same viewer.
+
 ## Automations
 
-**Automations** in the side menu (below Meetings) lists the workspace's
+**Automations** in the bottom bar lists the workspace's
 automations as the web list orders them, each with when it runs, what its
 last run did and a word for one that won't run (Paused, Finished) or keeps
 failing. Pull down to refresh; the list also re-reads while it is open.

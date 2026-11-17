@@ -25,7 +25,6 @@ import { appSessionPath } from "@/app-links";
 import { rankChatSearch, workspacesToSearch } from "@/chat-search";
 import { useServerChatSearch } from "@/use-server-chat-search";
 import { cachedLists, rememberLists, subscribeLists } from "@/session-list-cache";
-import { isCapturing, useMeetingRecorder } from "@/meetings";
 import { EMPTY_SESSION_LISTS, useSessionPinToggle, type SessionLists } from "@/session-pins";
 import { AppThemeProvider } from "@/theme";
 import { WorkspaceSwitcherBlock } from "@/workspace-switcher";
@@ -229,12 +228,6 @@ function Sessions() {
             style={{ ...fontStyle(theme), flex: 1, fontSize: 14, color: c.fg }}
           />
         </View>
-        {searching ? null : (
-          <>
-            <MeetingsRow />
-            <RailRow icon="zap" label="Automations" onPress={() => router.push("/automations")} />
-          </>
-        )}
         {searching ? (
           <>
             {results.workspaces.length > 0 ? (
@@ -387,69 +380,6 @@ function WorkspaceResultRow(props: {
         ) : null}
       </View>
       <Text style={{ ...fontStyle(theme), fontSize: 11, color: c["fg-subtle"] }}>Switch</Text>
-    </Pressable>
-  );
-}
-
-/* The rail's Meetings entry, saying so while a recording is running. */
-function MeetingsRow() {
-  const recorder = useMeetingRecorder();
-  const live = isCapturing(recorder);
-  return (
-    <RailRow
-      icon="audio-lines"
-      label="Meetings"
-      accessibilityLabel={live ? "Meetings, recording now" : "Meetings"}
-      onPress={() => router.push("/meetings")}
-      accessory={live ? <RecordingNow /> : null}
-    />
-  );
-}
-
-function RecordingNow() {
-  const theme = useNativeTimelineTheme();
-  const c = theme.colors;
-  return (
-    <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-      <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: c.danger }} />
-      <Text style={{ ...fontStyle(theme, 500), fontSize: 12, color: c.danger }}>Recording</Text>
-    </View>
-  );
-}
-
-/** A workspace page above the chats (Meetings, Automations), as on the web's rail. */
-function RailRow(props: {
-  icon: "audio-lines" | "zap";
-  label: string;
-  accessibilityLabel?: string;
-  accessory?: React.ReactNode;
-  onPress: () => void;
-}) {
-  const theme = useNativeTimelineTheme();
-  const c = theme.colors;
-  return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={props.accessibilityLabel ?? props.label}
-      onPress={props.onPress}
-      style={({ pressed }) => ({
-        flexDirection: "row",
-        alignItems: "center",
-        gap: 10,
-        minHeight: 40,
-        paddingVertical: 8,
-        paddingHorizontal: 8,
-        marginBottom: 4,
-        borderRadius: theme.radius.md,
-        backgroundColor: pressed ? c.hover : "transparent",
-      })}
-    >
-      <Icon name={props.icon} size={16} color={c["fg-muted"]} />
-      <Text style={{ ...fontStyle(theme, 500), flex: 1, fontSize: 15, color: c.fg }}>
-        {props.label}
-      </Text>
-      {props.accessory}
-      <Icon name="chevron-right" size={14} color={c["fg-subtle"]} />
     </Pressable>
   );
 }
