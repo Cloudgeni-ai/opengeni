@@ -1769,6 +1769,30 @@ export function recordSandboxViewerOnlyDrain(
   });
 }
 
+/** Fixed reasons the reaper drains a warm box no turn holds under the plan's
+ * compute bounds (docs/deployment.md, "Free compute bounds"). */
+export const SANDBOX_COMPUTE_BOUNDS_DRAIN_REASONS = [
+  "compute_closed",
+  "compute_daily_budget",
+  "compute_idle",
+] as const;
+
+export type SandboxComputeBoundsDrainReason = (typeof SANDBOX_COMPUTE_BOUNDS_DRAIN_REASONS)[number];
+
+/** One box drained (`drained`) or asked to stop its commands
+ * (`stop_requested`) under the plan's compute bounds, by fixed reason. */
+export function recordSandboxComputeBoundsDrain(
+  observability: Observability,
+  reason: SandboxComputeBoundsDrainReason,
+  mode: "drained" | "stop_requested",
+): void {
+  observability.incrementCounter({
+    name: "opengeni_sandbox_compute_bounds_drains_total",
+    help: "Warm boxes no turn holds that the reaper drained or stopped under the plan's compute bounds, by fixed reason and mode.",
+    labels: { reason, mode },
+  });
+}
+
 /** Only call after the exact draining->cold commit reports wentCold. The
  * backend is validated against the closed contract so provider IDs and other
  * per-sandbox values can never become metric labels. */

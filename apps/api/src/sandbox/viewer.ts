@@ -25,6 +25,7 @@ import {
   hasGitCredentialRepositorySelection,
   resolveStreamTokenSecret,
   sandboxPlanLimits,
+  settingsForSandboxPlanTier,
   sandboxLifecycleTransitionWaitMs,
   sandboxWarmRateMicrosPerSecond,
   stableSandboxEnvironmentForRun,
@@ -309,11 +310,7 @@ export async function attachViewer(
       throw viewerRefusal(viewerBoxLimitMessage(error), "computer_limit");
     }
     if (error instanceof SandboxOrganizationBoxLimitError) {
-      throw viewerRefusal(
-        `your organization already runs ${error.limit} computers, the most its plan allows; ` +
-          "close one or wait for a task to finish",
-        "computer_limit",
-      );
+      throw viewerRefusal(error.message, "computer_limit");
     }
     if (error instanceof SandboxPaidComputeAdmissionError) {
       throw new HTTPException(402, { message: error.message, cause: error });
@@ -386,7 +383,10 @@ export async function attachViewer(
       // session envelope (a never-warmed cold start).
       const result = await establishApiSandboxSpawner({
         db,
-        settings: providerSettings,
+        // A Free or unpaid organization's box gets the unpaid ceilings.
+        settings: settingsForSandboxPlanTier(providerSettings, acquired.sandboxPlanTier, {
+          paidHistory: acquired.sandboxPaidHistory,
+        }),
         accountId,
         workspaceId,
         sandboxGroupId,
@@ -1664,12 +1664,16 @@ function viewerBoxLimitMessage(error: SandboxViewerBoxLimitError): string {
 
 function runningLimitsOnly(limits: Readonly<Record<string, SandboxPlanLimit>>) {
   return Object.fromEntries(
-    Object.entries(limits).map(([tier, limit]) => [
-      tier,
-      limit.runningBoxesPerOrganization === undefined
-        ? {}
-        : { runningBoxesPerOrganization: limit.runningBoxesPerOrganization },
-    ]),
+    Object.entries(limits).map(([tier, limit]) => {
+      // Every bound but the viewer-only ones: running boxes, per person,
+      // daily box time and a closed tier still apply.
+      const {
+        viewerOnlyBoxesPerOrganization: _organization,
+        viewerOnlyBoxesPerMember: _member,
+        ...rest
+      } = limit;
+      return [tier, rest];
+    }),
   );
 }
 

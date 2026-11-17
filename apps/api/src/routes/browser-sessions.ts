@@ -11,8 +11,14 @@ import {
   environmentsEncryptionKeyBytes,
   resolveFirstPartyDelegationSecret,
   resolveStreamTokenSecret,
+  sandboxPlanLimits,
   sandboxWarmRateMicrosPerSecond,
 } from "@opengeni/config";
+import {
+  sandboxActingPerson,
+  sandboxComputeRefusal,
+  sandboxComputeStandingFallbackObserver,
+} from "../sandbox/compute-bounds";
 import {
   BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX,
   EPHEMERAL_CHROMIUM_DRIVER_ID,
@@ -6003,7 +6009,14 @@ async function ensureInteractionHolder(
     rigVersionId: sourceSession.rigVersionId,
     leaseTtlMs: deps.settings.sandboxLeaseTtlMs,
     expectedEpoch: placement.lease.leaseEpoch,
+    // The plan's compute bounds apply to a browser session's box like any
+    // other holder's (a held or denied organization, a spent daily budget).
+    sandboxPlanLimits: sandboxPlanLimits(deps.settings),
+    actingSubjectId: sandboxActingPerson(grant.subjectId),
+    onComputeStandingFallback: sandboxComputeStandingFallbackObserver(deps.observability),
     waitSignal,
+  }).catch((error: unknown) => {
+    throw sandboxComputeRefusal(error) ?? error;
   });
   if (acquired.role === "blocked" || acquired.role === "fenced") {
     throw new BrowserSessionStateError("BrowserSession placement is transitioning; retry");

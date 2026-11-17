@@ -23,6 +23,36 @@ export function modalCreateOperationName(operationId: string): string {
   return `opengeni-create-${operationId}`;
 }
 
+/** Thrown before dispatch when a SandboxCreate carries no CPU or memory
+ * ceiling: Modal would apply none, so the box could use a whole host. */
+export class ModalSandboxResourceCeilingMissingError extends Error {
+  readonly name = "ModalSandboxResourceCeilingMissingError";
+  constructor() {
+    super("Modal SandboxCreate must carry positive CPU and memory ceilings; refusing to start");
+  }
+}
+
+/** True when the wire request sets positive milliCpuMax and memoryMbMax. */
+export function modalCreateRequestHasResourceCeilings(definition: unknown): boolean {
+  const resources =
+    definition && typeof definition === "object"
+      ? (definition as { resources?: unknown }).resources
+      : undefined;
+  if (!resources || typeof resources !== "object") return false;
+  const { milliCpuMax, memoryMbMax } = resources as {
+    milliCpuMax?: unknown;
+    memoryMbMax?: unknown;
+  };
+  return (
+    typeof milliCpuMax === "number" &&
+    Number.isSafeInteger(milliCpuMax) &&
+    milliCpuMax > 0 &&
+    typeof memoryMbMax === "number" &&
+    Number.isSafeInteger(memoryMbMax) &&
+    memoryMbMax > 0
+  );
+}
+
 /** One controller per attempted physical create, on a dedicated Modal client.
  *
  * Modal 0.9.0 runs this middleware outside its retry middleware. Disable retries
@@ -66,6 +96,11 @@ export function createModalProviderCreateBoundary(input: {
       )
     ) {
       throw new Error("Modal SandboxCreate wire identity does not match the owned operation");
+    }
+    // Fail closed before anything is dispatched or recorded: a box without
+    // ceilings is never created.
+    if (!modalCreateRequestHasResourceCeilings(request.definition)) {
+      throw new ModalSandboxResourceCeilingMissingError();
     }
     const wireRequest = {
       ...request,
