@@ -42,7 +42,7 @@ export interface CodeGrepInput {
   /** Judges excerpts; without one the excerpts are returned in lexical order. */
   decisionModel?: DecisionModel | null | undefined;
   signal?: AbortSignal | undefined;
-  /** Characters of excerpt text shown in full (default 6000); later excerpts are listed by location. */
+  /** Characters of excerpt text shown in full (default 9000); later excerpts are listed by location. */
   budgetChars?: number | undefined;
   limits?: Partial<CodeGrepLimits> | undefined;
   onStage?: ((stage: string, data: Record<string, unknown>) => void) | undefined;
@@ -85,8 +85,8 @@ export const CODE_GREP_DEFAULT_LIMITS: Readonly<CodeGrepLimits> = Object.freeze(
   maxWaves: 4,
   excerptsPerRequest: 24,
   requestConcurrency: 8,
-  judgeExcerptChars: 1600,
-  shownExcerptChars: 3000,
+  judgeExcerptChars: 2400,
+  shownExcerptChars: 4500,
   relevantFloor: 0.5,
   earlyStop: false,
   stopFloor: 0.8,
@@ -96,13 +96,16 @@ export const CODE_GREP_DEFAULT_LIMITS: Readonly<CodeGrepLimits> = Object.freeze(
   matchesPerFile: 50,
 });
 
-/** Smaller windows than code_search: an excerpt is one function or block around a hit. */
+/**
+ * Windows sized like the reads that follow a search (about 100 lines around a hit), so a shown excerpt
+ * replaces the read instead of preceding it.
+ */
 const GREP_CONFIG: CodeSearchConfig = codeSearchConfig({
   wave2: {
-    maxUp: 30,
-    maxDown: 40,
-    maxWindowLines: 60,
-    maxWindowChars: 3000,
+    maxUp: 45,
+    maxDown: 60,
+    maxWindowLines: 100,
+    maxWindowChars: 4500,
     maxProseLineChars: 800,
     maxProseWindowChars: 2000,
     seedHitsPerFile: 12,
@@ -166,6 +169,21 @@ const excerptQuestion = (id: string) =>
 const STOP_QUESTION =
   "Do the excerpts found so far already answer the question, so that the remaining matches need not be examined?";
 
+/** Each file's first excerpt (in the given order), then the rest, both keeping the given order. */
+export function byFileBreadth<T extends { path: string }>(items: readonly T[]): T[] {
+  const seen = new Set<string>();
+  const first: T[] = [];
+  const rest: T[] = [];
+  for (const e of items) {
+    if (seen.has(e.path)) rest.push(e);
+    else {
+      seen.add(e.path);
+      first.push(e);
+    }
+  }
+  return [...first, ...rest];
+}
+
 /** The excerpt's first line matching one of its patterns (numbered as in the excerpt), shortened. */
 export function firstMatchingLine(
   e: Pick<CodeGrepExcerpt, "text" | "patterns">,
@@ -204,7 +222,7 @@ export async function runCodeGrep(input: CodeGrepInput): Promise<CodeGrepResult>
     }
   };
   const session = new WorkspaceSession(input.workspace, signal, cfg.recall.ripgrepTimeoutMs);
-  const budget = input.budgetChars ?? 6_000;
+  const budget = input.budgetChars ?? 9_000;
 
   // ---- 1. the caller's patterns, in parallel
   let searchPaths = ["."];
@@ -428,10 +446,12 @@ export async function runCodeGrep(input: CodeGrepInput): Promise<CodeGrepResult>
 
   // ---- 4. the result: relevant excerpts (or lexical order), then the files not shown
   const judged = excerpts.filter((e) => e.p !== null);
-  const order =
+  // Breadth first: each file's best excerpt before any file's second, so more files are shown in full.
+  const order = byFileBreadth(
     judge === "on"
       ? judged.filter((e) => e.p! >= L.relevantFloor).sort((a, b) => b.p! - a.p!)
-      : excerpts;
+      : excerpts,
+  );
   const shown: CodeGrepExcerpt[] = [];
   let used = 0;
   for (const e of order) {

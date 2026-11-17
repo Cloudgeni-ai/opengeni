@@ -11,6 +11,7 @@ import {
   CODE_GREP_LIMITS,
   CodeSearchArgumentError,
   JevClient,
+  byFileBreadth,
   createJevDecisionModel,
   firstMatchingLine,
   parseCodeGrepArguments,
@@ -246,6 +247,17 @@ describeWithRipgrep("runCodeGrep", () => {
     const e = { text: "10| import x\n11| const token = renew()\n12| }", patterns: [1] };
     expect(firstMatchingLine(e, ["nothing", "Token"], true)).toBe("11| const token = renew()");
     expect(firstMatchingLine(e, ["nothing", "absent("])).toBe("10| import x");
+  });
+
+  test("byFileBreadth puts each file's first excerpt before any file's second", () => {
+    const order = byFileBreadth([
+      { path: "a", id: 1 },
+      { path: "a", id: 2 },
+      { path: "b", id: 3 },
+      { path: "c", id: 4 },
+      { path: "b", id: 5 },
+    ]);
+    expect(order.map((e) => e.id)).toEqual([1, 3, 4, 2, 5]);
   });
 
   test("paths limit the search and missing paths are reported", async () => {
