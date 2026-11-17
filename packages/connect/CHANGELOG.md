@@ -1,5 +1,7 @@
 # @opengeni/connect
 
+## 6.27.1
+
 ## 6.27.0
 
 ### Patch Changes

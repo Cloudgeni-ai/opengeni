@@ -1,5 +1,27 @@
 # @opengeni/core
 
+## 6.27.1
+
+### Patch Changes
+
+- 02804ec: Creating or updating a session with a first-party tool's old name from before a one-to-one rename (for example `session_send_message`, now `session_queue_message`) selects the new name again instead of failing with "disabled by deployment policy". Clients built against an older contract kept sending the old name and every such session was refused at creation. The old name is still never offered to models.
+- Updated dependencies [afcb2d6]
+- Updated dependencies [02804ec]
+  - @opengeni/db@6.27.1
+  - @opengeni/contracts@6.27.1
+  - @opengeni/documents@6.27.1
+  - @opengeni/events@6.27.1
+  - @opengeni/capabilities@6.27.1
+  - @opengeni/codex@6.27.1
+  - @opengeni/config@6.27.1
+  - @opengeni/observability@6.27.1
+  - @opengeni/runtime@6.27.1
+  - @opengeni/storage@6.27.1
+  - @opengeni/tool-gateway@6.27.1
+  - @opengeni/vaults@6.27.1
+  - @opengeni/network@6.27.1
+  - @opengeni/xai-subscription@6.27.1
+
 ## 6.27.0
 
 ### Patch Changes
