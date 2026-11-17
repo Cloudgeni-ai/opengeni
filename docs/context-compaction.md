@@ -600,6 +600,32 @@ Existing budget-driven omission and text truncation still apply. Assistant
 messages, reasoning, tool calls, and tool results leave the active model
 history but remain in inactive audit rows.
 
+### Loaded tools
+
+Deferred tools reach the model through search results (native
+`tool_search_output`, generic `tool_search` results) and entry-tool family
+disclosures, which are tool items the rebuild drops. Without more, every tool
+the model had loaded would vanish at the checkpoint, and the model would search
+for the same tools again right after it.
+
+Every rebuild (portable, remote v2 and the trimmed fallback) therefore adds one
+platform-context item before the retained messages: the provider-neutral tool
+disclosure (`opengeni.tool_disclosure.v1`) that each projection already renders,
+as Codex `additional_tools` where the route accepts it, otherwise as a
+developer or system message. It carries the frozen definitions the history
+recorded, never a re-read of the live catalog, and is marked
+`opengeni.carried_tool_disclosure.v1` so a later rebuild recomputes it instead
+of retaining it as a message.
+
+A tool is carried when it was called after it was loaded, or when the model has
+called no tool since loading it (a checkpoint right after a search keeps what
+the search just loaded). A tool that was loaded and then passed over is left
+out and can be searched for again, so repeated checkpoints do not accumulate
+schemas nobody uses. The item is built only from the items it replaces and
+stored with the replacement, so it changes no earlier request and every later
+request replays it unchanged. An entry-tool family disclosure after the
+checkpoint does not declare a carried tool again.
+
 On the **portable** path, the generated replacement must estimate strictly
 smaller than the active input, and its deterministic fingerprint must differ
 from the latest durable replacement (an exact repeat settles as

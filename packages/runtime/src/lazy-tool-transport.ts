@@ -44,7 +44,13 @@ import {
   type ToolMeaningRanker,
 } from "./tool-discovery-meaning";
 import { toolDescriptor, toolGroup, toolGroups } from "./tool-discovery-catalog";
-import { toolDisclosureItem } from "./provider-history-adapter";
+import { TOOL_DISCLOSURE_KEY, toolDisclosureItem } from "./provider-history-adapter";
+import {
+  FAMILY_DISCLOSURE_MARKER_KEY,
+  INTERNAL_DISPATCH_REGISTRATION_CALL_PREFIX,
+  isCarriedToolDisclosure,
+  SEARCH_MARKER_KEY,
+} from "./carried-tool-disclosure";
 import { isProviderToolName, providerValidCallName } from "./provider-tool-names";
 import { restoreDeferredToolArgumentTypes } from "./deferred-tool-arguments";
 import { isAliasedMcpToolName, prefixedMcpToolName } from "./mcp-model-tool-name";
@@ -146,9 +152,6 @@ export function isAlwaysVisibleBaseToolName(name: string): boolean {
   return ALWAYS_VISIBLE_BASE_TOOL_NAMES.has(name);
 }
 const DISPATCH_MARKER_KEY = "opengeni.lazy_dispatch.v1";
-const SEARCH_MARKER_KEY = "opengeni.lazy_search.v1";
-/** Frozen companion schemas an entry-tool call disclosed, kept on the call itself. */
-const FAMILY_DISCLOSURE_MARKER_KEY = "opengeni.family_disclosure.v1";
 const INTERNAL_REGISTRATION_TOOL_MARKER_KEY = "opengeni.internal_lazy_registration.v1";
 /**
  * Marks the local response that loads a new session's opening tools (see
@@ -171,8 +174,6 @@ export function isOpeningToolLoadResponse(value: unknown): boolean {
     response.providerData[OPENING_TOOL_LOAD_MARKER_KEY] === true
   );
 }
-const INTERNAL_DISPATCH_REGISTRATION_CALL_PREFIX = "opengeni:lazy-dispatch:register:";
-
 const SEARCH_DESCRIPTION =
   "Find currently authorized tools by capability. Describe the action and resource you need; separate independent tasks with semicolons and include useful context. Loads the strongest few matches and returns compact alternatives; ranking is not certainty, so check the match. If a decision model is configured, it can select tools for ambiguous searches. With schemasLoaded:true, only tools have loaded schemas; suggestions are unloaded alternatives. With schemasLoaded:false, load chosen exact names with query:'' before invoking. Known exact names bypass ranking and inference. Call loaded tools by name or through tool_invoke. Search is not exhaustive: tool_list view:'groups' shows available groups. Discovery never grants access.";
 const NATIVE_SEARCH_DESCRIPTION =
@@ -3211,6 +3212,16 @@ export function expandInteractionFamilyDisclosures<T>(input: T[]): T[] {
     if (!result) flush(index);
     expanded?.push(original);
     if (!isRecord(candidate)) continue;
+    // Tools a compaction carried over are loaded; a family disclosure after
+    // the checkpoint does not declare them again.
+    if (isCarriedToolDisclosure(candidate)) {
+      const disclosure = isRecord(candidate.providerData)
+        ? candidate.providerData[TOOL_DISCLOSURE_KEY]
+        : undefined;
+      for (const name of disclosedToolNames(isRecord(disclosure) ? disclosure.tools : undefined))
+        disclosed.add(name);
+      continue;
+    }
     if (candidate.type === "tool_search_call") {
       const providerData = isRecord(candidate.providerData) ? candidate.providerData : null;
       const searchMarker = providerData?.[SEARCH_MARKER_KEY];

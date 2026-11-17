@@ -53,6 +53,7 @@ import {
   withSearchRecordsAfterOpenCalls,
 } from "./hosted-search-evidence";
 import { isClaudeThinkingContentPart } from "./opaque-reasoning-replay";
+import { carriedToolDisclosureItem, isCarriedToolDisclosure } from "./carried-tool-disclosure";
 
 import {
   latestReasoningConfiguration,
@@ -2298,12 +2299,16 @@ function rebuildAroundCheckpoint(
     retained,
     options.attachmentUploadTimes,
   );
+  // Tools loaded before the checkpoint that the conversation still uses stay
+  // loaded after it, rather than being searched for again.
+  const loadedTools = carriedToolDisclosureItem(items);
   const prefix = [
     currentCatalog,
     currentRepositorySkills,
     currentGovernance,
     carriedAgentInstructions,
     attachmentCatalog,
+    loadedTools,
   ].filter((item): item is CompactionItem => Boolean(item));
   const history = [...prefix, ...retained];
   // Platform context items before the retained messages belong to no turn.
@@ -2331,7 +2336,12 @@ export function isRemoteCompactionItem(item: unknown): item is CompactionItem {
 
 /** Messages retained beside a remote v2 compaction blob (user + system + developer). */
 export function isRetainedRemoteV2Message(item: unknown): boolean {
-  if (isCompactionSummary(item) || isAttachmentCatalog(item) || itemType(item) === "compaction") {
+  if (
+    isCompactionSummary(item) ||
+    isAttachmentCatalog(item) ||
+    isCarriedToolDisclosure(item) ||
+    itemType(item) === "compaction"
+  ) {
     return false;
   }
   const role = itemRole(item);

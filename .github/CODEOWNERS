@@ -63,6 +63,7 @@
 
 # Compaction requests.
 /packages/runtime/src/context-compaction.ts @jorgensandhaug
+/packages/runtime/src/carried-tool-disclosure.ts @jorgensandhaug
 /packages/runtime/src/prepared-compaction-request.ts @jorgensandhaug
 /apps/worker/src/activities/context-compaction.ts @jorgensandhaug
 /apps/worker/src/activities/agent-turn/compaction-prep.ts @jorgensandhaug
