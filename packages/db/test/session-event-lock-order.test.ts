@@ -1353,6 +1353,7 @@ describe("event-ordering invariant canonical session-event lock order", () => {
           childSessionId: child.sessionId,
           sequence: answer!.sequence,
           attemptId: parent.attemptId,
+          callId: identity.callId,
         },
       ]);
       expect(stored?.result).toEqual({

@@ -80876,18 +80876,26 @@ export async function acknowledgeConsumedChildEvents(
 /**
  * Turn metadata key recording each direct child answer (`turn.completed`
  * sequence) that one exact attempt of the turn returned whole to its model
- * from a read tool. It is bounded, append-only per turn, and only ever
- * suppresses a duplicate: a lost or unproven record delivers the child's
- * result normally.
+ * from a read tool, with the model's call id for that read when known. It is
+ * bounded, append-only per turn, and only ever suppresses a duplicate: a lost
+ * or unproven record delivers the child's result normally.
  */
 export const CONSUMED_CHILD_ANSWERS_METADATA_KEY = "consumedChildAnswers";
 const CONSUMED_CHILD_ANSWERS_MAX = 64;
 const CONSUMED_CHILD_ANSWERS_TURN_WINDOW = 16;
+/** The model call ids a read record keeps; longer ids are not recorded. */
+const CONSUMED_CHILD_ANSWER_CALL_ID_MAX_LENGTH = 512;
 /** Any hex UUID shape, so a stored attempt id is cast only when castable. */
 const UUID_TEXT_PATTERN_SQL =
   "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$";
 
-type ConsumedChildAnswerEntry = { childSessionId: string; sequence: number; attemptId: string };
+type ConsumedChildAnswerEntry = {
+  childSessionId: string;
+  sequence: number;
+  attemptId: string;
+  /** The model's call id of the read whose output carried the answer. */
+  callId?: string;
+};
 
 function consumedChildAnswerEntries(metadata: unknown): ConsumedChildAnswerEntry[] {
   if (metadata === null || typeof metadata !== "object" || Array.isArray(metadata)) return [];
@@ -80931,8 +80939,15 @@ function childTerminalResultAnswerParts(
  * the answer); a record outside that window, like a lost one, only means the
  * result is delivered normally. `attempt` also counts the records one exact
  * attempt made on its own turn: its caller proves that attempt is live, or has
- * just completed its turn in the same transaction. A record of an attempt that
- * failed, was interrupted, or was replaced proves nothing.
+ * just completed its turn in the same transaction.
+ *
+ * A turn can outlive the attempt that read: a provider interruption, worker
+ * restart or Retry continues the same turn in a new attempt, which resumes
+ * from the turn's durable history. A record by such an earlier attempt counts
+ * once that history holds the read's own tool result (by the model's call id):
+ * every later attempt of the turn received it. Without that result in history,
+ * a record of an attempt that failed, was interrupted, or was replaced proves
+ * nothing.
  */
 async function consumedChildAnswerSequencesTx(
   tx: Database,
@@ -80992,7 +81007,14 @@ async function consumedChildAnswerSequencesTx(
           attempt
             ? sql` or (turn.id = ${attempt.turnId}::uuid and attempt.id = ${attempt.attemptId}::uuid)`
             : sql``
-        })`,
+        }
+          or (jsonb_typeof(entry -> 'callId') = 'string' and exists (
+            select 1 from session_history_items carried
+            where carried.workspace_id = ${input.workspaceId}::uuid
+              and carried.session_id = ${input.parentSessionId}::uuid
+              and carried.turn_id = turn.id
+              and carried.item_ordered ->> 'type' = 'function_call_result'
+              and carried.item_ordered ->> 'callId' = entry ->> 'callId')))`,
   );
   for (const row of rows) {
     const sequences = consumed.get(row.childSessionId) ?? new Set<number>();
@@ -81079,12 +81101,14 @@ async function pendingChildResultsConsumedTx(
 }
 
 /**
- * Inside the successful completion settlement of a turn attempt that recorded
- * a consumed child answer: supersede each still-pending idle child result the
- * parent's model has now received whole, before the next claim could start an
- * inference that only repeats it. The tool output that carried each answer is
- * durable history once the attempt completes. The canonical row stays as
- * audit truth; the caller appends the `system.update.cancelled` event.
+ * Inside the successful completion settlement of a turn that recorded a
+ * consumed child answer, by this attempt or an earlier attempt of the same
+ * turn: supersede each still-pending idle child result the parent's model has
+ * now received whole, before the next claim could start an inference that only
+ * repeats it. The tool output that carried each answer is durable history once
+ * the attempt completes (see `consumedChildAnswerSequencesTx`). The canonical
+ * row stays as audit truth; the caller appends the `system.update.cancelled`
+ * event.
  */
 async function supersedeChildResultsConsumedByCompletedAttemptTx(
   tx: Database,
@@ -81096,13 +81120,7 @@ async function supersedeChildResultsConsumedByCompletedAttemptTx(
     turnMetadata: unknown;
   },
 ): Promise<string[]> {
-  if (
-    !consumedChildAnswerEntries(input.turnMetadata).some(
-      (entry) => entry.attemptId === input.attemptId,
-    )
-  ) {
-    return [];
-  }
+  if (consumedChildAnswerEntries(input.turnMetadata).length === 0) return [];
   const consumed = await pendingChildResultsConsumedTx(tx, {
     workspaceId: input.workspaceId,
     parentSessionId: input.sessionId,
@@ -81136,11 +81154,13 @@ async function supersedeChildResultsConsumedByCompletedAttemptTx(
  * The caller proves the read returned whole content to the model; this proves
  * the attempt is still the session's current one and that each sequence is a
  * direct child's result-bearing answer. A read whose answers this attempt
- * already recorded writes nothing. Metadata writes take the canonical session
- * prefix: the archive guard on a turn UPDATE also locks its session, so taking
- * only the turn first would invert claim/settlement and parallel tool writers.
- * It is best effort: a busy ownership row skips it and the result is then
- * delivered normally.
+ * already recorded writes nothing. `callId` is the model's id for the reading
+ * tool call; it lets a later attempt of the same turn, resuming from the
+ * turn's durable history, prove it holds the read's output too. Metadata
+ * writes take the canonical session prefix: the archive guard on a turn UPDATE
+ * also locks its session, so taking only the turn first would invert
+ * claim/settlement and parallel tool writers. It is best effort: a busy
+ * ownership row skips it and the result is then delivered normally.
  */
 export async function recordConsumedChildAnswers(
   db: Database,
@@ -81151,9 +81171,16 @@ export async function recordConsumedChildAnswers(
     turnId: string;
     attemptId: string;
     executionGeneration: number;
+    callId?: string;
     children: readonly { sessionId: string; sequences: readonly number[] }[];
   },
 ): Promise<{ recorded: number }> {
+  const callId =
+    typeof input.callId === "string" &&
+    input.callId.length > 0 &&
+    input.callId.length <= CONSUMED_CHILD_ANSWER_CALL_ID_MAX_LENGTH
+      ? input.callId
+      : undefined;
   const children = input.children
     .map((child) => ({
       sessionId: child.sessionId,
@@ -81287,6 +81314,7 @@ export async function recordConsumedChildAnswers(
           const newlyRecorded = unrecorded(turn.metadata).map((answer) => ({
             ...answer,
             attemptId: input.attemptId,
+            ...(callId ? { callId } : {}),
           }));
           if (newlyRecorded.length === 0) return { recorded: 0 };
           // Under the turn row lock: only this key changes, the rest of the
