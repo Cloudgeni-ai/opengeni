@@ -1695,6 +1695,34 @@ const SettingsSchema = z.object({
   // resume cannot silently change the reservation.
   modalSandboxCpu: z.coerce.number().positive().optional(),
   modalSandboxMemoryMiB: z.coerce.number().int().positive().optional(),
+  // Hard CPU (physical cores, may be fractional) and memory (MiB) ceilings
+  // sent on every new Modal sandbox. Modal applies no ceiling when a create
+  // omits them, so one box could use a whole host. Required and positive:
+  // the Modal provider refuses to create a box without both. Paid,
+  // Enterprise and host-provisioned organizations get these; a Free or
+  // unpaid organization's box gets the lower unpaid ceilings below.
+  // Knobs: OPENGENI_MODAL_SANDBOX_CPU_LIMIT, OPENGENI_MODAL_SANDBOX_MEMORY_LIMIT_MIB.
+  modalSandboxCpuLimit: z.coerce.number().positive().max(128).default(8),
+  modalSandboxMemoryLimitMiB: z.coerce.number().int().positive().max(1_048_576).default(16_384),
+  // The same ceilings for a box of a Free, new, plan-less or restricted
+  // organization (sandboxResourceClass "unpaid"). A reservation above the
+  // ceiling is lowered to it. Knobs: OPENGENI_MODAL_UNPAID_SANDBOX_CPU_LIMIT,
+  // OPENGENI_MODAL_UNPAID_SANDBOX_MEMORY_LIMIT_MIB.
+  modalUnpaidSandboxCpuLimit: z.coerce.number().positive().max(128).default(2),
+  modalUnpaidSandboxMemoryLimitMiB: z.coerce.number().int().positive().max(1_048_576).default(4096),
+  // Optional outbound allowlists for an unpaid organization's Modal box.
+  // Modal can only allow destinations (CIDRs or domains); it has no deny rule
+  // and no port rule, so outbound SMTP cannot be blocked by port on Modal.
+  // Empty (the default) leaves egress open; setting either list confines an
+  // unpaid box to the listed destinations. Comma-separated. Knobs:
+  // OPENGENI_MODAL_UNPAID_OUTBOUND_CIDR_ALLOWLIST,
+  // OPENGENI_MODAL_UNPAID_OUTBOUND_DOMAIN_ALLOWLIST.
+  modalUnpaidOutboundCidrAllowlist: z.string().default(""),
+  modalUnpaidOutboundDomainAllowlist: z.string().default(""),
+  // Which resource ceilings a box gets. Not an environment setting: the
+  // caller that creates a box rebinds it from the organization's plan tier
+  // (sandboxResourceClassForPlanTier). "standard" is the paid ceiling.
+  sandboxResourceClass: z.enum(["standard", "unpaid"]).default("standard"),
   // Optional Modal placement for every new physical box (fresh create and
   // snapshot restore alike). Every setup step and tool call is a round trip from
   // the worker to the box, so placing boxes near the workers cuts per-command
@@ -6564,6 +6592,12 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     modalTimeoutSeconds: optional("OPENGENI_MODAL_TIMEOUT_SECONDS"),
     modalSandboxCpu: optional("OPENGENI_MODAL_SANDBOX_CPU"),
     modalSandboxMemoryMiB: optional("OPENGENI_MODAL_SANDBOX_MEMORY_MIB"),
+    modalSandboxCpuLimit: optional("OPENGENI_MODAL_SANDBOX_CPU_LIMIT"),
+    modalSandboxMemoryLimitMiB: optional("OPENGENI_MODAL_SANDBOX_MEMORY_LIMIT_MIB"),
+    modalUnpaidSandboxCpuLimit: optional("OPENGENI_MODAL_UNPAID_SANDBOX_CPU_LIMIT"),
+    modalUnpaidSandboxMemoryLimitMiB: optional("OPENGENI_MODAL_UNPAID_SANDBOX_MEMORY_LIMIT_MIB"),
+    modalUnpaidOutboundCidrAllowlist: optional("OPENGENI_MODAL_UNPAID_OUTBOUND_CIDR_ALLOWLIST"),
+    modalUnpaidOutboundDomainAllowlist: optional("OPENGENI_MODAL_UNPAID_OUTBOUND_DOMAIN_ALLOWLIST"),
     modalRegions: optional("OPENGENI_MODAL_REGIONS"),
     modalTokenId: optional("OPENGENI_MODAL_TOKEN_ID"),
     modalTokenSecret: optional("OPENGENI_MODAL_TOKEN_SECRET"),
@@ -12404,7 +12438,23 @@ export function parseSandboxWarmRateJson(raw: string): Record<string, number> {
  * - `viewerOnlyBoxesPerMember`: the same, kept warm by one person's viewer.
  * - `runningBoxesPerOrganization`: every running managed box (warming, warm or
  *   draining; Connected Machines never count), including boxes agent turns
- *   hold. A new box beyond it waits for a slot instead of starting.
+ *   hold. A new box beyond it waits for a slot instead of starting. It is one
+ *   budget for every kind of holder (turn, terminal, process, browser or
+ *   desktop session, viewer). 0 closes the tier: no box starts, an already
+ *   running box is not kept warm for anything but an in-flight turn, and a
+ *   turn that needs a new box fails with a clear message instead of waiting.
+ * - `runningBoxesPerPerson`: the same count across every limited
+ *   organization the acting person owns or administers (paid, Enterprise and
+ *   host-provisioned organizations never count).
+ * - `boxSecondsPerOrganizationPerDay` / `boxSecondsPerPersonPerDay`: metered
+ *   box time since the start of the UTC day, for the organization and across
+ *   the acting person's limited organizations. Beyond it no new box starts
+ *   and the reaper drains running boxes no turn holds; an in-flight turn
+ *   finishes.
+ * - `idleDrainAllHolders`: the reaper drains a box no turn holds after the
+ *   viewer idle window (OPENGENI_SANDBOX_VIEWER_IDLE_DRAIN_MS) without
+ *   activity, whatever holds it (terminal, process, browser or desktop
+ *   session, viewer), not only a viewer-only box.
  * - `organizationsYoungerThanMs`: only for the `new` tier, which applies to a
  *   Free self-serve organization created less than this long
  *   ago. Omitted or 0 turns the `new` tier off.
@@ -12413,6 +12463,10 @@ export type SandboxPlanLimit = {
   viewerOnlyBoxesPerOrganization?: number;
   viewerOnlyBoxesPerMember?: number;
   runningBoxesPerOrganization?: number;
+  runningBoxesPerPerson?: number;
+  boxSecondsPerOrganizationPerDay?: number;
+  boxSecondsPerPersonPerDay?: number;
+  idleDrainAllHolders?: boolean;
   organizationsYoungerThanMs?: number;
 };
 
@@ -12421,37 +12475,70 @@ export type SandboxPlanLimit = {
  * `enterprise`, or any operator-defined key), plus `none` for an organization
  * with no plan row (plans disabled), `restricted` for a Free or plan-less
  * organization whose promotion decision is `held` or `denied` while promotion
- * enforcement is on, `new` for a Free self-serve organization
+ * enforcement is on (or whose acting person holds such an organization), and
+ * that has neither bought credit nor an active paid plan, `new` for a Free
+ * self-serve organization
  * younger than the `new` tier's `organizationsYoungerThanMs`, and `embedded`
  * for an organization a host provisioned (its own external source is not a
  * signup one). A tier absent from the table is unbounded.
  */
 export type SandboxPlanLimits = Readonly<Record<string, SandboxPlanLimit>>;
 
-const SANDBOX_PLAN_LIMIT_FIELDS = [
+const SANDBOX_PLAN_LIMIT_COUNT_FIELDS = [
   "viewerOnlyBoxesPerOrganization",
   "viewerOnlyBoxesPerMember",
   "runningBoxesPerOrganization",
+  "runningBoxesPerPerson",
+  "boxSecondsPerOrganizationPerDay",
+  "boxSecondsPerPersonPerDay",
   "organizationsYoungerThanMs",
 ] as const;
+
+/** 12 box-hours: the daily box-time budget of an unpaid organization and person. */
+const UNPAID_BOX_SECONDS_PER_DAY = 12 * 60 * 60;
+
+/** The running, per-person, daily and idle bounds every unpaid tier shares. */
+const UNPAID_SANDBOX_BOUNDS = {
+  runningBoxesPerOrganization: 2,
+  runningBoxesPerPerson: 2,
+  boxSecondsPerOrganizationPerDay: UNPAID_BOX_SECONDS_PER_DAY,
+  boxSecondsPerPersonPerDay: UNPAID_BOX_SECONDS_PER_DAY,
+  idleDrainAllHolders: true,
+} as const satisfies SandboxPlanLimit;
 
 export const DEFAULT_SANDBOX_PLAN_LIMITS: SandboxPlanLimits = {
   free: {
     viewerOnlyBoxesPerOrganization: 2,
     viewerOnlyBoxesPerMember: 1,
-    runningBoxesPerOrganization: 3,
+    ...UNPAID_SANDBOX_BOUNDS,
   },
   // A Free self-serve organization in its first three days.
   new: {
     organizationsYoungerThanMs: 3 * 24 * 60 * 60 * 1000,
     viewerOnlyBoxesPerOrganization: 1,
     viewerOnlyBoxesPerMember: 1,
-    runningBoxesPerOrganization: 3,
+    ...UNPAID_SANDBOX_BOUNDS,
   },
+  // Held or denied, with no bought credit and no paid plan: no sandbox of
+  // any kind.
   restricted: {
     viewerOnlyBoxesPerOrganization: 0,
     viewerOnlyBoxesPerMember: 0,
-    runningBoxesPerOrganization: 3,
+    runningBoxesPerOrganization: 0,
+    runningBoxesPerPerson: 0,
+    boxSecondsPerOrganizationPerDay: 0,
+    boxSecondsPerPersonPerDay: 0,
+    idleDrainAllHolders: true,
+  },
+  // No plan row yet. A new self-serve organization has none until
+  // subscription maintenance enrolls it in Free (and one with an unexpired
+  // credit period but no plan row is not enrolled), so `none` is bounded like
+  // Free rather than closed: closing it would refuse a brand-new person's
+  // first sandbox.
+  none: {
+    viewerOnlyBoxesPerOrganization: 1,
+    viewerOnlyBoxesPerMember: 1,
+    ...UNPAID_SANDBOX_BOUNDS,
   },
   pro: {
     viewerOnlyBoxesPerOrganization: 10,
@@ -12496,7 +12583,17 @@ export function parseSandboxPlanLimitsJson(raw: string): SandboxPlanLimits {
     }
     const limit: SandboxPlanLimit = {};
     for (const [field, amount] of Object.entries(value)) {
-      if (!(SANDBOX_PLAN_LIMIT_FIELDS as readonly string[]).includes(field)) {
+      if (field === "idleDrainAllHolders") {
+        if (amount === null) continue;
+        if (typeof amount !== "boolean") {
+          throw new Error(
+            `OPENGENI_SANDBOX_PLAN_LIMITS_JSON ${tier}.${field} must be a boolean or null`,
+          );
+        }
+        limit.idleDrainAllHolders = amount;
+        continue;
+      }
+      if (!(SANDBOX_PLAN_LIMIT_COUNT_FIELDS as readonly string[]).includes(field)) {
         throw new Error(
           `OPENGENI_SANDBOX_PLAN_LIMITS_JSON tier ${tier} has unknown field ${field}`,
         );
@@ -12507,7 +12604,7 @@ export function parseSandboxPlanLimitsJson(raw: string): SandboxPlanLimits {
           `OPENGENI_SANDBOX_PLAN_LIMITS_JSON ${tier}.${field} must be a non-negative integer or null`,
         );
       }
-      limit[field as (typeof SANDBOX_PLAN_LIMIT_FIELDS)[number]] = amount;
+      limit[field as (typeof SANDBOX_PLAN_LIMIT_COUNT_FIELDS)[number]] = amount;
     }
     out[tier] = limit;
   }
@@ -12516,6 +12613,99 @@ export function parseSandboxPlanLimitsJson(raw: string): SandboxPlanLimits {
 
 export function sandboxPlanLimits(settings: Settings): SandboxPlanLimits {
   return parseSandboxPlanLimitsJson(settings.sandboxPlanLimitsJson);
+}
+
+/** Plan tiers whose organization has not paid: Free, a young Free, no plan
+ * row yet, or restricted. Their boxes get the unpaid resource ceilings and
+ * egress allowlists. Paid plans, `enterprise` and `embedded` never do. */
+export const UNPAID_SANDBOX_PLAN_TIERS: readonly string[] = ["free", "new", "none", "restricted"];
+
+/** The resource class for a box of an organization on `tier`; an unknown
+ * tier (null) keeps the standard (paid) ceilings. */
+export function sandboxResourceClassForPlanTier(
+  tier: string | null | undefined,
+): Settings["sandboxResourceClass"] {
+  return tier && UNPAID_SANDBOX_PLAN_TIERS.includes(tier) ? "unpaid" : "standard";
+}
+
+/** `settings` rebound to the resource class of the creating organization's tier. */
+export function settingsForSandboxPlanTier<T extends Pick<Settings, "sandboxResourceClass">>(
+  settings: T,
+  tier: string | null | undefined,
+): T {
+  const resourceClass = sandboxResourceClassForPlanTier(tier);
+  return settings.sandboxResourceClass === resourceClass
+    ? settings
+    : { ...settings, sandboxResourceClass: resourceClass };
+}
+
+/** Modal's documented default reservation for a container that sets none. */
+const MODAL_DEFAULT_CPU_RESERVATION = 0.125;
+const MODAL_DEFAULT_MEMORY_RESERVATION_MIB = 128;
+
+/** Hard ceilings and egress allowlists for one new Modal box. Throws when a
+ * ceiling is missing or not positive, so no box is created without one. */
+export function modalSandboxResourceBounds(
+  settings: Pick<
+    Settings,
+    | "sandboxResourceClass"
+    | "modalSandboxCpu"
+    | "modalSandboxMemoryMiB"
+    | "modalSandboxCpuLimit"
+    | "modalSandboxMemoryLimitMiB"
+    | "modalUnpaidSandboxCpuLimit"
+    | "modalUnpaidSandboxMemoryLimitMiB"
+    | "modalUnpaidOutboundCidrAllowlist"
+    | "modalUnpaidOutboundDomainAllowlist"
+  >,
+): {
+  cpu: number;
+  cpuLimit: number;
+  memoryMiB: number;
+  memoryLimitMiB: number;
+  outboundCidrAllowlist?: string[];
+  outboundDomainAllowlist?: string[];
+} {
+  const unpaid = settings.sandboxResourceClass === "unpaid";
+  const cpuLimit = unpaid ? settings.modalUnpaidSandboxCpuLimit : settings.modalSandboxCpuLimit;
+  const memoryLimitMiB = unpaid
+    ? settings.modalUnpaidSandboxMemoryLimitMiB
+    : settings.modalSandboxMemoryLimitMiB;
+  if (
+    typeof cpuLimit !== "number" ||
+    !Number.isFinite(cpuLimit) ||
+    Math.trunc(cpuLimit * 1000) < 1 ||
+    typeof memoryLimitMiB !== "number" ||
+    !Number.isSafeInteger(memoryLimitMiB) ||
+    memoryLimitMiB < 1
+  ) {
+    throw new Error("Modal sandbox CPU and memory ceilings must be set and positive");
+  }
+  // A reservation never exceeds its ceiling. Without a configured
+  // reservation, Modal's own default reservation (0.125 cores, 128 MiB) is
+  // sent explicitly: Modal needs a reservation with a ceiling, and a larger
+  // one would raise what every idle box is billed.
+  const cpu = Math.min(settings.modalSandboxCpu ?? MODAL_DEFAULT_CPU_RESERVATION, cpuLimit);
+  const memoryMiB = Math.min(
+    settings.modalSandboxMemoryMiB ?? MODAL_DEFAULT_MEMORY_RESERVATION_MIB,
+    memoryLimitMiB,
+  );
+  const list = (raw: string) =>
+    raw
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean);
+  const cidrs = unpaid ? list(settings.modalUnpaidOutboundCidrAllowlist) : [];
+  const domains = unpaid ? list(settings.modalUnpaidOutboundDomainAllowlist) : [];
+  return {
+    cpu,
+    cpuLimit,
+    memoryMiB,
+    memoryLimitMiB,
+    ...(cidrs.length > 0 || domains.length > 0
+      ? { outboundCidrAllowlist: cidrs, outboundDomainAllowlist: domains }
+      : {}),
+  };
 }
 
 // Resolve the warm rate (usd_micros/sec) for a backend; 0 when the backend has no

@@ -1218,7 +1218,7 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
     expect(await tierOf(ws.accountId, ws.workspaceId)).toBe("max");
   }, 60_000);
 
-  test("(6g) a restricted organization keeps no task-less box warm even before the count definer is granted", async () => {
+  test("(6g) a restricted organization gets no box of any kind, even before the count definer is granted", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
     await admin`insert into organization_plans (account_id, plan_key, status)
@@ -1242,20 +1242,27 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
     } catch (error) {
       refused = error;
     }
-    expect(refused).toBeInstanceOf(SandboxViewerBoxLimitError);
-    expect((refused as SandboxViewerBoxLimitError).limit).toBe(0);
-    // Agent work in the same organization is not refused by viewer limits.
-    const turn = await acquireLease(db, {
-      accountId: ws.accountId,
-      workspaceId: ws.workspaceId,
-      sandboxGroupId: ws.groupId,
-      kind: "turn",
-      holderId: "t1",
-      backend: "modal",
-      leaseTtlMs: 90_000,
-      sandboxPlanLimits: DEFAULT_SANDBOX_PLAN_LIMITS,
-    });
-    expect(turn.role).toBe("spawner");
+    expect(refused).toBeInstanceOf(SandboxOrganizationBoxLimitError);
+    expect((refused as SandboxOrganizationBoxLimitError).reason).toBe("closed");
+    // Nor does agent work in the same organization start one: the turn fails
+    // with the same message instead of waiting for a slot.
+    let turnRefused: unknown;
+    try {
+      await acquireLease(db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        sandboxGroupId: ws.groupId,
+        kind: "turn",
+        holderId: "t1",
+        backend: "modal",
+        leaseTtlMs: 90_000,
+        sandboxPlanLimits: DEFAULT_SANDBOX_PLAN_LIMITS,
+      });
+    } catch (error) {
+      turnRefused = error;
+    }
+    expect(turnRefused).toBeInstanceOf(SandboxOrganizationBoxLimitError);
+    expect((turnRefused as SandboxOrganizationBoxLimitError).reason).toBe("closed");
   }, 60_000);
 
   test("(6j) a restricted organization's viewer is refused whatever credential keeps it alive", async () => {
@@ -1268,7 +1275,7 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
     await setPromotionEnforcement(true);
     // A browser session and a personal API key name the person; a workspace
     // or organization API key names the key, or nobody. The tier belongs to
-    // the organization, so each is refused the same way.
+    // the organization, so each is refused the same way: it allows no box.
     for (const viewerSubjectId of ["user:held", "api_key:held-key", undefined]) {
       let refused: unknown;
       try {
@@ -1286,7 +1293,7 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
       } catch (error) {
         refused = error;
       }
-      expect(refused).toBeInstanceOf(SandboxViewerBoxLimitError);
+      expect(refused).toBeInstanceOf(SandboxOrganizationBoxLimitError);
     }
   }, 60_000);
 

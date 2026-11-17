@@ -22,10 +22,12 @@ import {
   hasGitCredentialRepositorySelection,
   sandboxLifecycleTransitionWaitMs,
   sandboxPlanLimits,
+  settingsForSandboxPlanTier,
   sandboxWarmRateMicrosPerSecond,
   stableSandboxEnvironmentForRun,
   type Settings,
 } from "@opengeni/config";
+import { sandboxActingPerson, sandboxComputeRefusal } from "./compute-bounds";
 import type { AccessGrant, Session } from "@opengeni/contracts";
 import {
   acquireLease,
@@ -1089,6 +1091,9 @@ async function withChannelAOperation<T>(
       // A direct operation that would start a new box counts against the
       // organization's running-box limit (429 at the limit).
       sandboxPlanLimits: sandboxPlanLimits(settings),
+      // The person behind the operation (an agent attempt's initiating
+      // human): their other organizations count toward the per-person bounds.
+      actingSubjectId: sandboxActingPerson((await machineAuthority()).subjectId),
       ...(ctx.waitSignal ? { waitSignal: ctx.waitSignal } : {}),
     });
     // Close the commit/abort race before any provider handle is established.
@@ -1294,7 +1299,8 @@ async function withChannelAOperation<T>(
         );
         const result = await establishApiSandboxSpawner({
           db,
-          settings: providerSettings,
+          // A Free or unpaid organization's box gets the unpaid ceilings.
+          settings: settingsForSandboxPlanTier(providerSettings, acquired.sandboxPlanTier),
           accountId,
           workspaceId,
           sandboxGroupId,
@@ -1514,13 +1520,7 @@ export function mapChannelAError(error: unknown, waitSignal?: AbortSignal): unkn
   if (error instanceof HTTPException) return error;
   if (error instanceof SandboxPaidComputeAdmissionError)
     return new HTTPException(402, { message: error.message, cause: error });
-  if (error instanceof SandboxOrganizationBoxLimitError)
-    return new HTTPException(429, {
-      message:
-        `your organization already runs ${error.limit} computers, the most its plan allows; ` +
-        "close one or wait for a task to finish",
-      cause: error,
-    });
+  if (error instanceof SandboxOrganizationBoxLimitError) return sandboxComputeRefusal(error);
   if (isChannelARequestCancellation(error, waitSignal))
     return new HTTPException(499 as never, {
       message: "request cancelled",

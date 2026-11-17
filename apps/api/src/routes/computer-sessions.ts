@@ -7,8 +7,10 @@ import { computerCursorIdentity } from "./computer-cursor-identity";
 import {
   resolveFirstPartyDelegationSecret,
   resolveStreamTokenSecret,
+  sandboxPlanLimits,
   sandboxWarmRateMicrosPerSecond,
 } from "@opengeni/config";
+import { sandboxActingPerson, sandboxComputeRefusal } from "../sandbox/compute-bounds";
 import {
   BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX,
   BROWSER_CONTROL_PORT,
@@ -1932,7 +1934,13 @@ export function registerComputerSessionRoutes(
       rigVersionId: sourceSession.rigVersionId,
       leaseTtlMs: deps.settings.sandboxLeaseTtlMs,
       expectedEpoch: placement.lease.leaseEpoch,
+      // The plan's compute bounds apply to a computer session's box like any
+      // other holder's (a held or denied organization, a spent daily budget).
+      sandboxPlanLimits: sandboxPlanLimits(deps.settings),
+      actingSubjectId: sandboxActingPerson(grant.subjectId),
       waitSignal,
+    }).catch((error: unknown) => {
+      throw sandboxComputeRefusal(error) ?? error;
     });
     if (acquired.role === "blocked" || acquired.role === "fenced") {
       throw new ComputerSessionStateError("ComputerSession placement is transitioning; retry");

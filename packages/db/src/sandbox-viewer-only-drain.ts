@@ -86,6 +86,8 @@ type ViewerOnlyLeaseRow = {
   sandbox_group_id: string;
   lease_epoch: number | string;
   viewers: number | string;
+  total?: number | string;
+  commands?: number | string;
   interaction_reported: boolean | null;
   last_active_at: Date | string;
   observed_at: Date | string;
@@ -98,8 +100,14 @@ const OPEN_STATUS_SQL = sql.raw(
 );
 
 /** Warm, viewer-only leases of one workspace (optionally one group) with
- * their activity. Caller supplies the RLS-scoped executor. */
-function viewerOnlyLeaseQuery(workspaceId: string, sandboxGroupId: string | null) {
+ * their activity, or with `anyHolder` every warm lease no turn holds (viewer,
+ * direct request, process or Browser/ComputerSession). Caller supplies the
+ * RLS-scoped executor. */
+function viewerOnlyLeaseQuery(
+  workspaceId: string,
+  sandboxGroupId: string | null,
+  anyHolder = false,
+) {
   return sql`
     select
       lease.id,
@@ -108,6 +116,8 @@ function viewerOnlyLeaseQuery(workspaceId: string, sandboxGroupId: string | null
       lease.sandbox_group_id,
       lease.lease_epoch,
       holders.viewers,
+      holders.total,
+      holders.commands,
       holders.interaction_reported,
       greatest(holders.last_attach_or_interaction, sessions_activity.last_turn_activity)
         as last_active_at,
@@ -123,6 +133,7 @@ function viewerOnlyLeaseQuery(workspaceId: string, sandboxGroupId: string | null
       select
         count(*)::int as total,
         count(*) filter (where holder.kind = 'viewer')::int as viewers,
+        count(*) filter (where holder.kind in ('process', 'interaction'))::int as commands,
         bool_or(holder.last_interaction_at is not null) as interaction_reported,
         max(coalesce(holder.last_interaction_at, holder.created_at)) as last_attach_or_interaction
       from sandbox_lease_holders holder
@@ -158,7 +169,7 @@ function viewerOnlyLeaseQuery(workspaceId: string, sandboxGroupId: string | null
       and lease.turn_holders = 0
       and lease.backend not in (${EXEMPT_BACKENDS_SQL})
       and holders.total > 0
-      and holders.total = holders.viewers
+      ${anyHolder ? sql`` : sql`and holders.total = holders.viewers`}
     order by lease.sandbox_group_id
   `;
 }
@@ -295,6 +306,169 @@ export async function drainViewerOnlyLease(
             and lease_epoch = ${input.expectedEpoch}
         `);
         return { drained: true, releasedViewers: released.length };
+      }),
+  );
+}
+
+// ============================================================================
+// Free-compute bounds over every holder kind (docs/deployment.md, "Free compute
+// bounds"). For an organization whose plan sets them, the reaper also drains a
+// warm box no turn holds, whatever holds it:
+//
+//   - compute_closed: the plan allows no sandbox (a held or denied
+//     organization that has not paid);
+//   - compute_daily_budget: the organization or its people used today's box
+//     time;
+//   - compute_idle: nothing on it was used (a new request, process, browser
+//     or desktop session, reported viewer interaction, message or turn) for
+//     the idle window.
+//
+// A box held only by viewers and in-flight requests drains like a viewer-only
+// box. A box that still runs commands or holds a Browser/ComputerSession gets
+// the orderly stop a box gets before its provider lifetime ends (a
+// provider-deadline rotation): new arrivals are fenced, its commands are
+// asked to stop, /workspace is saved and the box ends. Nothing restarts it
+// until someone is admitted again.
+// ============================================================================
+
+export type ComputeBoundsDrainReason = "compute_closed" | "compute_daily_budget" | "compute_idle";
+
+export type NoTurnWarmLease = ViewerOnlyWarmLease & {
+  /** Every holder (viewer, direct request, process, Browser/ComputerSession). */
+  holders: number;
+  /** Process and Browser/ComputerSession holders. */
+  commandHolders: number;
+};
+
+function mapNoTurnLease(row: ViewerOnlyLeaseRow): NoTurnWarmLease {
+  return {
+    ...mapViewerOnlyLease(row),
+    holders: Number(row.total ?? 0),
+    commandHolders: Number(row.commands ?? 0),
+  };
+}
+
+/** Warm boxes of one workspace that no turn holds, with their activity. */
+export async function listNoTurnWarmLeases(
+  db: Database,
+  input: { accountId: string; workspaceId: string },
+): Promise<NoTurnWarmLease[]> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await rawRows<ViewerOnlyLeaseRow>(
+        scopedDb,
+        viewerOnlyLeaseQuery(input.workspaceId, null, true),
+      );
+      return rows.map(mapNoTurnLease);
+    },
+  );
+}
+
+export type ComputeBoundsDrainOutcome =
+  | { drained: true; mode: "drained" | "stop_requested"; releasedHolders: number }
+  | {
+      drained: false;
+      reason:
+        | "not_held"
+        | "epoch_changed"
+        | "open_session_work"
+        | "transitioning"
+        | "active_since_decision";
+    };
+
+/**
+ * Drain one warm box no turn holds under the plan's compute bounds. The
+ * decision is checked again under the lease row lock: a turn that arrived
+ * keeps the box, and for `compute_idle` so does any activity since the read
+ * or open session work. Viewer and direct-request holders are released; a box
+ * still holding processes or a Browser/ComputerSession instead gets a
+ * provider-deadline rotation request (see above).
+ */
+export async function drainNoTurnLeaseForComputeBounds(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    expectedEpoch: number;
+    reason: ComputeBoundsDrainReason;
+    /** compute_idle only: nothing on the box was active for this long. */
+    quietForMs: number;
+    idleGraceMs: number;
+  },
+): Promise<ComputeBoundsDrainOutcome> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw): Promise<ComputeBoundsDrainOutcome> => {
+        const tx = txRaw as unknown as Database;
+        const locked = await rawRows<{ id: string; lease_epoch: number | string }>(
+          tx,
+          sql`
+            select id, lease_epoch from sandbox_leases
+            where workspace_id = ${input.workspaceId}
+              and sandbox_group_id = ${input.sandboxGroupId}
+            for update
+          `,
+        );
+        const lease = locked[0];
+        if (!lease) return { drained: false, reason: "not_held" };
+        if (Number(lease.lease_epoch) !== input.expectedEpoch) {
+          return { drained: false, reason: "epoch_changed" };
+        }
+        const current = (
+          await rawRows<ViewerOnlyLeaseRow>(
+            tx,
+            viewerOnlyLeaseQuery(input.workspaceId, input.sandboxGroupId, true),
+          )
+        ).map(mapNoTurnLease)[0];
+        if (!current) return { drained: false, reason: "not_held" };
+        if (current.transitioning) return { drained: false, reason: "transitioning" };
+        if (input.reason === "compute_idle") {
+          if (current.openSessionWork) return { drained: false, reason: "open_session_work" };
+          const quietCutoffMs =
+            current.observedAt.getTime() - Math.max(0, Math.floor(input.quietForMs));
+          if (current.lastActiveAt.getTime() > quietCutoffMs) {
+            return { drained: false, reason: "active_since_decision" };
+          }
+        }
+        const released = await rawRows<{ id: string }>(
+          tx,
+          sql`
+            delete from sandbox_lease_holders
+            where lease_id = ${lease.id} and kind in ('viewer', 'direct')
+            returning id
+          `,
+        );
+        if (current.commandHolders === 0) {
+          await tx.execute(sql`
+            update sandbox_leases set
+              refcount = 0, turn_holders = 0, viewer_holders = 0,
+              liveness = 'draining',
+              expires_at = now() + (${String(input.idleGraceMs)} || ' milliseconds')::interval,
+              updated_at = now()
+            where id = ${lease.id}
+              and liveness = 'warm'
+              and lease_epoch = ${input.expectedEpoch}
+          `);
+          return { drained: true, mode: "drained", releasedHolders: released.length };
+        }
+        await tx.execute(sql`
+          update sandbox_leases set
+            rotation_requested_at = coalesce(rotation_requested_at, now()),
+            rotation_reason = coalesce(rotation_reason, 'provider_deadline'),
+            refcount = (select count(*)::int from sandbox_lease_holders holder
+              where holder.lease_id = ${lease.id}),
+            viewer_holders = 0,
+            updated_at = now()
+          where id = ${lease.id}
+            and liveness = 'warm'
+            and lease_epoch = ${input.expectedEpoch}
+        `);
+        return { drained: true, mode: "stop_requested", releasedHolders: released.length };
       }),
   );
 }

@@ -1577,7 +1577,14 @@ commands as not started, and parks the same turn for
 `ORGANIZATION_SANDBOX_CAPACITY_RETRY_MS` (one minute) with no retry budget and no
 turn worker held. The replacement attempt asks again; joining or re-arming a box
 that already runs never counts. This is a concurrency bound, never a run-length
-limit: an admitted turn keeps its box for as long as it works. The lazy
+limit: an admitted turn keeps its box for as long as it works. The same wait
+applies to the per-person bound `runningBoxesPerPerson`. A tier that allows no
+box (`restricted`) or an organization or person past today's box time
+(`boxSecondsPerOrganizationPerDay`, `boxSecondsPerPersonPerDay`) never frees
+within the turn, so admission raises `SandboxOrganizationBoxLimitError` instead
+and the turn fails with its message (code `sandbox_compute_unavailable`, not
+retryable); a turn that already holds the box finishes (see
+[deployment](deployment.md), "Free compute bounds"). The lazy
 provisioner never retries the transition in place.
 
 **Durable recovery observability.** The control worker reads one content-free,
