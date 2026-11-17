@@ -18,6 +18,7 @@
  * person, billed as app use),
  * OPENGENI_EVAL_CONNECTED_WORKSPACE_ID (integrations connected),
  * OPENGENI_EVAL_EMPTY_WORKSPACE_ID (nothing connected; for not_connected rows),
+ * both defaulting to the shared test workspaces when the caller can open them,
  * optional OPENGENI_EVAL_APP_URL for chat links, and VERIFY_* (see verify.ts).
  *
  * Results append to DIR/results.jsonl; a rerun of the same DIR skips rows that
@@ -84,6 +85,31 @@ function env(name: string): string {
   const value = process.env[name];
   if (!value) throw new Error(`set ${name}`);
   return value;
+}
+
+/**
+ * The shared test workspaces of the production "Opengeni Integration Tests"
+ * org: "All integrations" has every integration connected with test
+ * accounts; "Nothing connected" has none, for the not_connected and
+ * Connect-card rows.
+ */
+export const DEFAULT_EVAL_WORKSPACES = {
+  OPENGENI_EVAL_CONNECTED_WORKSPACE_ID: "16b48a95-e3b1-4063-bbbe-13de88e18ff8",
+  OPENGENI_EVAL_EMPTY_WORKSPACE_ID: "7593433e-07e7-4d8f-a359-0ff3de2d99cd",
+} as const;
+
+/**
+ * Fill each unset workspace variable with its shared default when the caller
+ * can open that workspace. A deployment without them still has to name its
+ * own, and an explicit variable always wins.
+ */
+export async function applyDefaultWorkspaces(
+  canOpen: (workspaceId: string) => Promise<boolean>,
+  environment: Record<string, string | undefined> = process.env,
+): Promise<void> {
+  for (const [name, workspaceId] of Object.entries(DEFAULT_EVAL_WORKSPACES)) {
+    if (!environment[name] && (await canOpen(workspaceId))) environment[name] = workspaceId;
+  }
 }
 
 /**
@@ -603,6 +629,14 @@ async function runAll(flags: Map<string, string>) {
   const resultsFile = join(outDir, "results.jsonl");
   const api = await new OpengeniApi(env("OPENGENI_EVAL_API_URL"), authFromEnv()).init();
   await initApprovalKeys(env("OPENGENI_EVAL_API_URL"));
+  await applyDefaultWorkspaces(async (workspaceId) => {
+    try {
+      await api.call("GET", `/v1/workspaces/${workspaceId}`, undefined, 1);
+      return true;
+    } catch {
+      return false;
+    }
+  });
   const skip = (flags.get("skip-integrations") ?? "").split(",").filter(Boolean);
 
   let jobs: Job[];
