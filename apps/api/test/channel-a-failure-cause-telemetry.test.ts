@@ -7,7 +7,6 @@ import { createObservability } from "@opengeni/observability";
 import { SandboxOrganizationBoxLimitError, SandboxPaidComputeAdmissionError } from "@opengeni/db";
 import {
   BrowserControlRequestError,
-  SelfhostedControlError,
   SynchronousCommandOutcomeUnknownError,
 } from "@opengeni/runtime/sandbox";
 import {
@@ -83,19 +82,6 @@ describe("Channel-A failure cause telemetry", () => {
         `backend="selfhosted",op="terminal.exec",reason="request_rejected",status="${status}"`,
       );
     }
-  });
-
-  test("an offline Connected Machine is reported with the 409 the route returns", () => {
-    const offline = new SelfhostedControlError({
-      message: "Connected Machine has no live runner connection",
-      code: 0,
-      reason: "agent_offline",
-      retryable: false,
-      agentOffline: true,
-    });
-    expect((mapChannelAError(offline) as HTTPException).status).toBe(409);
-    const [line] = observedWarnings(offline, "terminal.exec");
-    expect(line).toMatchObject({ reason: "provider_unavailable", status: 409 });
   });
 
   test("a controller's own 4xx refusal is counted as rejected, not as an unexpected 500", async () => {

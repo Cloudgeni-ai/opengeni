@@ -1670,14 +1670,6 @@ export function channelAOperationFailureDiagnostic(
       errorCode: "sandbox_channel_a_operation_failed",
     };
   }
-  // An offline Connected Machine is answered with 409, not a server fault.
-  if (error instanceof SelfhostedControlError && error.agentOffline) {
-    return {
-      reason: "provider_unavailable",
-      status: 409,
-      errorCode: "sandbox_channel_a_provider_unavailable",
-    };
-  }
   if (error instanceof SandboxProviderReadLockUnavailableError) {
     return {
       reason: "provider_read_busy",
