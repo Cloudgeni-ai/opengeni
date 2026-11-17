@@ -12,6 +12,7 @@ import {
   CodeSearchArgumentError,
   JevClient,
   createJevDecisionModel,
+  firstMatchingLine,
   parseCodeGrepArguments,
   renderCodeGrepError,
   runCodeGrep,
@@ -218,8 +219,17 @@ describeWithRipgrep("runCodeGrep", () => {
     expect(r.stats.judge).toBe("off");
     expect(r.stats.shown).toBeGreaterThan(0);
     expect(r.stats.shown).toBeLessThan(r.stats.excerpts);
-    // Files matching both patterns rank first.
-    expect(r.text.indexOf("--- src/auth/")).toBeLessThan(r.text.indexOf("Other matching files"));
+    // Files matching both patterns rank first; excerpts past the budget are listed by location.
+    const more = r.text.indexOf("More excerpts, not shown in full");
+    expect(r.text.indexOf("--- src/auth/")).toBeLessThan(more);
+    const unshown = r.excerpts.find((e) => !e.shown)!;
+    expect(r.text.slice(more)).toContain(`${unshown.path}:${unshown.start}-${unshown.end}: `);
+  });
+
+  test("firstMatchingLine picks the numbered line that matches the excerpt's pattern", () => {
+    const e = { text: "10| import x\n11| const token = renew()\n12| }", patterns: [1] };
+    expect(firstMatchingLine(e, ["nothing", "Token"], true)).toBe("11| const token = renew()");
+    expect(firstMatchingLine(e, ["nothing", "absent("])).toBe("10| import x");
   });
 
   test("paths limit the search and missing paths are reported", async () => {

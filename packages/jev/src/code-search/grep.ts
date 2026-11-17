@@ -40,7 +40,7 @@ export interface CodeGrepInput {
   /** Judges excerpts; without one the excerpts are returned in lexical order. */
   decisionModel?: DecisionModel | null | undefined;
   signal?: AbortSignal | undefined;
-  /** Output size in characters (default 10000). */
+  /** Characters of excerpt text shown in full (default 6000); later excerpts are listed by location. */
   budgetChars?: number | undefined;
   limits?: Partial<CodeGrepLimits> | undefined;
   onStage?: ((stage: string, data: Record<string, unknown>) => void) | undefined;
@@ -65,6 +65,8 @@ export interface CodeGrepLimits {
   stopFloor: number;
   judgeDeadlineMs: number;
   otherFilesListed: number;
+  /** Excerpts past the text budget, listed as location plus their first matching line. */
+  moreExcerptsListed: number;
   matchesPerFile: number;
 }
 
@@ -81,6 +83,7 @@ export const CODE_GREP_DEFAULT_LIMITS: Readonly<CodeGrepLimits> = Object.freeze(
   stopFloor: 0.8,
   judgeDeadlineMs: 20_000,
   otherFilesListed: 40,
+  moreExcerptsListed: 20,
   matchesPerFile: 50,
 });
 
@@ -154,6 +157,31 @@ const excerptQuestion = (id: string) =>
 const STOP_QUESTION =
   "Do the excerpts found so far already answer the question, so that the remaining matches need not be examined?";
 
+/** The excerpt's first line matching one of its patterns (numbered as in the excerpt), shortened. */
+export function firstMatchingLine(
+  e: Pick<CodeGrepExcerpt, "text" | "patterns">,
+  patterns: readonly string[],
+  ignoreCase?: boolean,
+): string {
+  const regexes = e.patterns.flatMap((i) => {
+    const p = patterns[i];
+    if (p === undefined) return [];
+    const flags = (ignoreCase ?? !/[A-Z]/.test(p)) ? "i" : "";
+    try {
+      return [new RegExp(p, flags)];
+    } catch {
+      return [new RegExp(escapeRegex(p), flags)];
+    }
+  });
+  const lines = e.text.split("\n");
+  const hit =
+    lines.find((l) => regexes.some((r) => r.test(l.replace(/^\s*\d+\| ?/, "")))) ??
+    lines.find((l) => l.replace(/^\s*\d+\| ?/, "").trim()) ??
+    "";
+  const line = hit.trim();
+  return line.length > 140 ? `${line.slice(0, 140)}...` : line;
+}
+
 export async function runCodeGrep(input: CodeGrepInput): Promise<CodeGrepResult> {
   const t0 = performance.now();
   const L: CodeGrepLimits = { ...CODE_GREP_DEFAULT_LIMITS, ...input.limits };
@@ -167,7 +195,7 @@ export async function runCodeGrep(input: CodeGrepInput): Promise<CodeGrepResult>
     }
   };
   const session = new WorkspaceSession(input.workspace, signal, cfg.recall.ripgrepTimeoutMs);
-  const budget = input.budgetChars ?? 10_000;
+  const budget = input.budgetChars ?? 6_000;
 
   // ---- 1. the caller's patterns, in parallel
   let searchPaths = ["."];
@@ -406,8 +434,11 @@ export async function runCodeGrep(input: CodeGrepInput): Promise<CodeGrepResult>
     e.shown = true;
     used += block.length;
   }
+  // Excerpts past the budget stay findable: their location and first matching line, not their text.
+  const more = order.filter((e) => !e.shown).slice(0, L.moreExcerptsListed);
   const shownPaths = new Set(shown.map((e) => e.path));
-  const others = ranked.filter((f) => !shownPaths.has(f.path));
+  const pointedPaths = new Set([...shownPaths, ...more.map((e) => e.path)]);
+  const others = ranked.filter((f) => !pointedPaths.has(f.path));
   const head: string[] = [];
   const filesTotal = files.size;
   head.push(
@@ -436,6 +467,17 @@ export async function runCodeGrep(input: CodeGrepInput): Promise<CodeGrepResult>
     (e) =>
       `--- ${e.path}:${e.start}-${e.end}${e.p === null ? "" : ` (relevance ${e.p.toFixed(2)})`}\n${e.text.length > L.shownExcerptChars ? `${e.text.slice(0, L.shownExcerptChars)}\n...[excerpt cut]` : e.text}`,
   );
+  const moreText = more.length
+    ? [
+        judge === "on"
+          ? "Also judged relevant, not shown in full (read these lines if needed):"
+          : "More excerpts, not shown in full (read these lines if needed):",
+        ...more.map(
+          (e) =>
+            `${e.path}:${e.start}-${e.end}${e.p === null ? "" : ` (relevance ${e.p.toFixed(2)})`}: ${firstMatchingLine(e, input.patterns, input.ignoreCase)}`,
+        ),
+      ].join("\n")
+    : "";
   const tail: string[] = [];
   if (others.length) {
     tail.push(
@@ -448,7 +490,7 @@ export async function runCodeGrep(input: CodeGrepInput): Promise<CodeGrepResult>
     if (others.length > L.otherFilesListed)
       tail.push(`...and ${others.length - L.otherFilesListed} more`);
   }
-  const text = [head.join("\n"), ...body, tail.join("\n")].filter(Boolean).join("\n\n");
+  const text = [head.join("\n"), ...body, moreText, tail.join("\n")].filter(Boolean).join("\n\n");
   const stats: CodeGrepStats = {
     wallMs: Math.round(performance.now() - t0),
     grepMs,

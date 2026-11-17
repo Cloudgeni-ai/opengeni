@@ -73,6 +73,7 @@ export {
 } from "./code-search/tool";
 export {
   CODE_GREP_DEFAULT_LIMITS,
+  firstMatchingLine,
   runCodeGrep,
   type CodeGrepExcerpt,
   type CodeGrepInput,
