@@ -17,6 +17,9 @@ import {
   EDGE_SWIPE_WIDTH,
   edgeSwipeOpensDrawer,
   TAB_BAR_HEIGHT,
+  TAB_BAR_GAP,
+  TAB_BAR_SIDE,
+  tabBarBottomGap,
   tabBarHeight,
   tabBadge,
   tabNavigation,
@@ -50,7 +53,7 @@ export function openTab(from: AppTab | null, to: AppTab): void {
 const openChatsMenu = () => router.push("/sessions");
 
 /**
- * One of the bar's places: its content, the bar docked under it, and a swipe
+ * One of the bar's places: its content, the pill bar under it, and a swipe
  * right from the left edge that opens the chats menu. The content is laid out
  * above the bar, so nothing scrolls or sits under it.
  */
@@ -86,9 +89,10 @@ export function TabScreen({ tab, children }: { tab: AppTab; children: ReactNode 
 }
 
 /**
- * The bar docked flush at the bottom, inside the safe area, with the place in
- * use filled. Meetings shows a red dot while a recording runs; Inbox counts
- * what waits on the person (questions and approvals).
+ * The bar: a solid rounded pill just above the home indicator, as in Claude,
+ * on plain page background (the content ends above it, nothing shows behind
+ * it), with the place in use filled. Meetings shows a red dot while a
+ * recording runs; Inbox counts what waits on the person.
  */
 export function AppTabBar({ current }: { current: AppTab }) {
   const theme = useNativeTimelineTheme();
@@ -104,15 +108,16 @@ export function AppTabBar({ current }: { current: AppTab }) {
     }, [refreshInbox]),
   );
   const badge = tabBadge(nativeInboxAttentionCount(inbox.data));
-  const height = tabBarHeight(insets.bottom);
+  const android = Platform.OS === "android";
   return (
     <View
       style={{
-        height,
-        paddingBottom: height - TAB_BAR_HEIGHT,
+        height: tabBarHeight(insets.bottom),
+        paddingTop: TAB_BAR_GAP,
+        paddingBottom: tabBarBottomGap(insets.bottom),
+        paddingHorizontal: TAB_BAR_SIDE,
         backgroundColor: c.bg,
-        borderTopWidth: StyleSheet.hairlineWidth,
-        borderTopColor: c.border,
+        alignItems: "center",
       }}
     >
       <View
@@ -120,11 +125,13 @@ export function AppTabBar({ current }: { current: AppTab }) {
         style={{
           flexDirection: "row",
           height: TAB_BAR_HEIGHT,
-          paddingHorizontal: 8,
-          paddingVertical: 4,
-          alignSelf: "center",
+          padding: 4,
           width: "100%",
-          maxWidth: 520,
+          maxWidth: 440,
+          borderRadius: TAB_BAR_HEIGHT / 2,
+          backgroundColor: android ? c["surface-2"] : c["surface-1"],
+          borderWidth: StyleSheet.hairlineWidth * 2,
+          borderColor: c.border,
         }}
       >
         {APP_TABS.map((entry) => {
@@ -162,7 +169,7 @@ export function AppTabBar({ current }: { current: AppTab }) {
               })}
             >
               <View>
-                <Icon name={entry.icon} size={20} color={selected ? c.fg : c["fg-muted"]} />
+                <Icon name={entry.icon} size={22} color={selected ? c.fg : c["fg-muted"]} />
                 {live ? (
                   <View
                     style={{

@@ -70,15 +70,31 @@ export function edgeSwipeOpensDrawer(swipe: {
   return swipe.dx >= EDGE_SWIPE_DISTANCE || swipe.vx >= EDGE_SWIPE_VELOCITY;
 }
 
-/** The bar's row, a little under iOS's own tab bar; it docks at the bottom with the screen's content laid out above it. */
-export const TAB_BAR_HEIGHT = 48;
+/** The pill's height: an icon over a small label, with room for the filled highlight. */
+export const TAB_BAR_HEIGHT = 56;
+/** Page background between the content's end and the pill. */
+export const TAB_BAR_GAP = 8;
+/** The pill's distance from each side of the screen. */
+export const TAB_BAR_SIDE = 20;
 
 /** The badge on Inbox: what waits on the person, capped as iOS does. */
 export function tabBadge(waiting: number): string | null {
   if (waiting <= 0) return null;
   return waiting > 99 ? "99+" : String(waiting);
 }
-/** The bar's whole height: its row, then the home indicator's area (a little room without one). */
+/**
+ * The pill's distance from the bottom: just above the home indicator, as in
+ * Claude, and a little room on phones without one.
+ */
+export function tabBarBottomGap(bottomInset: number): number {
+  return Math.max(bottomInset - 12, 10);
+}
+
+/**
+ * The strip the pill takes under a screen's content: a gap, the pill, then the
+ * room to the bottom edge. The content ends above it, so nothing sits behind
+ * the pill.
+ */
 export function tabBarHeight(bottomInset: number): number {
-  return TAB_BAR_HEIGHT + Math.max(bottomInset, 6);
+  return TAB_BAR_GAP + TAB_BAR_HEIGHT + tabBarBottomGap(bottomInset);
 }

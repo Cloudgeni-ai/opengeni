@@ -60,7 +60,7 @@ the workspace switcher.
 
 ## Navigation
 
-A bar docked at the bottom moves between **Chats** (Home), **Artifacts**,
+A rounded bar at the bottom (the content ends above it) moves between **Chats** (Home), **Artifacts**,
 **Meetings** and **Inbox** (with a count of the questions and approvals
 waiting on you). Home stays at the bottom of the stack and
 the other places swap in place above it, so switching never grows the stack.

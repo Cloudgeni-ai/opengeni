@@ -3,11 +3,13 @@ import {
   APP_TABS,
   EDGE_SWIPE_DISTANCE,
   edgeSwipeOpensDrawer,
+  tabBarBottomGap,
   tabBarHeight,
   tabBadge,
   tabForPath,
   tabNavigation,
   TAB_BAR_HEIGHT,
+  TAB_BAR_GAP,
 } from "./app-tabs";
 
 test("the bar has Chats, Artifacts, Meetings and Inbox, in that order", () => {
@@ -55,11 +57,11 @@ test("other swipes don't open it", () => {
   expect(edgeSwipeOpensDrawer({ startX: 4, dx: 30, dy: 0, vx: 100 })).toBe(false);
 });
 
-test("the docked bar takes its row plus the home indicator's area", () => {
-  // Slim: no taller than iOS's own tab bar row (49pt).
-  expect(TAB_BAR_HEIGHT).toBeLessThanOrEqual(49);
-  expect(tabBarHeight(34)).toBe(TAB_BAR_HEIGHT + 34);
-  expect(tabBarHeight(0)).toBe(TAB_BAR_HEIGHT + 6);
+test("the pill sits just above the home indicator, with the content ending above it", () => {
+  expect(TAB_BAR_HEIGHT).toBeLessThanOrEqual(60);
+  expect(tabBarBottomGap(34)).toBe(22);
+  expect(tabBarBottomGap(0)).toBe(10);
+  expect(tabBarHeight(34)).toBe(TAB_BAR_GAP + TAB_BAR_HEIGHT + 22);
 });
 
 test("Inbox's badge counts what waits, capped at 99+", () => {
