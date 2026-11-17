@@ -1467,6 +1467,7 @@ export * from "./sandbox-viewer-only-drain";
 export * from "./sandbox-fleet-limits";
 import {
   lockSandboxUnpaidFleet,
+  sandboxUnpaidFleetAvailable,
   readSandboxFleetPressure,
   readSandboxUnpaidFleet,
   readSandboxUnpaidFleetBoxSecondsToday,
@@ -50752,9 +50753,12 @@ async function enforceSandboxFleetLimits(
   const cap = Math.min(...caps);
   // Under pressure with no new unpaid box allowed, nothing needs counting.
   if (cap === 0) refuse("fleet_busy", 0);
-  await lockSandboxUnpaidFleet(tx);
   let counts: SandboxUnpaidFleetCounts | null;
   try {
+    // Not granted yet (1486 withholds it): the running cap waits for its
+    // grant, and no admission takes the fleet lock for nothing.
+    if (!(await sandboxUnpaidFleetAvailable(tx))) return;
+    await lockSandboxUnpaidFleet(tx);
     counts = await readSandboxUnpaidFleet(tx, {
       excludeLeaseId: input.leaseId,
       withBoxSeconds: false,
@@ -50763,7 +50767,6 @@ async function enforceSandboxFleetLimits(
     reportSandboxComputeStandingFallback(input.onFallback, error, "fleet");
     return refuse("fleet_busy", cap);
   }
-  // Not granted yet (1486 withholds it): the running cap waits for its grant.
   if (counts === null) return;
   if (counts.runningBoxes >= cap) refuse("fleet_busy", cap);
 }
@@ -52690,26 +52693,31 @@ async function acquireLeaseOnce(
           // (runningBoxesPerPerson); their other organizations' boxes were
           // counted before this transaction.
           // A young unpaid organization runs fewer boxes (fleet limits).
+          // It counts boxes a turn or a person's own work keeps warm, not
+          // boxes only viewers keep warm (the viewer-only limits bound those),
+          // so an open desktop does not park the organization's next chat.
           const youngLimit =
+            backend !== "selfhosted" &&
+            kind !== "viewer" &&
             fleet !== null &&
             fleet.young &&
-            fleet.limits.youngOrganizationRunningBoxes !== undefined &&
-            (planLimit.runningBoxesPerOrganization === undefined ||
-              fleet.limits.youngOrganizationRunningBoxes < planLimit.runningBoxesPerOrganization)
+            fleet.limits.youngOrganizationRunningBoxes !== undefined
               ? fleet.limits.youngOrganizationRunningBoxes
               : undefined;
           const runningBoxLimit =
-            backend === "selfhosted"
-              ? undefined
-              : (youngLimit ?? planLimit.runningBoxesPerOrganization);
+            backend === "selfhosted" ? undefined : planLimit.runningBoxesPerOrganization;
           const personBoxLimit =
             backend === "selfhosted" || standing === null || !standing.bounded
               ? undefined
               : planLimit.runningBoxesPerPerson;
-          if (runningBoxLimit !== undefined || personBoxLimit !== undefined) {
+          if (
+            runningBoxLimit !== undefined ||
+            personBoxLimit !== undefined ||
+            youngLimit !== undefined
+          ) {
             await lockOrganizationSandboxLimit(tx, accountId);
             const counts =
-              runningBoxLimit === 0 || personBoxLimit === 0
+              runningBoxLimit === 0 || personBoxLimit === 0 || youngLimit === 0
                 ? null
                 : await organizationWarmSandboxCounts(tx, {
                     accountId,
@@ -52720,26 +52728,32 @@ async function acquireLeaseOnce(
               runningBoxLimit !== undefined &&
               (runningBoxLimit === 0 ||
                 (counts !== null && counts.runningBoxes >= runningBoxLimit));
+            const youngFull =
+              !organizationFull &&
+              youngLimit !== undefined &&
+              (youngLimit === 0 ||
+                (counts !== null && counts.runningBoxes - counts.viewerOnlyBoxes >= youngLimit));
             const personFull =
               !organizationFull &&
+              !youngFull &&
               personBoxLimit !== undefined &&
               (personBoxLimit === 0 ||
                 (counts !== null &&
                   (standing?.personOwnsOrganization ? counts.runningBoxes : 0) +
                     (standing?.personOtherRunningBoxes ?? 0) >=
                     personBoxLimit));
-            if (organizationFull || personFull) {
-              const limit = organizationFull ? (runningBoxLimit ?? 0) : (personBoxLimit ?? 0);
+            if (organizationFull || youngFull || personFull) {
+              const limit = organizationFull
+                ? (runningBoxLimit ?? 0)
+                : youngFull
+                  ? (youngLimit ?? 0)
+                  : (personBoxLimit ?? 0);
               if (kind !== "turn") {
                 throw new SandboxOrganizationBoxLimitError(
                   workspaceId,
                   sandboxGroupId,
                   limit,
-                  organizationFull
-                    ? youngLimit !== undefined && runningBoxLimit !== 0
-                      ? "young_running"
-                      : "running"
-                    : "person_running",
+                  organizationFull ? "running" : youngFull ? "young_running" : "person_running",
                 );
               }
               return {

@@ -4,6 +4,7 @@ import type { NoTurnWarmLease } from "@opengeni/db";
 import { SandboxOrganizationBoxLimitError, SandboxLeaseTransitionError } from "@opengeni/db";
 import { agentRunFailurePayload } from "../src/activities/agent-turn/errors";
 import { isLazySandboxProvisionRetryable } from "../src/activities/agent-turn/sandbox-provision";
+import { initializeWorkerOutcomeMetrics } from "../src/observability-metrics";
 import {
   organizationHasComputeBounds,
   planComputeBoundsDrains,
@@ -194,6 +195,21 @@ describe("unpaid fleet limits", () => {
     expect(new SandboxOrganizationBoxLimitError("ws", "group", 1, "young_running").code).toBe(
       "sandbox_compute_unavailable",
     );
+  });
+
+  test("every fleet state is published at zero from start, so its first pass alerts", () => {
+    const counters: Array<{ name: string; labels?: Record<string, string>; amount?: number }> = [];
+    initializeWorkerOutcomeMetrics({
+      incrementCounter: (input: (typeof counters)[number]) => counters.push(input),
+    } as unknown as Parameters<typeof initializeWorkerOutcomeMetrics>[0]);
+    const fleet = counters.filter(
+      (counter) => counter.name === "opengeni_sandbox_unpaid_fleet_checks_total",
+    );
+    expect(fleet.map((counter) => [counter.labels?.state, counter.amount])).toEqual([
+      ["normal", 0],
+      ["pressure", 0],
+      ["daily_budget_exhausted", 0],
+    ]);
   });
 
   test("the reaper reports a spent day before pressure", () => {

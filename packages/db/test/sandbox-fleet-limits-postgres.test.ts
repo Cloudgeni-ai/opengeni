@@ -222,6 +222,11 @@ describe("unpaid fleet limits (real PostgreSQL)", () => {
       reason: "organization_sandbox_capacity",
       organizationBoxLimit: 1,
     });
+    // A box only viewers keep warm (an open desktop) is not counted, so the
+    // first chat still gets its box.
+    const watching = await organization({ plan: "free", ageMs: 60_000 });
+    expect((await acquire(watching, "viewer", fleet)).role).toBe("spawner");
+    expect((await acquire(watching, "turn", fleet, { holderId: "t2" })).role).toBe("spawner");
     // A plan-less young organization is bounded the same way.
     const noPlan = await organization({ ageMs: 60_000 });
     expect((await acquire(noPlan, "direct", fleet)).role).toBe("spawner");

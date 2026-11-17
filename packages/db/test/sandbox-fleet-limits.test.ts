@@ -3,6 +3,7 @@ import type { Database } from "../src/database";
 import {
   observeSandboxFleetWarmBoxes,
   readSandboxFleetPressure,
+  readSandboxUnpaidFleetBoxSecondsToday,
   resetSandboxFleetState,
 } from "../src/sandbox-fleet-limits";
 
@@ -86,5 +87,30 @@ describe("sandbox fleet pressure", () => {
     expect((await readSandboxFleetPressure(failing, limits, { now: now + 121_000 })).failed).toBe(
       true,
     );
+  });
+});
+
+describe("unpaid fleet box time", () => {
+  test("a failed read is reused briefly instead of read again for every admission", async () => {
+    let reads = 0;
+    let failing = true;
+    const db = {
+      execute: async () => {
+        reads += 1;
+        if (failing) throw new Error("database unavailable");
+        return [{ available: true, running_boxes: 3, box_seconds_today: 7200 }];
+      },
+    } as unknown as Database;
+    const start = Date.now();
+    await expect(readSandboxUnpaidFleetBoxSecondsToday(db, start)).rejects.toThrow(
+      "database unavailable",
+    );
+    expect(reads).toBe(1);
+    await expect(readSandboxUnpaidFleetBoxSecondsToday(db, start + 5_000)).rejects.toThrow(
+      "database unavailable",
+    );
+    expect(reads).toBe(1);
+    failing = false;
+    expect(await readSandboxUnpaidFleetBoxSecondsToday(db, start + 16_000)).toBe(7200);
   });
 });

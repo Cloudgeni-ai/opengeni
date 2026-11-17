@@ -563,6 +563,17 @@ export function turnLifecycleMetricsFor(observability: Observability): TurnLifec
   return tracker;
 }
 
+const UNPAID_SANDBOX_FLEET_STATES: readonly UnpaidSandboxFleetState[] = [
+  "normal",
+  "pressure",
+  "daily_budget_exhausted",
+];
+
+const UNPAID_SANDBOX_FLEET_CHECKS_METRIC = {
+  name: "opengeni_sandbox_unpaid_fleet_checks_total",
+  help: "Sandbox reaper passes by the unpaid fleet's state (normal, fleet pressure engaged, or today's unpaid box time exhausted).",
+} as const;
+
 export function initializeWorkerOutcomeMetrics(observability: Observability): void {
   for (const outcome of TURN_OUTCOMES) {
     observability.incrementCounter({
@@ -574,6 +585,15 @@ export function initializeWorkerOutcomeMetrics(observability: Observability): vo
   }
   for (const cause of TURN_RECOVERY_CAUSES) {
     observability.incrementCounter({ ...TURN_RECOVERIES_METRIC, labels: { cause }, amount: 0 });
+  }
+  // Every unpaid fleet state exists from start, so an alert on its increase
+  // fires on the first pass in that state.
+  for (const state of UNPAID_SANDBOX_FLEET_STATES) {
+    observability.incrementCounter({
+      ...UNPAID_SANDBOX_FLEET_CHECKS_METRIC,
+      labels: { state },
+      amount: 0,
+    });
   }
   observability.incrementCounter({
     name: "opengeni_turns_total",
@@ -1840,8 +1860,7 @@ export function recordUnpaidSandboxFleet(
   },
 ): void {
   observability.incrementCounter({
-    name: "opengeni_sandbox_unpaid_fleet_checks_total",
-    help: "Sandbox reaper passes by the unpaid fleet's state (normal, fleet pressure engaged, or today's unpaid box time exhausted).",
+    ...UNPAID_SANDBOX_FLEET_CHECKS_METRIC,
     labels: { state: input.state },
   });
   const gauges: Array<[string, string, number | null]> = [

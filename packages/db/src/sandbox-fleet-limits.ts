@@ -61,6 +61,7 @@ export function resetSandboxFleetState(): void {
   unpaidFleetRoutine.available = null;
   unpaidFleetBoxSeconds.value = null;
   unpaidFleetBoxSeconds.readAt = 0;
+  unpaidFleetBoxSeconds.failure = null;
   unpaidFleetBoxSeconds.inflight = null;
 }
 
@@ -231,16 +232,20 @@ export async function readSandboxUnpaidFleet(
 
 /** How long one process reuses today's unpaid box time. */
 const UNPAID_FLEET_BOX_SECONDS_READ_INTERVAL_MS = 60_000;
+/** How long one process reuses a failed read before reading again. */
+const UNPAID_FLEET_BOX_SECONDS_RETRY_MS = 15_000;
 const unpaidFleetBoxSeconds: {
   value: number | null;
   readAt: number;
+  failure: { error: unknown; at: number } | null;
   inflight: Promise<void> | null;
-} = { value: null, readAt: 0, inflight: null };
+} = { value: null, readAt: 0, failure: null, inflight: null };
 
 /**
  * Today's unpaid box time for one admission, read at most every minute per
  * process. Null when the definer is not available yet. Throws when the read
- * fails, so admission can fail closed.
+ * fails, so admission can fail closed; a failure is reused for fifteen
+ * seconds, so a struggling database is not read once per admission.
  */
 export async function readSandboxUnpaidFleetBoxSecondsToday(
   db: Database,
@@ -257,6 +262,8 @@ export async function readSandboxUnpaidFleetBoxSecondsToday(
   ) {
     return unpaidFleetBoxSeconds.value;
   }
+  const failure = unpaidFleetBoxSeconds.failure;
+  if (failure && now - failure.at < UNPAID_FLEET_BOX_SECONDS_RETRY_MS) throw failure.error;
   unpaidFleetBoxSeconds.inflight ??= (async () => {
     try {
       const counts = await readSandboxUnpaidFleet(db, {
@@ -265,6 +272,10 @@ export async function readSandboxUnpaidFleetBoxSecondsToday(
       });
       unpaidFleetBoxSeconds.value = counts?.boxSecondsToday ?? null;
       unpaidFleetBoxSeconds.readAt = Date.now();
+      unpaidFleetBoxSeconds.failure = null;
+    } catch (error) {
+      unpaidFleetBoxSeconds.failure = { error, at: now };
+      throw error;
     } finally {
       unpaidFleetBoxSeconds.inflight = null;
     }
