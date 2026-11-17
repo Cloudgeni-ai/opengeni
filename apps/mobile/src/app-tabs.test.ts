@@ -9,20 +9,16 @@ import {
   TAB_BAR_HEIGHT,
 } from "./app-tabs";
 
-test("the bar has Chats, Artifacts, Automations and Meetings, in that order", () => {
-  expect(APP_TABS.map((entry) => entry.label)).toEqual([
-    "Chats",
-    "Artifacts",
-    "Automations",
-    "Meetings",
-  ]);
+test("the bar has Chats, Artifacts and Meetings, in that order", () => {
+  expect(APP_TABS.map((entry) => entry.label)).toEqual(["Chats", "Artifacts", "Meetings"]);
 });
 
 test("each place is found from its screen path", () => {
   expect(tabForPath("/")).toBe("chats");
   expect(tabForPath("/artifacts")).toBe("artifacts");
-  expect(tabForPath("/automations/")).toBe("automations");
-  expect(tabForPath("/meetings")).toBe("meetings");
+  expect(tabForPath("/meetings/")).toBe("meetings");
+  // Automations opens from the chats menu, not the bar.
+  expect(tabForPath("/automations")).toBeNull();
   expect(tabForPath("/artifact/abc")).toBeNull();
   expect(tabForPath("/session/1")).toBeNull();
 });
@@ -31,7 +27,7 @@ test("switching places never grows the stack", () => {
   expect(tabNavigation("chats", "chats")).toEqual({ kind: "stay" });
   expect(tabNavigation("chats", "artifacts")).toEqual({ kind: "push", path: "/artifacts" });
   expect(tabNavigation("artifacts", "meetings")).toEqual({ kind: "replace", path: "/meetings" });
-  expect(tabNavigation("automations", "chats")).toEqual({ kind: "home" });
+  expect(tabNavigation("meetings", "chats")).toEqual({ kind: "home" });
   expect(tabNavigation(null, "artifacts")).toEqual({
     kind: "home-then-push",
     path: "/artifacts",

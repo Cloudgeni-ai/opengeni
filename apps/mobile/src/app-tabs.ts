@@ -1,21 +1,20 @@
 /*
- * The bottom bar's places: Chats (Home), Artifacts, Automations and
- * Meetings. Home stays at the bottom of the stack; another place sits on top
+ * The bottom bar's places: Chats (Home), Artifacts and Meetings; a place is
+ * one entry in APP_TABS. Home stays at the bottom of the stack; another place sits on top
  * of it, and moving between those replaces the top, so the stack never grows
  * from switching. Kept free of React Native so it is tested directly.
  */
 
-export type AppTab = "chats" | "artifacts" | "automations" | "meetings";
+export type AppTab = "chats" | "artifacts" | "meetings";
 
 export const APP_TABS: readonly {
   tab: AppTab;
   label: string;
-  icon: "message-square" | "panels-top-left" | "zap" | "audio-lines";
-  path: "/" | "/artifacts" | "/automations" | "/meetings";
+  icon: "message-square" | "panels-top-left" | "audio-lines";
+  path: "/" | "/artifacts" | "/meetings";
 }[] = [
   { tab: "chats", label: "Chats", icon: "message-square", path: "/" },
   { tab: "artifacts", label: "Artifacts", icon: "panels-top-left", path: "/artifacts" },
-  { tab: "automations", label: "Automations", icon: "zap", path: "/automations" },
   { tab: "meetings", label: "Meetings", icon: "audio-lines", path: "/meetings" },
 ];
 

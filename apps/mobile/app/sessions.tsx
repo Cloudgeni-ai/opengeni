@@ -228,6 +228,9 @@ function Sessions() {
             style={{ ...fontStyle(theme), flex: 1, fontSize: 14, color: c.fg }}
           />
         </View>
+        {searching ? null : (
+          <RailRow icon="zap" label="Automations" onPress={() => router.push("/automations")} />
+        )}
         {searching ? (
           <>
             {results.workspaces.length > 0 ? (
@@ -380,6 +383,36 @@ function WorkspaceResultRow(props: {
         ) : null}
       </View>
       <Text style={{ ...fontStyle(theme), fontSize: 11, color: c["fg-subtle"] }}>Switch</Text>
+    </Pressable>
+  );
+}
+
+/** A workspace page above the chats (Automations), as on the web's rail. */
+function RailRow(props: { icon: "zap"; label: string; onPress: () => void }) {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={props.label}
+      onPress={props.onPress}
+      style={({ pressed }) => ({
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 10,
+        minHeight: 40,
+        paddingVertical: 8,
+        paddingHorizontal: 8,
+        marginBottom: 4,
+        borderRadius: theme.radius.md,
+        backgroundColor: pressed ? c.hover : "transparent",
+      })}
+    >
+      <Icon name={props.icon} size={16} color={c["fg-muted"]} />
+      <Text style={{ ...fontStyle(theme, 500), flex: 1, fontSize: 15, color: c.fg }}>
+        {props.label}
+      </Text>
+      <Icon name="chevron-right" size={14} color={c["fg-subtle"]} />
     </Pressable>
   );
 }

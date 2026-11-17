@@ -80,10 +80,7 @@ export default function RootLayout() {
                     options={{ title: "Meetings", animation: "none" }}
                   />
                   <Stack.Screen name="meeting/[id]" options={{ title: "" }} />
-                  <Stack.Screen
-                    name="automations"
-                    options={{ title: "Automations", animation: "none" }}
-                  />
+                  <Stack.Screen name="automations" options={{ title: "Automations" }} />
                   <Stack.Screen name="automation/[id]" options={{ title: "" }} />
                   <Stack.Screen
                     name="automation-new"

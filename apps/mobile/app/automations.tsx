@@ -17,7 +17,6 @@ import { SettingsList } from "@/settings-list";
 import type { SettingsRow, SettingsSection } from "@/settings-model";
 import { AppThemeProvider } from "@/theme";
 import { useAutomationList } from "@/use-automation-list";
-import { TabScreen, tabHeaderOptions } from "@/app-tab-bar";
 
 /** How often an open list re-reads, so a run that starts or finishes shows up. */
 const REFRESH_MS = 30_000;
@@ -32,16 +31,12 @@ function NewAutomationButton() {
 export default function AutomationsScreen() {
   return (
     <AppThemeProvider>
-      <TabScreen tab="automations">
-        <WorkspaceGate title="Automations" message="Choose a workspace to see its automations.">
-          {(workspaceId) => <Automations workspaceId={workspaceId} />}
-        </WorkspaceGate>
-      </TabScreen>
+      <WorkspaceGate title="Automations" message="Choose a workspace to see its automations.">
+        {(workspaceId) => <Automations workspaceId={workspaceId} />}
+      </WorkspaceGate>
     </AppThemeProvider>
   );
 }
-
-const themed = (node: React.ReactNode) => <AppThemeProvider>{node}</AppThemeProvider>;
 
 /* The web Automations list at phone width: each automation with when it runs
    and what it last did, a word at the end for one that won't run (Paused,
@@ -72,7 +67,6 @@ function Automations({ workspaceId }: { workspaceId: string }) {
         headerStyle: { backgroundColor: c.bg },
         headerTintColor: c.fg,
         headerShadowVisible: false,
-        ...tabHeaderOptions(themed),
         ...(canCreate
           ? Platform.OS === "ios"
             ? {
@@ -121,19 +115,17 @@ function Automations({ workspaceId }: { workspaceId: string }) {
   return (
     <>
       {header}
-      <View style={{ flex: 1, backgroundColor: c.bg }}>
-        <SettingsList
-          sections={sections}
-          onRefresh={reload}
-          empty={{
-            title: "No automations yet",
-            symbol: "bolt",
-            description: canCreate
-              ? "Automations run a task on a schedule or when something happens. Tap + and say what should happen."
-              : "Automations run a task on a schedule or when something happens. The ones in this workspace show here.",
-          }}
-        />
-      </View>
+      <SettingsList
+        sections={sections}
+        onRefresh={reload}
+        empty={{
+          title: "No automations yet",
+          symbol: "bolt",
+          description: canCreate
+            ? "Automations run a task on a schedule or when something happens. Tap + and say what should happen."
+            : "Automations run a task on a schedule or when something happens. The ones in this workspace show here.",
+        }}
+      />
     </>
   );
 }

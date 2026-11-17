@@ -60,8 +60,8 @@ the workspace switcher.
 
 ## Navigation
 
-A bar docked at the bottom moves between **Chats** (Home), **Artifacts**,
-**Automations** and **Meetings**. Home stays at the bottom of the stack and
+A bar docked at the bottom moves between **Chats** (Home), **Artifacts**
+and **Meetings**. Home stays at the bottom of the stack and
 the other places swap in place above it, so switching never grows the stack.
 The chats menu opens from the header's menu button or with a swipe right from
 the left edge of any of these places.
@@ -85,7 +85,7 @@ is a card that opens the same viewer.
 
 ## Automations
 
-**Automations** in the bottom bar lists the workspace's
+**Automations** in the side menu lists the workspace's
 automations as the web list orders them, each with when it runs, what its
 last run did and a word for one that won't run (Paused, Finished) or keeps
 failing. Pull down to refresh; the list also re-reads while it is open.
