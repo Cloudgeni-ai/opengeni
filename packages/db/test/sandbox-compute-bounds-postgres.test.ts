@@ -67,7 +67,12 @@ function forgetCaches(): void {
 type Org = { accountId: string; workspaceId: string };
 
 async function organization(
-  options: { plan?: string; status?: string; decision?: "held" | "denied"; source?: string } = {},
+  options: {
+    plan?: string | undefined;
+    status?: string;
+    decision?: "held" | "denied";
+    source?: string;
+  } = {},
 ): Promise<Org> {
   const [account] = await admin<{ id: string }[]>`
     insert into managed_accounts (name, external_source)
