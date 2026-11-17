@@ -3578,14 +3578,22 @@ describe("runtime event normalization", () => {
     );
 
     test.each([
-      ["one account", undefined, false],
-      ["several accounts", "alice@example.test", true],
+      [
+        "one account",
+        undefined,
+        "Account: Documents — alice@example.test · Yours. Use only this account.\n",
+      ],
+      [
+        "several accounts",
+        "alice@example.test",
+        "Account: Documents — alice@example.test · Yours. Use only this account. When the request does not say which account to write to, use the default; ask only if there is none.\n",
+      ],
     ] as const)(
-      "connector tool descriptions name the account only to tell several apart (%s)",
-      async (_case, account, named) => {
+      "connector tool descriptions always name the account they reach (%s)",
+      async (_case, account, line) => {
         const serverId = `account-${"b".repeat(64)}`;
         const accountLabel: McpAccountRouteLabel = {
-          model: "Documents — Personal: alice@example.test",
+          model: "Documents — alice@example.test · Yours",
           connector: "Documents",
           providerDomain: "docs.example.test",
           ...(account ? { account } : {}),
@@ -3598,20 +3606,73 @@ describe("runtime event normalization", () => {
         try {
           const tools = await fixture.prepared.mcpServers[0]!.listTools();
           expect(tools.length).toBeGreaterThan(0);
-          for (const tool of tools) {
-            expect((tool.description ?? "").startsWith("Account: ")).toBe(named);
-          }
-          if (named) {
-            expect(tools[0]!.description).toStartWith(
-              "Account: Documents — Personal: alice@example.test. Use only this account. When the request does not say which account to write to, use the default; ask only if there is none.\n",
-            );
-          }
+          for (const tool of tools) expect(tool.description ?? "").toStartWith(line);
         } finally {
           await fixture.prepared.close();
           fixture.mcp.close();
         }
       },
     );
+
+    test("a search reaching a connector's only account names that account", async () => {
+      const accountFixture = (letter: string, connector: string, identity: string) =>
+        connectorPolicyFixture({
+          connectorDecision: "allow",
+          serverId: `account-${letter.repeat(64)}`,
+          lazyToolTransport: "generic_dispatch",
+          accountLabel: {
+            model: `${connector} — ${identity} · Yours`,
+            connector,
+            providerDomain: "docs.example.test",
+            kind: "files",
+          },
+        });
+      // Two connectors of one kind, one account each.
+      const documents = await accountFixture("c", "Documents", "alice@example.test");
+      const drive = await accountFixture("d", "Drive", "alice@drive.example.test");
+      try {
+        const agent = buildOpenGeniAgent(documents.settings, [], {
+          lazyToolTransport: "generic_dispatch",
+          toolPreparationReady: Promise.all([documents.prepared.ready, drive.prepared.ready]).then(
+            () => undefined,
+          ),
+          mcpServers: [...documents.prepared.mcpServers, ...drive.prepared.mcpServers],
+        });
+        const model = new ScriptedModel([
+          {
+            output: [
+              scriptedFunctionCall(
+                "tool_search",
+                { query: "search documents", limit: 1 },
+                "search-call",
+              ),
+            ],
+          },
+          { outputText: "done" },
+        ]);
+        const result = await runAgentStream(
+          agent.clone({ model }),
+          "Find my notes",
+          documents.settings,
+        );
+        for await (const _event of result.toStream()) {
+          // Drain the search and the answer.
+        }
+        await result.completed;
+        const searchOutput = JSON.stringify(model.requests[1]!.input);
+        expect(searchOutput).toContain(
+          "Account: Documents — alice@example.test · Yours. Use only this account.",
+        );
+        expect(searchOutput).toMatch(
+          /These tools reach (Documents \(alice@example\.test · Yours\)|Drive \(alice@drive\.example\.test · Yours\))\. Also connected: (Documents \(alice@example\.test · Yours\)|Drive \(alice@drive\.example\.test · Yours\))\./,
+        );
+      } finally {
+        await documents.prepared.close();
+        documents.mcp.close();
+        await drive.prepared.close();
+        drive.mcp.close();
+      }
+    });
 
     test("a search that reaches one of two connected accounts names the other", async () => {
       const accountFixture = (letter: string, account: string) =>

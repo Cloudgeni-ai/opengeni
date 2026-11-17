@@ -174,6 +174,15 @@ html[data-office-platform="Mac"] [data-titlebar] {
   cursor: default;
 }
 
+.pane-center .pane-code {
+  font-family: var(--og-font-mono);
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: 0.2em;
+  color: var(--og-color-fg);
+  user-select: all;
+}
+
 .pane-error {
   color: var(--og-color-danger) !important;
 }

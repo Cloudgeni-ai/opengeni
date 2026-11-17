@@ -655,7 +655,11 @@ export async function completeApiIntegrationProviderOAuth(
     const reason = providerOAuthFailureReason(error);
     // An unreadable state carries no return path; an authentic but aged one
     // still names its workspace and is reported as expired.
-    const failure = state ? null : oauthStateFailureReturn(deps.settings, input.state);
+    const failure = state
+      ? null
+      : oauthStateFailureReturn(deps.settings, input.state, {
+          providerError: input.error,
+        });
     return {
       redirectTo: providerOAuthReturnUrl(
         returnBaseUrl,

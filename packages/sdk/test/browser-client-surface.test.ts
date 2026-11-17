@@ -143,13 +143,16 @@ const integrationMethods = [
 ];
 
 // The native app exchanges its sign-in code, signs out and manages its push
-// device through the public client. The web app only starts the authorization.
+// device through the public client. The web app only starts the authorization
+// (and approves a relayed one); the Excel pane creates and polls its relay.
 const nativeAppMethods = [
   "answerAgentCall",
+  "createNativeAppRelay",
   "declineAgentCall",
   "exchangeNativeAppCode",
   "getAgentCall",
   "getNativePushDevice",
+  "pollNativeAppRelay",
   "registerNativePushDevice",
   "signOutNativeApp",
   "unregisterNativePushDevice",
