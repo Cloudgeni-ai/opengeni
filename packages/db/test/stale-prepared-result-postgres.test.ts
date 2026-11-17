@@ -143,6 +143,60 @@ describe("a column added while statements are prepared", () => {
     }
   });
 
+  test("statements in flight together are repeated, in and outside a transaction", async () => {
+    // One connection, so the statements are pipelined on it: the first
+    // refusal's repeat must not take the parameter description meant for the
+    // statement behind it (upstream postgres.js then waits forever), and a
+    // sibling's 25P02 must not hide the refusal that aborted the transaction.
+    const single = createDb(shared.appUrl, { max: 1, preparedStatements: true });
+    const deadline = <T>(work: Promise<T>) =>
+      Promise.race([
+        work,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("statements in flight never settled")), 10_000),
+        ),
+      ]);
+    try {
+      await readAll(single.db);
+      await readOne(single.db);
+      await addColumn("added_while_pipelined");
+      const [all, one] = await deadline(Promise.all([readAll(single.db), readOne(single.db)]));
+      expect(all).toHaveLength(2);
+      expect(one[0]).toHaveProperty("added_while_pipelined", null);
+
+      await addColumn("added_while_pipelined_in_transaction");
+      let runs = 0;
+      const [allInTransaction, oneInTransaction] = await deadline(
+        single.db.transaction(async (tx) => {
+          runs += 1;
+          return Promise.all([readAll(tx), readOne(tx)]);
+        }),
+      );
+      expect(allInTransaction).toHaveLength(2);
+      expect(oneInTransaction[0]).toHaveProperty("added_while_pipelined_in_transaction", null);
+      expect(runs).toBe(2);
+    } finally {
+      await single.close();
+    }
+  });
+
+  test("a refusal inside a savepoint repeats the enclosing transaction", async () => {
+    await warmEveryConnection();
+    await pool.db.transaction(async (tx) => {
+      await tx.transaction(async (inner) => {
+        await readOne(inner);
+      });
+    });
+    await addColumn("added_under_savepoint");
+    let runs = 0;
+    const keys = await pool.db.transaction(async (tx) => {
+      runs += 1;
+      return tx.transaction(async (inner) => Object.keys((await readOne(inner))[0] ?? {}));
+    });
+    expect(keys).toContain("added_under_savepoint");
+    expect(runs).toBeGreaterThanOrEqual(1);
+  });
+
   test("other failures inside a transaction are not repeated", async () => {
     let runs = 0;
     await expect(

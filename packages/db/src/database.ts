@@ -672,22 +672,6 @@ function abortableQuery<T extends postgres.Row[]>(
 }
 
 /**
- * Drizzle sends every query through `sql.unsafe(text, params)`, and postgres-js
- * never prepares `unsafe` queries unless asked per call, whatever the pool's
- * `prepare` option says. Ask on every call, including inside transactions and
- * savepoints, which hand Drizzle a fresh transaction-scoped `sql`. Queries without
- * parameters keep postgres-js's one-message simple protocol.
- *
- * Some statements vary their SQL text by list length (`in ($1, $2, ...)` from
- * `inArray`, multi-row inserts), and each length becomes another named
- * statement on every connection that runs it: 0.13-0.56 MB each as the RLS role.
- * Staging's 908 distinct statements held 24 such families with 107 texts;
- * preparing only the first text of each saved 7% of a warm backend's memory.
- * That is too little to justify a per-query family check here, so every text is
- * still prepared and the connection lifetime bounds the accumulation. Pass a
- * list as one array parameter with `anyOf` (`./sql-arrays`) where it is hot.
- */
-/**
  * Postgres refuses to reuse a prepared statement whose result columns changed
  * since it was prepared: SQLSTATE 0A000, "cached plan must not change result
  * type", raised from `RevalidateCachedQuery` before the statement runs. A
@@ -714,16 +698,48 @@ export function isStalePreparedResultError(error: unknown): boolean {
   return false;
 }
 
+/** Whether a statement in one transaction attempt was refused as stale. */
+type StaleResultRefusals = { refused: boolean };
+
+/**
+ * Note a transaction's stale-result refusal even when the caller never sees it:
+ * with statements in flight together (`Promise.all`), a sibling's "current
+ * transaction is aborted" (25P02) can reject first and become the callback's
+ * error, while the refusal that aborted the transaction settles later.
+ */
+function observingStaleRefusal<T extends postgres.Row[]>(
+  query: postgres.PendingQuery<T>,
+  refusals: StaleResultRefusals,
+): postgres.PendingQuery<T> {
+  const observe = query.then.bind(query);
+  Object.defineProperty(query, "then", {
+    configurable: true,
+    writable: true,
+    value: (...[onFulfilled, onRejected]: Parameters<Promise<unknown>["then"]>) =>
+      observe(onFulfilled as never, (error: unknown) => {
+        if (isStalePreparedResultError(error)) refusals.refused = true;
+        if (onRejected) return onRejected(error);
+        throw error;
+      }),
+  });
+  return query;
+}
+
 /**
  * Run a pool transaction again when it failed only because a statement in it
  * was prepared against an older row type (see {@link isStalePreparedResultError}).
  *
- * Outside a transaction postgres.js already re-prepares and repeats such a
- * statement. Inside one the refusal aborts the transaction, so only the whole
- * transaction can be repeated. That is safe for its database work: the refused
- * statement never ran and the transaction rolled back, so nothing it wrote
- * remains. As with any repeated attempt (an activity retry, a client retry),
- * work the callback does outside the database runs again.
+ * Outside a transaction postgres.js re-prepares and repeats such a statement
+ * (our patch keeps that working with other statements in flight). Inside one
+ * the refusal aborts the transaction, so only the whole transaction can be
+ * repeated. That is safe for its database work: the refused statement never
+ * ran and the transaction rolled back, so nothing it wrote remains. As with any
+ * repeated attempt (an activity retry, a client retry), work the callback does
+ * outside the database runs again.
+ *
+ * The attempt is repeated when its error is the refusal, or when any statement
+ * in it was refused (see {@link observingStaleRefusal}): the transaction was
+ * aborted by then, so every later error in it follows from the refusal.
  *
  * Our postgres.js patch makes a connection forget every statement it prepared
  * on its first such refusal, not just the refused one, so each connection
@@ -734,33 +750,53 @@ export function isStalePreparedResultError(error: unknown): boolean {
  */
 async function retryingStalePreparedResults<T>(
   attempts: number,
-  run: () => Promise<T>,
+  run: (refusals: StaleResultRefusals) => Promise<T>,
 ): Promise<T> {
   for (let attempt = 1; ; attempt += 1) {
+    const refusals: StaleResultRefusals = { refused: false };
     try {
-      return await run();
+      return await run(refusals);
     } catch (error) {
-      if (attempt >= attempts || !isStalePreparedResultError(error)) throw error;
+      if (attempt >= attempts || !(refusals.refused || isStalePreparedResultError(error))) {
+        throw error;
+      }
       // A maintenance stop that arrived meanwhile ends the retries.
       databaseQuerySignal.getStore()?.throwIfAborted();
     }
   }
 }
 
+/**
+ * Drizzle sends every query through `sql.unsafe(text, params)`, and postgres-js
+ * never prepares `unsafe` queries unless asked per call, whatever the pool's
+ * `prepare` option says. Ask on every call, including inside transactions and
+ * savepoints, which hand Drizzle a fresh transaction-scoped `sql`. Queries without
+ * parameters keep postgres-js's one-message simple protocol.
+ *
+ * Some statements vary their SQL text by list length (`in ($1, $2, ...)` from
+ * `inArray`, multi-row inserts), and each length becomes another named
+ * statement on every connection that runs it: 0.13-0.56 MB each as the RLS role.
+ * Staging's 908 distinct statements held 24 such families with 107 texts;
+ * preparing only the first text of each saved 7% of a warm backend's memory.
+ * That is too little to justify a per-query family check here, so every text is
+ * still prepared and the connection lifetime bounds the accumulation. Pass a
+ * list as one array parameter with `anyOf` (`./sql-arrays`) where it is hot.
+ */
 function preparingUnsafe<T extends PostgresSql>(
   target: T,
   prepare = true,
   reserved = false,
   credential?: RotatingDatabasePassword,
   staleResultAttempts = 1,
+  staleRefusals?: StaleResultRefusals,
 ): T {
-  const wrapScoped = (args: unknown[]) =>
+  const wrapScoped = (args: unknown[], refusals: StaleResultRefusals | undefined) =>
     args.map((arg) =>
       typeof arg === "function"
         ? async (scoped: postgres.TransactionSql) => {
             databaseQuerySignal.getStore()?.throwIfAborted();
             const result = await (arg as (scoped: postgres.TransactionSql) => unknown)(
-              preparingUnsafe(scoped, prepare, true),
+              preparingUnsafe(scoped, prepare, true, undefined, 1, refusals),
             );
             databaseQuerySignal.getStore()?.throwIfAborted();
             return result;
@@ -777,21 +813,22 @@ function preparingUnsafe<T extends PostgresSql>(
             traceQuery(base.unsafe(query, parameters as never, { prepare, ...options }), query);
           const pending =
             credential && !reserved ? retryingAuthentication(send(), send, credential) : send();
-          return signal ? abortableQuery(pending, signal) : pending;
+          const observed = staleRefusals ? observingStaleRefusal(pending, staleRefusals) : pending;
+          return signal ? abortableQuery(observed, signal) : observed;
         };
       }
       if (property === "begin" || property === "savepoint") {
         const method = Reflect.get(base, property) as unknown;
         if (typeof method !== "function") return method;
         // Only the pool's own BEGIN repeats a transaction; a savepoint's
-        // failure belongs to its enclosing transaction.
-        const repeatable = (run: () => Promise<unknown>) =>
+        // failure belongs to its enclosing transaction, which it reports to.
+        const repeatable = (run: (refusals: StaleResultRefusals | undefined) => Promise<unknown>) =>
           property === "begin" && !reserved && staleResultAttempts > 1
             ? retryingStalePreparedResults(staleResultAttempts, run)
-            : run();
+            : run(staleRefusals);
         if (property === "begin" && credential && !reserved) {
           return (...args: unknown[]) =>
-            repeatable(() =>
+            repeatable((refusals) =>
               traceTransaction("transaction", async () => {
                 let entered = false;
                 const tracked = args.map((arg) =>
@@ -811,7 +848,7 @@ function preparingUnsafe<T extends PostgresSql>(
                   () => {
                     // A maintenance stop that arrived meanwhile ends the retries.
                     if (attempts++ > 0) databaseQuerySignal.getStore()?.throwIfAborted();
-                    return method.apply(base, wrapScoped(tracked)) as Promise<unknown>;
+                    return method.apply(base, wrapScoped(tracked, refusals)) as Promise<unknown>;
                   },
                   () => !entered,
                 );
@@ -819,9 +856,9 @@ function preparingUnsafe<T extends PostgresSql>(
             );
         }
         return (...args: unknown[]) =>
-          repeatable(() =>
+          repeatable((refusals) =>
             traceTransaction(property === "begin" ? "transaction" : "savepoint", () =>
-              method.apply(base, wrapScoped(args)),
+              method.apply(base, wrapScoped(args, refusals)),
             ),
           );
       }

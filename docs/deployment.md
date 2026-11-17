@@ -3418,9 +3418,13 @@ refuses to reuse such a statement that a running pod prepared earlier. The
 refused statement never ran and its transaction rolled back, so the pool
 repeats the whole transaction, at most once per pool connection plus once
 (work the callback does outside the database runs again, as on any retry).
+It also repeats when a statement in flight beside the refused one failed first
+with "current transaction is aborted".
 The connection that saw the refusal forgets all of its prepared statements,
 so each connection is refused at most once per schema change. Outside a
-transaction postgres.js re-prepares and repeats the statement itself.
+transaction postgres.js re-prepares and repeats the statement itself; our
+patch sends that repeat in one round so statements in flight behind it on the
+same connection no longer hang.
 
 After the upstream Temporal chart is running, the stack wrapper applies
 `deploy/stacks/official-temporal-namespace-job.yaml` to register the Temporal

@@ -23,7 +23,25 @@ diff --git a/src/connection.js b/src/connection.js
      if (stream)
        return queryError(q, Errors.generic('COPY_IN_PROGRESS', 'You cannot execute queries during copy'))
  
-@@ -252,10 +260,16 @@
+@@ -240,6 +248,17 @@
+       ? statements[q.signature]
+       : { string, types, name: q.prepare ? statementId + statementCount++ : '' }
+ 
++    // A retried statement (see retry) is parsed again under a new name. Its
++    // parameter types are known from its first run, so send Parse, Describe,
++    // Bind and Execute together instead of waiting for the parameter
++    // description: a statement in flight behind it would otherwise consume
++    // that description and leave the other waiting forever.
++    if (q.retryTypes && !q.prepared && !q.onlyDescribe
++      && q.retryTypes.length === types.length && q.retryTypes.every(Boolean)) {
++      q.statement.types = q.retryTypes.slice()
++      q.describeFirst = false
++    }
++
+     typeof options.debug === 'function' && options.debug(id, string, parameters, types)
+   }
+ 
+@@ -252,10 +271,16 @@
    }
  
    function nextWrite(fn) {
@@ -42,7 +60,7 @@ diff --git a/src/connection.js b/src/connection.js
    }
  
    function connectTimedOut() {
-@@ -287,6 +301,11 @@
+@@ -287,6 +312,11 @@
  
      socket.removeAllListeners()
      socket = tls.connect(options)
@@ -54,7 +72,7 @@ diff --git a/src/connection.js b/src/connection.js
      socket.on('secureConnect', connected)
      socket.on('error', error)
      socket.on('close', closed)
-@@ -364,6 +383,10 @@
+@@ -364,6 +394,10 @@
  
    function connected() {
      try {
@@ -65,7 +83,7 @@ diff --git a/src/connection.js b/src/connection.js
        statements = {}
        needsTypes = options.fetch_types
        statementId = Math.random().toString(36).slice(2)
-@@ -438,6 +461,7 @@
+@@ -438,6 +472,7 @@
      remaining = 0
      incomings = null
      clearImmediate(nextWriteTimer)
@@ -73,7 +91,7 @@ diff --git a/src/connection.js b/src/connection.js
      socket.removeListener('data', data)
      socket.removeListener('connect', connected)
      idleTimer.cancel()
-@@ -447,10 +471,20 @@
+@@ -447,10 +482,20 @@
      socket.removeAllListeners()
      socket = null
  
@@ -96,7 +114,7 @@ diff --git a/src/connection.js b/src/connection.js
      closedTime = performance.now()
      hadError && options.shared.retries++
      delay = (typeof backoff === 'function' ? backoff(options.shared.retries) : backoff) * 1000
-@@ -548,6 +582,8 @@
+@@ -548,6 +593,8 @@
      }
  
      query = results = errorResponse = null
@@ -105,7 +123,7 @@ diff --git a/src/connection.js b/src/connection.js
      result = new Result()
      connectTimer.cancel()
  
-@@ -561,7 +597,12 @@
+@@ -561,7 +608,12 @@
  
        if (needsTypes) {
          initial.reserve && (initial = null)
@@ -119,7 +137,7 @@ diff --git a/src/connection.js b/src/connection.js
        }
  
        initial && !initial.reserve && execute(initial)
-@@ -748,7 +789,7 @@
+@@ -748,7 +800,7 @@
  
    function Pass() {
      return Promise.resolve(typeof options.pass === 'function'
@@ -128,7 +146,7 @@ diff --git a/src/connection.js b/src/connection.js
        : options.pass
      )
    }
-@@ -814,12 +855,21 @@
+@@ -814,13 +866,23 @@
        (query.cursorFn || query.describeFirst) && write(Sync)
        errorResponse = Errors.postgres(parseError(x))
      } else {
@@ -150,8 +168,10 @@ diff --git a/src/connection.js b/src/connection.js
 +      ? statements = {}
 +      : delete statements[q.signature]
      q.retried = error
++    q.retryTypes = q.statement.types
      execute(q)
    }
+ 
 diff --git a/cjs/src/connection.js b/cjs/src/connection.js
 --- a/cjs/src/connection.js
 +++ b/cjs/src/connection.js
@@ -177,7 +197,25 @@ diff --git a/cjs/src/connection.js b/cjs/src/connection.js
      if (stream)
        return queryError(q, Errors.generic('COPY_IN_PROGRESS', 'You cannot execute queries during copy'))
  
-@@ -252,10 +260,16 @@
+@@ -240,6 +248,17 @@
+       ? statements[q.signature]
+       : { string, types, name: q.prepare ? statementId + statementCount++ : '' }
+ 
++    // A retried statement (see retry) is parsed again under a new name. Its
++    // parameter types are known from its first run, so send Parse, Describe,
++    // Bind and Execute together instead of waiting for the parameter
++    // description: a statement in flight behind it would otherwise consume
++    // that description and leave the other waiting forever.
++    if (q.retryTypes && !q.prepared && !q.onlyDescribe
++      && q.retryTypes.length === types.length && q.retryTypes.every(Boolean)) {
++      q.statement.types = q.retryTypes.slice()
++      q.describeFirst = false
++    }
++
+     typeof options.debug === 'function' && options.debug(id, string, parameters, types)
+   }
+ 
+@@ -252,10 +271,16 @@
    }
  
    function nextWrite(fn) {
@@ -196,7 +234,7 @@ diff --git a/cjs/src/connection.js b/cjs/src/connection.js
    }
  
    function connectTimedOut() {
-@@ -287,6 +301,11 @@
+@@ -287,6 +312,11 @@
  
      socket.removeAllListeners()
      socket = tls.connect(options)
@@ -208,7 +246,7 @@ diff --git a/cjs/src/connection.js b/cjs/src/connection.js
      socket.on('secureConnect', connected)
      socket.on('error', error)
      socket.on('close', closed)
-@@ -364,6 +383,10 @@
+@@ -364,6 +394,10 @@
  
    function connected() {
      try {
@@ -219,7 +257,7 @@ diff --git a/cjs/src/connection.js b/cjs/src/connection.js
        statements = {}
        needsTypes = options.fetch_types
        statementId = Math.random().toString(36).slice(2)
-@@ -438,6 +461,7 @@
+@@ -438,6 +472,7 @@
      remaining = 0
      incomings = null
      clearImmediate(nextWriteTimer)
@@ -227,7 +265,7 @@ diff --git a/cjs/src/connection.js b/cjs/src/connection.js
      socket.removeListener('data', data)
      socket.removeListener('connect', connected)
      idleTimer.cancel()
-@@ -447,10 +471,20 @@
+@@ -447,10 +482,20 @@
      socket.removeAllListeners()
      socket = null
  
@@ -250,7 +288,7 @@ diff --git a/cjs/src/connection.js b/cjs/src/connection.js
      closedTime = performance.now()
      hadError && options.shared.retries++
      delay = (typeof backoff === 'function' ? backoff(options.shared.retries) : backoff) * 1000
-@@ -548,6 +582,8 @@
+@@ -548,6 +593,8 @@
      }
  
      query = results = errorResponse = null
@@ -259,7 +297,7 @@ diff --git a/cjs/src/connection.js b/cjs/src/connection.js
      result = new Result()
      connectTimer.cancel()
  
-@@ -561,7 +597,12 @@
+@@ -561,7 +608,12 @@
  
        if (needsTypes) {
          initial.reserve && (initial = null)
@@ -273,7 +311,7 @@ diff --git a/cjs/src/connection.js b/cjs/src/connection.js
        }
  
        initial && !initial.reserve && execute(initial)
-@@ -748,7 +789,7 @@
+@@ -748,7 +800,7 @@
  
    function Pass() {
      return Promise.resolve(typeof options.pass === 'function'
@@ -282,7 +320,7 @@ diff --git a/cjs/src/connection.js b/cjs/src/connection.js
        : options.pass
      )
    }
-@@ -814,12 +855,21 @@
+@@ -814,13 +866,23 @@
        (query.cursorFn || query.describeFirst) && write(Sync)
        errorResponse = Errors.postgres(parseError(x))
      } else {
@@ -304,8 +342,10 @@ diff --git a/cjs/src/connection.js b/cjs/src/connection.js
 +      ? statements = {}
 +      : delete statements[q.signature]
      q.retried = error
++    q.retryTypes = q.statement.types
      execute(q)
    }
+ 
 diff --git a/src/index.js b/src/index.js
 --- a/src/index.js
 +++ b/src/index.js
