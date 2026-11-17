@@ -3433,7 +3433,7 @@ function inspectModularAgentInstructions(
     ...modularToolAvailability(settings, options),
     ...agentPromptExperimentsFor(settings),
     ...(codemodeIsAvailable(options) ? { codemode: CODEMODE_PROGRAMMATIC_DIRECTIVE } : {}),
-    ...(options.codeSearchAvailable ? { codeSearch: CODE_SEARCH_DIRECTIVE } : {}),
+    ...(options.codeSearchAvailable ? { codeSearch: codeSearchDirectiveFor(settings) } : {}),
     ...(options.agentInstructions ? { agentInstructions: options.agentInstructions } : {}),
     ...(gitBindingDiscoveryApplies(options.gitCredentialBindings, options.activeSandboxBackend)
       ? { gitBindings: GIT_BINDING_DISCOVERY_DIRECTIVE }
@@ -3516,7 +3516,7 @@ export function inspectPersistentAgentInstructions(
       });
     }
     if (options.codeSearchAvailable) {
-      add({ id: "code_search", title: "Code search", content: CODE_SEARCH_DIRECTIVE });
+      add({ id: "code_search", title: "Code search", content: codeSearchDirectiveFor(settings) });
     }
     pushAgentInstructions();
     if (gitBindingDiscoveryApplies(options.gitCredentialBindings, options.activeSandboxBackend)) {
@@ -3546,7 +3546,7 @@ export function inspectPersistentAgentInstructions(
       });
     }
     if (options.codeSearchAvailable) {
-      add({ id: "code_search", title: "Code search", content: CODE_SEARCH_DIRECTIVE });
+      add({ id: "code_search", title: "Code search", content: codeSearchDirectiveFor(settings) });
     }
     if (gitBindingDiscoveryApplies(options.gitCredentialBindings, options.activeSandboxBackend)) {
       add({
@@ -11795,6 +11795,19 @@ function repositorySkillsInputFilterForRun(
  */
 export const CODE_SEARCH_DIRECTIVE =
   "To find where something is implemented, configured or decided in the code, start with one `code_search` call (a precise question plus 6-15 likely identifiers, file-name fragments, config keys or error strings) instead of a series of separate searches and file reads. When the question asks whether something is required, enforced or the default, add a subQuestion and keywords for what could skip, bypass or override it. Use the returned passages directly instead of re-reading them. Their evidence rating covers only what the search returned, so spend follow-up searches outside those passages: other entry points to the same outcome (API routes, automatic or self-service paths), defaults, flags, exceptions and its unfollowed leads.";
+
+/**
+ * Directive added when the attempt offers `code_grep` instead of `code_search`.
+ * It names the situation the tool is for (several searches in a row), not any
+ * task, so it holds for every code base.
+ */
+export const CODE_GREP_DIRECTIVE =
+  "When you would run several rg searches to find code, call `code_grep` once with those patterns instead; it runs them in parallel and returns only the relevant excerpts.";
+
+/** The code-search directive for the deployment's code-search engine. */
+export function codeSearchDirectiveFor(settings: Pick<Settings, "codeSearchEngine">): string {
+  return settings.codeSearchEngine === "grep" ? CODE_GREP_DIRECTIVE : CODE_SEARCH_DIRECTIVE;
+}
 
 export const CODEMODE_PROGRAMMATIC_DIRECTIVE =
   "Every tool in the Codemode catalog (what `ogtool list` shows) is also callable programmatically from the sandbox through the same frozen catalog, authority, credentials, policy, and execution path. Built-in sandbox tools for the shell, file patching, image viewing and terminal input are not in that catalog; inside the sandbox, use the shell and filesystem directly. Prefer Codemode for loops, polling, bulk filtering, and intermediate data within the live attempt instead of consuming your context window. Background commands keep the launching attempt's credentials; a new turn does not renew those processes. Do not leave a sleeping script or polling loop to make Codemode calls after ending your turn. For a later recheck, let the session wake, then launch a fresh command. " +

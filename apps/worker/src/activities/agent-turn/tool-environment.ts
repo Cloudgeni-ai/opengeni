@@ -1689,8 +1689,8 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       ...titleToolPlan.preparationIndependentToolNames,
       "skill_read",
     ],
-    // The code_search directive describes code_search only; code_grep relies on its description.
-    codeSearchAvailable: codeSearchTools.some((tool) => tool.modelName === "code_search"),
+    // The directive follows the engine: code_search or code_grep.
+    codeSearchAvailable: codeSearchTools.length > 0,
     promptToolAvailability:
       promptToolAvailability && !toolRouterExpected
         ? { ...promptToolAvailability, toolSearchAbsent: true as const }
