@@ -133,6 +133,10 @@ come from `@opengeni/sdk/office` and `@opengeni/react`:
   `*.cloud.microsoft`, `*.sharepoint.com` and the rest of the list in
   `apps/web/src/server.ts`) and no `X-Frame-Options`. Opengeni's own console
   does this for `/office/` and allows only itself to frame every other page.
+- **Script policy.** `WorkbookLink` compiles the agent's code in the pane, so
+  a pane page with a Content-Security-Policy must allow
+  `OFFICE_RUN_SCRIPT_SOURCES` (`'unsafe-eval'`) in `script-src`, or every
+  `excel_run` fails. Opengeni's console allows it on the pane page only.
 - **Server passthrough.** The packaged session proxy needs no option: it
   forwards the workbook routes (`office/workbook-tickets`, `office/workbooks`)
   and everything `SessionApp` reads as the signed-in user (`asUser`), so each

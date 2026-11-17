@@ -5,6 +5,7 @@ import {
   OFFICE_FRAME_ANCESTOR_ORIGINS,
   htmlFrameHostContentSecurityPolicy,
 } from "@opengeni/contracts/html-frame-host";
+import { OFFICE_RUN_SCRIPT_SOURCES } from "@opengeni/sdk/office";
 
 /**
  * The console's Content-Security-Policy.
@@ -79,6 +80,14 @@ export const OFFICE_FRAME_SOURCES = [
   "https://telemetryservice.firstpartyapps.oaspapps.com",
 ] as const;
 
+/**
+ * The Excel add-in's task pane document. It alone runs agents' `excel_run`
+ * code, so it alone gets the script sources that needs (`'unsafe-eval'`);
+ * every other page, including the add-in's sign-in callback, keeps the
+ * strict policy.
+ */
+export const OFFICE_PANE_DOCUMENT = "/office/index.html";
+
 const DIRECTIVE_ORDER = [
   "default-src",
   "script-src",
@@ -105,6 +114,8 @@ export type PageKind = "console" | "office";
 
 export type ConsolePolicyInput = {
   kind: PageKind;
+  /** The Excel task pane document, which runs agent code (`OFFICE_PANE_DOCUMENT`). */
+  officePane?: boolean;
   /** The console's public origin, for its own WebSocket origin. */
   publicOrigin?: string | undefined;
   sources: ConsoleContentSecuritySources | null;
@@ -177,6 +188,7 @@ export function buildContentSecurityPolicy(input: ConsolePolicyInput): string {
     add("script-src", OFFICE_SCRIPT_SOURCES);
     add("frame-src", OFFICE_FRAME_SOURCES);
     add("child-src", OFFICE_FRAME_SOURCES);
+    if (input.officePane) add("script-src", OFFICE_RUN_SCRIPT_SOURCES);
   }
   return DIRECTIVE_ORDER.map((directive) => `${directive} ${policy[directive].join(" ")}`).join(
     "; ",

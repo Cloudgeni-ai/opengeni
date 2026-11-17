@@ -16,7 +16,7 @@ import {
 } from "@opengeni/react/session-app";
 import { enableWorkbench } from "@opengeni/react/workbench";
 import { setImageProxyTicket } from "@opengeni/react/app/lib/content-hosting";
-import { OpenGeniClient, type Workspace } from "@opengeni/sdk";
+import { OpenGeniClient, type AccessContext, type Workspace } from "@opengeni/sdk";
 import {
   lazy,
   StrictMode,
@@ -43,6 +43,7 @@ import {
 } from "@opengeni/sdk/office";
 import { forgetToken, prepareSignIn, signIn, storedToken, type SignInRequest } from "./office-auth";
 import { landingWorkspaceId } from "./landing-workspace";
+import { workspaceGroups } from "./workspace-groups";
 import { SPREADSHEET_STARTERS } from "./starters";
 import {
   availableSessionStorage,
@@ -274,10 +275,20 @@ function WorkbookStatus(props: {
 
 function PaneAccount(props: {
   workspaces: Workspace[];
+  access: AccessContext | null;
   workspaceId: string;
   onWorkspace: (workspaceId: string) => void;
   onSignOut: () => void;
 }) {
+  const groups = useMemo(
+    () => workspaceGroups(props.workspaces, props.access),
+    [props.workspaces, props.access],
+  );
+  const option = (each: Workspace) => (
+    <option key={each.id} value={each.id}>
+      {each.name}
+    </option>
+  );
   return (
     <div className="pane-account">
       {props.workspaces.length > 1 ? (
@@ -286,11 +297,13 @@ function PaneAccount(props: {
           value={props.workspaceId}
           onChange={(event) => props.onWorkspace(event.target.value)}
         >
-          {props.workspaces.map((each) => (
-            <option key={each.id} value={each.id}>
-              {each.name}
-            </option>
-          ))}
+          {groups.length > 1
+            ? groups.map((group) => (
+                <optgroup key={group.label} label={group.label}>
+                  {group.workspaces.map(option)}
+                </optgroup>
+              ))
+            : props.workspaces.map(option)}
         </select>
       ) : (
         <span className="pane-account-name">{props.workspaces[0]?.name}</span>
@@ -348,6 +361,7 @@ function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }
   const client = useMemo(() => new OpenGeniClient({ baseUrl: apiBaseUrl, apiKey: token }), [token]);
   const imageTicketSettled = useImageProxyTicket(token);
   const [workspaces, setWorkspaces] = useState<Workspace[] | null>(null);
+  const [access, setAccess] = useState<AccessContext | null>(null);
   const [workspaceId, setWorkspaceId] = useState<string | null>(remembered(WORKSPACE_KEY));
   const [loadError, setLoadError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
@@ -370,16 +384,17 @@ function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }
       // The person's own default workspace; without it the pane still opens one.
       client.getAccessContext().catch(() => null),
     ])
-      .then(async ([list, access]) => {
+      .then(async ([list, accessContext]) => {
         await shown;
         if (!live) return;
         setWorkspaces(list);
+        setAccess(accessContext);
         setLoadError(null);
         setWorkspaceId((current) =>
           landingWorkspaceId({
             workspaceIds: list.map((each) => each.id),
             remembered: current,
-            defaultWorkspaceId: access?.defaultWorkspaceId,
+            defaultWorkspaceId: accessContext?.defaultWorkspaceId,
           }),
         );
         setRetrying(false);
@@ -494,6 +509,7 @@ function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }
         railFooter: (
           <PaneAccount
             workspaces={workspaces}
+            access={access}
             workspaceId={workspaceId}
             onWorkspace={(next) => {
               setWorkspaceId(next);
@@ -518,7 +534,10 @@ function App() {
 
 void office()
   .onReady()
-  .then(() => {
+  .then(({ platform }) => {
+    // Office for Mac floats its add-in info button over the pane's top-right
+    // corner; pane.css keeps the header's buttons clear of it.
+    if (platform) document.documentElement.dataset.officePlatform = platform;
     createRoot(document.getElementById("root")!).render(
       <StrictMode>
         <App />

@@ -18,6 +18,7 @@ import {
   type ConsoleContentSecuritySources,
 } from "./csp";
 import { OFFICE_FRAME_ANCESTOR_ORIGINS } from "@opengeni/contracts/html-frame-host";
+import { OFFICE_RUN_SCRIPT_SOURCES } from "@opengeni/sdk/office";
 import { contentSecurityApiUrlFromEnvironment, createWebHandler } from "./server";
 
 const roots: string[] = [];
@@ -59,6 +60,10 @@ async function served(sources: ConsoleContentSecuritySources | null) {
   await Bun.write(
     join(root, "office/index.html"),
     '<!doctype html><head><script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script><script>window.boot=1</script></head>',
+  );
+  await Bun.write(
+    join(root, "office/auth-callback.html"),
+    '<!doctype html><head><script type="module" src="./assets/callback.js"></script></head>',
   );
   return createWebHandler(root, {
     publicOrigin: "https://app.opengeni.ai",
@@ -165,6 +170,24 @@ describe("console Content-Security-Policy", () => {
     expect(policy.get("script-src")).toContain(inlineScriptHashes(html)[0]);
     expect(response.headers.get("x-frame-options")).toBeNull();
     expect(html).toContain(`id="${CONTENT_HOSTING_ELEMENT_ID}"`);
+  });
+
+  test("the Excel task pane allows what excel_run's executor needs; no other page does", async () => {
+    // runOfficeCode compiles agent code with the AsyncFunction constructor;
+    // without these sources every excel_run fails in Excel (Mac, Windows, web).
+    expect(OFFICE_RUN_SCRIPT_SOURCES).toContain("'unsafe-eval'");
+    const handler = await served(PRODUCTION_SOURCES);
+    for (const path of ["/office/", "/office/index.html"]) {
+      const pane = await handler(new Request(`https://app.opengeni.ai${path}`));
+      const script = directives(pane.headers.get("content-security-policy")!).get("script-src");
+      for (const source of OFFICE_RUN_SCRIPT_SOURCES) expect(script).toContain(source);
+    }
+    for (const path of ["/", "/sign-in", "/office/auth-callback.html"]) {
+      const page = await handler(new Request(`https://app.opengeni.ai${path}`));
+      expect(page.headers.get("content-type")).toContain("text/html");
+      const script = directives(page.headers.get("content-security-policy")!).get("script-src");
+      expect(script).not.toContain("'unsafe-eval'");
+    }
   });
 
   test("the console learns its content hosting from an inert JSON block", async () => {
