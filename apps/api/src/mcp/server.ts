@@ -107,6 +107,7 @@ import {
   type SessionStatus,
   SubmitHumanInputResponseRequest,
   FIRST_PARTY_MCP_CALLER_META_KEY,
+  FIRST_PARTY_MCP_MODEL_CALL_ID_META_KEY,
   TOOL_DISCOVERY_CARD_META_KEY,
 } from "@opengeni/contracts";
 import {
@@ -5914,6 +5915,8 @@ function registerWorkspaceOrchestrationTools(
   // answer to its model. Record it on the reading turn: when that attempt
   // completes its turn, a pending terminal result repeating only answers the
   // model already holds is superseded instead of starting another inference.
+  // The model's call id lets a later attempt of the same turn, which resumes
+  // from durable history holding this read's output, count it too.
   // Only a direct model call counts: a Codemode script may keep the output to
   // itself. Best-effort: a failure leaves that result to be delivered.
   const recordConsumedChildResults = async (
@@ -5929,6 +5932,7 @@ function registerWorkspaceOrchestrationTools(
       !children.some((child) => child.sequences.length > 0)
     )
       return;
+    const callId = extra?._meta?.[FIRST_PARTY_MCP_MODEL_CALL_ID_META_KEY];
     try {
       await recordConsumedChildAnswers(deps.db, {
         accountId: grant.accountId,
@@ -5937,6 +5941,7 @@ function registerWorkspaceOrchestrationTools(
         turnId: claims.turnId,
         attemptId: claims.attemptId,
         executionGeneration: claims.executionGeneration,
+        ...(typeof callId === "string" ? { callId } : {}),
         children,
       });
     } catch (error) {

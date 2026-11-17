@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   NangoClient,
   classifyNangoTool,
+  connectorProviderDomain,
   credentialRequestTarget,
   effectiveNangoIntegrations,
   estimateNangoCostUsd,
@@ -18,6 +19,7 @@ import {
   nativeNangoIntegrationByKey,
   nativeNangoIntegrationForMcpUrl,
   nativeNangoIntegrationForProviderDomain,
+  sameConnectorProviderDomain,
   parseNangoAuthWebhook,
   parseNangoIntegrationDefinition,
   planNangoOrphans,
@@ -42,6 +44,17 @@ function setting(overrides: Partial<IntegrationBackendSetting>): IntegrationBack
 }
 
 describe("Nango identities", () => {
+  test("a reviewed connector's native and Nango accounts are the same connector's", () => {
+    expect(connectorProviderDomain("nango:gmail")).toBe("gmailmcp.googleapis.com");
+    expect(connectorProviderDomain(" WWW.Linear.App ")).toBe("linear.app");
+    // A config-only integration has no native identity: it is itself.
+    expect(connectorProviderDomain("nango:linkedin")).toBe("nango:linkedin");
+    expect(sameConnectorProviderDomain("nango:gmail", "gmailmcp.googleapis.com")).toBe(true);
+    expect(sameConnectorProviderDomain("nango:google-drive", "gmailmcp.googleapis.com")).toBe(
+      false,
+    );
+  });
+
   test("provider domains are namespaced away from native domains", () => {
     expect(nangoProviderDomain("gmail")).toBe("nango:gmail");
     expect(nangoIntegrationKeyFromProviderDomain("nango:gmail")).toBe("gmail");

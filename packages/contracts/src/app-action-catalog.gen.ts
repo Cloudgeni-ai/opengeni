@@ -514,6 +514,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ToolGatewayCatalog",
       "ToolGatewayDeclarationsResponse",
       "ToolGatewaySiteConsentResponse",
+      "ToolGatewaySiteReadinessResponse",
       "ToolGatewayTargetApprovalResponse"
     ],
     "permission": "workspace:read",
@@ -7562,6 +7563,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ToolGatewayCatalog",
       "ToolGatewayDeclarationsResponse",
       "ToolGatewaySiteConsentResponse",
+      "ToolGatewaySiteReadinessResponse",
       "ToolGatewayTargetApprovalResponse"
     ],
     "permission": "workspace:read",
@@ -7579,6 +7581,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ToolGatewayManifestResponse",
       "ToolGatewayResolvedTool",
       "ToolGatewaySiteConsentResponse",
+      "ToolGatewaySiteReadinessResponse",
       "ToolGatewayTargetApprovalResponse"
     ],
     "permission": "workspace:read",
@@ -7597,6 +7600,21 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "workspace:read"
   },
   {
+    "id": "POST /v1/workspaces/:workspaceId/tools/readiness",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/tools/readiness",
+    "request": [],
+    "response": [
+      "ToolGatewaySiteConsentResponse",
+      "ToolGatewaySiteReadinessResponse",
+      "ToolGatewayTargetApprovalResponse"
+    ],
+    "permission": "workspace:read",
+    "secretFields": [
+      "response.approvalToken"
+    ]
+  },
+  {
     "id": "POST /v1/workspaces/:workspaceId/tools/resolve",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/tools/resolve",
@@ -7604,6 +7622,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "ToolGatewayResolvedTool"
     ],
+    "permission": "workspace:read"
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/tools/site-allowances/reset",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/tools/site-allowances/reset",
+    "request": [
+      "ToolGatewaySiteAllowancesResetRequest"
+    ],
+    "response": [],
     "permission": "workspace:read"
   },
   {
@@ -7628,6 +7656,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ToolGatewayManifestResponse",
       "ToolGatewayResolvedTool",
       "ToolGatewaySiteConsentResponse",
+      "ToolGatewaySiteReadinessResponse",
       "ToolGatewayTargetApprovalResponse"
     ],
     "permission": "workspace:read",

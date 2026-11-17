@@ -11,6 +11,7 @@ const demoInputs = {
   approvalReview: resolve(__dirname, "approval-review.html"),
   siteToolConsent: resolve(__dirname, "site-tool-consent.html"),
   siteToolFailure: resolve(__dirname, "site-tool-failure.html"),
+  siteToolReadiness: resolve(__dirname, "site-tool-readiness.html"),
   genieLoading: resolve(__dirname, "genie-loading.html"),
   exchangeFold: resolve(__dirname, "exchange-fold.html"),
   main: resolve(__dirname, "index.html"),

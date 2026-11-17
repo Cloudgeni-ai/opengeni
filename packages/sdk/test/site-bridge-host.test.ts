@@ -9,6 +9,7 @@ import {
 import {
   SiteBridgeHost,
   injectSiteBridgeBootstrap,
+  siteBridgeError,
   siteBridgeReadyMessage,
   type SiteBridgeToolHandlers,
   type SiteBridgeViewerHandlers,
@@ -185,5 +186,106 @@ describe("Site bridge host", () => {
     const document = injectSiteBridgeBootstrap("<!-- c --><!doctype html><p>x</p>");
     expect(document.startsWith("<!-- c --><!doctype html><script>")).toBe(true);
     expect(injectSiteBridgeBootstrap("<p>x</p>").startsWith("<script>")).toBe(true);
+  });
+});
+
+describe("Site tool readiness through the bridge host", () => {
+  const target = { identity: { serverId: "crm", toolName: "update" } };
+  const answer = {
+    version: 1 as const,
+    tools: [
+      {
+        target,
+        state: "connect" as const,
+        confirm: "never" as const,
+        runsAs: null,
+        connector: "CRM",
+      },
+    ],
+  };
+
+  test("answers $readiness and tells the Site when it may have changed", async () => {
+    const seen: unknown[] = [];
+    let changed: (() => void) | undefined;
+    const ready: SiteBridgeToolHandlers = {
+      ...tools,
+      readiness: async (request) => {
+        seen.push(request);
+        return answer;
+      },
+      subscribeReadiness: (listener) => {
+        changed = listener;
+        return () => {
+          changed = undefined;
+        };
+      },
+    };
+    expect(siteBridgeReadyMessage(ready)).toMatchObject({ toolReadiness: 1 });
+    const { host, site } = connect({ tools: () => ready });
+    try {
+      expect(await site.tools.$readiness([target])).toEqual(answer);
+      expect(seen).toEqual([{ targets: [target] }]);
+      let heard = 0;
+      const heardOnce = new Promise<void>((resolve) => {
+        site.tools.$onReadinessChange(() => {
+          heard += 1;
+          resolve();
+        });
+      });
+      changed!();
+      await heardOnce;
+      expect(heard).toBe(1);
+    } finally {
+      site.close();
+      host.close();
+    }
+    expect(changed).toBeUndefined();
+  });
+
+  test("a host without readiness refuses it with readiness_unsupported", async () => {
+    expect(siteBridgeReadyMessage(tools)).not.toHaveProperty("toolReadiness");
+    const { host, site } = connect({ tools: () => tools });
+    try {
+      const error = await site.tools.$readiness([target]).catch((reason: unknown) => reason);
+      expect(error).toMatchObject({ code: "readiness_unsupported" });
+    } finally {
+      site.close();
+      host.close();
+    }
+  });
+
+  test("typed server answers reach Site code as their site_tool codes", () => {
+    expect(
+      siteBridgeError({
+        code: "forbidden",
+        message: "tool_blocked",
+        details: { code: "tool_blocked" },
+      }),
+    ).toMatchObject({ code: "site_tool_blocked", retryable: false, outcomeUnknown: false });
+    expect(
+      siteBridgeError({
+        code: "conflict",
+        message: "x",
+        details: { code: "site_tool_consent_requires_opengeni" },
+      }),
+    ).toMatchObject({ code: "site_tool_open_in_opengeni", retryable: false });
+    expect(
+      siteBridgeError({
+        code: "upstream_unavailable",
+        message: "x",
+        retryable: true,
+        outcomeUnknown: false,
+        details: { code: "tool_server_unreachable" },
+      }),
+    ).toMatchObject({ code: "site_tool_upstream_unavailable", retryable: true });
+    // Without proof that nothing was sent, it is never presented as retryable.
+    expect(
+      siteBridgeError({
+        code: "upstream_unavailable",
+        message: "x",
+        outcomeUnknown: true,
+        details: { code: "tool_server_unreachable" },
+      }),
+    ).toMatchObject({ code: "upstream_unavailable", retryable: false, outcomeUnknown: true });
   });
 });

@@ -2,7 +2,10 @@ import { expect, test } from "bun:test";
 import { RunContext } from "@openai/agents";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { FIRST_PARTY_MCP_CALLER_META_KEY } from "@opengeni/contracts";
+import {
+  FIRST_PARTY_MCP_CALLER_META_KEY,
+  FIRST_PARTY_MCP_MODEL_CALL_ID_META_KEY,
+} from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing/settings";
 import { attemptToolCallMeta, buildOpenGeniAgent, prepareAgentTools } from "../src/index";
 
@@ -34,6 +37,35 @@ test("transport metadata cannot claim another caller", () => {
   ).toBe("codemode");
 });
 
+test("only a model call names its own call id, which transport metadata cannot claim", () => {
+  const transportMeta = { [FIRST_PARTY_MCP_MODEL_CALL_ID_META_KEY]: "call-spoofed" };
+  expect(
+    attemptToolCallMeta("opengeni", {
+      operationId,
+      caller: { kind: "model" },
+      sourceCallId: "call-model",
+      transportMeta,
+    })[FIRST_PARTY_MCP_MODEL_CALL_ID_META_KEY],
+  ).toBe("call-model");
+  for (const meta of [
+    attemptToolCallMeta("opengeni", {
+      operationId,
+      caller: { kind: "codemode" },
+      sourceCallId: "call-model",
+      transportMeta,
+    }),
+    attemptToolCallMeta("opengeni", { operationId, caller: { kind: "model" }, transportMeta }),
+    attemptToolCallMeta("github", {
+      operationId,
+      caller: { kind: "model" },
+      sourceCallId: "call-model",
+      transportMeta,
+    }),
+  ]) {
+    expect(meta).not.toHaveProperty(FIRST_PARTY_MCP_MODEL_CALL_ID_META_KEY);
+  }
+});
+
 test("a third-party server never learns the caller surface", () => {
   expect(
     attemptToolCallMeta("github", {
@@ -46,6 +78,7 @@ test("a third-party server never learns the caller surface", () => {
 
 test("the attempt gateway marks model and Codemode calls to the first-party server", async () => {
   const callers: unknown[] = [];
+  const callIds: unknown[] = [];
   const transports: WebStandardStreamableHTTPServerTransport[] = [];
   const provider = Bun.serve({
     hostname: "127.0.0.1",
@@ -54,6 +87,7 @@ test("the attempt gateway marks model and Codemode calls to the first-party serv
       const server = new McpServer({ name: "first-party", version: "1.0.0" });
       server.registerTool("session_get", { inputSchema: {} }, async (_input, extra) => {
         callers.push(extra._meta?.[FIRST_PARTY_MCP_CALLER_META_KEY]);
+        callIds.push(extra._meta?.[FIRST_PARTY_MCP_MODEL_CALL_ID_META_KEY]);
         return { content: [{ type: "text" as const, text: "{}" }] };
       });
       const transport = new WebStandardStreamableHTTPServerTransport({
@@ -106,6 +140,8 @@ test("the attempt gateway marks model and Codemode calls to the first-party serv
       })
     ).execute();
     expect(callers).toEqual(["model", "codemode"]);
+    // The model's call id, as conversation history stores it for the result.
+    expect(callIds).toEqual(["call-model", undefined]);
   } finally {
     await prepared.close();
     for (const transport of transports) await transport.close();

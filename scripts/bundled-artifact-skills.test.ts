@@ -123,7 +123,7 @@ describe("bundled editable-artifact skills", () => {
       expect(skill).toContain("normal tool approval rules");
       // In Opengeni the frame asks the viewer; a published hostname cannot.
       expect(skill).toContain("in Opengeni the frame asks the viewer to confirm");
-      expect(skill).toContain("site_tool_consent_requires_opengeni");
+      expect(skill).toContain("site_tool_open_in_opengeni");
       expect(skill).toContain("offer to set it to Allow in the chat");
       expect(skill).toContain("viewer's\n   live workspace, permission, and connection authority");
       expect(skill).not.toContain("declined approvals");

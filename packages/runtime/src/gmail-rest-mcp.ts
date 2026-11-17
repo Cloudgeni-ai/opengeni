@@ -1,5 +1,6 @@
 import {
   TOOL_REVIEW_SELECTION_LABELS_MAX,
+  toolScopeShortfallReason,
   type McpServerConnectionRef,
   type ToolAuthNeededPayload,
 } from "@opengeni/contracts";
@@ -1778,27 +1779,31 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
     }
     this.pinnedConnectionId = result.connectionId;
     // A host-supplied credential may not report grants; Google then decides.
-    if (result.grantedScopes && !gmailToolSupportsScopes(toolName, result.grantedScopes)) {
-      // A Nango-managed app has fixed scopes: asking for more access would
-      // only reopen the same consent, so the tool is simply not available.
-      if (result.proxy) throw new GmailRestProviderError(GMAIL_NOT_AVAILABLE_FOR_CONNECTION, 403);
-      await this.reportAuthNeeded(
-        {
-          status: "auth_needed",
-          reason: "insufficient_scope",
-          providerDomain: this.options.connectionRef.providerDomain,
-          ...(this.options.connectionRef.provider
-            ? { provider: this.options.connectionRef.provider }
-            : {}),
-          connectionId: result.connectionId,
-          ...(result.authoritySource === "host" ? { authoritySource: "host" as const } : {}),
-          scopes: [gmailToolRequiredScope(toolName)],
-          ...(this.options.connectionRef.resource
-            ? { resource: this.options.connectionRef.resource }
-            : {}),
-        },
+    const scopeNeed = result.grantedScopes
+      ? gmailToolScopeNeed(toolName, result.grantedScopes)
+      : null;
+    if (scopeNeed) {
+      // A proxy-managed account (Nango) has fixed access: asking for more
+      // would only reopen the same consent, so the tool is simply not
+      // available for it and no step-up is offered.
+      const fixedAccess = !!result.proxy;
+      await this.options.onAuthNeeded?.({
+        serverId: this.options.serverId,
         toolName,
-      );
+        providerDomain: this.options.connectionRef.providerDomain,
+        ...(this.options.connectionRef.provider
+          ? { provider: this.options.connectionRef.provider }
+          : {}),
+        ...toolScopeShortfallReason(fixedAccess),
+        connectionId: result.connectionId,
+        ...(result.authoritySource === "host" ? { authoritySource: "host" as const } : {}),
+        scopes: [...scopeNeed],
+        ...(this.options.connectionRef.resource
+          ? { resource: this.options.connectionRef.resource }
+          : {}),
+        ...(this.options.subjectId ? { subjectId: this.options.subjectId } : {}),
+      });
+      if (fixedAccess) throw new GmailRestProviderError(GMAIL_NOT_AVAILABLE_FOR_CONNECTION, 403);
       throw new GmailRestAuthError(GMAIL_MORE_ACCESS_NEEDED);
     }
     return result;
@@ -1927,7 +1932,15 @@ export const GMAIL_REST_MCP_BRIDGE_ADAPTER: LocalMcpBridgeAdapter<
       connectionRef: config.connectionRef,
     });
   },
+  toolScopeNeed: gmailToolScopeNeed,
 });
+
+/** The Gmail access a tool needs beyond `grantedScopes`, or null when they are enough. */
+function gmailToolScopeNeed(toolName: string, grantedScopes: readonly string[]): string[] | null {
+  return gmailToolSupportsScopes(toolName, grantedScopes)
+    ? null
+    : [gmailToolRequiredScope(toolName)];
+}
 
 const MESSAGE_HEADERS = ["Subject", "From", "To", "Cc", "Bcc", "Date", "Message-ID"];
 

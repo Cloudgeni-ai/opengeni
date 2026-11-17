@@ -186,7 +186,23 @@ describe("Google bridges under Nango", () => {
     };
     expect(result.isError).toBe(true);
     expect(result.content[0]!.text).toContain("not available");
-    expect(authNeeded).toEqual([]);
+    // One "not available for this account" notice: never an insufficient_scope
+    // (step-up) request that would reopen the same consent.
+    expect(authNeeded).toEqual([
+      {
+        serverId: "gmail",
+        toolName: "create_label",
+        providerDomain: "nango:gmail",
+        reason: "unsupported_auth",
+        accountReason: "account_scope_fixed",
+        connectionId: "c1",
+        scopes: ["https://www.googleapis.com/auth/gmail.modify"],
+        subjectId: "user:a",
+      },
+    ]);
+    expect(
+      authNeeded.some((payload) => JSON.stringify(payload).includes("insufficient_scope")),
+    ).toBe(false);
   });
 
   test("Calendar proxies through Nango", async () => {

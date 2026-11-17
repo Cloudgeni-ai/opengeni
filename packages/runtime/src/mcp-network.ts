@@ -323,6 +323,61 @@ function snapshotMcpTransportFailureCauseChain(error: unknown): {
   };
 }
 
+// "Nothing was sent" is decided only here, at the physical MCP request: a POST
+// whose fetch rejected before any response with a failure that can only occur
+// while opening the connection. The exact error object is marked; nothing
+// else (another error with the same code, a database failure inside a call)
+// can claim it.
+const MCP_NOT_SENT_CONNECT_CODES = new Set([
+  "ECONNREFUSED",
+  "CONNECTIONREFUSED",
+  "FAILEDTOOPENSOCKET",
+]);
+const MCP_NOT_SENT_DNS_CODES = new Set(["ENOTFOUND", "EAI_AGAIN", "EAI_NONAME"]);
+// These also occur on an open socket (a read or write), so only `connect` counts.
+const MCP_NOT_SENT_ROUTE_CODES = new Set(["EHOSTUNREACH", "ENETUNREACH"]);
+const MCP_NOT_SENT_DESTINATION_REASONS = new Set(["dns_failed", "dns_empty"]);
+const mcpRequestsNotSent = new WeakSet<object>();
+
+/** Whether a rejected fetch failed while connecting (its first coded error decides). */
+export function mcpFetchFailedBeforeSending(error: unknown): boolean {
+  let current = error;
+  try {
+    for (let depth = 0; depth < 4 && current && typeof current === "object"; depth++) {
+      const record = current as Record<string, unknown>;
+      if (record.name === "DestinationPolicyError") {
+        return (
+          typeof record.reason === "string" && MCP_NOT_SENT_DESTINATION_REASONS.has(record.reason)
+        );
+      }
+      if (typeof record.code === "string") {
+        const code = record.code.toUpperCase();
+        const syscall = record.syscall;
+        if (MCP_NOT_SENT_CONNECT_CODES.has(code))
+          return syscall === undefined || syscall === "connect";
+        if (MCP_NOT_SENT_DNS_CODES.has(code))
+          return syscall === undefined || syscall === "getaddrinfo";
+        if (MCP_NOT_SENT_ROUTE_CODES.has(code)) return syscall === "connect";
+        return false;
+      }
+      current = record.cause;
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+/** The exact error a physical MCP request rejected with, proven sent nowhere. */
+export function isMcpRequestNotSentMark(value: unknown): boolean {
+  return !!value && typeof value === "object" && mcpRequestsNotSent.has(value);
+}
+
+/** Keep the mark when a caller replaces the transport's error (to redact it). */
+export function carryMcpRequestNotSentMark(from: unknown, to: object): void {
+  if (isMcpRequestNotSentMark(from)) mcpRequestsNotSent.add(to);
+}
+
 function recordMcpTransportRequestFailure(
   error: unknown,
   request: { httpMethod: string; rpcMethod?: string },
@@ -947,6 +1002,16 @@ export function guardedMcpFetch<TInput extends string | URL | Request>(
       observation.end(response.ok ? "completed" : "rejected");
     } catch (error) {
       observation.end("failed");
+      // A JSON-RPC message goes out only as a POST; its fetch rejecting while
+      // connecting proves the server received nothing.
+      if (
+        httpMethod === "POST" &&
+        error &&
+        typeof error === "object" &&
+        mcpFetchFailedBeforeSending(error)
+      ) {
+        mcpRequestsNotSent.add(error);
+      }
       recordMcpTransportRequestFailure(error, {
         httpMethod,
         ...(rpcMethod ? { rpcMethod } : {}),

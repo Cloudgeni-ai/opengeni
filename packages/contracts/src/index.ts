@@ -13063,9 +13063,30 @@ export const ToolAuthNeededReason = /* @__PURE__ */ defineSchema(() =>
     // The workspace's explicitly designated credential (for example Codex Apps)
     // cannot be used; distinct from a token refresh failure.
     "designated_credential_unavailable",
+    // The connected account lacks access this tool needs and its access is
+    // fixed (managed outside Opengeni), so it cannot be given more here. Sent
+    // as `accountReason` beside the legacy-safe `unsupported_auth`.
+    "account_scope_fixed",
   ]),
 );
 export type ToolAuthNeededReason = z.infer<typeof ToolAuthNeededReason>;
+
+/**
+ * The reason fields of a `tool.auth_needed` notice for a tool whose access the
+ * connected account lacks. An account whose access can be extended gets the
+ * step-up `insufficient_scope`; a fixed-access account gets the legacy-safe
+ * `unsupported_auth` (older clients show the tools as unavailable, with no
+ * action) and the exact `accountReason` for newer clients.
+ */
+export function toolScopeShortfallReason(
+  fixedAccess: boolean,
+):
+  | { reason: "insufficient_scope" }
+  | { reason: "unsupported_auth"; accountReason: "account_scope_fixed" } {
+  return fixedAccess
+    ? { reason: "unsupported_auth", accountReason: "account_scope_fixed" }
+    : { reason: "insufficient_scope" };
+}
 
 export const ScheduledTaskStatus = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
   z.enum(["active", "paused"]),
@@ -18691,6 +18712,12 @@ export const ToolAuthNeededPayload = /* @__PURE__ */ defineSchema(() =>
       reason: ToolAuthNeededReason,
       /** Exact host recovery reason consumed by host-aware clients. */
       hostReason: ToolAuthNeededReason.optional(),
+      /**
+       * Exact account reason for clients that know it, beside the legacy-safe
+       * `unsupported_auth`: the connected account cannot get the access this
+       * tool needs (`scopes`), so no step-up is offered.
+       */
+      accountReason: z.literal("account_scope_fixed").optional(),
       scopes: z.array(primitives.nonEmptyString).optional(),
       resource: z.string().min(1).optional(),
       selectedResources: McpConnectionResourceScopes.optional(),
@@ -18773,6 +18800,13 @@ export const ToolAuthNeededPayload = /* @__PURE__ */ defineSchema(() =>
           code: "custom",
           message: "hostReason is reserved for host-owned auth-needed events",
           path: ["hostReason"],
+        });
+      }
+      if (payload.accountReason && payload.reason !== "unsupported_auth") {
+        context.addIssue({
+          code: "custom",
+          message: "accountReason requires the legacy-safe unsupported_auth reason",
+          path: ["reason"],
         });
       }
     }),

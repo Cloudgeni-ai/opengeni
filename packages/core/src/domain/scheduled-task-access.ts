@@ -328,6 +328,7 @@ const AuthNeededFact = z.object({
   canonicalServerId: z.string().min(1).optional(),
   providerDomain: z.string().min(1),
   reason: ToolAuthNeededReason,
+  accountReason: z.literal("account_scope_fixed").optional(),
   capability: z.unknown().optional(),
   setupRequest: z.unknown().optional(),
 });
@@ -348,7 +349,10 @@ export function scheduledTaskRunAccessFailures(
     const fact = parsed.data;
     if (fact.capability !== undefined || fact.setupRequest !== undefined) continue;
     const serverId = (fact.canonicalServerId ?? fact.serverId).slice(0, 256);
-    const key = `${serverId}\u0000${fact.reason}`;
+    // The exact account reason, when the notice carries one beside its
+    // legacy-safe reason.
+    const reason = fact.accountReason ?? fact.reason;
+    const key = `${serverId}\u0000${reason}`;
     const prior = byKey.get(key);
     if (prior) {
       prior.count += 1;
@@ -359,7 +363,7 @@ export function scheduledTaskRunAccessFailures(
       serverId,
       name: connector(serverId, names, fact.providerDomain).name,
       providerDomain: fact.providerDomain.slice(0, 512),
-      reason: fact.reason,
+      reason,
       count: 1,
       firstOccurredAt: event.occurredAt,
     });

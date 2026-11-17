@@ -27,6 +27,7 @@ import {
   toolPolicyActionName,
   isSecretReferenceError,
   type AccessGrant,
+  type ToolAuthNeededPayload,
   type ToolGatewayIdentity,
   type ToolReviewContext,
   type ToolRef,
@@ -76,6 +77,8 @@ import {
 import {
   ConnectionApprovalPreflightError,
   isMcpAccountParameterChoiceError,
+  isMcpRequestNotSentError,
+  isMcpServerUnreachableError,
   type LocalMcpServerRegistration,
   type PreparedWorkspaceToolGatewayTools,
   type ResolveConnectionCredentialInput,
@@ -132,6 +135,12 @@ export type PreparedWorkspaceToolGateway = Pick<
   toolGatewayCatalog: NonNullable<PreparedWorkspaceToolGatewayTools["toolGatewayCatalog"]>;
   reauthorize?: () => Promise<void>;
   /**
+   * Servers that dropped out of this preparation because they could not be
+   * reached (`PreparedAgentTools.unreachableMcpServers`), so a missing tool
+   * on one of them is answered as "try again", not as a tool that isn't there.
+   */
+  unreachable?: ReadonlySet<string>;
+  /**
    * The provider's own review of exact arguments (for Gmail, the message as it
    * would be sent), read through the same fenced connection. Empty when the
    * provider has none.
@@ -141,6 +150,18 @@ export type PreparedWorkspaceToolGateway = Pick<
     args: Record<string, unknown>,
   ) => Promise<Partial<ToolReviewContext>>;
 };
+
+/**
+ * A provider review that stopped because the account must first sign in again
+ * or allow more access. `payload` is the connector's own typed auth-needed
+ * report for that exact tool, raised while reading the review; nothing ran.
+ */
+export class ToolReviewAuthNeededError extends Error {
+  constructor(readonly payload: ToolAuthNeededPayload) {
+    super("tool review needs the account's sign-in or more access");
+    this.name = "ToolReviewAuthNeededError";
+  }
+}
 
 type WorkspaceSiteToolContext = {
   siteArtifactId: string;
@@ -919,6 +940,21 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
       : gatewaySettings;
   const deps = { ...routeDeps, catalogSourceSettings, settings: firstPartySettings };
   const nativeResolveConnection = buildConnectionTokenResolver(routeDeps.db, gatewaySettings);
+  // A person's own account may live in the workspace it was added in and be
+  // turned on here ("Use it here"). Its credential is read where it lives,
+  // exactly as an accepted turn reads it. Only the caller's own routed
+  // accounts qualify: the bindings above are the caller's turned-on logins,
+  // and the fence re-reads them before every provider request.
+  const ownAccountHomes = ownAccountHomeWorkspaces(accountBindings, grant);
+  const callerConnectionRequest = (
+    input: ResolveConnectionCredentialInput,
+  ): ResolveConnectionCredentialInput => {
+    if (input.connectionRef.subjectScope !== "subject") return input;
+    const home = input.connectionRef.connectionId
+      ? ownAccountHomes.get(input.connectionRef.connectionId)
+      : undefined;
+    return { ...input, subjectId: grant.subjectId, ...(home ? { workspaceId: home } : {}) };
+  };
   const resolveConnection = fence
     ? withTargetFenceConnectionAuthorization(nativeResolveConnection, fence, {
         preflight: options.target !== undefined,
@@ -938,10 +974,7 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
   const resolveCredential = async (
     input: ResolveConnectionCredentialInput,
   ): Promise<ResolveConnectionCredentialResult> =>
-    await resolveConnection({
-      ...input,
-      ...(input.connectionRef.subjectScope === "subject" ? { subjectId: grant.subjectId } : {}),
-    });
+    await resolveConnection(callerConnectionRequest(input));
   // Read once per gateway request: a backend flip reaches the next request.
   const nangoBackends = await nangoBackendsFor(routeDeps.db, routeDeps.settings);
   const firstPartyServers = await Promise.all([
@@ -992,11 +1025,7 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
       workspaceId: grant.workspaceId,
       initiatingSubjectId: grant.subjectId,
     },
-    resolveCredential: async (input) =>
-      await resolveConnection({
-        ...input,
-        ...(input.connectionRef.subjectScope === "subject" ? { subjectId: grant.subjectId } : {}),
-      }),
+    resolveCredential: async (input) => await resolveConnection(callerConnectionRequest(input)),
   });
   // Legacy designation without a Codex cutover row; the core designation
   // (rechecked by the database on every request) with an enabled cutover;
@@ -1043,6 +1072,9 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
     ),
   );
   const recommendations = new Map<string, "allow" | "ask">();
+  // Connectors report "sign in again" or "allow more access" through their
+  // typed auth-needed hook; a review that stops on one says which.
+  const authNeeded: ToolAuthNeededPayload[] = [];
   const prepared = await prepareWorkspaceToolGatewayTools(
     gatewaySettings,
     allGatewayToolRefs(gatewaySettings),
@@ -1050,6 +1082,9 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       subjectId: grant.subjectId,
+      onAuthNeeded: (payload) => {
+        authNeeded.push(payload);
+      },
       ...(options.signal ? { requestSignal: options.signal } : {}),
       ...(authorizeTransportRequest ? { authorizeProviderRequest: authorizeTransportRequest } : {}),
       // A person may confirm an approval-required connection tool here, so
@@ -1195,6 +1230,7 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
     toolGateway: prepared.toolGateway,
     toolGatewayCatalog: prepared.toolGatewayCatalog,
     close: prepared.close,
+    unreachable: prepared.unreachableMcpServers,
     review: async (identity, args) => {
       const server = prepared.mcpServers.find(
         (candidate) => (candidate as { registryId?: unknown }).registryId === identity.serverId,
@@ -1209,9 +1245,20 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
       // The route's own server is always prepared here; failing to find it
       // must not read as "this provider has no review".
       if (!server) throw new Error("tool review server unavailable");
-      return typeof server.reviewContext === "function"
-        ? await server.reviewContext(identity.toolName, args)
-        : {};
+      if (typeof server.reviewContext !== "function") return {};
+      const before = authNeeded.length;
+      try {
+        return await server.reviewContext(identity.toolName, args);
+      } catch (error) {
+        const reported = authNeeded
+          .slice(before)
+          .find(
+            (payload) =>
+              payload.serverId === identity.serverId && payload.toolName === identity.toolName,
+          );
+        if (reported) throw new ToolReviewAuthNeededError(reported);
+        throw error;
+      }
     },
   };
 }
@@ -1392,6 +1439,10 @@ export async function callWorkspaceToolGateway(
     source: entry?.source ?? "aggregate",
   });
   try {
+    // Missing because its server couldn't be reached, not because the catalog
+    // changed: nothing was sent, so the same call can simply be tried again.
+    if (!entry && prepared.unreachable?.has(request.identity.serverId))
+      throw toolServerUnreachableError();
     const siteContext =
       request.siteArtifactId && request.siteVersionId
         ? {
@@ -1449,9 +1500,16 @@ export async function callWorkspaceToolGateway(
     const secretContext = siteContext
       ? { siteId: siteContext.siteArtifactId, siteVersion: siteContext.siteVersionId }
       : null;
-    const result = await withSiteSecretContext(secretContext, () =>
-      origin ? withSiteSessionOrigin(origin, () => preparedCall.execute()) : preparedCall.execute(),
-    );
+    let result: Awaited<ReturnType<PreparedToolGatewayCall["execute"]>>;
+    try {
+      result = await withSiteSecretContext(secretContext, () =>
+        origin
+          ? withSiteSessionOrigin(origin, () => preparedCall.execute())
+          : preparedCall.execute(),
+      );
+    } catch (error) {
+      throwWorkspaceToolGatewayExecuteError(error);
+    }
     observation.end(result.isError ? "tool_error" : "ok");
     return ToolGatewayCallResponse.parse({
       operationId,
@@ -1582,8 +1640,16 @@ export function throwWorkspaceToolGatewayHttpError(error: unknown): never {
     throw new HTTPException(409, { message: error.code, cause: error });
   }
   if (error instanceof ToolGatewayBlockedError) {
-    throw new HTTPException(403, { message: error.code, cause: error });
+    // The message stays the bare code existing callers match on.
+    throw new ApiHttpError(403, {
+      code: "forbidden",
+      message: error.code,
+      retryable: false,
+      outcomeUnknown: false,
+      details: { code: "tool_blocked" },
+    });
   }
+  if (isMcpRequestNotSentError(error)) throw toolServerUnreachableError();
   if (isMcpAccountParameterChoiceError(error)) {
     // Nothing was sent; the message names the account's values to choose from.
     throw new ApiHttpError(422, {
@@ -1632,6 +1698,39 @@ export function throwWorkspaceToolGatewayHttpError(error: unknown): never {
     });
   }
   throw error;
+}
+
+/**
+ * The tool's server could not be reached (connection refused, DNS failure, a
+ * tunnel that is gone), and the call itself was never sent. Safe to retry.
+ */
+export function toolServerUnreachableError(): ApiHttpError {
+  return new ApiHttpError(503, {
+    code: "upstream_unavailable",
+    message: "The tool's server couldn't be reached. Nothing was sent; try again.",
+    retryable: true,
+    outcomeUnknown: false,
+    details: { code: "tool_server_unreachable" },
+  });
+}
+
+/**
+ * A failure while executing a prepared call. A request that provably never
+ * left is retryable; any other typed transport failure may have reached the
+ * provider, so its outcome is unknown. Everything else keeps the ordinary
+ * gateway mapping.
+ */
+export function throwWorkspaceToolGatewayExecuteError(error: unknown): never {
+  if (isMcpRequestNotSentError(error)) throw toolServerUnreachableError();
+  if (!(error instanceof HTTPException) && isMcpServerUnreachableError(error))
+    throw new ApiHttpError(502, {
+      code: "upstream_unavailable",
+      message: "The tool call ended without a confirmed result. Reconcile before retrying.",
+      retryable: false,
+      outcomeUnknown: true,
+      details: { code: "tool_outcome_unknown" },
+    });
+  throwWorkspaceToolGatewayHttpError(error);
 }
 
 /** A saved Site version, only when the caller can see the Site. */
@@ -1768,4 +1867,28 @@ export function workspaceToolGatewayDeclarations(
     moduleSpecifier,
     source: generateToolGatewayDeclarations(prepared.toolGatewayCatalog, { moduleSpecifier }),
   });
+}
+
+/** The other workspaces the caller's own turned-on accounts live in, by
+ * connection id. Only accounts the caller owns qualify; a colleague's or a
+ * shared account never redirects a credential read to another workspace. */
+export function ownAccountHomeWorkspaces(
+  bindings: readonly {
+    connectionId: string;
+    subjectScope: string;
+    ownerSubjectId?: string | null;
+    originWorkspaceId: string;
+  }[],
+  caller: { subjectId: string; workspaceId: string },
+): Map<string, string> {
+  return new Map(
+    bindings
+      .filter(
+        (binding) =>
+          binding.subjectScope === "subject" &&
+          binding.ownerSubjectId === caller.subjectId &&
+          binding.originWorkspaceId !== caller.workspaceId,
+      )
+      .map((binding) => [binding.connectionId, binding.originWorkspaceId]),
+  );
 }

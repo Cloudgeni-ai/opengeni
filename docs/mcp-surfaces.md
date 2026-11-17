@@ -400,10 +400,45 @@ operation. A declared Site tool the viewer can neither use nor connect answers
 the publisher's own account routes with their connector so other viewers get
 their own account or the connect card instead. Every other way a Site call
 stops reaches the viewer as a plain state and the Site as a typed `code`
-(`site_tool_reconnect_required`, `site_tool_permission_denied`,
-`site_tool_not_available_for_viewer`, `site_tool_outcome_unknown`,
-`site_tool_unavailable`); see "Failures" in the same design. See
+(`site_tool_reconnect_required`, `site_tool_grant_required`, `site_tool_permission_denied`,
+`site_tool_not_available_for_viewer`, `site_tool_blocked`,
+`site_tool_open_in_opengeni`, `site_tool_upstream_unavailable`,
+`site_tool_outcome_unknown`, `site_tool_unavailable`); see "Failures" in the
+same design. See
 "Host-native consent" in `docs/design/workspace-html-sites-2026-09-01.md`.
+
+`POST tools/readiness` (`{siteArtifactId, siteVersionId, targets}`, 1–128
+targets) tells a Site what each declared tool needs for this viewer before a
+click: `state` (`ready`, `confirm`, `choose_account`, `connect`, `reconnect`,
+`grant`, `blocked`, `open_in_opengeni`, `unavailable`), `confirm`
+(`never`/`always`/`remembered`/`maybe`), `runsAs` and `connector`. It reads the
+same authority as invoke (the Site's declarations, the viewer's accounts and
+routing, saved tool permissions, "Always allow on this Site" and connection
+status) and never prepares a provider or calls one; invoke still enforces
+everything. `grant` (with `scopes`) comes from the account's recorded grants and
+the first-party bridge's own rule for what each tool needs
+(`LocalMcpBridgeAdapter.toolScopeNeed`); an account whose access is fixed (a
+Nango-held one) reads `unavailable` with `unavailableReason: "account"` instead. `POST tools/site-allowances/reset` removes the caller's own "Always
+allow" choices on one Site (people only).
+
+In a chat, the same bridge rule decides the `tool.auth_needed` notice for a
+tool the account lacks access for: `insufficient_scope` with `scopes` (the
+"Give {provider} more access" step-up) when the account can be given more, or,
+for a fixed-access account, the legacy-safe `unsupported_auth` with
+`accountReason: "account_scope_fixed"` and `scopes`. Older clients show that as
+unavailable tools with no action; newer ones say the provider can't do this
+with the connected account.
+
+A gateway call whose MCP server could not be reached before anything was sent
+(connection refused, DNS failure, a tunnel that is gone) answers 503 `upstream_unavailable`
+with `details.code` `tool_server_unreachable`, `retryable: true` and
+`outcomeUnknown: false`, for every gateway caller. Only the MCP transport's own
+POST decides this: its fetch rejected while connecting (a refusal, a DNS
+failure, or an unreachable host or network during `connect`), and that exact
+error is marked. The same code from anywhere else (a read on an open socket, a
+database inside the call) and any other transport failure during execution
+stay 502 `tool_outcome_unknown`. A tool set to Block answers
+403 with `details.code` `tool_blocked`.
 
 `POST tools/target-approvals` issues a version-2 binding over the existing
 executable effect digest and Site tuple. Exact caller, identity, arguments and
@@ -824,7 +859,7 @@ First-party Opengeni MCP company-profile tools (separate organization policy):
 First-party Opengeni MCP session monitoring tools (`sessions:read`):
 
 - `sessions_list` / `session_get` / `session_events` - compact-by-default discovery and child-management state, and conversation-first history with explicit `results`, `tools`, and `debug` views. Each `sessions_list` row and `session_get` result (and `session_create`'s receipt `facts.chatUrl`) carries the chat's canonical `chatUrl`, built from `webBaseUrl` (falling back to `publicBaseUrl`) and the chat's own workspace, so agents never build links themselves; it is omitted when neither is configured. `session_get({})` reads only the authenticated current agent session (a child reads itself); sessionless/operator callers must supply an explicit `sessionId`. Both forms retain live-attempt and target authorization. Use `detail: "full"` on list/get for the previous bounded projections (get includes `effectiveToolPolicy`). Plain compact list browse skips claim reads; `includeRelatedWork` opts in and query/subject automatically enables advisory evidence without granting access. REST/UI defaults are unchanged. See [session monitoring](session-monitoring-mcp.md) for exact fields, pagination and loss facts, and [work discovery](work-discovery.md) for matching semantics.
-- `session_wait` - one blocking call for a short in-turn wait (a sessionless caller waits on its targets only). It returns when a watched session has a matching durable event after the supplied cursor, the calling session has immediate pending machine input, or `maxWaitSeconds` elapses (default 45, max 50). `waitFor: "change"` observes turn lifecycle, completed agent messages, terminal background commands, blocking failures, goal facts, and session control; `waitFor: "completion"` remains the child-result join and ignores progress, goal facts, background commands, maintenance turns, and continuation segments until a result-bearing final turn or blocker. The tool subscribes to NATS before reading PostgreSQL, but `session_events` remains authority and every wake is followed by a durable read. Failed live fanout degrades to the durable pre-check plus deadline re-check. `ownPendingUpdates > 0` means input will be delivered only when the next turn is claimed. When the returned events include a direct child's complete final answer and the call is the exact live parent attempt's own model call (the worker marks it `_meta.opengeniCaller: "model"`; a Codemode call does not count), the read is recorded on the turn and the own-pending counts exclude that child's idle terminal result for it. The attempt's successful completion supersedes a still-pending such result (`consumed_by_parent_read`), and one committed after that completion arrives already consumed; a failed or interrupted attempt suppresses nothing. Do not immediately repeat a timed-out short wait without new evidence; an unchanged `session_get` snapshot between waits is not new evidence.
+- `session_wait` - one blocking call for a short in-turn wait (a sessionless caller waits on its targets only). It returns when a watched session has a matching durable event after the supplied cursor, the calling session has immediate pending machine input, or `maxWaitSeconds` elapses (default 45, max 50). `waitFor: "change"` observes turn lifecycle, completed agent messages, terminal background commands, blocking failures, goal facts, and session control; `waitFor: "completion"` remains the child-result join and ignores progress, goal facts, background commands, maintenance turns, and continuation segments until a result-bearing final turn or blocker. The tool subscribes to NATS before reading PostgreSQL, but `session_events` remains authority and every wake is followed by a durable read. Failed live fanout degrades to the durable pre-check plus deadline re-check. `ownPendingUpdates > 0` means input will be delivered only when the next turn is claimed. When the returned events include a direct child's complete final answer and the call is the exact live parent attempt's own model call (the worker marks it `_meta.opengeniCaller: "model"`; a Codemode call does not count), the read is recorded on the turn and the own-pending counts exclude that child's idle terminal result for it. The attempt's successful completion supersedes a still-pending such result (`consumed_by_parent_read`), and one committed after that completion arrives already consumed; a failed or interrupted attempt suppresses nothing unless the turn's durable history kept the read's tool result (matched by the model call id the worker sends as `_meta.opengeniModelCallId`) and a recovered attempt completes the turn. Do not immediately repeat a timed-out short wait without new evidence; an unchanged `session_get` snapshot between waits is not new evidence.
 - `command_read` / `command_wait` - one provider-neutral, command-specific output/status path. Both wait while the command runs (defaults 30 and 45 seconds, at most 50; `waitSeconds: 0` reads at once) and return when it finishes, not on new output alone; `command_wait` can wait on up to eight `commandIds` with `waitFor: "all"` or `"any"`. Output over the byte budget, read without a cursor, returns its start and end with the omitted middle's approximate size and cursor; a read with a cursor pages on from there, and `endCursor` reads only newer output. The model sees a plain-text projection; programmatic callers keep the structured receipt (see [run lifecycle](run-lifecycle.md)). A terminal read marks completion observed and suppresses its still-pending notification; a running read leaves future completion eligible. Retained output remains readable after settlement subject to explicit retention limits. Timeout never cancels the command; use `wait_for_input` for a long or uncertain wait. The separate native shell tool `command_input(session_id, chars)` sends nonempty stdin in its owning context where supported; it is not a first-party MCP endpoint and reports unsupported capabilities explicitly.
 - `wait_for_input` (`sessions:control`, session-scoped grants only, self-only) - the out-of-turn long wait. It does not require a goal. The tool stores the exact declaring turn, a bounded reason, and an absolute PostgreSQL deadline derived from relative `timeoutSeconds` (30 seconds to 7 days), appends `session.wait.started`, and arms the durable workflow-wake outbox. Its optional `reply` is the agent's complete message for the person: the worker shows it verbatim as the turn's answer once the wait is accepted (see [run lifecycle](run-lifecycle.md)). The agent must end its turn after success. Human/API input, Agent message or Steer, an immediate child notice, a schedule, a terminal background-command result, or the deadline restarts the session. A human/API turn that neither calls `wait_for_input` again nor consumes the awaited machine input leaves the wait armed; only a newer finished turn that a person did not start or that consumed immediate machine input, or the deadline, retires it. A timeout queues typed `session_wait_timeout` machine input and never cancels background work. `goal_pause` remains the correct tool when the active goal itself must stop for a human decision.
 

@@ -6,6 +6,7 @@ import {
 } from "@opengeni/react/app/lib/drive-connect-return";
 import type { ChatClient } from "@opengeni/sdk";
 import { PERSONAL_INTEGRATION_SETUP_PERMISSION } from "@opengeni/contracts/personal-integration-setup";
+import { sameConnectorProviderDomain } from "@opengeni/contracts/nango";
 import type { SkillSummary } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import {
@@ -37,6 +38,10 @@ import {
   OWNERSHIP_HELP,
 } from "@/components/capabilities/capability-copy";
 import { ConnectionAccessNotice } from "@/components/capabilities/connection-access-notice";
+import {
+  connectorRowHealth,
+  connectorRowRepairAction,
+} from "@/components/capabilities/connector-row-health";
 import {
   catalogServiceIdentity,
   collapseConnectionService,
@@ -159,7 +164,6 @@ import {
   connectionHealth,
   isConnectorCatalogItem,
   isMissingCredentialsError,
-  normalizeProviderDomain,
   oauthConnectionRef,
   catalogConnectionAccountSelection,
   oauthConnectionOwnership,
@@ -321,6 +325,7 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
     connections,
     connectionsLoadFailed,
     connectionsAccessDenied,
+    accounts,
     fetchConnections,
     apiIntegrationDefinitions,
     apiIntegrationInstances,
@@ -650,9 +655,22 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
     !item.enabled && nativeCatalogItemCannotConnect(item)
       ? { label: "Unavailable" as const, tone: "plain" as const }
       : connectionAccessChip(
-          capabilityStateChip(item, connectionHealth(item, connections ?? [], connectionsLoaded)),
+          capabilityStateChip(item, connectionHealth(item, accounts ?? [], accounts !== null)),
           connectionsAccessDenied,
         );
+  // One state source with the item page: the reason names what needs fixing
+  // and the row offers that page's one repair.
+  const connectorRowStatus = (item: CapabilityCatalogItem) => {
+    const health = connectionHealth(item, accounts ?? [], accounts !== null);
+    return connectorRowHealth({
+      item,
+      health,
+      chip: connectorChip(item),
+      repairable: !connectionsAccessDenied,
+      busy: busyId !== null,
+      onRepair: () => repairFromList(item, health),
+    });
+  };
   const openIntegrationFrom = () => {
     integrationOpenerRef.current =
       document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -707,8 +725,7 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
             description: personalExtensionOrigin(item)
               ? `From ${personalExtensionOrigin(item)}`
               : (capabilityDescription(item) ?? undefined),
-            status: connectorChip(item).label,
-            state: catalogStatusForChip(connectorChip(item)),
+            ...connectorRowStatus(item),
             connected: item.enabled,
             onOpen: () => openItem(item),
           },
@@ -819,7 +836,7 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
         }
       : rawSelectedItem;
   const selectedHealth: ConnectionHealth = selectedItem
-    ? connectionHealth(selectedItem, connections ?? [], connectionsLoaded)
+    ? connectionHealth(selectedItem, accounts ?? [], accounts !== null)
     : { state: "none" };
   const currentWorkspace = context.workspaces.find((workspace) => workspace.id === workspaceId);
   const selectedConnectAccess = selectedItem
@@ -830,17 +847,29 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
         memberIntegrationSetup,
       )
     : null;
-  const selectedSetupUnavailable = selectedItem
-    ? (nativeCatalogItemNotice(
-        selectedItem,
+  const setupUnavailableFor = (item: CapabilityCatalogItem) => {
+    const connectAccess =
+      item === selectedItem
+        ? selectedConnectAccess
+        : catalogConnectAccess(
+            item,
+            context.accessContext?.workspaceGrants.find(
+              (grant) => grant.workspaceId === workspaceId,
+            ),
+            currentWorkspace?.kind,
+            memberIntegrationSetup,
+          );
+    return (
+      nativeCatalogItemNotice(
+        item,
         nativeConnectCatalog,
         () => void refresh(),
         nativeConnectionFacts,
       ) ??
-      (selectedConnectAccess?.blocked
-        ? { tone: "muted" as const, ...selectedConnectAccess.blocked }
-        : undefined))
-    : undefined;
+      (connectAccess?.blocked ? { tone: "muted" as const, ...connectAccess.blocked } : undefined)
+    );
+  };
+  const selectedSetupUnavailable = selectedItem ? setupUnavailableFor(selectedItem) : undefined;
   const selectedSocialConnections = selectedItem
     ? (() => {
         const plan = capabilityConnectPlan(selectedItem);
@@ -1207,9 +1236,28 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
       busyId !== null ||
       (selectedSetupUnavailable &&
         action.type !== "remove_connection" &&
-        action.type !== "rename_connection")
+        action.type !== "rename_connection" &&
+        action.type !== "turn_on_here")
     )
       return false;
+    return await runAction(selectedItem, selected.registry, action);
+  }
+
+  /** A list row's one repair; without one the item's page opens and offers it. */
+  function repairFromList(item: CapabilityCatalogItem, health: ConnectionHealth) {
+    const action = connectorRowRepairAction(item, health, {
+      setupUnavailable: setupUnavailableFor(item) !== undefined,
+    });
+    if (action) void runAction(item, false, action);
+    else openItem(item);
+  }
+
+  async function runAction(
+    targetItem: CapabilityCatalogItem,
+    registry: boolean,
+    action: ConnectAction,
+  ): Promise<boolean> {
+    if (busyId !== null) return false;
     // Social authorization starts a new provider attempt even when existing
     // rows are retained for management. Disconnect never needs this readiness.
     if (
@@ -1217,15 +1265,15 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
       !nativeProviderAvailable(nativeConnectCatalog, action.provider)
     )
       return false;
-    setBusyId(selectedItem.id);
+    setBusyId(targetItem.id);
     setSheetError(null);
     try {
       await performCapabilityAction(
         {
           client,
           workspaceId,
-          item: selectedItem,
-          registry: selected.registry,
+          item: targetItem,
+          registry,
           connections: connectionsLoadFailed ? null : connections,
           canManageSkills,
           refresh,
@@ -1240,12 +1288,20 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
         },
         action,
       );
-      if (action.type === "remove_connection" || action.type === "rename_connection")
+      if (
+        action.type === "remove_connection" ||
+        action.type === "rename_connection" ||
+        action.type === "turn_on_here"
+      )
         catalogConnectionAccounts.onRetry();
       return true;
     } catch (error) {
       await refresh();
-      if (action.type === "remove_connection" || action.type === "rename_connection")
+      if (
+        action.type === "remove_connection" ||
+        action.type === "rename_connection" ||
+        action.type === "turn_on_here"
+      )
         catalogConnectionAccounts.onRetry();
       const copy = capabilityErrorToast(error, "Something went wrong");
       setSheetError(
@@ -1499,12 +1555,11 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
     if (!domain) return;
     reconnectHandled.current = true;
     clearReturnParams();
-    const target = normalizeProviderDomain(domain);
     const item = items.find(
       (candidate) =>
         candidate.enabled &&
         candidate.connectionRef &&
-        normalizeProviderDomain(candidate.connectionRef.providerDomain) === target,
+        sameConnectorProviderDomain(candidate.connectionRef.providerDomain, domain),
     );
     if (item) {
       setSelected(

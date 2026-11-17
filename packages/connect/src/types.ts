@@ -28,6 +28,11 @@ export type ConnectAccount = {
   label: string;
   ownership: ConnectOwnership;
   status: "connected" | "auth_needed" | "disabled";
+  /**
+   * `nango`: held by an integration platform. Sign it in again through its
+   * connector's own Connect, never a native reconnect; its access is fixed.
+   */
+  backend?: "nango";
 };
 export type ConnectResource = { id: string; label: string; kind: string };
 export type ConnectInstallationTarget = {

@@ -358,7 +358,9 @@ that issued it (`_meta.opengeniCaller`, `FIRST_PARTY_MCP_CALLER_META_KEY`), and
 a Codemode script, which may return only a summary to the model, or an
 unmarked call from an older worker proves nothing. The read records each such
 answer on the reading turn as `metadata.consumedChildAnswers` entries
-(`childSessionId`, `sequence`, `attemptId`; the newest 64 are kept) in a
+(`childSessionId`, `sequence`, `attemptId`, and the model's `callId` for the
+read when the worker sent it as `_meta.opengeniModelCallId`; the newest 64 are
+kept) in a
 separate best-effort transaction that locks only that turn row (a bounded wait;
 a busy row skips it) and re-proves that the attempt is still live and the
 session's current one and that each sequence is the child's result-bearing
@@ -385,8 +387,12 @@ attempt that completed it: the row is inserted `superseded`, keeps its
 with `reason: consumed_by_parent_read`, with no goal auto-resume, wake, or
 queued status. The insert and the completion both hold the parent session lock,
 so they serialize. A read by an attempt that fails, is interrupted, or is
-replaced, even after the read, suppresses nothing: that result is delivered
-normally, as is a result reporting any part the parent did not read, such as an
+replaced, even after the read, suppresses nothing unless the same turn's
+durable history holds that read's own tool result (`function_call_result` with
+the recorded `callId`): a recovered attempt of the turn resumes from that
+history, so the turn's completion counts the read as if that attempt had made
+it. Otherwise that result is delivered normally, as is a result reporting any
+part the parent did not read, such as an
 older answer skipped by a later cursor. The record only ever suppresses a
 duplicate: an older writer or a lost record delivers the result as before, and
 older workers ignore the metadata key. A parent that reads an answer and then
