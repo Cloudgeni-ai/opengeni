@@ -1,5 +1,65 @@
 # @opengeni/worker-bundle
 
+## 6.26.0
+
+### Patch Changes
+
+- b6b3579: Less waiting between a model response and the next model request. A tool's result is now recorded as soon as its response's usage and tool calls are saved, instead of waiting for that response's billing writes and history checkpoint; the next model request still waits for both. The task usage receipt that the saved usage event already records is no longer written a second time, and the model-call slot is released before the response's history checkpoint, which the next request still makes durable before it is sent.
+
+  Recovery of owed model usage no longer counts a response twice against a task's usage limit when its provider response id is stored encoded (one containing a lone surrogate or starting with the lossless codec's prefix), and such a response is no longer listed as owed again after its ledger is settled.
+
+- c8efcb0: The per-turn connector availability notice now also names the chat's connectors that are connected for this turn, noting that their tools may appear only through tool search. Before, a turn with an unavailable connector named only that one, so an agent asked to use a connected service whose tools wait behind tool search could take a similarly named unavailable connector (Google Calendar beside a connected Outlook Calendar) for it and answer that the service wasn't available without searching. Connectors already reported unavailable, selections narrowed to no tools, and connectors whose every account needs reconnecting are not listed as connected. The line appears only on turns that already carry the notice.
+- 8fae328: Connected tools that can do a task now win over a Connect card for an unconnected alternative. Tool search no longer shows an integration's Connect card by itself when the chat already has a connected account of the same kind (Outlook Mail beside an unconnected Gmail); the search result still names the integration, and the agent can show its card when the person asked for it. In the agent's integration catalog search, a service the person can already use in the chat comes before a same-category service they would still have to connect, unless the request names the unconnected service. The per-turn connector availability notice now says that a configured but unavailable connector is needed only when the person named it or no loaded tool can do the task.
+- 47eb375: One verified account is now one connection, on every backend. Connections record a server-owned `account_identity_key` (the integration and the verified provider account), and the database allows one live connection per organization, owner and key, so a racing or legacy writer can no longer save a second connection to the same account; it fails as "already connected" instead. OAuth MCP logins, Nango connections and provider OAuth connections (personal GitHub and others) set it.
+
+  Opengeni also no longer pays for two Nango connections for the same account. When a person connects the same verified account to the same Nango integration in several organizations, every organization's row now points at one shared Nango connection, and that connection is deleted in Nango only when the last row referencing it is gone. Reconnects, refused or failed connect attempts and disconnects release the replaced connection through the same reference check, and the worker now sweeps Nango every 15 minutes: for connections this release made (tagged with the deployment), it merges leftover duplicates, deletes abandoned and cascade-orphaned connections, and deletes connections whose refresh has failed for 24 hours. Older, untagged connections are left to `integrations:nango orphans`. Disconnecting a Nango-managed Google app still does not revoke the grant at Google, because Nango's OAuth client is shared across the person's connections.
+
+  Email accounts are matched case-insensitively, and scopes Nango could not report never move another organization's connection onto a narrower one.
+
+  Reconnecting the same verified account no longer breaks running turns: the connection keeps its authority generation when the new grant includes every scope it had, so tool calls in a turn accepted before the reconnect no longer fail with "Authentication required". A different account, fewer scopes, a revoke or a status change still end that authority.
+
+  While a release rolls out, or after a rollback to an older release, pods of the older release still delete a replaced Nango connection directly; a connection shared by this release can then be revoked in another organization and must be reconnected there.
+
+- Updated dependencies [6d7ea1e]
+- Updated dependencies [b6b3579]
+- Updated dependencies [8fae328]
+- Updated dependencies [8fae328]
+- Updated dependencies [c8efcb0]
+- Updated dependencies [20e4937]
+- Updated dependencies [47eb375]
+- Updated dependencies [c8efcb0]
+- Updated dependencies [33dd6da]
+- Updated dependencies [5e3441a]
+- Updated dependencies [c8efcb0]
+- Updated dependencies [e1199c0]
+  - @opengeni/contracts@6.26.0
+  - @opengeni/db@6.26.0
+  - @opengeni/sdk@6.26.0
+  - @opengeni/core@6.26.0
+  - @opengeni/runtime@6.26.0
+  - @opengeni/tool-gateway@6.26.0
+  - @opengeni/codemode@6.26.0
+  - @opengeni/xai-subscription@6.26.0
+  - @opengeni/capabilities@6.26.0
+  - @opengeni/codex@6.26.0
+  - @opengeni/config@6.26.0
+  - @opengeni/decisions@6.26.0
+  - @opengeni/documents@6.26.0
+  - @opengeni/events@6.26.0
+  - @opengeni/github@6.26.0
+  - @opengeni/interaction@6.26.0
+  - @opengeni/observability@6.26.0
+  - @opengeni/storage@6.26.0
+  - @opengeni/vaults@6.26.0
+  - @opengeni/vaults-bitwarden@6.26.0
+  - @opengeni/vaults-keeper@6.26.0
+  - @opengeni/vaults-onepassword@6.26.0
+  - @opengeni/vaults-protonpass@6.26.0
+  - @opengeni/jev@6.26.0
+  - @opengeni/agent-proto@6.26.0
+  - @opengeni/network@6.26.0
+  - @opengeni/subscriptions@6.26.0
+
 ## 6.25.0
 
 ### Patch Changes
