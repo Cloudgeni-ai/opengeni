@@ -100,10 +100,13 @@ export function nangoAccountName(label: string): string {
  * Whether Nango reported the scopes the row records (or a connection whose
  * reported grant covers them now stands for it). Rows without the marker,
  * including every row saved before it existed, may hold the app's default
- * scopes instead of a grant.
+ * scopes instead of a grant. The marker names the Nango connection it
+ * vouches for, so a row an older release moved elsewhere (copying its
+ * metadata) no longer vouches for its new connection.
  */
 export function nangoScopesConfirmed(connection: ConnectionMetadata): boolean {
-  return connection.metadata.nangoScopesConfirmed === true;
+  const id = nangoConnectionIdOf(connection);
+  return id !== null && connection.metadata.nangoScopesConfirmed === id;
 }
 
 /** `lastError` of a row whose Nango connection Nango no longer has. */
@@ -295,7 +298,7 @@ function confirmedMetadata(
   target: string,
 ): Record<string, unknown> {
   const { nangoScopesUnconfirmed: _unconfirmed, ...rest } = metadata;
-  return { ...rest, nangoConnectionId: target, nangoScopesConfirmed: true };
+  return { ...rest, nangoConnectionId: target, nangoScopesConfirmed: target };
 }
 
 /**
@@ -660,7 +663,7 @@ export type NangoSweepResult = {
   skippedPeople: number;
   /** Too many orphans at once to trust; none were deleted. */
   orphanBreakerTripped: boolean;
-  /** Too many rows on missing connections at once to trust; none were marked. */
+  /** Too many missing connections at once to trust; no row was marked. */
   missingBreakerTripped: boolean;
   /** The pass ran out of time; the people left wait for the next pass. */
   deferredPeople: number;
@@ -708,8 +711,8 @@ export const NANGO_SWEEP_BUDGET_MS = 3 * 60 * 1000;
  * Every Nango deletion happens after the rows' writes commit, under the
  * person lock in a transaction that writes no connection rows. Marking a row
  * first confirms the 404 with Nango, then re-reads under the lock and marks
- * only active rows still on that connection. Too many rows on missing
- * connections at once (as with a wrong Nango environment) marks none.
+ * only active rows still on that connection. Too many missing
+ * connections at once (as with a wrong Nango environment) marks no row.
  *
  * Connections without this deployment's tag (made outside Opengeni, by
  * another deployment sharing the Nango environment, or before the tag) are
@@ -890,7 +893,7 @@ export async function sweepNangoConnections(
       });
   } else if (missingCount > Math.max(10, Math.floor(knownCount / 2))) {
     result.missingBreakerTripped = true;
-    console.warn("[nango] sweep found too many rows on missing connections; none marked", {
+    console.warn("[nango] sweep found too many missing connections; no row marked", {
       missing: missingCount,
       known: knownCount,
     });

@@ -138,8 +138,10 @@ connections; that is not a duplicate.
   An existing connection replaces a fresh one only while Nango reports it
   without auth errors.
 - A row's scopes count as a grant only when its metadata carries
-  `nangoScopesConfirmed`: Nango reported them at connect time, or the row was
-  moved onto a connection whose confirmed grant covers them. When Nango
+  `nangoScopesConfirmed` naming the row's own Nango connection: Nango reported
+  them at connect time, or the row was moved onto a connection whose confirmed
+  grant covers them. A marker naming another connection (an older release
+  moved the row, copying its metadata) vouches for nothing. When Nango
   reports no scopes the row records the app's default scopes without the
   marker (and with the older `nangoScopesUnconfirmed`, which the previous
   release reads), and so does every row saved before the marker existed. No other
@@ -215,7 +217,7 @@ Repoints are committed first. Every deletion in Nango happens afterwards
 under the person's lock, in a transaction that writes no connection rows,
 after the rows are read again. Marking a row first confirms the 404 with
 Nango, then re-reads under the lock and marks only active rows still on that
-connection. When more rows stand for missing connections than for half of
+connection. When more of the connections live rows stand for are missing than half of
 the connections the pass knows (and more than ten), as with a wrong Nango
 environment, it marks none and logs a warning. A pass that ran out of time
 before planning everyone marks none either, so a deployment too large to

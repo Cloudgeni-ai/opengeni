@@ -643,7 +643,7 @@ async function persistNangoConnection(
   // Only scopes Nango reported are a grant; without the report the stored
   // scopes are the app's defaults, and sharing never treats them as a grant
   // that covers another organization's row.
-  if (input.grantedScopes !== null) metadata.nangoScopesConfirmed = true;
+  if (input.grantedScopes !== null) metadata.nangoScopesConfirmed = input.nangoConnectionId;
   // The previous release only reads the negative marker; keep writing it
   // until no release that reads it can still run (rollout or rollback).
   else metadata.nangoScopesUnconfirmed = true;

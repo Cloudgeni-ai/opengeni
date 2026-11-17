@@ -944,6 +944,28 @@ describe("Nango connections in PostgreSQL", () => {
     expect(nango.deleted("um-1")).toBe(false);
   });
 
+  test("a scope marker vouches only for the connection it names", async () => {
+    if (!shared) return;
+    const moved = await owner("nango marker moved");
+    const fresh = await owner("nango marker fresh", moved.subjectId);
+    const nango = fakeNango();
+    const both = "https://www.googleapis.com/auth/gmail.readonly https://mail.google.com/";
+    await connect(moved, nango, "mm-1", "marker-moved@example.com", both);
+    // An older release moved the row onto a connection Google granted read-only
+    // only, copying its metadata (and so its marker for mm-1) along.
+    await leaveRowOn(moved, "mm-x", nango, "marker-moved@example.com");
+    nango.remote.find((entry) => entry.connectionId === "mm-x")!.scope =
+      "https://www.googleapis.com/auth/gmail.readonly";
+    await connect(fresh, nango, "mm-2", "marker-moved@example.com");
+    // mm-x is no confirmed full-mail grant: nobody is moved onto it.
+    expect((await nangoRows(fresh))[0]).toMatchObject({
+      status: "active",
+      nango_connection_id: "mm-2",
+    });
+    expect((await nangoRows(moved))[0]).toMatchObject({ nango_connection_id: "mm-x" });
+    expect(nango.deleted("mm-2")).toBe(false);
+  });
+
   test("the sweep deletes a broken connection only after its repoints commit", async () => {
     if (!shared) return;
     const first = await owner("nango sweep broken commit first");
