@@ -1,5 +1,20 @@
 # @opengeni/sdk
 
+## 6.26.0
+
+### Minor Changes
+
+- c8efcb0: The Excel add-in on Mac and Windows now signs in through the person's own browser, where their saved sign-ins, passwords and passkeys work, instead of Office's embedded window. The pane shows "Continue in your browser" with a short code; the person types it on the browser page and chooses Allow. The new `/v1/native-app/relays` routes carry the sign-in back to the pane: relays last five minutes, are single-use and rate-limited, release the code only to the pane's PKCE verifier, and are approved only with the pane's code. The SDK adds `createNativeAppRelay`, `approveNativeAppRelay` and `pollNativeAppRelay`. Excel on the web keeps its sign-in window. The Mac install steps on `/excel` now say that the `wef` folder usually has to be created.
+- 20e4937: Agents can run code in the Excel add-in again (`excel_run`). The add-in's task pane page now allows `'unsafe-eval'`, which the add-in kit needs to run the agent's Office.js code; the console and the add-in's other pages keep the strict policy. `@opengeni/sdk/office` exports `OFFICE_RUN_SCRIPT_SOURCES`, the script sources a product's own pane page must allow. In the pane, Excel for Mac's add-in info button no longer covers the header's buttons, and the workspace picker groups workspaces under their organization.
+
+### Patch Changes
+
+- 6d7ea1e: A context checkpoint that failed before any provider answer, including one refused because the sandbox moved to another machine just before it was sent, now retries the same turn instead of failing it. When a checkpoint does fail for good, a goal's continuation reports `blocked` with the new reason `compaction_failed`, and the goal pill says a message or Compact continues it, rather than claiming the goal will continue automatically.
+- Updated dependencies [6d7ea1e]
+- Updated dependencies [8fae328]
+  - @opengeni/contracts@6.26.0
+  - @opengeni/connect@6.26.0
+
 ## 6.25.0
 
 ### Minor Changes

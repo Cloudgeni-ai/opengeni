@@ -3411,6 +3411,21 @@ started or a failed savepoint. Running turns whose database connection remains
 unavailable, including SQLSTATE 53300, use the existing fenced exact-attempt
 recovery lane; ordinary data/authentication failures remain failures.
 
+One refusal does replay a started callback: SQLSTATE 0A000 "cached plan must
+not change result type". A rolling migration that adds a column changes the row
+that `select *`, `table.*` and `returning *` statements return, and Postgres
+refuses to reuse such a statement that a running pod prepared earlier. The
+refused statement never ran and its transaction rolled back, so the pool
+repeats the whole transaction, at most once per pool connection plus once
+(work the callback does outside the database runs again, as on any retry).
+It also repeats when a statement in flight beside the refused one failed first
+with "current transaction is aborted".
+The connection that saw the refusal forgets all of its prepared statements,
+so each connection is refused at most once per schema change. Outside a
+transaction postgres.js re-prepares and repeats the statement itself; our
+patch sends that repeat in one round so statements in flight behind it on the
+same connection no longer hang.
+
 After the upstream Temporal chart is running, the stack wrapper applies
 `deploy/stacks/official-temporal-namespace-job.yaml` to register the Temporal
 namespace used by Opengeni (`default` by default). The Opengeni worker cannot

@@ -268,6 +268,38 @@ send-as address, which proves only that someone once verified it) stands in for
 the ID, so a login whose address changed before it recorded the ID is removed
 and added again.
 
+The database holds the same rule for every backend. A writer that verified
+which provider account a connection is stores `connections.account_identity_key`
+(`connectionAccountIdentityKey`: SHA-256 of the integration and the account),
+and migration 1481 allows one live (not revoked) row per organization, owner (a
+person, or a workspace for a shared connection) and key. OAuth MCP logins use
+the provider, issuer, resource group and Google's account ID when recorded,
+else the verified identity; Nango connections use the Nango integration and
+the verified account; provider OAuth (personal GitHub and others) uses the
+workspace, provider family and provider principal. A racing or legacy writer
+that would add a second live row for the account fails as
+`account_already_connected` instead. Connections whose account is not verified
+(API keys, Fiken, vaults, auto-connected logins) have no key and keep their
+per-writer rules. Rows saved before the key get it when they are next
+connected or reconnected, and a credential replaced by a writer that sets no
+key (a pasted token, an auto-connect) loses it, so it neither keeps the
+account's slot nor vouches for that account later.
+
+Reconnecting the same account into its row is not an authority change: when
+the update carries the row's own key and its new grant includes every scope
+the row had, `authority_generation` stays, so a turn accepted on the row
+keeps using it with the new token. A row saved before keys existed counts
+when the writer derives the same key from the stored row's own verified
+account (`previousAccountIdentityKey`). A different account, fewer scopes, a
+writer without a key, a revoke or a status change still advance it. The MCP
+key includes the authorization server issuer and the identity the provider
+verified (its account ID when recorded); if either changes between connects,
+the key changes and that one reconnect advances the generation.
+
+Provider OAuth keys are per workspace (the workspace is part of the key), as
+those connections are. Reconnecting picks the live row of the provider
+principal before any revoked duplicate.
+
 An exact `connectionRef.connectionId` remains pinned to that account, including
 custom API instances. Multi-account selectors are unpinned; the explicit
 `accountSelection: "all_eligible"` mode cannot be combined with a connection ID,

@@ -16,7 +16,7 @@ import {
 } from "@opengeni/react/session-app";
 import { enableWorkbench } from "@opengeni/react/workbench";
 import { setImageProxyTicket } from "@opengeni/react/app/lib/content-hosting";
-import { OpenGeniClient, type Workspace } from "@opengeni/sdk";
+import { OpenGeniClient, type AccessContext, type Workspace } from "@opengeni/sdk";
 import {
   lazy,
   StrictMode,
@@ -41,8 +41,20 @@ import {
   type SelectionSnapshot,
   type WorkbookLinkState,
 } from "@opengeni/sdk/office";
-import { forgetToken, prepareSignIn, signIn, storedToken, type SignInRequest } from "./office-auth";
+import {
+  forgetToken,
+  officePlatform,
+  prepareSignIn,
+  SIGN_IN_CANCELLED,
+  signIn,
+  signInMode,
+  startBrowserSignIn,
+  storedToken,
+  type BrowserSignIn,
+  type SignInRequest,
+} from "./office-auth";
 import { landingWorkspaceId } from "./landing-workspace";
+import { workspaceGroups } from "./workspace-groups";
 import { SPREADSHEET_STARTERS } from "./starters";
 import {
   availableSessionStorage,
@@ -124,6 +136,9 @@ function SignIn({ onSignedIn }: { onSignedIn: (token: string) => void }) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [request, setRequest] = useState<SignInRequest | null>(null);
+  const [browser, setBrowser] = useState<BrowserSignIn | null>(null);
+  // Only the latest attempt updates the screen: a cancelled one may settle later.
+  const attempt = useRef(0);
   useEffect(() => {
     if (request) return;
     let live = true;
@@ -134,6 +149,74 @@ function SignIn({ onSignedIn }: { onSignedIn: (token: string) => void }) {
       live = false;
     };
   }, [request]);
+  const finished = () => {
+    attempt.current += 1;
+    setPending(false);
+    setBrowser(null);
+    // A PKCE verifier is single-use.
+    setRequest(null);
+  };
+  const start = (prepared: SignInRequest) => {
+    const current = (attempt.current += 1);
+    const failed = (caught: unknown) => {
+      if (attempt.current !== current) return;
+      if (!(caught instanceof Error && caught.message === SIGN_IN_CANCELLED)) {
+        setError(caught instanceof Error ? caught.message : "Sign-in failed. Try again.");
+      }
+      finished();
+    };
+    const succeeded = (token: string) => {
+      if (attempt.current !== current) return;
+      finished();
+      onSignedIn(token);
+    };
+    setPending(true);
+    setError(null);
+    if (signInMode(officePlatform()) === "dialog") {
+      signIn(apiBaseUrl, prepared).then(succeeded, failed);
+      return;
+    }
+    startBrowserSignIn(
+      {
+        client: new OpenGeniClient({ baseUrl: apiBaseUrl }),
+        webOrigin: window.location.origin,
+        openBrowser: openInBrowser,
+      },
+      prepared,
+    ).then((started) => {
+      if (attempt.current !== current) return started.cancel();
+      setBrowser(started);
+      started.done.then(succeeded, failed);
+    }, failed);
+  };
+  if (browser) {
+    return (
+      <PaneScreen>
+        <main className="pane-center">
+          <h1>Continue in your browser</h1>
+          <p>Enter this code there to sign in.</p>
+          <p className="pane-code" aria-label={browser.confirmationCode.split("").join(" ")}>
+            {browser.confirmationCode}
+          </p>
+          <div className="pane-actions">
+            <button type="button" className="pane-secondary" onClick={browser.reopen}>
+              Open browser again
+            </button>
+            <button
+              type="button"
+              className="pane-secondary"
+              onClick={() => {
+                browser.cancel();
+                finished();
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </main>
+      </PaneScreen>
+    );
+  }
   return (
     <PaneScreen>
       <main className="pane-center">
@@ -144,19 +227,7 @@ function SignIn({ onSignedIn }: { onSignedIn: (token: string) => void }) {
           className="pane-primary"
           disabled={pending || !request}
           onClick={() => {
-            if (!request) return;
-            setPending(true);
-            setError(null);
-            signIn(apiBaseUrl, request)
-              .then(onSignedIn)
-              .catch((caught: unknown) =>
-                setError(caught instanceof Error ? caught.message : "Sign-in failed. Try again."),
-              )
-              .finally(() => {
-                setPending(false);
-                // A PKCE verifier is single-use.
-                setRequest(null);
-              });
+            if (request) start(request);
           }}
         >
           {pending ? "Signing in…" : "Sign in"}
@@ -274,10 +345,20 @@ function WorkbookStatus(props: {
 
 function PaneAccount(props: {
   workspaces: Workspace[];
+  access: AccessContext | null;
   workspaceId: string;
   onWorkspace: (workspaceId: string) => void;
   onSignOut: () => void;
 }) {
+  const groups = useMemo(
+    () => workspaceGroups(props.workspaces, props.access),
+    [props.workspaces, props.access],
+  );
+  const option = (each: Workspace) => (
+    <option key={each.id} value={each.id}>
+      {each.name}
+    </option>
+  );
   return (
     <div className="pane-account">
       {props.workspaces.length > 1 ? (
@@ -286,11 +367,13 @@ function PaneAccount(props: {
           value={props.workspaceId}
           onChange={(event) => props.onWorkspace(event.target.value)}
         >
-          {props.workspaces.map((each) => (
-            <option key={each.id} value={each.id}>
-              {each.name}
-            </option>
-          ))}
+          {groups.length > 1
+            ? groups.map((group) => (
+                <optgroup key={group.accountId} label={group.label}>
+                  {group.workspaces.map(option)}
+                </optgroup>
+              ))
+            : props.workspaces.map(option)}
         </select>
       ) : (
         <span className="pane-account-name">{props.workspaces[0]?.name}</span>
@@ -348,6 +431,7 @@ function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }
   const client = useMemo(() => new OpenGeniClient({ baseUrl: apiBaseUrl, apiKey: token }), [token]);
   const imageTicketSettled = useImageProxyTicket(token);
   const [workspaces, setWorkspaces] = useState<Workspace[] | null>(null);
+  const [access, setAccess] = useState<AccessContext | null>(null);
   const [workspaceId, setWorkspaceId] = useState<string | null>(remembered(WORKSPACE_KEY));
   const [loadError, setLoadError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
@@ -370,16 +454,17 @@ function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }
       // The person's own default workspace; without it the pane still opens one.
       client.getAccessContext().catch(() => null),
     ])
-      .then(async ([list, access]) => {
+      .then(async ([list, accessContext]) => {
         await shown;
         if (!live) return;
         setWorkspaces(list);
+        setAccess(accessContext);
         setLoadError(null);
         setWorkspaceId((current) =>
           landingWorkspaceId({
             workspaceIds: list.map((each) => each.id),
             remembered: current,
-            defaultWorkspaceId: access?.defaultWorkspaceId,
+            defaultWorkspaceId: accessContext?.defaultWorkspaceId,
           }),
         );
         setRetrying(false);
@@ -494,6 +579,7 @@ function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }
         railFooter: (
           <PaneAccount
             workspaces={workspaces}
+            access={access}
             workspaceId={workspaceId}
             onWorkspace={(next) => {
               setWorkspaceId(next);
@@ -518,7 +604,12 @@ function App() {
 
 void office()
   .onReady()
-  .then(() => {
+  .then(({ platform }) => {
+    // Office for Mac floats its add-in info button over the pane's top-right
+    // corner; pane.css keeps the header's buttons clear of it.
+    const context = office().context as Partial<ReturnType<typeof office>["context"]> | undefined;
+    const host = platform ?? context?.diagnostics?.platform ?? context?.platform;
+    if (host) document.documentElement.dataset.officePlatform = host;
     createRoot(document.getElementById("root")!).render(
       <StrictMode>
         <App />

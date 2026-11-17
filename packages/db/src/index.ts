@@ -1176,6 +1176,7 @@ import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-
 import {
   fromPostgresLosslessJson,
   fromPostgresLosslessText,
+  isStoredVerbatimAsLosslessJsonString,
   LOSSLESS_CONTENT_CODEC_VERSION,
   toPostgresLosslessText,
   withLosslessContentWriteVersion,
@@ -7975,6 +7976,8 @@ export type CreateConnectionInput = {
   verifiedInstallAt?: Date | null;
   verifiedInstallVersion?: number | null;
   metadata?: Record<string, unknown>;
+  /** See connectionAccountIdentityKey; omit when the account is unverified. */
+  accountIdentityKey?: string | null;
   /** The person's own name for the connection (already normalized). */
   label?: string | null;
   createdBySubjectId?: string | null;
@@ -8043,6 +8046,17 @@ export type UpdateConnectionInput = {
   verifiedInstallAt?: Date | null;
   verifiedInstallVersion?: number | null;
   metadata?: Record<string, unknown>;
+  /**
+   * See connectionAccountIdentityKey. Undefined keeps the stored key, unless
+   * the update replaces the credential: then the key is cleared.
+   */
+  accountIdentityKey?: string | null;
+  /**
+   * The key the writer derives from the stored row's own verified account,
+   * for a row saved before keys existed. With `accountIdentityKey` equal to
+   * it (and no scope lost) the reconnect keeps `authorityGeneration`.
+   */
+  previousAccountIdentityKey?: string | null;
   /** Rename: display only, so it changes neither `version` nor authority. */
   label?: string | null;
   updatedBySubjectId?: string | null;
@@ -13639,11 +13653,13 @@ async function createConnectionInScope(
       verifiedInstallAt: input.verifiedInstallAt ?? null,
       verifiedInstallVersion: input.verifiedInstallVersion ?? null,
       metadata: input.metadata ?? {},
+      accountIdentityKey: input.accountIdentityKey ?? null,
       label: input.label ?? null,
       createdBySubjectId: input.createdBySubjectId ?? null,
       updatedBySubjectId: input.updatedBySubjectId ?? input.createdBySubjectId ?? null,
     })
-    .returning(connectionMetadataColumns);
+    .returning(connectionMetadataColumns)
+    .catch(rethrowAccountIdentityConflict);
   if (!row) {
     throw new Error("Failed to create connection");
   }
@@ -13746,6 +13762,44 @@ export async function createConnectionIdempotently(
       return connection;
     },
   );
+}
+
+/**
+ * The key that makes a connection one verified provider account of one
+ * integration: `parts` name the integration (backend, provider, resource) and
+ * then the account as the provider identifies it. Each owner (a person within
+ * an organization, or a workspace) holds at most one live connection per key;
+ * a second insert or reactivation fails with ConnectionAccountAlreadyConnectedError.
+ * Writers stamp it only for an account they verified: an unknown account is
+ * never deduplicated on a guess.
+ */
+export function connectionAccountIdentityKey(parts: readonly string[]): string {
+  if (parts.length < 2 || parts.some((part) => typeof part !== "string" || !part))
+    throw new Error("A connection account identity needs its integration and account");
+  return createHash("sha256").update(JSON.stringify(parts)).digest("hex");
+}
+
+/** Another live connection of the same owner already holds this account. */
+export class ConnectionAccountAlreadyConnectedError extends Error {
+  constructor() {
+    super("This account is already connected");
+    this.name = "ConnectionAccountAlreadyConnectedError";
+  }
+}
+
+/** Whether an error is the live-account uniqueness check (migration 1481). */
+export function isConnectionAccountIdentityConflict(error: unknown): boolean {
+  if (error instanceof ConnectionAccountAlreadyConnectedError) return true;
+  return (
+    nestedPostgresSqlState(error) === "23505" &&
+    safeDatabaseErrorFacts(error).constraint === "connections_live_account_identity_uq"
+  );
+}
+
+function rethrowAccountIdentityConflict(error: unknown): never {
+  throw isConnectionAccountIdentityConflict(error)
+    ? new ConnectionAccountAlreadyConnectedError()
+    : error;
 }
 
 export async function createConnection(
@@ -14223,6 +14277,15 @@ export async function persistProviderOAuthConnection(
           sql`select pg_advisory_xact_lock(hashtextextended(${`provider-oauth-connection:${input.workspaceId}:${ownerKey}:${input.providerDomain}:${input.providerFamily}:${input.providerPrincipalId}`}, 0))`,
         );
         const exactOwner = connectionExactSubject(input.subjectId ?? null);
+        // One live connection per owner, workspace and provider principal.
+        const accountIdentityKey = connectionAccountIdentityKey([
+          "provider-oauth",
+          input.workspaceId,
+          input.providerDomain,
+          input.providerFamily,
+          input.credentialRole,
+          input.providerPrincipalId,
+        ]);
         const requested = input.requestedConnectionId
           ? (
               await tx
@@ -14268,12 +14331,18 @@ export async function persistProviderOAuthConnection(
                   sql`${schema.connections.metadata} ->> 'providerPrincipalId' = ${input.providerPrincipalId}`,
                 ),
               )
-              .orderBy(desc(schema.connections.updatedAt), desc(schema.connections.id))
+              // A live row first: reactivating a revoked duplicate would
+              // collide with the live row that holds the account.
+              .orderBy(
+                sql`${schema.connections.status} = 'revoked'`,
+                desc(schema.connections.updatedAt),
+                desc(schema.connections.id),
+              )
               .for("update")
               .limit(1)
           )[0];
         if (!existing) {
-          const created = await createConnectionInScope(tx, input);
+          const created = await createConnectionInScope(tx, { ...input, accountIdentityKey });
           if (input.requireLiveUserAuthority && !created.authorityId) {
             throw new Error("Connection owner authority was not bound");
           }
@@ -14312,6 +14381,9 @@ export async function persistProviderOAuthConnection(
           credentialEncrypted: input.credentialEncrypted,
           grantedScopes: input.grantedScopes ?? [],
           expiresAt: input.expiresAt ?? null,
+          accountIdentityKey,
+          // Matched on the same provider principal: the same account.
+          previousAccountIdentityKey: accountIdentityKey,
           metadata: {
             ...existing.metadata,
             ...(input.metadata ?? {}),
@@ -14472,6 +14544,35 @@ export async function verifyPersonalGitHubRepositorySelections(
   return await mutatePersonalGitHubRepositorySelections(db, input, true);
 }
 
+/**
+ * A new credential advances the connection's authority generation, so work
+ * accepted with the old one stops using it, unless it is the same verified
+ * account signing in again: the stored row already holds this account's key,
+ * and the new grant keeps every scope the row had. Then it is a fresh token
+ * for the same authority, and accepted turns keep working through the
+ * reconnect. A different account, a narrower grant, an unverified account, a
+ * status change (the connections trigger advances it) or an owner change
+ * (immutable) still advance it.
+ */
+function sameAccountReconnectGeneration(input: UpdateConnectionInput) {
+  const next = sql`${schema.connections.authorityGeneration} + 1`;
+  if (!input.accountIdentityKey) return next;
+  // A row saved before keys existed carries none; the writer then vouches
+  // for the stored row's account with the key it derives from that row.
+  const stored = input.previousAccountIdentityKey
+    ? sql`coalesce(${schema.connections.accountIdentityKey}, ${input.previousAccountIdentityKey})`
+    : sql`${schema.connections.accountIdentityKey}`;
+  const keepsScopes =
+    input.grantedScopes === undefined
+      ? sql`true`
+      : sql`${JSON.stringify(input.grantedScopes)}::jsonb @> ${schema.connections.grantedScopes}`;
+  return sql`case
+    when ${stored} = ${input.accountIdentityKey} and ${keepsScopes}
+      then ${schema.connections.authorityGeneration}
+    else ${next}
+  end`;
+}
+
 async function updateConnectionInScope(
   db: Database,
   input: UpdateConnectionInput,
@@ -14486,7 +14587,7 @@ async function updateConnectionInScope(
       ? {
           credentialEncrypted: input.credentialEncrypted,
           version: sql`${schema.connections.version} + 1`,
-          authorityGeneration: sql`${schema.connections.authorityGeneration} + 1`,
+          authorityGeneration: sameAccountReconnectGeneration(input),
           lastError: null,
         }
       : {}),
@@ -14499,6 +14600,13 @@ async function updateConnectionInScope(
       ? { verifiedInstallVersion: input.verifiedInstallVersion }
       : {}),
     ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+    // A credential replaced by a writer that verified no account no longer
+    // vouches for the stored one: it loses the key (and its unique slot).
+    ...(input.accountIdentityKey !== undefined
+      ? { accountIdentityKey: input.accountIdentityKey }
+      : input.credentialEncrypted !== undefined
+        ? { accountIdentityKey: null }
+        : {}),
     ...(input.label !== undefined ? { label: input.label } : {}),
     ...(input.updatedBySubjectId !== undefined
       ? { updatedBySubjectId: input.updatedBySubjectId }
@@ -14517,7 +14625,8 @@ async function updateConnectionInScope(
           : []),
       ),
     )
-    .returning(connectionMetadataColumns);
+    .returning(connectionMetadataColumns)
+    .catch(rethrowAccountIdentityConflict);
   return row ? mapConnectionMetadata(row) : null;
 }
 
@@ -42585,7 +42694,7 @@ export async function listOwedModelUsageSettlements(
     if (input.turnId) filters.push(eq(events.turnId, input.turnId));
     if (input.attemptId) filters.push(eq(events.turnAttemptId, input.attemptId));
     if (input.since) filters.push(gte(events.createdAt, input.since));
-    return await scopedDb
+    const rows = await scopedDb
       .select({
         id: events.id,
         accountId: events.accountId,
@@ -42593,11 +42702,56 @@ export async function listOwedModelUsageSettlements(
         turnAttemptId: events.turnAttemptId,
         rejected: sql<boolean>`(${events.type} <> 'agent.model.usage')`,
         payload: sql<unknown>`${usagePayload}`,
+        payloadCodecVersion: events.payloadCodecVersion,
       })
       .from(events)
       .where(and(...filters))
       .orderBy(asc(events.sequence));
+    // The payload is read through SQL, so restore the logical values here: a
+    // source key the codec stored encoded must reach settlement as the
+    // original key, or its receipt identity is encoded a second time.
+    const decoded = rows.map(({ payloadCodecVersion, ...row }) => ({
+      ...row,
+      payload: fromPostgresLosslessJson(row.payload, payloadCodecVersion),
+    }));
+    // Such a key's completion key is encoded in the payload but written to the
+    // ledger as given, so the anti-join above cannot see its ledger row.
+    // Check those few keys as written.
+    const encodedKeys = new Map<(typeof decoded)[number], string>();
+    for (const row of decoded) {
+      const key = owedCompletionKey(row.payload);
+      if (key !== null && !isStoredVerbatimAsLosslessJsonString(key)) encodedKeys.set(row, key);
+    }
+    if (encodedKeys.size === 0) return decoded;
+    const keys = [...new Set(encodedKeys.values())];
+    const settled = new Set(
+      [
+        ...(await scopedDb
+          .select({ key: schema.usageEvents.idempotencyKey })
+          .from(schema.usageEvents)
+          .where(inArray(schema.usageEvents.idempotencyKey, keys))),
+        ...(await scopedDb
+          .select({ key: schema.creditLedgerEntries.idempotencyKey })
+          .from(schema.creditLedgerEntries)
+          .where(inArray(schema.creditLedgerEntries.idempotencyKey, keys))),
+      ].map((row) => row.key),
+    );
+    if (settled.size === 0) return decoded;
+    // Compare as the database stored both sides.
+    const stored = (key: string) => Buffer.from(key, "utf8").toString("utf8");
+    const settledStored = new Set([...settled].map(stored));
+    return decoded.filter((row) => {
+      const key = encodedKeys.get(row);
+      return key === undefined || !settledStored.has(stored(key));
+    });
   });
+}
+
+function owedCompletionKey(payload: unknown): string | null {
+  const settlement = (payload as { settlement?: { charges?: { completionKey?: unknown } } } | null)
+    ?.settlement;
+  const key = settlement?.charges?.completionKey;
+  return typeof key === "string" ? key : null;
 }
 
 function normalizeEventSequence(value: number | undefined, fallback: number): number {
@@ -74300,6 +74454,7 @@ export type SessionGoalContinuationProjection = {
     | "system_work_pending"
     | "held_for_input"
     | "backoff_pending"
+    | "compaction_failed"
     | "missing_obligation";
   wakeRevision: number;
   observedRevision: number;
@@ -74431,6 +74586,17 @@ export async function getSessionGoalWithContinuation(
       // has an active goal. The wait itself remains independent of goal state.
       const sessionWait = await sessionInputWaitStateTx(tx, workspaceId, sessionId, session);
       const currentWaitUntil = sessionWait.disposition === "held" ? session.inputWaitUntil : null;
+      // With no turn in flight, a terminal checkpoint failure holds the input
+      // that was already pending (including this goal's own continuation) until
+      // something newer arrives. Say so rather than "continuing automatically".
+      const heldByCompactionFailure =
+        goal.status === "active" && !turn
+          ? await sessionHeldByCompactionFailureTx(
+              tx as unknown as Database,
+              workspaceId,
+              sessionId,
+            )
+          : false;
 
       const pendingWorkflowWake =
         wake !== undefined && wake.wakeRevision > wake.deliveredRevision ? wake : null;
@@ -74492,6 +74658,12 @@ export async function getSessionGoalWithContinuation(
         continuation = {
           state: turn.status === "running" ? "blocked" : "scheduled",
           reason: "system_work_pending",
+          ...base,
+        };
+      } else if (heldByCompactionFailure) {
+        continuation = {
+          state: "blocked",
+          reason: "compaction_failed",
           ...base,
         };
       } else if (continuationUpdate) {
@@ -85185,6 +85357,25 @@ async function pendingAgentSteerExistsTx(
     )
     .limit(1);
   return row !== undefined;
+}
+
+/**
+ * Whether the compaction-failure hold (`compactionFailureHoldSequenceTx`) is
+ * what keeps this idle session from running: a hold applies, and neither an
+ * Agent Steer nor any input committed after the failure is pending.
+ */
+async function sessionHeldByCompactionFailureTx(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<boolean> {
+  const holdSequence = await compactionFailureHoldSequenceTx(db, workspaceId, sessionId);
+  if (holdSequence === null) return false;
+  if (await pendingAgentSteerExistsTx(db, workspaceId, sessionId)) return false;
+  const newer = await pendingSystemUpdateWakeClassesTx(db, workspaceId, sessionId, {
+    pendingAfterSequence: holdSequence,
+  });
+  return !newer.immediate && !newer.deferred && !newer.command;
 }
 
 /** Read durable session state without reserving a turn-worker slot or mutating it. */

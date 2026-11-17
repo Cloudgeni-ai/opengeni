@@ -137,6 +137,78 @@ export async function readEffectiveNangoIntegrations(
 }
 
 // ---------------------------------------------------------------------------
+// One person's Nango connections
+// ---------------------------------------------------------------------------
+
+/**
+ * Serializes, deployment-wide, every change to which Nango connection one
+ * person's rows of one Nango integration stand for: storing a connect,
+ * sharing it across organizations, and deciding that a Nango connection is
+ * no longer used and may be deleted. Holds a transaction-scoped advisory lock
+ * on the caller's open transaction.
+ */
+export async function lockNangoPersonIntegration(
+  tx: Database,
+  input: { subjectId: string; providerConfigKey: string },
+): Promise<void> {
+  await tx.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`nango-person:${input.providerConfigKey}:${input.subjectId}`}, 0))`,
+  );
+}
+
+/** `fn` in one transaction that holds `lockNangoPersonIntegration`. */
+export async function withNangoPersonIntegrationLock<T>(
+  db: Database,
+  input: { subjectId: string; providerConfigKey: string },
+  fn: (tx: Database) => Promise<T>,
+): Promise<T> {
+  return await db.transaction(async (tx) => {
+    const scoped = tx as unknown as Database;
+    await lockNangoPersonIntegration(scoped, input);
+    return await fn(scoped);
+  });
+}
+
+/** Migration 1482's check, withheld from the runtime for one release. */
+export const NANGO_CONNECTIONS_IN_USE_ROUTINE =
+  "opengeni_private.nango_connections_in_use_v1(text[])";
+
+/** False while the deployment's database withholds the check (1482). */
+export async function nangoConnectionsInUseAvailable(db: Database): Promise<boolean> {
+  const [row] = await rawRows<{ granted: boolean | null }>(
+    db,
+    sql`select has_function_privilege(
+      to_regprocedure(${NANGO_CONNECTIONS_IN_USE_ROUTINE})::oid, 'EXECUTE') as granted`,
+  );
+  return row?.granted === true;
+}
+
+/**
+ * The ids among `nangoConnectionIds` that some live (not revoked) Nango-backed
+ * connection row still stands for, in any organization; null while the check
+ * is withheld (see nangoConnectionsInUseAvailable). The check opens and
+ * closes a one-transaction capability, so call it from a read-write
+ * transaction (every caller holds the person lock in one).
+ */
+export async function nangoConnectionsInUse(
+  db: Database,
+  nangoConnectionIds: readonly string[],
+): Promise<Set<string> | null> {
+  if (nangoConnectionIds.length === 0) return new Set();
+  if (!(await nangoConnectionsInUseAvailable(db))) return null;
+  const used = new Set<string>();
+  for (let start = 0; start < nangoConnectionIds.length; start += 1000) {
+    const rows = await rawRows<{ nango_connection_id: string }>(
+      db,
+      sql`select nango_connection_id from opengeni_private.nango_connections_in_use_v1(
+        ${sql.param(nangoConnectionIds.slice(start, start + 1000))}::text[])`,
+    );
+    for (const row of rows) used.add(row.nango_connection_id);
+  }
+  return used;
+}
+
+// ---------------------------------------------------------------------------
 // Usage events
 // ---------------------------------------------------------------------------
 

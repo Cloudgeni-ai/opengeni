@@ -1377,7 +1377,11 @@ export async function completeFikenOAuthCallback(
     if (exactReturnUrl) return { redirectTo: exactReturnUrl, exactReturn: true };
     // Reading the state is the first step, so no state means the link itself
     // was unusable: say whether it expired instead of suggesting a token.
-    const failure = state ? null : oauthStateFailureReturn(deps.settings, input.state);
+    const failure = state
+      ? null
+      : oauthStateFailureReturn(deps.settings, input.state, {
+          providerError: input.error,
+        });
     return {
       redirectTo: fikenReturnUrl(
         returnBaseUrl,

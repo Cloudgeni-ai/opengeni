@@ -9320,6 +9320,10 @@ export const SessionGoalContinuationReason = /* @__PURE__ */ defineSchema(() =>
     // Idle backoff: consecutive no-input continuations are paced, and the next
     // evaluation is armed as a delayed workflow wake at `nextAttemptAt`.
     "backoff_pending",
+    // The last turn ended with a terminal context-compaction failure, and the
+    // input pending at that failure (this goal's own continuation included)
+    // stays held until a person or newer input starts another attempt.
+    "compaction_failed",
     "missing_obligation",
   ]),
 );

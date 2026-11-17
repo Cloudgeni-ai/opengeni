@@ -10,6 +10,7 @@ import {
 import { SETUP_ACCOUNT_PATH, SETUP_ACCOUNT_RESPONSE_HEADERS } from "./setup-account-token";
 import {
   OFFICE_FRAME_ANCESTORS,
+  OFFICE_PANE_DOCUMENT,
   SAME_ORIGIN_HTML_FRAME_HOST_PATH,
   STYLE_NONCE_PLACEHOLDER,
   buildContentSecurityPolicy,
@@ -349,7 +350,7 @@ export function createWebHandler(
     const sources = currentSources();
     let text = await Bun.file(path).text();
     // The two app documents read their content hosting at boot.
-    if (path === indexPath || pathname === "/office/index.html") {
+    if (path === indexPath || pathname === OFFICE_PANE_DOCUMENT) {
       text = withContentHosting(text, contentHostingFor(sources, publicOrigin));
     }
     if (path === indexPath && publicOrigin) text = withAbsoluteLinkPreviewUrls(text, publicOrigin);
@@ -358,6 +359,7 @@ export function createWebHandler(
       text,
       policy: buildContentSecurityPolicy({
         kind,
+        officePane: pathname === OFFICE_PANE_DOCUMENT,
         publicOrigin,
         sources,
         scriptHashes: inlineScriptHashes(text),

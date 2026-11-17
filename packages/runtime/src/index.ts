@@ -4288,6 +4288,7 @@ export function buildOpenGeniAgent(
       approvedToolCallIdsOf(options),
       options.unattendedNow === true,
     );
+    installModelArgumentAdmission(agent as unknown as ApprovalCapableAgent);
     installModelMcpCallIdentity(agent as unknown as ApprovalCapableAgent);
     installRouteMoveOrdering(agent as unknown as ApprovalCapableAgent);
     if (options.unattendedNow) {
@@ -4456,6 +4457,7 @@ export function buildOpenGeniAgent(
     approvedToolCallIdsOf(options),
     options.unattendedNow === true,
   );
+  installModelArgumentAdmission(agent as unknown as ApprovalCapableAgent);
   installModelMcpCallIdentity(agent as unknown as ApprovalCapableAgent);
   installRouteMoveOrdering(agent as unknown as ApprovalCapableAgent);
   if (options.unattendedNow) {
@@ -4593,9 +4595,10 @@ function maybeInstallLazyToolTransport(
         const account: ConnectedToolAccount = {
           source: server.registryId,
           // The connector's default account says so, as its tools' account line does.
+          // A connector's only account is named by its model label's account.
           label: route.account
             ? `${route.connector} (${route.account}${route.defaultAccount === route.model ? ", the default" : ""})`
-            : route.connector,
+            : `${route.connector} (${onlyAccountName(route)})`,
           connector: route.connector,
           ...(route.kind ? { kind: route.kind } : {}),
           ...(route.providerDomain ? { providerDomain: route.providerDomain } : {}),
@@ -4623,6 +4626,12 @@ function maybeInstallLazyToolTransport(
     harnessControlServer ? catalogConnectCardRequest(harnessControlServer) : undefined,
   );
   if (options.openingToolNames?.length) lazyRuntime.loadAtOpening(options.openingToolNames);
+}
+
+/** "Gmail — alice@example.com · Yours" → "alice@example.com · Yours". */
+function onlyAccountName(route: McpAccountRouteLabel): string {
+  const prefix = `${route.connector} — `;
+  return route.model.startsWith(prefix) ? route.model.slice(prefix.length) : route.model;
 }
 
 function mcpServerRegistryId(server: MCPServer): string {
@@ -4857,6 +4866,15 @@ export function toolPreflightFailureOutput(error: unknown): {
   if (isMcpAccountParameterChoiceError(error)) {
     return { isError: true, content: [{ type: "text", text: error.message }] };
   }
+  // Rejected arguments and unusable schemas read exactly as when the call
+  // itself rejects them: nothing ran, and the model can correct the call.
+  if (
+    error instanceof ToolGatewayInputValidationError ||
+    error instanceof ToolGatewaySchemaCompilationError
+  ) {
+    const { isError, content } = mcpToolErrorOutput(error);
+    return { isError, content };
+  }
   const message = exactErrorMessage(error);
   const bounded =
     message.length > TOOL_PREFLIGHT_FAILURE_MESSAGE_MAX_CHARS
@@ -4939,6 +4957,117 @@ function installUnattendedApprovalRefusal(
     agent.clone = (config: unknown) => {
       const cloned = clone(config);
       installUnattendedApprovalRefusal(cloned, approvedToolCallIds);
+      return cloned;
+    };
+  }
+}
+
+/** An MCP server whose model calls run through the attempt tool gateway. */
+type ModelArgumentAdmittingServer = MCPServer & {
+  /**
+   * The arguments a call to `toolName` would run with, checked by the same
+   * gateway check the call itself gets. Undefined when this server does not
+   * check them here (no gateway bound, or not its tool): the call path then
+   * decides as before. Throws the gateway's own rejection otherwise.
+   */
+  admitModelArguments(
+    toolName: string,
+    args: Record<string, unknown>,
+  ): Promise<Record<string, unknown> | undefined>;
+  /** Whether this server listed `toolName` to the model. Reads no tool list. */
+  ownsModelTool(toolName: string): boolean;
+};
+
+function admitsModelArguments(server: MCPServer): server is ModelArgumentAdmittingServer {
+  return (
+    typeof (server as Partial<ModelArgumentAdmittingServer>).admitModelArguments === "function" &&
+    typeof (server as Partial<ModelArgumentAdmittingServer>).ownsModelTool === "function"
+  );
+}
+
+/**
+ * Run the gateway's argument check without calling the tool. Only the
+ * rejections the call itself would return to the model propagate; anything
+ * else (for example a tool the catalog does not hold) is left to the call.
+ */
+function admitGatewayModelArguments(
+  environment: AttemptToolEnvironment,
+  input: Parameters<AttemptToolEnvironment["admitModelArguments"]>[0],
+): Record<string, unknown> | undefined {
+  try {
+    return environment.admitModelArguments(input);
+  } catch (error) {
+    if (
+      error instanceof ToolGatewayInputValidationError ||
+      error instanceof ToolGatewaySchemaCompilationError
+    ) {
+      throw error;
+    }
+    return undefined;
+  }
+}
+
+function isArgumentRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Check a call's arguments against the tool's input schema before any
+ * Opengeni approval hook asks a person about it. Without this, approval
+ * preflight (connector policy, review previews, Ask cards) ran first and the
+ * schema check only when the approved call executed, so a person could be
+ * asked to approve a call that can never run. The check is the attempt
+ * gateway's own (`admitModelArguments`), so it accepts and rejects exactly
+ * what execution would. A rejection is thrown and preflight containment
+ * returns it to the model as the usual invalid-arguments tool error; no card
+ * is created.
+ *
+ * When the gateway repairs string-encoded values, the inner hooks receive the
+ * repaired arguments, so the reviewed and fingerprinted call is the one the
+ * gateway executes (execution repeats the same deterministic repair).
+ *
+ * The owning server is found when a call is checked, from what each server
+ * already listed, so listing tools never reads any server's tool list again.
+ *
+ * Installed after every approval wrapper and before unattended refusal and
+ * preflight containment, and reinstalled on each clone like them.
+ */
+function installModelArgumentAdmission(agent: ApprovalCapableAgent): void {
+  const listMcpTools = agent.getMcpTools.bind(agent);
+  const ownerOf = (toolName: string) =>
+    (agent.mcpServers ?? []).find(
+      (server): server is ModelArgumentAdmittingServer =>
+        admitsModelArguments(server) && server.ownsModelTool(toolName),
+    );
+  agent.getMcpTools = async (resolutionContext: unknown) =>
+    (await listMcpTools(resolutionContext)).map((tool) => {
+      if (tool.type !== "function" || !opengeniApprovalHooks.has(tool.needsApproval)) return tool;
+      const needsApproval = tool.needsApproval.bind(tool);
+      return {
+        ...tool,
+        needsApproval: opengeniApprovalHook(
+          async (
+            runContext: Parameters<typeof needsApproval>[0],
+            parsedInput: Parameters<typeof needsApproval>[1],
+            callId: Parameters<typeof needsApproval>[2],
+          ) => {
+            const admitted = isArgumentRecord(parsedInput)
+              ? await ownerOf(tool.name)?.admitModelArguments(tool.name, parsedInput)
+              : undefined;
+            return await needsApproval(
+              runContext,
+              (admitted ?? parsedInput) as typeof parsedInput,
+              callId,
+            );
+          },
+        ),
+      };
+    });
+  const clone = agent.clone?.bind(agent);
+  if (clone) {
+    agent.clone = (config: unknown) => {
+      const cloned = clone(config);
+      installModelArgumentAdmission(cloned);
       return cloned;
     };
   }
@@ -6563,6 +6692,17 @@ class DeferredPreparedMcpServer implements MCPServer {
     args: unknown,
   ): Promise<McpAccountParameterChoiceError | undefined> {
     return await this.preparedTarget?.accountParameterChoice(toolName, args);
+  }
+
+  async admitModelArguments(
+    toolName: string,
+    args: Record<string, unknown>,
+  ): Promise<Record<string, unknown> | undefined> {
+    return await this.preparedTarget?.admitModelArguments(toolName, args);
+  }
+
+  ownsModelTool(toolName: string): boolean {
+    return this.listedModelNames.has(toolName);
   }
 
   async unprefixedToolName(name: string): Promise<string> {
@@ -10282,6 +10422,32 @@ class AttemptDefinitionMcpServer implements MCPServer {
     return this.catalogIdentities.get(modelName);
   }
 
+  ownsModelTool(toolName: string): boolean {
+    return this.catalogIdentities.has(toolName);
+  }
+
+  /** The gateway check `callToolResult` runs, without calling the tool. */
+  async admitModelArguments(
+    toolName: string,
+    args: Record<string, unknown>,
+  ): Promise<Record<string, unknown> | undefined> {
+    if (this.closed) return undefined;
+    const expectedIdentity = this.catalogIdentities.get(toolName)?.identity;
+    if (expectedIdentity === undefined) return undefined;
+    let environment: AttemptToolEnvironment;
+    try {
+      environment = await this.requiredAttemptToolEnvironment();
+    } catch {
+      // The call itself reports a missing attempt authority.
+      return undefined;
+    }
+    return admitGatewayModelArguments(environment, {
+      modelName: toolName,
+      expectedIdentity,
+      arguments: args,
+    });
+  }
+
   bindAttemptToolEnvironment(environment: AttemptToolEnvironment): void {
     if (this.environment && this.environment !== environment) {
       throw new Error("local model tool server is already bound to another attempt catalog");
@@ -10664,6 +10830,30 @@ export class PrefixedMcpServer implements MCPServer {
     this.attemptToolSubjectId = subjectId;
   }
 
+  /** Whether this server listed `toolName` to the model this turn. */
+  ownsModelTool(toolName: string): boolean {
+    return this.originalToolNames.has(toolName) && !this.omittedModelNames.has(toolName);
+  }
+
+  /**
+   * The gateway check `callToolResult` runs, without calling the tool.
+   * Without a bound attempt gateway the call does not check arguments here
+   * either, so neither does this.
+   */
+  async admitModelArguments(
+    toolName: string,
+    args: Record<string, unknown>,
+  ): Promise<Record<string, unknown> | undefined> {
+    if (!this.attemptToolEnvironment || !this.ownsModelTool(toolName)) return undefined;
+    const unprefixed = this.unprefixToolName(toolName);
+    if (!this.isAllowed(unprefixed)) return undefined;
+    return admitGatewayModelArguments(this.attemptToolEnvironment, {
+      modelName: toolName,
+      expectedIdentity: { serverId: this.registryId, toolName: unprefixed },
+      arguments: args,
+    });
+  }
+
   unprefixedToolName(toolName: string): string {
     return this.unprefixToolName(toolName);
   }
@@ -10794,11 +10984,17 @@ export class PrefixedMcpServer implements MCPServer {
           return {
             ...tool,
             name,
-            // Name the account only when the turn has several accounts of this
-            // connector to tell apart. With one account the line adds nothing
-            // the model can act on, and it would repeat on every tool.
-            ...(this.accountLabel?.account
-              ? { description: withAccountLine(this.accountLabel, tool.description) }
+            // Every connected account's tools name the account, so the model
+            // knows whose account it reaches even when it is the connector's
+            // only one. The line follows from the accepted account alone, so
+            // it reads the same on every turn of that selection.
+            ...(this.accountLabel
+              ? {
+                  description: withAccountLine(
+                    { ...this.accountLabel, only: !this.accountLabel.account },
+                    tool.description,
+                  ),
+                }
               : {}),
           };
         })

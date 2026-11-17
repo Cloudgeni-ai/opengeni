@@ -266,7 +266,9 @@ export async function completeSocialOAuthCallback(
     state = readSocialOAuthState(input.state, settings);
   } catch (error) {
     logSocialOAuthFailure(observability, "state_verify", state, error);
-    const failure = oauthStateFailureReturn(settings, input.state);
+    const failure = oauthStateFailureReturn(settings, input.state, {
+      providerError: input.error,
+    });
     return {
       redirectTo: callbackReturnPath(failure.returnPath, "error", { reason: failure.reason }),
     };
