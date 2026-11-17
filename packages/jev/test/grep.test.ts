@@ -16,6 +16,7 @@ import {
   createJevDecisionModel,
   firstMatchingLine,
   parseCodeGrepArguments,
+  referencedSymbols,
   renderCodeGrepError,
   runCodeGrep,
 } from "../src";
@@ -107,8 +108,11 @@ describeWithRipgrep("runCodeGrep", () => {
       workspace: ws,
       decisionModel: model,
     });
-    // One rg call per pattern; LocalCodeSearchWorkspace rejects flags outside the allowlist.
-    expect(ws.calls.filter((c) => c.kind === "ripgrep")).toHaveLength(3);
+    // One rg call per pattern and per followed symbol; LocalCodeSearchWorkspace rejects flags outside
+    // the allowlist.
+    expect(ws.calls.filter((c) => c.kind === "ripgrep")).toHaveLength(
+      3 + r.stats.hop.symbols.length,
+    );
     const shownPaths = new Set(r.excerpts.filter((e) => (e.p ?? 0) >= 0.5).map((e) => e.path));
     expect([...shownPaths].sort()).toEqual(["src/auth/renew.ts", "src/auth/token.ts"]);
     expect(r.text).toContain("--- src/auth/token.ts:");
@@ -242,6 +246,61 @@ describeWithRipgrep("runCodeGrep", () => {
     expect(r.text.indexOf("--- src/auth/")).toBeLessThan(more);
     const unshown = r.excerpts.find((e) => !e.shown)!;
     expect(r.text.slice(more)).toContain(`${unshown.path}:${unshown.start}-${unshown.end}: `);
+  });
+
+  test("follows symbols the relevant excerpts call to their definitions, judged and shown within the budget", async () => {
+    const ws = new LocalCodeSearchWorkspace(repo());
+    const model = fakeModel({ relevant: (p) => p.startsWith("src/auth/") });
+    const r = await runCodeGrep({
+      question: "How is an expired session token renewed?",
+      patterns: ["refreshToken"],
+      workspace: ws,
+      decisionModel: model,
+    });
+    expect(r.stats.hop.symbols).toContain("renewSession");
+    expect(r.stats.hop.symbols).not.toContain("refreshToken");
+    expect(r.stats.hop.shown).toBe(1);
+    const related = r.text.indexOf("Related definitions");
+    expect(related).toBeGreaterThan(r.text.indexOf("--- src/auth/token.ts:"));
+    expect(r.text.slice(related)).toContain("--- src/auth/renew.ts:1-");
+    expect(r.text.slice(related)).toContain("(defines renewSession; relevance 0.90)");
+    expect(r.excerpts.find((e) => e.defines === "renewSession")?.shown).toBe(true);
+  });
+
+  test("leaves out related definitions the judge rejects, and does not hop without a judge", async () => {
+    const judged = await runCodeGrep({
+      question: "Where is the token refreshed?",
+      patterns: ["refreshToken"],
+      workspace: new LocalCodeSearchWorkspace(repo()),
+      decisionModel: fakeModel({ relevant: (p) => p === "src/auth/token.ts" }),
+    });
+    expect(judged.stats.hop.excerpts).toBeGreaterThan(0);
+    expect(judged.stats.hop.shown).toBe(0);
+    expect(judged.text).not.toContain("Related definitions");
+    const unjudged = await runCodeGrep({
+      question: "Where is the token refreshed?",
+      patterns: ["refreshToken"],
+      workspace: new LocalCodeSearchWorkspace(repo()),
+    });
+    expect(unjudged.stats.hop.symbols).toEqual([]);
+    expect(unjudged.text).not.toContain("Related definitions");
+  });
+
+  test("referencedSymbols keeps called or code-shaped names the excerpt does not declare", () => {
+    const text = [
+      "10| def handle_request(req):",
+      "11|     cfg = load_config(req.path)  # parse_args here is a comment",
+      '12|     log("validate_input is in a string")',
+      "13|     return RequestHandler(cfg).dispatch(req)",
+    ].join("\n");
+    const names = referencedSymbols(text, [/dispatch/]);
+    expect(names).toContain("load_config");
+    expect(names).toContain("RequestHandler");
+    expect(names).not.toContain("handle_request");
+    expect(names).not.toContain("parse_args");
+    expect(names).not.toContain("validate_input");
+    expect(names).not.toContain("dispatch");
+    expect(names).not.toContain("return");
   });
 
   test("firstMatchingLine picks the numbered line that matches the excerpt's pattern", () => {

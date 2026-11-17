@@ -21,6 +21,7 @@ import {
   type HitLine,
   type KeywordInfo,
 } from "./recall";
+import { definitionPattern as leadDefinitionPattern } from "./leads";
 import { mapLimit, WorkspaceSession } from "./session";
 import { escapeRegex } from "./text";
 import {
@@ -91,6 +92,18 @@ export interface CodeGrepLimits {
   /** Excerpts past the text budget, listed as location plus their first matching line. */
   moreExcerptsListed: number;
   matchesPerFile: number;
+  /**
+   * One follow-up hop: symbols the top relevant excerpts use but do not define are looked up by their
+   * definitions, judged like the other excerpts, and the relevant ones shown under "Related definitions"
+   * within the same text budget. Needs the judge.
+   */
+  relatedDefinitions: boolean;
+  /** Relevant excerpts whose symbols are followed, symbols looked up, files per symbol, lines and text shown. */
+  hopFromExcerpts: number;
+  hopSymbols: number;
+  hopFilesPerSymbol: number;
+  hopExcerptLines: number;
+  hopBudgetChars: number;
 }
 
 export const CODE_GREP_DEFAULT_LIMITS: Readonly<CodeGrepLimits> = Object.freeze({
@@ -112,6 +125,12 @@ export const CODE_GREP_DEFAULT_LIMITS: Readonly<CodeGrepLimits> = Object.freeze(
   otherFilesListed: 40,
   moreExcerptsListed: 20,
   matchesPerFile: 50,
+  relatedDefinitions: true,
+  hopFromExcerpts: 6,
+  hopSymbols: 8,
+  hopFilesPerSymbol: 2,
+  hopExcerptLines: 60,
+  hopBudgetChars: 4000,
 });
 
 /**
@@ -184,6 +203,8 @@ export interface CodeGrepExcerpt {
   hits?: number[] | undefined;
   /** Widened to a read-sized span for the result. */
   widened?: boolean | undefined;
+  /** For a related definition: the symbol it defines. */
+  defines?: string | undefined;
 }
 
 export interface CodeGrepStats {
@@ -202,6 +223,8 @@ export interface CodeGrepStats {
   shown: number;
   /** Shown excerpts widened to a read-sized span. */
   widened: number;
+  /** The related-definitions hop: symbols looked up, definition excerpts judged and shown, time taken. */
+  hop: { symbols: string[]; excerpts: number; relevant: number; shown: number; ms: number };
   waves: number;
   stoppedEarly: boolean;
   judge: "on" | "off" | "failed";
@@ -269,6 +292,70 @@ export function firstMatchingLine(
     "";
   const line = hit.trim();
   return line.length > 140 ? `${line.slice(0, 140)}...` : line;
+}
+
+const KEYWORDS = new Set(
+  (
+    "abstract async await break case catch class const constructor continue default defer delete do " +
+    "else enum export extends false final finally for from func function go if impl implements import " +
+    "in instanceof interface lambda let loop match module mut namespace new nil none null override " +
+    "package private protected pub public raise return self static struct super switch this throw " +
+    "throws trait true try type typeof undefined unsafe use var void while with yield elif except " +
+    "pass print len str int bool float dict list tuple object string number boolean console require " +
+    "assert expect describe test println printf sprintf malloc free sizeof"
+  ).split(" "),
+);
+
+/** Declaration keywords before a name, in the languages ripgrep sees most. */
+const DECL = String.raw`(?:def|class|func|function|fn|struct|interface|type|enum|trait|module|record|object|const|let|var|val|macro|typedef|alias)`;
+
+/**
+ * A ripgrep pattern for lines that define `symbol`: the code-search lead definitions (declarations,
+ * methods, keys), plus Go receiver methods, C-family definitions with a return type and #define.
+ */
+export function symbolDefinitionPattern(symbol: string): string {
+  const s = escapeRegex(symbol);
+  return [
+    leadDefinitionPattern([symbol]),
+    String.raw`(?-u:\bfunc\s+\([^)]*\)\s*${s}\b)`,
+    String.raw`(?-u:^\s*(?:[\w:<>,*&\[\]]+\s+)+[*&]*${s}\s*\([^;]*$)`,
+    String.raw`(?-u:#\s*define\s+${s}\b)`,
+  ].join("|");
+}
+
+const DECL_LINE = new RegExp(String.raw`\b${DECL}\s`);
+
+/**
+ * Symbols an excerpt uses but does not define, most promising first: identifiers that look like code
+ * symbols (snake_case, camelCase, CapitalCase or CONSTANT) or that are called, minus keywords, names the
+ * excerpt itself declares, and names the caller's patterns already match.
+ */
+export function referencedSymbols(text: string, patterns: readonly RegExp[]): string[] {
+  const code = text
+    .split("\n")
+    .map((l) => l.replace(/^\s*\d+\| ?/, ""))
+    .join("\n")
+    .replace(/(["'`])(?:\\.|(?!\1).)*\1/g, '""')
+    .replace(/\/\/.*$|#(?!\s*define).*$/gm, "");
+  const declared = new Set<string>();
+  for (const m of code.matchAll(new RegExp(String.raw`\b${DECL}\s+\*?([A-Za-z_]\w*)`, "g")))
+    declared.add(m[1]!);
+  const score = new Map<string, number>();
+  for (const m of code.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)\b(\s*\()?/g)) {
+    const name = m[1]!;
+    if (name.length < 4 || KEYWORDS.has(name.toLowerCase()) || declared.has(name)) continue;
+    const called = Boolean(m[2]);
+    const shaped =
+      /[a-z][A-Z]/.test(name) ||
+      /^_?[a-z0-9]+(?:_[a-z0-9]+)+$/i.test(name) ||
+      (/^[A-Z]/.test(name) && name.length >= 5);
+    if (!called && !shaped) continue;
+    score.set(name, (score.get(name) ?? 0) + (called ? 2 : 1));
+  }
+  return [...score.entries()]
+    .filter(([name]) => !patterns.some((r) => r.test(name)))
+    .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
+    .map(([name]) => name);
 }
 
 export async function runCodeGrep(input: CodeGrepInput): Promise<CodeGrepResult> {
@@ -507,6 +594,185 @@ export async function runCodeGrep(input: CodeGrepInput): Promise<CodeGrepResult>
 
   const judgeMs = model && excerpts.length ? Math.round(performance.now() - judgeStart) : 0;
 
+  // ---- 3b. one hop: the definitions of symbols the top relevant excerpts use but do not define
+  const hopStart = performance.now();
+  const hop: CodeGrepStats["hop"] = { symbols: [], excerpts: 0, relevant: 0, shown: 0, ms: 0 };
+  const related: CodeGrepExcerpt[] = [];
+  if (model && judge === "on" && L.relatedDefinitions && L.hopSymbols > 0) {
+    const relevantNow = excerpts.filter((e) => (e.p ?? 0) >= L.relevantFloor);
+    const top = byFileBreadth([...relevantNow].sort((a, b) => b.p! - a.p!)).slice(
+      0,
+      L.hopFromExcerpts,
+    );
+    const callerRegexes = input.patterns.flatMap((p) => {
+      const flags = (input.ignoreCase ?? !/[A-Z]/.test(p)) ? "i" : "";
+      try {
+        return [new RegExp(p, flags)];
+      } catch {
+        return [new RegExp(escapeRegex(p), flags)];
+      }
+    });
+    // Round robin over the top excerpts, so each contributes its most promising symbols.
+    const perExcerpt = top.map((e) => referencedSymbols(e.text, callerRegexes).slice(0, 4));
+    const symbols: string[] = [];
+    for (let rank = 0; rank < 4 && symbols.length < L.hopSymbols; rank++)
+      for (const list of perExcerpt) {
+        const s = list[rank];
+        if (s && !symbols.includes(s) && symbols.length < L.hopSymbols) symbols.push(s);
+      }
+    hop.symbols = symbols;
+    const definitionHits = await mapLimit(symbols, 8, async (symbol) => {
+      const out = await session.ripgrep(
+        [
+          "--null",
+          "--line-number",
+          "--with-filename",
+          "--no-heading",
+          "--color",
+          "never",
+          "--no-require-git",
+          ...hiddenArgs(cfg),
+          "-m",
+          "2",
+          "--max-columns",
+          String(cfg.recall.maxLineColumns),
+          "--max-filesize",
+          String(cfg.recall.maxFileBytes),
+          ...excludeArgs(cfg),
+          "-e",
+          symbolDefinitionPattern(symbol),
+          "--",
+          ".",
+        ],
+        { allowFailure: true },
+      );
+      const byPath = new Map<string, number>();
+      for (const m of parseRgOutput(out)) {
+        // A line that ends a statement is a call, not a definition, unless it declares something.
+        const line = m.text.trim();
+        if (/[;)]$/.test(line) && !DECL_LINE.test(line)) continue;
+        if (!byPath.has(m.path)) byPath.set(m.path, m.line);
+      }
+      return { symbol, hits: [...byPath.entries()] };
+    });
+    // A name defined in many files is too ambiguous to follow; prefer files near the excerpts.
+    const near = (path: string) =>
+      Math.max(
+        0,
+        ...top.map((e) => {
+          const a = e.path.split("/");
+          const b = path.split("/");
+          let i = 0;
+          while (i < a.length - 1 && i < b.length - 1 && a[i] === b[i]) i++;
+          return i;
+        }),
+      );
+    const targets: { symbol: string; path: string; line: number }[] = [];
+    for (const { symbol, hits } of definitionHits) {
+      if (!hits.length || hits.length > 6) continue;
+      const inside = (path: string, line: number) =>
+        relevantNow.some((e) => e.path === path && line >= e.start && line <= e.end);
+      hits
+        .filter(([path, line]) => !inside(path, line))
+        .sort((x, y) => near(y[0]) - near(x[0]) || (x[0] < y[0] ? -1 : 1))
+        .slice(0, L.hopFilesPerSymbol)
+        .forEach(([path, line]) => targets.push({ symbol, path, line }));
+    }
+    const fileText = new Map<string, string[]>();
+    for (const t of targets) {
+      if (fileText.has(t.path)) continue;
+      const text = await session.readText(t.path, cfg.recall.maxFileBytes).catch(() => null);
+      fileText.set(t.path, text === null ? [] : splitLines(text));
+    }
+    for (const t of targets) {
+      const lines = fileText.get(t.path) ?? [];
+      if (!lines.length) continue;
+      const w = enclosingWindow(lines, t.line, langOf(t.path), cfg);
+      let s = Math.min(w.start, t.line);
+      let e = Math.max(w.end, t.line);
+      if (e - s + 1 > L.hopExcerptLines) {
+        s = Math.max(s, t.line - 3);
+        e = Math.min(e, s + L.hopExcerptLines - 1);
+      }
+      if (related.some((r) => r.path === t.path && s <= r.end && e >= r.start)) continue;
+      related.push({
+        id: `d${related.length + 1}`,
+        path: t.path,
+        start: s,
+        end: e,
+        text: renderLines(lines, s, e, { maxLineChars: cfg.wave2.maxLineChars }),
+        patterns: [],
+        p: null,
+        shown: false,
+        hits: [t.line],
+        defines: t.symbol,
+      });
+    }
+    hop.excerpts = related.length;
+    if (related.length) {
+      const perRequest = Math.max(
+        1,
+        Math.min(L.excerptsPerRequest, model.maxQuestionsPerRequest ?? L.excerptsPerRequest),
+      );
+      const batches: CodeGrepExcerpt[][] = [];
+      for (let i = 0; i < related.length; i += perRequest)
+        batches.push(related.slice(i, i + perRequest));
+      try {
+        await mapLimit(batches, L.requestConcurrency, async (batch) => {
+          const r = await model.decide(
+            {
+              task: JUDGE_TASK,
+              question: input.question,
+              excerpts: Object.fromEntries(
+                batch.map((e) => [
+                  e.id,
+                  {
+                    path: e.path,
+                    lines: `${e.start}-${e.end}`,
+                    text: e.text.slice(0, L.judgeExcerptChars),
+                  },
+                ]),
+              ),
+            },
+            Object.fromEntries(batch.map((e) => [e.id, predicate(excerptQuestion(e.id))])),
+            { signal, tag: "code_grep", onUsage },
+          );
+          for (const e of batch) {
+            const a = r.answers[e.id];
+            e.p = a?.type === "predicate" ? a.probability : null;
+          }
+        });
+      } catch (error) {
+        if (signal.aborted) throw error;
+        if (!(error instanceof DecisionUnavailableError || error instanceof DecisionRequestError))
+          throw error;
+        // The main result stands; the hop is only an addition.
+        for (const e of related) e.p = null;
+      }
+    }
+    hop.relevant = related.filter((e) => (e.p ?? 0) >= L.relevantFloor).length;
+    hop.ms = Math.round(performance.now() - hopStart);
+    emit("hop", { ...hop });
+  }
+  const relatedBlock = (e: CodeGrepExcerpt) =>
+    `--- ${e.path}:${e.start}-${e.end} (defines ${e.defines}; relevance ${e.p!.toFixed(2)})\n${
+      e.text.length > L.shownExcerptChars
+        ? `${e.text.slice(0, L.shownExcerptChars)}\n...[excerpt cut]`
+        : e.text
+    }`;
+  const relatedShown: CodeGrepExcerpt[] = [];
+  let hopUsed = 0;
+  for (const e of related
+    .filter((r) => (r.p ?? 0) >= L.relevantFloor)
+    .sort((a, b) => b.p! - a.p!)) {
+    const size = relatedBlock(e).length + 1;
+    if (hopUsed + size > L.hopBudgetChars) continue;
+    relatedShown.push(e);
+    e.shown = true;
+    hopUsed += size;
+  }
+  hop.shown = relatedShown.length;
+
   // ---- 4. the result: relevant excerpts (or lexical order), then the files not shown
   const judged = excerpts.filter((e) => e.p !== null);
   // Breadth first: each file's best excerpt before any file's second, so more files are shown in full.
@@ -546,7 +812,7 @@ export async function runCodeGrep(input: CodeGrepInput): Promise<CodeGrepResult>
   let used = 0;
   for (const e of order) {
     const block = `--- ${e.path}:${e.start}-${e.end}${e.p === null ? "" : ` (relevance ${e.p.toFixed(2)})`}\n${shownText(e)}\n`;
-    if (used + block.length > budget && shown.length) break;
+    if (used + block.length > budget - hopUsed && shown.length) break;
     shown.push(e);
     e.shown = true;
     used += block.length;
@@ -554,7 +820,11 @@ export async function runCodeGrep(input: CodeGrepInput): Promise<CodeGrepResult>
   // Excerpts past the budget stay findable: their location and first matching line, not their text.
   const more = order.filter((e) => !e.shown).slice(0, L.moreExcerptsListed);
   const shownPaths = new Set(shown.map((e) => e.path));
-  const pointedPaths = new Set([...shownPaths, ...more.map((e) => e.path)]);
+  const pointedPaths = new Set([
+    ...shownPaths,
+    ...more.map((e) => e.path),
+    ...relatedShown.map((e) => e.path),
+  ]);
   const others = ranked.filter((f) => !pointedPaths.has(f.path));
   const head: string[] = [];
   const filesTotal = files.size;
@@ -611,7 +881,15 @@ export async function runCodeGrep(input: CodeGrepInput): Promise<CodeGrepResult>
     if (others.length > L.otherFilesListed)
       tail.push(`...and ${others.length - L.otherFilesListed} more`);
   }
-  const text = [head.join("\n"), ...body, moreText, tail.join("\n")].filter(Boolean).join("\n\n");
+  const relatedText = relatedShown.length
+    ? [
+        "Related definitions (of symbols the excerpts above use):",
+        ...relatedShown.map(relatedBlock),
+      ].join("\n")
+    : "";
+  const text = [head.join("\n"), ...body, relatedText, moreText, tail.join("\n")]
+    .filter(Boolean)
+    .join("\n\n");
   const stats: CodeGrepStats = {
     wallMs: Math.round(performance.now() - t0),
     grepMs,
@@ -626,6 +904,7 @@ export async function runCodeGrep(input: CodeGrepInput): Promise<CodeGrepResult>
     relevant: judged.filter((e) => e.p! >= L.relevantFloor).length,
     shown: shown.length,
     widened: shown.filter((e) => e.widened).length,
+    hop,
     waves,
     stoppedEarly,
     judge,
@@ -633,5 +912,5 @@ export async function runCodeGrep(input: CodeGrepInput): Promise<CodeGrepResult>
     decision: usage,
   };
   emit("summary", { ...stats });
-  return { text, excerpts, stats, judgeError };
+  return { text, excerpts: [...excerpts, ...related], stats, judgeError };
 }
