@@ -747,6 +747,9 @@ export type AttachViewerRequest = {
   desktop?: boolean | undefined;
   terminal?: boolean | undefined;
   files?: boolean | undefined;
+  /** How long ago the person last interacted with the page; omit when
+   * unknown. */
+  lastInteractionAgeMs?: number | undefined;
 };
 
 // Mirror of `@opengeni/contracts` ViewerHolder + the P4.2 desktop-stream fields
@@ -761,6 +764,10 @@ export type ViewerHolder = {
   archiveComplete: boolean;
   viewerHeartbeatIntervalMs: number;
   dataPlaneUrl: string | null;
+  /** How long the viewer may go without reporting interaction on its
+   * heartbeat before a box held only by viewers may be drained. Null when the
+   * idle drain is disabled; absent from older servers. */
+  viewerIdleDrainMs?: number | null | undefined;
 };
 export type AttachViewerResponse = ViewerHolder & {
   // The scoped desktop-stream address minted for THIS holder (P4.2). Null when
@@ -797,7 +804,12 @@ export type AcknowledgeStreamResponse = {
 // Mirror of `@opengeni/contracts` ViewerHeartbeatRequest/Response — the
 // Channel-A viewer-liveness ping, epoch-fenced (a stale-epoch beat → alive:false
 // → the client re-attaches).
-export type ViewerHeartbeatRequest = { leaseEpoch: number };
+// `lastInteractionAgeMs`: how long ago the person last interacted with the
+// page; omit it when unknown.
+export type ViewerHeartbeatRequest = {
+  leaseEpoch: number;
+  lastInteractionAgeMs?: number | undefined;
+};
 export type ViewerHeartbeatResponse = { alive: boolean };
 
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -1108,6 +1120,12 @@ export type ConnectionMetadata = {
   verifiedInstallVersion?: number | null;
   metadata: Record<string, unknown>;
   /**
+   * The name the person gave this connection. Shown when the provider doesn't
+   * say which account it is (an API key); a provider identity such as an
+   * email always comes first. Absent when unnamed and from older servers.
+   */
+  label?: string | null | undefined;
+  /**
    * Whether this OAuth MCP account can be told apart from another account of
    * the same service: `verified` (its account is known), `reconnect` (sign in
    * again once before adding another), or `single` (the service doesn't say
@@ -1178,6 +1196,8 @@ type CreateConnectionRequestBase = {
   operationId?: string | undefined;
   /** Direct OpenAI/Azure keys only: verify the provider/model before saving. */
   verifyModelAccess?: boolean | undefined;
+  /** A name for the connection (at most 80 characters), shown when the provider gives no account identity. */
+  label?: string | null | undefined;
 };
 
 export type CreateConnectionRequest = CreateConnectionRequestBase &
@@ -1636,6 +1656,12 @@ export type UpdateConnectionRequest = {
   grantedScopes?: string[] | undefined;
   expiresAt?: string | null | undefined;
   metadata?: Record<string, unknown> | undefined;
+  /**
+   * Rename the connection (at most 80 characters); null or blank removes the
+   * name. Send it on its own: a rename never changes the credential, its
+   * version or the account already-accepted work uses.
+   */
+  label?: string | null | undefined;
   expectedVersion?: number | undefined;
   operationId?: string | undefined;
 };
@@ -4419,6 +4445,7 @@ export type FirstPartyMcpToolName =
   | "command_read"
   | "command_wait"
   | "session_create"
+  | "session_queue_message"
   | "session_send_message"
   | "session_message_status"
   | "session_target_get"

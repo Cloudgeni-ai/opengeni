@@ -2033,6 +2033,18 @@ const SettingsSchema = z.object({
   // snapshotted before the box dies (sandbox-file-persistence).
   sandboxLeaseReaperPeriodMs: z.coerce.number().int().positive().default(30_000),
   sandboxViewerHolderTtlMs: z.coerce.number().int().positive().default(90_000),
+  // Viewer-only idle drain. A viewer holder (an open session page heartbeating
+  // the desktop/terminal/files planes) keeps its box warm for as long as
+  // heartbeats arrive. When every holder of a warm box is a viewer, no session
+  // of its sandbox group has an open turn, and for this long there was no
+  // reported viewer interaction, viewer attach, message or turn, the reaper
+  // releases those viewers and drains the box through the ordinary drain
+  // (workspace saved, box stopped). A viewer that comes back re-attaches and
+  // the box resumes. Clients that do not report interaction fall back to the
+  // attach time and session activity. Host-provisioned (`embedded`) and
+  // `enterprise` organizations are exempt. Default 30min; 0 disables.
+  // Knob: OPENGENI_SANDBOX_VIEWER_IDLE_DRAIN_MS.
+  sandboxViewerIdleDrainMs: z.coerce.number().int().nonnegative().default(1_800_000),
   // A BrowserSession controller refreshes its durable resource and exact
   // interaction lease holder together. This longer crash horizon tolerates API
   // replacement while still releasing a placement whose controller died.
@@ -6665,6 +6677,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     sandboxSelfhostedControlTimeoutMs: optional("OPENGENI_SANDBOX_SELFHOSTED_CONTROL_TIMEOUT_MS"),
     sandboxLeaseReaperPeriodMs: optional("OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS"),
     sandboxViewerHolderTtlMs: optional("OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS"),
+    sandboxViewerIdleDrainMs: optional("OPENGENI_SANDBOX_VIEWER_IDLE_DRAIN_MS"),
     sandboxInteractionHolderTtlMs: optional("OPENGENI_SANDBOX_INTERACTION_HOLDER_TTL_MS"),
     sandboxIdleGraceMs: optional("OPENGENI_SANDBOX_IDLE_GRACE_MS"),
     sandboxIdleCommandContainmentMs: optional("OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS"),
@@ -12392,19 +12405,26 @@ export function parseSandboxWarmRateJson(raw: string): Record<string, number> {
  * - `runningBoxesPerOrganization`: every running managed box (warming, warm or
  *   draining; Connected Machines never count), including boxes agent turns
  *   hold. A new box beyond it waits for a slot instead of starting.
+ * - `organizationsYoungerThanMs`: only for the `new` tier, which applies to a
+ *   Free self-serve organization created less than this long
+ *   ago. Omitted or 0 turns the `new` tier off.
  */
 export type SandboxPlanLimit = {
   viewerOnlyBoxesPerOrganization?: number;
   viewerOnlyBoxesPerMember?: number;
   runningBoxesPerOrganization?: number;
+  organizationsYoungerThanMs?: number;
 };
 
 /**
  * Limits by tier. Tiers are subscription plan keys (`free`, `pro`, `max`,
  * `enterprise`, or any operator-defined key), plus `none` for an organization
- * with no plan row (plans disabled) and `restricted` for a Free or plan-less
- * organization whose promotion decision is `held` or `denied`. A tier absent
- * from the table is unbounded.
+ * with no plan row (plans disabled), `restricted` for a Free or plan-less
+ * organization whose promotion decision is `held` or `denied` while promotion
+ * enforcement is on, `new` for a Free self-serve organization
+ * younger than the `new` tier's `organizationsYoungerThanMs`, and `embedded`
+ * for an organization a host provisioned (its own external source is not a
+ * signup one). A tier absent from the table is unbounded.
  */
 export type SandboxPlanLimits = Readonly<Record<string, SandboxPlanLimit>>;
 
@@ -12412,11 +12432,19 @@ const SANDBOX_PLAN_LIMIT_FIELDS = [
   "viewerOnlyBoxesPerOrganization",
   "viewerOnlyBoxesPerMember",
   "runningBoxesPerOrganization",
+  "organizationsYoungerThanMs",
 ] as const;
 
 export const DEFAULT_SANDBOX_PLAN_LIMITS: SandboxPlanLimits = {
   free: {
     viewerOnlyBoxesPerOrganization: 2,
+    viewerOnlyBoxesPerMember: 1,
+    runningBoxesPerOrganization: 3,
+  },
+  // A Free self-serve organization in its first three days.
+  new: {
+    organizationsYoungerThanMs: 3 * 24 * 60 * 60 * 1000,
+    viewerOnlyBoxesPerOrganization: 1,
     viewerOnlyBoxesPerMember: 1,
     runningBoxesPerOrganization: 3,
   },
@@ -12435,6 +12463,10 @@ export const DEFAULT_SANDBOX_PLAN_LIMITS: SandboxPlanLimits = {
     viewerOnlyBoxesPerMember: 5,
     runningBoxesPerOrganization: 50,
   },
+  // An organization a host provisioned (a configured deployment, an
+  // embedding host or the SDK bootstrap): unbounded unless an operator sets
+  // limits.
+  embedded: {},
 };
 
 /** Parse OPENGENI_SANDBOX_PLAN_LIMITS_JSON; blank keeps the defaults. */

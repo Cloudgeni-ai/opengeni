@@ -157,7 +157,7 @@ describe("MCP real PostgreSQL exhausted-counter admission", () => {
           { initialMessage: "Refuse new work", idempotencyKey: crypto.randomUUID() },
         ],
         [
-          "session_send_message",
+          "session_queue_message",
           { sessionId: target.id, text: "Refuse new input", idempotencyKey: crypto.randomUUID() },
         ],
       ] as const) {
@@ -182,7 +182,7 @@ describe("MCP real PostgreSQL exhausted-counter admission", () => {
           turnId: claimed.turn.id,
           attemptId,
           executionGeneration: claimed.turn.executionGeneration,
-          firstPartyMcpTools: ["session_send_message", "session_steer"],
+          firstPartyMcpTools: ["session_queue_message", "session_steer"],
         },
       });
       const delegatedTools = (
@@ -206,7 +206,7 @@ describe("MCP real PostgreSQL exhausted-counter admission", () => {
       const commandBefore = await commandState();
       for (const [name, args] of [
         [
-          "session_send_message",
+          "session_queue_message",
           {
             sessionId: target.id,
             text: "Refuse delegated Send",

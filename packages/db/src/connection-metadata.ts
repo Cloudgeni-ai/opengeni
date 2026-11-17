@@ -40,6 +40,7 @@ export const connectionMetadataColumns = {
   verifiedInstallAt: schema.connections.verifiedInstallAt,
   verifiedInstallVersion: schema.connections.verifiedInstallVersion,
   metadata: schema.connections.metadata,
+  label: schema.connections.label,
   priceBasisModelId: schema.connections.priceBasisModelId,
   listPricing: schema.connections.listPricing,
   createdBySubjectId: schema.connections.createdBySubjectId,
@@ -202,6 +203,7 @@ export function mapConnectionMetadata(row: {
   verifiedInstallAt: Date | null;
   verifiedInstallVersion: number | null;
   metadata: Record<string, unknown>;
+  label?: string | null;
   priceBasisModelId?: string | null;
   listPricing?: ConnectedModelListPricing | null;
   createdBySubjectId: string | null;
@@ -241,6 +243,7 @@ export function mapConnectionMetadata(row: {
     verifiedInstallAt: row.verifiedInstallAt?.toISOString() ?? null,
     verifiedInstallVersion: row.verifiedInstallVersion,
     metadata: publicMetadata,
+    ...(row.label ? { label: row.label } : {}),
     // A workspace model key's price (see schema.connections.priceBasisModelId).
     ...(row.metadata.directModelProvider === undefined
       ? {}

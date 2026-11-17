@@ -1279,7 +1279,7 @@ or scripted clients work unchanged.
 
 `buildTimeline(events)` is a pure, tested reducer from the raw event log to
 renderable items (user/agent messages with streaming flags, tool calls matched
-to outputs, `session_create`/`session_send_message` calls promoted to worker
+to outputs, `session_create`/`session_queue_message` calls promoted to worker
 items, sandbox operations with command output, goal markers, status changes,
 notices). User messages carry their attached `resources` and requested `tools`
 so consumers can render attachment chips. `groupTimeline` clusters consecutive

@@ -728,6 +728,55 @@ describe("rejected serialized edits never brick an artifact", () => {
     }
   });
 
+  test("deletes a slide and its content in one atomic presentation batch", async () => {
+    const adapter = await loadRealAdapter("presentation");
+    const snapshot = await createSlideWithContentSnapshot(adapter);
+    const storage = new MemoryEditableArtifactStorage();
+    const session = createSession(
+      "presentation",
+      adapter,
+      storage,
+      new SerializedTransport(
+        bootstrap(
+          "presentation",
+          adapter,
+          snapshot,
+          0,
+          snapshot.stateHash,
+          snapshot.nativeRevision,
+        ),
+        [],
+      ),
+    );
+    try {
+      await session.whenReady();
+      await session.applyPresentationCommands(
+        {
+          version: PRESENTATION_ARTIFACT_COMMAND_VERSION,
+          commands: [
+            { kind: "node.delete", id: NODE_ID },
+            { kind: "slide.delete", id: SLIDE_ID },
+          ],
+        },
+        { clientTransactionId: "atomic.slide.delete.1" },
+      );
+      expect(session.getView().authoringBlockedReason).toBeUndefined();
+      expect((await storage.listPending(scope)).map((entry) => entry.clientTransactionId)).toEqual([
+        "atomic.slide.delete.1",
+      ]);
+      const catalog = await session.queryPresentationSlideCatalog({
+        kind: "slide-catalog",
+        startSlide: 0,
+        maxSlides: 8,
+        maxTextBytes: 1_024,
+        maxBytes: 8_192,
+      });
+      expect(catalog.slides).toEqual([]);
+    } finally {
+      await session.close();
+    }
+  });
+
   for (const replicaId of [WRITER_REPLICA_ID, REMOTE_REPLICA_ID]) {
     test(`opens a presentation whose retained WAL holds a rejected edit (replica ${replicaId})`, async () => {
       const adapter = await loadRealAdapter("presentation");

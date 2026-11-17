@@ -42,7 +42,7 @@ const REFERENCE = `${brace}${brace}secret:cloudgeni-cloud-auth/FAKE_HANDOFF_TOKE
 const ESCAPED = `\\${REFERENCE}`;
 const TOOLS = [
   "session_create",
-  "session_send_message",
+  "session_queue_message",
   "session_steer",
   "goal_set",
   "goal_update",
@@ -293,7 +293,7 @@ describe("hand-off tools keep secret references (incident 2)", () => {
       });
       const childId = String((child as { id?: unknown }).id ?? "");
       expect(childId).toMatch(/^[0-9a-f-]{36}$/u);
-      await call("session_send_message", {
+      await call("session_queue_message", {
         sessionId: childId,
         text: `Then open the PR with ${REFERENCE}`,
         idempotencyKey: crypto.randomUUID(),

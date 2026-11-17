@@ -1,6 +1,10 @@
 // Opengeni Console URLs. Kept small: the route table and the boot redirect
 // import this, while the Console pages themselves load lazily.
 
+import { isConsoleHostname } from "@opengeni/contracts/console-sign-in";
+
+export { isConsoleHostname };
+
 export const CONSOLE_PATH = "/console";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
@@ -52,18 +56,6 @@ export function parseConsoleUsageSearch(search: Record<string, unknown>): Consol
     result.checkoutSession = search.checkoutSession;
   }
   return result;
-}
-
-/**
- * Console's own hosts: a host whose first or second label is `console`
- * (console.opengeni.ai, staging.console.opengeni.ai), never consolex.* or app.*.
- */
-export function isConsoleHostname(hostname: string): boolean {
-  const labels = hostname.toLowerCase().replace(/\.$/u, "").split(".");
-  return (
-    (labels.length >= 2 && labels[0] === "console") ||
-    (labels.length >= 3 && labels[1] === "console")
-  );
 }
 
 /**

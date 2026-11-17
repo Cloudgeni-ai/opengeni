@@ -407,13 +407,20 @@ describe("installed API Integration worker adapters", () => {
         connector: "Inventory API",
         providerDomain: item.providerDomain,
         account: "Alice",
+        // The person's own account is the integration's default for writes,
+        // and the shared account's route names it.
+        defaultAccount: "Inventory API — Alice · Yours",
       });
+      expect(labels.get(bindings[1]!.serverId)?.defaultAccount).toBe(
+        "Inventory API — Alice · Yours",
+      );
       const single = apiIntegrationAccountLabels({
         integrations: [item],
         bindings: bindings.slice(0, 1),
         tools: routed.tools,
       });
       expect(single.get(bindings[0]!.serverId)).not.toHaveProperty("account");
+      expect(single.get(bindings[0]!.serverId)).not.toHaveProperty("defaultAccount");
       expect(
         apiIntegrationAccountLabels({ integrations: [item], bindings: null, tools: routed.tools }),
       ).toEqual(new Map());
@@ -462,12 +469,14 @@ describe("installed API Integration worker adapters", () => {
         connector: "Inventory API",
         providerDomain: item.providerDomain,
         account: "Team",
+        defaultAccount: "Inventory API — Alice · Yours",
       });
       expect(installs.get(own!.serverId)).toEqual({
         model: "Inventory API — Alice · Yours",
         connector: "Inventory API",
         providerDomain: item.providerDomain,
         account: "Alice",
+        defaultAccount: "Inventory API — Alice · Yours",
       });
       // A reviewed definition's installs take its reviewed name.
       const calendars = apiIntegrationAccountLabels({

@@ -5,7 +5,7 @@ import type { ChatClient } from "@opengeni/sdk";
 import { useEffect, useState } from "react";
 import { capabilityLogoFallback } from "../capability-logo-fallback";
 import { browserConnectWindowHost } from "../connect-window-host";
-import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";
+import { connectionAccountLabel } from "@opengeni/contracts/connection-account-label";
 import { capabilityPresentation } from "../integration-presentation";
 import { useOpenGeniText } from "../messages/runtime";
 import { useAdminStepUp } from "../app/lib/app-host";
@@ -122,8 +122,8 @@ function ScopedCard({
   const useOwnLoginHere = offHere !== null && !connected && item !== null;
   const ownLoginQuestion = useOwnLoginHere
     ? `${t("sessionMcpCapabilityCard.useYourLoginHereToo", {
-        account: connectionAccountIdentityLabel(
-          offHere.metadata,
+        account: connectionAccountLabel(
+          offHere,
           t("sessionMcpCapabilityCard.yourNameAccount", { name: item.name }),
         ),
       })} ${t("sessionMcpCapabilityCard.useYourLoginHereScope")}`

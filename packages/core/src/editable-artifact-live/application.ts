@@ -1,3 +1,4 @@
+import { EditableArtifactDomainError } from "../domain/editable-artifacts/errors";
 import type { EditableArtifactService } from "../domain/editable-artifacts/service";
 import { EDITABLE_ARTIFACT_KERNEL_VERSION_MAX_BYTES } from "@opengeni/contracts/editable-artifacts";
 import {
@@ -187,6 +188,9 @@ export class EditableArtifactApplication implements EditableArtifactApplicationP
     input: MintEditableArtifactApplicationTicketInput,
   ): Promise<EditableArtifactLiveTicket> {
     const artifact = await this.readArtifact(input);
+    // An archived artifact is removed and no longer opens.
+    if (artifact.lifecycle !== "active")
+      throw new EditableArtifactDomainError("not_found", "Editable artifact was archived");
     await this.dependencies.compatibility.assertCompatible({
       artifact,
       modality: input.modality,

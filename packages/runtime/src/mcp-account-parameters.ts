@@ -29,8 +29,13 @@ export type McpAccountParameter = Readonly<{
   labelFields: readonly string[];
 }>;
 
-/** One value the account offers for a parameter. */
-export type McpAccountChoice = Readonly<{ value: string; label?: string }>;
+/** One value the account offers for a parameter: its name (the first label
+ * field it has) and the other label fields it has, such as a site URL. */
+export type McpAccountChoice = Readonly<{
+  value: string;
+  label?: string;
+  details?: readonly string[];
+}>;
 
 /**
  * Atlassian's MCP tools take the site as cloudId; getAccessibleAtlassianResources
@@ -175,8 +180,18 @@ export function accountChoicesFromResult(
       if (!isRecord(item)) continue;
       const value = text(item[parameter.valueField]);
       if (!value || choices.has(value)) continue;
-      const label = parameter.labelFields.map((field) => text(item[field])).find(Boolean);
-      choices.set(value, label ? { value, label } : { value });
+      const [label, ...details] = [
+        ...new Set(
+          parameter.labelFields
+            .map((field) => text(item[field]))
+            .filter((field): field is string => Boolean(field)),
+        ),
+      ];
+      choices.set(value, {
+        value,
+        ...(label ? { label } : {}),
+        ...(details.length ? { details } : {}),
+      });
       if (choices.size >= MAX_ACCOUNT_CHOICES) break;
     }
     return [...choices.values()];
@@ -238,7 +253,9 @@ export function accountParameterChoiceText(
   const listed = choices
     .slice(0, MAX_LISTED_CHOICES)
     .map((choice) =>
-      choice.label ? `${JSON.stringify(choice.label)} (${choice.value})` : choice.value,
+      choice.label
+        ? `${[JSON.stringify(choice.label), ...(choice.details ?? [])].join(", ")} (${choice.value})`
+        : choice.value,
     )
     .join(", ");
   const more =

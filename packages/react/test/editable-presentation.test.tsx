@@ -159,9 +159,6 @@ class FakePresentationSession {
         }
         nodes = nodes.filter((node) => node.id !== command.id);
       } else if (command.kind === "slide.delete") {
-        if (batch.commands.some((other) => other.kind !== "slide.delete")) {
-          throw new Error("[ARTIFACT_PRESENTATION_BATCH_REJECTED] unknown presentation slide");
-        }
         if (
           nodes.some(
             (node) =>
@@ -198,11 +195,13 @@ class FakePresentationSession {
         },
         ...this.nodes.slice(command.index),
       ];
-    } else if (command?.kind === "node.delete") {
+    } else if (command?.kind === "node.delete" || command?.kind === "slide.delete") {
       this.nodes = nodes;
-    } else if (command?.kind === "slide.delete") {
+      const deletedSlides = new Set(
+        batch.commands.flatMap((other) => (other.kind === "slide.delete" ? [other.id] : [])),
+      );
       this.slides = this.slides
-        .filter((candidate) => candidate.id !== command.id)
+        .filter((candidate) => !deletedSlides.has(candidate.id))
         .map((candidate, index) => ({ ...candidate, index }));
     }
     this.revision += 1n;
@@ -469,15 +468,15 @@ describe("SDK-backed editable presentation", () => {
 
       await actRun(() => confirmButton("Delete slide").click());
       await flush(60);
-      // Children before their group; inherited master objects are untouched;
-      // the slide is deleted in its own batch once it is empty.
+      // One atomic batch: children before their group, inherited master
+      // objects untouched, then the emptied slide.
       expect(fake.commands.map((batch) => batch.commands)).toEqual([
         [
           { kind: "node.delete", id: SHAPE_ID },
           { kind: "node.delete", id: CHILD_ID },
           { kind: "node.delete", id: GROUP_ID },
+          { kind: "slide.delete", id: SLIDE_ID },
         ],
-        [{ kind: "slide.delete", id: SLIDE_ID }],
       ]);
       expect(rendered.container.querySelectorAll('[role="option"]')).toHaveLength(0);
       expect(rendered.container.textContent).not.toContain("Change not saved");

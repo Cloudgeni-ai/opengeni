@@ -13,6 +13,7 @@ import {
   MANAGED_AUTH_SIGN_IN_EMAIL_NOT_ALLOWED_CODE,
   MANAGED_AUTH_SIGNUP_EMAIL_NOT_ALLOWED_CODE,
 } from "@opengeni/contracts";
+import { isConsoleHostname } from "@opengeni/contracts/console-sign-in";
 import {
   configureManagedUserAdmission,
   recordManagedAuthLoggedFailure,
@@ -1224,6 +1225,32 @@ export function managedAuthPublicOrigins(settings: Settings): string[] {
   const origins = new Set(betterAuthTrustedOrigins(settings));
   for (const base of managedAuthPublicBaseUrls(settings, undefined)) {
     origins.add(new URL(base).origin);
+  }
+  return [...origins];
+}
+
+/**
+ * Opengeni Console's own origins: every trusted origin and allowed public host
+ * whose host is a Console host (`console.*` or `*.console.*`), never the app's
+ * own origin. The Console sign-in handoff only ever returns to one of these.
+ */
+export function managedAuthConsoleOrigins(settings: Settings): string[] {
+  if (!settings.publicBaseUrl) return [];
+  const appOrigin = new URL(settings.publicBaseUrl).origin;
+  const appIsHttps = new URL(settings.publicBaseUrl).protocol === "https:";
+  const origins = new Set<string>();
+  for (const candidate of managedAuthPublicOrigins(settings)) {
+    let url: URL;
+    try {
+      url = new URL(candidate);
+    } catch {
+      continue;
+    }
+    if (url.protocol !== "https:" && url.protocol !== "http:") continue;
+    // Handoff codes never travel over plain http from an https deployment.
+    if (appIsHttps && url.protocol !== "https:") continue;
+    if (url.origin === appOrigin || !isConsoleHostname(url.hostname)) continue;
+    origins.add(url.origin);
   }
   return [...origins];
 }

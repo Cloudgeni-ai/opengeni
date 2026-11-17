@@ -1,4 +1,5 @@
 import {
+  mcpHostsDeploymentCannotConnect,
   mcpEndpointIdentity,
   type CapabilityCatalogItem,
   type PluginInstallationSummary,
@@ -278,6 +279,7 @@ export function PluginDiscovery({
             busy={busy}
             error={error}
             canManage={canManage}
+            cannotConnectHosts={mcpHostsDeploymentCannotConnect(connections)}
             connections={Object.fromEntries(
               (selected.mcpServers ?? []).map((server) => [
                 server.endpoint ?? "",

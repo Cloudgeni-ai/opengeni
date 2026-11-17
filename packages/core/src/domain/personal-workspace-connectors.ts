@@ -16,6 +16,7 @@ import {
   type OriginMcpCapabilityServer,
 } from "@opengeni/db";
 import { readOrganizationIntegrationPolicyForServing } from "@opengeni/db/organization-integration-policy";
+import { dedicatedMcpIntegrationKey } from "./organization-integration-catalog";
 import {
   personalWorkspaceOwnerOriginConnections,
   type PersonalWorkspaceOriginConnections,
@@ -28,17 +29,6 @@ import {
 const MCP_INTEGRATION_KEY = "custom:mcp";
 
 /**
- * Reviewed MCP endpoints a dedicated Connect adapter owns, with the policy key
- * that adapter checks (see `integrationKeyForConnectProvider`).
- */
-const DEDICATED_MCP_INTEGRATION_KEYS: Readonly<Record<string, string>> = {
-  "gmailmcp.googleapis.com": "gmail",
-  "drivemcp.googleapis.com": "google-drive",
-  "calendarmcp.googleapis.com": "google-calendar",
-  "mcp.slack.com": "slack-personal",
-};
-
-/**
  * The organization policy keys the owner's own setup of this connector in
  * Personal would check: a curated connector served by a dedicated adapter uses
  * that adapter's key, any other curated connector the generic MCP key, and a
@@ -48,13 +38,7 @@ const DEDICATED_MCP_INTEGRATION_KEYS: Readonly<Record<string, string>> = {
 function integrationKeysForCarriedServer(
   server: Pick<OriginMcpCapabilityServer, "url" | "catalogScope">,
 ): string[] {
-  let host: string | null = null;
-  try {
-    host = new URL(server.url).hostname.toLowerCase();
-  } catch {
-    host = null;
-  }
-  const dedicated = host ? DEDICATED_MCP_INTEGRATION_KEYS[host] : undefined;
+  const dedicated = dedicatedMcpIntegrationKey(server.url);
   if (server.catalogScope === "workspace")
     return dedicated ? [MCP_INTEGRATION_KEY, dedicated] : [MCP_INTEGRATION_KEY];
   return [dedicated ?? MCP_INTEGRATION_KEY];

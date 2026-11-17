@@ -119,6 +119,14 @@ export type McpAccountRouteLabel = {
   /** Present only when the connector has several accounts in the turn. */
   account?: string | undefined;
   /**
+   * The model label of the connector's default account, when the turn has
+   * several accounts of the connector and exactly one is the person's own.
+   * Set on every route of that connector, so a route that is not the default
+   * still names the one that is. Absent when no account is a clear default
+   * (several of the person's own, or only shared ones).
+   */
+  defaultAccount?: string | undefined;
+  /**
    * The kind of need the connector serves, its catalog category
    * ("communication", "files"), when one is known. Never model-facing.
    */

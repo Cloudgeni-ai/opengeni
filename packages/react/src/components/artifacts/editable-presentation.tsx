@@ -191,23 +191,18 @@ function EditablePresentationArtifactSurfaceSession({
         return;
       }
       if (commit.kind === "slide-delete") {
-        // The kernel deletes only empty slides, and cannot delete a slide in
-        // the same batch that edits its objects. Empty it first, then delete
-        // it; each edit is validated before it is saved.
-        const contents = presentationNodeDeletionCommands(
-          [...sceneNodes.current.values()],
-          commit.slideId,
-          null,
-        );
-        if (contents.length > 0) {
-          await session.applyPresentationCommands({
-            version: PRESENTATION_ARTIFACT_COMMAND_VERSION,
-            commands: contents,
-          });
-        }
+        // The kernel deletes only empty slides, so one atomic batch empties
+        // the slide and then deletes it.
         await session.applyPresentationCommands({
           version: PRESENTATION_ARTIFACT_COMMAND_VERSION,
-          commands: [{ kind: "slide.delete", id: commit.slideId }],
+          commands: [
+            ...presentationNodeDeletionCommands(
+              [...sceneNodes.current.values()],
+              commit.slideId,
+              null,
+            ),
+            { kind: "slide.delete", id: commit.slideId },
+          ],
         });
         notifyPresentationCommit(t, onCommit, onCommandError, commit);
         refresh();

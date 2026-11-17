@@ -357,6 +357,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "workspace:read"
   },
   {
+    "id": "archiveEditableArtifact",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/editable-artifacts/:artifactId/archive",
+    "request": [],
+    "response": [],
+    "permission": "artifacts:publish"
+  },
+  {
     "id": "archiveKnowledgeEntry",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/knowledge/entries/:entryId/archive",
@@ -2557,6 +2565,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/config/content-security",
     "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/console-sign-in/start",
+    "method": "GET",
+    "path": "/v1/console-sign-in/start",
+    "request": [],
+    "query": [
+      "return"
+    ],
     "response": []
   },
   {
@@ -7191,6 +7209,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [],
     "permission": "sessions:control"
+  },
+  {
+    "id": "POST /v1/console-sign-in/authorize",
+    "method": "POST",
+    "path": "/v1/console-sign-in/authorize",
+    "request": [],
+    "response": []
   },
   {
     "id": "POST /v1/organizations/:organizationId/codex/accounts/:accountId/activate",

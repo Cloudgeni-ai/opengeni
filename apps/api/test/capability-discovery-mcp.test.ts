@@ -12,8 +12,10 @@ import {
 } from "@opengeni/contracts";
 import { createCatalogItem, type ApiRouteDeps } from "@opengeni/core";
 import {
+  createImportBatch,
   enableCapabilityInstallation,
   upsertCapabilityCatalogItem,
+  upsertRegistryCapabilityCatalogItem,
   persistAttemptToolCatalog,
   bootstrapWorkspace,
   createDb,
@@ -837,6 +839,8 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
     expect(sentry.setup.detail).toBe(
       "Not installed. The person can review what the sentry plugin adds and install it for the workspace from its card.",
     );
+    // Later tests search the same workspace for Gmail.
+    await shared.admin`delete from capability_catalog_items where id = ${connectionId} and workspace_id = ${workspace.workspaceId}`;
   }, 60_000);
   test("'connect Microsoft Dynamics' shows a card that asks for the environment, and turns an address into the card's endpoint", async () => {
     if (!shared) return;
@@ -1810,6 +1814,136 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
     }
   }, 60_000);
 
+  test("a registry entry for a built-in integration gives way to it; a built-in the organization turned off gets no card", async () => {
+    if (!shared) throw new Error("Real PostgreSQL fixture required");
+    const gmailUrl = "https://gmailmcp.googleapis.com/mcp/v1";
+    const registryId = `mcp:integrations-sh:gmailmcp-googleapis-com-${crypto.randomUUID().slice(0, 8)}`;
+    // Registry rows are global, as the integrations.sh importer stores them.
+    const batch = await createImportBatch(client.db, {
+      source: "integrations.sh",
+      snapshotDate: new Date("2026-11-16T00:00:00.000Z"),
+      attributionNote: "test fixture",
+    });
+    await upsertRegistryCapabilityCatalogItem(client.db, {
+      id: registryId,
+      providerDomain: "gmailmcp.googleapis.com",
+      name: "Gmail",
+      description: "Search and read Gmail through Google's hosted MCP server.",
+      mcpUrl: gmailUrl,
+      transport: "streamable-http",
+      authKind: "oauth2",
+      credentialFacts: [],
+      tier: "verified",
+      provenance: "official",
+      importBatchId: batch.id,
+      metadata: { mcpProbe: { status: "real" } },
+    });
+    const builtInGmail = {
+      id: "gmail",
+      name: "Gmail",
+      url: gmailUrl,
+      connectionRef: {
+        providerDomain: "gmailmcp.googleapis.com",
+        subjectScope: "subject" as const,
+        kind: "oauth2" as const,
+      },
+    };
+    const open = async (settings: ReturnType<typeof testSettings>) => {
+      const attempt = await seedAttempt();
+      const server = buildOpenGeniMcpServer(
+        { settings, db: client.db, bus: new MemoryEventBus() } as ApiRouteDeps,
+        {
+          accountId: workspace.accountId,
+          workspaceId: workspace.workspaceId,
+          subjectId: "worker:first-party-mcp",
+          permissions: ["workspace:read"],
+          principalKind: "agent_attempt",
+          metadata: {
+            ...attempt,
+            firstPartyMcpTools: ["capability_catalog_search", "capability_authorization_request"],
+          },
+        },
+      );
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      const mcp = new Client({ name: "capability-discovery-test", version: "1" });
+      await server.connect(serverTransport);
+      await mcp.connect(clientTransport);
+      const search = async (query: string) =>
+        (
+          mcpJson(
+            await mcp.callTool({ name: "capability_catalog_search", arguments: { query } }),
+          ) as {
+            matches: Array<{ capabilityId: string; setup: { status: string; detail: string } }>;
+          }
+        ).matches;
+      const request = async (capabilityId: string) =>
+        mcpJson(
+          await mcp.callTool({
+            name: "capability_authorization_request",
+            arguments: { capabilityId, rationale: "Read the person's mail." },
+          }),
+        ) as { capabilityId: string; status: string; cardShown: boolean; message: string };
+      return {
+        search,
+        request,
+        close: async () => await Promise.all([mcp.close(), server.close()]),
+      };
+    };
+    try {
+      // The deployment serves Gmail itself: the registry's Gmail row is not
+      // offered beside it, and a request for that row gets the built-in.
+      const withBuiltIn = await open(
+        testSettings({ googleConnectorSetupEnabled: true, mcpServers: [builtInGmail] }),
+      );
+      try {
+        const ids = (await withBuiltIn.search("Gmail")).map((match) => match.capabilityId);
+        expect(ids).toContain("mcp:gmail");
+        expect(ids).not.toContain(registryId);
+        expect((await withBuiltIn.request(registryId)).capabilityId).toBe("mcp:gmail");
+      } finally {
+        await withBuiltIn.close();
+      }
+
+      // The organization turned Gmail off: neither entry gets a card, and the
+      // agent is told why.
+      await shared.admin`insert into organization_integration_policies (account_id, mode, allowed_integration_keys, revision)
+        values (${workspace.accountId}, 'restricted', '["custom:mcp"]'::jsonb, 1)`;
+      for (const settings of [
+        testSettings({ googleConnectorSetupEnabled: true, mcpServers: [builtInGmail] }),
+        testSettings({ googleConnectorSetupEnabled: true }),
+      ]) {
+        const turnedOff = await open(settings);
+        try {
+          const gmail = (await turnedOff.search("Gmail")).filter((match) =>
+            ["mcp:gmail", registryId].includes(match.capabilityId),
+          );
+          expect(gmail).toHaveLength(1);
+          expect(gmail[0]!.setup).toMatchObject({ status: "unavailable" });
+          expect(gmail[0]!.setup.detail).toContain("Gmail is turned off for this organization");
+          const requested = await turnedOff.request(registryId);
+          expect(requested).toMatchObject({ status: "unavailable", cardShown: false });
+          expect(requested.message).toContain("turned off for this organization");
+          // The Gmail plugin is only Gmail's reviewed endpoint: no install card either.
+          const plugin = (await turnedOff.search("Gmail")).find(
+            (match) => match.capabilityId === "plugin:marketplace/openai/gmail",
+          );
+          expect(plugin?.setup).toMatchObject({ status: "unavailable" });
+          expect(plugin?.setup.detail).toContain("is turned off for this organization");
+          expect(await turnedOff.request("plugin:marketplace/openai/gmail")).toMatchObject({
+            status: "unavailable",
+            cardShown: false,
+          });
+        } finally {
+          await turnedOff.close();
+        }
+      }
+    } finally {
+      await shared.admin`delete from organization_integration_policies where account_id = ${workspace.accountId}`;
+      await shared.admin`delete from capability_catalog_items where id = ${registryId} and source = 'registry'`;
+      await shared.admin`delete from import_batches where id = ${batch.id}`;
+    }
+  }, 60_000);
+
   test("finds a near-spelled custom MCP and suggests closest names on a miss", async () => {
     if (!shared) throw new Error("Real PostgreSQL fixture required");
     const capabilityId = `mcp:whisprflow-${crypto.randomUUID()}`;
@@ -2128,6 +2262,113 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
       } finally {
         await Promise.all([mcp.close(), server.close()]);
       }
+    }
+  }, 60_000);
+
+  test("a connected service of the same kind comes before an unconnected alternative unless the query names it", async () => {
+    if (!shared) throw new Error("Real PostgreSQL fixture required");
+    const services = [
+      { name: "Quillmail", serverId: "quillmail-order-test" },
+      { name: "Zephmail", serverId: "zephmail-order-test" },
+    ];
+    for (const { name, serverId } of services) {
+      const capabilityId = `mcp:${serverId}`;
+      await upsertCapabilityCatalogItem(client.db, {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        id: capabilityId,
+        kind: "mcp",
+        source: "manual",
+        name,
+        category: "mail-order-test",
+        description: "Read and send email in the person's mailbox.",
+        endpointUrl: `https://${serverId}.example.com/mcp`,
+        authModel: "credential_ref",
+        metadata: { mcpServerId: serverId },
+      });
+      await enableCapabilityInstallation(client.db, {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        capabilityId,
+        kind: "mcp",
+        metadata: { mcpConnectivity: { status: "ok" } },
+        config: {
+          connectionRef: {
+            providerDomain: `${serverId}.example.com`,
+            kind: "oauth2",
+            subjectScope: "subject",
+          },
+        },
+      });
+    }
+    // Quillmail has no account for this turn; Zephmail's tools are loaded.
+    const attempt = await seedAttempt(true, undefined, undefined, {
+      mode: "workspace_default",
+      inheritedFromSessionId: null,
+    });
+    await persistAttemptToolCatalog(
+      client.db,
+      createAttemptToolEnvironment({
+        scope: { ...attempt, accountId: workspace.accountId, workspaceId: workspace.workspaceId },
+        generation: 1,
+        definitions: [
+          {
+            identity: { serverId: "zephmail-order-test", toolName: "send_email" },
+            modelName: "zephmail-order-test__send_email",
+            description: "Send an email",
+            inputSchema: { type: "object" },
+            source: "mcp",
+            approval: "none",
+            execute: async () => ({ content: [] }),
+          },
+        ],
+      }).catalog,
+    );
+    const server = buildOpenGeniMcpServer(
+      { settings: testSettings(), db: client.db, bus: new MemoryEventBus() } as ApiRouteDeps,
+      {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        subjectId: "worker:first-party-mcp",
+        permissions: ["workspace:read"],
+        principalKind: "agent_attempt",
+        metadata: {
+          ...attempt,
+          firstPartyMcpTools: ["capability_catalog_search", "capability_authorization_request"],
+        },
+      },
+    );
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const mcp = new Client({ name: "connected-first-order-test", version: "1" });
+    await server.connect(st);
+    await mcp.connect(ct);
+    const search = async (query: string) => {
+      const result = await mcp.callTool({
+        name: "capability_catalog_search",
+        arguments: { query },
+      });
+      expect(result.isError).not.toBe(true);
+      return (
+        mcpJson(result) as {
+          matches: Array<{ name: string; setup: { status: string } }>;
+        }
+      ).matches
+        .filter((match) => match.name === "Quillmail" || match.name === "Zephmail")
+        .map((match) => [match.name, match.setup.status]);
+    };
+    try {
+      // Both match equally; by name Quillmail would come first.
+      expect(await search("send email from my mailbox")).toEqual([
+        ["Zephmail", "ready"],
+        ["Quillmail", "authorization_required"],
+      ]);
+      // Asking for Quillmail by name still finds it first.
+      expect((await search("send email with Quillmail"))[0]).toEqual([
+        "Quillmail",
+        "authorization_required",
+      ]);
+    } finally {
+      await Promise.all([mcp.close(), server.close()]);
     }
   }, 60_000);
 

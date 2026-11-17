@@ -27,7 +27,7 @@ const ref = (path: string, kind: "secret" | "secretfile" = "secret") =>
 /** Opengeni tools that store text or hand it to other work (incident 2 and its siblings). */
 const HAND_OFF_TOOLS = [
   "session_create",
-  "session_send_message",
+  "session_queue_message",
   "session_steer",
   "goal_set",
   "goal_update",
@@ -325,7 +325,7 @@ describe("secret argument resolution (GW-1, GW-2, AG-4)", () => {
     );
     expect(escaped.seen[0]).toEqual({ text: `run with ${ref("GitHub/token")}` });
     const mixed = `${ref("Key", "secretfile")} ${brace}${brace}secret:bad name}} ${ref("Missing/item")}`;
-    const kept = await run("opengeni", mixed, resolver, "model", "session_send_message");
+    const kept = await run("opengeni", mixed, resolver, "model", "session_queue_message");
     expect(kept.seen[0]).toEqual({ text: mixed });
     expect(calls).toHaveLength(0);
     // The helper is lenient on nested structures too.
@@ -364,7 +364,7 @@ describe("secret argument resolution (GW-1, GW-2, AG-4)", () => {
 
   test("a literal connector call still receives the value next to a hand-off call", async () => {
     const { resolver, calls } = fakeResolver({ "GitHub/token": VALUE });
-    const used = await run("mcp", ref("GitHub/token"), resolver, "model", "session_send_message");
+    const used = await run("mcp", ref("GitHub/token"), resolver, "model", "session_queue_message");
     expect(used.seen[0]).toEqual({ text: VALUE });
     expect(used.call.arguments).toEqual({ text: ref("GitHub/token") });
     expect(calls).toHaveLength(1);
@@ -373,7 +373,7 @@ describe("secret argument resolution (GW-1, GW-2, AG-4)", () => {
       `run with ${ref("GitHub/token")}`,
       resolver,
       "model",
-      "session_send_message",
+      "session_queue_message",
     );
     expect(handedOn.seen[0]).toEqual({ text: `run with ${ref("GitHub/token")}` });
     expect(calls).toHaveLength(1);

@@ -92,6 +92,7 @@ test("SharePoint admits only reviewed site, list, library and search operations"
   const keys = compiled.tools.map((tool) => tool.operationKey).sort();
   expect(keys).toEqual(
     [
+      "drives.GetItemsContent",
       "search.query",
       "sites.ListLists",
       "sites.lists.CreateItems",
@@ -118,6 +119,11 @@ test("SharePoint search is a reviewed read while list changes still need review"
   const byKey = new Map(revision().tools.map((tool) => [tool.operationKey, tool]));
   expect(byKey.get("search.query")).toMatchObject({ safety: "read", approvalMode: "never" });
   expect(byKey.get("search.query")!.description).toContain("entityTypes");
+  // Downloading a library file is a plain read, like reading its metadata.
+  expect(byKey.get("drives.GetItemsContent")).toMatchObject({
+    safety: "read",
+    approvalMode: "never",
+  });
   expect(byKey.get("sites.lists.CreateItems")).toMatchObject({
     safety: "write",
     approvalMode: "ask",
@@ -221,6 +227,67 @@ test("SharePoint search may only request reviewed SharePoint entity types", asyn
     expect(rejected.fetched()).toEqual([]);
     expect(rejected.resolved()).toBe(0);
   }
+});
+
+test("A search body with several requests runs each request on its own and merges results", async () => {
+  const bodies: unknown[] = [];
+  const searchWith = (status: (call: number) => number) =>
+    invokeOpenApiOperation(
+      {
+        revision: revision(),
+        authority: { accountId: "a", workspaceId: "w", connectionRef: "conn" },
+        credentialResolver: {
+          resolve: async () => ({
+            audience: { origin: "https://graph.microsoft.com", pathPrefix: "/v1.0" },
+            placements: [
+              { carrier: "header", name: "Authorization", prefix: "Bearer ", value: "t" },
+            ],
+          }),
+        },
+        transport: {
+          fetch: async (_url, init) => {
+            const body = JSON.parse(String(init?.body));
+            bodies.push(body);
+            const code = status(bodies.length);
+            return new Response(
+              JSON.stringify(
+                code === 200
+                  ? { value: [{ hitsContainers: [{ total: bodies.length }] }] }
+                  : { error: { code: "BadRequest" } },
+              ),
+              { status: code, headers: { "content-type": "application/json" } },
+            );
+          },
+        },
+      },
+      searchToolId(),
+      {
+        body: {
+          requests: [
+            { entityTypes: ["driveItem"], query: { queryString: "a" } },
+            { entityTypes: ["site"], query: { queryString: "b" } },
+          ],
+        },
+      },
+    );
+
+  // Graph v1.0 refuses a body with several requests, so each goes alone.
+  const merged = await searchWith(() => 200);
+  expect(bodies).toEqual([
+    { requests: [{ entityTypes: ["driveItem"], query: { queryString: "a" } }] },
+    { requests: [{ entityTypes: ["site"], query: { queryString: "b" } }] },
+  ]);
+  expect(merged).toMatchObject({
+    ok: true,
+    status: 200,
+    data: { value: [{ hitsContainers: [{ total: 1 }] }, { hitsContainers: [{ total: 2 }] }] },
+  });
+
+  // The first refused request is the answer; later ones are not sent.
+  bodies.length = 0;
+  const failed = await searchWith((call) => (call === 1 ? 400 : 200));
+  expect(failed).toMatchObject({ ok: false, status: 400 });
+  expect(bodies).toHaveLength(1);
 });
 
 test("Reviewed read-only overrides are part of the revision identity", () => {

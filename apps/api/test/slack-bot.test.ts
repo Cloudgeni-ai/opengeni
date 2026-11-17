@@ -398,7 +398,7 @@ describe("organization bot posting from ordinary chats", () => {
         channelId: CHANNEL,
         text: "Scheduled summary",
       });
-      await sendSlackBotPost({
+      const sent = await sendSlackBotPost({
         db: client.db,
         settings,
         grant,
@@ -407,6 +407,12 @@ describe("organization bot posting from ordinary chats", () => {
         slackFetch: slack.fetch,
       });
       expect(slack.committedPosts).toHaveLength(1);
+      // The result says it was the app's bot, never a person's account.
+      expect(sent.postedAs).toEqual({
+        identity: "opengeni_slack_bot",
+        summary:
+          "Posted by the Opengeni Slack app's bot, not by any person's Slack account. Slack shows the app, or the agent name it posted under, as the sender.",
+      });
       await expect(
         prepareSlackBotPost({
           db: client.db,
