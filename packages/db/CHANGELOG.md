@@ -1,5 +1,39 @@
 # @opengeni/db
 
+## 6.27.0
+
+### Patch Changes
+
+- c3ca657: A parent no longer repeats its final answer when a child's result arrives after the parent already read it in a turn that was recovered from an interrupted attempt. The worker now tells the first-party server the model's call id for each direct tool call, the read record keeps it, and the turn's completion counts the read when its durable history holds that call's output.
+- 8f1f5e2: Free compute is bounded for every kind of sandbox use, not only viewers. A held or denied Free or plan-less organization that has not bought credit or paid for a plan gets no sandbox at all: terminals, commands, background processes, browser and desktop sessions, viewers and new boxes for agent turns are refused, a turn that needs a box fails with a clear message instead of waiting forever, an already running box stays usable only while a turn holds it, and the reaper drains boxes no turn holds. A person who owns or administers such an organization carries the restriction into their other unpaid organizations.
+
+  Free, young Free and plan-less organizations share one running-box budget of 2 across every holder kind, plus 2 running boxes and 12 box-hours per UTC day per organization and per person across their organizations. Past the daily budget no box starts and the reaper drains boxes no turn holds, while an in-flight turn finishes. Boxes that nothing uses drain after the viewer idle window, whatever holds them. All values are plan-limit settings (`OPENGENI_SANDBOX_PLAN_LIMITS_JSON`).
+
+  Every new Modal box carries hard CPU and memory ceilings (2 cores / 4096 MiB for unpaid organizations, 16 cores / 32768 MiB for paid, Enterprise, host-provisioned and credit-buying organizations), and a create without them is refused. Unpaid boxes can be limited to an outbound CIDR/domain allowlist; Modal has no per-port egress rule, so SMTP cannot be blocked by port alone.
+
+  A denied Free organization with no paid history is suspended from sandboxes, Site publishing, invitations, uploads and API keys until the decision is reversed or it buys credit; sign-in keeps working. Creating an additional organization now goes through the signup network checks and rate limit, and inherits its owner's review hold.
+
+  An unpaid organization that bought credit is treated as paying: no per-person, daily or all-holder idle bounds. Paid, Enterprise and host-provisioned organizations are unaffected.
+
+  Rollout: set the new plan-limit fields in `OPENGENI_SANDBOX_PLAN_LIMITS_JSON` only after this release runs everywhere, because older pods reject unknown fields. Defaults for `free`, `new` and `none`: `runningBoxesPerOrganization` 2, `runningBoxesPerPerson` 2, `boxSecondsPerOrganizationPerDay` 43200, `boxSecondsPerPersonPerDay` 43200, `idleDrainAllHolders` true; `restricted` is 0 for every count.
+
+- d85f57f: Finishing owed model-usage ledger writes no longer scans the usage ledger. The check that a recorded response is already settled now looks its completion key up in the ledger's unique index under the runtime role's row-level security, so it costs a few milliseconds per session however large the ledger is. Before, PostgreSQL could not use that index under row-level security and scanned every usage row the tenant could see for each response, which took minutes per idle, failure or worker-death boundary and could occupy every database connection of the control worker, stalling turn starts across the deployment.
+- d51e6e5: A Steer no longer lets a later message be answered before one sent earlier. Steering a queued message, or sending a new message as a Steer, used to move it to the front of the queue. When nothing was running yet, that turn started first and answered without ever seeing the earlier message, which then ran on its own afterwards. A Steer now keeps the order messages were sent in. The running turn, and each message still waiting ahead of the Steer, hands over to it before its first model request, so the agent reads every message up to the Steer, in order, before it answers. A pending Agent Steer still runs ahead of queued messages, but no longer lets a human Steer skip an earlier human message. Only an explicit queue Move changes the order.
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [8f1f5e2]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+  - @opengeni/contracts@6.27.0
+  - @opengeni/config@6.27.0
+  - @opengeni/codemode@6.27.0
+  - @opengeni/codex@6.27.0
+  - @opengeni/observability@6.27.0
+  - @opengeni/network@6.27.0
+  - @opengeni/subscriptions@6.27.0
+  - @opengeni/xai-subscription@6.27.0
+
 ## 6.26.0
 
 ### Patch Changes
