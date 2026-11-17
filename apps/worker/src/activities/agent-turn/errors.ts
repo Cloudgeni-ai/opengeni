@@ -1539,6 +1539,14 @@ export function isCompactionSummaryFailure(error: unknown): boolean {
 }
 
 export function shouldRecoverCompactionProviderFailure(error: unknown): boolean {
+  // The active sandbox route moved (another home, workspace root or native
+  // capability set) before the checkpoint request left: the transport's
+  // pre-dispatch route check refused it, so no provider saw it. That is the
+  // same route transition an ordinary request recovers from. Failure
+  // settlement continues the same turn in a fresh attempt on the new route,
+  // which checkpoints there. Checked before the wrapper type: the check may
+  // also throw unwrapped.
+  if (sandboxRouteTransitionCode(error) !== null) return true;
   if (!(error instanceof CompactionProviderResponseError)) return false;
   // The worker's own included-usage refusal (usage exhausted or unverifiable)
   // happens before dispatch, so the checkpoint request was never sent. It
@@ -2359,6 +2367,20 @@ const REPLAY_SAFE_CHECKPOINT_TRANSPORT_CODES: ReadonlySet<string> = new Set([
   CODEX_RESPONSE_TIMEOUT_ERROR_TYPE,
 ]);
 
+/**
+ * A checkpoint failure whose diagnostics carry nothing but an error name: no
+ * HTTP status, response, request id, provider code, type, field, stream event
+ * or rejection reason. The provider never answered.
+ */
+function isUnansweredCompactionProviderFailure(
+  error: unknown,
+): error is CompactionProviderResponseError {
+  if (!(error instanceof CompactionProviderResponseError)) return false;
+  return Object.entries(error.diagnostics).every(
+    ([key, value]) => key === "errorName" || value === null || value === undefined,
+  );
+}
+
 function classifyAgentRunFailurePayload(
   error: unknown,
   options: { isCodexTurn?: boolean } = {},
@@ -2454,6 +2476,25 @@ function classifyAgentRunFailurePayload(
   const expired = nodes.find((node) => node instanceof ProviderOverloadRecoveryExpiredError);
   if (expired instanceof ProviderOverloadRecoveryExpiredError) return expired.failure;
   const failure = baseAgentRunFailurePayload(error, options);
+  // A checkpoint request that failed before any provider answer (no status,
+  // response, code or type anywhere in its cause chain) changed nothing and
+  // proved nothing about the history: a dropped connection, a fetch that
+  // never left, a pre-dispatch check. The next request may pass, so retry the
+  // same turn under the bounded provider recovery policy rather than failing
+  // it and holding the session. Only the unclassified fallback is replaced;
+  // every typed failure above keeps its own classification.
+  if (
+    failure.code === undefined &&
+    failure.retryable === undefined &&
+    isUnansweredCompactionProviderFailure(error)
+  ) {
+    return {
+      error: "The context checkpoint request did not finish. The same turn will retry it.",
+      code: "provider_unavailable",
+      retryable: true,
+      detail: error.message,
+    };
+  }
   const diagnostic = materializationVerificationDiagnostic(error);
   const anthropic = anthropicRequestDiagnostic(error);
   if (anthropic) {

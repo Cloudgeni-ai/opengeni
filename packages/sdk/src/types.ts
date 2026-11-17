@@ -7918,6 +7918,7 @@ export type SessionGoalContinuationReason =
   | "system_work_pending"
   | "held_for_input"
   | "backoff_pending"
+  | "compaction_failed"
   | "missing_obligation";
 
 export type SessionGoalContinuation = {

@@ -29354,7 +29354,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"approval_required\\\"\",\"\\\"backoff_pending\\\"\",\"\\\"continuation_pending\\\"\",\"\\\"goal_inactive\\\"\",\"\\\"goal_turn_running\\\"\",\"\\\"held_for_input\\\"\",\"\\\"human_turn_running\\\"\",\"\\\"human_work_pending\\\"\",\"\\\"missing_obligation\\\"\",\"\\\"provider_backpressure\\\"\",\"\\\"session_cancelled\\\"\",\"\\\"system_work_pending\\\"\",\"\\\"wake_pending\\\"\",\"\\\"workstream_paused\\\"\"]"
+        "$": "enum=[\"\\\"approval_required\\\"\",\"\\\"backoff_pending\\\"\",\"\\\"compaction_failed\\\"\",\"\\\"continuation_pending\\\"\",\"\\\"goal_inactive\\\"\",\"\\\"goal_turn_running\\\"\",\"\\\"held_for_input\\\"\",\"\\\"human_turn_running\\\"\",\"\\\"human_work_pending\\\"\",\"\\\"missing_obligation\\\"\",\"\\\"provider_backpressure\\\"\",\"\\\"session_cancelled\\\"\",\"\\\"system_work_pending\\\"\",\"\\\"wake_pending\\\"\",\"\\\"workstream_paused\\\"\"]"
       }
     },
     "SessionGoalContinuationState": {
