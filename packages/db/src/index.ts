@@ -42656,6 +42656,16 @@ export async function listSessionEvents(
  * the idempotency key of its last ledger write (`completionKey`); a response
  * is owed while no usage or credit ledger row has that key. One query; a
  * settled response costs one index probe per table and no write.
+ *
+ * The candidates, with their completion keys, are a materialized CTE so the
+ * ledger anti-joins compare two plain text columns. Under row-level security
+ * PostgreSQL uses a join clause as an index condition only when it is
+ * leakproof, and the JSON operators that read the key out of the payload are
+ * not: written in the anti-join itself, they turned each probe into a scan of
+ * every usage row the tenant can see, with its row policy, per event. Every
+ * idle, failure and worker-death boundary and every attempt's first model
+ * request runs this read, so its cost must follow the session's own responses,
+ * never the size of the ledger.
  */
 export async function listOwedModelUsageSettlements(
   db: Database,
@@ -42688,25 +42698,46 @@ export async function listOwedModelUsageSettlements(
         ),
       )!,
       sql`${completionKey} is not null`,
-      sql`not exists (select 1 from ${schema.usageEvents} where ${schema.usageEvents.idempotencyKey} = ${completionKey})`,
-      sql`not exists (select 1 from ${schema.creditLedgerEntries} where ${schema.creditLedgerEntries.idempotencyKey} = ${completionKey})`,
     ];
     if (input.turnId) filters.push(eq(events.turnId, input.turnId));
     if (input.attemptId) filters.push(eq(events.turnAttemptId, input.attemptId));
     if (input.since) filters.push(gte(events.createdAt, input.since));
-    const rows = await scopedDb
-      .select({
-        id: events.id,
-        accountId: events.accountId,
-        turnId: events.turnId,
-        turnAttemptId: events.turnAttemptId,
-        rejected: sql<boolean>`(${events.type} <> 'agent.model.usage')`,
-        payload: sql<unknown>`${usagePayload}`,
-        payloadCodecVersion: events.payloadCodecVersion,
-      })
-      .from(events)
-      .where(and(...filters))
-      .orderBy(asc(events.sequence));
+    const rows = await rawRows<{
+      id: string;
+      accountId: string;
+      turnId: string | null;
+      turnAttemptId: string | null;
+      rejected: boolean;
+      payload: unknown;
+      payloadCodecVersion: number | null;
+    }>(
+      scopedDb,
+      sql`with candidates as materialized (
+          select ${events.id} as id, ${events.accountId} as account_id,
+            ${events.turnId} as turn_id, ${events.turnAttemptId} as turn_attempt_id,
+            ${events.sequence} as sequence,
+            (${events.type} <> 'agent.model.usage') as rejected,
+            ${usagePayload} as payload,
+            ${events.payloadCodecVersion} as payload_codec_version,
+            ${completionKey} as completion_key
+          from ${events}
+          where ${and(...filters)}
+        )
+        select candidates.id::text as "id", candidates.account_id::text as "accountId",
+          candidates.turn_id::text as "turnId", candidates.turn_attempt_id::text as "turnAttemptId",
+          candidates.rejected as "rejected", candidates.payload as "payload",
+          candidates.payload_codec_version as "payloadCodecVersion"
+        from candidates
+        where not exists (
+            select 1 from ${schema.usageEvents}
+            where ${schema.usageEvents.idempotencyKey} = candidates.completion_key
+          )
+          and not exists (
+            select 1 from ${schema.creditLedgerEntries}
+            where ${schema.creditLedgerEntries.idempotencyKey} = candidates.completion_key
+          )
+        order by candidates.sequence`,
+    );
     // The payload is read through SQL, so restore the logical values here: a
     // source key the codec stored encoded must reach settlement as the
     // original key, or its receipt identity is encoded a second time.
