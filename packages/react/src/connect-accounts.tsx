@@ -18,6 +18,12 @@ export type ConnectAccountsProps = {
   client?: ChatClient<OpenGeniClient> | undefined;
   /** Reconcile surrounding service state after a confirmed account disconnect. */
   onDisconnected?: (() => void) | undefined;
+  /**
+   * An account kept by an integration platform (`backend` set) signs in again
+   * through its connector's own Connect, never a native reconnect. The host
+   * opens that Connect; without it such a row only says where to sign in.
+   */
+  onReconnectViaConnector?: ((account: ConnectAccount) => void) | undefined;
 };
 
 /** Local credential revocation only. Unknown or changed versions must be
@@ -39,6 +45,7 @@ function ScopedAccounts({
   finishInPopup = false,
   client,
   onDisconnected,
+  onReconnectViaConnector,
 }: ConnectAccountsProps) {
   const t = useOpenGeniText();
   const view = useConnect(controller);
@@ -118,7 +125,9 @@ function ScopedAccounts({
     }
   };
   const reconnect = async (account: ConnectAccount) => {
-    if (!returnUrl || mutation.current || view.busy) return;
+    // Never a native attempt for a platform account: it would start a fresh
+    // sign-in beside it instead of restoring it.
+    if (account.backend || !returnUrl || mutation.current || view.busy) return;
     setError(false);
     try {
       await controller.begin({
@@ -176,16 +185,32 @@ function ScopedAccounts({
                   </svg>
                 </summary>
                 <div className="og-connect-account-actions">
-                  {returnUrl && account.status === "auth_needed" && (
-                    <button
-                      type="button"
-                      aria-label={t("connectAccounts.reconnectLabel", { label: account.label })}
-                      disabled={busy || view.busy}
-                      onClick={() => void reconnect(account)}
-                    >
-                      {t("connectAccounts.reconnect")}
-                    </button>
-                  )}
+                  {account.status === "auth_needed" &&
+                    (account.backend ? (
+                      onReconnectViaConnector ? (
+                        <button
+                          type="button"
+                          aria-label={t("connectAccounts.reconnectLabel", { label: account.label })}
+                          disabled={busy || view.busy}
+                          onClick={() => onReconnectViaConnector(account)}
+                        >
+                          {t("connectAccounts.reconnect")}
+                        </button>
+                      ) : (
+                        <p>{t("connectAccounts.signInFromConnector")}</p>
+                      )
+                    ) : (
+                      returnUrl && (
+                        <button
+                          type="button"
+                          aria-label={t("connectAccounts.reconnectLabel", { label: account.label })}
+                          disabled={busy || view.busy}
+                          onClick={() => void reconnect(account)}
+                        >
+                          {t("connectAccounts.reconnect")}
+                        </button>
+                      )
+                    ))}
                   {selected === `${account.providerId}:${account.id}` ? (
                     <div
                       role="group"

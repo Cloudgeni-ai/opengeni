@@ -104,6 +104,7 @@ const context = {
       }> => ({ kind: "none" }),
     ),
     listConnections: async () => connections,
+    listOwnConnectionAccounts: async () => connections,
     listSocialConnections: async () => [],
     listSlackInstallationBindings: async () => [],
     listIntegrationDefinitions: async () => ({ definitions: [] }),

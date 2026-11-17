@@ -28,6 +28,7 @@ import {
   stableJson,
   assertOrganizationIntegrationAllowed,
   OPENGENI_PERSONAL_SLACK_MCP_URL,
+  connectorProviderDomain,
 } from "@opengeni/contracts";
 import {
   CORE_INTEGRATION_DEFINITIONS,
@@ -66,6 +67,8 @@ import {
   MissingPermissionRefusal,
   WORKSPACE_SETTINGS_REFUSAL,
   workspaceSettingsAuthorized,
+  nangoBackendsFor,
+  projectConnectionsForBackends,
   type AccessGrantAuthorization,
   type ApiRouteDeps,
 } from "@opengeni/core";
@@ -515,8 +518,13 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/connect/accounts", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const { grant } = await requireAccessGrantAuthorization(c, deps, workspaceId, "workspace:read");
+    // Read as the inventory does while an integration's backend is switched:
+    // a native account of a Nango-backed connector needs its Nango account.
     const connections = hasPermission(grant.permissions, "connections:read")
-      ? await listConnectionsMetadata(deps.db, workspaceId, grant.subjectId)
+      ? projectConnectionsForBackends(
+          await listConnectionsMetadata(deps.db, workspaceId, grant.subjectId),
+          await nangoBackendsFor(deps.db, deps.settings),
+        )
       : [];
     const githubInstallations =
       hasPermission(grant.permissions, "github:use") ||
@@ -626,15 +634,20 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                     : "auth_needed",
             }),
           ];
+        // A Nango connection serves its connector's MCP endpoint like a
+        // discovered OAuth sign-in does, but is signed in again through its
+        // connector's own Connect: marked, so no native reconnect starts.
+        const nango = connection.metadata.integrationBackend === "nango";
         if (
           connection.kind === "oauth2" &&
-          connection.metadata.oauthDiscovery &&
+          (connection.metadata.oauthDiscovery || nango) &&
           typeof connection.metadata.mcpUrl === "string"
         )
           return [
             ConnectAccount.parse({
               id: connection.id,
               version: connection.version,
+              ...(nango ? { backend: "nango" as const } : {}),
               providerId:
                 connection.metadata.mcpUrl === OPENGENI_PERSONAL_SLACK_MCP_URL
                   ? "slack-personal"
@@ -645,16 +658,25 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                       : connection.metadata.mcpUrl === OFFICIAL_GOOGLE_CALENDAR_MCP_URL
                         ? "google-calendar"
                         : "mcp-oauth",
-              label: connectionAccountLabel(connection, connection.providerDomain).slice(0, 256),
+              // A Nango row is named by the connector it serves, not the
+              // integration platform's domain.
+              label: connectionAccountLabel(
+                connection,
+                connectorProviderDomain(connection.providerDomain),
+              ).slice(0, 256),
               ownership: connection.subjectId === null ? "workspace" : "personal",
               status:
                 connection.status === "revoked"
                   ? "disabled"
-                  : [
+                  : // A native shared Google sign-in is not supported; a
+                    // shared Nango account is.
+                    !nango &&
+                      [
                         OFFICIAL_GMAIL_MCP_URL,
                         OFFICIAL_DRIVE_MCP_URL,
                         OFFICIAL_GOOGLE_CALENDAR_MCP_URL,
-                      ].includes(connection.metadata.mcpUrl) && connection.subjectId === null
+                      ].includes(connection.metadata.mcpUrl) &&
+                      connection.subjectId === null
                     ? "auth_needed"
                     : connection.status === "active"
                       ? "connected"

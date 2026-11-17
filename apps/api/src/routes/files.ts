@@ -65,7 +65,12 @@ import {
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
 } from "@opengeni/core";
-import { recordWorkspaceUsage, requireLimit, sanitizeWorkspaceFilename } from "@opengeni/core";
+import {
+  assertOrganizationNotSuspended,
+  recordWorkspaceUsage,
+  requireLimit,
+  sanitizeWorkspaceFilename,
+} from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { retryWhileMissing } from "@opengeni/storage";
 import { createApiMcpTransport } from "../mcp/transport";
@@ -185,6 +190,12 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/files/uploads", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "files:upload");
+    // A suspended organization cannot upload (docs/deployment.md,
+    // "Free compute bounds").
+    await assertOrganizationNotSuspended(db, {
+      accountId: grant.accountId,
+      subjectId: grant.subjectId,
+    });
     if (!objectStorage) {
       throw new HTTPException(503, {
         message: "object storage is not configured",

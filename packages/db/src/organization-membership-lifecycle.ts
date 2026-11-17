@@ -130,7 +130,15 @@ export async function createManagedOrganizationWithSignupNetwork(
   });
 }
 
-export async function createAdditionalManagedOrganization(
+/**
+ * Create one more organization for a person who already has one. Like a
+ * first organization's setup (migration 1484), it records the signup network
+ * passed here and may be refused with SQLSTATE OG429 by the network rate
+ * limit; `evaluateAccountIds` lists the accounts to evaluate after commit.
+ * A person who owns or administers a held or denied organization gets the new
+ * one held.
+ */
+export async function createAdditionalManagedOrganizationWithSignupNetwork(
   db: Database,
   input: {
     subjectId: string;
@@ -138,10 +146,15 @@ export async function createAdditionalManagedOrganization(
     name: string;
     workspaceName: string;
     operationId: string;
+    signupNetwork?: SignupNetworkSource | null;
   },
-): Promise<CreateAdditionalOrganizationResponseType> {
+): Promise<{
+  organization: CreateAdditionalOrganizationResponseType;
+  evaluateAccountIds: string[];
+}> {
   return await db.transaction(async (tx) => {
     await setSubjectRlsContext(tx as unknown as Database, input.subjectId);
+    await setSignupNetworkSourceForSetup(tx as unknown as Database, input.signupNetwork);
     const [row] = await rawRows<{ result: unknown }>(
       tx,
       sql`select create_additional_managed_organization(
@@ -152,8 +165,24 @@ export async function createAdditionalManagedOrganization(
         ${input.operationId}::uuid
       ) as result`,
     );
-    return CreateAdditionalOrganizationResponse.parse(row?.result);
+    return {
+      organization: CreateAdditionalOrganizationResponse.parse(row?.result),
+      evaluateAccountIds: await readSignupNetworkEvaluateAccounts(tx as unknown as Database),
+    };
   });
+}
+
+export async function createAdditionalManagedOrganization(
+  db: Database,
+  input: {
+    subjectId: string;
+    subjectLabel: string;
+    name: string;
+    workspaceName: string;
+    operationId: string;
+  },
+): Promise<CreateAdditionalOrganizationResponseType> {
+  return (await createAdditionalManagedOrganizationWithSignupNetwork(db, input)).organization;
 }
 
 /**

@@ -1098,6 +1098,7 @@ import {
 } from "@opengeni/contracts";
 import {
   environmentsEncryptionKeyBytes,
+  paidSandboxPlanLimit,
   SANDBOX_LIFECYCLE_TRANSITION_MAX_WAIT_MS,
   SANDBOX_DEADLINE_COMMAND_STOP_GRACE_MS,
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
@@ -42656,6 +42657,16 @@ export async function listSessionEvents(
  * the idempotency key of its last ledger write (`completionKey`); a response
  * is owed while no usage or credit ledger row has that key. One query; a
  * settled response costs one index probe per table and no write.
+ *
+ * The candidates, with their completion keys, are a materialized CTE so the
+ * ledger anti-joins compare two plain text columns. Under row-level security
+ * PostgreSQL uses a join clause as an index condition only when it is
+ * leakproof, and the JSON operators that read the key out of the payload are
+ * not: written in the anti-join itself, they turned each probe into a scan of
+ * every usage row the tenant can see, with its row policy, per event. Every
+ * idle, failure and worker-death boundary and every attempt's first model
+ * request runs this read, so its cost must follow the session's own responses,
+ * never the size of the ledger.
  */
 export async function listOwedModelUsageSettlements(
   db: Database,
@@ -42688,25 +42699,46 @@ export async function listOwedModelUsageSettlements(
         ),
       )!,
       sql`${completionKey} is not null`,
-      sql`not exists (select 1 from ${schema.usageEvents} where ${schema.usageEvents.idempotencyKey} = ${completionKey})`,
-      sql`not exists (select 1 from ${schema.creditLedgerEntries} where ${schema.creditLedgerEntries.idempotencyKey} = ${completionKey})`,
     ];
     if (input.turnId) filters.push(eq(events.turnId, input.turnId));
     if (input.attemptId) filters.push(eq(events.turnAttemptId, input.attemptId));
     if (input.since) filters.push(gte(events.createdAt, input.since));
-    const rows = await scopedDb
-      .select({
-        id: events.id,
-        accountId: events.accountId,
-        turnId: events.turnId,
-        turnAttemptId: events.turnAttemptId,
-        rejected: sql<boolean>`(${events.type} <> 'agent.model.usage')`,
-        payload: sql<unknown>`${usagePayload}`,
-        payloadCodecVersion: events.payloadCodecVersion,
-      })
-      .from(events)
-      .where(and(...filters))
-      .orderBy(asc(events.sequence));
+    const rows = await rawRows<{
+      id: string;
+      accountId: string;
+      turnId: string | null;
+      turnAttemptId: string | null;
+      rejected: boolean;
+      payload: unknown;
+      payloadCodecVersion: number | null;
+    }>(
+      scopedDb,
+      sql`with candidates as materialized (
+          select ${events.id} as id, ${events.accountId} as account_id,
+            ${events.turnId} as turn_id, ${events.turnAttemptId} as turn_attempt_id,
+            ${events.sequence} as sequence,
+            (${events.type} <> 'agent.model.usage') as rejected,
+            ${usagePayload} as payload,
+            ${events.payloadCodecVersion} as payload_codec_version,
+            ${completionKey} as completion_key
+          from ${events}
+          where ${and(...filters)}
+        )
+        select candidates.id::text as "id", candidates.account_id::text as "accountId",
+          candidates.turn_id::text as "turnId", candidates.turn_attempt_id::text as "turnAttemptId",
+          candidates.rejected as "rejected", candidates.payload as "payload",
+          candidates.payload_codec_version as "payloadCodecVersion"
+        from candidates
+        where not exists (
+            select 1 from ${schema.usageEvents}
+            where ${schema.usageEvents.idempotencyKey} = candidates.completion_key
+          )
+          and not exists (
+            select 1 from ${schema.creditLedgerEntries}
+            where ${schema.creditLedgerEntries.idempotencyKey} = candidates.completion_key
+          )
+        order by candidates.sequence`,
+    );
     // The payload is read through SQL, so restore the logical values here: a
     // source key the codec stored encoded must reach settlement as the
     // original key, or its receipt identity is encoded a second time.
@@ -49411,6 +49443,15 @@ export interface AcquireLeaseInput {
    * limit is refused (non-turn holders) or capacity-blocked (turns). Omitted =
    * no organization limits. */
   sandboxPlanLimits?: SandboxPlanLimits;
+  /** The person on whose behalf the box is held (`user:<id>`): the viewer,
+   * the terminal or browser user, or the human who started the turn. With
+   * sandboxPlanLimits, their other organizations count toward the per-person
+   * bounds and a restricted one restricts this organization too
+   * (resolveSandboxComputeStanding). Defaults to viewerSubjectId. */
+  actingSubjectId?: string | null;
+  /** Called when a standing read failed and admission fell back (fails
+   * open); callers record it. Without it the fallback is logged. */
+  onComputeStandingFallback?: SandboxComputeStandingFallback | undefined;
   /** Viewer holders only: for this long after the reaper released a box's
    * viewers for the viewer idle window, refuse (`viewer_idle`) an attach to
    * it unless the attach reports interaction after that release or a turn
@@ -49429,9 +49470,13 @@ export type AcquireLeaseResult =
   // Caller WON the cold->warming CAS: it is the spawner (any pool worker). Must
   // resume-by-id from resume_state, expose the stream port, then call
   // commitWarmingToWarm. No owner process is started.
-  | { role: "spawner"; lease: LeaseSnapshot }
+  //
+  // `sandboxPlanTier` is the organization's plan tier when the admission
+  // resolved it (sandboxPlanLimits given): the spawner creates the box with
+  // that tier's resource ceilings (settingsForSandboxPlanTier).
+  | { role: "spawner"; lease: LeaseSnapshot; sandboxPlanTier?: string; sandboxPaidHistory?: true }
   // Box live or being built by someone else: attach (and, for warming, wait).
-  | { role: "attached"; lease: LeaseSnapshot }
+  | { role: "attached"; lease: LeaseSnapshot; sandboxPlanTier?: string; sandboxPaidHistory?: true }
   // Re-armed a draining lease back to warm (box never torn down).
   | { role: "rearmed"; lease: LeaseSnapshot }
   // Durable recovery truth says this cold group cannot safely materialize. No
@@ -49852,20 +49897,442 @@ export class SandboxViewerBoxLimitError extends Error {
 }
 
 /**
- * Starting one more box would exceed the organization's running-box limit
- * for its plan. Raised for holders that cannot wait (viewer, direct,
- * interaction); a turn instead parks until a slot frees.
+ * Why a sandbox was refused under the plan's compute bounds:
+ *
+ * - `running`: one more box would exceed the organization's running-box
+ *   limit (`limit` boxes);
+ * - `person_running`: the same across the acting person's limited
+ *   organizations (`limit` boxes);
+ * - `closed`: the tier allows no sandbox (a held or denied organization that
+ *   has not paid);
+ * - `daily_budget`: the organization or the acting person used today's box
+ *   time (`limit` seconds), until the next UTC day.
+ */
+export type SandboxOrganizationBoxLimitReason =
+  | "running"
+  | "person_running"
+  | "closed"
+  | "daily_budget";
+
+/** The person-facing explanation of a SandboxOrganizationBoxLimitError. */
+export function sandboxOrganizationBoxLimitMessage(
+  reason: SandboxOrganizationBoxLimitReason,
+  limit: number,
+): string {
+  switch (reason) {
+    case "closed":
+      return "Sandboxes aren't available for this organization. Add credit or choose a paid plan to use them.";
+    case "daily_budget":
+      return `This organization (or you, across your organizations) has used today's ${Math.round(
+        limit / 3600,
+      )} sandbox hours on the Free plan. Sandboxes start again after midnight UTC; add credit or choose a paid plan to keep working now.`;
+    case "person_running":
+      return `You already run ${limit} sandboxes across your organizations, the most the Free plan allows; close one or wait for a task to finish`;
+    case "running":
+      return `Your organization already runs ${limit} sandboxes, the most its plan allows; close one or wait for a task to finish`;
+  }
+}
+
+/**
+ * A sandbox refused under the plan's compute bounds (see
+ * SandboxOrganizationBoxLimitReason). Raised for holders that cannot wait
+ * (viewer, direct, interaction) and, for `closed` and `daily_budget`, for a
+ * turn that does not already hold the box: those do not free on their own,
+ * so the turn fails with this message. A turn beyond a running-box limit
+ * instead parks until a slot frees.
  */
 export class SandboxOrganizationBoxLimitError extends Error {
   readonly name = "SandboxOrganizationBoxLimitError";
+  readonly code = "sandbox_compute_unavailable";
 
   constructor(
     public readonly workspaceId: string,
     public readonly sandboxGroupId: string,
     public readonly limit: number,
+    public readonly reason: SandboxOrganizationBoxLimitReason = "running",
   ) {
-    super(`The organization already runs ${limit} sandboxes, the most its plan allows`);
+    super(sandboxOrganizationBoxLimitMessage(reason, limit));
   }
+}
+
+/** An organization's plan standing for one admission plus what the
+ * free-compute bounds need beyond its own lease rows, read once before
+ * admission (resolveSandboxComputeStanding) and reused under the lease lock. */
+export type SandboxComputeStanding = {
+  /** The plan tier admission applies, including a linked restriction. */
+  tier: string;
+  /** Bought credit or had a paid subscription: a paying customer, outside the
+   * unpaid-only bounds and on the standard resource class. */
+  paidHistory: boolean;
+  /** The unpaid-only bounds (per person, daily box time, idle drain) apply. */
+  bounded: boolean;
+  /** The acting person owns or administers this organization and another
+   * unpaid one that its own held or denied decision restricts. */
+  linkedRestricted: boolean;
+  /** The acting person owns this organization, so its boxes and box time are
+   * theirs for the per-person bounds. */
+  personOwnsOrganization: boolean;
+  /** Running boxes in the other unpaid organizations the acting person owns. */
+  personOtherRunningBoxes: number;
+  /** Metered box seconds since the start of the UTC day. */
+  organizationBoxSecondsToday: number;
+  /** The same across the unpaid organizations the acting person owns. */
+  personBoxSecondsToday: number;
+};
+
+/** Called when a standing read failed and admission fell back (fails open):
+ * `organization` to the in-transaction tier only, `person` to the
+ * organization's own bounds. */
+export type SandboxComputeStandingFallback = (
+  error: unknown,
+  part: "organization" | "person",
+) => void;
+
+function reportSandboxComputeStandingFallback(
+  onFallback: SandboxComputeStandingFallback | undefined,
+  error: unknown,
+  part: "organization" | "person",
+): void {
+  if (onFallback) {
+    try {
+      onFallback(error, part);
+    } catch {
+      // Reporting never changes admission.
+    }
+    return;
+  }
+  console.warn("sandbox compute standing read failed; admission falls back", {
+    part,
+    error: error instanceof Error ? error.message : String(error),
+  });
+}
+
+/** The most other organizations of one person the standing reads. */
+const SANDBOX_STANDING_PERSON_ORGANIZATION_LIMIT = 25;
+
+function sandboxDailyBoxTimeSpent(limit: SandboxPlanLimit, standing: SandboxComputeStanding) {
+  return (
+    (limit.boxSecondsPerOrganizationPerDay !== undefined &&
+      standing.organizationBoxSecondsToday >= limit.boxSecondsPerOrganizationPerDay) ||
+    (limit.boxSecondsPerPersonPerDay !== undefined &&
+      standing.personBoxSecondsToday >= limit.boxSecondsPerPersonPerDay)
+  );
+}
+
+function sandboxDailyBoxTimeLimitSeconds(
+  limit: SandboxPlanLimit,
+  standing: SandboxComputeStanding | null,
+): number {
+  if (
+    standing !== null &&
+    limit.boxSecondsPerOrganizationPerDay !== undefined &&
+    standing.organizationBoxSecondsToday >= limit.boxSecondsPerOrganizationPerDay
+  ) {
+    return limit.boxSecondsPerOrganizationPerDay;
+  }
+  return limit.boxSecondsPerPersonPerDay ?? limit.boxSecondsPerOrganizationPerDay ?? 0;
+}
+
+/** Tiers whose boxes count toward a person's bounds across organizations. */
+const SANDBOX_PERSON_BOUNDED_TIERS: readonly string[] = ["free", "new", "none", "restricted"];
+
+/** Metered box seconds of one organization since the start of the UTC day.
+ * Needs the organization's account-only RLS context (no workspace), so every
+ * workspace's meter counts. */
+async function organizationBoxSecondsToday(tx: Database, accountId: string): Promise<number> {
+  const [row] = await rawRows<{ seconds: string | number | null }>(
+    tx,
+    sql`select coalesce(sum(quantity), 0)::bigint as seconds
+      from usage_events
+      where account_id = ${accountId}::uuid
+        and event_type = 'sandbox.warm_seconds'
+        and occurred_at >= (date_trunc('day', now() at time zone 'UTC') at time zone 'UTC')`,
+  );
+  return Number(row?.seconds ?? 0);
+}
+
+/** What a suspended organization is told when a cost path refuses it. */
+export const ORGANIZATION_SUSPENDED_MESSAGE =
+  "This organization is suspended after review, so it can't use paid resources. Add credit or contact support if you think this is a mistake.";
+
+/** Suspension is read on every cost path; reuse it briefly per process. */
+const ORGANIZATION_SUSPENSION_TTL_MS = 30_000;
+const organizationSuspensionCache = new Map<string, { at: number; value: Promise<boolean> }>();
+
+/** Forget cached suspensions (tests). */
+export function resetOrganizationSuspensionCache(): void {
+  organizationSuspensionCache.clear();
+}
+
+/**
+ * Whether an organization is suspended: a Free or plan-less organization with
+ * no paid history (never bought credit, never had a paid subscription) whose
+ * own promotion decision is `denied` while promotion enforcement is on, or one
+ * the acting person (`user:<id>`) owns or administers while they own or
+ * administer such a suspended organization. Derived from the decision, so it
+ * applies as soon as the organization is denied and clears as soon as the
+ * decision is reversed or the organization pays; nothing is deleted and no
+ * ledger is touched. Paid, Enterprise and host-provisioned organizations are
+ * never suspended. A suspended organization's people can still sign in and buy
+ * credit, which lifts it.
+ */
+export async function resolveOrganizationSuspension(
+  db: Database,
+  input: { accountId: string; subjectId?: string | null },
+): Promise<boolean> {
+  const subjectId = input.subjectId?.startsWith("user:") ? input.subjectId : null;
+  const key = `${input.accountId}\u0000${subjectId ?? ""}`;
+  const now = Date.now();
+  const cached = organizationSuspensionCache.get(key);
+  if (cached && now - cached.at < ORGANIZATION_SUSPENSION_TTL_MS) return await cached.value;
+  if (organizationSuspensionCache.size >= SANDBOX_PERSON_STANDING_CACHE_LIMIT) {
+    organizationSuspensionCache.clear();
+  }
+  const value = readOrganizationSuspension(db, { accountId: input.accountId, subjectId });
+  organizationSuspensionCache.set(key, { at: now, value });
+  value.catch(() => organizationSuspensionCache.delete(key));
+  return await value;
+}
+
+async function readOrganizationSuspension(
+  db: Database,
+  input: { accountId: string; subjectId: string | null },
+): Promise<boolean> {
+  const own = await withAccountRls(db, input.accountId, (tx) =>
+    resolveSandboxPlanStanding(tx, input.accountId),
+  );
+  if (own.suspended) return true;
+  if (own.paidHistory || (own.tier !== "free" && own.tier !== "none")) return false;
+  if (input.subjectId === null) return false;
+  const subjectId = input.subjectId;
+  const memberships = await db.transaction(async (tx) => {
+    await setSubjectRlsContext(tx as unknown as Database, subjectId);
+    const [row] = await rawRows<{ result: unknown }>(
+      tx,
+      sql`select list_self_organization_memberships(${subjectId}) as result`,
+    );
+    return Array.isArray(row?.result)
+      ? (row.result as Array<{ organizationId?: unknown; role?: unknown; status?: unknown }>)
+      : [];
+  });
+  const administered = memberships.filter(
+    (membership) =>
+      membership.status === "active" &&
+      (membership.role === "owner" || membership.role === "admin") &&
+      typeof membership.organizationId === "string",
+  );
+  if (!administered.some((membership) => membership.organizationId === input.accountId)) {
+    return false;
+  }
+  for (const organizationId of administered
+    .map((membership) => membership.organizationId as string)
+    .filter((candidate) => candidate !== input.accountId)
+    .sort()
+    .slice(0, SANDBOX_STANDING_PERSON_ORGANIZATION_LIMIT)) {
+    const other = await withAccountRls(db, organizationId, (tx) =>
+      resolveSandboxPlanStanding(tx, organizationId),
+    );
+    if (other.suspended) return true;
+  }
+  return false;
+}
+
+/** Metered box seconds of one organization since the start of the UTC day
+ * (maintenance callers). */
+export async function readOrganizationBoxSecondsToday(
+  db: Database,
+  accountId: string,
+): Promise<number> {
+  return await withAccountRls(db, accountId, (tx) => organizationBoxSecondsToday(tx, accountId));
+}
+
+/**
+ * An organization's standing for one admission (see SandboxComputeStanding):
+ * its plan tier, whether it has paid, its box time today when its tier bounds
+ * that and, for an acting person (`user:<id>`), the organizations they own or
+ * administer. Only an unpaid-tier organization that never paid reads more than
+ * its own tier: paid plans, `enterprise` and `embedded` read no ledger, no box
+ * time and no person.
+ *
+ * The person's other organizations are read each under its own RLS context,
+ * outside the admission transaction, so the cross-organization counts are a
+ * snapshot: two simultaneous admissions in two organizations of one person can
+ * both pass. The per-organization limits stay exact. A failed person read
+ * falls back to the organization's own bounds (reported through
+ * `onFallback`); a failed organization read throws, and acquireLease falls
+ * back to the tier it reads under the lease lock.
+ */
+export async function resolveSandboxComputeStanding(
+  db: Database,
+  input: {
+    accountId: string;
+    limits: SandboxPlanLimits;
+    actingSubjectId?: string | null;
+    onFallback?: SandboxComputeStandingFallback | undefined;
+  },
+): Promise<SandboxComputeStanding> {
+  const own = await withAccountRls(db, input.accountId, async (tx) => {
+    const standing = await resolveSandboxPlanStanding(tx, input.accountId, input.limits);
+    const bounded = SANDBOX_PERSON_BOUNDED_TIERS.includes(standing.tier) && !standing.paidHistory;
+    const limit = sandboxPlanLimitFor(input.limits, standing.tier);
+    const needsSeconds =
+      bounded &&
+      (limit.boxSecondsPerOrganizationPerDay !== undefined ||
+        limit.boxSecondsPerPersonPerDay !== undefined);
+    return {
+      standing,
+      bounded,
+      seconds: needsSeconds ? await organizationBoxSecondsToday(tx, input.accountId) : 0,
+    };
+  });
+  const result: SandboxComputeStanding = {
+    tier: own.standing.tier,
+    paidHistory: own.standing.paidHistory,
+    bounded: own.bounded,
+    linkedRestricted: false,
+    personOwnsOrganization: false,
+    personOtherRunningBoxes: 0,
+    organizationBoxSecondsToday: own.seconds,
+    personBoxSecondsToday: 0,
+  };
+  const subjectId = input.actingSubjectId ?? null;
+  if (!own.bounded || subjectId === null || !subjectId.startsWith("user:")) return result;
+  // A restricted organization needs no person facts: it is already closed.
+  if (own.standing.tier === "restricted") return result;
+  let person: SandboxPersonStanding;
+  try {
+    person = await cachedSandboxPersonStanding(db, {
+      accountId: input.accountId,
+      subjectId,
+      limits: input.limits,
+    });
+  } catch (error) {
+    reportSandboxComputeStandingFallback(input.onFallback, error, "person");
+    return result;
+  }
+  result.linkedRestricted = person.linkedRestricted;
+  if (person.linkedRestricted) result.tier = "restricted";
+  result.personOwnsOrganization = person.ownsOrganization;
+  result.personOtherRunningBoxes = person.otherRunningBoxes;
+  result.personBoxSecondsToday =
+    (person.ownsOrganization ? own.seconds : 0) + person.otherBoxSecondsToday;
+  return result;
+}
+
+type SandboxPersonStanding = {
+  linkedRestricted: boolean;
+  ownsOrganization: boolean;
+  otherRunningBoxes: number;
+  otherBoxSecondsToday: number;
+};
+
+/** A person's standing is read for every admission of their requests, and a
+ * terminal or file browser makes many; reuse it briefly per process. */
+const SANDBOX_PERSON_STANDING_TTL_MS = 15_000;
+const SANDBOX_PERSON_STANDING_CACHE_LIMIT = 2_000;
+const sandboxPersonStandingCache = new Map<
+  string,
+  { at: number; value: Promise<SandboxPersonStanding> }
+>();
+
+/** Forget cached person standings (tests). */
+export function resetSandboxPersonStandingCache(): void {
+  sandboxPersonStandingCache.clear();
+  organizationPurchasedCreditCache.clear();
+}
+
+async function cachedSandboxPersonStanding(
+  db: Database,
+  input: { accountId: string; subjectId: string; limits: SandboxPlanLimits },
+): Promise<SandboxPersonStanding> {
+  const key = `${input.accountId}\u0000${input.subjectId}`;
+  const now = Date.now();
+  const cached = sandboxPersonStandingCache.get(key);
+  if (cached && now - cached.at < SANDBOX_PERSON_STANDING_TTL_MS) return await cached.value;
+  if (sandboxPersonStandingCache.size >= SANDBOX_PERSON_STANDING_CACHE_LIMIT) {
+    sandboxPersonStandingCache.clear();
+  }
+  const value = readSandboxPersonStanding(db, input);
+  sandboxPersonStandingCache.set(key, { at: now, value });
+  value.catch(() => sandboxPersonStandingCache.delete(key));
+  return await value;
+}
+
+/**
+ * The acting person's other organizations. A restriction follows them from
+ * any organization they own or administer into this one, when they also own
+ * or administer this one. Boxes and box time count toward their per-person
+ * bounds only from organizations they own (the ones they created), so an
+ * admin invited into a busy team organization is not bounded by their
+ * teammates' work.
+ */
+async function readSandboxPersonStanding(
+  db: Database,
+  input: { accountId: string; subjectId: string; limits: SandboxPlanLimits },
+): Promise<SandboxPersonStanding> {
+  const subjectId = input.subjectId;
+  const result: SandboxPersonStanding = {
+    linkedRestricted: false,
+    ownsOrganization: false,
+    otherRunningBoxes: 0,
+    otherBoxSecondsToday: 0,
+  };
+  const memberships = await db.transaction(async (tx) => {
+    await setSubjectRlsContext(tx as unknown as Database, subjectId);
+    const [row] = await rawRows<{ result: unknown }>(
+      tx,
+      sql`select list_self_organization_memberships(${subjectId}) as result`,
+    );
+    return Array.isArray(row?.result)
+      ? (row.result as Array<{ organizationId?: unknown; role?: unknown; status?: unknown }>)
+      : [];
+  });
+  const administered = memberships.filter(
+    (membership) =>
+      membership.status === "active" &&
+      (membership.role === "owner" || membership.role === "admin") &&
+      typeof membership.organizationId === "string",
+  );
+  const administersThis = administered.some(
+    (membership) => membership.organizationId === input.accountId,
+  );
+  result.ownsOrganization = administered.some(
+    (membership) => membership.organizationId === input.accountId && membership.role === "owner",
+  );
+  const others = administered
+    .filter((membership) => membership.organizationId !== input.accountId)
+    .sort((left, right) => String(left.organizationId).localeCompare(String(right.organizationId)))
+    .slice(0, SANDBOX_STANDING_PERSON_ORGANIZATION_LIMIT);
+  for (const membership of others) {
+    const organizationId = membership.organizationId as string;
+    const owned = membership.role === "owner";
+    const other = await withAccountRls(db, organizationId, async (tx) => {
+      const standing = await resolveSandboxPlanStanding(tx, organizationId, input.limits);
+      if (!SANDBOX_PERSON_BOUNDED_TIERS.includes(standing.tier) || standing.paidHistory) {
+        return null;
+      }
+      const counts = owned
+        ? await organizationWarmSandboxCounts(tx, {
+            accountId: organizationId,
+            subjectId: null,
+            excludeLeaseId: null,
+          })
+        : null;
+      return {
+        restricted: standing.tier === "restricted" && standing.ownDecision !== null,
+        runningBoxes: counts?.runningBoxes ?? 0,
+        seconds: owned ? await organizationBoxSecondsToday(tx, organizationId) : 0,
+      };
+    });
+    if (other === null) continue;
+    // Only a person who runs this organization carries another one's
+    // restriction into it; a member invited into someone else's organization
+    // does not restrict it.
+    if (other.restricted && administersThis) result.linkedRestricted = true;
+    result.otherRunningBoxes += other.runningBoxes;
+    result.otherBoxSecondsToday += other.seconds;
+  }
+  return result;
 }
 
 /** The organization-wide count definer (1475, granted by 1479). */
@@ -49910,7 +50377,10 @@ export const SELF_SERVE_ACCOUNT_SOURCES: readonly string[] = [
  * - otherwise its plan key (a paid plan only while active, trialing or past
  *   due), `none` without a plan row;
  * - `restricted` for a Free or plan-less organization whose promotion
- *   decision is `held` or `denied`, while promotion enforcement is on;
+ *   decision is `held` or `denied`, while promotion enforcement is on, or
+ *   whose acting person owns or administers such an organization
+ *   (`linkedRestricted`), unless it bought credit (a top-up) or ever had a
+ *   paid subscription;
  * - `new` for any other Free organization created less than the `new` tier's
  *   `organizationsYoungerThanMs` ago (only when `limits` is given and sets it).
  *
@@ -49924,7 +50394,75 @@ export async function resolveSandboxPlanTier(
   tx: Database,
   accountId: string,
   limits?: SandboxPlanLimits,
+  options: { linkedRestricted?: boolean } = {},
 ): Promise<string> {
+  return (await resolveSandboxPlanStanding(tx, accountId, limits, options)).tier;
+}
+
+/** An organization's plan tier plus the facts the free-compute bounds need. */
+export type SandboxPlanStanding = {
+  tier: string;
+  /** Bought credit (a top-up) or ever had a paid subscription. Never
+   * restricted or suspended. */
+  paidHistory: boolean;
+  /** Its own promotion decision is held or denied while enforcement is on. */
+  ownDecision: "held" | "denied" | null;
+  /** Restricted because its own decision is denied (not only held and not
+   * only linked): the organization is suspended. See
+   * resolveSandboxSuspension. */
+  suspended: boolean;
+};
+
+/** resolveSandboxPlanTier with the facts behind it. `linkedRestricted`
+ * restricts a Free or plan-less organization with no paid history because the
+ * acting person owns or administers another restricted organization. */
+/** Whether an organization ever bought credit is read for unpaid-tier
+ * organizations on admission paths; a purchase never un-happens, so a yes is
+ * kept for the process's life (bounded) and a no for a minute. */
+const ORGANIZATION_PURCHASED_CREDIT_NEGATIVE_TTL_MS = 60_000;
+const ORGANIZATION_PURCHASED_CREDIT_CACHE_LIMIT = 5_000;
+const organizationPurchasedCreditCache = new Map<string, { at: number; value: Promise<boolean> }>();
+
+/** Forget cached purchase facts (tests). */
+export function resetOrganizationPurchasedCreditCache(): void {
+  organizationPurchasedCreditCache.clear();
+}
+
+/** Any positive credit top-up (a purchase, never a grant) in the ledger. Needs
+ * the organization's RLS context. */
+async function organizationPurchasedCredit(tx: Database, accountId: string): Promise<boolean> {
+  const now = Date.now();
+  const cached = organizationPurchasedCreditCache.get(accountId);
+  if (cached) {
+    const value = await cached.value.catch(() => null);
+    if (
+      value === true ||
+      (value === false && now - cached.at < ORGANIZATION_PURCHASED_CREDIT_NEGATIVE_TTL_MS)
+    ) {
+      return value;
+    }
+  }
+  if (organizationPurchasedCreditCache.size >= ORGANIZATION_PURCHASED_CREDIT_CACHE_LIMIT) {
+    organizationPurchasedCreditCache.clear();
+  }
+  const value = rawRows<{ purchased: boolean }>(
+    tx,
+    sql`select exists (select 1 from credit_ledger_entries entry
+      where entry.account_id = ${accountId}::uuid
+        and entry.type = 'credit_topup'
+        and entry.amount_micros > 0) as purchased`,
+  ).then((rows) => rows[0]?.purchased === true);
+  organizationPurchasedCreditCache.set(accountId, { at: now, value });
+  value.catch(() => organizationPurchasedCreditCache.delete(accountId));
+  return await value;
+}
+
+export async function resolveSandboxPlanStanding(
+  tx: Database,
+  accountId: string,
+  limits?: SandboxPlanLimits,
+  options: { linkedRestricted?: boolean } = {},
+): Promise<SandboxPlanStanding> {
   const newTierAgeMs = limits
     ? (sandboxPlanLimitFor(limits, SANDBOX_NEW_PLAN_TIER).organizationsYoungerThanMs ?? 0)
     : 0;
@@ -49935,6 +50473,7 @@ export async function resolveSandboxPlanTier(
     enforcement: boolean | null;
     hosted_account: boolean | null;
     young: boolean | null;
+    stripe_subscription: boolean | null;
   }>(
     tx,
     sql`select plan.plan_key, plan.status, decision.decision,
@@ -49950,27 +50489,48 @@ export async function resolveSandboxPlanTier(
             and account.external_source not in (${sql.join(
               SELF_SERVE_ACCOUNT_SOURCES.map((source) => sql`${source}`),
               sql`, `,
-            )})) as hosted_account
+            )})) as hosted_account,
+        plan.stripe_subscription_id is not null as stripe_subscription
       from (select ${accountId}::uuid as account_id) organization
       left join organization_plans plan on plan.account_id = organization.account_id
       left join promotion_decisions decision on decision.account_id = organization.account_id`,
   );
-  if (row?.hosted_account === true) return SANDBOX_EMBEDDED_PLAN_TIER;
+  if (row?.hosted_account === true) {
+    return {
+      tier: SANDBOX_EMBEDDED_PLAN_TIER,
+      paidHistory: false,
+      ownDecision: null,
+      suspended: false,
+    };
+  }
   const planKey = row?.plan_key ?? null;
   let tier: string;
   if (planKey === null) tier = "none";
   else if (planKey === "free" || planKey === "enterprise") tier = planKey;
   else if (["active", "trialing", "past_due"].includes(row?.status ?? "")) tier = planKey;
   else tier = "free";
+  // Paid history matters only for an unpaid tier; a paid, Enterprise or
+  // host-provisioned organization never reads the ledger here.
+  const paidHistory =
+    row?.stripe_subscription === true ||
+    ((tier === "free" || tier === "none") && (await organizationPurchasedCredit(tx, accountId)));
+  const ownDecision =
+    row?.enforcement === true && (row?.decision === "held" || row?.decision === "denied")
+      ? row.decision
+      : null;
+  // Restricted only without paid history: a person who bought credit or paid
+  // for a plan is never cut off by a review decision.
   if (
     (tier === "free" || tier === "none") &&
-    row?.enforcement === true &&
-    ["held", "denied"].includes(row?.decision ?? "")
+    !paidHistory &&
+    (ownDecision !== null || options.linkedRestricted === true)
   ) {
-    return "restricted";
+    return { tier: "restricted", paidHistory, ownDecision, suspended: ownDecision === "denied" };
   }
-  if (tier === "free" && row?.young === true) return SANDBOX_NEW_PLAN_TIER;
-  return tier;
+  if (tier === "free" && row?.young === true) {
+    return { tier: SANDBOX_NEW_PLAN_TIER, paidHistory, ownDecision, suspended: false };
+  }
+  return { tier, paidHistory, ownDecision, suspended: false };
 }
 
 export function sandboxPlanLimitFor(limits: SandboxPlanLimits, tier: string): SandboxPlanLimit {
@@ -49990,6 +50550,19 @@ export async function resolveSandboxPlanTierInWorkspace(
   );
 }
 
+/** resolveSandboxPlanStanding for maintenance callers, in the RLS context of
+ * one of the organization's workspaces. */
+export async function resolveSandboxPlanStandingInWorkspace(
+  db: Database,
+  input: { accountId: string; workspaceId: string; limits?: SandboxPlanLimits },
+): Promise<SandboxPlanStanding> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => await resolveSandboxPlanStanding(scopedDb, input.accountId, input.limits),
+  );
+}
+
 type OrganizationWarmSandboxCounts = {
   viewerOnlyBoxes: number;
   subjectViewerOnlyBoxes: number;
@@ -50000,7 +50573,7 @@ type OrganizationWarmSandboxCounts = {
  * it. */
 async function organizationWarmSandboxCounts(
   tx: Database,
-  input: { accountId: string; subjectId: string | null; excludeLeaseId: string },
+  input: { accountId: string; subjectId: string | null; excludeLeaseId: string | null },
 ): Promise<OrganizationWarmSandboxCounts> {
   const [row] = await rawRows<{
     viewer_only_boxes: number;
@@ -51325,6 +51898,7 @@ async function lockSandboxLeaseAdmission(
 async function acquireLeaseOnce(
   db: Database,
   input: AcquireLeaseInput,
+  standing: SandboxComputeStanding | null = null,
 ): Promise<AcquireLeaseResult> {
   if (input.kind === "process") {
     throw new Error("Process lease holders are created only by atomic retained-process promotion");
@@ -51525,18 +52099,68 @@ async function acquireLeaseOnce(
         // host-provisioned (`embedded`) or `enterprise` organization is
         // outside the per-workspace limit as well as the plan limits its tier
         // does not set.
+        // The standing read before this transaction carries the tier (and any
+        // linked restriction); without one (no plan limits, or its read
+        // failed) the tier is read here.
         const planTier =
-          input.sandboxPlanLimits || (input.viewerOnlyBoxLimit ?? 0) > 0
-            ? await resolveSandboxPlanTier(tx, accountId, input.sandboxPlanLimits)
-            : null;
+          standing !== null
+            ? standing.tier
+            : input.sandboxPlanLimits || (input.viewerOnlyBoxLimit ?? 0) > 0
+              ? await resolveSandboxPlanTier(tx, accountId, input.sandboxPlanLimits)
+              : null;
         const viewerOnlyBoxLimit =
           planTier !== null && sandboxPlanTierExemptFromViewerOnlyBounds(planTier)
             ? 0
             : (input.viewerOnlyBoxLimit ?? 0);
-        const planLimit =
+        // An unpaid-tier organization that bought credit or paid for a plan
+        // is a paying customer: none of the unpaid-only bounds apply.
+        const tierLimit =
           input.sandboxPlanLimits && planTier !== null
             ? sandboxPlanLimitFor(input.sandboxPlanLimits, planTier)
             : {};
+        const planLimit = standing?.paidHistory ? paidSandboxPlanLimit(tierLimit) : tierLimit;
+        // Free-compute bounds shared by every holder kind (docs/deployment.md,
+        // "Free compute bounds"). A closed tier (running limit 0) or a spent
+        // daily box-time budget refuses every holder, including a join, a
+        // re-arm or a replayed holder, of a box no turn keeps warm. A warm box
+        // a turn holds admits everything that turn and its people use (the
+        // agent's own requests, its Browser/ComputerSessions, someone
+        // watching), so an in-flight turn finishes; the reaper drains only
+        // boxes no turn holds. Any other turn fails with a clear message
+        // instead of waiting for a slot that will not come. A Connected
+        // Machine never counts.
+        if (backend !== "selfhosted") {
+          const refusal: SandboxOrganizationBoxLimitReason | null =
+            planLimit.runningBoxesPerOrganization === 0
+              ? "closed"
+              : standing !== null &&
+                  standing.bounded &&
+                  sandboxDailyBoxTimeSpent(planLimit, standing)
+                ? "daily_budget"
+                : null;
+          const turnHeldWarm = row.liveness === "warm" && Number(row.turn_holders) > 0;
+          if (refusal !== null && !turnHeldWarm) {
+            const inFlightTurn =
+              kind === "turn" &&
+              Boolean(
+                (
+                  await tx.execute<{ held: boolean }>(sql`
+                    select exists (select 1 from sandbox_lease_holders
+                      where lease_id = ${row.id} and kind = 'turn'
+                        and holder_id = ${holderId}) as held
+                  `)
+                )[0]?.held,
+              );
+            if (!inFlightTurn) {
+              throw new SandboxOrganizationBoxLimitError(
+                workspaceId,
+                sandboxGroupId,
+                refusal === "closed" ? 0 : sandboxDailyBoxTimeLimitSeconds(planLimit, standing),
+                refusal,
+              );
+            }
+          }
+        }
         const organizationViewerLimit = planLimit.viewerOnlyBoxesPerOrganization;
         const memberViewerLimit = input.viewerSubjectId
           ? planLimit.viewerOnlyBoxesPerMember
@@ -51884,31 +52508,52 @@ async function acquireLeaseOnce(
           // A new box counts against the organization's running-box limit for
           // its plan. Attaching to, or re-arming, a box that already runs
           // adds none and never reaches this election.
+          // The acting person's limited organizations share a second budget
+          // (runningBoxesPerPerson); their other organizations' boxes were
+          // counted before this transaction.
           const runningBoxLimit =
             backend === "selfhosted" ? undefined : planLimit.runningBoxesPerOrganization;
-          if (runningBoxLimit !== undefined) {
+          const personBoxLimit =
+            backend === "selfhosted" || standing === null || !standing.bounded
+              ? undefined
+              : planLimit.runningBoxesPerPerson;
+          if (runningBoxLimit !== undefined || personBoxLimit !== undefined) {
             await lockOrganizationSandboxLimit(tx, accountId);
             const counts =
-              runningBoxLimit === 0
+              runningBoxLimit === 0 || personBoxLimit === 0
                 ? null
                 : await organizationWarmSandboxCounts(tx, {
                     accountId,
                     subjectId: null,
                     excludeLeaseId: row.id,
                   });
-            if (runningBoxLimit === 0 || (counts && counts.runningBoxes >= runningBoxLimit)) {
+            const organizationFull =
+              runningBoxLimit !== undefined &&
+              (runningBoxLimit === 0 ||
+                (counts !== null && counts.runningBoxes >= runningBoxLimit));
+            const personFull =
+              !organizationFull &&
+              personBoxLimit !== undefined &&
+              (personBoxLimit === 0 ||
+                (counts !== null &&
+                  (standing?.personOwnsOrganization ? counts.runningBoxes : 0) +
+                    (standing?.personOtherRunningBoxes ?? 0) >=
+                    personBoxLimit));
+            if (organizationFull || personFull) {
+              const limit = organizationFull ? (runningBoxLimit ?? 0) : (personBoxLimit ?? 0);
               if (kind !== "turn") {
                 throw new SandboxOrganizationBoxLimitError(
                   workspaceId,
                   sandboxGroupId,
-                  runningBoxLimit,
+                  limit,
+                  organizationFull ? "running" : "person_running",
                 );
               }
               return {
                 role: "fenced" as const,
                 reason: "organization_sandbox_capacity" as const,
                 lease: mapLeaseRow(row),
-                organizationBoxLimit: runningBoxLimit,
+                organizationBoxLimit: limit,
               };
             }
           }
@@ -51945,6 +52590,8 @@ async function acquireLeaseOnce(
           const role = casRows.length === 0 ? ("attached" as const) : ("spawner" as const);
           return {
             role,
+            ...(planTier !== null ? { sandboxPlanTier: planTier } : {}),
+            ...(standing?.paidHistory ? { sandboxPaidHistory: true } : {}),
             lease: {
               ...mapLeaseRow(updated),
               historicalRecoveryAuthorized:
@@ -52020,6 +52667,36 @@ function waitForSandboxTransition(
   });
 }
 
+/**
+ * A request or Browser/ComputerSession admitted to a box is use of it: move
+ * the box's process and Browser/ComputerSession holders' activity forward, so
+ * the compute-bounds idle drain (listNoTurnWarmLeases) sees a terminal being
+ * typed into or a browser being driven as activity, not only when its process
+ * started. Holder rows only, never the lease row, so it takes no lock an
+ * admission waits on. Best-effort.
+ */
+async function stampSandboxCommandHolderActivity(
+  db: Database,
+  input: Pick<AcquireLeaseInput, "accountId" | "workspaceId" | "sandboxGroupId">,
+): Promise<void> {
+  await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await scopedDb.execute(sql`
+        update sandbox_lease_holders holder set last_interaction_at = now()
+        from sandbox_leases lease
+        where lease.workspace_id = ${input.workspaceId}
+          and lease.sandbox_group_id = ${input.sandboxGroupId}
+          and holder.lease_id = lease.id
+          and holder.kind in ('process', 'interaction')
+          and (holder.last_interaction_at is null
+            or holder.last_interaction_at < now() - interval '30 seconds')
+      `);
+    },
+  );
+}
+
 export async function acquireLease(
   db: Database,
   input: AcquireLeaseInput,
@@ -52037,8 +52714,32 @@ export async function acquireLease(
   const startedAt = performance.now();
   const waitBudget = new SandboxTransitionWaitBudget(captureWaitMs, startedAt);
   let delayMs = 25;
+  // The organization's tier and the facts outside its lease rows (its box
+  // time today and the acting person's other organizations), read once before
+  // admission. A failed read fails open to the tier read under the lease lock.
+  let standing: SandboxComputeStanding | null = null;
+  if (input.sandboxPlanLimits) {
+    try {
+      standing = await resolveSandboxComputeStanding(db, {
+        accountId: input.accountId,
+        limits: input.sandboxPlanLimits,
+        actingSubjectId: input.actingSubjectId ?? input.viewerSubjectId ?? null,
+        onFallback: input.onComputeStandingFallback,
+      });
+    } catch (error) {
+      reportSandboxComputeStandingFallback(input.onComputeStandingFallback, error, "organization");
+    }
+  }
   for (;;) {
-    const result = await acquireLeaseOnce(db, input);
+    const result = await acquireLeaseOnce(db, input, standing);
+    if (
+      standing !== null &&
+      standing.bounded &&
+      (input.kind === "direct" || input.kind === "interaction") &&
+      (result.role === "attached" || result.role === "rearmed")
+    ) {
+      await stampSandboxCommandHolderActivity(db, input).catch(() => undefined);
+    }
     const now = performance.now();
     if (captureWaitMs > 0 && result.role === "fenced" && result.reason === "capture_in_progress") {
       waitBudget.observeCapture(result.captureRemainingMs, now);
@@ -75698,7 +76399,8 @@ export async function updateSessionGoalWithEvent(
   events: SessionEvent[];
   operationId: string | null;
   replay: boolean;
-  outcome: "applied" | "proposed";
+  /** `unchanged`: the requested content already is the goal; nothing was written. */
+  outcome: "applied" | "proposed" | "unchanged";
   proposalId: string | null;
 }> {
   if (input.text !== undefined) {
@@ -75762,11 +76464,13 @@ export async function updateSessionGoalWithEvent(
         const parsed = SessionGoalContract.safeParse(reserved.receipt.result.goal);
         const goalVersion = reserved.receipt.result.goalVersion;
         const eventId = reserved.receipt.result.eventId;
+        const outcome = reserved.receipt.result.outcome;
+        // An unchanged update wrote no event, so its receipt holds none.
         if (
           !parsed.success ||
           !Number.isSafeInteger(goalVersion) ||
           parsed.data.version !== goalVersion ||
-          typeof eventId !== "string"
+          (outcome === "unchanged" ? eventId !== null : typeof eventId !== "string")
         ) {
           throw new SessionControlInvariantError(
             `Goal update receipt ${reserved.receipt.id} has no valid committed result`,
@@ -75777,7 +76481,7 @@ export async function updateSessionGoalWithEvent(
           events: [],
           operationId: reserved.receipt.id,
           replay: true,
-          outcome: reserved.receipt.result.outcome === "proposed" ? "proposed" : "applied",
+          outcome: outcome === "proposed" || outcome === "unchanged" ? outcome : "applied",
           proposalId:
             typeof reserved.receipt.result.proposalId === "string"
               ? reserved.receipt.result.proposalId
@@ -75810,13 +76514,13 @@ export async function updateSessionGoalWithEvent(
       if (existing.status === "completed") {
         throw new Error("session goal is completed; use goal_set to start a new goal");
       }
-      const semanticChangeRequested =
+      const contentSupplied =
         input.text !== undefined ||
         input.successCriteria !== undefined ||
         input.mutationPolicy !== undefined;
       if (
         input.actor === "agent" &&
-        semanticChangeRequested &&
+        contentSupplied &&
         (!input.changeKind ||
           !input.rationale?.trim() ||
           input.expectedObjectiveRevision === undefined)
@@ -75838,7 +76542,30 @@ export async function updateSessionGoalWithEvent(
       const nextSuccessCriteria =
         input.successCriteria !== undefined ? input.successCriteria : existing.successCriteria;
       const nextMutationPolicy = input.mutationPolicy ?? existing.mutationPolicy;
-      if (!semanticChangeRequested) {
+      // The objective revision counts semantic changes, and the revision
+      // trigger refuses to advance it for content that did not change. Content
+      // equal to the current goal is therefore not a rewrite at all.
+      const semanticChange =
+        nextText !== existing.text ||
+        nextSuccessCriteria !== existing.successCriteria ||
+        nextMutationPolicy !== existing.mutationPolicy;
+      if (!semanticChange && contentSupplied && !input.progressNote) {
+        const goal = mapSessionGoal(existing);
+        if (reserved) {
+          await updateSessionCommandReceiptResult(tx, reserved.receipt.id, {
+            result: { goal, goalVersion: goal.version, eventId: null, outcome: "unchanged" },
+          });
+        }
+        return {
+          goal,
+          events: [],
+          operationId: reserved?.receipt.id ?? null,
+          replay: false,
+          outcome: "unchanged",
+          proposalId: null,
+        };
+      }
+      if (!semanticChange) {
         if (!input.progressNote) {
           throw new Error("goal_update requires semantic content or a progress note");
         }
@@ -80175,18 +80902,26 @@ export async function acknowledgeConsumedChildEvents(
 /**
  * Turn metadata key recording each direct child answer (`turn.completed`
  * sequence) that one exact attempt of the turn returned whole to its model
- * from a read tool. It is bounded, append-only per turn, and only ever
- * suppresses a duplicate: a lost or unproven record delivers the child's
- * result normally.
+ * from a read tool, with the model's call id for that read when known. It is
+ * bounded, append-only per turn, and only ever suppresses a duplicate: a lost
+ * or unproven record delivers the child's result normally.
  */
 export const CONSUMED_CHILD_ANSWERS_METADATA_KEY = "consumedChildAnswers";
 const CONSUMED_CHILD_ANSWERS_MAX = 64;
 const CONSUMED_CHILD_ANSWERS_TURN_WINDOW = 16;
+/** The model call ids a read record keeps; longer ids are not recorded. */
+const CONSUMED_CHILD_ANSWER_CALL_ID_MAX_LENGTH = 512;
 /** Any hex UUID shape, so a stored attempt id is cast only when castable. */
 const UUID_TEXT_PATTERN_SQL =
   "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$";
 
-type ConsumedChildAnswerEntry = { childSessionId: string; sequence: number; attemptId: string };
+type ConsumedChildAnswerEntry = {
+  childSessionId: string;
+  sequence: number;
+  attemptId: string;
+  /** The model's call id of the read whose output carried the answer. */
+  callId?: string;
+};
 
 function consumedChildAnswerEntries(metadata: unknown): ConsumedChildAnswerEntry[] {
   if (metadata === null || typeof metadata !== "object" || Array.isArray(metadata)) return [];
@@ -80230,8 +80965,15 @@ function childTerminalResultAnswerParts(
  * the answer); a record outside that window, like a lost one, only means the
  * result is delivered normally. `attempt` also counts the records one exact
  * attempt made on its own turn: its caller proves that attempt is live, or has
- * just completed its turn in the same transaction. A record of an attempt that
- * failed, was interrupted, or was replaced proves nothing.
+ * just completed its turn in the same transaction.
+ *
+ * A turn can outlive the attempt that read: a provider interruption, worker
+ * restart or Retry continues the same turn in a new attempt, which resumes
+ * from the turn's durable history. A record by such an earlier attempt counts
+ * once that history holds the read's own tool result (by the model's call id):
+ * every later attempt of the turn received it. Without that result in history,
+ * a record of an attempt that failed, was interrupted, or was replaced proves
+ * nothing.
  */
 async function consumedChildAnswerSequencesTx(
   tx: Database,
@@ -80291,7 +81033,14 @@ async function consumedChildAnswerSequencesTx(
           attempt
             ? sql` or (turn.id = ${attempt.turnId}::uuid and attempt.id = ${attempt.attemptId}::uuid)`
             : sql``
-        })`,
+        }
+          or (jsonb_typeof(entry -> 'callId') = 'string' and exists (
+            select 1 from session_history_items carried
+            where carried.workspace_id = ${input.workspaceId}::uuid
+              and carried.session_id = ${input.parentSessionId}::uuid
+              and carried.turn_id = turn.id
+              and carried.item_ordered ->> 'type' = 'function_call_result'
+              and carried.item_ordered ->> 'callId' = entry ->> 'callId')))`,
   );
   for (const row of rows) {
     const sequences = consumed.get(row.childSessionId) ?? new Set<number>();
@@ -80378,12 +81127,14 @@ async function pendingChildResultsConsumedTx(
 }
 
 /**
- * Inside the successful completion settlement of a turn attempt that recorded
- * a consumed child answer: supersede each still-pending idle child result the
- * parent's model has now received whole, before the next claim could start an
- * inference that only repeats it. The tool output that carried each answer is
- * durable history once the attempt completes. The canonical row stays as
- * audit truth; the caller appends the `system.update.cancelled` event.
+ * Inside the successful completion settlement of a turn that recorded a
+ * consumed child answer, by this attempt or an earlier attempt of the same
+ * turn: supersede each still-pending idle child result the parent's model has
+ * now received whole, before the next claim could start an inference that only
+ * repeats it. The tool output that carried each answer is durable history once
+ * the attempt completes (see `consumedChildAnswerSequencesTx`). The canonical
+ * row stays as audit truth; the caller appends the `system.update.cancelled`
+ * event.
  */
 async function supersedeChildResultsConsumedByCompletedAttemptTx(
   tx: Database,
@@ -80395,13 +81146,7 @@ async function supersedeChildResultsConsumedByCompletedAttemptTx(
     turnMetadata: unknown;
   },
 ): Promise<string[]> {
-  if (
-    !consumedChildAnswerEntries(input.turnMetadata).some(
-      (entry) => entry.attemptId === input.attemptId,
-    )
-  ) {
-    return [];
-  }
+  if (consumedChildAnswerEntries(input.turnMetadata).length === 0) return [];
   const consumed = await pendingChildResultsConsumedTx(tx, {
     workspaceId: input.workspaceId,
     parentSessionId: input.sessionId,
@@ -80435,11 +81180,13 @@ async function supersedeChildResultsConsumedByCompletedAttemptTx(
  * The caller proves the read returned whole content to the model; this proves
  * the attempt is still the session's current one and that each sequence is a
  * direct child's result-bearing answer. A read whose answers this attempt
- * already recorded writes nothing. Metadata writes take the canonical session
- * prefix: the archive guard on a turn UPDATE also locks its session, so taking
- * only the turn first would invert claim/settlement and parallel tool writers.
- * It is best effort: a busy ownership row skips it and the result is then
- * delivered normally.
+ * already recorded writes nothing. `callId` is the model's id for the reading
+ * tool call; it lets a later attempt of the same turn, resuming from the
+ * turn's durable history, prove it holds the read's output too. Metadata
+ * writes take the canonical session prefix: the archive guard on a turn UPDATE
+ * also locks its session, so taking only the turn first would invert
+ * claim/settlement and parallel tool writers. It is best effort: a busy
+ * ownership row skips it and the result is then delivered normally.
  */
 export async function recordConsumedChildAnswers(
   db: Database,
@@ -80450,9 +81197,16 @@ export async function recordConsumedChildAnswers(
     turnId: string;
     attemptId: string;
     executionGeneration: number;
+    callId?: string;
     children: readonly { sessionId: string; sequences: readonly number[] }[];
   },
 ): Promise<{ recorded: number }> {
+  const callId =
+    typeof input.callId === "string" &&
+    input.callId.length > 0 &&
+    input.callId.length <= CONSUMED_CHILD_ANSWER_CALL_ID_MAX_LENGTH
+      ? input.callId
+      : undefined;
   const children = input.children
     .map((child) => ({
       sessionId: child.sessionId,
@@ -80586,6 +81340,7 @@ export async function recordConsumedChildAnswers(
           const newlyRecorded = unrecorded(turn.metadata).map((answer) => ({
             ...answer,
             attemptId: input.attemptId,
+            ...(callId ? { callId } : {}),
           }));
           if (newlyRecorded.length === 0) return { recorded: 0 };
           // Under the turn row lock: only this key changes, the rest of the

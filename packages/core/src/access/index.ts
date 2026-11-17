@@ -27,6 +27,8 @@ import {
   permissionSetCovers,
 } from "@opengeni/contracts/personal-integration-setup";
 import {
+  ORGANIZATION_SUSPENDED_MESSAGE,
+  resolveOrganizationSuspension,
   bootstrapWorkspace,
   ensureManagedAccessForUser,
   getManagedUserProfilesByIds,
@@ -450,6 +452,12 @@ export async function stampPersonalApiKeyRequest(
     await sha256Hex(authorization.slice(bearerPrefix.length)),
   );
   if (!apiKey || apiKey.credentialKind !== "personal" || !apiKey.ownerSubjectId) return false;
+  // A suspended organization's API keys stop working (its people can still
+  // sign in and buy credit).
+  await assertOrganizationNotSuspended(deps.db, {
+    accountId: apiKey.accountId,
+    subjectId: apiKey.ownerSubjectId,
+  });
   stampDelegatedHumanAuthorization(request, {
     organizationId: apiKey.accountId,
     subjectId: apiKey.ownerSubjectId,
@@ -460,6 +468,28 @@ export async function stampPersonalApiKeyRequest(
     workspaceScope: apiKey.workspaceScope ?? { kind: "all" },
   });
   return true;
+}
+
+/**
+ * Refuse a cost path (an API key, a Sites publish, an invitation, an upload)
+ * for a suspended organization (resolveOrganizationSuspension) with 403 and a
+ * person-facing reason. `subjectId` is the acting person, whose own suspended
+ * organizations suspend the ones they run. A failed read admits: suspension is
+ * derived from a review decision and must never block a person by accident.
+ */
+export async function assertOrganizationNotSuspended(
+  db: Pick<AccessDeps, "db">["db"],
+  input: { accountId: string; subjectId?: string | null },
+): Promise<void> {
+  let suspended = false;
+  try {
+    suspended = await resolveOrganizationSuspension(db, input);
+  } catch {
+    return;
+  }
+  if (suspended) {
+    throw new HTTPException(403, { message: ORGANIZATION_SUSPENDED_MESSAGE });
+  }
 }
 
 /** Immutable verified dispatch bounds for this exact raw Request, not a grant. */
@@ -2490,6 +2520,8 @@ async function apiKeyAccessContext(
   if (apiKey.credentialKind === "personal") {
     throw new HTTPException(401, { message: "personal API key could not be verified" });
   }
+  // A suspended organization's API keys stop working.
+  await assertOrganizationNotSuspended(deps.db, { accountId: apiKey.accountId });
   const externalHeader = c.req.header("x-opengeni-external-actor");
   const service = serviceInitiatorFromHeaders(c.req.raw.headers);
   if (

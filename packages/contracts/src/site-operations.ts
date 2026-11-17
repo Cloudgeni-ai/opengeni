@@ -123,6 +123,7 @@ export const SITE_TOOL_METHODS = Object.freeze([
   "call",
   "resolve",
   "invoke",
+  "readiness",
 ] as const);
 export type SiteToolMethod = (typeof SITE_TOOL_METHODS)[number];
 

@@ -778,6 +778,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                 {
                   accountId: input.accountId,
                   workspaceId: input.workspaceId,
+                  actingSubjectId: fileAuthoritySubjectId,
                   sandboxGroupId: lazyGroupId,
                   sessionId: input.sessionId,
                   backend: groupBoxBackend,
@@ -863,6 +864,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                 {
                   accountId: input.accountId,
                   workspaceId: input.workspaceId,
+                  actingSubjectId: fileAuthoritySubjectId,
                   sandboxGroupId: session.sandboxGroupId,
                   sessionId: input.sessionId,
                   // groupBoxBackend, not turn.sandboxBackend: a machine-home turn that

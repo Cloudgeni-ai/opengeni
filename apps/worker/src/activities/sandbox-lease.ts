@@ -230,6 +230,7 @@ import { browserCheckpointPrerequisites } from "./browser-deadline-checkpoint";
 import { assertSandboxDrainInputTiming, sandboxDrainTiming } from "../sandbox-reaper-timeout";
 import type { ControlActivityServices as ActivityServices } from "./types";
 import { boundViewerOnlyWarmBoxes } from "./sandbox-viewer-only-bounds";
+import { boundComputeBoundedWarmBoxes } from "./sandbox-compute-bounds";
 import { reconcilePendingParentSystemUpdates } from "./parent-wake";
 import {
   recordActiveUserGauges,
@@ -1430,6 +1431,25 @@ export function createSandboxLeaseActivities(
           bounds.drained.viewer_organization_limit;
       } catch (error) {
         observability.warn("sandbox reaper: viewer-only box bounds failed", {
+          error: errorMessage(error),
+        });
+      }
+
+      // The plan's free-compute bounds over every holder kind: a closed plan,
+      // a spent daily box-time budget, or (idleDrainAllHolders) a box no turn
+      // holds that nobody used for the idle window.
+      try {
+        const bounds = await boundComputeBoundedWarmBoxes(
+          { db, settings, observability },
+          meterResult.leases,
+          { concurrency: SANDBOX_MAINTENANCE_ITEM_CONCURRENCY },
+        );
+        forceDrained +=
+          bounds.drained.compute_closed +
+          bounds.drained.compute_daily_budget +
+          bounds.drained.compute_idle;
+      } catch (error) {
+        observability.warn("sandbox reaper: compute bounds failed", {
           error: errorMessage(error),
         });
       }

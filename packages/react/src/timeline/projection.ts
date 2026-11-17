@@ -1765,11 +1765,15 @@ export function buildTimeline(
           providerDomain: stringValue(payload.providerDomain),
           connectionId: typeof payload.connectionId === "string" ? payload.connectionId : null,
           authoritySource: payload.authoritySource === "host" ? "host" : null,
-          reason: authNeededReason(
-            payload.authoritySource === "host" && typeof payload.authorizationUrl === "string"
-              ? (payload.hostReason ?? payload.reason)
-              : payload.reason,
-          ),
+          // The exact account reason beside a legacy-safe reason, when known.
+          reason:
+            payload.accountReason === "account_scope_fixed"
+              ? "account_scope_fixed"
+              : authNeededReason(
+                  payload.authoritySource === "host" && typeof payload.authorizationUrl === "string"
+                    ? (payload.hostReason ?? payload.reason)
+                    : payload.reason,
+                ),
           scopes: stringList(payload.scopes),
           resource: typeof payload.resource === "string" ? payload.resource : null,
           toolName: typeof payload.toolName === "string" ? payload.toolName : null,
@@ -4941,6 +4945,7 @@ const AUTH_NEEDED_REASONS: ReadonlySet<string> = new Set([
   "unsupported_auth",
   "resource_scope_unavailable",
   "designated_credential_unavailable",
+  "account_scope_fixed",
 ]);
 
 function authNeededReason(value: unknown): AuthNeededItem["reason"] {

@@ -8,6 +8,7 @@ import { userErrorText } from "../../../ui/api-error";
 
 import { useAppContext } from "../../app-context";
 import { hasWorkspacePermission, isWorkspacePermissionDenied } from "../../lib/permissions";
+import { loadConnectionHealthAccounts } from "../../lib/capabilities";
 import type {
   ApiIntegrationInstallationSummary,
   CapabilityCatalogItem,
@@ -36,6 +37,12 @@ export type CapabilitiesCatalog = {
    */
   connectionsLoadFailed: boolean;
   connectionsAccessDenied: boolean;
+  /**
+   * The account inventory connection health derives from (see
+   * `connectionHealth`): shared accounts here and the viewer's own accounts
+   * from every workspace. null until it loads, or after its read failed.
+   */
+  accounts: ConnectionMetadata[] | null;
   /** Merge one freshly returned connection row into the loaded list. */
   replaceConnection: (connection: ConnectionMetadata) => void;
   /** Fetch connection rows independently of the catalog (also used on OAuth return). */
@@ -67,6 +74,7 @@ type CatalogState = {
   connections: ConnectionMetadata[] | null;
   connectionsLoadFailed: boolean;
   connectionsAccessDenied: boolean;
+  accounts: ConnectionMetadata[] | null;
   apiIntegrationDefinitions: IntegrationDefinitionSummary[];
   apiIntegrationInstances: ApiIntegrationInstallationSummary[];
   socialConnections: SocialConnection[];
@@ -94,6 +102,7 @@ function emptyCatalogState(
     connections: null,
     connectionsLoadFailed: readAccess === false,
     connectionsAccessDenied: readAccess === false,
+    accounts: null,
     apiIntegrationDefinitions: [],
     apiIntegrationInstances: [],
     socialConnections: [],
@@ -173,8 +182,12 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
     if (readAccess !== true) return null;
     const request = ++connectionRevision.current;
     const live = () => isCurrentScope();
+    // Health reads the account inventory; its own failure only leaves health
+    // unverified, never the connection list unavailable.
+    const accountsLoad = loadConnectionHealthAccounts(client, workspaceId).catch(() => null);
     try {
       const loaded = await client.listConnections(workspaceId);
+      const accounts = await accountsLoad;
       // A later successful read restores access; an earlier success cannot undo
       // a confirmed denial, even if it settles after that denial.
       if (
@@ -190,6 +203,8 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
         update((current) => ({
           ...current,
           connections: loaded,
+          // A transient inventory failure keeps the last accounts read.
+          accounts: accounts ?? current.accounts,
           connectionsLoadFailed: false,
           connectionsAccessDenied: false,
         }));
@@ -209,6 +224,7 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
         update((current) => ({
           ...current,
           connections: null,
+          accounts: null,
           connectionsLoadFailed: true,
           connectionsAccessDenied: true,
         }));
@@ -304,6 +320,7 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
     connections: visible.connections,
     connectionsLoadFailed: visible.connectionsLoadFailed,
     connectionsAccessDenied: visible.connectionsAccessDenied,
+    accounts: visible.accounts,
     replaceConnection: (updated) =>
       update((current) =>
         callbackAuthorityEpoch !== mutationAuthorityEpoch.current || current.connectionsAccessDenied
@@ -315,6 +332,18 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
                   ? current.connections.map((entry) => (entry.id === updated.id ? updated : entry))
                   : [...current.connections, updated]
                 : [updated],
+              // Inventory rows carry where an own account is turned on; keep that.
+              accounts:
+                current.accounts?.map((entry) =>
+                  entry.id === updated.id
+                    ? {
+                        ...entry,
+                        ...updated,
+                        turnedOnHere: entry.turnedOnHere,
+                        turnedOnHereGrantId: entry.turnedOnHereGrantId,
+                      }
+                    : entry,
+                ) ?? null,
             },
       ),
     fetchConnections,

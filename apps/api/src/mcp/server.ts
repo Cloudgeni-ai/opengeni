@@ -107,6 +107,7 @@ import {
   type SessionStatus,
   SubmitHumanInputResponseRequest,
   FIRST_PARTY_MCP_CALLER_META_KEY,
+  FIRST_PARTY_MCP_MODEL_CALL_ID_META_KEY,
   TOOL_DISCOVERY_CARD_META_KEY,
 } from "@opengeni/contracts";
 import {
@@ -556,7 +557,8 @@ import {
   markToolArgumentRejection,
   toolArgumentRejectionResult,
 } from "./tool-argument-error";
-import { databaseToolFailureResult, taskNoteRefusalResult } from "./database-tool-failure";
+import { FirstPartyMcpServer, taskNoteRefusalResult } from "./database-tool-failure";
+import type { Observability } from "@opengeni/observability";
 import {
   boundSessionEventCompactResult,
   boundSessionEventMcpPage,
@@ -1210,7 +1212,7 @@ function buildSessionCreateToolInput(
   });
 }
 
-export class PolicyMcpServer extends McpServer {
+export class PolicyMcpServer extends FirstPartyMcpServer {
   private registeredToolCount = 0;
 
   constructor(
@@ -1218,8 +1220,9 @@ export class PolicyMcpServer extends McpServer {
     private readonly sessionId: string | null,
     private readonly selectedTools: ReadonlySet<FirstPartyMcpToolName> | null,
     private readonly appActions: { startedByPerson: boolean; fullAccess: boolean } | null = null,
+    failureLog?: Pick<Observability, "error">,
   ) {
-    super({ name: "opengeni", version: "1.0.0" });
+    super({ name: "opengeni", version: "1.0.0" }, failureLog);
     const sdk = this as unknown as {
       createToolError(message: string): { _meta?: Record<string, unknown> };
       executeToolHandler(tool: unknown, args: unknown, extra: unknown): Promise<unknown>;
@@ -1328,17 +1331,14 @@ export class PolicyMcpServer extends McpServer {
     }
     this.registeredToolCount += 1;
     const handler = cb as (...args: unknown[]) => unknown;
-    return super.registerTool(name, config, (async (...args: unknown[]) => {
-      try {
-        return await dispatchWithSessionAuthorizationReadReuse(() => handler(...args));
-      } catch (error) {
-        // The SDK would return the thrown message verbatim; a raw database
-        // error's message is its query and every parameter.
-        const databaseFailure = databaseToolFailureResult(name, error);
-        if (databaseFailure) return databaseFailure;
-        throw error;
-      }
-    }) as ToolCallback<InputArgs>);
+    return super.registerTool(
+      name,
+      config,
+      (async (...args: unknown[]) =>
+        await dispatchWithSessionAuthorizationReadReuse(() =>
+          handler(...args),
+        )) as ToolCallback<InputArgs>,
+    );
   }
 
   ensureToolsListHandler(): void {
@@ -1557,6 +1557,7 @@ export function buildOpenGeniMcpServer(
       startedByPerson: appActions.startedByPerson,
       fullAccess: appActions.fullAccess,
     },
+    deps.observability,
   );
   // One authority for everything this session does as a person: the app
   // action tools, and the session tools' chats in other workspaces, which
@@ -3883,6 +3884,11 @@ function registerGoalTools(
         replay: semantic.replay,
         outcome: semantic.outcome,
         proposalId: semantic.proposalId,
+        ...(semantic.outcome === "unchanged"
+          ? {
+              message: `Nothing changed: the goal already has this content, so its objective revision stays ${semantic.goal.objectiveRevision}.`,
+            }
+          : {}),
       });
     },
   );
@@ -5914,6 +5920,8 @@ function registerWorkspaceOrchestrationTools(
   // answer to its model. Record it on the reading turn: when that attempt
   // completes its turn, a pending terminal result repeating only answers the
   // model already holds is superseded instead of starting another inference.
+  // The model's call id lets a later attempt of the same turn, which resumes
+  // from durable history holding this read's output, count it too.
   // Only a direct model call counts: a Codemode script may keep the output to
   // itself. Best-effort: a failure leaves that result to be delivered.
   const recordConsumedChildResults = async (
@@ -5929,6 +5937,7 @@ function registerWorkspaceOrchestrationTools(
       !children.some((child) => child.sequences.length > 0)
     )
       return;
+    const callId = extra?._meta?.[FIRST_PARTY_MCP_MODEL_CALL_ID_META_KEY];
     try {
       await recordConsumedChildAnswers(deps.db, {
         accountId: grant.accountId,
@@ -5937,6 +5946,7 @@ function registerWorkspaceOrchestrationTools(
         turnId: claims.turnId,
         attemptId: claims.attemptId,
         executionGeneration: claims.executionGeneration,
+        ...(typeof callId === "string" ? { callId } : {}),
         children,
       });
     } catch (error) {

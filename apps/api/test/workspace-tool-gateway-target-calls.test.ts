@@ -26,6 +26,7 @@ const real = {
   settingsWithEnabledCapabilityMcpServersForTargets:
     core.settingsWithEnabledCapabilityMcpServersForTargets,
   visibleMcpAccountConnectionsByIds: core.visibleMcpAccountConnectionsByIds,
+  visibleMcpAccountConnections: core.visibleMcpAccountConnections,
   availableMcpAccountBindings: core.availableMcpAccountBindings,
   siteViewerForGrant: core.siteViewerForGrant,
   buildConnectionTokenResolver: dbModule.buildConnectionTokenResolver,
@@ -89,6 +90,14 @@ mock.module("@opengeni/core", () => ({
           connection.status === "active" &&
           input.personalConnectionIds.includes(connection.id),
     );
+  },
+  // The viewer's visible accounts: the fixture's, as the account inventory reads them.
+  visibleMcpAccountConnections: async (
+    ...args: Parameters<typeof real.visibleMcpAccountConnections>
+  ) => {
+    const fixture = fixtures.get(args[0]);
+    if (!fixture) return real.visibleMcpAccountConnections(...args);
+    return fixture.connections;
   },
   availableMcpAccountBindings: async (
     input: Parameters<typeof real.availableMcpAccountBindings>[0],
@@ -180,6 +189,7 @@ const {
   prepareAttestedWorkspaceToolGateway,
   prepareWorkspaceToolGatewayForGrant,
   prepareWorkspaceToolGateway,
+  ToolReviewAuthNeededError,
   workspaceToolGatewayAttestationScope,
   workspaceToolGatewayServerTiming,
 } = await import("../src/workspace-tool-gateway");
@@ -188,11 +198,14 @@ const { createWorkspaceToolGatewayCatalogAttestations } =
 const {
   approveWorkspaceToolTarget,
   describeWorkspaceSiteToolConsent,
+  describeWorkspaceSiteToolReadiness,
+  resetWorkspaceSiteToolAllowances,
   invokeWorkspaceToolTarget,
   resolveWorkspaceToolTarget,
   resolveWorkspaceToolManifest,
 } = await import("../src/workspace-tool-target");
-const { declareSiteToolsForEveryViewer } = await import("../src/site-tool-routing");
+const { declareSiteToolsForEveryViewer, readSiteToolAccountInventory } =
+  await import("../src/site-tool-routing");
 import type { TargetGatewayOptions } from "../src/workspace-tool-target";
 
 afterAll(() => mock.restore());
@@ -2082,14 +2095,15 @@ describe("Site tool consent", () => {
         contentSha256: "a".repeat(64),
         attachments: [{ name: "a.pdf", mediaType: "application/pdf", bytes: 3 }],
       };
-      let fail = false;
+      let fail: unknown = false;
       const reviewing = targetOptions({
         readSiteVersion: siteVersion([canonical]),
         prepare: async (deps, authorization, options = {}) => ({
           ...(await prepareWorkspaceToolGateway(deps, authorization, options)),
           review: async (identity, args) => {
             reviewed.push({ identity, args });
-            if (fail) throw new Error("the draft is gone");
+            if (fail === true) throw new Error("the draft is gone");
+            if (fail) throw fail;
             return { protectedFields: ["raw"], email };
           },
         }),
@@ -2146,6 +2160,64 @@ describe("Site tool consent", () => {
         422,
         "site_tool_review_unavailable",
       );
+      expect(f.grafana.calls).toHaveLength(0);
+      // The connector's own report says what the account needs: more access,
+      // or signing in again. A refusal for this account says it isn't available.
+      const refusal = async (error: unknown) => {
+        fail = error;
+        return (await describeWorkspaceSiteToolConsent(
+          f.deps,
+          targetAuthorization(),
+          { ...site, identity: canonical, arguments: args },
+          reviewing,
+        ).then(
+          () => null,
+          (caught: unknown) => caught,
+        )) as { status?: number; details?: Record<string, unknown> } | null;
+      };
+      const report = {
+        serverId: f.identity(f.personal).serverId,
+        toolName: canonical.toolName,
+        providerDomain: "127.0.0.1",
+        connectionId: f.personal.id,
+      };
+      expect(
+        await refusal(
+          new ToolReviewAuthNeededError({
+            ...report,
+            reason: "insufficient_scope",
+            scopes: ["https://example.test/compose"],
+          }),
+        ),
+      ).toMatchObject({
+        status: 409,
+        details: {
+          code: "tool_connection_needs_more_access",
+          connectionId: f.personal.id,
+          scopes: ["https://example.test/compose"],
+        },
+      });
+      expect(
+        await refusal(new ToolReviewAuthNeededError({ ...report, reason: "expired" })),
+      ).toMatchObject({
+        status: 409,
+        details: { code: "tool_connection_needs_attention", connectionId: f.personal.id },
+      });
+      // A fixed-access account short of access: unavailable to it, never a
+      // reconnect that cannot help.
+      expect(
+        await refusal(
+          new ToolReviewAuthNeededError({
+            ...report,
+            reason: "unsupported_auth",
+            accountReason: "account_scope_fixed",
+            scopes: ["https://example.test/compose"],
+          }),
+        ),
+      ).toMatchObject({ status: 403, details: { code: "tool_unavailable_for_account" } });
+      expect(
+        await refusal(Object.assign(new Error("not for this account"), { code: "access_denied" })),
+      ).toMatchObject({ status: 403, details: { code: "tool_unavailable_for_account" } });
       expect(f.grafana.calls).toHaveLength(0);
     } finally {
       f.close();
@@ -2243,6 +2315,421 @@ describe("Site tool consent", () => {
         ),
         403,
       );
+    } finally {
+      f.close();
+    }
+  });
+});
+
+describe("Site tool readiness and typed failures", () => {
+  const site = { siteArtifactId: artifactId, siteVersionId: versionId };
+  const canonical = { serverId: "grafana", toolName: "query_prometheus" };
+  const policy = (
+    connectionId: string,
+    decision: "allow" | "ask" | "block",
+  ): ConnectorActionPolicySnapshotEntry => ({
+    id: crypto.randomUUID(),
+    connectionId,
+    serverId: "grafana",
+    toolName: "query_prometheus",
+    actionName: "*",
+    policy: decision,
+    version: 1,
+  });
+  const remembered = (connectionId: string) => ({
+    listAllowances: async () => [
+      {
+        siteId: artifactId,
+        serverId: "grafana",
+        toolName: "query_prometheus",
+        connectionId,
+        createdAt: "2026-11-15T00:00:00Z",
+      },
+    ],
+  });
+  const readiness = async (
+    f: ReturnType<typeof createFixture>,
+    options: TargetGatewayOptions = {},
+    targets: Parameters<typeof describeWorkspaceSiteToolReadiness>[2]["targets"] = [
+      { identity: canonical },
+    ],
+  ) =>
+    (
+      await describeWorkspaceSiteToolReadiness(
+        f.deps,
+        targetAuthorization(),
+        { ...site, targets },
+        targetOptions({ readSiteVersion: siteVersion([canonical]), ...options }),
+      )
+    ).tools;
+
+  test("says what each declared tool needs for this viewer without preparing or calling anything", async () => {
+    const f = createFixture();
+    try {
+      // One own account and no saved choice: it runs; whether it asks depends on the provider.
+      f.state.connections = [f.personal, f.foreign];
+      f.resetRequests();
+      const [own] = await readiness(f);
+      expect(own).toMatchObject({
+        target: { identity: canonical },
+        state: "ready",
+        confirm: "maybe",
+        runsAs: { shared: false },
+      });
+      expect(own!.runsAs!.account).toBeString();
+      expect(own!.connector).toBe(own!.runsAs!.connector);
+      // Ask first on that account; "Always allow" on this Site answers it.
+      f.state.policies = [policy(f.personal.id, "ask")];
+      expect((await readiness(f))[0]).toMatchObject({ state: "confirm", confirm: "always" });
+      expect((await readiness(f, remembered(f.personal.id)))[0]).toMatchObject({
+        state: "ready",
+        confirm: "remembered",
+      });
+      // Block wins over "Always allow".
+      f.state.policies = [policy(f.personal.id, "block")];
+      expect((await readiness(f, remembered(f.personal.id)))[0]).toMatchObject({
+        state: "blocked",
+      });
+      f.state.policies = [policy(f.personal.id, "allow")];
+      expect((await readiness(f))[0]).toMatchObject({ state: "ready", confirm: "never" });
+      // Readiness never builds a provider or reaches one.
+      expect(f.grafana.requests).toHaveLength(0);
+      expect(f.unrelatedSetupRequests()).toBe(0);
+      expect(preparations).toHaveLength(0);
+    } finally {
+      f.close();
+    }
+  });
+
+  test("a shared account says so, several accounts ask which, and none offers Connect or Reconnect", async () => {
+    const f = createFixture();
+    try {
+      f.state.connections = [f.shared, f.foreign];
+      expect((await readiness(f))[0]).toMatchObject({
+        state: "ready",
+        runsAs: { shared: true },
+      });
+      f.state.connections = [f.shared, f.personal, f.foreign];
+      expect((await readiness(f))[0]).toMatchObject({
+        state: "choose_account",
+        runsAs: null,
+      });
+      // "Always allow" on one of them chose that account for this Site.
+      expect((await readiness(f, remembered(f.shared.id)))[0]).toMatchObject({
+        state: "ready",
+        runsAs: { shared: true },
+      });
+      f.state.connections = [f.foreign];
+      const [connect] = await readiness(f, { readReconnect: async () => [] });
+      expect(connect).toMatchObject({ state: "connect", runsAs: null });
+      expect(connect!.connector).toBeString();
+      const [reconnect] = await readiness(f, {
+        readReconnect: async () => [
+          {
+            canonicalServerId: "grafana",
+            connectionId: f.personal.id,
+            account: "ada@example.test",
+            shared: false,
+          },
+        ],
+      });
+      expect(reconnect).toMatchObject({
+        state: "reconnect",
+        runsAs: { account: "ada@example.test", shared: false },
+      });
+    } finally {
+      f.close();
+    }
+  });
+
+  test("an account that must allow more access is grant; a fixed-access one is unavailable for it", async () => {
+    const f = createFixture();
+    try {
+      f.state.connections = [f.personal, f.foreign];
+      // The connector served by a first-party bridge that gates tools on the
+      // account's recorded grants (Gmail's), with the account's grants.
+      const asGmail = (account: { grantedScopes: string[]; fixedAccess?: boolean }) => ({
+        readAccounts: async (...args: Parameters<typeof readSiteToolAccountInventory>) => {
+          const inventory = await readSiteToolAccountInventory(...args);
+          const servers = new Map(inventory.servers);
+          for (const [id, server] of servers)
+            servers.set(id, {
+              ...server,
+              url: "https://gmailmcp.googleapis.com/mcp/v1",
+              connectionRef: { providerDomain: "gmailmcp.googleapis.com", kind: "oauth2" as const },
+            });
+          return {
+            ...inventory,
+            servers,
+            accounts: inventory.accounts.map((entry) => ({ ...entry, ...account })),
+          };
+        },
+      });
+      const readOnly = "https://www.googleapis.com/auth/gmail.readonly";
+      const [grant] = await readiness(f, asGmail({ grantedScopes: [] }));
+      expect(grant).toMatchObject({
+        state: "grant",
+        scopes: [readOnly],
+        runsAs: { shared: false },
+      });
+      expect((await readiness(f, asGmail({ grantedScopes: [readOnly] })))[0]).toMatchObject({
+        state: "ready",
+      });
+      const [fixed] = await readiness(f, asGmail({ grantedScopes: [], fixedAccess: true }));
+      expect(fixed).toMatchObject({ state: "unavailable", unavailableReason: "account" });
+      expect(fixed!.scopes).toBeUndefined();
+      // Nothing was prepared or sent to find this out.
+      expect(f.grafana.requests).toHaveLength(0);
+      expect(preparations).toHaveLength(0);
+    } finally {
+      f.close();
+    }
+  });
+
+  test("an undeclared target is unavailable; a replaced Site version is refused", async () => {
+    const f = createFixture();
+    try {
+      f.state.connections = [f.personal, f.foreign];
+      const tools = await readiness(f, {}, [
+        { identity: canonical },
+        { identity: { serverId: "grafana", toolName: "delete_everything" } },
+        { path: ["nothing", "declared"] },
+      ]);
+      expect(tools.map((tool) => tool.state)).toEqual(["ready", "unavailable", "unavailable"]);
+      await expectHttpStatus(
+        describeWorkspaceSiteToolReadiness(
+          f.deps,
+          targetAuthorization(),
+          {
+            siteArtifactId: artifactId,
+            siteVersionId: crypto.randomUUID(),
+            targets: [{ identity: canonical }],
+          },
+          targetOptions({
+            readSiteVersion: async () =>
+              ({
+                status: "active",
+                version: { id: versionId, requestedTools: [canonical] },
+              }) as never,
+          }),
+        ),
+        403,
+      );
+    } finally {
+      f.close();
+    }
+  });
+
+  test("a blocked call answers tool_blocked; nothing reaches the provider", async () => {
+    const f = createFixture();
+    try {
+      f.state.connections = [f.personal, f.foreign];
+      f.state.policies = [policy(f.personal.id, "block")];
+      const error = await invokeWorkspaceToolTarget(
+        f.deps,
+        targetAuthorization(),
+        {
+          ...site,
+          target: { identity: canonical },
+          operationId: crypto.randomUUID(),
+          arguments: {},
+        },
+        targetOptions({ readSiteVersion: siteVersion([canonical]) }),
+      ).then(
+        () => null,
+        (caught: unknown) => caught as { status?: number; message?: string; details?: unknown },
+      );
+      expect(error).toMatchObject({
+        status: 403,
+        message: "tool_blocked",
+        retryable: false,
+        outcomeUnknown: false,
+        details: { code: "tool_blocked" },
+      });
+      expect(f.grafana.calls).toHaveLength(0);
+    } finally {
+      f.close();
+    }
+  });
+
+  test("an unreachable server is a retryable 503 on every gateway path, never a 500 or a missing tool", async () => {
+    const f = createFixture();
+    try {
+      f.state.connections = [f.personal, f.foreign];
+      const route = f.identity(f.personal);
+      // Prepare the legacy catalog while the server still answers.
+      const catalog = await attestedCatalog(f, createWorkspaceToolGatewayCatalogAttestations());
+      f.grafana.close();
+      const unreachable = {
+        status: 503,
+        retryable: true,
+        outcomeUnknown: false,
+        details: { code: "tool_server_unreachable" },
+      };
+      const failure = (promise: Promise<unknown>) =>
+        promise.then(
+          () => null,
+          (caught: unknown) => caught,
+        );
+      expect(
+        await failure(
+          invokeWorkspaceToolTarget(
+            f.deps,
+            targetAuthorization(),
+            {
+              ...site,
+              target: { identity: canonical },
+              operationId: crypto.randomUUID(),
+              arguments: {},
+            },
+            targetOptions({ readSiteVersion: siteVersion([canonical]) }),
+          ),
+        ),
+      ).toMatchObject(unreachable);
+      expect(
+        await failure(
+          resolveWorkspaceToolTarget(
+            f.deps,
+            targetAuthorization(),
+            { target: { identity: route } },
+            targetOptions(),
+          ),
+        ),
+      ).toMatchObject(unreachable);
+      expect(
+        await failure(
+          call(f, undefined, { identity: route, arguments: {}, catalogDigest: catalog.digest }),
+        ),
+      ).toMatchObject(unreachable);
+    } finally {
+      f.close();
+    }
+  });
+
+  test("after admission only the transport's own refused request is not-sent; other connection errors stay unknown", async () => {
+    const f = createFixture();
+    try {
+      f.state.connections = [f.personal, f.foreign];
+      // A database refusing a connection inside the call, and a read on an
+      // already-open socket: both carry not-sent-looking codes, neither proves
+      // the provider received nothing.
+      const thrown = [
+        Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:5432"), {
+          code: "ECONNREFUSED",
+          syscall: "connect",
+          port: 5432,
+        }),
+        Object.assign(new TypeError("fetch failed"), {
+          cause: { code: "EHOSTUNREACH", syscall: "read" },
+        }),
+      ];
+      let executed = 0;
+      const invoke = (options: TargetGatewayOptions) =>
+        invokeWorkspaceToolTarget(
+          f.deps,
+          targetAuthorization(),
+          {
+            ...site,
+            target: { identity: canonical },
+            operationId: crypto.randomUUID(),
+            arguments: {},
+          },
+          options,
+        ).then(
+          () => null,
+          (reason: unknown) => reason,
+        );
+      /** The real preparation, with the admitted call's execution replaced. */
+      const executing = (run: (send: () => Promise<unknown>) => Promise<unknown>) =>
+        targetOptions({
+          readSiteVersion: siteVersion([canonical]),
+          prepare: async (deps, authorization, options = {}) => {
+            const prepared = await prepareWorkspaceToolGateway(deps, authorization, options);
+            const prepareCall = prepared.toolGateway.prepareCall.bind(prepared.toolGateway);
+            return {
+              ...prepared,
+              toolGateway: {
+                ...prepared.toolGateway,
+                prepareCall: async (...args: Parameters<typeof prepareCall>) => {
+                  const admitted = await prepareCall(...args);
+                  return {
+                    ...admitted,
+                    execute: async () => {
+                      executed++;
+                      return (await run(() => admitted.execute())) as never;
+                    },
+                  };
+                },
+              } as typeof prepared.toolGateway,
+            };
+          },
+        });
+      for (const error of thrown) {
+        expect(
+          await invoke(
+            executing(async () => {
+              throw error;
+            }),
+          ),
+        ).toMatchObject({
+          status: 502,
+          retryable: false,
+          outcomeUnknown: true,
+          details: { code: "tool_outcome_unknown" },
+        });
+      }
+      expect(executed).toBe(2);
+      // The server goes away after the call was admitted: the transport's own
+      // refused request is the only proof that nothing was sent.
+      expect(
+        await invoke(
+          executing(async (send) => {
+            f.grafana.close();
+            return await send();
+          }),
+        ),
+      ).toMatchObject({
+        status: 503,
+        retryable: true,
+        outcomeUnknown: false,
+        details: { code: "tool_server_unreachable" },
+      });
+      expect(executed).toBe(3);
+    } finally {
+      f.close();
+    }
+  });
+
+  test("reset removes only this person's choices on this Site, and only for a person", async () => {
+    const f = createFixture();
+    try {
+      const cleared: unknown[] = [];
+      const options = targetOptions({
+        readSiteVersion: siteVersion([canonical]),
+        clearAllowances: async (_db, key) => {
+          cleared.push(key);
+          return 2;
+        },
+      });
+      expect(
+        await resetWorkspaceSiteToolAllowances(f.deps, targetAuthorization(), site, options),
+      ).toEqual({ version: 1, removed: 2 });
+      expect(cleared).toEqual([{ workspaceId, subjectId, siteId: artifactId }]);
+      // Without a person in an Opengeni frame there is nothing of theirs to reset.
+      const service = targetAuthorization();
+      service.canonicalManagedHumanSession = false;
+      await expectHttpStatus(resetWorkspaceSiteToolAllowances(f.deps, service, site, options), 403);
+      // A Site the viewer can no longer see is refused before anything is removed.
+      await expectHttpStatus(
+        resetWorkspaceSiteToolAllowances(f.deps, targetAuthorization(), site, {
+          ...options,
+          readSiteVersion: async () => {
+            throw new (dbModule.WorkspaceArtifactNotFoundError as unknown as new () => Error)();
+          },
+        }),
+        403,
+      );
+      expect(cleared).toHaveLength(1);
     } finally {
       f.close();
     }

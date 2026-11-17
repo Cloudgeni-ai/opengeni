@@ -1,5 +1,6 @@
 // Preview harness: the production Site tool consent dialog with sample data.
-// `?theme=dark|light`, `?accounts=1|2` and `?tool=send|create` pick the state.
+// `?theme=dark|light`, `?accounts=1|2`, `?tool=send|create` and
+// `?runsAs=own|shared|none` (whose account it runs as) pick the state.
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { SiteToolConsentPrompt } from "@opengeni/sdk/site";
@@ -11,6 +12,7 @@ const params = new URLSearchParams(location.search);
 const dark = params.get("theme") === "dark";
 const accountCount = params.get("accounts") === "1" ? 1 : 2;
 const send = params.get("tool") !== "create";
+const runsAs = params.get("runsAs");
 // Themed like the app: the whole document (lib/appearance.tsx), not a subtree.
 document.documentElement.dataset.ogTheme = dark ? "dark" : "light";
 document.documentElement.classList.toggle("dark", dark);
@@ -18,7 +20,7 @@ document.documentElement.style.colorScheme = dark ? "dark" : "light";
 
 const work = { serverId: "account-sample-work", toolName: "send_message" };
 const home = { serverId: "account-sample-home", toolName: "send_message" };
-const prompt: SiteToolConsentPrompt = send
+const sample: SiteToolConsentPrompt = send
   ? {
       tool: {
         version: 1,
@@ -82,6 +84,19 @@ const prompt: SiteToolConsentPrompt = send
       reviewFor: async () => null,
       signal: new AbortController().signal,
     };
+
+// "Runs as": the viewer's own account, the workspace's shared one, or no account.
+const prompt: SiteToolConsentPrompt =
+  runsAs === "shared"
+    ? {
+        ...sample,
+        accounts: [{ ...sample.accounts[0]!, account: "ops@cloudgeni.ai", shared: true }],
+      }
+    : runsAs === "none"
+      ? { ...sample, accounts: [], selected: null, review: null }
+      : runsAs === "own"
+        ? { ...sample, accounts: sample.accounts.slice(0, 1) }
+        : sample;
 
 function Harness() {
   const [layer, setLayer] = useState<HTMLDivElement | null>(null);

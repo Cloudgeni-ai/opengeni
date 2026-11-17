@@ -246,6 +246,69 @@ describe("goal revision decisions", () => {
     },
   );
 
+  test.each(["preserve_intent", "review_changes"] as const)(
+    "rewriting a %s goal to its own content changes nothing and replays exactly",
+    async (mutationPolicy) => {
+      const ctx = await fixture({ mutationPolicy });
+      const before = (await getSessionGoal(client.db, ctx.grant.workspaceId, ctx.session.id))!;
+      const revisionsBefore = await listSessionGoalRevisions(
+        client.db,
+        ctx.grant.workspaceId,
+        ctx.session.id,
+      );
+      const input = {
+        text: before.text,
+        successCriteria: before.successCriteria,
+        mutationPolicy,
+        changeKind: "refinement" as const,
+        rationale: "Restate the unchanged objective",
+        expectedObjectiveRevision: before.objectiveRevision,
+        actor: "agent" as const,
+        command: command(ctx),
+      };
+      const unchanged = await updateSessionGoalWithEvent(
+        client.db,
+        ctx.grant.workspaceId,
+        ctx.session.id,
+        input,
+      );
+      expect(unchanged).toMatchObject({
+        outcome: "unchanged",
+        replay: false,
+        events: [],
+        proposalId: null,
+        goal: before,
+      });
+      expect(unchanged.operationId).toBeTruthy();
+      expect(
+        await updateSessionGoalWithEvent(client.db, ctx.grant.workspaceId, ctx.session.id, input),
+      ).toEqual({ ...unchanged, replay: true });
+      expect(await getSessionGoal(client.db, ctx.grant.workspaceId, ctx.session.id)).toEqual(
+        before,
+      );
+      // No applied revision and no proposal for a human to review.
+      expect(
+        await listSessionGoalRevisions(client.db, ctx.grant.workspaceId, ctx.session.id),
+      ).toEqual(revisionsBefore);
+      // The revision fence still holds for unchanged content.
+      await expect(
+        updateSessionGoalWithEvent(client.db, ctx.grant.workspaceId, ctx.session.id, {
+          ...input,
+          expectedObjectiveRevision: before.objectiveRevision + 1,
+          command: command(ctx),
+        }),
+      ).rejects.toBeInstanceOf(SessionControlConflictError);
+      // Changing one field while repeating the others is still a rewrite.
+      const changed = await updateSessionGoalWithEvent(
+        client.db,
+        ctx.grant.workspaceId,
+        ctx.session.id,
+        { ...input, successCriteria: "A new success criterion", command: command(ctx) },
+      );
+      expect(changed.outcome).toBe(mutationPolicy === "review_changes" ? "proposed" : "applied");
+    },
+  );
+
   test("agent semantic rewrites require classification, rationale, and an exact revision fence", async () => {
     const ctx = await fixture({ rootConstraints: ["human-owned constraint"] });
     await expect(

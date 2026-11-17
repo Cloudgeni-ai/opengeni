@@ -220,10 +220,11 @@ access limitation. Missing publishing access itself still blocks publication.
 4. The immutable requested set is only a maximum allowlist; publishing it grants
    no tool authority and requires no separate tool approval. Execution still follows
    normal tool approval rules: in Opengeni the frame asks the viewer to confirm
-   (Send/Cancel, "Always allow for this Site") before an approval-required call
+   (Send/Cancel, showing which account it runs as, "Always allow on this Site")
+   before an approval-required call
    runs, so do not build your own confirmation for it. Handle a cancelled call
    (`site_tool_consent_declined`) and, on a published hostname,
-   `site_tool_consent_requires_opengeni` as normal UI states. When a published
+   `site_tool_open_in_opengeni` as normal UI states. When a published
    Site is blocked by a tool set to Ask and that blocks the person you work for,
    offer to set it to Allow in the chat with the integration's tool approval app
    action instead of describing the setting.
@@ -231,6 +232,26 @@ access limitation. Missing publishing access itself still blocks publication.
    live workspace, permission, and connection authority on every call. Handle
    missing tools, revoked connections, stale catalogs, and access loss as normal
    user-visible error states.
+6. Before drawing action buttons, ask what each declared tool needs for this
+   viewer: `const { tools } = await site.tools.$readiness([{ identity }, ...])`.
+   Each answer has a `state` (`ready`, `confirm`, `choose_account`, `connect`,
+   `reconnect`, `grant` (the account must allow more access, `scopes`), `blocked`,
+   `open_in_opengeni`, `unavailable`; `unavailableReason: "account"` means the
+   connected account can't run it), `runsAs` (the account and whether the
+   workspace shares it) and `connector`. Show "Connect
+   {connector}" or a disabled button with its reason instead of letting the click
+   fail, and redraw on `site.tools.$onReadinessChange(listener)` (after a
+   connect, reconnect, "Always allow" or reset). Readiness is advice: the call
+   is still checked, so keep handling its errors. A host without readiness
+   rejects with `readiness_unsupported`; then just call the tool.
+7. A stopped call reaches Site code as a typed `code`:
+   `site_tool_reconnect_required`, `site_tool_grant_required` (the account must
+   allow more access), `site_tool_permission_denied`,
+   `site_tool_not_available_for_viewer`, `site_tool_blocked` (tool permissions
+   block it), `site_tool_open_in_opengeni`, `site_tool_upstream_unavailable`
+   (the tool's server couldn't be reached and nothing was sent; `retryable` is
+   true), `site_tool_outcome_unknown` (check before trying again) and
+   `site_tool_unavailable`.
 
 ## Completion gate (apps)
 

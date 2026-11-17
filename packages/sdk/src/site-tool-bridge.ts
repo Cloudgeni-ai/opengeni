@@ -10,6 +10,13 @@ import {
 import { OpenGeniApiError } from "./errors";
 import { createSharedCatalogLoader } from "./shared-catalog-loader";
 import { siteSessionPath, type SiteHttpRequest } from "./site-http";
+import {
+  SITE_TOOL_TYPED_ANSWERS,
+  siteToolFailureMessage,
+  type SiteToolFailureCode,
+} from "./site-tool-failure-message";
+
+export { siteToolFailureMessage, type SiteToolFailureCode } from "./site-tool-failure-message";
 import type { OpenGeniSiteToolCatalog } from "./site";
 import type { OpenGeniWorkspaceTools } from "./tools";
 import type {
@@ -23,6 +30,8 @@ import type {
   ToolGatewaySiteConsentAccount,
   ToolGatewaySiteConsentResponse,
   ToolGatewaySiteConsentReview,
+  ToolGatewaySiteReadinessResponse,
+  ToolGatewayTarget,
   ToolGatewayTargetApprovalRequest,
   ToolGatewayTargetApprovalResponse,
 } from "./types";
@@ -118,22 +127,6 @@ function siteToolRefusal(message: string, code: string, retryable: boolean): Err
 const undeclaredTool = () =>
   siteToolRefusal("This tool is not available to the Site", "site_tool_not_declared", false);
 
-/**
- * Why a Site's tool call didn't complete, as the viewer and Site code see it.
- * Site code reads the same `code` on the error (or on the result's
- * `structuredContent.error` for a provider's refusal).
- * - `site_tool_reconnect_required`: the viewer's connection must sign in again.
- * - `site_tool_permission_denied`: the provider refused it for the viewer's account.
- * - `site_tool_not_available_for_viewer`: the Site's tool can't run for this viewer.
- * - `site_tool_outcome_unknown`: it may have run; check before trying again.
- * - `site_tool_unavailable`: anything else that stopped it.
- */
-export type SiteToolFailureCode =
-  | "site_tool_reconnect_required"
-  | "site_tool_permission_denied"
-  | "site_tool_not_available_for_viewer"
-  | "site_tool_outcome_unknown"
-  | "site_tool_unavailable";
 export type SiteToolFailure = {
   code: SiteToolFailureCode;
   /** The system the tool belongs to ("Microsoft Dynamics"), when known. */
@@ -253,6 +246,13 @@ export function siteToolFailureKind(
     return kind("site_tool_not_available_for_viewer", false, detail);
   if (nested === "site_tool_not_available_for_viewer" || code === "site_tool_not_declared")
     return kind("site_tool_not_available_for_viewer", false);
+  // Typed answers: each says what the viewer can do next (nothing ran).
+  const typed =
+    typeof nested === "string" && Object.hasOwn(SITE_TOOL_TYPED_ANSWERS, nested)
+      ? SITE_TOOL_TYPED_ANSWERS[nested]!
+      : Object.values(SITE_TOOL_TYPED_ANSWERS).find((answer) => answer.code === code);
+  if (typed && (!typed.retryable || source.outcomeUnknown === false))
+    return kind(typed.code, typed.retryable);
   const status = typeof source.status === "number" ? source.status : null;
   const refused = status === null ? source.outcomeUnknown === false : status >= 400 && status < 500;
   // A missing route can appear (the viewer connects elsewhere); other refusals
@@ -276,26 +276,6 @@ function siteToolResultFailureKind(
   if (error?.code === "provider_permission_denied")
     return { code: "site_tool_permission_denied", retryable: false, detail, sourceCode };
   return null;
-}
-
-/** The viewer's sentence for a failure; it names the system when known. */
-export function siteToolFailureMessage(code: SiteToolFailureCode, system: string | null): string {
-  switch (code) {
-    case "site_tool_reconnect_required":
-      return system ? `Sign in to ${system} again to continue.` : "Sign in again to continue.";
-    case "site_tool_permission_denied":
-      return system
-        ? `${system} didn't allow this for your account.`
-        : "This wasn't allowed for your account.";
-    case "site_tool_not_available_for_viewer":
-      return "This isn't available to you on this Site.";
-    case "site_tool_outcome_unknown":
-      return system
-        ? `Couldn't confirm this finished. Check ${system} before trying again.`
-        : "Couldn't confirm this finished. Check before trying again.";
-    case "site_tool_unavailable":
-      return system ? `Couldn't get this from ${system}.` : "This didn't work.";
-  }
 }
 
 /**
@@ -362,10 +342,22 @@ export type SiteToolBridge = {
     request: ToolGatewayCallRequest,
     options: { signal: AbortSignal },
   ) => Promise<ToolGatewayCallResponse>;
+  /** What the viewer can do with the pinned Site's tools; only with a pinned Site. */
+  readiness?: (
+    request: { targets: ToolGatewayTarget[] },
+    options: { signal: AbortSignal },
+  ) => Promise<ToolGatewaySiteReadinessResponse>;
+  /** Hear when readiness may have changed; returns an unsubscribe. Only with a pinned Site. */
+  subscribeReadiness?: (listener: () => void) => () => void;
 };
 export type CreateSiteToolBridgeOptions = {
   workspaceTools: Pick<OpenGeniWorkspaceTools, "$catalog"> &
-    Partial<Pick<OpenGeniWorkspaceTools, "$targetProtocol" | "$resolve" | "$invoke" | "$manifest">>;
+    Partial<
+      Pick<
+        OpenGeniWorkspaceTools,
+        "$targetProtocol" | "$resolve" | "$invoke" | "$manifest" | "$readiness"
+      >
+    >;
   workspaceId: string;
 
   callTool: SiteToolCaller;
@@ -387,6 +379,12 @@ export type CreateSiteToolBridgeOptions = {
    * Without it the Site still receives the typed `SiteToolCallFailedError`.
    */
   recoverToolCall?: (prompt: SiteToolFailurePrompt) => Promise<boolean>;
+  /**
+   * Other places the host changes what the viewer can do on this Site (for
+   * example "Reset allowed actions"). Each change reaches the Site as a
+   * readiness change, like the bridge's own connects and "Always allow".
+   */
+  readinessChanges?: (listener: () => void) => () => void;
 } & (
   | { artifactId: string; siteVersionId: string; requestedTools: readonly ToolGatewayIdentity[] }
   | { artifactId?: never; siteVersionId?: never; requestedTools?: never }
@@ -413,6 +411,16 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
     ? { siteArtifactId: input.artifactId, siteVersionId: input.siteVersionId }
     : {};
   const manifests = new Map<string, readonly ToolGatewayResolvedTool[]>();
+  const readinessListeners = new Set<() => void>();
+  const readinessChanged = () => {
+    for (const listener of [...readinessListeners]) {
+      try {
+        listener();
+      } catch {
+        // One listener's failure must not stop the others.
+      }
+    }
+  };
   const resolve = async (
     request: ToolGatewayResolveRequest,
     { signal }: { signal: AbortSignal },
@@ -503,6 +511,7 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
         throw new SiteToolConnectionRequiredError(consent.connect.name);
       if (!(await input.connectForToolCall({ connect: consent.connect, signal })))
         throw new SiteToolConsentDeclinedError();
+      readinessChanged();
       signal.throwIfAborted();
       // Connected: run again, asking once more only if the call still needs it.
       try {
@@ -563,6 +572,7 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
         signal,
       );
       approvalToken = approval.approvalToken;
+      if (decision.alwaysAllow) readinessChanged();
     } catch (error) {
       // Choosing an account was all this call needed.
       if (
@@ -573,6 +583,8 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
         )
       )
         throw error;
+      // "Always allow" still remembered the account chosen for this Site.
+      if (decision.alwaysAllow) readinessChanged();
     }
     return await invokeOnce(routed, signal, approvalToken);
   };
@@ -645,8 +657,35 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
     signal.throwIfAborted();
     return catalog;
   };
+  const pinned = input.artifactId
+    ? { siteArtifactId: input.artifactId, siteVersionId: input.siteVersionId }
+    : null;
+  const readiness = pinned
+    ? async (request: { targets: ToolGatewayTarget[] }, { signal }: { signal: AbortSignal }) =>
+        input.workspaceTools.$readiness
+          ? await input.workspaceTools.$readiness(request.targets, { signal, ...pinned })
+          : await hostJson<ToolGatewaySiteReadinessResponse>(
+              "readiness",
+              { targets: request.targets, ...pinned },
+              signal,
+            )
+    : null;
+  const canReadiness = Boolean(pinned && (input.workspaceTools.$readiness || input.fetchResponse));
   const bridge: SiteToolBridge = {
     ...(targeted ? { resolve, invoke } : {}),
+    ...(canReadiness && readiness
+      ? {
+          readiness,
+          subscribeReadiness: (listener: () => void) => {
+            readinessListeners.add(listener);
+            const external = input.readinessChanges?.(listener);
+            return () => {
+              readinessListeners.delete(listener);
+              external?.();
+            };
+          },
+        }
+      : {}),
     ...(input.fetchResponse && input.artifactId ? { siteData: true } : {}),
     ...(input.fetchResponse
       ? {
@@ -865,6 +904,13 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
           : false;
       signal.throwIfAborted();
       if (again && failure.reconnect && value === undefined) {
+        reconnected = true;
+        readinessChanged();
+        continue;
+      }
+      // The server was unreachable: nothing ran, but the operation (and any
+      // approval for it) may be spent, so it runs again as a new one.
+      if (again && failure.code === "site_tool_upstream_unavailable" && value === undefined) {
         reconnected = true;
         continue;
       }

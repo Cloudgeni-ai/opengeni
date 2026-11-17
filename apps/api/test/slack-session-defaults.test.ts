@@ -143,22 +143,23 @@ describe("Slack task repositories from the new-chat form", () => {
     ).toEqual([1]);
   });
 
-  test("drops repositories the catalog no longer offers, archived ones and empty ones", () => {
+  test("drops repositories the catalog no longer offers and archived ones, never by size", () => {
     expect(
       selectFormRepositoryResources(
         [
           selected(9, "gone"),
           selected(3, "archived"),
-          selected(4, "empty"),
+          selected(4, "fresh"),
           selected(1, "project"),
         ],
         [
           catalogEntry(1, "project"),
           catalogEntry(3, "archived", { archived: true, sizeKb: 120 }),
-          catalogEntry(4, "empty", { archived: false, sizeKb: 0 }),
+          // GitHub computes size lazily: 0 long after the first push.
+          catalogEntry(4, "fresh", { archived: false, sizeKb: 0 }),
         ],
       ).map((resource) => resource.githubRepositoryId),
-    ).toEqual([1]);
+    ).toEqual([4, 1]);
   });
 
   test("stops at five distinct repositories", () => {

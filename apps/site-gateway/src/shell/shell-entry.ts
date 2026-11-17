@@ -83,8 +83,11 @@ function gatewayError(status: number, body: unknown, mutating: boolean): Error {
     {
       code: typeof envelope.code === "string" ? envelope.code : "site_request_failed",
       retryable: envelope.retryable === true,
+      // A gateway status without the API's own answer may follow a dispatch;
+      // the API's explicit `outcomeUnknown: false` (nothing was sent) stands.
       outcomeUnknown:
-        envelope.outcomeUnknown === true || (mutating && status >= 502 && status <= 504),
+        envelope.outcomeUnknown === true ||
+        (mutating && status >= 502 && status <= 504 && envelope.outcomeUnknown !== false),
       ...(envelope.details && typeof envelope.details === "object"
         ? { details: envelope.details }
         : {}),
@@ -200,6 +203,7 @@ const tools: SiteBridgeToolHandlers = {
   call: (request, { signal }) => tool("call", request, signal),
   resolve: (request, { signal }) => tool("resolve", request, signal),
   invoke: (request, { signal }) => tool("invoke", request, signal),
+  readiness: (request, { signal }) => tool("readiness", request, signal),
   fetch: siteHttp,
   siteData: true,
 };

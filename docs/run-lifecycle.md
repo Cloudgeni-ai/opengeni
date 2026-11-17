@@ -1577,7 +1577,14 @@ commands as not started, and parks the same turn for
 `ORGANIZATION_SANDBOX_CAPACITY_RETRY_MS` (one minute) with no retry budget and no
 turn worker held. The replacement attempt asks again; joining or re-arming a box
 that already runs never counts. This is a concurrency bound, never a run-length
-limit: an admitted turn keeps its box for as long as it works. The lazy
+limit: an admitted turn keeps its box for as long as it works. The same wait
+applies to the per-person bound `runningBoxesPerPerson`. A tier that allows no
+box (`restricted`) or an organization or person past today's box time
+(`boxSecondsPerOrganizationPerDay`, `boxSecondsPerPersonPerDay`) never frees
+within the turn, so admission raises `SandboxOrganizationBoxLimitError` instead
+and the turn fails with its message (code `sandbox_compute_unavailable`, not
+retryable); a turn that already holds the box finishes (see
+[deployment](deployment.md), "Free compute bounds"). The lazy
 provisioner never retries the transition in place.
 
 **Durable recovery observability.** The control worker reads one content-free,
@@ -4899,8 +4906,17 @@ turns finish naturally for its shutdown grace (default 90 seconds,
 turn that outlasts the grace, Temporal cancels the activity with reason
 `WORKER_SHUTDOWN`; the activity checkpoints conversation truth and the sandbox
 envelope, closes the exact attempt as recoverable, and leaves the same logical
-turn in `recovering`. It never creates a human queue row or synthetic user
-message. Any in-flight side-effecting tool call is durably closed with an
+turn in `recovering`. The handoff does not depend on the run noticing the
+cancellation: a run still parked a few seconds later, in a wait that never
+observes cancellation (an unanswered machine or provider call), is abandoned
+and the attempt is settled and finalized as the same `worker_shutdown`
+handoff inside the force-stop window; the abandoned run is fenced by the
+closed attempt and ends with the process. A turn whose worker died anyway is
+closed `lease_lost_recoverable` after the heartbeat timeout, and its
+subscription lease stops holding the turn at that closure, so the redispatched
+attempt is not refused as busy until the lease TTL runs out. It never creates
+a human queue row or synthetic user message. Any in-flight side-effecting tool
+call is durably closed with an
 explicit `interrupted / outcome unknown` result before the next attempt can
 run; this includes Codemode calls, whose operation is journaled before dispatch
 and whose execution-start marker prevents replay after the side-effect boundary.

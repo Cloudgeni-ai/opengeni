@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   bootstrapWorkspace,
@@ -7,8 +9,10 @@ import {
   createSession,
   getSessionGoal,
   initializeSessionStartAtomically,
+  listSessionGoalRevisions,
   listSessionEvents,
   recoverSessionDispatch,
+  setSessionGoalStatus,
   type DbClient,
 } from "@opengeni/db";
 import {
@@ -255,6 +259,169 @@ describe("goal_update idempotency", () => {
     expect(liveGoalUpdates).toHaveLength(2);
     expect(bus.published.flat().filter((event) => event.type === "goal.progress")).toHaveLength(1);
     expect(bus.published).toHaveLength(3);
+  });
+
+  test("goal_update with the goal's own content is an idempotent no-op, never a database error", async () => {
+    if (!available) return;
+
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "goal-update-unchanged-test",
+      accountExternalId: `account-${suffix}`,
+      accountName: "Goal update unchanged",
+      workspaceExternalSource: "goal-update-unchanged-test",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "Goal update unchanged",
+      subjectId: `subject-${suffix}`,
+    });
+    const baseGrant = access.workspaceGrants[0]!;
+    const { workspaceId } = baseGrant;
+    const session = await createSession(client.db, {
+      accountId: baseGrant.accountId,
+      workspaceId,
+      initialMessage: "start",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const text = "Fix the defect and open one draft PR.";
+    const successCriteria = "Draft PR open with regression tests.";
+    await initializeSessionStartAtomically(client.db, {
+      accountId: baseGrant.accountId,
+      workspaceId,
+      sessionId: session.id,
+      clientEventId: `initial:${session.id}`,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+      goal: { text, successCriteria },
+    });
+    const attemptId = crypto.randomUUID();
+    const claim = await claimSessionWorkForAttempt(client.db, workspaceId, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    if (claim.action !== "claimed") throw new Error("attempt was not claimed");
+    const deps = {
+      settings: testSettings({}),
+      db: client.db,
+      bus: new MemoryEventBus(),
+      workflowClient: {},
+      objectStorage: null,
+      githubStateSecret: "test-state-secret",
+      documentIndexer: { indexDocument: async () => undefined },
+      getDocumentServices: () => {
+        throw new Error("document services are not used by goal tests");
+      },
+      resumeBoxById: async () => {
+        throw new Error("sandbox resume is not used by goal tests");
+      },
+    } as unknown as ApiRouteDeps;
+    const server = buildOpenGeniMcpServer(deps, {
+      ...baseGrant,
+      metadata: {
+        ...baseGrant.metadata,
+        delegated: true,
+        sessionId: session.id,
+        firstPartyMcpTools: [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+        turnId: claim.turn.id,
+        attemptId,
+        executionGeneration: claim.turn.executionGeneration,
+      },
+    });
+    // What the model sees: the tool result as an MCP client receives it.
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const mcp = new Client({ name: "goal-update-unchanged", version: "1" });
+    await server.connect(serverTransport);
+    await mcp.connect(clientTransport);
+    const call = async (name: string, args: Record<string, unknown>) => {
+      const result = await mcp.callTool({ name, arguments: args });
+      const resultText = (result.content as Array<{ text: string }>)[0]!.text;
+      expect(resultText).not.toContain("Failed query");
+      expect(resultText).not.toContain("session_goals");
+      return { isError: result.isError === true, text: resultText };
+    };
+
+    // 1. goal_set reopens the completed goal with the same content. It changes
+    // the goal (completed -> active, a new version) but not the objective.
+    await setSessionGoalStatus(client.db, workspaceId, session.id, {
+      status: "completed",
+      evidence: "first pass done",
+    });
+    const reopened = await call("goal_set", { text, successCriteria });
+    expect(reopened.isError).toBe(false);
+    expect(JSON.parse(reopened.text)).toMatchObject({
+      outcome: "updated",
+      changed: true,
+      resource: { state: "active" },
+      facts: { replaced: true },
+    });
+    const active = (await getSessionGoal(client.db, workspaceId, session.id))!;
+    expect(active).toMatchObject({ status: "active", objectiveRevision: 1 });
+    const revisionsBefore = await listSessionGoalRevisions(client.db, workspaceId, session.id);
+    const eventsBefore = await listSessionEvents(client.db, workspaceId, session.id);
+
+    // 2. goal_update with exactly the current content changes nothing.
+    const unchangedKey = crypto.randomUUID();
+    const unchangedArgs = {
+      text,
+      successCriteria,
+      changeKind: "refinement",
+      rationale: "Restate the objective after reopening it.",
+      expectedObjectiveRevision: active.objectiveRevision,
+      idempotencyKey: unchangedKey,
+    };
+    const unchanged = await call("goal_update", unchangedArgs);
+    expect(unchanged.isError).toBe(false);
+    const unchangedResult = JSON.parse(unchanged.text);
+    expect(unchangedResult).toMatchObject({
+      text,
+      successCriteria,
+      status: "active",
+      objectiveRevision: 1,
+      version: active.version,
+      replay: false,
+      outcome: "unchanged",
+      proposalId: null,
+      message:
+        "Nothing changed: the goal already has this content, so its objective revision stays 1.",
+    });
+    expect(await getSessionGoal(client.db, workspaceId, session.id)).toEqual(active);
+    expect(await listSessionGoalRevisions(client.db, workspaceId, session.id)).toEqual(
+      revisionsBefore,
+    );
+    expect(await listSessionEvents(client.db, workspaceId, session.id)).toHaveLength(
+      eventsBefore.length,
+    );
+    // A retry with the same key replays the same answer.
+    const replayed = await call("goal_update", unchangedArgs);
+    expect(JSON.parse(replayed.text)).toEqual({ ...unchangedResult, replay: true });
+
+    // 3. goal_set on the now active goal is refused in plain words.
+    const refused = await call("goal_set", { text, successCriteria });
+    expect(refused).toEqual({
+      isError: true,
+      text: "this session's goal is active at objective revision 1; use goal_update to revise it",
+    });
+
+    // A real change still advances the objective exactly once.
+    const changed = await call("goal_update", {
+      ...unchangedArgs,
+      successCriteria: "Draft PR open with real-Postgres regression tests.",
+      idempotencyKey: crypto.randomUUID(),
+    });
+    expect(JSON.parse(changed.text)).toMatchObject({
+      outcome: "applied",
+      objectiveRevision: 2,
+      version: active.version + 1,
+    });
   });
 });
 

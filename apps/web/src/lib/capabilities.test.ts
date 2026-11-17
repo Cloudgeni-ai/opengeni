@@ -17,7 +17,10 @@ import {
   capabilityReconnectPlan,
   defaultCapabilityConnectionOwnership,
   capabilitySourceLabel,
+  connectionAttentionLabel,
   connectionHealth,
+  connectionRepair,
+  connectionRepairLabel,
   connectionToReuseForApiKey,
   curatedSkillProvenance,
   domainFromUrl,
@@ -471,6 +474,7 @@ describe("first-party fiken capability state", () => {
     expect(connectionHealth(fikenItem, [lapsed], true)).toEqual({
       state: "attention",
       connection: lapsed,
+      reason: "signed_out",
     });
   });
 
@@ -705,7 +709,7 @@ describe("connectionHealth", () => {
 
   test("ref whose row is MISSING (loaded, absent) needs attention (row null)", () => {
     const health = connectionHealth(item({ enabled: true, connectionRef: ref }), [], true);
-    expect(health).toEqual({ state: "attention", connection: null });
+    expect(health).toEqual({ state: "attention", connection: null, reason: "removed" });
   });
 
   test("ref pointing at an inactive row needs attention (carries the row)", () => {
@@ -753,7 +757,7 @@ describe("connectionHealth", () => {
     });
     expect(
       connectionHealth(item({ enabled: true, connectionRef: subjectRef }), [shared], true),
-    ).toEqual({ state: "attention", connection: null });
+    ).toEqual({ state: "attention", connection: null, reason: "not_connected" });
   });
 
   describe("a subject binding with several of the caller's own accounts", () => {
@@ -790,19 +794,177 @@ describe("connectionHealth", () => {
     test("an account that stopped working is reported over a removed one", () => {
       const removed = gmail("removed", "revoked");
       const lapsed = gmail("lapsed", "needs_reauth");
-      expect(health([removed, lapsed])).toEqual({ state: "attention", connection: lapsed });
+      expect(health([removed, lapsed])).toEqual({
+        state: "attention",
+        connection: lapsed,
+        reason: "signed_out",
+      });
     });
 
     test("only removed accounts left means no account, so the repair is Connect", () => {
       const binding = item({ enabled: true, connectionRef: gmailRef });
       const result = health([gmail("removed", "revoked"), gmail("older-removed", "revoked")]);
-      expect(result).toEqual({ state: "attention", connection: null });
+      expect(result).toEqual({ state: "attention", connection: null, reason: "removed" });
       // Never a reconnect of a removed login the server refuses to revive.
       expect(capabilityReconnectPlan(binding, result)).toEqual({
         kind: "oauth",
         connectionId: null,
         ownership: "personal",
       });
+    });
+  });
+
+  describe("a personal account connected in another workspace", () => {
+    const gmailRef = {
+      providerDomain: "gmailmcp.googleapis.com",
+      kind: "oauth2" as const,
+      subjectScope: "subject" as const,
+    };
+    const binding = item({ enabled: true, connectionRef: gmailRef });
+    // The account inventory (listOwnConnectionAccounts) marks where each own
+    // account is turned on; GET /connections never lists one from elsewhere.
+    const own = (overrides: Partial<ConnectionMetadata>) =>
+      connection({
+        id: "own-gmail",
+        workspaceId: "integration-tests",
+        subjectId: "current-user",
+        providerDomain: "gmailmcp.googleapis.com",
+        turnedOnHere: true,
+        ...overrides,
+      });
+
+    test("turned on here with Use it here, it is Connected", () => {
+      const account = own({});
+      expect(connectionHealth(binding, [account], true)).toEqual({
+        state: "connected",
+        connection: account,
+      });
+    });
+
+    test("working but off here, the reason is that and the one repair turns it on", () => {
+      const account = own({ turnedOnHere: false });
+      const health = connectionHealth(binding, [account], true);
+      expect(health).toEqual({ state: "attention", connection: account, reason: "off_here" });
+      expect(connectionRepair(health)).toBe("turn_on_here");
+      expect(connectionRepairLabel("turn_on_here", "Gmail")).toBe("Turn on here");
+      // Never a sign-in for an account that works.
+      expect(capabilityReconnectPlan(binding, health)).toBeNull();
+    });
+
+    test("signed out, it says so and reconnects the account in its own workspace", () => {
+      const account = own({ status: "needs_reauth" });
+      const health = connectionHealth(binding, [account], true);
+      expect(health).toEqual({ state: "attention", connection: account, reason: "signed_out" });
+      expect(connectionAttentionLabel("signed_out")).toBe("Signed out");
+      expect(connectionRepair(health)).toBe("reconnect");
+      expect(capabilityReconnectPlan(binding, health)).toEqual({
+        kind: "oauth",
+        connectionId: "own-gmail",
+        ownership: "personal",
+        connectionWorkspaceId: "integration-tests",
+      });
+    });
+
+    test("a working account turned on here wins over one off here", () => {
+      const off = own({ id: "off", turnedOnHere: false });
+      const on = own({ id: "on" });
+      expect(connectionHealth(binding, [off, on], true)).toEqual({
+        state: "connected",
+        connection: on,
+      });
+    });
+
+    test("an account that failed is reported as failed", () => {
+      const account = own({ status: "error" });
+      expect(connectionHealth(binding, [account], true)).toMatchObject({
+        state: "attention",
+        reason: "failed",
+      });
+    });
+
+    test("with no account at all the reason is that, and the repair is Connect", () => {
+      const health = connectionHealth(binding, [], true);
+      expect(health).toEqual({ state: "attention", connection: null, reason: "not_connected" });
+      expect(connectionRepair(health)).toBe("connect");
+      expect(connectionRepairLabel("connect", "Gmail")).toBe("Connect Gmail");
+    });
+
+    test("an unread inventory stays unverified", () => {
+      expect(connectionHealth(binding, [], false)).toEqual({ state: "unverified" });
+    });
+
+    test("signed out and off here, it is Signed out with Reconnect, not a new sign-in", () => {
+      const account = own({ status: "needs_reauth", turnedOnHere: false });
+      const health = connectionHealth(binding, [account], true);
+      expect(health).toEqual({ state: "attention", connection: account, reason: "signed_out" });
+      expect(connectionRepair(health)).toBe("reconnect");
+      expect(capabilityReconnectPlan(binding, health)).toMatchObject({
+        connectionId: "own-gmail",
+        connectionWorkspaceId: "integration-tests",
+      });
+    });
+  });
+
+  describe("a connector served through Nango", () => {
+    // Installations keep the native catalog domain whichever backend connected the account.
+    const binding = item({
+      enabled: true,
+      connectionRef: {
+        providerDomain: "gmailmcp.googleapis.com",
+        kind: "oauth2",
+        subjectScope: "subject",
+      },
+    });
+    const own = (overrides: Partial<ConnectionMetadata>) =>
+      connection({ subjectId: "current-user", turnedOnHere: true, ...overrides });
+
+    test("an active Nango account is Connected despite removed native ones", () => {
+      const nango = own({ id: "nango", providerDomain: "nango:gmail" });
+      const removed = own({
+        id: "native",
+        providerDomain: "gmailmcp.googleapis.com",
+        status: "revoked",
+      });
+      const superseded = own({
+        id: "superseded",
+        providerDomain: "gmailmcp.googleapis.com",
+        status: "needs_reauth",
+        metadata: { integrationBackendProjection: "superseded" },
+      });
+      expect(connectionHealth(binding, [removed, superseded, nango], true)).toEqual({
+        state: "connected",
+        connection: nango,
+      });
+    });
+
+    test("another connector's Nango account does not count", () => {
+      const other = own({ id: "calendar", providerDomain: "nango:google-calendar" });
+      expect(connectionHealth(binding, [other], true)).toMatchObject({
+        state: "attention",
+        reason: "not_connected",
+      });
+    });
+  });
+
+  test("an all-eligible selector counts only accounts the runtime resolves here", () => {
+    const selector = item({
+      enabled: true,
+      connectionRef: {
+        providerDomain: "linear.app",
+        kind: "oauth2",
+        accountSelection: "all_eligible",
+      },
+    });
+    const offHere = connection({ id: "own", subjectId: "current-user", turnedOnHere: false });
+    expect(connectionHealth(selector, [offHere], true)).toEqual({
+      state: "attention",
+      connection: offHere,
+      reason: "off_here",
+    });
+    const shared = connection({ id: "shared" });
+    expect(connectionHealth(selector, [offHere, shared], true)).toEqual({
+      state: "connected",
+      connection: shared,
     });
   });
 
@@ -820,10 +982,10 @@ describe("connectionHealth", () => {
         [removed, lapsed],
         true,
       ),
-    ).toEqual({ state: "attention", connection: lapsed });
+    ).toEqual({ state: "attention", connection: lapsed, reason: "signed_out" });
     expect(
       connectionHealth(item({ enabled: true, connectionRef: selectorRef }), [removed], true),
-    ).toEqual({ state: "attention", connection: null });
+    ).toEqual({ state: "attention", connection: null, reason: "removed" });
   });
 
   test("workspace bindings continue to match only their exact UUID", () => {
@@ -837,6 +999,7 @@ describe("connectionHealth", () => {
     expect(connectionHealth(item({ enabled: true, connectionRef: ref }), conns, true)).toEqual({
       state: "attention",
       connection: null,
+      reason: "removed",
     });
   });
 
@@ -870,8 +1033,9 @@ describe("capabilityReconnectPlan", () => {
   const inactive = {
     state: "attention",
     connection: connection({ id: "conn-1", status: "revoked" }),
+    reason: "removed",
   } as const;
-  const deleted = { state: "attention", connection: null } as const;
+  const deleted = { state: "attention", connection: null, reason: "removed" } as const;
 
   test("offers api_key repair from connectionRef.kind even when the catalog plan drifted to 'enable'", () => {
     // Enabled item, live api_key connectionRef, inactive connection, but the
@@ -1100,7 +1264,11 @@ describe("OAuth ownership helpers", () => {
       state: "connected",
       connection: shared,
     });
-    expect(connectionHealth(selector, [], true)).toEqual({ state: "attention", connection: null });
+    expect(connectionHealth(selector, [], true)).toEqual({
+      state: "attention",
+      connection: null,
+      reason: "not_connected",
+    });
   });
   test("new catalog connection selectors explicitly allow both ownership scopes without a seed pin", () => {
     for (const ownership of ["workspace", "personal"] as const) {

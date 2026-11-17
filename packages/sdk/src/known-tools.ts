@@ -6,6 +6,7 @@ import {
   type OpenGeniToolTransport,
   type OpenGeniWorkspaceTools,
   type OpenGeniToolCallOptions,
+  toolReadiness,
 } from "./tools";
 import type {
   ToolGatewayTarget,
@@ -264,6 +265,7 @@ export function createKnownWorkspaceTools(
           options?: OpenGeniToolCallOptions,
         ) => call({ identity }, args, options);
       if (property === "$approveTarget") return approveTarget;
+      if (property === "$readiness") return toolReadiness(transport, base);
       if (property === "$approve")
         return async (...args: Parameters<OpenGeniWorkspaceTools["$approve"]>) => {
           const response = await old().$approve(...args);

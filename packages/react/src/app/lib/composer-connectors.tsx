@@ -1,7 +1,7 @@
 import type { ChatSession as Session, UpdateSessionToolPolicyRequest } from "@opengeni/sdk";
 import type { CapabilityCatalogItem, ConnectionMetadata } from "../types";
 import type { McpServerOption } from "./session-tools";
-import { connectionHealth } from "./capabilities";
+import { connectionHealth, connectionRepair } from "./capabilities";
 import { capabilityLogoSource } from "../components/capabilities/capability-logo-source";
 import { connectorLogo, connectorLogoIndex } from "../../timeline/connector-logo-index";
 
@@ -50,12 +50,15 @@ export function composerConnectorOptions(
     const id = item.runtime.mcpServerId;
     if (item.kind !== "mcp" || !item.enabled || !id) continue;
     const health = connectionHealth(item, connections ?? [], connections !== null);
+    const repair = connectionRepair(health);
     const state =
       health.state === "attention"
-        ? !health.connection && item.connectionRef?.subjectScope === "subject"
-          ? "connect"
-          : health.connection?.status === "needs_reauth"
-            ? "reconnect"
+        ? repair === "reconnect" && health.reason === "signed_out"
+          ? "reconnect"
+          : repair === "connect" || repair === "turn_on_here"
+            ? item.connectionRef?.subjectScope === "subject"
+              ? "connect"
+              : "unavailable"
             : "unavailable"
         : health.state === "unverified"
           ? "unknown"

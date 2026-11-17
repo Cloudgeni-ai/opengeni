@@ -27,6 +27,7 @@ import {
   isSessionEventPersistenceError,
   DatabaseTransactionError,
   SandboxLeaseTransitionError,
+  SandboxOrganizationBoxLimitError,
   KnowledgeLearningScopeChangedError,
   nestedErrorRecords,
   nestedPostgresMessage,
@@ -2331,6 +2332,20 @@ export function findSandboxBackendNotServedError(
   return null;
 }
 
+/** A plan compute-bound refusal anywhere in an error's cause chain. */
+export function findSandboxOrganizationBoxLimitError(
+  error: unknown,
+): SandboxOrganizationBoxLimitError | null {
+  const seen = new Set<unknown>();
+  for (let current = error; current && typeof current === "object";) {
+    if (current instanceof SandboxOrganizationBoxLimitError) return current;
+    if (seen.has(current) || seen.size >= 16) return null;
+    seen.add(current);
+    current = (current as { cause?: unknown }).cause;
+  }
+  return null;
+}
+
 /**
  * Record the closed provider condition on a retryable model-provider failure so
  * clients can say "overloaded" rather than a generic outage. Presentation
@@ -2459,6 +2474,14 @@ function classifyAgentRunFailurePayload(
       code: backendNotServed.code,
       retryable: false,
     };
+  }
+  // The organization's plan allows no sandbox now: a held or denied
+  // organization that has not paid, or a Free organization (or person) past
+  // today's box time. Neither frees on its own within the turn, so the turn
+  // fails with the person-facing reason instead of waiting.
+  const computeRefusal = findSandboxOrganizationBoxLimitError(error);
+  if (computeRefusal) {
+    return { error: computeRefusal.message, code: computeRefusal.code, retryable: false };
   }
   // The chat's personal machine isn't allowed for this turn. Its cause is the
   // database's refusal, which is not a database fault: the machine's owner
