@@ -128,7 +128,7 @@ diff --git a/src/connection.js b/src/connection.js
        : options.pass
      )
    }
-@@ -814,7 +855,9 @@
+@@ -814,12 +855,21 @@
        (query.cursorFn || query.describeFirst) && write(Sync)
        errorResponse = Errors.postgres(parseError(x))
      } else {
@@ -139,6 +139,19 @@ diff --git a/src/connection.js b/src/connection.js
      }
    }
  
+   function retry(q, error) {
+-    delete statements[q.signature]
++    // A changed result type (a column added to a table that `*` expands)
++    // invalidates every statement this connection prepared over that row, not
++    // only this one. Forget them all so each re-prepares on its next use
++    // instead of failing once per statement; inside a transaction the retry
++    // below cannot succeed, and the caller repeats the whole transaction.
++    error.routine === 'RevalidateCachedQuery'
++      ? statements = {}
++      : delete statements[q.signature]
+     q.retried = error
+     execute(q)
+   }
 diff --git a/cjs/src/connection.js b/cjs/src/connection.js
 --- a/cjs/src/connection.js
 +++ b/cjs/src/connection.js
@@ -269,7 +282,7 @@ diff --git a/cjs/src/connection.js b/cjs/src/connection.js
        : options.pass
      )
    }
-@@ -814,7 +855,9 @@
+@@ -814,12 +855,21 @@
        (query.cursorFn || query.describeFirst) && write(Sync)
        errorResponse = Errors.postgres(parseError(x))
      } else {
@@ -280,6 +293,19 @@ diff --git a/cjs/src/connection.js b/cjs/src/connection.js
      }
    }
  
+   function retry(q, error) {
+-    delete statements[q.signature]
++    // A changed result type (a column added to a table that `*` expands)
++    // invalidates every statement this connection prepared over that row, not
++    // only this one. Forget them all so each re-prepares on its next use
++    // instead of failing once per statement; inside a transaction the retry
++    // below cannot succeed, and the caller repeats the whole transaction.
++    error.routine === 'RevalidateCachedQuery'
++      ? statements = {}
++      : delete statements[q.signature]
+     q.retried = error
+     execute(q)
+   }
 diff --git a/src/index.js b/src/index.js
 --- a/src/index.js
 +++ b/src/index.js

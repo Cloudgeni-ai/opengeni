@@ -63,17 +63,40 @@ export function assertBaselineAdvanceScope(
   }
 }
 
+/** The branch production deploys from; pull requests into it promote main. */
+export const PRODUCTION_PROMOTION_BASE_REF = "production";
+
+/**
+ * A promotion pull request (main into production) carries many already-merged
+ * pull requests at once, so its whole diff always mixes a pin advance with
+ * source changes. The rule still holds per change: every commit in it that
+ * moves the pin must have landed on main as a pin-only change.
+ */
+export function assertPromotionBaselineAdvanceScope(
+  commits: readonly { sha: string; changedPaths: readonly string[] }[],
+  alreadyPinned: boolean,
+) {
+  for (const commit of commits) {
+    try {
+      assertBaselineAdvanceScope(commit.changedPaths, alreadyPinned);
+    } catch (error) {
+      throw new Error(`Commit ${commit.sha}: ${(error as Error).message}`, { cause: error });
+    }
+  }
+}
+
+function gitLines(root: string, args: string[]): string[] {
+  return execFileSync("git", args, { cwd: root, encoding: "utf8" })
+    .split("\n")
+    .filter((line) => line.length > 0);
+}
+
 if (import.meta.main) {
   const base = process.argv[2];
   if (!base || !/^[a-f0-9]{40}$/.test(base))
-    throw new Error("usage: bun scripts/runtime-posture-baseline.ts <base-sha>");
+    throw new Error("usage: bun scripts/runtime-posture-baseline.ts <base-sha> [base-ref]");
+  const baseRef = process.argv[3] ?? "";
   const root = process.cwd();
-  const paths = execFileSync("git", ["diff", "--name-only", `${base}...HEAD`], {
-    cwd: root,
-    encoding: "utf8",
-  })
-    .trim()
-    .split("\n");
   let alreadyPinned = false;
   try {
     execFileSync("git", ["cat-file", "-e", `${base}:scripts/runtime-posture-baseline.json`], {
@@ -87,7 +110,24 @@ if (import.meta.main) {
   const pin = await readRuntimePostureBaseline(root);
   if (!alreadyPinned && pin.status !== "bootstrap")
     throw new Error("The first baseline must explicitly declare bootstrap status");
-  assertBaselineAdvanceScope(paths, alreadyPinned);
+  if (baseRef === PRODUCTION_PROMOTION_BASE_REF) {
+    const commits = gitLines(root, [
+      "rev-list",
+      "--no-merges",
+      `${base}..HEAD`,
+      "--",
+      "scripts/runtime-posture-baseline.json",
+    ]).map((sha) => ({
+      sha,
+      changedPaths: gitLines(root, ["diff-tree", "--no-commit-id", "--name-only", "-r", sha]),
+    }));
+    assertPromotionBaselineAdvanceScope(commits, alreadyPinned);
+  } else {
+    assertBaselineAdvanceScope(
+      gitLines(root, ["diff", "--name-only", `${base}...HEAD`]),
+      alreadyPinned,
+    );
+  }
   console.log(`Validated ${pin.status} runtime posture baseline ${pin.sourceCommit}`);
 }
 

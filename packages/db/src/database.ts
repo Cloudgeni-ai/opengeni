@@ -687,11 +687,72 @@ function abortableQuery<T extends postgres.Row[]>(
  * still prepared and the connection lifetime bounds the accumulation. Pass a
  * list as one array parameter with `anyOf` (`./sql-arrays`) where it is hot.
  */
+/**
+ * Postgres refuses to reuse a prepared statement whose result columns changed
+ * since it was prepared: SQLSTATE 0A000, "cached plan must not change result
+ * type", raised from `RevalidateCachedQuery` before the statement runs. A
+ * rolling migration that adds a column causes it for every statement that
+ * expands the table's row (`select *`, `table.*`, `returning *`, a CTE or
+ * function over that row) on connections the running release prepared earlier.
+ * Found directly or through a wrapping error's `cause` (Drizzle wraps query
+ * failures). Other 0A000 errors are unrelated features and do not match.
+ */
+export function isStalePreparedResultError(error: unknown): boolean {
+  let current = error;
+  for (let depth = 0; depth < 5 && current && typeof current === "object"; depth += 1) {
+    const candidate = current as { code?: unknown; routine?: unknown; message?: unknown };
+    if (
+      candidate.code === "0A000" &&
+      (candidate.routine === "RevalidateCachedQuery" ||
+        (typeof candidate.message === "string" &&
+          candidate.message.includes("cached plan must not change result type")))
+    ) {
+      return true;
+    }
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+/**
+ * Run a pool transaction again when it failed only because a statement in it
+ * was prepared against an older row type (see {@link isStalePreparedResultError}).
+ *
+ * Outside a transaction postgres.js already re-prepares and repeats such a
+ * statement. Inside one the refusal aborts the transaction, so only the whole
+ * transaction can be repeated. That is safe for its database work: the refused
+ * statement never ran and the transaction rolled back, so nothing it wrote
+ * remains. As with any repeated attempt (an activity retry, a client retry),
+ * work the callback does outside the database runs again.
+ *
+ * Our postgres.js patch makes a connection forget every statement it prepared
+ * on its first such refusal, not just the refused one, so each connection
+ * refuses at most once per schema change. One attempt per pool connection
+ * plus one is therefore enough for any transaction to reach a refreshed
+ * connection; another schema change in the meantime can only add a refusal,
+ * which surfaces unchanged once the attempts are spent.
+ */
+async function retryingStalePreparedResults<T>(
+  attempts: number,
+  run: () => Promise<T>,
+): Promise<T> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await run();
+    } catch (error) {
+      if (attempt >= attempts || !isStalePreparedResultError(error)) throw error;
+      // A maintenance stop that arrived meanwhile ends the retries.
+      databaseQuerySignal.getStore()?.throwIfAborted();
+    }
+  }
+}
+
 function preparingUnsafe<T extends PostgresSql>(
   target: T,
   prepare = true,
   reserved = false,
   credential?: RotatingDatabasePassword,
+  staleResultAttempts = 1,
 ): T {
   const wrapScoped = (args: unknown[]) =>
     args.map((arg) =>
@@ -722,35 +783,46 @@ function preparingUnsafe<T extends PostgresSql>(
       if (property === "begin" || property === "savepoint") {
         const method = Reflect.get(base, property) as unknown;
         if (typeof method !== "function") return method;
+        // Only the pool's own BEGIN repeats a transaction; a savepoint's
+        // failure belongs to its enclosing transaction.
+        const repeatable = (run: () => Promise<unknown>) =>
+          property === "begin" && !reserved && staleResultAttempts > 1
+            ? retryingStalePreparedResults(staleResultAttempts, run)
+            : run();
         if (property === "begin" && credential && !reserved) {
           return (...args: unknown[]) =>
-            traceTransaction("transaction", async () => {
-              let entered = false;
-              const tracked = args.map((arg) =>
-                typeof arg === "function"
-                  ? (scoped: unknown) => {
-                      entered = true;
-                      return (arg as (scoped: unknown) => unknown)(scoped);
-                    }
-                  : arg,
-              );
-              // Only BEGIN's own connection attempt can be repeated: once the
-              // callback ran, its work is the caller's to judge.
-              let attempts = 0;
-              return withDatabaseAuthenticationRetry(
-                credential,
-                () => {
-                  // A maintenance stop that arrived meanwhile ends the retries.
-                  if (attempts++ > 0) databaseQuerySignal.getStore()?.throwIfAborted();
-                  return method.apply(base, wrapScoped(tracked)) as Promise<unknown>;
-                },
-                () => !entered,
-              );
-            });
+            repeatable(() =>
+              traceTransaction("transaction", async () => {
+                let entered = false;
+                const tracked = args.map((arg) =>
+                  typeof arg === "function"
+                    ? (scoped: unknown) => {
+                        entered = true;
+                        return (arg as (scoped: unknown) => unknown)(scoped);
+                      }
+                    : arg,
+                );
+                // Only BEGIN's own connection attempt can be repeated for
+                // authentication: once the callback ran, its work is the
+                // caller's to judge.
+                let attempts = 0;
+                return withDatabaseAuthenticationRetry(
+                  credential,
+                  () => {
+                    // A maintenance stop that arrived meanwhile ends the retries.
+                    if (attempts++ > 0) databaseQuerySignal.getStore()?.throwIfAborted();
+                    return method.apply(base, wrapScoped(tracked)) as Promise<unknown>;
+                  },
+                  () => !entered,
+                );
+              }),
+            );
         }
         return (...args: unknown[]) =>
-          traceTransaction(property === "begin" ? "transaction" : "savepoint", () =>
-            method.apply(base, wrapScoped(args)),
+          repeatable(() =>
+            traceTransaction(property === "begin" ? "transaction" : "savepoint", () =>
+              method.apply(base, wrapScoped(args)),
+            ),
           );
       }
       return Reflect.get(base, property);
@@ -827,7 +899,10 @@ export function createDb(databaseUrl: string, options: CreateDbOptions = {}): Db
   });
   // Registering the full schema eagerly allocates one relational query builder
   // per table on every transaction/savepoint, even for a single raw SQL query.
-  const db = drizzle(preparingUnsafe(client, preparedStatements, false, credential));
+  // One attempt per pool connection plus one: see retryingStalePreparedResults.
+  const db = drizzle(
+    preparingUnsafe(client, preparedStatements, false, credential, (options.max ?? 10) + 1),
+  );
   const notificationDatabaseUrl = options.notificationDatabaseUrl;
   // The LISTEN connection is its own pool with its own sticky candidate. The
   // files hold one login's password, so they apply only to that same login.
