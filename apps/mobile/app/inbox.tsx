@@ -6,27 +6,30 @@ import {
 import type { InboxItem } from "@opengeni/sdk";
 import * as Haptics from "expo-haptics";
 import { Stack, router, useFocusEffect } from "expo-router";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { RefreshControl, ScrollView } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAccount } from "@/account";
+import { TabScreen, tabHeaderOptions } from "@/app-tab-bar";
 import { syncInboxBadge } from "@/notifications";
 import { AppThemeProvider } from "@/theme";
 
 export default function InboxScreen() {
   return (
     <AppThemeProvider>
-      <Inbox />
+      <TabScreen tab="inbox">
+        <Inbox />
+      </TabScreen>
     </AppThemeProvider>
   );
 }
+
+const themed = (node: ReactNode) => <AppThemeProvider>{node}</AppThemeProvider>;
 
 /* The web Inbox page at phone width. Tapping a row opens its session; the
    row's buttons approve, deny or answer in place. */
 function Inbox() {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
-  const insets = useSafeAreaInsets();
   const { client, workspaces, workspaceId, setWorkspaceId } = useAccount();
   const inbox = useNativeInbox(client, { pollMs: 10_000 });
   const refreshInbox = inbox.refresh;
@@ -64,6 +67,7 @@ function Inbox() {
           headerStyle: { backgroundColor: c.bg },
           headerTintColor: c.fg,
           headerShadowVisible: false,
+          ...tabHeaderOptions(themed),
         }}
       />
       <ScrollView
@@ -77,7 +81,7 @@ function Inbox() {
             }}
           />
         }
-        contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: insets.bottom + 32 }}
+        contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }}
       >
         <NativeInboxList
           client={client}

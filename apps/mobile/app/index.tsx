@@ -16,8 +16,6 @@ import {
   SectionLabel,
   SessionComposer,
   SessionRowList,
-  nativeInboxAttentionCount,
-  useNativeInbox,
   useNativeTimelineTheme,
 } from "@opengeni/react-native/timeline";
 import { Stack, router, useFocusEffect } from "expo-router";
@@ -129,10 +127,6 @@ function Home() {
   const [draft, setDraft] = useState("");
   const [creating, setCreating] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
-  // What waits on the person, for the Inbox button's badge.
-  const inbox = useNativeInbox(client);
-  const refreshInbox = inbox.refresh;
-  const waiting = nativeInboxAttentionCount(inbox.data);
 
   const load = useCallback(async () => {
     if (!workspaceId) return;
@@ -165,8 +159,7 @@ function Home() {
   useFocusEffect(
     useCallback(() => {
       void load();
-      void refreshInbox();
-    }, [load, refreshInbox]),
+    }, [load]),
   );
 
   // The new session's model: the person's pick in this workspace, else the
@@ -371,19 +364,6 @@ function Home() {
                     accessibilityLabel: "Search chats and workspaces",
                     icon: { type: "sfSymbol" as const, name: "magnifyingglass" },
                     onPress: openSearch,
-                  },
-                  {
-                    type: "button" as const,
-                    label: "Inbox",
-                    accessibilityLabel: waiting > 0 ? `Inbox, ${waiting} waiting` : "Inbox",
-                    icon: {
-                      type: "sfSymbol" as const,
-                      name: waiting > 0 ? "tray.full" : "tray",
-                    },
-                    ...(waiting > 0
-                      ? { badge: { value: waiting > 99 ? "99+" : String(waiting) } }
-                      : {}),
-                    onPress: () => router.push("/inbox"),
                   },
                   {
                     type: "menu" as const,
@@ -620,13 +600,12 @@ function HeaderMenuButton() {
   );
 }
 
-/* Android and older iOS: the Inbox and account buttons drawn by the app. */
+/* Android and older iOS: the search and account buttons drawn by the app. */
 function HeaderRightButtons() {
   return (
     <AppThemeProvider>
       <View style={{ flexDirection: "row", alignItems: "center" }}>
         <SearchButton />
-        <InboxButton />
         <AccountMenuButton />
       </View>
     </AppThemeProvider>
@@ -649,47 +628,6 @@ function SearchButton() {
       style={{ width: 44, height: 44, alignItems: "center", justifyContent: "center" }}
     >
       <Icon name="search" size={20} color={theme.colors.fg} />
-    </Pressable>
-  );
-}
-
-function InboxButton() {
-  const theme = useNativeTimelineTheme();
-  const c = theme.colors;
-  const { client } = useAccount();
-  const waiting = nativeInboxAttentionCount(useNativeInbox(client).data);
-  return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={waiting > 0 ? `Inbox, ${waiting} waiting` : "Inbox"}
-      hitSlop={8}
-      onPress={() => router.push("/inbox")}
-      style={{ width: 44, height: 44, alignItems: "center", justifyContent: "center" }}
-    >
-      <Icon name="inbox" size={20} color={c.fg} />
-      {waiting > 0 ? (
-        <View
-          style={{
-            position: "absolute",
-            top: 6,
-            right: 4,
-            minWidth: 16,
-            minHeight: 16,
-            paddingHorizontal: 4,
-            borderRadius: 8,
-            alignItems: "center",
-            justifyContent: "center",
-            backgroundColor: c["status-waiting"],
-          }}
-        >
-          <Text
-            maxFontSizeMultiplier={BAR_MAX_FONT_SCALE}
-            style={{ ...fontStyle(theme, 600), fontSize: 10, lineHeight: 12, color: "#fff" }}
-          >
-            {waiting > 99 ? "99+" : waiting}
-          </Text>
-        </View>
-      ) : null}
     </Pressable>
   );
 }

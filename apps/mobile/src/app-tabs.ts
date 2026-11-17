@@ -1,21 +1,22 @@
 /*
- * The bottom bar's places: Chats (Home), Artifacts and Meetings; a place is
- * one entry in APP_TABS. Home stays at the bottom of the stack; another place sits on top
+ * The bottom bar's places: Chats (Home), Artifacts, Meetings and Inbox; a
+ * place is one entry in APP_TABS. Home stays at the bottom of the stack; another place sits on top
  * of it, and moving between those replaces the top, so the stack never grows
  * from switching. Kept free of React Native so it is tested directly.
  */
 
-export type AppTab = "chats" | "artifacts" | "meetings";
+export type AppTab = "chats" | "artifacts" | "meetings" | "inbox";
 
 export const APP_TABS: readonly {
   tab: AppTab;
   label: string;
-  icon: "message-square" | "panels-top-left" | "audio-lines";
-  path: "/" | "/artifacts" | "/meetings";
+  icon: "message-square" | "panels-top-left" | "audio-lines" | "inbox";
+  path: "/" | "/artifacts" | "/meetings" | "/inbox";
 }[] = [
   { tab: "chats", label: "Chats", icon: "message-square", path: "/" },
   { tab: "artifacts", label: "Artifacts", icon: "panels-top-left", path: "/artifacts" },
   { tab: "meetings", label: "Meetings", icon: "audio-lines", path: "/meetings" },
+  { tab: "inbox", label: "Inbox", icon: "inbox", path: "/inbox" },
 ];
 
 /** The bar's place for a screen path, or null on screens without the bar. */
@@ -69,8 +70,14 @@ export function edgeSwipeOpensDrawer(swipe: {
   return swipe.dx >= EDGE_SWIPE_DISTANCE || swipe.vx >= EDGE_SWIPE_VELOCITY;
 }
 
-/** The bar's row; it docks at the bottom with the screen's content laid out above it. */
-export const TAB_BAR_HEIGHT = 52;
+/** The bar's row, a little under iOS's own tab bar; it docks at the bottom with the screen's content laid out above it. */
+export const TAB_BAR_HEIGHT = 48;
+
+/** The badge on Inbox: what waits on the person, capped as iOS does. */
+export function tabBadge(waiting: number): string | null {
+  if (waiting <= 0) return null;
+  return waiting > 99 ? "99+" : String(waiting);
+}
 /** The bar's whole height: its row, then the home indicator's area (a little room without one). */
 export function tabBarHeight(bottomInset: number): number {
   return TAB_BAR_HEIGHT + Math.max(bottomInset, 6);

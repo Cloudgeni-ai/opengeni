@@ -4,19 +4,21 @@ import {
   EDGE_SWIPE_DISTANCE,
   edgeSwipeOpensDrawer,
   tabBarHeight,
+  tabBadge,
   tabForPath,
   tabNavigation,
   TAB_BAR_HEIGHT,
 } from "./app-tabs";
 
-test("the bar has Chats, Artifacts and Meetings, in that order", () => {
-  expect(APP_TABS.map((entry) => entry.label)).toEqual(["Chats", "Artifacts", "Meetings"]);
+test("the bar has Chats, Artifacts, Meetings and Inbox, in that order", () => {
+  expect(APP_TABS.map((entry) => entry.label)).toEqual(["Chats", "Artifacts", "Meetings", "Inbox"]);
 });
 
 test("each place is found from its screen path", () => {
   expect(tabForPath("/")).toBe("chats");
   expect(tabForPath("/artifacts")).toBe("artifacts");
   expect(tabForPath("/meetings/")).toBe("meetings");
+  expect(tabForPath("/inbox")).toBe("inbox");
   // Automations opens from the chats menu, not the bar.
   expect(tabForPath("/automations")).toBeNull();
   expect(tabForPath("/artifact/abc")).toBeNull();
@@ -28,6 +30,7 @@ test("switching places never grows the stack", () => {
   expect(tabNavigation("chats", "artifacts")).toEqual({ kind: "push", path: "/artifacts" });
   expect(tabNavigation("artifacts", "meetings")).toEqual({ kind: "replace", path: "/meetings" });
   expect(tabNavigation("meetings", "chats")).toEqual({ kind: "home" });
+  expect(tabNavigation("inbox", "artifacts")).toEqual({ kind: "replace", path: "/artifacts" });
   expect(tabNavigation(null, "artifacts")).toEqual({
     kind: "home-then-push",
     path: "/artifacts",
@@ -53,7 +56,14 @@ test("other swipes don't open it", () => {
 });
 
 test("the docked bar takes its row plus the home indicator's area", () => {
-  expect(TAB_BAR_HEIGHT).toBeLessThan(56);
+  // Slim: no taller than iOS's own tab bar row (49pt).
+  expect(TAB_BAR_HEIGHT).toBeLessThanOrEqual(49);
   expect(tabBarHeight(34)).toBe(TAB_BAR_HEIGHT + 34);
   expect(tabBarHeight(0)).toBe(TAB_BAR_HEIGHT + 6);
+});
+
+test("Inbox's badge counts what waits, capped at 99+", () => {
+  expect(tabBadge(0)).toBeNull();
+  expect(tabBadge(3)).toBe("3");
+  expect(tabBadge(120)).toBe("99+");
 });

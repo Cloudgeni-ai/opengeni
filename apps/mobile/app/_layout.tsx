@@ -67,7 +67,7 @@ export default function RootLayout() {
                       fullScreenGestureEnabled: true,
                     }}
                   />
-                  <Stack.Screen name="inbox" options={{ title: "Inbox" }} />
+                  <Stack.Screen name="inbox" options={{ title: "Inbox", animation: "none" }} />
                   {/* The bottom bar's places sit above Home and swap in place, like
                     tabs, so they appear without a slide. */}
                   <Stack.Screen

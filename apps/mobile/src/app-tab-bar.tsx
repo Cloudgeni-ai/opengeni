@@ -2,11 +2,13 @@ import {
   BAR_MAX_FONT_SCALE,
   fontStyle,
   Icon,
+  nativeInboxAttentionCount,
+  useNativeInbox,
   useNativeTimelineTheme,
 } from "@opengeni/react-native/timeline";
 import * as Haptics from "expo-haptics";
-import { router } from "expo-router";
-import type { ReactNode } from "react";
+import { router, useFocusEffect } from "expo-router";
+import { useCallback, type ReactNode } from "react";
 import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -16,9 +18,11 @@ import {
   edgeSwipeOpensDrawer,
   TAB_BAR_HEIGHT,
   tabBarHeight,
+  tabBadge,
   tabNavigation,
   type AppTab,
 } from "@/app-tabs";
+import { useAccount } from "@/account";
 import { isCapturing, useMeetingRecorder } from "@/meetings";
 import { dismissToHome } from "@/navigation";
 
@@ -83,13 +87,23 @@ export function TabScreen({ tab, children }: { tab: AppTab; children: ReactNode 
 
 /**
  * The bar docked flush at the bottom, inside the safe area, with the place in
- * use filled. Meetings shows a red dot while a recording runs.
+ * use filled. Meetings shows a red dot while a recording runs; Inbox counts
+ * what waits on the person (questions and approvals).
  */
 export function AppTabBar({ current }: { current: AppTab }) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const insets = useSafeAreaInsets();
   const recording = isCapturing(useMeetingRecorder());
+  const { client } = useAccount();
+  const inbox = useNativeInbox(client);
+  const refreshInbox = inbox.refresh;
+  useFocusEffect(
+    useCallback(() => {
+      void refreshInbox();
+    }, [refreshInbox]),
+  );
+  const badge = tabBadge(nativeInboxAttentionCount(inbox.data));
   const height = tabBarHeight(insets.bottom);
   return (
     <View
@@ -116,12 +130,18 @@ export function AppTabBar({ current }: { current: AppTab }) {
         {APP_TABS.map((entry) => {
           const selected = entry.tab === current;
           const live = entry.tab === "meetings" && recording;
+          const count = entry.tab === "inbox" ? badge : null;
+          const label = live
+            ? `${entry.label}, recording now`
+            : count
+              ? `${entry.label}, ${count} waiting`
+              : entry.label;
           return (
             <Pressable
               key={entry.tab}
               accessibilityRole="tab"
               accessibilityState={{ selected }}
-              accessibilityLabel={live ? `${entry.label}, recording now` : entry.label}
+              accessibilityLabel={label}
               onPress={() => {
                 if (selected) return;
                 void Haptics.selectionAsync();
@@ -155,6 +175,34 @@ export function AppTabBar({ current }: { current: AppTab }) {
                       backgroundColor: c.danger,
                     }}
                   />
+                ) : null}
+                {count ? (
+                  <View
+                    style={{
+                      position: "absolute",
+                      top: -4,
+                      left: 12,
+                      minWidth: 16,
+                      height: 16,
+                      paddingHorizontal: 4,
+                      borderRadius: 8,
+                      alignItems: "center",
+                      justifyContent: "center",
+                      backgroundColor: c["status-waiting"],
+                    }}
+                  >
+                    <Text
+                      maxFontSizeMultiplier={BAR_MAX_FONT_SCALE}
+                      style={{
+                        ...fontStyle(theme, 600),
+                        fontSize: 10,
+                        lineHeight: 12,
+                        color: "#fff",
+                      }}
+                    >
+                      {count}
+                    </Text>
+                  </View>
                 ) : null}
               </View>
               <Text
