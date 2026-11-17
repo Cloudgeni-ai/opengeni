@@ -1,13 +1,16 @@
 import { createHash } from "node:crypto";
 import type { Tool } from "@openai/agents";
-import { prefixedMcpToolName } from "../../../packages/runtime/src/index";
+import {
+  mcpServerNamespace,
+  mcpWireToolNames,
+} from "../../../packages/runtime/src/mcp-model-tool-name";
 import type { Catalog, CatalogTool } from "./types";
 
 /**
  * Accepted files: a JSON array, `{ tools: [...] }`, or JSON Lines with one entry per line.
  * Accepted entries:
  * - `{ server, tool, description, inputSchema }`: an MCP tool as its server publishes it.
- *   The model name is derived exactly as the runtime derives it.
+ *   The model name is derived exactly as the runtime derives it for this catalog.
  * - `{ name | modelName, description, parameters | inputSchema, identity?: { serverId, toolName? } }`:
  *   a tool already under its model name, such as an attempt tool-catalog entry.
  * Either may set `eager: true` for a tool sent on every request instead of searched.
@@ -33,16 +36,35 @@ export function normalizedName(reference: string): string {
     .replace(/[.\-/\s]+/g, "_");
 }
 
+/** The wire name of every entry given as a server and tool, as the runtime names it. */
+function catalogWireNames(entries: readonly RawEntry[]): Map<string, Map<string, string>> {
+  const byServer = new Map<string, string[]>();
+  for (const entry of entries) {
+    if (entry.name ?? entry.modelName) continue;
+    const server = entry.server ?? entry.identity?.serverId;
+    const published = entry.tool ?? entry.identity?.toolName;
+    if (!server || !published) continue;
+    byServer.set(server, [...(byServer.get(server) ?? []), published]);
+  }
+  return new Map(
+    [...byServer].map(([registryId, toolNames]) => [
+      registryId,
+      mcpWireToolNames(registryId, mcpServerNamespace(registryId).namespace, toolNames),
+    ]),
+  );
+}
+
 export async function loadCatalog(path: string): Promise<Catalog> {
   const text = await Bun.file(path).text();
   const entries = parseEntries(text);
+  const wireNames = catalogWireNames(entries);
   const tools: CatalogTool[] = entries.map((entry, index) => {
     const server = entry.server ?? entry.identity?.serverId;
     const published = entry.tool ?? entry.identity?.toolName;
     const name =
       entry.name ??
       entry.modelName ??
-      (server && published ? prefixedMcpToolName(server, published) : undefined);
+      (server && published ? wireNames.get(server)?.get(published) : undefined);
     if (!name) throw new Error(`Catalog entry ${index} has neither a name nor a server and tool`);
     return {
       name,

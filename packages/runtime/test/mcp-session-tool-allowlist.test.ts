@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import type { MCPServer } from "@openai/agents";
 import { testSettings } from "@opengeni/testing/settings";
-import { prepareAgentTools, prefixedMcpToolName } from "../src/index";
+import { prepareAgentTools } from "../src/index";
+import { mcpToolWireName } from "../src/mcp-model-tool-name";
 
 test("session tool policy intersects connection tools for discovery and direct execution", async () => {
   const called: string[] = [];
@@ -31,15 +32,15 @@ test("session tool policy intersects connection tools for discovery and direct e
     try {
       const server = prepared.mcpServers[0]!;
       expect((await server.listTools()).map((tool) => tool.name)).toEqual(
-        allowedTools.length ? [prefixedMcpToolName("crm", "read")] : [],
+        allowedTools.length ? [mcpToolWireName("crm", "read")] : [],
       );
-      await expect(server.callTool(prefixedMcpToolName("crm", "write"), {})).rejects.toThrow(
-        "not allowed",
+      await expect(server.callTool(mcpToolWireName("crm", "write"), {})).rejects.toThrow(
+        "is not one of the tools",
       );
-      await expect(server.callTool(prefixedMcpToolName("crm", "admin"), {})).rejects.toThrow(
-        "not allowed",
+      await expect(server.callTool(mcpToolWireName("crm", "admin"), {})).rejects.toThrow(
+        "is not one of the tools",
       );
-      if (allowedTools.length) await server.callTool(prefixedMcpToolName("crm", "read"), {});
+      if (allowedTools.length) await server.callTool(mcpToolWireName("crm", "read"), {});
     } finally {
       await prepared.close();
     }

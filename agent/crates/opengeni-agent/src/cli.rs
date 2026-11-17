@@ -373,8 +373,10 @@ fn parse_list_limit(value: &str) -> Result<usize, String> {
 /// Arguments for `codemode show`.
 #[derive(Debug, clap::Args)]
 pub struct CodemodeShowArgs {
-    /// Generated path, model name, or `server.tool` identity.
-    pub tool: String,
+    /// Path (`server.tool`), `server__tool`, model name, or the tool's own name
+    /// when one tool has it. Several names print an array.
+    #[arg(required = true, num_args = 1..)]
+    pub tools: Vec<String>,
 }
 
 /// Arguments for `codemode call`.
@@ -687,8 +689,8 @@ mod tests {
         let cli =
             Cli::try_parse_from(["opengeni-agent", "codemode", "show", "docs.search"]).unwrap();
         assert!(matches!(cli.command, Some(Command::Codemode(CodemodeArgs {
-            action: CodemodeAction::Show(CodemodeShowArgs { tool })
-        })) if tool == "docs.search"));
+            action: CodemodeAction::Show(CodemodeShowArgs { tools })
+        })) if tools == ["docs.search"]));
         for args in [
             vec!["list", "--full", "--json"],
             vec!["list", "--json", "--full"],
@@ -697,7 +699,6 @@ mod tests {
             vec!["list", "--unknown"],
             vec!["list", "extra"],
             vec!["show"],
-            vec!["show", "docs.search", "extra"],
             vec!["show", "--full"],
             vec!["show", "docs.search", "--json"],
             vec!["list", "--limit", "0"],

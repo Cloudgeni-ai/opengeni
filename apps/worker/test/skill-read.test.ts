@@ -366,6 +366,22 @@ describe("skill_read gateway definition", () => {
     }
   });
 
+  test("a full read discloses the tools the Skill declares; paths and listings disclose none", async () => {
+    const definition = createSkillReadAttemptToolDefinition({
+      authorize: async () => {},
+      load: async () => [
+        {
+          path: "SKILL.md",
+          content:
+            "---\nname: records\ndescription: Work with records\ntools:\n  - records.swap\n  - get_line\n---\n# Records",
+        },
+      ],
+    });
+    expect(await definition.discloses!({ skill: "records" })).toEqual(["records.swap", "get_line"]);
+    expect(await definition.discloses!({ skill: "records", paths: ["SKILL.md"] })).toEqual([]);
+    expect(await definition.discloses!({ skill: "records", listFiles: true })).toEqual([]);
+  });
+
   test("inventory rechecks authority before loading", async () => {
     const definition = createSkillReadAttemptToolDefinition({
       authorize: async () => {

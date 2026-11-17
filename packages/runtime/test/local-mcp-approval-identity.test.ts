@@ -3,12 +3,12 @@ import { RunContext, type MCPServer } from "@openai/agents";
 import { testSettings } from "@opengeni/testing/settings";
 import {
   buildOpenGeniAgent,
-  prefixedMcpToolName,
   prepareAgentTools,
   sessionMcpApprovalConnectionId,
   type ConnectorActionPolicyHooks,
   type ConnectorActionToolCall,
 } from "../src/index";
+import { mcpToolWireName } from "../src/mcp-model-tool-name";
 
 // Reported in https://github.com/Cloudgeni-ai/opengeni/pull/2537 by Ali Ozaltin:
 // an embedding host registers an in-process MCP server together with its own
@@ -83,7 +83,7 @@ async function harness(approvedToolCallId?: string, approvedToolCallIds?: readon
   });
   const tools = await agent.getMcpTools(new RunContext());
   const tool = (name: string) => {
-    const found = tools.find((candidate) => candidate.name === prefixedMcpToolName(serverId, name));
+    const found = tools.find((candidate) => candidate.name === mcpToolWireName(serverId, name));
     if (!found || found.type !== "function") throw new Error(`local MCP tool ${name} missing`);
     return found;
   };

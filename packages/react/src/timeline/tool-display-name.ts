@@ -1,7 +1,8 @@
 /**
  * MCP / first-party tool naming helpers.
  *
- * Wire names are often `<serverId>__<toolName>` (see prefixedMcpToolName).
+ * Wire names are `<server>__<toolName>`, where server is Opengeni's own
+ * server id or a connector's namespace (see mcpServerNamespace).
  * Matching and titles must use the leaf tool name so `opengeni__session_create`
  * and bare `session_create` resolve the same UI — without inventing previews
  * from argument JSON.

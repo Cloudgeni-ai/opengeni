@@ -202,7 +202,7 @@ describe("worker activities integration", () => {
         attemptConnectorActionBindings: [
           ...(options.attemptConnectorActionBindings ?? []),
           {
-            modelName: "fixture__change",
+            identity: { serverId: "fixture", toolName: "change" },
             call: (approvalId, args) => ({
               approvalId,
               connectionId: "session-mcp:fixture:synthetic",
