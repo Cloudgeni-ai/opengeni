@@ -300,16 +300,7 @@ export class ToolGateway {
     if (!this.resolveApproval && this.requireApproval?.(definition.entry, caller, context)) {
       throw new ToolGatewayApprovalRequiredError();
     }
-    let callArguments = request.arguments;
-    if (!definition.validateInput(callArguments)) {
-      const repaired = repairableInputSize(callArguments)
-        ? repairStringEncodedArguments(callArguments, definition.diagnoseInput())
-        : undefined;
-      if (!repaired) throw inputValidationError(definition, callArguments);
-      // Report what is still wrong after the repair, not what it fixed.
-      if (!definition.validateInput(repaired)) throw inputValidationError(definition, repaired);
-      callArguments = repaired;
-    }
+    const callArguments = admitInput(definition, request.arguments);
     if (
       caller.kind === "model" &&
       !this.resolveApproval &&
@@ -448,17 +439,7 @@ export class ToolGateway {
   }
 
   async callModel(input: ModelToolGatewayCall): Promise<ToolGatewayResultValue> {
-    const definition = this.byModelName.get(input.modelName);
-    if (!definition) {
-      throw new ToolGatewayToolNotFoundError();
-    }
-    if (
-      input.expectedIdentity !== undefined &&
-      identityKey(input.expectedIdentity) !== identityKey(definition.entry.identity)
-    ) {
-      // Two tools claimed this model name and the catalog kept the other one.
-      throw new ToolGatewayToolNotFoundError();
-    }
+    const definition = this.modelDefinition(input);
     const call = {
       operationId: input.operationId ?? randomUUID(),
       catalogDigest: this.catalogDigest,
@@ -482,6 +463,54 @@ export class ToolGateway {
       await this.prepareCallWithModelApproval(call, context, modelApprovalConfirmed)
     ).execute();
   }
+
+  /**
+   * The arguments a model call would run with, checked exactly as `callModel`
+   * checks them: the same compiled input schema and the same repair of
+   * string-encoded values. Approval hooks run this before asking anyone, so
+   * a call that can never run is rejected instead of reviewed, and a review
+   * shows the repaired arguments the call will actually execute with.
+   * Throws `ToolGatewayInputValidationError` for arguments the call would
+   * reject, and `ToolGatewayToolNotFoundError` when `callModel` would not
+   * find the tool. Authorization, approval and execution are not touched.
+   */
+  admitModelArguments(
+    input: Pick<ModelToolGatewayCall, "modelName" | "arguments" | "expectedIdentity">,
+  ): Record<string, unknown> {
+    return admitInput(this.modelDefinition(input), input.arguments);
+  }
+
+  private modelDefinition(
+    input: Pick<ModelToolGatewayCall, "modelName" | "expectedIdentity">,
+  ): CompiledDefinition {
+    const definition = this.byModelName.get(input.modelName);
+    if (!definition) {
+      throw new ToolGatewayToolNotFoundError();
+    }
+    if (
+      input.expectedIdentity !== undefined &&
+      identityKey(input.expectedIdentity) !== identityKey(definition.entry.identity)
+    ) {
+      // Two tools claimed this model name and the catalog kept the other one.
+      throw new ToolGatewayToolNotFoundError();
+    }
+    return definition;
+  }
+}
+
+/** Validate call arguments, repairing string-encoded values the schema expects decoded. */
+function admitInput(
+  definition: CompiledDefinition,
+  args: Record<string, unknown>,
+): Record<string, unknown> {
+  if (definition.validateInput(args)) return args;
+  const repaired = repairableInputSize(args)
+    ? repairStringEncodedArguments(args, definition.diagnoseInput())
+    : undefined;
+  if (!repaired) throw inputValidationError(definition, args);
+  // Report what is still wrong after the repair, not what it fixed.
+  if (!definition.validateInput(repaired)) throw inputValidationError(definition, repaired);
+  return repaired;
 }
 
 /**
