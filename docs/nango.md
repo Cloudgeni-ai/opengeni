@@ -210,9 +210,14 @@ URL, so deployments sharing one Nango environment never sweep each other's):
   only people with at least one connection this deployment tagged are
   visited.
 
-Repoints are committed first. Every deletion in Nango, and the confirmation
-before marking a row, happens afterwards under the person's lock, in a
-transaction that writes no connection rows, after the rows are read again. A
+Repoints are committed first. Every deletion in Nango happens afterwards
+under the person's lock, in a transaction that writes no connection rows,
+after the rows are read again. Marking a row first confirms the 404 with
+Nango, then re-reads under the lock and marks only active rows still on that
+connection. When more rows stand for missing connections than for half of
+the connections the pass knows (and more than ten), as with a wrong Nango
+environment, it marks none and logs a warning; with a deployment tag
+mismatch it does not use the deployment-wide listing at all. A
 worker whose public base URL tags none of the listed connections while others
 carry another deployment's tag logs once that its tag is possibly mismatched
 (it then cleans up nothing, unless it is a new deployment sharing the Nango

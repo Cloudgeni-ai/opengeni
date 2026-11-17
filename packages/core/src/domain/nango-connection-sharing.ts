@@ -660,6 +660,8 @@ export type NangoSweepResult = {
   skippedPeople: number;
   /** Too many orphans at once to trust; none were deleted. */
   orphanBreakerTripped: boolean;
+  /** Too many rows on missing connections at once to trust; none were marked. */
+  missingBreakerTripped: boolean;
   /** The pass ran out of time; the people left wait for the next pass. */
   deferredPeople: number;
 };
@@ -703,8 +705,11 @@ export const NANGO_SWEEP_BUDGET_MS = 3 * 60 * 1000;
  *   connection of the same account that covers its scopes is pointed at that
  *   one instead (the duplicates step).
  *
- * Every Nango deletion and confirmation happens after the rows' writes
- * commit, under the person lock in a transaction that writes no connection rows.
+ * Every Nango deletion happens after the rows' writes commit, under the
+ * person lock in a transaction that writes no connection rows. Marking a row
+ * first confirms the 404 with Nango, then re-reads under the lock and marks
+ * only active rows still on that connection. Too many rows on missing
+ * connections at once (as with a wrong Nango environment) marks none.
  *
  * Connections without this deployment's tag (made outside Opengeni, by
  * another deployment sharing the Nango environment, or before the tag) are
@@ -751,7 +756,10 @@ export async function sweepNangoConnections(
     }
     group.remote.push(connection);
   }
-  if (groups.size === 0 && otherDeployments > 0 && !deploymentTagMismatchLogged) {
+  // Nothing listed is this deployment's while others' are: possibly the
+  // wrong Nango environment or tag, so nothing can be taken for missing.
+  const tagMismatch = groups.size === 0 && otherDeployments > 0;
+  if (tagMismatch && !deploymentTagMismatchLogged) {
     // Possibly the worker's public base URL differs from the API's (then this
     // sweep never cleans up anything), or a new deployment shares the Nango
     // environment with another and has no connections yet.
@@ -767,14 +775,18 @@ export async function sweepNangoConnections(
   // People whose live rows all stand for connections Nango no longer lists
   // (deleted outside reference counting) have nothing listed to be found
   // by; the deployment-wide listing (1484, once granted) finds them too.
-  const owners = await listNangoLiveConnectionOwners(deps.db).catch((error: unknown) => {
-    console.warn("[nango] sweep could not list live Nango rows", {
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return null;
-  });
+  const owners = tagMismatch
+    ? null
+    : await listNangoLiveConnectionOwners(deps.db).catch((error: unknown) => {
+        console.warn("[nango] sweep could not list live Nango rows", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return null;
+      });
+  let unlisted = 0;
   for (const owner of owners ?? []) {
     if (listed.has(listedKey(owner.providerConfigKey, owner.nangoConnectionId))) continue;
+    unlisted += 1;
     const key = JSON.stringify([owner.subjectId, owner.providerConfigKey]);
     if (groups.has(key)) continue;
     groups.set(key, {
@@ -792,12 +804,15 @@ export async function sweepNangoConnections(
     markedMissing: 0,
     skippedPeople: 0,
     orphanBreakerTripped: false,
+    missingBreakerTripped: false,
     deferredPeople: 0,
   };
   const order = shuffled([...groups.values()]);
   const tagged = order.reduce((sum, group) => sum + group.remote.length, 0);
   const withOrphans: SweepGroup[] = [];
   let orphanCount = 0;
+  const withMissing: Array<{ group: SweepGroup; missing: string[] }> = [];
+  let missingCount = 0;
   const outOfTime = () => clock() - started >= budgetMs;
   for (const [index, group] of order.entries()) {
     if (outOfTime()) {
@@ -843,11 +858,10 @@ export async function sweepNangoConnections(
           kept("broken connections"),
         )),
       );
-      result.markedMissing += (
-        await markMissingCommitted(deps, client, group, outcome.missing).catch(
-          kept("rows on missing connections"),
-        )
-      ).length;
+      if (outcome.missing.length) {
+        withMissing.push({ group, missing: outcome.missing });
+        missingCount += outcome.missing.length;
+      }
       if (outcome.orphans.length) {
         withOrphans.push(group);
         orphanCount += outcome.orphans.length;
@@ -863,6 +877,32 @@ export async function sweepNangoConnections(
     console.warn("[nango] sweep could not decide for some people; their connections were kept", {
       skippedPeople: result.skippedPeople,
     });
+  // A wrong Nango environment (every connection a 404) must never ask
+  // everyone to reconnect.
+  const known = tagged + unlisted;
+  if (missingCount > Math.max(10, Math.floor(known / 2))) {
+    result.missingBreakerTripped = true;
+    console.warn("[nango] sweep found too many rows on missing connections; none marked", {
+      missing: missingCount,
+      known,
+    });
+  } else {
+    for (const { group, missing } of withMissing) {
+      if (outOfTime()) {
+        result.deferredPeople += 1;
+        continue;
+      }
+      options.onProgress?.();
+      result.markedMissing += (
+        await markMissingCommitted(deps, client, group, missing).catch((error: unknown) => {
+          console.warn("[nango] sweep kept one person's rows on missing connections", {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return [];
+        })
+      ).length;
+    }
+  }
   // A broken read must never delete everyone's connections.
   if (orphanCount > Math.max(10, Math.floor(tagged / 2))) {
     result.orphanBreakerTripped = true;

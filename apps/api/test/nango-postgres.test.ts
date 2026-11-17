@@ -1051,7 +1051,24 @@ describe("Nango connections in PostgreSQL", () => {
     await shared!.admin.unsafe(
       "GRANT EXECUTE ON FUNCTION opengeni_private.nango_live_connection_owners_v1(text, text, text, integer) TO opengeni_app",
     );
+    // Earlier tests' rows stand for connections only their own fake Nango
+    // had; retire them so this pass sees only this person.
+    await shared!.admin`update connections set status = 'revoked'
+      where metadata ->> 'integrationBackend' = 'nango' and status <> 'revoked'
+        and workspace_id <> ${target.workspaceId}`;
     try {
+      // Nango lists only another deployment's connections (possibly the wrong
+      // environment): the listing is not used, so nothing is taken for missing.
+      nango.remote.push({
+        connectionId: "nl-other-deployment",
+        tags: { ...attemptTags(target, "other"), [NANGO_DEPLOYMENT_TAG]: "https://other.test" },
+        email: "other@example.com",
+        scope: "",
+        authErrors: 0,
+      });
+      await sweepNangoConnections(sweepDeps(nango));
+      expect((await nangoRows(target))[0]).toMatchObject({ status: "active" });
+      nango.remote.pop();
       await sweepNangoConnections(sweepDeps(nango));
     } finally {
       await shared!.admin.unsafe(
@@ -1062,6 +1079,26 @@ describe("Nango connections in PostgreSQL", () => {
       select status, last_error from connections
       where workspace_id = ${target.workspaceId} and provider_domain = 'nango:gmail'`;
     expect({ ...row }).toEqual({ status: "needs_reauth", last_error: "nango_connection_missing" });
+  });
+
+  test("too many rows on missing connections at once marks none", async () => {
+    if (!shared) return;
+    const target = await owner("nango sweep missing breaker");
+    const nango = fakeNango();
+    await connect(target, nango, "mb-listed", "mb-listed@example.com");
+    const gone = Array.from({ length: 11 }, (_, index) => `mb-${index}`);
+    for (const id of gone) await connect(target, nango, id, `${id}@example.com`);
+    // As with a Nango key for the wrong environment: every one of them a 404.
+    nango.remote.splice(
+      0,
+      nango.remote.length,
+      ...nango.remote.filter((entry) => !gone.includes(entry.connectionId)),
+    );
+    expect(await sweepNangoConnections(sweepDeps(nango))).toMatchObject({
+      markedMissing: 0,
+      missingBreakerTripped: true,
+    });
+    expect((await nangoRows(target)).every((row) => row.status === "active")).toBe(true);
   });
 
   test("older duplicates without the scope marker merge on the scopes Nango reports", async () => {

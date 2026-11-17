@@ -258,9 +258,10 @@ export async function listNangoLiveConnectionOwners(
         providerConfigKey: row.provider_config_key,
         nangoConnectionId: row.nango_connection_id,
       });
-    if (page.length < pageSize) break;
+    if (page.length < pageSize) return owners;
     after = owners[owners.length - 1]!;
   }
+  console.warn("[nango] live Nango rows listing stopped at its cap", { maxRows });
   return owners;
 }
 

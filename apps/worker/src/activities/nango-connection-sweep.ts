@@ -12,6 +12,7 @@ export type SweepNangoConnectionsActivityResult = {
   skippedPeople: number;
   deferredPeople: number;
   orphanBreakerTripped: boolean;
+  missingBreakerTripped: boolean;
 };
 
 function heartbeat(): void {
@@ -57,6 +58,7 @@ export function createNangoConnectionSweepActivities(
           skippedPeople: 0,
           deferredPeople: 0,
           orphanBreakerTripped: false,
+          missingBreakerTripped: false,
         };
       const summary = {
         skipped: false,
@@ -70,6 +72,7 @@ export function createNangoConnectionSweepActivities(
         skippedPeople: result.skippedPeople,
         deferredPeople: result.deferredPeople,
         orphanBreakerTripped: result.orphanBreakerTripped,
+        missingBreakerTripped: result.missingBreakerTripped,
       };
       // People whose rows could not all be read keep their connections; say so.
       if (summary.skippedPeople > 0 || summary.deferredPeople > 0)
@@ -81,7 +84,8 @@ export function createNangoConnectionSweepActivities(
         summary.deleted > 0 ||
         summary.repointed > 0 ||
         summary.markedMissing > 0 ||
-        summary.orphanBreakerTripped
+        summary.orphanBreakerTripped ||
+        summary.missingBreakerTripped
       )
         observability.info("Nango connection sweep", {
           ...summary,
