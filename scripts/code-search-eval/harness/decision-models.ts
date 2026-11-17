@@ -3,6 +3,9 @@ import { JevClient, estimateJevTokens } from "../../../packages/jev/src/client";
 import { createJevDecisionModel } from "../../../packages/jev/src/decision-model";
 import type {
   DecisionModel,
+  DecisionOptions,
+  DecisionQuestion,
+  DecisionResult,
   DecisionUsage,
 } from "../../../packages/decisions/src/types";
 import { BudgetStop } from "./budget";
@@ -93,9 +96,58 @@ export function createDecisionModelsDecisionModel(options: {
   concurrency?: number;
   /** The provider's per-request question cap (GET /v1/models max_questions; s1-pro: 3). */
   maxQuestions?: number;
+  /** Append one JSON line per HTTP attempt (status, ms, questions, split) and per failed decision. */
+  tracePath?: string;
   /** Test transport. */
   fetch?: (url: string, init: RequestInit) => Promise<Response>;
 }): DecisionModel {
+  const trace = (entry: Record<string, unknown>) => {
+    if (options.tracePath)
+      appendFileSync(
+        options.tracePath,
+        `${JSON.stringify({ at: new Date().toISOString(), arm: options.arm, taskId: options.taskId(), ...entry })}\n`,
+      );
+  };
+  const baseFetch =
+    options.fetch ?? ((url: string, init: RequestInit) => fetch(url, init));
+  // Every attempt, including the client's own 429 retries, is visible to the trace.
+  const tracedFetch = async (url: string, init: RequestInit) => {
+    const t0 = performance.now();
+    let questions: number | null = null;
+    let bodyChars: number | null = null;
+    if (typeof init.body === "string") {
+      bodyChars = init.body.length;
+      try {
+        const q = (JSON.parse(init.body) as { questions?: unknown }).questions;
+        if (q && typeof q === "object") questions = Object.keys(q).length;
+      } catch {
+        // not JSON; leave unknown
+      }
+    }
+    try {
+      const res = await baseFetch(url, init);
+      if (options.tracePath && !url.endsWith("/healthz"))
+        trace({
+          kind: "http",
+          status: res.status,
+          ms: Math.round(performance.now() - t0),
+          questions,
+          bodyChars,
+          retryAfter: res.headers.get("retry-after"),
+        });
+      return res;
+    } catch (error) {
+      trace({
+        kind: "http",
+        status: null,
+        ms: Math.round(performance.now() - t0),
+        questions,
+        bodyChars,
+        error: String(error).slice(0, 200),
+      });
+      throw error;
+    }
+  };
   const client = new JevClient({
     apiKey: options.apiKey,
     baseUrl: options.baseUrl ?? DECISION_MODELS_BASE_URL,
@@ -106,15 +158,16 @@ export function createDecisionModelsDecisionModel(options: {
     maxRetryAfterMs: 20_000,
     retryBaseDelayMs: 1_000,
     concurrency: options.concurrency ?? 4,
-    ...(options.fetch ? { fetch: options.fetch } : {}),
+    fetch: tracedFetch,
   });
   const inner = createJevDecisionModel(client);
   const maxQuestions = options.maxQuestions ?? 3;
-  const single: DecisionModel["decide"] = async (
-    input,
-    questions,
-    decideOptions = {},
-  ) => {
+  const single = async <Q extends Record<string, DecisionQuestion>>(
+    input: unknown,
+    questions: Q,
+    decideOptions: DecisionOptions = {},
+    part: { index: number; of: number } = { index: 0, of: 1 },
+  ): Promise<DecisionResult<Q>> => {
     const taskId = options.taskId();
     // Reserve the request's own size estimate, doubled for chunked question maps and estimate error.
     const estimate = 2 * estimateJevTokens({ input, questions }) + 1_000;
@@ -129,9 +182,25 @@ export function createDecisionModelsDecisionModel(options: {
         },
       });
       hold.settle(reported ?? estimate);
+      trace({
+        kind: "decision",
+        ok: true,
+        questions: Object.keys(questions).length,
+        split: part,
+        inputTokens: reported,
+      });
       return result;
     } catch (error) {
       const status = (error as { status?: number }).status;
+      trace({
+        kind: "decision",
+        ok: false,
+        status: status ?? null,
+        questions: Object.keys(questions).length,
+        split: part,
+        inputTokens: reported,
+        error: String((error as Error)?.message ?? error).slice(0, 300),
+      });
       if (reported !== null) hold.settle(reported);
       // A timeout or connection failure may still have been processed; count the estimate.
       else if (status === undefined) hold.settle(estimate);
@@ -156,7 +225,9 @@ export function createDecisionModelsDecisionModel(options: {
           ) as typeof questions,
         );
       const results = await Promise.all(
-        parts.map((q) => single(input, q, decideOptions)),
+        parts.map((q, index) =>
+          single(input, q, decideOptions, { index, of: parts.length }),
+        ),
       );
       const sum = (pick: (u: DecisionUsage) => number | null) =>
         results.every((r) => pick(r.usage) !== null)

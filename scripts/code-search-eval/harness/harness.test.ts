@@ -823,6 +823,55 @@ describe("decision models", () => {
     expect(result.usage.inputTokens).toBe(200);
     expect(ledger.usedTokens).toBe(200);
   });
+  test("the request trace records every HTTP attempt, splits and failures", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cse-trace-"));
+    const tracePath = join(dir, "trace.jsonl");
+    let status = 200;
+    const model = createDecisionModelsDecisionModel({
+      apiKey: "k",
+      model: "s1-pro",
+      ledger: new TokenLedger(1_000_000),
+      arm: "dm",
+      taskId: () => "t1",
+      maxQuestions: 3,
+      tracePath,
+      fetch: async (_url, init) => {
+        const ids = Object.keys(
+          (JSON.parse(String(init.body)) as { questions: object }).questions,
+        );
+        if (status !== 200) return reply({ error: { message: "x" } }, status);
+        return reply({
+          model: "s1-pro-x",
+          answers: Object.fromEntries(
+            ids.map((id) => [id, { type: "noul", noul: 0.5 }]),
+          ),
+          usage: { input_tokens: 100 },
+        });
+      },
+    });
+    const many = Object.fromEntries(
+      ["a", "b", "c", "d", "e"].map((id) => [id, questions.p]),
+    );
+    await model.decide({ s: 1 }, many);
+    status = 400;
+    await expect(model.decide({ s: 1 }, questions)).rejects.toThrow();
+    const lines = require("node:fs")
+      .readFileSync(tracePath, "utf8")
+      .trim()
+      .split("\n")
+      .map((l: string) => JSON.parse(l));
+    const http = lines.filter((l: { kind: string }) => l.kind === "http");
+    expect(http.map((l: { status: number }) => l.status).sort()).toEqual([
+      200, 200, 400,
+    ]);
+    expect(http.every((l: { taskId: string }) => l.taskId === "t1")).toBe(true);
+    const decisions = lines.filter((l: { kind: string }) => l.kind === "decision");
+    expect(
+      decisions.filter((l: { ok: boolean }) => l.ok).map((l: { split: { of: number } }) => l.split.of),
+    ).toEqual([2, 2]);
+    expect(decisions.find((l: { ok: boolean }) => !l.ok)?.status).toBe(400);
+    rmSync(dir, { recursive: true, force: true });
+  });
 });
 
 describe("helpers and report", () => {

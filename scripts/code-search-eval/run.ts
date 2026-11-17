@@ -186,6 +186,7 @@ async function buildArms(): Promise<Arm[]> {
       ledger: tokens,
       arm: "decision-models",
       taskId: () => currentTask.get(),
+      tracePath: join(values.out!, "dm-requests.jsonl"),
     });
   }
   return names.map((name) => {
@@ -194,7 +195,10 @@ async function buildArms(): Promise<Arm[]> {
     if (name === "repomap") return repoMapArm;
     if (name === "hybrid") return hybridArm;
     if (name === "jev-rerank") return jevRerankArm(gatewayModel!);
-    if (name === "code-search") return codeSearchArm(gatewayModel!);
+    if (name === "code-search")
+      return codeSearchArm(gatewayModel!, "code-search", {
+        traceDir: join(values.out!, "code-search-traces"),
+      });
     if (name === "dm-rerank")
       // Decision Models takes 3 questions and 8K input tokens per s1-pro request: 3 candidates per
       // call with shorter excerpts keeps a call inside both limits.
@@ -205,7 +209,9 @@ async function buildArms(): Promise<Arm[]> {
         maxTaskChars: 5000,
       });
     if (name === "dm-code-search")
-      return codeSearchArm(dmModel!, "dm-code-search");
+      return codeSearchArm(dmModel!, "dm-code-search", {
+        traceDir: join(values.out!, "code-search-traces"),
+      });
     if (name === "dense" || name === "hybrid-dense") {
       if (!denseScores) throw new Error(`${name} needs --dense-scores`);
       return name === "dense"
