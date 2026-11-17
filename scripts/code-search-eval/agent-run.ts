@@ -43,6 +43,7 @@ import {
 } from "./harness/opengeni-session";
 import { RepoCache } from "./harness/repos";
 import {
+  codeGrepStats,
   localizeTrajectory,
   predictionFromAnswer,
   type AgentEvent,
@@ -67,6 +68,10 @@ const { values } = parseArgs({
     concurrency: { type: "string", default: "4" },
     "timeout-sec": { type: "string", default: "1200" },
     smoke: { type: "boolean", default: false },
+    /** Enable the deployment's code-search tool in each attempt workspace (the tool arms). */
+    "code-search": { type: "boolean", default: false },
+    /** A file of task ids, one per line: run only these (a paired subset shared by every arm). */
+    "task-ids": { type: "string" },
   },
 });
 
@@ -152,6 +157,7 @@ async function attempt(task: Task, repos: RepoCache) {
   let session: string | null = null;
   let enrollment: string | null = null;
   const t0 = performance.now();
+  record.startedAt = new Date().toISOString();
   try {
     const repoDir = repos.checkout(task.repo, task.repoUrl, task.commit);
     snap = snapshot(repoDir);
@@ -163,7 +169,7 @@ async function attempt(task: Task, repos: RepoCache) {
     await api.call(
       "PATCH",
       `/v1/workspaces/${workspace}/settings`,
-      ATTEMPT_SETTINGS,
+      { ...ATTEMPT_SETTINGS, codeSearchEnabled: values["code-search"] === true },
     );
     sh(["docker", "rm", "-f", name], { check: false });
     sh([
@@ -313,6 +319,7 @@ async function attempt(task: Task, repos: RepoCache) {
     record.network = networkCommands(events);
     record.turnsFailed = events.filter((e) => e.type === "turn.failed").length;
     record.calls = viewed.calls;
+    record.codeGrep = codeGrepStats(events);
     const failed = status === "timeout" || !answer;
     const runs: ArmRun[] = [
       {
@@ -405,7 +412,7 @@ async function attempt(task: Task, repos: RepoCache) {
     }
     appendFileSync(
       detailPath,
-      `${JSON.stringify({ ...record, workspace, wallMs: Math.round(performance.now() - t0) })}\n`,
+      `${JSON.stringify({ ...record, workspace, endedAt: new Date().toISOString(), wallMs: Math.round(performance.now() - t0) })}\n`,
     );
   }
 }
@@ -418,6 +425,12 @@ if (values.split !== "all")
   tasks = tasks.filter((t) => t.split === values.split);
 if (values["per-language"])
   tasks = stratifiedSample(tasks, Number(values["per-language"]));
+if (values["task-ids"]) {
+  const wanted = new Set(
+    readFileSync(values["task-ids"], "utf8").split("\n").map((l) => l.trim()).filter(Boolean),
+  );
+  tasks = tasks.filter((t) => wanted.has(t.id));
+}
 if (values.limit) tasks = tasks.slice(0, Number(values.limit));
 const done = new Set(
   existsSync(runsPath)

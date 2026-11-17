@@ -106,6 +106,9 @@ export function localizeTrajectory(
       } else if (name === "code_search") {
         kinds.set(String(p.id), "code_search");
         explore++;
+      } else if (name === "code_grep") {
+        kinds.set(String(p.id), "code_grep");
+        explore++;
       }
     } else if (event.type === "agent.toolCall.output") {
       const kind = kinds.get(String(p.id));
@@ -118,6 +121,9 @@ export function localizeTrajectory(
           if (!searched.includes(f)) searched.push(f);
       if (kind === "code_search")
         for (const m of out.matchAll(/^== (.+?):(\d+)-(\d+)\s/gm))
+          spans.push({ file: m[1]!, start: Number(m[2]), end: Number(m[3]) });
+      if (kind === "code_grep")
+        for (const m of out.matchAll(/^--- (.+?):(\d+)-(\d+)/gm))
           spans.push({ file: m[1]!, start: Number(m[2]), end: Number(m[3]) });
     }
   }
@@ -169,4 +175,34 @@ function safeJson(text: string): unknown {
   } catch {
     return {};
   }
+}
+
+/** Per-task code_grep calls: how many, output size, and whether the judge failed or stopped early. */
+export function codeGrepStats(events: AgentEvent[]): {
+  calls: number;
+  patterns: number;
+  outputChars: number;
+  judgeFailed: number;
+  stoppedEarly: number;
+  errors: number;
+} {
+  const ids = new Set<string>();
+  const stats = { calls: 0, patterns: 0, outputChars: 0, judgeFailed: 0, stoppedEarly: 0, errors: 0 };
+  for (const event of events) {
+    const p = event.payload ?? {};
+    if (event.type === "agent.toolCall.created" && p.name === "code_grep") {
+      ids.add(String(p.id));
+      stats.calls++;
+      const raw = p.arguments;
+      const args = (typeof raw === "string" ? safeJson(raw) : (raw ?? {})) as { patterns?: unknown };
+      if (Array.isArray(args.patterns)) stats.patterns += args.patterns.length;
+    } else if (event.type === "agent.toolCall.output" && ids.has(String(p.id))) {
+      const out = typeof p.output === "string" ? p.output : JSON.stringify(p.output ?? "");
+      stats.outputChars += out.length;
+      if (out.includes("Relevance judging failed")) stats.judgeFailed++;
+      if (out.includes("stopped early")) stats.stoppedEarly++;
+      if (/code_grep (failed|could not|cannot|was cancelled)|code_grep: invalid/.test(out)) stats.errors++;
+    }
+  }
+  return stats;
 }
