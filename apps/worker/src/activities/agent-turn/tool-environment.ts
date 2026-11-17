@@ -1079,7 +1079,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     settings: runSettings,
     engine: runSettings.codeSearchEngine,
     grepJudge: runSettings.codeGrepJudge,
-    grepShellCommand: runSettings.codeGrepShellCommand === "on",
+    grepShellCommand: runSettings.codeGrepShellCommand !== "off",
     grepLimits: {
       ...(runSettings.codeGrepRelevantFloor !== undefined
         ? { relevantFloor: runSettings.codeGrepRelevantFloor }
@@ -1601,6 +1601,11 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         nestedAgentDepth: session.nestedAgentDepth,
         effectiveMaxNestedAgentDepth: session.effectiveMaxNestedAgentDepth,
         attemptToolDefinitions,
+        // With the `cg` command only, code_grep is reached through Codemode from the shell.
+        ...(runSettings.codeGrepShellCommand === "only" &&
+        codeSearchTools.some((tool) => tool.modelName === "code_grep")
+          ? { codemodeOnlyToolNames: ["code_grep"] }
+          : {}),
         connectorActionPolicy,
         attemptConnectorActionBindings,
       }),

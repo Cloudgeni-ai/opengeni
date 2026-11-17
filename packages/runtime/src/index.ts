@@ -6065,7 +6065,7 @@ function buildAgentCapabilitiesFromComposition(
     const finishFloor = settings.experimentCutPolling && toolCancellation !== null;
     // Sandboxes with the `cg` command (code_grep from the shell) say so in the shell's help.
     const extraHelp =
-      settings.codeSearchEngine === "grep" && settings.codeGrepShellCommand === "on"
+      settings.codeSearchEngine === "grep" && settings.codeGrepShellCommand !== "off"
         ? CODE_GREP_SHELL_HELP
         : undefined;
     for (const capability of caps) {
@@ -6274,6 +6274,11 @@ export type PrepareToolsOptions = {
    * and exact attempt catalog; this is not a second tool registry.
    */
   attemptToolDefinitions?: readonly AttemptToolDefinition[];
+  /**
+   * Attempt tools reachable only through Codemode (for example from a shell command), not
+   * offered to the model as tools. They stay in the exact attempt catalog.
+   */
+  codemodeOnlyToolNames?: readonly string[];
   /** Host authorization applied after catalog/input validation and before execution. */
   attemptToolAuthorize?: AttemptToolAuthorization;
   /** Live accepted-attempt fence, evaluated at execution rather than catalog
@@ -7197,9 +7202,13 @@ export async function prepareAgentTools(
   };
   // Built-in tools claim their model names and budget before any connector
   // lists, so a connector's tool can never displace or impersonate one.
-  let localToolServer: AttemptDefinitionMcpServer | null = attemptToolDefinitions.length
+  const codemodeOnly = new Set(options.codemodeOnlyToolNames ?? []);
+  const modelToolDefinitions = attemptToolDefinitions.filter(
+    (definition) => !codemodeOnly.has(definition.modelName),
+  );
+  let localToolServer: AttemptDefinitionMcpServer | null = modelToolDefinitions.length
     ? new AttemptDefinitionMcpServer(
-        attemptToolDefinitions,
+        modelToolDefinitions,
         aggregateToolBudget,
         options.subjectId ?? "worker:mcp-model",
         unavailableMcpServers,
@@ -11816,9 +11825,20 @@ export const CODE_GREP_DIRECTIVE =
 export const CODE_GREP_SHELL_HELP =
   "`cg QUESTION PATTERN... [-- PATH...]` runs code_grep from the shell.";
 
+/**
+ * Directive when code_grep is offered only as the sandbox `cg` command. It
+ * names the same situation as CODE_GREP_DIRECTIVE and lets the search share a
+ * shell command with the reads.
+ */
+export const CODE_GREP_SHELL_DIRECTIVE =
+  "When you would run several rg searches to find code, run `cg QUESTION PATTERN... [-- PATH...]` in the shell instead, in the same command as the reads you need; it runs the patterns in parallel and prints only the relevant excerpts.";
+
 /** The code-search directive for the deployment's code-search engine. */
-export function codeSearchDirectiveFor(settings: Pick<Settings, "codeSearchEngine">): string {
-  return settings.codeSearchEngine === "grep" ? CODE_GREP_DIRECTIVE : CODE_SEARCH_DIRECTIVE;
+export function codeSearchDirectiveFor(
+  settings: Pick<Settings, "codeSearchEngine"> & Partial<Pick<Settings, "codeGrepShellCommand">>,
+): string {
+  if (settings.codeSearchEngine !== "grep") return CODE_SEARCH_DIRECTIVE;
+  return settings.codeGrepShellCommand === "only" ? CODE_GREP_SHELL_DIRECTIVE : CODE_GREP_DIRECTIVE;
 }
 
 export const CODEMODE_PROGRAMMATIC_DIRECTIVE =

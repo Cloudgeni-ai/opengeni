@@ -1595,8 +1595,9 @@ const SettingsSchema = z.object({
   // match order, cut to the same size.
   codeGrepJudge: z.enum(["on", "off"]).default("on"),
   // `on` when sandboxes provide the `cg` command (code_grep from the shell, through
-  // Codemode); adds its one-line usage to the code_grep description.
-  codeGrepShellCommand: z.enum(["on", "off"]).default("off"),
+  // Codemode); adds its one-line usage to the code_grep description. `only`
+  // offers code_grep only through `cg`, not as a model tool.
+  codeGrepShellCommand: z.enum(["on", "off", "only"]).default("off"),
   // code_grep judge thresholds, calibrated per decision model: the relevance
   // an excerpt needs to be shown, the confidence that stops judging early,
   // and the excerpts judged per wave. Unset keeps the engine defaults.
