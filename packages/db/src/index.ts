@@ -74454,6 +74454,7 @@ export type SessionGoalContinuationProjection = {
     | "system_work_pending"
     | "held_for_input"
     | "backoff_pending"
+    | "compaction_failed"
     | "missing_obligation";
   wakeRevision: number;
   observedRevision: number;
@@ -74585,6 +74586,17 @@ export async function getSessionGoalWithContinuation(
       // has an active goal. The wait itself remains independent of goal state.
       const sessionWait = await sessionInputWaitStateTx(tx, workspaceId, sessionId, session);
       const currentWaitUntil = sessionWait.disposition === "held" ? session.inputWaitUntil : null;
+      // With no turn in flight, a terminal checkpoint failure holds the input
+      // that was already pending (including this goal's own continuation) until
+      // something newer arrives. Say so rather than "continuing automatically".
+      const heldByCompactionFailure =
+        goal.status === "active" && !turn
+          ? await sessionHeldByCompactionFailureTx(
+              tx as unknown as Database,
+              workspaceId,
+              sessionId,
+            )
+          : false;
 
       const pendingWorkflowWake =
         wake !== undefined && wake.wakeRevision > wake.deliveredRevision ? wake : null;
@@ -74646,6 +74658,12 @@ export async function getSessionGoalWithContinuation(
         continuation = {
           state: turn.status === "running" ? "blocked" : "scheduled",
           reason: "system_work_pending",
+          ...base,
+        };
+      } else if (heldByCompactionFailure) {
+        continuation = {
+          state: "blocked",
+          reason: "compaction_failed",
           ...base,
         };
       } else if (continuationUpdate) {
@@ -85339,6 +85357,25 @@ async function pendingAgentSteerExistsTx(
     )
     .limit(1);
   return row !== undefined;
+}
+
+/**
+ * Whether the compaction-failure hold (`compactionFailureHoldSequenceTx`) is
+ * what keeps this idle session from running: a hold applies, and neither an
+ * Agent Steer nor any input committed after the failure is pending.
+ */
+async function sessionHeldByCompactionFailureTx(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<boolean> {
+  const holdSequence = await compactionFailureHoldSequenceTx(db, workspaceId, sessionId);
+  if (holdSequence === null) return false;
+  if (await pendingAgentSteerExistsTx(db, workspaceId, sessionId)) return false;
+  const newer = await pendingSystemUpdateWakeClassesTx(db, workspaceId, sessionId, {
+    pendingAfterSequence: holdSequence,
+  });
+  return !newer.immediate && !newer.deferred && !newer.command;
 }
 
 /** Read durable session state without reserving a turn-worker slot or mutating it. */
