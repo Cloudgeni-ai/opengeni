@@ -30,6 +30,7 @@ def main() -> None:
     ap.add_argument("--batch", type=int, default=16)
     ap.add_argument("--max-length", type=int, default=512)
     ap.add_argument("--cache-dir", default=None)
+    ap.add_argument("--max-chars", type=int, default=3000)
     ap.add_argument("--segment", type=int, default=1000, help="chunks per fresh model session")
     ap.add_argument("--work-dir", default=None, help="finished segments (default: <out>.parts)")
     args = ap.parse_args()
@@ -75,7 +76,9 @@ def main() -> None:
             vectors = np.asarray(
                 list(
                     model.passage_embed(
-                        [texts[k] for k in seg],
+                        # Not every model's tokenizer honours max_length; a minified line can be
+                        # tens of thousands of tokens, so cap characters as well.
+                        [texts[k][: args.max_chars] for k in seg],
                         batch_size=args.batch,
                         parallel=args.workers if args.workers > 1 else None,
                     )
