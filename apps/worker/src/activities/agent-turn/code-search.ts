@@ -382,6 +382,7 @@ export function createCodeGrepAttemptToolDefinition(input: {
           judged: s.judged,
           relevant: s.relevant,
           shown: s.shown,
+          widened: s.widened,
           waves: s.waves,
           stoppedEarly: s.stoppedEarly,
           decisionRequests: s.decision.requests,

@@ -12,6 +12,7 @@ import {
   CodeSearchArgumentError,
   JevClient,
   byFileBreadth,
+  widenForRead,
   createJevDecisionModel,
   firstMatchingLine,
   parseCodeGrepArguments,
@@ -258,6 +259,26 @@ describeWithRipgrep("runCodeGrep", () => {
       { path: "b", id: 5 },
     ]);
     expect(order.map((e) => e.id)).toEqual([1, 3, 4, 2, 5]);
+  });
+
+  test("widenForRead grows an excerpt to its enclosing function, or a read-sized span when there is none", () => {
+    const fn = [
+      "export function handle(req: Request) {",
+      ...Array.from({ length: 70 }, (_, i) => `  const v${i} = step(${i});`),
+      "  return done(req);",
+      "}",
+      ...Array.from({ length: 200 }, (_, i) => `const tail${i} = ${i};`),
+    ];
+    // a hit 60 lines into the function: the whole function (lines 1-73) comes back
+    expect(widenForRead(fn, [61], 55, 70, "brace", 120)).toEqual({ start: 1, end: 73 });
+    // no enclosing declaration: 25 lines above and 50 below the hit, padded to cover the excerpt
+    const flat = Array.from({ length: 300 }, (_, i) => `x${i} = ${i}`);
+    const r = widenForRead(flat, [150], 144, 164, "other", 120);
+    expect(r.start).toBe(125);
+    expect(r.end).toBe(200);
+    // never longer than maxLines, and the hit stays inside, in the upper third
+    const long = widenForRead(flat, [150], 140, 250, "other", 60);
+    expect(long).toEqual({ start: 130, end: 189 });
   });
 
   test("paths limit the search and missing paths are reported", async () => {

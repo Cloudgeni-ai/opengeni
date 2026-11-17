@@ -23,7 +23,15 @@ import {
 } from "./recall";
 import { mapLimit, WorkspaceSession } from "./session";
 import { escapeRegex } from "./text";
-import { langOf, rankFileWindows, renderLines, splitLines, type Window } from "./windows";
+import {
+  enclosingWindow,
+  langOf,
+  rankFileWindows,
+  renderLines,
+  splitLines,
+  type Lang,
+  type Window,
+} from "./windows";
 import type { CodeSearchWorkspace } from "./workspace";
 
 export interface CodeGrepInput {
@@ -42,7 +50,7 @@ export interface CodeGrepInput {
   /** Judges excerpts; without one the excerpts are returned in lexical order. */
   decisionModel?: DecisionModel | null | undefined;
   signal?: AbortSignal | undefined;
-  /** Characters of excerpt text shown in full (default 9000); later excerpts are listed by location. */
+  /** Characters of excerpt text shown in full (default 14000); later excerpts are listed by location. */
   budgetChars?: number | undefined;
   limits?: Partial<CodeGrepLimits> | undefined;
   onStage?: ((stage: string, data: Record<string, unknown>) => void) | undefined;
@@ -63,6 +71,13 @@ export interface CodeGrepLimits {
   judgeExcerptChars: number;
   /** Excerpt text shown in the result. */
   shownExcerptChars: number;
+  /**
+   * The first excerpts shown (each from a different file) are widened to the size of a read: their
+   * enclosing block, or a fixed span around the hit, so the caller need not read around them.
+   */
+  widenTop: number;
+  widenedMaxLines: number;
+  widenedChars: number;
   relevantFloor: number;
   /**
    * Judge in waves and ask after each whether the relevant excerpts already answer the question. Off by
@@ -87,6 +102,9 @@ export const CODE_GREP_DEFAULT_LIMITS: Readonly<CodeGrepLimits> = Object.freeze(
   requestConcurrency: 8,
   judgeExcerptChars: 2400,
   shownExcerptChars: 4500,
+  widenTop: 3,
+  widenedMaxLines: 120,
+  widenedChars: 6000,
   relevantFloor: 0.5,
   earlyStop: false,
   stopFloor: 0.8,
@@ -114,6 +132,44 @@ const GREP_CONFIG: CodeSearchConfig = codeSearchConfig({
   },
 });
 
+/** Read-sized windows for the top excerpts: the enclosing block further up, or 25 lines above and 50 below. */
+const READ_CONFIG: CodeSearchConfig = codeSearchConfig({
+  wave2: {
+    maxUp: 150,
+    maxDown: 120,
+    maxWindowLines: 120,
+    maxWindowChars: 6000,
+    minWindowLines: 40,
+    fallbackBefore: 25,
+    fallbackAfter: 50,
+  },
+});
+
+/**
+ * Widen an excerpt (1-based start..end, with its hit lines) to its enclosing block or a read-sized span
+ * around its first hit, at most maxLines long and always containing that hit.
+ */
+export function widenForRead(
+  lines: readonly string[],
+  hits: readonly number[],
+  start: number,
+  end: number,
+  lang: Lang,
+  maxLines: number,
+): { start: number; end: number } {
+  const n = lines.length;
+  const anchor = hits.find((h) => h >= 1 && h <= n) ?? start;
+  const w = enclosingWindow(lines as string[], anchor, lang, READ_CONFIG);
+  let s = Math.max(1, Math.min(w.start, start));
+  let e = Math.min(n, Math.max(w.end, end));
+  if (e - s + 1 > maxLines) {
+    // Too long: keep the hit in the upper third.
+    s = Math.max(s, anchor - Math.floor(maxLines / 3));
+    e = Math.min(e, s + maxLines - 1);
+  }
+  return { start: s, end: e };
+}
+
 export interface CodeGrepExcerpt {
   id: string;
   path: string;
@@ -124,6 +180,10 @@ export interface CodeGrepExcerpt {
   p: number | null;
   /** Shown in the result. */
   shown: boolean;
+  /** Hit lines inside the excerpt (1-based). */
+  hits?: number[] | undefined;
+  /** Widened to a read-sized span for the result. */
+  widened?: boolean | undefined;
 }
 
 export interface CodeGrepStats {
@@ -140,6 +200,8 @@ export interface CodeGrepStats {
   judged: number;
   relevant: number;
   shown: number;
+  /** Shown excerpts widened to a read-sized span. */
+  widened: number;
   waves: number;
   stoppedEarly: boolean;
   judge: "on" | "off" | "failed";
@@ -222,7 +284,7 @@ export async function runCodeGrep(input: CodeGrepInput): Promise<CodeGrepResult>
     }
   };
   const session = new WorkspaceSession(input.workspace, signal, cfg.recall.ripgrepTimeoutMs);
-  const budget = input.budgetChars ?? 9_000;
+  const budget = input.budgetChars ?? 14_000;
 
   // ---- 1. the caller's patterns, in parallel
   let searchPaths = ["."];
@@ -340,6 +402,7 @@ export async function runCodeGrep(input: CodeGrepInput): Promise<CodeGrepResult>
         ),
         p: null,
         shown: false,
+        hits: [...w.hits].sort((a, b) => a - b),
       });
     }
   const excerptMs = Math.round(performance.now() - t0) - grepMs;
@@ -447,19 +510,42 @@ export async function runCodeGrep(input: CodeGrepInput): Promise<CodeGrepResult>
   // ---- 4. the result: relevant excerpts (or lexical order), then the files not shown
   const judged = excerpts.filter((e) => e.p !== null);
   // Breadth first: each file's best excerpt before any file's second, so more files are shown in full.
-  const order = byFileBreadth(
+  const ranked2 = byFileBreadth(
     judge === "on"
       ? judged.filter((e) => e.p! >= L.relevantFloor).sort((a, b) => b.p! - a.p!)
       : excerpts,
   );
+  // The top excerpts become read-sized, so the usual read around a search result is already done;
+  // excerpts of the same file that the widened span mostly covers are folded into it.
+  const linesByPath = new Map(windowsByFile.map((w) => [w.f.path, w.lines]));
+  const absorbed = new Set<CodeGrepExcerpt>();
+  let widened = 0;
+  for (const e of ranked2) {
+    if (widened >= L.widenTop) break;
+    if (absorbed.has(e)) continue;
+    const lines = linesByPath.get(e.path);
+    if (!lines?.length) continue;
+    const r = widenForRead(lines, e.hits ?? [], e.start, e.end, langOf(e.path), L.widenedMaxLines);
+    e.start = r.start;
+    e.end = r.end;
+    e.text = renderLines(lines, r.start, r.end, { maxLineChars: cfg.wave2.maxLineChars });
+    e.widened = true;
+    widened++;
+    for (const o of ranked2) {
+      if (o === e || o.path !== e.path || absorbed.has(o)) continue;
+      const overlap = Math.min(o.end, r.end) - Math.max(o.start, r.start) + 1;
+      if (overlap >= (o.end - o.start + 1) / 2) absorbed.add(o);
+    }
+  }
+  const order = ranked2.filter((e) => !absorbed.has(e));
+  const shownText = (e: CodeGrepExcerpt) => {
+    const cap = e.widened ? L.widenedChars : L.shownExcerptChars;
+    return e.text.length > cap ? `${e.text.slice(0, cap)}\n...[excerpt cut]` : e.text;
+  };
   const shown: CodeGrepExcerpt[] = [];
   let used = 0;
   for (const e of order) {
-    const body =
-      e.text.length > L.shownExcerptChars
-        ? `${e.text.slice(0, L.shownExcerptChars)}\n...[excerpt cut]`
-        : e.text;
-    const block = `--- ${e.path}:${e.start}-${e.end}${e.p === null ? "" : ` (relevance ${e.p.toFixed(2)})`}\n${body}\n`;
+    const block = `--- ${e.path}:${e.start}-${e.end}${e.p === null ? "" : ` (relevance ${e.p.toFixed(2)})`}\n${shownText(e)}\n`;
     if (used + block.length > budget && shown.length) break;
     shown.push(e);
     e.shown = true;
@@ -500,7 +586,7 @@ export async function runCodeGrep(input: CodeGrepInput): Promise<CodeGrepResult>
   if (session.partial) head.push("Some searches returned partial output (size or time limit).");
   const body = shown.map(
     (e) =>
-      `--- ${e.path}:${e.start}-${e.end}${e.p === null ? "" : ` (relevance ${e.p.toFixed(2)})`}\n${e.text.length > L.shownExcerptChars ? `${e.text.slice(0, L.shownExcerptChars)}\n...[excerpt cut]` : e.text}`,
+      `--- ${e.path}:${e.start}-${e.end}${e.p === null ? "" : ` (relevance ${e.p.toFixed(2)})`}\n${shownText(e)}`,
   );
   const moreText = more.length
     ? [
@@ -539,6 +625,7 @@ export async function runCodeGrep(input: CodeGrepInput): Promise<CodeGrepResult>
     judged: judged.length,
     relevant: judged.filter((e) => e.p! >= L.relevantFloor).length,
     shown: shown.length,
+    widened: shown.filter((e) => e.widened).length,
     waves,
     stoppedEarly,
     judge,

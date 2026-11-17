@@ -74,6 +74,7 @@ export {
 export {
   CODE_GREP_DEFAULT_LIMITS,
   byFileBreadth,
+  widenForRead,
   firstMatchingLine,
   runCodeGrep,
   type CodeGrepExcerpt,
