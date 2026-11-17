@@ -15,6 +15,7 @@ import {
   editQueuedTurnInTransaction,
   enqueueSessionTurn,
   evaluateSessionControl,
+  getActiveSessionHistoryItemsPaged,
   getComposerDraftInTransaction,
   getScheduledTargetSessionExecution,
   getSessionTurn,
@@ -1056,6 +1057,142 @@ describe("steer_or_send: the server chooses Steer or Send with the turn state", 
       submit(value, "send", "follow-up", operationKey, fingerprint("send")),
     ).rejects.toBeInstanceOf(SessionCommandIdempotencyError);
   });
+
+  describe("a Steer is never answered before a message sent earlier", () => {
+    const order = async (value: Fixture) =>
+      (await storedOrder(value.grant.workspaceId!, value.session.id)).map((row) => row.id);
+    const steerRow = async (value: Fixture, turnId: string) => {
+      const turn = await storedTurn(value, turnId);
+      return await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
+        db.transaction((tx) =>
+          steerQueuedTurnInTransaction(tx as unknown as typeof db, {
+            accountId: value.grant.accountId,
+            workspaceId: value.grant.workspaceId!,
+            sessionId: value.session.id,
+            turnId,
+            expectedTurnVersion: turn.version,
+            actor: value.actor,
+            operationKey: crypto.randomUUID(),
+          }),
+        ),
+      );
+    };
+    /** The settlement the worker writes when model-call admission finds a pending Steer. */
+    const handOver = async (value: Fixture, turn: Awaited<ReturnType<typeof claimNext>>) =>
+      await applySessionTurnSettlement(client.db, value.grant.workspaceId!, {
+        sessionId: value.session.id,
+        turnId: turn.id,
+        triggerEventId: turn.triggerEventId,
+        attemptId: turn.activeAttemptId!,
+        turnStatus: "superseded",
+        sessionStatus: "queued",
+        activeTurnId: null,
+        requirePendingSteer: true,
+        events: [
+          { type: "turn.superseded", payload: { reason: "steer", atModelStep: true } },
+          { type: "session.status.changed", payload: { status: "queued" } },
+        ],
+      });
+    /**
+     * Each message ahead of the Steer starts first and hands over before its
+     * first model request; the Steer's turn then answers with every message
+     * in its history, in the order they were sent.
+     */
+    const expectReadInOrder = async (value: Fixture, turnIds: string[], texts: string[]) => {
+      for (const turnId of turnIds.slice(0, -1)) {
+        const started = await claimNext(value);
+        expect(started.id).toBe(turnId);
+        expect(await pendingSteerFor(value, started.id)).toBe(true);
+        expect(await handOver(value, started)).toMatchObject({ action: "settled" });
+      }
+      const answering = await claimNext(value);
+      expect(answering.id).toBe(turnIds.at(-1)!);
+      const history = (
+        await getActiveSessionHistoryItemsPaged(
+          client.db,
+          value.grant.workspaceId!,
+          value.session.id,
+        )
+      ).map((row) => JSON.stringify(row.item));
+      const positions = texts.map((text) => history.findIndex((item) => item.includes(text)));
+      expect(positions.every((position) => position >= 0)).toBe(true);
+      expect([...positions].sort((left, right) => left - right)).toEqual(positions);
+    };
+
+    test("Steering a queued message while an earlier one waits to start keeps both, in order", async () => {
+      // The earlier message is accepted but its turn has not started yet (for
+      // example while turn starts are slow); it is not in the visible queue.
+      const value = await fixture(0);
+      const earlier = await submit(value, "send", "please send the follow-up email");
+      expect(earlier.routing).toBe("accepted_for_execution");
+      const later = await submit(value, "send", "hello??");
+      expect(later.routing).toBe("queued_for_execution");
+      // The person presses Steer on the only queued message they can see.
+      await steerRow(value, later.turnId);
+      expect(await order(value)).toEqual([earlier.turnId, later.turnId]);
+      await expectReadInOrder(
+        value,
+        [earlier.turnId, later.turnId],
+        ["please send the follow-up email", "hello??"],
+      );
+    });
+
+    test("a Steered prompt with nothing running joins the end of the queue", async () => {
+      const value = await fixture(0);
+      const earlier = await submit(value, "send", "first question");
+      const steered = await submit(value, "steer", "second thought");
+      expect(steered.routing).toBe("accepted_for_steering");
+      expect(await order(value)).toEqual([earlier.turnId, steered.turnId]);
+      await expectReadInOrder(
+        value,
+        [earlier.turnId, steered.turnId],
+        ["first question", "second thought"],
+      );
+    });
+
+    test("a Steer while a turn runs stays behind a message queued before it", async () => {
+      const { value, running } = await runningChat();
+      const queued = await submit(value, "send", "after this, also check the logs");
+      expect(queued.routing).toBe("queued_for_execution");
+      const steered = await submit(value, "steer_or_send", "stop, do this instead");
+      expect(steered.routing).toBe("accepted_for_steering");
+      expect(await order(value)).toEqual([queued.turnId, steered.turnId]);
+      expect(await pendingSteerFor(value, running.id)).toBe(true);
+      expect(await handOver(value, running)).toMatchObject({ action: "settled" });
+      await expectReadInOrder(
+        value,
+        [queued.turnId, steered.turnId],
+        ["after this, also check the logs", "stop, do this instead"],
+      );
+    });
+
+    test("a pending Agent Steer never lets a human Steer skip an earlier human message", async () => {
+      const value = await fixture(0);
+      const earlier = await submit(value, "send", "the earlier question");
+      const steered = await submit(value, "steer", "the later Steer");
+      const added = await addSessionSystemUpdate(client.db, {
+        accountId: value.grant.accountId,
+        workspaceId: value.grant.workspaceId!,
+        sessionId: value.session.id,
+        kind: "agent_steer_instruction",
+        classification: "action_required",
+        sourceId: crypto.randomUUID(),
+        dedupeKey: crypto.randomUUID(),
+        summary: "Change direction",
+        payload: {
+          type: "agent_steer_instruction",
+          instruction: "Change direction",
+          operationId: crypto.randomUUID(),
+        },
+      });
+      if (!added.added) throw new Error(`failed to add Agent Steer: ${added.reason}`);
+      await expectReadInOrder(
+        value,
+        [earlier.turnId, steered.turnId],
+        ["the earlier question", "the later Steer"],
+      );
+    });
+  });
 });
 
 describe("canonical queue commands", () => {
@@ -1626,15 +1763,16 @@ describe("canonical queue commands", () => {
         ),
       );
     // An ordinary Steer waits for the live owner's next model step: no
-    // interruption, the attempt keeps running, and the queue reports it.
+    // interruption, the attempt keeps running, and the queue reports it. The
+    // Steered row keeps its place behind the messages sent before it.
     const waiting = await steerRow(target.version, false);
     expect(waiting.interruptionCount).toBe(0);
     expect(waiting.items.map((row) => row.id)).toEqual([
-      target.id,
       value.turns[0]!.id,
       value.turns[1]!.id,
+      target.id,
     ]);
-    expect(waiting.items[0]).toMatchObject({
+    expect(waiting.items[2]).toMatchObject({
       id: target.id,
       version: target.version + 1,
       metadata: {
@@ -1660,7 +1798,12 @@ describe("canonical queue commands", () => {
 
     // "Send now" interrupts the live owner for the waiting Steer.
     const steered = await steerRow(target.version + 1, true);
-    expect(steered.items[0]).toMatchObject({
+    expect(steered.items.map((row) => row.id)).toEqual([
+      value.turns[0]!.id,
+      value.turns[1]!.id,
+      target.id,
+    ]);
+    expect(steered.items[2]).toMatchObject({
       id: target.id,
       triggerEventId: target.triggerEventId,
       prompt: target.prompt,
@@ -1672,10 +1815,10 @@ describe("canonical queue commands", () => {
         interruptionCount: 1,
       },
     });
-    expect(steered.items[0]!.metadata).not.toHaveProperty("deferredUntilModelStep");
+    expect(steered.items[2]!.metadata).not.toHaveProperty("deferredUntilModelStep");
     expect(steered.interruptionCount).toBe(1);
     expect(steered.eventIds.length).toBeGreaterThan(0);
-    const validSteerMetadata = steered.items[0]!.metadata;
+    const validSteerMetadata = steered.items[2]!.metadata;
     const setTargetMetadata = async (metadata: Record<string, unknown>) => {
       await withWorkspaceRls(client.db, value.grant.workspaceId!, async (db) => {
         await db
@@ -1882,10 +2025,20 @@ describe("canonical queue commands", () => {
         trigger: { kind: "next" },
       },
     );
+    // The message sent first claims first; it hands over to the Steer before
+    // its first model request, so the Steer is answered after reading it.
     expect(claimAfterSettlement).toMatchObject({
       action: "claimed",
-      turn: { id: target.id, triggerEventId: target.triggerEventId },
+      turn: { id: value.turns[0]!.id, triggerEventId: value.turns[0]!.triggerEventId },
     });
+    expect(
+      await hasPendingSteerForTurn(client.db, {
+        accountId: value.grant.accountId,
+        workspaceId: value.grant.workspaceId!,
+        sessionId: value.session.id,
+        turnId: value.turns[0]!.id,
+      }),
+    ).toBe(true);
     const [closedAttempt, settledInterruption] = await withWorkspaceRls(
       client.db,
       value.grant.workspaceId!,

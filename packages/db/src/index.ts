@@ -80992,16 +80992,23 @@ async function selectQueuedSessionClaimBatch(
   // ordinary head). A long queue of later Sends must not inflate claim memory.
   // Waiting messages break that run, and only those sent before the head are
   // taken in with it.
+  // A pending Agent Steer runs ahead of queued human Sends. A runnable human
+  // Steer outranks it, but it still reads every message queued ahead of it
+  // first, so the whole human queue is then eligible and the Agent Steer is
+  // carried as context on the turn that claims.
   const previews = await rawRows<{ id: string; version: number; waits: boolean }>(
     tx,
     sql`
-    with candidates as (
+    with queued as (
       select id, version, position, created_at, ${waits} as waits,
         metadata->>'delivery' is distinct from 'steer' as send
       from session_turns
       where workspace_id = ${session.workspaceId} and session_id = ${session.id}
         and status = 'queued' and source in ('user', 'api')
-        and (${pendingAgentSteer} = false or metadata->>'delivery' = 'steer')
+    ), candidates as (
+      select * from queued
+      where ${pendingAgentSteer} = false
+        or exists (select 1 from queued steer where not steer.send and not steer.waits)
     ), ordered as (
       select id, version, position, created_at, waits,
         count(*) filter (where not waits) over run as runnable,
@@ -82453,10 +82460,11 @@ export async function claimSessionWorkForAttempt(
           )
           .limit(1)
           .for("update");
-        // A human/API Steer is the newest explicit replacement direction. It
-        // must claim next even when an older Agent Steer is pending; the
-        // internal instruction is delivered as context on that same human turn
-        // instead of manufacturing another system inference ahead of it.
+        // A human/API Steer is the newest explicit replacement direction. It,
+        // after the human messages queued ahead of it, must claim next even
+        // when an older Agent Steer is pending; the internal instruction is
+        // delivered as context on the claiming human turn instead of
+        // manufacturing another system inference ahead of it.
         // Ordinary queued sends retain the established Agent-Steer priority.
         const { batch: queuedBatch, waiting: waitingMessages } =
           await selectQueuedSessionClaimBatch(
@@ -92425,9 +92433,12 @@ export async function getSessionQueueSnapshot(
     const hasPendingAgentSteer = pendingInputs.some(
       (update) => update.kind === "agent_steer_instruction",
     );
-    const attachmentTurn = hasPendingAgentSteer
-      ? physicalItems.find((turn) => turn.metadata.delivery === "steer")
-      : physicalItems[0];
+    // Mirrors the claim: a pending Agent Steer runs ahead of queued Sends, but
+    // once a human Steer is queued the queue head claims and carries it.
+    const attachmentTurn =
+      hasPendingAgentSteer && !physicalItems.some((turn) => turn.metadata.delivery === "steer")
+        ? undefined
+        : physicalItems[0];
     const attachmentRow = attachmentTurn
       ? rows.find((row) => row.id === attachmentTurn.id)
       : undefined;
