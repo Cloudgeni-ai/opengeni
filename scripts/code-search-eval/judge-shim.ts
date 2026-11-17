@@ -38,6 +38,8 @@ const { values } = parseArgs({
     "cap-tokens": { type: "string" },
     "cap-usd": { type: "string" },
     log: { type: "string" },
+    /** Optional JSONL of every judged item: question, excerpt path and lines, answered probability. */
+    trace: { type: "string" },
     arm: { type: "string", default: "shim" },
     concurrency: { type: "string", default: "4" },
     "min-interval-ms": { type: "string", default: "0" },
@@ -63,6 +65,37 @@ export type ShimLogEntry = {
 };
 const log = (entry: Omit<ShimLogEntry, "at">) =>
   appendFileSync(values.log!, `${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`);
+
+type TraceState = {
+  question?: unknown;
+  excerpts?: Record<string, { path?: string; lines?: string }>;
+  found?: Array<{ path?: string; lines?: string }>;
+};
+/** One trace line per request: which excerpts were asked about and the probability each got. */
+export function traceEntry(body: JevBody, status: number, responseText: string, startedAt: string, ms: number) {
+  const state = (body.state ?? {}) as TraceState;
+  let answers: Record<string, { noul?: number; probability?: number; type?: string }> = {};
+  try {
+    answers = (JSON.parse(responseText) as { answers?: typeof answers }).answers ?? {};
+  } catch {
+    // non-JSON error body
+  }
+  const p = (id: string) => {
+    const a = answers[id];
+    return typeof a?.noul === "number" ? a.noul : typeof a?.probability === "number" ? a.probability : null;
+  };
+  const ids = Object.keys(body.questions ?? {});
+  return {
+    startedAt,
+    ms,
+    status,
+    question: typeof state.question === "string" ? state.question : null,
+    kind: state.found ? "stop" : "relevance",
+    items: state.found
+      ? [{ id: "stop", p: p("stop"), found: state.found.map((f) => `${f.path}:${f.lines}`) }]
+      : ids.map((id) => ({ id, path: state.excerpts?.[id]?.path ?? null, lines: state.excerpts?.[id]?.lines ?? null, p: p(id) })),
+  };
+}
 
 // ---- pacing: bounded concurrency plus a minimum spacing between request starts
 const maxConcurrent = Math.max(1, Number(values.concurrency));
@@ -220,8 +253,15 @@ const server = Bun.serve({
       return json(400, { error: { message: "invalid JSON" } });
     }
     await acquire();
+    const startedAt = new Date().toISOString();
+    const t0 = performance.now();
     try {
-      return mode === "dm" ? await forwardDm(raw, body) : await forwardGateway(body);
+      const res = mode === "dm" ? await forwardDm(raw, body) : await forwardGateway(body);
+      if (values.trace) {
+        const text = await res.clone().text();
+        appendFileSync(values.trace, `${JSON.stringify(traceEntry(body, res.status, text, startedAt, Math.round(performance.now() - t0)))}\n`);
+      }
+      return res;
     } catch (error) {
       if (error instanceof BudgetStop) {
         stop(`${error.reason}: ${error.message}`);

@@ -50,7 +50,11 @@ const ask = (url: string) =>
   fetch(`${url}/v1/systemone`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: "Bearer dummy" },
-    body: JSON.stringify({ model: "jev-latest", state: { a: 1 }, questions: { e1: { type: "noul", instructions: "q" } } }),
+    body: JSON.stringify({
+      model: "jev-latest",
+      state: { question: "where?", excerpts: { e1: { path: "src/a.ts", lines: "3-9", text: "x" } } },
+      questions: { e1: { type: "noul", instructions: "q" } },
+    }),
   });
 
 describe("judge shim (Decision Models mode)", () => {
@@ -58,13 +62,16 @@ describe("judge shim (Decision Models mode)", () => {
     const up = upstream();
     const ledger = join(dir, "ledger.jsonl");
     const log = join(dir, "log.jsonl");
+    const trace = join(dir, "trace.jsonl");
     const { proc, url } = await startShim([
-      "--mode", "dm", "--ledger", ledger, "--log", log, "--cap-tokens", "1000000",
+      "--mode", "dm", "--ledger", ledger, "--log", log, "--trace", trace, "--cap-tokens", "1000000",
       "--dm-base-url", `http://127.0.0.1:${up.server.port}`,
     ]);
     try {
       const ok = (await (await ask(url)).json()) as { answers: Record<string, { noul: number }> };
       expect(ok.answers.e1!.noul).toBe(0.7);
+      const traced = JSON.parse(readFileSync(trace, "utf8").split("\n")[0]!);
+      expect(traced).toMatchObject({ status: 200, question: "where?", kind: "relevance", items: [{ id: "e1", path: "src/a.ts", lines: "3-9", p: 0.7 }] });
       expect(up.seen[0]!.auth).toBe("Bearer fake-key");
       expect(up.seen[0]!.body.model).toBe("s1-pro");
       const settled = readFileSync(ledger, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
