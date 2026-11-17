@@ -13,8 +13,9 @@ type AppInbox = ReturnType<typeof useNativeInbox>;
 const InboxContext = createContext<AppInbox | null>(null);
 
 export function AppInboxProvider({ children }: { children: ReactNode }) {
-  const { client } = useAccount();
-  const inbox = useNativeInbox(client);
+  const { client, status } = useAccount();
+  // Only a signed-in account reads its inbox.
+  const inbox = useNativeInbox(client, { enabled: status === "ready" });
   return <InboxContext.Provider value={inbox}>{children}</InboxContext.Provider>;
 }
 

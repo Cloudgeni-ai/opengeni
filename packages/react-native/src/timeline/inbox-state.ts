@@ -50,30 +50,44 @@ function normalizeInboxItem(item: InboxItem): InboxItem {
   };
 }
 
-/** The person's inbox, refreshed on an interval, on foreground and after every action. */
-export function useNativeInbox(client: NativeInboxClient, options: { pollMs?: number } = {}) {
-  const [state, setState] = useState<InboxState>({ data: null, error: null, loading: true });
-  // Another account's client: its items are not this person's, so start over
-  // rather than show the last account's rows until the first read lands.
-  const [stateClient, setStateClient] = useState(client);
-  if (stateClient !== client) {
-    setStateClient(client);
-    setState({ data: null, error: null, loading: true });
-  }
+const NOTHING_YET: InboxState = { data: null, error: null, loading: true };
+
+/**
+ * The person's inbox, refreshed on an interval, on foreground and after every
+ * action. `enabled: false` (signed out, still loading) reads nothing.
+ */
+export function useNativeInbox(
+  client: NativeInboxClient,
+  options: { pollMs?: number; enabled?: boolean } = {},
+) {
+  // What was read belongs to the client that read it: another account's
+  // client starts empty, and a late answer for the last client never shows.
+  const [held, setHeld] = useState<InboxState & { client: NativeInboxClient }>({
+    client,
+    ...NOTHING_YET,
+  });
+  const state: InboxState = held.client === client ? held : NOTHING_YET;
+  const enabled = options.enabled ?? true;
   const pollMs = options.pollMs ?? 30_000;
   const generation = useRef(0);
   const refresh = useCallback(async () => {
+    if (!enabled) return;
     const request = ++generation.current;
     try {
       const listed = await client.listInbox();
       const data = { ...listed, items: listed.items.map(normalizeInboxItem) };
-      if (request === generation.current) setState({ data, error: null, loading: false });
+      if (request === generation.current) setHeld({ client, data, error: null, loading: false });
     } catch (error) {
       if (request === generation.current)
-        setState((current) => ({ ...current, error, loading: false }));
+        setHeld((current) =>
+          current.client === client
+            ? { ...current, error, loading: false }
+            : { client, data: null, error, loading: false },
+        );
     }
-  }, [client]);
+  }, [client, enabled]);
   useEffect(() => {
+    if (!enabled) return;
     void refresh();
     const timer = setInterval(() => void refresh(), pollMs);
     const subscription = AppState.addEventListener("change", (next) => {
@@ -83,9 +97,9 @@ export function useNativeInbox(client: NativeInboxClient, options: { pollMs?: nu
       clearInterval(timer);
       subscription.remove();
     };
-  }, [pollMs, refresh]);
+  }, [enabled, pollMs, refresh]);
   const patch = useCallback((update: (items: InboxItem[]) => InboxItem[]) => {
-    setState((current) =>
+    setHeld((current) =>
       current.data
         ? { ...current, data: { ...current.data, items: update(current.data.items) } }
         : current,

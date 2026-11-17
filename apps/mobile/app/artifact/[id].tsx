@@ -436,7 +436,8 @@ function WebPageView({
           setSupportMultipleWindows={false}
           onShouldStartLoadWithRequest={(request) => {
             if (viewerKeepsNavigation(account.baseUrl, request)) return true;
-            void Linking.openURL(request.url);
+            // Only web and mail links leave for the system; a Site can't open other apps.
+            if (/^(https?|mailto):/iu.test(request.url)) void Linking.openURL(request.url);
             return false;
           }}
           onLoadEnd={() => setPainted(true)}

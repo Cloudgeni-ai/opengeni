@@ -54,14 +54,17 @@ function Artifacts({ workspaceId }: { workspaceId: string }) {
   const [now, setNow] = useState(() => new Date());
   const catalog = useArtifactCatalog(client, workspaceId, kind, query);
   const { refresh } = catalog;
+  // Read live, so a new filter (a new refresh) doesn't count as coming back.
+  const refreshLatest = useRef(refresh);
+  refreshLatest.current = refresh;
   // Fresh each time the screen comes back to the front (after the viewer, too).
   const focusedOnce = useRef(false);
   useFocusEffect(
     useCallback(() => {
       setNow(new Date());
-      if (focusedOnce.current) void refresh();
+      if (focusedOnce.current) void refreshLatest.current();
       focusedOnce.current = true;
-    }, [refresh]),
+    }, []),
   );
   const open = useCallback(
     (item: ArtifactCatalogItem) =>

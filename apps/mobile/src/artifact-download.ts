@@ -35,6 +35,7 @@ export function downloadFilename(title: string, extension: string): string {
     .replace(/[\\/:*?"<>|\u0000-\u001f]+/gu, " ")
     .replace(/\s+/gu, " ")
     .trim()
+    .replace(/^\.+/u, "")
     .slice(0, 80);
   const ext = extension.replace(/^\./u, "").toLowerCase();
   if (!ext) return base || "download";

@@ -18,7 +18,7 @@ function inboxClient(title: string, pending?: Promise<void>) {
         items: [
           {
             id: title,
-            kind: "human_input",
+            kind: "question",
             title,
             sessionId: "s1",
             workspaceId: "w1",
@@ -50,5 +50,42 @@ test("another account's client starts empty instead of showing the last account'
     await Promise.resolve();
   });
   expect(hook.result.current.data?.items.map((item) => item.id)).toEqual(["from-b"]);
+  await hook.unmount();
+});
+
+test("a late answer for the last account never shows for the new one", async () => {
+  let releaseA!: () => void;
+  const first = inboxClient("from-a", new Promise<void>((resolve) => (releaseA = resolve)));
+  let releaseB!: () => void;
+  const second = inboxClient("from-b", new Promise<void>((resolve) => (releaseB = resolve)));
+  const hook = await renderHook((client) => useNativeInbox(client), first);
+  await hook.rerender(second);
+  await act(async () => {
+    releaseA();
+    await Promise.resolve();
+  });
+  expect(hook.result.current.data).toBeNull();
+  await act(async () => {
+    releaseB();
+    await Promise.resolve();
+  });
+  expect(hook.result.current.data?.items.map((item) => item.id)).toEqual(["from-b"]);
+  await hook.unmount();
+});
+
+test("disabled (signed out): nothing is read", async () => {
+  let reads = 0;
+  const client = {
+    listInbox: async () => {
+      reads += 1;
+      return { items: [] };
+    },
+  } as unknown as Parameters<typeof useNativeInbox>[0];
+  const hook = await renderHook(() => useNativeInbox(client, { enabled: false }), undefined);
+  await act(async () => {
+    await hook.result.current.refresh();
+  });
+  expect(reads).toBe(0);
+  expect(hook.result.current.data).toBeNull();
   await hook.unmount();
 });
