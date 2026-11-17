@@ -28300,8 +28300,40 @@ export type SubscriptionCoreCodexWaitEvaluation =
 
 export type ReconcileSubscriptionCoreCodexCapacityWaitResult =
   | { action: "waiting"; waiter: SubscriptionCoreCodexCapacityWait; events: SessionEvent[] }
-  | { action: "resumed" | "superseded"; events: SessionEvent[] }
+  | {
+      action: "resumed";
+      events: SessionEvent[];
+      /** When the turn parked: its waiting attempt's close (null if unknown). */
+      parkedAt: Date | null;
+    }
+  | {
+      action: "superseded";
+      events: SessionEvent[];
+      /** Why, when this call ended the wait (deleted its waiter). */
+      reason?: string;
+      parkedAt?: Date | null;
+    }
   | { action: "paused" | "stale"; events: SessionEvent[] };
+
+/**
+ * When a parked turn's current capacity wait began: the close of its latest
+ * attempt that parked (outcome `waiting_capacity`), as the 1485 summary
+ * reads it. Null when no such attempt is visible.
+ */
+async function readCapacityWaitParkedAtInTransaction(
+  tx: SessionActivityDatabase,
+  input: { workspaceId: string; sessionId: string; turnId: string },
+): Promise<Date | null> {
+  const [row] = await rawRows<{ parked_at: Date | string | null }>(
+    tx,
+    sql`select max(closed_at) as parked_at from session_turn_attempts
+      where workspace_id = ${input.workspaceId}::uuid
+        and session_id = ${input.sessionId}::uuid
+        and turn_id = ${input.turnId}::uuid
+        and outcome = 'waiting_capacity'`,
+  );
+  return row?.parked_at == null ? null : new Date(row.parked_at);
+}
 
 /**
  * Row-lock and settle one core waiter after the caller evaluated placement
@@ -28835,7 +28867,12 @@ export async function reconcileSubscriptionCoreCapacityWait(
         if (!recoveringSession) {
           throw new Error(`Core ${vocabulary.label} capacity session changed during atomic resume`);
         }
-        return { action: "resumed", events: events.map(mapEvent) } as const;
+        const parkedAt = await readCapacityWaitParkedAtInTransaction(tx, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: blockedTurn.id,
+        });
+        return { action: "resumed", events: events.map(mapEvent), parkedAt } as const;
       }),
   );
 }
@@ -28849,7 +28886,12 @@ async function supersedeSubscriptionCoreCodexCapacityWaitInTransaction(
     reason: string;
     now: Date;
   },
-): Promise<{ action: "superseded"; events: SessionEvent[] }> {
+): Promise<{
+  action: "superseded";
+  events: SessionEvent[];
+  reason?: string;
+  parkedAt?: Date | null;
+}> {
   const vocabulary = subscriptionCoreWaitVocabulary(input.waiter.provider);
   const deleted = await rawRows<{ waiter_id: string }>(
     tx,
@@ -28860,6 +28902,11 @@ async function supersedeSubscriptionCoreCodexCapacityWaitInTransaction(
       returning waiter_id::text as waiter_id`,
   );
   if (deleted.length !== 1) return { action: "superseded", events: [] };
+  const parkedAt = await readCapacityWaitParkedAtInTransaction(tx, {
+    workspaceId: input.session.workspaceId,
+    sessionId: input.session.id,
+    turnId: input.blockedTurn.id,
+  });
   const turnWasCurrent = input.session.activeTurnId === input.blockedTurn.id;
   const terminalTurnStatus = input.session.status === "cancelled" ? "cancelled" : "superseded";
   if (input.blockedTurn.status === "waiting_capacity") {
@@ -28966,7 +29013,7 @@ async function supersedeSubscriptionCoreCodexCapacityWaitInTransaction(
     .returning({ id: schema.sessions.id });
   if (!updatedSession)
     throw new Error(`Core ${vocabulary.label} capacity session changed during supersession`);
-  return { action: "superseded", events: inserted.map(mapEvent) };
+  return { action: "superseded", events: inserted.map(mapEvent), reason: input.reason, parkedAt };
 }
 
 /**
@@ -62023,6 +62070,78 @@ export async function summarizeQueuedTurnsByHold(
   for (const row of rows) {
     if (!(row.hold in summary)) continue;
     summary[row.hold as QueuedTurnHold] = {
+      count: Number(row.count),
+      oldestAgeSeconds: Number(row.oldest_age_seconds),
+    };
+  }
+  return summary;
+}
+
+/**
+ * The providers whose turns park on the shared subscription core's capacity
+ * waiter, in the order {@link summarizeCapacityWaitingTurns} reports them.
+ * The same set as `subscription_capacity_waiters`' provider check.
+ */
+export const CAPACITY_WAITING_TURN_PROVIDERS = [
+  "claude",
+  "codex",
+  "xai",
+] as const satisfies readonly SubscriptionCoreWaiterProvider[];
+
+export type CapacityWaitingTurnProvider = (typeof CAPACITY_WAITING_TURN_PROVIDERS)[number];
+
+export type CapacityWaitingTurnSummary = {
+  /** Turns parked on this provider's capacity right now. */
+  count: number;
+  /** Seconds since the oldest of them parked; 0 when none is parked. */
+  oldestAgeSeconds: number;
+};
+
+/** Migration 1485's summary, withheld from the runtime for one release. */
+export const CAPACITY_WAITING_TURNS_ROUTINE =
+  "opengeni_private.summarize_capacity_waiting_turns_v1()";
+
+/** False while the deployment's database withholds the summary (1485). */
+export async function capacityWaitingTurnsSummaryAvailable(db: Database): Promise<boolean> {
+  const [row] = await rawRows<{ granted: boolean | null }>(
+    db,
+    sql`select has_function_privilege(
+      to_regprocedure(${CAPACITY_WAITING_TURNS_ROUTINE})::oid, 'EXECUTE') as granted`,
+  );
+  return row?.granted === true;
+}
+
+/**
+ * Content-free cross-workspace count of turns parked waiting for
+ * subscription capacity, by provider (migration 1485). A parked turn is its
+ * session's active turn in `waiting_capacity`, so
+ * {@link summarizeQueuedTurnsByHold} never counts it: its `waiting_capacity`
+ * class is only the prompts queued behind one. Every provider is always
+ * present, 0 when none of its turns waits.
+ */
+export async function summarizeCapacityWaitingTurns(
+  db: Database,
+): Promise<Record<CapacityWaitingTurnProvider, CapacityWaitingTurnSummary>> {
+  const summary = Object.fromEntries(
+    CAPACITY_WAITING_TURN_PROVIDERS.map((provider) => [
+      provider,
+      { count: 0, oldestAgeSeconds: 0 },
+    ]),
+  ) as Record<CapacityWaitingTurnProvider, CapacityWaitingTurnSummary>;
+  const rows = await rawRows<{
+    provider: string;
+    count: number | string;
+    oldest_age_seconds: number | string;
+  }>(
+    db,
+    sql`
+      select provider, count, oldest_age_seconds
+      from opengeni_private.summarize_capacity_waiting_turns_v1()
+    `,
+  );
+  for (const row of rows) {
+    if (!(row.provider in summary)) continue;
+    summary[row.provider as CapacityWaitingTurnProvider] = {
       count: Number(row.count),
       oldestAgeSeconds: Number(row.oldest_age_seconds),
     };
