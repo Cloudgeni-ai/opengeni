@@ -1,5 +1,14 @@
 # @opengeni/events
 
+## 6.27.1
+
+### Patch Changes
+
+- Updated dependencies [afcb2d6]
+- Updated dependencies [02804ec]
+  - @opengeni/db@6.27.1
+  - @opengeni/contracts@6.27.1
+
 ## 6.27.0
 
 ### Patch Changes

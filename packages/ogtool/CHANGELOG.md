@@ -1,5 +1,13 @@
 # @opengeni/ogtool
 
+## 6.27.1
+
+### Patch Changes
+
+- Updated dependencies [02804ec]
+  - @opengeni/contracts@6.27.1
+  - @opengeni/codemode@6.27.1
+
 ## 6.27.0
 
 ### Patch Changes
