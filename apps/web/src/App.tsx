@@ -562,6 +562,7 @@ const nativeSignInRoute = createRoute({
       ...text("code_challenge"),
       ...text("state"),
       ...text("device_name"),
+      ...text("relay"),
       ...(isNativeAppPlatform(search.platform) ? { platform: search.platform } : {}),
     };
   },

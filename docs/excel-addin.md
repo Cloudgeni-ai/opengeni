@@ -40,16 +40,57 @@ Excel on the web, Windows and Mac.
   sample of its displayed values and formulas (at most 20 rows by 8 columns of
   its filled part). The selection shows as a pill above the composer; the
   person can leave it out, and selecting something else brings it back.
-- **Sign-in.** The pane opens the deployment's `/native-sign-in` page in an
-  Office dialog with `platform=office` and PKCE. The page redirects to
-  `/office/auth-callback.html` on the same origin, which hands the code to the
-  pane with `Office.context.ui.messageParent`; the pane redeems it for its own
-  revocable credential. The API accepts that redirect only for the
-  deployment's own web origins (`nativeAppRedirectAllowed`). An add-in
-  installed from another address (an older or internal one) still loads its
-  pane there, so its sign-in is refused with a message that says the add-in
-  is out of date and links the current install page. Sign out revokes the
-  credential.
+- **Sign-in.** The pane signs in through the deployment's `/native-sign-in`
+  page with `platform=office` and PKCE, and redeems the one-time code for its
+  own revocable credential. Sign out revokes the credential.
+  - *Excel on the web* already runs in the person's browser, so the page opens
+    in an Office dialog. It redirects to `/office/auth-callback.html` on the
+    same origin, which hands the code to the pane with
+    `Office.context.ui.messageParent`.
+  - *Excel for Mac and Windows* (`Office.context.platform` is `Mac` or `PC`)
+    would show that dialog in an embedded webview (WKWebView, WebView2) with
+    none of the person's saved sign-ins, passwords or passkeys, so the pane
+    opens the page in the system browser with
+    `Office.context.ui.openBrowserWindow` instead. That browser can't reach
+    the pane, so the code goes through a sign-in relay
+    (`apps/api/src/routes/native-app-relay.ts`):
+    1. The pane keeps its PKCE verifier and creates a relay with its
+       challenge (`POST /v1/native-app/relays`). It gets a random 256-bit relay
+       id and a six-character confirmation code, shows the code under
+       "Continue in your browser", and opens
+       `/native-sign-in?relay=<id>&platform=office`. The page names the device
+       from the platform, never from text in the link.
+    2. The signed-in browser page asks for the code shown in Excel. Allow
+       (`POST /v1/native-app/relays/approve`, same-origin and
+       cookie-authenticated like `/authorize`) mints the ordinary one-time code
+       server-side and parks it in the relay. The code never passes through
+       the browser.
+    3. The pane polls every two seconds with its verifier
+       (`POST /v1/native-app/relays/poll`), takes the code once, and redeems it
+       with `exchangeNativeAppCode` as on the web.
+
+    Relays are Better Auth verification rows like the codes themselves (no
+    migration): five-minute lifetime, keyed by a hash of the relay id. Every
+    state change (a wrong code, the approval, handing out the code) takes the
+    row atomically and writes the next state, so concurrent requests can't
+    undo an approval or undercount wrong codes. Each relay route has its own
+    per-source rate limit; polls are limited per relay and address, with a
+    higher cap for the whole address so many people behind one office address
+    can sign in at once.
+
+    | Abuse | How it's closed |
+    | --- | --- |
+    | Someone sends a link carrying their own relay, so the victim's Allow would sign the attacker in | Allow needs the code shown in the pane that made the relay, so the victim has to type a code that isn't in their own Excel, and the page says to allow only a sign-in they started there. This is friction, not proof: an attacker can send the code along with the link, as with any device-code flow. The relay also lives only five minutes. |
+    | Guessing a relay id | 256 random bits, rate-limited polls, five-minute lifetime; and a poll returns nothing without the matching verifier. |
+    | Depositing into someone else's relay (signing their pane in to the attacker's account, so the attacker's agents reach their workbook) | Approving needs both the relay id, which only that pane and its person's browser hold, and the code shown only in that pane. Five wrong codes refuse the relay, and the approve route is rate-limited. |
+    | Replay | The relay is taken atomically on approval and on the poll that hands out the code; the code itself is single-use with a two-minute lifetime. |
+    | Code read by the wrong party | Only a poll with the right verifier releases it, and redeeming it needs the verifier too, which never leaves the pane. |
+
+  The API accepts the callback address only for the deployment's own web
+  origins (`nativeAppRedirectAllowed`), for both paths. An add-in installed
+  from another address (an older or internal one) still loads its pane there,
+  so its sign-in is refused with a message that says the add-in is out of
+  date and links the current install page.
 - **Relay.** `apps/api/src/office-workbooks.ts`. The pane holds one WebSocket
   (`/v1/office/workbooks/live`, subprotocol `opengeni-office-v1`) authenticated
   by a two-minute ticket from
@@ -91,9 +132,12 @@ Excel on the web, Windows and Mac.
   code may have changed the workbook.
 - A copy is always an .xlsx of the open workbook, never the file in OneDrive
   or SharePoint itself, and it reaches only the people who can open the chat.
-- The sign-in window opens straight from the click (`promptBeforeOpen: false`)
-  and falls back to Office's "allow this window" prompt only when a popup
-  blocker stops it.
+- On Excel on the web, the sign-in window opens straight from the click
+  (`promptBeforeOpen: false`) and falls back to Office's "allow this window"
+  prompt only when a popup blocker stops it.
+- On Excel for Mac and Windows, sign-in always happens in the system browser,
+  never in an Office dialog, and only after the person types the pane's
+  confirmation code.
 
 ## A branded add-in for a product that embeds Opengeni
 
@@ -133,6 +177,10 @@ come from `@opengeni/sdk/office` and `@opengeni/react`:
   `*.cloud.microsoft`, `*.sharepoint.com` and the rest of the list in
   `apps/web/src/server.ts`) and no `X-Frame-Options`. Opengeni's own console
   does this for `/office/` and allows only itself to frame every other page.
+- **Script policy.** `WorkbookLink` compiles the agent's code in the pane, so
+  a pane page with a Content-Security-Policy must allow
+  `OFFICE_RUN_SCRIPT_SOURCES` (`'unsafe-eval'`) in `script-src`, or every
+  `excel_run` fails. Opengeni's console allows it on the pane page only.
 - **Server passthrough.** The packaged session proxy needs no option: it
   forwards the workbook routes (`office/workbook-tickets`, `office/workbooks`)
   and everything `SessionApp` reads as the signed-in user (`asUser`), so each

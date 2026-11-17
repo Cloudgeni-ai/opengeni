@@ -1,5 +1,62 @@
 # @opengeni/api-router
 
+## 6.26.0
+
+### Minor Changes
+
+- c8efcb0: The Excel add-in on Mac and Windows now signs in through the person's own browser, where their saved sign-ins, passwords and passkeys work, instead of Office's embedded window. The pane shows "Continue in your browser" with a short code; the person types it on the browser page and chooses Allow. The new `/v1/native-app/relays` routes carry the sign-in back to the pane: relays last five minutes, are single-use and rate-limited, release the code only to the pane's PKCE verifier, and are approved only with the pane's code. The SDK adds `createNativeAppRelay`, `approveNativeAppRelay` and `pollNativeAppRelay`. Excel on the web keeps its sign-in window. The Mac install steps on `/excel` now say that the `wef` folder usually has to be created.
+
+### Patch Changes
+
+- 8fae328: Connected tools that can do a task now win over a Connect card for an unconnected alternative. Tool search no longer shows an integration's Connect card by itself when the chat already has a connected account of the same kind (Outlook Mail beside an unconnected Gmail); the search result still names the integration, and the agent can show its card when the person asked for it. In the agent's integration catalog search, a service the person can already use in the chat comes before a same-category service they would still have to connect, unless the request names the unconnected service. The per-turn connector availability notice now says that a configured but unavailable connector is needed only when the person named it or no loaded tool can do the task.
+- c8efcb0: Reconnect works again for MCP sign-ins whose catalog domain differs from their server's host, such as Sentry (sentry.io, mcp.sentry.dev) and Stripe (stripe.com, mcp.stripe.com). Connect saves an account under the server's host, while Reconnect on the Capabilities page sent the catalog's domain, and the sign-in start only accepted an exact match, so it answered "connection not found" ("It may have been removed"). Reconnect now signs in to the exact connection it names, for the same server, under the provider domain that connection was saved with; a built-in profile's fixed domain is still required. Turning the connector off and connecting again is no longer needed.
+- 47eb375: One verified account is now one connection, on every backend. Connections record a server-owned `account_identity_key` (the integration and the verified provider account), and the database allows one live connection per organization, owner and key, so a racing or legacy writer can no longer save a second connection to the same account; it fails as "already connected" instead. OAuth MCP logins, Nango connections and provider OAuth connections (personal GitHub and others) set it.
+
+  Opengeni also no longer pays for two Nango connections for the same account. When a person connects the same verified account to the same Nango integration in several organizations, every organization's row now points at one shared Nango connection, and that connection is deleted in Nango only when the last row referencing it is gone. Reconnects, refused or failed connect attempts and disconnects release the replaced connection through the same reference check, and the worker now sweeps Nango every 15 minutes: for connections this release made (tagged with the deployment), it merges leftover duplicates, deletes abandoned and cascade-orphaned connections, and deletes connections whose refresh has failed for 24 hours. Older, untagged connections are left to `integrations:nango orphans`. Disconnecting a Nango-managed Google app still does not revoke the grant at Google, because Nango's OAuth client is shared across the person's connections.
+
+  Email accounts are matched case-insensitively, and scopes Nango could not report never move another organization's connection onto a narrower one.
+
+  Reconnecting the same verified account no longer breaks running turns: the connection keeps its authority generation when the new grant includes every scope it had, so tool calls in a turn accepted before the reconnect no longer fail with "Authentication required". A different account, fewer scopes, a revoke or a status change still end that authority.
+
+  While a release rolls out, or after a rollback to an older release, pods of the older release still delete a replaced Nango connection directly; a connection shared by this release can then be revoked in another organization and must be reconnected there.
+
+- c8efcb0: A provider that refuses a connection now says so, instead of "This connection link is no longer valid or was already used". Some providers redirect a refusal back with only an error and no state; Fiken does when the signed-in Fiken user is not approved for the app. Every OAuth callback (Fiken, curated provider OAuth, MCP, social, personal GitHub and the Slack bot install) treated the missing state as a stale link. They now report the provider's refusal (cancelled for `access_denied`, refused otherwise), and Fiken says the Fiken user may not be approved for the app yet.
+- Updated dependencies [6d7ea1e]
+- Updated dependencies [b6b3579]
+- Updated dependencies [8fae328]
+- Updated dependencies [8fae328]
+- Updated dependencies [47eb375]
+- Updated dependencies [c8efcb0]
+- Updated dependencies [33dd6da]
+- Updated dependencies [5e3441a]
+- Updated dependencies [c8efcb0]
+- Updated dependencies [e1199c0]
+  - @opengeni/contracts@6.26.0
+  - @opengeni/db@6.26.0
+  - @opengeni/core@6.26.0
+  - @opengeni/runtime@6.26.0
+  - @opengeni/tool-gateway@6.26.0
+  - @opengeni/codemode@6.26.0
+  - @opengeni/xai-subscription@6.26.0
+  - @opengeni/artifact-tool@6.26.0
+  - @opengeni/capabilities@6.26.0
+  - @opengeni/codex@6.26.0
+  - @opengeni/config@6.26.0
+  - @opengeni/decisions@6.26.0
+  - @opengeni/documents@6.26.0
+  - @opengeni/events@6.26.0
+  - @opengeni/github@6.26.0
+  - @opengeni/interaction@6.26.0
+  - @opengeni/observability@6.26.0
+  - @opengeni/storage@6.26.0
+  - @opengeni/vaults@6.26.0
+  - @opengeni/vaults-bitwarden@6.26.0
+  - @opengeni/vaults-keeper@6.26.0
+  - @opengeni/vaults-onepassword@6.26.0
+  - @opengeni/vaults-protonpass@6.26.0
+  - @opengeni/agent-proto@6.26.0
+  - @opengeni/network@6.26.0
+
 ## 6.25.0
 
 ### Minor Changes

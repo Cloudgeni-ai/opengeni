@@ -276,6 +276,9 @@ export function sessionChromeGoalPillExplanation(
   if (state === "waiting" && continuation?.reason === "system_work_pending") {
     return t("sessionChrome.waitingForOtherSessionWork");
   }
+  if (state === "blocked" && continuation?.reason === "compaction_failed") {
+    return t("sessionChrome.compactionFailedGoalHeld");
+  }
   if (state === "held" && continuation?.reason === "held_for_input") {
     const reason = continuation.holdReason?.trim();
     const until = continuation.nextAttemptAt

@@ -1,12 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import {
   createModalProviderCreateBoundary,
+  ModalSandboxResourceCeilingMissingError,
   modalCreateOperationName,
 } from "../src/sandbox/providers/modal-create-boundary";
 
 const operationId = "11111111-1111-4111-8111-111111111111";
 const path = "/modal.client.ModalClient/SandboxCreate";
-const request = () => ({ appId: "ap-test", definition: { imageId: "im-test" }, tags: [] });
+const request = () => ({
+  appId: "ap-test",
+  definition: { imageId: "im-test", resources: { milliCpuMax: 2000, memoryMbMax: 4096 } },
+  tags: [],
+});
 type Boundary = ReturnType<typeof createModalProviderCreateBoundary>;
 async function invoke(
   boundary: Boundary,
@@ -56,6 +61,7 @@ describe("Modal physical-create boundary", () => {
         expect(wire.definition).toEqual({
           imageId: "im-test",
           name: modalCreateOperationName(operationId),
+          resources: { milliCpuMax: 2000, memoryMbMax: 4096 },
           secretIds: ["private-value"],
         });
         expect(wire.tags).toEqual([
@@ -68,7 +74,11 @@ describe("Modal physical-create boundary", () => {
       {
         request: {
           ...request(),
-          definition: { imageId: "im-test", secretIds: ["private-value"] },
+          definition: {
+            imageId: "im-test",
+            resources: { milliCpuMax: 2000, memoryMbMax: 4096 },
+            secretIds: ["private-value"],
+          },
           tags: [{ tagName: "fixture", tagValue: "test" }],
         },
       },
@@ -76,6 +86,38 @@ describe("Modal physical-create boundary", () => {
     );
     expect(response).toEqual({ sandboxId: "sb-test" });
     expect(events).toEqual(["intent", "dispatch", "receipt"]);
+  });
+
+  test.each([
+    ["no resources", { imageId: "im-test" }],
+    ["zero CPU ceiling", { imageId: "im-test", resources: { milliCpuMax: 0, memoryMbMax: 4096 } }],
+    [
+      "zero memory ceiling",
+      { imageId: "im-test", resources: { milliCpuMax: 2000, memoryMbMax: 0 } },
+    ],
+    ["requests only", { imageId: "im-test", resources: { milliCpu: 125, memoryMb: 128 } }],
+  ])("refuses a create with %s before recording or dispatching it", async (_label, definition) => {
+    let recorded = 0;
+    let dispatched = 0;
+    const boundary = createModalProviderCreateBoundary({
+      operationId,
+      beforeDispatch: async () => {
+        recorded++;
+      },
+      onReceipt: async () => {},
+    });
+    await expect(
+      invoke(
+        boundary,
+        async () => {
+          dispatched++;
+          return { sandboxId: "sb-test" };
+        },
+        { request: { ...request(), definition } },
+      ),
+    ).rejects.toBeInstanceOf(ModalSandboxResourceCeilingMissingError);
+    expect(recorded).toBe(0);
+    expect(dispatched).toBe(0);
   });
 
   test("failed admission and concurrent calls never dispatch", async () => {
@@ -181,7 +223,14 @@ describe("Modal physical-create boundary", () => {
     });
     for (const wire of [
       {},
-      { ...request(), definition: { imageId: "im-test", name: "someone-else" } },
+      {
+        ...request(),
+        definition: {
+          imageId: "im-test",
+          resources: { milliCpuMax: 2000, memoryMbMax: 4096 },
+          name: "someone-else",
+        },
+      },
     ]) {
       await expect(
         invoke(

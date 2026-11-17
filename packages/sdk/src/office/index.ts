@@ -9,6 +9,7 @@ export { openOfficeDialog } from "./dialog";
 export {
   explainOfficeError,
   jsonSafe,
+  OFFICE_RUN_SCRIPT_SOURCES,
   runOfficeCode,
   serialQueue,
   type RunResult,

@@ -1577,7 +1577,14 @@ commands as not started, and parks the same turn for
 `ORGANIZATION_SANDBOX_CAPACITY_RETRY_MS` (one minute) with no retry budget and no
 turn worker held. The replacement attempt asks again; joining or re-arming a box
 that already runs never counts. This is a concurrency bound, never a run-length
-limit: an admitted turn keeps its box for as long as it works. The lazy
+limit: an admitted turn keeps its box for as long as it works. The same wait
+applies to the per-person bound `runningBoxesPerPerson`. A tier that allows no
+box (`restricted`) or an organization or person past today's box time
+(`boxSecondsPerOrganizationPerDay`, `boxSecondsPerPersonPerDay`) never frees
+within the turn, so admission raises `SandboxOrganizationBoxLimitError` instead
+and the turn fails with its message (code `sandbox_compute_unavailable`, not
+retryable); a turn that already holds the box finishes (see
+[deployment](deployment.md), "Free compute bounds"). The lazy
 provisioner never retries the transition in place.
 
 **Durable recovery observability.** The control worker reads one content-free,
@@ -2188,7 +2195,7 @@ write. Once `session.context.compacted` or
 `session.context.compaction.skipped` is durable, a waiting human/API or Agent
 Steer cooperatively settles the ordinary turn as `superseded` before another
 model request. A claimed standalone compaction instead completes its maintenance
-turn, then the waiting Steer is first to claim. Pause and Cancel remain immediate
+turn, then the queue runs on to the waiting Steer. Pause and Cancel remain immediate
 interruption fences.
 A compaction cut short by its own attempt's cancellation (graceful worker
 shutdown during a deploy, or any other Temporal activity cancellation) is not a
@@ -2809,8 +2816,9 @@ terminal event on a unique contiguous durable sequence. The operator output is
 limited to safe IDs, event counts, sequences, and model name; credentials and
 event payloads are never printed.
 Pause closes the exact live attempt as `interrupted_recoverable` and leaves its
-logical turn `recovering`; Steer normally closes it as `superseded`, makes the
-steered human prompt first, and does not revive the old turn. The exact exception
+logical turn `recovering`; Steer normally closes it as `superseded`, lets the
+queue run on to the steered human prompt (messages sent before it are read
+first, never skipped), and does not revive the old turn. The exact exception
 is active compaction: while the latest exact-attempt landmark is
 `session.context.compaction.started`, and for the whole lifetime of a claimed
 standalone compaction turn, Steer records durable waiting work but inserts no

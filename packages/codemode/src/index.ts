@@ -747,6 +747,13 @@ export class AttemptToolEnvironment {
   async callModel(input: ModelAttemptToolCall): Promise<AttemptToolResultValue> {
     return await this.gateway.callModel(input);
   }
+
+  /** The checked, possibly repaired arguments `callModel` would run with; throws its rejection. */
+  admitModelArguments(
+    input: Pick<ModelAttemptToolCall, "modelName" | "arguments" | "expectedIdentity">,
+  ): Record<string, unknown> {
+    return this.gateway.admitModelArguments(input);
+  }
 }
 
 export function createAttemptToolEnvironment(

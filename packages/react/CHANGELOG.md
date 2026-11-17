@@ -1,5 +1,18 @@
 # @opengeni/react
 
+## 6.26.0
+
+### Patch Changes
+
+- 6d7ea1e: A context checkpoint that failed before any provider answer, including one refused because the sandbox moved to another machine just before it was sent, now retries the same turn instead of failing it. When a checkpoint does fail for good, a goal's continuation reports `blocked` with the new reason `compaction_failed`, and the goal pill says a message or Compact continues it, rather than claiming the goal will continue automatically.
+- Updated dependencies [6d7ea1e]
+- Updated dependencies [8fae328]
+- Updated dependencies [c8efcb0]
+- Updated dependencies [20e4937]
+  - @opengeni/contracts@6.26.0
+  - @opengeni/sdk@6.26.0
+  - @opengeni/connect@6.26.0
+
 ## 6.25.0
 
 ### Minor Changes

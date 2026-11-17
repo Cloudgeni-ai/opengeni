@@ -173,12 +173,18 @@ export function workspaceIntegrationsPathForUntrusted(candidate: unknown): strin
  * tampered, or signed with another secret returns to
  * {@link INTEGRATIONS_FALLBACK_PATH}. Display routing only: nothing here
  * authorizes, resumes, or replays the callback.
+ *
+ * A provider that refuses authorization may redirect with only `error` and
+ * no `state` (Fiken does when the user is not approved for the app). That
+ * callback failed at the provider, not because the link was stale, so the
+ * provider's refusal is reported instead of a state reason.
  */
 export function oauthStateFailureReturn(
   settings: Settings,
   rawState: string | undefined,
-  nowMs = Date.now(),
-): { returnPath: string; reason: "state_expired" | "state_invalid" } {
+  options: { providerError?: string | undefined; nowMs?: number } = {},
+): { returnPath: string; reason: OAuthStateFailureReason } {
+  const nowMs = options.nowMs ?? Date.now();
   let payload: ReturnType<typeof inspectSignedState> = null;
   try {
     payload = rawState
@@ -187,15 +193,25 @@ export function oauthStateFailureReturn(
   } catch {
     payload = null;
   }
+  const providerError = options.providerError?.trim();
   return {
     returnPath:
       workspaceIntegrationsPathForUntrusted(payload?.workspaceId) ?? INTEGRATIONS_FALLBACK_PATH,
-    reason:
-      payload !== null && nowMs - payload.iat * 1000 > oauthStateTtlMs
+    reason: providerError
+      ? providerError === "access_denied"
+        ? "provider_denied"
+        : "provider_error"
+      : payload !== null && nowMs - payload.iat * 1000 > oauthStateTtlMs
         ? "state_expired"
         : "state_invalid",
   };
 }
+
+export type OAuthStateFailureReason =
+  | "state_expired"
+  | "state_invalid"
+  | "provider_denied"
+  | "provider_error";
 export {
   OFFICIAL_GMAIL_MCP_SCOPES,
   OFFICIAL_GMAIL_MCP_URL,
@@ -592,9 +608,32 @@ async function startMcpOAuthWithinDeadline(
     throw new HTTPException(403, { message: "external OAuth actor mismatch" });
   const mcpUrl = canonicalMcpResource(context.payload.mcpUrl ?? context.payload.resource);
   const urlProfile = builtInOAuthProfileFor({ mcpUrl });
+  // Reconnect names its exact account. Read it first: its own provider domain,
+  // not the caller's hint, decides which account is signed in to again.
+  const reconnecting = Boolean(context.payload.connectionId) && context.payload.newAccount !== true;
+  const reconnectRow = reconnecting
+    ? await deadline.run("connection_lookup", async () =>
+        getConnectionMetadata(
+          db,
+          context.workspaceId,
+          context.payload.connectionId!,
+          context.subjectId,
+        ),
+      )
+    : null;
+  const existing = mcpOAuthReconnectConnection(reconnectRow, {
+    mcpUrl,
+    subjectId: context.subjectId,
+    requestedOwnership: context.payload.ownership,
+    profileProviderDomain: urlProfile?.canonicalProviderDomain,
+  });
+  if (context.payload.connectionId && !existing) {
+    throw new HTTPException(404, { message: "connection not found" });
+  }
   // A per-customer endpoint profile names each environment by its own host.
   const providerDomain =
     urlProfile?.canonicalProviderDomain ??
+    existing?.providerDomain ??
     canonicalProviderDomain(
       (urlProfile?.match.mcpUrl ? undefined : context.payload.providerDomain) ??
         new URL(mcpUrl).hostname,
@@ -622,20 +661,6 @@ async function startMcpOAuthWithinDeadline(
   const baseUrl = integrationBaseUrl(settings.publicBaseUrl, context.requestUrl);
   const redirectUri = `${baseUrl}/v1/integrations/oauth/callback`;
   const metadataUrl = `${baseUrl}/v1/integrations/oauth/client-metadata.json`;
-  const existing = await deadline.run("connection_lookup", async () =>
-    existingOAuthConnectionForStart(db, {
-      workspaceId: context.workspaceId,
-      subjectId: context.subjectId,
-      providerDomain,
-      mcpUrl,
-      connectionId: context.payload.connectionId,
-      newAccount: context.payload.newAccount === true,
-      requestedOwnership: context.payload.ownership,
-    }),
-  );
-  if (context.payload.connectionId && !existing) {
-    throw new HTTPException(404, { message: "connection not found" });
-  }
   const ownership = existing
     ? ownershipForConnection(existing.subjectId, context.subjectId)
     : requestedOwnership;
@@ -980,7 +1005,8 @@ async function completeMcpOAuthCallbackWithinDeadline(
     return {
       redirectTo: callbackReturnPath(INTEGRATIONS_FALLBACK_PATH, "error", {
         stage: error.stage,
-        reason: error.reason,
+        // A provider refusal can arrive without state; report the refusal.
+        reason: oauthStateFailureReturn(settings, undefined, { providerError: input.error }).reason,
       }),
     };
   }
@@ -1138,7 +1164,9 @@ async function completeMcpOAuthCallbackWithinDeadline(
     if (!state) {
       // The state itself could not be resolved, so it carries no return path.
       // An authentic but aged state still names its workspace and "expired".
-      const failure = oauthStateFailureReturn(settings, input.state);
+      const failure = oauthStateFailureReturn(settings, input.state, {
+        providerError: input.error,
+      });
       return {
         redirectTo: callbackReturnPath(failure.returnPath, "error", {
           stage: staged.stage,
@@ -2618,47 +2646,43 @@ async function dynamicClientRegistration(
   };
 }
 
-async function existingOAuthConnectionForStart(
-  db: Database,
+/**
+ * The connection an explicit OAuth Reconnect signs in to again, or null when
+ * the named row cannot be reconnected here. Only explicit Reconnect may
+ * replace a credential; plain Connect and Add resolve the returned identity
+ * through the atomic persistence policy instead.
+ *
+ * The exact row is the authority: an OAuth row for this same MCP endpoint is
+ * reconnected under the provider domain it was saved with. A caller's domain
+ * hint does not decide it, because the same server is named two ways (a
+ * catalog entry names its vendor, sentry.io or stripe.com, while Connect
+ * saves the server's host, mcp.sentry.dev or mcp.stripe.com), and either can
+ * be saved on the row. Only a built-in profile that fixes the domain still
+ * requires it.
+ */
+export function mcpOAuthReconnectConnection<
+  Connection extends Pick<ConnectionMetadata, "kind" | "subjectId" | "providerDomain" | "metadata">,
+>(
+  connection: Connection | null,
   input: {
-    workspaceId: string;
-    subjectId: string;
-    providerDomain: string;
     mcpUrl: string;
-    connectionId?: string | undefined;
-    newAccount?: boolean;
+    subjectId: string;
     requestedOwnership?: ConnectionOwnership | undefined;
+    /** The domain a built-in profile fixes for this endpoint, if any. */
+    profileProviderDomain?: string | undefined;
   },
-) {
-  if (input.newAccount) {
-    // Resolve account identity after authorization; never choose credentials
-    // based only on the provider before we know who signed in.
+): Connection | null {
+  if (!connection || connection.kind !== "oauth2") return null;
+  const ownership = ownershipForConnection(connection.subjectId, input.subjectId);
+  if (input.requestedOwnership && input.requestedOwnership !== ownership) {
+    throw new HTTPException(409, {
+      message: "connection ownership cannot be changed during OAuth reconnect",
+    });
+  }
+  if (connection.metadata.mcpUrl !== input.mcpUrl) return null;
+  if (input.profileProviderDomain && connection.providerDomain !== input.profileProviderDomain)
     return null;
-  }
-  if (input.connectionId) {
-    const connection = await getConnectionMetadata(
-      db,
-      input.workspaceId,
-      input.connectionId,
-      input.subjectId,
-    );
-    if (!connection || connection.kind !== "oauth2") {
-      return null;
-    }
-    const ownership = ownershipForConnection(connection.subjectId, input.subjectId);
-    if (input.requestedOwnership && input.requestedOwnership !== ownership) {
-      throw new HTTPException(409, {
-        message: "connection ownership cannot be changed during OAuth reconnect",
-      });
-    }
-    return connection.providerDomain === input.providerDomain &&
-      connection.metadata.mcpUrl === input.mcpUrl
-      ? connection
-      : null;
-  }
-  // Only explicit Reconnect may replace a credential. Plain Connect and Add
-  // resolve the returned identity through the same atomic persistence policy.
-  return null;
+  return connection;
 }
 
 function ownershipForConnection(

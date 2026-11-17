@@ -3,6 +3,7 @@ import {
   SandboxLeaseSupersededError,
   SandboxLeaseTransitionError,
   SandboxImageConflictError,
+  SandboxOrganizationBoxLimitError,
   SandboxRigConflictError,
 } from "@opengeni/db";
 import {
@@ -444,7 +445,9 @@ export function isLazySandboxProvisionRetryable(error: unknown): boolean {
       (value) =>
         value instanceof SandboxImageConflictError ||
         value instanceof SandboxRigConflictError ||
-        value instanceof SandboxLeaseRecoveryBlockedError,
+        value instanceof SandboxLeaseRecoveryBlockedError ||
+        // The plan allows no sandbox now; a retry gives the same answer.
+        value instanceof SandboxOrganizationBoxLimitError,
     )
   ) {
     return false;

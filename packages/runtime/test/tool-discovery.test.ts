@@ -324,6 +324,13 @@ describe("tool discovery ranking", () => {
     expect(withAccountLine({ model: shared }, "Create an event.")).toBe(
       `Account: ${shared}. ${guidance}\nCreate an event.`,
     );
+    // A connector's only account: the line names it and keeps to it.
+    expect(withAccountLine({ model: own, only: true }, "Create an event.")).toBe(
+      `Account: ${own}. Use only this account.\nCreate an event.`,
+    );
+    expect(descriptionPreview(withAccountLine({ model: own, only: true }, "Create."), 500)).toBe(
+      `Account: ${own}. Create.`,
+    );
     // A preview keeps the account and its default, then the tool's own text.
     expect(
       descriptionPreview(withAccountLine({ model: shared, defaultAccount: own }, "Create."), 500),
@@ -351,6 +358,24 @@ describe("tool discovery ranking", () => {
         names(new ToolSearchIndex(plain).rank(query, 8)),
       );
       expect(names(new ToolSearchIndex(lined).strongestMatches(query, 3))).toEqual(
+        names(new ToolSearchIndex(plain).strongestMatches(query, 3)),
+      );
+      // A connector's only account carries the shorter line, also read past.
+      const only = CONNECTED_TOOL_CATALOG.map((t) =>
+        t.source === "mcp__gmail"
+          ? {
+              ...t,
+              description: withAccountLine(
+                { model: "Gmail — a@example.com · Yours", only: true },
+                t.description,
+              ),
+            }
+          : t,
+      ).map(catalogTool);
+      expect(names(new ToolSearchIndex(only).rank(query, 8))).toEqual(
+        names(new ToolSearchIndex(plain).rank(query, 8)),
+      );
+      expect(names(new ToolSearchIndex(only).strongestMatches(query, 3))).toEqual(
         names(new ToolSearchIndex(plain).strongestMatches(query, 3)),
       );
     }
