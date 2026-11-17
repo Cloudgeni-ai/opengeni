@@ -2537,6 +2537,12 @@ const SettingsSchema = z.object({
   githubAppSlug: z.string().optional(),
   githubWebhookSecret: z.string().optional(),
   githubAppPrivateKey: z.string().optional(),
+  /**
+   * Optional token for Skill source reads against GitHub (preview and install).
+   * Without it those reads are unauthenticated, and GitHub budgets unauthenticated
+   * callers per IP — one shared 60-requests/hour pool for the whole deployment.
+   */
+  skillImportGithubToken: z.string().min(1).optional(),
   signupChallengeEnabled: EnvBoolean.default(false),
   signupChallengeSiteKey: z.string().optional(),
   signupChallengeSecretKey: z.string().optional(),
@@ -7058,6 +7064,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     githubAppSlug: optional("OPENGENI_GITHUB_APP_SLUG"),
     githubWebhookSecret: optional("OPENGENI_GITHUB_WEBHOOK_SECRET"),
     githubAppPrivateKey: optional("OPENGENI_GITHUB_APP_PRIVATE_KEY"),
+    skillImportGithubToken: optional("OPENGENI_SKILL_IMPORT_GITHUB_TOKEN"),
     signupChallengeEnabled: optional("OPENGENI_SIGNUP_CHALLENGE_ENABLED"),
     signupChallengeSiteKey: optional("OPENGENI_SIGNUP_CHALLENGE_SITE_KEY"),
     signupChallengeSecretKey: optional("OPENGENI_SIGNUP_CHALLENGE_SECRET_KEY"),

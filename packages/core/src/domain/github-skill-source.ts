@@ -179,6 +179,23 @@ async function downloadSkillSnapshot(
   });
 }
 
+/**
+ * Headers for GitHub REST reads behind Skill preview and install. A configured
+ * token lifts the shared per-IP budget unauthenticated callers get (60/hour for
+ * the whole deployment) to the token's own 5,000/hour.
+ */
+export function githubSkillSourceHeaders(settings: Settings): Record<string, string> {
+  const headers: Record<string, string> = {
+    accept: "application/vnd.github+json",
+    "user-agent": "OpenGeni-Capabilities",
+    "x-github-api-version": "2022-11-28",
+  };
+  if (settings.skillImportGithubToken) {
+    headers.authorization = `Bearer ${settings.skillImportGithubToken}`;
+  }
+  return headers;
+}
+
 async function githubJson(
   settings: Settings,
   path: string,
@@ -192,11 +209,7 @@ async function githubJson(
       `${githubApiBase}${path}`,
       {
         method: "GET",
-        headers: {
-          accept: "application/vnd.github+json",
-          "user-agent": "OpenGeni-Capabilities",
-          "x-github-api-version": "2022-11-28",
-        },
+        headers: githubSkillSourceHeaders(settings),
         signal: controller.signal,
       },
       settings,
@@ -207,8 +220,9 @@ async function githubJson(
       if (response.status === 404) throw new Error(`${label} was not found or is not public`);
       if (response.status === 403 || response.status === 429) {
         throw new HTTPException(429, {
-          message:
-            "GitHub's public request limit has been reached. Skill search is still available; try previewing again after the limit resets.",
+          message: settings.skillImportGithubToken
+            ? "GitHub's request limit for this deployment has been reached. Skill search is still available; try previewing again after the limit resets."
+            : "GitHub's public request limit has been reached. Skill search is still available; try previewing again after the limit resets.",
         });
       }
       throw new Error(`${label} failed with HTTP ${response.status}`);
