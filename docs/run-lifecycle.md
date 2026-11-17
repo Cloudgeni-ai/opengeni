@@ -4907,8 +4907,17 @@ turns finish naturally for its shutdown grace (default 90 seconds,
 turn that outlasts the grace, Temporal cancels the activity with reason
 `WORKER_SHUTDOWN`; the activity checkpoints conversation truth and the sandbox
 envelope, closes the exact attempt as recoverable, and leaves the same logical
-turn in `recovering`. It never creates a human queue row or synthetic user
-message. Any in-flight side-effecting tool call is durably closed with an
+turn in `recovering`. The handoff does not depend on the run noticing the
+cancellation: a run still parked a few seconds later, in a wait that never
+observes cancellation (an unanswered machine or provider call), is abandoned
+and the attempt is settled and finalized as the same `worker_shutdown`
+handoff inside the force-stop window; the abandoned run is fenced by the
+closed attempt and ends with the process. A turn whose worker died anyway is
+closed `lease_lost_recoverable` after the heartbeat timeout, and its
+subscription lease stops holding the turn at that closure, so the redispatched
+attempt is not refused as busy until the lease TTL runs out. It never creates
+a human queue row or synthetic user message. Any in-flight side-effecting tool
+call is durably closed with an
 explicit `interrupted / outcome unknown` result before the next attempt can
 run; this includes Codemode calls, whose operation is journaled before dispatch
 and whose execution-start marker prevents replay after the side-effect boundary.
