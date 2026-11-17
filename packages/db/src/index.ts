@@ -76399,7 +76399,8 @@ export async function updateSessionGoalWithEvent(
   events: SessionEvent[];
   operationId: string | null;
   replay: boolean;
-  outcome: "applied" | "proposed";
+  /** `unchanged`: the requested content already is the goal; nothing was written. */
+  outcome: "applied" | "proposed" | "unchanged";
   proposalId: string | null;
 }> {
   if (input.text !== undefined) {
@@ -76463,11 +76464,13 @@ export async function updateSessionGoalWithEvent(
         const parsed = SessionGoalContract.safeParse(reserved.receipt.result.goal);
         const goalVersion = reserved.receipt.result.goalVersion;
         const eventId = reserved.receipt.result.eventId;
+        const outcome = reserved.receipt.result.outcome;
+        // An unchanged update wrote no event, so its receipt holds none.
         if (
           !parsed.success ||
           !Number.isSafeInteger(goalVersion) ||
           parsed.data.version !== goalVersion ||
-          typeof eventId !== "string"
+          (outcome === "unchanged" ? eventId !== null : typeof eventId !== "string")
         ) {
           throw new SessionControlInvariantError(
             `Goal update receipt ${reserved.receipt.id} has no valid committed result`,
@@ -76478,7 +76481,7 @@ export async function updateSessionGoalWithEvent(
           events: [],
           operationId: reserved.receipt.id,
           replay: true,
-          outcome: reserved.receipt.result.outcome === "proposed" ? "proposed" : "applied",
+          outcome: outcome === "proposed" || outcome === "unchanged" ? outcome : "applied",
           proposalId:
             typeof reserved.receipt.result.proposalId === "string"
               ? reserved.receipt.result.proposalId
@@ -76511,13 +76514,13 @@ export async function updateSessionGoalWithEvent(
       if (existing.status === "completed") {
         throw new Error("session goal is completed; use goal_set to start a new goal");
       }
-      const semanticChangeRequested =
+      const contentSupplied =
         input.text !== undefined ||
         input.successCriteria !== undefined ||
         input.mutationPolicy !== undefined;
       if (
         input.actor === "agent" &&
-        semanticChangeRequested &&
+        contentSupplied &&
         (!input.changeKind ||
           !input.rationale?.trim() ||
           input.expectedObjectiveRevision === undefined)
@@ -76539,7 +76542,30 @@ export async function updateSessionGoalWithEvent(
       const nextSuccessCriteria =
         input.successCriteria !== undefined ? input.successCriteria : existing.successCriteria;
       const nextMutationPolicy = input.mutationPolicy ?? existing.mutationPolicy;
-      if (!semanticChangeRequested) {
+      // The objective revision counts semantic changes, and the revision
+      // trigger refuses to advance it for content that did not change. Content
+      // equal to the current goal is therefore not a rewrite at all.
+      const semanticChange =
+        nextText !== existing.text ||
+        nextSuccessCriteria !== existing.successCriteria ||
+        nextMutationPolicy !== existing.mutationPolicy;
+      if (!semanticChange && contentSupplied && !input.progressNote) {
+        const goal = mapSessionGoal(existing);
+        if (reserved) {
+          await updateSessionCommandReceiptResult(tx, reserved.receipt.id, {
+            result: { goal, goalVersion: goal.version, eventId: null, outcome: "unchanged" },
+          });
+        }
+        return {
+          goal,
+          events: [],
+          operationId: reserved?.receipt.id ?? null,
+          replay: false,
+          outcome: "unchanged",
+          proposalId: null,
+        };
+      }
+      if (!semanticChange) {
         if (!input.progressNote) {
           throw new Error("goal_update requires semantic content or a progress note");
         }
