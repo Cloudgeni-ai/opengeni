@@ -1594,6 +1594,12 @@ const SettingsSchema = z.object({
   // `off` runs code_grep without the decision model: the same excerpts in
   // match order, cut to the same size.
   codeGrepJudge: z.enum(["on", "off"]).default("on"),
+  // code_grep judge thresholds, calibrated per decision model: the relevance
+  // an excerpt needs to be shown, the confidence that stops judging early,
+  // and the excerpts judged per wave. Unset keeps the engine defaults.
+  codeGrepRelevantFloor: z.coerce.number().min(0).max(1).optional(),
+  codeGrepStopFloor: z.coerce.number().min(0).max(1).optional(),
+  codeGrepWaveSize: z.coerce.number().int().min(1).max(96).optional(),
   // Deployment-default agent persona template (the white-label surface). The
   // runtime resolves the effective template per turn as
   // per-session-override > per-workspace override > this default, substitutes
@@ -6541,6 +6547,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     codeSearchMode: optional("OPENGENI_CODE_SEARCH_MODE"),
     codeSearchEngine: optional("OPENGENI_CODE_SEARCH_ENGINE"),
     codeGrepJudge: optional("OPENGENI_CODE_GREP_JUDGE"),
+    codeGrepRelevantFloor: optional("OPENGENI_CODE_GREP_RELEVANT_FLOOR"),
+    codeGrepStopFloor: optional("OPENGENI_CODE_GREP_STOP_FLOOR"),
+    codeGrepWaveSize: optional("OPENGENI_CODE_GREP_WAVE_SIZE"),
     agentInstructionsTemplate: optional("OPENGENI_AGENT_INSTRUCTIONS_TEMPLATE"),
     deploymentAgentInstructions: optional("OPENGENI_DEPLOYMENT_AGENT_INSTRUCTIONS"),
     experimentKnowledgeRetrievalGuidance: optional(

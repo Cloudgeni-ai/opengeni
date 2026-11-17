@@ -107,10 +107,16 @@ export interface CodeGrepExcerpt {
   text: string;
   patterns: number[];
   p: number | null;
+  /** Shown in the result. */
+  shown: boolean;
 }
 
 export interface CodeGrepStats {
   wallMs: number;
+  /** Time in ripgrep, in reading files and building excerpts, and waiting on the judge. */
+  grepMs: number;
+  excerptMs: number;
+  judgeMs: number;
   patternFiles: number[];
   patternHits: number[];
   invalidPatterns: number[];
@@ -244,6 +250,7 @@ export async function runCodeGrep(input: CodeGrepInput): Promise<CodeGrepResult>
   const ranked = [...files.values()].sort(
     (a, b) => weight(b) - weight(a) || a.path.length - b.path.length || (a.path < b.path ? -1 : 1),
   );
+  const grepMs = Math.round(performance.now() - t0);
   emit("grep", { patternFiles, patternHits, invalid, files: files.size, missingPaths });
 
   // ---- 2. excerpts around the hits (best files first, one window per file per round)
@@ -277,8 +284,10 @@ export async function runCodeGrep(input: CodeGrepInput): Promise<CodeGrepResult>
           w.hits.some((h) => f.lines.get(h)?.kws.includes(i)),
         ),
         p: null,
+        shown: false,
       });
     }
+  const excerptMs = Math.round(performance.now() - t0) - grepMs;
   emit("excerpts", { files: windowsByFile.length, excerpts: excerpts.length });
 
   // ---- 3. judge in parallel waves; stop once the relevant excerpts answer the question
@@ -297,6 +306,7 @@ export async function runCodeGrep(input: CodeGrepInput): Promise<CodeGrepResult>
     await input.onDecisionUsage?.(u);
   };
   const model = input.decisionModel;
+  const judgeStart = performance.now();
   if (model && excerpts.length) {
     const perRequest = Math.max(
       1,
@@ -375,6 +385,8 @@ export async function runCodeGrep(input: CodeGrepInput): Promise<CodeGrepResult>
     }
   }
 
+  const judgeMs = model && excerpts.length ? Math.round(performance.now() - judgeStart) : 0;
+
   // ---- 4. the result: relevant excerpts (or lexical order), then the files not shown
   const judged = excerpts.filter((e) => e.p !== null);
   const order =
@@ -391,6 +403,7 @@ export async function runCodeGrep(input: CodeGrepInput): Promise<CodeGrepResult>
     const block = `--- ${e.path}:${e.start}-${e.end}${e.p === null ? "" : ` (relevance ${e.p.toFixed(2)})`}\n${body}\n`;
     if (used + block.length > budget && shown.length) break;
     shown.push(e);
+    e.shown = true;
     used += block.length;
   }
   const shownPaths = new Set(shown.map((e) => e.path));
@@ -438,6 +451,9 @@ export async function runCodeGrep(input: CodeGrepInput): Promise<CodeGrepResult>
   const text = [head.join("\n"), ...body, tail.join("\n")].filter(Boolean).join("\n\n");
   const stats: CodeGrepStats = {
     wallMs: Math.round(performance.now() - t0),
+    grepMs,
+    excerptMs,
+    judgeMs,
     patternFiles,
     patternHits,
     invalidPatterns: invalid,

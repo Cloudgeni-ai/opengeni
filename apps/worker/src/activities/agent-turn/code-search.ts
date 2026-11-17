@@ -18,6 +18,7 @@ import {
   renderCodeSearchError,
   runCodeGrep,
   runCodeSearch,
+  type CodeGrepLimits,
   type CodeSearchWorkspace,
   type JevCircuitLease,
 } from "@opengeni/jev";
@@ -284,6 +285,8 @@ export function createCodeGrepAttemptToolDefinition(input: {
   settings: WorkerDecisionSettings;
   /** `off` never calls the decision model. */
   judge: "on" | "off";
+  /** Judge thresholds calibrated for the deployment's decision model. */
+  limits?: Partial<CodeGrepLimits>;
   workspace: () => Promise<CodeSearchWorkspace>;
   observability: Observability;
   recordUsage?: (usage: CodeSearchUsage) => Promise<void>;
@@ -336,6 +339,7 @@ export function createCodeGrepAttemptToolDefinition(input: {
           ...(request.globs.length ? { globs: request.globs } : {}),
           ...(request.ignoreCase !== undefined ? { ignoreCase: request.ignoreCase } : {}),
           workspace,
+          ...(input.limits ? { limits: input.limits } : {}),
           decisionModel: lease && configured ? configured.model : null,
           onDecisionUsage: (usage) => {
             decisionRequests += usage.requests;
@@ -362,6 +366,30 @@ export function createCodeGrepAttemptToolDefinition(input: {
           else breaker.release(held);
         }
         outcome = "completed";
+        // One structured line per call: where the time went and what the judge kept, without code.
+        const s = result.stats;
+        input.observability.info("code_grep call", {
+          operationId: context.operationId,
+          judge: s.judge,
+          wallMs: s.wallMs,
+          grepMs: s.grepMs,
+          excerptMs: s.excerptMs,
+          judgeMs: s.judgeMs,
+          patterns: request.patterns.length,
+          filesMatched: s.filesMatched,
+          excerpts: s.excerpts,
+          judged: s.judged,
+          relevant: s.relevant,
+          shown: s.shown,
+          waves: s.waves,
+          stoppedEarly: s.stoppedEarly,
+          decisionRequests: s.decision.requests,
+          decisionInputTokens: s.decision.inputTokens,
+          outputChars: result.text.length,
+          excerptTrace: JSON.stringify(
+            result.excerpts.map((e) => [e.path, e.start, e.end, e.p, e.shown ? 1 : 0]),
+          ),
+        });
         return textResult(result.text, false);
       } catch (error) {
         if (context.signal?.aborted) {
@@ -429,6 +457,7 @@ export function codeSearchToolDefinitions(input: {
   /** `grep` offers code_grep in place of code_search. */
   engine?: "search" | "grep";
   grepJudge?: "on" | "off";
+  grepLimits?: Partial<CodeGrepLimits>;
   backend: Settings["sandboxBackend"];
   /** The turn's Connected Machine workspace root, when a machine is primary. */
   machineWorkspaceRoot?: string | null;
@@ -450,6 +479,7 @@ export function codeSearchToolDefinitions(input: {
       createCodeGrepAttemptToolDefinition({
         settings: input.settings,
         judge: input.grepJudge ?? "on",
+        ...(input.grepLimits ? { limits: input.grepLimits } : {}),
         workspace: input.workspace,
         observability: input.observability,
         ...(input.recordUsage ? { recordUsage: input.recordUsage } : {}),

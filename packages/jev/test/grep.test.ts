@@ -114,6 +114,14 @@ describeWithRipgrep("runCodeGrep", () => {
     expect(r.stats.judge).toBe("on");
     expect(r.stats.decision.requests).toBeGreaterThan(0);
     expect(r.judgeError).toBeNull();
+    expect(r.stats.judgeMs).toBeGreaterThanOrEqual(0);
+    expect(r.stats.wallMs).toBeGreaterThanOrEqual(r.stats.grepMs);
+    expect(
+      r.excerpts
+        .filter((e) => e.shown)
+        .map((e) => e.path)
+        .sort(),
+    ).toEqual([...shownPaths].sort());
   });
 
   test("smart case by default, literal fallback for an invalid regex", async () => {

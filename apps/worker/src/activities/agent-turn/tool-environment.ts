@@ -1079,6 +1079,17 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     settings: runSettings,
     engine: runSettings.codeSearchEngine,
     grepJudge: runSettings.codeGrepJudge,
+    grepLimits: {
+      ...(runSettings.codeGrepRelevantFloor !== undefined
+        ? { relevantFloor: runSettings.codeGrepRelevantFloor }
+        : {}),
+      ...(runSettings.codeGrepStopFloor !== undefined
+        ? { stopFloor: runSettings.codeGrepStopFloor }
+        : {}),
+      ...(runSettings.codeGrepWaveSize !== undefined
+        ? { waveSize: runSettings.codeGrepWaveSize }
+        : {}),
+    },
     backend: activeSandboxBackend ?? groupBoxBackend,
     machineWorkspaceRoot: sandboxState.machinePrimarySession?.workspaceRoot ?? null,
     observability,
@@ -1678,7 +1689,8 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       ...titleToolPlan.preparationIndependentToolNames,
       "skill_read",
     ],
-    codeSearchAvailable: codeSearchTools.length > 0,
+    // The code_search directive describes code_search only; code_grep relies on its description.
+    codeSearchAvailable: codeSearchTools.some((tool) => tool.modelName === "code_search"),
     promptToolAvailability:
       promptToolAvailability && !toolRouterExpected
         ? { ...promptToolAvailability, toolSearchAbsent: true as const }
