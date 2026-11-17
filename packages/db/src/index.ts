@@ -8061,7 +8061,9 @@ export type UpdateConnectionInput = {
    * The new credential's verified account key, when the writer cannot store
    * it on this row (another live row of the same owner already holds it, as
    * for a legacy duplicate). It counts like `accountIdentityKey` for keeping
-   * `authorityGeneration`, but the row stays without a key.
+   * `authorityGeneration`, but the row stays without a key. Pass it only
+   * after verifying the new credential is that account; it is ignored when
+   * `accountIdentityKey` is given (including null, an unverified account).
    */
   vouchedAccountIdentityKey?: string | null;
   /** Rename: display only, so it changes neither `version` nor authority. */
@@ -14563,7 +14565,10 @@ export async function verifyPersonalGitHubRepositorySelections(
  */
 function sameAccountReconnectGeneration(input: UpdateConnectionInput) {
   const next = sql`${schema.connections.authorityGeneration} + 1`;
-  const incoming = input.accountIdentityKey ?? input.vouchedAccountIdentityKey;
+  const incoming =
+    input.accountIdentityKey !== undefined
+      ? input.accountIdentityKey
+      : input.vouchedAccountIdentityKey;
   if (!incoming) return next;
   // A row saved before keys existed carries none; the writer then vouches
   // for the stored row's account with the key it derives from that row.

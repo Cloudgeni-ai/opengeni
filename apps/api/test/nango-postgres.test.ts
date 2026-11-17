@@ -134,6 +134,8 @@ function fakeNango() {
     identityStatus?: number;
     /** The status GET /connections/{id} (the scope read) answers with instead. */
     scopeStatus?: number;
+    /** Left out of every GET /connections listing, yet readable by id. */
+    unlisted?: boolean;
   };
   const remote: Remote[] = [];
   /** Nango connection ids whose deletion fails. */
@@ -155,6 +157,7 @@ function fakeNango() {
         connections: remote
           .filter(
             (entry) =>
+              !entry.unlisted &&
               (!connectionId || entry.connectionId === connectionId) &&
               wantedTags.every(([key, value]) => entry.tags[key] === value),
           )
@@ -918,10 +921,13 @@ describe("Nango connections in PostgreSQL", () => {
     const nango = fakeNango();
     const both = "https://www.googleapis.com/auth/gmail.readonly https://mail.google.com/";
     await connect(legacy, nango, "um-1", "unmarked@example.com", both);
-    // As saved before the marker: its scopes may be the app's defaults.
+    // As saved before the marker: its stored scopes are the app's defaults,
+    // while Google only granted read-only.
     await shared!.admin`update connections
       set metadata = metadata - 'nangoScopesConfirmed'
       where workspace_id = ${legacy.workspaceId} and provider_domain = 'nango:gmail'`;
+    nango.remote.find((entry) => entry.connectionId === "um-1")!.scope =
+      "https://www.googleapis.com/auth/gmail.readonly";
     // The same account connected read-only elsewhere, as Nango reports it.
     await connect(fresh, nango, "um-2", "unmarked@example.com");
     // The fresh row keeps its own, confirmed connection; the unmarked one
@@ -1015,6 +1021,69 @@ describe("Nango connections in PostgreSQL", () => {
       markedMissing: 0,
       repointed: 0,
     });
+  });
+
+  test("a connection Nango still has is never taken for gone, even if a listing misses it", async () => {
+    if (!shared) return;
+    const target = await owner("nango sweep unlisted");
+    const nango = fakeNango();
+    await connect(target, nango, "nh-listed", "listed@example.com");
+    await connect(target, nango, "nh-hidden", "hidden@example.com");
+    // Nango's listings leave it out, but the connection itself still answers.
+    nango.remote.find((entry) => entry.connectionId === "nh-hidden")!.unlisted = true;
+    expect(await sweepNangoConnections(sweepDeps(nango))).toMatchObject({ markedMissing: 0 });
+    expect((await nangoRows(target)).map((row) => row.status)).toEqual(["active", "active"]);
+  });
+
+  test("once granted, the sweep finds a person whose only connection is gone", async () => {
+    if (!shared) return;
+    const target = await owner("nango sweep only connection gone");
+    const nango = fakeNango();
+    await connect(target, nango, "nl-only", "only-gone@example.com");
+    // Deleted outside reference counting, with no webhook: Nango lists nothing for them.
+    nango.remote.splice(
+      nango.remote.findIndex((entry) => entry.connectionId === "nl-only"),
+      1,
+    );
+    // Without the deployment-wide listing nobody leads the sweep to them.
+    await sweepNangoConnections(sweepDeps(nango));
+    expect((await nangoRows(target))[0]).toMatchObject({ status: "active" });
+    await shared!.admin.unsafe(
+      "GRANT EXECUTE ON FUNCTION opengeni_private.nango_live_connection_owners_v1(text, text, text, integer) TO opengeni_app",
+    );
+    try {
+      await sweepNangoConnections(sweepDeps(nango));
+    } finally {
+      await shared!.admin.unsafe(
+        "REVOKE EXECUTE ON FUNCTION opengeni_private.nango_live_connection_owners_v1(text, text, text, integer) FROM opengeni_app",
+      );
+    }
+    const [row] = await shared!.admin<Array<{ status: string; last_error: string | null }>>`
+      select status, last_error from connections
+      where workspace_id = ${target.workspaceId} and provider_domain = 'nango:gmail'`;
+    expect({ ...row }).toEqual({ status: "needs_reauth", last_error: "nango_connection_missing" });
+  });
+
+  test("older duplicates without the scope marker merge on the scopes Nango reports", async () => {
+    if (!shared) return;
+    const first = await owner("nango sweep unmarked first");
+    const second = await owner("nango sweep unmarked second", first.subjectId);
+    const nango = fakeNango();
+    await connect(first, nango, "nu-1", "dup-unmarked@example.com");
+    await connect(second, nango, "nu-2", "dup-unmarked@example.com");
+    await leaveRowOn(first, "nu-1", nango, "dup-unmarked@example.com");
+    // Saved before the marker existed: neither row vouches for its scopes.
+    for (const target of [first, second])
+      await shared!.admin`update connections
+        set metadata = metadata - 'nangoScopesConfirmed'
+        where workspace_id = ${target.workspaceId} and provider_domain = 'nango:gmail'`;
+    const result = await sweepNangoConnections(sweepDeps(nango));
+    expect(result).toMatchObject({ repointed: 1, deletedDuplicates: ["nu-1"] });
+    expect((await nangoRows(first))[0]).toMatchObject({
+      status: "active",
+      nango_connection_id: "nu-2",
+    });
+    expect(nango.remote.map((entry) => entry.connectionId)).toEqual(["nu-2"]);
   });
 
   test("the sweep shares duplicates of one account an older release left", async () => {

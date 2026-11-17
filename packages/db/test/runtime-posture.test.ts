@@ -618,10 +618,20 @@ function safePosture(): RuntimeDatabasePosture {
         hasDependents: false,
         configuration: ["search_path=pg_catalog, public, pg_temp"],
       },
-      // 1482 reads only connections, present in every current posture, and
-      // withholds its runtime grant.
+      // 1482 and 1484 read only connections, present in every current posture, and
+      // withhold their runtime grants.
       {
         name: "nango_connections_in_use_v1(text[])",
+        owner: "opengeni_migrator",
+        execute: false,
+        publicExecute: false,
+        securityDefiner: true,
+        triggerCallable: false,
+        hasDependents: false,
+        configuration: ["search_path=pg_catalog, public, pg_temp"],
+      },
+      {
+        name: "nango_live_connection_owners_v1(text, text, text, integer)",
         owner: "opengeni_migrator",
         execute: false,
         publicExecute: false,
@@ -4316,6 +4326,7 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
       "organization_warm_sandbox_counts_v1(uuid, text, uuid)",
       "nango_connections_in_use_v1(text[])",
+      "nango_live_connection_owners_v1(text, text, text, integer)",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -4328,6 +4339,7 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "collect_session_content_garbage_v1(uuid, uuid, integer)",
       "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
       "nango_connections_in_use_v1(text[])",
+      "nango_live_connection_owners_v1(text, text, text, integer)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
@@ -4414,6 +4426,7 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
       "organization_warm_sandbox_counts_v1(uuid, text, uuid)",
       "nango_connections_in_use_v1(text[])",
+      "nango_live_connection_owners_v1(text, text, text, integer)",
     ]) {
       const posture = eventPosture(false);
       posture.privateRoutines = posture.privateRoutines.filter((entry) => entry.name !== name);

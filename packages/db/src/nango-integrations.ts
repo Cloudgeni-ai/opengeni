@@ -208,6 +208,62 @@ export async function nangoConnectionsInUse(
   return used;
 }
 
+/** Migration 1484's listing, withheld from the runtime for one release. */
+export const NANGO_LIVE_CONNECTION_OWNERS_ROUTINE =
+  "opengeni_private.nango_live_connection_owners_v1(text, text, text, integer)";
+
+export type NangoLiveConnectionOwner = {
+  subjectId: string;
+  providerConfigKey: string;
+  nangoConnectionId: string;
+};
+
+/**
+ * Every active Nango-backed row's owner, Nango integration and Nango
+ * connection id, deployment-wide (each triple once), in pages of `pageSize`;
+ * null while the listing is withheld. Like nangoConnectionsInUse it opens
+ * and closes a one-transaction capability, so each page runs in its own
+ * read-write transaction.
+ */
+export async function listNangoLiveConnectionOwners(
+  db: Database,
+  options: { pageSize?: number; maxRows?: number } = {},
+): Promise<NangoLiveConnectionOwner[] | null> {
+  const [granted] = await rawRows<{ granted: boolean | null }>(
+    db,
+    sql`select has_function_privilege(
+      to_regprocedure(${NANGO_LIVE_CONNECTION_OWNERS_ROUTINE})::oid, 'EXECUTE') as granted`,
+  );
+  if (granted?.granted !== true) return null;
+  const pageSize = Math.min(Math.max(options.pageSize ?? 1000, 1), 1000);
+  const maxRows = options.maxRows ?? 100_000;
+  const owners: NangoLiveConnectionOwner[] = [];
+  let after: NangoLiveConnectionOwner | null = null;
+  while (owners.length < maxRows) {
+    const cursor: NangoLiveConnectionOwner | null = after;
+    const page = await db.transaction(async (tx) =>
+      rawRows<{ subject_id: string; provider_config_key: string; nango_connection_id: string }>(
+        tx as unknown as Database,
+        sql`select subject_id, provider_config_key, nango_connection_id
+          from opengeni_private.nango_live_connection_owners_v1(
+            ${cursor?.subjectId ?? null}::text,
+            ${cursor?.providerConfigKey ?? null}::text,
+            ${cursor?.nangoConnectionId ?? null}::text,
+            ${pageSize}::integer)`,
+      ),
+    );
+    for (const row of page)
+      owners.push({
+        subjectId: row.subject_id,
+        providerConfigKey: row.provider_config_key,
+        nangoConnectionId: row.nango_connection_id,
+      });
+    if (page.length < pageSize) break;
+    after = owners[owners.length - 1]!;
+  }
+  return owners;
+}
+
 // ---------------------------------------------------------------------------
 // Usage events
 // ---------------------------------------------------------------------------

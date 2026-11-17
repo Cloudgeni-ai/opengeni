@@ -107,6 +107,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
   "organization_warm_sandbox_counts_v1(uuid, text, uuid)",
   "nango_connections_in_use_v1(text[])",
+  "nango_live_connection_owners_v1(text, text, text, integer)",
 ] as const;
 
 /**
@@ -163,6 +164,7 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "collect_session_content_garbage_v1(uuid, uuid, integer)",
   "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
   "nango_connections_in_use_v1(text[])",
+  "nango_live_connection_owners_v1(text, text, text, integer)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -289,6 +291,7 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "workspaces",
   ],
   "nango_connections_in_use_v1(text[])": ["connections"],
+  "nango_live_connection_owners_v1(text, text, text, integer)": ["connections"],
 };
 
 export const SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE =

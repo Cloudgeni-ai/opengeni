@@ -193,6 +193,35 @@ describe("one live connection per owner and verified account", () => {
     expect(await generation()).toBe(start);
   }, 60_000);
 
+  test("a vouched key keeps the generation only when the writer does not call the account unverified", async () => {
+    const workspace = await organization();
+    const legacy = await connect(workspace, { personal: true, accountIdentityKey: null });
+    const generation = async () =>
+      Number(
+        (
+          await shared.admin<Array<{ authority_generation: string }>>`
+            select authority_generation from connections where id = ${legacy.id}`
+        )[0]!.authority_generation,
+      );
+    const write = (accountIdentityKey?: null) =>
+      updateConnection(client.db, {
+        workspaceId: workspace.workspaceId,
+        connectionId: legacy.id,
+        visibleToSubjectId: workspace.subjectId,
+        credentialEncrypted: `token-${crypto.randomUUID()}`,
+        previousAccountIdentityKey: KEY,
+        vouchedAccountIdentityKey: KEY,
+        ...(accountIdentityKey === null ? { accountIdentityKey } : {}),
+      });
+    const start = await generation();
+    // The same account, without taking the key (a sibling row holds it).
+    await write();
+    expect(await generation()).toBe(start);
+    // An explicitly unverified credential is an authority change, vouched or not.
+    await write(null);
+    expect(await generation()).toBe(start + 1);
+  }, 60_000);
+
   test("provider OAuth reconnects the live row, never a revoked duplicate", async () => {
     const workspace = await organization();
     const metadata = {

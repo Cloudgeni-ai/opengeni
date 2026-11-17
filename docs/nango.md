@@ -143,7 +143,9 @@ connections; that is not a duplicate.
   reports no scopes the row records the app's default scopes without the
   marker, and so does every row saved before the marker existed. No other
   organization's row is moved onto a connection on the strength of unmarked
-  scopes. Email accounts are compared case-insensitively.
+  scopes; for a connection no marked row vouches for, the scopes Nango
+  reports for it now count instead (none when Nango cannot read it), so
+  older duplicates are still merged. Email accounts are compared case-insensitively.
 - A legacy duplicate row of the same owner and account (saved before account
   keys) shares the connection without the key, so it is billed once. It is
   the same verified account, so its `authority_generation` is kept too.
@@ -198,16 +200,23 @@ URL, so deployments sharing one Nango environment never sweep each other's):
 - marks active rows whose Nango connection Nango no longer has
   (`nango_connection_missing`, for example deleted by an older release during
   a rollout or rollback) as needing reconnection, after Nango confirms the
-  connection is gone. A row with a healthy connection of the same account
-  that covers its scopes is moved onto that one instead. Only people with at
-  least one connection this deployment tagged are visited (the sweep finds
-  people through Nango's tags).
+  connection is gone (a 404 for that very connection; any other answer keeps
+  the row). A row with a healthy connection of the same account that covers
+  its scopes is moved onto that one instead. People are found through
+  Nango's tags and, once a later migration grants it,
+  `opengeni_private.nango_live_connection_owners_v1` (migration 1484: the
+  owner, integration and Nango connection id of every active Nango row), so
+  a person whose only connection is gone is visited too. Until that grant,
+  only people with at least one connection this deployment tagged are
+  visited.
 
 Repoints are committed first. Every deletion in Nango, and the confirmation
 before marking a row, happens afterwards under the person's lock, in a
-transaction that writes nothing, after the rows are read again. A worker
-whose public base URL tags none of the listed connections while others carry
-another deployment's tag logs that once, since it then cleans up nothing.
+transaction that writes no connection rows, after the rows are read again. A
+worker whose public base URL tags none of the listed connections while others
+carry another deployment's tag logs once that its tag is possibly mismatched
+(it then cleans up nothing, unless it is a new deployment sharing the Nango
+environment).
 
 Connections made outside Opengeni or before the deployment tag (untagged)
 are left to the operator's `integrations:nango orphans` command; that

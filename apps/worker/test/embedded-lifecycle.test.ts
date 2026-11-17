@@ -856,6 +856,17 @@ describe("embedded worker lifecycle contract", () => {
             has_dependents: false,
             configuration: ["search_path=pg_catalog, public, pg_temp"],
           },
+          // Migration 1484: the live Nango connection owners listing, likewise.
+          {
+            name: "nango_live_connection_owners_v1(text, text, text, integer)",
+            owner: "opengeni_migrator",
+            can_execute: false,
+            public_execute: false,
+            security_definer: true,
+            trigger_callable: false,
+            has_dependents: false,
+            configuration: ["search_path=pg_catalog, public, pg_temp"],
+          },
           // Migration 1103: the subscription account-administrator grant,
           // created without runtime EXECUTE; 1149 granted it.
           {

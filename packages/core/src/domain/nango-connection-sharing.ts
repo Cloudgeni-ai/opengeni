@@ -18,6 +18,7 @@ import {
   isConnectionAccountIdentityConflict,
   listConnectionsMetadata,
   listSelfOrganizationMemberships,
+  listNangoLiveConnectionOwners,
   nangoConnectionsInUse,
   nangoConnectionsInUseAvailable,
   recordNangoUsageEvent,
@@ -305,7 +306,7 @@ function confirmedMetadata(
 function sharedTarget(
   preference: readonly string[],
   accountRows: readonly ConnectionMetadata[],
-  extraGrant: { id: string; scopes: readonly string[] } | null = null,
+  extraGrants: ReadonlyArray<{ id: string; scopes: readonly string[] }> = [],
 ): { target: string; grant: string[] } {
   const grants = new Map<string, Set<string>>();
   for (const row of accountRows) {
@@ -317,10 +318,10 @@ function sharedTarget(
     if (nangoScopesConfirmed(row)) for (const scope of row.grantedScopes) grant.add(scope);
     grants.set(id, grant);
   }
-  if (extraGrant) {
-    const grant = grants.get(extraGrant.id) ?? new Set<string>();
-    for (const scope of extraGrant.scopes) grant.add(scope);
-    grants.set(extraGrant.id, grant);
+  for (const extra of extraGrants) {
+    const grant = grants.get(extra.id) ?? new Set<string>();
+    for (const scope of extra.scopes) grant.add(scope);
+    grants.set(extra.id, grant);
   }
   const required = new Set(accountRows.flatMap((row) => row.grantedScopes));
   const covering = preference.find((id) =>
@@ -328,6 +329,31 @@ function sharedTarget(
   );
   const target = covering ?? preference[0]!;
   return { target, grant: [...(grants.get(target) ?? [])] };
+}
+
+/**
+ * What Nango reports each candidate connection was granted, for the ones no
+ * confirmed row vouches for (rows saved before the marker). Without this an
+ * older connection would never cover anything, and its duplicates would
+ * stay billed until reconnected. A connection Nango cannot read is no grant.
+ */
+async function reportedGrants(
+  client: NangoClient,
+  providerConfigKey: string,
+  ids: readonly string[],
+  accountRows: readonly ConnectionMetadata[],
+): Promise<Array<{ id: string; scopes: string[] }>> {
+  const reported: Array<{ id: string; scopes: string[] }> = [];
+  for (const id of ids) {
+    const vouched = accountRows.some(
+      (row) => nangoConnectionIdOf(row) === id && nangoScopesConfirmed(row),
+    );
+    if (vouched) continue;
+    const connection = await client.getConnection(id, providerConfigKey).catch(() => null);
+    if (connection?.scopes && !connection.refreshFailed)
+      reported.push({ id, scopes: connection.scopes });
+  }
+  return reported;
 }
 
 /** Whether the row's organization still allows the integration. */
@@ -512,11 +538,10 @@ export async function shareNangoConnection(
     const storedConfirmed = accountRows.some(
       (row) => nangoConnectionIdOf(row) === stored && nangoScopesConfirmed(row),
     );
-    const { target, grant } = sharedTarget(
-      [stored, ...confirmed],
-      accountRows,
-      storedConfirmed ? { id: stored, scopes: input.grantedScopes } : null,
-    );
+    const { target, grant } = sharedTarget([stored, ...confirmed], accountRows, [
+      ...(storedConfirmed ? [{ id: stored, scopes: input.grantedScopes }] : []),
+      ...(await reportedGrants(client, input.providerConfigKey, confirmed, accountRows)),
+    ]);
     const others = accountRows.filter((row) => nangoConnectionIdOf(row) !== target);
     const written = await repointRows(deps, tx, {
       subjectId: input.subjectId,
@@ -679,7 +704,7 @@ export const NANGO_SWEEP_BUDGET_MS = 3 * 60 * 1000;
  *   one instead (the duplicates step).
  *
  * Every Nango deletion and confirmation happens after the rows' writes
- * commit, under the person lock in a transaction that writes nothing.
+ * commit, under the person lock in a transaction that writes no connection rows.
  *
  * Connections without this deployment's tag (made outside Opengeni, by
  * another deployment sharing the Nango environment, or before the tag) are
@@ -727,12 +752,35 @@ export async function sweepNangoConnections(
     group.remote.push(connection);
   }
   if (groups.size === 0 && otherDeployments > 0 && !deploymentTagMismatchLogged) {
-    // Usually the worker's public base URL differs from the API's: then this
-    // sweep never cleans up anything.
+    // Possibly the worker's public base URL differs from the API's (then this
+    // sweep never cleans up anything), or a new deployment shares the Nango
+    // environment with another and has no connections yet.
     deploymentTagMismatchLogged = true;
-    console.warn("[nango] sweep found no connections tagged for this deployment", {
-      deployment,
-      taggedForOtherDeployments: otherDeployments,
+    console.warn(
+      "[nango] sweep found no connections tagged for this deployment; its deployment tag is possibly mismatched",
+      {
+        deployment,
+        taggedForOtherDeployments: otherDeployments,
+      },
+    );
+  }
+  // People whose live rows all stand for connections Nango no longer lists
+  // (deleted outside reference counting) have nothing listed to be found
+  // by; the deployment-wide listing (1484, once granted) finds them too.
+  const owners = await listNangoLiveConnectionOwners(deps.db).catch((error: unknown) => {
+    console.warn("[nango] sweep could not list live Nango rows", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  });
+  for (const owner of owners ?? []) {
+    if (listed.has(listedKey(owner.providerConfigKey, owner.nangoConnectionId))) continue;
+    const key = JSON.stringify([owner.subjectId, owner.providerConfigKey]);
+    if (groups.has(key)) continue;
+    groups.set(key, {
+      subjectId: owner.subjectId,
+      providerConfigKey: owner.providerConfigKey,
+      remote: [],
     });
   }
   const result: NangoSweepResult = {
@@ -860,7 +908,7 @@ function workspacesOf(group: SweepGroup): string[] {
 
 /**
  * Delete the broken connections a committed pass found, checking again under
- * the person lock (in a transaction that writes nothing) that every row on
+ * the person lock (in a transaction that writes no connection rows) that every row on
  * one still asks to reconnect and that Nango still reports it failing.
  */
 async function deleteBrokenCommitted(
@@ -885,8 +933,9 @@ async function deleteBrokenCommitted(
 
 /**
  * Mark the live rows still standing for a connection Nango no longer has as
- * needing reconnection. Nango confirms each one is gone first (a connection
- * made after the listing is never taken for gone); then, under the person
+ * needing reconnection. Nango confirms each one is gone first with a 404 on
+ * the connection itself (a connection made after the listing is never taken
+ * for gone); then, under the person
  * lock, rows already asking to reconnect are left as they are. Returns the
  * rows marked.
  */
@@ -899,13 +948,10 @@ async function markMissingCommitted(
   if (candidates.length === 0) return [];
   const gone = new Set<string>();
   for (const id of candidates) {
-    const found = await client.listConnections({ connectionId: id }).then(
-      (list) =>
-        list.some(
-          (connection) =>
-            connection.connectionId === id &&
-            connection.providerConfigKey === group.providerConfigKey,
-        ),
+    // Only Nango's 404 for this very connection proves it gone; any other
+    // answer or error keeps the row as it is.
+    const found = await client.getConnection(id, group.providerConfigKey).then(
+      (connection) => connection !== null,
       () => null,
     );
     if (found === false) gone.add(id);
@@ -995,7 +1041,7 @@ async function planGroup(
   let rows = person.rows;
   const written: Array<{ before: ConnectionMetadata; after: ConnectionMetadata }> = [];
   const duplicates = new Set<string>();
-  // A read-only pass (the re-checks before deleting) writes nothing.
+  // A read-only pass (the re-checks before deleting) writes no connection rows.
   if (!mode.readOnly) {
     // 1. Duplicates: one verified account standing for several connections.
     const byAccount = new Map<string, ConnectionMetadata[]>();
@@ -1008,9 +1054,12 @@ async function planGroup(
       // Only a healthy connection Nango still has can stand for the others.
       const healthy = ids.filter((id) => (remoteById.get(id)?.authErrors ?? 1) === 0);
       if (ids.length < 2 || healthy.length === 0) continue;
+      healthy.sort((a, b) => created(b) - created(a) || a.localeCompare(b));
+      const client = nangoSharingClient(deps);
       const { target, grant } = sharedTarget(
-        healthy.sort((a, b) => created(b) - created(a) || a.localeCompare(b)),
+        healthy,
         accountRows,
+        client ? await reportedGrants(client, group.providerConfigKey, healthy, accountRows) : [],
       );
       const repointed = await repointRows(deps, tx, {
         subjectId: group.subjectId,
