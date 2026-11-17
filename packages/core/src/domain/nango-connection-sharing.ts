@@ -775,18 +775,19 @@ export async function sweepNangoConnections(
   // People whose live rows all stand for connections Nango no longer lists
   // (deleted outside reference counting) have nothing listed to be found
   // by; the deployment-wide listing (1484, once granted) finds them too.
-  const owners = tagMismatch
-    ? null
-    : await listNangoLiveConnectionOwners(deps.db).catch((error: unknown) => {
-        console.warn("[nango] sweep could not list live Nango rows", {
-          error: error instanceof Error ? error.message : String(error),
+  // Nothing listed for this deployment at all (another's tags, or an empty
+  // environment, as with a wrong Nango key): nobody is taken for missing.
+  const owners =
+    groups.size === 0
+      ? null
+      : await listNangoLiveConnectionOwners(deps.db).catch((error: unknown) => {
+          console.warn("[nango] sweep could not list live Nango rows", {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return null;
         });
-        return null;
-      });
-  let unlisted = 0;
   for (const owner of owners ?? []) {
     if (listed.has(listedKey(owner.providerConfigKey, owner.nangoConnectionId))) continue;
-    unlisted += 1;
     const key = JSON.stringify([owner.subjectId, owner.providerConfigKey]);
     if (groups.has(key)) continue;
     groups.set(key, {
@@ -813,6 +814,7 @@ export async function sweepNangoConnections(
   let orphanCount = 0;
   const withMissing: Array<{ group: SweepGroup; missing: string[] }> = [];
   let missingCount = 0;
+  let knownCount = 0;
   const outOfTime = () => clock() - started >= budgetMs;
   for (const [index, group] of order.entries()) {
     if (outOfTime()) {
@@ -858,6 +860,7 @@ export async function sweepNangoConnections(
           kept("broken connections"),
         )),
       );
+      knownCount += outcome.known;
       if (outcome.missing.length) {
         withMissing.push({ group, missing: outcome.missing });
         missingCount += outcome.missing.length;
@@ -878,13 +881,18 @@ export async function sweepNangoConnections(
       skippedPeople: result.skippedPeople,
     });
   // A wrong Nango environment (every connection a 404) must never ask
-  // everyone to reconnect.
-  const known = tagged + unlisted;
-  if (missingCount > Math.max(10, Math.floor(known / 2))) {
+  // everyone to reconnect. The threshold is only meaningful once every
+  // person was planned; a pass that ran out of time marks nothing.
+  if (result.deferredPeople > 0) {
+    if (withMissing.length)
+      console.warn("[nango] sweep did not plan everyone; rows on missing connections wait", {
+        deferredPeople: result.deferredPeople,
+      });
+  } else if (missingCount > Math.max(10, Math.floor(knownCount / 2))) {
     result.missingBreakerTripped = true;
     console.warn("[nango] sweep found too many rows on missing connections; none marked", {
       missing: missingCount,
-      known,
+      known: knownCount,
     });
   } else {
     for (const { group, missing } of withMissing) {
@@ -990,8 +998,8 @@ async function markMissingCommitted(
   for (const id of candidates) {
     // Only Nango's 404 for this very connection proves it gone; any other
     // answer or error keeps the row as it is.
-    const found = await client.getConnection(id, group.providerConfigKey).then(
-      (connection) => connection !== null,
+    const found = await client.connectionExists(id, group.providerConfigKey).then(
+      (exists) => exists,
       () => null,
     );
     if (found === false) gone.add(id);
@@ -1061,6 +1069,8 @@ async function planGroup(
   orphans: string[];
   /** Ids live rows stand for that Nango's listing did not include. */
   missing: string[];
+  /** Distinct Nango connections this person's rows or Nango's listing name. */
+  known: number;
 } | null> {
   const knownWorkspaceIds = workspacesOf(group);
   const person = await listPersonNangoConnections(tx, {
@@ -1153,7 +1163,9 @@ async function planGroup(
             .filter((id) => !options.listed.has(listedKey(group.providerConfigKey, id))),
         ),
       ];
-  return { written, duplicates: [...duplicates], broken, orphans, missing };
+  const known = new Set([...used, ...group.remote.map((connection) => connection.connectionId)])
+    .size;
+  return { written, duplicates: [...duplicates], broken, orphans, missing, known };
 }
 
 type PlanOptions = {

@@ -469,3 +469,31 @@ describe("NangoClient.getConnection", () => {
     expect(await client.connectionGrantedScopes("stale", "google-mail")).toBeNull();
   });
 });
+
+describe("NangoClient.connectionExists", () => {
+  test("is false only on Nango's 404 for that very connection", async () => {
+    const client = new NangoClient({
+      secretKey: "nango-secret-test",
+      baseUrl: "https://nango.test",
+      fetchImpl: (async (input: string | URL | Request) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/connections/missing") return new Response("", { status: 404 });
+        if (url.pathname === "/connections/stale")
+          return Response.json({ error: { code: "refresh_exhausted" } }, { status: 424 });
+        if (url.pathname === "/connections/down") return new Response("", { status: 503 });
+        if (url.pathname === "/connections/other")
+          return Response.json({
+            connection_id: "someone-else",
+            provider_config_key: "google-mail",
+          });
+        return Response.json({ connection_id: "c-1", provider_config_key: "google-mail" });
+      }) as typeof fetch,
+    });
+    expect(await client.connectionExists("c-1", "google-mail")).toBe(true);
+    expect(await client.connectionExists("stale", "google-mail")).toBe(true);
+    expect(await client.connectionExists("missing", "google-mail")).toBe(false);
+    // An answer for another connection, or an error, proves nothing.
+    await expect(client.connectionExists("other", "google-mail")).rejects.toThrow();
+    await expect(client.connectionExists("down", "google-mail")).rejects.toThrow();
+  });
+});

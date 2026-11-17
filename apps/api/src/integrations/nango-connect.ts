@@ -644,6 +644,9 @@ async function persistNangoConnection(
   // scopes are the app's defaults, and sharing never treats them as a grant
   // that covers another organization's row.
   if (input.grantedScopes !== null) metadata.nangoScopesConfirmed = true;
+  // The previous release only reads the negative marker; keep writing it
+  // until no release that reads it can still run (rollout or rollback).
+  else metadata.nangoScopesUnconfirmed = true;
   const credentialEncrypted = encryptedNangoCredential(
     settings,
     input.integration,

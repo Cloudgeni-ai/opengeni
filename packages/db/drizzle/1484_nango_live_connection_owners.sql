@@ -10,6 +10,9 @@
 -- pages through the active Nango-backed rows (owner subject, Nango
 -- integration and Nango connection id, each triple once) after a keyset
 -- cursor, so the sweep can visit those people too. Nothing else is read.
+-- Unlike 1482's yes/no answer for ids the caller names, this lists every
+-- owner subject and Nango connection id in the deployment to whoever may
+-- execute it; only the runtime role will, once granted.
 --
 -- As 1482 explains, the previous release rejects a runtime EXECUTE grant on
 -- a definer it doesn't know, so this migration grants nothing; until a later

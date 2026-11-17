@@ -141,7 +141,8 @@ connections; that is not a duplicate.
   `nangoScopesConfirmed`: Nango reported them at connect time, or the row was
   moved onto a connection whose confirmed grant covers them. When Nango
   reports no scopes the row records the app's default scopes without the
-  marker, and so does every row saved before the marker existed. No other
+  marker (and with the older `nangoScopesUnconfirmed`, which the previous
+  release reads), and so does every row saved before the marker existed. No other
   organization's row is moved onto a connection on the strength of unmarked
   scopes; for a connection no marked row vouches for, the scopes Nango
   reports for it now count instead (none when Nango cannot read it), so
@@ -216,8 +217,11 @@ after the rows are read again. Marking a row first confirms the 404 with
 Nango, then re-reads under the lock and marks only active rows still on that
 connection. When more rows stand for missing connections than for half of
 the connections the pass knows (and more than ten), as with a wrong Nango
-environment, it marks none and logs a warning; with a deployment tag
-mismatch it does not use the deployment-wide listing at all. A
+environment, it marks none and logs a warning. A pass that ran out of time
+before planning everyone marks none either, so a deployment too large to
+plan within one pass never marks missing rows. When nothing listed carries
+this deployment's tag (another deployment's tags, or an empty environment),
+the deployment-wide listing is not used at all. A
 worker whose public base URL tags none of the listed connections while others
 carry another deployment's tag logs once that its tag is possibly mismatched
 (it then cleans up nothing, unless it is a new deployment sharing the Nango

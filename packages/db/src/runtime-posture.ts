@@ -68,8 +68,9 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * and the sandbox reaper's inventory of cold sandboxes whose chats are all
  * archived (1404), the organization-wide sandbox counts behind
  * plan-tiered sandbox limits (1475), and the deployment-wide check of
- * which Nango connections a live connection still stands for (1482).
- * Each is
+ * which Nango connections a live connection still stands for (1482), and
+ * the deployment-wide listing of live Nango rows' owners for the Nango
+ * sweep (1484). Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
@@ -152,6 +153,8 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * stands for; until it is granted, deleting a Nango connection is decided
  * from the person's own reads, and nothing is deleted when one of their
  * organizations cannot be fully read.
+ * 1484 withholds the listing of live Nango rows' owners; until it is
+ * granted, the Nango sweep only visits people Nango lists a connection for.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",

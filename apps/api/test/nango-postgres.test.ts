@@ -1068,7 +1068,18 @@ describe("Nango connections in PostgreSQL", () => {
       });
       await sweepNangoConnections(sweepDeps(nango));
       expect((await nangoRows(target))[0]).toMatchObject({ status: "active" });
+      // Nothing listed at all (an empty environment): likewise.
       nango.remote.pop();
+      await sweepNangoConnections(sweepDeps(nango));
+      expect((await nangoRows(target))[0]).toMatchObject({ status: "active" });
+      // Once Nango lists someone's connection for this deployment, the listing
+      // leads the sweep to this person too.
+      await connect(
+        await owner("nango sweep listed anchor"),
+        nango,
+        "nl-anchor",
+        "anchor@example.com",
+      );
       await sweepNangoConnections(sweepDeps(nango));
     } finally {
       await shared!.admin.unsafe(
