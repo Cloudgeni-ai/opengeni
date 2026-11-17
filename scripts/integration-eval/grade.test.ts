@@ -7,8 +7,10 @@ import { gradeCase } from "./grade";
 import { INTEGRATIONS } from "./integrations";
 import { parseReceipts, type EventLike } from "./receipts";
 import {
+  applyDefaultWorkspaces,
   cellsFromConfig,
   countFlag,
+  DEFAULT_EVAL_WORKSPACES,
   errorCode,
   gradeEvents,
   latestRecords,
@@ -832,5 +834,24 @@ describe("grid", () => {
     );
     expect(stoppedAtDeadline(stopped)).toBe(true);
     expect(stoppedAtDeadline(events({ type: "turn.cancelled", payload: {} }))).toBe(false);
+  });
+});
+
+describe("applyDefaultWorkspaces", () => {
+  test("fills unset workspaces the caller can open; an explicit one wins", async () => {
+    const environment: Record<string, string | undefined> = {
+      OPENGENI_EVAL_CONNECTED_WORKSPACE_ID: "ws-mine",
+    };
+    await applyDefaultWorkspaces(async () => true, environment);
+    expect(environment.OPENGENI_EVAL_CONNECTED_WORKSPACE_ID).toBe("ws-mine");
+    expect(environment.OPENGENI_EVAL_EMPTY_WORKSPACE_ID).toBe(
+      DEFAULT_EVAL_WORKSPACES.OPENGENI_EVAL_EMPTY_WORKSPACE_ID,
+    );
+  });
+
+  test("leaves them unset where the shared workspaces don't exist", async () => {
+    const environment: Record<string, string | undefined> = {};
+    await applyDefaultWorkspaces(async () => false, environment);
+    expect(environment).toEqual({});
   });
 });
