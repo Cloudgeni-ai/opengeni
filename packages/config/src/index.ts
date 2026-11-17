@@ -1594,6 +1594,9 @@ const SettingsSchema = z.object({
   // `off` runs code_grep without the decision model: the same excerpts in
   // match order, cut to the same size.
   codeGrepJudge: z.enum(["on", "off"]).default("on"),
+  // `on` when sandboxes provide the `cg` command (code_grep from the shell, through
+  // Codemode); adds its one-line usage to the code_grep description.
+  codeGrepShellCommand: z.enum(["on", "off"]).default("off"),
   // code_grep judge thresholds, calibrated per decision model: the relevance
   // an excerpt needs to be shown, the confidence that stops judging early,
   // and the excerpts judged per wave. Unset keeps the engine defaults.
@@ -6547,6 +6550,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     codeSearchMode: optional("OPENGENI_CODE_SEARCH_MODE"),
     codeSearchEngine: optional("OPENGENI_CODE_SEARCH_ENGINE"),
     codeGrepJudge: optional("OPENGENI_CODE_GREP_JUDGE"),
+    codeGrepShellCommand: optional("OPENGENI_CODE_GREP_SHELL_COMMAND"),
     codeGrepRelevantFloor: optional("OPENGENI_CODE_GREP_RELEVANT_FLOOR"),
     codeGrepStopFloor: optional("OPENGENI_CODE_GREP_STOP_FLOOR"),
     codeGrepWaveSize: optional("OPENGENI_CODE_GREP_WAVE_SIZE"),

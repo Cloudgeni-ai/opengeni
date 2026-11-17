@@ -2,6 +2,7 @@ import type { AttemptToolDefinition } from "@opengeni/codemode";
 import { decisionModelConfiguration, decisionModelTarget, type Settings } from "@opengeni/config";
 import { DecisionUnavailableError, DecisionRequestError } from "@opengeni/decisions";
 import {
+  CODE_GREP_SHELL_COMMAND_HELP,
   CODE_GREP_TOOL_DESCRIPTION,
   CODE_GREP_TOOL_NAME,
   CODE_SEARCH_TOOL_DESCRIPTION,
@@ -285,6 +286,8 @@ export function createCodeGrepAttemptToolDefinition(input: {
   settings: WorkerDecisionSettings;
   /** `off` never calls the decision model. */
   judge: "on" | "off";
+  /** The sandbox has the `cg` command, which runs this tool from the shell. */
+  shellCommand?: boolean;
   /** Judge thresholds calibrated for the deployment's decision model. */
   limits?: Partial<CodeGrepLimits>;
   workspace: () => Promise<CodeSearchWorkspace>;
@@ -306,7 +309,9 @@ export function createCodeGrepAttemptToolDefinition(input: {
     modelName: CODE_GREP_TOOL_NAME,
     codemodePath: ["opengeni", CODE_GREP_TOOL_NAME],
     title: "Search code",
-    description: CODE_GREP_TOOL_DESCRIPTION,
+    description: input.shellCommand
+      ? `${CODE_GREP_TOOL_DESCRIPTION} ${CODE_GREP_SHELL_COMMAND_HELP}`
+      : CODE_GREP_TOOL_DESCRIPTION,
     inputSchema: codeGrepInputSchema,
     annotations: {
       title: "Search code",
@@ -459,6 +464,8 @@ export function codeSearchToolDefinitions(input: {
   /** `grep` offers code_grep in place of code_search. */
   engine?: "search" | "grep";
   grepJudge?: "on" | "off";
+  /** The sandbox has the `cg` command (code_grep from the shell). */
+  grepShellCommand?: boolean;
   grepLimits?: Partial<CodeGrepLimits>;
   backend: Settings["sandboxBackend"];
   /** The turn's Connected Machine workspace root, when a machine is primary. */
@@ -481,6 +488,7 @@ export function codeSearchToolDefinitions(input: {
       createCodeGrepAttemptToolDefinition({
         settings: input.settings,
         judge: input.grepJudge ?? "on",
+        ...(input.grepShellCommand ? { shellCommand: true } : {}),
         ...(input.grepLimits ? { limits: input.grepLimits } : {}),
         workspace: input.workspace,
         observability: input.observability,

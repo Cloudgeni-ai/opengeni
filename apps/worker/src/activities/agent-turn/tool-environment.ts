@@ -1079,6 +1079,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     settings: runSettings,
     engine: runSettings.codeSearchEngine,
     grepJudge: runSettings.codeGrepJudge,
+    grepShellCommand: runSettings.codeGrepShellCommand === "on",
     grepLimits: {
       ...(runSettings.codeGrepRelevantFloor !== undefined
         ? { relevantFloor: runSettings.codeGrepRelevantFloor }

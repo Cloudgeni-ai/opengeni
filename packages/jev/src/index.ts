@@ -86,6 +86,7 @@ export {
 export {
   CODE_GREP_LIMITS,
   CODE_GREP_TOOL_DESCRIPTION,
+  CODE_GREP_SHELL_COMMAND_HELP,
   CODE_GREP_TOOL_NAME,
   codeGrepInputSchema,
   parseCodeGrepArguments,

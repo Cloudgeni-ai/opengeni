@@ -710,6 +710,19 @@ describe("code_grep tool", () => {
     ).toEqual(["code_search"]);
   });
 
+  test("the cg help line is in the code_grep description only when the sandbox has cg", () => {
+    const [plain] = codeSearchToolDefinitions({ ...base, breaker: new JevCircuitBreaker() });
+    const [withShell] = codeSearchToolDefinitions({
+      ...base,
+      grepShellCommand: true,
+      breaker: new JevCircuitBreaker(),
+    });
+    expect(plain?.description).not.toContain("`cg ");
+    expect(withShell?.description).toBe(
+      `${plain?.description} \`cg QUESTION PATTERN... [-- PATH...]\` runs code_grep from the shell.`,
+    );
+  });
+
   test.skipIf(!hasRipgrep)(
     "judges excerpts found through the sandbox channel and records usage",
     async () => {

@@ -20,7 +20,12 @@ export const CODE_GREP_TOOL_DESCRIPTION =
   "suffice. Returns those excerpts with paths and line numbers, the locations of further relevant excerpts, then " +
   "the other matching files it did not show. Follow up with another search or a file read when something is " +
   "missing. It can run in the same step as other independent tool calls, such as reading files you already know " +
-  "you need.";
+  "you need. It searches the whole working directory when paths is omitted, so you do not need to list " +
+  "directories first.";
+
+/** Help line added to the description when the sandbox has the `cg` command (code_grep from the shell). */
+export const CODE_GREP_SHELL_COMMAND_HELP =
+  "`cg QUESTION PATTERN... [-- PATH...]` runs code_grep from the shell.";
 
 export const CODE_GREP_LIMITS = {
   questionMinChars: 3,
