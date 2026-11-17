@@ -31,7 +31,6 @@ import {
   Text,
   View,
 } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as Haptics from "expo-haptics";
 import { useAccount, usePickAccount } from "@/account";
 import { useAgentCall } from "@/call";
@@ -59,7 +58,6 @@ import { AccountMenuButton, WorkspaceSwitcherTitle } from "@/workspace-switcher"
 import { openOnWeb, webPaths } from "@/web-links";
 import { rememberPendingPrompt } from "@/pending-prompt";
 import { TabScreen } from "@/app-tab-bar";
-import { tabBarClearance } from "@/app-tabs";
 
 export default function HomeScreen() {
   return (
@@ -108,7 +106,6 @@ function Home() {
   const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
-  const insets = useSafeAreaInsets();
   const {
     account,
     accounts,
@@ -447,7 +444,7 @@ function Home() {
           contentContainerStyle={{
             paddingHorizontal: 16,
             paddingTop: 40,
-            paddingBottom: tabBarClearance(insets.bottom) + 24,
+            paddingBottom: 48,
           }}
         >
           <Text

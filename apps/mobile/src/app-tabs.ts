@@ -1,5 +1,5 @@
 /*
- * The floating bottom bar's places: Chats (Home), Artifacts, Automations and
+ * The bottom bar's places: Chats (Home), Artifacts, Automations and
  * Meetings. Home stays at the bottom of the stack; another place sits on top
  * of it, and moving between those replaces the top, so the stack never grows
  * from switching. Kept free of React Native so it is tested directly.
@@ -70,8 +70,9 @@ export function edgeSwipeOpensDrawer(swipe: {
   return swipe.dx >= EDGE_SWIPE_DISTANCE || swipe.vx >= EDGE_SWIPE_VELOCITY;
 }
 
-/** Space a screen keeps under its content so the floating bar never covers it. */
-export const TAB_BAR_HEIGHT = 64;
-export function tabBarClearance(bottomInset: number): number {
-  return TAB_BAR_HEIGHT + Math.max(bottomInset, 12) + 12;
+/** The bar's row; it docks at the bottom with the screen's content laid out above it. */
+export const TAB_BAR_HEIGHT = 52;
+/** The bar's whole height: its row, then the home indicator's area (a little room without one). */
+export function tabBarHeight(bottomInset: number): number {
+  return TAB_BAR_HEIGHT + Math.max(bottomInset, 6);
 }

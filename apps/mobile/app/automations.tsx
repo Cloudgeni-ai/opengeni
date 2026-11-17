@@ -18,8 +18,6 @@ import type { SettingsRow, SettingsSection } from "@/settings-model";
 import { AppThemeProvider } from "@/theme";
 import { useAutomationList } from "@/use-automation-list";
 import { TabScreen, tabHeaderOptions } from "@/app-tab-bar";
-import { tabBarClearance } from "@/app-tabs";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 /** How often an open list re-reads, so a run that starts or finishes shows up. */
 const REFRESH_MS = 30_000;
@@ -51,7 +49,6 @@ const themed = (node: React.ReactNode) => <AppThemeProvider>{node}</AppThemeProv
 function Automations({ workspaceId }: { workspaceId: string }) {
   const t = useOpenGeniText();
   const c = useNativeTimelineTheme().colors;
-  const insets = useSafeAreaInsets();
   const { client, accessContext } = useAccount();
   const { list, error, refresh } = useAutomationList(client, workspaceId);
   const [now, setNow] = useState(() => new Date());
@@ -124,10 +121,7 @@ function Automations({ workspaceId }: { workspaceId: string }) {
   return (
     <>
       {header}
-      {/* The list ends above the floating bar, so its last row is never under it. */}
-      <View
-        style={{ flex: 1, backgroundColor: c.bg, paddingBottom: tabBarClearance(insets.bottom) }}
-      >
+      <View style={{ flex: 1, backgroundColor: c.bg }}>
         <SettingsList
           sections={sections}
           onRefresh={reload}

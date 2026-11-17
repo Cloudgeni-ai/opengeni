@@ -2,13 +2,11 @@ import { MeetingsList } from "@opengeni/react-native/meetings";
 import { useNativeTimelineTheme } from "@opengeni/react-native/timeline";
 import { Stack, router, useFocusEffect } from "expo-router";
 import { useCallback, useState } from "react";
-import { Platform } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
+
 import { useAccount } from "@/account";
 import { WorkspaceGate } from "@/meetings";
 import { AppThemeProvider } from "@/theme";
 import { TabScreen, tabHeaderOptions } from "@/app-tab-bar";
-import { TAB_BAR_HEIGHT, tabBarClearance } from "@/app-tabs";
 
 export default function MeetingsScreen() {
   return (
@@ -28,7 +26,6 @@ const themed = (node: React.ReactNode) => <AppThemeProvider>{node}</AppThemeProv
 
 function Meetings({ workspaceId }: { workspaceId: string }) {
   const c = useNativeTimelineTheme().colors;
-  const insets = useSafeAreaInsets();
   const { client } = useAccount();
   const [focused, setFocused] = useState(false);
   useFocusEffect(
@@ -52,9 +49,8 @@ function Meetings({ workspaceId }: { workspaceId: string }) {
         client={client}
         workspaceId={workspaceId}
         focused={focused}
-        // The list scrolls under the floating bar and ends clear of it (iOS
-        // already keeps it clear of the home indicator).
-        bottomInset={Platform.OS === "ios" ? TAB_BAR_HEIGHT + 16 : tabBarClearance(insets.bottom)}
+        // The docked bar sits below the list and keeps the home indicator's area.
+        bottomInset={0}
         onOpen={(id) => router.push(`/meeting/${id}`)}
       />
     </>

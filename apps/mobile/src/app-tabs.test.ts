@@ -3,7 +3,7 @@ import {
   APP_TABS,
   EDGE_SWIPE_DISTANCE,
   edgeSwipeOpensDrawer,
-  tabBarClearance,
+  tabBarHeight,
   tabForPath,
   tabNavigation,
   TAB_BAR_HEIGHT,
@@ -56,7 +56,8 @@ test("other swipes don't open it", () => {
   expect(edgeSwipeOpensDrawer({ startX: 4, dx: 30, dy: 0, vx: 100 })).toBe(false);
 });
 
-test("content keeps room for the floating bar above the home indicator", () => {
-  expect(tabBarClearance(34)).toBe(TAB_BAR_HEIGHT + 34 + 12);
-  expect(tabBarClearance(0)).toBe(TAB_BAR_HEIGHT + 12 + 12);
+test("the docked bar takes its row plus the home indicator's area", () => {
+  expect(TAB_BAR_HEIGHT).toBeLessThan(56);
+  expect(tabBarHeight(34)).toBe(TAB_BAR_HEIGHT + 34);
+  expect(tabBarHeight(0)).toBe(TAB_BAR_HEIGHT + 6);
 });

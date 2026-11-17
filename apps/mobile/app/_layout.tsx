@@ -68,7 +68,7 @@ export default function RootLayout() {
                     }}
                   />
                   <Stack.Screen name="inbox" options={{ title: "Inbox" }} />
-                  {/* The floating bar's places sit above Home and swap in place, like
+                  {/* The bottom bar's places sit above Home and swap in place, like
                     tabs, so they appear without a slide. */}
                   <Stack.Screen
                     name="artifacts"

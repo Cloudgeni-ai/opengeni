@@ -13,10 +13,8 @@ import {
   TextInput,
   View,
 } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAccount } from "@/account";
 import { TabScreen, tabHeaderOptions } from "@/app-tab-bar";
-import { tabBarClearance } from "@/app-tabs";
 import { ArtifactCard } from "@/artifact-card";
 import { useArtifactCatalog } from "@/artifact-library";
 import {
@@ -49,7 +47,6 @@ function Artifacts({ workspaceId }: { workspaceId: string }) {
   const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
-  const insets = useSafeAreaInsets();
   const { client } = useAccount();
   const [kind, setKind] = useState<ArtifactKindFilter>("all");
   const [query, setQuery] = useState("");
@@ -222,7 +219,7 @@ function Artifacts({ workspaceId }: { workspaceId: string }) {
         }
         contentContainerStyle={{
           paddingHorizontal: 16,
-          paddingBottom: tabBarClearance(insets.bottom) + 24,
+          paddingBottom: 24,
         }}
       />
     </>

@@ -46,7 +46,7 @@ export {
   useNativeTimelineMessages,
 } from "./messages";
 export type { NativeTimelineMessages } from "./messages";
-export { ComposerPill, ComposerSurface, SessionComposer } from "./composer";
+export { ComposerPill, SessionComposer } from "./composer";
 export { ModelPickerSheet } from "./model-picker";
 export { ModelLevelControl } from "./model-level-control";
 export { BottomSheet } from "./sheet";

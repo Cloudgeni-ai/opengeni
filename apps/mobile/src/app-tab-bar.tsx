@@ -1,6 +1,5 @@
 import {
   BAR_MAX_FONT_SCALE,
-  ComposerSurface,
   fontStyle,
   Icon,
   useNativeTimelineTheme,
@@ -8,7 +7,7 @@ import {
 import * as Haptics from "expo-haptics";
 import { router } from "expo-router";
 import type { ReactNode } from "react";
-import { Platform, Pressable, Text, View } from "react-native";
+import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
@@ -16,6 +15,7 @@ import {
   EDGE_SWIPE_WIDTH,
   edgeSwipeOpensDrawer,
   TAB_BAR_HEIGHT,
+  tabBarHeight,
   tabNavigation,
   type AppTab,
 } from "@/app-tabs";
@@ -46,9 +46,9 @@ export function openTab(from: AppTab | null, to: AppTab): void {
 const openChatsMenu = () => router.push("/sessions");
 
 /**
- * One of the bar's places: its content, the floating bar over it, and a swipe
- * right from the left edge that opens the chats menu. Content keeps
- * `tabBarClearance` free at its end so the bar never covers it.
+ * One of the bar's places: its content, the bar docked under it, and a swipe
+ * right from the left edge that opens the chats menu. The content is laid out
+ * above the bar, so nothing scrolls or sits under it.
  */
 export function TabScreen({ tab, children }: { tab: AppTab; children: ReactNode }) {
   // The pan may only start at the left edge and must move sideways first, so
@@ -74,7 +74,7 @@ export function TabScreen({ tab, children }: { tab: AppTab; children: ReactNode 
   return (
     <GestureDetector gesture={edgeSwipe}>
       <View style={{ flex: 1 }} collapsable={false}>
-        {children}
+        <View style={{ flex: 1 }}>{children}</View>
         <AppTabBar current={tab} />
       </View>
     </GestureDetector>
@@ -82,91 +82,97 @@ export function TabScreen({ tab, children }: { tab: AppTab; children: ReactNode 
 }
 
 /**
- * The floating bar: glass on iOS 26, a raised surface elsewhere, with the
- * place in use filled. Meetings shows a red dot while a recording runs.
+ * The bar docked flush at the bottom, inside the safe area, with the place in
+ * use filled. Meetings shows a red dot while a recording runs.
  */
 export function AppTabBar({ current }: { current: AppTab }) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const insets = useSafeAreaInsets();
   const recording = isCapturing(useMeetingRecorder());
+  const height = tabBarHeight(insets.bottom);
   return (
     <View
-      pointerEvents="box-none"
       style={{
-        position: "absolute",
-        left: 0,
-        right: 0,
-        bottom: Math.max(insets.bottom - 6, 12),
-        alignItems: "center",
+        height,
+        paddingBottom: height - TAB_BAR_HEIGHT,
+        backgroundColor: c.bg,
+        borderTopWidth: StyleSheet.hairlineWidth,
+        borderTopColor: c.border,
       }}
     >
-      <ComposerSurface radius={TAB_BAR_HEIGHT / 2} style={{ width: "92%", maxWidth: 440 }}>
-        <View
-          accessibilityRole="tablist"
-          style={{ flexDirection: "row", height: TAB_BAR_HEIGHT, padding: 5 }}
-        >
-          {APP_TABS.map((entry) => {
-            const selected = entry.tab === current;
-            const live = entry.tab === "meetings" && recording;
-            return (
-              <Pressable
-                key={entry.tab}
-                accessibilityRole="tab"
-                accessibilityState={{ selected }}
-                accessibilityLabel={live ? `${entry.label}, recording now` : entry.label}
-                onPress={() => {
-                  if (selected) return;
-                  void Haptics.selectionAsync();
-                  openTab(current, entry.tab);
+      <View
+        accessibilityRole="tablist"
+        style={{
+          flexDirection: "row",
+          height: TAB_BAR_HEIGHT,
+          paddingHorizontal: 8,
+          paddingVertical: 4,
+          alignSelf: "center",
+          width: "100%",
+          maxWidth: 520,
+        }}
+      >
+        {APP_TABS.map((entry) => {
+          const selected = entry.tab === current;
+          const live = entry.tab === "meetings" && recording;
+          return (
+            <Pressable
+              key={entry.tab}
+              accessibilityRole="tab"
+              accessibilityState={{ selected }}
+              accessibilityLabel={live ? `${entry.label}, recording now` : entry.label}
+              onPress={() => {
+                if (selected) return;
+                void Haptics.selectionAsync();
+                openTab(current, entry.tab);
+              }}
+              style={({ pressed }) => ({
+                flex: 1,
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 3,
+                borderRadius: (TAB_BAR_HEIGHT - 8) / 2,
+                backgroundColor: selected
+                  ? theme.scheme === "dark"
+                    ? "rgba(255,255,255,0.12)"
+                    : "rgba(0,0,0,0.06)"
+                  : "transparent",
+                opacity: pressed && !selected ? 0.6 : 1,
+              })}
+            >
+              <View>
+                <Icon name={entry.icon} size={20} color={selected ? c.fg : c["fg-muted"]} />
+                {live ? (
+                  <View
+                    style={{
+                      position: "absolute",
+                      top: -1,
+                      right: -4,
+                      width: 8,
+                      height: 8,
+                      borderRadius: 4,
+                      backgroundColor: c.danger,
+                    }}
+                  />
+                ) : null}
+              </View>
+              <Text
+                numberOfLines={1}
+                maxFontSizeMultiplier={BAR_MAX_FONT_SCALE}
+                style={{
+                  ...fontStyle(theme, selected ? 600 : 500),
+                  fontSize: 11,
+                  lineHeight: 14,
+                  color: selected ? c.fg : c["fg-muted"],
                 }}
-                style={({ pressed }) => ({
-                  flex: 1,
-                  alignItems: "center",
-                  justifyContent: "center",
-                  gap: 3,
-                  borderRadius: (TAB_BAR_HEIGHT - 10) / 2,
-                  backgroundColor: selected
-                    ? theme.scheme === "dark"
-                      ? "rgba(255,255,255,0.12)"
-                      : "rgba(0,0,0,0.06)"
-                    : "transparent",
-                  opacity: pressed && !selected ? 0.6 : 1,
-                })}
               >
-                <View>
-                  <Icon name={entry.icon} size={20} color={selected ? c.fg : c["fg-muted"]} />
-                  {live ? (
-                    <View
-                      style={{
-                        position: "absolute",
-                        top: -1,
-                        right: -4,
-                        width: 8,
-                        height: 8,
-                        borderRadius: 4,
-                        backgroundColor: c.danger,
-                      }}
-                    />
-                  ) : null}
-                </View>
-                <Text
-                  numberOfLines={1}
-                  maxFontSizeMultiplier={BAR_MAX_FONT_SCALE}
-                  style={{
-                    ...fontStyle(theme, selected ? 600 : 500),
-                    fontSize: 11,
-                    lineHeight: 14,
-                    color: selected ? c.fg : c["fg-muted"],
-                  }}
-                >
-                  {entry.label}
-                </Text>
-              </Pressable>
-            );
-          })}
-        </View>
-      </ComposerSurface>
+                {entry.label}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </View>
     </View>
   );
 }
