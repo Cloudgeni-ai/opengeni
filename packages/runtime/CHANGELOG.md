@@ -1,5 +1,40 @@
 # @opengeni/runtime
 
+## 6.25.0
+
+### Patch Changes
+
+- 43435d5: Agent turns with long histories use less worker CPU per model request. The history prefix check compares canonical items instead of hashing the whole history, model context snapshots reuse unchanged content from the previous request, request copies avoid `structuredClone` for plain data, model provider and pricing settings are parsed once per value, and the row-level security scope statement is built once per shape. Outputs, stored snapshots and history rejections are unchanged.
+- f99f940: Sentry and Apollo connections now show the signed-in account (email or name, plus the Sentry organization when there is only one) instead of a generic "Sentry account" or "Apollo.io account", and you can connect more than one account of each. Stripe connections are recognised again with Stripe's current account answer and are labelled with the account's email and business name when it has them. When an Atlassian tool needs a site and several are available, the message the agent gets now lists each site's URL next to its name and cloud ID.
+- f99f940: Opengeni now says correctly who sent a Slack message. A message sent with your own Slack account is posted under your name, but Slack also marks the Opengeni app it went through, so Opengeni sometimes said the bot had sent it. The send result now says which account a message was posted as (`postedAs`: your own account, naming the app only as the route it went through, or the Opengeni Slack bot). Channel and thread reads with your own account mark your own messages with `postedByYou`.
+
+  When you mention Opengeni, it now sees messages that apps and bots posted. The surrounding channel or thread messages, and the `slack_bot_*` history reads, name the app that posted each message and include text an app put in attachments or blocks. Replies that apps post in a thread, and posts people send through an app, are kept as context for the next mention in that thread. They never start or stop a task, and Opengeni's own posts are still left out.
+
+- 43435d5: A tool call the model asks for is saved before its tool starts, so a worker that stops mid-step can always recover it: the call is closed as interrupted instead of being lost and run again. The response's usage is saved in the same write as its tool calls, before any of them runs; its billing runs alongside the tools, and the next model request still waits for it. If the worker stops, is replaced or its billing fails before billing finishes, recovery, the attempt's failure handling or the session's next idle point finishes it exactly once, at the price recorded with the usage. Recovery only looks at responses whose billing is still unfinished.
+- Updated dependencies [e126cb5]
+- Updated dependencies [61abc98]
+- Updated dependencies [81570f9]
+- Updated dependencies [f99f940]
+- Updated dependencies [bb55e5d]
+- Updated dependencies [43435d5]
+- Updated dependencies [f99f940]
+- Updated dependencies [bfd2970]
+  - @opengeni/contracts@6.25.0
+  - @opengeni/sdk@6.25.0
+  - @opengeni/capabilities@6.25.0
+  - @opengeni/config@6.25.0
+  - @opengeni/codemode@6.25.0
+  - @opengeni/codex@6.25.0
+  - @opengeni/decisions@6.25.0
+  - @opengeni/interaction@6.25.0
+  - @opengeni/observability@6.25.0
+  - @opengeni/tool-gateway@6.25.0
+  - @opengeni/vaults@6.25.0
+  - @opengeni/jev@6.25.0
+  - @opengeni/agent-proto@6.25.0
+  - @opengeni/network@6.25.0
+  - @opengeni/xai-subscription@6.25.0
+
 ## 6.24.1
 
 ### Patch Changes

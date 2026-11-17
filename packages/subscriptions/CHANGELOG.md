@@ -1,5 +1,7 @@
 # @opengeni/subscriptions
 
+## 6.25.0
+
 ## 6.24.1
 
 ## 6.24.0
