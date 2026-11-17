@@ -76,7 +76,7 @@ glyph otherwise). Search and type chips filter it; pull down to refresh.
 Tapping a card opens the viewer. Sites and editors show in the web app's
 chromeless pages (`/native-view/…`), signed in from the device session through
 `POST /v1/native-app/web-session`, so a Site's data and the editors work as on
-the web; a presentation turns one slide at a time with a swipe. Images open
+the web. Images open
 zoomable and other files in the system viewer. The header has Share and the
 web library's menu: Open chat, Pin, Duplicate (Sites), Copy link, Download in
 the original format (HTML, the file itself, XLSX), and Delete… for documents,

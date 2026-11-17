@@ -469,23 +469,6 @@ function nextSlideIndexFromKey(key: string, activeIndex: number, length: number)
   return null;
 }
 
-/** Minimum horizontal travel, in CSS pixels, for a touch swipe to turn the slide. */
-export const SLIDE_SWIPE_DISTANCE = 48;
-
-/**
- * The slide step for a finished touch swipe: left goes to the next slide, right
- * to the previous one. Mostly vertical or short gestures, and swipes inside a
- * zoomed slide that can still scroll sideways, do nothing.
- */
-export function slideSwipeStep(
-  input: Readonly<{ dx: number; dy: number; canScrollX: boolean }>,
-): -1 | 1 | null {
-  if (input.canScrollX) return null;
-  if (Math.abs(input.dx) < SLIDE_SWIPE_DISTANCE) return null;
-  if (Math.abs(input.dy) * 1.5 > Math.abs(input.dx)) return null;
-  return input.dx < 0 ? 1 : -1;
-}
-
 function PresentationEditorCore({
   presentation,
   revision,
@@ -564,14 +547,6 @@ function PresentationEditorCore({
   const overlayRef = useRef<SVGSVGElement>(null);
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const dragRef = useRef<DragState | null>(null);
-  // A touch that may become a slide swipe; a touch on an unselected object
-  // selects it only once the finger lifts without swiping.
-  const swipeRef = useRef<{
-    pointerId: number;
-    x: number;
-    y: number;
-    tapHit: DisplayObject | null;
-  } | null>(null);
   const textEditRef = useRef<TextEdit | null>(null);
   const imageCacheRef = useRef(new Map<string, CanvasImageEntry>());
   const mountedRef = useRef(true);
@@ -1358,18 +1333,9 @@ function PresentationEditorCore({
         selectObject(null);
         return;
       }
-      const swipe = swipeRef.current;
-      if (
-        event.pointerType === "touch" &&
-        swipe?.pointerId === event.pointerId &&
-        hit.id !== selected?.id
-      ) {
-        swipe.tapHit = hit;
-        return;
-      }
       beginDrag(event, hit, "move");
     },
-    [beginDrag, pointFromPointer, selectObject, selected?.id, spatialIndex],
+    [beginDrag, pointFromPointer, selectObject, spatialIndex],
   );
 
   const handlePointerMove = useCallback(
@@ -1785,33 +1751,6 @@ function PresentationEditorCore({
         <div
           ref={viewportRef}
           className="relative min-h-0 min-w-0 flex-1 overflow-auto bg-og-surface-3/60 p-6"
-          style={{
-            // Leave sideways touch pans to the slide swipe unless a zoomed slide scrolls.
-            touchAction: stageWidth + 48 > viewport.width ? "auto" : "pan-y pinch-zoom",
-          }}
-          onPointerDownCapture={(event) => {
-            swipeRef.current =
-              event.pointerType === "touch" && event.isPrimary
-                ? { pointerId: event.pointerId, x: event.clientX, y: event.clientY, tapHit: null }
-                : null;
-          }}
-          onPointerUpCapture={(event) => {
-            const swipe = swipeRef.current;
-            swipeRef.current = null;
-            if (!swipe || swipe.pointerId !== event.pointerId) return;
-            if (dragRef.current || textEditRef.current) return;
-            const element = event.currentTarget;
-            const step = slideSwipeStep({
-              dx: event.clientX - swipe.x,
-              dy: event.clientY - swipe.y,
-              canScrollX: element.scrollWidth > element.clientWidth + 1,
-            });
-            if (step) changeSlideBy(step);
-            else if (swipe.tapHit) selectObject(swipe.tapHit);
-          }}
-          onPointerCancelCapture={() => {
-            swipeRef.current = null;
-          }}
           onScroll={(event) => {
             const element = event.currentTarget;
             const width = element.clientWidth || viewport.width;
