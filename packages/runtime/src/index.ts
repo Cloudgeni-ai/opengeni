@@ -4595,9 +4595,10 @@ function maybeInstallLazyToolTransport(
         const account: ConnectedToolAccount = {
           source: server.registryId,
           // The connector's default account says so, as its tools' account line does.
+          // A connector's only account is named by its model label's account.
           label: route.account
             ? `${route.connector} (${route.account}${route.defaultAccount === route.model ? ", the default" : ""})`
-            : route.connector,
+            : `${route.connector} (${onlyAccountName(route)})`,
           connector: route.connector,
           ...(route.kind ? { kind: route.kind } : {}),
           ...(route.providerDomain ? { providerDomain: route.providerDomain } : {}),
@@ -4625,6 +4626,12 @@ function maybeInstallLazyToolTransport(
     harnessControlServer ? catalogConnectCardRequest(harnessControlServer) : undefined,
   );
   if (options.openingToolNames?.length) lazyRuntime.loadAtOpening(options.openingToolNames);
+}
+
+/** "Gmail — alice@example.com · Yours" → "alice@example.com · Yours". */
+function onlyAccountName(route: McpAccountRouteLabel): string {
+  const prefix = `${route.connector} — `;
+  return route.model.startsWith(prefix) ? route.model.slice(prefix.length) : route.model;
 }
 
 function mcpServerRegistryId(server: MCPServer): string {
@@ -10977,11 +10984,17 @@ export class PrefixedMcpServer implements MCPServer {
           return {
             ...tool,
             name,
-            // Name the account only when the turn has several accounts of this
-            // connector to tell apart. With one account the line adds nothing
-            // the model can act on, and it would repeat on every tool.
-            ...(this.accountLabel?.account
-              ? { description: withAccountLine(this.accountLabel, tool.description) }
+            // Every connected account's tools name the account, so the model
+            // knows whose account it reaches even when it is the connector's
+            // only one. The line follows from the accepted account alone, so
+            // it reads the same on every turn of that selection.
+            ...(this.accountLabel
+              ? {
+                  description: withAccountLine(
+                    { ...this.accountLabel, only: !this.accountLabel.account },
+                    tool.description,
+                  ),
+                }
               : {}),
           };
         })
