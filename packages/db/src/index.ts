@@ -28317,8 +28317,8 @@ export type ReconcileSubscriptionCoreCodexCapacityWaitResult =
 
 /**
  * When a parked turn's current capacity wait began: the close of its latest
- * attempt that parked (outcome `waiting_capacity`), as the 1485 summary
- * reads it. Null when no such attempt is visible.
+ * attempt that parked (outcome `waiting_capacity`), as the turn hold
+ * summary (1485) reads it. Null when no such attempt is visible.
  */
 async function readCapacityWaitParkedAtInTransaction(
   tx: SessionActivityDatabase,
@@ -62053,9 +62053,58 @@ export type QueuedTurnHoldSummary = {
 export async function summarizeQueuedTurnsByHold(
   db: Database,
 ): Promise<Record<QueuedTurnHold, QueuedTurnHoldSummary>> {
-  const summary = Object.fromEntries(
+  return (await summarizeTurnHolds(db)).queued;
+}
+
+/**
+ * The providers whose turns park on the shared subscription core's capacity
+ * waiter, in the order {@link summarizeTurnHolds} reports them. The same set
+ * as `subscription_capacity_waiters`' provider check.
+ */
+export const CAPACITY_WAITING_TURN_PROVIDERS = [
+  "claude",
+  "codex",
+  "xai",
+] as const satisfies readonly SubscriptionCoreWaiterProvider[];
+
+export type CapacityWaitingTurnProvider = (typeof CAPACITY_WAITING_TURN_PROVIDERS)[number];
+
+export type CapacityWaitingTurnSummary = {
+  /** Turns parked on this provider's capacity that run as soon as it returns. */
+  count: number;
+  /** Seconds since the oldest of them parked; 0 when none is parked. */
+  oldestAgeSeconds: number;
+};
+
+/** The summary's row class for one provider's parked turns (migration 1485). */
+const CAPACITY_WAIT_HOLD_PREFIX = "capacity_wait:";
+
+/**
+ * Content-free cross-workspace turn hold summary for the control worker, one
+ * call to `opengeni_private.summarize_queued_turns_by_hold()`:
+ *
+ * - `queued`: every `queued` turn by what holds it (0988).
+ * - `capacityWaiting`: the turns parked waiting for subscription capacity, by
+ *   provider (1485), counted exactly when the capacity reconcile would resume
+ *   them once capacity returns (live waiter, not paused or stopped, goal
+ *   unchanged). A parked turn is its session's active turn, so the queued
+ *   `waiting_capacity` class never counts it: that class is only the prompts
+ *   queued behind one. Before 1485 the function returns no such rows and every
+ *   provider reads 0.
+ */
+export async function summarizeTurnHolds(db: Database): Promise<{
+  queued: Record<QueuedTurnHold, QueuedTurnHoldSummary>;
+  capacityWaiting: Record<CapacityWaitingTurnProvider, CapacityWaitingTurnSummary>;
+}> {
+  const queued = Object.fromEntries(
     QUEUED_TURN_HOLDS.map((hold) => [hold, { count: 0, oldestAgeSeconds: 0 }]),
   ) as Record<QueuedTurnHold, QueuedTurnHoldSummary>;
+  const capacityWaiting = Object.fromEntries(
+    CAPACITY_WAITING_TURN_PROVIDERS.map((provider) => [
+      provider,
+      { count: 0, oldestAgeSeconds: 0 },
+    ]),
+  ) as Record<CapacityWaitingTurnProvider, CapacityWaitingTurnSummary>;
   const rows = await rawRows<{
     hold: string;
     count: number | string;
@@ -62068,85 +62117,24 @@ export async function summarizeQueuedTurnsByHold(
     `,
   );
   for (const row of rows) {
-    if (!(row.hold in summary)) continue;
-    summary[row.hold as QueuedTurnHold] = {
-      count: Number(row.count),
-      oldestAgeSeconds: Number(row.oldest_age_seconds),
-    };
+    const value = { count: Number(row.count), oldestAgeSeconds: Number(row.oldest_age_seconds) };
+    if (row.hold in queued) {
+      queued[row.hold as QueuedTurnHold] = value;
+    } else if (row.hold.startsWith(CAPACITY_WAIT_HOLD_PREFIX)) {
+      const provider = row.hold.slice(CAPACITY_WAIT_HOLD_PREFIX.length);
+      if (provider in capacityWaiting) {
+        capacityWaiting[provider as CapacityWaitingTurnProvider] = value;
+      }
+    }
   }
-  return summary;
+  return { queued, capacityWaiting };
 }
 
-/**
- * The providers whose turns park on the shared subscription core's capacity
- * waiter, in the order {@link summarizeCapacityWaitingTurns} reports them.
- * The same set as `subscription_capacity_waiters`' provider check.
- */
-export const CAPACITY_WAITING_TURN_PROVIDERS = [
-  "claude",
-  "codex",
-  "xai",
-] as const satisfies readonly SubscriptionCoreWaiterProvider[];
-
-export type CapacityWaitingTurnProvider = (typeof CAPACITY_WAITING_TURN_PROVIDERS)[number];
-
-export type CapacityWaitingTurnSummary = {
-  /** Turns parked on this provider's capacity right now. */
-  count: number;
-  /** Seconds since the oldest of them parked; 0 when none is parked. */
-  oldestAgeSeconds: number;
-};
-
-/** Migration 1485's summary, withheld from the runtime for one release. */
-export const CAPACITY_WAITING_TURNS_ROUTINE =
-  "opengeni_private.summarize_capacity_waiting_turns_v1()";
-
-/** False while the deployment's database withholds the summary (1485). */
-export async function capacityWaitingTurnsSummaryAvailable(db: Database): Promise<boolean> {
-  const [row] = await rawRows<{ granted: boolean | null }>(
-    db,
-    sql`select has_function_privilege(
-      to_regprocedure(${CAPACITY_WAITING_TURNS_ROUTINE})::oid, 'EXECUTE') as granted`,
-  );
-  return row?.granted === true;
-}
-
-/**
- * Content-free cross-workspace count of turns parked waiting for
- * subscription capacity, by provider (migration 1485). A parked turn is its
- * session's active turn in `waiting_capacity`, so
- * {@link summarizeQueuedTurnsByHold} never counts it: its `waiting_capacity`
- * class is only the prompts queued behind one. Every provider is always
- * present, 0 when none of its turns waits.
- */
+/** The parked-turn half of {@link summarizeTurnHolds}. */
 export async function summarizeCapacityWaitingTurns(
   db: Database,
 ): Promise<Record<CapacityWaitingTurnProvider, CapacityWaitingTurnSummary>> {
-  const summary = Object.fromEntries(
-    CAPACITY_WAITING_TURN_PROVIDERS.map((provider) => [
-      provider,
-      { count: 0, oldestAgeSeconds: 0 },
-    ]),
-  ) as Record<CapacityWaitingTurnProvider, CapacityWaitingTurnSummary>;
-  const rows = await rawRows<{
-    provider: string;
-    count: number | string;
-    oldest_age_seconds: number | string;
-  }>(
-    db,
-    sql`
-      select provider, count, oldest_age_seconds
-      from opengeni_private.summarize_capacity_waiting_turns_v1()
-    `,
-  );
-  for (const row of rows) {
-    if (!(row.provider in summary)) continue;
-    summary[row.provider as CapacityWaitingTurnProvider] = {
-      count: Number(row.count),
-      oldestAgeSeconds: Number(row.oldest_age_seconds),
-    };
-  }
-  return summary;
+  return (await summarizeTurnHolds(db)).capacityWaiting;
 }
 
 export type ContextCompactionPendingSummary = {

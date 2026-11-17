@@ -923,10 +923,12 @@ export function recordQueuedTurnHoldGauges(
 }
 
 /**
- * Turns parked waiting for subscription capacity right now, by the provider
- * they wait on. A parked turn is its session's active turn, so the queued
- * hold split above never counts it. Every provider is always published so an
- * emptied provider drops to 0.
+ * Turns parked waiting for subscription capacity right now that run as soon
+ * as capacity returns, by the provider they wait on: a paused or stopped
+ * chat's wait, or a waiter the reconcile would supersede, is not counted. A
+ * parked turn is its session's active turn, so the queued hold split above
+ * never counts it. Every provider is always published so an emptied provider
+ * drops to 0.
  */
 export function recordCapacityWaitingTurnGauges(
   observability: Observability,
@@ -936,7 +938,7 @@ export function recordCapacityWaitingTurnGauges(
     const entry = summary[provider];
     observability.setGauge({
       name: "opengeni_turns_waiting_capacity",
-      help: "Turns parked right now waiting for subscription capacity (usage limit or no eligible account), by the provider they wait on. Each is its session's active turn and resumes on its own when capacity returns.",
+      help: "Turns parked right now waiting for subscription capacity (usage limit or no eligible account) that run as soon as it returns, by the provider they wait on. Each is its session's active turn; waits in a paused or stopped chat are not counted.",
       labels: { provider },
       value: nonnegativeFinite(entry?.count ?? 0),
     });

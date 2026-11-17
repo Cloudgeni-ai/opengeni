@@ -1,16 +1,11 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import {
-  acquireSharedTestDatabase,
-  grantDeferredRuntimeAccess,
-  type SharedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import type { Settings } from "@opengeni/config";
 import { metadataWithTurnExecutionPolicyV1 } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import {
   applySessionTurnSettlement,
   armSubscriptionCoreCodexCapacityWait,
-  capacityWaitingTurnsSummaryAvailable,
   initializeSessionStartAtomically,
   materializeGoalContinuation,
   claimSessionWorkForAttempt,
@@ -610,11 +605,6 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
   });
 
   test("a parked turn counts as waiting for capacity by provider until it resumes; the queued-turn split never sees it", async () => {
-    // 1485 withholds the summary from the runtime for one release.
-    expect(await capacityWaitingTurnsSummaryAvailable(client!.db)).toBe(false);
-    await grantDeferredRuntimeAccess(shared!.admin);
-    expect(await capacityWaitingTurnsSummaryAvailable(client!.db)).toBe(true);
-
     const org = await organization();
     const connectionId = await sharedConnection(org, "capacity-gauge");
     const resetAt = Date.now() + 3_600_000;

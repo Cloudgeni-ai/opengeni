@@ -1,6 +1,6 @@
 -- deployment-mode: rolling
--- How many turns are parked waiting for subscription capacity right now, by
--- provider, with the age of the oldest wait.
+-- Turns parked waiting for subscription capacity, by provider, in the control
+-- worker's existing turn hold summary.
 --
 -- A turn that hits a provider's usage limit (or finds no eligible account)
 -- parks on its session's row in subscription_capacity_waiters: the turn and
@@ -9,108 +9,259 @@
 -- turn is the session's active turn, never a `queued` one, so
 -- opengeni_turns_queued_by_hold{hold="waiting_capacity"} (0988) does not
 -- count it: that class counts only further prompts queued behind it. A
--- deployment can therefore have turns parked for hours with that gauge at 0.
+-- deployment could have turns parked for hours with that gauge at 0.
 --
--- opengeni_private.summarize_capacity_waiting_turns_v1() returns one row per
--- waiter provider (always all three, so an emptied provider reads 0): the
--- number of live waits (the waiter still names the session's active turn,
--- and both the session and that turn are `waiting_capacity`; a row a Steer
--- or Cancel left behind for the reconcile to supersede is not a wait) and
--- how long ago the oldest of them parked. A wait parked when its attempt
--- closed with outcome `waiting_capacity`; a resumption that lands straight
--- back on missing capacity parks again and starts a new wait. Counts and
--- ages only, nothing that names a tenant.
+-- opengeni_private.summarize_queued_turns_by_hold() keeps its signature, its
+-- grant (1274) and its seven queued-turn classes, and gains one row per
+-- waiter provider, `capacity_wait:claude`, `capacity_wait:codex` and
+-- `capacity_wait:xai` (always all three, so an emptied provider reads 0):
+-- the parked turns that will run as soon as capacity returns, with the age of
+-- the oldest wait. A wait counts exactly when the capacity reconcile
+-- (reconcileSubscriptionCoreCapacityWait) would resume it on capacity:
+--   * its waiter still names the session's active turn, the session and that
+--     turn are `waiting_capacity`, the turn has no live attempt and is at the
+--     generation the waiter blocked, and the waiter's goal, if any, is still
+--     active at the same version (otherwise the reconcile supersedes it);
+--   * the session is not effectively paused: its own Pause or Stop, an
+--     ancestor's not defeated by a newer subtree resume, or the workspace's
+--     not defeated by any (the reconcile leaves a paused wait untouched; it
+--     resumes only after Resume). This is the same pause algebra this
+--     function already applies to queued turns, from session-control.ts.
+-- A Stop's brief in-flight settlement is not modelled: it ends in the Pause
+-- above. The age runs from the close of the attempt that parked the turn (a
+-- resumption that lands straight back on missing capacity starts a new wait).
+-- Counts and ages only, nothing that names a tenant.
 --
--- The waiters table gains the read-only owner inventory policy sessions and
--- turns already have, so the owner-run summary sees waiter rows in every
--- workspace inside that transaction-scoped window (as 0982 did for credit
--- allocations).
+-- Sessions, turns and attempts are row-secured even for their owner, so the
+-- summary now reads inside the transaction's session inventory window (as
+-- 1002 and 1474 do), and subscription_capacity_waiters and
+-- workspace_inference_controls gain the read-only owner inventory policy
+-- sessions and turns already have (as 0982 did for credit allocations).
+-- Under an owner that does not bypass row security the queued classes now
+-- read every queued turn, and every workspace Pause, instead of none.
 --
--- As 0937, 0978, 1060 and 1404 explain, the previous release rejects a
--- runtime EXECUTE grant on a definer it doesn't know, so this migration
--- grants nothing. Until a later migration grants it the control worker does
--- not publish the gauge.
---
--- Rolling: one owner-only read policy no runtime query can satisfy, and one
--- definer the previous release never calls. The definer only reads; its one
--- write is the transaction's own inventory capability row.
+-- Rolling: the previous release already has EXECUTE and reads only the seven
+-- classes it knows, skipping the new rows. The policies admit only the owner
+-- inside the window. The function's one write is the transaction's own
+-- inventory capability row.
 SET LOCAL lock_timeout = '5s';
 
--- Sessions, turns and attempts already admit their owner inside the session
--- inventory window (session_tenancy_fence_inventory_read). Waiter rows were
--- readable only in their own organization's context; the same read-only
--- owner policy lets the summary below see them, and nothing else changes.
-DO $capacity_waiters_inventory$
+DO $turn_hold_inventory$
 DECLARE
   data_schema text := current_schema();
+  table_name text;
   owner_name text;
 BEGIN
-  SELECT pg_catalog.pg_get_userbyid(relowner) INTO STRICT owner_name FROM pg_catalog.pg_class
-    WHERE oid = pg_catalog.format('%I.subscription_capacity_waiters', data_schema)::regclass;
-  EXECUTE pg_catalog.format(
-    'CREATE POLICY session_tenancy_fence_inventory_read ON %1$I.subscription_capacity_waiters '
-    'FOR SELECT USING (%1$I.session_tenancy_fence_owner_policy_active('
-    '(CURRENT_USER)::text, %2$L::text, %3$s::oid, workspace_id, true))',
-    data_schema, owner_name, data_schema::regnamespace::oid);
+  FOREACH table_name IN ARRAY ARRAY['subscription_capacity_waiters', 'workspace_inference_controls']
+  LOOP
+    SELECT pg_catalog.pg_get_userbyid(relowner) INTO STRICT owner_name FROM pg_catalog.pg_class
+      WHERE oid = pg_catalog.format('%I.%I', data_schema, table_name)::regclass;
+    EXECUTE pg_catalog.format(
+      'CREATE POLICY session_tenancy_fence_inventory_read ON %1$I.%4$I '
+      'FOR SELECT USING (%1$I.session_tenancy_fence_owner_policy_active('
+      '(CURRENT_USER)::text, %2$L::text, %3$s::oid, workspace_id, true))',
+      data_schema, owner_name, data_schema::regnamespace::oid, table_name);
+  END LOOP;
 END
-$capacity_waiters_inventory$;
+$turn_hold_inventory$;
 
-DO $capacity_waiting_turns$
+DO $turn_holds$
 DECLARE
   data_schema text := current_schema();
 BEGIN
   EXECUTE pg_catalog.format($definition$
-    CREATE FUNCTION opengeni_private.summarize_capacity_waiting_turns_v1()
-    RETURNS TABLE(provider text, count bigint, oldest_age_seconds double precision)
+    CREATE OR REPLACE FUNCTION opengeni_private.summarize_queued_turns_by_hold()
+    RETURNS TABLE (
+      hold text,
+      count bigint,
+      oldest_age_seconds double precision
+    )
     LANGUAGE plpgsql
     SECURITY DEFINER
     SET search_path = pg_catalog, %1$I, pg_temp
     AS $body$
+    #variable_conflict use_column
     DECLARE inventory_id uuid;
     BEGIN
-      -- Sessions and turns are row-secured even for their owner; the
-      -- inventory window admits this cross-workspace count, as in 1002.
       inventory_id := opengeni_private.open_session_tenancy_fence_inventory(
         %1$I.session_tenancy_fence_target_schema());
       RETURN QUERY
-      WITH providers(provider) AS (
-        VALUES ('codex'::text), ('claude'::text), ('xai'::text)
-      ), waits AS (
+      WITH RECURSIVE holds(hold) AS (
+        VALUES
+          ('ready'::text),
+          ('behind_active_turn'::text),
+          ('paused'::text),
+          ('failed'::text),
+          ('requires_action'::text),
+          ('waiting_capacity'::text),
+          ('cancelled'::text),
+          ('capacity_wait:claude'::text),
+          ('capacity_wait:codex'::text),
+          ('capacity_wait:xai'::text)
+      ), queued AS (
+        SELECT turn.workspace_id, turn.session_id, turn.created_at
+        FROM session_turns turn
+        WHERE turn.status = 'queued'
+      ), parked AS (
+        -- The reconcile's own supersede checks, inverted.
         SELECT
-          waiter.provider,
+          waiter.workspace_id,
+          waiter.session_id,
+          'capacity_wait:' || waiter.provider AS hold,
           COALESCE(
             (
-              SELECT pg_catalog.max(attempt.closed_at)
-              FROM %1$I.session_turn_attempts attempt
+              SELECT max(attempt.closed_at)
+              FROM session_turn_attempts attempt
               WHERE attempt.workspace_id = waiter.workspace_id
                 AND attempt.session_id = waiter.session_id
                 AND attempt.turn_id = waiter.turn_id
                 AND attempt.outcome = 'waiting_capacity'
             ),
             waiter.updated_at
-          ) AS parked_at
-        FROM %1$I.subscription_capacity_waiters waiter
-        JOIN %1$I.sessions chat
+          ) AS since
+        FROM subscription_capacity_waiters waiter
+        JOIN sessions chat
           ON chat.workspace_id = waiter.workspace_id
          AND chat.id = waiter.session_id
          AND chat.active_turn_id = waiter.turn_id
          AND chat.status = 'waiting_capacity'
-        JOIN %1$I.session_turns turn
+        JOIN session_turns turn
           ON turn.workspace_id = waiter.workspace_id
          AND turn.id = waiter.turn_id
          AND turn.status = 'waiting_capacity'
+         AND turn.active_attempt_id IS NULL
+         AND turn.execution_generation = waiter.blocked_turn_generation
+        WHERE waiter.goal_id IS NULL
+          OR EXISTS (
+            SELECT 1
+            FROM session_goals goal
+            WHERE goal.workspace_id = waiter.workspace_id
+              AND goal.id = waiter.goal_id
+              AND goal.session_id = waiter.session_id
+              AND goal.status = 'active'
+              AND goal.version = waiter.goal_version
+          )
+      ), candidate_sessions AS (
+        SELECT DISTINCT
+          session.workspace_id,
+          session.id AS session_id,
+          session.status,
+          session.active_turn_id
+        FROM (
+          SELECT queued.workspace_id, queued.session_id FROM queued
+          UNION
+          SELECT parked.workspace_id, parked.session_id FROM parked
+        ) wanted
+        JOIN sessions session
+          ON session.workspace_id = wanted.workspace_id
+         AND session.id = wanted.session_id
+      ), ancestry AS (
+        -- Bound and cycle guard match the canonical effective-control algebra.
+        SELECT
+          candidate.session_id AS candidate_session_id,
+          session_row.workspace_id,
+          session_row.parent_session_id,
+          session_row.direct_control_state,
+          session_row.direct_pause_revision,
+          session_row.subtree_run_override_revision,
+          0::integer AS depth,
+          ARRAY[session_row.id]::uuid[] AS path,
+          false AS cycle
+        FROM candidate_sessions candidate
+        JOIN sessions session_row
+          ON session_row.workspace_id = candidate.workspace_id
+         AND session_row.id = candidate.session_id
+        UNION ALL
+        SELECT
+          child.candidate_session_id,
+          parent.workspace_id,
+          parent.parent_session_id,
+          parent.direct_control_state,
+          parent.direct_pause_revision,
+          parent.subtree_run_override_revision,
+          child.depth + 1,
+          child.path || parent.id,
+          parent.id = ANY(child.path)
+        FROM ancestry child
+        JOIN sessions parent
+          ON parent.workspace_id = child.workspace_id
+         AND parent.id = child.parent_session_id
+        WHERE child.parent_session_id IS NOT NULL
+          AND NOT child.cycle
+          AND child.depth < 10000
+      ), ancestry_overrides AS (
+        -- Newest override on a strictly deeper (descendant-side) row of the path.
+        SELECT
+          path_row.*,
+          max(path_row.subtree_run_override_revision) OVER (
+            PARTITION BY path_row.candidate_session_id
+            ORDER BY path_row.depth
+            ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+          ) AS descendant_override_revision
+        FROM ancestry path_row
+      ), effectively_paused AS MATERIALIZED (
+        -- A session pause is defeated only by a strictly newer override on a
+        -- strictly deeper (descendant-side) path row.
+        SELECT pause.candidate_session_id AS session_id
+        FROM ancestry_overrides pause
+        WHERE NOT pause.cycle
+          AND pause.direct_control_state = 'paused'
+          AND pause.direct_pause_revision IS NOT NULL
+          AND (
+            pause.descendant_override_revision IS NULL
+            OR pause.descendant_override_revision <= pause.direct_pause_revision
+          )
+        UNION
+        -- A workspace pause is defeated by any newer override on the path.
+        SELECT candidate.session_id
+        FROM candidate_sessions candidate
+        JOIN workspace_inference_controls control_row
+          ON control_row.workspace_id = candidate.workspace_id
+         AND control_row.workspace_state = 'paused'
+        WHERE NOT EXISTS (
+          SELECT 1
+          FROM ancestry override_row
+          WHERE override_row.candidate_session_id = candidate.session_id
+            AND control_row.workspace_pause_revision IS NOT NULL
+            AND override_row.subtree_run_override_revision > control_row.workspace_pause_revision
+        )
+      ), classified AS (
+        SELECT
+          CASE
+            WHEN paused.session_id IS NOT NULL THEN 'paused'::text
+            WHEN candidate.status = 'failed' THEN 'failed'::text
+            WHEN candidate.status = 'requires_action' THEN 'requires_action'::text
+            WHEN candidate.status = 'waiting_capacity' THEN 'waiting_capacity'::text
+            WHEN candidate.status = 'cancelled' THEN 'cancelled'::text
+            WHEN candidate.active_turn_id IS NOT NULL
+              OR candidate.status IN ('running', 'recovering') THEN 'behind_active_turn'::text
+            ELSE 'ready'::text
+          END AS hold,
+          queued.created_at AS since
+        FROM queued
+        JOIN candidate_sessions candidate
+          ON candidate.workspace_id = queued.workspace_id
+         AND candidate.session_id = queued.session_id
+        LEFT JOIN effectively_paused paused
+          ON paused.session_id = candidate.session_id
+        UNION ALL
+        SELECT parked.hold, parked.since
+        FROM parked
+        WHERE NOT EXISTS (
+          SELECT 1 FROM effectively_paused paused WHERE paused.session_id = parked.session_id
+        )
       )
       SELECT
-        providers.provider,
-        pg_catalog.count(waits.provider)::bigint,
+        holds.hold,
+        count(classified.hold)::bigint,
         COALESCE(
-          GREATEST(0, EXTRACT(EPOCH FROM (pg_catalog.now() - pg_catalog.min(waits.parked_at)))),
+          GREATEST(0, EXTRACT(EPOCH FROM (now() - min(classified.since)))),
           0
         )::double precision
-      FROM providers
-      LEFT JOIN waits ON waits.provider = providers.provider
-      GROUP BY providers.provider
-      ORDER BY providers.provider;
+      FROM holds
+      LEFT JOIN classified ON classified.hold = holds.hold
+      GROUP BY holds.hold
+      ORDER BY holds.hold;
       PERFORM opengeni_private.close_session_tenancy_fence_inventory(inventory_id);
     EXCEPTION WHEN OTHERS THEN
       PERFORM opengeni_private.close_session_tenancy_fence_inventory(inventory_id);
@@ -119,6 +270,6 @@ BEGIN
     $body$
   $definition$, data_schema);
 END
-$capacity_waiting_turns$;
+$turn_holds$;
 
-REVOKE ALL ON FUNCTION opengeni_private.summarize_capacity_waiting_turns_v1() FROM PUBLIC;
+REVOKE ALL ON FUNCTION opengeni_private.summarize_queued_turns_by_hold() FROM PUBLIC;

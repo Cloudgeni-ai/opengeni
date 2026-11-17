@@ -61,9 +61,7 @@ import {
   deferRetainedProcessReconciliation,
   forceDrainOverLimitViewerOnlyBoxes,
   listCreditBalancesByAccount,
-  summarizeQueuedTurnsByHold,
-  capacityWaitingTurnsSummaryAvailable,
-  summarizeCapacityWaitingTurns,
+  summarizeTurnHolds,
   countActiveUsers,
   readCreditGrantTotals,
   readManagedAuthNewSignupsSwitch,
@@ -4129,22 +4127,14 @@ async function refreshQueueLeaseAndCreditGauges(
     })(),
     (async () => {
       try {
-        recordQueuedTurnHoldGauges(observability, await summarizeQueuedTurnsByHold(db));
+        // One summary: the queued-turn hold split and the turns parked
+        // waiting for subscription capacity (1485).
+        const holds = await summarizeTurnHolds(db);
+        recordQueuedTurnHoldGauges(observability, holds.queued);
+        recordCapacityWaitingTurnGauges(observability, holds.capacityWaiting);
       } catch (error) {
         observability.warn("sandbox reaper: queued-turn hold gauge refresh failed", {
           error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    })(),
-    (async () => {
-      try {
-        // 1485 withholds the summary's runtime grant for one release; until
-        // it is granted there is nothing to publish.
-        if (!(await capacityWaitingTurnsSummaryAvailable(db))) return;
-        recordCapacityWaitingTurnGauges(observability, await summarizeCapacityWaitingTurns(db));
-      } catch (error) {
-        observability.warn("sandbox reaper: capacity-waiting turn gauge refresh failed", {
-          error: errorMessage(error),
         });
       }
     })(),
