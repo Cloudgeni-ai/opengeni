@@ -1562,6 +1562,12 @@ describe("Nango connections in PostgreSQL", () => {
     const nango = fakeNango();
     await connect(target, nango, "nra-1", "reconnect@example.com");
     const [row] = await nangoRows(target);
+    const generation = async (id: string) =>
+      (
+        await shared!.admin<Array<{ authority_generation: string }>>`
+          select authority_generation::text from connections where id = ${id}`
+      )[0]!.authority_generation;
+    const generationBefore = await generation(row!.id);
     const switchTo = async (integrationKey: string, providerConfigKey: string | null) => {
       await shared!.admin`insert into integration_backend_revisions
           (integration_key, backend, nango_provider_config_key, enabled, changed_by, reason)
@@ -1587,7 +1593,7 @@ describe("Nango connections in PostgreSQL", () => {
       });
       const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
       const base = `/v1/workspaces/${target.workspaceId}/connect/attempts`;
-      const begin = (providerId: string) =>
+      const begin = (providerId: string, accountId = row!.id) =>
         app.request(base, {
           method: "POST",
           headers,
@@ -1595,7 +1601,7 @@ describe("Nango connections in PostgreSQL", () => {
             providerId,
             ownership: "personal",
             returnUrl: "https://app.opengeni.test/integrations",
-            reconnectAccountId: row!.id,
+            reconnectAccountId: accountId,
             idempotencyKey: crypto.randomUUID(),
           }),
         });
@@ -1644,6 +1650,8 @@ describe("Nango connections in PostgreSQL", () => {
       expect(rows.map((entry) => [entry.id, entry.nango_connection_id])).toEqual([
         [row!.id, "nra-2"],
       ]);
+      // The same account's reconnect keeps running turns' authority.
+      expect(await generation(row!.id)).toBe(generationBefore);
       const finished = await (await app.request(`${base}/${attempt.id}`, { headers })).json();
       expect(finished.account?.id).toBe(row!.id);
 
@@ -1652,6 +1660,39 @@ describe("Nango connections in PostgreSQL", () => {
       const other = await (await begin("mcp-oauth")).json();
       expect(other.account?.id).toBe(row!.id);
       expect((await advance(other, "https://calendarmcp.googleapis.com/mcp/v1")).status).toBe(404);
+
+      // A native sign-in of the same connector may be named too (its Nango
+      // account replaces it), but not one of another connector.
+      const native = async (mcpUrl: string, providerDomain: string) =>
+        await createConnection(client.db, {
+          accountId: target.accountId,
+          workspaceId: target.workspaceId,
+          subjectId: target.subjectId,
+          providerDomain,
+          kind: "oauth2",
+          status: "needs_reauth",
+          credentialEncrypted: "unused",
+          metadata: { oauthDiscovery: true, mcpUrl },
+          createdBySubjectId: target.subjectId,
+        });
+      const nativeGmail = await native(
+        "https://gmailmcp.googleapis.com/mcp/v1",
+        "gmailmcp.googleapis.com",
+      );
+      const nativeCalendar = await native(
+        "https://calendarmcp.googleapis.com/mcp/v1",
+        "calendarmcp.googleapis.com",
+      );
+      const viaNative = await advance(await (await begin("gmail", nativeGmail.id)).json());
+      expect(viaNative.status).toBe(200);
+      expect(new URL((await viaNative.json()).nextAction.url).pathname).toBe(
+        "/v1/integrations/nango/connect",
+      );
+      const wrongNative = await (await begin("mcp-oauth", nativeCalendar.id)).json();
+      expect(wrongNative.account?.id).toBe(nativeCalendar.id);
+      expect((await advance(wrongNative, "https://gmailmcp.googleapis.com/mcp/v1")).status).toBe(
+        404,
+      );
 
       // Once Gmail is native again, its Nango row is no reconnect target.
       await switchTo("gmail", null);
