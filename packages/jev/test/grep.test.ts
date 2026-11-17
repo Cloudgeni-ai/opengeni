@@ -266,7 +266,7 @@ describe("parseCodeGrepArguments", () => {
     const a = parseCodeGrepArguments({
       question: "  where?  ",
       patterns: [" foo\\(", "bar", "bar", ""],
-      paths: ["./src/", "src"],
+      paths: ["./src/", "src", "/app", "/app"],
       globs: ["*.ts"],
       ignoreCase: true,
     });
@@ -274,9 +274,20 @@ describe("parseCodeGrepArguments", () => {
       question: "where?",
       patterns: [" foo\\(", "bar"],
       paths: ["src"],
+      ignoredPaths: ["/app"],
       globs: ["*.ts"],
       ignoreCase: true,
     });
+  });
+
+  test("absolute paths are set aside and reported; the search still runs", async () => {
+    const ws = new LocalCodeSearchWorkspace(repo());
+    const a = parseCodeGrepArguments({ question: "where?", patterns: ["token"], paths: ["/app"] });
+    const r = await runCodeGrep({ ...a, workspace: ws });
+    expect(r.stats.filesMatched).toBeGreaterThan(0);
+    expect(r.text).toContain(
+      "absolute paths ignored (give paths relative to the working directory): /app",
+    );
   });
 
   test("rejects bad input with model-facing messages", () => {
@@ -288,7 +299,6 @@ describe("parseCodeGrepArguments", () => {
         patterns: Array.from({ length: CODE_GREP_LIMITS.patternsMax + 1 }, (_, i) => `p${i}`),
       },
       { question: "where?", patterns: ["a".repeat(CODE_GREP_LIMITS.patternMaxChars + 1)] },
-      { question: "where?", patterns: ["a"], paths: ["/etc"] },
       { question: "where?", patterns: ["a"], paths: ["../x"] },
       { question: "where?", patterns: ["a"], ignoreCase: "yes" },
       { question: "where?", patterns: ["a"], keywords: ["a"] },

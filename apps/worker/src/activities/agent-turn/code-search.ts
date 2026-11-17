@@ -336,6 +336,7 @@ export function createCodeGrepAttemptToolDefinition(input: {
           question: request.question,
           patterns: request.patterns,
           ...(request.paths.length ? { paths: request.paths } : {}),
+          ...(request.ignoredPaths.length ? { ignoredPaths: request.ignoredPaths } : {}),
           ...(request.globs.length ? { globs: request.globs } : {}),
           ...(request.ignoreCase !== undefined ? { ignoreCase: request.ignoreCase } : {}),
           workspace,

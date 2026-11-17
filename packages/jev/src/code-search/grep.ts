@@ -36,6 +36,8 @@ export interface CodeGrepInput {
   globs?: string[] | undefined;
   /** Default: smart case (case-insensitive unless the pattern has an upper-case letter). */
   ignoreCase?: boolean | undefined;
+  /** Paths the caller gave that were set aside (absolute); reported, not searched. */
+  ignoredPaths?: readonly string[] | undefined;
   workspace: CodeSearchWorkspace;
   /** Judges excerpts; without one the excerpts are returned in lexical order. */
   decisionModel?: DecisionModel | null | undefined;
@@ -461,6 +463,10 @@ export async function runCodeGrep(input: CodeGrepInput): Promise<CodeGrepResult>
     ),
   );
   if (missingPaths.length) head.push(`paths not found (ignored): ${missingPaths.join(", ")}`);
+  if (input.ignoredPaths?.length)
+    head.push(
+      `absolute paths ignored (give paths relative to the working directory): ${input.ignoredPaths.join(", ")}`,
+    );
   if (judge === "on")
     head.push(
       `Relevance-judged ${judged.length} of ${excerpts.length} excerpts${stoppedEarly ? " (stopped early: the excerpts shown answer the question)" : ""}; ${judged.filter((e) => e.p! >= L.relevantFloor).length} judged relevant.`,

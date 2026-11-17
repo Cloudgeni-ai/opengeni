@@ -79,9 +79,14 @@ export interface CodeGrepArguments {
   question: string;
   patterns: string[];
   paths: string[];
+  /** Absolute paths, set aside rather than failing the call (the search runs without them). */
+  ignoredPaths: string[];
   globs: string[];
   ignoreCase: boolean | undefined;
 }
+
+const isAbsolutePath = (p: string) =>
+  p.startsWith("/") || p.startsWith("~") || /^[A-Za-z]:[\\/]/.test(p);
 
 const KNOWN = new Set(["question", "patterns", "paths", "globs", "ignoreCase"]);
 
@@ -117,7 +122,9 @@ export function parseCodeGrepArguments(args: Record<string, unknown>): CodeGrepA
   if (patterns.some((p) => p.includes("\0")))
     throw new CodeSearchArgumentError("patterns must not contain NUL");
 
-  const paths = [...new Set(stringList(args.paths, "paths", false).map(normalizePath))];
+  const rawPaths = stringList(args.paths, "paths", false);
+  const ignoredPaths = [...new Set(rawPaths.filter(isAbsolutePath))];
+  const paths = [...new Set(rawPaths.filter((p) => !isAbsolutePath(p)).map(normalizePath))];
   if (paths.length > L.pathsMax)
     throw new CodeSearchArgumentError(`paths accepts at most ${L.pathsMax} entries`);
   const globs = stringList(args.globs, "globs", false);
@@ -133,7 +140,7 @@ export function parseCodeGrepArguments(args: Record<string, unknown>): CodeGrepA
   )
     throw new CodeSearchArgumentError("ignoreCase must be a boolean");
   const ignoreCase = typeof args.ignoreCase === "boolean" ? args.ignoreCase : undefined;
-  return { question, patterns, paths, globs, ignoreCase };
+  return { question, patterns, paths, ignoredPaths, globs, ignoreCase };
 }
 
 const FALLBACK = "Search with exec_command (rg, sed) instead.";
