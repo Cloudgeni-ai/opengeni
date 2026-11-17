@@ -1656,6 +1656,28 @@ export function channelAOperationFailureDiagnostic(
       errorCode: "sandbox_channel_a_operation_failed",
     };
   }
+  // Compute admission refusals (insufficient credits as 402, the organization's
+  // running-box limit as 403 or 429) are deliberate answers, not server faults.
+  // Report the status the route returns so the log and metric match the response.
+  if (
+    error instanceof SandboxPaidComputeAdmissionError ||
+    error instanceof SandboxOrganizationBoxLimitError
+  ) {
+    const mapped = mapChannelAError(error, waitSignal);
+    return {
+      reason: "request_rejected",
+      status: mapped instanceof HTTPException ? mapped.status : 500,
+      errorCode: "sandbox_channel_a_operation_failed",
+    };
+  }
+  // An offline Connected Machine is answered with 409, not a server fault.
+  if (error instanceof SelfhostedControlError && error.agentOffline) {
+    return {
+      reason: "provider_unavailable",
+      status: 409,
+      errorCode: "sandbox_channel_a_provider_unavailable",
+    };
+  }
   if (error instanceof SandboxProviderReadLockUnavailableError) {
     return {
       reason: "provider_read_busy",
