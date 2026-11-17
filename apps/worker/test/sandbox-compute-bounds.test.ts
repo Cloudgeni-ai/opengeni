@@ -25,6 +25,7 @@ function lease(overrides: Partial<NoTurnWarmLease> = {}): NoTurnWarmLease {
     transitioning: false,
     holders: 1,
     commandHolders: 1,
+    backend: "modal",
     ...overrides,
   };
 }
@@ -88,6 +89,20 @@ describe("free compute bounds: reaper decisions", () => {
     expect(
       planComputeBoundsDrains([lease({ lastActiveAt: idle })], organizations, { idleDrainMs: 0 }),
     ).toEqual([]);
+    // A compute box is never drained for being idle; a closed tier still
+    // drains it.
+    expect(
+      planComputeBoundsDrains([lease({ lastActiveAt: idle, backend: "compute" })], organizations, {
+        idleDrainMs: 1_800_000,
+      }),
+    ).toEqual([]);
+    expect(
+      planComputeBoundsDrains(
+        [lease({ lastActiveAt: idle, backend: "compute" })],
+        new Map([["org-a", { limit: restricted, boxSecondsToday: 0 }]]),
+        { idleDrainMs: 1_800_000 },
+      ).map((decision) => decision.reason),
+    ).toEqual(["compute_closed"]);
   });
 
   test("boxes of organizations without bounds and transitioning boxes are left alone", () => {

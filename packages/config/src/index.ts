@@ -1702,8 +1702,8 @@ const SettingsSchema = z.object({
   // Enterprise and host-provisioned organizations get these; a Free or
   // unpaid organization's box gets the lower unpaid ceilings below.
   // Knobs: OPENGENI_MODAL_SANDBOX_CPU_LIMIT, OPENGENI_MODAL_SANDBOX_MEMORY_LIMIT_MIB.
-  modalSandboxCpuLimit: z.coerce.number().positive().max(128).default(8),
-  modalSandboxMemoryLimitMiB: z.coerce.number().int().positive().max(1_048_576).default(16_384),
+  modalSandboxCpuLimit: z.coerce.number().positive().max(128).default(16),
+  modalSandboxMemoryLimitMiB: z.coerce.number().int().positive().max(1_048_576).default(32_768),
   // The same ceilings for a box of a Free, new, plan-less or restricted
   // organization (sandboxResourceClass "unpaid"). A reservation above the
   // ceiling is lowered to it. Knobs: OPENGENI_MODAL_UNPAID_SANDBOX_CPU_LIMIT,
@@ -12620,20 +12620,45 @@ export function sandboxPlanLimits(settings: Settings): SandboxPlanLimits {
  * egress allowlists. Paid plans, `enterprise` and `embedded` never do. */
 export const UNPAID_SANDBOX_PLAN_TIERS: readonly string[] = ["free", "new", "none", "restricted"];
 
-/** The resource class for a box of an organization on `tier`; an unknown
- * tier (null) keeps the standard (paid) ceilings. */
-export function sandboxResourceClassForPlanTier(
-  tier: string | null | undefined,
-): Settings["sandboxResourceClass"] {
-  return tier && UNPAID_SANDBOX_PLAN_TIERS.includes(tier) ? "unpaid" : "standard";
+/** Plan-limit fields that bound only organizations that have never paid. An
+ * unpaid-tier organization that bought credit or had a paid subscription
+ * (`paidHistory`) is a paying customer: it keeps its tier's viewer-only and
+ * running-box limits but none of these. */
+export const UNPAID_ONLY_SANDBOX_PLAN_LIMIT_FIELDS = [
+  "runningBoxesPerPerson",
+  "boxSecondsPerOrganizationPerDay",
+  "boxSecondsPerPersonPerDay",
+  "idleDrainAllHolders",
+] as const satisfies readonly (keyof SandboxPlanLimit)[];
+
+/** `limit` for an organization that has paid: without the unpaid-only bounds. */
+export function paidSandboxPlanLimit(limit: SandboxPlanLimit): SandboxPlanLimit {
+  if (!UNPAID_ONLY_SANDBOX_PLAN_LIMIT_FIELDS.some((field) => limit[field] !== undefined)) {
+    return limit;
+  }
+  const paid: SandboxPlanLimit = { ...limit };
+  for (const field of UNPAID_ONLY_SANDBOX_PLAN_LIMIT_FIELDS) delete paid[field];
+  return paid;
 }
 
-/** `settings` rebound to the resource class of the creating organization's tier. */
+/** The resource class for a box of an organization on `tier`; an unknown
+ * tier (null) and an organization that has paid keep the standard ceilings. */
+export function sandboxResourceClassForPlanTier(
+  tier: string | null | undefined,
+  options: { paidHistory?: boolean | undefined } = {},
+): Settings["sandboxResourceClass"] {
+  return tier && UNPAID_SANDBOX_PLAN_TIERS.includes(tier) && options.paidHistory !== true
+    ? "unpaid"
+    : "standard";
+}
+
+/** `settings` rebound to the resource class of the creating organization. */
 export function settingsForSandboxPlanTier<T extends Pick<Settings, "sandboxResourceClass">>(
   settings: T,
   tier: string | null | undefined,
+  options: { paidHistory?: boolean | undefined } = {},
 ): T {
-  const resourceClass = sandboxResourceClassForPlanTier(tier);
+  const resourceClass = sandboxResourceClassForPlanTier(tier, options);
   return settings.sandboxResourceClass === resourceClass
     ? settings
     : { ...settings, sandboxResourceClass: resourceClass };

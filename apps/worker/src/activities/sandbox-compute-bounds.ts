@@ -12,17 +12,19 @@
 // (`compute_idle`), not only a viewer-only one.
 //
 // An in-flight turn is never interrupted: a box a turn holds is not listed.
+// Compute boxes are drained for a closed tier or a spent day only when no
+// process or Browser/ComputerSession holds them (compute has no orderly
+// provider-deadline stop), and never for being idle.
 import type { SandboxPlanLimit } from "@opengeni/config";
 import type { MeterableWarmLease, NoTurnWarmLease } from "@opengeni/db";
 import {
   drainNoTurnLeaseForComputeBounds,
   listNoTurnWarmLeases,
   readOrganizationBoxSecondsToday,
-  resolveSandboxPlanTierInWorkspace,
+  resolveSandboxPlanStandingInWorkspace,
   sandboxPlanLimitFor,
-  VIEWER_ONLY_EXEMPT_BACKENDS,
 } from "@opengeni/db";
-import { sandboxPlanLimits } from "@opengeni/config";
+import { paidSandboxPlanLimit, sandboxPlanLimits } from "@opengeni/config";
 import { errorMessage } from "@opengeni/contracts/values";
 import {
   recordSandboxComputeBoundsDrain,
@@ -79,6 +81,8 @@ export function planComputeBoundsDrains(
     }
     if (
       limit.idleDrainAllHolders === true &&
+      // A compute box is never drained for being idle.
+      lease.backend !== "compute" &&
       options.idleDrainMs > 0 &&
       !lease.openSessionWork &&
       lease.observedAt.getTime() - lease.lastActiveAt.getTime() >= options.idleDrainMs
@@ -109,11 +113,10 @@ export async function boundComputeBoundedWarmBoxes(
   const planLimits = sandboxPlanLimits(settings);
   const concurrency = Math.max(1, options.concurrency ?? 8);
 
-  // Workspaces by organization; Connected Machines and compute boxes are
-  // outside these bounds.
+  // Workspaces by organization; Connected Machines are outside these bounds.
   const workspacesByAccount = new Map<string, Set<string>>();
   for (const lease of warmLeases) {
-    if (VIEWER_ONLY_EXEMPT_BACKENDS.has(lease.backend)) continue;
+    if (lease.backend === "selfhosted") continue;
     const workspaces = workspacesByAccount.get(lease.accountId) ?? new Set<string>();
     workspaces.add(lease.workspaceId);
     workspacesByAccount.set(lease.accountId, workspaces);
@@ -125,12 +128,15 @@ export async function boundComputeBoundedWarmBoxes(
   await forEachLimited([...workspacesByAccount], concurrency, async ([accountId, workspaces]) => {
     try {
       const workspaceId = [...workspaces][0]!;
-      const tier = await resolveSandboxPlanTierInWorkspace(db, {
+      const standing = await resolveSandboxPlanStandingInWorkspace(db, {
         accountId,
         workspaceId,
         limits: planLimits,
       });
-      const limit = sandboxPlanLimitFor(planLimits, tier);
+      // An organization that bought credit or paid is outside the unpaid-only
+      // bounds (daily box time, idle drain of every holder).
+      const tierLimit = sandboxPlanLimitFor(planLimits, standing.tier);
+      const limit = standing.paidHistory ? paidSandboxPlanLimit(tierLimit) : tierLimit;
       if (!organizationHasComputeBounds(limit)) return;
       organizations.set(accountId, {
         limit,

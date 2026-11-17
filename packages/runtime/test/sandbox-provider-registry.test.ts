@@ -336,9 +336,9 @@ describe("createSandboxClient — per-backend matrix construction", () => {
     };
     expect(standard.options).toMatchObject({
       cpu: 0.125,
-      cpuLimit: 8,
+      cpuLimit: 16,
       memoryMiB: 128,
-      memoryLimitMiB: 16_384,
+      memoryLimitMiB: 32_768,
     });
     expect(standard.options?.outboundCidrAllowlist).toBeUndefined();
     const unpaid = createSandboxClient(

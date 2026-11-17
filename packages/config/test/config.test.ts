@@ -9,6 +9,7 @@ import {
   DEFAULT_MODAL_IMAGE_REF,
   DEFAULT_SANDBOX_PLAN_LIMITS,
   modalSandboxResourceBounds,
+  paidSandboxPlanLimit,
   parseSandboxPlanLimitsJson,
   sandboxResourceClassForPlanTier,
   settingsForSandboxPlanTier,
@@ -3083,9 +3084,9 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
     expect(settings.sandboxResourceClass).toBe("standard");
     expect(modalSandboxResourceBounds(settings)).toEqual({
       cpu: 0.125,
-      cpuLimit: 8,
+      cpuLimit: 16,
       memoryMiB: 128,
-      memoryLimitMiB: 16_384,
+      memoryLimitMiB: 32_768,
     });
     for (const tier of ["free", "new", "none", "restricted"]) {
       expect(sandboxResourceClassForPlanTier(tier)).toBe("unpaid");
@@ -3101,6 +3102,19 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
       memoryLimitMiB: 4096,
     });
     expect(settingsForSandboxPlanTier(settings, "pro")).toBe(settings);
+    // An unpaid-tier organization that bought credit keeps the paid ceilings
+    // and loses only the unpaid-only bounds, not its running-box limits.
+    expect(sandboxResourceClassForPlanTier("free", { paidHistory: true })).toBe("standard");
+    expect(settingsForSandboxPlanTier(settings, "free", { paidHistory: true })).toBe(settings);
+    const paidFree = paidSandboxPlanLimit(DEFAULT_SANDBOX_PLAN_LIMITS.free!);
+    expect(paidFree).toEqual({
+      viewerOnlyBoxesPerOrganization: 2,
+      viewerOnlyBoxesPerMember: 1,
+      runningBoxesPerOrganization: 2,
+    });
+    expect(paidSandboxPlanLimit(DEFAULT_SANDBOX_PLAN_LIMITS.pro!)).toBe(
+      DEFAULT_SANDBOX_PLAN_LIMITS.pro!,
+    );
     // A reservation never exceeds its ceiling.
     expect(
       modalSandboxResourceBounds({ ...unpaid, modalSandboxCpu: 4, modalSandboxMemoryMiB: 8192 }),

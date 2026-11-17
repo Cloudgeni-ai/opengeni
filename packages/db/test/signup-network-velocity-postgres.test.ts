@@ -765,4 +765,17 @@ test("an additional organization goes through the signup network checks and inhe
   expect((await decision(cleanExtra.organization.organization.id))?.decision ?? null).not.toBe(
     "held",
   );
+  // A held organization that bought credit is a paying customer: it does not
+  // hold its owner's new organization.
+  const payingOwner = await owner(fresh("paying-owner"));
+  const payingCurrent = await decision(payingOwner.accountId);
+  await shared.admin`select opengeni_private.set_promotion_decision(${payingOwner.accountId}::uuid,
+    'held', 'operator-v1', 'manual-review', '{"reason":"test"}'::jsonb, 'operator:test',
+    ${payingCurrent?.revision ?? 0}::bigint)`;
+  await shared.admin`insert into credit_ledger_entries (account_id, type, amount_micros, idempotency_key)
+    values (${payingOwner.accountId}::uuid, 'credit_topup', 5000000, ${crypto.randomUUID()})`;
+  const payingExtra = await additional(payingOwner.userId, null);
+  expect((await decision(payingExtra.organization.organization.id))?.decision ?? null).not.toBe(
+    "held",
+  );
 }, 180_000);

@@ -57,6 +57,9 @@ export const VIEWER_ONLY_LIMIT_QUIET_MS = 5 * 60_000;
 const EXEMPT_BACKENDS_SQL = sql.raw(
   [...VIEWER_ONLY_EXEMPT_BACKENDS].map((backend) => `'${backend}'`).join(", "),
 );
+/** The compute-bounds drains (any holder) take compute boxes too, for a
+ * closed tier or a spent day; only Connected Machines are outside them. */
+const COMPUTE_BOUNDS_EXEMPT_BACKENDS_SQL = sql.raw("'selfhosted'");
 
 export type ViewerOnlyWarmLease = {
   accountId: string;
@@ -85,6 +88,7 @@ type ViewerOnlyLeaseRow = {
   workspace_id: string;
   sandbox_group_id: string;
   lease_epoch: number | string;
+  backend?: string | null;
   viewers: number | string;
   total?: number | string;
   commands?: number | string;
@@ -115,6 +119,7 @@ function viewerOnlyLeaseQuery(
       lease.workspace_id,
       lease.sandbox_group_id,
       lease.lease_epoch,
+      lease.backend,
       holders.viewers,
       holders.total,
       holders.commands,
@@ -167,7 +172,7 @@ function viewerOnlyLeaseQuery(
       ${sandboxGroupId === null ? sql`` : sql`and lease.sandbox_group_id = ${sandboxGroupId}`}
       and lease.liveness = 'warm'
       and lease.turn_holders = 0
-      and lease.backend not in (${EXEMPT_BACKENDS_SQL})
+      and lease.backend not in (${anyHolder ? COMPUTE_BOUNDS_EXEMPT_BACKENDS_SQL : EXEMPT_BACKENDS_SQL})
       and holders.total > 0
       ${anyHolder ? sql`` : sql`and holders.total = holders.viewers`}
     order by lease.sandbox_group_id
@@ -216,7 +221,8 @@ export type ViewerOnlyDrainOutcome =
         | "epoch_changed"
         | "open_session_work"
         | "transitioning"
-        | "active_since_decision";
+        | "active_since_decision"
+        | "compute_commands";
     };
 
 /**
@@ -334,6 +340,8 @@ export async function drainViewerOnlyLease(
 export type ComputeBoundsDrainReason = "compute_closed" | "compute_daily_budget" | "compute_idle";
 
 export type NoTurnWarmLease = ViewerOnlyWarmLease & {
+  /** The box's backend (`compute` boxes are listed but never idle-drained). */
+  backend: string;
   /** Every holder (viewer, direct request, process, Browser/ComputerSession). */
   holders: number;
   /** Process and Browser/ComputerSession holders. */
@@ -343,6 +351,7 @@ export type NoTurnWarmLease = ViewerOnlyWarmLease & {
 function mapNoTurnLease(row: ViewerOnlyLeaseRow): NoTurnWarmLease {
   return {
     ...mapViewerOnlyLease(row),
+    backend: row.backend ?? "",
     holders: Number(row.total ?? 0),
     commandHolders: Number(row.commands ?? 0),
   };
@@ -375,7 +384,8 @@ export type ComputeBoundsDrainOutcome =
         | "epoch_changed"
         | "open_session_work"
         | "transitioning"
-        | "active_since_decision";
+        | "active_since_decision"
+        | "compute_commands";
     };
 
 /**
@@ -427,6 +437,15 @@ export async function drainNoTurnLeaseForComputeBounds(
         ).map(mapNoTurnLease)[0];
         if (!current) return { drained: false, reason: "not_held" };
         if (current.transitioning) return { drained: false, reason: "transitioning" };
+        // A compute box is never idle-drained, and its commands have no
+        // orderly provider-deadline stop: such a box with live processes or
+        // Browser/ComputerSessions is left to them.
+        if (
+          current.backend === "compute" &&
+          (input.reason === "compute_idle" || current.commandHolders > 0)
+        ) {
+          return { drained: false, reason: "compute_commands" };
+        }
         if (input.reason === "compute_idle") {
           if (current.openSessionWork) return { drained: false, reason: "open_session_work" };
           const quietCutoffMs =
@@ -459,7 +478,7 @@ export async function drainNoTurnLeaseForComputeBounds(
         await tx.execute(sql`
           update sandbox_leases set
             rotation_requested_at = coalesce(rotation_requested_at, now()),
-            rotation_reason = coalesce(rotation_reason, 'provider_deadline'),
+            rotation_reason = 'provider_deadline',
             refcount = (select count(*)::int from sandbox_lease_holders holder
               where holder.lease_id = ${lease.id}),
             viewer_holders = 0,

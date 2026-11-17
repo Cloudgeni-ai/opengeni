@@ -10,7 +10,11 @@ import {
   sandboxPlanLimits,
   sandboxWarmRateMicrosPerSecond,
 } from "@opengeni/config";
-import { sandboxActingPerson, sandboxComputeRefusal } from "../sandbox/compute-bounds";
+import {
+  sandboxActingPerson,
+  sandboxComputeRefusal,
+  sandboxComputeStandingFallbackObserver,
+} from "../sandbox/compute-bounds";
 import {
   BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX,
   BROWSER_CONTROL_PORT,
@@ -1938,6 +1942,7 @@ export function registerComputerSessionRoutes(
       // other holder's (a held or denied organization, a spent daily budget).
       sandboxPlanLimits: sandboxPlanLimits(deps.settings),
       actingSubjectId: sandboxActingPerson(grant.subjectId),
+      onComputeStandingFallback: sandboxComputeStandingFallbackObserver(deps.observability),
       waitSignal,
     }).catch((error: unknown) => {
       throw sandboxComputeRefusal(error) ?? error;

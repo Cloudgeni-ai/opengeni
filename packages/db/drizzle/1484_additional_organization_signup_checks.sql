@@ -17,8 +17,9 @@
 --    opengeni.signup_network_evaluate_accounts;
 -- 3. starts the new organization held (rule linked-owner-v1, through
 --    set_promotion_decision, so it has history) when the person owns or
---    administers an organization whose decision is held or denied. An
---    operator who releases the person releases these organizations too.
+--    administers an organization whose decision is held or denied and that
+--    does not pay. Each such hold is released on its own, like any other
+--    detector hold.
 --
 -- Every new step fails open except the refusal, as in 1471. The Free catalog,
 -- the limit of ten and invitations are unchanged.
@@ -49,6 +50,9 @@ DECLARE
   public_result jsonb;
   -- 1484: signup network and linked review decisions.
   linked_held boolean := false;
+  linked_account_id uuid;
+  prior_account_scope text;
+  prior_workspace_scope text;
   network_target text;
   network jsonb;
   address_hash_value text;
@@ -99,15 +103,43 @@ BEGIN
   END IF;
 
   -- 1484: a person who owns or administers an organization that review held
-  -- or denied starts every new organization held too.
-  SELECT EXISTS (
-    SELECT 1 FROM organization_memberships membership
+  -- or denied starts every new organization held too, unless that
+  -- organization pays (a paid or Enterprise plan, a Stripe subscription, or
+  -- bought credit), as the sandbox plan tier treats it. Plans and the credit
+  -- ledger are visible only under their own account's row-level security, so
+  -- each candidate is checked under its account and the caller's scope is
+  -- restored after.
+  prior_account_scope := pg_catalog.current_setting('opengeni.account_id', true);
+  prior_workspace_scope := pg_catalog.current_setting('opengeni.workspace_id', true);
+  FOR linked_account_id IN
+    SELECT membership.account_id FROM organization_memberships membership
     JOIN promotion_decisions decision ON decision.account_id = membership.account_id
     WHERE membership.subject_id = p_subject_id
       AND membership.status = 'active'
       AND membership.role IN ('owner', 'admin')
       AND decision.decision IN ('held', 'denied')
-  ) INTO linked_held;
+  LOOP
+    PERFORM pg_catalog.set_config('opengeni.account_id', linked_account_id::text, true);
+    PERFORM pg_catalog.set_config('opengeni.workspace_id', '', true);
+    IF NOT EXISTS (
+        SELECT 1 FROM organization_plans plan
+        WHERE plan.account_id = linked_account_id
+          AND (plan.stripe_subscription_id IS NOT NULL
+            OR plan.plan_key = 'enterprise'
+            OR (plan.plan_key <> 'free'
+              AND plan.status IN ('active', 'trialing', 'past_due')))
+      ) AND NOT EXISTS (
+        SELECT 1 FROM credit_ledger_entries entry
+        WHERE entry.account_id = linked_account_id
+          AND entry.type = 'credit_topup'
+          AND entry.amount_micros > 0
+      ) THEN
+      linked_held := true;
+    END IF;
+    EXIT WHEN linked_held;
+  END LOOP;
+  PERFORM pg_catalog.set_config('opengeni.account_id', coalesce(prior_account_scope, ''), true);
+  PERFORM pg_catalog.set_config('opengeni.workspace_id', coalesce(prior_workspace_scope, ''), true);
 
   PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
     'additional-organization-creation:' || p_operation_id::text, 0

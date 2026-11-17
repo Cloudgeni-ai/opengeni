@@ -27,7 +27,11 @@ import {
   stableSandboxEnvironmentForRun,
   type Settings,
 } from "@opengeni/config";
-import { sandboxActingPerson, sandboxComputeRefusal } from "./compute-bounds";
+import {
+  sandboxActingPerson,
+  sandboxComputeRefusal,
+  sandboxComputeStandingFallbackObserver,
+} from "./compute-bounds";
 import type { AccessGrant, Session } from "@opengeni/contracts";
 import {
   acquireLease,
@@ -1094,6 +1098,7 @@ async function withChannelAOperation<T>(
       // The person behind the operation (an agent attempt's initiating
       // human): their other organizations count toward the per-person bounds.
       actingSubjectId: sandboxActingPerson((await machineAuthority()).subjectId),
+      onComputeStandingFallback: sandboxComputeStandingFallbackObserver(services.observability),
       ...(ctx.waitSignal ? { waitSignal: ctx.waitSignal } : {}),
     });
     // Close the commit/abort race before any provider handle is established.
@@ -1300,7 +1305,9 @@ async function withChannelAOperation<T>(
         const result = await establishApiSandboxSpawner({
           db,
           // A Free or unpaid organization's box gets the unpaid ceilings.
-          settings: settingsForSandboxPlanTier(providerSettings, acquired.sandboxPlanTier),
+          settings: settingsForSandboxPlanTier(providerSettings, acquired.sandboxPlanTier, {
+            paidHistory: acquired.sandboxPaidHistory,
+          }),
           accountId,
           workspaceId,
           sandboxGroupId,

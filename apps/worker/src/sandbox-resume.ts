@@ -1455,6 +1455,12 @@ async function resumeBoxForTurnOnce(
     // The person who started the turn: their other organizations count
     // toward the per-person bounds.
     ...(ids.actingSubjectId ? { actingSubjectId: ids.actingSubjectId } : {}),
+    // A failed standing read fails open to the organization's own bounds.
+    onComputeStandingFallback: (error, part) =>
+      services.observability?.warn("sandbox compute standing read failed; admission fell back", {
+        part,
+        error: errorMessage(error),
+      }),
     ...(cancellationSignal ? { waitSignal: cancellationSignal } : {}),
   });
 
@@ -1806,7 +1812,9 @@ async function resumeBoxForTurnOnce(
           ? (hydrateEnvelopeRaw as Record<string, unknown>)
           : null;
       // A Free or unpaid organization's box gets the unpaid resource ceilings.
-      const boxSettings = settingsForSandboxPlanTier(settings, acquired.sandboxPlanTier);
+      const boxSettings = settingsForSandboxPlanTier(settings, acquired.sandboxPlanTier, {
+        paidHistory: acquired.sandboxPaidHistory,
+      });
       const established = await establishSandboxSessionFromEnvelope(boxSettings, hydrateEnvelope, {
         sessionId: ids.sessionId,
         recovery: "create-or-restore",

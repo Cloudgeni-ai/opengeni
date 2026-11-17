@@ -153,6 +153,20 @@ async function warm(org: Org, group: string): Promise<number> {
   return committed.lease!.leaseEpoch;
 }
 
+/** The turn that held a warm box finishes; other holders keep it warm. */
+async function endTurn(org: Org, group: string, holderId: string): Promise<void> {
+  await admin`delete from sandbox_lease_holders holder using sandbox_leases lease
+    where holder.lease_id = lease.id and lease.workspace_id = ${org.workspaceId}
+      and lease.sandbox_group_id = ${group} and holder.kind = 'turn'
+      and holder.holder_id = ${holderId}`;
+  await admin`update sandbox_leases lease set
+      turn_holders = (select count(*) from sandbox_lease_holders holder
+        where holder.lease_id = lease.id and holder.kind = 'turn'),
+      refcount = (select count(*) from sandbox_lease_holders holder
+        where holder.lease_id = lease.id)
+    where lease.workspace_id = ${org.workspaceId} and lease.sandbox_group_id = ${group}`;
+}
+
 describe("free compute bounds (real PostgreSQL)", () => {
   test("a held or denied organization that has not paid gets no sandbox of any kind", async () => {
     for (const decision of ["held", "denied"] as const) {
@@ -170,7 +184,7 @@ describe("free compute bounds (real PostgreSQL)", () => {
     }
   }, 120_000);
 
-  test("a box already running when the organization is held keeps only its in-flight turn", async () => {
+  test("a box already running when the organization is held stays only while its turn runs", async () => {
     const org = await organization({ plan: "free" });
     const group = crypto.randomUUID();
     expect((await acquire(org, "turn", { group, holderId: "t1" })).role).toBe("spawner");
@@ -179,8 +193,16 @@ describe("free compute bounds (real PostgreSQL)", () => {
     await decide(org.accountId, "held");
     // The turn that holds the box finishes.
     expect((await acquire(org, "turn", { group, holderId: "t1" })).role).not.toBe("fenced");
-    // Nothing else joins or keeps it warm: not a new viewer, not a replayed
-    // viewer, not a request, not another turn.
+    // While that turn runs, the agent's own requests, interaction holders and
+    // the person watching it still join the box it already pays for.
+    expect((await acquire(org, "viewer", { group, holderId: "v1" })).role).toBe("attached");
+    expect((await acquire(org, "direct", { group })).role).toBe("attached");
+    expect((await acquire(org, "interaction", { group })).role).toBe("attached");
+    // A new box is refused even then.
+    expect((await refusal(acquire(org, "direct"))).reason).toBe("closed");
+    // Once the turn ends, nothing joins or keeps the box warm: not a new
+    // viewer, not a replayed viewer, not a request, not another turn.
+    await endTurn(org, group, "t1");
     expect((await refusal(acquire(org, "viewer", { group, holderId: "v2" }))).reason).toBe(
       "closed",
     );
@@ -209,6 +231,18 @@ describe("free compute bounds (real PostgreSQL)", () => {
     await admin`insert into credit_ledger_entries (account_id, type, amount_micros, idempotency_key)
       values (${granted.accountId}::uuid, 'plan_credit_grant', 5000000, ${crypto.randomUUID()})`;
     expect((await refusal(acquire(granted, "direct"))).reason).toBe("closed");
+  }, 60_000);
+
+  test("a Free organization that bought credit is a paying customer for every bound", async () => {
+    const org = await organization({ plan: "free" });
+    await admin`insert into credit_ledger_entries (account_id, type, amount_micros, idempotency_key)
+      values (${org.accountId}::uuid, 'credit_topup', 5000000, ${crypto.randomUUID()})`;
+    forgetCaches();
+    await boxSecondsToday(org, 1_000_000);
+    const started = await acquire(org, "direct");
+    expect(started).toMatchObject({ role: "spawner", sandboxPaidHistory: true });
+    // Past the Free daily budget, it still starts boxes.
+    expect((await acquire(org, "interaction")).role).toBe("spawner");
   }, 60_000);
 
   test("paid, Enterprise and host-provisioned organizations are not limited by the new bounds", async () => {
@@ -255,9 +289,13 @@ describe("free compute bounds (real PostgreSQL)", () => {
     const spent = await refusal(acquire(org, "direct"));
     expect([spent.reason, spent.limit]).toEqual(["daily_budget", 43_200]);
     expect(spent.message).toContain("12 sandbox hours");
-    expect((await refusal(acquire(org, "viewer", { group }))).reason).toBe("daily_budget");
     expect((await refusal(acquire(org, "turn"))).reason).toBe("daily_budget");
+    // The in-flight turn finishes, and the person can still watch it.
     expect((await acquire(org, "turn", { group, holderId: "t1" })).role).not.toBe("fenced");
+    expect((await acquire(org, "viewer", { group })).role).toBe("attached");
+    // Once the turn ends, the box takes no new holder.
+    await endTurn(org, group, "t1");
+    expect((await refusal(acquire(org, "viewer", { group }))).reason).toBe("daily_budget");
   }, 60_000);
 
   describe("across a person's organizations", () => {

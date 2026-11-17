@@ -384,7 +384,9 @@ export async function attachViewer(
       const result = await establishApiSandboxSpawner({
         db,
         // A Free or unpaid organization's box gets the unpaid ceilings.
-        settings: settingsForSandboxPlanTier(providerSettings, acquired.sandboxPlanTier),
+        settings: settingsForSandboxPlanTier(providerSettings, acquired.sandboxPlanTier, {
+          paidHistory: acquired.sandboxPaidHistory,
+        }),
         accountId,
         workspaceId,
         sandboxGroupId,

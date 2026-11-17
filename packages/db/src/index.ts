@@ -1098,6 +1098,7 @@ import {
 } from "@opengeni/contracts";
 import {
   environmentsEncryptionKeyBytes,
+  paidSandboxPlanLimit,
   SANDBOX_LIFECYCLE_TRANSITION_MAX_WAIT_MS,
   SANDBOX_DEADLINE_COMMAND_STOP_GRACE_MS,
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
@@ -49417,6 +49418,9 @@ export interface AcquireLeaseInput {
    * bounds and a restricted one restricts this organization too
    * (resolveSandboxComputeStanding). Defaults to viewerSubjectId. */
   actingSubjectId?: string | null;
+  /** Called when a standing read failed and admission fell back (fails
+   * open); callers record it. Without it the fallback is logged. */
+  onComputeStandingFallback?: SandboxComputeStandingFallback | undefined;
   /** Viewer holders only: for this long after the reaper released a box's
    * viewers for the viewer idle window, refuse (`viewer_idle`) an attach to
    * it unless the attach reports interaction after that release or a turn
@@ -49439,9 +49443,9 @@ export type AcquireLeaseResult =
   // `sandboxPlanTier` is the organization's plan tier when the admission
   // resolved it (sandboxPlanLimits given): the spawner creates the box with
   // that tier's resource ceilings (settingsForSandboxPlanTier).
-  | { role: "spawner"; lease: LeaseSnapshot; sandboxPlanTier?: string }
+  | { role: "spawner"; lease: LeaseSnapshot; sandboxPlanTier?: string; sandboxPaidHistory?: true }
   // Box live or being built by someone else: attach (and, for warming, wait).
-  | { role: "attached"; lease: LeaseSnapshot; sandboxPlanTier?: string }
+  | { role: "attached"; lease: LeaseSnapshot; sandboxPlanTier?: string; sandboxPaidHistory?: true }
   // Re-armed a draining lease back to warm (box never torn down).
   | { role: "rearmed"; lease: LeaseSnapshot }
   // Durable recovery truth says this cold group cannot safely materialize. No
@@ -49920,20 +49924,57 @@ export class SandboxOrganizationBoxLimitError extends Error {
   }
 }
 
-/** What the free-compute bounds need beyond the organization's own lease
- * rows, read before admission (resolveSandboxComputeStanding). */
+/** An organization's plan standing for one admission plus what the
+ * free-compute bounds need beyond its own lease rows, read once before
+ * admission (resolveSandboxComputeStanding) and reused under the lease lock. */
 export type SandboxComputeStanding = {
+  /** The plan tier admission applies, including a linked restriction. */
+  tier: string;
+  /** Bought credit or had a paid subscription: a paying customer, outside the
+   * unpaid-only bounds and on the standard resource class. */
+  paidHistory: boolean;
+  /** The unpaid-only bounds (per person, daily box time, idle drain) apply. */
+  bounded: boolean;
   /** The acting person owns or administers this organization and another
-   * Free or plan-less one that its own held or denied decision restricts. */
+   * unpaid one that its own held or denied decision restricts. */
   linkedRestricted: boolean;
-  /** Running boxes in the acting person's other limited organizations. */
+  /** The acting person owns this organization, so its boxes and box time are
+   * theirs for the per-person bounds. */
+  personOwnsOrganization: boolean;
+  /** Running boxes in the other unpaid organizations the acting person owns. */
   personOtherRunningBoxes: number;
   /** Metered box seconds since the start of the UTC day. */
   organizationBoxSecondsToday: number;
-  /** The same across the acting person's limited organizations, this one
-   * included. */
+  /** The same across the unpaid organizations the acting person owns. */
   personBoxSecondsToday: number;
 };
+
+/** Called when a standing read failed and admission fell back (fails open):
+ * `organization` to the in-transaction tier only, `person` to the
+ * organization's own bounds. */
+export type SandboxComputeStandingFallback = (
+  error: unknown,
+  part: "organization" | "person",
+) => void;
+
+function reportSandboxComputeStandingFallback(
+  onFallback: SandboxComputeStandingFallback | undefined,
+  error: unknown,
+  part: "organization" | "person",
+): void {
+  if (onFallback) {
+    try {
+      onFallback(error, part);
+    } catch {
+      // Reporting never changes admission.
+    }
+    return;
+  }
+  console.warn("sandbox compute standing read failed; admission falls back", {
+    part,
+    error: error instanceof Error ? error.message : String(error),
+  });
+}
 
 /** The most other organizations of one person the standing reads. */
 const SANDBOX_STANDING_PERSON_ORGANIZATION_LIMIT = 25;
@@ -50075,56 +50116,81 @@ export async function readOrganizationBoxSecondsToday(
 }
 
 /**
- * The facts outside one organization's lease rows that its plan's compute
- * bounds need: its box time today and, for an acting person (`user:<id>`),
- * the organizations they own or administer. Reads nothing for a tier whose
- * limits set none of these bounds (paid plans, `enterprise`, `embedded`).
+ * An organization's standing for one admission (see SandboxComputeStanding):
+ * its plan tier, whether it has paid, its box time today when its tier bounds
+ * that and, for an acting person (`user:<id>`), the organizations they own or
+ * administer. Only an unpaid-tier organization that never paid reads more than
+ * its own tier: paid plans, `enterprise` and `embedded` read no ledger, no box
+ * time and no person.
  *
  * The person's other organizations are read each under its own RLS context,
  * outside the admission transaction, so the cross-organization counts are a
  * snapshot: two simultaneous admissions in two organizations of one person can
- * both pass. The per-organization limits stay exact.
+ * both pass. The per-organization limits stay exact. A failed person read
+ * falls back to the organization's own bounds (reported through
+ * `onFallback`); a failed organization read throws, and acquireLease falls
+ * back to the tier it reads under the lease lock.
  */
 export async function resolveSandboxComputeStanding(
   db: Database,
-  input: { accountId: string; limits: SandboxPlanLimits; actingSubjectId?: string | null },
-): Promise<SandboxComputeStanding | null> {
+  input: {
+    accountId: string;
+    limits: SandboxPlanLimits;
+    actingSubjectId?: string | null;
+    onFallback?: SandboxComputeStandingFallback | undefined;
+  },
+): Promise<SandboxComputeStanding> {
   const own = await withAccountRls(db, input.accountId, async (tx) => {
     const standing = await resolveSandboxPlanStanding(tx, input.accountId, input.limits);
+    const bounded = SANDBOX_PERSON_BOUNDED_TIERS.includes(standing.tier) && !standing.paidHistory;
     const limit = sandboxPlanLimitFor(input.limits, standing.tier);
     const needsSeconds =
-      limit.boxSecondsPerOrganizationPerDay !== undefined ||
-      limit.boxSecondsPerPersonPerDay !== undefined;
+      bounded &&
+      (limit.boxSecondsPerOrganizationPerDay !== undefined ||
+        limit.boxSecondsPerPersonPerDay !== undefined);
     return {
       standing,
-      limit,
+      bounded,
       seconds: needsSeconds ? await organizationBoxSecondsToday(tx, input.accountId) : 0,
     };
   });
-  if (!SANDBOX_PERSON_BOUNDED_TIERS.includes(own.standing.tier)) return null;
   const result: SandboxComputeStanding = {
+    tier: own.standing.tier,
+    paidHistory: own.standing.paidHistory,
+    bounded: own.bounded,
     linkedRestricted: false,
+    personOwnsOrganization: false,
     personOtherRunningBoxes: 0,
     organizationBoxSecondsToday: own.seconds,
-    personBoxSecondsToday: own.seconds,
+    personBoxSecondsToday: 0,
   };
   const subjectId = input.actingSubjectId ?? null;
-  if (subjectId === null || !subjectId.startsWith("user:")) return result;
+  if (!own.bounded || subjectId === null || !subjectId.startsWith("user:")) return result;
   // A restricted organization needs no person facts: it is already closed.
   if (own.standing.tier === "restricted") return result;
-  const person = await cachedSandboxPersonStanding(db, {
-    accountId: input.accountId,
-    subjectId,
-    limits: input.limits,
-  });
+  let person: SandboxPersonStanding;
+  try {
+    person = await cachedSandboxPersonStanding(db, {
+      accountId: input.accountId,
+      subjectId,
+      limits: input.limits,
+    });
+  } catch (error) {
+    reportSandboxComputeStandingFallback(input.onFallback, error, "person");
+    return result;
+  }
   result.linkedRestricted = person.linkedRestricted;
+  if (person.linkedRestricted) result.tier = "restricted";
+  result.personOwnsOrganization = person.ownsOrganization;
   result.personOtherRunningBoxes = person.otherRunningBoxes;
-  result.personBoxSecondsToday += person.otherBoxSecondsToday;
+  result.personBoxSecondsToday =
+    (person.ownsOrganization ? own.seconds : 0) + person.otherBoxSecondsToday;
   return result;
 }
 
 type SandboxPersonStanding = {
   linkedRestricted: boolean;
+  ownsOrganization: boolean;
   otherRunningBoxes: number;
   otherBoxSecondsToday: number;
 };
@@ -50141,6 +50207,7 @@ const sandboxPersonStandingCache = new Map<
 /** Forget cached person standings (tests). */
 export function resetSandboxPersonStandingCache(): void {
   sandboxPersonStandingCache.clear();
+  organizationPurchasedCreditCache.clear();
 }
 
 async function cachedSandboxPersonStanding(
@@ -50160,6 +50227,14 @@ async function cachedSandboxPersonStanding(
   return await value;
 }
 
+/**
+ * The acting person's other organizations. A restriction follows them from
+ * any organization they own or administer into this one, when they also own
+ * or administer this one. Boxes and box time count toward their per-person
+ * bounds only from organizations they own (the ones they created), so an
+ * admin invited into a busy team organization is not bounded by their
+ * teammates' work.
+ */
 async function readSandboxPersonStanding(
   db: Database,
   input: { accountId: string; subjectId: string; limits: SandboxPlanLimits },
@@ -50167,6 +50242,7 @@ async function readSandboxPersonStanding(
   const subjectId = input.subjectId;
   const result: SandboxPersonStanding = {
     linkedRestricted: false,
+    ownsOrganization: false,
     otherRunningBoxes: 0,
     otherBoxSecondsToday: 0,
   };
@@ -50189,24 +50265,32 @@ async function readSandboxPersonStanding(
   const administersThis = administered.some(
     (membership) => membership.organizationId === input.accountId,
   );
+  result.ownsOrganization = administered.some(
+    (membership) => membership.organizationId === input.accountId && membership.role === "owner",
+  );
   const others = administered
-    .map((membership) => membership.organizationId as string)
-    .filter((organizationId) => organizationId !== input.accountId)
-    .sort()
+    .filter((membership) => membership.organizationId !== input.accountId)
+    .sort((left, right) => String(left.organizationId).localeCompare(String(right.organizationId)))
     .slice(0, SANDBOX_STANDING_PERSON_ORGANIZATION_LIMIT);
-  for (const organizationId of others) {
+  for (const membership of others) {
+    const organizationId = membership.organizationId as string;
+    const owned = membership.role === "owner";
     const other = await withAccountRls(db, organizationId, async (tx) => {
       const standing = await resolveSandboxPlanStanding(tx, organizationId, input.limits);
-      if (!SANDBOX_PERSON_BOUNDED_TIERS.includes(standing.tier)) return null;
-      const counts = await organizationWarmSandboxCounts(tx, {
-        accountId: organizationId,
-        subjectId: null,
-        excludeLeaseId: null,
-      });
+      if (!SANDBOX_PERSON_BOUNDED_TIERS.includes(standing.tier) || standing.paidHistory) {
+        return null;
+      }
+      const counts = owned
+        ? await organizationWarmSandboxCounts(tx, {
+            accountId: organizationId,
+            subjectId: null,
+            excludeLeaseId: null,
+          })
+        : null;
       return {
         restricted: standing.tier === "restricted" && standing.ownDecision !== null,
-        runningBoxes: counts.runningBoxes,
-        seconds: await organizationBoxSecondsToday(tx, organizationId),
+        runningBoxes: counts?.runningBoxes ?? 0,
+        seconds: owned ? await organizationBoxSecondsToday(tx, organizationId) : 0,
       };
     });
     if (other === null) continue;
@@ -50301,6 +50385,47 @@ export type SandboxPlanStanding = {
 /** resolveSandboxPlanTier with the facts behind it. `linkedRestricted`
  * restricts a Free or plan-less organization with no paid history because the
  * acting person owns or administers another restricted organization. */
+/** Whether an organization ever bought credit is read for unpaid-tier
+ * organizations on admission paths; a purchase never un-happens, so a yes is
+ * kept for the process's life (bounded) and a no for a minute. */
+const ORGANIZATION_PURCHASED_CREDIT_NEGATIVE_TTL_MS = 60_000;
+const ORGANIZATION_PURCHASED_CREDIT_CACHE_LIMIT = 5_000;
+const organizationPurchasedCreditCache = new Map<string, { at: number; value: Promise<boolean> }>();
+
+/** Forget cached purchase facts (tests). */
+export function resetOrganizationPurchasedCreditCache(): void {
+  organizationPurchasedCreditCache.clear();
+}
+
+/** Any positive credit top-up (a purchase, never a grant) in the ledger. Needs
+ * the organization's RLS context. */
+async function organizationPurchasedCredit(tx: Database, accountId: string): Promise<boolean> {
+  const now = Date.now();
+  const cached = organizationPurchasedCreditCache.get(accountId);
+  if (cached) {
+    const value = await cached.value.catch(() => null);
+    if (
+      value === true ||
+      (value === false && now - cached.at < ORGANIZATION_PURCHASED_CREDIT_NEGATIVE_TTL_MS)
+    ) {
+      return value;
+    }
+  }
+  if (organizationPurchasedCreditCache.size >= ORGANIZATION_PURCHASED_CREDIT_CACHE_LIMIT) {
+    organizationPurchasedCreditCache.clear();
+  }
+  const value = rawRows<{ purchased: boolean }>(
+    tx,
+    sql`select exists (select 1 from credit_ledger_entries entry
+      where entry.account_id = ${accountId}::uuid
+        and entry.type = 'credit_topup'
+        and entry.amount_micros > 0) as purchased`,
+  ).then((rows) => rows[0]?.purchased === true);
+  organizationPurchasedCreditCache.set(accountId, { at: now, value });
+  value.catch(() => organizationPurchasedCreditCache.delete(accountId));
+  return await value;
+}
+
 export async function resolveSandboxPlanStanding(
   tx: Database,
   accountId: string,
@@ -50317,7 +50442,7 @@ export async function resolveSandboxPlanStanding(
     enforcement: boolean | null;
     hosted_account: boolean | null;
     young: boolean | null;
-    paid_history: boolean | null;
+    stripe_subscription: boolean | null;
   }>(
     tx,
     sql`select plan.plan_key, plan.status, decision.decision,
@@ -50334,18 +50459,18 @@ export async function resolveSandboxPlanStanding(
               SELF_SERVE_ACCOUNT_SOURCES.map((source) => sql`${source}`),
               sql`, `,
             )})) as hosted_account,
-        (plan.stripe_subscription_id is not null
-          or exists (select 1 from credit_ledger_entries entry
-            where entry.account_id = organization.account_id
-              and entry.type = 'credit_topup'
-              and entry.amount_micros > 0)) as paid_history
+        plan.stripe_subscription_id is not null as stripe_subscription
       from (select ${accountId}::uuid as account_id) organization
       left join organization_plans plan on plan.account_id = organization.account_id
       left join promotion_decisions decision on decision.account_id = organization.account_id`,
   );
-  const paidHistory = row?.paid_history === true;
   if (row?.hosted_account === true) {
-    return { tier: SANDBOX_EMBEDDED_PLAN_TIER, paidHistory, ownDecision: null, suspended: false };
+    return {
+      tier: SANDBOX_EMBEDDED_PLAN_TIER,
+      paidHistory: false,
+      ownDecision: null,
+      suspended: false,
+    };
   }
   const planKey = row?.plan_key ?? null;
   let tier: string;
@@ -50353,6 +50478,11 @@ export async function resolveSandboxPlanStanding(
   else if (planKey === "free" || planKey === "enterprise") tier = planKey;
   else if (["active", "trialing", "past_due"].includes(row?.status ?? "")) tier = planKey;
   else tier = "free";
+  // Paid history matters only for an unpaid tier; a paid, Enterprise or
+  // host-provisioned organization never reads the ledger here.
+  const paidHistory =
+    row?.stripe_subscription === true ||
+    ((tier === "free" || tier === "none") && (await organizationPurchasedCredit(tx, accountId)));
   const ownDecision =
     row?.enforcement === true && (row?.decision === "held" || row?.decision === "denied")
       ? row.decision
@@ -50386,6 +50516,19 @@ export async function resolveSandboxPlanTierInWorkspace(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => await resolveSandboxPlanTier(scopedDb, input.accountId, input.limits),
+  );
+}
+
+/** resolveSandboxPlanStanding for maintenance callers, in the RLS context of
+ * one of the organization's workspaces. */
+export async function resolveSandboxPlanStandingInWorkspace(
+  db: Database,
+  input: { accountId: string; workspaceId: string; limits?: SandboxPlanLimits },
+): Promise<SandboxPlanStanding> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => await resolveSandboxPlanStanding(scopedDb, input.accountId, input.limits),
   );
 }
 
@@ -51925,35 +52068,47 @@ async function acquireLeaseOnce(
         // host-provisioned (`embedded`) or `enterprise` organization is
         // outside the per-workspace limit as well as the plan limits its tier
         // does not set.
+        // The standing read before this transaction carries the tier (and any
+        // linked restriction); without one (no plan limits, or its read
+        // failed) the tier is read here.
         const planTier =
-          input.sandboxPlanLimits || (input.viewerOnlyBoxLimit ?? 0) > 0
-            ? await resolveSandboxPlanTier(tx, accountId, input.sandboxPlanLimits, {
-                linkedRestricted: standing?.linkedRestricted === true,
-              })
-            : null;
+          standing !== null
+            ? standing.tier
+            : input.sandboxPlanLimits || (input.viewerOnlyBoxLimit ?? 0) > 0
+              ? await resolveSandboxPlanTier(tx, accountId, input.sandboxPlanLimits)
+              : null;
         const viewerOnlyBoxLimit =
           planTier !== null && sandboxPlanTierExemptFromViewerOnlyBounds(planTier)
             ? 0
             : (input.viewerOnlyBoxLimit ?? 0);
-        const planLimit =
+        // An unpaid-tier organization that bought credit or paid for a plan
+        // is a paying customer: none of the unpaid-only bounds apply.
+        const tierLimit =
           input.sandboxPlanLimits && planTier !== null
             ? sandboxPlanLimitFor(input.sandboxPlanLimits, planTier)
             : {};
+        const planLimit = standing?.paidHistory ? paidSandboxPlanLimit(tierLimit) : tierLimit;
         // Free-compute bounds shared by every holder kind (docs/deployment.md,
         // "Free compute bounds"). A closed tier (running limit 0) or a spent
         // daily box-time budget refuses every holder, including a join, a
-        // re-arm or a replayed holder, so nothing but an in-flight turn keeps
-        // such a box warm. A turn that already holds this box finishes; any
-        // other turn fails with a clear message instead of waiting for a slot
-        // that will not come. A Connected Machine never counts.
+        // re-arm or a replayed holder, of a box no turn keeps warm. A warm box
+        // a turn holds admits everything that turn and its people use (the
+        // agent's own requests, its Browser/ComputerSessions, someone
+        // watching), so an in-flight turn finishes; the reaper drains only
+        // boxes no turn holds. Any other turn fails with a clear message
+        // instead of waiting for a slot that will not come. A Connected
+        // Machine never counts.
         if (backend !== "selfhosted") {
           const refusal: SandboxOrganizationBoxLimitReason | null =
             planLimit.runningBoxesPerOrganization === 0
               ? "closed"
-              : standing !== null && sandboxDailyBoxTimeSpent(planLimit, standing)
+              : standing !== null &&
+                  standing.bounded &&
+                  sandboxDailyBoxTimeSpent(planLimit, standing)
                 ? "daily_budget"
                 : null;
-          if (refusal !== null) {
+          const turnHeldWarm = row.liveness === "warm" && Number(row.turn_holders) > 0;
+          if (refusal !== null && !turnHeldWarm) {
             const inFlightTurn =
               kind === "turn" &&
               Boolean(
@@ -52328,7 +52483,7 @@ async function acquireLeaseOnce(
           const runningBoxLimit =
             backend === "selfhosted" ? undefined : planLimit.runningBoxesPerOrganization;
           const personBoxLimit =
-            backend === "selfhosted" || standing === null
+            backend === "selfhosted" || standing === null || !standing.bounded
               ? undefined
               : planLimit.runningBoxesPerPerson;
           if (runningBoxLimit !== undefined || personBoxLimit !== undefined) {
@@ -52350,7 +52505,8 @@ async function acquireLeaseOnce(
               personBoxLimit !== undefined &&
               (personBoxLimit === 0 ||
                 (counts !== null &&
-                  counts.runningBoxes + (standing?.personOtherRunningBoxes ?? 0) >=
+                  (standing?.personOwnsOrganization ? counts.runningBoxes : 0) +
+                    (standing?.personOtherRunningBoxes ?? 0) >=
                     personBoxLimit));
             if (organizationFull || personFull) {
               const limit = organizationFull ? (runningBoxLimit ?? 0) : (personBoxLimit ?? 0);
@@ -52404,6 +52560,7 @@ async function acquireLeaseOnce(
           return {
             role,
             ...(planTier !== null ? { sandboxPlanTier: planTier } : {}),
+            ...(standing?.paidHistory ? { sandboxPaidHistory: true } : {}),
             lease: {
               ...mapLeaseRow(updated),
               historicalRecoveryAuthorized:
@@ -52502,6 +52659,8 @@ async function stampSandboxCommandHolderActivity(
           and lease.sandbox_group_id = ${input.sandboxGroupId}
           and holder.lease_id = lease.id
           and holder.kind in ('process', 'interaction')
+          and (holder.last_interaction_at is null
+            or holder.last_interaction_at < now() - interval '30 seconds')
       `);
     },
   );
@@ -52524,19 +52683,27 @@ export async function acquireLease(
   const startedAt = performance.now();
   const waitBudget = new SandboxTransitionWaitBudget(captureWaitMs, startedAt);
   let delayMs = 25;
-  // Facts outside this organization's lease rows (its box time today and the
-  // acting person's other organizations), read once before admission.
-  const standing = input.sandboxPlanLimits
-    ? await resolveSandboxComputeStanding(db, {
+  // The organization's tier and the facts outside its lease rows (its box
+  // time today and the acting person's other organizations), read once before
+  // admission. A failed read fails open to the tier read under the lease lock.
+  let standing: SandboxComputeStanding | null = null;
+  if (input.sandboxPlanLimits) {
+    try {
+      standing = await resolveSandboxComputeStanding(db, {
         accountId: input.accountId,
         limits: input.sandboxPlanLimits,
         actingSubjectId: input.actingSubjectId ?? input.viewerSubjectId ?? null,
-      })
-    : null;
+        onFallback: input.onComputeStandingFallback,
+      });
+    } catch (error) {
+      reportSandboxComputeStandingFallback(input.onComputeStandingFallback, error, "organization");
+    }
+  }
   for (;;) {
     const result = await acquireLeaseOnce(db, input, standing);
     if (
       standing !== null &&
+      standing.bounded &&
       (input.kind === "direct" || input.kind === "interaction") &&
       (result.role === "attached" || result.role === "rearmed")
     ) {
