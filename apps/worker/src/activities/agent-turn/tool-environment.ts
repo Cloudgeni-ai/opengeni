@@ -389,31 +389,68 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
 const BUILT_IN_SESSION_MCP_SERVER_IDS = new Set(["opengeni", "files", "docs"]);
 
 /**
- * Names of the connectors this turn has tools for: selected MCP connectors
- * that were not left out, and the API integrations whose accounts this turn
- * routes. The availability notice names them beside the connectors it runs
- * without, so a connector whose tools wait behind tool search is not taken
- * for an unavailable one with a similar name.
+ * The connectors connected for this turn: selected MCP connectors that were
+ * not left out, and the API integrations whose accounts this turn routes. The
+ * availability notice names them beside the connectors it runs without, so a
+ * connector whose tools wait behind tool search is not taken for an
+ * unavailable one with a similar name. Left out: connectors already reported
+ * unavailable, selections narrowed to no tools, and connectors whose every
+ * routed account stopped working (the notice lists those for reconnecting).
+ * Tools are listed after this, so a connector here can still fail to connect.
  */
-export function connectedMcpConnectorNames(input: {
+export function connectedMcpConnectors(input: {
   servers: readonly { id: string; name?: string | null | undefined }[];
-  toolIds: readonly string[];
-  unavailableIds: readonly string[];
-  apiIntegrations: readonly { name: string }[];
-}): string[] {
-  const selected = new Set(input.toolIds);
+  tools: readonly { id: string; allowedTools?: readonly string[] | undefined }[];
+  unavailableIds: Iterable<string>;
+  bindings: readonly { canonicalServerId: string; connectionId: string }[] | null | undefined;
+  apiIntegrations: readonly {
+    serverId: string;
+    name: string;
+    connectionRef?: { connectionId?: string | null | undefined } | null | undefined;
+  }[];
+  brokenConnectionIds: ReadonlySet<string>;
+}): { id: string; name: string }[] {
+  const selected = new Map<string, boolean>();
+  for (const tool of input.tools) {
+    const hasTools = tool.allowedTools === undefined || tool.allowedTools.length > 0;
+    selected.set(tool.id, (selected.get(tool.id) ?? false) || hasTools);
+  }
   const unavailable = new Set(input.unavailableIds);
-  return [
-    ...input.servers
-      .filter(
-        (server) =>
-          selected.has(server.id) &&
-          !unavailable.has(server.id) &&
-          !BUILT_IN_SESSION_MCP_SERVER_IDS.has(server.id),
-      )
-      .map((server) => server.name ?? server.id),
-    ...input.apiIntegrations.map((integration) => integration.name),
-  ];
+  const allBroken = (connectionIds: readonly (string | null | undefined)[]) =>
+    connectionIds.length > 0 &&
+    connectionIds.every((id) => typeof id === "string" && input.brokenConnectionIds.has(id));
+  const connectors: { id: string; name: string }[] = [];
+  for (const server of input.servers) {
+    if (
+      !selected.get(server.id) ||
+      unavailable.has(server.id) ||
+      BUILT_IN_SESSION_MCP_SERVER_IDS.has(server.id)
+    )
+      continue;
+    const routed = (input.bindings ?? [])
+      .filter((binding) => binding.canonicalServerId === server.id)
+      .map((binding) => binding.connectionId);
+    if (allBroken(routed)) continue;
+    connectors.push({ id: server.id, name: server.name ?? server.id });
+  }
+  // Routes of one integration share its name; it is connected while one works.
+  const integrations = new Map<string, { id: string; connectionIds: (string | null)[] }>();
+  for (const integration of input.apiIntegrations) {
+    if (!selected.get(integration.serverId) || unavailable.has(integration.serverId)) continue;
+    const entry = integrations.get(integration.name) ?? {
+      id: integration.serverId,
+      connectionIds: [],
+    };
+    entry.connectionIds.push(
+      integration.connectionRef ? (integration.connectionRef.connectionId ?? null) : null,
+    );
+    integrations.set(integration.name, entry);
+  }
+  for (const [name, entry] of integrations) {
+    if (allBroken(entry.connectionIds)) continue;
+    connectors.push({ id: entry.id, name });
+  }
+  return connectors;
 }
 
 /**
@@ -560,39 +597,30 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   const connectionBackedServers = canonicalRunSettings.mcpServers.filter(
     (server) => server.connectionRef,
   );
-  const needsReconnect =
-    connectionBackedServers.length === 0
-      ? []
-      : mcpAccountsNeedingReconnect(
-          connectionBackedServers,
-          await listConnectionsNeedingReconnect(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            subjectId: turn.initiatingHumanSubjectId ?? null,
-            integrationBackends: await nangoBackendsFor(db, runSettings),
-          }).catch((error: unknown) => {
-            observability.warn("Connections needing reconnect were not read", {
-              error: error instanceof Error ? error.message : String(error),
-            });
-            return [];
-          }),
-        );
   const apiIntegrations = expandApiIntegrationAccountRoutes({
     integrations: installedApiIntegrations,
     bindings: turn.mcpAccountBindings,
     tools: turnTools,
   });
-  const mcpAvailabilityNote = unavailableMcpOperationalContext({
-    connectors: unavailableMcpConnectors,
-    omittedCount: deps.unavailableMcpConnectors.omittedCount,
-    needsReconnect,
-    connected: connectedMcpConnectorNames({
-      servers: canonicalRunSettings.mcpServers,
-      toolIds: canonicalTurnTools.map((tool) => tool.id),
-      unavailableIds: unavailableMcpConnectors.map((connector) => connector.id),
-      apiIntegrations,
-    }),
-  });
+  const brokenConnections =
+    connectionBackedServers.length === 0 &&
+    !apiIntegrations.some((integration) => integration.connectionRef?.connectionId)
+      ? []
+      : await listConnectionsNeedingReconnect(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: turn.initiatingHumanSubjectId ?? null,
+          integrationBackends: await nangoBackendsFor(db, runSettings),
+        }).catch((error: unknown) => {
+          observability.warn("Connections needing reconnect were not read", {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return [];
+        });
+  const needsReconnect =
+    connectionBackedServers.length === 0
+      ? []
+      : mcpAccountsNeedingReconnect(connectionBackedServers, brokenConnections);
   // Tool discovery reports the same connectors beside runtime failures.
   const preparationUnavailableMcpServers = new Map(
     unavailableMcpConnectors.map((connector) => [
@@ -600,6 +628,19 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       `not loaded this turn: ${unavailableMcpConnectorReasonText(connector.reason)}`,
     ]),
   );
+  const mcpAvailabilityNote = unavailableMcpOperationalContext({
+    connectors: unavailableMcpConnectors,
+    omittedCount: deps.unavailableMcpConnectors.omittedCount,
+    needsReconnect,
+    connected: connectedMcpConnectors({
+      servers: canonicalRunSettings.mcpServers,
+      tools: [...canonicalTurnTools, ...turnTools],
+      unavailableIds: preparationUnavailableMcpServers.keys(),
+      bindings: turn.mcpAccountBindings,
+      apiIntegrations,
+      brokenConnectionIds: new Set(brokenConnections.map((connection) => connection.connectionId)),
+    }),
+  });
   const credentialRestriction = turnCredentialRestriction(turnExecutionPolicy, session.metadata);
   const toolContextPreparationStartedAt = performance.now();
   throwIfWorkerShuttingDown();

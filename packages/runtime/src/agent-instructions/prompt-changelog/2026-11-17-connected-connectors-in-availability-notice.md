@@ -2,13 +2,17 @@
 
 No system-prompt text changes. The per-turn "Connector availability" notice
 (and the "Accounts that need reconnecting" notice when it stands alone) gains
-one closing line naming the chat's connectors that this turn has tools for:
-selected MCP connectors that were not left out, and routed API integrations.
-It appears only on turns that already carry the notice: about 169 bytes plus
-the quoted names, at most 16 names, the rest counted.
+one closing line naming the chat's connectors that are connected for this
+turn: selected MCP connectors and routed API integrations, leaving out those
+already reported unavailable, selections narrowed to no tools, and connectors
+whose every routed account stopped working (they stay in the reconnect list).
+A name equal to one named above carries its ID, as the unavailable entries
+do. The line appears only on turns that already carry the notice: 166 bytes
+plus the quoted names, at most 16 names, the rest counted. It does not promise
+tools, because the connectors' tools are listed after the notice is written.
 
 ```text
-+ Connected this turn, with tools available (tool search finds any not listed): "<name>", "<name>". A connector the person names may be one of these rather than a similarly named one above.
++ Connected for this turn: "<name>", "<name>" (their tools may appear only through tool search). A connector the person names may be one of these rather than a similarly named one above.
 ```
 
 Why it is general: the notice named only the connectors a turn runs

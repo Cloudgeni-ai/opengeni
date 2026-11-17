@@ -676,36 +676,54 @@ export function unavailableMcpOperationalContext(input: {
   /** Accounts of this chat's connectors that stopped working and need reconnecting. */
   needsReconnect?: readonly McpConnectorAccountNeedingReconnect[];
   /**
-   * Names of this chat's connectors that this turn does have tools for. Named
-   * only beside an unavailable or broken one, so a missing connector is never
-   * the only connector the model hears about: their tools may be deferred
-   * behind tool search, and a similarly named unavailable connector must not
-   * read as the one the person asked for.
+   * This chat's connectors that are connected for this turn. Named only beside
+   * an unavailable or broken one, so a missing connector is never the only
+   * connector the model hears about: their tools may be deferred behind tool
+   * search, and a similarly named unavailable connector must not read as the
+   * one the person asked for. Their tools are listed only after this notice is
+   * written, so it does not promise any.
    */
-  connected?: readonly string[];
+  connected?: readonly { id: string; name?: string | undefined }[];
 }): string | undefined {
   const unavailable = unavailableMcpConnectorsNotice(input);
   const reconnect = mcpAccountsNeedingReconnectNotice(input.needsReconnect ?? []);
   const notice =
     unavailable && reconnect ? `${unavailable}\n${reconnect}` : (unavailable ?? reconnect);
   if (!notice) return undefined;
-  const connected = connectedMcpConnectorsLine(input.connected ?? []);
+  const named = new Set(
+    [
+      ...input.connectors.map((connector) => connector.name),
+      ...(input.needsReconnect ?? []).map((account) => account.connector.name),
+    ]
+      .map(cleanConnectorName)
+      .filter(Boolean),
+  );
+  const connected = connectedMcpConnectorsLine(input.connected ?? [], named);
   return connected ? `${notice}\n${connected}` : notice;
 }
 
-/** One line naming the connectors this turn can use, deduplicated and sorted. */
-function connectedMcpConnectorsLine(names: readonly string[]): string | undefined {
-  const unique = [...new Set(names.map(cleanConnectorName).filter(Boolean))].sort((left, right) =>
-    left < right ? -1 : left > right ? 1 : 0,
-  );
+/**
+ * One line naming the connectors connected for this turn, deduplicated and
+ * sorted. A name shared with a connector named above carries its ID, as there.
+ */
+function connectedMcpConnectorsLine(
+  connectors: readonly { id: string; name?: string | undefined }[],
+  namedAbove: ReadonlySet<string>,
+): string | undefined {
+  const unique = [
+    ...new Set(
+      connectors.map((connector) => {
+        const name = cleanConnectorName(connector.name);
+        return name && !namedAbove.has(name)
+          ? JSON.stringify(name)
+          : displayConnector({ ...connector, reason: "no_account" });
+      }),
+    ),
+  ].sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
   if (unique.length === 0) return undefined;
   const listed = unique.slice(0, CONNECTED_MCP_NOTICE_MAX_LISTED);
   const more = unique.length - listed.length;
-  return `Connected this turn, with tools available (tool search finds any not listed): ${listed
-    .map((name) => JSON.stringify(name))
-    .join(
-      ", ",
-    )}${more > 0 ? ` and ${more} more` : ""}. A connector the person names may be one of these rather than a similarly named one above.`;
+  return `Connected for this turn: ${listed.join(", ")}${more > 0 ? ` and ${more} more` : ""} (their tools may appear only through tool search). A connector the person names may be one of these rather than a similarly named one above.`;
 }
 
 /**
