@@ -5,7 +5,11 @@ import {
 } from "@opengeni/contracts";
 import { attachSessionRepositoryResource, type ApiRouteDeps } from "@opengeni/core";
 import { listPersonApprovedFirstPartyToolCalls } from "@opengeni/db";
-import { githubRepositoryResourceRef, listWorkspaceGitHubRepositories } from "./github-access";
+import {
+  githubRepositoryResourceRef,
+  isGitHubRepositoryProvenEmpty,
+  listWorkspaceGitHubRepositories,
+} from "./github-access";
 
 export const GITHUB_REPOSITORY_ATTACH_TOOL_NAME = "github_repository_attach";
 
@@ -79,6 +83,9 @@ export type SessionRepositoryAttachOutcome = {
  * permission as the repository picker), not archived and not empty. It is
  * attached best effort (`optional`) on the branch asked for or its default
  * branch, and the next turn clones it.
+ *
+ * Empty means GitHub shows no branch at all. GitHub's repository `size` is
+ * no evidence: it is computed lazily and stays 0 for a while after a push.
  */
 export async function attachApprovedSessionRepository(
   deps: ApiRouteDeps,
@@ -122,7 +129,7 @@ export async function attachApprovedSessionRepository(
   if (repository.archived === true) {
     throw new SessionRepositoryAttachRefusedError(`${repository.fullName} is archived.`);
   }
-  if (repository.sizeKb === 0) {
+  if (await isGitHubRepositoryProvenEmpty(deps, repository)) {
     throw new SessionRepositoryAttachRefusedError(
       `${repository.fullName} is empty, so there is nothing to clone.`,
     );
