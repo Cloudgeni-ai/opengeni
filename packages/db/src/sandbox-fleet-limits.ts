@@ -37,8 +37,18 @@ const fleetPressureState: {
   warmBoxes: number | null;
   readAt: number;
   succeededAt: number;
+  /** While engaged: since when the warm count has stayed below the release
+   * level. */
+  belowReleaseSince: number | null;
   inflight: Promise<void> | null;
-} = { engaged: false, warmBoxes: null, readAt: 0, succeededAt: 0, inflight: null };
+} = {
+  engaged: false,
+  warmBoxes: null,
+  readAt: 0,
+  succeededAt: 0,
+  belowReleaseSince: null,
+  inflight: null,
+};
 
 /** Forget the process's fleet state (tests). */
 export function resetSandboxFleetState(): void {
@@ -46,6 +56,7 @@ export function resetSandboxFleetState(): void {
   fleetPressureState.warmBoxes = null;
   fleetPressureState.readAt = 0;
   fleetPressureState.succeededAt = 0;
+  fleetPressureState.belowReleaseSince = null;
   fleetPressureState.inflight = null;
   unpaidFleetRoutine.available = null;
   unpaidFleetBoxSeconds.value = null;
@@ -59,9 +70,10 @@ function fleetPressureConfigured(limits: SandboxFleetLimits): boolean {
 
 /**
  * Apply one warm count to the pressure state: engage when it exceeds
- * `pressureEngageWarmBoxes`, release when it falls to
- * `pressureReleaseWarmBoxes` (or the engage level when unset) or below.
- * Returns the transition, if any.
+ * `pressureEngageWarmBoxes`; release once every reading for
+ * `pressureReleaseAfterMs` (none: at once) has been below
+ * `pressureReleaseWarmBoxes` (none: at or below the engage level). Returns
+ * the transition, if any.
  */
 export function observeSandboxFleetWarmBoxes(
   limits: SandboxFleetLimits,
@@ -77,9 +89,13 @@ export function observeSandboxFleetWarmBoxes(
     fleetPressureState.engaged = false;
     return wasEngaged ? "released" : null;
   }
-  const releaseAt = Math.min(limits.pressureReleaseWarmBoxes ?? engageAt, engageAt);
+  const below =
+    limits.pressureReleaseWarmBoxes === undefined
+      ? warmBoxes <= engageAt
+      : warmBoxes < Math.min(limits.pressureReleaseWarmBoxes, engageAt + 1);
   if (!fleetPressureState.engaged && warmBoxes > engageAt) {
     fleetPressureState.engaged = true;
+    fleetPressureState.belowReleaseSince = null;
     console.warn("sandbox fleet pressure engaged: new unpaid boxes are limited", {
       warmBoxes,
       engageAt,
@@ -87,9 +103,19 @@ export function observeSandboxFleetWarmBoxes(
     });
     return "engaged";
   }
-  if (fleetPressureState.engaged && warmBoxes <= releaseAt) {
+  if (!fleetPressureState.engaged) return null;
+  if (!below) {
+    fleetPressureState.belowReleaseSince = null;
+    return null;
+  }
+  fleetPressureState.belowReleaseSince ??= now;
+  if (now - fleetPressureState.belowReleaseSince >= (limits.pressureReleaseAfterMs ?? 0)) {
     fleetPressureState.engaged = false;
-    console.warn("sandbox fleet pressure released", { warmBoxes, releaseAt });
+    fleetPressureState.belowReleaseSince = null;
+    console.warn("sandbox fleet pressure released", {
+      warmBoxes,
+      releaseBelow: limits.pressureReleaseWarmBoxes ?? null,
+    });
     return "released";
   }
   return null;

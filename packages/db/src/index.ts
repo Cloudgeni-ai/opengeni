@@ -49971,6 +49971,8 @@ export class SandboxViewerBoxLimitError extends Error {
  *   time (`limit` seconds), until the next UTC day;
  * - `young_running`: an unpaid organization in its first day (fleet limits)
  *   already runs `limit` boxes;
+ * - `young_box_time`: an unpaid organization in its first day used the box
+ *   time new organizations get (`limit` seconds);
  * - `fleet_busy`: unpaid organizations together already run as many boxes as
  *   the fleet allows (`limit`), or the fleet is under pressure;
  * - `fleet_daily_budget`: unpaid organizations together used today's fleet
@@ -49982,6 +49984,7 @@ export type SandboxOrganizationBoxLimitReason =
   | "closed"
   | "daily_budget"
   | "young_running"
+  | "young_box_time"
   | "fleet_busy"
   | "fleet_daily_budget";
 
@@ -50010,6 +50013,10 @@ export function sandboxOrganizationBoxLimitMessage(
       return `Your organization already runs ${limit} sandboxes, the most its plan allows; close one or wait for a task to finish`;
     case "young_running":
       return `New organizations on the Free plan run ${limit === 1 ? "one sandbox" : `${limit} sandboxes`} at a time during their first day; close one or wait for a task to finish, or add credit to run more`;
+    case "young_box_time":
+      return `New organizations on the Free plan can use ${Math.round(
+        limit / 3600,
+      )} sandbox hours during their first day, and this one has. Sandboxes start again when it is a day old; add credit or choose a paid plan to keep working now.`;
     case "fleet_busy":
       return "Free sandboxes are at capacity right now. Try again in a few minutes, or add credit or choose a paid plan to start one now.";
     case "fleet_daily_budget":
@@ -52302,7 +52309,9 @@ async function acquireLeaseOnce(
                   standing.bounded &&
                   sandboxDailyBoxTimeSpent(planLimit, standing)
                 ? "daily_budget"
-                : null;
+                : sandboxYoungBoxTimeSpent(fleet)
+                  ? "young_box_time"
+                  : null;
           const turnHeldWarm = row.liveness === "warm" && Number(row.turn_holders) > 0;
           if (refusal !== null && !turnHeldWarm) {
             const inFlightTurn =
@@ -52320,7 +52329,11 @@ async function acquireLeaseOnce(
               throw new SandboxOrganizationBoxLimitError(
                 workspaceId,
                 sandboxGroupId,
-                refusal === "closed" ? 0 : sandboxDailyBoxTimeLimitSeconds(planLimit, standing),
+                refusal === "closed"
+                  ? 0
+                  : refusal === "young_box_time"
+                    ? (fleet?.limits.youngOrganizationBoxSeconds ?? 0)
+                    : sandboxDailyBoxTimeLimitSeconds(planLimit, standing),
                 refusal,
               );
             }
@@ -52679,11 +52692,8 @@ async function acquireLeaseOnce(
           // A young unpaid organization runs fewer boxes (fleet limits).
           const youngLimit =
             fleet !== null &&
-            fleet.limits.youngOrganizationAgeMs !== undefined &&
+            fleet.young &&
             fleet.limits.youngOrganizationRunningBoxes !== undefined &&
-            standing?.organizationCreatedAt != null &&
-            Date.now() - standing.organizationCreatedAt.getTime() <
-              fleet.limits.youngOrganizationAgeMs &&
             (planLimit.runningBoxesPerOrganization === undefined ||
               fleet.limits.youngOrganizationRunningBoxes < planLimit.runningBoxesPerOrganization)
               ? fleet.limits.youngOrganizationRunningBoxes
@@ -52905,7 +52915,40 @@ type SandboxFleetAdmission = {
   boxSecondsToday: number | null;
   /** The box-time read failed: fail closed for this unpaid organization. */
   boxSecondsFailed: boolean;
+  /** The organization is younger than `youngOrganizationAgeMs`. */
+  young: boolean;
+  /** A young organization's metered box seconds since it was created; null
+   * when unbounded or unreadable (fails open, like its other own bounds). */
+  youngBoxSeconds: number | null;
 };
+
+function sandboxYoungBoxTimeSpent(fleet: SandboxFleetAdmission | null): boolean {
+  return (
+    fleet !== null &&
+    fleet.young &&
+    fleet.limits.youngOrganizationBoxSeconds !== undefined &&
+    fleet.youngBoxSeconds !== null &&
+    fleet.youngBoxSeconds >= fleet.limits.youngOrganizationBoxSeconds
+  );
+}
+
+async function organizationBoxSecondsSince(
+  db: Database,
+  accountId: string,
+  since: Date,
+): Promise<number> {
+  return await withAccountRls(db, accountId, async (tx) => {
+    const [row] = await rawRows<{ seconds: string | number | null }>(
+      tx,
+      sql`select coalesce(sum(quantity), 0)::bigint as seconds
+        from usage_events
+        where account_id = ${accountId}::uuid
+          and event_type = 'sandbox.warm_seconds'
+          and occurred_at >= ${since.toISOString()}::timestamptz`,
+    );
+    return Number(row?.seconds ?? 0);
+  });
+}
 
 /** An unpaid organization (unpaid tier, no paid history) the fleet limits
  * apply to; paid, Enterprise and host-provisioned organizations never are. */
@@ -52933,7 +52976,20 @@ async function readSandboxFleetAdmission(
       boxSecondsFailed = true;
     }
   }
-  return { limits, pressure, boxSecondsToday, boxSecondsFailed };
+  const createdAt = standing?.organizationCreatedAt ?? null;
+  const young =
+    limits.youngOrganizationAgeMs !== undefined &&
+    createdAt !== null &&
+    Date.now() - createdAt.getTime() < limits.youngOrganizationAgeMs;
+  let youngBoxSeconds: number | null = null;
+  if (young && createdAt !== null && limits.youngOrganizationBoxSeconds !== undefined) {
+    try {
+      youngBoxSeconds = await organizationBoxSecondsSince(db, input.accountId, createdAt);
+    } catch (error) {
+      reportSandboxComputeStandingFallback(input.onComputeStandingFallback, error, "organization");
+    }
+  }
+  return { limits, pressure, boxSecondsToday, boxSecondsFailed, young, youngBoxSeconds };
 }
 
 export async function acquireLease(

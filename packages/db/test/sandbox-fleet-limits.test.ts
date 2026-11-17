@@ -6,7 +6,7 @@ import {
   resetSandboxFleetState,
 } from "../src/sandbox-fleet-limits";
 
-const limits = { pressureEngageWarmBoxes: 50, pressureReleaseWarmBoxes: 35 };
+const limits = { pressureEngageWarmBoxes: 50, pressureReleaseWarmBoxes: 40 };
 
 function warmCountDatabase(read: () => number): Database {
   return {
@@ -17,13 +17,25 @@ function warmCountDatabase(read: () => number): Database {
 afterEach(() => resetSandboxFleetState());
 
 describe("sandbox fleet pressure", () => {
-  test("engages above the engage level and releases only at the release level", () => {
+  test("engages above the engage level and releases only below the release level", () => {
     expect(observeSandboxFleetWarmBoxes(limits, 50)).toBeNull();
     expect(observeSandboxFleetWarmBoxes(limits, 51)).toBe("engaged");
-    expect(observeSandboxFleetWarmBoxes(limits, 40)).toBeNull();
-    expect(observeSandboxFleetWarmBoxes(limits, 36)).toBeNull();
-    expect(observeSandboxFleetWarmBoxes(limits, 35)).toBe("released");
     expect(observeSandboxFleetWarmBoxes(limits, 45)).toBeNull();
+    expect(observeSandboxFleetWarmBoxes(limits, 40)).toBeNull();
+    expect(observeSandboxFleetWarmBoxes(limits, 39)).toBe("released");
+    expect(observeSandboxFleetWarmBoxes(limits, 45)).toBeNull();
+  });
+
+  test("releases only after the warm count stays below the release level long enough", () => {
+    const sustained = { ...limits, pressureReleaseAfterMs: 15 * 60_000 };
+    const start = Date.now();
+    expect(observeSandboxFleetWarmBoxes(sustained, 60, start)).toBe("engaged");
+    expect(observeSandboxFleetWarmBoxes(sustained, 30, start + 60_000)).toBeNull();
+    // Back over the release level: the window starts again.
+    expect(observeSandboxFleetWarmBoxes(sustained, 42, start + 10 * 60_000)).toBeNull();
+    expect(observeSandboxFleetWarmBoxes(sustained, 30, start + 11 * 60_000)).toBeNull();
+    expect(observeSandboxFleetWarmBoxes(sustained, 30, start + 25 * 60_000)).toBeNull();
+    expect(observeSandboxFleetWarmBoxes(sustained, 30, start + 26 * 60_000)).toBe("released");
   });
 
   test("removing the engage level releases pressure", () => {

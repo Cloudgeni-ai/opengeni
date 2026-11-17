@@ -237,11 +237,42 @@ describe("unpaid fleet limits (real PostgreSQL)", () => {
     }
   }, 120_000);
 
+  test("a young unpaid organization gets its first day's box time, then no new box", async () => {
+    const fleet = { youngOrganizationAgeMs: DAY_MS, youngOrganizationBoxSeconds: 6 * 3600 };
+    const used = async (org: Org, seconds: number, ago: string) => {
+      await admin`insert into usage_events (account_id, workspace_id, event_type, quantity, unit,
+          idempotency_key, occurred_at)
+        values (${org.accountId}, ${org.workspaceId}, 'sandbox.warm_seconds', ${seconds}, 'seconds',
+          ${crypto.randomUUID()}, now() - ${ago}::interval)`;
+    };
+    const young = await organization({ plan: "free", ageMs: 2 * 3600_000 });
+    await used(young, 6 * 3600 - 1, "1 hour");
+    expect((await acquire(young, "direct", fleet)).role).toBe("spawner");
+    await used(young, 1, "1 minute");
+    for (const kind of ["direct", "viewer", "turn"] as const) {
+      const spent = await refusal(acquire(young, kind, fleet));
+      expect([spent.reason, spent.code, spent.limit]).toEqual([
+        "young_box_time",
+        "sandbox_compute_unavailable",
+        6 * 3600,
+      ]);
+      expect(spent.message).toContain("6 sandbox hours");
+    }
+    // The same use by an older or a paid young organization is within its plan.
+    const older = await organization({ plan: "free", ageMs: 2 * DAY_MS });
+    await used(older, 6 * 3600, "1 hour");
+    expect((await acquire(older, "direct", fleet)).role).toBe("spawner");
+    const paidYoung = await organization({ plan: "pro", ageMs: 2 * 3600_000 });
+    await used(paidYoung, 6 * 3600, "1 hour");
+    expect((await acquire(paidYoung, "direct", fleet)).role).toBe("spawner");
+  }, 120_000);
+
   test("fleet pressure stops new unpaid boxes and releases with hysteresis", async () => {
     const current = await warmBoxes();
     const fleet = {
       pressureEngageWarmBoxes: current + 1,
       pressureReleaseWarmBoxes: current,
+      pressureReleaseAfterMs: 0,
       pressureUnpaidRunningBoxes: 0,
     };
     const unpaid = await organization({ plan: "free" });

@@ -12,9 +12,11 @@ describe("OPENGENI_SANDBOX_FLEET_LIMITS_JSON", () => {
       unpaidBoxSecondsPerDay: 1_080_000,
       youngOrganizationAgeMs: 86_400_000,
       youngOrganizationRunningBoxes: 1,
+      youngOrganizationBoxSeconds: 21_600,
       pressureEngageWarmBoxes: 50,
-      pressureReleaseWarmBoxes: 35,
-      pressureUnpaidRunningBoxes: 0,
+      pressureReleaseWarmBoxes: 40,
+      pressureReleaseAfterMs: 900_000,
+      pressureUnpaidRunningBoxes: 15,
     });
   });
 

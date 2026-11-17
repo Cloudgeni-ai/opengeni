@@ -12631,21 +12631,27 @@ export function sandboxPlanLimits(settings: Settings): SandboxPlanLimits {
  *   (`sandbox_capacity_unpaid_busy`); joining a running box is not.
  * - `unpaidBoxSecondsPerDay`: metered box seconds of all unpaid organizations
  *   since 00:00 UTC. Past it no unpaid box starts until the next UTC day.
- * - `youngOrganizationAgeMs` / `youngOrganizationRunningBoxes`: an unpaid
- *   organization younger than the age runs at most that many boxes.
+ * - `youngOrganizationAgeMs` / `youngOrganizationRunningBoxes` /
+ *   `youngOrganizationBoxSeconds`: an unpaid organization younger than the
+ *   age runs at most that many boxes, and once it has used that many metered
+ *   box seconds since it was created it gets no box until it is older (like
+ *   a spent daily budget).
  * - `pressureEngageWarmBoxes` / `pressureReleaseWarmBoxes` /
- *   `pressureUnpaidRunningBoxes`: when more than `pressureEngageWarmBoxes`
- *   boxes of every plan are warm, the unpaid cap drops to
- *   `pressureUnpaidRunningBoxes` (0: no new unpaid box) until the warm count
- *   falls to `pressureReleaseWarmBoxes` or below.
+ *   `pressureReleaseAfterMs` / `pressureUnpaidRunningBoxes`: when more than
+ *   `pressureEngageWarmBoxes` boxes of every plan are warm, the unpaid cap
+ *   drops to `pressureUnpaidRunningBoxes` (0: no new unpaid box) until the
+ *   warm count has stayed below `pressureReleaseWarmBoxes` for
+ *   `pressureReleaseAfterMs`.
  */
 export type SandboxFleetLimits = {
   unpaidRunningBoxes?: number;
   unpaidBoxSecondsPerDay?: number;
   youngOrganizationAgeMs?: number;
   youngOrganizationRunningBoxes?: number;
+  youngOrganizationBoxSeconds?: number;
   pressureEngageWarmBoxes?: number;
   pressureReleaseWarmBoxes?: number;
+  pressureReleaseAfterMs?: number;
   pressureUnpaidRunningBoxes?: number;
 };
 
@@ -12654,21 +12660,27 @@ const SANDBOX_FLEET_LIMIT_FIELDS = [
   "unpaidBoxSecondsPerDay",
   "youngOrganizationAgeMs",
   "youngOrganizationRunningBoxes",
+  "youngOrganizationBoxSeconds",
   "pressureEngageWarmBoxes",
   "pressureReleaseWarmBoxes",
+  "pressureReleaseAfterMs",
   "pressureUnpaidRunningBoxes",
 ] as const satisfies readonly (keyof SandboxFleetLimits)[];
 
-/** Safe starting points; operators size production from their own traffic.
- * Pressure engages at the same 50 warm boxes as the warm-fleet page. */
+/** Sized from hosted production's unpaid traffic: legitimate Free use peaked
+ * at 15 concurrent boxes and 112 box-hours a day, and new organizations'
+ * first day at a p90 of under two box-hours. Pressure engages at the same 50
+ * warm boxes as the warm-fleet page. */
 export const DEFAULT_SANDBOX_FLEET_LIMITS: SandboxFleetLimits = {
   unpaidRunningBoxes: 40,
   unpaidBoxSecondsPerDay: 300 * 60 * 60,
   youngOrganizationAgeMs: 24 * 60 * 60 * 1000,
   youngOrganizationRunningBoxes: 1,
+  youngOrganizationBoxSeconds: 6 * 60 * 60,
   pressureEngageWarmBoxes: 50,
-  pressureReleaseWarmBoxes: 35,
-  pressureUnpaidRunningBoxes: 0,
+  pressureReleaseWarmBoxes: 40,
+  pressureReleaseAfterMs: 15 * 60 * 1000,
+  pressureUnpaidRunningBoxes: 15,
 };
 
 /**
