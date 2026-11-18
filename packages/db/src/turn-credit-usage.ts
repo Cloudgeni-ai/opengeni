@@ -11,7 +11,7 @@ const TERMINAL_TURN_EVENT_TYPES = [
 ] as const;
 
 /**
- * A terminal turn event's payload without the `usage` migration 1495 attaches
+ * A terminal turn event's payload without the `usage` migration 1497 attaches
  * when the event is written. `usage` is accounting metadata, not content:
  * code that proves a copy of an event's content (for example a child's final
  * answer quoted to its parent) compares this projection.
@@ -32,7 +32,7 @@ export function terminalTurnContentPayload(type: string, payload: unknown): unkn
 
 /**
  * Each turn's `usage` from its latest terminal event (written there by
- * migration 1495's trigger), in one read of the session_events
+ * migration 1497's trigger), in one read of the session_events
  * (workspace_id, turn_id, type) index. A turn without one (still running, or
  * from before the field existed) maps to null. Runs inside the caller's
  * workspace scope.

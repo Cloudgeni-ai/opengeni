@@ -32,7 +32,7 @@
 -- their own turn events.
 --
 -- Reads: the session_events (workspace_id, turn_id, type) index, the
--- usage_events (workspace_id, turn_id) index of 1494, and unique idempotency
+-- usage_events (workspace_id, turn_id) index of 1496, and unique idempotency
 -- probes. Turn webhooks carry the same `usage` in `data`.
 --
 -- Rolling: the previous release writes the same events and gets the field

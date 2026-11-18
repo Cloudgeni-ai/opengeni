@@ -108,7 +108,7 @@ async function persistedTurnEvent(
 }
 
 const largeOutput = "output-😀".repeat(40_000);
-// What migration 1495 attaches to a terminal event of a turn that charged nothing.
+// What migration 1497 attaches to a terminal event of a turn that charged nothing.
 const ZERO_TURN_USAGE = {
   creditsMicros: 0,
   tokens: { input: 0, output: 0 },

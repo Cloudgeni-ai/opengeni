@@ -136,7 +136,7 @@ async function setSessionStatus(
   });
 }
 
-// What a terminal event of a turn that charged nothing carries (migration 1495).
+// What a terminal event of a turn that charged nothing carries (migration 1497).
 const ZERO_TURN_USAGE = {
   creditsMicros: 0,
   tokens: { input: 0, output: 0 },
