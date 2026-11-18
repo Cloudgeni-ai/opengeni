@@ -31,6 +31,7 @@ import { analyticsAction } from "../../ui/analytics-actions";
 import { checkoutPageReturnUrl, checkoutTabReturnUrl } from "../lib/credit-checkout";
 import { subscriptionAction } from "../lib/subscription-plans";
 import type { PaymentRefusalCode } from "../lib/model-access";
+import { AddCardButton } from "./add-card-button";
 
 const DEFAULT_TOPUP = "25.00";
 
@@ -77,6 +78,11 @@ export function CreditRequiredPromptView({
   const [stripeEnabled, setStripeEnabled] = useState(false);
   const [upgradeAccountId, setUpgradeAccountId] = useState<string | null>(null);
   const canUpgrade = open && canBuyCredits && accountId !== null && upgradeAccountId === accountId;
+  // A Free organization without a verified card gets its Free credit once a
+  // card is added (card verification gate).
+  const [cardAccountId, setCardAccountId] = useState<string | null>(null);
+  const offerCard =
+    open && canBuyCredits && purpose === "required" && !refusalCode && cardAccountId === accountId;
 
   useEffect(() => {
     setUpgradeAccountId(null);
@@ -86,11 +92,18 @@ export function CreditRequiredPromptView({
     }
     let active = true;
     setStripeEnabled(false);
+    setCardAccountId(null);
     void client
       .getBilling({ accountId })
       .then(async (billing) => {
         if (active) setStripeEnabled(billing.mode === "stripe");
         if (!active || !billing.balance.plan || billing.mode !== "stripe") return;
+        void client
+          .getBillingCardVerification?.({ accountId })
+          .then((card) => {
+            if (active && card.required && !card.verified) setCardAccountId(accountId);
+          })
+          .catch(() => undefined);
         const catalog = await client.getBillingSubscriptionPlans({ accountId }).catch(() => null);
         if (
           active &&
@@ -214,6 +227,12 @@ export function CreditRequiredPromptView({
                 : "Add credits to use this model, or choose another model."}
           </DialogDescription>
         </DialogHeader>
+        {offerCard ? (
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border p-3 text-sm">
+            <span>Add a card so this organization can get Free credit. You won't be charged.</span>
+            <AddCardButton client={client} accountId={accountId} variant="outline" />
+          </div>
+        ) : null}
         {canBuyCredits && stripeEnabled ? (
           <div className="grid gap-4">
             <CreditAmountPicker value={topupAmount} onChange={setTopupAmount} disabled={busy} />

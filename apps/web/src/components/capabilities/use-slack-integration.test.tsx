@@ -370,6 +370,51 @@ test("an unverified installation cannot silently become a new setup invitation",
   }
 });
 
+test("a Slack app that can't post as agents says so, with one Update that reinstalls it", async () => {
+  const { bot, binding } = installedBot();
+  const withoutIdentity = {
+    ...bot,
+    grantedScopes: bot.grantedScopes.filter((scope) => scope !== "chat:write.customize"),
+  };
+  const rendered = await renderAdapter({
+    permissions: ["workspace:admin"],
+    connections: [withoutIdentity],
+    bindings: [binding],
+    contextOverride: { ...appContext(["workspace:admin"]), client: {} },
+  });
+  try {
+    expect(rendered.model.footer.kind).toBe("connected");
+    expect(rendered.model.notice?.title).toBe("Replies show as Opengeni");
+    expect(rendered.model.notice?.description).toBe(
+      "Agents' names and icons show once Slack is updated.",
+    );
+    expect(rendered.model.notice?.action?.label).toBe("Update");
+    await act(async () => rendered.model.notice?.action?.onClick());
+    const fragment = rendered.dialogs() as React.ReactElement<{ children: React.ReactNode[] }>;
+    const setup = fragment.props.children.find(
+      (child) => isValidElement<{ request?: unknown }>(child) && child.props.request !== undefined,
+    ) as React.ReactElement<{
+      request: { providerId: string; reconnectAccountId: string };
+    }>;
+    expect(setup.props.request.providerId).toBe("slack-bot");
+    expect(setup.props.request.reconnectAccountId).toBe(bot.id);
+  } finally {
+    await rendered.unmount();
+  }
+
+  // With the grant, nothing to say.
+  const granted = await renderAdapter({
+    permissions: ["workspace:admin"],
+    connections: [bot],
+    bindings: [binding],
+  });
+  try {
+    expect(granted.model.notice).toBeUndefined();
+  } finally {
+    await granted.unmount();
+  }
+});
+
 test("a sibling installation cannot hide the local bot's reconnect action", async () => {
   const { bot, binding } = installedBot();
   const siblingId = "55555555-5555-4555-8555-555555555555";

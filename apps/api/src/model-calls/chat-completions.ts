@@ -286,7 +286,16 @@ export function parseChatCompletionRequest(body: unknown): ParsedChatCompletionR
   };
 }
 
-export function chatCompletionUsage(usage: SingleModelCallResult["usage"]) {
+/**
+ * OpenAI's usage object, plus OpenRouter's `cost`: the Opengeni credits the
+ * call charged, in USD (0 for subscription and customer-key calls apart from
+ * the bring-your-own-key platform fee). `cost` is left out when the amount is
+ * unknown (settlement failed), never reported as a false 0.
+ */
+export function chatCompletionUsage(
+  usage: SingleModelCallResult["usage"],
+  creditsChargedMicros?: number | null,
+) {
   if (!usage) return null;
   const normalized = normalizeModelCallUsage(usage.usage);
   const prompt = normalized.telemetry.inputTokens ?? 0;
@@ -297,6 +306,9 @@ export function chatCompletionUsage(usage: SingleModelCallResult["usage"]) {
     total_tokens: normalized.totalTokens ?? prompt + completion,
     prompt_tokens_details: { cached_tokens: normalized.telemetry.cachedTokens ?? 0 },
     completion_tokens_details: { reasoning_tokens: normalized.telemetry.reasoningTokens ?? 0 },
+    ...(typeof creditsChargedMicros === "number" && Number.isFinite(creditsChargedMicros)
+      ? { cost: creditsChargedMicros / 1_000_000 }
+      : {}),
   };
 }
 
@@ -309,6 +321,7 @@ export function chatCompletionResponse(input: {
   created: number;
   model: string;
   result: SingleModelCallResult;
+  creditsChargedMicros?: number | null | undefined;
 }) {
   return {
     id: chatCompletionId(input.requestId),
@@ -323,7 +336,7 @@ export function chatCompletionResponse(input: {
         finish_reason: input.result.finishReason,
       },
     ],
-    usage: chatCompletionUsage(input.result.usage),
+    usage: chatCompletionUsage(input.result.usage, input.creditsChargedMicros),
   };
 }
 

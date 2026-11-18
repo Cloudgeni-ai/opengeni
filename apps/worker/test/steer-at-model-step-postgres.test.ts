@@ -7,6 +7,7 @@ import {
   type StreamEvent,
 } from "@openai/agents";
 import * as opengeniDb from "@opengeni/db";
+import * as opengeniEvents from "@opengeni/events";
 import {
   acquireRestrictedRuntimeTestDatabase,
   type RestrictedRuntimeTestDatabase,
@@ -31,6 +32,7 @@ import {
   preemptedResponseDone,
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
+import { recordModelTransportStarted } from "../../../packages/runtime/src/model-preparation-diagnostics";
 import { createActivityTestHarness } from "../src/activities";
 
 // A Steer to a busy chat is read at the running turn's next model-step
@@ -701,6 +703,85 @@ test("several quick Steers while the model generates are read in order by one re
   );
   expect(superseded[0]!.payload).toMatchObject({ cutOffText: "Let me" });
   expect(await interruptionCount(session.id)).toBe(0);
+});
+
+/** A provider transport: the request's start and first byte are audited like a real one's. */
+class TransportStreamingModel extends StreamingModel {
+  override async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
+    await recordModelTransportStarted();
+    yield* super.getStreamedResponse(request);
+  }
+}
+
+test("a Steer that cuts a request short before the worker has read its start still hands over", async () => {
+  const ctx = await fixture();
+  const session = await startSession(ctx);
+  const bus = new MemoryEventBus();
+  const model = new TransportStreamingModel((call) =>
+    call === 0
+      ? {
+          // Cut short before any output finished: the response has no items.
+          completed: [],
+          cutOff: { itemId: "msg-cut", text: "Let me" },
+          onStreaming: async () => {
+            const before = (await events(ctx, session.id)).at(-1)?.sequence ?? 0;
+            await send(ctx, session.id, "What is the status?", "steer");
+            await publishSince(ctx, session.id, bus, before);
+          },
+        }
+      : { completed: [assistantMessage("Status: just started.", "msg-answer")] },
+  );
+  // The worker is still recording the first request's first byte (an awaited
+  // write on the turn's first request) when the cut-off response arrives, so
+  // the SDK handles that response and asks for its next model call before the
+  // worker reads the response at all.
+  const append = opengeniEvents.appendAndPublishTurnEventsFenced;
+  const slowFirstByte = spyOn(
+    opengeniEvents,
+    "appendAndPublishTurnEventsFenced",
+  ).mockImplementation(async (...args: Parameters<typeof append>) => {
+    const firstByte = args[7].some(
+      (event) =>
+        event.type === "agent.model.request" &&
+        (event.payload as { phase?: string }).phase === "first_byte",
+    );
+    if (firstByte) {
+      while (model.preemptedAt.length === 0) await Bun.sleep(5);
+      await Bun.sleep(200);
+    }
+    return await append(...args);
+  });
+  let result: Awaited<ReturnType<typeof runTurn>>;
+  try {
+    result = await Promise.race([
+      runTurn(
+        ctx,
+        session.id,
+        scriptedRuntime(model, async () => {}),
+        bus,
+      ),
+      Bun.sleep(20_000).then(() => {
+        throw new Error("the turn wedged after the Steer cut its request short");
+      }),
+    ]);
+  } finally {
+    slowFirstByte.mockRestore();
+  }
+  expect(result.status).toBe("idle");
+  expect(model.preemptedAt).toEqual([0]);
+  expect(model.calls).toBe(1);
+  const timeline = await events(ctx, session.id);
+  expect(timeline.some((event) => event.type === "turn.failed")).toBe(false);
+  const superseded = timeline.filter((event) => event.type === "turn.superseded");
+  expect(superseded).toHaveLength(1);
+  expect(superseded[0]!.payload).toMatchObject({ reason: "steer", atModelStep: true });
+  // The cut request's audit and usage were recorded with the turn.
+  const phases = timeline
+    .filter((event) => event.type === "agent.model.request")
+    .map((event) => (event.payload as { phase?: string }).phase);
+  expect(phases).toEqual(["started", "first_byte", "completed"]);
+  expect(timeline.some((event) => event.type === "agent.model.usage")).toBe(true);
+  expect((await turns(session.id)).map((turn) => turn.status)).toEqual(["superseded", "queued"]);
 });
 
 test("a Steer the watch notices while the step's own read is stale still hands over at that step", async () => {

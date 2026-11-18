@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act, type ReactNode } from "react";
+import { act, createContext, useContext, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { BillingPlanBalance } from "@opengeni/sdk";
 
@@ -47,10 +47,12 @@ mock.module("../lib/navigation", () => ({
   ),
 }));
 
+// Complete: bun shares module mocks across the test files of one process.
+const MockAppContext = createContext<unknown>(null);
 mock.module("../app-context", () => ({
-  useAppContext: () => ({
-    client,
-  }),
+  AppContext: MockAppContext,
+  useAppContext: () => useContext(MockAppContext) ?? { client },
+  useOptionalAppContext: () => useContext(MockAppContext),
 }));
 
 mock.module("../../ui/dialog", () => ({
@@ -93,6 +95,60 @@ afterEach(async () => {
 });
 
 describe("credit required prompt", () => {
+  test("a Free organization without a verified card is offered Add a card for its Free credit", async () => {
+    const plan: BillingPlanBalance = {
+      key: "free",
+      label: "Free",
+      status: "active",
+      creditGrantedMicros: 0,
+      creditRemainingMicros: 0,
+      periodResetAt: null,
+      seatsUsed: 1,
+      seatLimit: 5,
+      cancelAtPeriodEnd: false,
+    };
+    getBilling.mockResolvedValue({ mode: "stripe", balance: { balanceMicros: 0, plan } });
+    const card = { required: true, verified: false, canVerify: true };
+    const getBillingCardVerification = mock(async () => ({
+      accountId: "account-a",
+      card: null,
+      ...card,
+    }));
+    const custom = {
+      ...client,
+      getBillingSubscriptionPlans: async () => ({ plan, plans: [] }),
+      getBillingCardVerification,
+    } as unknown as Parameters<typeof CreditRequiredPromptView>[0]["client"];
+    const container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    const render = async () =>
+      act(async () =>
+        root!.render(
+          <CreditRequiredPromptView
+            client={custom}
+            open
+            workspaceId="workspace-a"
+            accountId="account-a"
+            canBuyCredits
+            onOpenChange={() => {}}
+          />,
+        ),
+      );
+    await render();
+    expect(getBillingCardVerification).toHaveBeenCalledWith({ accountId: "account-a" });
+    expect(container.textContent).toContain("Add a card so this organization can get Free credit.");
+    expect([...container.querySelectorAll("button")].map((b) => b.textContent)).toContain(
+      "Add a card",
+    );
+    // Verified (or not gated): no card offer.
+    await act(async () => root!.unmount());
+    card.verified = true;
+    root = createRoot(container);
+    await render();
+    expect(container.textContent).not.toContain("Add a card");
+  });
+
   test("an enrolled Free account offers plans while a disabled catalog preserves the legacy action", async () => {
     const plan: BillingPlanBalance = {
       key: "free",

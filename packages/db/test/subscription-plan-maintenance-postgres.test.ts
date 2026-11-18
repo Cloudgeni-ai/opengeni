@@ -217,7 +217,8 @@ test("bounded production-owner inventory discovers unenrolled orgs and eligible 
   expect(owner).toEqual({ rolsuper: false, rolbypassrls: false });
   const policies =
     await shared.admin`select cmd, qual from pg_policies where schemaname = ${shared.schema} and policyname = 'subscription_plan_maintenance_inventory_read' order by tablename`;
-  expect(policies).toHaveLength(4);
+  // 1494 adds billing_card_verifications (the card verification gate).
+  expect(policies).toHaveLength(5);
   expect(
     policies.every(
       (p) =>

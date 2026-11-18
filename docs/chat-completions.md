@@ -48,6 +48,7 @@ use the workspace default for new work. A model the caller cannot use returns
 - `response_format: { type: "json_schema", json_schema: { name, schema, strict? } }`
   for models that declare structured output. `text` is accepted as a no-op.
 - `stream: true`, with `stream_options.include_usage` for a final usage chunk.
+  Its `usage`, like a non-streamed response's, includes `cost` (see Billing).
 
 Some backends do not take every control. The Codex subscription backend
 ignores `temperature`, `top_p` and the output-token limits (its request
@@ -103,6 +104,14 @@ An unavailable subscription returns `503 subscription_unavailable` or
   ID (`model_call:{requestId}`), with the same pricing and attribution as turn
   model usage. Subscription and customer-credential calls cost no Opengeni
   credits but still record usage.
+- `usage.cost` is what the call charged in Opengeni credits, in US dollars
+  (a number, as OpenRouter returns it): `0` for subscription and
+  customer-key calls apart from the bring-your-own-key platform fee. It is on
+  non-streamed responses and on the final usage chunk of a stream with
+  `stream_options.include_usage`. Settlement completes before that response
+  or chunk is sent; if it fails, `cost` is left out rather than reported as
+  `0`. Agent turns report their cost as `usage.creditsMicros` on the turn's
+  terminal event; see [what a turn cost](workspace-integrations.md#what-a-turn-cost).
 - There are no endpoint-specific rate limits; provider limits surface as
   `429 provider_rate_limited`.
 

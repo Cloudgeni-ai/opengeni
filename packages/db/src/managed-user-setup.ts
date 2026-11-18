@@ -95,6 +95,28 @@ export async function completeSelfServiceOrganizationSetup(
 export type SignupNetworkSource = { addressHash: string; prefixHash: string };
 
 /**
+ * Whether the owner's mail address is a disposable inbox (its domain or MX
+ * host is a temporary-inbox service, migration 1493), as the API found at
+ * setup. Only this flag is recorded, never the domain or the MX host.
+ */
+export type SignupMailSignal = "disposable" | "clear";
+
+/**
+ * Hands the setup trigger the owner's mail signal for this transaction
+ * (migration 1493). Transaction-local and set by the trusted API; null
+ * records nothing (unknown).
+ */
+export async function setSignupMailSignalForSetup(
+  txDb: Database,
+  signal: SignupMailSignal | null | undefined,
+): Promise<void> {
+  await rawRows(
+    txDb,
+    sql`select pg_catalog.set_config('opengeni.signup_owner_mail_signal', ${signal ?? ""}, true)`,
+  );
+}
+
+/**
  * Hands the setup receipt trigger the signup network (migration 1354) for
  * this transaction. Every route that can create a self-serve organization
  * must call it before the receipt is written, so the network rate limit and
@@ -161,6 +183,7 @@ export async function completeSelfServiceOrganizationSetupWithSignupNetwork(
     trialCreditsEnabled?: boolean;
     trialCreditModelIds?: string[] | undefined;
     signupNetwork?: SignupNetworkSource | null;
+    signupMailSignal?: SignupMailSignal | null;
   },
 ): Promise<{
   setup: CompleteSelfServiceOrganizationSetupResponseType;
@@ -188,6 +211,7 @@ export async function completeSelfServiceOrganizationSetupWithSignupNetwork(
     )`,
     );
     await setSignupNetworkSourceForSetup(txDb, input.signupNetwork);
+    await setSignupMailSignalForSetup(txDb, input.signupMailSignal);
     const [row] = await rawRows<{ result: unknown }>(
       txDb,
       sql`select complete_self_service_organization_setup(

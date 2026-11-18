@@ -16,6 +16,7 @@ import { tool } from "@openai/agents";
 import { z } from "zod";
 import { createProductionAgentRuntime, prepareAgentTools } from "@opengeni/runtime";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { turnContentEvents } from "@opengeni/testing/assertions";
 import { functionCall, ScriptedModel } from "@opengeni/testing/scripted-model";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
@@ -208,7 +209,7 @@ describe("goal_complete reply ends the turn (production worker, PostgreSQL)", ()
       turn: await getSessionTurn(client.db, workspaceId, result.turnId),
       goal: await getSessionGoal(client.db, workspaceId, session.id),
       history: await getSessionHistoryItems(client.db, workspaceId, session.id),
-      events: await listSessionEvents(client.db, workspaceId, session.id),
+      events: turnContentEvents(await listSessionEvents(client.db, workspaceId, session.id)),
     };
   }
 

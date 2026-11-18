@@ -2511,6 +2511,18 @@ const SettingsSchema = z.object({
   signupChallengeSiteKey: z.string().optional(),
   signupChallengeSecretKey: z.string().optional(),
   signupChallengeHostnames: z.string().default(""),
+  /**
+   * More disposable-inbox mail domains or MX hosts (comma separated) for
+   * signup checks, added to the built-in list. A domain matches itself and
+   * its subdomains.
+   */
+  signupDisposableMailDomains: z.string().default(""),
+  /**
+   * Bound for the owner's mail domain MX lookup at organization setup, in
+   * milliseconds; 0 turns the lookup off. A slow or failed lookup checks the
+   * domain alone.
+   */
+  signupMailMxLookupTimeoutMs: z.coerce.number().int().nonnegative().max(10_000).default(1_500),
   betterAuthSecret: z.string().optional(),
   betterAuthAllowedHosts: z.string().default(""),
   betterAuthCookieDomain: z.string().optional(),
@@ -7005,6 +7017,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     signupChallengeSiteKey: optional("OPENGENI_SIGNUP_CHALLENGE_SITE_KEY"),
     signupChallengeSecretKey: optional("OPENGENI_SIGNUP_CHALLENGE_SECRET_KEY"),
     signupChallengeHostnames: optional("OPENGENI_SIGNUP_CHALLENGE_HOSTNAMES"),
+    signupDisposableMailDomains: optional("OPENGENI_SIGNUP_DISPOSABLE_MAIL_DOMAINS"),
+    signupMailMxLookupTimeoutMs: optional("OPENGENI_SIGNUP_MAIL_MX_LOOKUP_TIMEOUT_MS"),
     betterAuthSecret: optional("OPENGENI_BETTER_AUTH_SECRET"),
     betterAuthAllowedHosts: optional("OPENGENI_BETTER_AUTH_ALLOWED_HOSTS"),
     betterAuthCookieDomain: optional("OPENGENI_BETTER_AUTH_COOKIE_DOMAIN"),

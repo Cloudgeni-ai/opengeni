@@ -97,7 +97,7 @@ import { formatRelativeTime } from "../../../ui/relative-time";
 import { Keycaps } from "./keycaps";
 import { ChatTitleInParent } from "./chat-title";
 import { WorkspaceTag } from "./workspace-tag";
-import { SessionAvatar } from "../session/session-avatar";
+import { ChatAvatar } from "../session/chat-avatar";
 import { ChatStatusMarks, useChatStatusRefresh } from "./chat-status";
 import { currentChatStatus, type ChatStatus } from "../../lib/actions/chat-status";
 
@@ -1488,13 +1488,19 @@ function CommandMenuDialog(props: {
                             selected ? "bg-hover text-fg" : null,
                           )}
                         >
-                          {item.chat?.avatar ? (
-                            <SessionAvatar
-                              avatar={item.chat.avatar}
+                          {item.chat ? (
+                            <ChatAvatar
+                              chat={item.chat}
                               name={item.chat.title}
-                              workspaceId={item.chat.workspaceId}
-                              seed={item.chat.id}
-                              size="xs"
+                              fallback={
+                                <Icon
+                                  aria-hidden="true"
+                                  className={cn(
+                                    "size-4 shrink-0",
+                                    selected ? "text-fg" : "text-fg-muted",
+                                  )}
+                                />
+                              }
                             />
                           ) : item.tile ? (
                             <span

@@ -6,6 +6,7 @@ import {
   catalogConnectionAccountSelection,
   oauthConnectionOwnership,
   oauthConnectionRef,
+  oauthResumeAction,
 } from "../lib/capabilities";
 import {
   attachSessionCapability,
@@ -41,14 +42,24 @@ export async function finishMcpCapabilityOAuthReturn(input: {
   if (!item || item.kind !== "mcp" || !connectionId || !providerDomain || !ownership) {
     throw new Error("The authorized capability could not be resolved from the live catalog.");
   }
-  await client.enableCapability(workspaceId, item.id, {
-    connectionRef: oauthConnectionRef(
-      ownership,
-      connectionId,
-      providerDomain,
-      catalogConnectionAccountSelection(item),
-    ),
-  });
+  // The sign-in callback usually turned the capability on already
+  // (`capability=enabled|on`); enable here only when it is not on with this
+  // account yet.
+  const current = params.get("capability")
+    ? ((await client.listCapabilities(workspaceId)).items.find(
+        (candidate) => candidate.id === item.id,
+      ) ?? item)
+    : item;
+  if (oauthResumeAction(current, connectionId) !== "reconnect") {
+    await client.enableCapability(workspaceId, item.id, {
+      connectionRef: oauthConnectionRef(
+        ownership,
+        connectionId,
+        providerDomain,
+        catalogConnectionAccountSelection(current),
+      ),
+    });
+  }
   await input.refreshCatalog(workspaceId);
   const connected = (await client.listCapabilities(workspaceId)).items.find(
     (candidate) => candidate.id === item.id,

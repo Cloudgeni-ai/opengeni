@@ -595,6 +595,10 @@ import type {
   UpdateBillingAutoTopUpRequest,
   CreateBillingAutoTopUpSetupSessionRequest,
   CreateBillingAutoTopUpSetupSessionResponse,
+  BillingCardVerificationStatus,
+  CreateBillingCardVerificationSessionRequest,
+  CreateBillingCardVerificationSessionResponse,
+  ConfirmBillingCardVerificationRequest,
   CreateSubscriptionCheckoutRequest,
   CreateSubscriptionCheckoutResponse,
   ChangeBillingSubscriptionRequest,
@@ -12989,6 +12993,27 @@ export class OpenGeniClient {
     request: CreateBillingAutoTopUpSetupSessionRequest,
   ): Promise<CreateBillingAutoTopUpSetupSessionResponse> {
     return await this.requestJson("POST", "/v1/billing/auto-top-up/setup", request);
+  }
+
+  /** Whether the organization needs a verified card for sandboxes and Free credit. */
+  async getBillingCardVerification(
+    options: { accountId?: string } = {},
+  ): Promise<BillingCardVerificationStatus> {
+    return await this.requestJson("GET", "/v1/billing/card-verification", undefined, options);
+  }
+
+  /** Owner-only. A Stripe Checkout session that saves and verifies a card; no charge. */
+  async createBillingCardVerificationSession(
+    request: CreateBillingCardVerificationSessionRequest,
+  ): Promise<CreateBillingCardVerificationSessionResponse> {
+    return await this.requestJson("POST", "/v1/billing/card-verification/setup", request);
+  }
+
+  /** Records the card of a completed card verification checkout session. */
+  async confirmBillingCardVerification(
+    request: ConfirmBillingCardVerificationRequest,
+  ): Promise<BillingCardVerificationStatus> {
+    return await this.requestJson("POST", "/v1/billing/card-verification/confirm", request);
   }
 
   async createSubscriptionCheckout(

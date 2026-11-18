@@ -1,5 +1,46 @@
 # @opengeni/db
 
+## 6.29.2
+
+### Patch Changes
+
+- 2c58048: Per-tool approvals work for connectors served through Nango, the same as for native ones.
+
+  - A connector's approvals page resolves the connector exactly as a session does, including the integration backend switch. A Gmail, Calendar or Drive account connected through Nango is the account its approvals are managed for, with the same tools and defaults (Drive: the tools its bridge serves), instead of the page asking to connect an account. Choices are stored for that account and apply to its calls.
+  - Choices belong to the provider account, not the backend. When the same person connects the same account under the other backend, its connection starts with the choices already made, and every later change is mirrored to both. Switching a connector between native and Nango no longer resets "Ask first" or "Always allow".
+  - Drive through Nango lists the tools its REST bridge serves.
+  - A Personal workspace carries a connector its owner connected through Nango in another workspace, as it does for a native account.
+  - Site tools and the workspace tool gateway read a personal account's choices from the workspace it was connected from, as an agent turn does, so a choice applies wherever the account is used.
+  - Gmail approvals through Nango get the same review titles as native Gmail.
+  - @opengeni/codemode@6.29.2
+  - @opengeni/codex@6.29.2
+  - @opengeni/config@6.29.2
+  - @opengeni/contracts@6.29.2
+  - @opengeni/network@6.29.2
+  - @opengeni/observability@6.29.2
+  - @opengeni/subscriptions@6.29.2
+  - @opengeni/xai-subscription@6.29.2
+
+## 6.29.1
+
+### Patch Changes
+
+- a641523: Fleet pressure counts only boxes on managed providers. Self-hosted (Connected Machine) boxes cost the deployment nothing and are exempt from the unpaid fleet limits, so they no longer keep pressure engaged. Migration 1492 adds the `opengeni_private.sandbox_fleet_warm_boxes_v1()` count withheld; until a later release grants it, pressure keeps reading every lease. Without subscription plans the reaper no longer reads or reports pressure (`OpenGeniSandboxFleetPressureEngaged`, `opengeni_sandbox_fleet_warm_boxes`), since `none` is not unpaid there; admission still applies pressure to any organization it finds unpaid.
+- 4884618: New self-serve organizations (first and additional) start held when the owner's mail domain, or its MX host, is a temporary-inbox service (rule `disposable-mail-v1`; the API checks the MX at setup with a bounded, cached lookup that fails open, and records only the flag), and when 3 or more owners of one company domain set up within 24 hours and none of their organizations ever used the product (`email-slow-domain-v1`). Both legs enforce by default and have their own mode in the signup settings (migration 1493). New settings: `OPENGENI_SIGNUP_DISPOSABLE_MAIL_DOMAINS` (more providers) and `OPENGENI_SIGNUP_MAIL_MX_LOOKUP_TIMEOUT_MS` (1500; 0 turns the lookup off).
+- Updated dependencies [5b05b73]
+- Updated dependencies [b23ec3f]
+- Updated dependencies [a641523]
+- Updated dependencies [4884618]
+- Updated dependencies [825e714]
+  - @opengeni/contracts@6.29.1
+  - @opengeni/config@6.29.1
+  - @opengeni/codemode@6.29.1
+  - @opengeni/codex@6.29.1
+  - @opengeni/observability@6.29.1
+  - @opengeni/network@6.29.1
+  - @opengeni/subscriptions@6.29.1
+  - @opengeni/xai-subscription@6.29.1
+
 ## 6.29.0
 
 ### Patch Changes

@@ -55,6 +55,12 @@ const { values } = parseArgs({
     "denied-domain-mode": { type: "string" },
     "denied-domain-threshold": { type: "string" },
     "denied-domain-lookback-days": { type: "string" },
+    // Disposable mail and slow domain legs (migration 1493).
+    "disposable-mail-mode": { type: "string" },
+    "slow-domain-mode": { type: "string" },
+    "card-verification-mode": { type: "string" },
+    "slow-domain-threshold": { type: "string" },
+    "slow-domain-window-hours": { type: "string" },
     rule: { type: "string" },
     "network-holds": { type: "boolean" },
     "network-capture-flagged": { type: "boolean" },
@@ -136,6 +142,8 @@ function networkVelocityChanges(): SignupNetworkVelocityChanges {
     ["email-domain-mode", "emailDomainMode"],
     ["burst-mode", "burstMode"],
     ["denied-domain-mode", "deniedDomainMode"],
+    ["disposable-mail-mode", "disposableMailMode"],
+    ["slow-domain-mode", "slowDomainMode"],
   ] as const;
   for (const [flag, key] of legModes) {
     const value = values[flag];
@@ -143,6 +151,12 @@ function networkVelocityChanges(): SignupNetworkVelocityChanges {
     if (value !== "off" && value !== "observe" && value !== "enforce")
       throw new Error(`--${flag} must be off, observe or enforce`);
     changes[key] = value;
+  }
+  if (values["card-verification-mode"] !== undefined) {
+    const mode = values["card-verification-mode"];
+    if (mode !== "off" && mode !== "enforce")
+      throw new Error("--card-verification-mode must be off or enforce");
+    changes.cardVerificationMode = mode;
   }
   const emailDomainThreshold = integer("email-domain-threshold", values["email-domain-threshold"]);
   if (emailDomainThreshold !== undefined) changes.emailDomainHoldThreshold = emailDomainThreshold;
@@ -166,9 +180,13 @@ function networkVelocityChanges(): SignupNetworkVelocityChanges {
     values["denied-domain-lookback-days"],
   );
   if (deniedDomainLookback !== undefined) changes.deniedDomainLookbackDays = deniedDomainLookback;
+  const slowDomainThreshold = integer("slow-domain-threshold", values["slow-domain-threshold"]);
+  if (slowDomainThreshold !== undefined) changes.slowDomainHoldThreshold = slowDomainThreshold;
+  const slowDomainWindow = integer("slow-domain-window-hours", values["slow-domain-window-hours"]);
+  if (slowDomainWindow !== undefined) changes.slowDomainWindowHours = slowDomainWindow;
   if (Object.keys(changes).length === 0)
     throw new Error(
-      "Give at least one of --mode, --window-hours, --exact-threshold, --prefix-threshold, --rate-limit, --rate-limit-max, --denied-network-mode, --sign-in-network-mode, --email-domain-mode, --email-domain-threshold, --email-domain-window-minutes, --burst-mode, --burst-threshold, --burst-window-seconds, --denied-domain-mode, --denied-domain-threshold, --denied-domain-lookback-days",
+      "Give at least one of --mode, --window-hours, --exact-threshold, --prefix-threshold, --rate-limit, --rate-limit-max, --denied-network-mode, --sign-in-network-mode, --email-domain-mode, --email-domain-threshold, --email-domain-window-minutes, --burst-mode, --burst-threshold, --burst-window-seconds, --denied-domain-mode, --denied-domain-threshold, --denied-domain-lookback-days, --disposable-mail-mode, --slow-domain-mode, --slow-domain-threshold, --slow-domain-window-hours, --card-verification-mode",
     );
   return changes;
 }

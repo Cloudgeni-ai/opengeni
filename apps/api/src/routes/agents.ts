@@ -563,6 +563,8 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
         slackTeamId: installation.slackTeamId,
         slackTeamName: installation.slackTeamName,
         botDisplayName: installation.botDisplayName,
+        postsAsAgent: installation.postsAsAgent,
+        installWorkspaceId: installation.installHome.workspaceId,
         availability: install
           ? agentSlackAvailabilityView(
               agent,

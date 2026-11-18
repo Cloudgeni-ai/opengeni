@@ -115,6 +115,7 @@ import {
   SessionSystemUpdateKind as ContractSessionSystemUpdateKind,
   SessionSystemUpdatePayload as ContractSessionSystemUpdatePayload,
   SessionTurn as ContractSessionTurn,
+  TurnUsage as ContractTurnUsage,
   SubmitHumanInputResponseRequest as ContractSubmitHumanInputResponseRequest,
   StreamUrlRotatedPayload as ContractStreamUrlRotatedPayload,
   ViewerHeartbeatRequest as ContractViewerHeartbeatRequest,
@@ -273,6 +274,7 @@ import type {
   SessionTurnSource,
   SessionTurnStatus,
   SubmitHumanInputResponseRequest,
+  TurnUsage,
   UpdateSessionMcpApprovalPolicyRequest,
   UpdateSessionMcpApprovalPolicyResponse,
   UninstallPluginRequest,
@@ -587,6 +589,8 @@ describe("SDK / contracts parity", () => {
       value: z.infer<typeof ContractSessionHumanInputRequest>,
     ): SessionHumanInputRequest => value;
     const acceptTurn = (value: z.infer<typeof ContractSessionTurn>): SessionTurn => value;
+    const acceptTurnUsage = (value: z.infer<typeof ContractTurnUsage>): TurnUsage => value;
+    const returnTurnUsage = (value: TurnUsage): z.infer<typeof ContractTurnUsage> => value;
     const acceptTurnStatus = (
       value: z.infer<typeof ContractSessionTurn>["status"],
     ): SessionTurnStatus => value;
@@ -630,6 +634,8 @@ describe("SDK / contracts parity", () => {
       acceptEvent,
       acceptHumanInputRequest,
       acceptTurn,
+      acceptTurnUsage,
+      returnTurnUsage,
       acceptTurnStatus,
       acceptTurnSource,
       acceptCreateRequest,

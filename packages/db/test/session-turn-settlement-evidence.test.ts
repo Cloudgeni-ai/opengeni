@@ -108,6 +108,12 @@ async function persistedTurnEvent(
 }
 
 const largeOutput = "output-😀".repeat(40_000);
+// What migration 1497 attaches to a terminal event of a turn that charged nothing.
+const ZERO_TURN_USAGE = {
+  creditsMicros: 0,
+  tokens: { input: 0, output: 0 },
+  breakdown: { model: 0, webSearch: 0, imageGeneration: 0, other: 0 },
+};
 
 function settlementInput(
   fixtureValue: Awaited<ReturnType<typeof fixture>>,
@@ -222,7 +228,7 @@ describe("atomic turn settlement retained-output evidence", () => {
       value.session.id,
       value.turn.id,
     );
-    expect(payload).toEqual({ output: largeOutput });
+    expect(payload).toEqual({ output: largeOutput, usage: ZERO_TURN_USAGE });
   });
 
   test("fails closed for malformed retained-output evidence", async () => {
@@ -247,7 +253,7 @@ describe("atomic turn settlement retained-output evidence", () => {
       value.session.id,
       value.turn.id,
     );
-    expect(payload).toEqual({ output: largeOutput });
+    expect(payload).toEqual({ output: largeOutput, usage: ZERO_TURN_USAGE });
   });
 
   test("keeps ordinary no-evidence settlement behavior unchanged", async () => {
@@ -267,6 +273,6 @@ describe("atomic turn settlement retained-output evidence", () => {
       value.session.id,
       value.turn.id,
     );
-    expect(payload).toEqual({ output: largeOutput });
+    expect(payload).toEqual({ output: largeOutput, usage: ZERO_TURN_USAGE });
   });
 });

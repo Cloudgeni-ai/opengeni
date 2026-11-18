@@ -411,6 +411,60 @@ Rollback: `--burst-mode off --denied-domain-mode off` (and `--email-domain-mode
 off`), then release with
 `--network-release-holds --rule email-cluster-v1`.
 
+### Disposable inboxes and slow domain groups
+
+`1493_signup_disposable_mail.sql` adds two more legs to `email-cluster-v1`:
+
+- Disposable mail (`disposable-mail-v1`, `disposableMailMode`, `enforce`): the
+  owner's mail domain, or one of its MX hosts, is a temporary-inbox service.
+  At setup (first and additional organizations) the API resolves the domain's
+  MX, bounded by `OPENGENI_SIGNUP_MAIL_MX_LOOKUP_TIMEOUT_MS` (1500; 0 turns the
+  lookup off), cached for an hour, and matches the domain and the MX hosts
+  against a built-in list of temporary-inbox services
+  (`apps/api/src/auth/signup-mail.ts`) plus
+  `OPENGENI_SIGNUP_DISPOSABLE_MAIL_DOMAINS` (comma separated; a name matches
+  itself and its subdomains). Only the flag reaches the database
+  (`mail_signal`: `disposable` or `clear`); a slow or failed lookup records
+  nothing (fail open). Anyone can read such an inbox, so the address proves no
+  person; the list never names general mail hosts that real companies use, or
+  forwarders that deliver to the person's own inbox.
+- Slow domain (`email-slow-domain-v1`, `slowDomainMode`, `enforce`):
+  `slowDomainHoldThreshold` (3) distinct owners on the same company or
+  personal relay domain within `slowDomainWindowHours` (24), and none of those
+  organizations ever admitted a model call. A farm signs owners up one a minute
+  over hours and never uses them; once any colleague of a company has started
+  working, its group is not held. Public providers, shared relays and academic
+  domains never group here. Use is stamped once per organization
+  (`first_admitted_at`) by a model-call admission; nothing reads other
+  organizations' usage. The hold lifts itself: when a held colleague sends a
+  model call, that admission stamps the use, finds the group used and
+  releases its own slow hold (`email-slow-domain-released-v1`) before the
+  eligibility check, so the call proceeds. Every other organization of the
+  group releases the same way at its own next evaluation. Only a detector
+  hold whose current rule is `email-slow-domain-v1` is released; manual
+  decisions and holds from other rules are never touched.
+
+Sizing (hosted production person lifecycle since June 2026, about 720
+non-public owner domains): 3 or more owners on one non-public domain within 24
+hours with no earlier use by any of them happened on 38 domains, all throwaway;
+real company groups had used the product before their third owner signed up.
+About 560 of those domains received mail at temporary-inbox MX hosts. How fast
+an address is verified is not a signal: two thirds of all email signups verify
+within 10 seconds.
+
+```sh
+bun scripts/operator/promotion-decisions.ts --network-velocity-set --slow-domain-mode observe \
+  --revision <current-revision> --operator <operator-id> --reason 'Observe slow domain groups'
+bun scripts/operator/promotion-decisions.ts --network-velocity-set --disposable-mail-mode off \
+  --slow-domain-threshold 4 --slow-domain-window-hours 12 \
+  --revision <current-revision> --operator <operator-id> --reason 'Loosen'
+```
+
+During the rollout, previous-release pods record no mail signal and stamp no
+use, so a group whose members only used the product through them looks
+unused. Rollback: `--disposable-mail-mode off --slow-domain-mode off`, then
+release with `--network-release-holds --rule email-cluster-v1`.
+
 ### Rapid additional organizations
 
 An unpaid person's second and later additional organizations created within 24
@@ -428,6 +482,73 @@ rule) restricts only that organization. It doesn't follow the person: their
 other organizations aren't linked-restricted, and it doesn't trigger the
 linked-owner hold on their next organization. A manual operator denial or
 reviewer decision still follows the person as before.
+
+## Card verification
+
+Migration `1494_card_verification_gate.sql` adds a deployment-wide gate,
+off until an operator turns it on. While it is on, an unpaid organization
+(Free or plan-less, never bought credit, no Stripe subscription) needs a card
+its owner verified before it:
+
+- starts a sandbox box. Every box-start path goes through sandbox admission
+  (agent turns, terminals and commands, background processes,
+  Browser/ComputerSessions, viewers). A refusal has reason `card_required`
+  and code `sandbox_card_required`: an agent turn fails with it (not
+  retried), API surfaces answer 403 (viewers 429) with `details.code`. Joining
+  a box that is already running, and a Connected Machine, are never refused.
+- receives Free monthly credit (`free_plan_credit_eligible` and the
+  subscription maintenance inventory).
+
+Chat without a box keeps working. Paid, Enterprise and host-provisioned
+organizations, and organizations that bought credit, are never gated. It
+builds on the free compute bounds (fleet cap, daily box time, young
+organizations, additional-organization holds), which still apply after a card
+is verified.
+
+The owner adds a card through Stripe Checkout in setup mode (a SetupIntent,
+nothing is charged): `POST /v1/billing/card-verification/setup`, confirmed by
+the `checkout.session.completed` webhook or by the page Checkout returns to
+(`POST /v1/billing/card-verification/confirm`), whichever comes first. Both
+check the SetupIntent and card with Stripe and that the person still owns the
+organization, then record the card (`billing_card_verifications`: brand, last
+four digits and Stripe's card fingerprint). Prepaid cards and cards whose
+security code check failed are refused; the webhook logs such a refusal and
+acknowledges the event, since retrying would not change it. A late webhook
+for an older SetupIntent never replaces a newer card.
+`GET /v1/billing/card-verification` says whether an organization needs one
+and whether the caller (its owner) can add it. The console shows one Add a
+card action where a box was refused and continues the refused chat once the
+card is added; other members are asked to have the owner add it.
+
+One Free grant per card and per person: the first organization whose verified
+card reaches Free issuance claims the card's fingerprint and the owner who
+verified it together (`opengeni_private.free_trial_card_claims`); an
+organization refused for either claims neither. Only Free issuance claims;
+model-call admission and sweeps only read the claims. Another organization
+with the same card, or verified by the same person, gets no Free credit. To
+release a claim (for example after a support review), the database owner
+deletes its rows for that organization from
+`opengeni_private.free_trial_card_claims`. Another organization of the same
+owner inherits their card for sandboxes when that owner acts, never for Free
+credit; work without an acting owner (for example a schedule another member
+created) needs the organization's own card. The gate covers the Free monthly
+credit; a nonzero signup trial grant, where configured, stays spendable. Existing Free organizations without
+a card hit the gate at their next box start or Free grant; nothing is deleted,
+no ledger is rewritten, and the Free amount is unchanged.
+
+Turn it on only after the release that carries it has finished rolling out:
+older processes do not refuse boxes, while the database applies the Free
+credit check at once. Switch it with the audited, revision-fenced network
+velocity setter (appends a `card_verification_gate_revisions` row; processes
+pick it up within 15 seconds):
+
+```sh
+bun scripts/operator/promotion-decisions.ts --network-velocity-set --card-verification-mode enforce \
+  --revision <current-revision> --operator <operator-id> --reason 'Require a verified card'
+```
+
+Rollback: `--card-verification-mode off`. Recorded cards and claims stay; with
+the gate off nothing reads them.
 
 ## Funding and review
 

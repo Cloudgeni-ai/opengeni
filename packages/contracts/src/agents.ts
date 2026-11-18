@@ -428,6 +428,18 @@ export const AgentSlackInstall = /* @__PURE__ */ defineSchema(() =>
      * Slack workspace unless something here stops it.
      */
     unavailable: z.enum(AGENT_ERROR_CODES).nullable().default(null),
+    /**
+     * False when this Slack app can't sign posts with the agent's name and
+     * icon (no `chat:write.customize`): its replies show as Opengeni until
+     * Slack is updated. Absent from older servers and for an installation no
+     * longer linked here.
+     */
+    postsAsAgent: z.boolean().optional(),
+    /**
+     * The Opengeni workspace that holds this Slack installation, where an
+     * admin updates it. Absent with `postsAsAgent`.
+     */
+    installWorkspaceId: Uuid.optional(),
   }),
 );
 export type AgentSlackInstall = z.infer<typeof AgentSlackInstall>;

@@ -207,6 +207,9 @@ describe("an agent's Slack availability (real PostgreSQL)", () => {
         connectionId: install.connectionId,
         availability: expect.objectContaining({ handle: "release-desk", open: false }),
         unavailable: null,
+        // Installed with chat:write only: replies show as Opengeni until updated.
+        postsAsAgent: false,
+        installWorkspaceId: install.home,
       }),
     ]);
     const [saved] = await shared!.admin<
