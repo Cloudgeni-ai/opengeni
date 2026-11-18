@@ -7,10 +7,12 @@
 // - the unpaid running boxes and today's unpaid box time, read through the
 //   cross-tenant definer opengeni_private.sandbox_unpaid_fleet_v1 (1486) over
 //   the boxes admission stamped `compute_unpaid`;
-// - fleet pressure: the warm count of every plan (the warm-fleet alert's own
-//   source, count_sandbox_leases_by_liveness) with hysteresis, kept per
-//   process. Every process reads the same count, so they agree within a read
-//   interval.
+// - fleet pressure: the starting or warm boxes of every plan on a managed
+//   provider (opengeni_private.sandbox_fleet_warm_boxes_v1, 1492) with
+//   hysteresis, kept per process. Self-hosted (Connected Machine) boxes cost
+//   the deployment nothing and are exempt from the fleet limits, so they
+//   never count. Every process reads the same count, so they agree within a
+//   read interval.
 import { sql } from "drizzle-orm";
 import type { SandboxFleetLimits } from "@opengeni/config";
 import type { Database } from "./database";
@@ -18,6 +20,7 @@ import { rawRows } from "./database";
 
 export const SANDBOX_UNPAID_FLEET_ROUTINE =
   "opengeni_private.sandbox_unpaid_fleet_v1(uuid, boolean)";
+export const SANDBOX_FLEET_WARM_BOXES_ROUTINE = "opengeni_private.sandbox_fleet_warm_boxes_v1()";
 
 /** Fleet pressure as admission sees it. `failed`: no warm count could be read
  * recently, so admission fails closed for unpaid organizations. */
@@ -59,6 +62,7 @@ export function resetSandboxFleetState(): void {
   fleetPressureState.belowReleaseSince = null;
   fleetPressureState.inflight = null;
   unpaidFleetRoutine.available = null;
+  fleetWarmBoxesRoutine.available = null;
   unpaidFleetBoxSeconds.value = null;
   unpaidFleetBoxSeconds.readAt = 0;
   unpaidFleetBoxSeconds.failure = null;
@@ -133,8 +137,47 @@ function currentFleetPressure(now: number): SandboxFleetPressure {
   };
 }
 
-/** Boxes of every plan that are starting or warm. */
+/** Whether the runtime may call `routine` (a withheld definer is rechecked
+ * every minute; once granted it stays so). */
+async function definerAvailable(
+  db: Database,
+  routine: string,
+  cache: { available: { value: boolean; at: number } | null },
+  now: number,
+): Promise<boolean> {
+  const cached = cache.available;
+  if (cached && (cached.value || now - cached.at < UNPAID_FLEET_ROUTINE_RECHECK_MS)) {
+    return cached.value;
+  }
+  const [row] = await rawRows<{ available: boolean | null }>(
+    db,
+    sql`select coalesce(pg_catalog.has_function_privilege(
+        pg_catalog.to_regprocedure(${routine}), 'EXECUTE'), false) as available`,
+  );
+  const value = row?.available === true;
+  cache.available = { value, at: now };
+  return value;
+}
+
+const fleetWarmBoxesRoutine: { available: { value: boolean; at: number } | null } = {
+  available: null,
+};
+
+/**
+ * Boxes of every plan on a managed provider that are starting or warm. Until
+ * 1492's definer is granted, the count of every lease (self-hosted included)
+ * stands in, as before.
+ */
 async function readFleetWarmBoxes(db: Database): Promise<number> {
+  if (
+    await definerAvailable(db, SANDBOX_FLEET_WARM_BOXES_ROUTINE, fleetWarmBoxesRoutine, Date.now())
+  ) {
+    const [row] = await rawRows<{ warm_boxes: number | string | null }>(
+      db,
+      sql`select opengeni_private.sandbox_fleet_warm_boxes_v1() as warm_boxes`,
+    );
+    return Number(row?.warm_boxes ?? 0);
+  }
   const rows = await rawRows<{ liveness: string; count: number | string }>(
     db,
     sql`select liveness, count from opengeni_private.count_sandbox_leases_by_liveness()`,
@@ -194,18 +237,7 @@ const UNPAID_FLEET_ROUTINE_RECHECK_MS = 60_000;
  * Until then the unpaid running cap and fleet box-time budget are inactive.
  */
 export async function sandboxUnpaidFleetAvailable(db: Database, now = Date.now()) {
-  const cached = unpaidFleetRoutine.available;
-  if (cached && (cached.value || now - cached.at < UNPAID_FLEET_ROUTINE_RECHECK_MS)) {
-    return cached.value;
-  }
-  const [row] = await rawRows<{ available: boolean | null }>(
-    db,
-    sql`select coalesce(pg_catalog.has_function_privilege(
-        pg_catalog.to_regprocedure(${SANDBOX_UNPAID_FLEET_ROUTINE}), 'EXECUTE'), false) as available`,
-  );
-  const value = row?.available === true;
-  unpaidFleetRoutine.available = { value, at: now };
-  return value;
+  return await definerAvailable(db, SANDBOX_UNPAID_FLEET_ROUTINE, unpaidFleetRoutine, now);
 }
 
 /** Read the unpaid fleet; null when the definer is not available yet. */

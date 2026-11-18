@@ -4362,6 +4362,7 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "nango_connections_in_use_v1(text[])",
       "nango_live_connection_owners_v1(text, text, text, integer)",
       "sandbox_unpaid_fleet_v1(uuid, boolean)",
+      "sandbox_fleet_warm_boxes_v1()",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -4375,6 +4376,7 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
       "nango_connections_in_use_v1(text[])",
       "nango_live_connection_owners_v1(text, text, text, integer)",
+      "sandbox_fleet_warm_boxes_v1()",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(

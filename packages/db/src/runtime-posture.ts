@@ -72,7 +72,7 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * which Nango connections a live connection still stands for (1482), the
  * unpaid sandbox fleet counts behind the fleet limits (1486), and the
  * deployment-wide listing of live Nango rows' owners for the Nango sweep
- * (1487).
+ * (1487), and the managed warm box count fleet pressure reads (1492).
  * Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
@@ -113,6 +113,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "nango_connections_in_use_v1(text[])",
   "nango_live_connection_owners_v1(text, text, text, integer)",
   "sandbox_unpaid_fleet_v1(uuid, boolean)",
+  "sandbox_fleet_warm_boxes_v1()",
 ] as const;
 
 /**
@@ -160,6 +161,8 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * 1487 withholds the listing of live Nango rows' owners; until it is
  * granted, the Nango sweep only visits people Nango lists a connection for.
  * 1486 withheld the unpaid sandbox fleet counts and 1490 granted them.
+ * 1492 withholds the managed warm box count; until it is granted, fleet
+ * pressure reads the warm count of every lease, self-hosted ones included.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -173,6 +176,7 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
   "nango_connections_in_use_v1(text[])",
   "nango_live_connection_owners_v1(text, text, text, integer)",
+  "sandbox_fleet_warm_boxes_v1()",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -310,6 +314,10 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
   "sandbox_unpaid_fleet_v1(uuid, boolean)": [
     "sandbox_leases",
     "usage_events",
+    "opengeni_private.modal_inventory_read_capabilities",
+  ],
+  "sandbox_fleet_warm_boxes_v1()": [
+    "sandbox_leases",
     "opengeni_private.modal_inventory_read_capabilities",
   ],
 };
