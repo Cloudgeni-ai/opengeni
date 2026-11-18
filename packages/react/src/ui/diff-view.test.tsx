@@ -139,6 +139,22 @@ describe("DiffView", () => {
   });
 });
 
+describe("DiffView rows", () => {
+  test("plain text drops blank lines, which would read as empty + rows", () => {
+    const html = renderToStaticMarkup(
+      <DiffView before="" after={"First line.\n\nSecond line."} format="text" bare />,
+    );
+    expect(html.match(/Added: /g)?.length).toBe(2);
+  });
+
+  test("code keeps its blank lines", () => {
+    const html = renderToStaticMarkup(
+      <DiffView before="" after={"a = 1\n\nb = 2"} format="code" bare />,
+    );
+    expect(html.match(/Added: /g)?.length).toBe(3);
+  });
+});
+
 describe("failedLoadParts", () => {
   test("replaces a raw API error string passed as the detail", () => {
     const parts = failedLoadParts({
@@ -191,6 +207,31 @@ describe("RevisionHistory", () => {
     expect(html).toContain("Current");
     expect(html).toContain("Restore this version: Created the instructions");
     expect(html).not.toContain("Restore this version: Added: Prefer small PRs.");
+  });
+
+  test("the first version reads as its text, not every line marked as added", () => {
+    const first: Revision[] = [
+      {
+        id: "1",
+        author: "You",
+        createdLabel: "6 days ago",
+        summary: "Created",
+        content: "Memory of the agent Meeting preparation.",
+      },
+    ];
+    const html = renderToStaticMarkup(
+      <RevisionHistory revisions={first} onRestore={() => undefined} format="text" />,
+    );
+    expect(html).toContain("Memory of the agent Meeting preparation.");
+    expect(html).not.toContain("Added: ");
+    expect(html).toContain('aria-label="Text of: Created"');
+  });
+
+  test("a later version still shows what changed", () => {
+    const html = renderToStaticMarkup(
+      <RevisionHistory revisions={revisions} onRestore={() => undefined} />,
+    );
+    expect(html).toContain("Added: ");
   });
 
   test("explains when restoring isn't allowed", () => {

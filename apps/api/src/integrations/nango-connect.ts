@@ -38,6 +38,7 @@ import {
   nangoAccountName,
   shareNangoConnection,
   turnOnOwnLoginHere,
+  carryConnectorToolChoices,
 } from "@opengeni/core";
 import {
   consumeIntegrationOAuthStateNonce,
@@ -1008,6 +1009,14 @@ async function afterNangoConnectionStored(
       kind: result.created ? "connection_created" : "connection_reconnected",
     });
   const knownWorkspaceIds = [owner.workspaceId, result.connection.workspaceId];
+  // The same account connected under the native backend keeps its tool
+  // choices here. Best effort: opening its approvals carries them too.
+  await carryConnectorToolChoices(deps.db, result.connection).catch((error: unknown) =>
+    console.warn("[nango] carrying tool choices to a connection failed", {
+      connectionId: result.connection.id,
+      error: error instanceof Error ? error.message : String(error),
+    }),
+  );
   // The same account's rows in the person's other organizations now stand
   // for this connection too, and the ones they stood for are deleted. A
   // failure here is repaired by the sweep.

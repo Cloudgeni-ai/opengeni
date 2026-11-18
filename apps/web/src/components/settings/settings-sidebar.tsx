@@ -139,6 +139,12 @@ export interface SettingsShellProps {
   /** The current page's scope for the narrow header: "Organization · Acme Robotics". */
   currentScope?: string;
   /**
+   * Which settings the page belongs to, first in the macOS window bar's
+   * trail: "Workspace settings", "Organization settings" or "Account
+   * settings". Defaults to `label`.
+   */
+  windowBarSection?: string;
+  /**
    * The page header of a settings page. `null` when the page brings its own: a
    * sub-page (an account, a key, a form) or a full page (Agents, Secrets).
    */
@@ -454,6 +460,7 @@ export function SettingsShell({
   activeId,
   currentPage,
   currentScope,
+  windowBarSection,
   page,
   layout = "settings",
   notice,
@@ -481,6 +488,12 @@ export function SettingsShell({
   const canvasRef = useRef<HTMLElement | null>(null);
   const titleInWindowBar = windowBarRowActive({ platform: desktopPlatform, mobile: narrow });
   const windowBarRow = useWindowBarRow(canvasRef, titleInWindowBar);
+  // "Organization settings › People": which settings the page belongs to, by
+  // the scope's kind (its name is in the rail's picker).
+  const barSection = useMemo(
+    () => ({ label: windowBarSection ?? label }),
+    [label, windowBarSection],
+  );
 
   const navigation = narrow ? (
     <header className="flex min-w-0 items-center gap-2 border-b border-border bg-bg px-2 py-1.5 pt-[max(0.375rem,env(safe-area-inset-top))]">
@@ -587,7 +600,11 @@ export function SettingsShell({
         {...windowBarRow}
         className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
       >
-        <WindowBarPageTitle enabled={titleInWindowBar} fallbackTitle={page?.title ?? currentPage}>
+        <WindowBarPageTitle
+          enabled={titleInWindowBar}
+          fallbackTitle={page?.title ?? currentPage}
+          section={barSection}
+        >
           {notice}
           <SettingsActionsSlotContext.Provider value={actionsSlot}>
             <PageHeaderStyleProvider icon="hide">

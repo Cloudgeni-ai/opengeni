@@ -156,6 +156,22 @@ describe("single-model calls and task usage limits", () => {
     expect(h.settle.mock.calls[0]![2]).not.toHaveProperty("sessionId");
   });
 
+  test("the call reports the credits its settlement charged, fee included, or null when unknown", async () => {
+    const h = harness({ allowed: true, state: null });
+    h.settle.mockImplementationOnce(
+      async () => ({ pricedCostMicros: 2_000, byokPlatformFeeMicros: 30 }) as never,
+    );
+    expect((await call(h.service, "api_key", "req-charged")).creditsChargedMicros).toBe(2_030);
+    h.settle.mockImplementationOnce(async () => ({ pricedCostMicros: 0 }) as never);
+    expect((await call(h.service, "api_key", "req-free")).creditsChargedMicros).toBe(0);
+    h.settle.mockImplementationOnce(async () => {
+      throw new Error("ledger unavailable");
+    });
+    const failed = await call(h.service, "api_key", "req-failed");
+    expect(failed.result).toMatchObject({ text: "answer" });
+    expect(failed.creditsChargedMicros).toBeNull();
+  });
+
   test("settlement records where the served route ran: its claim, never evidence", async () => {
     const h = harness({ allowed: true, state: null });
     spy(runtimeModelCall.MultiProviderModelProvider.prototype, "resolveBinding", () => ({

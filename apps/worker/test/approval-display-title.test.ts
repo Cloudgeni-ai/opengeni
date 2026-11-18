@@ -33,6 +33,14 @@ test("a Gmail approval carries the title its review card shows", () => {
   ).toBe("Update 1 message");
 });
 
+test("Gmail through Nango gets the same title", () => {
+  const approval = gmail("batch_modify_messages", { messageIds: ["a"], addLabelIds: ["TRASH"] });
+  const nango = { ...approval, display: { ...approval.display, providerDomain: "nango:gmail" } };
+  expect((withApprovalDisplayTitle(nango) as { display: { title: string } }).display.title).toBe(
+    "Move 1 message to Trash",
+  );
+});
+
 test("other tools get a readable name; a title the tool set is kept", () => {
   expect(
     (

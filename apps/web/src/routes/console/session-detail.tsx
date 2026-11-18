@@ -1,9 +1,9 @@
 import type { ConsoleSessionDetail, SessionEvent } from "@opengeni/sdk";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { EyeIcon, LockIcon, ThumbsDownIcon, ThumbsUpIcon } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
-import { MessageTimeline } from "@opengeni/react/session-ui";
+import { MessageTimeline, type MessageTimelineProps } from "@opengeni/react/session-ui";
 import { Button } from "@opengeni/react/ui/button";
 import {
   DetailAside,
@@ -28,6 +28,7 @@ import {
   useConsole,
   type ConsoleClient,
 } from "./console-shared";
+import { answerCosts } from "./answer-costs";
 import { sessionStatus, sessionTitle } from "./sessions";
 
 const EVENTS_PAGE = 500;
@@ -116,6 +117,22 @@ export function ConsoleSessionRoute() {
     );
     return () => controller.abort();
   }, [client, full, key, organizationId, sessionId, transcriptAttempt, workspaceId]);
+  // Each answer's cost, from the credits its turn charged: one value beside
+  // the reply, styled like its time.
+  const transcriptEvents = transcript?.events ?? null;
+  const costs = useMemo(() => answerCosts(transcriptEvents ?? []), [transcriptEvents]);
+  const renderAnswerCost = useCallback(
+    (item: Parameters<NonNullable<MessageTimelineProps["renderMessageActions"]>>[0]): ReactNode => {
+      if (item.kind !== "agent-message") return null;
+      const cost = costs.costFor(item);
+      return cost === null ? null : (
+        <span className="shrink-0 tabular-nums text-og-xs text-og-fg-subtle">
+          {formatMicros(cost, { precise: true })}
+        </span>
+      );
+    },
+    [costs],
+  );
 
   const back = {
     label: "Sessions",
@@ -257,6 +274,7 @@ export function ConsoleSessionRoute() {
                   status="idle"
                   autoFollow={false}
                   className="h-full"
+                  renderMessageActions={renderAnswerCost}
                 />
               </div>
             ) : (

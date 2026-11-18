@@ -294,6 +294,23 @@ signature).
   runtime errors and 5xx, is reported as an unknown outcome and never retried.
   Response bodies are read up to 4 MiB.
 
+### Tool approvals
+
+A connector's approvals page resolves the connector exactly as a session does
+(`settingsWithEnabledCapabilityMcpServers`, the backend switch included), so
+the account whose per-tool choices are managed is the account a turn binds,
+and the choices are stored and enforced for it as for a native account. The
+tool list and its defaults come from the same reviewed bridge under both
+backends (Drive under Nango lists its REST bridge's tools).
+
+Choices belong to the provider account, not the backend: the same person's
+connection of the same connector and verified account (email) under the other
+backend shares them. A connection with no choices yet takes its counterpart's
+(the most recently changed) when it is connected or its approvals are first
+opened, and every change is mirrored to the counterpart, including a reset.
+So flipping a connector to Nango and back never resets "Ask first" or "Always
+allow". An unverified account never takes another's choices.
+
 ## Operator runbook
 
 ### Configure

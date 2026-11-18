@@ -264,3 +264,32 @@ export function isConfigItemActive(
   const destination = `/workspaces/${workspaceId}/${configPathSuffix(to)}`;
   return pathname === destination || pathname.startsWith(`${destination}/`);
 }
+
+/** Routes that belong to a section under another path. */
+const SECTION_ALIASES: Readonly<Record<string, WorkspaceConfigTarget>> = {
+  sites: "/workspaces/$workspaceId/artifacts",
+  schedules: "/workspaces/$workspaceId/automations",
+  memory: "/workspaces/$workspaceId/state",
+  documents: "/workspaces/$workspaceId/state",
+  "bot-templates": "/workspaces/$workspaceId/agents",
+};
+
+/**
+ * The rail section a workspace page is in, by the same names as the rail:
+ * "/workspaces/w/agents/a1" is in Agents. Null for chats and pages outside
+ * every section.
+ */
+export function workspaceSectionForPath(
+  pathname: string,
+  workspaceId: string,
+): { label: string; path: string } | null {
+  const prefix = `/workspaces/${workspaceId}/`;
+  if (!pathname.startsWith(prefix)) return null;
+  const first = pathname.slice(prefix.length).split("/")[0] ?? "";
+  const items = [...PRIMARY_WORKSPACE_ITEMS, ...WORKSPACE_BROWSE_ITEMS];
+  const target = SECTION_ALIASES[first];
+  const item = items.find((each) =>
+    target ? each.to === target : configPathSuffix(each.to) === first,
+  );
+  return item ? { label: item.label, path: `${prefix}${configPathSuffix(item.to)}` } : null;
+}

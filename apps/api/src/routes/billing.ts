@@ -67,9 +67,14 @@ import {
   createBillingAutoTopUpService,
   registerBillingAutoTopUpRoutes,
 } from "./billing-auto-top-up";
+import {
+  handleCardVerificationWebhookSession,
+  registerBillingCardVerificationRoutes,
+} from "./billing-card-verification";
 
 export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
   registerBillingAutoTopUpRoutes(app, deps);
+  registerBillingCardVerificationRoutes(app, deps);
   registerSubscriptionRoutes(app, deps);
   app.get("/v1/billing/alerts", async (c) => {
     const context = await requireAccessContext(c, deps);
@@ -754,6 +759,14 @@ export async function handleStripeWebhookEvent(
   switch (event.type) {
     case "checkout.session.completed":
     case "checkout.session.async_payment_succeeded":
+      if (
+        await handleCardVerificationWebhookSession(
+          deps,
+          stripe,
+          event.data.object as Stripe.Checkout.Session,
+        )
+      )
+        return;
       if (
         await createBillingAutoTopUpService(deps, stripe).handleSetup(
           event.data.object as Stripe.Checkout.Session,

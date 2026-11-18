@@ -346,6 +346,10 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
           errorName: error instanceof Error ? error.name : typeof error,
         });
       };
+      // The Opengeni credits this call charged, once settled: its model debit
+      // plus any bring-your-own-key platform fee. Unknown (null) without a
+      // usage report or when settlement failed, never a false 0.
+      let creditsChargedMicros: number | null = null;
       if (usage) {
         await withCreditDebitAttribution(creditDebitAttributionForGrant(input.grant), () =>
           // Execution settings carry the workspace catalog the price resolves from.
@@ -372,25 +376,31 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
             billingOrigin,
             byok,
           }),
-        ).catch(async (error: unknown) => {
-          logSettlementFailure(error);
-          if (!usageLimitSessionId || owedReceipt) return;
-          // Settlement failed before or after the task receipt; the amount
-          // is unknown here. An unpriced receipt fills a still-open marker
-          // (disclosed, never free); a receipt already recorded for this
-          // source is kept and this write is a no-op conflict.
-          const unknownAmount: HeldSessionUsageReceipt = {
-            sessionId: usageLimitSessionId,
-            sourceId,
-            turnId: null,
-            amountMicros: null,
-            pricingSource: null,
-            model: model.id,
-          };
-          await writeOwedReceipt(deps.db, input, unknownAmount).catch(() => {
-            owedReceipt = unknownAmount;
+        )
+          .then((settled) => {
+            const priced = settled?.pricedCostMicros;
+            creditsChargedMicros =
+              typeof priced === "number" ? priced + (settled.byokPlatformFeeMicros ?? 0) : null;
+          })
+          .catch(async (error: unknown) => {
+            logSettlementFailure(error);
+            if (!usageLimitSessionId || owedReceipt) return;
+            // Settlement failed before or after the task receipt; the amount
+            // is unknown here. An unpriced receipt fills a still-open marker
+            // (disclosed, never free); a receipt already recorded for this
+            // source is kept and this write is a no-op conflict.
+            const unknownAmount: HeldSessionUsageReceipt = {
+              sessionId: usageLimitSessionId,
+              sourceId,
+              turnId: null,
+              amountMicros: null,
+              pricingSource: null,
+              model: model.id,
+            };
+            await writeOwedReceipt(deps.db, input, unknownAmount).catch(() => {
+              owedReceipt = unknownAmount;
+            });
           });
-        });
       } else if (usageLimitSessionId) {
         // A response without a usage report is an unknown amount for the
         // task: disclosed as unpriced, never counted as free.
@@ -428,7 +438,7 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
           // The unfilled marker still blocks once overdue.
         });
       }
-      return { model: model.id, result } satisfies ModelCallOutput;
+      return { model: model.id, result, creditsChargedMicros } satisfies ModelCallOutput;
     },
   };
 }

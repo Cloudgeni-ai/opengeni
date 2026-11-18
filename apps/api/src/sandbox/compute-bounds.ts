@@ -4,15 +4,25 @@ import {
 } from "@opengeni/db";
 import type { Observability } from "@opengeni/observability";
 import { HTTPException } from "hono/http-exception";
+import { ApiHttpError } from "../http/api-error";
 
 /**
  * The HTTP answer to a sandbox refused under the plan's compute bounds
  * (docs/deployment.md, "Free compute bounds"): 403 when the plan allows no
  * sandbox at all, 429 when a running-box or daily box-time limit is reached.
- * The message is the person-facing reason. Null for any other error.
+ * The message is the person-facing reason. Null for any other error. A
+ * missing verified card is 403 with `details.code` `sandbox_card_required`, so
+ * a client can offer Add a card.
  */
 export function sandboxComputeRefusal(error: unknown): HTTPException | null {
   if (!(error instanceof SandboxOrganizationBoxLimitError)) return null;
+  if (error.reason === "card_required") {
+    return new ApiHttpError(403, {
+      code: "forbidden",
+      message: error.message,
+      details: { code: error.code },
+    });
+  }
   return new HTTPException(error.reason === "closed" ? 403 : 429, {
     message: error.message,
     cause: error,

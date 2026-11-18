@@ -187,7 +187,7 @@ function MemoryRow({
   const enabled = pending ?? agent.memory.enabled;
   const collectionId = agent.memory.collectionId;
   const href = collectionId
-    ? `/workspaces/${encodeURIComponent(workspaceId)}/state?entry=${encodeURIComponent(collectionId)}`
+    ? `/workspaces/${encodeURIComponent(workspaceId)}/state?entry=${encodeURIComponent(collectionId)}&agent=${encodeURIComponent(agent.id)}`
     : null;
   return (
     <SettingRow

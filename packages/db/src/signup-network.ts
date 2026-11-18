@@ -112,6 +112,11 @@ export type SignupNetworkVelocitySettings = {
   slowDomainMode?: "off" | "observe" | "enforce";
   slowDomainHoldThreshold?: number;
   slowDomainWindowHours?: number;
+  /**
+   * Migration 1494: the card verification gate (docs/signup-abuse-protection.md,
+   * "Card verification"); "off" until set. Older databases omit it.
+   */
+  cardVerificationMode?: "off" | "enforce";
   operator: string | null;
   changedAt: string | null;
 };
@@ -140,6 +145,7 @@ export type SignupNetworkVelocityChanges = Partial<
     | "slowDomainMode"
     | "slowDomainHoldThreshold"
     | "slowDomainWindowHours"
+    | "cardVerificationMode"
   >
 >;
 

@@ -928,7 +928,45 @@ export async function listKnowledgeEntryHistory(
     .parse({ entryId, beforeRevision });
   const rows = await read(db, context, { ...request, operation: "history", limit: 20 });
   const entries = rows.slice(0, 20).map((row) => decodeProjection(row, false));
-  return { entries, beforeRevision: rows.length > 20 ? entries.at(-1)!.revision.number : null };
+  return {
+    entries,
+    beforeRevision: rows.length > 20 ? entries.at(-1)!.revision.number : null,
+    savedByYou: await historySavedBy(
+      db,
+      context,
+      request.entryId,
+      entries.map((entry) => entry.revision.id),
+    ),
+  };
+}
+
+/**
+ * Of these versions, the ones the person asking saved (migration 1498), so
+ * the history can say "You". Empty for agents and services, and before that
+ * migration.
+ */
+async function historySavedBy(
+  db: Database,
+  context: KnowledgeContext,
+  entryId: string,
+  revisionIds: string[],
+): Promise<string[]> {
+  if (context.actor.kind !== "human" || revisionIds.length === 0) return [];
+  const result = await inKnowledgeContext(db, context, (tx) =>
+    skipUnavailable(tx, async (savepoint) => {
+      const [row] = await rawRows<{ result: unknown }>(
+        savepoint,
+        sql`SELECT knowledge_entry_read(${context.accountId}::uuid,${context.workspaceId}::uuid,
+          ${JSON.stringify(context.actor)}::jsonb,
+          ${JSON.stringify({ operation: "history_authors", entryId, revisionIds })}::jsonb) AS result`,
+      );
+      return row?.result ?? null;
+    }),
+  );
+  return z
+    .array(z.uuid())
+    .catch([])
+    .parse(result ?? []);
 }
 
 const SettingsRecord = z.object({

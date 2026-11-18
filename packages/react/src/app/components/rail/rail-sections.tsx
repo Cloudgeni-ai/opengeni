@@ -8,6 +8,7 @@ import { useRail } from "./rail-context";
 import { RAIL_BRAND_LINK_CLASS, RailBrandMark, RailBrandRow } from "./rail-surface";
 import { NewSessionLink } from "./session-list";
 import { Button } from "../../../ui/button";
+import type { WindowBarCrumb } from "../../../ui/window-bar-title";
 import { useActionShortcut } from "../../lib/actions/actions-provider";
 import {
   SIDEBAR_TOGGLE_IN_WINDOW_BAR,
@@ -38,6 +39,11 @@ export type SessionShellSlots = Readonly<{
   railFooter?: ReactNode;
   /** Notices across the top of the canvas, under the top strip. */
   canvasBanners?: ReactNode;
+  /**
+   * The rail section a page is in ("Agents"), first in the macOS window bar's
+   * trail. Null where the page is the section itself or in none.
+   */
+  windowBarSection?: ((pathname: string) => WindowBarCrumb | null) | undefined;
 }>;
 
 export const SessionShellSlotsContext = createContext<SessionShellSlots>({});

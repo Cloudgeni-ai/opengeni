@@ -1,5 +1,55 @@
 # @opengeni/runtime
 
+## 6.30.0
+
+### Patch Changes
+
+- Updated dependencies [133db2c]
+- Updated dependencies [df0c5ac]
+  - @opengeni/contracts@6.30.0
+  - @opengeni/sdk@6.30.0
+  - @opengeni/capabilities@6.30.0
+  - @opengeni/codemode@6.30.0
+  - @opengeni/codex@6.30.0
+  - @opengeni/config@6.30.0
+  - @opengeni/decisions@6.30.0
+  - @opengeni/interaction@6.30.0
+  - @opengeni/observability@6.30.0
+  - @opengeni/tool-gateway@6.30.0
+  - @opengeni/vaults@6.30.0
+  - @opengeni/jev@6.30.0
+  - @opengeni/agent-proto@6.30.0
+  - @opengeni/network@6.30.0
+  - @opengeni/xai-subscription@6.30.0
+
+## 6.29.2
+
+### Patch Changes
+
+- 2c58048: Per-tool approvals work for connectors served through Nango, the same as for native ones.
+
+  - A connector's approvals page resolves the connector exactly as a session does, including the integration backend switch. A Gmail, Calendar or Drive account connected through Nango is the account its approvals are managed for, with the same tools and defaults (Drive: the tools its bridge serves), instead of the page asking to connect an account. Choices are stored for that account and apply to its calls.
+  - Choices belong to the provider account, not the backend. When the same person connects the same account under the other backend, its connection starts with the choices already made, and every later change is mirrored to both. Switching a connector between native and Nango no longer resets "Ask first" or "Always allow".
+  - Drive through Nango lists the tools its REST bridge serves.
+  - A Personal workspace carries a connector its owner connected through Nango in another workspace, as it does for a native account.
+  - Site tools and the workspace tool gateway read a personal account's choices from the workspace it was connected from, as an agent turn does, so a choice applies wherever the account is used.
+  - Gmail approvals through Nango get the same review titles as native Gmail.
+  - @opengeni/agent-proto@6.29.2
+  - @opengeni/capabilities@6.29.2
+  - @opengeni/codemode@6.29.2
+  - @opengeni/codex@6.29.2
+  - @opengeni/config@6.29.2
+  - @opengeni/contracts@6.29.2
+  - @opengeni/decisions@6.29.2
+  - @opengeni/interaction@6.29.2
+  - @opengeni/jev@6.29.2
+  - @opengeni/network@6.29.2
+  - @opengeni/observability@6.29.2
+  - @opengeni/sdk@6.29.2
+  - @opengeni/tool-gateway@6.29.2
+  - @opengeni/vaults@6.29.2
+  - @opengeni/xai-subscription@6.29.2
+
 ## 6.29.1
 
 ### Patch Changes

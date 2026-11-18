@@ -1,5 +1,26 @@
 # @opengeni/sdk
 
+## 6.30.0
+
+### Minor Changes
+
+- 133db2c: A card verification gate for the Free plan, off until an operator turns it on (`--card-verification-mode enforce`). While it is on, an unpaid organization needs a card its owner verified through Stripe Checkout (a SetupIntent, no charge) before it starts a sandbox box or receives Free monthly credit; chat without a box keeps working. One card and one person get Free credit for one organization, and another organization of the same owner inherits the card for sandboxes only. A refused box start has code `sandbox_card_required`, and the console offers one Add a card action that continues the chat once the card is added. Paid, Enterprise, host-provisioned and credit-buying organizations are unaffected; nothing is deleted and the Free amount is unchanged. New routes: `GET /v1/billing/card-verification`, `POST /v1/billing/card-verification/setup` and `POST /v1/billing/card-verification/confirm`.
+- df0c5ac: Each turn reports the Opengeni credits it charged. `turn.completed`, `turn.failed`, `turn.cancelled` and `turn.superseded` carry `usage` (`{ creditsMicros, tokens: { input, output }, breakdown: { model, webSearch, imageGeneration, other } }`, USD micros) in the event payload, in the turn webhooks' `data`, and on each turn from the turns API (`TurnUsage` in `@opengeni/contracts` and `@opengeni/sdk`). It is computed from durable usage and ledger records when the terminal event is written (migrations 1496 and 1497), so it holds after worker recovery or a new attempt; `creditsMicros` is `null` when a charge has no known price, and turns from before this release return `usage: null`. Chat completions add OpenRouter's `usage.cost` (USD) to non-streamed responses and the final usage chunk. Opengeni leaves both out of reads a session proxy relays and of published Sites, and `sessionEventsToSseStream` drops turn `usage` unless `includeCreditUsage: true` is passed, and the Console shows each answer's cost beside the reply.
+
+### Patch Changes
+
+- Updated dependencies [133db2c]
+- Updated dependencies [df0c5ac]
+  - @opengeni/contracts@6.30.0
+  - @opengeni/connect@6.30.0
+
+## 6.29.2
+
+### Patch Changes
+
+- @opengeni/connect@6.29.2
+- @opengeni/contracts@6.29.2
+
 ## 6.29.1
 
 ### Patch Changes

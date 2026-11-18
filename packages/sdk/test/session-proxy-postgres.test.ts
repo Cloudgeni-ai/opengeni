@@ -324,5 +324,61 @@ describe("session proxy real PostgreSQL", () => {
         new Set([f.workspace.id]),
       );
     }, 180_000);
+
+    test("a relayed browser never sees what a turn cost; the product server does", async () => {
+      const f = await fixture();
+      const session = await createSession(db.db, {
+        accountId: f.accountId,
+        workspaceId: f.workspace.id,
+        initialMessage: "What did this cost?",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        reasoningEffort: "medium" as const,
+        latencyMode: "standard" as const,
+        sandboxBackend: "none",
+        createdBy: { kind: "subject", subjectId: f.identity.subjectId, label: "Product user" },
+        createdByContext: {},
+      });
+      const turnId = crypto.randomUUID();
+      await shared.admin`
+        insert into session_turns (
+          id, account_id, workspace_id, session_id, trigger_event_id,
+          temporal_workflow_id, status, position, prompt, model,
+          reasoning_effort, sandbox_backend, resources, tools, metadata, started_at, finished_at
+        ) values (
+          ${turnId}, ${f.accountId}, ${f.workspace.id}, ${session.id}, ${crypto.randomUUID()},
+          ${`session-${session.id}`}, 'completed', 1, 'What did this cost?', 'scripted-model',
+          'medium', 'none', '[]'::jsonb, '[]'::jsonb, '{}'::jsonb, now(), now()
+        )`;
+      await appendSessionEvents(db.db, f.workspace.id, session.id, [
+        { type: "turn.completed", turnId, payload: { maintenance: "none" } },
+      ]);
+      const usageOf = (events: Array<{ type: string; payload: unknown }>) =>
+        (
+          events.find((event) => event.type === "turn.completed")?.payload as
+            | { usage?: { creditsMicros: number | null } }
+            | undefined
+        )?.usage;
+      const turnUsage = (turns: Array<{ id: string; usage?: unknown }>) =>
+        turns.find((turn) => turn.id === turnId)?.usage;
+
+      // The product server, as itself or as the user, reads the full projection.
+      for (const server of [f.service, f.actor]) {
+        expect(usageOf(await server.listEvents(f.workspace.id, session.id))).toMatchObject({
+          creditsMicros: 0,
+        });
+        expect(turnUsage(await server.listTurns(f.workspace.id, session.id))).toMatchObject({
+          creditsMicros: 0,
+        });
+      }
+      // The browser's reads go through the proxy as the user.
+      expect(usageOf(await f.browser.listEvents(f.workspace.id, session.id))).toBeUndefined();
+      expect(turnUsage(await f.browser.listTurns(f.workspace.id, session.id)) ?? null).toBeNull();
+      const relayed = await f.browser
+        .withSessionResponse("chat")
+        .listTurns(f.workspace.id, session.id);
+      expect(turnUsage(relayed) ?? null).toBeNull();
+    }, 180_000);
   });
 });

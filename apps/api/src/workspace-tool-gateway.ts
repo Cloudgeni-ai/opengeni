@@ -1054,6 +1054,10 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
             config.connectionRef?.connectionId ??
             sessionMcpApprovalConnectionId(config.id, config.url),
           serverId: binding?.canonicalServerId ?? config.id,
+          // A personal login's choices are kept where it was connected and
+          // follow it everywhere, as for a turn (`connectorActionPolicySnapshotForTurn`).
+          policyWorkspaceId:
+            binding?.subjectScope === "subject" ? binding.originWorkspaceId : grant.workspaceId,
         },
       ] as const;
     }),
@@ -1066,6 +1070,7 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
             id,
             await listConnectorToolPermissionPolicies(routeDeps.db, {
               ...grant,
+              workspaceId: target.policyWorkspaceId,
               connectionId: target.connectionId,
             }),
           ] as const,
@@ -1171,6 +1176,7 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
             resolveConnectorActionPolicy(
               await listConnectorToolPermissionPolicies(db, {
                 ...grant,
+                workspaceId: target.policyWorkspaceId,
                 connectionId: target.connectionId,
               }),
               {

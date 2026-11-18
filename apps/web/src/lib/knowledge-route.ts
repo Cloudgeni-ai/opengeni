@@ -23,6 +23,8 @@ export interface KnowledgeSearch {
   entry?: string;
   /** An earlier revision of that entry. */
   revision?: string;
+  /** Opened from this agent's page (its Memory): the back link returns there. */
+  agent?: string;
   page?: KnowledgeSubpage;
   /** Add knowledge into this collection. */
   collection?: string;
@@ -87,6 +89,7 @@ export function parseKnowledgeSearch(search: Record<string, unknown>): Knowledge
   const page = SUBPAGES.find((each) => each === search.page);
   const entry = id(search.entry);
   const revision = entry ? id(search.revision) : undefined;
+  const agent = entry ? id(search.agent) : undefined;
   const collection = id(search.collection);
   const file = typeof search.file === "string" && search.file ? search.file : undefined;
   const proposal =
@@ -98,6 +101,7 @@ export function parseKnowledgeSearch(search: Record<string, unknown>): Knowledge
     ...(view ? { view } : {}),
     ...(entry ? { entry } : {}),
     ...(revision ? { revision } : {}),
+    ...(agent ? { agent } : {}),
     ...(page ? { page } : {}),
     ...(collection ? { collection } : {}),
     ...(file ? { file } : {}),

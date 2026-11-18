@@ -136,6 +136,13 @@ async function setSessionStatus(
   });
 }
 
+// What a terminal event of a turn that charged nothing carries (migration 1497).
+const ZERO_TURN_USAGE = {
+  creditsMicros: 0,
+  tokens: { input: 0, output: 0 },
+  breakdown: { model: 0, webSearch: 0, imageGeneration: 0, other: 0 },
+};
+
 describe("worker activities integration", () => {
   let services: TestServices;
   let dbClient: ReturnType<typeof createDb>;
@@ -1590,6 +1597,7 @@ describe("worker activities integration", () => {
     expect(completed?.payload).toEqual({
       output: "",
       segmentLimit: "max_turns",
+      usage: ZERO_TURN_USAGE,
     });
     expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
     const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id, 10);
@@ -1797,6 +1805,7 @@ describe("worker activities integration", () => {
       retryable: false,
       quotaScope: "daily",
       detail: `429 ${providerMessage}`,
+      usage: ZERO_TURN_USAGE,
     });
     expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("failed");
     const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id, 10);

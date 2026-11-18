@@ -274,7 +274,7 @@ function SessionShellFrame({ children }: { children: ReactNode }) {
   const rail = useRail();
   const chatList = useSessionUiFeature("chatList");
   const context = useAppContext();
-  const { canvasBanners } = useContext(SessionShellSlotsContext);
+  const { canvasBanners, windowBarSection } = useContext(SessionShellSlotsContext);
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
   });
@@ -411,7 +411,10 @@ function SessionShellFrame({ children }: { children: ReactNode }) {
           {...windowBarRow}
           className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
         >
-          <WindowBarPageTitle enabled={pageTitleInWindowBar}>
+          <WindowBarPageTitle
+            enabled={pageTitleInWindowBar}
+            section={pageTitleInWindowBar ? (windowBarSection?.(pathname) ?? null) : null}
+          >
             <SessionStartupProvider session={context.session}>
               <CanvasTopStrip hamburgerRef={hamburgerRef} />
               {canvasBanners}

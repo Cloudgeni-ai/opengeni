@@ -31,6 +31,13 @@ export type ModelCallOutput = {
   /** Canonical product model id that served the call. */
   model: string;
   result: SingleModelCallResult;
+  /**
+   * The Opengeni credits this call charged, in USD micros, settled before the
+   * call returns: 0 for subscription and customer-key calls apart from the
+   * bring-your-own-key platform fee. Null when the amount is unknown (no usage
+   * report, or settlement failed).
+   */
+  creditsChargedMicros?: number | null | undefined;
 };
 
 export type ModelCallModel = {

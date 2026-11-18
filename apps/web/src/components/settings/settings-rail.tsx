@@ -244,6 +244,18 @@ export type SettingsRail = {
   organizationSection: ReturnType<typeof resolveOrganizationSettingsSection> | null;
 };
 
+/** Which settings a page belongs to, as the macOS window bar's trail names them. */
+export function settingsWindowBarSection(location: SettingsLocation): string {
+  if (location.kind === "organization") return "Organization settings";
+  if (
+    location.kind === "account" ||
+    (location.kind === "settings" && location.section === "mine")
+  ) {
+    return "Account settings";
+  }
+  return "Workspace settings";
+}
+
 export function useSettingsRail(input: {
   /** The accessible workspace settings open through; null when there is none. */
   workspaceId: string | null;

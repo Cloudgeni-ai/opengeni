@@ -440,6 +440,9 @@ The body is a thin event; read details through the API:
   "occurredAt": "2026-09-24T18:00:00.000Z", "data": { "status": "idle" } }
 ```
 
+Turn events also carry what the turn cost in `data.usage`; see
+[What a turn cost](#what-a-turn-cost).
+
 Delivery is at least once. Dedupe on `id`, also sent as `OpenGeni-Event-Id`.
 Deliveries are sent concurrently and may arrive out of order; use `sequence`
 within a session, or treat the event as a signal to read the session's events
@@ -458,6 +461,64 @@ events, after verifying the signature against the unchanged raw body.
 Import `listOrganizationWebhookDeliveries` and
 `redeliverOrganizationWebhookDelivery` from the focused subpath for organization
 registrations; call them with `client` first.
+
+### What a turn cost
+
+`turn.completed`, `turn.failed`, `turn.cancelled` and `turn.superseded` carry
+the Opengeni credits the turn charged, in the event's `payload.usage`, in the
+webhook's `data.usage`, and on each turn from
+`GET /v1/workspaces/:workspaceId/sessions/:sessionId/turns` (`listTurns`):
+
+```json
+"usage": {
+  "creditsMicros": 41230,
+  "tokens": { "input": 18200, "output": 950 },
+  "breakdown": { "model": 39100, "webSearch": 2130, "imageGeneration": 0, "other": 0 }
+}
+```
+
+- `creditsMicros` is the total, in integer USD micros (1,000,000 = $1): every
+  credit debit of this session's turn, including model calls (title and
+  compaction calls made within the turn too), web search, image generation,
+  the bring-your-own-key platform fee and anything else (`other`, for example
+  video generation). Read this field for cost tracking; `breakdown` and
+  `tokens` are secondary. Divide by 1,000,000 for dollars.
+- Subscription and customer-key calls charge 0 credits apart from the
+  bring-your-own-key platform fee.
+- `creditsMicros` is `null` when a charge of the turn has no recorded price, so
+  an unknown amount is never reported as 0. `breakdown` then holds the known
+  amounts.
+- It is computed when the turn's terminal event is written, from the durable
+  usage and credit records, so it is the same after a worker restart or a
+  retried attempt. A video is charged when it starts, so one still rendering
+  is included, net of the credits a refund written before the turn ended
+  returned; a later refund, or a title generated after the turn, does not
+  change the figure.
+- Not attributed to the turn: model calls that code in the agent's sandbox
+  makes through the model-call or chat-completions API (each reports its own
+  `usage.cost`), knowledge-search embeddings, and a response still in flight
+  when the turn is cancelled or superseded.
+- Only this session's own turn: sub-agents are separate sessions and report
+  on their own turn events. To keep all of a request's cost on one turn, turn
+  sub-agents off with `agent: { capabilities: { subagents: false } }` or
+  `maxNestedAgentDepth: 0`.
+- Turns from before this field existed return `usage: null` and their events
+  have no `usage`. The field is additive: payloads stay open objects.
+- End users never see it. Opengeni leaves it, and chat completions'
+  `usage.cost`, out of reads a session proxy relays: reads as an end user
+  (`asUser`) or with a server credential that ask for the chat projection
+  (`Accept: application/json; opengeni-session=chat`, which every
+  `createSessionProxyHandler` sends). `afterForward` hooks therefore don't see
+  it either; a hand-written relay must send that header too.
+  `sessionEventsToSseStream` and `proxySessionEventStream` remove it as well
+  (`includeCreditUsage: true` keeps it for trusted consumers), and published
+  Sites never carry it.
+- Read it on your server in the full projection, the default for the SDK
+  client and `asUser`; a client switched to `withSessionResponse("chat")`
+  doesn't get it. The Console shows it too.
+
+For a single model call, chat completions return the same amount as
+OpenRouter's `usage.cost`; see [chat completions](chat-completions.md#billing).
 
 ### Management API and SDK
 
