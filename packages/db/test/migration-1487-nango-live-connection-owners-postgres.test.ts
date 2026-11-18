@@ -4,7 +4,7 @@
  * id, deployment-wide. Like 1482 it runs as the table owner, which FORCE ROW
  * LEVEL SECURITY binds too, so it must read through the one-transaction
  * tenancy inventory window, close it again, and leave the runtime role
- * seeing only its own rows. Its runtime grant is withheld.
+ * seeing only its own rows. It was created withheld; 1494 grants it.
  */
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
@@ -83,7 +83,7 @@ async function nangoRow(nangoConnectionId: string, providerConfigKey = "google-m
 }
 
 describe("migration 1487: live Nango connection owners", () => {
-  test("the owner-run listing pages through active rows only; the runtime grant is withheld", async () => {
+  test("the owner-run listing pages through active rows only; without the runtime grant it answers nothing", async () => {
     if (!owned) return;
     const live = await nangoRow("owners-live");
     const second = await nangoRow("owners-second");
@@ -108,7 +108,8 @@ describe("migration 1487: live Nango connection owners", () => {
         },
       ),
     ).toBe(true);
-    // Withheld until a later migration grants it.
+    // 1487 created it withheld (1494 grants it): without the grant, no answer.
+    await owned.admin.unsafe(`REVOKE EXECUTE ON FUNCTION ${ROUTINE} FROM opengeni_app`);
     expect(await listNangoLiveConnectionOwners(client!.db)).toBeNull();
     await owned.admin.unsafe(`GRANT EXECUTE ON FUNCTION ${ROUTINE} TO opengeni_app`);
     try {
@@ -132,7 +133,7 @@ describe("migration 1487: live Nango connection owners", () => {
         owners!.slice(0, 1),
       );
     } finally {
-      await owned.admin.unsafe(`REVOKE EXECUTE ON FUNCTION ${ROUTINE} FROM opengeni_app`);
+      await owned.admin.unsafe(`GRANT EXECUTE ON FUNCTION ${ROUTINE} TO opengeni_app`);
     }
     // The inventory window it opened is closed again.
     const [windows] = await owned.admin.unsafe(
