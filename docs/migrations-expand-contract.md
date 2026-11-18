@@ -293,7 +293,7 @@ removed the check; 1479 ships in the release after the one that contains 1475.
 1486 created the unpaid sandbox fleet counts withheld and 1490 grants them; 1490
 ships in the release after the one that contains 1486.
 1482 and 1487 created the Nango in-use check and live owner listing withheld
-and 1494 grants them; 1494 ships in the release after the one that contains 1487.
+and 1499 grants them; 1499 ships in the release after the one that contains 1487.
 Pin only the binary production really runs
 (its healthz `deploymentRevision`), never one that merely reached staging.
 

@@ -4,7 +4,7 @@
  * id, deployment-wide. Like 1482 it runs as the table owner, which FORCE ROW
  * LEVEL SECURITY binds too, so it must read through the one-transaction
  * tenancy inventory window, close it again, and leave the runtime role
- * seeing only its own rows. It was created withheld; 1494 grants it.
+ * seeing only its own rows. It was created withheld; 1499 grants it.
  */
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
@@ -108,7 +108,7 @@ describe("migration 1487: live Nango connection owners", () => {
         },
       ),
     ).toBe(true);
-    // 1487 created it withheld (1494 grants it): without the grant, no answer.
+    // 1487 created it withheld (1499 grants it): without the grant, no answer.
     try {
       await owned.admin.unsafe(`REVOKE EXECUTE ON FUNCTION ${ROUTINE} FROM opengeni_app`);
       expect(await listNangoLiveConnectionOwners(client!.db)).toBeNull();

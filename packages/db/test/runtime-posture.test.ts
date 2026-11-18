@@ -641,7 +641,7 @@ function safePosture(): RuntimeDatabasePosture {
         configuration: ["search_path=pg_catalog, public, pg_temp"],
       },
       // 1482 and 1487 read only connections, present in every current posture;
-      // 1494 grants them to the runtime.
+      // 1499 grants them to the runtime.
       {
         name: "nango_connections_in_use_v1(text[])",
         owner: "opengeni_migrator",

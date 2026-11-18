@@ -422,7 +422,7 @@ function unreferenced(
  * The ids of `candidates` nothing stands for any more, decided under the
  * person lock: no row in `rows` (the person's reads, including writes this
  * transaction made) and, deployment-wide, no live row in any organization.
- * Without that check's grant (1494; a database before it) only a complete
+ * Without that check's grant (1499; a database before it) only a complete
  * read of every organization of the person may decide; otherwise nothing is
  * unused.
  */

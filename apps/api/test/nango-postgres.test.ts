@@ -1087,7 +1087,7 @@ describe("Nango connections in PostgreSQL", () => {
       nango.remote.findIndex((entry) => entry.connectionId === "nl-only"),
       1,
     );
-    // Without the deployment-wide listing (withheld until 1494 granted it)
+    // Without the deployment-wide listing (withheld until 1499 granted it)
     // nobody leads the sweep to them.
     try {
       await shared!.admin.unsafe(
@@ -1365,7 +1365,7 @@ describe("Nango connections in PostgreSQL", () => {
     await connect(second, nango, "nsu-2", "suspended@example.com");
     const [firstRow] = await nangoRows(first);
     expect(firstRow).toMatchObject({ nango_connection_id: "nsu-2" });
-    // First as before 1494 granted the deployment-wide check: decided from the
+    // First as before 1499 granted the deployment-wide check: decided from the
     // person's own reads, which cannot see the suspended membership.
     try {
       await shared!.admin.unsafe(

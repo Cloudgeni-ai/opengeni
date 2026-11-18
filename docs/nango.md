@@ -127,7 +127,7 @@ connections; that is not a duplicate.
   state; it opens the one-transaction tenancy inventory window for its own
   query only, since `connections` forces row-level security on its owner
   too). 1482 created it without its runtime grant (the previous release
-  rejects a grant on a definer it does not know) and 1494 grants it. Before
+  rejects a grant on a definer it does not know) and 1499 grants it. Before
   that grant the person's own reads decided, and a membership that was not
   active or an organization that could not be read meant nothing was
   deleted, except for a
@@ -207,7 +207,7 @@ URL, so deployments sharing one Nango environment never sweep each other's):
   Nango's tags and
   `opengeni_private.nango_live_connection_owners_v1` (migration 1487: the
   owner, integration and Nango connection id of every active Nango row;
-  granted to the runtime by 1494), so a person whose only connection is gone
+  granted to the runtime by 1499), so a person whose only connection is gone
   is visited too. Without that grant only people with at least one
   connection this deployment tagged are visited.
 

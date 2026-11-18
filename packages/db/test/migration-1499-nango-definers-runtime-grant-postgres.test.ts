@@ -8,7 +8,7 @@ const signatures = [
   "nango_live_connection_owners_v1(text, text, text, integer)",
 ];
 
-test("1494 grants both Nango definers to every configured role without PUBLIC, and 1495 validates the identity key check", async () => {
+test("1499 grants both Nango definers to every configured role without PUBLIC, and 1500 validates the identity key check", async () => {
   const owned = await acquireOwnerMigratedTestDatabase("nango-definers-grant");
   if (!owned) {
     if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") throw new Error("PostgreSQL is required");
@@ -23,13 +23,13 @@ test("1494 grants both Nango definers to every configured role without PUBLIC, a
       where conname = 'connections_account_identity_key_check'`;
     expect(constraint).toEqual({ validated: true });
     for (let index = 0; index < 2; index++) {
-      const role = `migration_1494_${crypto.randomUUID().replaceAll("-", "")}`;
+      const role = `migration_1499_${crypto.randomUUID().replaceAll("-", "")}`;
       await owned.admin.unsafe(`CREATE ROLE "${role}" NOSUPERUSER NOBYPASSRLS`);
       roles.push(role);
       await recordTestRoleOwner(owned.admin, role);
     }
     const source = await Bun.file(
-      new URL("../drizzle/1494_nango_definers_runtime_grant.sql", import.meta.url),
+      new URL("../drizzle/1499_nango_definers_runtime_grant.sql", import.meta.url),
     ).text();
     expect(source).toStartWith("-- deployment-mode: rolling");
     expect(source).not.toMatch(/\b(DROP|REVOKE)\b/i);

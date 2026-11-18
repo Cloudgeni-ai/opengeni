@@ -87,7 +87,7 @@ describe("migration 1482: Nango connections in use", () => {
       revoked.grant.subjectId,
     );
     const ids = ["in-use-live", "in-use-revoked", "in-use-unknown"];
-    // 1482 created it withheld (1494 grants it): without the grant, no answer.
+    // 1482 created it withheld (1499 grants it): without the grant, no answer.
     await owned.admin.unsafe(
       "REVOKE EXECUTE ON FUNCTION opengeni_private.nango_connections_in_use_v1(text[]) FROM opengeni_app",
     );
