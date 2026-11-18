@@ -1749,6 +1749,9 @@ export type OAuthStartRequest = {
    * Never combined with connectionId. */
   newAccount?: true | undefined;
   ownership?: ConnectionOwnership | undefined;
+  /** The catalog capability this sign-in is for; the callback turns it on
+   * with the new account, so setup finishes even if no page loads afterwards. */
+  capabilityId?: string | undefined;
   oauthClient?:
     | {
         clientId: string;
@@ -2104,6 +2107,11 @@ export type Session = {
   description?: string | null | undefined;
   /** Display-only avatar. Never sent to the model. */
   avatar?: SessionAvatar | null | undefined;
+  /**
+   * The agent this chat was started with; null for an ordinary chat. Fixed at
+   * create. Omitted by older servers.
+   */
+  agentId?: string | null | undefined;
   instructions: string | null;
   /** Immutable normalized prompt-policy role; distinct from membership roles. */
   policyRole: string | null;
@@ -2302,6 +2310,7 @@ export type SessionListEntry = Pick<
   | "titleSource"
   | "description"
   | "avatar"
+  | "agentId"
   | "createdBy"
   | "channelId"
   | "parentSessionId"
@@ -11000,6 +11009,10 @@ export type {
   UpdateBillingAutoTopUpRequest,
   CreateBillingAutoTopUpSetupSessionRequest,
   CreateBillingAutoTopUpSetupSessionResponse,
+  BillingCardVerificationStatus,
+  CreateBillingCardVerificationSessionRequest,
+  CreateBillingCardVerificationSessionResponse,
+  ConfirmBillingCardVerificationRequest,
   CreateSubscriptionCheckoutRequest,
   CreateSubscriptionCheckoutResponse,
   ChangeBillingSubscriptionRequest,

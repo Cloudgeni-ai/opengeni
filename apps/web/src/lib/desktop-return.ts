@@ -4,6 +4,10 @@
  * app, which already shows the finished connection.
  */
 import { openInAppUrl } from "@opengeni/react/app/lib/open-in-app";
+import {
+  mcpOAuthCallbackFailureMessage,
+  oauthCallbackFailureMessage,
+} from "@opengeni/react/app/lib/oauth-callback-messages";
 
 /**
  * The console page the flow meant to return to, or null when the link is
@@ -31,4 +35,39 @@ export function desktopReturnTarget(search: string, origin: string): string | nu
 /** The link that opens `target` in the desktop app. */
 export function desktopReturnAppLink(target: string): string {
   return openInAppUrl(target);
+}
+
+/**
+ * What the browser can say about the sign-in it just finished. Most flows add
+ * their outcome to the return link; a Connect flow that returns to its exact
+ * page adds none, and the app (which watches the connection itself) shows the
+ * result. Either way the browser's part is over.
+ */
+export type DesktopReturnOutcome =
+  | { kind: "connected" }
+  | { kind: "failed"; message: string }
+  | { kind: "done" };
+
+export function desktopReturnOutcome(target: string | null): DesktopReturnOutcome {
+  if (!target) return { kind: "done" };
+  let params: URLSearchParams;
+  try {
+    params = new URL(target).searchParams;
+  } catch {
+    return { kind: "done" };
+  }
+  const reason = params.get("reason");
+  const integration = params.get("integration_oauth");
+  if (integration === "success") return { kind: "connected" };
+  if (integration === "error")
+    return { kind: "failed", message: mcpOAuthCallbackFailureMessage(params.get("stage"), reason) };
+  for (const key of ["social_oauth", "github_personal_oauth", "fiken"]) {
+    const value = params.get(key);
+    if (value === "success" || value === "connected") return { kind: "connected" };
+    if (value === "error" || value === "failed")
+      return { kind: "failed", message: oauthCallbackFailureMessage(reason) };
+  }
+  if (params.get("google_drive") === "error")
+    return { kind: "failed", message: oauthCallbackFailureMessage(reason) };
+  return { kind: "done" };
 }

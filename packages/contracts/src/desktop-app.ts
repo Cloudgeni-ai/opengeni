@@ -48,3 +48,46 @@ export function desktopAppReturnPath(returnPath: string): string {
   if (new URL(returnPath, base).pathname === DESKTOP_APP_RETURN_PATH) return returnPath;
   return `${DESKTOP_APP_RETURN_PATH}?${new URLSearchParams({ url: returnPath }).toString()}`;
 }
+
+/**
+ * The console page a sign-in started in the desktop app goes through when
+ * the person's browser is not signed in to Opengeni. Such a sign-in may only
+ * finish in a browser signed in as the person who started it, so instead of
+ * failing, the browser signs in here first and then finishes it.
+ */
+export const OAUTH_SIGN_IN_TO_FINISH_PATH = "/connect-continue";
+
+/**
+ * The server steps a browser may resume after signing in: the OAuth
+ * callbacks and the Nango connect page. Nothing else, so the page can't be
+ * used to send someone elsewhere.
+ */
+export const OAUTH_SIGN_IN_TO_FINISH_STEPS = [
+  "/v1/integrations/oauth/callback",
+  "/v1/integrations/provider-oauth/callback",
+  "/v1/integrations/nango/connect",
+] as const;
+
+/** The console path that signs the browser in and then resumes `step` (a full URL or a path). */
+export function oauthSignInToFinishPath(step: string): string {
+  const url = new URL(step, "https://console.invalid");
+  return `${OAUTH_SIGN_IN_TO_FINISH_PATH}?${new URLSearchParams({ next: `${url.pathname}${url.search}` }).toString()}`;
+}
+
+/**
+ * The step a `/connect-continue` page resumes, as a URL on `origin`, or null
+ * when the link names anything but one of the allowed steps.
+ */
+export function oauthSignInToFinishTarget(search: string, origin: string): string | null {
+  const raw = new URLSearchParams(search).get("next");
+  if (!raw || !raw.startsWith("/") || raw.startsWith("//") || raw.includes("\\")) return null;
+  let target: URL;
+  try {
+    target = new URL(raw, origin);
+  } catch {
+    return null;
+  }
+  if (target.origin !== new URL(origin).origin) return null;
+  if (!(OAUTH_SIGN_IN_TO_FINISH_STEPS as readonly string[]).includes(target.pathname)) return null;
+  return target.toString();
+}

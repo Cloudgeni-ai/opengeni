@@ -1503,9 +1503,15 @@ function toDocxTable(
   const columnWidths =
     block.style.columnWidthsPt ??
     Array.from({ length: columnCount }, () => totalWidth / columnCount);
-  const columnWidthsTwip = columnWidths.map(ptToTwip);
-  // Derive tblW from the exact serialized grid. Rounding the model width and
-  // each grid column independently can otherwise make our own DOCX fail the
+  // The page and its margins are serialized in whole twips, and the grid must
+  // fit that serialized text width. Rounding each column can add up to half a
+  // twip per column and push a full-width grid past it (three columns on A4:
+  // 3 x 3009 > 9026), so the importer would reject our own file.
+  const columnWidthsTwip = fitTwipsWithin(
+    columnWidths,
+    ptToTwip(page.widthPt) - ptToTwip(page.marginLeftPt) - ptToTwip(page.marginRightPt),
+  );
+  // Derive tblW from the exact serialized grid so our own DOCX passes the
   // strict fixed-grid consistency check on import.
   const tableWidthTwip = columnWidthsTwip.reduce((sum, width) => sum + width, 0);
   const padding = ptToTwip(block.style.cellPaddingPt ?? 6);
@@ -2239,6 +2245,26 @@ function assertRepresentableCommentInitials(author: string, value: string | unde
 
 function ptToTwip(value: number): number {
   return Math.round(value * 20);
+}
+
+/**
+ * Rounds each width to whole twips, then, only if the rounded total exceeds
+ * `limitTwip`, takes the excess back one twip at a time from the widths that
+ * rounding enlarged the most. Model widths are at least 1pt (20 twips) and fit
+ * the text width within 0.01pt, so the excess is only a few twips.
+ */
+function fitTwipsWithin(widthsPt: readonly number[], limitTwip: number): number[] {
+  const widthsTwip = widthsPt.map(ptToTwip);
+  const excess = widthsTwip.reduce((sum, width) => sum + width, 0) - limitTwip;
+  if (excess <= 0) return widthsTwip;
+  const byRoundingGain = widthsTwip
+    .map((width, index) => ({ index, gain: width - widthsPt[index]! * 20 }))
+    .sort((left, right) => right.gain - left.gain || left.index - right.index);
+  for (let step = 0; step < excess; step += 1) {
+    const { index } = byRoundingGain[step % byRoundingGain.length]!;
+    widthsTwip[index] = widthsTwip[index]! - 1;
+  }
+  return widthsTwip;
 }
 
 function normalizeHex(value: string): string {

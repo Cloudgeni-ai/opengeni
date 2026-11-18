@@ -1,5 +1,85 @@
 # @opengeni/worker-bundle
 
+## 6.29.2
+
+### Patch Changes
+
+- 2c58048: Per-tool approvals work for connectors served through Nango, the same as for native ones.
+
+  - A connector's approvals page resolves the connector exactly as a session does, including the integration backend switch. A Gmail, Calendar or Drive account connected through Nango is the account its approvals are managed for, with the same tools and defaults (Drive: the tools its bridge serves), instead of the page asking to connect an account. Choices are stored for that account and apply to its calls.
+  - Choices belong to the provider account, not the backend. When the same person connects the same account under the other backend, its connection starts with the choices already made, and every later change is mirrored to both. Switching a connector between native and Nango no longer resets "Ask first" or "Always allow".
+  - Drive through Nango lists the tools its REST bridge serves.
+  - A Personal workspace carries a connector its owner connected through Nango in another workspace, as it does for a native account.
+  - Site tools and the workspace tool gateway read a personal account's choices from the workspace it was connected from, as an agent turn does, so a choice applies wherever the account is used.
+  - Gmail approvals through Nango get the same review titles as native Gmail.
+
+- becc8b1: A turn no longer wedges when a model response with no tool calls (for example one a Steer cut short) arrives while the worker is still busy recording the request's start. The worker kept the response's streamed items only while it waited for tool calls, so when it read the response afterwards it never learned the items were complete. The response then never settled, and the next model step (which hands the turn over to the Steer) waited on it until the attempt was cancelled. The items now wait for the response that owns them.
+- Updated dependencies [2c58048]
+  - @opengeni/core@6.29.2
+  - @opengeni/db@6.29.2
+  - @opengeni/runtime@6.29.2
+  - @opengeni/documents@6.29.2
+  - @opengeni/events@6.29.2
+  - @opengeni/agent-proto@6.29.2
+  - @opengeni/capabilities@6.29.2
+  - @opengeni/codemode@6.29.2
+  - @opengeni/codex@6.29.2
+  - @opengeni/config@6.29.2
+  - @opengeni/contracts@6.29.2
+  - @opengeni/decisions@6.29.2
+  - @opengeni/github@6.29.2
+  - @opengeni/interaction@6.29.2
+  - @opengeni/jev@6.29.2
+  - @opengeni/network@6.29.2
+  - @opengeni/observability@6.29.2
+  - @opengeni/sdk@6.29.2
+  - @opengeni/storage@6.29.2
+  - @opengeni/subscriptions@6.29.2
+  - @opengeni/tool-gateway@6.29.2
+  - @opengeni/vaults@6.29.2
+  - @opengeni/vaults-bitwarden@6.29.2
+  - @opengeni/vaults-keeper@6.29.2
+  - @opengeni/vaults-onepassword@6.29.2
+  - @opengeni/vaults-protonpass@6.29.2
+  - @opengeni/xai-subscription@6.29.2
+
+## 6.29.1
+
+### Patch Changes
+
+- Updated dependencies [5b05b73]
+- Updated dependencies [b23ec3f]
+- Updated dependencies [a641523]
+- Updated dependencies [4884618]
+- Updated dependencies [825e714]
+  - @opengeni/contracts@6.29.1
+  - @opengeni/sdk@6.29.1
+  - @opengeni/core@6.29.1
+  - @opengeni/db@6.29.1
+  - @opengeni/config@6.29.1
+  - @opengeni/capabilities@6.29.1
+  - @opengeni/codemode@6.29.1
+  - @opengeni/codex@6.29.1
+  - @opengeni/decisions@6.29.1
+  - @opengeni/documents@6.29.1
+  - @opengeni/events@6.29.1
+  - @opengeni/github@6.29.1
+  - @opengeni/interaction@6.29.1
+  - @opengeni/observability@6.29.1
+  - @opengeni/runtime@6.29.1
+  - @opengeni/storage@6.29.1
+  - @opengeni/tool-gateway@6.29.1
+  - @opengeni/vaults@6.29.1
+  - @opengeni/vaults-bitwarden@6.29.1
+  - @opengeni/vaults-keeper@6.29.1
+  - @opengeni/vaults-onepassword@6.29.1
+  - @opengeni/vaults-protonpass@6.29.1
+  - @opengeni/jev@6.29.1
+  - @opengeni/agent-proto@6.29.1
+  - @opengeni/network@6.29.1
+  - @opengeni/subscriptions@6.29.1
+  - @opengeni/xai-subscription@6.29.1
+
 ## 6.29.0
 
 ### Patch Changes

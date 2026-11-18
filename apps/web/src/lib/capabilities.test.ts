@@ -34,6 +34,7 @@ import {
   oauthConnectionRef,
   catalogConnectionAccountSelection,
   oauthResumeAction,
+  oauthServerFinish,
   preferredSocialConnection,
   registryResultsForQuery,
   resolveSheetItem,
@@ -663,6 +664,29 @@ describe("oauthResumeAction", () => {
 
   test("a fresh connect of a disabled item enables it", () => {
     expect(oauthResumeAction(item({ enabled: false }), "conn-1")).toBe("enable");
+  });
+
+  test("an enabled all-eligible workspace binding already includes a new account", () => {
+    // Re-enabling would be refused for a member (create-only) and changes nothing.
+    const enabled = item({
+      enabled: true,
+      connectionRef: {
+        providerDomain: "linear.app",
+        kind: "oauth2",
+        subjectScope: "workspace",
+        accountSelection: "all_eligible",
+      },
+    });
+    expect(oauthResumeAction(enabled, "conn-new")).toBe("reconnect");
+  });
+});
+
+describe("oauthServerFinish", () => {
+  test("reads only the callback's known outcomes", () => {
+    expect(oauthServerFinish("enabled")).toBe("enabled");
+    expect(oauthServerFinish("on")).toBe("on");
+    expect(oauthServerFinish("yes")).toBeNull();
+    expect(oauthServerFinish(null)).toBeNull();
   });
 });
 

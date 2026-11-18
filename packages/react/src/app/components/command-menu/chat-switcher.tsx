@@ -17,7 +17,7 @@ import type { ChatSwitcherState } from "../../lib/actions/chat-switcher";
 import type { ChordPlatform } from "../../lib/actions/chords";
 import type { WorkspaceChoice } from "../../lib/actions/registry";
 import { cn } from "../../lib/utils";
-import { SessionAvatar } from "../session/session-avatar";
+import { ChatAvatar } from "../session/chat-avatar";
 import { formatRelativeTime } from "../../../ui/relative-time";
 import { currentChatStatus } from "../../lib/actions/chat-status";
 import { ChatStatusMarks, useChatStatusRefresh } from "./chat-status";
@@ -137,20 +137,16 @@ export default function ChatSwitcher(props: {
                   selected ? "bg-hover text-fg" : null,
                 )}
               >
-                {record?.avatar ? (
-                  <SessionAvatar
-                    avatar={record.avatar}
-                    name={record.title}
-                    workspaceId={record.workspaceId}
-                    seed={record.id}
-                    size="xs"
-                  />
-                ) : (
-                  <Icon
-                    aria-hidden="true"
-                    className={cn("size-4 shrink-0", selected ? "text-fg" : "text-fg-muted")}
-                  />
-                )}
+                <ChatAvatar
+                  chat={record ?? { id, workspaceId: props.workspaceId }}
+                  name={title}
+                  fallback={
+                    <Icon
+                      aria-hidden="true"
+                      className={cn("size-4 shrink-0", selected ? "text-fg" : "text-fg-muted")}
+                    />
+                  }
+                />
                 {parentTitle ? (
                   <ChatTitleInParent title={title} parentTitle={parentTitle} />
                 ) : (

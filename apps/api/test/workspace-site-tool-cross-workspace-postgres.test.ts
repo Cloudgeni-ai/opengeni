@@ -199,9 +199,11 @@ async function fixture() {
         subjectId,
         authorityId,
       }),
-    setPolicy: (policy: "allow" | "ask") =>
+    // A personal login's choices are kept in the workspace it was connected
+    // from and follow it here, as they do for an agent turn.
+    setPolicy: (policy: "allow" | "ask", where: "home" | "here" = "home") =>
       updateConnectorToolPermissionPolicies(db, {
-        ...grant,
+        ...(where === "home" ? homeGrant : grant),
         connectionId: connection.id,
         serverId: "tracker",
         toolNames: ["create_item"],
@@ -239,6 +241,8 @@ describe("Site tools on an account turned on from another workspace", () => {
 
       await f.turnOn();
       await f.setPolicy("ask");
+      // A copy left in this workspace is ignored, as it is for a turn.
+      await f.setPolicy("allow", "here");
       expect(await readiness()).toMatchObject({
         state: "confirm",
         runsAs: { account: "ada@example.com" },

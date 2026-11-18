@@ -24,6 +24,13 @@ import { freeModelConnectRemedy, freeModelDailyLimitReason } from "../../lib/fre
 import { isCodexUsageLimitFailure } from "../../lib/unavailable-session-model";
 import { ContinueAtResetSwitch, type CodexUsageChoice } from "./codex-usage-notice";
 import { FailedSessionActions } from "./failed-session-actions";
+import { AddCardButton } from "../add-card-button";
+import { useOptionalAppContext } from "../../app-context";
+import {
+  CARD_VERIFIED_EVENT,
+  SANDBOX_CARD_REQUIRED_CODE,
+  takeCardVerified,
+} from "../../lib/card-verification";
 import {
   SandboxRecoveryActions,
   type SandboxRecoveryActionsProps,
@@ -125,6 +132,16 @@ export function FailedSessionBanner({
     machineAccess,
   } = failedSessionCopy(failure, billingFailure, modelChanged, chooseModel, creditGap, stopRefusal);
   const machineAllow = machineAccess && !structuralFailure ? allowMachine : undefined;
+  // A Free organization without a verified card: Add a card is the one
+  // action, and the chat continues once the card is added.
+  const cardRequired =
+    failure.failureCode === SANDBOX_CARD_REQUIRED_CODE && !structuralFailure && !billingFailure;
+  const appContext = useOptionalAppContext();
+  const workspaces = appContext?.workspaces ?? [];
+  const cardAccountId = cardRequired
+    ? (workspaces.find((workspace) => workspace.id === workspaceId)?.accountId ?? null)
+    : null;
+  useContinueAfterCard(cardRequired, actions?.onRetry);
   // Offer the switch until the composer selects a model that can run. An
   // own-key or API stop has one fix, never another model.
   const switchTo =
@@ -175,6 +192,8 @@ export function FailedSessionBanner({
   // once the limit resets. Another model from the picker continues at once.
   const retryActions = machineAllow ? (
     <AllowMachineButton action={machineAllow} />
+  ) : cardRequired ? (
+    <AddCardButton client={appContext?.client} accountId={cardAccountId} />
   ) : codexUsageFailure ? (
     <>
       <ContinueAtResetSwitch {...codexUsageFailure} />
@@ -303,6 +322,24 @@ export function FailedSessionBanner({
       </div>
     </div>
   );
+}
+
+/** Retries the refused turn once, right after a card is verified on return from checkout. */
+function useContinueAfterCard(
+  cardRequired: boolean,
+  onRetry: (() => Promise<boolean>) | undefined,
+): void {
+  const retry = useRef(onRetry);
+  retry.current = onRetry;
+  useEffect(() => {
+    if (!cardRequired) return;
+    const continueIfVerified = () => {
+      if (retry.current && takeCardVerified()) void retry.current();
+    };
+    continueIfVerified();
+    window.addEventListener(CARD_VERIFIED_EVENT, continueIfVerified);
+    return () => window.removeEventListener(CARD_VERIFIED_EVENT, continueIfVerified);
+  }, [cardRequired]);
 }
 
 /** The banner's one unblocking action is the primary; next to Connect it is the outline. */

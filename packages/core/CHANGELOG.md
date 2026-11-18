@@ -1,5 +1,60 @@
 # @opengeni/core
 
+## 6.29.2
+
+### Patch Changes
+
+- 2c58048: Per-tool approvals work for connectors served through Nango, the same as for native ones.
+
+  - A connector's approvals page resolves the connector exactly as a session does, including the integration backend switch. A Gmail, Calendar or Drive account connected through Nango is the account its approvals are managed for, with the same tools and defaults (Drive: the tools its bridge serves), instead of the page asking to connect an account. Choices are stored for that account and apply to its calls.
+  - Choices belong to the provider account, not the backend. When the same person connects the same account under the other backend, its connection starts with the choices already made, and every later change is mirrored to both. Switching a connector between native and Nango no longer resets "Ask first" or "Always allow".
+  - Drive through Nango lists the tools its REST bridge serves.
+  - A Personal workspace carries a connector its owner connected through Nango in another workspace, as it does for a native account.
+  - Site tools and the workspace tool gateway read a personal account's choices from the workspace it was connected from, as an agent turn does, so a choice applies wherever the account is used.
+  - Gmail approvals through Nango get the same review titles as native Gmail.
+
+- Updated dependencies [2c58048]
+  - @opengeni/db@6.29.2
+  - @opengeni/runtime@6.29.2
+  - @opengeni/documents@6.29.2
+  - @opengeni/events@6.29.2
+  - @opengeni/capabilities@6.29.2
+  - @opengeni/codex@6.29.2
+  - @opengeni/config@6.29.2
+  - @opengeni/contracts@6.29.2
+  - @opengeni/network@6.29.2
+  - @opengeni/observability@6.29.2
+  - @opengeni/storage@6.29.2
+  - @opengeni/tool-gateway@6.29.2
+  - @opengeni/vaults@6.29.2
+  - @opengeni/xai-subscription@6.29.2
+
+## 6.29.1
+
+### Patch Changes
+
+- 5b05b73: Connecting an integration from the catalog now finishes on the server. `OAuthStartRequest` takes an optional `capabilityId`; when the provider sign-in (MCP OAuth or Nango connect) completes, the callback turns that capability on with the new account as the person who started it, with the same permission rules as enabling it, and reports `capability=enabled|on` on the return. Closing the browser tab, or a desktop hand-back the browser blocks, no longer leaves the connection saved but unused. The console's return handling only shows the result and never re-enables something already on, so members are no longer refused when the capability was turned on meanwhile.
+- 825e714: Chats started for a person from Slack, Teams, a schedule or the API now freeze that person's name like chats started in the app, and the sidebar resolves older unlabeled chats to the person's name instead of showing an id fragment. Session list entries carry `agentId`, so agent chats show the agent's icon in the sidebar and chat switcher. Agents' Slack installs report `postsAsAgent`; when the Slack app lacks `chat:write.customize`, the Slack integration page and the agent's Slack row say replies show as Opengeni, with one Update action.
+- Updated dependencies [5b05b73]
+- Updated dependencies [b23ec3f]
+- Updated dependencies [a641523]
+- Updated dependencies [4884618]
+- Updated dependencies [825e714]
+  - @opengeni/contracts@6.29.1
+  - @opengeni/db@6.29.1
+  - @opengeni/config@6.29.1
+  - @opengeni/capabilities@6.29.1
+  - @opengeni/codex@6.29.1
+  - @opengeni/documents@6.29.1
+  - @opengeni/events@6.29.1
+  - @opengeni/observability@6.29.1
+  - @opengeni/runtime@6.29.1
+  - @opengeni/storage@6.29.1
+  - @opengeni/tool-gateway@6.29.1
+  - @opengeni/vaults@6.29.1
+  - @opengeni/network@6.29.1
+  - @opengeni/xai-subscription@6.29.1
+
 ## 6.29.0
 
 ### Patch Changes

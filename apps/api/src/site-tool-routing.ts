@@ -46,6 +46,8 @@ export type SiteToolAccount = {
   connectionId: string;
   /** The connection is shared with the workspace rather than the viewer's own. */
   shared?: boolean;
+  /** Where a personal login's tool choices are kept: the workspace it was connected from. */
+  choicesWorkspaceId?: string;
   /** The access the connection was granted, when it records it. */
   grantedScopes?: readonly string[];
   /** Its access is fixed by the service that holds it; asking for more changes nothing. */
@@ -216,6 +218,9 @@ export async function readSiteToolAccountInventory(
         canonicalServerId: binding.canonicalServerId,
         connectionId: binding.connectionId,
         shared: binding.subjectScope === "workspace",
+        ...(binding.subjectScope === "subject"
+          ? { choicesWorkspaceId: binding.originWorkspaceId }
+          : {}),
         ...(connection ? { grantedScopes: connection.grantedScopes } : {}),
         // A Nango-held account keeps the scopes of the managed app.
         ...(connection?.metadata.integrationBackend === "nango" ? { fixedAccess: true } : {}),
@@ -337,6 +342,7 @@ export function routeSiteTool(
         canonicalServerId: own.canonicalServerId,
         connectionId: own.connectionId,
         ...(own.shared === undefined ? {} : { shared: own.shared }),
+        ...(own.choicesWorkspaceId ? { choicesWorkspaceId: own.choicesWorkspaceId } : {}),
       },
     };
   }

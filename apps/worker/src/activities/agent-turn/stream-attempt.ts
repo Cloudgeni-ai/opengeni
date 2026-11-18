@@ -1118,7 +1118,8 @@ export async function runTurnStreamAttempt(
     >;
     // Assigned from callbacks: keep the declared type, not a narrowed `null`.
     let openResponseItems = null as CollectedResponseItems | null;
-    // The items the SDK last reported streamed, until their calls are durable.
+    // The items the SDK reported streamed for a response the consumer has not
+    // claimed yet. The claim takes them, whether or not the response had calls.
     let streamedResponseItems = null as readonly unknown[] | null;
     const closeResponseItems = () => {
       openResponseItems?.close();
@@ -1362,19 +1363,20 @@ export async function runTurnStreamAttempt(
           // (see openResponseItems below).
           beforeToolExecution: async (items) => {
             // The producer may get here before the consumer has read the
-            // response's end; a response collected later picks these up.
-            streamedResponseItems = items;
-            openResponseItems?.streamed(items);
-            try {
-              await modelCallAdmission.awaitToolCallsDurable(
-                items.flatMap((item) => {
-                  const call = pendingToolCallFromSdkEvent({ type: "run_item_stream_event", item });
-                  return call ? [call.callId] : [];
-                }),
-              );
-            } finally {
-              if (streamedResponseItems === items) streamedResponseItems = null;
-            }
+            // response's end (the consumer lags while it awaits a write). The
+            // claim then picks these items up. Keep them for it even when the
+            // response has no calls to wait for: its items only close when
+            // they are known, and the next model entry waits for that.
+            // An open bundle is this response's: the previous one closed
+            // before this response's request was admitted.
+            if (openResponseItems?.isOpen()) openResponseItems.streamed(items);
+            else streamedResponseItems = items;
+            await modelCallAdmission.awaitToolCallsDurable(
+              items.flatMap((item) => {
+                const call = pendingToolCallFromSdkEvent({ type: "run_item_stream_event", item });
+                return call ? [call.callId] : [];
+              }),
+            );
           },
           onContentlessModelResponse: () => {
             contentlessResponseHandover = true;
@@ -1794,6 +1796,9 @@ export async function runTurnStreamAttempt(
           onClaimed: () => {
             currentToolBatchCallIds = new Set<string>();
             currentToolBatchCompletedCallIds = new Set<string>();
+            // Items streamed before this claim belong to this response.
+            const streamedBeforeClaim = streamedResponseItems;
+            streamedResponseItems = null;
             if (!collectsResponseItems) return;
             closeResponseItems();
             claimedResponseItems = createResponseItemBundle<
@@ -1801,7 +1806,7 @@ export async function runTurnStreamAttempt(
               SessionEventMutation<"event">
             >();
             openResponseItems = claimedResponseItems;
-            if (streamedResponseItems) claimedResponseItems.streamed(streamedResponseItems);
+            if (streamedBeforeClaim) claimedResponseItems.streamed(streamedBeforeClaim);
             // Start writing the response's streamed text now; its items
             // follow it in the log.
             void eventing.batcher?.flush().catch(() => undefined);

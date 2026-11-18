@@ -2316,14 +2316,14 @@ function validateTableStyle(
     "document table style",
   );
   const usableWidth = page.widthPt - page.marginLeftPt - page.marginRightPt;
-  if (style.widthPt !== undefined) finiteInRange(style.widthPt, 1, usableWidth, "table width");
+  if (style.widthPt !== undefined) fitsUsableWidth(style.widthPt, usableWidth, "table width");
   if (style.columnWidthsPt !== undefined) {
     if (style.columnWidthsPt.length !== columnCount)
       throw new Error("Table columnWidthsPt must match the table column count");
     for (const width of style.columnWidthsPt)
-      finiteInRange(width, 1, usableWidth, "table column width");
+      fitsUsableWidth(width, usableWidth, "table column width");
     const sum = style.columnWidthsPt.reduce((total, width) => total + width, 0);
-    if (sum > usableWidth + 0.01)
+    if (sum > usableWidth + TABLE_WIDTH_TOLERANCE_PT)
       throw new Error("Table column widths exceed the usable page width");
     if (style.widthPt !== undefined && Math.abs(sum - style.widthPt) > 0.01) {
       throw new Error("Table widthPt must exactly equal the sum of columnWidthsPt");
@@ -2449,6 +2449,16 @@ function normalizeHex(value: string): string {
 function finiteInRange(value: number, min: number, max: number, label: string): void {
   if (!Number.isFinite(value) || value < min || value > max)
     throw new Error(`${label} must be between ${min} and ${max}`);
+}
+/**
+ * Usable width is a floating-point difference (A4 is 595.3 - 72 - 72 =
+ * 451.29999999999995), so a table exactly as wide as the text area must
+ * compare within the same tolerance as the column-width sum.
+ */
+const TABLE_WIDTH_TOLERANCE_PT = 0.01;
+function fitsUsableWidth(value: number, usableWidth: number, label: string): void {
+  if (!Number.isFinite(value) || value < 1 || value > usableWidth + TABLE_WIDTH_TOLERANCE_PT)
+    throw new Error(`${label} must be between 1 and ${usableWidth}`);
 }
 function ensureCapacity(value: number, max: number, label: string): void {
   if (!Number.isSafeInteger(value) || value > max) throw new Error(`${label} exceeds limit ${max}`);

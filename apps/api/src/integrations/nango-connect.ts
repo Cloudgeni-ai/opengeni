@@ -22,6 +22,7 @@ import {
   OAuthStartResponse,
   type ConnectionMetadata,
   type ConnectionOwnership,
+  oauthSignInToFinishPath,
 } from "@opengeni/contracts";
 import {
   connectSetupPermission,
@@ -37,6 +38,7 @@ import {
   nangoAccountName,
   shareNangoConnection,
   turnOnOwnLoginHere,
+  carryConnectorToolChoices,
 } from "@opengeni/core";
 import {
   consumeIntegrationOAuthStateNonce,
@@ -72,9 +74,11 @@ import {
   workspaceIntegrationsPath,
   type OAuthStartContext,
 } from "./oauth-client";
+import { finishCapabilityAfterConnect } from "./connect-capability-finish";
 import {
   OAUTH_BROWSER_MISMATCH_MESSAGE,
   oauthCallbackBrowserAccepted,
+  oauthCallbackNeedsSignIn,
   oauthStateBrowserBinding,
   type OAuthCallbackBrowser,
   type OAuthStateBrowserBinding,
@@ -100,6 +104,8 @@ type NangoDeps = {
   fetchImpl?: typeof fetch;
   /** The effective backend switch; defaults to the cached deployment setting. */
   nangoBackends?: () => Promise<ReadonlyMap<string, EffectiveNangoIntegration>>;
+  /** Stores a custom server's logo when the completion turns it on. */
+  mcpServerLogoStorage?: Parameters<typeof finishCapabilityAfterConnect>[0]["mcpServerLogoStorage"];
 };
 
 async function backendsFor(deps: NangoDeps) {
@@ -171,6 +177,8 @@ export type NangoConnectState = {
   returnPath: string;
   returnUrl?: string;
   connectAttemptId?: string;
+  /** The catalog capability the finish turns on (connect-capability-finish.ts). */
+  capabilityId?: string;
   encryptedExternalContinuation?: string;
   nonce: string;
   iat: number;
@@ -213,6 +221,7 @@ export function readNangoConnectState(settings: Settings, token: string): NangoC
     ...(text(payload.encryptedExternalContinuation, 16384)
       ? { encryptedExternalContinuation: text(payload.encryptedExternalContinuation, 16384)! }
       : {}),
+    ...(text(payload.capabilityId, 512) ? { capabilityId: text(payload.capabilityId, 512)! } : {}),
     nonce: required("nonce"),
     iat: typeof payload.iat === "number" ? payload.iat : 0,
     ...(binding ?? {}),
@@ -293,6 +302,15 @@ export async function startNangoConnect(
     returnPath,
     ...(context.payload.returnUrl ? { returnUrl: context.payload.returnUrl } : {}),
     ...(context.connectAttemptId ? { connectAttemptId: context.connectAttemptId } : {}),
+    // Only a person's own sign-in (a browser-proven start) names a capability
+    // for the callback to turn on: the callback acts with that person's grant,
+    // which a narrower token or API key that started it never held.
+    ...(context.payload.capabilityId &&
+    context.browserBinding.browserProof !== "none" &&
+    !externalContinuation &&
+    !context.connectAttemptId
+      ? { capabilityId: context.payload.capabilityId }
+      : {}),
     ...(externalContinuation
       ? {
           encryptedExternalContinuation: encryptEnvironmentValue(
@@ -418,8 +436,21 @@ export async function nangoConnectPage(
 ): Promise<Response> {
   if (!input.state) throw new HTTPException(400, { message: "missing connection state" });
   const state = readNangoConnectState(deps.settings, input.state);
-  if (!oauthCallbackBrowserAccepted(state, input.browser))
+  if (!oauthCallbackBrowserAccepted(state, input.browser)) {
+    // Started in the app, opened in a browser signed in to no one: sign in
+    // there first, then this page opens again as that person.
+    if (oauthCallbackNeedsSignIn(state, input.browser)) {
+      const webBase = (
+        deps.settings.webBaseUrl ??
+        integrationBaseUrl(deps.settings.publicBaseUrl, input.requestUrl)
+      ).replace(/\/+$/, "");
+      return new Response(null, {
+        status: 302,
+        headers: { Location: `${webBase}${oauthSignInToFinishPath(input.requestUrl)}` },
+      });
+    }
     throw new HTTPException(403, { message: OAUTH_BROWSER_MISMATCH_MESSAGE });
+  }
   // Tags are minted only for an owner the start verified; the webhook relies on it.
   if (!personalOwnerStateAccepted(state))
     throw new HTTPException(422, { message: "This account cannot own a personal connection" });
@@ -813,9 +844,20 @@ export async function completeNangoConnect(
     throw new HTTPException(422, { message: "The account could not be verified. Connect again." });
   }
   const grantedScopes = granted.scopes;
-  const success = (connection: ConnectionMetadata): NangoConnectCompletion => {
+  const success = async (connection: ConnectionMetadata): Promise<NangoConnectCompletion> => {
     if (state.returnUrl && (state.connectAttemptId || state.encryptedExternalContinuation))
       return { status: "complete", redirectTo: state.returnUrl, exactReturn: true };
+    // Turn on the capability this connect was for, so setup is done even if
+    // no page loads afterwards (connect-capability-finish.ts).
+    const capability =
+      state.capabilityId && state.browserProof !== "none" && !state.encryptedExternalContinuation
+        ? await finishCapabilityAfterConnect(deps, {
+            owner: state,
+            capabilityId: state.capabilityId,
+            ownership: state.ownership,
+            connection,
+          })
+        : null;
     return {
       status: "complete",
       exactReturn: false,
@@ -825,6 +867,7 @@ export async function completeNangoConnect(
           connectionId: connection.id,
           providerDomain: connection.providerDomain,
           ownership: state.ownership,
+          ...(capability ? { capability } : {}),
         }),
         false,
       ),
@@ -939,7 +982,7 @@ export async function completeNangoConnect(
   const result = outcome as Awaited<ReturnType<typeof persistNangoConnection>> | null;
   if (!result) throw new HTTPException(409, { message: "connection changed; try again" });
   await afterNangoConnectionStored(deps, state, integration, result, match.connectionId);
-  return success(result.connection);
+  return await success(result.connection);
 }
 
 async function afterNangoConnectionStored(
@@ -966,6 +1009,14 @@ async function afterNangoConnectionStored(
       kind: result.created ? "connection_created" : "connection_reconnected",
     });
   const knownWorkspaceIds = [owner.workspaceId, result.connection.workspaceId];
+  // The same account connected under the native backend keeps its tool
+  // choices here. Best effort: opening its approvals carries them too.
+  await carryConnectorToolChoices(deps.db, result.connection).catch((error: unknown) =>
+    console.warn("[nango] carrying tool choices to a connection failed", {
+      connectionId: result.connection.id,
+      error: error instanceof Error ? error.message : String(error),
+    }),
+  );
   // The same account's rows in the person's other organizations now stand
   // for this connection too, and the ones they stood for are deleted. A
   // failure here is repaired by the sweep.

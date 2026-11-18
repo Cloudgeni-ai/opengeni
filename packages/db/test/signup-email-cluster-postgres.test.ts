@@ -8,6 +8,7 @@ import {
   createAdditionalManagedOrganizationWithSignupNetwork,
   createDb,
   evaluateSignupNetworkAccounts,
+  getSpendableCreditBalance,
   listSignupNetworkHolds,
   readSignupNetworkVelocitySettings,
   releaseSignupNetworkHolds,
@@ -15,6 +16,7 @@ import {
   resolveSandboxComputeStanding,
   setSignupNetworkVelocitySettings,
   type DbClient,
+  type SignupMailSignal,
   type SignupNetworkSource,
   type SignupNetworkVelocityChanges,
 } from "../src";
@@ -77,6 +79,7 @@ function network(name: string): SignupNetworkSource {
 async function owner(
   domain: string,
   signupNetwork: SignupNetworkSource | null = null,
+  signupMailSignal: SignupMailSignal | null = null,
 ): Promise<Owner> {
   const userId = await user(domain);
   const { setup, evaluateAccountIds } = await completeSelfServiceOrganizationSetupWithSignupNetwork(
@@ -90,13 +93,17 @@ async function owner(
       trialCreditsEnabled: true,
       trialCreditModelIds: ["model-a"],
       signupNetwork,
+      signupMailSignal,
     },
   );
   await evaluate(evaluateAccountIds);
   return { accountId: setup.organizationId, userId, evaluateAccountIds };
 }
 
-async function additional(userId: string): Promise<Owner> {
+async function additional(
+  userId: string,
+  signupMailSignal: SignupMailSignal | null = null,
+): Promise<Owner> {
   const { organization, evaluateAccountIds } =
     await createAdditionalManagedOrganizationWithSignupNetwork(client!.db, {
       subjectId: `user:${userId}`,
@@ -105,6 +112,7 @@ async function additional(userId: string): Promise<Owner> {
       workspaceName: "Team",
       operationId: crypto.randomUUID(),
       signupNetwork: null,
+      signupMailSignal,
     });
   await evaluate(evaluateAccountIds);
   return { accountId: organization.organization.id, userId, evaluateAccountIds };
@@ -155,16 +163,36 @@ const ONLY_DOMAIN: SignupNetworkVelocityChanges = {
   emailDomainMode: "enforce",
   burstMode: "off",
   deniedDomainMode: "off",
+  disposableMailMode: "off",
+  slowDomainMode: "off",
 };
 const ONLY_BURST: SignupNetworkVelocityChanges = {
   emailDomainMode: "off",
   burstMode: "enforce",
   deniedDomainMode: "off",
+  disposableMailMode: "off",
+  slowDomainMode: "off",
 };
 const ONLY_DENIED: SignupNetworkVelocityChanges = {
   emailDomainMode: "off",
   burstMode: "off",
   deniedDomainMode: "enforce",
+  disposableMailMode: "off",
+  slowDomainMode: "off",
+};
+const ONLY_DISPOSABLE: SignupNetworkVelocityChanges = {
+  emailDomainMode: "off",
+  burstMode: "off",
+  deniedDomainMode: "off",
+  disposableMailMode: "enforce",
+  slowDomainMode: "off",
+};
+const ONLY_SLOW: SignupNetworkVelocityChanges = {
+  emailDomainMode: "off",
+  burstMode: "off",
+  deniedDomainMode: "off",
+  disposableMailMode: "off",
+  slowDomainMode: "enforce",
 };
 const DEFAULTS: SignupNetworkVelocityChanges = {
   emailDomainMode: "observe",
@@ -176,6 +204,10 @@ const DEFAULTS: SignupNetworkVelocityChanges = {
   deniedDomainMode: "enforce",
   deniedDomainHoldThreshold: 2,
   deniedDomainLookbackDays: 30,
+  disposableMailMode: "enforce",
+  slowDomainMode: "enforce",
+  slowDomainHoldThreshold: 3,
+  slowDomainWindowHours: 24,
 };
 
 // Tests share one database and run in order.
@@ -259,7 +291,12 @@ test("owners at reserved domains are recorded but never evaluated or counted", a
 
 test("domain leg: observed by default, and when enforced the third owner of one company domain holds the group", async () => {
   if (!shared || !client) return;
-  await configure({ ...DEFAULTS, burstMode: "off", deniedDomainMode: "off" });
+  await configure({
+    ...DEFAULTS,
+    burstMode: "off",
+    deniedDomainMode: "off",
+    slowDomainMode: "off",
+  });
   const observedDomain = `colleagues-${unique()}.com`;
   const colleagues = [
     await owner(observedDomain),
@@ -534,7 +571,13 @@ test("denied leg: two denied organizations on a company domain hold later owners
 
 test("additional organizations: the second within a day of the first starts held, unless the person pays or the day has passed", async () => {
   if (!shared || !client) return;
-  await configure({ emailDomainMode: "off", burstMode: "off", deniedDomainMode: "off" });
+  await configure({
+    emailDomainMode: "off",
+    burstMode: "off",
+    deniedDomainMode: "off",
+    disposableMailMode: "off",
+    slowDomainMode: "off",
+  });
   // Within a day of the first organization: the first additional one is
   // free, the second and later start held.
   const farm = await owner(`farm-${unique()}.net`);
@@ -630,7 +673,13 @@ test("manual decisions win, and every leg off lists and evaluates nothing", asyn
   });
   for (const one of rest) expect(await decision(one.accountId)).toMatchObject(HELD);
 
-  await configure({ emailDomainMode: "off", burstMode: "off", deniedDomainMode: "off" });
+  await configure({
+    emailDomainMode: "off",
+    burstMode: "off",
+    deniedDomainMode: "off",
+    disposableMailMode: "off",
+    slowDomainMode: "off",
+  });
   const quiet = `off-${unique()}.ai`;
   const off = [await owner(quiet), await owner(quiet), await owner(quiet), await owner(quiet)];
   for (const one of off) {
@@ -638,4 +687,169 @@ test("manual decisions win, and every leg off lists and evaluates nothing", asyn
     expect(await decision(one.accountId)).toBeNull();
   }
   await configure(DEFAULTS);
+}, 180_000);
+
+// Migration 1493: disposable mail and slow domain legs.
+async function mailRecord(accountId: string) {
+  const [row] = await shared!.admin`select mail_signal, first_admitted_at
+    from opengeni_private.signup_owner_email_domains
+    where data_schema = ${shared!.schema} and account_id = ${accountId}`;
+  return row ?? null;
+}
+
+test("disposable leg: a disposable inbox holds a first or additional organization; clear or unknown never do", async () => {
+  if (!shared || !client) return;
+  await configure(ONLY_DISPOSABLE);
+  const throwaway = await owner(`inbox-${unique()}.net`, null, "disposable");
+  expect(await decision(throwaway.accountId)).toMatchObject(HELD);
+  expect(await lastHistory(throwaway.accountId)).toMatchObject({
+    rule_id: "disposable-mail-v1",
+    evidence: { mailSignal: "disposable", disposableMailMode: "enforce" },
+  });
+  expect(await mailRecord(throwaway.accountId)).toMatchObject({ mail_signal: "disposable" });
+
+  const clear = await owner(`company-${unique()}.com`, null, "clear");
+  expect(await decision(clear.accountId)).toBeNull();
+  expect(await mailRecord(clear.accountId)).toMatchObject({ mail_signal: "clear" });
+  const unknown = await owner(`company-${unique()}.com`);
+  expect(await decision(unknown.accountId)).toBeNull();
+  expect(await mailRecord(unknown.accountId)).toMatchObject({ mail_signal: null });
+
+  // An additional organization is checked the same way.
+  const extra = await additional(clear.userId, "disposable");
+  expect(await decision(extra.accountId)).toMatchObject(HELD);
+
+  // Observed only: recorded, never held.
+  await configure({ disposableMailMode: "observe" });
+  const observed = await owner(`inbox-${unique()}.net`, null, "disposable");
+  expect(await decision(observed.accountId)).toBeNull();
+  expect(await observation(observed.accountId)).toMatchObject({ ruleId: "disposable-mail-v1" });
+  await age([throwaway, clear, unknown, extra, observed], 86_400 * 2);
+  await configure(DEFAULTS);
+}, 180_000);
+
+test("slow domain leg: three unused owners of one company domain within a day are held; a used group, public domains and a later day are not", async () => {
+  if (!shared || !client) return;
+  await configure(ONLY_SLOW);
+  // A farm: one owner every few hours, none ever used.
+  const farmDomain = `slow-${unique()}.com`;
+  const farm: Owner[] = [];
+  for (let index = 0; index < 3; index += 1) {
+    if (farm.length > 0) await age(farm, 3 * 3600);
+    farm.push(await owner(farmDomain));
+  }
+  for (const one of farm) expect(await decision(one.accountId)).toMatchObject(HELD);
+  expect(await lastHistory(farm[2]!.accountId)).toMatchObject({
+    rule_id: "email-slow-domain-v1",
+    evidence: { slowDomainGroupSize: 3, slowDomainGroupUsed: false },
+  });
+
+  // A company: the first colleague starts working before the third signs up.
+  const teamDomain = `team-${unique()}.com`;
+  const first = await owner(teamDomain);
+  await getSpendableCreditBalance(client.db, first.accountId);
+  expect((await mailRecord(first.accountId))?.first_admitted_at).not.toBeNull();
+  await age([first], 3600);
+  const team = [first, await owner(teamDomain), await owner(teamDomain)];
+  for (const one of team) expect(await decision(one.accountId)).toBeNull();
+  expect(await observation(team[2]!.accountId)).toMatchObject({
+    slowDomainGroupSize: 3,
+    slowDomainGroupUsed: true,
+  });
+
+  // Owners more than a day apart, and public providers, never group.
+  const spreadDomain = `spread-${unique()}.com`;
+  const spread: Owner[] = [];
+  for (let index = 0; index < 3; index += 1) {
+    if (spread.length > 0) await age(spread, 25 * 3600);
+    spread.push(await owner(spreadDomain));
+  }
+  for (const one of spread) expect(await decision(one.accountId)).toBeNull();
+  const publicOwners = [
+    await owner("gmail.com"),
+    await owner("gmail.com"),
+    await owner("gmail.com"),
+  ];
+  for (const one of publicOwners) expect(await decision(one.accountId)).toBeNull();
+  await age([...farm, ...team, ...spread, ...publicOwners], 86_400 * 2);
+  await configure(DEFAULTS);
+}, 180_000);
+
+test("slow domain leg: once a held colleague sends a model call, the group's slow holds release; other holds stay", async () => {
+  if (!shared || !client) return;
+  await configure(ONLY_SLOW);
+  // Real colleagues who signed up over a day before anyone used the product.
+  const domain = `colleagues-${unique()}.com`;
+  const team: Owner[] = [];
+  for (let index = 0; index < 5; index += 1) {
+    if (team.length > 0) await age(team, 2 * 3600);
+    team.push(await owner(domain));
+  }
+  for (const one of team) expect(await decision(one.accountId)).toMatchObject(HELD);
+  const [caller, second, third, operatorHeld, otherRuleHeld] = team as [
+    Owner,
+    Owner,
+    Owner,
+    Owner,
+    Owner,
+  ];
+  // A manual operator hold, and a detector hold from another rule, are never lifted here.
+  await decide(operatorHeld.accountId, "held");
+  const otherRevision = (await decision(otherRuleHeld.accountId))!.revision;
+  await shared.admin`select opengeni_private.set_promotion_decision(${otherRuleHeld.accountId}::uuid,
+    'held', 'ip-velocity-v1', 'ip-velocity-v1', '{"reason":"test"}'::jsonb,
+    'service:promotion-detector', ${otherRevision}::bigint)`;
+
+  // The first model call's admission stamps the use and releases the
+  // caller's own hold in the same evaluation, before the eligibility check,
+  // so that very call proceeds.
+  await getSpendableCreditBalance(client.db, caller.accountId);
+  expect((await mailRecord(caller.accountId))?.first_admitted_at).not.toBeNull();
+  expect(await decision(caller.accountId)).toMatchObject({
+    decision: "eligible",
+    actor: "service:promotion-detector",
+  });
+  expect(await lastHistory(caller.accountId)).toMatchObject({
+    policy_version: "email-cluster-v1",
+    rule_id: "email-slow-domain-released-v1",
+    evidence: { slowDomainGroupUsed: true },
+  });
+  // Each colleague's organization releases on its own next evaluation (its
+  // first admission or any check), without using the product itself.
+  await evaluate([
+    second.accountId,
+    third.accountId,
+    operatorHeld.accountId,
+    otherRuleHeld.accountId,
+  ]);
+  for (const one of [second, third]) {
+    expect(await decision(one.accountId)).toMatchObject({ decision: "eligible" });
+    expect((await mailRecord(one.accountId))?.first_admitted_at).toBeNull();
+  }
+  expect(await decision(operatorHeld.accountId)).toMatchObject({
+    decision: "held",
+    actor: "operator:test",
+  });
+  expect(await decision(otherRuleHeld.accountId)).toMatchObject(HELD);
+  expect(await lastHistory(otherRuleHeld.accountId)).toMatchObject({ rule_id: "ip-velocity-v1" });
+  // Released organizations are not held again by the used group.
+  await evaluate([caller.accountId, second.accountId]);
+  expect(await decision(second.accountId)).toMatchObject({ decision: "eligible" });
+  await age(team, 86_400 * 2);
+  await configure(DEFAULTS);
+}, 180_000);
+
+test("with the shipped defaults, two denied organizations on a custom domain hold the next signup there", async () => {
+  if (!shared || !client) return;
+  await configure(DEFAULTS);
+  const domain = `custom-${unique()}.io`;
+  const firstDenied = await owner(domain);
+  await decide(firstDenied.accountId, "denied");
+  await age([firstDenied], 2 * 86_400);
+  const secondDenied = await owner(domain);
+  await decide(secondDenied.accountId, "denied");
+  await age([secondDenied], 2 * 86_400);
+  const next = await owner(domain);
+  expect(await decision(next.accountId)).toMatchObject(HELD);
+  expect(await lastHistory(next.accountId)).toMatchObject({ rule_id: "email-denied-domain-v1" });
 }, 180_000);

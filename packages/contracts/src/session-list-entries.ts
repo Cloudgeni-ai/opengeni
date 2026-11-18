@@ -23,11 +23,13 @@ export type SessionListEntryInput = Omit<
   | "archiveVersion"
   | "description"
   | "avatar"
+  | "agentId"
   | "latestTurn"
 > & {
   /** Absent from older servers' rows and SDK-projected sessions. */
   description?: string | null | undefined;
   avatar?: Session["avatar"] | undefined;
+  agentId?: Session["agentId"] | undefined;
 } & Partial<
     Pick<
       Session,
@@ -71,6 +73,8 @@ export function sessionListEntry(session: SessionListEntryInput): SessionListEnt
     titleSource: session.titleSource,
     description: session.description ?? null,
     avatar: session.avatar ?? null,
+    // Lets a row show the agent's icon; absent from older servers' rows.
+    ...(session.agentId !== undefined ? { agentId: session.agentId } : {}),
     displayTitle: deriveSessionDisplayTitle(session),
     renameSeed: sessionTitleIsPending(session)
       ? (deriveAutomaticSessionTitlePreview(session.initialMessage) ?? "")

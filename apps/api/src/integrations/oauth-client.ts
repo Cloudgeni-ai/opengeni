@@ -6,11 +6,13 @@ import { reverifyLoginsBlockingNewAccount } from "./oauth-account-reverify";
 import {
   builtInIntegrationDuplicatedByEndpoint,
   builtInIntegrationTurnedOffMessage,
+  carryConnectorToolChoices,
 } from "@opengeni/core";
-import { OrganizationIntegrationDeniedError } from "@opengeni/contracts";
+import { OrganizationIntegrationDeniedError, oauthSignInToFinishPath } from "@opengeni/contracts";
 import {
   OAUTH_BROWSER_MISMATCH_MESSAGE,
   oauthCallbackBrowserAccepted,
+  oauthCallbackNeedsSignIn,
   oauthStateBrowserBinding,
   type OAuthCallbackBrowser,
   type OAuthStateBrowserBinding,
@@ -126,6 +128,7 @@ import {
 } from "./oauth-profiles";
 import { canonicalProviderDomain } from "./provider-domain";
 import { nangoIntegrationForConnectTarget, startNangoConnect } from "./nango-connect";
+import { finishCapabilityAfterConnect } from "./connect-capability-finish";
 import { microsoftAuthorizationNotGranted } from "./microsoft-admin-consent";
 import { microsoftAdminConsentUrl } from "@opengeni/contracts/connect";
 import {
@@ -225,6 +228,8 @@ type OAuthClientDeps = {
   observability?: Observability | undefined;
   oauthStartDeadlineMs?: number | undefined;
   oauthCallbackDeadlineMs?: number | undefined;
+  /** Stores a custom server's logo when the callback turns it on. */
+  mcpServerLogoStorage?: Parameters<typeof finishCapabilityAfterConnect>[0]["mcpServerLogoStorage"];
 };
 
 export type OAuthStartContext = {
@@ -269,6 +274,8 @@ type OAuthClientRegistration = {
 type OAuthStatePayload = {
   integrationKey?: "gmail" | "google-drive" | "google-calendar" | "slack-personal";
   connectAttemptId?: string;
+  /** The catalog capability the callback turns on (connect-capability-finish.ts). */
+  capabilityId?: string;
   externalContinuation?: ExternalActorContinuation;
   returnUrl?: string;
   accountId: string;
@@ -795,6 +802,15 @@ async function startMcpOAuthWithinDeadline(
         }
       : {}),
     returnPath,
+    // Only a person's own sign-in (a browser-proven start) names a capability
+    // for the callback to turn on: the callback acts with that person's grant,
+    // which a narrower token or API key that started it never held.
+    ...(context.payload.capabilityId &&
+    context.browserBinding.browserProof !== "none" &&
+    !externalContinuation &&
+    !context.connectAttemptId
+      ? { capabilityId: context.payload.capabilityId }
+      : {}),
     ...(existing ? { connectionId: existing.id, connectionVersion: existing.version } : {}),
   });
   const expiresAt = new Date(Date.now() + oauthStateTtlMs);
@@ -1015,12 +1031,17 @@ async function completeMcpOAuthCallbackWithinDeadline(
     integrationKey = state.integrationKey ?? "custom:mcp";
     // Before any attempt is claimed: a consent finished in someone else's
     // browser leaves the starter's attempt untouched (CASA 3.2.2).
-    if (!oauthCallbackBrowserAccepted(state, input.browser))
+    if (!oauthCallbackBrowserAccepted(state, input.browser)) {
+      // Started in the app and returned to a browser signed in to no one: the
+      // browser signs in and this callback runs again, as that person.
+      if (input.code && !input.error && oauthCallbackNeedsSignIn(state, input.browser))
+        return { redirectTo: oauthSignInToFinishPath(input.requestUrl) };
       throw new OAuthCallbackStageError(
         "state_verify",
         "browser_mismatch",
         new HTTPException(403, { message: OAUTH_BROWSER_MISMATCH_MESSAGE }),
       );
+    }
     if (state.connectAttemptId) {
       const stored = await getConnectAttempt(db, state, state.connectAttemptId);
       // Dedicated Google setup shares this callback. Bind each trusted provider
@@ -1349,6 +1370,15 @@ async function completeMcpOAuthCallbackWithinDeadline(
           error: error instanceof Error ? error.message : String(error),
         });
       }
+      // The same account connected under the other integration backend
+      // keeps its tool choices. Best effort: opening its approvals carries
+      // them too.
+      await carryConnectorToolChoices(db, connection).catch((error: unknown) =>
+        console.warn("[api] could not carry tool choices to a login", {
+          connectionId: connection.id,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
     };
     const persistConnection = async (scopedDb: Database) => {
       await requireOAuthCallbackGrant(scopedDb, state!, ownerPermission);
@@ -1528,6 +1558,20 @@ async function completeMcpOAuthCallbackWithinDeadline(
       });
     }
     await turnOnPersistedLoginHere();
+    // Turn on the capability this sign-in was for, so setup is done even if
+    // no page loads after this redirect (connect-capability-finish.ts).
+    const capability =
+      state.capabilityId &&
+      state.browserProof &&
+      state.browserProof !== "none" &&
+      !state.externalContinuation
+        ? await finishCapabilityAfterConnect(deps, {
+            owner: state,
+            capabilityId: state.capabilityId,
+            ownership: state.ownership,
+            connection,
+          })
+        : null;
     // Carry the canonical providerDomain (not just the id) so the SPA can build
     // the enable connectionRef straight from the redirect, without a listConnections
     // round-trip that could fail (transient, or a grant lacking connections:read)
@@ -1536,6 +1580,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
       connectionId: connection.id,
       providerDomain: connection.providerDomain,
       ownership: state.ownership,
+      ...(capability ? { capability } : {}),
       ...(verification.metadata.status === "failed" ? { verification: "failed" } : {}),
     });
   } catch (error) {
@@ -2847,6 +2892,9 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
       : {}),
     ...(stringValue(payload.connectAttemptId)
       ? { connectAttemptId: requiredString(payload.connectAttemptId, "state.connectAttemptId") }
+      : {}),
+    ...(stringValue(payload.capabilityId)
+      ? { capabilityId: stringValue(payload.capabilityId)! }
       : {}),
     ownership,
     // Absent on a legacy state, which therefore cannot land a personal owner.

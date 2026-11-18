@@ -1,5 +1,24 @@
 # @opengeni/sdk
 
+## 6.29.2
+
+### Patch Changes
+
+- @opengeni/connect@6.29.2
+- @opengeni/contracts@6.29.2
+
+## 6.29.1
+
+### Patch Changes
+
+- 5b05b73: Connecting an integration from the catalog now finishes on the server. `OAuthStartRequest` takes an optional `capabilityId`; when the provider sign-in (MCP OAuth or Nango connect) completes, the callback turns that capability on with the new account as the person who started it, with the same permission rules as enabling it, and reports `capability=enabled|on` on the return. Closing the browser tab, or a desktop hand-back the browser blocks, no longer leaves the connection saved but unused. The console's return handling only shows the result and never re-enables something already on, so members are no longer refused when the capability was turned on meanwhile.
+- 825e714: Chats started for a person from Slack, Teams, a schedule or the API now freeze that person's name like chats started in the app, and the sidebar resolves older unlabeled chats to the person's name instead of showing an id fragment. Session list entries carry `agentId`, so agent chats show the agent's icon in the sidebar and chat switcher. Agents' Slack installs report `postsAsAgent`; when the Slack app lacks `chat:write.customize`, the Slack integration page and the agent's Slack row say replies show as Opengeni, with one Update action.
+- Updated dependencies [5b05b73]
+- Updated dependencies [b23ec3f]
+- Updated dependencies [825e714]
+  - @opengeni/contracts@6.29.1
+  - @opengeni/connect@6.29.1
+
 ## 6.29.0
 
 ### Patch Changes

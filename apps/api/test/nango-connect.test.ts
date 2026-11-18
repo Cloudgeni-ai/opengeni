@@ -137,6 +137,22 @@ describe("Nango Connect", () => {
     expect(() => readNangoConnectState(settings, "forged.state")).toThrow();
   });
 
+  test("the capability a catalog connect is for rides in the state, so completion turns it on", async () => {
+    const { createSignedState } = await import("@opengeni/github");
+    const base = readNangoConnectState(settings, await startedState());
+    const { capabilityId: _none, ...payload } = base;
+    expect(_none).toBeUndefined();
+    const sign = (extra: Record<string, unknown>) =>
+      createSignedState(settings.integrationsStateSecret!, { ...payload, ...extra });
+    expect(
+      readNangoConnectState(settings, await sign({ capabilityId: "mcp:gmail" })).capabilityId,
+    ).toBe("mcp:gmail");
+    // An oversized value is not a capability id.
+    expect(
+      readNangoConnectState(settings, await sign({ capabilityId: "x".repeat(513) })).capabilityId,
+    ).toBeUndefined();
+  });
+
   test("the page opens a session for exactly this integration, tagged with this attempt", async () => {
     const token = await startedState();
     const nango = fakeNango([]);
@@ -274,6 +290,36 @@ describe("Nango Connect", () => {
           request.method === "DELETE" && request.url.includes("/connections/nango-conn-1"),
       ),
     ).toBe(false);
+  });
+
+  test("a desktop start opened in a signed-out browser signs in first, then opens again", async () => {
+    const { createSignedState } = await import("@opengeni/github");
+    const token = createSignedState(settings.integrationsStateSecret!, {
+      ...readNangoConnectState(settings, await startedState()),
+      browserProof: "session",
+    });
+    const requestUrl = `https://app.example.test/v1/integrations/nango/connect?state=${encodeURIComponent(token)}`;
+    const response = await nangoConnectPage(
+      { db: unreachableDb, settings, nangoBackends: async () => backends },
+      { state: token, browser: { bindingDigests: [], signedInSubjectId: null }, requestUrl },
+    );
+    expect(response.status).toBe(302);
+    const signIn = new URL(response.headers.get("location")!);
+    // The console signs the browser in; the step itself stays on the API.
+    expect(signIn.origin).toBe("https://app.opengeni.test");
+    expect(signIn.pathname).toBe("/connect-continue");
+    expect(new URL(signIn.searchParams.get("next")!, requestUrl).toString()).toBe(requestUrl);
+    // Signed in as someone else, it is refused as before.
+    await expect(
+      nangoConnectPage(
+        { db: unreachableDb, settings, nangoBackends: async () => backends },
+        {
+          state: token,
+          browser: { bindingDigests: [], signedInSubjectId: "user:someone-else" },
+          requestUrl,
+        },
+      ),
+    ).rejects.toMatchObject({ status: 403 });
   });
 
   test("a completion from another browser is refused", async () => {

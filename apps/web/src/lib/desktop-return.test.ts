@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { parseAppLink } from "@opengeni/sdk/app-links";
 
-import { desktopReturnAppLink, desktopReturnTarget } from "./desktop-return";
+import { desktopReturnAppLink, desktopReturnOutcome, desktopReturnTarget } from "./desktop-return";
 
 const origin = "https://app.example.com";
 const page = `${origin}/workspaces/w1/sessions/s1`;
@@ -60,5 +60,33 @@ describe("desktop hand-back page", () => {
       providerDomain: "mail.example.com",
       ownership: "personal",
     });
+  });
+});
+
+describe("what the hand-back page says", () => {
+  const at = (query: string) => `${origin}/workspaces/w1/plugins?connect_item=x&${query}`;
+
+  test("a finished connection is done; the tab can close", () => {
+    expect(desktopReturnOutcome(at("integration_oauth=success&connectionId=c1"))).toEqual({
+      kind: "connected",
+    });
+    expect(desktopReturnOutcome(at("social_oauth=success"))).toEqual({ kind: "connected" });
+    expect(desktopReturnOutcome(at("fiken=connected&connectionId=c1"))).toEqual({
+      kind: "connected",
+    });
+  });
+
+  test("a failure says why", () => {
+    const outcome = desktopReturnOutcome(
+      at("integration_oauth=error&stage=token_exchange&reason=access_denied"),
+    );
+    expect(outcome.kind).toBe("failed");
+    expect(outcome.kind === "failed" && outcome.message).toContain("cancelled");
+    expect(desktopReturnOutcome(at("google_drive=error&reason=x")).kind).toBe("failed");
+  });
+
+  test("a return without an outcome only says the browser's part is done", () => {
+    expect(desktopReturnOutcome(`${origin}/workspaces/w1/sessions/s1`)).toEqual({ kind: "done" });
+    expect(desktopReturnOutcome(null)).toEqual({ kind: "done" });
   });
 });

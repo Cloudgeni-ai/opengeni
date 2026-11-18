@@ -835,6 +835,11 @@ pub(crate) fn validate_table_style_parts(
     page: PageGeometry,
 ) -> Result<(), DocumentError> {
     let usable_width = page.width_pt - page.margin_left_pt - page.margin_right_pt;
+    // The usable width is a floating-point difference (A4 is 595.3 - 72 - 72 =
+    // 451.29999999999995), so a table exactly as wide as the text area must be
+    // compared within the same tolerance as the column-width sum below.
+    let fits_usable_width =
+        |value: f64| in_range(value, 1.0, usable_width + TABLE_WIDTH_TOLERANCE_PT);
     // Name the field, the value, and the bound: a bare "invalid style" left
     // agents guessing (for example rewriting valid colors) instead of fixing
     // the column widths that actually overflowed the page.
@@ -845,10 +850,7 @@ pub(crate) fn validate_table_style_parts(
         )
     };
     let invalid = |reason: String| Err(DocumentError::InvalidTableStyle(reason));
-    if let Some(width) = style
-        .width_pt
-        .filter(|value| !in_range(*value, 1.0, usable_width))
-    {
+    if let Some(width) = style.width_pt.filter(|value| !fits_usable_width(*value)) {
         return invalid(format!(
             "widthPt {width} must be at least 1 and fit the page; {}",
             usable()
@@ -888,7 +890,7 @@ pub(crate) fn validate_table_style_parts(
         if let Some((index, width)) = widths
             .iter()
             .enumerate()
-            .find(|(_, width)| !in_range(**width, 1.0, usable_width))
+            .find(|(_, width)| !fits_usable_width(**width))
         {
             return invalid(format!(
                 "columnWidthsPt[{index}] {width} must be at least 1 and fit the page; {}",
@@ -896,7 +898,7 @@ pub(crate) fn validate_table_style_parts(
             ));
         }
         let sum: f64 = widths.iter().sum();
-        if sum > usable_width + 0.01 {
+        if sum > usable_width + TABLE_WIDTH_TOLERANCE_PT {
             return invalid(format!(
                 "columnWidthsPt sum to {sum}pt, wider than the page; {}. Scale the widths down \
                  or widen the section page",
@@ -1140,6 +1142,9 @@ fn valid_color(value: &str) -> bool {
     let digits = value.strip_prefix('#').unwrap_or(value);
     digits.len() == 6 && digits.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
+
+/// Floating-point slack for table widths against the usable page width.
+const TABLE_WIDTH_TOLERANCE_PT: f64 = 0.01;
 
 fn in_range(value: f64, minimum: f64, maximum: f64) -> bool {
     value.is_finite()

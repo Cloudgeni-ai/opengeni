@@ -23,6 +23,7 @@
  * Slack workspace that takes its name, at once.
  */
 import {
+  hasOpenGeniSlackBotIdentityScope,
   slackAgentNameKey,
   slackAgentNameProblem,
   slackAgentNameProblemText,
@@ -53,6 +54,11 @@ export type LinkedSlackInstallation = {
   installHome: Home;
   /** What people mention, for example "Opengeni" or "Opengeni Staging". */
   botDisplayName: string;
+  /**
+   * Whether the app may sign posts with an agent's name and icon
+   * (`chat:write.customize`). Without it agents' replies show as the app.
+   */
+  postsAsAgent: boolean;
 };
 
 /**
@@ -92,6 +98,7 @@ export async function linkedSlackInstallations(
       slackTeamName: binding.slackTeamName ?? null,
       installHome: { accountId: home.accountId, workspaceId: connection.workspaceId },
       botDisplayName: binding.botDisplayName,
+      postsAsAgent: hasOpenGeniSlackBotIdentityScope(connection.grantedScopes),
     });
   }
   const own = (installation: LinkedSlackInstallation) =>

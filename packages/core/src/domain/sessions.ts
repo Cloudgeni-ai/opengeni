@@ -268,6 +268,7 @@ import {
   type AccessGrantAuthorization,
 } from "../access";
 import { externalCreationMetadata } from "./external-creation-attribution";
+import { withPersonCreatorLabel } from "./session-creator-label";
 import { resolveMemberExecutionDefault } from "./member-execution-defaults";
 import { prepareExternalLinkTurnAdmission } from "../application/external-link-work-admission";
 import { externalContinuationCommitAuthorizer } from "../application/external-continuation";
@@ -2965,7 +2966,14 @@ async function createSessionForRequestInFileScope(
   // visibility: presence is read from the raw request because the Zod
   // defaults erase absent-vs-explicit, and the parent side comes from the
   // durable row rather than anything the caller sent.
-  const creationInitiator = creationInitiatorForGrant(grant);
+  // A person's work started outside the app (Slack, Teams, a Personal
+  // workspace grant, an API call for them) may carry no display label; freeze
+  // the one the app would, so the sidebar never shows an id fragment.
+  const grantCreationInitiator = creationInitiatorForGrant(grant);
+  const labeledCreator = await withPersonCreatorLabel(db, grantCreationInitiator.initiator);
+  const creationInitiator: FrozenCreationInitiator = labeledCreator
+    ? { ...grantCreationInitiator, initiator: labeledCreator }
+    : grantCreationInitiator;
   const scopeUser =
     creationInitiator.initiator?.kind === "subject" ? creationInitiator.initiator.subjectId : null;
   const sessionScope = resolveSessionCreateScope({
@@ -4241,7 +4249,7 @@ async function createSessionForRequestInFileScope(
                     ...(creationInitiator.context ? { context: creationInitiator.context } : {}),
                   }
                 : { type: "human", subjectId: creationInitiator.initiator!.subjectId }),
-            grant.subjectLabel,
+            grant.subjectLabel ?? creationInitiator.initiator?.label,
           ),
         ),
     );

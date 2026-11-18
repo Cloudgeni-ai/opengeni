@@ -198,3 +198,79 @@ test("it is available in every linked Slack workspace at once, with nothing to m
   expect(container.textContent).not.toContain("Move here");
   expect(container.textContent).not.toContain("one Slack workspace");
 });
+
+test("an agent whose Slack app can't post as it says so, with one Update for admins", async () => {
+  const agent = makeAgent({
+    name: "Meeting preparation",
+    slack: [availability()],
+    viewer: { canEdit: true, canManageSlack: true, canOpenInSlack: true },
+  });
+  const listed = [row({ postsAsAgent: false, installWorkspaceId: kit.WORKSPACE_ID })];
+  // A plain member reads the note, with nothing to press.
+  const memberView = await render(agent, { listAgentSlackInstalls: installs(listed) });
+  expect(memberView.textContent).toContain("Replies show as Opengeni");
+  expect(memberView.textContent).toContain("Its name and icon show once Slack is updated.");
+  expect(
+    [...memberView.querySelectorAll("button")].some((b) => b.textContent?.trim() === "Update"),
+  ).toBe(false);
+  await cleanup?.();
+
+  // It names the app as that Slack workspace shows it.
+  const staging = await render(agent, {
+    listAgentSlackInstalls: installs([{ ...listed[0], botDisplayName: "Opengeni Staging" }]),
+  });
+  expect(staging.textContent).toContain("Replies show as Opengeni Staging");
+  await cleanup?.();
+
+  // Someone who manages the workspace's integrations gets the one Update.
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  cleanup = async () => {
+    await act(async () => root.unmount());
+    container.remove();
+  };
+  const context = kit.appContext(
+    {
+      listAgentSlackInstalls: installs(listed),
+      connectTransport: () => ({}),
+    },
+    {
+      accessContext: {
+        subjectId: "user-me",
+        subjectLabel: "Maja",
+        accountGrants: [],
+        workspaceGrants: [
+          {
+            workspaceId: kit.WORKSPACE_ID,
+            accountId: "account-1",
+            subjectId: "user-me",
+            permissions: ["capabilities:manage"],
+          },
+        ],
+      },
+    },
+  );
+  await act(async () =>
+    root.render(
+      <AgentsTestHost context={context}>
+        <AgentSlackSection agent={agent} onIntroduce={() => undefined} />
+      </AgentsTestHost>,
+    ),
+  );
+  for (let index = 0; index < 3; index += 1) {
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+  }
+  const update = [...container.querySelectorAll("button")].filter(
+    (b) => b.textContent?.trim() === "Update",
+  );
+  expect(update).toHaveLength(1);
+});
+
+test("an agent whose Slack app posts as it shows no note", async () => {
+  const agent = makeAgent({ name: "Data team", slack: [availability()] });
+  const container = await render(agent, {
+    listAgentSlackInstalls: installs([row({ postsAsAgent: true })]),
+  });
+  expect(container.textContent).not.toContain("Replies show as Opengeni");
+});
