@@ -398,21 +398,22 @@ async function baselineSqlForSession(
   return text.replace(baselineVectorStatement, "\n");
 }
 
-function preinstalledVectorPolicy(options: MigrationRuntimeOptions | undefined): boolean {
-  if (options !== undefined) return options.preinstalledVector === true;
+/** An explicit option wins; an option the caller left out falls back to the
+ * deployment environment, as the command-line runner passes only its phase. */
+export function preinstalledVectorPolicy(options: MigrationRuntimeOptions | undefined): boolean {
+  if (options?.preinstalledVector !== undefined) return options.preinstalledVector;
   const configured = process.env.OPENGENI_MIGRATIONS_PREINSTALLED_VECTOR;
   if (configured === undefined || configured === "false") return false;
   if (configured === "true") return true;
   throw new Error("OPENGENI_MIGRATIONS_PREINSTALLED_VECTOR must be true or false");
 }
 
-function deploymentDepthPolicy(
+export function deploymentDepthPolicy(
   options: MigrationRuntimeOptions | undefined,
 ): DeploymentDepthPolicy {
   const raw =
-    options === undefined
-      ? process.env.OPENGENI_MAX_NESTED_AGENT_DEPTH?.trim() || undefined
-      : options.maxNestedAgentDepth;
+    options?.maxNestedAgentDepth ??
+    (process.env.OPENGENI_MAX_NESTED_AGENT_DEPTH?.trim() || undefined);
   if (raw === undefined) {
     return { maxNestedAgentDepth: DEFAULT_MAX_NESTED_AGENT_DEPTH, source: "default" };
   }
