@@ -332,18 +332,25 @@ export function unpaidSandboxFleetState(
  * this records them (a page fires while the day's unpaid box time is
  * exhausted) and logs while the fleet is not normal. Until the fleet definer
  * is granted (1486) only pressure is observed.
+ *
+ * Without subscription plans `none` is every organization's ordinary tier and
+ * is not unpaid, so pressure limits nobody there: it is not read or reported
+ * (no warm count, never the `pressure` state). Admission still applies it to
+ * any organization it finds unpaid.
  */
 export async function observeUnpaidSandboxFleet(
   services: Pick<ActivityServices, "db" | "settings" | "observability">,
 ): Promise<UnpaidSandboxFleetState> {
   const { db, settings, observability } = services;
   const limits = sandboxFleetLimits(settings);
-  const pressure = await readSandboxFleetPressure(db, limits, {
-    onReadFailure: (error) =>
-      observability.warn("sandbox reaper: fleet warm count read failed", {
-        error: errorMessage(error),
-      }),
-  });
+  const pressure = settings.subscriptionPlansEnabled
+    ? await readSandboxFleetPressure(db, limits, {
+        onReadFailure: (error) =>
+          observability.warn("sandbox reaper: fleet warm count read failed", {
+            error: errorMessage(error),
+          }),
+      })
+    : { engaged: false, warmBoxes: null };
   let unpaid: Awaited<ReturnType<typeof readSandboxUnpaidFleet>> = null;
   try {
     unpaid = await readSandboxUnpaidFleet(db, { excludeLeaseId: null, withBoxSeconds: true });

@@ -12795,9 +12795,10 @@ export function sandboxPlanLimits(
  *   works and lifts the bound.
  * - `pressureEngageWarmBoxes` / `pressureReleaseWarmBoxes` /
  *   `pressureReleaseAfterMs` / `pressureUnpaidRunningBoxes`: when more than
- *   `pressureEngageWarmBoxes` boxes of every plan are warm, the unpaid cap
- *   drops to `pressureUnpaidRunningBoxes` (0: no new unpaid box) until the
- *   warm count has stayed below `pressureReleaseWarmBoxes` for
+ *   `pressureEngageWarmBoxes` boxes of every plan on a managed provider are
+ *   warm (self-hosted boxes are exempt and never count), the unpaid cap drops
+ *   to `pressureUnpaidRunningBoxes` (0: no new unpaid box) until the warm
+ *   count has stayed below `pressureReleaseWarmBoxes` for
  *   `pressureReleaseAfterMs`.
  */
 export type SandboxFleetLimits = {

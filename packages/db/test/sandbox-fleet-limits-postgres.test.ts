@@ -9,6 +9,7 @@ import {
 import {
   acquireLease as acquireLeaseUnscoped,
   createDb,
+  readSandboxFleetPressure,
   readSandboxUnpaidFleet,
   resetOrganizationSuspensionCache,
   resetSandboxFleetState,
@@ -30,6 +31,7 @@ const acquireLease: typeof acquireLeaseUnscoped = (db, input) =>
   withCreditDebitAttribution({ kind: "service" }, () => acquireLeaseUnscoped(db, input));
 
 const FLEET_ROUTINE = "opengeni_private.sandbox_unpaid_fleet_v1(uuid, boolean)";
+const WARM_BOXES_ROUTINE = "opengeni_private.sandbox_fleet_warm_boxes_v1()";
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 let shared: SharedTestDatabase | null = null;
@@ -47,6 +49,7 @@ beforeAll(async () => {
     "grant execute on function opengeni_private.organization_warm_sandbox_counts_v1(uuid, text, uuid) to opengeni_app",
   );
   await grantFleet(true);
+  await grantWarmBoxes(true);
 }, 180_000);
 
 afterAll(async () => {
@@ -66,6 +69,21 @@ async function grantFleet(granted: boolean): Promise<void> {
       ? `grant execute on function ${FLEET_ROUTINE} to opengeni_app`
       : `revoke execute on function ${FLEET_ROUTINE} from opengeni_app`,
   );
+  resetSandboxFleetState();
+}
+
+/** 1492 creates the managed warm box count withheld; a later release grants
+ * it. (Absent before 1492, so this grants only where it exists.) */
+async function grantWarmBoxes(granted: boolean): Promise<void> {
+  await admin.unsafe(`do $grant$ begin
+    if pg_catalog.to_regprocedure('${WARM_BOXES_ROUTINE}') is not null then
+      ${
+        granted
+          ? `grant execute on function ${WARM_BOXES_ROUTINE} to opengeni_app;`
+          : `revoke execute on function ${WARM_BOXES_ROUTINE} from opengeni_app;`
+      }
+    end if;
+  end $grant$`);
   resetSandboxFleetState();
 }
 
@@ -94,7 +112,12 @@ function acquire(
   org: Org,
   kind: AcquireLeaseInput["kind"],
   fleet: SandboxFleetLimits,
-  options: { group?: string; holderId?: string; subscriptionPlansEnabled?: boolean } = {},
+  options: {
+    group?: string;
+    holderId?: string;
+    subscriptionPlansEnabled?: boolean;
+    backend?: AcquireLeaseInput["backend"];
+  } = {},
 ) {
   const withoutPlans = options.subscriptionPlansEnabled === false;
   return acquireLease(db, {
@@ -103,7 +126,7 @@ function acquire(
     sandboxGroupId: options.group ?? crypto.randomUUID(),
     kind,
     holderId: options.holderId ?? `${kind}-${crypto.randomUUID()}`,
-    backend: "modal",
+    backend: options.backend ?? "modal",
     leaseTtlMs: 90_000,
     sandboxPlanLimits: withoutPlans
       ? parseSandboxPlanLimitsJson("", { subscriptionPlansEnabled: false })
@@ -129,9 +152,10 @@ async function unpaidRunning(): Promise<number> {
   return counts!.runningBoxes;
 }
 
+/** Starting or warm boxes on a managed provider (fleet pressure's count). */
 async function warmBoxes(): Promise<number> {
   const [row] = await admin<{ n: number }[]>`select count(*)::int as n from sandbox_leases
-    where liveness in ('warming', 'warm')`;
+    where liveness in ('warming', 'warm') and backend <> 'selfhosted'`;
   return row!.n;
 }
 
@@ -390,8 +414,35 @@ describe("unpaid fleet limits (real PostgreSQL)", () => {
     }
   }, 120_000);
 
+  test("self-hosted boxes never count toward fleet pressure", async () => {
+    // Many Connected Machine boxes warm, more than the engage level over the
+    // managed boxes.
+    for (let index = 0; index < 5; index += 1) {
+      const machine = await organization({ plan: "pro" });
+      expect((await acquire(machine, "direct", {}, { backend: "selfhosted" })).role).toBe(
+        "spawner",
+      );
+    }
+    const managed = await warmBoxes();
+    const fleet = {
+      pressureEngageWarmBoxes: managed,
+      pressureReleaseWarmBoxes: managed,
+      pressureReleaseAfterMs: 0,
+      pressureUnpaidRunningBoxes: 0,
+    };
+    resetSandboxFleetState();
+    expect((await acquire(await organization({ plan: "free" }), "direct", fleet)).role).toBe(
+      "spawner",
+    );
+    // Reading again now: the new managed box puts the count over the level.
+    resetSandboxFleetState();
+    const pressure = await readSandboxFleetPressure(db, fleet);
+    expect(pressure).toEqual({ engaged: true, warmBoxes: managed + 1, failed: false });
+  }, 120_000);
+
   test("until the fleet definer is granted, its cap and budget wait; pressure still applies", async () => {
     await grantFleet(false);
+    await grantWarmBoxes(false);
     try {
       const fleet = { unpaidRunningBoxes: 0, unpaidBoxSecondsPerDay: 0 };
       // A cap of 0 refuses without counting; a positive cap needs the count.
@@ -425,6 +476,7 @@ describe("unpaid fleet limits (real PostgreSQL)", () => {
       ).toBe("fleet_busy");
     } finally {
       await grantFleet(true);
+      await grantWarmBoxes(true);
     }
   }, 120_000);
 });

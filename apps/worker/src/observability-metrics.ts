@@ -1871,7 +1871,7 @@ export function recordUnpaidSandboxFleet(
   const gauges: Array<[string, string, number | null]> = [
     [
       "opengeni_sandbox_fleet_warm_boxes",
-      "Boxes of every plan starting or warm, as fleet pressure reads them.",
+      "Boxes of every plan on a managed provider (not self-hosted) starting or warm, as fleet pressure reads them.",
       input.warmBoxes,
     ],
     [
