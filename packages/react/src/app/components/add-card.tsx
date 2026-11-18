@@ -1,16 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "../../ui/dialog";
 import { userErrorText } from "../../ui/api-error";
 import { useAppContext } from "../app-context";
-import { AddCardButton } from "./add-card-button";
 import {
   CARD_REQUIRED_EVENT,
   CARD_RETURN_QUERY,
@@ -20,6 +11,12 @@ import {
 } from "../lib/card-verification";
 import { usePage } from "../lib/navigation";
 import { toast } from "../lib/toast";
+
+// The dialog and its card glyph load only when a card is asked for, so they
+// stay out of the eager bundle.
+const CardRequiredDialog = lazy(() =>
+  import("./add-card-dialog").then((module) => ({ default: module.CardRequiredDialog })),
+);
 
 /**
  * Mounted once beside the routes (with CreditRequiredGate): asks for a card
@@ -49,19 +46,9 @@ export function CardRequiredGate() {
     workspaces.find((workspace) => workspace.id === required.workspaceId)?.accountId ??
     null;
   return (
-    <Dialog open onOpenChange={(open) => (open ? undefined : setRequired(null))}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Add a card</DialogTitle>
-          <DialogDescription>
-            Sandboxes on the Free plan need a verified card. You won't be charged.
-          </DialogDescription>
-        </DialogHeader>
-        <DialogFooter>
-          <AddCardButton client={client} accountId={accountId} />
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <Suspense fallback={null}>
+      <CardRequiredDialog client={client} accountId={accountId} onClose={() => setRequired(null)} />
+    </Suspense>
   );
 }
 
