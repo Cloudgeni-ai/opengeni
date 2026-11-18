@@ -24,7 +24,7 @@ import { freeModelConnectRemedy, freeModelDailyLimitReason } from "../../lib/fre
 import { isCodexUsageLimitFailure } from "../../lib/unavailable-session-model";
 import { ContinueAtResetSwitch, type CodexUsageChoice } from "./codex-usage-notice";
 import { FailedSessionActions } from "./failed-session-actions";
-import { AddCardButton } from "../add-card";
+import { AddCardButton } from "../add-card-button";
 import { useOptionalAppContext } from "../../app-context";
 import {
   CARD_VERIFIED_EVENT,
@@ -136,7 +136,8 @@ export function FailedSessionBanner({
   // action, and the chat continues once the card is added.
   const cardRequired =
     failure.failureCode === SANDBOX_CARD_REQUIRED_CODE && !structuralFailure && !billingFailure;
-  const workspaces = useOptionalAppContext()?.workspaces ?? [];
+  const appContext = useOptionalAppContext();
+  const workspaces = appContext?.workspaces ?? [];
   const cardAccountId = cardRequired
     ? (workspaces.find((workspace) => workspace.id === workspaceId)?.accountId ?? null)
     : null;
@@ -192,7 +193,11 @@ export function FailedSessionBanner({
   const retryActions = machineAllow ? (
     <AllowMachineButton action={machineAllow} />
   ) : cardRequired ? (
-    <AddCardButton accountId={cardAccountId} canManage={canBuyCredits} />
+    <AddCardButton
+      client={appContext?.client}
+      accountId={cardAccountId}
+      canManage={canBuyCredits}
+    />
   ) : codexUsageFailure ? (
     <>
       <ContinueAtResetSwitch {...codexUsageFailure} />

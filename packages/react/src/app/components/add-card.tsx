@@ -1,7 +1,5 @@
-import { CreditCardIcon, Loader2Icon } from "lucide-react";
 import { useEffect, useState } from "react";
 
-import { Button } from "../../ui/button";
 import {
   Dialog,
   DialogContent,
@@ -11,55 +9,19 @@ import {
   DialogTitle,
 } from "../../ui/dialog";
 import { userErrorText } from "../../ui/api-error";
-import { useAppContext, useOptionalAppContext } from "../app-context";
+import { useAppContext } from "../app-context";
+import { AddCardButton } from "./add-card-button";
 import {
   CARD_REQUIRED_EVENT,
   CARD_RETURN_QUERY,
   noteCardVerified,
   readCardVerificationReturn,
-  startCardVerification,
   type CardRequiredDetail,
 } from "../lib/card-verification";
 import { usePage } from "../lib/navigation";
 import { hasAccountPermission } from "../lib/permissions";
 import { toast } from "../lib/toast";
 import type { AccessContext } from "../types";
-
-/** The one action for a missing card: Stripe Checkout in setup mode, no charge. */
-export function AddCardButton(props: {
-  accountId: string | null | undefined;
-  canManage: boolean;
-  variant?: "default" | "outline";
-}) {
-  const client = useOptionalAppContext()?.client;
-  const [busy, setBusy] = useState(false);
-  if (!client || !props.accountId || !props.canManage) {
-    return <span className="text-sm text-fg-muted">Ask the organization owner to add a card.</span>;
-  }
-  const accountId = props.accountId;
-  return (
-    <Button
-      type="button"
-      size="sm"
-      variant={props.variant ?? "default"}
-      disabled={busy}
-      onClick={() => {
-        setBusy(true);
-        startCardVerification(client, accountId).catch((error: unknown) => {
-          setBusy(false);
-          toast.error("Couldn't add a card", { description: userErrorText(error) });
-        });
-      }}
-    >
-      {busy ? (
-        <Loader2Icon className="size-4 animate-spin" aria-hidden="true" />
-      ) : (
-        <CreditCardIcon className="size-4" aria-hidden="true" />
-      )}
-      Add a card
-    </Button>
-  );
-}
 
 /**
  * Mounted once beside the routes (with CreditRequiredGate): asks for a card
@@ -68,7 +30,7 @@ export function AddCardButton(props: {
  */
 export function CardRequiredGate(props: { accessContext: AccessContext | null }) {
   const [required, setRequired] = useState<CardRequiredDetail | null>(null);
-  const workspaces = useAppContext().workspaces;
+  const { workspaces, client } = useAppContext();
   useCardVerificationReturn();
   useEffect(() => {
     const listener = (event: Event) => {
@@ -96,7 +58,7 @@ export function CardRequiredGate(props: { accessContext: AccessContext | null })
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
-          <AddCardButton accountId={accountId} canManage={canManage} />
+          <AddCardButton client={client} accountId={accountId} canManage={canManage} />
         </DialogFooter>
       </DialogContent>
     </Dialog>
