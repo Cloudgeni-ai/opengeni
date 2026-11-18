@@ -576,8 +576,14 @@ export function sessionCreatorLabel(session: Session): string {
   if (session.createdBy.kind === "service") {
     return `Service · ${session.createdBy.subjectId}`;
   }
+  // A managed person's id is a random UUID that names no one; a host's own
+  // subject ids stay displayed as they are.
+  if (session.createdBy.subjectId.startsWith("user:")) return UNNAMED_PERSON_LABEL;
   return session.createdBy.subjectId;
 }
+
+/** What a person without a known name is called in creator lists. */
+export const UNNAMED_PERSON_LABEL = "Unnamed person";
 
 export type SessionCreatorOption = {
   value: string;
@@ -598,9 +604,11 @@ export function sessionCreatorLabelMap(sessions: Session[]): ReadonlyMap<string,
     const key = sessionCreatorKey(session);
     // One API key's older subject-frozen and newer service-frozen sessions are
     // one creator; prefer a session that carries the key's name.
+    // The same goes for a person: keep the session that carries their name.
     if (
       byKey.has(key) &&
-      creatorType(session.createdBy) === "api_key" &&
+      (creatorType(session.createdBy) === "api_key" ||
+        creatorType(session.createdBy) === "person") &&
       !session.createdBy.label?.trim()
     ) {
       continue;
@@ -625,9 +633,10 @@ export function sessionCreatorLabelMap(sessions: Session[]): ReadonlyMap<string,
         const machine = machineCreatorLabel({ kind: creator.kind, subjectId: creator.subjectId });
         return {
           value,
-          label: machine
-            ? `${creator.label} (${shared.indexOf(value) + 1})`
-            : `${creator.label} · ${creator.kind === "service" ? "Service" : "Subject"} · ${creator.subjectId}`,
+          label:
+            machine || creator.label === UNNAMED_PERSON_LABEL
+              ? `${creator.label} (${shared.indexOf(value) + 1})`
+              : `${creator.label} · ${creator.kind === "service" ? "Service" : "Subject"} · ${creator.subjectId}`,
         };
       })
       .sort(

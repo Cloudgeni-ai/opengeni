@@ -249,7 +249,11 @@ import {
   writeSessionBrowsePreferences,
 } from "../../lib/session-browse-preferences";
 import { creatorPageIdentity, railRowCreator } from "../../lib/creator-initials";
-import { useResolvedCreator } from "../../lib/creator-labels";
+import {
+  creatorNeedsLabel,
+  useCreatorLabelResolver,
+  useResolvedCreator,
+} from "../../lib/creator-labels";
 import { formatWaitingSince } from "../../lib/format";
 import {
   sessionDescendantCountAria,
@@ -1408,7 +1412,26 @@ export function SessionList() {
       (session) => !session.parentSessionId || !loadedIds.has(session.parentSessionId),
     );
   }, [allSessions, hierarchyMode]);
-  const creatorLabels = useMemo(() => sessionCreatorLabelMap(creatorSessions), [creatorSessions]);
+  // Name people frozen without a label, so creator groups never show an id.
+  const resolveCreator = useCreatorLabelResolver(
+    rail.workspaceId,
+    browseGroupBy === "creator" &&
+      creatorSessions.some((session) => creatorNeedsLabel(session.createdBy)),
+  );
+  const creatorLabels = useMemo(
+    () =>
+      sessionCreatorLabelMap(
+        creatorSessions.map((session) =>
+          creatorNeedsLabel(session.createdBy)
+            ? {
+                ...session,
+                createdBy: { ...session.createdBy, ...resolveCreator(session.createdBy) },
+              }
+            : session,
+        ),
+      ),
+    [creatorSessions, resolveCreator],
+  );
   const paginationBrowseFilter = useMemo<SessionPaginationBrowseFilter>(
     () => ({
       creator: null,

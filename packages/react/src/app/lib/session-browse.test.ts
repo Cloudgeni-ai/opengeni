@@ -108,6 +108,33 @@ describe("session browse projections", () => {
     expect(sessionCreatorLabel(scheduler)).toBe("Service");
   });
 
+  test("never groups under a managed person's id, and prefers a session that names them", () => {
+    const unlabeled = session({
+      id: "slack",
+      createdBy: { kind: "subject", subjectId: "user:3b61b5c7-363f-4934-96c9-45fa7bfb47db" },
+    });
+    expect(sessionCreatorLabel(unlabeled)).toBe("Unnamed person");
+    const named = session({
+      id: "app",
+      createdBy: {
+        kind: "subject",
+        subjectId: "user:3b61b5c7-363f-4934-96c9-45fa7bfb47db",
+        label: "bendik@cloudgeni.ai",
+      },
+    });
+    expect([...sessionCreatorLabelMap([named, unlabeled]).values()]).toEqual([
+      "bendik@cloudgeni.ai",
+    ]);
+    const other = session({
+      id: "other",
+      createdBy: { kind: "subject", subjectId: "user:9f00aa11-0000-4000-8000-000000000000" },
+    });
+    expect([...sessionCreatorLabelMap([unlabeled, other]).values()]).toEqual([
+      "Unnamed person (1)",
+      "Unnamed person (2)",
+    ]);
+  });
+
   test("groups root browse results by creator or created-date buckets", () => {
     const ada = session({ id: "ada" });
     const grace = session({

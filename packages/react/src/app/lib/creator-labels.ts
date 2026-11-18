@@ -8,7 +8,7 @@
  * freezes for them), anyone else from the workspace's members. One members
  * read per workspace is shared by every row. Display only.
  */
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { WorkspaceMember } from "@opengeni/sdk";
 
 import { useOptionalAppContext } from "../app-context";
@@ -81,6 +81,36 @@ export function resolveCreatorLabel(
     self && self.subjectId === createdBy.subjectId ? self.subjectLabel?.trim() || null : null;
   const label = own ?? members?.get(createdBy.subjectId) ?? null;
   return label ? { ...createdBy, label } : createdBy;
+}
+
+/**
+ * Names for many creators at once, for views over a list (such as grouping
+ * the sidebar by creator): a function that fills in each unlabeled person's
+ * name, reading the workspace's members only when `needed`.
+ */
+export function useCreatorLabelResolver(
+  workspaceId: string,
+  needed: boolean,
+): (createdBy: CreatorRef) => CreatorRef {
+  const context = useOptionalAppContext();
+  const self = context?.accessContext ?? null;
+  const client = needed ? (context?.client ?? null) : null;
+  const [loaded, setLoaded] = useState<{ workspaceId: string; labels: MemberLabels } | null>(null);
+  useEffect(() => {
+    if (!client || typeof client.listWorkspaceMembers !== "function") return;
+    let live = true;
+    void memberLabels(client, workspaceId).then((labels) => {
+      if (live) setLoaded({ workspaceId, labels });
+    });
+    return () => {
+      live = false;
+    };
+  }, [client, workspaceId]);
+  const members = loaded?.workspaceId === workspaceId ? loaded.labels : null;
+  return useCallback(
+    (createdBy: CreatorRef) => resolveCreatorLabel(createdBy, self, members) ?? createdBy,
+    [self, members],
+  );
 }
 
 /** {@link resolveCreatorLabel} for a row in a workspace, reading members only when needed. */
