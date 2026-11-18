@@ -577,8 +577,9 @@ export function sessionCreatorLabel(session: Session): string {
     return `Service · ${session.createdBy.subjectId}`;
   }
   // A managed person's id is a random UUID that names no one; a host's own
-  // subject ids stay displayed as they are.
-  if (session.createdBy.subjectId.startsWith("user:")) return UNNAMED_PERSON_LABEL;
+  // subject ids stay displayed as they are. Older rows may lack a subject id.
+  const subjectId: unknown = session.createdBy.subjectId;
+  if (typeof subjectId === "string" && subjectId.startsWith("user:")) return UNNAMED_PERSON_LABEL;
   return session.createdBy.subjectId;
 }
 

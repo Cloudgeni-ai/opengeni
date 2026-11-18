@@ -114,6 +114,9 @@ describe("session browse projections", () => {
       createdBy: { kind: "subject", subjectId: "user:3b61b5c7-363f-4934-96c9-45fa7bfb47db" },
     });
     expect(sessionCreatorLabel(unlabeled)).toBe("Unnamed person");
+    // A row from an older server without a subject id must not crash the rail.
+    const legacy = session({ id: "legacy", createdBy: { type: "user", id: "x" } as never });
+    expect(() => sessionCreatorLabel(legacy)).not.toThrow();
     const named = session({
       id: "app",
       createdBy: {
