@@ -1,5 +1,25 @@
 # @opengeni/runtime
 
+## 6.29.2
+
+### Patch Changes
+
+- @opengeni/agent-proto@6.29.2
+- @opengeni/capabilities@6.29.2
+- @opengeni/codemode@6.29.2
+- @opengeni/codex@6.29.2
+- @opengeni/config@6.29.2
+- @opengeni/contracts@6.29.2
+- @opengeni/decisions@6.29.2
+- @opengeni/interaction@6.29.2
+- @opengeni/jev@6.29.2
+- @opengeni/network@6.29.2
+- @opengeni/observability@6.29.2
+- @opengeni/sdk@6.29.2
+- @opengeni/tool-gateway@6.29.2
+- @opengeni/vaults@6.29.2
+- @opengeni/xai-subscription@6.29.2
+
 ## 6.29.1
 
 ### Patch Changes

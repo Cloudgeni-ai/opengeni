@@ -1,5 +1,38 @@
 # @opengeni/worker-bundle
 
+## 6.29.2
+
+### Patch Changes
+
+- becc8b1: A turn no longer wedges when a model response with no tool calls (for example one a Steer cut short) arrives while the worker is still busy recording the request's start. The worker kept the response's streamed items only while it waited for tool calls, so when it read the response afterwards it never learned the items were complete. The response then never settled, and the next model step (which hands the turn over to the Steer) waited on it until the attempt was cancelled. The items now wait for the response that owns them.
+  - @opengeni/agent-proto@6.29.2
+  - @opengeni/capabilities@6.29.2
+  - @opengeni/codemode@6.29.2
+  - @opengeni/codex@6.29.2
+  - @opengeni/config@6.29.2
+  - @opengeni/contracts@6.29.2
+  - @opengeni/core@6.29.2
+  - @opengeni/db@6.29.2
+  - @opengeni/decisions@6.29.2
+  - @opengeni/documents@6.29.2
+  - @opengeni/events@6.29.2
+  - @opengeni/github@6.29.2
+  - @opengeni/interaction@6.29.2
+  - @opengeni/jev@6.29.2
+  - @opengeni/network@6.29.2
+  - @opengeni/observability@6.29.2
+  - @opengeni/runtime@6.29.2
+  - @opengeni/sdk@6.29.2
+  - @opengeni/storage@6.29.2
+  - @opengeni/subscriptions@6.29.2
+  - @opengeni/tool-gateway@6.29.2
+  - @opengeni/vaults@6.29.2
+  - @opengeni/vaults-bitwarden@6.29.2
+  - @opengeni/vaults-keeper@6.29.2
+  - @opengeni/vaults-onepassword@6.29.2
+  - @opengeni/vaults-protonpass@6.29.2
+  - @opengeni/xai-subscription@6.29.2
+
 ## 6.29.1
 
 ### Patch Changes
