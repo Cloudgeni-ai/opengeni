@@ -51,12 +51,16 @@ export function configuredDecisionModel(
       : createHttpDecisionModel({
           provider: config.provider,
           model: config.model,
-          // A key, or a cached Entra token for the deployment's own identity (Azure OpenAI).
+          // A key, or a cached Entra token for the deployment's own identity (Azure).
           apiKey:
             "apiKey" in config
               ? config.apiKey
               : sharedAzureEntraAccessTokenSource(config.azureEntra),
-          ...(config.baseUrl ? { endpoint: `${config.baseUrl.replace(/\/$/, "")}/decisions` } : {}),
+          ...(config.endpoint
+            ? { endpoint: config.endpoint }
+            : config.baseUrl
+              ? { endpoint: `${config.baseUrl.replace(/\/$/, "")}/decisions` }
+              : {}),
           fetch: routeFetch,
         });
   return { id: `${config.provider}/${config.model}`, model };

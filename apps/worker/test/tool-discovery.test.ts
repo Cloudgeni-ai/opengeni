@@ -1,4 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { resetSharedAzureEntraAccessTokenSources } from "@opengeni/network/azure-entra";
 import { testSettings } from "@opengeni/testing";
 import { DecisionError, type DecisionUsage } from "@opengeni/decisions";
 import type { DocumentEmbedder } from "@opengeni/documents";
@@ -208,6 +212,96 @@ describe("shared deployment decision category", () => {
       }),
     ).toBeUndefined();
     expect(unavailable).toBe(1);
+  });
+  test("an Azure AI Foundry decision model posts to its endpoint as the deployment identity, in the EU", async () => {
+    const resource = "https://foundry-decisions.services.ai.azure.test";
+    const endpoint = `${resource}/providers/microsoft/v1/systemone`;
+    const directory = await mkdtemp(join(tmpdir(), "foundry-decisions-"));
+    const tokenFile = join(directory, "token");
+    await writeFile(tokenFile, "projected-assertion");
+    const originalFetch = globalThis.fetch;
+    const tokenRequests: URLSearchParams[] = [];
+    const calls: Array<{ url: string; authorization: string | null; body: any }> = [];
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.startsWith("https://login.microsoftonline.com/")) {
+        tokenRequests.push(new URLSearchParams(String(init?.body)));
+        return Response.json({ access_token: "entra-token", expires_in: 3600 });
+      }
+      calls.push({
+        url,
+        authorization: new Headers(init?.headers).get("authorization"),
+        body: JSON.parse(String(init?.body)),
+      });
+      return Response.json({
+        id: "decision-response",
+        model: "decision-deployment",
+        answers: { 0: { type: "noul", noul: 0.6 }, 1: { type: "noul", noul: 0.1 } },
+        usage: { input_tokens: 120, output_tokens: 0 },
+      });
+    }) as typeof fetch;
+    resetSharedAzureEntraAccessTokenSources();
+    try {
+      const settings = testSettings({
+        decisionModelAuth: "deployment_identity",
+        decisionModelProvider: "openrouter",
+        decisionModelId: "decision-deployment",
+        decisionModelEndpoint: endpoint,
+        azureTenantId: "tenant-test",
+        azureClientId: "client-test",
+        azureFederatedTokenFile: tokenFile,
+        requiredModelGeography: "eu",
+        sideFeatureResidencyJson: JSON.stringify({
+          "decision_model.openrouter": {
+            endpoint: resource,
+            residency: {
+              geography: "eu",
+              deploymentType: "azure_data_zone",
+              regions: ["germanywestcentral"],
+              evidence: {
+                source: "operator_declaration",
+                reference: "Decision deployment, DataZoneStandard",
+                verifiedAt: "2026-11-18",
+              },
+            },
+          },
+        }),
+      });
+      const choose = configuredToolDecisionModel({
+        settings,
+        recordUsage: async () => {},
+        onUnavailable: () => {
+          throw new Error("available");
+        },
+      })!;
+      const candidates = [
+        { name: "tasks__read", description: "Read task", inputFields: ["id"] },
+        { name: "tasks__list", description: "List tasks", inputFields: [] },
+      ];
+      expect(await createToolSelector(choose)({ query: "read task", candidates })).toEqual([
+        { name: "tasks__read", probability: 0.6 },
+        { name: "tasks__list", probability: 0.1 },
+      ]);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.url).toBe(endpoint);
+      expect(calls[0]!.authorization).toBe("Bearer entra-token");
+      // The openrouter-shaped request: the deployment as the model, state and named questions.
+      expect(calls[0]!.body.model).toBe("decision-deployment");
+      expect(calls[0]!.body.state).toBeDefined();
+      expect(calls[0]!.body.questions["0"].type).toBe("noul");
+      expect(tokenRequests[0]!.get("scope")).toBe("https://cognitiveservices.azure.com/.default");
+      // The deployment's threshold travels with the selector.
+      expect(createToolSelector(choose).loadThreshold).toBeUndefined();
+      expect(createToolSelector(choose, { loadThreshold: 0.7 }).loadThreshold).toBe(0.7);
+      // Undeclared, the route is not EU, so the model is not configured for this run.
+      expect(
+        configuredDecisionModel({ ...settings, sideFeatureResidencyJson: undefined }),
+      ).toBeUndefined();
+    } finally {
+      globalThis.fetch = originalFetch;
+      resetSharedAzureEntraAccessTokenSources();
+      await rm(directory, { recursive: true, force: true });
+    }
   });
   test("uses the typed endpoint, model and usage hook rather than chat completions", async () => {
     const bodies: Array<Record<string, unknown>> = [];

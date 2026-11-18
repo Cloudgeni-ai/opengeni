@@ -1097,6 +1097,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
               processingResidency: decisionModelProcessingResidency(runSettings),
             }),
         }),
+        toolSearchLoadThreshold: runSettings.toolSearchLoadThreshold,
         // The search result says only that it fell back; the deployment
         // keeps why, so slow or failing selections can be fixed.
         onToolSelectionError: (failure) => {

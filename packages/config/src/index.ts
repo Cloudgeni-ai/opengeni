@@ -1474,19 +1474,31 @@ const SettingsSchema = z.object({
   decisionModelId: z.string().trim().min(1).optional(),
   decisionModelApiKey: z.string().optional(),
   decisionModelBaseUrl: z.string().url().optional(),
+  // The exact URL an openai or openrouter decision model posts to, for a host
+  // that serves the same API at another path (Azure AI Foundry serves the
+  // openrouter-shaped API at <resource>/providers/microsoft/v1/systemone).
+  // When set it replaces the base URL and the provider's /decisions path.
+  // OPENGENI_DECISION_MODEL_ENDPOINT
+  decisionModelEndpoint: z.string().url().optional(),
   // How an explicit decision model signs in. `deployment_identity` is for an
-  // Azure OpenAI v1 resource (provider openai with its /openai/v1 base URL):
-  // a Microsoft Entra token for the deployment's own identity, the standard
-  // AZURE_TENANT_ID and AZURE_CLIENT_ID with AZURE_FEDERATED_TOKEN_FILE or
-  // AZURE_CLIENT_SECRET, instead of a static key.
+  // Azure resource (provider openai or openrouter with the resource's base URL
+  // or endpoint): a Microsoft Entra token for the deployment's own identity,
+  // the standard AZURE_TENANT_ID and AZURE_CLIENT_ID with
+  // AZURE_FEDERATED_TOKEN_FILE or AZURE_CLIENT_SECRET, instead of a static key.
   // OPENGENI_DECISION_MODEL_AUTH
   decisionModelAuth: z.enum(["api_key", "deployment_identity"]).default("api_key"),
+  // The probability above which tool search loads a candidate the decision
+  // model judged. Decision models are calibrated differently, so a deployment
+  // can tune it for its model. Unset keeps the built-in 0.5.
+  // OPENGENI_TOOL_SEARCH_LOAD_THRESHOLD
+  toolSearchLoadThreshold: z.coerce.number().gt(0).lt(1).optional(),
   // Optional complete override for stateless public /decisions calls only.
   // Unset preserves the shared decision category; never mix credentials between categories.
   publicDecisionModelProvider: z.enum(["jev", "openai", "openrouter"]).optional(),
   publicDecisionModelId: z.string().trim().min(1).optional(),
   publicDecisionModelApiKey: z.string().optional(),
   publicDecisionModelBaseUrl: z.string().url().optional(),
+  publicDecisionModelEndpoint: z.string().url().optional(),
   publicDecisionModelAuth: z.enum(["api_key", "deployment_identity"]).optional(),
   // Decision-observability fence. When enabled, the worker emits one
   // bounded, metadata-only adaptive-policy replay record alongside the unchanged
@@ -2897,6 +2909,7 @@ export type DecisionModelSettings = Pick<
   Partial<
     Pick<
       Settings,
+      | "decisionModelEndpoint"
       | "decisionModelAuth"
       | "azureTenantId"
       | "azureClientId"
@@ -2909,14 +2922,24 @@ export type DecisionModelSettings = Pick<
 
 /**
  * A configured decision model. It signs in with a static key, or with a
- * Microsoft Entra token for the deployment's own identity (Azure OpenAI only).
+ * Microsoft Entra token for the deployment's own identity (an Azure resource
+ * serving the openai or openrouter decisions API). `endpoint` is the exact URL
+ * an openai or openrouter model posts to; without it the model posts to its
+ * base URL plus `/decisions`, or to the provider's official endpoint.
  */
 export type DecisionModelConfiguration =
-  | { provider: "jev" | "openai" | "openrouter"; model: string; apiKey: string; baseUrl?: string }
   | {
-      provider: "openai";
+      provider: "jev" | "openai" | "openrouter";
       model: string;
-      baseUrl: string;
+      apiKey: string;
+      baseUrl?: string;
+      endpoint?: string;
+    }
+  | {
+      provider: "openai" | "openrouter";
+      model: string;
+      baseUrl?: string;
+      endpoint?: string;
       azureEntra: NonNullable<ReturnType<typeof deploymentAzureEntraCredential>>;
     };
 
@@ -2927,6 +2950,7 @@ export function publicDecisionModelSettings(settings: Settings): Settings {
     settings.publicDecisionModelId !== undefined ||
     settings.publicDecisionModelApiKey !== undefined ||
     settings.publicDecisionModelBaseUrl !== undefined ||
+    settings.publicDecisionModelEndpoint !== undefined ||
     settings.publicDecisionModelAuth !== undefined;
   if (!explicit) return settings;
   return {
@@ -2935,6 +2959,7 @@ export function publicDecisionModelSettings(settings: Settings): Settings {
     decisionModelId: settings.publicDecisionModelId,
     decisionModelApiKey: settings.publicDecisionModelApiKey,
     decisionModelBaseUrl: settings.publicDecisionModelBaseUrl,
+    decisionModelEndpoint: settings.publicDecisionModelEndpoint,
     decisionModelAuth: settings.publicDecisionModelAuth ?? "api_key",
   };
 }
@@ -2956,17 +2981,25 @@ export function decisionModelConfiguration(
 }
 
 /**
- * The route a decision model sends over. An OpenAI-compatible model is
- * resolved with the endpoint it calls (api.openai.com without a base URL),
- * so a declaration covers only the endpoint it names.
+ * The route a decision model sends over. An openai or openrouter model is
+ * resolved with the endpoint it calls (the provider's official host without
+ * an endpoint or base URL), so a declaration covers only the endpoint it names.
  */
 export function decisionModelTarget(config: {
   provider: "jev" | "openai" | "openrouter";
   baseUrl?: string | undefined;
+  endpoint?: string | undefined;
 }): SideFeatureTarget {
-  return config.provider === "openai"
-    ? { route: "decision_model.openai", endpoint: config.baseUrl ?? "https://api.openai.com/v1" }
-    : `decision_model.${config.provider}`;
+  if (config.provider === "jev") return "decision_model.jev";
+  return {
+    route: `decision_model.${config.provider}`,
+    endpoint:
+      config.endpoint ??
+      config.baseUrl ??
+      (config.provider === "openai"
+        ? "https://api.openai.com/v1"
+        : "https://openrouter.ai/api/alpha"),
+  };
 }
 
 /**
@@ -2987,37 +3020,37 @@ function unrestrictedDecisionModelConfiguration(
     Partial<Pick<Settings, "jevApiKey" | "jevModel" | "jevBaseUrl">>,
   allowLegacyCodeSearch: boolean,
 ): DecisionModelConfiguration | undefined {
+  const provider = settings.decisionModelProvider;
+  // An explicit endpoint is for the HTTP decisions APIs; the Jev client posts
+  // to its own path under its base URL.
+  if (settings.decisionModelEndpoint !== undefined && provider === "jev") return undefined;
+  const location = {
+    ...(settings.decisionModelBaseUrl ? { baseUrl: settings.decisionModelBaseUrl } : {}),
+    ...(settings.decisionModelEndpoint ? { endpoint: settings.decisionModelEndpoint } : {}),
+  };
   if (settings.decisionModelAuth === "deployment_identity") {
-    // Azure OpenAI v1 only: it needs the resource's base URL and the deployment identity.
+    // An Azure resource only: it needs the resource's base URL or endpoint and
+    // the deployment identity.
     const azureEntra = deploymentAzureEntraCredential(settings);
     if (
-      settings.decisionModelProvider !== "openai" ||
+      (provider !== "openai" && provider !== "openrouter") ||
       !settings.decisionModelId ||
-      !settings.decisionModelBaseUrl ||
+      !(location.baseUrl || location.endpoint) ||
       !azureEntra
     )
       return undefined;
-    return {
-      provider: "openai",
-      model: settings.decisionModelId,
-      baseUrl: settings.decisionModelBaseUrl,
-      azureEntra,
-    };
+    return { provider, model: settings.decisionModelId, ...location, azureEntra };
   }
   const explicit =
-    settings.decisionModelProvider !== undefined ||
+    provider !== undefined ||
     settings.decisionModelId !== undefined ||
     settings.decisionModelApiKey !== undefined ||
-    settings.decisionModelBaseUrl !== undefined;
+    settings.decisionModelBaseUrl !== undefined ||
+    settings.decisionModelEndpoint !== undefined;
   if (explicit) {
     const apiKey = usableDeploymentSecret(settings.decisionModelApiKey);
-    if (!settings.decisionModelProvider || !settings.decisionModelId || !apiKey) return undefined;
-    return {
-      provider: settings.decisionModelProvider,
-      model: settings.decisionModelId,
-      apiKey,
-      ...(settings.decisionModelBaseUrl ? { baseUrl: settings.decisionModelBaseUrl } : {}),
-    };
+    if (!provider || !settings.decisionModelId || !apiKey) return undefined;
+    return { provider, model: settings.decisionModelId, apiKey, ...location };
   }
   const apiKey = allowLegacyCodeSearch ? usableJevApiKey(settings) : undefined;
   return apiKey
@@ -6520,11 +6553,14 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     decisionModelId: optional("OPENGENI_DECISION_MODEL_ID"),
     decisionModelApiKey: optional("OPENGENI_DECISION_MODEL_API_KEY"),
     decisionModelBaseUrl: optional("OPENGENI_DECISION_MODEL_BASE_URL"),
+    decisionModelEndpoint: optional("OPENGENI_DECISION_MODEL_ENDPOINT"),
     decisionModelAuth: optional("OPENGENI_DECISION_MODEL_AUTH"),
+    toolSearchLoadThreshold: optional("OPENGENI_TOOL_SEARCH_LOAD_THRESHOLD"),
     publicDecisionModelProvider: optional("OPENGENI_PUBLIC_DECISION_MODEL_PROVIDER"),
     publicDecisionModelId: optional("OPENGENI_PUBLIC_DECISION_MODEL_ID"),
     publicDecisionModelApiKey: optional("OPENGENI_PUBLIC_DECISION_MODEL_API_KEY"),
     publicDecisionModelBaseUrl: optional("OPENGENI_PUBLIC_DECISION_MODEL_BASE_URL"),
+    publicDecisionModelEndpoint: optional("OPENGENI_PUBLIC_DECISION_MODEL_ENDPOINT"),
     publicDecisionModelAuth: optional("OPENGENI_PUBLIC_DECISION_MODEL_AUTH"),
     codexFleetPolicyShadowEnabled: optional("OPENGENI_CODEX_FLEET_POLICY_SHADOW_ENABLED"),
     subscriptionCoreShadowEnabled: optional("OPENGENI_SUBSCRIPTION_CORE_SHADOW_ENABLED"),

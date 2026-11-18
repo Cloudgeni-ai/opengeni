@@ -47,11 +47,29 @@ test.each([
   { OPENGENI_PUBLIC_DECISION_MODEL_PROVIDER: "openrouter" },
   { OPENGENI_PUBLIC_DECISION_MODEL_API_KEY: "product-test-key" },
   { OPENGENI_PUBLIC_DECISION_MODEL_BASE_URL: "https://public.example.test/v1" },
+  { OPENGENI_PUBLIC_DECISION_MODEL_ENDPOINT: "https://public.example.test/v1/systemone" },
   { OPENGENI_PUBLIC_DECISION_MODEL_AUTH: "api_key" },
 ])("partial public configuration does not borrow agent settings: %j", (env) => {
   const shared = settings(env);
   expect(decisionModelConfiguration(publicDecisionModelSettings(shared))).toBeUndefined();
   expect(decisionModelConfiguration(shared)?.model).toBe("agent-model");
+});
+
+test("public configuration never inherits the agent endpoint", () => {
+  const shared = settings({
+    OPENGENI_DECISION_MODEL_ENDPOINT: "https://agents.example.test/v1/systemone",
+    OPENGENI_PUBLIC_DECISION_MODEL_PROVIDER: "openrouter",
+    OPENGENI_PUBLIC_DECISION_MODEL_ID: "product-model",
+    OPENGENI_PUBLIC_DECISION_MODEL_API_KEY: "product-test-key",
+  });
+  expect(decisionModelConfiguration(publicDecisionModelSettings(shared))).toEqual({
+    provider: "openrouter",
+    model: "product-model",
+    apiKey: "product-test-key",
+  });
+  expect(decisionModelConfiguration(shared)).toMatchObject({
+    endpoint: "https://agents.example.test/v1/systemone",
+  });
 });
 
 test("public API key auth does not inherit agent deployment-identity auth", () => {
