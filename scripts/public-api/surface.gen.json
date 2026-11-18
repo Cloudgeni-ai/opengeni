@@ -24534,6 +24534,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.capabilityId": "string?",
         "$.connectionId": "string?",
         "$.mcpUrl": "string?",
         "$.newAccount": "const?=[\"true\"]",
