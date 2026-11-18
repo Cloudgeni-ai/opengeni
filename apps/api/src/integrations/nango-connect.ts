@@ -22,6 +22,7 @@ import {
   OAuthStartResponse,
   type ConnectionMetadata,
   type ConnectionOwnership,
+  oauthSignInToFinishPath,
 } from "@opengeni/contracts";
 import {
   connectSetupPermission,
@@ -75,6 +76,7 @@ import {
 import {
   OAUTH_BROWSER_MISMATCH_MESSAGE,
   oauthCallbackBrowserAccepted,
+  oauthCallbackNeedsSignIn,
   oauthStateBrowserBinding,
   type OAuthCallbackBrowser,
   type OAuthStateBrowserBinding,
@@ -418,8 +420,21 @@ export async function nangoConnectPage(
 ): Promise<Response> {
   if (!input.state) throw new HTTPException(400, { message: "missing connection state" });
   const state = readNangoConnectState(deps.settings, input.state);
-  if (!oauthCallbackBrowserAccepted(state, input.browser))
+  if (!oauthCallbackBrowserAccepted(state, input.browser)) {
+    // Started in the app, opened in a browser signed in to no one: sign in
+    // there first, then this page opens again as that person.
+    if (oauthCallbackNeedsSignIn(state, input.browser)) {
+      const webBase = (
+        deps.settings.webBaseUrl ??
+        integrationBaseUrl(deps.settings.publicBaseUrl, input.requestUrl)
+      ).replace(/\/+$/, "");
+      return new Response(null, {
+        status: 302,
+        headers: { Location: `${webBase}${oauthSignInToFinishPath(input.requestUrl)}` },
+      });
+    }
     throw new HTTPException(403, { message: OAUTH_BROWSER_MISMATCH_MESSAGE });
+  }
   // Tags are minted only for an owner the start verified; the webhook relies on it.
   if (!personalOwnerStateAccepted(state))
     throw new HTTPException(422, { message: "This account cannot own a personal connection" });

@@ -6,6 +6,7 @@ import {
 import { claimOAuthAcquisition, finishOAuthAcquisition } from "./oauth-client";
 import {
   oauthCallbackBrowserAccepted,
+  oauthCallbackNeedsSignIn,
   oauthStateBrowserBinding,
   type OAuthCallbackBrowser,
   type OAuthStateBrowserBinding,
@@ -31,6 +32,7 @@ import {
   type ApiIntegrationOAuthStartRequest,
   type ConnectionOwnership,
   type OrganizationIntegrationPolicy,
+  oauthSignInToFinishPath,
 } from "@opengeni/contracts";
 import {
   integrationKeyForConnectProvider,
@@ -331,8 +333,13 @@ export async function completeApiIntegrationProviderOAuth(
     state = readProviderOAuthState(input.state, deps.settings);
     // Before any attempt is claimed or nonce consumed: a consent finished in
     // someone else's browser leaves the starter's attempt untouched (CASA 3.2.2).
-    if (!oauthCallbackBrowserAccepted(state, input.browser))
+    if (!oauthCallbackBrowserAccepted(state, input.browser)) {
+      // Started in the app and returned to a browser signed in to no one: the
+      // browser signs in and this callback runs again, as that person.
+      if (input.code && !input.error && oauthCallbackNeedsSignIn(state, input.browser))
+        return { redirectTo: `${returnBaseUrl}${oauthSignInToFinishPath(input.requestUrl)}` };
       throw new ProviderOAuthCallbackError("browser_mismatch");
+    }
     if (state.connectAttemptId) {
       const stored = await getConnectAttempt(deps.db, state, state.connectAttemptId);
       if (

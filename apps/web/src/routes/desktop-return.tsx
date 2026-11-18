@@ -1,14 +1,20 @@
 // Where a sign-in started in the desktop app lands in the person's browser once
 // the provider is done. PUBLIC: the browser need not be signed in to Opengeni,
 // so `RootRouteComponent` renders this ahead of the auth gate and without the
-// app context. It opens the app, which shows how the sign-in went (connected,
-// cancelled or failed); this page cannot know, so it claims neither.
-import { AppWindowIcon } from "lucide-react";
+// app context. The app watches the connection itself and shows it without this
+// page; the page says the browser's part is over, shows the outcome the return
+// link carries, and offers to bring the app forward.
 import { useEffect, useMemo } from "react";
 
 import { Button } from "@opengeni/react/ui/button";
 import { desktopBridge } from "@opengeni/react/app/lib/desktop";
-import { desktopReturnAppLink, desktopReturnTarget } from "@/lib/desktop-return";
+import { ConnectReturnCard } from "@/components/connect-return-card";
+import {
+  desktopReturnAppLink,
+  desktopReturnOutcome,
+  desktopReturnTarget,
+  type DesktopReturnOutcome,
+} from "@/lib/desktop-return";
 
 export function DesktopReturnRoute() {
   const target = useMemo(
@@ -21,40 +27,52 @@ export function DesktopReturnRoute() {
     if (!target || !appLink) return;
     // Already inside the app: just continue there.
     if (desktopBridge) window.location.replace(target);
+    // Bring the app forward. Nothing depends on it: the app already updated itself.
     else window.location.assign(appLink);
   }, [appLink, target]);
 
   return (
-    <section className="og-page-glow flex flex-1 items-center justify-center px-4">
-      <div className="w-full max-w-sm rounded-xl border border-border bg-surface p-6">
-        <div className="mb-4 flex items-center gap-3">
-          <span className="flex size-9 shrink-0 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
-            <AppWindowIcon className="size-4" />
-          </span>
-          <div>
-            <h1 className="text-base font-semibold">Back to Opengeni</h1>
-            <p className="text-sm text-fg-subtle">Continue in the app where you started.</p>
-          </div>
+    <DesktopReturnView
+      outcome={desktopReturnOutcome(target)}
+      appLink={appLink}
+      browserLink={target}
+    />
+  );
+}
+
+const COPY: Record<DesktopReturnOutcome["kind"], { title: string; body: string }> = {
+  connected: { title: "Connected", body: "You can close this tab. Opengeni shows the connection." },
+  failed: { title: "Couldn't connect", body: "" },
+  done: { title: "Done", body: "You can close this tab and go back to Opengeni." },
+};
+
+/** The page's content; `DesktopReturnRoute` supplies it from the return link. */
+export function DesktopReturnView({
+  outcome,
+  appLink,
+  browserLink,
+}: {
+  outcome: DesktopReturnOutcome;
+  appLink: string | null;
+  browserLink: string | null;
+}) {
+  const copy = COPY[outcome.kind];
+  return (
+    <ConnectReturnCard
+      tone={outcome.kind}
+      title={copy.title}
+      body={outcome.kind === "failed" ? outcome.message : copy.body}
+    >
+      {appLink && browserLink ? (
+        <div className="mt-5 flex flex-col gap-2">
+          <Button asChild variant={outcome.kind === "failed" ? "default" : "outline"}>
+            <a href={appLink}>Open Opengeni</a>
+          </Button>
+          <Button asChild variant="ghost" size="sm" className="text-fg-subtle">
+            <a href={browserLink}>Continue in this browser</a>
+          </Button>
         </div>
-        {appLink && target ? (
-          <>
-            <p className="text-sm text-fg-muted">
-              Opengeni opens by itself and shows the result there. If your browser asks, allow it to
-              open Opengeni. You can close this tab afterwards.
-            </p>
-            <Button asChild className="mt-4 w-full">
-              <a href={appLink}>Open Opengeni</a>
-            </Button>
-            <Button asChild variant="ghost" className="mt-2 w-full">
-              <a href={target}>Continue in this browser</a>
-            </Button>
-          </>
-        ) : (
-          <p className="text-sm text-fg-muted">
-            Go back to the Opengeni app to continue. You can close this tab.
-          </p>
-        )}
-      </div>
-    </section>
+      ) : null}
+    </ConnectReturnCard>
   );
 }

@@ -149,6 +149,15 @@ import { SECTION_TITLE_CLASS } from "@opengeni/react/ui/section";
 import { WindowBarTitleBoundary } from "@opengeni/react/ui/window-bar-title";
 import { cn } from "@opengeni/react/app/lib/utils";
 import { PrReviewAutomationCard } from "@/components/capabilities/pr-review-automation-card";
+import { desktopBridge } from "@opengeni/react/app/lib/desktop";
+import {
+  DESKTOP_CONNECT_POLL_MS,
+  desktopConnectAlreadyFinished,
+  finishedDesktopConnection,
+  rememberDesktopConnectFinished,
+  startDesktopConnectWatch,
+  type DesktopConnectWatch,
+} from "@/lib/desktop-connect-watch";
 import { Button } from "@opengeni/react/ui/button";
 import { DetailPage } from "@opengeni/react/ui/detail-page";
 import { DetailSkeleton } from "@opengeni/react/ui/detail-sheet";
@@ -1267,6 +1276,8 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
       return false;
     setBusyId(targetItem.id);
     setSheetError(null);
+    // The id the sign-in returns to: a registry entry is saved first and gets its own.
+    let returnItemId = targetItem.id;
     try {
       await performCapabilityAction(
         {
@@ -1282,9 +1293,14 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
           onComplete: () => setSheetError(null),
           onSkillRemoval: setSkillRemoval,
           connectReturnUrl: window.location.href,
-          returnPathFor: (id) =>
-            `${window.location.pathname}?connect_item=${encodeURIComponent(id)}`,
-          redirect: (url) => window.location.assign(url),
+          returnPathFor: (id) => {
+            returnItemId = id;
+            return `${window.location.pathname}?connect_item=${encodeURIComponent(id)}`;
+          },
+          redirect: (url) => {
+            watchDesktopConnect(targetItem, returnItemId, action);
+            window.location.assign(url);
+          },
         },
         action,
       );
@@ -1469,26 +1485,41 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
   // ?integration_oauth=success|error; we read it once, strip it from the URL,
   // and either auto-enable with the fresh connection or reopen the sheet with a
   // human error + retry. Runs after the catalog loads so the item is resolvable.
-  const oauthHandled = useRef(false);
+  // Keyed by the search it read: the desktop app can bring a later outcome to
+  // this page while it is open, without a reload.
+  const oauthHandled = useRef<string | null>(null);
   useEffect(() => {
-    if (oauthHandled.current || loading) return;
-    const params = new URLSearchParams(window.location.search);
+    if (loading) return;
+    const search = window.location.search;
+    if (oauthHandled.current === search) return;
+    const params = new URLSearchParams(search);
     const outcome = params.get("integration_oauth");
     if (!outcome) return;
     // Provider-definition API integrations have their own immutable preview/install
     // continuation. Leave those callback parameters intact for the control
     // center instead of treating them as a legacy MCP catalog connection.
     if (params.has("api_integration_definition")) return;
-    oauthHandled.current = true;
+    oauthHandled.current = search;
 
     const itemId = params.get("connect_item");
     // Strip the OAuth params so a refresh doesn't reprocess them.
     clearReturnParams();
 
+    const connectionId = params.get("connectionId");
+    if (outcome === "success" && connectionId && desktopConnectAlreadyFinished(connectionId)) {
+      // The app finished this connection while the browser was still open.
+      void refresh();
+      return;
+    }
+    if (outcome === "success" && connectionId) {
+      // The hand-back arrived first: finish here, and stop watching for it.
+      rememberDesktopConnectFinished(connectionId);
+      setDesktopWatch(null);
+    }
     if (outcome === "success") {
       void resumeOAuthConnect(
         itemId,
-        params.get("connectionId"),
+        connectionId,
         params.get("providerDomain"),
         oauthConnectionOwnership(params.get("ownership")),
       );
@@ -1512,7 +1543,7 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, items, setQuery]);
+  }, [loading, items, setQuery, searchStr]);
 
   // An agent recommendation deep-links to the same human-reviewed setup sheet
   // as a marketplace click. Loading the live catalog again prevents an old
@@ -1682,6 +1713,89 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
     } finally {
       setBusyId(null);
     }
+  }
+
+  // In the desktop app a connection's sign-in finishes in the person's
+  // browser. Watch for the new connection and finish here as soon as it
+  // appears, instead of waiting for the browser to hand the person back.
+  const [desktopWatch, setDesktopWatch] = useState<DesktopConnectWatch | null>(null);
+  const resumeFromWatch = useRef(resumeOAuthConnect);
+  resumeFromWatch.current = resumeOAuthConnect;
+  useEffect(() => {
+    if (!desktopWatch) return;
+    let stopped = false;
+    let checking = false;
+    const check = async () => {
+      if (stopped || checking) return;
+      if (Date.now() > desktopWatch.until) {
+        stopped = true;
+        setDesktopWatch(null);
+        return;
+      }
+      checking = true;
+      try {
+        const finished = finishedDesktopConnection(
+          desktopWatch,
+          await client.listConnections(workspaceId),
+          (id) => desktopConnectAlreadyFinished(id),
+        );
+        if (!finished || stopped) return;
+        stopped = true;
+        setDesktopWatch(null);
+        rememberDesktopConnectFinished(finished.id);
+        await resumeFromWatch.current(
+          desktopWatch.itemId,
+          finished.id,
+          finished.providerDomain,
+          desktopWatch.ownership,
+        );
+      } catch {
+        // Read again on the next tick.
+      } finally {
+        checking = false;
+      }
+    };
+    const timer = window.setInterval(() => void check(), DESKTOP_CONNECT_POLL_MS);
+    const onFocus = () => void check();
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onFocus);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onFocus);
+    };
+  }, [desktopWatch, client, workspaceId]);
+
+  function watchDesktopConnect(
+    item: CapabilityCatalogItem,
+    itemId: string,
+    action: ConnectAction,
+  ): void {
+    if (!desktopBridge || connections === null) return;
+    if (
+      action.type !== "oauth" &&
+      action.type !== "reconnect_oauth" &&
+      action.type !== "add_oauth_account"
+    )
+      return;
+    // Google Drive resumes through its own return step.
+    if ((item.mcpUrl ?? item.endpointUrl) === DRIVE_MCP_URL) return;
+    const plan = capabilityConnectPlan(item);
+    setDesktopWatch(
+      startDesktopConnectWatch({
+        itemId,
+        providerDomain:
+          plan.mode === "oauth"
+            ? plan.providerDomain
+            : (item.connectionRef?.providerDomain ?? null),
+        mcpUrl: plan.mode === "oauth" ? plan.mcpUrl : (item.mcpUrl ?? item.endpointUrl ?? null),
+        ownership: action.ownership,
+        viewerSubjectId: context.accessContext?.subjectId ?? null,
+        reconnectConnectionId: action.type === "reconnect_oauth" ? action.connectionId : null,
+        connections,
+      }),
+    );
   }
 
   async function submitAddCustom(form: CapabilityFormState) {
