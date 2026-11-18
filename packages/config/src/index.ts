@@ -2237,7 +2237,9 @@ const SettingsSchema = z.object({
   // compute per workspace. Boxes a turn holds never count. 0 = unbounded.
   sandboxMaxViewerOnlyBoxesPerWorkspace: z.coerce.number().int().nonnegative().default(3),
   // Organization-wide sandbox limits by subscription plan (see
-  // parseSandboxPlanLimitsJson). Empty = DEFAULT_SANDBOX_PLAN_LIMITS; "{}" = none.
+  // parseSandboxPlanLimitsJson). Empty = DEFAULT_SANDBOX_PLAN_LIMITS (without
+  // subscription plans, DEFAULT_SANDBOX_PLAN_LIMITS_WITHOUT_SUBSCRIPTION_PLANS);
+  // "{}" = none.
   sandboxPlanLimitsJson: z.string().default(""),
   // Fleet-wide bounds on unpaid sandbox compute (see
   // parseSandboxFleetLimitsJson). Empty = DEFAULT_SANDBOX_FLEET_LIMITS.
@@ -12477,7 +12479,7 @@ export type SandboxPlanLimit = {
 /**
  * Limits by tier. Tiers are subscription plan keys (`free`, `pro`, `max`,
  * `enterprise`, or any operator-defined key), plus `none` for an organization
- * with no plan row (plans disabled), `restricted` for a Free or plan-less
+ * with no plan row, `restricted` for a Free or plan-less
  * organization whose promotion decision is `held` or `denied` while promotion
  * enforcement is on (or whose acting person holds such an organization), and
  * that has neither bought credit nor an active paid plan, `new` for a Free
@@ -12485,6 +12487,14 @@ export type SandboxPlanLimit = {
  * younger than the `new` tier's `organizationsYoungerThanMs`, and `embedded`
  * for an organization a host provisioned (its own external source is not a
  * signup one). A tier absent from the table is unbounded.
+ *
+ * What `none` means depends on OPENGENI_SUBSCRIPTION_PLANS_ENABLED. With
+ * subscription plans on, subscription maintenance enrolls every organization
+ * in Free, so a plan-less organization is an unpaid one not yet enrolled and
+ * is bounded like Free. Without them no organization ever gets a plan row, so
+ * `none` is every organization's ordinary tier: it is not unpaid
+ * (sandboxPlanTierUnpaid) and the defaults leave it unbounded
+ * (DEFAULT_SANDBOX_PLAN_LIMITS_WITHOUT_SUBSCRIPTION_PLANS).
  */
 export type SandboxPlanLimits = Readonly<Record<string, SandboxPlanLimit>>;
 
@@ -12534,11 +12544,12 @@ export const DEFAULT_SANDBOX_PLAN_LIMITS: SandboxPlanLimits = {
     boxSecondsPerPersonPerDay: 0,
     idleDrainAllHolders: true,
   },
-  // No plan row yet. A new self-serve organization has none until
-  // subscription maintenance enrolls it in Free (and one with an unexpired
-  // credit period but no plan row is not enrolled), so `none` is bounded like
-  // Free rather than closed: closing it would refuse a brand-new person's
-  // first sandbox.
+  // No plan row yet, with subscription plans on. A new self-serve
+  // organization has none until subscription maintenance enrolls it in Free
+  // (and one with an unexpired credit period but no plan row is not
+  // enrolled), so `none` is bounded like Free rather than closed: closing it
+  // would refuse a brand-new person's first sandbox. Without subscription
+  // plans this entry is absent (see SandboxPlanLimits).
   none: {
     viewerOnlyBoxesPerOrganization: 1,
     viewerOnlyBoxesPerMember: 1,
@@ -12560,9 +12571,24 @@ export const DEFAULT_SANDBOX_PLAN_LIMITS: SandboxPlanLimits = {
   embedded: {},
 };
 
-/** Parse OPENGENI_SANDBOX_PLAN_LIMITS_JSON; blank keeps the defaults. */
-export function parseSandboxPlanLimitsJson(raw: string): SandboxPlanLimits {
-  if (!raw.trim()) return DEFAULT_SANDBOX_PLAN_LIMITS;
+/** The defaults on a deployment without subscription plans: no organization
+ * has a plan row, so `none` is every organization's tier and is unbounded. */
+export const DEFAULT_SANDBOX_PLAN_LIMITS_WITHOUT_SUBSCRIPTION_PLANS: SandboxPlanLimits =
+  Object.fromEntries(
+    Object.entries(DEFAULT_SANDBOX_PLAN_LIMITS).filter(([tier]) => tier !== "none"),
+  );
+
+/** Parse OPENGENI_SANDBOX_PLAN_LIMITS_JSON; blank keeps the defaults for
+ * whether subscription plans are on (default: on). */
+export function parseSandboxPlanLimitsJson(
+  raw: string,
+  options: { subscriptionPlansEnabled?: boolean } = {},
+): SandboxPlanLimits {
+  if (!raw.trim()) {
+    return options.subscriptionPlansEnabled === false
+      ? DEFAULT_SANDBOX_PLAN_LIMITS_WITHOUT_SUBSCRIPTION_PLANS
+      : DEFAULT_SANDBOX_PLAN_LIMITS;
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -12615,8 +12641,12 @@ export function parseSandboxPlanLimitsJson(raw: string): SandboxPlanLimits {
   return out;
 }
 
-export function sandboxPlanLimits(settings: Settings): SandboxPlanLimits {
-  return parseSandboxPlanLimitsJson(settings.sandboxPlanLimitsJson);
+export function sandboxPlanLimits(
+  settings: Pick<Settings, "sandboxPlanLimitsJson" | "subscriptionPlansEnabled">,
+): SandboxPlanLimits {
+  return parseSandboxPlanLimitsJson(settings.sandboxPlanLimitsJson, {
+    subscriptionPlansEnabled: settings.subscriptionPlansEnabled,
+  });
 }
 
 /**
@@ -12743,8 +12773,24 @@ export function sandboxFleetLimits(settings: Pick<Settings, "sandboxFleetLimitsJ
 
 /** Plan tiers whose organization has not paid: Free, a young Free, no plan
  * row yet, or restricted. Their boxes get the unpaid resource ceilings and
- * egress allowlists. Paid plans, `enterprise` and `embedded` never do. */
+ * egress allowlists. Paid plans, `enterprise` and `embedded` never do, nor
+ * does `none` without subscription plans (sandboxPlanTierUnpaid). */
 export const UNPAID_SANDBOX_PLAN_TIERS: readonly string[] = ["free", "new", "none", "restricted"];
+
+/**
+ * Whether an organization on `tier` is unpaid: its boxes get the unpaid
+ * ceilings and egress allowlists, the unpaid-only plan-limit fields and the
+ * fleet limits. `none` is unpaid only with subscription plans on (default:
+ * on), where it is an organization not yet enrolled in Free; without them it
+ * is every organization's ordinary tier.
+ */
+export function sandboxPlanTierUnpaid(
+  tier: string | null | undefined,
+  options: { subscriptionPlansEnabled?: boolean | undefined } = {},
+): boolean {
+  if (!tier || !UNPAID_SANDBOX_PLAN_TIERS.includes(tier)) return false;
+  return tier !== "none" || options.subscriptionPlansEnabled !== false;
+}
 
 /** Plan-limit fields that bound only organizations that have never paid. An
  * unpaid-tier organization that bought credit or had a paid subscription
@@ -12771,20 +12817,28 @@ export function paidSandboxPlanLimit(limit: SandboxPlanLimit): SandboxPlanLimit 
  * tier (null) and an organization that has paid keep the standard ceilings. */
 export function sandboxResourceClassForPlanTier(
   tier: string | null | undefined,
-  options: { paidHistory?: boolean | undefined } = {},
+  options: {
+    paidHistory?: boolean | undefined;
+    subscriptionPlansEnabled?: boolean | undefined;
+  } = {},
 ): Settings["sandboxResourceClass"] {
-  return tier && UNPAID_SANDBOX_PLAN_TIERS.includes(tier) && options.paidHistory !== true
+  return sandboxPlanTierUnpaid(tier, options) && options.paidHistory !== true
     ? "unpaid"
     : "standard";
 }
 
 /** `settings` rebound to the resource class of the creating organization. */
-export function settingsForSandboxPlanTier<T extends Pick<Settings, "sandboxResourceClass">>(
+export function settingsForSandboxPlanTier<
+  T extends Pick<Settings, "sandboxResourceClass" | "subscriptionPlansEnabled">,
+>(
   settings: T,
   tier: string | null | undefined,
   options: { paidHistory?: boolean | undefined } = {},
 ): T {
-  const resourceClass = sandboxResourceClassForPlanTier(tier, options);
+  const resourceClass = sandboxResourceClassForPlanTier(tier, {
+    ...options,
+    subscriptionPlansEnabled: settings.subscriptionPlansEnabled,
+  });
   return settings.sandboxResourceClass === resourceClass
     ? settings
     : { ...settings, sandboxResourceClass: resourceClass };

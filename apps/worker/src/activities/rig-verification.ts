@@ -649,6 +649,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
       // plan, standing and fleet bounds apply (a held or denied organization
       // gets none, Free shares its running boxes).
       sandboxPlanLimits: sandboxPlanLimits(input.settings),
+      subscriptionPlansEnabled: input.settings.subscriptionPlansEnabled,
       sandboxFleetLimits: sandboxFleetLimits(input.settings),
     });
     // The organization already runs as many boxes as its plan allows. No

@@ -1942,6 +1942,7 @@ export function registerComputerSessionRoutes(
       // The plan's compute bounds apply to a computer session's box like any
       // other holder's (a held or denied organization, a spent daily budget).
       sandboxPlanLimits: sandboxPlanLimits(deps.settings),
+      subscriptionPlansEnabled: deps.settings.subscriptionPlansEnabled,
       sandboxFleetLimits: sandboxFleetLimits(deps.settings),
       actingSubjectId: sandboxActingPerson(grant.subjectId),
       onComputeStandingFallback: sandboxComputeStandingFallbackObserver(deps.observability),

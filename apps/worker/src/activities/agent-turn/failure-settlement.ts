@@ -381,9 +381,14 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
             reason: "rotation_in_progress" as const,
           }
         : undefined;
+      // The organization already runs as many boxes as its plan allows: the
+      // turn waits for one of its own boxes to drain, a designed wait with no
+      // retry budget rather than a sandbox fault.
+      const organizationLimitPark =
+        !sandboxLifecycleWait && lifecycleTransition?.reason === "organization_sandbox_capacity";
       const transitionRetryAfterMs =
         transitionPending && !sandboxLifecycleWait
-          ? lifecycleTransition?.reason === "organization_sandbox_capacity"
+          ? organizationLimitPark
             ? ORGANIZATION_SANDBOX_CAPACITY_RETRY_MS
             : sandboxDeadlineRotationRecoveryDelayMs(settings)
           : undefined;
@@ -429,7 +434,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
       control.activityStatus = "recovering";
       control.turnMetricOutcome = "recovering";
-      control.turnRecoveryCause = "sandbox";
+      control.turnRecoveryCause = organizationLimitPark ? "organization_limit" : "sandbox";
       return claimedResult({
         status: "recovering",
         ...(transitionRetryAfterMs !== undefined

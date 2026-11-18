@@ -296,6 +296,7 @@ export async function attachViewer(
       sandboxPlanLimits: input.operationScoped
         ? runningLimitsOnly(sandboxPlanLimits(settings))
         : sandboxPlanLimits(settings),
+      subscriptionPlansEnabled: settings.subscriptionPlansEnabled,
       sandboxFleetLimits: sandboxFleetLimits(settings),
       ...(input.waitSignal ? { waitSignal: input.waitSignal } : {}),
       ...(!input.operationScoped && settings.sandboxViewerIdleDrainMs > 0

@@ -68,7 +68,9 @@ export type TurnOutcome = "completed" | "failed" | "cancelled" | "recovering";
  * Why a turn attempt ended recovering. A closed set chosen at each recovery
  * site: `provider` (the model provider or its subscription lease), `route_change`
  * (the session's active sandbox was deliberately moved mid-turn, so the turn
- * continues on its new machine in a fresh attempt), `sandbox`,
+ * continues on its new machine in a fresh attempt), `organization_limit` (the
+ * organization already runs as many boxes as its plan allows, so the turn
+ * parks until one drains), `sandbox`,
  * `tool` (MCP and first-party tool setup), `worker` (shutdown or death),
  * `database` (settlement could not be written), `control` (admission holds)
  * and `other`.
@@ -76,6 +78,7 @@ export type TurnOutcome = "completed" | "failed" | "cancelled" | "recovering";
 export type TurnRecoveryCause =
   | "provider"
   | "route_change"
+  | "organization_limit"
   | "sandbox"
   | "tool"
   | "worker"
@@ -141,6 +144,7 @@ const TURN_OUTCOMES: readonly TurnOutcome[] = ["completed", "failed", "cancelled
 const TURN_RECOVERY_CAUSES: readonly TurnRecoveryCause[] = [
   "provider",
   "route_change",
+  "organization_limit",
   "sandbox",
   "tool",
   "worker",

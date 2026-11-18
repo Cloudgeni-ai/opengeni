@@ -1096,6 +1096,7 @@ async function withChannelAOperation<T>(
       // A direct operation that would start a new box counts against the
       // organization's running-box limit (429 at the limit).
       sandboxPlanLimits: sandboxPlanLimits(settings),
+      subscriptionPlansEnabled: settings.subscriptionPlansEnabled,
       sandboxFleetLimits: sandboxFleetLimits(settings),
       // The person behind the operation (an agent attempt's initiating
       // human): their other organizations count toward the per-person bounds.
