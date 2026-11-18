@@ -53,7 +53,9 @@ import {
 import { nestedPostgresSqlState } from "./persistence-errors";
 import {
   readSignupNetworkEvaluateAccounts,
+  setSignupMailSignalForSetup,
   setSignupNetworkSourceForSetup,
+  type SignupMailSignal,
   type SignupNetworkSource,
 } from "./managed-user-setup";
 import { lockSessionEventWriteRows } from "./session-control";
@@ -92,6 +94,7 @@ export async function createManagedOrganizationWithSignupNetwork(
     trialCreditsEnabled?: boolean;
     trialCreditModelIds?: string[] | undefined;
     signupNetwork?: SignupNetworkSource | null;
+    signupMailSignal?: SignupMailSignal | null;
   },
 ): Promise<{ organization: CreateOrganizationResponseType; evaluateAccountIds: string[] }> {
   return await db.transaction(async (tx) => {
@@ -114,6 +117,7 @@ export async function createManagedOrganizationWithSignupNetwork(
     )`,
     );
     await setSignupNetworkSourceForSetup(tx as unknown as Database, input.signupNetwork);
+    await setSignupMailSignalForSetup(tx as unknown as Database, input.signupMailSignal);
     const [row] = await rawRows<{ result: unknown }>(
       tx,
       sql`select create_managed_organization(
@@ -147,6 +151,7 @@ export async function createAdditionalManagedOrganizationWithSignupNetwork(
     workspaceName: string;
     operationId: string;
     signupNetwork?: SignupNetworkSource | null;
+    signupMailSignal?: SignupMailSignal | null;
   },
 ): Promise<{
   organization: CreateAdditionalOrganizationResponseType;
@@ -155,6 +160,7 @@ export async function createAdditionalManagedOrganizationWithSignupNetwork(
   return await db.transaction(async (tx) => {
     await setSubjectRlsContext(tx as unknown as Database, input.subjectId);
     await setSignupNetworkSourceForSetup(tx as unknown as Database, input.signupNetwork);
+    await setSignupMailSignalForSetup(tx as unknown as Database, input.signupMailSignal);
     const [row] = await rawRows<{ result: unknown }>(
       tx,
       sql`select create_additional_managed_organization(

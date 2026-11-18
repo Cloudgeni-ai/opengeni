@@ -35,6 +35,7 @@ import {
 import { recordOrganizationSetupOutcome } from "../auth/signup-funnel-metrics";
 import {
   evaluateSignupNetworkAccountsAfterSetup,
+  requestSignupMailSignal,
   requestSignupNetworkSource,
   signupNetworkRateLimitError,
 } from "../auth/signup-network";
@@ -137,6 +138,9 @@ export function registerManagedOnboardingRoutes(
       });
     }
     const organizationName = parsed.data.organizationName.trim();
+    // Bounded and failing open (migration 1493): only the flag is recorded.
+    // Started now so the MX lookup overlaps the fingerprint; never throws.
+    const pendingSignupMailSignal = requestSignupMailSignal(session.user.email, deps.settings);
     try {
       const requestFingerprint = await selfServiceOrganizationSetupRequestFingerprint({
         authUserId: session.user.id,
@@ -157,6 +161,7 @@ export function registerManagedOnboardingRoutes(
             deps.settings.productAccessMode === "managed" &&
             deps.settings.verifiedSignupTrialCreditsEnabled,
           signupNetwork,
+          signupMailSignal: await pendingSignupMailSignal,
         });
       const completed = CompleteSelfServiceOrganizationSetupResponse.parse(setup);
       // Committed. Evaluate this organization and recent same-network ones,
