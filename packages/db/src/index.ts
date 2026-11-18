@@ -49430,7 +49430,24 @@ export interface LiveModalSandboxLeaseAttribution {
   liveness: SandboxLeaseLiveness;
 }
 
-export interface AcquireLeaseInput {
+/**
+ * The named, explicit opt-out from the organization plan limits. Only a test
+ * fixture that exercises lease mechanics without plan bounds may use it;
+ * every product caller passes the deployment's limits (sandboxPlanLimits).
+ */
+export type SandboxPlanLimitsOptOut = "unbounded_test_fixture";
+
+/**
+ * acquireLease input. `sandboxPlanLimits` is required, so no caller can start
+ * or keep a box outside the plan, standing and fleet bounds by omission.
+ */
+export type AcquireLeaseInput = Omit<AcquireLeaseAdmissionInput, "sandboxPlanLimits"> & {
+  /** Organization-wide limits by plan tier (sandboxPlanLimits(settings)), or
+   * the named test-fixture opt-out. */
+  sandboxPlanLimits: SandboxPlanLimits | SandboxPlanLimitsOptOut;
+};
+
+interface AcquireLeaseAdmissionInput {
   accountId: string;
   workspaceId: string;
   // The group's identity (sessions.sandbox_group_id; == session id for a
@@ -49498,8 +49515,8 @@ export interface AcquireLeaseInput {
   /** Organization-wide limits by plan tier (resolveSandboxPlanTier). Viewer
    * holders are refused beyond the tier's viewer-only limits with
    * SandboxViewerBoxLimitError; electing a new box beyond its running-box
-   * limit is refused (non-turn holders) or capacity-blocked (turns). Omitted =
-   * no organization limits. */
+   * limit is refused (non-turn holders) or capacity-blocked (turns). Omitted
+   * only for the explicit test-fixture opt-out (AcquireLeaseInput). */
   sandboxPlanLimits?: SandboxPlanLimits;
   /** Fleet-wide bounds on unpaid compute (OPENGENI_SANDBOX_FLEET_LIMITS_JSON),
    * applied with sandboxPlanLimits to a new box of an unpaid organization:
@@ -50836,7 +50853,7 @@ function warmBillingSnapshot(
  */
 async function sandboxWarmAdmissionAttribution(
   tx: Database,
-  input: AcquireLeaseInput,
+  input: AcquireLeaseAdmissionInput,
 ): Promise<CreditDebitAttribution> {
   if (input.kind === "turn" && input.holderId.startsWith("turn-attempt:")) {
     const attemptId = input.holderId.slice("turn-attempt:".length);
@@ -52071,7 +52088,7 @@ async function lockSandboxLeaseAdmission(
 // The single most load-bearing function: the sole double-spawn guard.
 async function acquireLeaseOnce(
   db: Database,
-  input: AcquireLeaseInput,
+  input: AcquireLeaseAdmissionInput,
   standing: SandboxComputeStanding | null = null,
   fleet: SandboxFleetAdmission | null = null,
 ): Promise<AcquireLeaseResult> {
@@ -52972,7 +52989,7 @@ function sandboxFleetBounded(standing: SandboxComputeStanding | null): boolean {
 
 async function readSandboxFleetAdmission(
   db: Database,
-  input: AcquireLeaseInput,
+  input: AcquireLeaseAdmissionInput,
   standing: SandboxComputeStanding | null,
 ): Promise<SandboxFleetAdmission | null> {
   const limits = input.sandboxFleetLimits;
@@ -53008,8 +53025,13 @@ async function readSandboxFleetAdmission(
 
 export async function acquireLease(
   db: Database,
-  input: AcquireLeaseInput,
+  request: AcquireLeaseInput,
 ): Promise<AcquireLeaseResult> {
+  const { sandboxPlanLimits: requestedPlanLimits, ...rest } = request;
+  const input: AcquireLeaseAdmissionInput =
+    requestedPlanLimits === "unbounded_test_fixture"
+      ? rest
+      : { ...rest, sandboxPlanLimits: requestedPlanLimits };
   const captureWaitMs = input.captureWaitMs ?? 0;
   if (!Number.isSafeInteger(captureWaitMs) || captureWaitMs < 0 || captureWaitMs > 60 * 60_000) {
     throw new Error("Sandbox lease archive capture wait is invalid");

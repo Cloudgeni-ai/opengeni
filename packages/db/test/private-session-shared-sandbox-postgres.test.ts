@@ -284,6 +284,7 @@ function makePrivate(org: Org, sessionId: string, expectedAuthorityEpoch = 1) {
 async function holdBox(org: Org, groupId: string, subjectId: string) {
   const holderId = `interaction-${crypto.randomUUID()}`;
   const acquired = await acquireLease(client.db, {
+    sandboxPlanLimits: "unbounded_test_fixture",
     accountId: org.accountId,
     workspaceId: org.workspaceId,
     sandboxGroupId: groupId,

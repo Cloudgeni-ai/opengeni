@@ -917,6 +917,7 @@ describe("checkpoints of held boxes between turns", () => {
     // admission) and closes before the next checkpoint.
     const viewerId = `viewer-${crypto.randomUUID()}`;
     const attached = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...ids,
       kind: "viewer",
       holderId: viewerId,
@@ -967,6 +968,7 @@ describe("checkpoints of held boxes between turns", () => {
 
     // A new lease epoch is a new box restored from the archive.
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...ids,
       kind: "viewer",
       holderId: viewerId,

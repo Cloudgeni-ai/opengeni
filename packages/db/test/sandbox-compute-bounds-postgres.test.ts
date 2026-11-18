@@ -373,6 +373,25 @@ describe("free compute bounds (real PostgreSQL)", () => {
     }, 120_000);
   });
 
+  test("a system-held box (a rig verification turn) gets no box for a held organization; only the named test opt-out skips the bounds", async () => {
+    const held = await organization({ plan: "free", decision: "held" });
+    const verification = await refusal(
+      acquire(held, "turn", { holderId: `rig-verification:${crypto.randomUUID()}` }),
+    );
+    expect([verification.reason, verification.limit]).toEqual(["closed", 0]);
+    const unbounded = await acquireLease(db, {
+      accountId: held.accountId,
+      workspaceId: held.workspaceId,
+      sandboxGroupId: crypto.randomUUID(),
+      kind: "turn",
+      holderId: `rig-verification:${crypto.randomUUID()}`,
+      backend: "modal",
+      leaseTtlMs: 90_000,
+      sandboxPlanLimits: "unbounded_test_fixture",
+    });
+    expect(unbounded.role).toBe("spawner");
+  }, 60_000);
+
   test("the reaper drains a box no turn holds and never one a turn holds", async () => {
     const org = await organization({ plan: "free" });
     const viewerOnly = crypto.randomUUID();

@@ -67,6 +67,7 @@ test("API-direct synchronous and nested commands retain exact custody without fa
   const firstRequestId = crypto.randomUUID();
   const firstHolderId = `direct:${firstRequestId}`;
   const initialLease = await acquireLease(client.db, {
+    sandboxPlanLimits: "unbounded_test_fixture",
     accountId: account.id,
     workspaceId: workspace.id,
     sandboxGroupId,
@@ -174,6 +175,7 @@ test("API-direct synchronous and nested commands retain exact custody without fa
   const makeRouted = async (requestId: string, holderId: string) => {
     if (requestId !== firstRequestId) {
       const attached = await acquireLease(client!.db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         accountId: account.id,
         workspaceId: workspace.id,
         sandboxGroupId,
