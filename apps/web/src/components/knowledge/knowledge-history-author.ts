@@ -13,3 +13,12 @@ export function authorOf(
   if (revision.createdBySessionId) return "Opengeni";
   return scope === "personal" || savedByYou.has(revision.id) ? "You" : "A teammate";
 }
+
+/**
+ * The versions a history page says the person asking saved. Servers before
+ * migration 1494 leave it out; anything malformed counts as none.
+ */
+export function savedByYouOf(page: object): string[] {
+  const value: unknown = (page as { savedByYou?: unknown }).savedByYou;
+  return Array.isArray(value) ? value.filter((id): id is string => typeof id === "string") : [];
+}

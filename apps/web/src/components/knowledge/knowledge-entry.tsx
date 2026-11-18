@@ -59,7 +59,7 @@ import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 
 import { errorText, useKnowledgeList } from "./knowledge-data";
 import { KnowledgeEvidenceEditor } from "./knowledge-evidence-editor";
-import { authorOf } from "./knowledge-history-author";
+import { authorOf, savedByYouOf } from "./knowledge-history-author";
 import { KnowledgeIndexNotice } from "./knowledge-index-status";
 import {
   KNOWLEDGE_KIND_HELP,
@@ -1034,7 +1034,7 @@ function EntryHistory({
       .listKnowledgeEntryHistory(workspaceId, record.id)
       .then(async (page) => {
         loaded.current = page.entries;
-        savedByYou.current = new Set(page.savedByYou ?? []);
+        savedByYou.current = new Set(savedByYouOf(page));
         const next = await toRevisions(page.entries);
         if (!current) return;
         setRevisions(next);
@@ -1054,7 +1054,7 @@ function EntryHistory({
     try {
       const page = await client.listKnowledgeEntryHistory(workspaceId, record.id, before);
       loaded.current = [...loaded.current, ...page.entries];
-      for (const id of page.savedByYou ?? []) savedByYou.current.add(id);
+      for (const id of savedByYouOf(page)) savedByYou.current.add(id);
       setRevisions(await toRevisions(loaded.current));
       setBefore(page.beforeRevision);
     } catch (reason) {

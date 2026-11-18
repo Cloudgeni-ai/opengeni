@@ -43596,6 +43596,10 @@
     "@opengeni/react/ui/window-bar-title": {
       "PageHeaderWindowBarContext": "value",
       "useWindowBarTitle": "value",
+      "WindowBarCrumb": "type",
+      "WindowBarOwnerReportContext": "value",
+      "WindowBarPlace": "type",
+      "WindowBarPlaceContext": "value",
       "WindowBarTitleBoundary": "value"
     },
     "@opengeni/react/ui/word-list-row": {

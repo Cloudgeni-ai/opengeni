@@ -9751,8 +9751,6 @@ export class OpenGeniClient {
   ): Promise<{
     entries: KnowledgeEntryListResponse["entries"];
     beforeRevision: number | null;
-    /** Of these versions, the ones the person asking saved. Absent from older servers. */
-    savedByYou?: string[] | undefined;
   }> {
     return this.requestJson(
       "GET",

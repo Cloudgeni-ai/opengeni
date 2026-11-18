@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { parseKnowledgeSearch } from "../../lib/knowledge-route";
-import { authorOf } from "./knowledge-history-author";
+import { authorOf, savedByYouOf } from "./knowledge-history-author";
 
 describe("who a Knowledge version names as its author", () => {
   const human = { id: "r1", createdBySessionId: null };
@@ -12,6 +12,14 @@ describe("who a Knowledge version names as its author", () => {
     expect(authorOf({ id: "r1", createdBySessionId: "s1" }, "workspace", new Set(["r1"]))).toBe(
       "Opengeni",
     );
+  });
+});
+
+describe("the versions a history page says you saved", () => {
+  test("reads them, and none from older servers or malformed pages", () => {
+    expect(savedByYouOf({ entries: [], savedByYou: ["r1", 2, "r2"] })).toEqual(["r1", "r2"]);
+    expect(savedByYouOf({ entries: [] })).toEqual([]);
+    expect(savedByYouOf({ savedByYou: "r1" })).toEqual([]);
   });
 });
 
