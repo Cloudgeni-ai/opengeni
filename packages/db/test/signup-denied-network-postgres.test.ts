@@ -835,6 +835,7 @@ test("review lists denied network holds with their own reason; release by rule",
       "ip-velocity-v1",
       "denied-network-v1",
       "email-cluster-v1",
+      "additional-organization-v1",
     ]);
     expect(listed.settings.deniedNetworkMode).toBe("enforce");
     expect(listed.accounts.map((account) => account.accountId)).toEqual([held.accountId]);
