@@ -5922,22 +5922,27 @@ function registerWorkspaceOrchestrationTools(
   // model already holds is superseded instead of starting another inference.
   // The model's call id lets a later attempt of the same turn, which resumes
   // from durable history holding this read's output, count it too.
-  // Only a direct model call counts: a Codemode script may keep the output to
-  // itself. Best-effort: a failure leaves that result to be delivered.
+  // A Codemode call (for example `ogtool call` in a shell command) is recorded
+  // apart: a script may keep the output to itself, so it counts only when the
+  // turn's durable history shows the model received the answer. An unmarked
+  // call proves nothing. Best-effort: a failure leaves that result to be
+  // delivered.
   const recordConsumedChildResults = async (
     children: { sessionId: string; sequences: number[] }[],
     extra: { _meta?: Record<string, unknown> } | undefined,
   ): Promise<void> => {
     const claims = exactAgentAttemptClaims(grant);
+    const caller = extra?._meta?.[FIRST_PARTY_MCP_CALLER_META_KEY];
     if (
-      extra?._meta?.[FIRST_PARTY_MCP_CALLER_META_KEY] !== "model" ||
+      (caller !== "model" && caller !== "codemode") ||
       !callerSessionId ||
       !claims ||
       claims.sessionId !== callerSessionId ||
       !children.some((child) => child.sequences.length > 0)
     )
       return;
-    const callId = extra?._meta?.[FIRST_PARTY_MCP_MODEL_CALL_ID_META_KEY];
+    const callId =
+      caller === "model" ? extra?._meta?.[FIRST_PARTY_MCP_MODEL_CALL_ID_META_KEY] : undefined;
     try {
       await recordConsumedChildAnswers(deps.db, {
         accountId: grant.accountId,
@@ -5946,6 +5951,7 @@ function registerWorkspaceOrchestrationTools(
         turnId: claims.turnId,
         attemptId: claims.attemptId,
         executionGeneration: claims.executionGeneration,
+        via: caller,
         ...(typeof callId === "string" ? { callId } : {}),
         children,
       });
