@@ -16,7 +16,7 @@ export function authorOf(
 
 /**
  * The versions a history page says the person asking saved. Servers before
- * migration 1494 leave it out; anything malformed counts as none.
+ * migration 1498 leave it out; anything malformed counts as none.
  */
 export function savedByYouOf(page: object): string[] {
   const value: unknown = (page as { savedByYou?: unknown }).savedByYou;

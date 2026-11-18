@@ -941,7 +941,7 @@ export async function listKnowledgeEntryHistory(
 }
 
 /**
- * Of these versions, the ones the person asking saved (migration 1494), so
+ * Of these versions, the ones the person asking saved (migration 1498), so
  * the history can say "You". Empty for agents and services, and before that
  * migration.
  */

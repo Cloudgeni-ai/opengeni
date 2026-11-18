@@ -8,7 +8,7 @@ import {
 } from "../src";
 
 /* A Knowledge entry's history says "You" for the versions you saved
-   (migration 1494): it lists them by id, only for the person asking, and
+   (migration 1498): it lists them by id, only for the person asking, and
    never names anyone else. */
 
 let shared: SharedTestDatabase;
