@@ -1,4 +1,4 @@
-import type { Permission } from "@opengeni/contracts";
+import type { AccessGrant, Permission } from "@opengeni/contracts";
 import { CORE_INTEGRATION_DEFINITIONS } from "@opengeni/capabilities";
 import type { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
 import { hasPermission } from "../access";
@@ -141,5 +141,31 @@ export async function requireConnectOwnerAuthority(
       (!personalOwnerSettings && !hasPermission(grant.permissions, permission))
     )
       throw new HTTPException(403, { message: "Connection owner authority changed" });
+  });
+}
+
+/**
+ * The signed-in person's current grant in the workspace a callback finishes
+ * in, found exactly as {@link requireConnectOwnerAuthority} finds it
+ * (membership, or the verified owner of a Personal workspace). Null for any
+ * other owner (API keys, external users, host continuations) or when the
+ * person no longer belongs there. A callback uses it to act as that person,
+ * with their permissions now, for follow-up steps such as turning on the
+ * capability they connected.
+ */
+export async function currentConnectOwnerGrant(
+  db: Database,
+  state: ConnectOwner,
+): Promise<AccessGrant | null> {
+  if (state.externalContinuation || !state.subjectId.startsWith("user:")) return null;
+  return await withWorkspaceSubjectRls(db, state.workspaceId, state.subjectId, async (tx) => {
+    const membership = await getWorkspaceGrant(tx, state.subjectId, state.workspaceId);
+    const grant =
+      membership?.accountId === state.accountId
+        ? membership
+        : state.personalOwnerVerified
+          ? await resolveNamedManagedPersonalWorkspaceGrant(tx, state)
+          : null;
+    return grant && grant.accountId === state.accountId ? grant : null;
   });
 }

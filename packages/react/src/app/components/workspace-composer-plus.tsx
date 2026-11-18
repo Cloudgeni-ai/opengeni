@@ -247,6 +247,7 @@ export function WorkspaceComposerPlus(
       "connectionId",
       "providerDomain",
       "ownership",
+      "capability",
       "stage",
       "reason",
     ])

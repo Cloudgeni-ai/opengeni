@@ -1566,7 +1566,13 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const result = isApiIntegrationProviderOAuthState(input.state, deps.settings)
       ? await completeApiIntegrationProviderOAuth(deps, input)
       : await completeMcpOAuthCallback(
-          { db, settings, observability, oauthCallbackDeadlineMs: deps.oauthCallbackDeadlineMs },
+          {
+            db,
+            settings,
+            observability,
+            oauthCallbackDeadlineMs: deps.oauthCallbackDeadlineMs,
+            mcpServerLogoStorage: deps.objectStorage,
+          },
           input,
         );
     if ("exactReturn" in result && result.exactReturn)

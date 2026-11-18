@@ -127,6 +127,7 @@ import {
 } from "./oauth-profiles";
 import { canonicalProviderDomain } from "./provider-domain";
 import { nangoIntegrationForConnectTarget, startNangoConnect } from "./nango-connect";
+import { finishCapabilityAfterConnect } from "./connect-capability-finish";
 import { microsoftAuthorizationNotGranted } from "./microsoft-admin-consent";
 import { microsoftAdminConsentUrl } from "@opengeni/contracts/connect";
 import {
@@ -226,6 +227,8 @@ type OAuthClientDeps = {
   observability?: Observability | undefined;
   oauthStartDeadlineMs?: number | undefined;
   oauthCallbackDeadlineMs?: number | undefined;
+  /** Stores a custom server's logo when the callback turns it on. */
+  mcpServerLogoStorage?: Parameters<typeof finishCapabilityAfterConnect>[0]["mcpServerLogoStorage"];
 };
 
 export type OAuthStartContext = {
@@ -270,6 +273,8 @@ type OAuthClientRegistration = {
 type OAuthStatePayload = {
   integrationKey?: "gmail" | "google-drive" | "google-calendar" | "slack-personal";
   connectAttemptId?: string;
+  /** The catalog capability the callback turns on (connect-capability-finish.ts). */
+  capabilityId?: string;
   externalContinuation?: ExternalActorContinuation;
   returnUrl?: string;
   accountId: string;
@@ -796,6 +801,15 @@ async function startMcpOAuthWithinDeadline(
         }
       : {}),
     returnPath,
+    // Only a person's own sign-in (a browser-proven start) names a capability
+    // for the callback to turn on: the callback acts with that person's grant,
+    // which a narrower token or API key that started it never held.
+    ...(context.payload.capabilityId &&
+    context.browserBinding.browserProof !== "none" &&
+    !externalContinuation &&
+    !context.connectAttemptId
+      ? { capabilityId: context.payload.capabilityId }
+      : {}),
     ...(existing ? { connectionId: existing.id, connectionVersion: existing.version } : {}),
   });
   const expiresAt = new Date(Date.now() + oauthStateTtlMs);
@@ -1534,6 +1548,20 @@ async function completeMcpOAuthCallbackWithinDeadline(
       });
     }
     await turnOnPersistedLoginHere();
+    // Turn on the capability this sign-in was for, so setup is done even if
+    // no page loads after this redirect (connect-capability-finish.ts).
+    const capability =
+      state.capabilityId &&
+      state.browserProof &&
+      state.browserProof !== "none" &&
+      !state.externalContinuation
+        ? await finishCapabilityAfterConnect(deps, {
+            owner: state,
+            capabilityId: state.capabilityId,
+            ownership: state.ownership,
+            connection,
+          })
+        : null;
     // Carry the canonical providerDomain (not just the id) so the SPA can build
     // the enable connectionRef straight from the redirect, without a listConnections
     // round-trip that could fail (transient, or a grant lacking connections:read)
@@ -1542,6 +1570,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
       connectionId: connection.id,
       providerDomain: connection.providerDomain,
       ownership: state.ownership,
+      ...(capability ? { capability } : {}),
       ...(verification.metadata.status === "failed" ? { verification: "failed" } : {}),
     });
   } catch (error) {
@@ -2853,6 +2882,9 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
       : {}),
     ...(stringValue(payload.connectAttemptId)
       ? { connectAttemptId: requiredString(payload.connectAttemptId, "state.connectAttemptId") }
+      : {}),
+    ...(stringValue(payload.capabilityId)
+      ? { capabilityId: stringValue(payload.capabilityId)! }
       : {}),
     ownership,
     // Absent on a legacy state, which therefore cannot land a personal owner.

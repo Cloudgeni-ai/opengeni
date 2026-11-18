@@ -161,6 +161,22 @@ Integration Definition OAuth therefore sign a `browserProof` into their state
   connections while the browser is open and finishes as soon as the new
   connection appears, so `/desktop-return` only says the browser's part is
   done and offers to bring the app forward.
+
+A catalog connect also names the capability it is for
+(`OAuthStartRequest.capabilityId`, signed into the MCP OAuth and Nango
+connect state). When the sign-in finishes, the callback turns that
+capability on with the new account itself
+(`apps/api/src/integrations/connect-capability-finish.ts`), acting as the
+person who started it with their current grant and the enable route's rules
+(admins change anything, members only turn on what is off, the personal setup
+permission turns on personal accounts). It decides exactly as the console did:
+a per-person or all-eligible binding already includes the new account, a
+pinned binding is pointed at it. The redirect carries `capability=enabled|on`,
+and the page that loads afterwards, if any, only shows the result, so a closed
+tab or a desktop hand-back the browser blocked still leaves setup done. When the
+callback cannot finish it (permission changed, an admin turned it off), the
+connection is kept and the page finishes as before. Host continuations and
+agent connect attempts keep their own exact returns and finish there.
 - `none`: API keys, services and host products (delegated tokens and external
   user continuations) authenticate with credentials issued to the host's
   server, which decides which of its users finishes the consent. Someone who

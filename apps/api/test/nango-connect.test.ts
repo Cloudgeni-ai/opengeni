@@ -137,6 +137,22 @@ describe("Nango Connect", () => {
     expect(() => readNangoConnectState(settings, "forged.state")).toThrow();
   });
 
+  test("the capability a catalog connect is for rides in the state, so completion turns it on", async () => {
+    const { createSignedState } = await import("@opengeni/github");
+    const base = readNangoConnectState(settings, await startedState());
+    const { capabilityId: _none, ...payload } = base;
+    expect(_none).toBeUndefined();
+    const sign = (extra: Record<string, unknown>) =>
+      createSignedState(settings.integrationsStateSecret!, { ...payload, ...extra });
+    expect(
+      readNangoConnectState(settings, await sign({ capabilityId: "mcp:gmail" })).capabilityId,
+    ).toBe("mcp:gmail");
+    // An oversized value is not a capability id.
+    expect(
+      readNangoConnectState(settings, await sign({ capabilityId: "x".repeat(513) })).capabilityId,
+    ).toBeUndefined();
+  });
+
   test("the page opens a session for exactly this integration, tagged with this attempt", async () => {
     const token = await startedState();
     const nango = fakeNango([]);

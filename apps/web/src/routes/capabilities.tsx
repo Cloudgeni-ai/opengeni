@@ -176,6 +176,7 @@ import {
   oauthConnectionRef,
   catalogConnectionAccountSelection,
   oauthConnectionOwnership,
+  oauthServerFinish,
   oauthResumeAction,
   registryResultsForQuery,
   resolveSheetItem,
@@ -1522,6 +1523,7 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
         connectionId,
         params.get("providerDomain"),
         oauthConnectionOwnership(params.get("ownership")),
+        oauthServerFinish(params.get("capability")),
       );
     } else {
       const reason = params.get("reason");
@@ -1613,6 +1615,9 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
     connectionId: string | null,
     providerDomain: string | null,
     ownership: ConnectionOwnership | null,
+    // What the sign-in callback already did with the capability. The callback
+    // turns it on itself, so this page usually only shows the result.
+    serverFinish: "enabled" | "on" | null = null,
   ) {
     setBusyId(itemId ?? "oauth-return");
     // Hoisted above the try so the catch can reopen the sheet from the freshly
@@ -1642,13 +1647,16 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
       }
       if (action === "reconnect") {
         // Already enabled: the exact pinned row was refreshed in place, or a
-        // personal account (refreshed or newly added) joined the generic binding.
+        // personal account (refreshed or newly added) joined the generic binding,
+        // or the sign-in callback turned it on.
         onRuntimeChanged();
         catalogConnectionAccounts.onRetry();
         toast.success(
-          item!.connectionRef?.connectionId === connectionId
-            ? `Reconnected ${item!.name}`
-            : `Connected ${item!.name}`,
+          serverFinish === "enabled" && !items.find((candidate) => candidate.id === itemId)?.enabled
+            ? `Connected and enabled ${item!.name}`
+            : item!.connectionRef?.connectionId === connectionId && serverFinish !== "enabled"
+              ? `Reconnected ${item!.name}`
+              : `Connected ${item!.name}`,
         );
         return true;
       }
@@ -1692,6 +1700,20 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
       );
       return true;
     } catch (error) {
+      // The sign-in callback may have turned it on at the same moment (the
+      // desktop app sees the new account as soon as it is saved). If it is on
+      // with this account now, setup is done.
+      if (itemId && connectionId) {
+        const settled = await client.listCapabilities(workspaceId).catch(() => null);
+        const now = settled?.items.find((candidate) => candidate.id === itemId) ?? null;
+        if (settled && now && oauthResumeAction(now, connectionId) === "reconnect") {
+          setItems(settled.items);
+          onRuntimeChanged();
+          catalogConnectionAccounts.onRetry();
+          toast.success(`Connected ${now.name}`);
+          return true;
+        }
+      }
       const copy = capabilityErrorToast(error, "Couldn't finish connecting");
       setSheetError(copy.description);
       // Reopen the sheet on the item so the failure has a Retry, when resolvable.
