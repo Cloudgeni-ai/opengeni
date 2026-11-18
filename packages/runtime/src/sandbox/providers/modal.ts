@@ -807,6 +807,14 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
   return session;
 }
 
+/** A create with no durable admission callback (cold starts from the viewer,
+ * Channel A, rematerialization and rig verification) still takes the bounded
+ * path; it simply records nothing before dispatch. */
+const UNRECORDED_MODAL_CREATE: ModalCreateLifecycle = {
+  beforeDispatch: async () => {},
+  onCreated: async () => {},
+};
+
 export class OpenGeniModalSandboxClient extends ModalSandboxClient {
   readonly #snapshotFilesystemTimeoutMs: number | undefined;
   readonly #createOptions: OpenGeniModalSandboxClientOptions;
@@ -817,12 +825,29 @@ export class OpenGeniModalSandboxClient extends ModalSandboxClient {
     this.#createOptions = { ...options };
   }
 
+  /**
+   * Every Modal box starts through Opengeni's own create. The pinned Agents
+   * adapter's create builds its own Modal client: it sends only the CPU and
+   * memory reservation, never the ceilings or egress allowlists, and it
+   * bypasses the create boundary that refuses a SandboxCreate without
+   * ceilings, so a box it started could use a whole host.
+   */
   override async create(
     args?: Parameters<ModalSandboxClient["create"]>[0],
     manifestOptions?: Parameters<ModalSandboxClient["create"]>[1],
   ): Promise<ModalSandboxSession> {
-    const session = await super.create(args, manifestOptions);
-    return installOpenGeniModalSnapshotPolicy(session);
+    if (manifestOptions !== undefined) {
+      throw new SandboxConfigError(
+        "modal",
+        "Modal create does not take positional manifest options",
+      );
+    }
+    return await createModalSessionWithLifecycle(
+      this.#createOptions,
+      args,
+      UNRECORDED_MODAL_CREATE,
+      installOpenGeniModalSnapshotPolicy,
+    );
   }
 
   async createWithLifecycle(

@@ -375,6 +375,48 @@ export async function listNoTurnWarmLeases(
   );
 }
 
+/**
+ * The people behind a workspace's warm boxes that no turn holds: the
+ * organization's self-serve owner and the people viewing those boxes. The
+ * reaper reads their standing so a restriction that follows a person from
+ * another organization (held or denied by review) closes these boxes too.
+ */
+export async function listNoTurnWarmLeasePeople(
+  db: Database,
+  input: { accountId: string; workspaceId: string },
+): Promise<string[]> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await rawRows<{ subject: string }>(
+        scopedDb,
+        sql`
+          select subject from (
+            select 'user:' || account.external_id as subject
+            from managed_accounts account
+            where account.id = ${input.accountId}
+              and account.external_source = 'better-auth:user'
+              and coalesce(account.external_id, '') <> ''
+            union
+            select holder.viewer_subject_id as subject
+            from sandbox_lease_holders holder
+            join sandbox_leases lease on lease.id = holder.lease_id
+            where holder.workspace_id = ${input.workspaceId}
+              and lease.workspace_id = ${input.workspaceId}
+              and lease.liveness = 'warm'
+              and lease.turn_holders = 0
+              and holder.viewer_subject_id like 'user:%'
+          ) people
+          order by subject
+          limit 10
+        `,
+      );
+      return rows.map((row) => row.subject);
+    },
+  );
+}
+
 export type ComputeBoundsDrainOutcome =
   | { drained: true; mode: "drained" | "stop_requested"; releasedHolders: number }
   | {

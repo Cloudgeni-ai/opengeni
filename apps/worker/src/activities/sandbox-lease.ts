@@ -230,7 +230,11 @@ import { browserCheckpointPrerequisites } from "./browser-deadline-checkpoint";
 import { assertSandboxDrainInputTiming, sandboxDrainTiming } from "../sandbox-reaper-timeout";
 import type { ControlActivityServices as ActivityServices } from "./types";
 import { boundViewerOnlyWarmBoxes } from "./sandbox-viewer-only-bounds";
-import { boundComputeBoundedWarmBoxes, observeUnpaidSandboxFleet } from "./sandbox-compute-bounds";
+import {
+  boundComputeBoundedWarmBoxes,
+  drainClosedComputeOrganizations,
+  observeUnpaidSandboxFleet,
+} from "./sandbox-compute-bounds";
 import { reconcilePendingParentSystemUpdates } from "./parent-wake";
 import {
   recordActiveUserGauges,
@@ -1008,6 +1012,11 @@ export function createSandboxLeaseActivities(
       });
       recordSandboxDeadlineRotationsRequested(observability, rotationsRequested);
 
+      // Organizations review just held or denied: drain their boxes now so
+      // the inventory below dispatches them in this sweep. Bounded, and a
+      // failure leaves them to the maintenance pass.
+      await drainClosedComputeOrganizationsBounded({ db, settings, observability });
+
       // Keep the remaining dispatch-critical path to one bounded DB inventory.
       // Billing, reconciliation, provider-orphan cleanup, artifact GC, and gauges
       // run only after every drainable box has its own durable child.
@@ -1708,6 +1717,37 @@ export const SANDBOX_CHECKPOINT_GC_CLAIM_TTL_MS = CHECKPOINT_GC_CLAIM_TTL_MS;
 const CHECKPOINT_TOMBSTONE_RETENTION_MS = 30 * 24 * 60 * 60_000;
 const CHECKPOINT_TOMBSTONE_PRUNE_LIMIT = 500;
 const SANDBOX_MAINTENANCE_ITEM_CONCURRENCY = 8;
+
+/** The sweep's closed-organization drain may take this long before the
+ * inventory goes on without waiting for it (its drains still land). */
+export const SANDBOX_CLOSED_COMPUTE_DRAIN_BUDGET_MS = 15_000;
+
+async function drainClosedComputeOrganizationsBounded(
+  services: Parameters<typeof drainClosedComputeOrganizations>[0],
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const pass = (async () => {
+    const leases = await listMeterableWarmLeases(services.db);
+    return await drainClosedComputeOrganizations(services, leases, {
+      concurrency: SANDBOX_MAINTENANCE_ITEM_CONCURRENCY,
+    });
+  })().catch((error: unknown) => {
+    services.observability.warn("sandbox reaper: closed compute drain failed", {
+      error: errorMessage(error),
+    });
+    return null;
+  });
+  try {
+    await Promise.race([
+      pass,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, SANDBOX_CLOSED_COMPUTE_DRAIN_BUDGET_MS);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 type ConnectedCommandReconciliationOutcome =
   | "claim_failed"
