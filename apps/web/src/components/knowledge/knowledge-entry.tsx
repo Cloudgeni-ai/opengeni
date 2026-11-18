@@ -59,6 +59,7 @@ import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 
 import { errorText, useKnowledgeList } from "./knowledge-data";
 import { KnowledgeEvidenceEditor } from "./knowledge-evidence-editor";
+import { authorOf, savedByYouOf } from "./knowledge-history-author";
 import { KnowledgeIndexNotice } from "./knowledge-index-status";
 import {
   KNOWLEDGE_KIND_HELP,
@@ -274,14 +275,6 @@ function CollectionPath({
   );
 }
 
-function authorOf(
-  revision: { createdBySessionId: string | null },
-  scope: KnowledgeEntryScope,
-): string {
-  if (revision.createdBySessionId) return "Opengeni";
-  return scope === "personal" ? "You" : "A teammate";
-}
-
 function summaryOf(summary: KnowledgeEntrySummary, previousTitle: string | undefined): string {
   if (summary.revision.change === "archive") return "Archived";
   if (summary.revision.restoredFromRevisionId) return "Restored an earlier version";
@@ -310,6 +303,13 @@ export interface EntryPageProps {
   /** The list the back link returns to. Default "Knowledge". */
   backLabel?: string;
   onBack: () => void;
+  /**
+   * The section the macOS window bar's trail starts with, when the page was
+   * opened from another one: "Agents" for an agent's Memory.
+   */
+  section?: { label: string; onClick: () => void };
+  /** Shown instead of the entry's title: "Memory" for an agent's Memory. */
+  title?: string;
   onOpenEntry: (id: string, revisionId?: string) => void;
   onEdit: (id: string) => void;
   onAddInCollection: (collectionId: string) => void;
@@ -333,6 +333,8 @@ function EntryPageContent({
   refresh,
   backLabel = "Knowledge",
   onBack,
+  section,
+  title: titleOverride,
   onOpenEntry,
   onEdit,
   onAddInCollection,
@@ -358,7 +360,7 @@ function EntryPageContent({
 
   if (missing) {
     return (
-      <DetailPage back={back}>
+      <DetailPage back={back} section={section}>
         <EmptyState
           variant="page"
           icon={<FileTextIcon />}
@@ -375,7 +377,7 @@ function EntryPageContent({
   }
   if (error && !record) {
     return (
-      <DetailPage back={back}>
+      <DetailPage back={back} section={section}>
         <Notice
           tone="failed"
           title="Couldn't load this entry"
@@ -393,7 +395,7 @@ function EntryPageContent({
   }
   if (!record) {
     return (
-      <DetailPage back={back}>
+      <DetailPage back={back} section={section}>
         <div aria-busy="true" aria-label="Loading entry" className="flex flex-col gap-4">
           <div className="flex items-center gap-3">
             <Skeleton className="size-10 rounded-[10px]" />
@@ -609,7 +611,7 @@ function EntryPageContent({
   );
 
   return (
-    <DetailPage back={back}>
+    <DetailPage back={back} section={section}>
       <LineTabs
         value={tab}
         onValueChange={(value) => setTab(value as EntryTab)}
@@ -617,7 +619,7 @@ function EntryPageContent({
       >
         <DetailPageHeader
           leading={<KindTile kind={entry.kind} />}
-          title={entry.title}
+          title={titleOverride ?? entry.title}
           // Where it lives is in the aside ("Where"); the header says it once there.
           chips={status}
           meta={[
@@ -993,6 +995,8 @@ function EntryHistory({
   const [loadingMore, setLoadingMore] = useState(false);
   const [retry, setRetry] = useState(0);
   const loaded = useRef<KnowledgeEntrySummary[]>([]);
+  // The versions the server says you saved, across loaded pages.
+  const savedByYou = useRef<Set<string>>(new Set());
 
   const toRevisions = useCallback(
     async (summaries: KnowledgeEntrySummary[]): Promise<Revision[]> => {
@@ -1009,7 +1013,11 @@ function EntryHistory({
       );
       return kept.map((item, index) => ({
         id: item.revision.id,
-        author: authorOf(item.revision as { createdBySessionId: string | null }, record.scope),
+        author: authorOf(
+          item.revision as { id: string; createdBySessionId: string | null },
+          record.scope,
+          savedByYou.current,
+        ),
         createdAt: item.revision.createdAt,
         summary: summaryOf(item, kept[index + 1]?.revision.title),
         content: full[index] ?? "",
@@ -1026,6 +1034,7 @@ function EntryHistory({
       .listKnowledgeEntryHistory(workspaceId, record.id)
       .then(async (page) => {
         loaded.current = page.entries;
+        savedByYou.current = new Set(savedByYouOf(page));
         const next = await toRevisions(page.entries);
         if (!current) return;
         setRevisions(next);
@@ -1045,6 +1054,7 @@ function EntryHistory({
     try {
       const page = await client.listKnowledgeEntryHistory(workspaceId, record.id, before);
       loaded.current = [...loaded.current, ...page.entries];
+      for (const id of savedByYouOf(page)) savedByYou.current.add(id);
       setRevisions(await toRevisions(loaded.current));
       setBefore(page.beforeRevision);
     } catch (reason) {
