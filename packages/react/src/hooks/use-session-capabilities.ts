@@ -238,6 +238,22 @@ export function useSessionCapabilities(
     setNonce((n) => n + 1);
   }, []);
 
+  // Refused for a missing card (card verification gate): attach again once a
+  // card is verified (app/lib/card-verification.ts raises the event).
+  const cardRefusedRef = useRef(false);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onCardVerified = () => {
+      if (!cardRefusedRef.current) return;
+      cardRefusedRef.current = false;
+      setViewerCapReached(false);
+      setViewerCapReason(null);
+      setNonce((n) => n + 1);
+    };
+    window.addEventListener("opengeni:card-verified", onCardVerified);
+    return () => window.removeEventListener("opengeni:card-verified", onCardVerified);
+  }, []);
+
   // Set when the server released this page's viewer while the person was away
   // (the idle drain): the box is re-acquired on their next interaction rather
   // than re-warmed at once for an empty room.
@@ -537,7 +553,23 @@ export function useSessionCapabilities(
                       : cause.message.includes("computers")
                         ? "computer_limit"
                         : null;
-                if (refusal === "viewer_idle") {
+                // A Free organization without a verified card: the app's
+                // card gate (app/components/add-card.tsx) offers Add a card.
+                const cardRequired = cause.details?.code === "sandbox_card_required";
+                if (cardRequired && typeof window !== "undefined") {
+                  window.dispatchEvent(
+                    new CustomEvent("opengeni:card-required", {
+                      detail: { workspaceId, accountId: null },
+                    }),
+                  );
+                }
+                if (cardRequired) {
+                  // Nothing warms this box until a card is added.
+                  cardRefusedRef.current = true;
+                  attachRefused = true;
+                  setViewerCapReached(true);
+                  setViewerCapReason("computers");
+                } else if (refusal === "viewer_idle") {
                   // The box was stopped while nobody used the page: wait for
                   // the person to interact, then attach again.
                   attachRefused = true;

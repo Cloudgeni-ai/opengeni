@@ -127,6 +127,12 @@ export async function beginPlanCreditSettlement(db: Database, accountId: string)
 
 export async function freePlanCreditEligible(db: Database, accountId: string): Promise<boolean> {
   return await withAccountRls(db, accountId, async (tx) => {
+    // Free issuance: the organization claims its verified card (and the
+    // person who verified it) for its Free credit (migration 1494).
+    // Transaction-local; admission and sweeps only read the claims.
+    await tx.execute(
+      sql`select pg_catalog.set_config('opengeni.free_credit_card_claim', 'on', true)`,
+    );
     const [row] = await rawRows<{ eligible: boolean }>(
       tx,
       sql`select free_plan_credit_eligible(${accountId}::uuid) as eligible`,
