@@ -1095,6 +1095,11 @@ two distinct secret paths:
   database but authenticating as `opengeni_app`; this is the only database URL
   available to API and worker containers.
 
+`db:provision-roles` grants `CONNECT` on the Opengeni database explicitly to
+every login role it provisions (the app role, the optional host-export and
+artifact roles; Temporal roles receive their own databases), so a host that
+revokes PostgreSQL's default `CONNECT` from `PUBLIC` needs no extra grant.
+
 After every migration and before rolling workloads, the Helm migration hook runs:
 
 ```bash

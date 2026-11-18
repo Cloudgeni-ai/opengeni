@@ -248,12 +248,17 @@ export async function provisionRoles(
  * The exporter is intentionally separate from `opengeni_app`: its functions
  * project every workspace into a host-owned sink and therefore cannot be made
  * available to the tenant-scoped application role.
+ *
+ * Like every login role provisioned here, it receives CONNECT on the current
+ * database explicitly: a hardened host may have revoked PostgreSQL's default
+ * PUBLIC CONNECT.
  */
 async function grantHostExportRoleIfSchemaExists(sql: postgres.Sql, role: string): Promise<void> {
   await sql.unsafe(`
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'opengeni_host_export') THEN
+    EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), ${literal(role)});
     EXECUTE format('GRANT USAGE ON SCHEMA opengeni_host_export TO %I', ${literal(role)});
     EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_host_export TO %I', ${literal(role)});
     EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA opengeni_host_export GRANT EXECUTE ON FUNCTIONS TO %I', ${literal(role)});
@@ -541,7 +546,9 @@ async function grantTemporalRoleInDatabase(
  * Grant the app role table DML in the Opengeni data schema + EXECUTE on the
  * `opengeni_private` helper functions. Schema-parameterized (Step I): standalone
  * passes `public`; embedded passes the dedicated schema. The grants are guarded
- * on schema existence so provisioning before migrate is a safe no-op.
+ * on schema existence so provisioning before migrate is a safe no-op. CONNECT
+ * on the current database is granted explicitly rather than inherited from
+ * PUBLIC, which a hardened host may have revoked.
  */
 async function grantAppRoleIfSchemaExists(
   sql: postgres.Sql,
@@ -689,6 +696,7 @@ DECLARE
 BEGIN
   EXECUTE format('REVOKE CREATE ON DATABASE %I FROM %I', current_database(), ${literal(role)});
   IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = ${literal(schema)}) THEN
+    EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), ${literal(role)});
     IF to_regprocedure(format('%I.mcp_operation_command(jsonb,text,jsonb)', ${literal(schema)})) IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON FUNCTION %I.mcp_operation_command(jsonb,text,jsonb) FROM PUBLIC', ${literal(schema)});
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.mcp_operation_command(jsonb,text,jsonb) TO %I', ${literal(schema)}, ${literal(role)});
