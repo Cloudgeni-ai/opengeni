@@ -1,5 +1,59 @@
 # @opengeni/db
 
+## 6.29.0
+
+### Patch Changes
+
+- 7b590d3: An unpaid person's second and later additional organizations created within 24 hours of their first organization start held (rule `additional-organization-v1`, migration 1491). The first additional organization and people with a paying organization are unaffected. A detector hold on an additional organization restricts only that organization: it doesn't follow the person to their other organizations (no linked restriction or linked-owner hold). A manual denial still does.
+- 59e5248: A parent that reads a child's complete answer through Codemode (for example `ogtool call` in a shell command) no longer gets that child's terminal result delivered again after its turn ends. The read is recorded on the turn and counts once the turn's own tool results hold the whole answer, so the result is superseded as `consumed_by_parent_read` instead of starting a turn that repeats the answer. A script that returned only a summary still delivers the result normally.
+- 30bd11c: A turn resolves its workspace governance (instruction policies and organization profile) when it starts running instead of when it was accepted. A turn that waited in the session queue or for subscription capacity now runs under the governance activated while it waited. Once a turn has run, its later attempts (recovery, approval, resume) keep that governance, and changes reach the next turn, as before. Migration 1488 changes when the snapshot routines resolve; the model-visible governance block and its text are unchanged.
+- b34167e: Every Modal box now starts with its CPU and memory ceilings. A cold start without a durable admission callback (the desktop viewer, Channel A, rematerialization and rig verification) used the pinned Agents adapter's create, which sent only the reservation (0.125 cores, 128 MiB), no ceilings or egress allowlists, and skipped the create boundary that refuses a box without ceilings. It now takes Opengeni's bounded create, so these boxes get the tier's ceilings (2 cores / 4096 MiB unpaid, 16 cores / 32768 MiB otherwise) and fail closed when they are missing.
+
+  A box of an organization that review holds or denies is now stopped in the next reaper sweep. The closed-organization drain runs in every sweep's inventory instead of only in the maintenance pass after it, skips the reconnect grace, and also closes an unpaid organization whose self-serve owner or a viewer runs a held or denied one. Before, a denial took a maintenance pass, the 60 second grace and another sweep before the box was stopped.
+
+- c64d1e4: Follow-ups to one Nango connection per account.
+
+  - **Missing connections:** the Nango sweep now asks an active row to reconnect (`nango_connection_missing`) when Nango confirms its connection is gone (a 404 for that connection), for example after an older release deleted a shared connection during a rollout or rollback. A row whose account has another healthy connection that covers its scopes is moved onto that one instead. People whose only connection is gone are found through a new deployment-wide listing (migration 1487) once a later migration grants it; until then only people with a connection Nango lists for this deployment are visited. Too many missing connections at once (as with a wrong Nango environment), or a pass that could not plan everyone, marks none; the worker reports the former as `missingBreakerTripped`. When nothing listed carries this deployment's tag, the deployment-wide listing is not used.
+  - **Legacy duplicates keep running turns:** a legacy duplicate row moved onto the shared connection without its account key keeps its `authority_generation`, so turns already running on it keep working.
+  - **Scopes count as a grant only when confirmed:** a row's scopes count as a grant for sharing only when it carries `nangoScopesConfirmed` naming its own Nango connection (Nango reported them for that connection). Rows without reported scopes still carry the older `nangoScopesUnconfirmed` for the previous release during a rollout or rollback. Rows saved before the marker no longer move another organization's row onto their connection on their stored scopes; for such connections the scopes Nango reports count instead, so older duplicates still merge.
+  - **Deletes after commit:** the sweep deletes connections Nango can no longer refresh only after the rows' writes commit, under the person lock in a transaction that writes no connection rows.
+  - **Deployment tag mismatch:** a worker whose deployment tag matches none of the listed connections logs once that its tag is possibly mismatched.
+  - **Reconnect attempts:** reconnecting a Nango-backed account through `POST /v1/workspaces/:workspaceId/connect/attempts` with `reconnectAccountId` no longer answers 404 while the integration is served through Nango; the attempt starts Nango Connect. A reconnect must name the person's own account of that same integration.
+
+- 60f6dea: Plan-less organizations on a deployment without subscription plans are no longer bounded like Free, and turns parked at an organization's running-box limit no longer count as sandbox recoveries.
+
+  - **`none` without subscription plans:** with `OPENGENI_SUBSCRIPTION_PLANS_ENABLED` off, no organization ever gets a plan row, so `none` is every organization's ordinary tier. It is no longer unpaid: the default plan limits leave it unbounded (`DEFAULT_SANDBOX_PLAN_LIMITS_WITHOUT_SUBSCRIPTION_PLANS`), and none of the free compute bounds, unpaid fleet limits or unpaid Modal ceilings apply to it. With subscription plans on, `none` is still a self-serve organization waiting for Free enrollment and stays bounded like Free. Promotion decisions (`restricted`, linked restriction, suspension) apply either way. Operators can still bound `none` in `OPENGENI_SANDBOX_PLAN_LIMITS_JSON`. New `sandboxPlanTierUnpaid`; `parseSandboxPlanLimitsJson` takes `{ subscriptionPlansEnabled }`, `settingsForSandboxPlanTier` reads `subscriptionPlansEnabled` from its settings, and `acquireLease` accepts `subscriptionPlansEnabled` (omitted means on).
+  - **Recovery cause `organization_limit`:** a turn parked because its organization already runs as many boxes as its plan allows counts in `opengeni_turn_recoveries_total` as `cause="organization_limit"` instead of `sandbox`, and `OpenGeniTurnRecoveryRatioHigh` excludes it like `route_change`.
+
+- bdecc33: `db:provision-roles` now grants `CONNECT` on the Opengeni database to the runtime app role and the host-export role, as it already did for the artifact roles. Installs on a PostgreSQL host that revokes `CONNECT` from `PUBLIC` no longer fail `db:assert-runtime-posture` with "permission denied for database".
+- 41414cf: Rig verification now takes a sandbox only within the organization's plan and fleet compute limits: an organization whose tier allows no running box (held or denied) is refused before a verification sandbox starts, and the verification records a failed outcome instead of retrying. Creating a sandbox environment, change or version is refused with 403 for a suspended organization. `acquireLease` now requires `sandboxPlanLimits`; a caller that must bypass the limits passes the named opt-out `"unbounded_test_fixture"`.
+- 7b590d3: New self-serve organizations (first and additional) start held when they arrive as a farm (rule `email-cluster-v1`, migration 1489), with a mode per leg in the signup network velocity settings:
+
+  - Burst (`burstMode`, enforce): four setups within ten seconds through the same shared relay, or with the same mail domain group and the same signup network. Bursts that share only a network, or only a company or academic domain (a workshop, classroom or office onboarding), and bursts of unrelated domains are only observed.
+  - Denied domain (`deniedDomainMode`, enforce): two denied organizations in the last 30 days on the same company or personal-relay domain; an academic domain is only observed.
+  - Domain (`emailDomainMode`, observe): three owners with one company or personal-relay domain within an hour.
+
+  Per-person subdomains of addy.io, anonaddy, 33mail and dynamic DNS hosts (DuckDNS, No-IP, Dynu, FreeDDNS and similar) group on the full subdomain; a burst through one such provider counts like one shared relay, and one denied organization on such a name holds the next.
+
+  Only a keyed hash of the domain is stored. Public providers and shared relays (Apple private relay, DuckDuckGo, Firefox Relay, SimpleLogin) never group on the domain or denied legs, academic domains never group on the domain leg, and reserved test domains never count.
+
+  An unpaid organization in its first day in which no turn was ever started gets 15 box-minutes (`youngTurnlessBoxSeconds` in `OPENGENI_SANDBOX_FLEET_LIMITS_JSON`). Past it, the reaper drains a box no turn holds once nothing on it was active for `youngTurnlessIdleMs` (5 minutes; `compute_turnless`). Running commands and Browser/ComputerSessions are never cut off. A box that is not running does not start again without a turn (`young_turnless`), and starting a chat always works and lifts the bound.
+
+- 7b590d3: Migration 1490 grants the runtime EXECUTE on the unpaid sandbox fleet counts that 1486 created withheld, so the unpaid fleet running cap, the pressure cap and the daily unpaid box-time budget apply at admission. Readiness now requires the grant. It must reach production only in a release after the one that contains 1486: the previous binary rejects an unknown granted definer.
+- Updated dependencies [c5a628c]
+- Updated dependencies [6581a0f]
+- Updated dependencies [60f6dea]
+- Updated dependencies [7b590d3]
+- Updated dependencies [ea75565]
+  - @opengeni/config@6.29.0
+  - @opengeni/codex@6.29.0
+  - @opengeni/xai-subscription@6.29.0
+  - @opengeni/codemode@6.29.0
+  - @opengeni/contracts@6.29.0
+  - @opengeni/network@6.29.0
+  - @opengeni/observability@6.29.0
+  - @opengeni/subscriptions@6.29.0
+
 ## 6.28.0
 
 ### Minor Changes

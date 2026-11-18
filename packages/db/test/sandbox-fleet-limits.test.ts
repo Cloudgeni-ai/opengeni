@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import type { SQL } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
 import type { Database } from "../src/database";
 import {
   observeSandboxFleetWarmBoxes,
@@ -9,9 +11,18 @@ import {
 
 const limits = { pressureEngageWarmBoxes: 50, pressureReleaseWarmBoxes: 40 };
 
-function warmCountDatabase(read: () => number): Database {
+const dialect = new PgDialect();
+
+/** A database whose lease count reads `read()`; the managed warm box count
+ * (1492) is granted only with `managed`. */
+function warmCountDatabase(read: () => number, managed?: () => number): Database {
   return {
-    execute: async () => [{ liveness: "warm", count: read() }],
+    execute: async (query: SQL) => {
+      const text = dialect.sqlToQuery(query).sql;
+      if (text.includes("has_function_privilege")) return [{ available: managed !== undefined }];
+      if (text.includes("sandbox_fleet_warm_boxes_v1")) return [{ warm_boxes: managed!() }];
+      return [{ liveness: "warm", count: read() }];
+    },
   } as unknown as Database;
 }
 
@@ -87,6 +98,32 @@ describe("sandbox fleet pressure", () => {
     expect((await readSandboxFleetPressure(failing, limits, { now: now + 121_000 })).failed).toBe(
       true,
     );
+  });
+
+  test("self-hosted boxes never count: pressure reads the managed warm count once granted", async () => {
+    // 220 leases are warm, 10 of them on a managed provider.
+    const db = warmCountDatabase(
+      () => 220,
+      () => 10,
+    );
+    expect(await readSandboxFleetPressure(db, limits)).toEqual({
+      engaged: false,
+      warmBoxes: 10,
+      failed: false,
+    });
+  });
+
+  test("until the managed count is granted, pressure reads every lease as before", async () => {
+    expect(
+      await readSandboxFleetPressure(
+        warmCountDatabase(() => 220),
+        limits,
+      ),
+    ).toEqual({
+      engaged: true,
+      warmBoxes: 220,
+      failed: false,
+    });
   });
 });
 

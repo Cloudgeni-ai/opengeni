@@ -35,6 +35,7 @@ import {
   type Database,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
+import { assertOrganizationNotSuspended } from "../access";
 import { rigProviderImagesFromVerification } from "./provider-images";
 
 export * from "./provider-images";
@@ -141,6 +142,19 @@ function assertUniqueCheckNames(checks: ReadonlyArray<{ name: string }> | undefi
   }
 }
 
+/**
+ * A new sandbox environment, change or version starts a verification sandbox
+ * (and may build a provider image): a cost path, refused with 403 for a
+ * suspended organization or a person whose own organization is suspended
+ * (assertOrganizationNotSuspended; a failed read admits).
+ */
+async function assertRigCostAdmitted(deps: RigServices, grant: AccessGrant): Promise<void> {
+  await assertOrganizationNotSuspended(deps.db, {
+    accountId: grant.accountId,
+    subjectId: grant.subjectId,
+  });
+}
+
 export async function createRigForApi(
   deps: RigServices,
   grant: AccessGrant,
@@ -149,6 +163,7 @@ export async function createRigForApi(
 ): Promise<Rig> {
   const name = trimmedRigName(payload.name);
   assertUniqueCheckNames(payload.checks);
+  await assertRigCostAdmitted(deps, grant);
   if ((await countRigs(deps.db, grant, payload.scope)) >= MAX_RIGS_PER_WORKSPACE) {
     throw new HTTPException(422, {
       message: `a workspace supports at most ${MAX_RIGS_PER_WORKSPACE} sandbox environments`,
@@ -262,6 +277,7 @@ export async function proposeRigChangeForApi(
   if (request.kind === "definition_edit") {
     assertUniqueCheckNames(request.payload.checks);
   }
+  await assertRigCostAdmitted(deps, grant);
   const change = await createRigChange(deps.db, {
     accountId: grant.accountId,
     workspaceId,
@@ -499,6 +515,7 @@ export async function createRigVersionForApi(
     throw new HTTPException(422, { message: "sandbox environment has no active version" });
   }
   assertUniqueCheckNames(payload.checks);
+  await assertRigCostAdmitted(deps, grant);
   const base = rig.activeVersion;
   const version = await createRigVersion(
     deps.db,

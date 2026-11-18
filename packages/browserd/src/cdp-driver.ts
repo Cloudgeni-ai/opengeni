@@ -9423,6 +9423,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       const visible =
         (await this.revealFromStickyCover(state, backendDOMNodeId, frameId)) ??
         (await this.visiblePartPoint(state, backendDOMNodeId));
+      if (
+        visible === null &&
+        (await this.centerClippedTarget(state, backendDOMNodeId, frameId, settleFrameId))
+      ) {
+        return await this.centerPoint(state, backendDOMNodeId);
+      }
       if (visible && "nested" in visible) {
         throw new InteractionDefiniteDriverError(
           "invalid_action",
@@ -9979,6 +9985,47 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
     }
     return null;
+  }
+
+  /**
+   * Brings a target that shows nowhere into view by centering it in the
+   * containers that scroll it. A scroller that an ancestor clips (a carousel
+   * wider than the page column that clips its overflow) can hold the target
+   * inside its own box but past the ancestor's edge: Chromium's scroll into
+   * view then counts the target as in view and leaves it there. Like that
+   * scroll, this is not input, and a scroll that moved nothing is no effect,
+   * so a refusal after it stays definite. A target something covers is left
+   * where it is, refused naming the cover. True when the target then takes
+   * the pointer at its center.
+   */
+  private async centerClippedTarget(
+    state: TargetState,
+    backendDOMNodeId: number,
+    frameId: string | undefined,
+    settleFrameId: string | undefined,
+  ): Promise<boolean> {
+    const reason = await this.callOnNode(
+      state,
+      backendDOMNodeId,
+      UNREACHABLE_REASON_FUNCTION,
+      [],
+    ).catch(() => null);
+    if (reason !== "outside" && reason !== "clipped" && reason !== "cut-off") return false;
+    if (await this.coveringElement(state, backendDOMNodeId)) return false;
+    const before = await this.scrollPositions(state, backendDOMNodeId, frameId);
+    const effectsBefore = state.actionEffectCount;
+    const scrolled = await this.callOnNode(state, backendDOMNodeId, SCROLL_INTO_VIEW_FUNCTION, [
+      { value: "center" },
+    ]).catch(() => false);
+    if (
+      scrolled !== true ||
+      (before !== null && (await this.scrollPositions(state, backendDOMNodeId, frameId)) === before)
+    ) {
+      state.actionEffectCount = effectsBefore;
+      return false;
+    }
+    await this.settleAfterScroll(state, backendDOMNodeId, frameId ?? settleFrameId);
+    return await this.hitsAtCenter(state, backendDOMNodeId);
   }
 
   private async focusNode(state: TargetState, backendDOMNodeId: number | null): Promise<void> {

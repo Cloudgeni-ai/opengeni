@@ -69,8 +69,10 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * and the sandbox reaper's inventory of cold sandboxes whose chats are all
  * archived (1404), the organization-wide sandbox counts behind
  * plan-tiered sandbox limits (1475), and the deployment-wide check of
- * which Nango connections a live connection still stands for (1482), and
- * the unpaid sandbox fleet counts behind the fleet limits (1486).
+ * which Nango connections a live connection still stands for (1482), the
+ * unpaid sandbox fleet counts behind the fleet limits (1486), and the
+ * deployment-wide listing of live Nango rows' owners for the Nango sweep
+ * (1487), and the managed warm box count fleet pressure reads (1492).
  * Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
@@ -109,7 +111,9 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
   "organization_warm_sandbox_counts_v1(uuid, text, uuid)",
   "nango_connections_in_use_v1(text[])",
+  "nango_live_connection_owners_v1(text, text, text, integer)",
   "sandbox_unpaid_fleet_v1(uuid, boolean)",
+  "sandbox_fleet_warm_boxes_v1()",
 ] as const;
 
 /**
@@ -154,9 +158,11 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * stands for; until it is granted, deleting a Nango connection is decided
  * from the person's own reads, and nothing is deleted when one of their
  * organizations cannot be fully read.
- * 1486 withholds the unpaid sandbox fleet counts; until they are granted, the
- * unpaid fleet running cap and box-time budget are inactive (fleet pressure
- * and the young-organization limit still apply).
+ * 1487 withholds the listing of live Nango rows' owners; until it is
+ * granted, the Nango sweep only visits people Nango lists a connection for.
+ * 1486 withheld the unpaid sandbox fleet counts and 1490 granted them.
+ * 1492 withholds the managed warm box count; until it is granted, fleet
+ * pressure reads the warm count of every lease, self-hosted ones included.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -169,7 +175,8 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "collect_session_content_garbage_v1(uuid, uuid, integer)",
   "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
   "nango_connections_in_use_v1(text[])",
-  "sandbox_unpaid_fleet_v1(uuid, boolean)",
+  "nango_live_connection_owners_v1(text, text, text, integer)",
+  "sandbox_fleet_warm_boxes_v1()",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -303,9 +310,14 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "workspaces",
   ],
   "nango_connections_in_use_v1(text[])": ["connections"],
+  "nango_live_connection_owners_v1(text, text, text, integer)": ["connections"],
   "sandbox_unpaid_fleet_v1(uuid, boolean)": [
     "sandbox_leases",
     "usage_events",
+    "opengeni_private.modal_inventory_read_capabilities",
+  ],
+  "sandbox_fleet_warm_boxes_v1()": [
+    "sandbox_leases",
     "opengeni_private.modal_inventory_read_capabilities",
   ],
 };

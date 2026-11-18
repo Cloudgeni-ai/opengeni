@@ -1,14 +1,21 @@
 import { describe, expect, test } from "bun:test";
 import { DEFAULT_SANDBOX_PLAN_LIMITS } from "@opengeni/config";
-import type { NoTurnWarmLease } from "@opengeni/db";
-import { SandboxOrganizationBoxLimitError, SandboxLeaseTransitionError } from "@opengeni/db";
+import type { Database, NoTurnWarmLease } from "@opengeni/db";
+import {
+  resetSandboxFleetState,
+  SandboxOrganizationBoxLimitError,
+  SandboxLeaseTransitionError,
+} from "@opengeni/db";
+import { testSettings } from "@opengeni/testing/settings";
 import { agentRunFailurePayload } from "../src/activities/agent-turn/errors";
 import { isLazySandboxProvisionRetryable } from "../src/activities/agent-turn/sandbox-provision";
 import { initializeWorkerOutcomeMetrics } from "../src/observability-metrics";
 import {
+  observeUnpaidSandboxFleet,
   organizationHasComputeBounds,
   planComputeBoundsDrains,
   unpaidSandboxFleetState,
+  youngOrganizationTurnless,
 } from "../src/activities/sandbox-compute-bounds";
 
 const observedAt = new Date("2026-11-17T12:00:00.000Z");
@@ -52,6 +59,84 @@ describe("free compute bounds: reaper decisions", () => {
       { idleDrainMs: 1_800_000 },
     );
     expect(decisions.map((decision) => decision.reason)).toEqual(["compute_closed"]);
+  });
+
+  test("only a young unpaid organization is read for the turnless bound", async () => {
+    const limits = { youngOrganizationAgeMs: 86_400_000, youngTurnlessBoxSeconds: 900 };
+    const now = observedAt.getTime();
+    // None of these reads the database.
+    const db = null as unknown as Parameters<typeof youngOrganizationTurnless>[0];
+    const young = new Date(now - 3_600_000);
+    expect(
+      await youngOrganizationTurnless(db, limits, {
+        accountId: "a",
+        unpaid: false,
+        createdAt: young,
+        now,
+      }),
+    ).toBe(false);
+    expect(
+      await youngOrganizationTurnless(db, limits, {
+        accountId: "a",
+        unpaid: true,
+        createdAt: new Date(now - 2 * 86_400_000),
+        now,
+      }),
+    ).toBe(false);
+    expect(
+      await youngOrganizationTurnless(db, limits, {
+        accountId: "a",
+        unpaid: true,
+        createdAt: null,
+        now,
+      }),
+    ).toBe(false);
+    expect(
+      await youngOrganizationTurnless(
+        db,
+        { youngOrganizationAgeMs: 86_400_000 },
+        { accountId: "a", unpaid: true, createdAt: young, now },
+      ),
+    ).toBe(false);
+  });
+
+  test("a young organization that never started a turn has its turnless boxes drained once idle, never with commands running", () => {
+    const bounds = new Map([["org-a", { limit: free, boxSecondsToday: 900, turnlessYoung: true }]]);
+    const reasons = (leases: NoTurnWarmLease[]) =>
+      planComputeBoundsDrains(leases, bounds, {
+        idleDrainMs: 1_800_000,
+        turnlessIdleMs: 300_000,
+      }).map((decision) => decision.reason);
+    const idle = new Date(observedAt.getTime() - 300_000);
+    expect(reasons([lease({ lastActiveAt: idle, viewerHolders: 1, commandHolders: 0 })])).toEqual([
+      "compute_turnless",
+    ]);
+    // Someone still using it, or a running command or Browser/ComputerSession, keeps it.
+    expect(
+      reasons([
+        lease({
+          lastActiveAt: new Date(observedAt.getTime() - 299_000),
+          viewerHolders: 1,
+          commandHolders: 0,
+        }),
+      ]),
+    ).toEqual([]);
+    expect(reasons([lease({ lastActiveAt: idle, commandHolders: 1 })])).toEqual([]);
+    // A turn just queued keeps the box; a compute box keeps its own state.
+    expect(
+      reasons([lease({ lastActiveAt: idle, openSessionWork: true, commandHolders: 0 })]),
+    ).toEqual([]);
+    expect(reasons([lease({ lastActiveAt: idle, backend: "compute", commandHolders: 0 })])).toEqual(
+      [],
+    );
+    // Without the flag (it chatted, is older or pays), an active box stays.
+    expect(
+      planComputeBoundsDrains(
+        [lease({ lastActiveAt: observedAt })],
+        new Map([["org-a", { limit: free, boxSecondsToday: 900 }]]),
+        { idleDrainMs: 1_800_000 },
+      ),
+    ).toEqual([]);
   });
 
   test("a compute box drains only when its tier is closed, never for a spent day", () => {
@@ -100,7 +185,7 @@ describe("free compute bounds: reaper decisions", () => {
     ).toEqual(["compute_idle"]);
     expect(
       planComputeBoundsDrains(
-        [lease({ lastActiveAt: idle, openSessionWork: true })],
+        [lease({ lastActiveAt: idle, openSessionWork: true, commandHolders: 0 })],
         organizations,
         { idleDrainMs: 1_800_000 },
       ),
@@ -229,5 +314,69 @@ describe("unpaid fleet limits", () => {
     expect(
       unpaidSandboxFleetState(limits, { pressureEngaged: false, unpaidBoxSecondsToday: null }),
     ).toBe("normal");
+  });
+
+  test("without subscription plans the reaper neither reads nor reports fleet pressure", async () => {
+    // The text of a drizzle query, enough to tell the reads apart.
+    const text = (value: unknown): string => {
+      if (typeof value === "string") return value;
+      if (Array.isArray(value)) return value.map(text).join("");
+      if (value && typeof value === "object") {
+        const chunk = value as { queryChunks?: unknown; value?: unknown };
+        return text(chunk.queryChunks ?? chunk.value ?? "");
+      }
+      return "";
+    };
+    // 220 warm leases (on a deployment of Connected Machines), and no fleet
+    // definer granted.
+    const warmReads: string[] = [];
+    const db = {
+      execute: async (query: unknown) => {
+        const sql = text(query);
+        if (sql.includes("has_function_privilege")) return [{ available: false }];
+        warmReads.push(sql);
+        return [{ liveness: "warm", count: 220 }];
+      },
+    } as unknown as Database;
+    const observe = async (subscriptionPlansEnabled: boolean) => {
+      resetSandboxFleetState();
+      warmReads.length = 0;
+      const counters: Array<{ name: string; labels?: Record<string, string> }> = [];
+      const gauges: Array<{ name: string; value: number }> = [];
+      const state = await observeUnpaidSandboxFleet({
+        db,
+        settings: testSettings({ subscriptionPlansEnabled }),
+        observability: {
+          incrementCounter: (input: (typeof counters)[number]) => counters.push(input),
+          setGauge: (input: (typeof gauges)[number]) => gauges.push(input),
+          warn: () => {},
+        } as unknown as Parameters<typeof observeUnpaidSandboxFleet>[0]["observability"],
+      });
+      return {
+        state,
+        reads: warmReads.length,
+        checks: counters
+          .filter((counter) => counter.name === "opengeni_sandbox_unpaid_fleet_checks_total")
+          .map((counter) => counter.labels?.state),
+        warmGauge: gauges.find((gauge) => gauge.name === "opengeni_sandbox_fleet_warm_boxes")
+          ?.value,
+      };
+    };
+    // No organization is unpaid by its tier there, so pressure limits nobody.
+    expect(await observe(false)).toEqual({
+      state: "normal",
+      reads: 0,
+      checks: ["normal"],
+      warmGauge: undefined,
+    });
+    // With plans, the same warm count engages pressure (the default engage
+    // level is 50).
+    expect(await observe(true)).toEqual({
+      state: "pressure",
+      reads: 1,
+      checks: ["pressure"],
+      warmGauge: 220,
+    });
+    resetSandboxFleetState();
   });
 });

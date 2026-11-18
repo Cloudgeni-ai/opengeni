@@ -379,8 +379,8 @@ export const galleryModelRows: PickerModelRow[] = projectPickerRows(t, [
     shortLabel: "5.6 Luna",
   }),
   catalogModel({
-    id: "codex/gpt-6-astra",
-    label: "GPT-6 Astra",
+    id: "codex/gpt-6.2-astra",
+    label: "GPT-6.2 Astra",
     shortLabel: "Astra",
     provider: "codex",
     providerLabel: "Codex",

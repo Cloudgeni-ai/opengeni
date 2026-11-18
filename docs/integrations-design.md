@@ -152,6 +152,15 @@ Integration Definition OAuth therefore sign a `browserProof` into their state
 - `session`: the desktop app's consent finishes in the person's own browser,
   and a native app credential arrives as a bearer, so neither can carry the
   cookie. That callback browser must be signed in to Opengeni as the starter.
+  When it is not signed in at all, the callback (MCP OAuth, provider OAuth or
+  Nango connect) consumes nothing and sends the browser to
+  `/connect-continue?next=<the same callback>`: the auth gate asks for one
+  sign-in, then the page replays the callback, which now finishes. A browser
+  signed in as someone else is still refused. The desktop Connections page
+  does not depend on the browser coming back: it watches the workspace's
+  connections while the browser is open and finishes as soon as the new
+  connection appears, so `/desktop-return` only says the browser's part is
+  done and offers to bring the app forward.
 - `none`: API keys, services and host products (delegated tokens and external
   user continuations) authenticate with credentials issued to the host's
   server, which decides which of its users finishes the consent. Someone who

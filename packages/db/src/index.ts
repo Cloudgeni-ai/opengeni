@@ -1099,6 +1099,8 @@ import {
 import {
   environmentsEncryptionKeyBytes,
   paidSandboxPlanLimit,
+  sandboxPlanTierUnpaid,
+  UNPAID_SANDBOX_PLAN_TIERS,
   SANDBOX_LIFECYCLE_TRANSITION_MAX_WAIT_MS,
   SANDBOX_DEADLINE_COMMAND_STOP_GRACE_MS,
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
@@ -8069,6 +8071,15 @@ export type UpdateConnectionInput = {
    * it (and no scope lost) the reconnect keeps `authorityGeneration`.
    */
   previousAccountIdentityKey?: string | null;
+  /**
+   * The new credential's verified account key, when the writer cannot store
+   * it on this row (another live row of the same owner already holds it, as
+   * for a legacy duplicate). It counts like `accountIdentityKey` for keeping
+   * `authorityGeneration`, but the row stays without a key. Pass it only
+   * after verifying the new credential is that account; it is ignored when
+   * `accountIdentityKey` is given (including null, an unverified account).
+   */
+  vouchedAccountIdentityKey?: string | null;
   /** Rename: display only, so it changes neither `version` nor authority. */
   label?: string | null;
   updatedBySubjectId?: string | null;
@@ -14568,7 +14579,11 @@ export async function verifyPersonalGitHubRepositorySelections(
  */
 function sameAccountReconnectGeneration(input: UpdateConnectionInput) {
   const next = sql`${schema.connections.authorityGeneration} + 1`;
-  if (!input.accountIdentityKey) return next;
+  const incoming =
+    input.accountIdentityKey !== undefined
+      ? input.accountIdentityKey
+      : input.vouchedAccountIdentityKey;
+  if (!incoming) return next;
   // A row saved before keys existed carries none; the writer then vouches
   // for the stored row's account with the key it derives from that row.
   const stored = input.previousAccountIdentityKey
@@ -14579,7 +14594,7 @@ function sameAccountReconnectGeneration(input: UpdateConnectionInput) {
       ? sql`true`
       : sql`${JSON.stringify(input.grantedScopes)}::jsonb @> ${schema.connections.grantedScopes}`;
   return sql`case
-    when ${stored} = ${input.accountIdentityKey} and ${keepsScopes}
+    when ${stored} = ${incoming} and ${keepsScopes}
       then ${schema.connections.authorityGeneration}
     else ${next}
   end`;
@@ -36311,7 +36326,8 @@ const SESSION_INPUT_WAIT_RETIRING_UPDATE_KINDS = (
  *
  * A person's turn consumes awaited machine input in two ways: its claim
  * delivered a pending immediate-class update to it, or its model read a
- * child's complete answer (`CONSUMED_CHILD_ANSWERS_METADATA_KEY`) that is a
+ * child's complete answer (`CONSUMED_CHILD_ANSWERS_METADATA_KEY`, or
+ * `CODEMODE_CHILD_ANSWER_READS_METADATA_KEY` for a Codemode read) that is a
  * part of a child result then superseded as `consumed_by_parent_read`: the
  * answer, a goal continuation, or an omitted earlier part (see
  * `childTerminalResultFinalAnswerSequences`). That result never wakes the
@@ -36337,9 +36353,12 @@ function sessionInputWaitDecidingTurnSql(
   waitTurnId: SQLWrapper | string,
 ): SQL {
   const consumedAnswersKey = CONSUMED_CHILD_ANSWERS_METADATA_KEY;
+  const codemodeReadsKey = CODEMODE_CHILD_ANSWER_READS_METADATA_KEY;
   const consumedAnswers = (metadata: SQLWrapper) =>
     sql`jsonb_array_elements(case when jsonb_typeof(${metadata} -> ${consumedAnswersKey}) = 'array'
-      then ${metadata} -> ${consumedAnswersKey} else '[]'::jsonb end)`;
+      then ${metadata} -> ${consumedAnswersKey} else '[]'::jsonb end
+      || case when jsonb_typeof(${metadata} -> ${codemodeReadsKey}) = 'array'
+      then ${metadata} -> ${codemodeReadsKey} else '[]'::jsonb end)`;
   // By its unique (workspace, id) key: the declaring turn is this session's.
   const waitDeclaredAt = sql`(select declaring.finished_at from ${schema.sessionTurns} declaring
     where declaring.workspace_id = ${turn.workspaceId} and declaring.id = ${waitTurnId})`;
@@ -49430,7 +49449,24 @@ export interface LiveModalSandboxLeaseAttribution {
   liveness: SandboxLeaseLiveness;
 }
 
-export interface AcquireLeaseInput {
+/**
+ * The named, explicit opt-out from the organization plan limits. Only a test
+ * fixture that exercises lease mechanics without plan bounds may use it;
+ * every product caller passes the deployment's limits (sandboxPlanLimits).
+ */
+export type SandboxPlanLimitsOptOut = "unbounded_test_fixture";
+
+/**
+ * acquireLease input. `sandboxPlanLimits` is required, so no caller can start
+ * or keep a box outside the plan, standing and fleet bounds by omission.
+ */
+export type AcquireLeaseInput = Omit<AcquireLeaseAdmissionInput, "sandboxPlanLimits"> & {
+  /** Organization-wide limits by plan tier (sandboxPlanLimits(settings)), or
+   * the named test-fixture opt-out. */
+  sandboxPlanLimits: SandboxPlanLimits | SandboxPlanLimitsOptOut;
+};
+
+interface AcquireLeaseAdmissionInput {
   accountId: string;
   workspaceId: string;
   // The group's identity (sessions.sandbox_group_id; == session id for a
@@ -49498,9 +49534,14 @@ export interface AcquireLeaseInput {
   /** Organization-wide limits by plan tier (resolveSandboxPlanTier). Viewer
    * holders are refused beyond the tier's viewer-only limits with
    * SandboxViewerBoxLimitError; electing a new box beyond its running-box
-   * limit is refused (non-turn holders) or capacity-blocked (turns). Omitted =
-   * no organization limits. */
+   * limit is refused (non-turn holders) or capacity-blocked (turns). Omitted
+   * only for the explicit test-fixture opt-out (AcquireLeaseInput). */
   sandboxPlanLimits?: SandboxPlanLimits;
+  /** Whether this deployment has subscription plans
+   * (settings.subscriptionPlansEnabled). Without them a plan-less
+   * organization (`none`) is not unpaid: none of the unpaid-only bounds or
+   * fleet limits apply to it (sandboxPlanTierUnpaid). Omitted = on. */
+  subscriptionPlansEnabled?: boolean;
   /** Fleet-wide bounds on unpaid compute (OPENGENI_SANDBOX_FLEET_LIMITS_JSON),
    * applied with sandboxPlanLimits to a new box of an unpaid organization:
    * the young-organization running limit, the unpaid running cap and box-time
@@ -49974,6 +50015,10 @@ export class SandboxViewerBoxLimitError extends Error {
  *   already runs `limit` boxes;
  * - `young_box_time`: an unpaid organization in its first day used the box
  *   time new organizations get (`limit` seconds);
+ * - `young_turnless`: an unpaid organization in its first day that never
+ *   started a turn used the box time it gets before one (`limit` seconds);
+ *   only holders other than a turn are refused, and only to start a box that
+ *   is not running (joining a running box works), so starting a chat works;
  * - `fleet_busy`: unpaid organizations together already run as many boxes as
  *   the fleet allows (`limit`), or the fleet is under pressure;
  * - `fleet_daily_budget`: unpaid organizations together used today's fleet
@@ -49986,6 +50031,7 @@ export type SandboxOrganizationBoxLimitReason =
   | "daily_budget"
   | "young_running"
   | "young_box_time"
+  | "young_turnless"
   | "fleet_busy"
   | "fleet_daily_budget";
 
@@ -50018,6 +50064,11 @@ export function sandboxOrganizationBoxLimitMessage(
       return `New organizations on the Free plan can use ${Math.round(
         limit / 3600,
       )} sandbox hours during their first day, and this one has. Sandboxes start again when it is a day old; add credit or choose a paid plan to keep working now.`;
+    case "young_turnless":
+      return `New organizations on the Free plan get ${Math.max(
+        1,
+        Math.round(limit / 60),
+      )} minutes of sandbox time before their first chat. Start a chat to keep using the sandbox, or add credit or choose a paid plan.`;
     case "fleet_busy":
       return "Free sandboxes are at capacity right now. Try again in a few minutes, or add credit or choose a paid plan to start one now.";
     case "fleet_daily_budget":
@@ -50132,9 +50183,6 @@ function sandboxDailyBoxTimeLimitSeconds(
   }
   return limit.boxSecondsPerPersonPerDay ?? limit.boxSecondsPerOrganizationPerDay ?? 0;
 }
-
-/** Tiers whose boxes count toward a person's bounds across organizations. */
-const SANDBOX_PERSON_BOUNDED_TIERS: readonly string[] = ["free", "new", "none", "restricted"];
 
 /** Metered box seconds of one organization since the start of the UTC day.
  * Needs the organization's account-only RLS context (no workspace), so every
@@ -50269,11 +50317,21 @@ export async function resolveSandboxComputeStanding(
     limits: SandboxPlanLimits;
     actingSubjectId?: string | null;
     onFallback?: SandboxComputeStandingFallback | undefined;
+    /** Whether this deployment has subscription plans
+     * (settings.subscriptionPlansEnabled; default on). Without them a
+     * plan-less organization (`none`) is not unpaid (sandboxPlanTierUnpaid). */
+    subscriptionPlansEnabled?: boolean | undefined;
   },
 ): Promise<SandboxComputeStanding> {
+  const plans = { subscriptionPlansEnabled: input.subscriptionPlansEnabled };
   const own = await withAccountRls(db, input.accountId, async (tx) => {
     const standing = await resolveSandboxPlanStanding(tx, input.accountId, input.limits);
-    const bounded = SANDBOX_PERSON_BOUNDED_TIERS.includes(standing.tier) && !standing.paidHistory;
+    const bounded = sandboxPlanTierUnpaid(standing.tier, plans) && !standing.paidHistory;
+    // A Free or plan-less organization that never paid can be restricted
+    // through its acting person, whether or not its tier is unpaid: without
+    // subscription plans a plan-less organization is unbounded, but the
+    // promotion decisions of its people still apply.
+    const restrictable = UNPAID_SANDBOX_PLAN_TIERS.includes(standing.tier) && !standing.paidHistory;
     const limit = sandboxPlanLimitFor(input.limits, standing.tier);
     const needsSeconds =
       bounded &&
@@ -50282,6 +50340,7 @@ export async function resolveSandboxComputeStanding(
     return {
       standing,
       bounded,
+      restrictable,
       seconds: needsSeconds ? await organizationBoxSecondsToday(tx, input.accountId) : 0,
     };
   });
@@ -50297,7 +50356,7 @@ export async function resolveSandboxComputeStanding(
     organizationCreatedAt: own.standing.organizationCreatedAt,
   };
   const subjectId = input.actingSubjectId ?? null;
-  if (!own.bounded || subjectId === null || !subjectId.startsWith("user:")) return result;
+  if (!own.restrictable || subjectId === null || !subjectId.startsWith("user:")) return result;
   // A restricted organization needs no person facts: it is already closed.
   if (own.standing.tier === "restricted") return result;
   let person: SandboxPersonStanding;
@@ -50306,6 +50365,7 @@ export async function resolveSandboxComputeStanding(
       accountId: input.accountId,
       subjectId,
       limits: input.limits,
+      ...plans,
     });
   } catch (error) {
     reportSandboxComputeStandingFallback(input.onFallback, error, "person");
@@ -50344,7 +50404,12 @@ export function resetSandboxPersonStandingCache(): void {
 
 async function cachedSandboxPersonStanding(
   db: Database,
-  input: { accountId: string; subjectId: string; limits: SandboxPlanLimits },
+  input: {
+    accountId: string;
+    subjectId: string;
+    limits: SandboxPlanLimits;
+    subscriptionPlansEnabled?: boolean | undefined;
+  },
 ): Promise<SandboxPersonStanding> {
   const key = `${input.accountId}\u0000${input.subjectId}`;
   const now = Date.now();
@@ -50369,7 +50434,12 @@ async function cachedSandboxPersonStanding(
  */
 async function readSandboxPersonStanding(
   db: Database,
-  input: { accountId: string; subjectId: string; limits: SandboxPlanLimits },
+  input: {
+    accountId: string;
+    subjectId: string;
+    limits: SandboxPlanLimits;
+    subscriptionPlansEnabled?: boolean | undefined;
+  },
 ): Promise<SandboxPersonStanding> {
   const subjectId = input.subjectId;
   const result: SandboxPersonStanding = {
@@ -50409,7 +50479,7 @@ async function readSandboxPersonStanding(
     const owned = membership.role === "owner";
     const other = await withAccountRls(db, organizationId, async (tx) => {
       const standing = await resolveSandboxPlanStanding(tx, organizationId, input.limits);
-      if (!SANDBOX_PERSON_BOUNDED_TIERS.includes(standing.tier) || standing.paidHistory) {
+      if (!sandboxPlanTierUnpaid(standing.tier, input) || standing.paidHistory) {
         return null;
       }
       const counts = owned
@@ -50420,7 +50490,10 @@ async function readSandboxPersonStanding(
           })
         : null;
       return {
-        restricted: standing.tier === "restricted" && standing.ownDecision !== null,
+        restricted:
+          standing.tier === "restricted" &&
+          standing.ownDecision !== null &&
+          standing.ownDecisionFollowsPerson,
         runningBoxes: counts?.runningBoxes ?? 0,
         seconds: owned ? await organizationBoxSecondsToday(tx, organizationId) : 0,
       };
@@ -50508,6 +50581,11 @@ export type SandboxPlanStanding = {
   paidHistory: boolean;
   /** Its own promotion decision is held or denied while enforcement is on. */
   ownDecision: "held" | "denied" | null;
+  /** Whether that decision follows the person into the other organizations
+   * they own or administer. A detector hold on an additional organization
+   * (the rapid or linked rule, or a signup rule) holds only that
+   * organization; a denial or any reviewer's decision follows the person. */
+  ownDecisionFollowsPerson: boolean;
   /** Restricted because its own decision is denied (not only held and not
    * only linked): the organization is suspended. See
    * resolveSandboxSuspension. */
@@ -50574,6 +50652,8 @@ export async function resolveSandboxPlanStanding(
     plan_key: string | null;
     status: string | null;
     decision: string | null;
+    decision_actor: string | null;
+    additional_organization: boolean | null;
     enforcement: boolean | null;
     hosted_account: boolean | null;
     young: boolean | null;
@@ -50581,7 +50661,10 @@ export async function resolveSandboxPlanStanding(
     created_at: Date | string | null;
   }>(
     tx,
-    sql`select plan.plan_key, plan.status, decision.decision,
+    sql`select plan.plan_key, plan.status, decision.decision, decision.actor as decision_actor,
+        exists (select 1 from managed_accounts account
+          where account.id = organization.account_id
+            and account.external_source = 'opengeni:additional-organization') as additional_organization,
         (select account.created_at from managed_accounts account
           where account.id = organization.account_id) as created_at,
         (select enforcement.enabled from promotion_enforcement enforcement
@@ -50608,6 +50691,7 @@ export async function resolveSandboxPlanStanding(
       tier: SANDBOX_EMBEDDED_PLAN_TIER,
       paidHistory: false,
       ownDecision: null,
+      ownDecisionFollowsPerson: false,
       suspended: false,
       organizationCreatedAt,
     };
@@ -50627,6 +50711,13 @@ export async function resolveSandboxPlanStanding(
     row?.enforcement === true && (row?.decision === "held" || row?.decision === "denied")
       ? row.decision
       : null;
+  const ownDecisionFollowsPerson =
+    ownDecision !== null &&
+    !(
+      ownDecision === "held" &&
+      row?.decision_actor === "service:promotion-detector" &&
+      row?.additional_organization === true
+    );
   // Restricted only without paid history: a person who bought credit or paid
   // for a plan is never cut off by a review decision.
   if (
@@ -50638,6 +50729,7 @@ export async function resolveSandboxPlanStanding(
       tier: "restricted",
       paidHistory,
       ownDecision,
+      ownDecisionFollowsPerson,
       suspended: ownDecision === "denied",
       organizationCreatedAt,
     };
@@ -50647,11 +50739,19 @@ export async function resolveSandboxPlanStanding(
       tier: SANDBOX_NEW_PLAN_TIER,
       paidHistory,
       ownDecision,
+      ownDecisionFollowsPerson,
       suspended: false,
       organizationCreatedAt,
     };
   }
-  return { tier, paidHistory, ownDecision, suspended: false, organizationCreatedAt };
+  return {
+    tier,
+    paidHistory,
+    ownDecision,
+    ownDecisionFollowsPerson,
+    suspended: false,
+    organizationCreatedAt,
+  };
 }
 
 export function sandboxPlanLimitFor(limits: SandboxPlanLimits, tier: string): SandboxPlanLimit {
@@ -50836,7 +50936,7 @@ function warmBillingSnapshot(
  */
 async function sandboxWarmAdmissionAttribution(
   tx: Database,
-  input: AcquireLeaseInput,
+  input: AcquireLeaseAdmissionInput,
 ): Promise<CreditDebitAttribution> {
   if (input.kind === "turn" && input.holderId.startsWith("turn-attempt:")) {
     const attemptId = input.holderId.slice("turn-attempt:".length);
@@ -52071,7 +52171,7 @@ async function lockSandboxLeaseAdmission(
 // The single most load-bearing function: the sole double-spawn guard.
 async function acquireLeaseOnce(
   db: Database,
-  input: AcquireLeaseInput,
+  input: AcquireLeaseAdmissionInput,
   standing: SandboxComputeStanding | null = null,
   fleet: SandboxFleetAdmission | null = null,
 ): Promise<AcquireLeaseResult> {
@@ -52314,7 +52414,12 @@ async function acquireLeaseOnce(
                 ? "daily_budget"
                 : sandboxYoungBoxTimeSpent(fleet)
                   ? "young_box_time"
-                  : null;
+                  : kind !== "turn" &&
+                      row.liveness !== "warm" &&
+                      row.liveness !== "warming" &&
+                      sandboxYoungTurnlessTimeSpent(fleet)
+                    ? "young_turnless"
+                    : null;
           const turnHeldWarm = row.liveness === "warm" && Number(row.turn_holders) > 0;
           if (refusal !== null && !turnHeldWarm) {
             const inFlightTurn =
@@ -52336,7 +52441,9 @@ async function acquireLeaseOnce(
                   ? 0
                   : refusal === "young_box_time"
                     ? (fleet?.limits.youngOrganizationBoxSeconds ?? 0)
-                    : sandboxDailyBoxTimeLimitSeconds(planLimit, standing),
+                    : refusal === "young_turnless"
+                      ? (fleet?.limits.youngTurnlessBoxSeconds ?? 0)
+                      : sandboxDailyBoxTimeLimitSeconds(planLimit, standing),
                 refusal,
               );
             }
@@ -52934,6 +53041,9 @@ type SandboxFleetAdmission = {
   /** A young organization's metered box seconds since it was created; null
    * when unbounded or unreadable (fails open, like its other own bounds). */
   youngBoxSeconds: number | null;
+  /** A young organization that never started a turn (read only for a holder
+   * other than a turn; false when unread or unreadable, failing open). */
+  turnless: boolean;
 };
 
 function sandboxYoungBoxTimeSpent(fleet: SandboxFleetAdmission | null): boolean {
@@ -52946,7 +53056,61 @@ function sandboxYoungBoxTimeSpent(fleet: SandboxFleetAdmission | null): boolean 
   );
 }
 
-async function organizationBoxSecondsSince(
+/** Whether a young organization is past the box time it gets before its
+ * first turn (`youngTurnlessBoxSeconds`). */
+function sandboxYoungTurnlessTimeSpent(fleet: SandboxFleetAdmission | null): boolean {
+  return (
+    fleet !== null &&
+    fleet.young &&
+    fleet.turnless &&
+    fleet.limits.youngTurnlessBoxSeconds !== undefined &&
+    fleet.youngBoxSeconds !== null &&
+    fleet.youngBoxSeconds >= fleet.limits.youngTurnlessBoxSeconds
+  );
+}
+
+/**
+ * Whether any turn was ever created in the organization (any workspace,
+ * shared or personal; the first 50 workspaces). Meant for young
+ * organizations, which have a few workspaces and turns.
+ */
+export async function organizationHasAnyTurn(db: Database, accountId: string): Promise<boolean> {
+  // A turn once created stays created: remember the organizations that have
+  // one, so frequent holders (terminal input, viewer heartbeats) read once.
+  if (ORGANIZATIONS_WITH_A_TURN.has(accountId)) return true;
+  const workspaces = await withRlsContext(
+    db,
+    { accountId, workspaceId: null },
+    async (scopedDb) =>
+      await rawRows<{ id: string }>(
+        scopedDb,
+        sql`select id from workspaces where account_id = ${accountId}::uuid
+          order by created_at limit 50`,
+      ),
+  );
+  for (const { id: workspaceId } of workspaces) {
+    const [row] = await withRlsContext(
+      db,
+      { accountId, workspaceId },
+      async (scopedDb) =>
+        await rawRows<{ any_turn: boolean }>(
+          scopedDb,
+          sql`select exists (select 1 from session_turns
+            where workspace_id = ${workspaceId}::uuid limit 1) as any_turn`,
+        ),
+    );
+    if (row?.any_turn) {
+      if (ORGANIZATIONS_WITH_A_TURN.size >= 10_000) ORGANIZATIONS_WITH_A_TURN.clear();
+      ORGANIZATIONS_WITH_A_TURN.add(accountId);
+      return true;
+    }
+  }
+  return false;
+}
+const ORGANIZATIONS_WITH_A_TURN = new Set<string>();
+
+/** Metered box seconds of one organization since `since`. */
+export async function organizationBoxSecondsSince(
   db: Database,
   accountId: string,
   since: Date,
@@ -52972,7 +53136,7 @@ function sandboxFleetBounded(standing: SandboxComputeStanding | null): boolean {
 
 async function readSandboxFleetAdmission(
   db: Database,
-  input: AcquireLeaseInput,
+  input: AcquireLeaseAdmissionInput,
   standing: SandboxComputeStanding | null,
 ): Promise<SandboxFleetAdmission | null> {
   const limits = input.sandboxFleetLimits;
@@ -52996,20 +53160,45 @@ async function readSandboxFleetAdmission(
     createdAt !== null &&
     Date.now() - createdAt.getTime() < limits.youngOrganizationAgeMs;
   let youngBoxSeconds: number | null = null;
-  if (young && createdAt !== null && limits.youngOrganizationBoxSeconds !== undefined) {
+  const turnlessBounded = limits.youngTurnlessBoxSeconds !== undefined && input.kind !== "turn";
+  if (
+    young &&
+    createdAt !== null &&
+    (limits.youngOrganizationBoxSeconds !== undefined || turnlessBounded)
+  ) {
     try {
       youngBoxSeconds = await organizationBoxSecondsSince(db, input.accountId, createdAt);
     } catch (error) {
       reportSandboxComputeStandingFallback(input.onComputeStandingFallback, error, "organization");
     }
   }
-  return { limits, pressure, boxSecondsToday, boxSecondsFailed, young, youngBoxSeconds };
+  // Only once its turnless box time is used: a turn ever started in the
+  // organization lifts the bound for good. A failed read fails open.
+  let turnless = false;
+  if (
+    young &&
+    turnlessBounded &&
+    youngBoxSeconds !== null &&
+    youngBoxSeconds >= limits.youngTurnlessBoxSeconds!
+  ) {
+    try {
+      turnless = !(await organizationHasAnyTurn(db, input.accountId));
+    } catch (error) {
+      reportSandboxComputeStandingFallback(input.onComputeStandingFallback, error, "organization");
+    }
+  }
+  return { limits, pressure, boxSecondsToday, boxSecondsFailed, young, youngBoxSeconds, turnless };
 }
 
 export async function acquireLease(
   db: Database,
-  input: AcquireLeaseInput,
+  request: AcquireLeaseInput,
 ): Promise<AcquireLeaseResult> {
+  const { sandboxPlanLimits: requestedPlanLimits, ...rest } = request;
+  const input: AcquireLeaseAdmissionInput =
+    requestedPlanLimits === "unbounded_test_fixture"
+      ? rest
+      : { ...rest, sandboxPlanLimits: requestedPlanLimits };
   const captureWaitMs = input.captureWaitMs ?? 0;
   if (!Number.isSafeInteger(captureWaitMs) || captureWaitMs < 0 || captureWaitMs > 60 * 60_000) {
     throw new Error("Sandbox lease archive capture wait is invalid");
@@ -53034,6 +53223,7 @@ export async function acquireLease(
         limits: input.sandboxPlanLimits,
         actingSubjectId: input.actingSubjectId ?? input.viewerSubjectId ?? null,
         onFallback: input.onComputeStandingFallback,
+        subscriptionPlansEnabled: input.subscriptionPlansEnabled,
       });
     } catch (error) {
       reportSandboxComputeStandingFallback(input.onComputeStandingFallback, error, "organization");
@@ -81277,6 +81467,17 @@ export async function acknowledgeConsumedChildEvents(
  * or unproven record delivers the child's result normally.
  */
 export const CONSUMED_CHILD_ANSWERS_METADATA_KEY = "consumedChildAnswers";
+/**
+ * Turn metadata key recording each direct child answer that a Codemode client
+ * of one exact attempt (for example `ogtool call` in a shell command) received
+ * whole. The read alone proves nothing, since a script may keep the output to
+ * itself: such a record counts only once a tool result in the same turn's
+ * durable history holds that answer as a whole JSON string value, which is the
+ * model's own view of the output. Kept apart from
+ * `CONSUMED_CHILD_ANSWERS_METADATA_KEY` so readers that predate it never take
+ * it for a model read.
+ */
+export const CODEMODE_CHILD_ANSWER_READS_METADATA_KEY = "codemodeChildAnswerReads";
 const CONSUMED_CHILD_ANSWERS_MAX = 64;
 const CONSUMED_CHILD_ANSWERS_TURN_WINDOW = 16;
 /** The model call ids a read record keeps; longer ids are not recorded. */
@@ -81293,9 +81494,12 @@ type ConsumedChildAnswerEntry = {
   callId?: string;
 };
 
-function consumedChildAnswerEntries(metadata: unknown): ConsumedChildAnswerEntry[] {
+function consumedChildAnswerEntries(
+  metadata: unknown,
+  key: string = CONSUMED_CHILD_ANSWERS_METADATA_KEY,
+): ConsumedChildAnswerEntry[] {
   if (metadata === null || typeof metadata !== "object" || Array.isArray(metadata)) return [];
-  const entries = (metadata as Record<string, unknown>)[CONSUMED_CHILD_ANSWERS_METADATA_KEY];
+  const entries = (metadata as Record<string, unknown>)[key];
   if (!Array.isArray(entries)) return [];
   return entries.filter(
     (entry): entry is ConsumedChildAnswerEntry =>
@@ -81344,6 +81548,15 @@ function childTerminalResultAnswerParts(
  * every later attempt of the turn received it. Without that result in history,
  * a record of an attempt that failed, was interrupted, or was replaced proves
  * nothing.
+ *
+ * A Codemode read (`CODEMODE_CHILD_ANSWER_READS_METADATA_KEY`) never counts by
+ * its attempt: the script that made it may have returned only a summary. It
+ * counts when a tool result in the same turn's durable history holds the
+ * child's whole answer as a JSON string value, as the model received it: once
+ * escaped (the read's own JSON, for example after `jq -r '.content[0].text'`)
+ * or twice (the tool result as `ogtool call` prints it). Text that only
+ * contains the answer, or an answer printed some other way, proves nothing and
+ * the result is delivered normally.
  */
 async function consumedChildAnswerSequencesTx(
   tx: Database,
@@ -81364,12 +81577,8 @@ async function consumedChildAnswerSequencesTx(
       ? input.attempt
       : null;
   const key = CONSUMED_CHILD_ANSWERS_METADATA_KEY;
-  const rows = await rawRows<{ childSessionId: string; sequence: string | number }>(
-    tx,
-    sql`select entry ->> 'childSessionId' as "childSessionId",
-        (entry ->> 'sequence')::numeric as sequence
-      from (
-        (select recent.id, recent.metadata from session_turns recent
+  const codemodeKey = CODEMODE_CHILD_ANSWER_READS_METADATA_KEY;
+  const turns = sql`(select recent.id, recent.metadata from session_turns recent
           where recent.workspace_id = ${input.workspaceId}::uuid
             and recent.session_id = ${input.parentSessionId}::uuid
             and recent.status = 'completed'
@@ -81382,8 +81591,17 @@ async function consumedChildAnswerSequencesTx(
             and own.session_id = ${input.parentSessionId}::uuid
             and own.id = ${attempt.turnId}::uuid)`
             : sql``
-        }
-      ) turn
+        }`;
+  const childSessionIdList = sql.join(
+    childSessionIds.map((id) => sql`${id}`),
+    sql`, `,
+  );
+  const rows = await rawRows<{ childSessionId: string; sequence: string | number }>(
+    tx,
+    sql`with turn as (${turns})
+      select entry ->> 'childSessionId' as "childSessionId",
+        (entry ->> 'sequence')::numeric as sequence
+      from turn
       cross join lateral jsonb_array_elements(
         case when jsonb_typeof(turn.metadata -> ${key}) = 'array'
           then turn.metadata -> ${key} else '[]'::jsonb end
@@ -81394,10 +81612,7 @@ async function consumedChildAnswerSequencesTx(
           and attempt.turn_id = turn.id
           and attempt.id = case when entry ->> 'attemptId' ~ ${UUID_TEXT_PATTERN_SQL}
             then (entry ->> 'attemptId')::uuid end
-      where entry ->> 'childSessionId' in (${sql.join(
-        childSessionIds.map((id) => sql`${id}`),
-        sql`, `,
-      )})
+      where entry ->> 'childSessionId' in (${childSessionIdList})
         and jsonb_typeof(entry -> 'sequence') = 'number'
         and (attempt.outcome = 'completed'${
           attempt
@@ -81410,7 +81625,41 @@ async function consumedChildAnswerSequencesTx(
               and carried.session_id = ${input.parentSessionId}::uuid
               and carried.turn_id = turn.id
               and carried.item_ordered ->> 'type' = 'function_call_result'
-              and carried.item_ordered ->> 'callId' = entry ->> 'callId')))`,
+              and carried.item_ordered ->> 'callId' = entry ->> 'callId')))
+      union all
+      select entry ->> 'childSessionId' as "childSessionId",
+        (entry ->> 'sequence')::numeric as sequence
+      from turn
+      cross join lateral jsonb_array_elements(
+        case when jsonb_typeof(turn.metadata -> ${codemodeKey}) = 'array'
+          then turn.metadata -> ${codemodeKey} else '[]'::jsonb end
+      ) as entry
+      join session_events answer
+        on answer.workspace_id = ${input.workspaceId}::uuid
+          and answer.session_id = case when entry ->> 'childSessionId' ~ ${UUID_TEXT_PATTERN_SQL}
+            then (entry ->> 'childSessionId')::uuid end
+          and answer.sequence = case when entry ->> 'sequence' ~ '^[0-9]{1,9}$'
+            then (entry ->> 'sequence')::integer end
+          and answer.type = 'turn.completed'
+          and jsonb_typeof(answer.payload -> 'output') = 'string'
+          and answer.payload ->> 'output' <> ''
+      -- The answer as a JSON string value, escaped once more for each layer
+      -- of JSON it can sit in inside a stored tool result.
+      cross join lateral (select to_json(to_json(answer.payload ->> 'output')::text)::text
+        as quoted) once_quoted
+      cross join lateral (select substr(once_quoted.quoted, 2, length(once_quoted.quoted) - 2)
+        as text) escaped_once
+      cross join lateral (select substr(to_json(escaped_once.text)::text, 2,
+        length(to_json(escaped_once.text)::text) - 2) as text) escaped_twice
+      where entry ->> 'childSessionId' in (${childSessionIdList})
+        and exists (
+          select 1 from session_history_items carried
+          where carried.workspace_id = ${input.workspaceId}::uuid
+            and carried.session_id = ${input.parentSessionId}::uuid
+            and carried.turn_id = turn.id
+            and carried.item_ordered ->> 'type' = 'function_call_result'
+            and (strpos(carried.item_ordered::text, escaped_once.text) > 0
+              or strpos(carried.item_ordered::text, escaped_twice.text) > 0))`,
   );
   for (const row of rows) {
     const sequences = consumed.get(row.childSessionId) ?? new Set<number>();
@@ -81516,7 +81765,12 @@ async function supersedeChildResultsConsumedByCompletedAttemptTx(
     turnMetadata: unknown;
   },
 ): Promise<string[]> {
-  if (consumedChildAnswerEntries(input.turnMetadata).length === 0) return [];
+  if (
+    consumedChildAnswerEntries(input.turnMetadata).length === 0 &&
+    consumedChildAnswerEntries(input.turnMetadata, CODEMODE_CHILD_ANSWER_READS_METADATA_KEY)
+      .length === 0
+  )
+    return [];
   const consumed = await pendingChildResultsConsumedTx(tx, {
     workspaceId: input.workspaceId,
     parentSessionId: input.sessionId,
@@ -81557,6 +81811,11 @@ async function supersedeChildResultsConsumedByCompletedAttemptTx(
  * also locks its session, so taking only the turn first would invert
  * claim/settlement and parallel tool writers. It is best effort: a busy
  * ownership row skips it and the result is then delivered normally.
+ *
+ * `via: "codemode"` records a read a Codemode client of the attempt made
+ * (`CODEMODE_CHILD_ANSWER_READS_METADATA_KEY`). The caller cannot prove that
+ * output reached the model, so such a record counts only when the turn's
+ * durable history shows it did (see `consumedChildAnswerSequencesTx`).
  */
 export async function recordConsumedChildAnswers(
   db: Database,
@@ -81568,10 +81827,16 @@ export async function recordConsumedChildAnswers(
     attemptId: string;
     executionGeneration: number;
     callId?: string;
+    via?: "model" | "codemode";
     children: readonly { sessionId: string; sequences: readonly number[] }[];
   },
 ): Promise<{ recorded: number }> {
+  const metadataKey =
+    input.via === "codemode"
+      ? CODEMODE_CHILD_ANSWER_READS_METADATA_KEY
+      : CONSUMED_CHILD_ANSWERS_METADATA_KEY;
   const callId =
+    input.via !== "codemode" &&
     typeof input.callId === "string" &&
     input.callId.length > 0 &&
     input.callId.length <= CONSUMED_CHILD_ANSWER_CALL_ID_MAX_LENGTH
@@ -81645,7 +81910,7 @@ export async function recordConsumedChildAnswers(
   });
   const readByChild = new Map(children.map((child) => [child.sessionId, child.sequences]));
   const unrecorded = (metadata: unknown) => {
-    const recorded = consumedChildAnswerEntries(metadata);
+    const recorded = consumedChildAnswerEntries(metadata, metadataKey);
     return probe.answers
       .map((answer) => ({ childSessionId: answer.sessionId, sequence: Number(answer.sequence) }))
       .filter(
@@ -81715,13 +81980,14 @@ export async function recordConsumedChildAnswers(
           if (newlyRecorded.length === 0) return { recorded: 0 };
           // Under the turn row lock: only this key changes, the rest of the
           // turn metadata stays exactly as committed.
-          const entries = [...consumedChildAnswerEntries(turn.metadata), ...newlyRecorded].slice(
-            -CONSUMED_CHILD_ANSWERS_MAX,
-          );
+          const entries = [
+            ...consumedChildAnswerEntries(turn.metadata, metadataKey),
+            ...newlyRecorded,
+          ].slice(-CONSUMED_CHILD_ANSWERS_MAX);
           await tx
             .update(schema.sessionTurns)
             .set({
-              metadata: sql`jsonb_set(coalesce(${schema.sessionTurns.metadata}, '{}'::jsonb), ${`{${CONSUMED_CHILD_ANSWERS_METADATA_KEY}}`}::text[], ${JSON.stringify(entries)}::jsonb)`,
+              metadata: sql`jsonb_set(coalesce(${schema.sessionTurns.metadata}, '{}'::jsonb), ${`{${metadataKey}}`}::text[], ${JSON.stringify(entries)}::jsonb)`,
             })
             .where(
               and(
@@ -83097,8 +83363,10 @@ export async function claimSessionWorkForAttempt(
           );
           // Freeze governance only after this exact attempt is durably claimed,
           // while the claim transaction still owns the session/turn/attempt
-          // locks. Later policy or preference activation applies to a future
-          // attempt and can never move accepted queued/in-flight work.
+          // locks. Policies resolve as the turn starts running (a queued turn
+          // sees what was activated while it waited); once a turn has run,
+          // its later attempts keep that snapshot and later activation
+          // applies to the next turn.
           await tx.execute(sql`
             SELECT snapshot.id
             FROM workspace_instruction_policy_get_or_create_snapshot(

@@ -338,7 +338,96 @@ Reviewers apply the rules above. A denied-network hold whose matches are only
 held accounts (no denied ones) or a single old sign-in deserves a closer look
 before denial. Rollback: `--denied-network-mode off`, then release with
 `--network-release-holds --rule denied-network-v1`. Without `--rule`,
-`--network-release-holds` releases the holds of both network rules.
+`--network-release-holds` releases the holds of every rule listed here.
+
+## Email clusters
+
+`1489_signup_email_cluster.sql` adds `email-cluster-v1` for farms that rotate
+networks: many new organizations whose owners use one throwaway or alias-relay
+mail domain, or setups scripted within the same seconds. Every new self-serve
+organization (first ones and additional ones, 1484) records the class of its
+owner's mail domain and, for a non-public domain, a keyed hash of it under the
+1368 key (`opengeni_private.signup_owner_email_domains`; no address or domain is
+stored; rows kept 45 days). Classes: `reserved` (`.test`, `.example`,
+`.invalid`, `.localhost`, `.local`, `example.com/.net/.org`; never counted),
+`public` (large mail providers such as Gmail, Outlook, iCloud, Yahoo, Proton,
+Posteo or regional ISPs), `relay` (shared relays such as SimpleLogin, Firefox
+Relay, DuckDuckGo or Apple's private relay, used by many unrelated people),
+`personal_relay` (a per-person subdomain of addy.io, anonaddy or 33mail, or of a
+dynamic DNS host such as DuckDNS, No-IP, Dynu or FreeDDNS; grouped on the full
+subdomain, never on the shared parent), `academic` (`.edu`, `.ac.*`), `company` (any other
+domain) and `unknown`.
+
+Three legs, each with its own mode:
+
+- Burst (`signup-burst-v1`, `burstMode`, `enforce`): `burstHoldThreshold` (4)
+  organizations set up within `burstWindowSeconds` (10) through the same
+  provider (a shared relay, a per-person relay service or a dynamic DNS host; a
+  same-second batch through one is a farm), or with the same domain group and the
+  same signup network. A burst that shares only a network, or only a company or
+  academic domain (a workshop, classroom or office onboarding colleagues), and a
+  burst of unrelated public or unknown domains are observed only.
+- Denied domain (`email-denied-domain-v1`, `deniedDomainMode`, `enforce`):
+  `deniedDomainHoldThreshold` (2) distinct denied organizations with the same
+  company, academic or personal relay domain, set up in the
+  `deniedDomainLookbackDays` (30) before this one; for a per-person relay or
+  dynamic DNS name (one person) one denied organization is enough. Public
+  providers and shared relays never propagate a denial, and an academic domain is observed only.
+  Holds never propagate; only denials do.
+- Domain (`email-domain-v1`, `emailDomainMode`, `observe`):
+  `emailDomainHoldThreshold` (3) distinct owners with the same company or
+  personal relay domain set up within `emailDomainWindowMinutes` (60). Observed
+  by default, because a company or workshop can sign several colleagues up in an
+  hour; shared relays and academic domains never group here.
+
+The defaults come from hosted production's self-serve setups (60 to 90 days):
+no legitimate company domain set up more than 2 organizations in an hour, every
+domain with 3 or more in an hour was a throwaway farm, and outside one abuse
+incident no 10 seconds saw more than 2 setups. Invited members never count.
+
+**Setting.** `emailDomainMode`, `burstMode` and `deniedDomainMode` in the 1354
+settings (`off`, `observe`, `enforce`), with the thresholds and windows above.
+Evaluated
+after setup (the setup lists this organization and its recent domain and burst
+peers in `opengeni.signup_email_cluster_evaluate_accounts`, so the first
+members of a burst are held too) and lazily at Free issuance and admission for
+seven days after setup. Hold semantics are those of the other rules: current
+account only, never over a manual decision or an operator release, fail open.
+Evidence carries the domain class, a 16-hex domain group, group sizes and
+settings; reviews show the owner's email domain as for the other rules.
+
+```sh
+bun scripts/operator/promotion-decisions.ts --network-velocity-set --burst-mode observe \
+  --revision <current-revision> --operator <operator-id> --reason 'Observe signup bursts'
+bun scripts/operator/promotion-decisions.ts --network-velocity-set --email-domain-mode enforce \
+  --revision <current-revision> --operator <operator-id> --reason 'Hold same-domain farms'
+bun scripts/operator/promotion-decisions.ts --network-velocity-set --email-domain-threshold 4 \
+  --burst-threshold 5 --revision <current-revision> --operator <operator-id> --reason 'Loosen'
+bun scripts/operator/promotion-decisions.ts --network-release-holds --rule email-cluster-v1 \
+  --dry-run --operator <operator-id> --reason 'Roll back email cluster holds'
+```
+
+Rollback: `--burst-mode off --denied-domain-mode off` (and `--email-domain-mode
+off`), then release with
+`--network-release-holds --rule email-cluster-v1`.
+
+### Rapid additional organizations
+
+An unpaid person's second and later additional organizations created within 24
+hours of their first organization start held (rule
+`additional-organization-v1`, migration 1491). The first additional
+organization is never held by this rule, and a person who owns or administers
+any paying organization (paid plan, Enterprise, Stripe or a credit top-up) is
+exempt. In the last 60 days every farm additional organization was created
+within 24 hours, while the few real people who did so created only one. The
+check fails open. Rollback: release with
+`--network-release-holds --rule additional-organization-v1`.
+
+A detector hold on an additional organization (this rule or any other signup
+rule) restricts only that organization. It doesn't follow the person: their
+other organizations aren't linked-restricted, and it doesn't trigger the
+linked-owner hold on their next organization. A manual operator denial or
+reviewer decision still follows the person as before.
 
 ## Funding and review
 

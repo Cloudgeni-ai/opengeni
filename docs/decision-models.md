@@ -57,6 +57,11 @@ path. Leave it unset for official endpoints. Model IDs are provider-native IDs,
 not IDs resolved through the ordinary chat-model registry. OpenRouter's Decisions
 models need not appear in its normal chat `/models` response.
 
+A host that serves the `openai` or `openrouter` decisions API at another path takes
+its exact URL in `OPENGENI_DECISION_MODEL_ENDPOINT` instead; the adapter posts there
+and appends nothing. It replaces the base URL and does not apply to `jev`, whose
+client posts to its own path.
+
 ### Azure OpenAI
 
 An Azure OpenAI resource serves the same typed endpoint on its v1 API. Use provider
@@ -78,6 +83,51 @@ use, and it needs an Azure OpenAI user role on the resource. Tokens are cached a
 renewed before they expire; a rejected token is dropped so the next request signs
 in again. Without a usable identity, the decision model is not configured. The
 default, `api_key`, sends `OPENGENI_DECISION_MODEL_API_KEY` as before.
+
+### Azure AI Foundry
+
+Azure AI Foundry serves decision models such as `Microsoft-Decision-1.1` on the
+`openrouter` decisions API, at the resource's `/providers/microsoft/v1/systemone`
+path (its `/openai/v1/decisions` route does not serve them). Use provider
+`openrouter`, the deployment name as the model ID and that exact endpoint:
+
+```dotenv
+OPENGENI_DECISION_MODEL_PROVIDER=openrouter
+OPENGENI_DECISION_MODEL_ID=<deployment name>
+OPENGENI_DECISION_MODEL_ENDPOINT=https://<resource>.services.ai.azure.com/providers/microsoft/v1/systemone
+OPENGENI_DECISION_MODEL_AUTH=deployment_identity
+```
+
+`deployment_identity` works as for Azure OpenAI above (the identity needs the
+Cognitive Services User role on the resource); a key in
+`OPENGENI_DECISION_MODEL_API_KEY` with the default `api_key` works too. Under
+[EU-only inference](eu-only-inference.md), declare the resource's origin for the
+`decision_model.openrouter` route in `OPENGENI_SIDE_FEATURE_RESIDENCY_JSON`, for
+an EU Data Zone deployment:
+
+```json
+{
+  "decision_model.openrouter": {
+    "endpoint": "https://<resource>.services.ai.azure.com",
+    "residency": {
+      "geography": "eu",
+      "deploymentType": "azure_data_zone",
+      "regions": ["<region>"],
+      "evidence": {
+        "source": "operator_declaration",
+        "reference": "<deployment> DataZoneStandard on <resource>",
+        "verifiedAt": "<date>"
+      }
+    }
+  }
+}
+```
+
+Decision models judge on different scales, so the tool search load threshold that
+suits one may load too many or too few tools with another. Measure the deployment's
+catalog with the [evaluation harness](../scripts/tool-discovery-eval/README.md) and
+set `OPENGENI_TOOL_SEARCH_LOAD_THRESHOLD` if it needs its own (see
+[tool search](tool-search.md#configuration)).
 
 Give the selector its own deployment rather than sharing one that serves the
 agents' own model calls: a tool-search selection with 40 candidates is roughly

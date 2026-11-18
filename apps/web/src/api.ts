@@ -9,7 +9,11 @@ import {
   OPENGENI_API_CONTRACT_REVISION,
   OPENGENI_CORRELATION_HEADER,
 } from "@opengeni/sdk/browser";
-import { isSignInLostRejection, type OrganizationUserSetupPreview } from "@opengeni/contracts";
+import {
+  isSignInLostRejection,
+  OAUTH_SIGN_IN_TO_FINISH_PATH,
+  type OrganizationUserSetupPreview,
+} from "@opengeni/contracts";
 import { desktopAppHeaders } from "@opengeni/react/app/lib/desktop";
 import { userActivityHeaders } from "./lib/user-activity";
 
@@ -1180,7 +1184,8 @@ function authReturnBase(): string {
     window.location.pathname === "/native-sign-in" ||
     window.location.pathname === CONSOLE_SIGN_IN_APP_PATH ||
     window.location.pathname === PASSKEY_STEP_UP_HANDOFF_PATH ||
-    window.location.pathname === "/site-auth/authorize"
+    window.location.pathname === "/site-auth/authorize" ||
+    window.location.pathname === OAUTH_SIGN_IN_TO_FINISH_PATH
     ? `${window.location.pathname}${window.location.search}`
     : "/";
 }

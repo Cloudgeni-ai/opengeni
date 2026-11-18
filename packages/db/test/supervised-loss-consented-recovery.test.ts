@@ -218,6 +218,7 @@ test("supervised provider loss permits explicit historical consent without rewri
     sandboxGroupId: session.sandboxGroupId,
   };
   const elected = await acquireLease(client.db, {
+    sandboxPlanLimits: "unbounded_test_fixture",
     ...leaseScope,
     kind: "viewer",
     holderId: "loss-recovery-test",

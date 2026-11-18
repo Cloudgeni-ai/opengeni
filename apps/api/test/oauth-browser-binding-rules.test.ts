@@ -12,6 +12,7 @@ import {
   oauthBrowserBindingDigest,
   oauthBrowserBindingForStart,
   oauthCallbackBrowserAccepted,
+  oauthCallbackNeedsSignIn,
   oauthStateBrowserBinding,
   type OAuthStateBrowserBinding,
 } from "../src/integrations/oauth-browser-binding";
@@ -138,6 +139,22 @@ describe("which callback browser may finish a state", () => {
     expect(
       oauthCallbackBrowserAccepted(sessionState, { bindingDigests: [], signedInSubjectId: null }),
     ).toBe(false);
+  });
+
+  test("only a session proof in a browser signed in to no one may sign in and finish", () => {
+    const signedOut = { bindingDigests: [], signedInSubjectId: null };
+    expect(oauthCallbackNeedsSignIn(sessionState, signedOut)).toBe(true);
+    // Someone else is signed in there: refused, never offered a sign-in.
+    expect(
+      oauthCallbackNeedsSignIn(sessionState, {
+        bindingDigests: [],
+        signedInSubjectId: "user:someone-else",
+      }),
+    ).toBe(false);
+    // A browser start is bound to its cookie; signing in elsewhere can't meet it.
+    expect(oauthCallbackNeedsSignIn(cookieState, signedOut)).toBe(false);
+    expect(oauthCallbackNeedsSignIn({ browserProof: "none" }, signedOut)).toBe(false);
+    expect(oauthCallbackNeedsSignIn(sessionState, undefined)).toBe(false);
   });
 
   test("signed state fields parse strictly; a malformed cookie proof can never be met", () => {

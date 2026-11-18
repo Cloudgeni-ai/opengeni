@@ -168,7 +168,7 @@ const previewMethods = {
       resources: [],
       tools: [],
       toolsProvided: false,
-      model: "gpt-6-astra",
+      model: "gpt-6.2-astra",
       reasoningEffort: "low",
       latencyMode: "standard",
       options: {},
@@ -306,7 +306,7 @@ function CreditBalancePreview() {
   const [latency, setLatency] = useState<LatencyMode>("standard");
   const rows = projectPickerRows(
     t,
-    ["gpt-6-luna", "gpt-6-sol", "gpt-6-astra"].map(
+    ["gpt-6-luna", "gpt-6-sol", "gpt-6.2-sol", "gpt-6.2-astra"].map(
       (id): WorkspaceModelCatalogModel => ({
         id,
         label: id,

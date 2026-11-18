@@ -1177,8 +1177,14 @@ See [`knowledge.md`](knowledge.md) for storage, migration and review.
 
 Approval, capacity wait, worker recovery, and Pause/Resume create newer
 attempts for the **same logical turn**, so they must replay the original policy
-rather than resolve or overwrite it; they also reuse the accepted governance
-snapshots. A new user/API turn or a newly materialized goal, system,
+rather than resolve or overwrite it; they also keep the turn's governance
+snapshots. Instruction policies and the organization profile are resolved when
+the turn starts running, not when it was accepted: an attempt resolves them as
+of the earliest snapshot an earlier attempt of the turn took, unless that
+attempt only parked the turn for capacity (it sends no model request), and
+otherwise as of its own snapshot time. A turn that waited in the queue or for
+capacity therefore runs under governance activated while it waited, and a
+change made while it runs reaches the next turn. A new user/API turn or a newly materialized goal, system,
 child-result, scheduled, or compaction turn is a new logical turn and resolves
 fresh execution and governance policy. Thus a per-turn model/provider switch
 persists through recovery without accidentally becoming a permanent session

@@ -1,5 +1,40 @@
 # @opengeni/runtime
 
+## 6.29.0
+
+### Minor Changes
+
+- c5a628c: Decision models can run on Azure AI Foundry (for example Microsoft-Decision-1.1). `OPENGENI_DECISION_MODEL_ENDPOINT` (and `OPENGENI_PUBLIC_DECISION_MODEL_ENDPOINT`) sets the exact URL an `openai` or `openrouter` decision model posts to, `OPENGENI_DECISION_MODEL_AUTH=deployment_identity` now works for `openrouter` as well as `openai`, and an `openrouter` decision model at the operator's own endpoint can be declared EU in `OPENGENI_SIDE_FEATURE_RESIDENCY_JSON` under `decision_model.openrouter` (OpenRouter's own host keeps its global rule). `OPENGENI_TOOL_SEARCH_LOAD_THRESHOLD` sets the probability above which tool search loads a judged tool; unset keeps 0.5. `selectFromJudgments` takes an optional threshold, `createToolSelector` an optional `loadThreshold`, and `BuildAgentOptions` an optional `toolSearchLoadThreshold`.
+
+### Patch Changes
+
+- b34167e: Every Modal box now starts with its CPU and memory ceilings. A cold start without a durable admission callback (the desktop viewer, Channel A, rematerialization and rig verification) used the pinned Agents adapter's create, which sent only the reservation (0.125 cores, 128 MiB), no ceilings or egress allowlists, and skipped the create boundary that refuses a box without ceilings. It now takes Opengeni's bounded create, so these boxes get the tier's ceilings (2 cores / 4096 MiB unpaid, 16 cores / 32768 MiB otherwise) and fail closed when they are missing.
+
+  A box of an organization that review holds or denies is now stopped in the next reaper sweep. The closed-organization drain runs in every sweep's inventory instead of only in the maintenance pass after it, skips the reconnect grace, and also closes an unpaid organization whose self-serve owner or a viewer runs a held or denied one. Before, a denial took a maintenance pass, the 60 second grace and another sweep before the box was stopped.
+
+- 088561b: When an internal filesystem step's outcome cannot be established, the error now says the outcome is unknown, that the step was not repeated, and that there is no background command or handle to read. Before, it said completion was "pending", which led agents to look for a background command that does not exist.
+- Updated dependencies [c5a628c]
+- Updated dependencies [6581a0f]
+- Updated dependencies [c64d1e4]
+- Updated dependencies [60f6dea]
+- Updated dependencies [7b590d3]
+- Updated dependencies [ea75565]
+  - @opengeni/config@6.29.0
+  - @opengeni/codex@6.29.0
+  - @opengeni/capabilities@6.29.0
+  - @opengeni/xai-subscription@6.29.0
+  - @opengeni/sdk@6.29.0
+  - @opengeni/agent-proto@6.29.0
+  - @opengeni/codemode@6.29.0
+  - @opengeni/contracts@6.29.0
+  - @opengeni/decisions@6.29.0
+  - @opengeni/interaction@6.29.0
+  - @opengeni/jev@6.29.0
+  - @opengeni/network@6.29.0
+  - @opengeni/observability@6.29.0
+  - @opengeni/tool-gateway@6.29.0
+  - @opengeni/vaults@6.29.0
+
 ## 6.28.0
 
 ### Patch Changes

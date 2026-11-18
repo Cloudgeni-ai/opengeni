@@ -247,6 +247,7 @@ describe("system continuity after a lost sandbox on every backend", () => {
     });
     // The elected owner restores exactly that older archive.
     const elected = await acquireLease(client.db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...f.group,
       kind: "turn",
       holderId: "docker-recovery",
@@ -310,6 +311,7 @@ describe("system continuity after a lost sandbox on every backend", () => {
       lane: "checkpoint",
     });
     const elected = await acquireLease(client.db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...f.group,
       kind: "turn",
       holderId: "notice-retry",
@@ -434,6 +436,7 @@ describe("system continuity after a lost sandbox on every backend", () => {
         // The verified restore adds no notice: the person was already told when
         // the drain stopped the box.
         const elected = await acquireLease(client.db, {
+          sandboxPlanLimits: "unbounded_test_fixture",
           ...f.group,
           kind: "turn",
           holderId: "abandoned-recovery",

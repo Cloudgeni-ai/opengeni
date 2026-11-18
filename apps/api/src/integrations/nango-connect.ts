@@ -22,6 +22,7 @@ import {
   OAuthStartResponse,
   type ConnectionMetadata,
   type ConnectionOwnership,
+  oauthSignInToFinishPath,
 } from "@opengeni/contracts";
 import {
   connectSetupPermission,
@@ -43,6 +44,7 @@ import {
   createConnection,
   encryptEnvironmentValue,
   getConnectAttempt,
+  getConnectionMetadata,
   isConnectionAccountIdentityConflict,
   listConnectionsMetadata,
   lockNangoPersonIntegration,
@@ -74,6 +76,7 @@ import {
 import {
   OAUTH_BROWSER_MISMATCH_MESSAGE,
   oauthCallbackBrowserAccepted,
+  oauthCallbackNeedsSignIn,
   oauthStateBrowserBinding,
   type OAuthCallbackBrowser,
   type OAuthStateBrowserBinding,
@@ -248,6 +251,27 @@ export async function startNangoConnect(
       message: `${integration.native?.displayName ?? integration.definition.displayName ?? "This integration"} connects only your own account`,
     });
   assertConnectionOwnershipAllowedForPrincipal(ownership, context.personalOwnershipAllowed);
+  // A reconnect names its account: it must be this person's account of this
+  // very integration (its Nango row, or a native sign-in of the same
+  // connector). The completion still matches the account that signs in, as
+  // the connector's own Connect does, so signing in with another account adds
+  // that account instead of replacing the named one.
+  if (context.payload.connectionId && context.payload.newAccount !== true) {
+    const named = await getConnectionMetadata(
+      deps.db,
+      context.workspaceId,
+      context.payload.connectionId,
+      context.subjectId,
+    );
+    if (
+      !named ||
+      named.subjectId !== context.subjectId ||
+      (named.metadata.integrationBackend === "nango"
+        ? named.metadata.nangoIntegrationKey !== integration.integrationKey
+        : named.metadata.mcpUrl !== connectMcpUrl(integration))
+    )
+      throw new HTTPException(404, { message: "connection not found" });
+  }
   await withOrganizationIntegrationAcquisition(
     deps.db,
     context,
@@ -396,8 +420,21 @@ export async function nangoConnectPage(
 ): Promise<Response> {
   if (!input.state) throw new HTTPException(400, { message: "missing connection state" });
   const state = readNangoConnectState(deps.settings, input.state);
-  if (!oauthCallbackBrowserAccepted(state, input.browser))
+  if (!oauthCallbackBrowserAccepted(state, input.browser)) {
+    // Started in the app, opened in a browser signed in to no one: sign in
+    // there first, then this page opens again as that person.
+    if (oauthCallbackNeedsSignIn(state, input.browser)) {
+      const webBase = (
+        deps.settings.webBaseUrl ??
+        integrationBaseUrl(deps.settings.publicBaseUrl, input.requestUrl)
+      ).replace(/\/+$/, "");
+      return new Response(null, {
+        status: 302,
+        headers: { Location: `${webBase}${oauthSignInToFinishPath(input.requestUrl)}` },
+      });
+    }
     throw new HTTPException(403, { message: OAUTH_BROWSER_MISMATCH_MESSAGE });
+  }
   // Tags are minted only for an owner the start verified; the webhook relies on it.
   if (!personalOwnerStateAccepted(state))
     throw new HTTPException(422, { message: "This account cannot own a personal connection" });
@@ -640,9 +677,13 @@ async function persistNangoConnection(
     input.nangoConnectionId,
     input.identity,
   );
-  // Without Nango's report the stored scopes are the app's defaults; sharing
-  // never treats them as a grant that covers another organization's row.
-  if (input.grantedScopes === null) metadata.nangoScopesUnconfirmed = true;
+  // Only scopes Nango reported are a grant; without the report the stored
+  // scopes are the app's defaults, and sharing never treats them as a grant
+  // that covers another organization's row.
+  if (input.grantedScopes !== null) metadata.nangoScopesConfirmed = input.nangoConnectionId;
+  // The previous release only reads the negative marker; keep writing it
+  // until no release that reads it can still run (rollout or rollback).
+  else metadata.nangoScopesUnconfirmed = true;
   const credentialEncrypted = encryptedNangoCredential(
     settings,
     input.integration,

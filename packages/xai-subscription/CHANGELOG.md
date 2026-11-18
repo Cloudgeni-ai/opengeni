@@ -1,5 +1,12 @@
 # @opengeni/xai-subscription
 
+## 6.29.0
+
+### Patch Changes
+
+- ea75565: SuperGrok requests present the current Grok CLI stable release (1.0.89), so xAI does not refuse them as an outdated client.
+  - @opengeni/network@6.29.0
+
 ## 6.28.0
 
 ### Patch Changes

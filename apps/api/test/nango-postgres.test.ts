@@ -140,6 +140,8 @@ function fakeNango() {
     identityStatus?: number;
     /** The status GET /connections/{id} (the scope read) answers with instead. */
     scopeStatus?: number;
+    /** Left out of every GET /connections listing, yet readable by id. */
+    unlisted?: boolean;
   };
   const remote: Remote[] = [];
   /** Nango connection ids whose deletion fails. */
@@ -161,6 +163,7 @@ function fakeNango() {
         connections: remote
           .filter(
             (entry) =>
+              !entry.unlisted &&
               (!connectionId || entry.connectionId === connectionId) &&
               wantedTags.every(([key, value]) => entry.tags[key] === value),
           )
@@ -335,6 +338,45 @@ async function disconnect(
 
 function sweepDeps(nango: ReturnType<typeof fakeNango>) {
   return { db: client.db, settings, fetchImpl: nango.fetchImpl };
+}
+
+/**
+ * As an older release left it: `target`'s row of `email` on its own Nango
+ * connection `id` (metadata and stored credential both), which Nango has.
+ */
+async function leaveRowOn(
+  target: Owner,
+  id: string,
+  nango: ReturnType<typeof fakeNango>,
+  email: string,
+) {
+  if (!nango.remote.some((entry) => entry.connectionId === id))
+    nango.remote.push({
+      connectionId: id,
+      tags: attemptTags(target, "older"),
+      email,
+      scope: "",
+      authErrors: 0,
+      created: "2026-11-01T00:00:00.000Z",
+    });
+  const { decryptEnvironmentValue, encryptEnvironmentValue } = await import("@opengeni/db");
+  const { environmentsEncryptionKeyBytes } = await import("@opengeni/config");
+  const key = environmentsEncryptionKeyBytes(settings)!;
+  const [stored] = await shared!.admin<Array<{ id: string; credential_encrypted: string }>>`
+    select id, credential_encrypted from connections
+    where workspace_id = ${target.workspaceId} and provider_domain = 'nango:gmail'
+      and lower(metadata ->> 'accountEmail') = ${email}`;
+  const credential = encryptEnvironmentValue(
+    key,
+    JSON.stringify({
+      ...JSON.parse(decryptEnvironmentValue(key, stored!.credential_encrypted)),
+      nangoConnectionId: id,
+    }),
+  );
+  await shared!.admin`update connections
+    set metadata = jsonb_set(metadata, '{nangoConnectionId}', to_jsonb(${id}::text)),
+      credential_encrypted = ${credential}
+    where id = ${stored!.id}`;
 }
 
 const HOUR = 60 * 60 * 1000;
@@ -857,6 +899,15 @@ describe("Nango connections in PostgreSQL", () => {
         account_identity_key = null
       where workspace_id = ${target.workspaceId} and provider_domain = 'nango:gmail'
         and metadata ->> 'nangoConnectionId' = 'ld-2'`;
+    const generations = async () =>
+      (
+        await shared!.admin<Array<{ authority_generation: number }>>`
+          select authority_generation from connections
+          where workspace_id = ${target.workspaceId} and provider_domain = 'nango:gmail'
+          order by created_at, id`
+      ).map((row) => Number(row.authority_generation));
+    // Turns accepted on either row hold it at these generations.
+    const accepted = await generations();
     // Reconnecting that account succeeds and leaves one billed connection.
     await connect(target, nango, "ld-3", "legacy@example.com");
     const rows = await nangoRows(target);
@@ -864,6 +915,252 @@ describe("Nango connections in PostgreSQL", () => {
     expect(rows.map((row) => row.nango_connection_id)).toEqual(["ld-3", "ld-3"]);
     expect(rows.every((row) => row.status === "active")).toBe(true);
     expect(nango.remote.map((entry) => entry.connectionId)).toEqual(["ld-3"]);
+    // The duplicate shares the connection without the key, but it is the
+    // same account: its accepted turns keep working too.
+    expect(rows[1]!.account_identity_key).toBeNull();
+    expect(await generations()).toEqual(accepted);
+  });
+
+  test("a row saved before the scope marker is no grant for another organization", async () => {
+    if (!shared) return;
+    const legacy = await owner("nango unmarked legacy");
+    const fresh = await owner("nango unmarked fresh", legacy.subjectId);
+    const nango = fakeNango();
+    const both = "https://www.googleapis.com/auth/gmail.readonly https://mail.google.com/";
+    await connect(legacy, nango, "um-1", "unmarked@example.com", both);
+    // As saved before the marker: its stored scopes are the app's defaults,
+    // while Google only granted read-only.
+    await shared!.admin`update connections
+      set metadata = metadata - 'nangoScopesConfirmed'
+      where workspace_id = ${legacy.workspaceId} and provider_domain = 'nango:gmail'`;
+    nango.remote.find((entry) => entry.connectionId === "um-1")!.scope =
+      "https://www.googleapis.com/auth/gmail.readonly";
+    // The same account connected read-only elsewhere, as Nango reports it.
+    await connect(fresh, nango, "um-2", "unmarked@example.com");
+    // The fresh row keeps its own, confirmed connection; the unmarked one
+    // stays where it was, since nothing confirmed covers its scopes.
+    expect((await nangoRows(fresh))[0]).toMatchObject({
+      status: "active",
+      nango_connection_id: "um-2",
+    });
+    expect((await nangoRows(legacy))[0]).toMatchObject({
+      status: "active",
+      nango_connection_id: "um-1",
+    });
+    expect(nango.deleted("um-2")).toBe(false);
+    expect(nango.deleted("um-1")).toBe(false);
+  });
+
+  test("a scope marker vouches only for the connection it names", async () => {
+    if (!shared) return;
+    const moved = await owner("nango marker moved");
+    const fresh = await owner("nango marker fresh", moved.subjectId);
+    const nango = fakeNango();
+    const both = "https://www.googleapis.com/auth/gmail.readonly https://mail.google.com/";
+    await connect(moved, nango, "mm-1", "marker-moved@example.com", both);
+    // An older release moved the row onto a connection Google granted read-only
+    // only, copying its metadata (and so its marker for mm-1) along.
+    await leaveRowOn(moved, "mm-x", nango, "marker-moved@example.com");
+    nango.remote.find((entry) => entry.connectionId === "mm-x")!.scope =
+      "https://www.googleapis.com/auth/gmail.readonly";
+    await connect(fresh, nango, "mm-2", "marker-moved@example.com");
+    // mm-x is no confirmed full-mail grant: nobody is moved onto it.
+    expect((await nangoRows(fresh))[0]).toMatchObject({
+      status: "active",
+      nango_connection_id: "mm-2",
+    });
+    expect((await nangoRows(moved))[0]).toMatchObject({ nango_connection_id: "mm-x" });
+    expect(nango.deleted("mm-2")).toBe(false);
+  });
+
+  test("the sweep deletes a broken connection only after its repoints commit", async () => {
+    if (!shared) return;
+    const first = await owner("nango sweep broken commit first");
+    const second = await owner("nango sweep broken commit second", first.subjectId);
+    const nango = fakeNango();
+    await connect(first, nango, "bc-1", "dup-commit@example.com");
+    await connect(second, nango, "bc-2", "dup-commit@example.com");
+    await leaveRowOn(first, "bc-1", nango, "dup-commit@example.com");
+    // Another account of the same person whose connection Nango cannot refresh.
+    await connect(first, nango, "bc-broken", "broken-commit@example.com");
+    nango.remote.find((entry) => entry.connectionId === "bc-broken")!.authErrors = 1;
+    expect(
+      await handleNangoWebhook(
+        {
+          db: client.db,
+          settings,
+          fetchImpl: nango.fetchImpl,
+          nangoBackends: async () => backends,
+        },
+        webhook(first, "bc-broken", { operation: "refresh", success: false }),
+      ),
+    ).toBe("needs_reauth");
+    const seen = committedAtDelete(nango, first);
+    const result = await sweepNangoConnections(sweepDeps(nango), {
+      now: Date.now() + 25 * HOUR,
+    });
+    expect(result).toMatchObject({
+      repointed: 1,
+      deletedDuplicates: ["bc-1"],
+      deletedBroken: ["bc-broken"],
+    });
+    // When the broken connection was deleted, the repoint was already visible.
+    expect(seen["bc-broken"]).toContain("bc-2");
+    expect(seen["bc-broken"]).not.toContain("bc-1");
+  });
+
+  test("the sweep asks rows whose Nango connection is gone to reconnect", async () => {
+    if (!shared) return;
+    const first = await owner("nango sweep missing first");
+    const second = await owner("nango sweep missing second", first.subjectId);
+    const nango = fakeNango();
+    // One account only in the first organization, one in both.
+    await connect(first, nango, "nm-alone", "alone@example.com");
+    await connect(first, nango, "nm-1", "shared-missing@example.com");
+    await connect(second, nango, "nm-2", "shared-missing@example.com");
+    await leaveRowOn(first, "nm-1", nango, "shared-missing@example.com");
+    // Deleted outside reference counting (an older release), with no webhook.
+    for (const gone of ["nm-alone", "nm-1"]) {
+      const index = nango.remote.findIndex((entry) => entry.connectionId === gone);
+      nango.remote.splice(index, 1);
+    }
+    const result = await sweepNangoConnections(sweepDeps(nango));
+    expect(result).toMatchObject({ markedMissing: 1, repointed: 1 });
+    const rows = await shared!.admin<
+      Array<{ email: string; status: string; last_error: string | null; nango: string }>
+    >`select metadata ->> 'accountEmail' as email, status, last_error,
+        metadata ->> 'nangoConnectionId' as nango
+      from connections
+      where workspace_id = ${first.workspaceId} and provider_domain = 'nango:gmail'
+      order by metadata ->> 'accountEmail'`;
+    expect(rows.map((row) => ({ ...row }))).toEqual([
+      // No other connection stands for this account: it asks to reconnect.
+      {
+        email: "alone@example.com",
+        status: "needs_reauth",
+        last_error: "nango_connection_missing",
+        nango: "nm-alone",
+      },
+      // A healthy connection of the same account covers it: moved there.
+      { email: "shared-missing@example.com", status: "active", last_error: null, nango: "nm-2" },
+    ]);
+    expect((await nangoRows(second))[0]).toMatchObject({ status: "active" });
+    // A second pass changes nothing more.
+    expect(await sweepNangoConnections(sweepDeps(nango))).toMatchObject({
+      markedMissing: 0,
+      repointed: 0,
+    });
+  });
+
+  test("a connection Nango still has is never taken for gone, even if a listing misses it", async () => {
+    if (!shared) return;
+    const target = await owner("nango sweep unlisted");
+    const nango = fakeNango();
+    await connect(target, nango, "nh-listed", "listed@example.com");
+    await connect(target, nango, "nh-hidden", "hidden@example.com");
+    // Nango's listings leave it out, but the connection itself still answers.
+    nango.remote.find((entry) => entry.connectionId === "nh-hidden")!.unlisted = true;
+    expect(await sweepNangoConnections(sweepDeps(nango))).toMatchObject({ markedMissing: 0 });
+    expect((await nangoRows(target)).map((row) => row.status)).toEqual(["active", "active"]);
+  });
+
+  test("once granted, the sweep finds a person whose only connection is gone", async () => {
+    if (!shared) return;
+    const target = await owner("nango sweep only connection gone");
+    const nango = fakeNango();
+    await connect(target, nango, "nl-only", "only-gone@example.com");
+    // Deleted outside reference counting, with no webhook: Nango lists nothing for them.
+    nango.remote.splice(
+      nango.remote.findIndex((entry) => entry.connectionId === "nl-only"),
+      1,
+    );
+    // Without the deployment-wide listing nobody leads the sweep to them.
+    await sweepNangoConnections(sweepDeps(nango));
+    expect((await nangoRows(target))[0]).toMatchObject({ status: "active" });
+    await shared!.admin.unsafe(
+      "GRANT EXECUTE ON FUNCTION opengeni_private.nango_live_connection_owners_v1(text, text, text, integer) TO opengeni_app",
+    );
+    // Earlier tests' rows stand for connections only their own fake Nango
+    // had; retire them so this pass sees only this person.
+    await shared!.admin`update connections set status = 'revoked'
+      where metadata ->> 'integrationBackend' = 'nango' and status <> 'revoked'
+        and workspace_id <> ${target.workspaceId}`;
+    try {
+      // Nango lists only another deployment's connections (possibly the wrong
+      // environment): the listing is not used, so nothing is taken for missing.
+      nango.remote.push({
+        connectionId: "nl-other-deployment",
+        tags: { ...attemptTags(target, "other"), [NANGO_DEPLOYMENT_TAG]: "https://other.test" },
+        email: "other@example.com",
+        scope: "",
+        authErrors: 0,
+      });
+      await sweepNangoConnections(sweepDeps(nango));
+      expect((await nangoRows(target))[0]).toMatchObject({ status: "active" });
+      // Nothing listed at all (an empty environment): likewise.
+      nango.remote.pop();
+      await sweepNangoConnections(sweepDeps(nango));
+      expect((await nangoRows(target))[0]).toMatchObject({ status: "active" });
+      // Once Nango lists someone's connection for this deployment, the listing
+      // leads the sweep to this person too.
+      await connect(
+        await owner("nango sweep listed anchor"),
+        nango,
+        "nl-anchor",
+        "anchor@example.com",
+      );
+      await sweepNangoConnections(sweepDeps(nango));
+    } finally {
+      await shared!.admin.unsafe(
+        "REVOKE EXECUTE ON FUNCTION opengeni_private.nango_live_connection_owners_v1(text, text, text, integer) FROM opengeni_app",
+      );
+    }
+    const [row] = await shared!.admin<Array<{ status: string; last_error: string | null }>>`
+      select status, last_error from connections
+      where workspace_id = ${target.workspaceId} and provider_domain = 'nango:gmail'`;
+    expect({ ...row }).toEqual({ status: "needs_reauth", last_error: "nango_connection_missing" });
+  });
+
+  test("too many rows on missing connections at once marks none", async () => {
+    if (!shared) return;
+    const target = await owner("nango sweep missing breaker");
+    const nango = fakeNango();
+    await connect(target, nango, "mb-listed", "mb-listed@example.com");
+    const gone = Array.from({ length: 11 }, (_, index) => `mb-${index}`);
+    for (const id of gone) await connect(target, nango, id, `${id}@example.com`);
+    // As with a Nango key for the wrong environment: every one of them a 404.
+    nango.remote.splice(
+      0,
+      nango.remote.length,
+      ...nango.remote.filter((entry) => !gone.includes(entry.connectionId)),
+    );
+    expect(await sweepNangoConnections(sweepDeps(nango))).toMatchObject({
+      markedMissing: 0,
+      missingBreakerTripped: true,
+    });
+    expect((await nangoRows(target)).every((row) => row.status === "active")).toBe(true);
+  });
+
+  test("older duplicates without the scope marker merge on the scopes Nango reports", async () => {
+    if (!shared) return;
+    const first = await owner("nango sweep unmarked first");
+    const second = await owner("nango sweep unmarked second", first.subjectId);
+    const nango = fakeNango();
+    await connect(first, nango, "nu-1", "dup-unmarked@example.com");
+    await connect(second, nango, "nu-2", "dup-unmarked@example.com");
+    await leaveRowOn(first, "nu-1", nango, "dup-unmarked@example.com");
+    // Saved before the marker existed: neither row vouches for its scopes.
+    for (const target of [first, second])
+      await shared!.admin`update connections
+        set metadata = metadata - 'nangoScopesConfirmed'
+        where workspace_id = ${target.workspaceId} and provider_domain = 'nango:gmail'`;
+    const result = await sweepNangoConnections(sweepDeps(nango));
+    expect(result).toMatchObject({ repointed: 1, deletedDuplicates: ["nu-1"] });
+    expect((await nangoRows(first))[0]).toMatchObject({
+      status: "active",
+      nango_connection_id: "nu-2",
+    });
+    expect(nango.remote.map((entry) => entry.connectionId)).toEqual(["nu-2"]);
   });
 
   test("the sweep shares duplicates of one account an older release left", async () => {
@@ -1257,5 +1554,152 @@ describe("Nango connections in PostgreSQL", () => {
     expect(own.status).toBe(200);
     expect(await own.json()).toMatchObject({ rows: [], totals: { proxyRequests: 0 } });
     expect((await read(theirs.accountId)).status).toBe(403);
+  });
+
+  test("a Nango-backed account reconnects through a connect attempt", async () => {
+    if (!shared) return;
+    const target = await owner("nango reconnect attempt");
+    const nango = fakeNango();
+    await connect(target, nango, "nra-1", "reconnect@example.com");
+    const [row] = await nangoRows(target);
+    const generation = async (id: string) =>
+      (
+        await shared!.admin<Array<{ authority_generation: string }>>`
+          select authority_generation::text from connections where id = ${id}`
+      )[0]!.authority_generation;
+    const generationBefore = await generation(row!.id);
+    const switchTo = async (integrationKey: string, providerConfigKey: string | null) => {
+      await shared!.admin`insert into integration_backend_revisions
+          (integration_key, backend, nango_provider_config_key, enabled, changed_by, reason)
+        values (${integrationKey}, ${providerConfigKey ? "nango" : "native"}, ${providerConfigKey},
+          true, 'test', 'reconnect attempt test')`;
+      integrationBackendSettingsCache.invalidate();
+    };
+    await switchTo("google-calendar", "google-calendar");
+    await switchTo("gmail", "google-mail");
+    try {
+      const app = createApp({
+        settings,
+        db: client.db,
+        bus: {} as never,
+        workflowClient: {} as never,
+        managedAuth: null,
+      } as never);
+      const token = await signDelegatedAccessToken(delegationSecret, {
+        ...target,
+        permissions: ["workspace:read", "connections:read", "connections:write"],
+        principalKind: "human_session",
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      });
+      const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+      const base = `/v1/workspaces/${target.workspaceId}/connect/attempts`;
+      const begin = (providerId: string, accountId = row!.id) =>
+        app.request(base, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            providerId,
+            ownership: "personal",
+            returnUrl: "https://app.opengeni.test/integrations",
+            reconnectAccountId: accountId,
+            idempotencyKey: crypto.randomUUID(),
+          }),
+        });
+      const advance = (attempt: { id: string; revision: number }, mcpUrl?: string) =>
+        app.request(`${base}/${attempt.id}/advance`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            expectedRevision: attempt.revision,
+            idempotencyKey: crypto.randomUUID(),
+            action: { type: "credentials", values: mcpUrl ? { mcpUrl } : {} },
+          }),
+        });
+
+      const begun = await begin("gmail");
+      expect(begun.status).toBe(200);
+      const attempt = await begun.json();
+      expect(attempt.account?.id).toBe(row!.id);
+      const advanced = await advance(attempt);
+      expect(advanced.status).toBe(200);
+      const ready = await advanced.json();
+      expect(ready.state).toBe("requires_user_action");
+      // The reconnect goes through the Nango connect page, not a native sign-in.
+      const page = new URL(ready.nextAction.url);
+      expect(page.pathname).toBe("/v1/integrations/nango/connect");
+      // Signing in to the same account again keeps the named row.
+      const state = page.searchParams.get("state")!;
+      nango.remote.push({
+        connectionId: "nra-2",
+        tags: attemptTags(target, readNangoConnectState(settings, state).nonce),
+        email: "reconnect@example.com",
+        scope: "https://www.googleapis.com/auth/gmail.readonly",
+        authErrors: 0,
+      });
+      const completed = await completeNangoConnect(
+        {
+          db: client.db,
+          settings,
+          fetchImpl: nango.fetchImpl,
+          nangoBackends: async () => backends,
+        },
+        { state, browser: { bindingDigests: [], signedInSubjectId: null } },
+      );
+      expect(completed.status).toBe("complete");
+      const rows = await nangoRows(target);
+      expect(rows.map((entry) => [entry.id, entry.nango_connection_id])).toEqual([
+        [row!.id, "nra-2"],
+      ]);
+      // The same account's reconnect keeps running turns' authority.
+      expect(await generation(row!.id)).toBe(generationBefore);
+      const finished = await (await app.request(`${base}/${attempt.id}`, { headers })).json();
+      expect(finished.account?.id).toBe(row!.id);
+
+      // The named account must be of the integration being connected: a
+      // Gmail account is not reconnected by a Google Calendar sign-in.
+      const other = await (await begin("mcp-oauth")).json();
+      expect(other.account?.id).toBe(row!.id);
+      expect((await advance(other, "https://calendarmcp.googleapis.com/mcp/v1")).status).toBe(404);
+
+      // A native sign-in of the same connector may be named too (its Nango
+      // account replaces it), but not one of another connector.
+      const native = async (mcpUrl: string, providerDomain: string) =>
+        await createConnection(client.db, {
+          accountId: target.accountId,
+          workspaceId: target.workspaceId,
+          subjectId: target.subjectId,
+          providerDomain,
+          kind: "oauth2",
+          status: "needs_reauth",
+          credentialEncrypted: "unused",
+          metadata: { oauthDiscovery: true, mcpUrl },
+          createdBySubjectId: target.subjectId,
+        });
+      const nativeGmail = await native(
+        "https://gmailmcp.googleapis.com/mcp/v1",
+        "gmailmcp.googleapis.com",
+      );
+      const nativeCalendar = await native(
+        "https://calendarmcp.googleapis.com/mcp/v1",
+        "calendarmcp.googleapis.com",
+      );
+      const viaNative = await advance(await (await begin("gmail", nativeGmail.id)).json());
+      expect(viaNative.status).toBe(200);
+      expect(new URL((await viaNative.json()).nextAction.url).pathname).toBe(
+        "/v1/integrations/nango/connect",
+      );
+      const wrongNative = await (await begin("mcp-oauth", nativeCalendar.id)).json();
+      expect(wrongNative.account?.id).toBe(nativeCalendar.id);
+      expect((await advance(wrongNative, "https://gmailmcp.googleapis.com/mcp/v1")).status).toBe(
+        404,
+      );
+
+      // Once Gmail is native again, its Nango row is no reconnect target.
+      await switchTo("gmail", null);
+      expect((await begin("gmail")).status).toBe(404);
+    } finally {
+      await switchTo("gmail", null);
+      await switchTo("google-calendar", null);
+    }
   });
 });

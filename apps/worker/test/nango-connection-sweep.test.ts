@@ -20,9 +20,11 @@ const SKIPPED = {
   listed: 0,
   deleted: 0,
   repointed: 0,
+  markedMissing: 0,
   skippedPeople: 0,
   deferredPeople: 0,
   orphanBreakerTripped: false,
+  missingBreakerTripped: false,
 };
 
 describe("the Nango connection sweep activity", () => {
@@ -47,9 +49,11 @@ describe("the Nango connection sweep activity", () => {
         deletedDuplicates: ["b"],
         deletedBroken: ["c"],
         repointed: 1,
+        markedMissing: 0,
         skippedPeople: 0,
         deferredPeople: 0,
         orphanBreakerTripped: false,
+        missingBreakerTripped: false,
       }),
     });
     expect(await activity.sweepUnusedNangoConnections()).toEqual({
@@ -57,9 +61,11 @@ describe("the Nango connection sweep activity", () => {
       listed: 5,
       deleted: 3,
       repointed: 1,
+      markedMissing: 0,
       skippedPeople: 0,
       deferredPeople: 0,
       orphanBreakerTripped: false,
+      missingBreakerTripped: false,
     });
     expect(logs).toEqual(["info:Nango connection sweep"]);
   });
@@ -77,9 +83,11 @@ describe("the Nango connection sweep activity", () => {
           deletedDuplicates: [],
           deletedBroken: [],
           repointed: 0,
+          markedMissing: 0,
           skippedPeople: 1,
           deferredPeople: 2,
           orphanBreakerTripped: false,
+          missingBreakerTripped: false,
         };
       },
     });

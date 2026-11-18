@@ -13,6 +13,8 @@ describe("OPENGENI_SANDBOX_FLEET_LIMITS_JSON", () => {
       youngOrganizationAgeMs: 86_400_000,
       youngOrganizationRunningBoxes: 1,
       youngOrganizationBoxSeconds: 21_600,
+      youngTurnlessBoxSeconds: 900,
+      youngTurnlessIdleMs: 300_000,
       pressureEngageWarmBoxes: 50,
       pressureReleaseWarmBoxes: 40,
       pressureReleaseAfterMs: 900_000,

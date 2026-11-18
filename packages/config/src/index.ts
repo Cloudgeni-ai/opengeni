@@ -1091,8 +1091,8 @@ const SettingsSchema = z.object({
   openaiProvider: z.enum(["openai", "azure"]).default("openai"),
   openaiApiKey: z.string().optional(),
   openaiBaseUrl: z.string().optional(),
-  openaiModel: z.string().default("gpt-6-astra"),
-  openaiAllowedModels: z.string().default("gpt-6-astra,gpt-6-sol,gpt-6-luna"),
+  openaiModel: z.string().default("gpt-6.2-astra"),
+  openaiAllowedModels: z.string().default("gpt-6.2-astra,gpt-6.2-sol,gpt-6-sol,gpt-6-luna"),
   // Opengeni-managed Vercel AI Gateway. When configured, the two reviewed
   // Gateway models below are added to the managed-credit catalog. Workspace
   // Gateway keys use the encrypted connection broker and never this secret.
@@ -1474,19 +1474,31 @@ const SettingsSchema = z.object({
   decisionModelId: z.string().trim().min(1).optional(),
   decisionModelApiKey: z.string().optional(),
   decisionModelBaseUrl: z.string().url().optional(),
+  // The exact URL an openai or openrouter decision model posts to, for a host
+  // that serves the same API at another path (Azure AI Foundry serves the
+  // openrouter-shaped API at <resource>/providers/microsoft/v1/systemone).
+  // When set it replaces the base URL and the provider's /decisions path.
+  // OPENGENI_DECISION_MODEL_ENDPOINT
+  decisionModelEndpoint: z.string().url().optional(),
   // How an explicit decision model signs in. `deployment_identity` is for an
-  // Azure OpenAI v1 resource (provider openai with its /openai/v1 base URL):
-  // a Microsoft Entra token for the deployment's own identity, the standard
-  // AZURE_TENANT_ID and AZURE_CLIENT_ID with AZURE_FEDERATED_TOKEN_FILE or
-  // AZURE_CLIENT_SECRET, instead of a static key.
+  // Azure resource (provider openai or openrouter with the resource's base URL
+  // or endpoint): a Microsoft Entra token for the deployment's own identity,
+  // the standard AZURE_TENANT_ID and AZURE_CLIENT_ID with
+  // AZURE_FEDERATED_TOKEN_FILE or AZURE_CLIENT_SECRET, instead of a static key.
   // OPENGENI_DECISION_MODEL_AUTH
   decisionModelAuth: z.enum(["api_key", "deployment_identity"]).default("api_key"),
+  // The probability above which tool search loads a candidate the decision
+  // model judged. Decision models are calibrated differently, so a deployment
+  // can tune it for its model. Unset keeps the built-in 0.5.
+  // OPENGENI_TOOL_SEARCH_LOAD_THRESHOLD
+  toolSearchLoadThreshold: z.coerce.number().gt(0).lt(1).optional(),
   // Optional complete override for stateless public /decisions calls only.
   // Unset preserves the shared decision category; never mix credentials between categories.
   publicDecisionModelProvider: z.enum(["jev", "openai", "openrouter"]).optional(),
   publicDecisionModelId: z.string().trim().min(1).optional(),
   publicDecisionModelApiKey: z.string().optional(),
   publicDecisionModelBaseUrl: z.string().url().optional(),
+  publicDecisionModelEndpoint: z.string().url().optional(),
   publicDecisionModelAuth: z.enum(["api_key", "deployment_identity"]).optional(),
   // Decision-observability fence. When enabled, the worker emits one
   // bounded, metadata-only adaptive-policy replay record alongside the unchanged
@@ -2237,7 +2249,9 @@ const SettingsSchema = z.object({
   // compute per workspace. Boxes a turn holds never count. 0 = unbounded.
   sandboxMaxViewerOnlyBoxesPerWorkspace: z.coerce.number().int().nonnegative().default(3),
   // Organization-wide sandbox limits by subscription plan (see
-  // parseSandboxPlanLimitsJson). Empty = DEFAULT_SANDBOX_PLAN_LIMITS; "{}" = none.
+  // parseSandboxPlanLimitsJson). Empty = DEFAULT_SANDBOX_PLAN_LIMITS (without
+  // subscription plans, DEFAULT_SANDBOX_PLAN_LIMITS_WITHOUT_SUBSCRIPTION_PLANS);
+  // "{}" = none.
   sandboxPlanLimitsJson: z.string().default(""),
   // Fleet-wide bounds on unpaid sandbox compute (see
   // parseSandboxFleetLimitsJson). Empty = DEFAULT_SANDBOX_FLEET_LIMITS.
@@ -2895,6 +2909,7 @@ export type DecisionModelSettings = Pick<
   Partial<
     Pick<
       Settings,
+      | "decisionModelEndpoint"
       | "decisionModelAuth"
       | "azureTenantId"
       | "azureClientId"
@@ -2907,14 +2922,24 @@ export type DecisionModelSettings = Pick<
 
 /**
  * A configured decision model. It signs in with a static key, or with a
- * Microsoft Entra token for the deployment's own identity (Azure OpenAI only).
+ * Microsoft Entra token for the deployment's own identity (an Azure resource
+ * serving the openai or openrouter decisions API). `endpoint` is the exact URL
+ * an openai or openrouter model posts to; without it the model posts to its
+ * base URL plus `/decisions`, or to the provider's official endpoint.
  */
 export type DecisionModelConfiguration =
-  | { provider: "jev" | "openai" | "openrouter"; model: string; apiKey: string; baseUrl?: string }
   | {
-      provider: "openai";
+      provider: "jev" | "openai" | "openrouter";
       model: string;
-      baseUrl: string;
+      apiKey: string;
+      baseUrl?: string;
+      endpoint?: string;
+    }
+  | {
+      provider: "openai" | "openrouter";
+      model: string;
+      baseUrl?: string;
+      endpoint?: string;
       azureEntra: NonNullable<ReturnType<typeof deploymentAzureEntraCredential>>;
     };
 
@@ -2925,6 +2950,7 @@ export function publicDecisionModelSettings(settings: Settings): Settings {
     settings.publicDecisionModelId !== undefined ||
     settings.publicDecisionModelApiKey !== undefined ||
     settings.publicDecisionModelBaseUrl !== undefined ||
+    settings.publicDecisionModelEndpoint !== undefined ||
     settings.publicDecisionModelAuth !== undefined;
   if (!explicit) return settings;
   return {
@@ -2933,6 +2959,7 @@ export function publicDecisionModelSettings(settings: Settings): Settings {
     decisionModelId: settings.publicDecisionModelId,
     decisionModelApiKey: settings.publicDecisionModelApiKey,
     decisionModelBaseUrl: settings.publicDecisionModelBaseUrl,
+    decisionModelEndpoint: settings.publicDecisionModelEndpoint,
     decisionModelAuth: settings.publicDecisionModelAuth ?? "api_key",
   };
 }
@@ -2954,17 +2981,25 @@ export function decisionModelConfiguration(
 }
 
 /**
- * The route a decision model sends over. An OpenAI-compatible model is
- * resolved with the endpoint it calls (api.openai.com without a base URL),
- * so a declaration covers only the endpoint it names.
+ * The route a decision model sends over. An openai or openrouter model is
+ * resolved with the endpoint it calls (the provider's official host without
+ * an endpoint or base URL), so a declaration covers only the endpoint it names.
  */
 export function decisionModelTarget(config: {
   provider: "jev" | "openai" | "openrouter";
   baseUrl?: string | undefined;
+  endpoint?: string | undefined;
 }): SideFeatureTarget {
-  return config.provider === "openai"
-    ? { route: "decision_model.openai", endpoint: config.baseUrl ?? "https://api.openai.com/v1" }
-    : `decision_model.${config.provider}`;
+  if (config.provider === "jev") return "decision_model.jev";
+  return {
+    route: `decision_model.${config.provider}`,
+    endpoint:
+      config.endpoint ??
+      config.baseUrl ??
+      (config.provider === "openai"
+        ? "https://api.openai.com/v1"
+        : "https://openrouter.ai/api/alpha"),
+  };
 }
 
 /**
@@ -2985,37 +3020,37 @@ function unrestrictedDecisionModelConfiguration(
     Partial<Pick<Settings, "jevApiKey" | "jevModel" | "jevBaseUrl">>,
   allowLegacyCodeSearch: boolean,
 ): DecisionModelConfiguration | undefined {
+  const provider = settings.decisionModelProvider;
+  // An explicit endpoint is for the HTTP decisions APIs; the Jev client posts
+  // to its own path under its base URL.
+  if (settings.decisionModelEndpoint !== undefined && provider === "jev") return undefined;
+  const location = {
+    ...(settings.decisionModelBaseUrl ? { baseUrl: settings.decisionModelBaseUrl } : {}),
+    ...(settings.decisionModelEndpoint ? { endpoint: settings.decisionModelEndpoint } : {}),
+  };
   if (settings.decisionModelAuth === "deployment_identity") {
-    // Azure OpenAI v1 only: it needs the resource's base URL and the deployment identity.
+    // An Azure resource only: it needs the resource's base URL or endpoint and
+    // the deployment identity.
     const azureEntra = deploymentAzureEntraCredential(settings);
     if (
-      settings.decisionModelProvider !== "openai" ||
+      (provider !== "openai" && provider !== "openrouter") ||
       !settings.decisionModelId ||
-      !settings.decisionModelBaseUrl ||
+      !(location.baseUrl || location.endpoint) ||
       !azureEntra
     )
       return undefined;
-    return {
-      provider: "openai",
-      model: settings.decisionModelId,
-      baseUrl: settings.decisionModelBaseUrl,
-      azureEntra,
-    };
+    return { provider, model: settings.decisionModelId, ...location, azureEntra };
   }
   const explicit =
-    settings.decisionModelProvider !== undefined ||
+    provider !== undefined ||
     settings.decisionModelId !== undefined ||
     settings.decisionModelApiKey !== undefined ||
-    settings.decisionModelBaseUrl !== undefined;
+    settings.decisionModelBaseUrl !== undefined ||
+    settings.decisionModelEndpoint !== undefined;
   if (explicit) {
     const apiKey = usableDeploymentSecret(settings.decisionModelApiKey);
-    if (!settings.decisionModelProvider || !settings.decisionModelId || !apiKey) return undefined;
-    return {
-      provider: settings.decisionModelProvider,
-      model: settings.decisionModelId,
-      apiKey,
-      ...(settings.decisionModelBaseUrl ? { baseUrl: settings.decisionModelBaseUrl } : {}),
-    };
+    if (!provider || !settings.decisionModelId || !apiKey) return undefined;
+    return { provider, model: settings.decisionModelId, apiKey, ...location };
   }
   const apiKey = allowLegacyCodeSearch ? usableJevApiKey(settings) : undefined;
   return apiKey
@@ -5684,6 +5719,61 @@ export function configuredOpperOrganizationProductModelIds(settings: Settings): 
  * llm-prices.com as a ground-truth canary; it does not generate this table.
  */
 export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
+  // Reviewed 2026-11-18 against https://developers.openai.com/api/docs/pricing
+  // and https://developers.openai.com/api/docs/models/gpt-6.2-astra. Cached
+  // input is 5% of input; the cache write is the 30-minute rate (1.25x input).
+  // Requests with more than 272K input tokens double input and cache rates and
+  // pay 1.5x output for the whole request.
+  "gpt-6.2-astra": {
+    default: {
+      // OpenAI list price: $8 / $0.40 cached / $10 cache write / $40 output.
+      inputMicrosPerMillionTokens: 8_000_000,
+      cachedInputMicrosPerMillionTokens: 400_000,
+      cacheWriteMicrosPerMillionTokens: 10_000_000,
+      outputMicrosPerMillionTokens: 40_000_000,
+      marginBps: 500,
+    },
+    inputTokenTiers: [
+      {
+        minimumInputTokens: 272_001,
+        pricing: {
+          inputMicrosPerMillionTokens: 16_000_000,
+          cachedInputMicrosPerMillionTokens: 800_000,
+          cacheWriteMicrosPerMillionTokens: 20_000_000,
+          outputMicrosPerMillionTokens: 60_000_000,
+          marginBps: 500,
+        },
+      },
+    ],
+  },
+  // Reviewed 2026-11-18 against https://developers.openai.com/api/docs/pricing
+  // and https://developers.openai.com/api/docs/models/gpt-6.2-sol. Same rates
+  // as GPT-6.1 Sol, with the same >272K whole-request schedule.
+  "gpt-6.2-sol": {
+    default: {
+      // OpenAI list price: $2 / $0.10 cached / $2.50 cache write / $10 output.
+      inputMicrosPerMillionTokens: 2_000_000,
+      cachedInputMicrosPerMillionTokens: 100_000,
+      cacheWriteMicrosPerMillionTokens: 2_500_000,
+      outputMicrosPerMillionTokens: 10_000_000,
+      marginBps: 500,
+    },
+    inputTokenTiers: [
+      {
+        minimumInputTokens: 272_001,
+        pricing: {
+          inputMicrosPerMillionTokens: 4_000_000,
+          cachedInputMicrosPerMillionTokens: 200_000,
+          cacheWriteMicrosPerMillionTokens: 5_000_000,
+          outputMicrosPerMillionTokens: 15_000_000,
+          marginBps: 500,
+        },
+      },
+    ],
+  },
+  // No longer a default or Codex model (GPT-6.2 Astra replaced it), but still
+  // priced: deployments that name it, Azure deployments of it, retained
+  // definitions of accepted turns and recorded usage keep a known rate.
   "gpt-6-astra": {
     default: {
       // OpenAI list price: $10 / $1 cached / $12.50 cache write / $50 output.
@@ -6518,11 +6608,14 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     decisionModelId: optional("OPENGENI_DECISION_MODEL_ID"),
     decisionModelApiKey: optional("OPENGENI_DECISION_MODEL_API_KEY"),
     decisionModelBaseUrl: optional("OPENGENI_DECISION_MODEL_BASE_URL"),
+    decisionModelEndpoint: optional("OPENGENI_DECISION_MODEL_ENDPOINT"),
     decisionModelAuth: optional("OPENGENI_DECISION_MODEL_AUTH"),
+    toolSearchLoadThreshold: optional("OPENGENI_TOOL_SEARCH_LOAD_THRESHOLD"),
     publicDecisionModelProvider: optional("OPENGENI_PUBLIC_DECISION_MODEL_PROVIDER"),
     publicDecisionModelId: optional("OPENGENI_PUBLIC_DECISION_MODEL_ID"),
     publicDecisionModelApiKey: optional("OPENGENI_PUBLIC_DECISION_MODEL_API_KEY"),
     publicDecisionModelBaseUrl: optional("OPENGENI_PUBLIC_DECISION_MODEL_BASE_URL"),
+    publicDecisionModelEndpoint: optional("OPENGENI_PUBLIC_DECISION_MODEL_ENDPOINT"),
     publicDecisionModelAuth: optional("OPENGENI_PUBLIC_DECISION_MODEL_AUTH"),
     codexFleetPolicyShadowEnabled: optional("OPENGENI_CODEX_FLEET_POLICY_SHADOW_ENABLED"),
     subscriptionCoreShadowEnabled: optional("OPENGENI_SUBSCRIPTION_CORE_SHADOW_ENABLED"),
@@ -8776,11 +8869,24 @@ const GPT56_FAST_BILLING_MULTIPLIER_BPS = 20_000;
  * observed from the provider's own usage readings, not priced here.
  */
 const ULTRAFAST_BILLING_MULTIPLIER_BPS = 60_000;
-/** Upstream slugs OpenAI serves at the Ultrafast tier. */
-const ULTRAFAST_UPSTREAM_SLUGS: readonly string[] = ["gpt-6-astra", "gpt-6.1-sol"];
+/**
+ * OpenAI's GPT-6.2 launch rate: Ultrafast is 3× Standard through 2027-02-28
+ * (Pacific time) and 6× from 2027-03-01
+ * (https://developers.openai.com/api/docs/pricing). The multiplier is part of
+ * the reviewed definition, so it moves to ULTRAFAST_BILLING_MULTIPLIER_BPS in a
+ * release before that date, not at runtime.
+ */
+const GPT62_LAUNCH_ULTRAFAST_BILLING_MULTIPLIER_BPS = 30_000;
+/** Upstream slugs OpenAI serves at the Ultrafast tier, with their price multiplier. */
+const ULTRAFAST_UPSTREAM_SLUGS: ReadonlyMap<string, number> = new Map([
+  ["gpt-6-astra", ULTRAFAST_BILLING_MULTIPLIER_BPS],
+  ["gpt-6.1-sol", ULTRAFAST_BILLING_MULTIPLIER_BPS],
+  ["gpt-6.2-astra", GPT62_LAUNCH_ULTRAFAST_BILLING_MULTIPLIER_BPS],
+  ["gpt-6.2-sol", GPT62_LAUNCH_ULTRAFAST_BILLING_MULTIPLIER_BPS],
+]);
 
 /**
- * Ultrafast for a model id (`gpt-6-astra` or `codex/gpt-6-astra`), when OpenAI
+ * Ultrafast for a model id (`gpt-6.2-astra` or `codex/gpt-6.2-astra`), when OpenAI
  * serves its slug at that tier. Codex accounts must still advertise the tier:
  * placement serves an Ultrafast turn only from an account whose live model
  * list includes it for that model.
@@ -8796,12 +8902,13 @@ function ultrafastLatencyModeForModel(modelId: string):
   const slug = modelId.startsWith(CODEX_MODEL_ID_PREFIX)
     ? modelId.slice(CODEX_MODEL_ID_PREFIX.length)
     : modelId;
-  return ULTRAFAST_UPSTREAM_SLUGS.includes(slug)
+  const billingMultiplierBps = ULTRAFAST_UPSTREAM_SLUGS.get(slug);
+  return billingMultiplierBps !== undefined
     ? {
         id: "ultrafast",
         upstream: "supported",
         runnable: true,
-        billingMultiplierBps: ULTRAFAST_BILLING_MULTIPLIER_BPS,
+        billingMultiplierBps,
       }
     : undefined;
 }
@@ -8864,6 +8971,10 @@ export function productShortLabelForModelId(modelId: string): string | null {
       return "6.1 Sol";
     case "gpt-6.1-terra":
       return "6.1 Terra";
+    case "gpt-6.2-astra":
+      return "6.2 Astra";
+    case "gpt-6.2-sol":
+      return "6.2 Sol";
     default:
       return null;
   }
@@ -8972,9 +9083,18 @@ function builtinPromptCachingForModel(
   const slug = modelId.startsWith(CODEX_MODEL_ID_PREFIX)
     ? modelId.slice(CODEX_MODEL_ID_PREFIX.length)
     : modelId;
-  return slug.startsWith("gpt-5.6-") || slug.startsWith("gpt-6-")
+  return slug.startsWith("gpt-5.6-") || isBuiltinGpt6CapabilitySlug(slug)
     ? { upstream: "supported", runnable: true, mode: "implicit" }
     : undefined;
+}
+
+/**
+ * GPT-6 and GPT-6.2 slugs that get the built-in prompt-caching and hosted image
+ * declarations. GPT-6.1 is deliberately absent: its built-in definitions never
+ * carried them, and adding them would change their accepted definitions.
+ */
+function isBuiltinGpt6CapabilitySlug(slug: string): boolean {
+  return slug.startsWith("gpt-6-") || slug.startsWith("gpt-6.2-");
 }
 
 /** Reviewed direct-OpenAI text models that accept the hosted image tool. */
@@ -8982,7 +9102,7 @@ function builtinHostedImageGenerationForModel(settings: Settings, modelId: strin
   return (
     settings.openaiProvider === "openai" &&
     isDirectOpenAiApiBaseUrl(settings.openaiBaseUrl) &&
-    (isBuiltinGpt56ModelId(modelId) || modelId.startsWith("gpt-6-"))
+    (isBuiltinGpt56ModelId(modelId) || isBuiltinGpt6CapabilitySlug(modelId))
   );
 }
 
@@ -12477,7 +12597,7 @@ export type SandboxPlanLimit = {
 /**
  * Limits by tier. Tiers are subscription plan keys (`free`, `pro`, `max`,
  * `enterprise`, or any operator-defined key), plus `none` for an organization
- * with no plan row (plans disabled), `restricted` for a Free or plan-less
+ * with no plan row, `restricted` for a Free or plan-less
  * organization whose promotion decision is `held` or `denied` while promotion
  * enforcement is on (or whose acting person holds such an organization), and
  * that has neither bought credit nor an active paid plan, `new` for a Free
@@ -12485,6 +12605,14 @@ export type SandboxPlanLimit = {
  * younger than the `new` tier's `organizationsYoungerThanMs`, and `embedded`
  * for an organization a host provisioned (its own external source is not a
  * signup one). A tier absent from the table is unbounded.
+ *
+ * What `none` means depends on OPENGENI_SUBSCRIPTION_PLANS_ENABLED. With
+ * subscription plans on, subscription maintenance enrolls every organization
+ * in Free, so a plan-less organization is an unpaid one not yet enrolled and
+ * is bounded like Free. Without them no organization ever gets a plan row, so
+ * `none` is every organization's ordinary tier: it is not unpaid
+ * (sandboxPlanTierUnpaid) and the defaults leave it unbounded
+ * (DEFAULT_SANDBOX_PLAN_LIMITS_WITHOUT_SUBSCRIPTION_PLANS).
  */
 export type SandboxPlanLimits = Readonly<Record<string, SandboxPlanLimit>>;
 
@@ -12534,11 +12662,12 @@ export const DEFAULT_SANDBOX_PLAN_LIMITS: SandboxPlanLimits = {
     boxSecondsPerPersonPerDay: 0,
     idleDrainAllHolders: true,
   },
-  // No plan row yet. A new self-serve organization has none until
-  // subscription maintenance enrolls it in Free (and one with an unexpired
-  // credit period but no plan row is not enrolled), so `none` is bounded like
-  // Free rather than closed: closing it would refuse a brand-new person's
-  // first sandbox.
+  // No plan row yet, with subscription plans on. A new self-serve
+  // organization has none until subscription maintenance enrolls it in Free
+  // (and one with an unexpired credit period but no plan row is not
+  // enrolled), so `none` is bounded like Free rather than closed: closing it
+  // would refuse a brand-new person's first sandbox. Without subscription
+  // plans this entry is absent (see SandboxPlanLimits).
   none: {
     viewerOnlyBoxesPerOrganization: 1,
     viewerOnlyBoxesPerMember: 1,
@@ -12560,9 +12689,24 @@ export const DEFAULT_SANDBOX_PLAN_LIMITS: SandboxPlanLimits = {
   embedded: {},
 };
 
-/** Parse OPENGENI_SANDBOX_PLAN_LIMITS_JSON; blank keeps the defaults. */
-export function parseSandboxPlanLimitsJson(raw: string): SandboxPlanLimits {
-  if (!raw.trim()) return DEFAULT_SANDBOX_PLAN_LIMITS;
+/** The defaults on a deployment without subscription plans: no organization
+ * has a plan row, so `none` is every organization's tier and is unbounded. */
+export const DEFAULT_SANDBOX_PLAN_LIMITS_WITHOUT_SUBSCRIPTION_PLANS: SandboxPlanLimits =
+  Object.fromEntries(
+    Object.entries(DEFAULT_SANDBOX_PLAN_LIMITS).filter(([tier]) => tier !== "none"),
+  );
+
+/** Parse OPENGENI_SANDBOX_PLAN_LIMITS_JSON; blank keeps the defaults for
+ * whether subscription plans are on (default: on). */
+export function parseSandboxPlanLimitsJson(
+  raw: string,
+  options: { subscriptionPlansEnabled?: boolean } = {},
+): SandboxPlanLimits {
+  if (!raw.trim()) {
+    return options.subscriptionPlansEnabled === false
+      ? DEFAULT_SANDBOX_PLAN_LIMITS_WITHOUT_SUBSCRIPTION_PLANS
+      : DEFAULT_SANDBOX_PLAN_LIMITS;
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -12615,8 +12759,12 @@ export function parseSandboxPlanLimitsJson(raw: string): SandboxPlanLimits {
   return out;
 }
 
-export function sandboxPlanLimits(settings: Settings): SandboxPlanLimits {
-  return parseSandboxPlanLimitsJson(settings.sandboxPlanLimitsJson);
+export function sandboxPlanLimits(
+  settings: Pick<Settings, "sandboxPlanLimitsJson" | "subscriptionPlansEnabled">,
+): SandboxPlanLimits {
+  return parseSandboxPlanLimitsJson(settings.sandboxPlanLimitsJson, {
+    subscriptionPlansEnabled: settings.subscriptionPlansEnabled,
+  });
 }
 
 /**
@@ -12636,11 +12784,21 @@ export function sandboxPlanLimits(settings: Settings): SandboxPlanLimits {
  *   age runs at most that many boxes, and once it has used that many metered
  *   box seconds since it was created it gets no box until it is older (like
  *   a spent daily budget).
+ * - `youngTurnlessBoxSeconds` / `youngTurnlessIdleMs`: such a young
+ *   organization in which no turn was ever started gets that many metered
+ *   box seconds (a desktop, browser, terminal or viewer with no chat). Past
+ *   it, the reaper drains a box no turn holds once nothing on it (requests,
+ *   reported viewer interaction, processes, Browser/ComputerSessions) was
+ *   active for `youngTurnlessIdleMs`; running commands are never cut off.
+ *   Holders other than a turn may still join a running box, but a box that
+ *   is not running is not started again for them. Starting a chat always
+ *   works and lifts the bound.
  * - `pressureEngageWarmBoxes` / `pressureReleaseWarmBoxes` /
  *   `pressureReleaseAfterMs` / `pressureUnpaidRunningBoxes`: when more than
- *   `pressureEngageWarmBoxes` boxes of every plan are warm, the unpaid cap
- *   drops to `pressureUnpaidRunningBoxes` (0: no new unpaid box) until the
- *   warm count has stayed below `pressureReleaseWarmBoxes` for
+ *   `pressureEngageWarmBoxes` boxes of every plan on a managed provider are
+ *   warm (self-hosted boxes are exempt and never count), the unpaid cap drops
+ *   to `pressureUnpaidRunningBoxes` (0: no new unpaid box) until the warm
+ *   count has stayed below `pressureReleaseWarmBoxes` for
  *   `pressureReleaseAfterMs`.
  */
 export type SandboxFleetLimits = {
@@ -12649,6 +12807,8 @@ export type SandboxFleetLimits = {
   youngOrganizationAgeMs?: number;
   youngOrganizationRunningBoxes?: number;
   youngOrganizationBoxSeconds?: number;
+  youngTurnlessBoxSeconds?: number;
+  youngTurnlessIdleMs?: number;
   pressureEngageWarmBoxes?: number;
   pressureReleaseWarmBoxes?: number;
   pressureReleaseAfterMs?: number;
@@ -12661,6 +12821,8 @@ const SANDBOX_FLEET_LIMIT_FIELDS = [
   "youngOrganizationAgeMs",
   "youngOrganizationRunningBoxes",
   "youngOrganizationBoxSeconds",
+  "youngTurnlessBoxSeconds",
+  "youngTurnlessIdleMs",
   "pressureEngageWarmBoxes",
   "pressureReleaseWarmBoxes",
   "pressureReleaseAfterMs",
@@ -12669,14 +12831,17 @@ const SANDBOX_FLEET_LIMIT_FIELDS = [
 
 /** Sized from hosted production's unpaid traffic: legitimate Free use peaked
  * at 15 concurrent boxes and 112 box-hours a day, and new organizations'
- * first day at a p90 of under two box-hours. Pressure engages at the same 50
- * warm boxes as the warm-fleet page. */
+ * first day at a p90 of under two box-hours. 95% of new people start their
+ * first turn within 15 minutes of their first session. Pressure engages at
+ * the same 50 warm boxes as the warm-fleet page. */
 export const DEFAULT_SANDBOX_FLEET_LIMITS: SandboxFleetLimits = {
   unpaidRunningBoxes: 40,
   unpaidBoxSecondsPerDay: 300 * 60 * 60,
   youngOrganizationAgeMs: 24 * 60 * 60 * 1000,
   youngOrganizationRunningBoxes: 1,
   youngOrganizationBoxSeconds: 6 * 60 * 60,
+  youngTurnlessBoxSeconds: 15 * 60,
+  youngTurnlessIdleMs: 5 * 60 * 1000,
   pressureEngageWarmBoxes: 50,
   pressureReleaseWarmBoxes: 40,
   pressureReleaseAfterMs: 15 * 60 * 1000,
@@ -12743,8 +12908,24 @@ export function sandboxFleetLimits(settings: Pick<Settings, "sandboxFleetLimitsJ
 
 /** Plan tiers whose organization has not paid: Free, a young Free, no plan
  * row yet, or restricted. Their boxes get the unpaid resource ceilings and
- * egress allowlists. Paid plans, `enterprise` and `embedded` never do. */
+ * egress allowlists. Paid plans, `enterprise` and `embedded` never do, nor
+ * does `none` without subscription plans (sandboxPlanTierUnpaid). */
 export const UNPAID_SANDBOX_PLAN_TIERS: readonly string[] = ["free", "new", "none", "restricted"];
+
+/**
+ * Whether an organization on `tier` is unpaid: its boxes get the unpaid
+ * ceilings and egress allowlists, the unpaid-only plan-limit fields and the
+ * fleet limits. `none` is unpaid only with subscription plans on (default:
+ * on), where it is an organization not yet enrolled in Free; without them it
+ * is every organization's ordinary tier.
+ */
+export function sandboxPlanTierUnpaid(
+  tier: string | null | undefined,
+  options: { subscriptionPlansEnabled?: boolean | undefined } = {},
+): boolean {
+  if (!tier || !UNPAID_SANDBOX_PLAN_TIERS.includes(tier)) return false;
+  return tier !== "none" || options.subscriptionPlansEnabled !== false;
+}
 
 /** Plan-limit fields that bound only organizations that have never paid. An
  * unpaid-tier organization that bought credit or had a paid subscription
@@ -12771,20 +12952,28 @@ export function paidSandboxPlanLimit(limit: SandboxPlanLimit): SandboxPlanLimit 
  * tier (null) and an organization that has paid keep the standard ceilings. */
 export function sandboxResourceClassForPlanTier(
   tier: string | null | undefined,
-  options: { paidHistory?: boolean | undefined } = {},
+  options: {
+    paidHistory?: boolean | undefined;
+    subscriptionPlansEnabled?: boolean | undefined;
+  } = {},
 ): Settings["sandboxResourceClass"] {
-  return tier && UNPAID_SANDBOX_PLAN_TIERS.includes(tier) && options.paidHistory !== true
+  return sandboxPlanTierUnpaid(tier, options) && options.paidHistory !== true
     ? "unpaid"
     : "standard";
 }
 
 /** `settings` rebound to the resource class of the creating organization. */
-export function settingsForSandboxPlanTier<T extends Pick<Settings, "sandboxResourceClass">>(
+export function settingsForSandboxPlanTier<
+  T extends Pick<Settings, "sandboxResourceClass" | "subscriptionPlansEnabled">,
+>(
   settings: T,
   tier: string | null | undefined,
   options: { paidHistory?: boolean | undefined } = {},
 ): T {
-  const resourceClass = sandboxResourceClassForPlanTier(tier, options);
+  const resourceClass = sandboxResourceClassForPlanTier(tier, {
+    ...options,
+    subscriptionPlansEnabled: settings.subscriptionPlansEnabled,
+  });
   return settings.sandboxResourceClass === resourceClass
     ? settings
     : { ...settings, sandboxResourceClass: resourceClass };

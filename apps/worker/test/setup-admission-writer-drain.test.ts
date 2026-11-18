@@ -84,6 +84,7 @@ async function setupInFlightFixture() {
   if (claim.action !== "claimed") throw new Error(`Fixture claim failed: ${claim.action}`);
   const holderId = sandboxLeaseHolderIdForAttempt(attemptId);
   const acquired = await acquireLease(client.db, {
+    sandboxPlanLimits: "unbounded_test_fixture",
     accountId,
     workspaceId,
     sandboxGroupId: session.sandboxGroupId,

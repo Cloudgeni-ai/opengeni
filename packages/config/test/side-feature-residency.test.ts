@@ -349,6 +349,7 @@ describe("side-feature residency records", () => {
       "transcription.azure-speech",
       "transcription.azure-openai-realtime",
       "knowledge.embeddings",
+      "decision_model.openrouter",
       "decision_model.openai",
     ]);
   });
@@ -586,6 +587,85 @@ describe("decision models under EU-only inference", () => {
           decisionModelBaseUrl: "https://api.openai.com./v1",
           requiredModelGeography: "eu",
           sideFeatureResidencyJson: declaredElsewhere,
+        }),
+      ),
+    ).toBeUndefined();
+  });
+
+  test("an OpenRouter decision model keeps OpenRouter's global rule", () => {
+    const openrouter = {
+      decisionModelProvider: "openrouter",
+      decisionModelApiKey: "key",
+      decisionModelId: "typesafe/jev-1.13",
+    } as const;
+    for (const config of [
+      openrouter,
+      { ...openrouter, decisionModelBaseUrl: "https://openrouter.ai/api/alpha" },
+    ]) {
+      const plain = settings(config);
+      const route = decisionModelRoute(plain)!;
+      // The same record the code-owned route had.
+      expect(sideFeatureRouteResidency(plain, route)).toEqual({
+        geography: "global",
+        deploymentType: "gateway",
+        regions: [],
+        evidence: {
+          source: "built_in_rule",
+          reference: "OpenRouter routes requests to upstream providers in any region.",
+          verifiedAt: "2026-10-26",
+        },
+      });
+      expect(
+        decisionModelConfiguration(settings({ ...config, requiredModelGeography: "eu" })),
+      ).toBeUndefined();
+    }
+    // OpenRouter itself cannot be declared EU.
+    expect(() =>
+      parseSideFeatureResidencyJson(
+        declarations({
+          "decision_model.openrouter": {
+            endpoint: "https://openrouter.ai/api/alpha",
+            residency: euDataZone,
+          },
+        }),
+      ),
+    ).toThrow(/vendor default host/);
+  });
+
+  test("an Azure AI Foundry decision model declared EU stays on, at its endpoint only", () => {
+    const endpoint = "https://resource.services.ai.azure.test/providers/microsoft/v1/systemone";
+    const foundry = {
+      decisionModelProvider: "openrouter",
+      decisionModelApiKey: "key",
+      decisionModelId: "decision-deployment",
+      decisionModelEndpoint: endpoint,
+    } as const;
+    const declared = declarations({
+      "decision_model.openrouter": {
+        endpoint: "https://resource.services.ai.azure.test",
+        residency: euDataZone,
+      },
+    });
+    const eu = settings({
+      ...foundry,
+      requiredModelGeography: "eu",
+      sideFeatureResidencyJson: declared,
+    });
+    expect(decisionModelRoute(eu)).toEqual({ route: "decision_model.openrouter", endpoint });
+    expect(decisionModelConfiguration(eu)?.provider).toBe("openrouter");
+    expect(sideFeatureProcessingResidency(eu, decisionModelRoute(eu)!).geography).toBe("eu");
+    // Undeclared, or another resource, is unknown and so switched off.
+    expect(
+      decisionModelConfiguration(settings({ ...foundry, requiredModelGeography: "eu" })),
+    ).toBeUndefined();
+    expect(
+      decisionModelConfiguration(
+        settings({
+          ...foundry,
+          decisionModelEndpoint:
+            "https://other.services.ai.azure.test/providers/microsoft/v1/systemone",
+          requiredModelGeography: "eu",
+          sideFeatureResidencyJson: declared,
         }),
       ),
     ).toBeUndefined();

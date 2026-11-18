@@ -7,10 +7,11 @@ import {
   builtInIntegrationDuplicatedByEndpoint,
   builtInIntegrationTurnedOffMessage,
 } from "@opengeni/core";
-import { OrganizationIntegrationDeniedError } from "@opengeni/contracts";
+import { OrganizationIntegrationDeniedError, oauthSignInToFinishPath } from "@opengeni/contracts";
 import {
   OAUTH_BROWSER_MISMATCH_MESSAGE,
   oauthCallbackBrowserAccepted,
+  oauthCallbackNeedsSignIn,
   oauthStateBrowserBinding,
   type OAuthCallbackBrowser,
   type OAuthStateBrowserBinding,
@@ -1015,12 +1016,17 @@ async function completeMcpOAuthCallbackWithinDeadline(
     integrationKey = state.integrationKey ?? "custom:mcp";
     // Before any attempt is claimed: a consent finished in someone else's
     // browser leaves the starter's attempt untouched (CASA 3.2.2).
-    if (!oauthCallbackBrowserAccepted(state, input.browser))
+    if (!oauthCallbackBrowserAccepted(state, input.browser)) {
+      // Started in the app and returned to a browser signed in to no one: the
+      // browser signs in and this callback runs again, as that person.
+      if (input.code && !input.error && oauthCallbackNeedsSignIn(state, input.browser))
+        return { redirectTo: oauthSignInToFinishPath(input.requestUrl) };
       throw new OAuthCallbackStageError(
         "state_verify",
         "browser_mismatch",
         new HTTPException(403, { message: OAUTH_BROWSER_MISMATCH_MESSAGE }),
       );
+    }
     if (state.connectAttemptId) {
       const stored = await getConnectAttempt(db, state, state.connectAttemptId);
       // Dedicated Google setup shares this callback. Bind each trusted provider

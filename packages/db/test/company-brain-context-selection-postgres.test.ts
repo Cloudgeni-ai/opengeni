@@ -2,8 +2,10 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import {
+  activateWorkspaceInstructionPolicyRevision,
   createDb,
   createSession,
+  createWorkspaceInstructionPolicyDraft,
   ensureManagedAccessForUser,
   getOrganizationPrivateSessionSettings,
   getOrCreateCompanyProfileSnapshot,
@@ -14,6 +16,7 @@ import {
   nestedPostgresSqlState,
   resolveCompanyBrainContextSelection,
   transitionSessionVisibility,
+  updateCompanyProfile,
   updateOrganizationPrivateSessionSettings,
   withSessionRlsActorContext,
   type DbClient,
@@ -141,6 +144,8 @@ async function seedAttempt(input: {
   turnId?: string;
   generation?: number;
   source?: "user" | "compaction";
+  /** How the previous attempt of `turnId` ended. */
+  previousOutcome?: "interrupted_recoverable" | "waiting_capacity";
 }): Promise<Attempt> {
   if (!shared) throw new Error("test database unavailable");
   const turnId = input.turnId ?? crypto.randomUUID();
@@ -150,8 +155,8 @@ async function seedAttempt(input: {
     await sql`select set_config('opengeni.session_inference_claim', '1', true)`;
     if (input.turnId) {
       await sql`
-        update session_turn_attempts set state = 'closed', outcome = 'interrupted_recoverable',
-          closed_at = now() where workspace_id = ${input.workspaceId} and turn_id = ${turnId}
+        update session_turn_attempts set state = 'closed',
+          outcome = ${input.previousOutcome ?? "interrupted_recoverable"}, closed_at = now() where workspace_id = ${input.workspaceId} and turn_id = ${turnId}
           and state in ('claimed','running')
       `;
       await sql`
@@ -238,6 +243,19 @@ async function resolve(attempt: Attempt) {
   );
 }
 
+async function governanceSnapshots(attempt: Attempt) {
+  return await withSessionRlsActorContext(
+    {
+      subjectId: "worker:context",
+      initiatingHumanSubjectId: attempt.ownerSubjectId,
+    },
+    async () => ({
+      policy: await getOrCreateWorkspaceInstructionPolicySnapshot(client!.db, claims(attempt)),
+      profile: await getOrCreateCompanyProfileSnapshot(client!.db, claims(attempt)),
+    }),
+  );
+}
+
 async function expectSqlState(action: () => Promise<unknown>, state: string): Promise<void> {
   let failure: unknown;
   try {
@@ -249,6 +267,120 @@ async function expectSqlState(action: () => Promise<unknown>, state: string): Pr
 }
 
 describe("accepted-turn Company Brain context selection", () => {
+  test("a turn resolves governance when it starts running and keeps it for its later attempts", async () => {
+    if (!shared || !client) return;
+    const f = await fixture({ mode: "retrieval_only" });
+    const scope = { accountId: f.grant.accountId, workspaceId: f.grant.workspaceId };
+    let current: { id: string; version: number } | null = null;
+    const activatePolicy = async (content: string) => {
+      const draft = await createWorkspaceInstructionPolicyDraft(client!.db, {
+        ...scope,
+        kind: "policy",
+        scope: "global",
+        roleKey: null,
+        content,
+        provenanceSource: "human",
+        provenanceSourceId: null,
+        supersedesRevisionId: current?.id ?? null,
+        createdBySubjectId: f.ownerSubjectId,
+      });
+      await activateWorkspaceInstructionPolicyRevision(client!.db, {
+        ...scope,
+        revisionId: draft.id,
+        expectedCurrentRevisionId: current?.id ?? null,
+        expectedActivationVersion: current?.version ?? 0,
+        actorSubjectId: f.ownerSubjectId,
+        reason: "Governance test",
+      });
+      current = { id: draft.id, version: (current?.version ?? 0) + 1 };
+      return draft.id;
+    };
+    const policyRevisions = async (attempt: Attempt) =>
+      (await governanceSnapshots(attempt)).policy.entries.map((entry) => entry.revisionId);
+
+    // Accepted under rule A; the first attempt is claimed (claim snapshots the
+    // policy) and parks the turn waiting for capacity, sending nothing.
+    const ruleA = await activatePolicy("Rule A.");
+    const parked = await seedAttempt({
+      ...scope,
+      sessionId: f.root.id,
+      ownerSubjectId: f.ownerSubjectId,
+    });
+    expect(await policyRevisions(parked)).toEqual([ruleA]);
+
+    // An owner activates rule B and fills in the organization profile while
+    // the turn waits. The attempt that resumes it runs under both.
+    const ruleB = await activatePolicy("Rule B.");
+    const profile = await updateCompanyProfile(client!.db, {
+      ...scope,
+      profile: {
+        identity: "A small software company.",
+        mission: null,
+        products: [],
+        customers: [],
+        goals: [],
+        constraints: [],
+      },
+      expectedCurrentRevisionId: null,
+      expectedActivationVersion: 0,
+      actorSubjectId: f.ownerSubjectId,
+      principalKind: "human_session",
+      reason: "Governance test",
+    });
+    const running = await seedAttempt({
+      ...scope,
+      sessionId: f.root.id,
+      ownerSubjectId: f.ownerSubjectId,
+      turnId: parked.turnId,
+      generation: 2,
+      previousOutcome: "waiting_capacity",
+    });
+    const runningSnapshots = await governanceSnapshots(running);
+    expect(runningSnapshots.policy.entries.map((entry) => entry.revisionId)).toEqual([ruleB]);
+    expect(runningSnapshots.profile.profile?.id).toBe(profile.revision!.id);
+    await prepareSnapshots(running);
+    const receipt = (await resolve(running)).receipt;
+
+    // Rule C arrives while the turn runs, then the worker is lost. The
+    // recovery attempt keeps what the turn's requests already saw, and the
+    // turn's receipt still matches it; rule C waits for the next turn.
+    const ruleC = await activatePolicy("Rule C.");
+    const recovered = await seedAttempt({
+      ...scope,
+      sessionId: f.root.id,
+      ownerSubjectId: f.ownerSubjectId,
+      turnId: parked.turnId,
+      generation: 3,
+    });
+    const recoveredSnapshots = await governanceSnapshots(recovered);
+    expect(recoveredSnapshots.policy.entryHash).toBe(runningSnapshots.policy.entryHash);
+    expect(recoveredSnapshots.profile.snapshotHash).toBe(runningSnapshots.profile.snapshotHash);
+    await prepareSnapshots(recovered);
+    expect((await resolve(recovered)).receipt.id).toBe(receipt.id);
+
+    await shared.admin.begin(async (sql) => {
+      await sql`select set_config('opengeni.session_inference_claim', '1', true)`;
+      await sql`
+        update session_turn_attempts set state = 'closed', outcome = 'completed', closed_at = now()
+        where workspace_id = ${scope.workspaceId} and id = ${recovered.attemptId}
+      `;
+      await sql`
+        update session_turns set status = 'completed', active_attempt_id = null
+        where workspace_id = ${scope.workspaceId} and id = ${recovered.turnId}
+      `;
+      await sql`
+        update sessions set active_turn_id = null, status = 'idle'
+        where workspace_id = ${scope.workspaceId} and id = ${f.root.id}
+      `;
+    });
+    const nextTurn = await seedAttempt({
+      ...scope,
+      sessionId: f.root.id,
+      ownerSubjectId: f.ownerSubjectId,
+    });
+    expect(await policyRevisions(nextTurn)).toEqual([ruleC]);
+  }, 180_000);
+
   test("keeps both context-selection routines security definer with a pinned search path", async () => {
     if (!shared) return;
     const routines = await shared.admin<

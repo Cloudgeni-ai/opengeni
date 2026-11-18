@@ -30,7 +30,10 @@ export type SynchronousCommandPage = {
   };
 };
 
-/** Observation failure is not operation failure or permission to start again. */
+/** Observation failure is not operation failure or permission to start again.
+ * The message reaches agents as a tool error. Its `sessionId` is an internal
+ * provider locator, never a session background command, so the text must not
+ * suggest a running command the agent could read. */
 export class SynchronousCommandOutcomeUnknownError extends Error {
   readonly code = "synchronous_command_outcome_unknown";
   constructor(
@@ -39,7 +42,7 @@ export class SynchronousCommandOutcomeUnknownError extends Error {
     cause?: unknown,
   ) {
     super(
-      "Internal filesystem command completion is pending or unknown; the original invocation was not replayed.",
+      "The outcome of an internal filesystem step is unknown, and it was not repeated. It is not a background command and has no handle to read; check the affected files before relying on this result.",
       { cause },
     );
     this.name = "SynchronousCommandOutcomeUnknownError";

@@ -7,7 +7,13 @@ import type {
   RigVersion,
   SandboxBackend,
 } from "@opengeni/contracts";
-import { sandboxLifecycleTransitionWaitMs } from "@opengeni/config";
+import {
+  paidSandboxPlanLimit,
+  sandboxFleetLimits,
+  sandboxLifecycleTransitionWaitMs,
+  sandboxPlanLimits,
+  settingsForSandboxPlanTier,
+} from "@opengeni/config";
 import {
   appendRigSetupCommand,
   recordRigAuditEvent,
@@ -34,6 +40,9 @@ import {
   recordWarmingSandboxCreated,
   registerSandboxCheckpointArtifact,
   releaseLeaseHolder,
+  resolveSandboxComputeStanding,
+  sandboxOrganizationBoxLimitMessage,
+  sandboxPlanLimitFor,
   touchLeaseHolder,
   updateRigChangeStatus,
   SandboxCheckpointArtifactRegistrationConflictError,
@@ -434,6 +443,43 @@ export type RigVerificationSandboxRunContext = {
   };
 };
 
+/** The organization's plan, standing or fleet bounds left no sandbox for a
+ * verification. The message is person-facing. */
+export class RigVerificationComputeUnavailableError extends Error {
+  readonly name = "RigVerificationComputeUnavailableError";
+}
+
+/**
+ * Refuse a verification before any work when the organization's plan or
+ * standing allows it no sandbox at all (a held or denied organization that
+ * has not paid, including one restricted through its person). The lease
+ * admission enforces the same bound again; a failed standing read admits
+ * here and leaves the decision to it.
+ */
+export async function assertRigVerificationComputeAdmitted(
+  db: Database,
+  settings: ControlActivityServices["settings"],
+  accountId: string,
+  resolveStanding: typeof resolveSandboxComputeStanding = resolveSandboxComputeStanding,
+): Promise<void> {
+  if (settings.sandboxBackend === "selfhosted") return;
+  const limits = sandboxPlanLimits(settings);
+  let closed = false;
+  try {
+    const standing = await resolveStanding(db, { accountId, limits });
+    const tierLimit = sandboxPlanLimitFor(limits, standing.tier);
+    const limit = standing.paidHistory ? paidSandboxPlanLimit(tierLimit) : tierLimit;
+    closed = limit.runningBoxesPerOrganization === 0;
+  } catch {
+    return;
+  }
+  if (closed) {
+    throw new RigVerificationComputeUnavailableError(
+      sandboxOrganizationBoxLimitMessage("closed", 0),
+    );
+  }
+}
+
 export class RigVerificationLeaseUnavailableError extends Error {
   readonly name = "RigVerificationLeaseUnavailableError";
 
@@ -599,7 +645,23 @@ export async function runWithOwnedRigVerificationSandbox<T>(
       warmingLeaseTtlMs: RIG_VERIFICATION_OWNER_TTL_MS,
       captureWaitMs: sandboxLifecycleTransitionWaitMs(input.settings),
       waitSignal: signal,
+      // A verification box is a box of the organization like any other: the
+      // plan, standing and fleet bounds apply (a held or denied organization
+      // gets none, Free shares its running boxes).
+      sandboxPlanLimits: sandboxPlanLimits(input.settings),
+      subscriptionPlansEnabled: input.settings.subscriptionPlansEnabled,
+      sandboxFleetLimits: sandboxFleetLimits(input.settings),
     });
+    // The organization already runs as many boxes as its plan allows. No
+    // holder exists and no box was created; the run fails with a clear
+    // reason (verification is never retried in a loop).
+    if (lease.role === "fenced" && lease.reason === "organization_sandbox_capacity") {
+      throw new RigVerificationComputeUnavailableError(
+        `Sandbox Environment verification needs a sandbox, and this organization already runs the ${
+          lease.organizationBoxLimit ?? 0
+        } its plan allows. Stop a running sandbox and verify again, or add credit or choose a paid plan.`,
+      );
+    }
     acquired = true;
     expectedEpoch = lease.lease.leaseEpoch;
     holderLivenessTimer = setInterval(() => {
@@ -620,9 +682,14 @@ export async function runWithOwnedRigVerificationSandbox<T>(
       throw new RigVerificationLeaseUnavailableError(sandboxGroupId, lease.role);
     }
     ownsWarmingEpoch = true;
+    // A Free or unpaid organization's verification box gets the unpaid
+    // resource ceilings, like its other boxes.
+    const boxSettings = settingsForSandboxPlanTier(input.settings, lease.sandboxPlanTier, {
+      paidHistory: lease.sandboxPaidHistory,
+    });
 
     establishmentPromise = Promise.resolve().then(() =>
-      dependencies.establish(input.settings, null, {
+      dependencies.establish(boxSettings, null, {
         sessionId: `${input.sessionIdPrefix}-${holderId}`,
         recovery: "create-or-restore",
         createIdentity: {
@@ -1668,6 +1735,7 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
 
         const verification: Record<string, unknown> = { startedAt, checkResults: [] };
         try {
+          await assertRigVerificationComputeAdmitted(db, settings, rig.accountId);
           const candidateVersion = candidateVersionForChange(baseVersion, change);
           const providerImageDefinition = providerImageDefinitionForChange(
             baseVersion,
@@ -1870,6 +1938,7 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
           metadata: { versionId: version.id },
         });
         try {
+          await assertRigVerificationComputeAdmitted(db, settings, rig.accountId);
           const runSettings = settingsForRigVerification(settings, version.image);
           const providerImageContentHash = rigProviderImageContentHash({
             backend: runSettings.sandboxBackend,

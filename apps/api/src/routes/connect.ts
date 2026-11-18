@@ -108,6 +108,7 @@ import {
   googleDriveOAuthClientConfigured,
   googleCalendarOAuthClientConfigured,
 } from "../integrations/oauth-client";
+import { nangoIntegrationForConnectTarget } from "../integrations/nango-connect";
 import { CONNECT_FINISHED_PATH, connectFinishedPage } from "../integrations/connect-finished-page";
 import {
   OFFICIAL_GMAIL_MCP_URL,
@@ -1921,6 +1922,18 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                 scope.subjectId,
               )
             : null;
+          // A Nango row reconnects only while its integration is still served
+          // through Nango; after a switch back to native it is not this
+          // connector's account any more.
+          const nangoBacked =
+            existing?.metadata.integrationBackend === "nango" &&
+            typeof existing.metadata.mcpUrl === "string" &&
+            (
+              await nangoIntegrationForConnectTarget(
+                { db: deps.db, settings: deps.settings },
+                existing.metadata.mcpUrl,
+              )
+            )?.integrationKey === existing.metadata.nangoIntegrationKey;
           if (
             input.reconnectAccountId &&
             (!existing ||
@@ -1934,7 +1947,9 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                       "google-calendar",
                     ].includes(input.providerId)
                   ? existing.kind !== "oauth2" ||
-                    !existing.metadata.oauthDiscovery ||
+                    // A Nango-backed account has no OAuth discovery of its own;
+                    // startMcpOAuth reconnects it through Nango Connect.
+                    (!existing.metadata.oauthDiscovery && !nangoBacked) ||
                     (input.providerId === "slack-personal" &&
                       existing.metadata.mcpUrl !== OPENGENI_PERSONAL_SLACK_MCP_URL) ||
                     (input.providerId === "gmail" &&

@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
-import { DEFAULT_SANDBOX_PLAN_LIMITS } from "@opengeni/config";
+import { DEFAULT_SANDBOX_PLAN_LIMITS, parseSandboxPlanLimitsJson } from "@opengeni/config";
 import {
   acquireLease as acquireLeaseUnscoped,
   commitWarmingToWarm,
@@ -31,6 +31,8 @@ const acquireLease: typeof acquireLeaseUnscoped = (db, input) =>
   withCreditDebitAttribution({ kind: "service" }, () => acquireLeaseUnscoped(db, input));
 
 const limits = DEFAULT_SANDBOX_PLAN_LIMITS;
+/** The default limits of a deployment without subscription plans. */
+const limitsWithoutPlans = parseSandboxPlanLimitsJson("", { subscriptionPlansEnabled: false });
 
 let shared: SharedTestDatabase | null = null;
 let admin: postgres.Sql;
@@ -111,8 +113,16 @@ async function boxSecondsToday(org: Org, seconds: number, daysAgo = 0): Promise<
 function acquire(
   org: Org,
   kind: AcquireLeaseInput["kind"],
-  options: { group?: string; holderId?: string; subjectId?: string; backend?: string } = {},
+  options: {
+    group?: string;
+    holderId?: string;
+    subjectId?: string;
+    backend?: string;
+    /** false: a deployment without subscription plans. */
+    subscriptionPlansEnabled?: boolean;
+  } = {},
 ) {
+  const withoutPlans = options.subscriptionPlansEnabled === false;
   return acquireLease(db, {
     accountId: org.accountId,
     workspaceId: org.workspaceId,
@@ -121,7 +131,10 @@ function acquire(
     holderId: options.holderId ?? `${kind}-${crypto.randomUUID()}`,
     backend: options.backend ?? "modal",
     leaseTtlMs: 90_000,
-    sandboxPlanLimits: limits,
+    sandboxPlanLimits: withoutPlans ? limitsWithoutPlans : limits,
+    ...(options.subscriptionPlansEnabled !== undefined
+      ? { subscriptionPlansEnabled: options.subscriptionPlansEnabled }
+      : {}),
     ...(options.subjectId
       ? {
           actingSubjectId: options.subjectId,
@@ -277,6 +290,58 @@ describe("free compute bounds (real PostgreSQL)", () => {
     });
   }, 60_000);
 
+  describe("a plan-less organization", () => {
+    // With subscription plans on, a new self-serve organization has no plan
+    // row until subscription maintenance enrolls it in Free, so it is bounded
+    // like Free; without them no organization ever gets a plan row, and a
+    // plan-less organization is not bounded at all.
+    const selfServe = () => organization({ source: "better-auth:user" });
+
+    test("is bounded like Free while it waits for Free enrollment", async () => {
+      for (const plansOn of [{}, { subscriptionPlansEnabled: true }]) {
+        const org = await selfServe();
+        expect(await acquire(org, "direct", plansOn)).toMatchObject({
+          role: "spawner",
+          sandboxPlanTier: "none",
+        });
+        expect((await acquire(org, "interaction", plansOn)).role).toBe("spawner");
+        const refused = await refusal(acquire(org, "direct", plansOn));
+        expect([refused.reason, refused.limit]).toEqual(["running", 2]);
+        expect(await acquire(org, "turn", plansOn)).toMatchObject({
+          role: "fenced",
+          reason: "organization_sandbox_capacity",
+          organizationBoxLimit: 2,
+        });
+        const spent = await selfServe();
+        await boxSecondsToday(spent, 43_200);
+        expect((await refusal(acquire(spent, "direct", plansOn))).reason).toBe("daily_budget");
+      }
+    }, 120_000);
+
+    test("is not bounded on a deployment without subscription plans", async () => {
+      const plansOff = { subscriptionPlansEnabled: false };
+      const org = await selfServe();
+      await boxSecondsToday(org, 1_000_000);
+      // More boxes than any Free bound, of every kind, all start, past a
+      // Free daily budget, for a person too.
+      for (const kind of ["direct", "interaction", "viewer", "turn", "turn", "direct"] as const) {
+        expect(
+          await acquire(org, kind, { ...plansOff, subjectId: `user:${crypto.randomUUID()}` }),
+        ).toMatchObject({ role: "spawner", sandboxPlanTier: "none" });
+      }
+    }, 120_000);
+
+    test("is still restricted by a held or denied decision without subscription plans", async () => {
+      const plansOff = { subscriptionPlansEnabled: false };
+      for (const decision of ["held", "denied"] as const) {
+        const org = await organization({ source: "better-auth:user", decision });
+        for (const kind of ["viewer", "direct", "interaction", "turn"] as const) {
+          expect((await refusal(acquire(org, kind, plansOff))).reason).toBe("closed");
+        }
+      }
+    }, 60_000);
+  });
+
   test("a spent day refuses new boxes and joins, lets an in-flight turn finish, and resets the next UTC day", async () => {
     const org = await organization({ plan: "free" });
     const group = crypto.randomUUID();
@@ -299,7 +364,7 @@ describe("free compute bounds (real PostgreSQL)", () => {
   }, 60_000);
 
   describe("across a person's organizations", () => {
-    async function personWithTwoOrganizations() {
+    async function personWithTwoOrganizations(planKey: string | null = "free") {
       const userId = `compute-bounds-${crypto.randomUUID()}`;
       const subjectId = `user:${userId}`;
       const access = await ensureManagedAccessForUserWithOrganizationMemberships(db, {
@@ -323,7 +388,7 @@ describe("free compute bounds (real PostgreSQL)", () => {
       for (const org of [one, two]) {
         await admin`insert into workspace_inference_controls (workspace_id, account_id)
           values (${org.workspaceId}, ${org.accountId}) on conflict do nothing`;
-        await plan(org.accountId, "free");
+        if (planKey !== null) await plan(org.accountId, planKey);
       }
       forgetCaches();
       return { subjectId, one, two };
@@ -371,7 +436,38 @@ describe("free compute bounds (real PostgreSQL)", () => {
       );
       expect((await acquire(two, "direct", { subjectId })).role).toBe("spawner");
     }, 120_000);
+
+    test("without subscription plans, a held plan-less organization still restricts every organization its person runs", async () => {
+      const plansOff = { subscriptionPlansEnabled: false };
+      const { subjectId, one, two } = await personWithTwoOrganizations(null);
+      expect((await acquire(two, "direct", { ...plansOff, subjectId })).role).toBe("spawner");
+      await decide(one.accountId, "held");
+      expect((await refusal(acquire(two, "direct", { ...plansOff, subjectId }))).reason).toBe(
+        "closed",
+      );
+      await decide(one.accountId, "eligible");
+      expect((await acquire(two, "direct", { ...plansOff, subjectId })).role).toBe("spawner");
+    }, 120_000);
   });
+
+  test("a system-held box (a rig verification turn) gets no box for a held organization; only the named test opt-out skips the bounds", async () => {
+    const held = await organization({ plan: "free", decision: "held" });
+    const verification = await refusal(
+      acquire(held, "turn", { holderId: `rig-verification:${crypto.randomUUID()}` }),
+    );
+    expect([verification.reason, verification.limit]).toEqual(["closed", 0]);
+    const unbounded = await acquireLease(db, {
+      accountId: held.accountId,
+      workspaceId: held.workspaceId,
+      sandboxGroupId: crypto.randomUUID(),
+      kind: "turn",
+      holderId: `rig-verification:${crypto.randomUUID()}`,
+      backend: "modal",
+      leaseTtlMs: 90_000,
+      sandboxPlanLimits: "unbounded_test_fixture",
+    });
+    expect(unbounded.role).toBe("spawner");
+  }, 60_000);
 
   test("the reaper drains a box no turn holds and never one a turn holds", async () => {
     const org = await organization({ plan: "free" });
@@ -428,5 +524,37 @@ describe("free compute bounds (real PostgreSQL)", () => {
       where workspace_id = ${org.workspaceId} and sandbox_group_id = ${group}`;
     expect(kept!.liveness).toBe("warm");
     expect(await drain("compute_closed")).toMatchObject({ drained: true });
+  }, 60_000);
+
+  test("a turnless drain never cuts off someone using the box or a running command", async () => {
+    const org = await organization({ plan: "free" });
+    const group = crypto.randomUUID();
+    expect((await acquire(org, "viewer", { group })).role).toBe("spawner");
+    const epoch = await warm(org, group);
+    const drain = (target: string, expectedEpoch: number, quietForMs: number) =>
+      drainNoTurnLeaseForComputeBounds(db, {
+        ...org,
+        sandboxGroupId: target,
+        expectedEpoch,
+        reason: "compute_turnless",
+        quietForMs,
+        idleGraceMs: 60_000,
+      });
+    // Active within the idle window: kept.
+    expect(await drain(group, epoch, 3_600_000)).toEqual({
+      drained: false,
+      reason: "active_since_decision",
+    });
+    // A running command or Browser/ComputerSession holder: kept, never stopped.
+    const busy = crypto.randomUUID();
+    expect((await acquire(org, "interaction", { group: busy })).role).toBe("spawner");
+    const busyEpoch = await warm(org, busy);
+    expect(await drain(busy, busyEpoch, 0)).toEqual({ drained: false, reason: "compute_commands" });
+    const [running] = await admin<{ liveness: string; rotation_reason: string | null }[]>`
+      select liveness, rotation_reason from sandbox_leases
+      where workspace_id = ${org.workspaceId} and sandbox_group_id = ${busy}`;
+    expect(running).toEqual({ liveness: "warm", rotation_reason: null });
+    // Idle: drained.
+    expect(await drain(group, epoch, 0)).toMatchObject({ drained: true, mode: "drained" });
   }, 60_000);
 });

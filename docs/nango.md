@@ -137,12 +137,21 @@ connections; that is not a duplicate.
   last two hours and no readable row names (never after a failed read).
   An existing connection replaces a fresh one only while Nango reports it
   without auth errors.
-- When Nango reports no scopes for a connection, its row records the app's
-  default scopes and is marked `nangoScopesUnconfirmed`. Those defaults are
-  not a grant: no other organization's row is moved onto that connection on
-  their strength. Email accounts are compared case-insensitively.
+- A row's scopes count as a grant only when its metadata carries
+  `nangoScopesConfirmed` naming the row's own Nango connection: Nango reported
+  them at connect time, or the row was moved onto a connection whose confirmed
+  grant covers them. A marker naming another connection (an older release
+  moved the row, copying its metadata) vouches for nothing. When Nango
+  reports no scopes the row records the app's default scopes without the
+  marker (and with the older `nangoScopesUnconfirmed`, which the previous
+  release reads), and so does every row saved before the marker existed. No other
+  organization's row is moved onto a connection on the strength of unmarked
+  scopes; for a connection no marked row vouches for, the scopes Nango
+  reports for it now count instead (none when Nango cannot read it), so
+  older duplicates are still merged. Email accounts are compared case-insensitively.
 - A legacy duplicate row of the same owner and account (saved before account
-  keys) shares the connection without the key, so it is billed once.
+  keys) shares the connection without the key, so it is billed once. It is
+  the same verified account, so its `authority_generation` is kept too.
 - Connections without a verified account are never merged. Config-only
   integrations (LinkedIn, X) without an `accountIdentity` therefore add a
   Nango connection on each connect, and each stays billed until its row is
@@ -190,7 +199,35 @@ URL, so deployments sharing one Nango environment never sweep each other's):
 - deletes connections whose rows have all needed reconnection because Nango
   could not refresh them (`nango_refresh_failed`) for 24 hours, while Nango
   still reports the failure. Those rows keep asking to reconnect, and a
-  reconnect stores a new connection.
+  reconnect stores a new connection;
+- marks active rows whose Nango connection Nango no longer has
+  (`nango_connection_missing`, for example deleted by an older release during
+  a rollout or rollback) as needing reconnection, after Nango confirms the
+  connection is gone (a 404 for that very connection; any other answer keeps
+  the row). A row with a healthy connection of the same account that covers
+  its scopes is moved onto that one instead. People are found through
+  Nango's tags and, once a later migration grants it,
+  `opengeni_private.nango_live_connection_owners_v1` (migration 1487: the
+  owner, integration and Nango connection id of every active Nango row), so
+  a person whose only connection is gone is visited too. Until that grant,
+  only people with at least one connection this deployment tagged are
+  visited.
+
+Repoints are committed first. Every deletion in Nango happens afterwards
+under the person's lock, in a transaction that writes no connection rows,
+after the rows are read again. Marking a row first confirms the 404 with
+Nango, then re-reads under the lock and marks only active rows still on that
+connection. When more of the connections live rows stand for are missing than half of
+the connections the pass knows (and more than ten), as with a wrong Nango
+environment, it marks none and logs a warning. A pass that ran out of time
+before planning everyone marks none either, so a deployment too large to
+plan within one pass never marks missing rows. When nothing listed carries
+this deployment's tag (another deployment's tags, or an empty environment),
+the deployment-wide listing is not used at all. A
+worker whose public base URL tags none of the listed connections while others
+carry another deployment's tag logs once that its tag is possibly mismatched
+(it then cleans up nothing, unless it is a new deployment sharing the Nango
+environment).
 
 Connections made outside Opengeni or before the deployment tag (untagged)
 are left to the operator's `integrations:nango orphans` command; that
