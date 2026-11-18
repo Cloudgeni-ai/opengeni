@@ -1140,15 +1140,16 @@ export async function describeWorkspaceSiteToolReadiness(
     string,
     Promise<Awaited<ReturnType<typeof listConnectorToolPermissionPolicies>>>
   >();
-  const policiesFor = (connectionId: string) => {
-    let read = policiesByConnection.get(connectionId);
+  const policiesFor = (connectionId: string, workspaceId: string = grant.workspaceId) => {
+    const cacheKey = JSON.stringify([workspaceId, connectionId]);
+    let read = policiesByConnection.get(cacheKey);
     if (!read) {
       read = (options.listPolicies ?? listConnectorToolPermissionPolicies)(deps.db, {
         accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
+        workspaceId,
         connectionId,
       });
-      policiesByConnection.set(connectionId, read);
+      policiesByConnection.set(cacheKey, read);
     }
     return read;
   };
@@ -1258,7 +1259,10 @@ export async function describeWorkspaceSiteToolReadiness(
     let permission: "block" | SiteReadinessConfirm = recommendsApproval ? "always" : "maybe";
     if (connectionId)
       permission = siteToolPermission(
-        await policiesFor(connectionId),
+        await policiesFor(
+          connectionId,
+          account?.connectionId === connectionId ? account.choicesWorkspaceId : undefined,
+        ),
         { connectionId, serverId: policyServerId, toolName: routing.identity.toolName },
         recommendsApproval,
       );

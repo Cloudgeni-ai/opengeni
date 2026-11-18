@@ -188,7 +188,7 @@ test("a Nango-backed connector's approvals load, save, are enforced and survive 
     expect(permissions.tools.map((entry) => entry.name)).toEqual(
       native.tools.map((entry) => entry.name),
     );
-    for (const entry of native.tools.filter((entry) => entry.name !== "send_message"))
+    for (const entry of native.tools.filter((candidate) => candidate.name !== "send_message"))
       expect(tool(permissions, entry.name)).toMatchObject({
         group: entry.group,
         permission: entry.permission,

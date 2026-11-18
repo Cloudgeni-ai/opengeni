@@ -1,4 +1,8 @@
-import { toolReviewAction, type ToolReviewContext } from "@opengeni/contracts";
+import {
+  connectorProviderDomain,
+  toolReviewAction,
+  type ToolReviewContext,
+} from "@opengeni/contracts";
 
 const GMAIL_PROVIDER_DOMAIN = "gmailmcp.googleapis.com";
 
@@ -23,9 +27,10 @@ export function withApprovalDisplayTitle(approval: unknown): unknown {
       ? (item.rawItem as Record<string, unknown>)
       : {};
   const context: ToolReviewContext = {
+    // Gmail through either integration backend reads the same.
     kind:
       typeof display.providerDomain === "string" &&
-      display.providerDomain.toLowerCase() === GMAIL_PROVIDER_DOMAIN
+      connectorProviderDomain(display.providerDomain) === GMAIL_PROVIDER_DOMAIN
         ? "gmail"
         : "generic",
   };
