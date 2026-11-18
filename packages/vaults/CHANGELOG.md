@@ -1,5 +1,11 @@
 # @opengeni/vaults
 
+## 6.29.2
+
+### Patch Changes
+
+- @opengeni/contracts@6.29.2
+
 ## 6.29.1
 
 ### Patch Changes
