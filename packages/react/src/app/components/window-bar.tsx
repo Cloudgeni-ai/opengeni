@@ -211,7 +211,7 @@ export function WindowBarTitle({
 /** A trail step: muted, the page's title stays the one strong word in the bar. */
 function WindowBarCrumbLink({ crumb }: { crumb: WindowBarCrumb }) {
   const className =
-    "min-w-0 truncate rounded-[6px] px-1 -mx-1 text-[15px] leading-6 font-medium tracking-[-0.01em] text-fg-muted outline-none transition-colors duration-[120ms] hover:text-fg focus-visible:ring-2 focus-visible:ring-brand/55 [-webkit-app-region:no-drag] [app-region:no-drag]";
+    "min-w-0 truncate rounded-[6px] px-1 -mx-1 text-[15px] leading-6 font-medium tracking-[-0.01em] text-fg-muted outline-hidden transition-colors duration-[120ms] hover:text-fg focus-visible:ring-2 focus-visible:ring-brand/55 [-webkit-app-region:no-drag] [app-region:no-drag]";
   if (crumb.href) {
     return (
       <a href={crumb.href} onClick={crumb.onClick} className={className}>
