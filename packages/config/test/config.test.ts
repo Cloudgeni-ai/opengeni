@@ -12,6 +12,8 @@ import {
   paidSandboxPlanLimit,
   parseSandboxPlanLimitsJson,
   sandboxResourceClassForPlanTier,
+  sandboxPlanLimits,
+  sandboxPlanTierUnpaid,
   settingsForSandboxPlanTier,
   FIRST_PARTY_MCP_CALL_TIMEOUT_MS,
   FIRST_PARTY_MCP_SETUP_TIMEOUT_MS,
@@ -3038,6 +3040,50 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
       viewerOnlyBoxesPerMember: 1,
       ...unpaidBounds,
     });
+  });
+
+  test("a plan-less organization is unpaid and bounded like Free only with subscription plans on", () => {
+    const plansOn = withEnv({ OPENGENI_SUBSCRIPTION_PLANS_ENABLED: "true" }, () => getSettings());
+    const plansOff = withEnv({}, () => getSettings());
+    expect(plansOff.subscriptionPlansEnabled).toBe(false);
+    // With plans on, a plan-less organization is waiting for Free enrollment.
+    expect(sandboxPlanLimits(plansOn).none).toEqual(DEFAULT_SANDBOX_PLAN_LIMITS.none);
+    expect(sandboxPlanTierUnpaid("none", { subscriptionPlansEnabled: true })).toBe(true);
+    expect(sandboxPlanTierUnpaid("none")).toBe(true);
+    expect(sandboxResourceClassForPlanTier("none", { subscriptionPlansEnabled: true })).toBe(
+      "unpaid",
+    );
+    expect(settingsForSandboxPlanTier(plansOn, "none").sandboxResourceClass).toBe("unpaid");
+    // Without plans no organization ever gets a plan row: `none` is every
+    // organization's ordinary tier, unbounded and on the standard ceilings.
+    const withoutPlans = sandboxPlanLimits(plansOff);
+    expect(Object.hasOwn(withoutPlans, "none")).toBe(false);
+    expect(withoutPlans).toEqual(
+      Object.fromEntries(
+        Object.entries(DEFAULT_SANDBOX_PLAN_LIMITS).filter(([tier]) => tier !== "none"),
+      ),
+    );
+    expect(sandboxPlanTierUnpaid("none", { subscriptionPlansEnabled: false })).toBe(false);
+    expect(sandboxResourceClassForPlanTier("none", { subscriptionPlansEnabled: false })).toBe(
+      "standard",
+    );
+    expect(settingsForSandboxPlanTier(plansOff, "none")).toBe(plansOff);
+    // Every other tier keeps its meaning either way, and an operator's own
+    // table still applies.
+    for (const subscriptionPlansEnabled of [true, false]) {
+      for (const tier of ["free", "new", "restricted"]) {
+        expect(sandboxPlanTierUnpaid(tier, { subscriptionPlansEnabled })).toBe(true);
+      }
+      for (const tier of ["pro", "max", "enterprise", "embedded", null]) {
+        expect(sandboxPlanTierUnpaid(tier, { subscriptionPlansEnabled })).toBe(false);
+      }
+    }
+    expect(
+      sandboxPlanLimits({
+        ...plansOff,
+        sandboxPlanLimitsJson: '{"none":{"runningBoxesPerOrganization":4}}',
+      }).none,
+    ).toEqual({ runningBoxesPerOrganization: 4 });
   });
 
   test("a held or denied organization that has not paid gets no sandbox at all", () => {

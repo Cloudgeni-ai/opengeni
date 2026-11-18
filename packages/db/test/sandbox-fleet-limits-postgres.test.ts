@@ -1,7 +1,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
-import { DEFAULT_SANDBOX_PLAN_LIMITS, type SandboxFleetLimits } from "@opengeni/config";
+import {
+  DEFAULT_SANDBOX_PLAN_LIMITS,
+  parseSandboxPlanLimitsJson,
+  type SandboxFleetLimits,
+} from "@opengeni/config";
 import {
   acquireLease as acquireLeaseUnscoped,
   createDb,
@@ -90,8 +94,9 @@ function acquire(
   org: Org,
   kind: AcquireLeaseInput["kind"],
   fleet: SandboxFleetLimits,
-  options: { group?: string; holderId?: string } = {},
+  options: { group?: string; holderId?: string; subscriptionPlansEnabled?: boolean } = {},
 ) {
+  const withoutPlans = options.subscriptionPlansEnabled === false;
   return acquireLease(db, {
     accountId: org.accountId,
     workspaceId: org.workspaceId,
@@ -100,7 +105,10 @@ function acquire(
     holderId: options.holderId ?? `${kind}-${crypto.randomUUID()}`,
     backend: "modal",
     leaseTtlMs: 90_000,
-    sandboxPlanLimits: DEFAULT_SANDBOX_PLAN_LIMITS,
+    sandboxPlanLimits: withoutPlans
+      ? parseSandboxPlanLimitsJson("", { subscriptionPlansEnabled: false })
+      : DEFAULT_SANDBOX_PLAN_LIMITS,
+    ...(withoutPlans ? { subscriptionPlansEnabled: false } : {}),
     sandboxFleetLimits: fleet,
   });
 }
@@ -240,6 +248,31 @@ describe("unpaid fleet limits (real PostgreSQL)", () => {
     for (let i = 0; i < 3; i++) {
       expect((await acquire(paid, "direct", fleet)).role).toBe("spawner");
     }
+  }, 120_000);
+
+  test("without subscription plans a plan-less organization is outside the unpaid fleet", async () => {
+    // No organization ever gets a plan row there, so a plan-less one is the
+    // deployment's ordinary organization: never young-limited, never counted
+    // toward or refused by the unpaid fleet's cap.
+    const before = await unpaidRunning();
+    const fleet = {
+      youngOrganizationAgeMs: DAY_MS,
+      youngOrganizationRunningBoxes: 1,
+      unpaidRunningBoxes: before,
+    };
+    const young = await organization({ ageMs: 60_000 });
+    for (const kind of ["direct", "turn", "interaction", "direct"] as const) {
+      resetSandboxFleetState();
+      expect((await acquire(young, kind, fleet, { subscriptionPlansEnabled: false })).role).toBe(
+        "spawner",
+      );
+    }
+    expect(await unpaidRunning()).toBe(before);
+    // With plans on, the same organization is unpaid and refused.
+    resetSandboxFleetState();
+    expect(
+      (await refusal(acquire(await organization({ ageMs: 60_000 }), "direct", fleet))).reason,
+    ).toBe("fleet_busy");
   }, 120_000);
 
   test("a young unpaid organization gets its first day's box time, then no new box", async () => {

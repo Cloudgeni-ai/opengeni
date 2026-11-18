@@ -1099,6 +1099,8 @@ import {
 import {
   environmentsEncryptionKeyBytes,
   paidSandboxPlanLimit,
+  sandboxPlanTierUnpaid,
+  UNPAID_SANDBOX_PLAN_TIERS,
   SANDBOX_LIFECYCLE_TRANSITION_MAX_WAIT_MS,
   SANDBOX_DEADLINE_COMMAND_STOP_GRACE_MS,
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
@@ -49531,6 +49533,11 @@ interface AcquireLeaseAdmissionInput {
    * limit is refused (non-turn holders) or capacity-blocked (turns). Omitted
    * only for the explicit test-fixture opt-out (AcquireLeaseInput). */
   sandboxPlanLimits?: SandboxPlanLimits;
+  /** Whether this deployment has subscription plans
+   * (settings.subscriptionPlansEnabled). Without them a plan-less
+   * organization (`none`) is not unpaid: none of the unpaid-only bounds or
+   * fleet limits apply to it (sandboxPlanTierUnpaid). Omitted = on. */
+  subscriptionPlansEnabled?: boolean;
   /** Fleet-wide bounds on unpaid compute (OPENGENI_SANDBOX_FLEET_LIMITS_JSON),
    * applied with sandboxPlanLimits to a new box of an unpaid organization:
    * the young-organization running limit, the unpaid running cap and box-time
@@ -50163,9 +50170,6 @@ function sandboxDailyBoxTimeLimitSeconds(
   return limit.boxSecondsPerPersonPerDay ?? limit.boxSecondsPerOrganizationPerDay ?? 0;
 }
 
-/** Tiers whose boxes count toward a person's bounds across organizations. */
-const SANDBOX_PERSON_BOUNDED_TIERS: readonly string[] = ["free", "new", "none", "restricted"];
-
 /** Metered box seconds of one organization since the start of the UTC day.
  * Needs the organization's account-only RLS context (no workspace), so every
  * workspace's meter counts. */
@@ -50299,11 +50303,21 @@ export async function resolveSandboxComputeStanding(
     limits: SandboxPlanLimits;
     actingSubjectId?: string | null;
     onFallback?: SandboxComputeStandingFallback | undefined;
+    /** Whether this deployment has subscription plans
+     * (settings.subscriptionPlansEnabled; default on). Without them a
+     * plan-less organization (`none`) is not unpaid (sandboxPlanTierUnpaid). */
+    subscriptionPlansEnabled?: boolean | undefined;
   },
 ): Promise<SandboxComputeStanding> {
+  const plans = { subscriptionPlansEnabled: input.subscriptionPlansEnabled };
   const own = await withAccountRls(db, input.accountId, async (tx) => {
     const standing = await resolveSandboxPlanStanding(tx, input.accountId, input.limits);
-    const bounded = SANDBOX_PERSON_BOUNDED_TIERS.includes(standing.tier) && !standing.paidHistory;
+    const bounded = sandboxPlanTierUnpaid(standing.tier, plans) && !standing.paidHistory;
+    // A Free or plan-less organization that never paid can be restricted
+    // through its acting person, whether or not its tier is unpaid: without
+    // subscription plans a plan-less organization is unbounded, but the
+    // promotion decisions of its people still apply.
+    const restrictable = UNPAID_SANDBOX_PLAN_TIERS.includes(standing.tier) && !standing.paidHistory;
     const limit = sandboxPlanLimitFor(input.limits, standing.tier);
     const needsSeconds =
       bounded &&
@@ -50312,6 +50326,7 @@ export async function resolveSandboxComputeStanding(
     return {
       standing,
       bounded,
+      restrictable,
       seconds: needsSeconds ? await organizationBoxSecondsToday(tx, input.accountId) : 0,
     };
   });
@@ -50327,7 +50342,7 @@ export async function resolveSandboxComputeStanding(
     organizationCreatedAt: own.standing.organizationCreatedAt,
   };
   const subjectId = input.actingSubjectId ?? null;
-  if (!own.bounded || subjectId === null || !subjectId.startsWith("user:")) return result;
+  if (!own.restrictable || subjectId === null || !subjectId.startsWith("user:")) return result;
   // A restricted organization needs no person facts: it is already closed.
   if (own.standing.tier === "restricted") return result;
   let person: SandboxPersonStanding;
@@ -50336,6 +50351,7 @@ export async function resolveSandboxComputeStanding(
       accountId: input.accountId,
       subjectId,
       limits: input.limits,
+      ...plans,
     });
   } catch (error) {
     reportSandboxComputeStandingFallback(input.onFallback, error, "person");
@@ -50374,7 +50390,12 @@ export function resetSandboxPersonStandingCache(): void {
 
 async function cachedSandboxPersonStanding(
   db: Database,
-  input: { accountId: string; subjectId: string; limits: SandboxPlanLimits },
+  input: {
+    accountId: string;
+    subjectId: string;
+    limits: SandboxPlanLimits;
+    subscriptionPlansEnabled?: boolean | undefined;
+  },
 ): Promise<SandboxPersonStanding> {
   const key = `${input.accountId}\u0000${input.subjectId}`;
   const now = Date.now();
@@ -50399,7 +50420,12 @@ async function cachedSandboxPersonStanding(
  */
 async function readSandboxPersonStanding(
   db: Database,
-  input: { accountId: string; subjectId: string; limits: SandboxPlanLimits },
+  input: {
+    accountId: string;
+    subjectId: string;
+    limits: SandboxPlanLimits;
+    subscriptionPlansEnabled?: boolean | undefined;
+  },
 ): Promise<SandboxPersonStanding> {
   const subjectId = input.subjectId;
   const result: SandboxPersonStanding = {
@@ -50439,7 +50465,7 @@ async function readSandboxPersonStanding(
     const owned = membership.role === "owner";
     const other = await withAccountRls(db, organizationId, async (tx) => {
       const standing = await resolveSandboxPlanStanding(tx, organizationId, input.limits);
-      if (!SANDBOX_PERSON_BOUNDED_TIERS.includes(standing.tier) || standing.paidHistory) {
+      if (!sandboxPlanTierUnpaid(standing.tier, input) || standing.paidHistory) {
         return null;
       }
       const counts = owned
@@ -53069,6 +53095,7 @@ export async function acquireLease(
         limits: input.sandboxPlanLimits,
         actingSubjectId: input.actingSubjectId ?? input.viewerSubjectId ?? null,
         onFallback: input.onComputeStandingFallback,
+        subscriptionPlansEnabled: input.subscriptionPlansEnabled,
       });
     } catch (error) {
       reportSandboxComputeStandingFallback(input.onComputeStandingFallback, error, "organization");

@@ -143,6 +143,8 @@ describe("Connected Machine to managed-home turn transition", () => {
       expect(acknowledgeRecoveryQuiescence).toHaveBeenCalledTimes(1);
       expect(control.activityStatus).toBe("recovering");
       expect(control.turnMetricOutcome).toBe("recovering");
+      // A lifecycle transition of the box itself is still a sandbox recovery.
+      expect((control as Record<string, unknown>).turnRecoveryCause).toBe("sandbox");
     } finally {
       requestRecovery.mockRestore();
       readLease.mockRestore();
@@ -264,6 +266,13 @@ describe("Connected Machine to managed-home turn transition", () => {
       rotationRequestedAt: null,
       rotationReason: null,
     } as never);
+    const control: Record<string, unknown> = {
+      cancellationRequestedAt: null,
+      activityStatus: "unknown",
+      turnMetricOutcome: null,
+      activityError: null,
+      acknowledgeQuiescence: false,
+    };
     try {
       const result = await settleTurnFailure({
         error: transition,
@@ -283,13 +292,7 @@ describe("Connected Machine to managed-home turn transition", () => {
         sandboxRotationController: new AbortController(),
         noteCancellationRequested: () => undefined,
         codexWorkspaceKey: "workspace-key",
-        control: {
-          cancellationRequestedAt: null,
-          activityStatus: "unknown",
-          turnMetricOutcome: null,
-          activityError: null,
-          acknowledgeQuiescence: false,
-        },
+        control,
         attempt: {
           turnId: "turn-1",
           triggerEventId: "trigger-1",
@@ -319,6 +322,12 @@ describe("Connected Machine to managed-home turn transition", () => {
         continueDelayMs: ORGANIZATION_SANDBOX_CAPACITY_RETRY_MS,
         turnId: "turn-1",
         attemptId: "attempt-1",
+      });
+      // A designed wait for one of the organization's own boxes, not a
+      // sandbox fault: it counts under its own recovery cause.
+      expect(control).toMatchObject({
+        turnMetricOutcome: "recovering",
+        turnRecoveryCause: "organization_limit",
       });
       const recovery = requestRecovery.mock.calls[0]?.[2] as Record<string, unknown>;
       expect(recovery).toMatchObject({
