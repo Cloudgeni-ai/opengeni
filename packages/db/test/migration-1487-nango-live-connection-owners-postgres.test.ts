@@ -109,10 +109,10 @@ describe("migration 1487: live Nango connection owners", () => {
       ),
     ).toBe(true);
     // 1487 created it withheld (1494 grants it): without the grant, no answer.
-    await owned.admin.unsafe(`REVOKE EXECUTE ON FUNCTION ${ROUTINE} FROM opengeni_app`);
-    expect(await listNangoLiveConnectionOwners(client!.db)).toBeNull();
-    await owned.admin.unsafe(`GRANT EXECUTE ON FUNCTION ${ROUTINE} TO opengeni_app`);
     try {
+      await owned.admin.unsafe(`REVOKE EXECUTE ON FUNCTION ${ROUTINE} FROM opengeni_app`);
+      expect(await listNangoLiveConnectionOwners(client!.db)).toBeNull();
+      await owned.admin.unsafe(`GRANT EXECUTE ON FUNCTION ${ROUTINE} TO opengeni_app`);
       // Without any workspace context, as the sweep calls it; one row per page.
       const owners = await listNangoLiveConnectionOwners(client!.db, { pageSize: 1 });
       expect(owners).toEqual(

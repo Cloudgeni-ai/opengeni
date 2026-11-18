@@ -169,11 +169,11 @@ export async function withNangoPersonIntegrationLock<T>(
   });
 }
 
-/** Migration 1482's check, withheld from the runtime for one release. */
+/** Migration 1482's check; created withheld, granted to the runtime by 1494. */
 export const NANGO_CONNECTIONS_IN_USE_ROUTINE =
   "opengeni_private.nango_connections_in_use_v1(text[])";
 
-/** False while the deployment's database withholds the check (1482). */
+/** False on a database without 1494's grant of the check (1482). */
 export async function nangoConnectionsInUseAvailable(db: Database): Promise<boolean> {
   const [row] = await rawRows<{ granted: boolean | null }>(
     db,
@@ -186,9 +186,10 @@ export async function nangoConnectionsInUseAvailable(db: Database): Promise<bool
 /**
  * The ids among `nangoConnectionIds` that some live (not revoked) Nango-backed
  * connection row still stands for, in any organization; null while the check
- * is withheld (see nangoConnectionsInUseAvailable). The check opens and
- * closes a one-transaction capability, so call it from a read-write
- * transaction (every caller holds the person lock in one).
+ * is not granted (a database before 1494; see
+ * nangoConnectionsInUseAvailable). The check opens and closes a
+ * one-transaction capability, so call it from a read-write transaction (every
+ * caller holds the person lock in one).
  */
 export async function nangoConnectionsInUse(
   db: Database,
@@ -208,7 +209,7 @@ export async function nangoConnectionsInUse(
   return used;
 }
 
-/** Migration 1487's listing, withheld from the runtime for one release. */
+/** Migration 1487's listing; created withheld, granted to the runtime by 1494. */
 export const NANGO_LIVE_CONNECTION_OWNERS_ROUTINE =
   "opengeni_private.nango_live_connection_owners_v1(text, text, text, integer)";
 
@@ -221,7 +222,7 @@ export type NangoLiveConnectionOwner = {
 /**
  * Every active Nango-backed row's owner, Nango integration and Nango
  * connection id, deployment-wide (each triple once), in pages of `pageSize`;
- * null while the listing is withheld. Like nangoConnectionsInUse it opens
+ * null on a database without 1494's grant. Like nangoConnectionsInUse it opens
  * and closes a one-transaction capability, so each page runs in its own
  * read-write transaction.
  */

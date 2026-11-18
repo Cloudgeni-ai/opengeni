@@ -1089,16 +1089,16 @@ describe("Nango connections in PostgreSQL", () => {
     );
     // Without the deployment-wide listing (withheld until 1494 granted it)
     // nobody leads the sweep to them.
-    await shared!.admin.unsafe(
-      "REVOKE EXECUTE ON FUNCTION opengeni_private.nango_live_connection_owners_v1(text, text, text, integer) FROM opengeni_app",
-    );
-    await sweepNangoConnections(sweepDeps(nango));
-    expect((await nangoRows(target))[0]).toMatchObject({ status: "active" });
-    await shared!.admin.unsafe(
-      "GRANT EXECUTE ON FUNCTION opengeni_private.nango_live_connection_owners_v1(text, text, text, integer) TO opengeni_app",
-    );
-    await retireOtherNangoRows(target);
     try {
+      await shared!.admin.unsafe(
+        "REVOKE EXECUTE ON FUNCTION opengeni_private.nango_live_connection_owners_v1(text, text, text, integer) FROM opengeni_app",
+      );
+      await sweepNangoConnections(sweepDeps(nango));
+      expect((await nangoRows(target))[0]).toMatchObject({ status: "active" });
+      await shared!.admin.unsafe(
+        "GRANT EXECUTE ON FUNCTION opengeni_private.nango_live_connection_owners_v1(text, text, text, integer) TO opengeni_app",
+      );
+      await retireOtherNangoRows(target);
       // Nango lists only another deployment's connections (possibly the wrong
       // environment): the listing is not used, so nothing is taken for missing.
       nango.remote.push({
@@ -1367,44 +1367,44 @@ describe("Nango connections in PostgreSQL", () => {
     expect(firstRow).toMatchObject({ nango_connection_id: "nsu-2" });
     // First as before 1494 granted the deployment-wide check: decided from the
     // person's own reads, which cannot see the suspended membership.
-    await shared!.admin.unsafe(
-      "REVOKE EXECUTE ON FUNCTION opengeni_private.nango_connections_in_use_v1(text[]) FROM opengeni_app",
-    );
-    // Suspended in the second organization, where a live row still stands for nsu-2.
-    await shared!.admin`update organization_memberships set status = 'suspended'
-      where account_id = ${second.accountId} and subject_id = ${second.subjectId}`;
-    await disconnect(first, firstRow!.id, nango);
-    expect(nango.deleted("nsu-2")).toBe(false);
-    // A fresh attempt that fails is still never left billed.
-    const token = await signedState(first);
-    nango.remote.push({
-      connectionId: "nsu-attempt",
-      tags: attemptTags(first, readNangoConnectState(settings, token).nonce),
-      email: "suspended@example.com",
-      scope: "https://www.googleapis.com/auth/gmail.readonly",
-      authErrors: 0,
-      created: new Date().toISOString(),
-      identityStatus: 403,
-    });
-    await expect(
-      completeNangoConnect(
-        {
-          db: client.db,
-          settings,
-          fetchImpl: nango.fetchImpl,
-          nangoBackends: async () => backends,
-        },
-        { state: token, browser: { bindingDigests: [], signedInSubjectId: null } },
-      ),
-    ).rejects.toThrow();
-    expect(nango.deleted("nsu-attempt")).toBe(true);
-    expect(await sweepNangoConnections(sweepDeps(nango))).toMatchObject({ deletedOrphans: [] });
-    expect(nango.deleted("nsu-2")).toBe(false);
-    // Once granted, the deployment-wide check decides: still in use, then not.
-    await shared!.admin.unsafe(
-      "GRANT EXECUTE ON FUNCTION opengeni_private.nango_connections_in_use_v1(text[]) TO opengeni_app",
-    );
     try {
+      await shared!.admin.unsafe(
+        "REVOKE EXECUTE ON FUNCTION opengeni_private.nango_connections_in_use_v1(text[]) FROM opengeni_app",
+      );
+      // Suspended in the second organization, where a live row still stands for nsu-2.
+      await shared!.admin`update organization_memberships set status = 'suspended'
+      where account_id = ${second.accountId} and subject_id = ${second.subjectId}`;
+      await disconnect(first, firstRow!.id, nango);
+      expect(nango.deleted("nsu-2")).toBe(false);
+      // A fresh attempt that fails is still never left billed.
+      const token = await signedState(first);
+      nango.remote.push({
+        connectionId: "nsu-attempt",
+        tags: attemptTags(first, readNangoConnectState(settings, token).nonce),
+        email: "suspended@example.com",
+        scope: "https://www.googleapis.com/auth/gmail.readonly",
+        authErrors: 0,
+        created: new Date().toISOString(),
+        identityStatus: 403,
+      });
+      await expect(
+        completeNangoConnect(
+          {
+            db: client.db,
+            settings,
+            fetchImpl: nango.fetchImpl,
+            nangoBackends: async () => backends,
+          },
+          { state: token, browser: { bindingDigests: [], signedInSubjectId: null } },
+        ),
+      ).rejects.toThrow();
+      expect(nango.deleted("nsu-attempt")).toBe(true);
+      expect(await sweepNangoConnections(sweepDeps(nango))).toMatchObject({ deletedOrphans: [] });
+      expect(nango.deleted("nsu-2")).toBe(false);
+      // Once granted, the deployment-wide check decides: still in use, then not.
+      await shared!.admin.unsafe(
+        "GRANT EXECUTE ON FUNCTION opengeni_private.nango_connections_in_use_v1(text[]) TO opengeni_app",
+      );
       expect(await sweepNangoConnections(sweepDeps(nango))).toMatchObject({ deletedOrphans: [] });
       expect(nango.deleted("nsu-2")).toBe(false);
       await shared!.admin`update connections set status = 'revoked'

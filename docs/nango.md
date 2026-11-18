@@ -130,7 +130,7 @@ connections; that is not a duplicate.
   rejects a grant on a definer it does not know) and 1494 grants it. Before
   that grant the person's own reads decided, and a membership that was not
   active or an organization that could not be read meant nothing was
-  deleted. The exception is a
+  deleted, except for a
   refused or failed attempt's own connection that Nango made within the
   last two hours and no readable row names (never after a failed read).
   An existing connection replaces a fresh one only while Nango reports it
