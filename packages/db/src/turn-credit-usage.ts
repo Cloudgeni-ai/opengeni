@@ -12,7 +12,7 @@ const TERMINAL_TURN_EVENT_TYPES = [
 
 /**
  * Each turn's `usage` from its latest terminal event (written there by
- * migration 1494's trigger), in one read of the session_events
+ * migration 1495's trigger), in one read of the session_events
  * (workspace_id, turn_id, type) index. A turn without one (still running, or
  * from before the field existed) maps to null. Runs inside the caller's
  * workspace scope.

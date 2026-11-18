@@ -13382,7 +13382,7 @@ export const usageEvents = pgTable(
       table.sessionId,
       table.occurredAt,
     ),
-    // A turn's charges, summed onto its terminal event (migrations 1493, 1494).
+    // A turn's charges, summed onto its terminal event (migrations 1494, 1495).
     workspaceTurn: index("usage_events_workspace_turn_idx")
       .on(table.workspaceId, table.turnId)
       .where(sql`${table.turnId} is not null`),
