@@ -455,7 +455,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   const [accessLoading, setAccessLoading] = useState(false);
   const [accessError, setAccessError] = useState<BootstrapErrorPresentation | null>(null);
   const [creditRequired, setCreditRequired] = useState<CreditRequired | null>(null);
-  const [chosenModel, setModel] = useState("gpt-6-astra");
+  const [chosenModel, setModel] = useState("gpt-6.2-astra");
   const [chosenReasoningEffort, setReasoningEffort] = useState<IntelligenceEffort>("low");
   const [chosenLatencyMode, setLatencyMode] = useState<LatencyMode>("standard");
   // The simplified interface has no model choice: whatever a default, a

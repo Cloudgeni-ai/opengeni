@@ -2,6 +2,38 @@
   "updated_at": "2026-09-29",
   "prices": [
     {
+      "id": "gpt-6.2-astra",
+      "vendor": "openai",
+      "name": "GPT-6.2 Astra ≤272k",
+      "input": 8,
+      "output": 40,
+      "input_cached": 0.4
+    },
+    {
+      "id": "gpt-6.2-astra-272k",
+      "vendor": "openai",
+      "name": "GPT-6.2 Astra >272k",
+      "input": 16,
+      "output": 60,
+      "input_cached": 0.8
+    },
+    {
+      "id": "gpt-6.2-sol",
+      "vendor": "openai",
+      "name": "GPT-6.2 Sol ≤272k",
+      "input": 2,
+      "output": 10,
+      "input_cached": 0.1
+    },
+    {
+      "id": "gpt-6.2-sol-272k",
+      "vendor": "openai",
+      "name": "GPT-6.2 Sol >272k",
+      "input": 4,
+      "output": 15,
+      "input_cached": 0.2
+    },
+    {
       "id": "gpt-6.1-sol",
       "vendor": "openai",
       "name": "GPT-6.1 Sol ≤272k",

@@ -195,7 +195,7 @@ export function ModelsFormPage({
 
 /**
  * Who pays, in one or two words, for the muted part of a model control:
- * "GPT-6 Astra" + "Codex". API-key models name their provider.
+ * "GPT-6.2 Astra" + "Codex". API-key models name their provider.
  */
 export function payerShortLabel(row: { billingClass: string; providerLabel: string }): string {
   switch (row.billingClass) {

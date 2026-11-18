@@ -192,7 +192,7 @@ export interface WorkspaceModelsSnapshot {
   claudeShared: ClaudeSubscriptionAccount[];
   keysOwn: WorkspaceGatewayId[];
   keysShared: { id: GatewayId; models: number }[];
-  /** "GPT-6 Astra · Codex", or null when it can't be read. */
+  /** "GPT-6.2 Astra · Codex", or null when it can't be read. */
   defaultModel: string | null;
   /** "All models", "3 models", or null when it can't be read. */
   allowed: string | null;
@@ -1305,7 +1305,7 @@ function WorkspaceRow({
 }
 
 /**
- * "Default: GPT-6 Astra · Codex", "3 models allowed", what it changed in its
+ * "Default: GPT-6.2 Astra · Codex", "3 models allowed", what it changed in its
  * subscription rules ("Spread Claude work: Off"), or "Uses the defaults".
  */
 function workspaceDifferences(snapshot: WorkspaceModelsSnapshot) {

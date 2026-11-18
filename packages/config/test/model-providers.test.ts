@@ -1197,10 +1197,11 @@ describe("configuredModels", () => {
     expect(
       models.find((model) => model.id === "codex/gpt-6-luna")?.capabilities.inputModalities,
     ).toEqual(["text", "image"]);
-    const astra = models.find((model) => model.id === "codex/gpt-6-astra");
+    expect(models.some((model) => model.id === "codex/gpt-6-astra")).toBe(false);
+    const astra = models.find((model) => model.id === "codex/gpt-6.2-astra");
     expect(astra).toMatchObject({
-      label: "GPT-6 Astra",
-      shortLabel: "6 Astra",
+      label: "GPT-6.2 Astra",
+      shortLabel: "6.2 Astra",
       contextWindowTokens: CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
       effectiveContextWindowTokens: CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
       autoCompactTokenLimit: CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
@@ -1211,6 +1212,13 @@ describe("configuredModels", () => {
       { id: "ultrafast", runnable: true },
     ]);
     expect(astra?.capabilities.inputModalities).toEqual(["text", "image"]);
+    const sol = models.find((model) => model.id === "codex/gpt-6.2-sol");
+    expect(sol).toMatchObject({ label: "GPT-6.2 Sol", shortLabel: "6.2 Sol" });
+    expect(sol?.capabilities.latencyModes.map(({ id }) => id)).toEqual([
+      "standard",
+      "fast",
+      "ultrafast",
+    ]);
   });
 
   test("with no registry returns exactly the built-in allow-list, default model first", () => {
@@ -1937,9 +1945,24 @@ describe("turn execution policy V1", () => {
   });
 
   test("preserves accepted Codex Astra identity across the implicit caching rollout", () => {
-    const current = withCodexCatalogProvider(
-      getSettings({ OPENGENI_CODEX_SUBSCRIPTION_ENABLED: "true" }),
-    );
+    // GPT-6 Astra left the built-in Codex list; a database catalog that still
+    // carries its unchanged definition must keep accepting its older digests.
+    const base = getSettings({ OPENGENI_CODEX_SUBSCRIPTION_ENABLED: "true" });
+    const builtin = JSON.parse(withCodexCatalogProvider(base).modelProvidersJson)[0].models;
+    const sol = builtin.find((model: { id: string }) => model.id === "codex/gpt-6-sol");
+    const current = withCodexCatalogProvider({
+      ...base,
+      resolvedCodexModelsJson: JSON.stringify([
+        {
+          ...sol,
+          id: "codex/gpt-6-astra",
+          upstreamModelId: "gpt-6-astra",
+          label: "GPT-6 Astra",
+          shortLabel: "6 Astra",
+        },
+        sol,
+      ]),
+    });
     const providers = JSON.parse(current.modelProvidersJson);
     delete providers[0].models[0].capabilities.promptCaching;
     const historical = { ...current, modelProvidersJson: JSON.stringify(providers) };

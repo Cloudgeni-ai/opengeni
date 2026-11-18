@@ -104,7 +104,7 @@ export function createModelsCacheFixture(holdDetails = false) {
         return Response.json({
           policy,
           personalWorkspacesSupported: true,
-          models: [{ id: "codex/gpt-6-astra", label: "GPT-6 Astra" }],
+          models: [{ id: "codex/gpt-6.2-astra", label: "GPT-6.2 Astra" }],
           workspaces: [currentWorkspace],
           localWorkspaceIds: [],
         } satisfies ModelConnectionAccessResponse);

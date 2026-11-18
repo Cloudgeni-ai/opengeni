@@ -158,6 +158,31 @@ describe("Ultrafast", () => {
     });
   }
 
+  for (const slug of ["gpt-6.2-astra", "gpt-6.2-sol"]) {
+    test(`${slug} declares Ultrafast at OpenAI's 3× launch rate`, () => {
+      const settings = codexDocument(slug);
+      const model = configuredModels(settings).find(
+        (candidate) => candidate.id === `codex/${slug}`,
+      )!;
+      expect(model.capabilities.latencyModes.map((mode) => mode.id)).toEqual([
+        "standard",
+        "fast",
+        "ultrafast",
+      ]);
+      expect(model.capabilities.latencyModes.at(-1)).toEqual({
+        id: "ultrafast",
+        upstream: "supported",
+        runnable: true,
+        billingMultiplierBps: 30_000,
+      });
+      expect(policy(settings, `codex/${slug}`, "ultrafast")).toMatchObject({
+        upstreamModelId: slug,
+        providerId: "codex-subscription",
+        latencyMode: "ultrafast",
+      });
+    });
+  }
+
   test("models OpenAI does not serve at the tier never offer it", () => {
     const settings = codexDocument("gpt-6-luna");
     const luna = configuredModels(settings).find((model) => model.id === "codex/gpt-6-luna")!;
