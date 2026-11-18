@@ -1,5 +1,140 @@
 # @opengeni/worker-bundle
 
+## 6.28.0
+
+### Minor Changes
+
+- 4ef5ef6: Operators can now see turns parked waiting for subscription capacity. A turn that finds no account with capacity (a usage limit or no eligible account) parks as its chat's active turn, so `opengeni_turns_queued_by_hold{hold="waiting_capacity"}`, which counts only prompts queued behind it, read 0 while turns waited for hours. The control worker now publishes `opengeni_turns_waiting_capacity{provider}`, the turns parked right now that run as soon as capacity returns, by the provider they wait on (`codex`, `claude`, `xai`; 0 when none), and `opengeni_turns_waiting_capacity_oldest_age_seconds{provider}`, the seconds since the oldest of them parked. A wait in a paused or stopped chat (its own Pause or Stop, an ancestor's or the workspace's) or one the capacity reconcile would supersede is not counted. The worker logs `Turn started waiting for subscription capacity` when a turn parks and `Turn stopped waiting for subscription capacity` (with `outcome`, `reason` and `waitedSeconds`) when capacity returns or the wait is superseded.
+
+  Migration 1485 extends the already granted `opengeni_private.summarize_queued_turns_by_hold()` with these rows (an earlier worker ignores them), so a normal deploy publishes the gauges with no further migration. The summary now reads inside the session inventory window, and `subscription_capacity_waiters` and `workspace_inference_controls` gain the owner-only inventory read policy sessions and turns already have: under a database owner that does not bypass row security, the queued-turn split also counts queued turns and workspace pauses it used to miss. `@opengeni/db` exports `summarizeTurnHolds`, `summarizeCapacityWaitingTurns` and `CAPACITY_WAITING_TURN_PROVIDERS`, and a resumed or superseded capacity reconcile reports when the turn parked.
+
+### Patch Changes
+
+- 515bc72: Connector tools have readable names: `<connector>_<account tag>__<tool>` (a configured server's readable id instead of the connector), decided by the tool's identity alone, instead of a name with a different hash per tool. Every tool of one server shares a guessable prefix, and a name never comes to mean another account's or connector's tool. Codemode paths use the same namespace. `tool_search` names, `ogtool show` and Codemode accept a tool's published `server.tool` or its own name, while a call needs a name carrying its server; a query naming several tools loads all of them whatever its limit, and a miss suggests the closest tools. `ogtool show` and the native client's `codemode show` accept several names. A Skill can list the tools it uses in a `tools:` frontmatter key, and reading it loads them. A call to a tool's former name runs nothing and returns its current name; approvals stay keyed by the tool's identity.
+- e09a38b: Unpaid sandboxes are now bounded across the whole fleet, not only per organization and person, so many new accounts cannot add up to a large fleet. All unpaid organizations together share a running-box cap (default 40) and a daily box-time budget (default 300 box-hours per UTC day); an unpaid organization in its first 24 hours runs one box and gets 6 box-hours; and when more than 50 boxes of every plan are warm, unpaid boxes are capped at 15 until the warm count stays below 40 for 15 minutes. A refused start says the shared free capacity is busy (`sandbox_capacity_unpaid_busy`); an agent turn fails with that message instead of retrying, and a turn already on a running box keeps working. Unpaid admissions fail closed when the fleet cannot be read. Paid, Enterprise, host-provisioned and credit-buying organizations are never counted or limited.
+
+  Values are runtime settings in `OPENGENI_SANDBOX_FLEET_LIMITS_JSON`, separate from the plan limits; unknown fields are ignored, so it can be set during a rolling deploy. The reaper records the fleet's state as metrics, with a page while the daily budget is spent. The running caps (including the pressure cap) and the daily budget read a new database function (migration 1486) that a later release grants; until then the young-organization limits apply, and pressure only with a cap of 0.
+
+- Updated dependencies [d5cadac]
+- Updated dependencies [515bc72]
+- Updated dependencies [4ef5ef6]
+- Updated dependencies [e09a38b]
+  - @opengeni/contracts@6.28.0
+  - @opengeni/runtime@6.28.0
+  - @opengeni/codemode@6.28.0
+  - @opengeni/tool-gateway@6.28.0
+  - @opengeni/db@6.28.0
+  - @opengeni/config@6.28.0
+  - @opengeni/capabilities@6.28.0
+  - @opengeni/codex@6.28.0
+  - @opengeni/core@6.28.0
+  - @opengeni/decisions@6.28.0
+  - @opengeni/documents@6.28.0
+  - @opengeni/events@6.28.0
+  - @opengeni/github@6.28.0
+  - @opengeni/interaction@6.28.0
+  - @opengeni/observability@6.28.0
+  - @opengeni/sdk@6.28.0
+  - @opengeni/storage@6.28.0
+  - @opengeni/vaults@6.28.0
+  - @opengeni/vaults-bitwarden@6.28.0
+  - @opengeni/vaults-keeper@6.28.0
+  - @opengeni/vaults-onepassword@6.28.0
+  - @opengeni/vaults-protonpass@6.28.0
+  - @opengeni/jev@6.28.0
+  - @opengeni/agent-proto@6.28.0
+  - @opengeni/network@6.28.0
+  - @opengeni/subscriptions@6.28.0
+  - @opengeni/xai-subscription@6.28.0
+
+## 6.27.1
+
+### Patch Changes
+
+- Updated dependencies [afcb2d6]
+- Updated dependencies [02804ec]
+  - @opengeni/db@6.27.1
+  - @opengeni/contracts@6.27.1
+  - @opengeni/core@6.27.1
+  - @opengeni/documents@6.27.1
+  - @opengeni/events@6.27.1
+  - @opengeni/capabilities@6.27.1
+  - @opengeni/codemode@6.27.1
+  - @opengeni/codex@6.27.1
+  - @opengeni/config@6.27.1
+  - @opengeni/decisions@6.27.1
+  - @opengeni/github@6.27.1
+  - @opengeni/interaction@6.27.1
+  - @opengeni/observability@6.27.1
+  - @opengeni/runtime@6.27.1
+  - @opengeni/sdk@6.27.1
+  - @opengeni/storage@6.27.1
+  - @opengeni/tool-gateway@6.27.1
+  - @opengeni/vaults@6.27.1
+  - @opengeni/vaults-bitwarden@6.27.1
+  - @opengeni/vaults-keeper@6.27.1
+  - @opengeni/vaults-onepassword@6.27.1
+  - @opengeni/vaults-protonpass@6.27.1
+  - @opengeni/jev@6.27.1
+  - @opengeni/agent-proto@6.27.1
+  - @opengeni/network@6.27.1
+  - @opengeni/subscriptions@6.27.1
+  - @opengeni/xai-subscription@6.27.1
+
+## 6.27.0
+
+### Patch Changes
+
+- 8f1f5e2: Free compute is bounded for every kind of sandbox use, not only viewers. A held or denied Free or plan-less organization that has not bought credit or paid for a plan gets no sandbox at all: terminals, commands, background processes, browser and desktop sessions, viewers and new boxes for agent turns are refused, a turn that needs a box fails with a clear message instead of waiting forever, an already running box stays usable only while a turn holds it, and the reaper drains boxes no turn holds. A person who owns or administers such an organization carries the restriction into their other unpaid organizations.
+
+  Free, young Free and plan-less organizations share one running-box budget of 2 across every holder kind, plus 2 running boxes and 12 box-hours per UTC day per organization and per person across their organizations. Past the daily budget no box starts and the reaper drains boxes no turn holds, while an in-flight turn finishes. Boxes that nothing uses drain after the viewer idle window, whatever holds them. All values are plan-limit settings (`OPENGENI_SANDBOX_PLAN_LIMITS_JSON`).
+
+  Every new Modal box carries hard CPU and memory ceilings (2 cores / 4096 MiB for unpaid organizations, 16 cores / 32768 MiB for paid, Enterprise, host-provisioned and credit-buying organizations), and a create without them is refused. Unpaid boxes can be limited to an outbound CIDR/domain allowlist; Modal has no per-port egress rule, so SMTP cannot be blocked by port alone.
+
+  A denied Free organization with no paid history is suspended from sandboxes, Site publishing, invitations, uploads and API keys until the decision is reversed or it buys credit; sign-in keeps working. Creating an additional organization now goes through the signup network checks and rate limit, and inherits its owner's review hold.
+
+  An unpaid organization that bought credit is treated as paying: no per-person, daily or all-holder idle bounds. Paid, Enterprise and host-provisioned organizations are unaffected.
+
+  Rollout: set the new plan-limit fields in `OPENGENI_SANDBOX_PLAN_LIMITS_JSON` only after this release runs everywhere, because older pods reject unknown fields. Defaults for `free`, `new` and `none`: `runningBoxesPerOrganization` 2, `runningBoxesPerPerson` 2, `boxSecondsPerOrganizationPerDay` 43200, `boxSecondsPerPersonPerDay` 43200, `idleDrainAllHolders` true; `restricted` is 0 for every count.
+
+- Updated dependencies [5d63995]
+- Updated dependencies [c3ca657]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [8f1f5e2]
+- Updated dependencies [5d63995]
+- Updated dependencies [d85f57f]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [d51e6e5]
+  - @opengeni/runtime@6.27.0
+  - @opengeni/capabilities@6.27.0
+  - @opengeni/contracts@6.27.0
+  - @opengeni/sdk@6.27.0
+  - @opengeni/db@6.27.0
+  - @opengeni/core@6.27.0
+  - @opengeni/config@6.27.0
+  - @opengeni/codemode@6.27.0
+  - @opengeni/codex@6.27.0
+  - @opengeni/decisions@6.27.0
+  - @opengeni/documents@6.27.0
+  - @opengeni/events@6.27.0
+  - @opengeni/github@6.27.0
+  - @opengeni/interaction@6.27.0
+  - @opengeni/observability@6.27.0
+  - @opengeni/storage@6.27.0
+  - @opengeni/tool-gateway@6.27.0
+  - @opengeni/vaults@6.27.0
+  - @opengeni/vaults-bitwarden@6.27.0
+  - @opengeni/vaults-keeper@6.27.0
+  - @opengeni/vaults-onepassword@6.27.0
+  - @opengeni/vaults-protonpass@6.27.0
+  - @opengeni/jev@6.27.0
+  - @opengeni/agent-proto@6.27.0
+  - @opengeni/network@6.27.0
+  - @opengeni/subscriptions@6.27.0
+  - @opengeni/xai-subscription@6.27.0
+
 ## 6.26.0
 
 ### Patch Changes

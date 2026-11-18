@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import * as db from "@opengeni/db";
+import * as eventBus from "@opengeni/events";
 import { DrizzleQueryError } from "drizzle-orm";
 import { isPostClaimDatabaseRecoveryCandidate } from "../src/activities/agent-turn/errors";
 import {
@@ -188,5 +189,85 @@ describe.each(["codex", "claude", "xai"] as const)("%s core capacity arming", (p
       activityStatus: "cancelled",
       turnMetricOutcome: "cancelled",
     });
+  });
+});
+
+describe.each(["codex", "claude", "xai"] as const)("%s capacity wait start log", (provider) => {
+  function fixture(events: unknown[]) {
+    const info = mock((_message: string, _attributes: Record<string, unknown>) => undefined);
+    const waiter = {
+      waiterId: "waiter-1",
+      provider,
+      generation: 1,
+      wakeRevision: 1,
+      waitReason: "no_eligible_capacity",
+      earliestResetAt: new Date("2030-01-01T00:00:00.000Z"),
+      nextCheckAt: new Date("2030-01-01T00:01:00.000Z"),
+    };
+    const arm = mock(async () => ({ action: "waiting" as const, waiter, events }));
+    const deps = {
+      input: {
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+        attemptId: "attempt-1",
+      },
+      db: {},
+      bus: {},
+      observability: { info, warn: mock(() => undefined) },
+      control: { activityStatus: "running", turnMetricOutcome: null, activityError: null },
+      attempt: { turnId: "turn-1" },
+      eventing: { settle: mock(async () => true) },
+      claimedResult: (value: Record<string, unknown>) => ({ ...value }),
+      acknowledgeLostAttemptOwnership: mock(() => undefined),
+    } as unknown as CapacityPhaseDeps;
+    restorers.push(spyOn(db, "getSessionGoal").mockResolvedValue(null));
+    restorers.push(spyOn(db, "resolveWaitingSteer").mockResolvedValue(null as never));
+    restorers.push(
+      spyOn(eventBus, "publishDurableSessionEvents").mockResolvedValue(undefined as never),
+    );
+    // The waiter is gone by the immediate re-evaluation; the start is logged regardless.
+    const binding = {
+      provider,
+      arm,
+      getWaiterById: async () => null,
+    } as unknown as CoreWaitBinding;
+    const run = () =>
+      parkCoreSubscriptionTurn(
+        deps,
+        {
+          kind: "wait",
+          reason: "no_eligible_capacity",
+          earliestResetAt: null,
+          healthRetryAt: null,
+        },
+        binding,
+        providers[provider],
+      );
+    return { info, run };
+  }
+
+  test("a newly armed wait logs its start once", async () => {
+    const f = fixture([{ type: "turn.capacity_waiting" }]);
+    await f.run();
+    const starts = f.info.mock.calls.filter(
+      ([message]) => message === "Turn started waiting for subscription capacity",
+    );
+    expect(starts).toHaveLength(1);
+    expect(starts[0]![1]).toMatchObject({
+      provider,
+      waitReason: "no_eligible_capacity",
+      earliestResetAt: "2030-01-01T00:00:00.000Z",
+      nextCheckAt: "2030-01-01T00:01:00.000Z",
+      waiterId: "waiter-1",
+      sessionId: "session-1",
+      turnId: "turn-1",
+    });
+  });
+
+  test("a replayed arm that finds its wait in place logs nothing", async () => {
+    const f = fixture([]);
+    await f.run();
+    expect(f.info).not.toHaveBeenCalled();
   });
 });

@@ -239,6 +239,35 @@ function unquoteFallbackValue(value: string): string {
     .trim();
 }
 
+/** At most this many declared tools are read from one Skill. */
+export const SKILL_DECLARED_TOOLS_MAX = 20;
+
+/**
+ * Tool reference names a Skill declares in its SKILL.md frontmatter
+ * `tools:` key, as a YAML list or one comma- or space-separated string
+ * (`server.tool`, `server__tool`, or a tool's own name). Reading the Skill
+ * loads these tools. A header that is not valid YAML declares none.
+ */
+export function skillDeclaredTools(markdown: string): string[] {
+  const block = frontmatterBlock(markdown);
+  if (!block) return [];
+  const document = parseDocument(block.join("\n"), { schema: "core", prettyErrors: false });
+  if (document.errors.length) return [];
+  const metadata: unknown = document.toJS({ maxAliasCount: 20 });
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return [];
+  const declared = (metadata as Record<string, unknown>).tools;
+  const names = Array.isArray(declared)
+    ? declared.filter((name): name is string => typeof name === "string")
+    : typeof declared === "string"
+      ? declared.split(/[\s,]+/u)
+      : [];
+  return [
+    ...new Set(
+      names.map((name) => name.trim()).filter((name) => name.length > 0 && name.length <= 256),
+    ),
+  ].slice(0, SKILL_DECLARED_TOOLS_MAX);
+}
+
 export function readSkillMetadata(markdown: string): { name: string; description: string } {
   const { name, description } = parseSkillFrontmatter(markdown);
   if (!name || name.length > 64 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(name))

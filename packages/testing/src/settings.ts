@@ -507,6 +507,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     sandboxMaxWarmSecondsPerWorkspace: 0,
     sandboxMaxViewerOnlyBoxesPerWorkspace: 3,
     sandboxPlanLimitsJson: "",
+    sandboxFleetLimitsJson: "",
     sandboxPreparationProfiles: "none",
     sandboxEnvAllowlist: "",
     sandboxImageAllowlist: "",

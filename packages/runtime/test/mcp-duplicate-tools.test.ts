@@ -161,7 +161,7 @@ describe("a model name claimed by an MCP tool and a built-in tool", () => {
         attemptToolDefinitions: [
           {
             identity: localIdentity,
-            modelName: "remote__observe",
+            modelName: "observe",
             codemodePath: [localIdentity.serverId, localIdentity.toolName],
             inputSchema: { type: "object", additionalProperties: false },
             source: "interaction",
@@ -194,25 +194,28 @@ describe("a model name claimed by an MCP tool and a built-in tool", () => {
     };
   }
 
-  test("the built-in tool keeps the name; the connector's tool is left out, not rerouted", async () => {
+  test("the built-in tool keeps the name; the connector's tool is named server__tool", async () => {
     const shared = await prepareShared({ serverId: "interaction", toolName: "observe" });
     try {
       // Built-in tools claim their model names before any connector lists.
-      expect(shared.prepared.attemptToolCatalog!.entries.map((entry) => entry.identity)).toEqual([
-        { serverId: "interaction", toolName: "observe" },
+      expect(
+        shared.prepared
+          .attemptToolCatalog!.entries.map((entry) => [entry.modelName, entry.identity])
+          .sort(),
+      ).toEqual([
+        ["observe", { serverId: "interaction", toolName: "observe" }],
+        ["remote__observe", { serverId: "remote", toolName: "observe" }],
       ]);
-      expect((await shared.remoteServer.listTools()).map((tool) => tool.name)).toEqual([]);
-      expect(shared.prepared.unavailableMcpServers.get("remote")).toMatch(
-        /1 of its tools are unavailable this turn .*clash with another integration/,
-      );
-      expect(await shared.localServer.callToolResult!("remote__observe", {})).toMatchObject({
+      expect((await shared.remoteServer.listTools()).map((tool) => tool.name)).toEqual([
+        "remote__observe",
+      ]);
+      expect(shared.prepared.unavailableMcpServers.get("remote")).toBeUndefined();
+      expect(await shared.localServer.callToolResult!("observe", {})).toMatchObject({
         content: [{ type: "text", text: "observed locally" }],
       });
       expect(shared.local).toEqual(["observe"]);
-      await expect(shared.remoteServer.callTool("remote__observe", {})).rejects.toMatchObject({
-        name: "ToolGatewayToolNotFoundError",
-      });
-      expect(shared.mcp.called).toEqual([]);
+      await shared.remoteServer.callTool("remote__observe", {});
+      expect(shared.mcp.called).toEqual(["observe"]);
     } finally {
       await shared.close();
     }
@@ -227,7 +230,7 @@ describe("a model name claimed by an MCP tool and a built-in tool", () => {
       await expect(shared.remoteServer.callTool("remote__observe", {})).rejects.toMatchObject({
         name: "ToolGatewayToolNotFoundError",
       });
-      expect(await shared.localServer.callToolResult!("remote__observe", {})).toMatchObject({
+      expect(await shared.localServer.callToolResult!("observe", {})).toMatchObject({
         content: [{ type: "text", text: "observed locally" }],
       });
       expect(shared.mcp.called).toEqual([]);

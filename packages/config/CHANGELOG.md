@@ -1,5 +1,53 @@
 # @opengeni/config
 
+## 6.28.0
+
+### Patch Changes
+
+- e09a38b: Unpaid sandboxes are now bounded across the whole fleet, not only per organization and person, so many new accounts cannot add up to a large fleet. All unpaid organizations together share a running-box cap (default 40) and a daily box-time budget (default 300 box-hours per UTC day); an unpaid organization in its first 24 hours runs one box and gets 6 box-hours; and when more than 50 boxes of every plan are warm, unpaid boxes are capped at 15 until the warm count stays below 40 for 15 minutes. A refused start says the shared free capacity is busy (`sandbox_capacity_unpaid_busy`); an agent turn fails with that message instead of retrying, and a turn already on a running box keeps working. Unpaid admissions fail closed when the fleet cannot be read. Paid, Enterprise, host-provisioned and credit-buying organizations are never counted or limited.
+
+  Values are runtime settings in `OPENGENI_SANDBOX_FLEET_LIMITS_JSON`, separate from the plan limits; unknown fields are ignored, so it can be set during a rolling deploy. The reaper records the fleet's state as metrics, with a page while the daily budget is spent. The running caps (including the pressure cap) and the daily budget read a new database function (migration 1486) that a later release grants; until then the young-organization limits apply, and pressure only with a cap of 0.
+
+- Updated dependencies [d5cadac]
+- Updated dependencies [515bc72]
+  - @opengeni/contracts@6.28.0
+  - @opengeni/codex@6.28.0
+  - @opengeni/xai-subscription@6.28.0
+
+## 6.27.1
+
+### Patch Changes
+
+- Updated dependencies [02804ec]
+  - @opengeni/contracts@6.27.1
+  - @opengeni/codex@6.27.1
+  - @opengeni/xai-subscription@6.27.1
+
+## 6.27.0
+
+### Patch Changes
+
+- 8f1f5e2: Free compute is bounded for every kind of sandbox use, not only viewers. A held or denied Free or plan-less organization that has not bought credit or paid for a plan gets no sandbox at all: terminals, commands, background processes, browser and desktop sessions, viewers and new boxes for agent turns are refused, a turn that needs a box fails with a clear message instead of waiting forever, an already running box stays usable only while a turn holds it, and the reaper drains boxes no turn holds. A person who owns or administers such an organization carries the restriction into their other unpaid organizations.
+
+  Free, young Free and plan-less organizations share one running-box budget of 2 across every holder kind, plus 2 running boxes and 12 box-hours per UTC day per organization and per person across their organizations. Past the daily budget no box starts and the reaper drains boxes no turn holds, while an in-flight turn finishes. Boxes that nothing uses drain after the viewer idle window, whatever holds them. All values are plan-limit settings (`OPENGENI_SANDBOX_PLAN_LIMITS_JSON`).
+
+  Every new Modal box carries hard CPU and memory ceilings (2 cores / 4096 MiB for unpaid organizations, 16 cores / 32768 MiB for paid, Enterprise, host-provisioned and credit-buying organizations), and a create without them is refused. Unpaid boxes can be limited to an outbound CIDR/domain allowlist; Modal has no per-port egress rule, so SMTP cannot be blocked by port alone.
+
+  A denied Free organization with no paid history is suspended from sandboxes, Site publishing, invitations, uploads and API keys until the decision is reversed or it buys credit; sign-in keeps working. Creating an additional organization now goes through the signup network checks and rate limit, and inherits its owner's review hold.
+
+  An unpaid organization that bought credit is treated as paying: no per-person, daily or all-holder idle bounds. Paid, Enterprise and host-provisioned organizations are unaffected.
+
+  Rollout: set the new plan-limit fields in `OPENGENI_SANDBOX_PLAN_LIMITS_JSON` only after this release runs everywhere, because older pods reject unknown fields. Defaults for `free`, `new` and `none`: `runningBoxesPerOrganization` 2, `runningBoxesPerPerson` 2, `boxSecondsPerOrganizationPerDay` 43200, `boxSecondsPerPersonPerDay` 43200, `idleDrainAllHolders` true; `restricted` is 0 for every count.
+
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+  - @opengeni/contracts@6.27.0
+  - @opengeni/codex@6.27.0
+  - @opengeni/xai-subscription@6.27.0
+
 ## 6.26.0
 
 ### Patch Changes

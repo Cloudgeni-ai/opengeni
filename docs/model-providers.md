@@ -1813,12 +1813,15 @@ tools and in every history item that carries definitions (`tool_search_output`,
 call, a Claude `tool_use`); one invalid name fails the whole request. The one
 format every provider and gateway accepts is `^[a-zA-Z0-9_-]{1,64}$`, and
 top-level names already use it, but a model can call a tool by its published
-`server.tool` form. The lazy tool transport names such a call once, when the
+`server.tool` form (connector tool wire names are described in
+[MCP surfaces](mcp-surfaces.md#tool-names-the-name-to-call-and-the-name-to-ask-by)).
+The lazy tool transport names such a call once, when the
 model's output item is received and before it is stored
-(`providerValidCallName` in `provider-tool-names.ts`): the one authorized
-tool it denotes (dotted `server.tool`, or a published short name), deferred
-tools included, else a stable alias with a digest of the whole name, so
-distinct names never collide. The call is stored and replayed with that name,
+(`providerValidCallName` in `provider-tool-names.ts`): the authorized tool
+it names exactly (dotted `server.tool` for `server__tool`), deferred tools
+included, else a stable alias with a digest of the whole name, so
+distinct names never collide. A published name alone does not name a server
+or account, so it is never mapped to a tool. The call is stored and replayed with that name,
 and history is never rewritten later, so every later request repeats the
 earlier items byte for byte. Chat Completions routes keep their own treatment
 of any other invalid name: such a call replays as a historical fact rather

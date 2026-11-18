@@ -36,6 +36,8 @@ import {
   releaseSubscriptionTurnLease,
   retrySubscriptionCapacityWakeDelivery,
   submitHumanPromptInTransaction,
+  summarizeCapacityWaitingTurns,
+  summarizeQueuedTurnsByHold,
   subscriptionCoreCodexCapacityWaitRef,
   subscriptionCoreCodexResetAuthority,
   subscriptionCoreCodexReselectionPoints,
@@ -600,6 +602,77 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
         evaluation: { kind: "run" },
       }),
     ).toEqual({ action: "stale", events: [] });
+  });
+
+  test("a parked turn counts as waiting for capacity by provider until it resumes; the queued-turn split never sees it", async () => {
+    const org = await organization();
+    const connectionId = await sharedConnection(org, "capacity-gauge");
+    const resetAt = Date.now() + 3_600_000;
+    await exhaust(org, connectionId, resetAt);
+    // Other tests in this file leave turns parked, so compare with before.
+    const before = await summarizeCapacityWaitingTurns(client!.db);
+    const queuedBefore = await summarizeQueuedTurnsByHold(client!.db);
+    const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    const armed = await arm(turn, new Date(resetAt));
+    if (armed.action !== "waiting") throw new Error(`arm returned ${armed.action}`);
+    expect(await rowState(turn)).toMatchObject({
+      session_status: "waiting_capacity",
+      turn_status: "waiting_capacity",
+    });
+
+    // The parked turn is its session's active turn, not a queued prompt: the
+    // queued-turn hold split (opengeni_turns_queued_by_hold) is unchanged.
+    const queuedParked = await summarizeQueuedTurnsByHold(client!.db);
+    expect(queuedParked.waiting_capacity.count).toBe(queuedBefore.waiting_capacity.count);
+    // The capacity summary counts it under the provider it waits on.
+    const parked = await summarizeCapacityWaitingTurns(client!.db);
+    expect(parked.codex.count).toBe(before.codex.count + 1);
+    expect(parked.claude.count).toBe(before.claude.count);
+    expect(parked.xai.count).toBe(before.xai.count);
+
+    // Its age runs from the close of the attempt that parked it.
+    const [attempt] = await shared!.admin<{ closed_at: Date; outcome: string }[]>`
+      select closed_at, outcome from session_turn_attempts
+      where id = ${turn.attemptId}::uuid`;
+    expect(attempt!.outcome).toBe("waiting_capacity");
+    await shared!.admin`update session_turn_attempts
+      set closed_at = now() - interval '2 hours'
+      where id = ${turn.attemptId}::uuid`;
+    const aged = await summarizeCapacityWaitingTurns(client!.db);
+    expect(aged.codex.oldestAgeSeconds).toBeGreaterThanOrEqual(7_200);
+    expect(aged.codex.oldestAgeSeconds).toBeLessThan(7_200 + 600);
+
+    // Capacity returns: the turn resumes, stops counting, and the reconcile
+    // reports when it parked (the worker logs the wait's length from it).
+    await exhaust(org, connectionId, null);
+    const resumed = await reconcileSubscriptionCoreCodexCapacityWait(client!.db, {
+      accountId: org.accountId,
+      workspaceId: org.sharedWorkspaceId,
+      sessionId: turn.identity.sessionId,
+      waiterId: armed.waiter.waiterId,
+      generation: armed.waiter.generation,
+      evaluatedWakeRevision: armed.waiter.wakeRevision,
+      evaluation: { kind: "run" },
+    });
+    if (resumed.action !== "resumed") throw new Error(`reconcile returned ${resumed.action}`);
+    expect(Date.now() - resumed.parkedAt!.getTime()).toBeGreaterThanOrEqual(7_200_000);
+    const after = await summarizeCapacityWaitingTurns(client!.db);
+    expect(after.codex.count).toBe(before.codex.count);
+
+    // A waiter row a transition left behind is not a wait.
+    const orphaned = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    await exhaust(org, connectionId, resetAt);
+    if ((await arm(orphaned, new Date(resetAt))).action !== "waiting")
+      throw new Error("arm failed");
+    expect((await summarizeCapacityWaitingTurns(client!.db)).codex.count).toBe(
+      before.codex.count + 1,
+    );
+    await shared!.admin`update session_turns set status = 'superseded', finished_at = now()
+      where id = ${orphaned.identity.turnId}::uuid`;
+    await shared!.admin`update sessions set status = 'idle', active_turn_id = null
+      where id = ${orphaned.identity.sessionId}::uuid`;
+    expect(await waiterRows(orphaned)).toHaveLength(1);
+    expect((await summarizeCapacityWaitingTurns(client!.db)).codex.count).toBe(before.codex.count);
   });
 
   test("the person's notification is restated in place when its reset passes or a later limit binds, never for an earlier one", async () => {

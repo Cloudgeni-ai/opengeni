@@ -170,6 +170,10 @@ A goal is `active`, `paused`, or `completed`.
   redirects apply directly. An applied semantic change advances both objective
   and lifecycle revisions but is not execution progress. Proposed content is
   not composed into model instructions until a user applies it.
+- A `goal_update` whose text, success criteria and policy equal the current
+  goal is not a rewrite: it writes nothing (no revision, proposal or event),
+  keeps its idempotency receipt, and returns `outcome: "unchanged"` with a
+  plain message. The expected objective revision is still checked first.
 - Goal edits do not grant permissions, change root constraints, or authorize
   work beyond the human's actual request. Preserve the intended outcome rather
   than shrinking it to fit completed work. Internal revision numbers remain

@@ -21,6 +21,7 @@ import {
   applyGitAuthPointerEnvironment,
   hasGitCredentialRepositorySelection,
   sandboxLifecycleTransitionWaitMs,
+  sandboxFleetLimits,
   sandboxPlanLimits,
   settingsForSandboxPlanTier,
   sandboxWarmRateMicrosPerSecond,
@@ -1095,6 +1096,7 @@ async function withChannelAOperation<T>(
       // A direct operation that would start a new box counts against the
       // organization's running-box limit (429 at the limit).
       sandboxPlanLimits: sandboxPlanLimits(settings),
+      sandboxFleetLimits: sandboxFleetLimits(settings),
       // The person behind the operation (an agent attempt's initiating
       // human): their other organizations count toward the per-person bounds.
       actingSubjectId: sandboxActingPerson((await machineAuthority()).subjectId),
@@ -1653,6 +1655,20 @@ export function channelAOperationFailureDiagnostic(
     return {
       reason: "request_rejected",
       status: error.reasonCode === "authority_revoked" ? 403 : 409,
+      errorCode: "sandbox_channel_a_operation_failed",
+    };
+  }
+  // Compute admission refusals (insufficient credits as 402, the organization's
+  // running-box limit as 403 or 429) are deliberate answers, not server faults.
+  // Report the status the route returns so the log and metric match the response.
+  if (
+    error instanceof SandboxPaidComputeAdmissionError ||
+    error instanceof SandboxOrganizationBoxLimitError
+  ) {
+    const mapped = mapChannelAError(error, waitSignal);
+    return {
+      reason: "request_rejected",
+      status: mapped instanceof HTTPException ? mapped.status : 500,
       errorCode: "sandbox_channel_a_operation_failed",
     };
   }

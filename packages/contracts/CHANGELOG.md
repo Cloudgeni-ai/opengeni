@@ -1,5 +1,38 @@
 # @opengeni/contracts
 
+## 6.28.0
+
+### Patch Changes
+
+- d5cadac: Artifacts in the phone app. A bottom bar moves between Chats, Artifacts, Meetings and Inbox (with a count of what waits on you; Automations stays in the chats menu), and on iOS a swipe right from the left edge opens the chats menu. Artifacts lists the workspace's Sites, documents, presentations, spreadsheets, images and files as cards with a still, with search and type chips; a card opens a full-screen viewer with Share and the web library's menu (Open chat, Pin, Duplicate, Copy link, Download, Delete…). An artifact linked on its own line in a chat is a card that opens the same viewer.
+
+  `createWebMarkdownRenderer` takes `renderOpenGeniLink` to draw a standalone Opengeni object link as a block. The native icon set adds `presentation`, `share` and `link`. `SiteViewRoute` takes `embedded` to show the Site alone, without its toolbar or chat. The inbox row's snooze fade no longer crashes dev builds with a non-increasing range, and `useNativeInbox` starts empty when its client changes (another account) instead of showing the last account's items, and takes `enabled` to read nothing while signed out. The client page list adds `native-view`.
+
+- 515bc72: Connector tools have readable names: `<connector>_<account tag>__<tool>` (a configured server's readable id instead of the connector), decided by the tool's identity alone, instead of a name with a different hash per tool. Every tool of one server shares a guessable prefix, and a name never comes to mean another account's or connector's tool. Codemode paths use the same namespace. `tool_search` names, `ogtool show` and Codemode accept a tool's published `server.tool` or its own name, while a call needs a name carrying its server; a query naming several tools loads all of them whatever its limit, and a miss suggests the closest tools. `ogtool show` and the native client's `codemode show` accept several names. A Skill can list the tools it uses in a `tools:` frontmatter key, and reading it loads them. A call to a tool's former name runs nothing and returns its current name; approvals stay keyed by the tool's identity.
+
+## 6.27.1
+
+### Patch Changes
+
+- 02804ec: Creating or updating a session with a first-party tool's old name from before a one-to-one rename (for example `session_send_message`, now `session_queue_message`) selects the new name again instead of failing with "disabled by deployment policy". Clients built against an older contract kept sending the old name and every such session was refused at creation. The old name is still never offered to models.
+
+## 6.27.0
+
+### Minor Changes
+
+- 5d63995: Sites can ask what each of their tools needs for the current viewer before a click: `site.tools.$readiness(targets)` (`POST /v1/workspaces/:id/tools/readiness`) answers `ready`, `confirm`, `choose_account`, `connect`, `reconnect`, `blocked`, `open_in_opengeni` or `unavailable`, with the account the tool runs as, and `site.tools.$onReadinessChange` fires after a connect, a reconnect, an "Always allow" or a reset. It reads the same authority as a call and never reaches the provider; calls still enforce everything.
+
+  The Site tool confirmation shows which account the action runs as ("Shared with workspace" for a workspace account, "You" when none is involved). The checkbox now reads "Always allow on this Site from this account". The Site menu has "Reset allowed actions" (`POST /v1/workspaces/:id/tools/site-allowances/reset`).
+
+  Typed failures: a tool set to Block answers 403 with `details.code` `tool_blocked` (Site code: `site_tool_blocked`); a confirmation a published address can't show is `site_tool_open_in_opengeni`. A tool server that couldn't be reached before anything was sent (refused connection, DNS failure, a tunnel that is gone, decided only at the MCP transport's own request) now answers 503 `upstream_unavailable` with `details.code` `tool_server_unreachable`, `retryable: true` and `outcomeUnknown: false` for every gateway caller instead of a 500 (Site code: `site_tool_upstream_unavailable`).
+
+### Patch Changes
+
+- 5d63995: A connected account that needs more access for a tool now shows "Give {provider} more access" with Allow in the chat instead of a connect card, and Allow finds the account even when it is homed in another workspace. Site tool readiness reports `grant` (with the scopes needed) for such tools, and `unavailable` with reason `account` when the account's access is fixed and cannot be extended.
+- 5d63995: An active account on either backend of a connector (its own sign-in or Nango) now counts as that connector's account. Connection health, the connector's account list and `GET /connect/accounts` match a Nango account to the connector it serves, so a working Nango account reads Connected, and removed or replaced native accounts no longer raise "Needs attention". `GET /connect/accounts` also lists Nango accounts and reads native accounts of a Nango-backed connector as needing sign-in, as the account inventory does. Your own account from another workspace that is off here and signed out now reads "Signed out" with Reconnect instead of offering a new sign-in.
+- 5d63995: When a tool needs access that a fixed-access account (for example one managed through Nango) cannot be given, the chat now shows "{provider} can't do this with the connected account" with no step-up. The `tool.auth_needed` notice keeps the legacy-safe reason `unsupported_auth`, so older clients show the tools as unavailable, and adds `accountReason: "account_scope_fixed"` with the scopes the tool needs.
+- 5d63995: Accounts held by Nango are listed by `GET /connect/accounts` with `backend: "nango"`, and the chat and Settings never start a native reconnect for them; a chat Reconnect opens the connector's own Connect instead. A workspace-shared Nango Google account reads as connected.
+
 ## 6.26.0
 
 ### Patch Changes

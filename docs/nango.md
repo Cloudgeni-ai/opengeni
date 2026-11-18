@@ -207,7 +207,7 @@ URL, so deployments sharing one Nango environment never sweep each other's):
   the row). A row with a healthy connection of the same account that covers
   its scopes is moved onto that one instead. People are found through
   Nango's tags and, once a later migration grants it,
-  `opengeni_private.nango_live_connection_owners_v1` (migration 1485: the
+  `opengeni_private.nango_live_connection_owners_v1` (migration 1487: the
   owner, integration and Nango connection id of every active Nango row), so
   a person whose only connection is gone is visited too. Until that grant,
   only people with at least one connection this deployment tagged are

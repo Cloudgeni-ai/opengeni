@@ -359,7 +359,10 @@ workspace) approved for exactly that repository and branch and that the same
 attempt is running; an agent's decision, or a call that reached the tool any
 other way, attaches nothing. The repository must be one the workspace GitHub
 App offers now, the same catalog and permission as the repository picker, and
-neither archived nor empty. It is attached to the chat's own repositories as
+neither archived nor empty. Empty means GitHub lists no branch for it; GitHub's
+repository `size` is not used, because GitHub computes it lazily and it stays 0
+for a while after the first push. When the branch list cannot be read, the
+repository is attached anyway. It is attached to the chat's own repositories as
 `optional` on the requested branch or its default branch, with a
 `session.resources.added` event, and from the next turn it is one of the
 chat's repositories, handled like the others: a managed sandbox clones it at

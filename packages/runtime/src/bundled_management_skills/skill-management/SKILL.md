@@ -55,6 +55,9 @@ That file is the source of truth: edit its frontmatter to change how the Skill
 appears in the index. There is no separately editable short description. Saves
 derive the index metadata from the same revision; supporting-file edits leave
 it unchanged. Invalid or missing frontmatter is an error, not a fallback.
+A Skill that uses particular tools can list them in an optional `tools:` list
+(`server.tool`, or a tool's own name); reading the Skill loads them, so they
+can be called without a tool search.
 Choose a fresh UUID `skillId`, set `expectedRevisionId` to null and
 `expectedScopeVersion` to 1, and retain the operation id for retries.
 Keep the main instructions focused; place longer references or scripts in

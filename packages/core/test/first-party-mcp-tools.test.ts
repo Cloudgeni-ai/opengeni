@@ -21,6 +21,30 @@ describe("first-party MCP tool selection at session creation", () => {
       );
     }
   });
+
+  test("a renamed tool's old name selects its successor instead of being refused", () => {
+    // Clients built against an older contract still send session_send_message.
+    expect(
+      resolveFirstPartyMcpToolsForCreate(["session_get", "session_send_message"], undefined, {
+        default: ["session_get"],
+        allowed: ["session_get", "session_queue_message"],
+      }),
+    ).toEqual(["session_get", "session_queue_message"]);
+    // A ceiling built from current names (old names filtered out) accepts it too.
+    expect(
+      resolveFirstPartyMcpToolsForCreate(["session_send_message"], undefined, {
+        default: DEFAULT_FIRST_PARTY_MCP_TOOLS,
+        allowed: DEFAULT_FIRST_PARTY_MCP_TOOLS,
+      }),
+    ).toEqual(["session_queue_message"]);
+    // Still refused when the deployment disables the successor.
+    expect(() =>
+      resolveFirstPartyMcpToolsForCreate(["session_send_message"], undefined, {
+        default: ["session_get"],
+        allowed: ["session_get"],
+      }),
+    ).toThrow("first-party MCP tools are disabled by deployment policy: session_send_message.");
+  });
   test("top-level omission snapshots the complete default catalog", () => {
     expect(resolveFirstPartyMcpToolsForCreate(undefined, undefined)).toEqual([
       ...DEFAULT_FIRST_PARTY_MCP_TOOLS,

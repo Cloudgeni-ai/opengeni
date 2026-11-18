@@ -45,8 +45,10 @@ function positiveRepositoryId(value: unknown): number | null {
  * through its current catalog entry (the same catalog and `github:use`
  * permission as the website picker), on its default branch, so a Slack task
  * never reaches a repository the person could not attach on the website today.
- * Archived and empty repositories are skipped when GitHub reported that,
- * because a clone of an empty repository has nothing to check out. Every
+ * Archived repositories are skipped when GitHub reported that. An empty
+ * repository is kept, as a new chat in the app keeps it: the sandbox starts it
+ * on an unborn branch. GitHub's repository `size` is not used to tell, because
+ * GitHub computes it lazily and it stays 0 for a while after a push. Every
  * returned resource is best effort (`optional`): one failed clone warns instead
  * of failing setup.
  */
@@ -88,7 +90,7 @@ export function selectFormRepositoryResources(
     const identity = `${match.installationId}:${match.id}`;
     if (chosen.has(identity)) continue;
     chosen.add(identity);
-    if (match.archived === true || match.sizeKb === 0) continue;
+    if (match.archived === true) continue;
     let resource: RepositoryResourceRef;
     try {
       resource = { ...githubRepositoryResourceRef(match), optional: true };

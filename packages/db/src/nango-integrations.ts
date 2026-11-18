@@ -208,7 +208,7 @@ export async function nangoConnectionsInUse(
   return used;
 }
 
-/** Migration 1485's listing, withheld from the runtime for one release. */
+/** Migration 1487's listing, withheld from the runtime for one release. */
 export const NANGO_LIVE_CONNECTION_OWNERS_ROUTINE =
   "opengeni_private.nango_live_connection_owners_v1(text, text, text, integer)";
 

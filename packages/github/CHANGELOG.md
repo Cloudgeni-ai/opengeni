@@ -1,5 +1,39 @@
 # @opengeni/github
 
+## 6.28.0
+
+### Patch Changes
+
+- Updated dependencies [d5cadac]
+- Updated dependencies [515bc72]
+- Updated dependencies [e09a38b]
+  - @opengeni/contracts@6.28.0
+  - @opengeni/config@6.28.0
+  - @opengeni/network@6.28.0
+
+## 6.27.1
+
+### Patch Changes
+
+- Updated dependencies [02804ec]
+  - @opengeni/contracts@6.27.1
+  - @opengeni/config@6.27.1
+  - @opengeni/network@6.27.1
+
+## 6.27.0
+
+### Patch Changes
+
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [8f1f5e2]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+  - @opengeni/contracts@6.27.0
+  - @opengeni/config@6.27.0
+  - @opengeni/network@6.27.0
+
 ## 6.26.0
 
 ### Patch Changes

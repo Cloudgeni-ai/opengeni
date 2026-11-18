@@ -1,12 +1,8 @@
 import { expect, test } from "bun:test";
 import { RunContext, type MCPServer } from "@openai/agents";
 import { testSettings } from "@opengeni/testing/settings";
-import {
-  buildOpenGeniAgent,
-  prepareAgentTools,
-  prefixedMcpToolName,
-  type ConnectorActionToolCall,
-} from "../src/index";
+import { buildOpenGeniAgent, prepareAgentTools, type ConnectorActionToolCall } from "../src/index";
+import { mcpServerNamespace, mcpWireToolNames } from "../src/mcp-model-tool-name";
 
 for (const backend of ["none", "docker"] as const) {
   test(`${backend}: actual SDK account tools are bounded, reversible and approval-gated after cloning`, async () => {
@@ -74,8 +70,10 @@ for (const backend of ["none", "docker"] as const) {
       expect(tools).toHaveLength(routes.length * names.length);
       expect(new Set(tools.map((tool) => tool.name)).size).toBe(tools.length);
       for (const [routeIndex, route] of routes.entries()) {
+        // `send-mail` and `send_mail` share one spelling, so the server's whole list decides.
+        const wire = mcpWireToolNames(route, mcpServerNamespace(route).namespace, names);
         for (const name of names) {
-          const modelName = prefixedMcpToolName(route, name);
+          const modelName = wire.get(name)!;
           expect(modelName.length).toBeLessThanOrEqual(64);
           expect(modelName).toMatch(/^[A-Za-z0-9_]+$/);
           const tool = tools.find((entry) => entry.name === modelName);

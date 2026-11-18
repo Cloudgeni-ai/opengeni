@@ -17,6 +17,8 @@ import {
   materializeCodemodeImages,
   type AttemptToolCatalog,
   type AttemptToolCatalogEntry,
+  catalogToolResolutionMessage,
+  resolveCatalogTool,
 } from "@opengeni/codemode";
 import { omitStructuredContentTextDuplicates, type AttemptToolResult } from "@opengeni/contracts";
 import packageManifest from "../package.json" with { type: "json" };
@@ -32,8 +34,8 @@ function usage(exitCode = 1): void {
     "usage:",
     "  ogtool list [--full | --json]",
     "              [--query <substring>] [--limit <1..100>] [--offset <nonnegative integer>]",
-    "  ogtool show <tool-path-or-model-name>",
-    "  ogtool call <tool-path-or-model-name> [json-object | @file | -] [--full] [--save-image <path>]",
+    "  ogtool show <tool-name> [<tool-name>...]",
+    "  ogtool call <tool-name> [json-object | @file | -] [--full] [--save-image <path>]",
     "  ogtool read <operation-id>",
     "  ogtool resume <operation-id>",
     "  ogtool declarations [output-file]",
@@ -41,6 +43,8 @@ function usage(exitCode = 1): void {
     "  ogtool --version",
     "",
     "list returns all authorized tools by default; --limit/--offset are opt-in slices",
+    "a tool-name is its path (server.tool) or server__tool; show also accepts the tool's own",
+    "  name when only one tool has it, and prints an array when given several names",
     "call reads its arguments inline, from a file with @path, or from stdin with -;",
     "  use a file or stdin for large arguments",
     "call omits a text block that only repeats structuredContent; --full prints the exact result",
@@ -144,19 +148,19 @@ function doctor(): void {
   process.exitCode = ok ? 0 : 1;
 }
 
-export function resolveTool(catalog: AttemptToolCatalog, name: string): AttemptToolCatalogEntry {
-  const matches = catalog.entries.filter(
-    (entry) =>
-      entry.modelName === name ||
-      entry.codemodePath.join(".") === name ||
-      `${entry.identity.serverId}.${entry.identity.toolName}` === name,
-  );
-  if (matches.length !== 1) {
-    throw new Error(
-      matches.length === 0 ? `Unknown Codemode tool: ${name}` : `Ambiguous tool: ${name}`,
-    );
-  }
-  return matches[0]!;
+/**
+ * The tool `name` refers to. show accepts the tool's own name alone; call
+ * (`forCall`) needs a name that carries the tool's server, so a call never
+ * reaches another account's tool of the same name.
+ */
+export function resolveTool(
+  catalog: AttemptToolCatalog,
+  name: string,
+  forCall = false,
+): AttemptToolCatalogEntry {
+  const resolved = resolveCatalogTool(catalog, name, { allowPlainName: !forCall });
+  if ("entry" in resolved) return resolved.entry;
+  throw new Error(catalogToolResolutionMessage(resolved));
 }
 
 export function listProjection(catalog: AttemptToolCatalog): Record<string, unknown> {
@@ -178,11 +182,12 @@ export function listProjection(catalog: AttemptToolCatalog): Record<string, unkn
   };
 }
 
-export function showOutput(catalog: AttemptToolCatalog, name: string): string {
-  const entry = resolveTool(catalog, name);
-  const projection = listProjection({ ...catalog, entries: [entry] });
-  const output = JSON.stringify((projection.tools as unknown[])[0], null, 2);
-  return `${output}\n`;
+/** One tool prints its object; several print an array in the order asked. */
+export function showOutput(catalog: AttemptToolCatalog, names: string | readonly string[]): string {
+  const asked = typeof names === "string" ? [names] : names;
+  const entries = asked.map((name) => resolveTool(catalog, name));
+  const tools = listProjection({ ...catalog, entries }).tools as unknown[];
+  return `${JSON.stringify(asked.length === 1 ? tools[0] : tools, null, 2)}\n`;
 }
 
 /**
@@ -318,8 +323,11 @@ async function main(): Promise<void> {
   )
     return usage(0);
   const listOptions = command === "list" ? parseListOptions(args) : null;
-  if (command === "show" && (args.length !== 1 || !args[0] || args[0].startsWith("-"))) {
-    throw new Error("usage: ogtool show <tool-path-or-model-name>");
+  if (
+    command === "show" &&
+    (args.length === 0 || args.some((arg) => !arg || arg.startsWith("-")))
+  ) {
+    throw new Error("usage: ogtool show <tool-name> [<tool-name>...]");
   }
 
   const client = configuredClient();
@@ -341,7 +349,7 @@ async function main(): Promise<void> {
     return;
   }
   if (command === "show") {
-    process.stdout.write(showOutput(await client.catalog(), args[0]!));
+    process.stdout.write(showOutput(await client.catalog(), args));
     return;
   }
   if (command === "call") {
@@ -350,7 +358,7 @@ async function main(): Promise<void> {
     if (!name) throw new Error("tool path or model name is required");
     const argumentsValue = await readToolArguments(rawArguments);
     const catalog = await client.catalog();
-    const entry = resolveTool(catalog, name);
+    const entry = resolveTool(catalog, name, true);
     if (saveTo !== undefined) preflightImagePath(saveTo);
     const operationId = randomUUID();
     const result = await client.call(entry.identity, argumentsValue, { operationId });

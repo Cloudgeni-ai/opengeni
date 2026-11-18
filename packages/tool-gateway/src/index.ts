@@ -77,6 +77,11 @@ export type ToolGatewayDefinition = Omit<ToolGatewayCatalogEntryValue, "codemode
   }) => Promise<void> | void;
   /** In-process execution lifecycle; never enters the public catalog or its digest. */
   lifecycle?: ToolGatewayCallLifecycle;
+  /**
+   * In-process: reference names of tools a model call with these arguments
+   * makes available. Never enters the public catalog or its digest.
+   */
+  discloses?: (args: Record<string, unknown>) => Promise<readonly string[]>;
   execute: (
     args: Record<string, unknown>,
     context: ToolGatewayExecutionContext,
@@ -599,6 +604,7 @@ function admitToolGatewayDefinitions(
         requiresProviderPreflight: _requiresProviderPreflight,
         preflightCall: _preflightCall,
         lifecycle: _lifecycle,
+        discloses: _discloses,
         codemodePath: _path,
         ...entryInput
       } = definition;
