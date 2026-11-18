@@ -159,9 +159,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * organizations cannot be fully read.
  * 1487 withholds the listing of live Nango rows' owners; until it is
  * granted, the Nango sweep only visits people Nango lists a connection for.
- * 1486 withholds the unpaid sandbox fleet counts; until they are granted, the
- * unpaid fleet running cap and box-time budget are inactive (fleet pressure
- * and the young-organization limit still apply).
+ * 1486 withheld the unpaid sandbox fleet counts and 1490 granted them.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -175,7 +173,6 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
   "nango_connections_in_use_v1(text[])",
   "nango_live_connection_owners_v1(text, text, text, integer)",
-  "sandbox_unpaid_fleet_v1(uuid, boolean)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**

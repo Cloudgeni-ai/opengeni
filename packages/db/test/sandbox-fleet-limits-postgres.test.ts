@@ -305,6 +305,66 @@ describe("unpaid fleet limits (real PostgreSQL)", () => {
     expect((await acquire(paidYoung, "direct", fleet)).role).toBe("spawner");
   }, 120_000);
 
+  test("a young unpaid organization that never started a turn gets a short box time; a chat always works", async () => {
+    const fleet = { youngOrganizationAgeMs: DAY_MS, youngTurnlessBoxSeconds: 900 };
+    const used = async (org: Org, seconds: number) => {
+      await admin`insert into usage_events (account_id, workspace_id, event_type, quantity, unit,
+          idempotency_key, occurred_at)
+        values (${org.accountId}, ${org.workspaceId}, 'sandbox.warm_seconds', ${seconds}, 'seconds',
+          ${crypto.randomUUID()}, now() - interval '1 minute')`;
+    };
+    const turn = async (org: Org) => {
+      const sessionId = crypto.randomUUID();
+      await admin`insert into sessions (id, account_id, workspace_id, initial_message, model,
+          reasoning_effort, latency_mode, sandbox_backend, sandbox_group_id, tool_policy,
+          root_session_id, status)
+        values (${sessionId}, ${org.accountId}, ${org.workspaceId}, 'hello', 'test-model', 'medium',
+          'standard', 'modal', ${sessionId},
+          jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null), ${sessionId}, 'idle')`;
+      await admin`insert into session_turns (id, account_id, workspace_id, session_id,
+          trigger_event_id, temporal_workflow_id, status, position, prompt, model, reasoning_effort,
+          sandbox_backend, finished_at)
+        values (${crypto.randomUUID()}, ${org.accountId}, ${org.workspaceId}, ${sessionId},
+          ${crypto.randomUUID()}, 'wf', 'completed', 1, 'hello', 'test-model', 'medium', 'modal', now())`;
+    };
+    // Opening the desktop briefly is fine.
+    const young = await organization({ plan: "free", ageMs: 3600_000 });
+    await used(young, 899);
+    const group = crypto.randomUUID();
+    expect((await acquire(young, "viewer", fleet, { group })).role).toBe("spawner");
+    // Past it, with no turn ever: someone using the running box is not cut
+    // off (the reaper drains it once idle), but no box that is not running
+    // starts again for a desktop, terminal, browser or viewer.
+    await used(young, 1);
+    for (const kind of ["viewer", "direct", "interaction"] as const) {
+      expect((await acquire(young, kind, fleet, { group })).role).not.toBe("fenced");
+    }
+    for (const kind of ["viewer", "direct", "interaction"] as const) {
+      const spent = await refusal(acquire(young, kind, fleet, { group: crypto.randomUUID() }));
+      expect([spent.reason, spent.code, spent.limit]).toEqual([
+        "young_turnless",
+        "sandbox_compute_unavailable",
+        900,
+      ]);
+      expect(spent.message).toContain("15 minutes of sandbox time before their first chat");
+    }
+    // A chat always gets its box, and then everything works again.
+    expect((await acquire(young, "turn", fleet, { holderId: "chat-1" })).role).toBe("spawner");
+    await turn(young);
+    expect((await acquire(young, "direct", fleet, { group })).role).not.toBe("fenced");
+    // The same use by an organization that chatted, an older or a paid one.
+    const chatted = await organization({ plan: "free", ageMs: 3600_000 });
+    await turn(chatted);
+    await used(chatted, 3600);
+    expect((await acquire(chatted, "viewer", fleet)).role).toBe("spawner");
+    const older = await organization({ plan: "free", ageMs: 2 * DAY_MS });
+    await used(older, 3600);
+    expect((await acquire(older, "viewer", fleet)).role).toBe("spawner");
+    const paidYoung = await organization({ plan: "pro", ageMs: 3600_000 });
+    await used(paidYoung, 3600);
+    expect((await acquire(paidYoung, "viewer", fleet)).role).toBe("spawner");
+  }, 120_000);
+
   test("fleet pressure stops new unpaid boxes and releases with hysteresis", async () => {
     const current = await warmBoxes();
     const fleet = {

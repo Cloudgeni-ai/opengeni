@@ -831,7 +831,11 @@ test("review lists denied network holds with their own reason; release by rule",
     const held = await owner([ip]);
     const listed = await listSignupNetworkHolds(ownerClient.db);
     expect(listed.schemaVersion).toBe(2);
-    expect(listed.policyVersions).toEqual(["ip-velocity-v1", "denied-network-v1"]);
+    expect(listed.policyVersions).toEqual([
+      "ip-velocity-v1",
+      "denied-network-v1",
+      "email-cluster-v1",
+    ]);
     expect(listed.settings.deniedNetworkMode).toBe("enforce");
     expect(listed.accounts.map((account) => account.accountId)).toEqual([held.accountId]);
     expect(listed.accounts[0]).toMatchObject({

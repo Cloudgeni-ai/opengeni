@@ -12666,6 +12666,15 @@ export function sandboxPlanLimits(
  *   age runs at most that many boxes, and once it has used that many metered
  *   box seconds since it was created it gets no box until it is older (like
  *   a spent daily budget).
+ * - `youngTurnlessBoxSeconds` / `youngTurnlessIdleMs`: such a young
+ *   organization in which no turn was ever started gets that many metered
+ *   box seconds (a desktop, browser, terminal or viewer with no chat). Past
+ *   it, the reaper drains a box no turn holds once nothing on it (requests,
+ *   reported viewer interaction, processes, Browser/ComputerSessions) was
+ *   active for `youngTurnlessIdleMs`; running commands are never cut off.
+ *   Holders other than a turn may still join a running box, but a box that
+ *   is not running is not started again for them. Starting a chat always
+ *   works and lifts the bound.
  * - `pressureEngageWarmBoxes` / `pressureReleaseWarmBoxes` /
  *   `pressureReleaseAfterMs` / `pressureUnpaidRunningBoxes`: when more than
  *   `pressureEngageWarmBoxes` boxes of every plan are warm, the unpaid cap
@@ -12679,6 +12688,8 @@ export type SandboxFleetLimits = {
   youngOrganizationAgeMs?: number;
   youngOrganizationRunningBoxes?: number;
   youngOrganizationBoxSeconds?: number;
+  youngTurnlessBoxSeconds?: number;
+  youngTurnlessIdleMs?: number;
   pressureEngageWarmBoxes?: number;
   pressureReleaseWarmBoxes?: number;
   pressureReleaseAfterMs?: number;
@@ -12691,6 +12702,8 @@ const SANDBOX_FLEET_LIMIT_FIELDS = [
   "youngOrganizationAgeMs",
   "youngOrganizationRunningBoxes",
   "youngOrganizationBoxSeconds",
+  "youngTurnlessBoxSeconds",
+  "youngTurnlessIdleMs",
   "pressureEngageWarmBoxes",
   "pressureReleaseWarmBoxes",
   "pressureReleaseAfterMs",
@@ -12699,14 +12712,17 @@ const SANDBOX_FLEET_LIMIT_FIELDS = [
 
 /** Sized from hosted production's unpaid traffic: legitimate Free use peaked
  * at 15 concurrent boxes and 112 box-hours a day, and new organizations'
- * first day at a p90 of under two box-hours. Pressure engages at the same 50
- * warm boxes as the warm-fleet page. */
+ * first day at a p90 of under two box-hours. 95% of new people start their
+ * first turn within 15 minutes of their first session. Pressure engages at
+ * the same 50 warm boxes as the warm-fleet page. */
 export const DEFAULT_SANDBOX_FLEET_LIMITS: SandboxFleetLimits = {
   unpaidRunningBoxes: 40,
   unpaidBoxSecondsPerDay: 300 * 60 * 60,
   youngOrganizationAgeMs: 24 * 60 * 60 * 1000,
   youngOrganizationRunningBoxes: 1,
   youngOrganizationBoxSeconds: 6 * 60 * 60,
+  youngTurnlessBoxSeconds: 15 * 60,
+  youngTurnlessIdleMs: 5 * 60 * 1000,
   pressureEngageWarmBoxes: 50,
   pressureReleaseWarmBoxes: 40,
   pressureReleaseAfterMs: 15 * 60 * 1000,

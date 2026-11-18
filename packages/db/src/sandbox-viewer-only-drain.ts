@@ -327,7 +327,11 @@ export async function drainViewerOnlyLease(
 //     time;
 //   - compute_idle: nothing on it was used (a new request, process, browser
 //     or desktop session, reported viewer interaction, message or turn) for
-//     the idle window.
+//     the idle window;
+//   - compute_turnless: an unpaid organization in its first day that never
+//     started a turn used the box time it gets before one, and nothing on
+//     the box was active for the turnless idle window. A box that still runs
+//     commands or holds a Browser/ComputerSession is kept (never stopped).
 //
 // A box held only by viewers and in-flight requests drains like a viewer-only
 // box. A box that still runs commands or holds a Browser/ComputerSession gets
@@ -337,7 +341,11 @@ export async function drainViewerOnlyLease(
 // until someone is admitted again.
 // ============================================================================
 
-export type ComputeBoundsDrainReason = "compute_closed" | "compute_daily_budget" | "compute_idle";
+export type ComputeBoundsDrainReason =
+  | "compute_closed"
+  | "compute_daily_budget"
+  | "compute_idle"
+  | "compute_turnless";
 
 export type NoTurnWarmLease = ViewerOnlyWarmLease & {
   /** The box's backend (`compute` boxes are listed but never idle-drained). */
@@ -446,7 +454,7 @@ export async function drainNoTurnLeaseForComputeBounds(
     sandboxGroupId: string;
     expectedEpoch: number;
     reason: ComputeBoundsDrainReason;
-    /** compute_idle only: nothing on the box was active for this long. */
+    /** compute_idle and compute_turnless: nothing on the box was active for this long. */
     quietForMs: number;
     idleGraceMs: number;
   },
@@ -491,7 +499,13 @@ export async function drainNoTurnLeaseForComputeBounds(
         ) {
           return { drained: false, reason: "compute_commands" };
         }
-        if (input.reason === "compute_idle") {
+        // compute_turnless never cuts off someone using the box: a turn
+        // queued since the read (which lifts the bound), a running command
+        // or Browser/ComputerSession, or recent activity keeps it.
+        if (input.reason === "compute_turnless" && current.commandHolders > 0) {
+          return { drained: false, reason: "compute_commands" };
+        }
+        if (input.reason === "compute_idle" || input.reason === "compute_turnless") {
           if (current.openSessionWork) return { drained: false, reason: "open_session_work" };
           const quietCutoffMs =
             current.observedAt.getTime() - Math.max(0, Math.floor(input.quietForMs));

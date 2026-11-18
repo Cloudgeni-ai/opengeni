@@ -50015,6 +50015,10 @@ export class SandboxViewerBoxLimitError extends Error {
  *   already runs `limit` boxes;
  * - `young_box_time`: an unpaid organization in its first day used the box
  *   time new organizations get (`limit` seconds);
+ * - `young_turnless`: an unpaid organization in its first day that never
+ *   started a turn used the box time it gets before one (`limit` seconds);
+ *   only holders other than a turn are refused, and only to start a box that
+ *   is not running (joining a running box works), so starting a chat works;
  * - `fleet_busy`: unpaid organizations together already run as many boxes as
  *   the fleet allows (`limit`), or the fleet is under pressure;
  * - `fleet_daily_budget`: unpaid organizations together used today's fleet
@@ -50027,6 +50031,7 @@ export type SandboxOrganizationBoxLimitReason =
   | "daily_budget"
   | "young_running"
   | "young_box_time"
+  | "young_turnless"
   | "fleet_busy"
   | "fleet_daily_budget";
 
@@ -50059,6 +50064,11 @@ export function sandboxOrganizationBoxLimitMessage(
       return `New organizations on the Free plan can use ${Math.round(
         limit / 3600,
       )} sandbox hours during their first day, and this one has. Sandboxes start again when it is a day old; add credit or choose a paid plan to keep working now.`;
+    case "young_turnless":
+      return `New organizations on the Free plan get ${Math.max(
+        1,
+        Math.round(limit / 60),
+      )} minutes of sandbox time before their first chat. Start a chat to keep using the sandbox, or add credit or choose a paid plan.`;
     case "fleet_busy":
       return "Free sandboxes are at capacity right now. Try again in a few minutes, or add credit or choose a paid plan to start one now.";
     case "fleet_daily_budget":
@@ -50480,7 +50490,10 @@ async function readSandboxPersonStanding(
           })
         : null;
       return {
-        restricted: standing.tier === "restricted" && standing.ownDecision !== null,
+        restricted:
+          standing.tier === "restricted" &&
+          standing.ownDecision !== null &&
+          standing.ownDecisionFollowsPerson,
         runningBoxes: counts?.runningBoxes ?? 0,
         seconds: owned ? await organizationBoxSecondsToday(tx, organizationId) : 0,
       };
@@ -50568,6 +50581,11 @@ export type SandboxPlanStanding = {
   paidHistory: boolean;
   /** Its own promotion decision is held or denied while enforcement is on. */
   ownDecision: "held" | "denied" | null;
+  /** Whether that decision follows the person into the other organizations
+   * they own or administer. A detector hold on an additional organization
+   * (the rapid or linked rule, or a signup rule) holds only that
+   * organization; a denial or any reviewer's decision follows the person. */
+  ownDecisionFollowsPerson: boolean;
   /** Restricted because its own decision is denied (not only held and not
    * only linked): the organization is suspended. See
    * resolveSandboxSuspension. */
@@ -50634,6 +50652,8 @@ export async function resolveSandboxPlanStanding(
     plan_key: string | null;
     status: string | null;
     decision: string | null;
+    decision_actor: string | null;
+    additional_organization: boolean | null;
     enforcement: boolean | null;
     hosted_account: boolean | null;
     young: boolean | null;
@@ -50641,7 +50661,10 @@ export async function resolveSandboxPlanStanding(
     created_at: Date | string | null;
   }>(
     tx,
-    sql`select plan.plan_key, plan.status, decision.decision,
+    sql`select plan.plan_key, plan.status, decision.decision, decision.actor as decision_actor,
+        exists (select 1 from managed_accounts account
+          where account.id = organization.account_id
+            and account.external_source = 'opengeni:additional-organization') as additional_organization,
         (select account.created_at from managed_accounts account
           where account.id = organization.account_id) as created_at,
         (select enforcement.enabled from promotion_enforcement enforcement
@@ -50668,6 +50691,7 @@ export async function resolveSandboxPlanStanding(
       tier: SANDBOX_EMBEDDED_PLAN_TIER,
       paidHistory: false,
       ownDecision: null,
+      ownDecisionFollowsPerson: false,
       suspended: false,
       organizationCreatedAt,
     };
@@ -50687,6 +50711,13 @@ export async function resolveSandboxPlanStanding(
     row?.enforcement === true && (row?.decision === "held" || row?.decision === "denied")
       ? row.decision
       : null;
+  const ownDecisionFollowsPerson =
+    ownDecision !== null &&
+    !(
+      ownDecision === "held" &&
+      row?.decision_actor === "service:promotion-detector" &&
+      row?.additional_organization === true
+    );
   // Restricted only without paid history: a person who bought credit or paid
   // for a plan is never cut off by a review decision.
   if (
@@ -50698,6 +50729,7 @@ export async function resolveSandboxPlanStanding(
       tier: "restricted",
       paidHistory,
       ownDecision,
+      ownDecisionFollowsPerson,
       suspended: ownDecision === "denied",
       organizationCreatedAt,
     };
@@ -50707,11 +50739,19 @@ export async function resolveSandboxPlanStanding(
       tier: SANDBOX_NEW_PLAN_TIER,
       paidHistory,
       ownDecision,
+      ownDecisionFollowsPerson,
       suspended: false,
       organizationCreatedAt,
     };
   }
-  return { tier, paidHistory, ownDecision, suspended: false, organizationCreatedAt };
+  return {
+    tier,
+    paidHistory,
+    ownDecision,
+    ownDecisionFollowsPerson,
+    suspended: false,
+    organizationCreatedAt,
+  };
 }
 
 export function sandboxPlanLimitFor(limits: SandboxPlanLimits, tier: string): SandboxPlanLimit {
@@ -52374,7 +52414,12 @@ async function acquireLeaseOnce(
                 ? "daily_budget"
                 : sandboxYoungBoxTimeSpent(fleet)
                   ? "young_box_time"
-                  : null;
+                  : kind !== "turn" &&
+                      row.liveness !== "warm" &&
+                      row.liveness !== "warming" &&
+                      sandboxYoungTurnlessTimeSpent(fleet)
+                    ? "young_turnless"
+                    : null;
           const turnHeldWarm = row.liveness === "warm" && Number(row.turn_holders) > 0;
           if (refusal !== null && !turnHeldWarm) {
             const inFlightTurn =
@@ -52396,7 +52441,9 @@ async function acquireLeaseOnce(
                   ? 0
                   : refusal === "young_box_time"
                     ? (fleet?.limits.youngOrganizationBoxSeconds ?? 0)
-                    : sandboxDailyBoxTimeLimitSeconds(planLimit, standing),
+                    : refusal === "young_turnless"
+                      ? (fleet?.limits.youngTurnlessBoxSeconds ?? 0)
+                      : sandboxDailyBoxTimeLimitSeconds(planLimit, standing),
                 refusal,
               );
             }
@@ -52994,6 +53041,9 @@ type SandboxFleetAdmission = {
   /** A young organization's metered box seconds since it was created; null
    * when unbounded or unreadable (fails open, like its other own bounds). */
   youngBoxSeconds: number | null;
+  /** A young organization that never started a turn (read only for a holder
+   * other than a turn; false when unread or unreadable, failing open). */
+  turnless: boolean;
 };
 
 function sandboxYoungBoxTimeSpent(fleet: SandboxFleetAdmission | null): boolean {
@@ -53006,7 +53056,61 @@ function sandboxYoungBoxTimeSpent(fleet: SandboxFleetAdmission | null): boolean 
   );
 }
 
-async function organizationBoxSecondsSince(
+/** Whether a young organization is past the box time it gets before its
+ * first turn (`youngTurnlessBoxSeconds`). */
+function sandboxYoungTurnlessTimeSpent(fleet: SandboxFleetAdmission | null): boolean {
+  return (
+    fleet !== null &&
+    fleet.young &&
+    fleet.turnless &&
+    fleet.limits.youngTurnlessBoxSeconds !== undefined &&
+    fleet.youngBoxSeconds !== null &&
+    fleet.youngBoxSeconds >= fleet.limits.youngTurnlessBoxSeconds
+  );
+}
+
+/**
+ * Whether any turn was ever created in the organization (any workspace,
+ * shared or personal; the first 50 workspaces). Meant for young
+ * organizations, which have a few workspaces and turns.
+ */
+export async function organizationHasAnyTurn(db: Database, accountId: string): Promise<boolean> {
+  // A turn once created stays created: remember the organizations that have
+  // one, so frequent holders (terminal input, viewer heartbeats) read once.
+  if (ORGANIZATIONS_WITH_A_TURN.has(accountId)) return true;
+  const workspaces = await withRlsContext(
+    db,
+    { accountId, workspaceId: null },
+    async (scopedDb) =>
+      await rawRows<{ id: string }>(
+        scopedDb,
+        sql`select id from workspaces where account_id = ${accountId}::uuid
+          order by created_at limit 50`,
+      ),
+  );
+  for (const { id: workspaceId } of workspaces) {
+    const [row] = await withRlsContext(
+      db,
+      { accountId, workspaceId },
+      async (scopedDb) =>
+        await rawRows<{ any_turn: boolean }>(
+          scopedDb,
+          sql`select exists (select 1 from session_turns
+            where workspace_id = ${workspaceId}::uuid limit 1) as any_turn`,
+        ),
+    );
+    if (row?.any_turn) {
+      if (ORGANIZATIONS_WITH_A_TURN.size >= 10_000) ORGANIZATIONS_WITH_A_TURN.clear();
+      ORGANIZATIONS_WITH_A_TURN.add(accountId);
+      return true;
+    }
+  }
+  return false;
+}
+const ORGANIZATIONS_WITH_A_TURN = new Set<string>();
+
+/** Metered box seconds of one organization since `since`. */
+export async function organizationBoxSecondsSince(
   db: Database,
   accountId: string,
   since: Date,
@@ -53056,14 +53160,34 @@ async function readSandboxFleetAdmission(
     createdAt !== null &&
     Date.now() - createdAt.getTime() < limits.youngOrganizationAgeMs;
   let youngBoxSeconds: number | null = null;
-  if (young && createdAt !== null && limits.youngOrganizationBoxSeconds !== undefined) {
+  const turnlessBounded = limits.youngTurnlessBoxSeconds !== undefined && input.kind !== "turn";
+  if (
+    young &&
+    createdAt !== null &&
+    (limits.youngOrganizationBoxSeconds !== undefined || turnlessBounded)
+  ) {
     try {
       youngBoxSeconds = await organizationBoxSecondsSince(db, input.accountId, createdAt);
     } catch (error) {
       reportSandboxComputeStandingFallback(input.onComputeStandingFallback, error, "organization");
     }
   }
-  return { limits, pressure, boxSecondsToday, boxSecondsFailed, young, youngBoxSeconds };
+  // Only once its turnless box time is used: a turn ever started in the
+  // organization lifts the bound for good. A failed read fails open.
+  let turnless = false;
+  if (
+    young &&
+    turnlessBounded &&
+    youngBoxSeconds !== null &&
+    youngBoxSeconds >= limits.youngTurnlessBoxSeconds!
+  ) {
+    try {
+      turnless = !(await organizationHasAnyTurn(db, input.accountId));
+    } catch (error) {
+      reportSandboxComputeStandingFallback(input.onComputeStandingFallback, error, "organization");
+    }
+  }
+  return { limits, pressure, boxSecondsToday, boxSecondsFailed, young, youngBoxSeconds, turnless };
 }
 
 export async function acquireLease(

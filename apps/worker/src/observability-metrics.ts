@@ -1831,6 +1831,7 @@ export const SANDBOX_COMPUTE_BOUNDS_DRAIN_REASONS = [
   "compute_closed",
   "compute_daily_budget",
   "compute_idle",
+  "compute_turnless",
 ] as const;
 
 export type SandboxComputeBoundsDrainReason = (typeof SANDBOX_COMPUTE_BOUNDS_DRAIN_REASONS)[number];

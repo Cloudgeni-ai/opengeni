@@ -4375,7 +4375,6 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
       "nango_connections_in_use_v1(text[])",
       "nango_live_connection_owners_v1(text, text, text, integer)",
-      "sandbox_unpaid_fleet_v1(uuid, boolean)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
