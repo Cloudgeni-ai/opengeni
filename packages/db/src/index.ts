@@ -36326,7 +36326,8 @@ const SESSION_INPUT_WAIT_RETIRING_UPDATE_KINDS = (
  *
  * A person's turn consumes awaited machine input in two ways: its claim
  * delivered a pending immediate-class update to it, or its model read a
- * child's complete answer (`CONSUMED_CHILD_ANSWERS_METADATA_KEY`) that is a
+ * child's complete answer (`CONSUMED_CHILD_ANSWERS_METADATA_KEY`, or
+ * `CODEMODE_CHILD_ANSWER_READS_METADATA_KEY` for a Codemode read) that is a
  * part of a child result then superseded as `consumed_by_parent_read`: the
  * answer, a goal continuation, or an omitted earlier part (see
  * `childTerminalResultFinalAnswerSequences`). That result never wakes the
@@ -36352,9 +36353,12 @@ function sessionInputWaitDecidingTurnSql(
   waitTurnId: SQLWrapper | string,
 ): SQL {
   const consumedAnswersKey = CONSUMED_CHILD_ANSWERS_METADATA_KEY;
+  const codemodeReadsKey = CODEMODE_CHILD_ANSWER_READS_METADATA_KEY;
   const consumedAnswers = (metadata: SQLWrapper) =>
     sql`jsonb_array_elements(case when jsonb_typeof(${metadata} -> ${consumedAnswersKey}) = 'array'
-      then ${metadata} -> ${consumedAnswersKey} else '[]'::jsonb end)`;
+      then ${metadata} -> ${consumedAnswersKey} else '[]'::jsonb end
+      || case when jsonb_typeof(${metadata} -> ${codemodeReadsKey}) = 'array'
+      then ${metadata} -> ${codemodeReadsKey} else '[]'::jsonb end)`;
   // By its unique (workspace, id) key: the declaring turn is this session's.
   const waitDeclaredAt = sql`(select declaring.finished_at from ${schema.sessionTurns} declaring
     where declaring.workspace_id = ${turn.workspaceId} and declaring.id = ${waitTurnId})`;
@@ -81339,6 +81343,17 @@ export async function acknowledgeConsumedChildEvents(
  * or unproven record delivers the child's result normally.
  */
 export const CONSUMED_CHILD_ANSWERS_METADATA_KEY = "consumedChildAnswers";
+/**
+ * Turn metadata key recording each direct child answer that a Codemode client
+ * of one exact attempt (for example `ogtool call` in a shell command) received
+ * whole. The read alone proves nothing, since a script may keep the output to
+ * itself: such a record counts only once a tool result in the same turn's
+ * durable history holds that answer as a whole JSON string value, which is the
+ * model's own view of the output. Kept apart from
+ * `CONSUMED_CHILD_ANSWERS_METADATA_KEY` so readers that predate it never take
+ * it for a model read.
+ */
+export const CODEMODE_CHILD_ANSWER_READS_METADATA_KEY = "codemodeChildAnswerReads";
 const CONSUMED_CHILD_ANSWERS_MAX = 64;
 const CONSUMED_CHILD_ANSWERS_TURN_WINDOW = 16;
 /** The model call ids a read record keeps; longer ids are not recorded. */
@@ -81355,9 +81370,12 @@ type ConsumedChildAnswerEntry = {
   callId?: string;
 };
 
-function consumedChildAnswerEntries(metadata: unknown): ConsumedChildAnswerEntry[] {
+function consumedChildAnswerEntries(
+  metadata: unknown,
+  key: string = CONSUMED_CHILD_ANSWERS_METADATA_KEY,
+): ConsumedChildAnswerEntry[] {
   if (metadata === null || typeof metadata !== "object" || Array.isArray(metadata)) return [];
-  const entries = (metadata as Record<string, unknown>)[CONSUMED_CHILD_ANSWERS_METADATA_KEY];
+  const entries = (metadata as Record<string, unknown>)[key];
   if (!Array.isArray(entries)) return [];
   return entries.filter(
     (entry): entry is ConsumedChildAnswerEntry =>
@@ -81406,6 +81424,15 @@ function childTerminalResultAnswerParts(
  * every later attempt of the turn received it. Without that result in history,
  * a record of an attempt that failed, was interrupted, or was replaced proves
  * nothing.
+ *
+ * A Codemode read (`CODEMODE_CHILD_ANSWER_READS_METADATA_KEY`) never counts by
+ * its attempt: the script that made it may have returned only a summary. It
+ * counts when a tool result in the same turn's durable history holds the
+ * child's whole answer as a JSON string value, as the model received it: once
+ * escaped (the read's own JSON, for example after `jq -r '.content[0].text'`)
+ * or twice (the tool result as `ogtool call` prints it). Text that only
+ * contains the answer, or an answer printed some other way, proves nothing and
+ * the result is delivered normally.
  */
 async function consumedChildAnswerSequencesTx(
   tx: Database,
@@ -81426,12 +81453,8 @@ async function consumedChildAnswerSequencesTx(
       ? input.attempt
       : null;
   const key = CONSUMED_CHILD_ANSWERS_METADATA_KEY;
-  const rows = await rawRows<{ childSessionId: string; sequence: string | number }>(
-    tx,
-    sql`select entry ->> 'childSessionId' as "childSessionId",
-        (entry ->> 'sequence')::numeric as sequence
-      from (
-        (select recent.id, recent.metadata from session_turns recent
+  const codemodeKey = CODEMODE_CHILD_ANSWER_READS_METADATA_KEY;
+  const turns = sql`(select recent.id, recent.metadata from session_turns recent
           where recent.workspace_id = ${input.workspaceId}::uuid
             and recent.session_id = ${input.parentSessionId}::uuid
             and recent.status = 'completed'
@@ -81444,8 +81467,17 @@ async function consumedChildAnswerSequencesTx(
             and own.session_id = ${input.parentSessionId}::uuid
             and own.id = ${attempt.turnId}::uuid)`
             : sql``
-        }
-      ) turn
+        }`;
+  const childSessionIdList = sql.join(
+    childSessionIds.map((id) => sql`${id}`),
+    sql`, `,
+  );
+  const rows = await rawRows<{ childSessionId: string; sequence: string | number }>(
+    tx,
+    sql`with turn as (${turns})
+      select entry ->> 'childSessionId' as "childSessionId",
+        (entry ->> 'sequence')::numeric as sequence
+      from turn
       cross join lateral jsonb_array_elements(
         case when jsonb_typeof(turn.metadata -> ${key}) = 'array'
           then turn.metadata -> ${key} else '[]'::jsonb end
@@ -81456,10 +81488,7 @@ async function consumedChildAnswerSequencesTx(
           and attempt.turn_id = turn.id
           and attempt.id = case when entry ->> 'attemptId' ~ ${UUID_TEXT_PATTERN_SQL}
             then (entry ->> 'attemptId')::uuid end
-      where entry ->> 'childSessionId' in (${sql.join(
-        childSessionIds.map((id) => sql`${id}`),
-        sql`, `,
-      )})
+      where entry ->> 'childSessionId' in (${childSessionIdList})
         and jsonb_typeof(entry -> 'sequence') = 'number'
         and (attempt.outcome = 'completed'${
           attempt
@@ -81472,7 +81501,41 @@ async function consumedChildAnswerSequencesTx(
               and carried.session_id = ${input.parentSessionId}::uuid
               and carried.turn_id = turn.id
               and carried.item_ordered ->> 'type' = 'function_call_result'
-              and carried.item_ordered ->> 'callId' = entry ->> 'callId')))`,
+              and carried.item_ordered ->> 'callId' = entry ->> 'callId')))
+      union all
+      select entry ->> 'childSessionId' as "childSessionId",
+        (entry ->> 'sequence')::numeric as sequence
+      from turn
+      cross join lateral jsonb_array_elements(
+        case when jsonb_typeof(turn.metadata -> ${codemodeKey}) = 'array'
+          then turn.metadata -> ${codemodeKey} else '[]'::jsonb end
+      ) as entry
+      join session_events answer
+        on answer.workspace_id = ${input.workspaceId}::uuid
+          and answer.session_id = case when entry ->> 'childSessionId' ~ ${UUID_TEXT_PATTERN_SQL}
+            then (entry ->> 'childSessionId')::uuid end
+          and answer.sequence = case when entry ->> 'sequence' ~ '^[0-9]{1,9}$'
+            then (entry ->> 'sequence')::integer end
+          and answer.type = 'turn.completed'
+          and jsonb_typeof(answer.payload -> 'output') = 'string'
+          and answer.payload ->> 'output' <> ''
+      -- The answer as a JSON string value, escaped once more for each layer
+      -- of JSON it can sit in inside a stored tool result.
+      cross join lateral (select to_json(to_json(answer.payload ->> 'output')::text)::text
+        as quoted) once_quoted
+      cross join lateral (select substr(once_quoted.quoted, 2, length(once_quoted.quoted) - 2)
+        as text) escaped_once
+      cross join lateral (select substr(to_json(escaped_once.text)::text, 2,
+        length(to_json(escaped_once.text)::text) - 2) as text) escaped_twice
+      where entry ->> 'childSessionId' in (${childSessionIdList})
+        and exists (
+          select 1 from session_history_items carried
+          where carried.workspace_id = ${input.workspaceId}::uuid
+            and carried.session_id = ${input.parentSessionId}::uuid
+            and carried.turn_id = turn.id
+            and carried.item_ordered ->> 'type' = 'function_call_result'
+            and (strpos(carried.item_ordered::text, escaped_once.text) > 0
+              or strpos(carried.item_ordered::text, escaped_twice.text) > 0))`,
   );
   for (const row of rows) {
     const sequences = consumed.get(row.childSessionId) ?? new Set<number>();
@@ -81578,7 +81641,12 @@ async function supersedeChildResultsConsumedByCompletedAttemptTx(
     turnMetadata: unknown;
   },
 ): Promise<string[]> {
-  if (consumedChildAnswerEntries(input.turnMetadata).length === 0) return [];
+  if (
+    consumedChildAnswerEntries(input.turnMetadata).length === 0 &&
+    consumedChildAnswerEntries(input.turnMetadata, CODEMODE_CHILD_ANSWER_READS_METADATA_KEY)
+      .length === 0
+  )
+    return [];
   const consumed = await pendingChildResultsConsumedTx(tx, {
     workspaceId: input.workspaceId,
     parentSessionId: input.sessionId,
@@ -81619,6 +81687,11 @@ async function supersedeChildResultsConsumedByCompletedAttemptTx(
  * also locks its session, so taking only the turn first would invert
  * claim/settlement and parallel tool writers. It is best effort: a busy
  * ownership row skips it and the result is then delivered normally.
+ *
+ * `via: "codemode"` records a read a Codemode client of the attempt made
+ * (`CODEMODE_CHILD_ANSWER_READS_METADATA_KEY`). The caller cannot prove that
+ * output reached the model, so such a record counts only when the turn's
+ * durable history shows it did (see `consumedChildAnswerSequencesTx`).
  */
 export async function recordConsumedChildAnswers(
   db: Database,
@@ -81630,10 +81703,16 @@ export async function recordConsumedChildAnswers(
     attemptId: string;
     executionGeneration: number;
     callId?: string;
+    via?: "model" | "codemode";
     children: readonly { sessionId: string; sequences: readonly number[] }[];
   },
 ): Promise<{ recorded: number }> {
+  const metadataKey =
+    input.via === "codemode"
+      ? CODEMODE_CHILD_ANSWER_READS_METADATA_KEY
+      : CONSUMED_CHILD_ANSWERS_METADATA_KEY;
   const callId =
+    input.via !== "codemode" &&
     typeof input.callId === "string" &&
     input.callId.length > 0 &&
     input.callId.length <= CONSUMED_CHILD_ANSWER_CALL_ID_MAX_LENGTH
@@ -81707,7 +81786,7 @@ export async function recordConsumedChildAnswers(
   });
   const readByChild = new Map(children.map((child) => [child.sessionId, child.sequences]));
   const unrecorded = (metadata: unknown) => {
-    const recorded = consumedChildAnswerEntries(metadata);
+    const recorded = consumedChildAnswerEntries(metadata, metadataKey);
     return probe.answers
       .map((answer) => ({ childSessionId: answer.sessionId, sequence: Number(answer.sequence) }))
       .filter(
@@ -81777,13 +81856,14 @@ export async function recordConsumedChildAnswers(
           if (newlyRecorded.length === 0) return { recorded: 0 };
           // Under the turn row lock: only this key changes, the rest of the
           // turn metadata stays exactly as committed.
-          const entries = [...consumedChildAnswerEntries(turn.metadata), ...newlyRecorded].slice(
-            -CONSUMED_CHILD_ANSWERS_MAX,
-          );
+          const entries = [
+            ...consumedChildAnswerEntries(turn.metadata, metadataKey),
+            ...newlyRecorded,
+          ].slice(-CONSUMED_CHILD_ANSWERS_MAX);
           await tx
             .update(schema.sessionTurns)
             .set({
-              metadata: sql`jsonb_set(coalesce(${schema.sessionTurns.metadata}, '{}'::jsonb), ${`{${CONSUMED_CHILD_ANSWERS_METADATA_KEY}}`}::text[], ${JSON.stringify(entries)}::jsonb)`,
+              metadata: sql`jsonb_set(coalesce(${schema.sessionTurns.metadata}, '{}'::jsonb), ${`{${metadataKey}}`}::text[], ${JSON.stringify(entries)}::jsonb)`,
             })
             .where(
               and(
