@@ -2710,6 +2710,25 @@ export type PersonalResourceAttachmentSummary = {
   sharedOutputWarningVersion: 1;
 };
 
+/**
+ * The Opengeni credits one turn charged: `usage` on the payload of its
+ * terminal event (`turn.completed`, `turn.failed`, `turn.cancelled`,
+ * `turn.superseded`), on the turn webhooks' `data`, and on turns from
+ * `listTurns`. Amounts are integer USD micros (1,000,000 = $1).
+ *
+ * `creditsMicros` is the total: model calls (title and compaction calls made
+ * within the turn too), web search, image generation, the bring-your-own-key
+ * platform fee and anything else. Subscription and customer-key calls cost 0
+ * apart from that fee. It is `null` when a charge of the turn has no recorded
+ * price, never a false 0. `breakdown` splits the known amounts by kind.
+ * Sub-agents are separate sessions and report on their own turn events.
+ */
+export type TurnUsage = {
+  creditsMicros: number | null;
+  tokens: { input: number; output: number };
+  breakdown: { model: number; webSearch: number; imageGeneration: number; other: number };
+};
+
 export type SessionTurn = {
   id: string;
   workspaceId: string;
@@ -2744,6 +2763,11 @@ export type SessionTurn = {
   finishedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  /**
+   * The credits this turn charged, from its terminal event. Null while it
+   * runs and on turns from before this field existed.
+   */
+  usage?: TurnUsage | null | undefined;
 };
 
 export type HumanInputQuestionKind = "text" | "single_select" | "multi_select" | "secret";

@@ -21,6 +21,8 @@ import {
   type OrganizationConnectorRow,
 } from "./organization-connectors";
 import { siteSessionAccessFilter } from "./site-session-access";
+import { terminalTurnContentPayload, withTurnUsage } from "./turn-credit-usage";
+export { turnUsageByTurn, withTurnUsage } from "./turn-credit-usage";
 import {
   decodeActivityXid,
   encodeActivityXid,
@@ -81514,7 +81516,15 @@ async function acknowledgeConsumedChildLifecycleNotices(
     const sequences = evidence
       .filter((proof) => {
         const event = bySequence.get(proof.sequence);
-        return event?.type === proof.type && isDeepStrictEqual(event.payload, proof.payload);
+        // A final answer quotes the event's content, not the `usage` written
+        // with it; a bounded evidence copy carries `usage` on both sides.
+        return (
+          event?.type === proof.type &&
+          isDeepStrictEqual(
+            terminalTurnContentPayload(event.type, event.payload),
+            terminalTurnContentPayload(proof.type, proof.payload),
+          )
+        );
       })
       .map((event) => event.sequence);
     if (sequences.length > 0) proven.set(childId, sequences);
@@ -93605,7 +93615,9 @@ export async function getLatestStartedSessionTurn(
 ): Promise<SessionTurn | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const row = await latestStartedSessionTurnRow(scopedDb, workspaceId, sessionId);
-    return row ? mapSessionTurn(row) : null;
+    if (!row) return null;
+    const [turn] = await withTurnUsage(scopedDb, workspaceId, [mapSessionTurn(row)]);
+    return turn ?? null;
   });
 }
 
@@ -93736,7 +93748,7 @@ export async function listSessionTurns(
       )
       .orderBy(asc(schema.sessionTurns.position), asc(schema.sessionTurns.createdAt))
       .limit(limit);
-    return rows.map(mapSessionTurn);
+    return await withTurnUsage(scopedDb, workspaceId, rows.map(mapSessionTurn));
   });
 }
 

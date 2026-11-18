@@ -22,6 +22,7 @@ import { tool } from "@openai/agents";
 import { z } from "zod";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { turnContentEvents } from "@opengeni/testing/assertions";
 import { assistantMessage, functionCall, ScriptedModel } from "@opengeni/testing/scripted-model";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
@@ -166,7 +167,7 @@ describe("empty final reply production runtime with PostgreSQL", () => {
       activities,
       turn: await getSessionTurn(client.db, grant.workspaceId!, result.turnId),
       history: await getSessionHistoryItems(client.db, grant.workspaceId!, session.id),
-      events: await listSessionEvents(client.db, grant.workspaceId!, session.id),
+      events: turnContentEvents(await listSessionEvents(client.db, grant.workspaceId!, session.id)),
     };
   }
   test("delivers a final after one nudge without rewriting history or creating another turn", async () => {
@@ -392,7 +393,9 @@ describe("empty final reply production runtime with PostgreSQL", () => {
     expect(JSON.stringify(actual.model.requests[2]?.input)).toContain(
       "Runtime final-reply handoff",
     );
-    const events = await listSessionEvents(client.db, actual.grant.workspaceId!, actual.session.id);
+    const events = turnContentEvents(
+      await listSessionEvents(client.db, actual.grant.workspaceId!, actual.session.id),
+    );
     expect(events.filter((e) => e.type === "turn.completed").at(-1)?.payload).toEqual({
       output: "Late finding: the deliverable remains verified.",
     });
@@ -562,7 +565,9 @@ describe("empty final reply production runtime with PostgreSQL", () => {
     expect(
       (await getSessionGoal(client.db, actual.grant.workspaceId!, actual.session.id))?.status,
     ).toBe("active");
-    const events = await listSessionEvents(client.db, actual.grant.workspaceId!, actual.session.id);
+    const events = turnContentEvents(
+      await listSessionEvents(client.db, actual.grant.workspaceId!, actual.session.id),
+    );
     expect(events.filter((e) => e.type === "turn.completed").at(-1)?.payload).toEqual({
       output: "Child result integrated.",
     });

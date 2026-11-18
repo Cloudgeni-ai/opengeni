@@ -10919,6 +10919,49 @@ export function renderUserMessageContentForModel(
   ];
 }
 
+/**
+ * The Opengeni credits one turn charged, carried as `usage` on its terminal
+ * event (`turn.completed`, `turn.failed`, `turn.cancelled`,
+ * `turn.superseded`), on the turn webhooks' `data`, and on the turn itself.
+ * Amounts are integer USD micros (1,000,000 = $1).
+ *
+ * - `creditsMicros`: every credit debit of this session's turn: model calls
+ *   (title and compaction calls made within it too), web search, image
+ *   generation, the bring-your-own-key platform fee and anything else.
+ *   Subscription and customer-key calls cost 0 apart from that fee. `null`
+ *   when a charge of the turn has no recorded price; it is never a false 0.
+ * - `breakdown`: the known amounts by kind; they add up to `creditsMicros`
+ *   when it is known.
+ * - `tokens`: input and output tokens of the turn's model calls.
+ *
+ * Sub-agents are separate sessions and report on their own turn events.
+ * Absent on turns from before this field existed. Stripped from what end-user
+ * browsers receive through the session proxy and published Sites.
+ */
+export const TurnUsage = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    creditsMicros: primitives.nonnegativeInteger.nullable(),
+    tokens: z.object({
+      input: primitives.nonnegativeInteger,
+      output: primitives.nonnegativeInteger,
+    }),
+    breakdown: z.object({
+      model: primitives.nonnegativeInteger,
+      webSearch: primitives.nonnegativeInteger,
+      imageGeneration: primitives.nonnegativeInteger,
+      other: primitives.nonnegativeInteger,
+    }),
+  }),
+);
+export type TurnUsage = z.infer<typeof TurnUsage>;
+
+/** The turn's `usage` read from an event payload, or null when absent or malformed. */
+export function turnUsageFromPayload(payload: unknown): TurnUsage | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const parsed = TurnUsage.safeParse((payload as Record<string, unknown>).usage);
+  return parsed.success ? parsed.data : null;
+}
+
 export const SessionTurn = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -10961,6 +11004,12 @@ export const SessionTurn = /* @__PURE__ */ defineSchema(() =>
       finishedAt: primitives.nullableString,
       createdAt: primitives.string,
       updatedAt: primitives.string,
+      /**
+       * The credits this turn charged, from its terminal event. Null while it
+       * runs and on turns from before this field existed. The turns API fills
+       * it; other reads of a turn may leave it out.
+       */
+      usage: TurnUsage.nullable().optional(),
     })
     .superRefine((turn, ctx) => {
       if (turn.prompt.length === 0 && turn.annotations.length === 0) {
