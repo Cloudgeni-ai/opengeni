@@ -29,7 +29,7 @@ beforeAll(async () => {
   const modelsProbe = spyOn(codex, "fetchCodexModels").mockResolvedValue({
     ok: true,
     status: 200,
-    slugs: ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"],
+    slugs: ["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-sol", "gpt-6-luna"],
   });
   restoreModelsProbe = () => modelsProbe.mockRestore();
   shared = await acquireSharedTestDatabase("worker-scheduled-default-model");
@@ -200,7 +200,7 @@ describe("scheduled occurrences without a model use the resolved default", () =>
         ${new Date(Date.now() + 3_600_000).toISOString()}::timestamptz, now()
       )`;
     expect(await occurrence(grant, report)).toMatchObject({
-      model: "codex/gpt-6-astra",
+      model: "codex/gpt-6.2-astra",
       reasoningEffort: "high",
     });
   }, 120_000);

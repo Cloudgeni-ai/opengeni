@@ -432,7 +432,7 @@ beforeAll(async () => {
   const modelsProbe = spyOn(codex, "fetchCodexModels").mockResolvedValue({
     ok: true,
     status: 200,
-    slugs: ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"],
+    slugs: ["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-sol", "gpt-6-luna"],
   });
   restoreModelsProbe = () => modelsProbe.mockRestore();
   shared = await acquireSharedTestDatabase("core-default-session-model");
@@ -683,7 +683,7 @@ describe("server-side default model resolution", () => {
     });
     await connectCodex(settings, grant);
     expect(await resolveDefaultSessionModel(db, settings, context)).toEqual({
-      model: "codex/gpt-6-astra",
+      model: "codex/gpt-6.2-astra",
       reasoningEffort: "high",
       source: "subscription",
     });
@@ -730,7 +730,7 @@ describe("server-side default model resolution", () => {
     await connectCodex(settings, grant);
     const withSubscription = await create();
     expect(withSubscription.model).toBe("gpt-6-luna");
-    await expect(create("codex/gpt-6-astra")).rejects.toMatchObject({
+    await expect(create("codex/gpt-6.2-astra")).rejects.toMatchObject({
       status: 403,
       cause: {
         allowed: false,
@@ -742,7 +742,7 @@ describe("server-side default model resolution", () => {
     await shared!.admin`
       update workspaces
       set settings = settings || ${shared!.admin.json({
-        sessionDefaults: { model: "codex/gpt-6-astra", reasoningEffort: "high" },
+        sessionDefaults: { model: "codex/gpt-6.2-astra", reasoningEffort: "high" },
       })}
       where id = ${grant.workspaceId}`;
     expect((await create()).model).toBe("gpt-6-luna");
@@ -888,7 +888,7 @@ describe("server-side default model resolution", () => {
     // A connected subscription still wins over the trial.
     await connectCodex(settings, grant);
     expect(await resolveDefaultSessionModel(db, settings, context)).toMatchObject({
-      model: "codex/gpt-6-astra",
+      model: "codex/gpt-6.2-astra",
       source: "subscription",
     });
   }, 180_000);
@@ -1086,7 +1086,7 @@ describe("server-side default model resolution", () => {
     await connectCodex(settings, grant);
     expect(await getActorNewSessionDraft(draftDeps, grant, grant.workspaceId)).toMatchObject({
       revision: saved.revision,
-      model: "codex/gpt-6-astra",
+      model: "codex/gpt-6.2-astra",
       reasoningEffort: "high",
       modelProvided: false,
     });
