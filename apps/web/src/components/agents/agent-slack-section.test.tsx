@@ -215,6 +215,13 @@ test("an agent whose Slack app can't post as it says so, with one Update for adm
   ).toBe(false);
   await cleanup?.();
 
+  // It names the app as that Slack workspace shows it.
+  const staging = await render(agent, {
+    listAgentSlackInstalls: installs([{ ...listed[0], botDisplayName: "Opengeni Staging" }]),
+  });
+  expect(staging.textContent).toContain("Replies show as Opengeni Staging");
+  await cleanup?.();
+
   // Someone who manages the workspace's integrations gets the one Update.
   const container = document.createElement("div");
   document.body.append(container);

@@ -5203,7 +5203,7 @@ function SessionRow(props: {
   const pinKeys = useActionShortcut("chat.pin");
   const hasChildren = props.hasChildren;
   const focusEvents = useUiEventTarget("window");
-  const creator = useResolvedCreator(rail.workspaceId, railRowCreator(props.session));
+  const creator = useResolvedCreator(props.session.workspaceId, railRowCreator(props.session));
   const jumpKey = usePinnedJumpKey(props.session.id, props.depth, rail.isMobile);
   const pinnedParentTitles = useContext(PinnedParentTitles);
   const parentTitle =

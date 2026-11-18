@@ -100,4 +100,45 @@ describe("useResolvedCreator", () => {
     await act(async () => root.unmount());
     container.remove();
   });
+
+  test("a members read that fails is shared by later rows instead of repeated per row", async () => {
+    let reads = 0;
+    const client = {
+      listWorkspaceMembers: async () => {
+        reads += 1;
+        throw new Error("forbidden");
+      },
+    };
+    function Row({ subjectId }: { subjectId: string }) {
+      const creator = useResolvedCreator(WORKSPACE, { kind: "subject", subjectId });
+      return <span>{creator ? (creatorInitials(creator) ?? "") : ""}</span>;
+    }
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const context = { client, accessContext: me } as never;
+    await act(async () =>
+      root.render(
+        <Provide value={context}>
+          <Row subjectId="user:kari" />
+        </Provide>,
+      ),
+    );
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+    // Rows that mount later, as when scrolling, reuse the failed answer.
+    await act(async () =>
+      root.render(
+        <Provide value={context}>
+          <Row subjectId="user:kari" />
+          <Row subjectId="user:ola" />
+          <Row subjectId="user:per" />
+        </Provide>,
+      ),
+    );
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(reads).toBe(1);
+    expect(container.textContent).toBe("");
+    await act(async () => root.unmount());
+    container.remove();
+  });
 });

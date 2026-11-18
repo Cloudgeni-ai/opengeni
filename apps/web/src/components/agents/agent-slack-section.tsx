@@ -34,6 +34,7 @@ import {
   canInstallOpenGeniSlackBot,
   openGeniSlackBotConnectRequest,
   SLACK_AGENT_IDENTITY_MISSING,
+  slackAgentIdentityMissingTitle,
 } from "../capabilities/use-slack-integration";
 
 /**
@@ -134,8 +135,8 @@ function InstallRow({
         <>
           {postsAsApp ? (
             <SettingRow
-              label={SLACK_AGENT_IDENTITY_MISSING.title}
-              description="Its name and icon show once Slack is updated."
+              label={slackAgentIdentityMissingTitle(install.botDisplayName)}
+              description={SLACK_AGENT_IDENTITY_MISSING.agentDescription}
               control={
                 onUpdate ? (
                   <RowButton onClick={onUpdate}>{SLACK_AGENT_IDENTITY_MISSING.action}</RowButton>

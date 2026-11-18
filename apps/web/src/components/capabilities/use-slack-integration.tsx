@@ -185,8 +185,16 @@ export function openGeniSlackBotConnectRequest(input: {
 export const SLACK_AGENT_IDENTITY_MISSING = {
   title: "Replies show as Opengeni",
   description: "Agents' names and icons show once Slack is updated.",
+  /** On one agent's Slack row. */
+  agentDescription: "Its name and icon show once Slack is updated.",
   action: "Update",
 } as const;
+
+/** The note's title, naming the app as it appears in that Slack workspace. */
+export function slackAgentIdentityMissingTitle(botDisplayName?: string | null): string {
+  const name = botDisplayName?.trim();
+  return name ? `Replies show as ${name}` : SLACK_AGENT_IDENTITY_MISSING.title;
+}
 
 export function canManageSlackReactionSummon(
   accessContext: ReturnType<typeof useAppContext>["accessContext"],

@@ -1,4 +1,3 @@
-import { withPersonCreatorLabel } from "./session-creator-label";
 import { KNOWLEDGE_SOURCE_SYNC_RETIRED_MESSAGE } from "@opengeni/contracts/knowledge-source-sync-retirement";
 import {
   getSessionTurnClaudeProviderAccountAuthoritySnapshot,
@@ -97,6 +96,7 @@ import {
   withSiteOriginMetadata,
 } from "../site-session-origin";
 
+import { withPersonCreatorLabel } from "./session-creator-label";
 import { personalGitHubRepositoryResources } from "./resources";
 import {
   agentPersonalGitHubRepositoryServices,

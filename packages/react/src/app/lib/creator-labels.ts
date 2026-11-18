@@ -20,6 +20,8 @@ type MemberLabels = ReadonlyMap<string, string>;
 
 // One read per workspace, shared by every row; an entry belongs to the
 // client that read it, so another account or access key reads again.
+const MEMBER_READ_RETRY_MS = 60_000;
+
 const memberLabelCache = new Map<string, { client: object; pending: Promise<MemberLabels> }>();
 
 /** Forget cached member names (tests; a later read fetches them again). */
@@ -40,10 +42,13 @@ function memberLabels(client: MembersClient, workspaceId: string): Promise<Membe
       return labels as MemberLabels;
     },
     () => {
-      // Unreadable now: no names, and ask again next time.
-      if (memberLabelCache.get(workspaceId)?.pending === pending) {
-        memberLabelCache.delete(workspaceId);
-      }
+      // Unreadable now: no names. Every row shares this answer for a while,
+      // then a later row asks again.
+      setTimeout(() => {
+        if (memberLabelCache.get(workspaceId)?.pending === pending) {
+          memberLabelCache.delete(workspaceId);
+        }
+      }, MEMBER_READ_RETRY_MS);
       return new Map() as MemberLabels;
     },
   );
