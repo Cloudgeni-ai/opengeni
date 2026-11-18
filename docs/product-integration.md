@@ -1249,6 +1249,12 @@ workspace credential provider, workspace webhooks, and an allowlisted
 [`docs/workspace-integrations.md`](workspace-integrations.md) for the protocol,
 signature scheme, and SDK helpers.
 
+Each turn's terminal event, its webhook and the turns API carry the Opengeni
+credits the turn charged as `usage.creditsMicros`, and chat completions return
+`usage.cost`; read them with your server credentials to track cost per answer
+([what a turn cost](workspace-integrations.md#what-a-turn-cost)). The session
+proxy removes both before anything reaches the browser.
+
 ### Model and runtime behavior
 
 Use `settings.sessionDefaults` for a workspace's default model and reasoning,

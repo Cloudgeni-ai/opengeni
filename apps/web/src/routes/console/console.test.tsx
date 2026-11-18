@@ -54,6 +54,7 @@ const { ConsoleSettingsRoute } = await import("./settings");
 const { ConsoleNewApiKeyRoute } = await import("./api-keys");
 const { ConsoleApiKeysRoute } = await import("./api-keys");
 const { ConsoleMembersRoute } = await import("./organization-pages");
+const { ConsoleSessionRoute } = await import("./session-detail");
 
 function session(index: number, reviewLevel: "full" | "metadata") {
   return {
@@ -128,11 +129,71 @@ const client = {
     updatedBySubjectId: "user:owner",
   })),
   listConsoleAuditLog: mock(async () => ({ events: [], nextCursor: null })),
+  getConsoleSession: mock(async () => ({
+    reviewLevel: "full",
+    session: session(1, "full"),
+    model: "azure-sol/gpt-6.1-sol",
+    reasoningEffort: "medium",
+    durationMs: 12_000,
+    tokens: { input: 18_200, output: 950, cached: 0, total: 19_150 },
+    modelCalls: 3,
+    models: ["azure-sol/gpt-6.1-sol"],
+    toolCalls: 1,
+    feedback: [],
+    auditEventId: null,
+  })),
+  listConsoleSessionEvents: mock(async () => ({
+    events: transcriptEvents(),
+    hasMore: false,
+    nextAfter: null,
+  })),
   createOrganizationApiKey: mock(async () => ({
     apiKey: { id: "key", name: "Production server", prefix: "og_live_ab12" },
     token: "og_live_ab12_secret_token_value",
   })),
 };
+
+function transcriptEvents() {
+  const sessionId = "44444444-4444-4444-8444-444444444444";
+  let sequence = 0;
+  const event = (turnId: string, type: string, payload: unknown, second: number) => {
+    sequence += 1;
+    return {
+      id: `00000000-0000-4000-8000-${String(sequence).padStart(12, "0")}`,
+      workspaceId,
+      sessionId,
+      sequence,
+      type,
+      payload,
+      turnId,
+      clientEventId: null,
+      occurredAt: `2026-11-12T10:00:${String(second).padStart(2, "0")}.000Z`,
+    };
+  };
+  const usage = (creditsMicros: number | null) => ({
+    creditsMicros,
+    tokens: { input: 100, output: 10 },
+    breakdown: { model: creditsMicros ?? 0, webSearch: 0, imageGeneration: 0, other: 0 },
+  });
+  const first = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const second = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const third = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  return [
+    event(first, "user.message", { text: "I was charged twice" }, 1),
+    event(first, "turn.started", {}, 2),
+    event(first, "agent.message.completed", { text: "Let me look.", phase: "commentary" }, 3),
+    event(first, "agent.message.completed", { text: "You were refunded." }, 4),
+    event(first, "turn.completed", { usage: usage(41_230) }, 5),
+    event(second, "user.message", { text: "Thanks" }, 6),
+    event(second, "turn.started", {}, 7),
+    event(second, "agent.message.completed", { text: "Anytime." }, 8),
+    event(second, "turn.completed", { usage: usage(null) }, 9),
+    event(third, "user.message", { text: "Bye" }, 10),
+    event(third, "turn.started", {}, 11),
+    event(third, "agent.message.completed", { text: "Goodbye." }, 12),
+    event(third, "turn.completed", {}, 13),
+  ];
+}
 
 function apiKey(
   id: string,
@@ -250,6 +311,23 @@ describe("Console sessions", () => {
     expect(container.textContent).toContain("Content hidden");
     expect(container.textContent).toContain("user-2");
     expect(container.querySelector('input[aria-label="Search sessions"]')).toBeNull();
+  });
+});
+
+describe("Console session", () => {
+  test("shows what each answer cost beside the reply, once per turn", async () => {
+    await render(createElement(ConsoleSessionRoute));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(client.listConsoleSessionEvents).toHaveBeenCalled();
+    const text = container.textContent ?? "";
+    expect(text).toContain("You were refunded.");
+    // $0.04123 rounds to 4 cents; one value, no label.
+    const cost = formatMicros(41_230, { precise: true });
+    expect(text.split(cost).length - 1).toBe(1);
+    // Unknown and pre-release turns show no cost rather than $0.
+    expect(text).not.toContain(formatMicros(0, { precise: true }));
   });
 });
 

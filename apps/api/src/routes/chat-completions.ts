@@ -115,6 +115,7 @@ export function registerChatCompletionRoutes(
             created,
             model: output.model,
             result: output.result,
+            creditsChargedMicros: output.creditsChargedMicros,
           }),
         );
       } catch (error) {
@@ -204,7 +205,7 @@ export function registerChatCompletionRoutes(
             created,
             model: output.model,
             choices: [],
-            usage: chatCompletionUsage(output.result.usage),
+            usage: chatCompletionUsage(output.result.usage, output.creditsChargedMicros),
           });
         }
         send("[DONE]");

@@ -1,5 +1,6 @@
 import type { OpenGeniClient } from "./client";
 import { sessionEventStreamCoveredThrough, type StreamSessionEventsOptions } from "./stream";
+import { withoutTurnCreditUsage } from "./session-proxy-usage";
 import type { SessionEvent } from "./types";
 
 /**
@@ -14,6 +15,8 @@ import type { SessionEvent } from "./types";
  * SDK's streaming core (or a plain `EventSource`), including resume via
  * `?after=` / `Last-Event-ID`. An ordinary event uses its own sequence as the
  * SSE `id`; a compact event uses the server-owned sequence it covers through.
+ * The re-emitted stream leaves out the credits each turn charged (`usage` on
+ * terminal turn events): that is the server's billing data, not the browser's.
  */
 
 /** Format one event with the exact Opengeni data and resume-cursor semantics. */
@@ -93,7 +96,7 @@ export function sessionEventsToSseStream(
         controller.close();
         return;
       }
-      controller.enqueue(encoder.encode(formatSseEvent(result.value)));
+      controller.enqueue(encoder.encode(formatSseEvent(withoutTurnCreditUsage(result.value))));
     },
     cancel: () => {
       cancelled = true;

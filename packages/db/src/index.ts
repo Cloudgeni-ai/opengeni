@@ -21,6 +21,8 @@ import {
   type OrganizationConnectorRow,
 } from "./organization-connectors";
 import { siteSessionAccessFilter } from "./site-session-access";
+import { withTurnUsage } from "./turn-credit-usage";
+export { turnUsageByTurn, withTurnUsage } from "./turn-credit-usage";
 import {
   decodeActivityXid,
   encodeActivityXid,
@@ -93523,7 +93525,9 @@ export async function getLatestStartedSessionTurn(
 ): Promise<SessionTurn | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const row = await latestStartedSessionTurnRow(scopedDb, workspaceId, sessionId);
-    return row ? mapSessionTurn(row) : null;
+    if (!row) return null;
+    const [turn] = await withTurnUsage(scopedDb, workspaceId, [mapSessionTurn(row)]);
+    return turn ?? null;
   });
 }
 
@@ -93654,7 +93658,7 @@ export async function listSessionTurns(
       )
       .orderBy(asc(schema.sessionTurns.position), asc(schema.sessionTurns.createdAt))
       .limit(limit);
-    return rows.map(mapSessionTurn);
+    return await withTurnUsage(scopedDb, workspaceId, rows.map(mapSessionTurn));
   });
 }
 

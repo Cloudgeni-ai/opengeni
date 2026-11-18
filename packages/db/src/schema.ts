@@ -13382,6 +13382,10 @@ export const usageEvents = pgTable(
       table.sessionId,
       table.occurredAt,
     ),
+    // A turn's charges, summed onto its terminal event (migrations 1493, 1494).
+    workspaceTurn: index("usage_events_workspace_turn_idx")
+      .on(table.workspaceId, table.turnId)
+      .where(sql`${table.turnId} is not null`),
     contextHierarchy: check(
       "usage_events_context_hierarchy_check",
       sql`(${table.turnId} is null or ${table.sessionId} is not null)

@@ -30445,6 +30445,7 @@
         "$.toolsProvided": "boolean?",
         "$.triggerEventId": "string!",
         "$.updatedAt": "string!",
+        "$.usage": "ref(TurnUsage)? null",
         "$.version": "integer!",
         "$.workspaceId": "string!"
       }
@@ -32979,6 +32980,23 @@
         "$.kind": "enum!=[\"\\\"service\\\"\",\"\\\"subject\\\"\"]",
         "$.label": "string?",
         "$.subjectId": "string!"
+      }
+    },
+    "TurnUsage": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.breakdown": "object!",
+        "$.breakdown.imageGeneration": "integer!",
+        "$.breakdown.model": "integer!",
+        "$.breakdown.other": "integer!",
+        "$.breakdown.webSearch": "integer!",
+        "$.creditsMicros": "integer! null",
+        "$.tokens": "object!",
+        "$.tokens.input": "integer!",
+        "$.tokens.output": "integer!"
       }
     },
     "UnbilledUsageMetering": {
@@ -38559,6 +38577,7 @@
       "turnCompletedWithEmptyFinalReply": "value",
       "TurnInitiator": "type",
       "TurnInitiatorContext": "type",
+      "TurnUsage": "type",
       "UninstallApiIntegrationRequest": "type",
       "UninstallApiIntegrationResult": "type",
       "UninstallPluginRequest": "type",

@@ -1,0 +1,407 @@
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { sql } from "drizzle-orm";
+import {
+  appendSessionEvents,
+  bootstrapWorkspace,
+  createDb,
+  createSession,
+  createWorkspaceWebhook,
+  listSessionTurns,
+  withRlsContext,
+  withWorkspaceSessionActivityRls,
+  type DbClient,
+} from "../src/index";
+
+const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
+setDefaultTimeout(180_000);
+
+let shared: SharedTestDatabase | null = null;
+let client: DbClient | null = null;
+
+beforeAll(async () => {
+  shared = await acquireSharedTestDatabase("turn-credit-usage");
+  if (!shared) {
+    if (requireRealDatabase) throw new Error("turn credit usage requires real PostgreSQL");
+    return;
+  }
+  client = createDb(shared.appUrl);
+}, 900_000);
+
+afterAll(async () => {
+  await client?.close();
+  await shared?.release();
+}, 180_000);
+
+const db = () => client!.db;
+
+type Scope = { accountId: string; workspaceId: string; sessionId: string; subjectId: string };
+
+function rowsOf<T>(result: unknown): T[] {
+  return Array.isArray(result) ? (result as T[]) : (result as { rows: T[] }).rows;
+}
+
+async function seedSession(label: string): Promise<Scope> {
+  const subjectId = `user:${crypto.randomUUID()}`;
+  const access = await bootstrapWorkspace(db(), {
+    accountExternalSource: "turn-credit-usage",
+    accountExternalId: `account:${crypto.randomUUID()}`,
+    accountName: `Turn usage ${label}`,
+    workspaceExternalSource: "turn-credit-usage",
+    workspaceExternalId: `workspace:${crypto.randomUUID()}`,
+    workspaceName: `Turn usage ${label}`,
+    subjectId,
+  });
+  const grant = access.workspaceGrants[0]!;
+  const scope = { accountId: grant.accountId, workspaceId: grant.workspaceId! };
+  const session = await createSession(db(), {
+    ...scope,
+    initialMessage: label,
+    resources: [],
+    metadata: {},
+    model: "scripted-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
+    sandboxBackend: "none",
+    createdBy: { kind: "subject", subjectId, label: "Ada" },
+    createdByContext: { label: "Ada" },
+  });
+  return { ...scope, sessionId: session.id, subjectId };
+}
+
+let position = 0;
+async function seedTurn(scope: Scope): Promise<string> {
+  const turnId = crypto.randomUUID();
+  position += 1;
+  await withWorkspaceSessionActivityRls(db(), scope.workspaceId, async (tx) => {
+    await tx.execute(sql`
+      insert into session_turns (
+        id, account_id, workspace_id, session_id, trigger_event_id,
+        temporal_workflow_id, status, position, prompt, model,
+        reasoning_effort, sandbox_backend, resources, tools, metadata, started_at, finished_at
+      ) values (
+        ${turnId}, ${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId},
+        ${crypto.randomUUID()}, ${`session-${scope.sessionId}`}, 'completed', ${position},
+        'hello', 'scripted-model', 'medium', 'none', '[]'::jsonb, '[]'::jsonb, '{}'::jsonb,
+        now(), now()
+      )
+    `);
+  });
+  return turnId;
+}
+
+async function usageRow(
+  scope: Scope,
+  turnId: string,
+  eventType: string,
+  quantity: number,
+  sourceResourceId: string,
+  idempotencyKey = `usage:${eventType}:${sourceResourceId}`,
+): Promise<void> {
+  await shared!.admin`
+    insert into usage_events (
+      account_id, workspace_id, session_id, turn_id, event_type, quantity, unit,
+      source_resource_type, source_resource_id, idempotency_key, occurred_at
+    ) values (
+      ${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId}, ${turnId}, ${eventType},
+      ${quantity}, 'usd_micros', 'model_response', ${sourceResourceId}, ${idempotencyKey}, now()
+    )`;
+}
+
+function creditsSettlement(
+  creditCostMicros: number,
+  hostedCreditMicros: number | null = null,
+): Record<string, unknown> {
+  return {
+    version: 1,
+    chargesOpenGeniCredits: true,
+    charges: {
+      debits: creditCostMicros > 0,
+      creditCostMicros,
+      byokPlatformFeeMicros: 0,
+      hostedWebSearch:
+        hostedCreditMicros === null
+          ? null
+          : { requests: 1, providerMicros: hostedCreditMicros, creditMicros: hostedCreditMicros },
+      completionKey: "unused",
+    },
+  };
+}
+
+function modelUsage(
+  sourceKey: string,
+  extra: Record<string, unknown>,
+  tokens: { input: number; output: number } = { input: 100, output: 10 },
+) {
+  return {
+    sourceKey,
+    model: "scripted-model",
+    inputTokens: tokens.input,
+    outputTokens: tokens.output,
+    ...extra,
+  };
+}
+
+async function terminalEvent(scope: Scope, turnId: string, type: string) {
+  return await withRlsContext(db(), scope, async (scoped) => {
+    const [row] = rowsOf<{ payload: Record<string, unknown> }>(
+      await scoped.execute(sql`select payload from session_events
+        where workspace_id = ${scope.workspaceId}::uuid and turn_id = ${turnId}::uuid
+          and type = ${type}`),
+    );
+    return row?.payload;
+  });
+}
+
+describe("per-turn credit usage on terminal turn events", () => {
+  test("sums every charge of the turn once, including the last call's owed settlement", async () => {
+    if (!client) return;
+    const scope = await seedSession("credits");
+    const turnId = await seedTurn(scope);
+    const webhook = await createWorkspaceWebhook(db(), {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      url: "https://example.test/hooks",
+      secretEncrypted: "encrypted",
+      eventTypes: ["turn.completed"],
+      enabled: true,
+      description: null,
+      createdBySubjectId: scope.subjectId,
+    });
+    // A: settled (model.cost and its hosted search written).
+    await appendSessionEvents(db(), scope.workspaceId, scope.sessionId, [
+      {
+        type: "agent.model.usage",
+        turnId,
+        payload: modelUsage("a", {
+          pricedCostMicros: 29_000,
+          settlement: creditsSettlement(30_000, 130),
+        }),
+      },
+      // B: its ledger writes are still owed.
+      {
+        type: "agent.model.usage",
+        turnId,
+        payload: modelUsage("b", {
+          pricedCostMicros: 9_100,
+          settlement: creditsSettlement(9_100, 2_000),
+        }),
+      },
+      // A fenced attempt's copy of A is counted once.
+      {
+        type: "turn.event.rejected_late",
+        turnId,
+        payload: {
+          rejectedType: "agent.model.usage",
+          rejectedPayload: modelUsage("a", {
+            pricedCostMicros: 29_000,
+            settlement: creditsSettlement(30_000, 130),
+          }),
+        },
+      },
+    ]);
+    await usageRow(scope, turnId, "model.cost", 30_000, `${turnId}:a`);
+    await usageRow(
+      scope,
+      turnId,
+      "web_search.cost",
+      130,
+      `hosted:${turnId}:a`,
+      `usage:web_search.cost:hosted:${turnId}:a`,
+    );
+    await usageRow(scope, turnId, "image_generation.cost", 5_000, "image-1");
+    await usageRow(scope, turnId, "video_generation.cost", 700, "video-1");
+    // Tokens and provider costs are not credits.
+    await usageRow(scope, turnId, "model.provider_cost", 99_999, `${turnId}:x`);
+    // C commits with the terminal event, before its settlement runs.
+    await appendSessionEvents(db(), scope.workspaceId, scope.sessionId, [
+      {
+        type: "agent.model.usage",
+        turnId,
+        payload: modelUsage(
+          "c",
+          { pricedCostMicros: 1_000, settlement: creditsSettlement(1_000) },
+          { input: 18_000, output: 900 },
+        ),
+      },
+      { type: "turn.completed", turnId, payload: { status: "completed" } },
+    ]);
+
+    const expected = {
+      creditsMicros: 47_930,
+      tokens: { input: 18_200, output: 920 },
+      breakdown: { model: 40_100, webSearch: 2_130, imageGeneration: 5_000, other: 700 },
+    };
+    const payload = await terminalEvent(scope, turnId, "turn.completed");
+    expect(payload).toEqual({ status: "completed", usage: expected });
+
+    const deliveries = await withRlsContext(db(), scope, async (scoped) =>
+      rowsOf<{ payload: { data: Record<string, unknown> } }>(
+        await scoped.execute(sql`select payload from workspace_webhook_deliveries
+          where webhook_id = ${webhook.id}::uuid`),
+      ),
+    );
+    expect(deliveries.map((row) => row.payload.data)).toEqual([
+      { status: "completed", usage: expected },
+    ]);
+
+    const turns = await listSessionTurns(db(), scope.workspaceId, scope.sessionId);
+    expect(turns.find((turn) => turn.id === turnId)?.usage).toEqual(expected);
+  });
+
+  test("a recovered turn counts a fenced attempt's calls, and a failed turn reports what it spent", async () => {
+    if (!client) return;
+    const scope = await seedSession("recovery");
+    const turnId = await seedTurn(scope);
+    await appendSessionEvents(db(), scope.workspaceId, scope.sessionId, [
+      {
+        type: "turn.event.rejected_late",
+        turnId,
+        payload: {
+          rejectedType: "agent.model.usage",
+          rejectedPayload: modelUsage("first-attempt", {
+            pricedCostMicros: 4_000,
+            settlement: creditsSettlement(4_000),
+          }),
+        },
+      },
+      // A compaction call of the second attempt: settled before it is recorded.
+      {
+        type: "agent.model.usage",
+        turnId,
+        payload: modelUsage("compaction-1", { pricedCostMicros: 600 }),
+      },
+    ]);
+    await usageRow(scope, turnId, "model.cost", 4_000, `${turnId}:first-attempt`);
+    await usageRow(scope, turnId, "model.cost", 600, `${turnId}:compaction-1`);
+    await appendSessionEvents(db(), scope.workspaceId, scope.sessionId, [
+      { type: "turn.failed", turnId, payload: { reason: "model_error" } },
+    ]);
+    expect((await terminalEvent(scope, turnId, "turn.failed"))?.usage).toEqual({
+      creditsMicros: 4_600,
+      tokens: { input: 200, output: 20 },
+      breakdown: { model: 4_600, webSearch: 0, imageGeneration: 0, other: 0 },
+    });
+  });
+
+  test("cancelled, superseded, subscription and bring-your-own-key turns", async () => {
+    if (!client) return;
+    const scope = await seedSession("kinds");
+    // An aggregate call recorded without a price, but settled.
+    const cancelled = await seedTurn(scope);
+    await appendSessionEvents(db(), scope.workspaceId, scope.sessionId, [
+      { type: "agent.model.usage", turnId: cancelled, payload: modelUsage("agg", {}) },
+    ]);
+    await usageRow(scope, cancelled, "model.cost", 250, `${cancelled}:agg`);
+    // An unpriced call: the total is unknown, never a false 0.
+    const superseded = await seedTurn(scope);
+    // Subscription: 0 credits.
+    const subscription = await seedTurn(scope);
+    // Bring your own key: a planned fee, plus a fee settled without recorded charges.
+    const byok = await seedTurn(scope);
+    await appendSessionEvents(db(), scope.workspaceId, scope.sessionId, [
+      { type: "agent.model.usage", turnId: superseded, payload: modelUsage("free?", {}) },
+      {
+        type: "agent.model.usage",
+        turnId: subscription,
+        payload: modelUsage("sub", {
+          pricedCostMicros: 0,
+          settlement: {
+            version: 1,
+            chargesOpenGeniCredits: false,
+            charges: {
+              debits: false,
+              creditCostMicros: 0,
+              byokPlatformFeeMicros: 0,
+              hostedWebSearch: null,
+              completionKey: "k",
+            },
+          },
+        }),
+      },
+      {
+        type: "agent.model.usage",
+        turnId: byok,
+        payload: modelUsage("planned", {
+          pricedCostMicros: 0,
+          settlement: {
+            version: 1,
+            chargesOpenGeniCredits: false,
+            charges: {
+              debits: false,
+              creditCostMicros: 0,
+              byokPlatformFeeMicros: 120,
+              hostedWebSearch: null,
+              completionKey: "k",
+            },
+          },
+        }),
+      },
+      { type: "agent.model.usage", turnId: byok, payload: modelUsage("plain", {}) },
+    ]);
+    await usageRow(scope, subscription, "model.cost", 0, `${subscription}:sub`);
+    await usageRow(scope, byok, "model.cost", 0, `${byok}:planned`);
+    await usageRow(scope, byok, "model.cost", 0, `${byok}:plain`);
+    await shared!.admin`
+      insert into credit_ledger_entries (account_id, workspace_id, type, amount_micros, idempotency_key)
+      values (${scope.accountId}, ${scope.workspaceId}, 'byok_platform_fee', -80,
+        ${`credit:byok_platform_fee:${byok}:plain`})`;
+    await appendSessionEvents(db(), scope.workspaceId, scope.sessionId, [
+      { type: "turn.cancelled", turnId: cancelled, payload: { reason: "user" } },
+      { type: "turn.superseded", turnId: superseded, payload: { reason: "steer" } },
+      { type: "turn.completed", turnId: subscription, payload: {} },
+      { type: "turn.completed", turnId: byok, payload: {} },
+    ]);
+    const zero = { model: 0, webSearch: 0, imageGeneration: 0, other: 0 };
+    const tokens = { input: 100, output: 10 };
+    expect((await terminalEvent(scope, cancelled, "turn.cancelled"))?.usage).toEqual({
+      creditsMicros: 250,
+      tokens,
+      breakdown: { ...zero, model: 250 },
+    });
+    expect((await terminalEvent(scope, superseded, "turn.superseded"))?.usage).toEqual({
+      creditsMicros: null,
+      tokens,
+      breakdown: zero,
+    });
+    expect((await terminalEvent(scope, subscription, "turn.completed"))?.usage).toEqual({
+      creditsMicros: 0,
+      tokens,
+      breakdown: zero,
+    });
+    expect((await terminalEvent(scope, byok, "turn.completed"))?.usage).toEqual({
+      creditsMicros: 200,
+      tokens: { input: 200, output: 20 },
+      breakdown: { ...zero, other: 200 },
+    });
+    const turns = await listSessionTurns(db(), scope.workspaceId, scope.sessionId);
+    expect(turns.find((turn) => turn.id === superseded)?.usage?.creditsMicros).toBeNull();
+  });
+
+  test("a turn with no charges reports 0; one written outside the tenant scope or never run reports nothing", async () => {
+    if (!client) return;
+    const scope = await seedSession("scope");
+    const idle = await seedTurn(scope);
+    const unknown = crypto.randomUUID();
+    const running = await seedTurn(scope);
+    await appendSessionEvents(db(), scope.workspaceId, scope.sessionId, [
+      { type: "turn.completed", turnId: idle, payload: {} },
+      { type: "turn.completed", turnId: unknown, payload: { status: "imported" } },
+    ]);
+    expect((await terminalEvent(scope, idle, "turn.completed"))?.usage).toEqual({
+      creditsMicros: 0,
+      tokens: { input: 0, output: 0 },
+      breakdown: { model: 0, webSearch: 0, imageGeneration: 0, other: 0 },
+    });
+    expect(await terminalEvent(scope, unknown, "turn.completed")).toEqual({ status: "imported" });
+    // A superuser write has no tenant scope to read the charges in.
+    await shared!.admin`
+      insert into session_events (account_id, workspace_id, session_id, turn_id, sequence, type, payload)
+      select ${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId}, ${running},
+        max(sequence) + 1, 'turn.failed', '{"reason":"x"}'::jsonb
+      from session_events where session_id = ${scope.sessionId}`;
+    expect(await terminalEvent(scope, running, "turn.failed")).toEqual({ reason: "x" });
+    const turns = await listSessionTurns(db(), scope.workspaceId, scope.sessionId);
+    expect(turns.find((turn) => turn.id === running)?.usage).toBeNull();
+  });
+});

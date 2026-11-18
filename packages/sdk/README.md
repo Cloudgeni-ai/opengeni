@@ -34,6 +34,31 @@ a connected subscription returns `403` with `subscription_api_unavailable`.
 See [billing origin](../../docs/billing-origin.md) for the internal legacy-account
 exception.
 
+### What each turn and call cost
+
+A turn's terminal event (`turn.completed`, `turn.failed`, `turn.cancelled`,
+`turn.superseded`), its webhook `data`, and each turn from `listTurns` carry
+`usage` (`TurnUsage`): `creditsMicros` is the Opengeni credits the turn
+charged, in USD micros, with `tokens` and a `breakdown` by kind. It is `null`
+when part of the turn has no known price, never a false 0. Chat completions
+return the per-call amount as OpenRouter's `usage.cost`, in dollars.
+
+```ts
+import type { OpenGeniClient, TurnUsage } from "@opengeni/sdk";
+
+async function turnCostsInDollars(client: OpenGeniClient, workspaceId: string, sessionId: string) {
+  for await (const event of client.streamEvents(workspaceId, sessionId)) {
+    if (event.type !== "turn.completed") continue;
+    const usage = (event.payload as { usage?: TurnUsage }).usage;
+    if (usage && usage.creditsMicros !== null) console.log(usage.creditsMicros / 1_000_000);
+  }
+}
+```
+
+Sub-agents are separate sessions and report on their own turns. The session
+proxy and `sessionEventsToSseStream` leave both fields out of what browsers
+receive. See [what a turn cost](../../docs/workspace-integrations.md#what-a-turn-cost).
+
 ## Task usage limits
 
 `createSession(workspaceId, { initialMessage, usageLimitMicros })` sets an
@@ -1838,8 +1863,9 @@ For the React conversation, use the packaged
 [`createSessionProxyHandler`](#embed-the-conversation-default). For a custom
 backend route, keep your organization API key on your server and re-emit the
 stream to your own browser clients. The re-emitted wire format is identical to Opengeni's SSE
-stream, so the browser side can consume it with this same SDK (or a plain
-`EventSource`), including resume via `?after=` / `Last-Event-ID`:
+stream, except that each turn's credit `usage` is left out, so the browser side
+can consume it with this same SDK (or a plain `EventSource`), including resume
+via `?after=` / `Last-Event-ID`:
 
 ```ts
 // Your server (Hono, Next.js route handler, Bun.serve, workers, ...):

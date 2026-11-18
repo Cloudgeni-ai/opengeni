@@ -1041,6 +1041,28 @@ describe("Site-safe session events", () => {
       payload: { code: "provider_error", error: `upstream said ${SECRET}`, retryable: true },
     });
     expect(failed?.payload).toEqual({ code: "provider_error", retryable: true });
+    // The credits a turn charged are the operator's, never a Site viewer's.
+    const turnUsage = {
+      creditsMicros: 41_230,
+      tokens: { input: 18_200, output: 950 },
+      breakdown: { model: 39_100, webSearch: 2_130, imageGeneration: 0, other: 0 },
+    };
+    expect(
+      siteSessionEventProjection({
+        ...base,
+        sequence: 7,
+        type: "turn.completed",
+        payload: { maintenance: "none", usage: turnUsage },
+      })?.payload,
+    ).toEqual({ maintenance: "none" });
+    expect(
+      siteSessionEventProjection({
+        ...base,
+        sequence: 7,
+        type: "turn.failed",
+        payload: { code: "provider_error", usage: turnUsage },
+      })?.payload,
+    ).toEqual({ code: "provider_error" });
     const user = siteSessionEventProjection({
       ...base,
       sequence: 8,

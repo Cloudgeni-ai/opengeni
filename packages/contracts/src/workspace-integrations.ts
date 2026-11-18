@@ -7,6 +7,7 @@ import {
   NotificationLink,
   NotificationUndeliveredReason,
   NotificationUrgency,
+  TurnUsage,
   type TurnInitiator,
   type TurnInitiatorContext,
 } from "./index";
@@ -298,6 +299,12 @@ export const SessionWorkspaceWebhookEvent = /* @__PURE__ */ defineSchema(() =>
         callerLabel: z.string().optional(),
         ringUntil: z.string().optional(),
         outcome: z.enum(["answered", "declined", "missed", "cancelled"]).optional(),
+        /**
+         * Turn events (`turn.completed`, `turn.failed`, `turn.cancelled`,
+         * `turn.superseded`): the Opengeni credits the turn charged, as on
+         * the event's payload. Absent on deliveries from before it existed.
+         */
+        usage: z.lazy(() => TurnUsage).optional(),
       })
       .passthrough(),
   }),

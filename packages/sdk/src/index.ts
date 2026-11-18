@@ -1660,6 +1660,7 @@ export type {
   SessionTurnStatus,
   SubmitHumanInputResponseRequest,
   TurnInitiator,
+  TurnUsage,
   ToolAuthNeededPayload,
   UpdateConnectionRequest,
   SandboxCommandOutputDeltaPayload,
