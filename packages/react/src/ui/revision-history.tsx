@@ -204,15 +204,27 @@ function Stacked({
                 </div>
               </div>
               {isOpen ? (
-                <div id={panelId} className="pb-2 pl-6">
-                  <DiffView
-                    before={previousContent(revisions, index)}
-                    after={revision.content}
-                    format={format}
-                    size="sm"
-                    hideStats
-                    label={`Changes in: ${revision.summary}`}
-                  />
+                <div id={panelId} className="pb-3 pl-6">
+                  {last && previousContent(revisions, index) === "" ? (
+                    // The first version has nothing to compare with: its text,
+                    // as it reads, not every line marked as added.
+                    <p
+                      aria-label={`Text of: ${revision.summary}`}
+                      className="m-0 border-l-2 border-border pl-3 text-sm leading-6 break-words whitespace-pre-wrap text-fg-muted"
+                    >
+                      {revision.content.trim()}
+                    </p>
+                  ) : (
+                    <DiffView
+                      before={previousContent(revisions, index)}
+                      after={revision.content}
+                      format={format}
+                      hideStats
+                      bare
+                      label={`Changes in: ${revision.summary}`}
+                      className="[&>div]:py-0"
+                    />
+                  )}
                 </div>
               ) : null}
             </div>

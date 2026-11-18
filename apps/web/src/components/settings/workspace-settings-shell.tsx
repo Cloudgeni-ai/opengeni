@@ -16,6 +16,7 @@ import { organizationSettingsLabel } from "./organization-settings-pages";
 import {
   WORKSPACE_SETTINGS_COPY,
   settingsRailItemId,
+  settingsWindowBarSection,
   useSettingsRail,
   workspacePageLabel,
 } from "./settings-rail";
@@ -113,6 +114,7 @@ export function WorkspaceManagementShell({
       activeId={activeId}
       currentPage={currentPage}
       currentScope={rail.scopeOf(location)}
+      windowBarSection={settingsWindowBarSection(location)}
       page={page}
       layout={
         location.kind === "page" ||

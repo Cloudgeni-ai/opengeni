@@ -84,8 +84,10 @@ export function DetailPageHeader({
   className,
 }: DetailPageHeaderProps) {
   const metaLine = Array.isArray(meta) ? <DetailMeta>{meta}</DetailMeta> : meta;
-  // In the macOS app the window bar shows a plain-text title instead.
-  const titleInWindowBar = useWindowBarTitle(title);
+  // In the macOS app the window bar ends its trail with the title too
+  // ("Agents › Meeting preparation"); the page keeps its own heading, so the
+  // tile, chips and meta line still read as one header.
+  useWindowBarTitle(title);
   return (
     <header data-slot="detail-page-header" className={cn("min-w-0", className)}>
       <div className="flex min-w-0 flex-wrap items-start justify-between gap-x-6 gap-y-4">
@@ -103,7 +105,6 @@ export function DetailPageHeader({
                 data-slot="detail-page-title"
                 className={cn(
                   "min-w-0 text-xl leading-7 font-semibold tracking-[-0.5px] break-words text-fg outline-hidden",
-                  titleInWindowBar && "sr-only",
                 )}
               >
                 {title}

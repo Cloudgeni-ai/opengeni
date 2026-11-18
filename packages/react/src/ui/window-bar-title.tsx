@@ -4,6 +4,36 @@
 import { createContext, useContext, useId, useLayoutEffect, useMemo, type ReactNode } from "react";
 
 /**
+ * A step in the window bar's trail before the page's title: the rail section
+ * ("Knowledge") and the list a detail page belongs to ("Library"). Clicking
+ * it goes there.
+ */
+export interface WindowBarCrumb {
+  label: string;
+  href?: string | undefined;
+  onClick?: (() => void) | undefined;
+}
+
+/**
+ * Where a detail page sits, for the header below it to put in the window
+ * bar's trail: the list it belongs to (its back link) and, when it differs
+ * from the shell's, the section ("Agents" for an agent's Memory, which lives
+ * in Knowledge). Provided by `DetailPage`.
+ */
+export interface WindowBarPlace {
+  parent: WindowBarCrumb | null;
+  section?: WindowBarCrumb | null | undefined;
+}
+
+export const WindowBarPlaceContext = createContext<WindowBarPlace | null>(null);
+
+/**
+ * Told whether a header below names the window bar, so a `DetailPage` drops
+ * its back link only while its own header carries it into the bar's trail.
+ */
+export const WindowBarOwnerReportContext = createContext<((owns: boolean) => void) | null>(null);
+
+/**
  * The desktop window bar's title line, when the page's shell draws one (the
  * macOS app): the first page header below claims it with its title, which is
  * then shown in the bar, and keeps its heading only for assistive tech, so the
@@ -16,7 +46,13 @@ export const PageHeaderWindowBarContext = createContext<{
    * title (a Site's) can be right-clicked in the bar to copy it; others stay
    * part of the bar's drag region.
    */
-  set(id: string, title: string | null, fallback?: boolean, copyable?: boolean): void;
+  set(
+    id: string,
+    title: string | null,
+    fallback?: boolean,
+    copyable?: boolean,
+    place?: WindowBarPlace | null,
+  ): void;
   release(id: string): void;
   /** The header whose title the bar shows. */
   owner: string | null;
@@ -44,8 +80,13 @@ export function WindowBarTitleBoundary({
       fallback && enclosing
         ? {
             ...enclosing,
-            set: (id: string, title: string | null, _fallback?: boolean, copyable?: boolean) =>
-              enclosing.set(id, title, true, copyable),
+            set: (
+              id: string,
+              title: string | null,
+              _fallback?: boolean,
+              copyable?: boolean,
+              place?: WindowBarPlace | null,
+            ) => enclosing.set(id, title, true, copyable, place),
           }
         : null,
     [fallback, enclosing],
@@ -70,15 +111,23 @@ export function useWindowBarTitle(
   { copyable = false }: { copyable?: boolean } = {},
 ): boolean {
   const windowBar = useContext(PageHeaderWindowBarContext);
+  const place = useContext(WindowBarPlaceContext);
   const id = useId();
   const text = typeof title === "string" ? title : null;
   const set = windowBar?.set;
   const release = windowBar?.release;
   useIsomorphicLayoutEffect(() => {
-    set?.(id, text || null, fallback, copyable);
-  }, [id, set, text, fallback, copyable]);
+    set?.(id, text || null, fallback, copyable, place);
+  }, [id, set, text, fallback, copyable, place]);
   useIsomorphicLayoutEffect(() => () => release?.(id), [id, release]);
-  return windowBar?.owner === id;
+  const owns = windowBar?.owner === id;
+  const report = useContext(WindowBarOwnerReportContext);
+  useIsomorphicLayoutEffect(() => {
+    if (!report || !owns) return;
+    report(true);
+    return () => report(false);
+  }, [report, owns]);
+  return owns;
 }
 
 const useIsomorphicLayoutEffect =

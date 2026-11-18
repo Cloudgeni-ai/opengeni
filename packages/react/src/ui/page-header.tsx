@@ -8,7 +8,7 @@ import {
 } from "react";
 
 import { cn } from "../lib/cn";
-import { useWindowBarTitle } from "./window-bar-title";
+import { useWindowBarTitle, WindowBarPlaceContext } from "./window-bar-title";
 
 /**
  * One header for every page: title, one-line description, primary action and
@@ -108,8 +108,12 @@ export const PageHeader = /* @__PURE__ */ forwardRef<HTMLElement, PageHeaderProp
     const large = variant === "large";
     const iconVisible = Boolean(icon) && !large && (showIcon ?? style.icon !== "hide");
     const ruled = divider && !tabs;
-    // In the macOS app the window bar shows the page's title instead.
-    const titleInWindowBar = useWindowBarTitle(title);
+    // In the macOS app the window bar shows a section page's title instead;
+    // a page opened from a list (inside a DetailPage) keeps its title, as the
+    // bar's trail then names where it is.
+    const barOwner = useWindowBarTitle(title);
+    const insideDetailPage = Boolean(useContext(WindowBarPlaceContext)?.parent);
+    const titleInWindowBar = barOwner && !insideDetailPage;
     // With only a title, nothing of it is left to show here.
     const titleOnly = titleInWindowBar && !description && !context && !meta && !actions && !tabs;
 
