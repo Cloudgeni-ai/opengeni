@@ -1,6 +1,7 @@
 import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";
 import {
   isNangoProviderDomain,
+  nativeNangoIntegrationForProviderDomain,
   sameConnectorProviderDomain,
   type ConnectionMetadata,
 } from "@opengeni/contracts";
@@ -59,7 +60,9 @@ async function counterparts(
   db: Database,
   connection: ChoiceConnection,
 ): Promise<ConnectionMetadata[]> {
-  if (!connection.subjectId) return [];
+  // Only a connector served under both backends has a counterpart.
+  if (!connection.subjectId || !nativeNangoIntegrationForProviderDomain(connection.providerDomain))
+    return [];
   return sameAccountOtherBackendConnections(
     connection,
     await listOwnConnectionMetadata(db, {

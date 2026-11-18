@@ -592,8 +592,19 @@ export async function updateConnectorToolPermissions(
     throw new HTTPException(409, {
       message: "The connector account changed. Reload its permissions.",
     });
-  // A change never starts from a reset copy of the account's choices.
-  if (target.connection?.subjectId) await carryConnectorToolChoices(input.db, target.connection);
+  // A change never starts from a reset copy of the account's choices. If they
+  // can't be brought over, nothing changes: an edit to an empty set would then
+  // be mirrored over the other backend's account.
+  if (target.connection?.subjectId)
+    await carryConnectorToolChoices(input.db, target.connection).catch((error: unknown) => {
+      console.warn("[connectors] carrying tool choices to an account failed", {
+        connectionId: target.connectionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw new HTTPException(409, {
+        message: "This account's choices could not be loaded. Reload its permissions.",
+      });
+    });
   try {
     await updateConnectorToolPermissionPolicies(input.db, {
       accountId: input.grant.accountId,

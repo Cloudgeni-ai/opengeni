@@ -101191,22 +101191,42 @@ export async function copyConnectorToolPermissionPolicies(
     serverId?: string;
   },
 ): Promise<number> {
-  const source = (
-    await listConnectorToolPermissionPolicies(db, {
-      accountId: input.accountId,
-      workspaceId: input.from.workspaceId,
-      connectionId: input.from.connectionId,
-    })
-  ).filter((row) => input.serverId === undefined || row.serverId === input.serverId);
-  if (input.serverId === undefined && source.length === 0) return 0;
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.to.workspaceId },
     async (scoped) =>
       scoped.transaction(async (tx) => {
-        await tx.execute(
-          sql`select pg_advisory_xact_lock(hashtextextended(${`connector-tool-permissions:${input.to.workspaceId}`}, 0))`,
-        );
+        // Both workspaces' choice locks, in a fixed order, so the source is
+        // read as last committed: an older edit's copy never lands after a
+        // newer one's.
+        for (const workspaceId of [
+          ...new Set([input.from.workspaceId, input.to.workspaceId]),
+        ].sort())
+          await tx.execute(
+            sql`select pg_advisory_xact_lock(hashtextextended(${`connector-tool-permissions:${workspaceId}`}, 0))`,
+          );
+        // The source login's home, read under that workspace's tenant scope
+        // inside this transaction (as a turn reads a followed login's choices).
+        const source = (
+          await withRlsContext(
+            tx,
+            { accountId: input.accountId, workspaceId: input.from.workspaceId },
+            async (home) =>
+              await home
+                .select()
+                .from(schema.connectorActionPolicies)
+                .where(
+                  and(
+                    eq(schema.connectorActionPolicies.workspaceId, input.from.workspaceId),
+                    eq(schema.connectorActionPolicies.connectionId, input.from.connectionId),
+                  ),
+                )
+                .orderBy(asc(schema.connectorActionPolicies.id)),
+            undefined,
+            "none",
+          )
+        ).filter((row) => input.serverId === undefined || row.serverId === input.serverId);
+        if (input.serverId === undefined && source.length === 0) return 0;
         const existing = await tx
           .select()
           .from(schema.connectorActionPolicies)
