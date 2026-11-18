@@ -74,7 +74,9 @@ test("folders disclose four at a time independently of their cached pages", asyn
     await defaultFolder
       .getByRole("button", { name: /^Show \d+ more sessions in Default$/ })
       .click();
-    await defaultFolder.getByText(`Default conversation ${Math.min(shown + 4, 65)}`).waitFor();
+    await defaultFolder
+      .getByText(`Default conversation ${Math.min(shown + 4, 65)}`, { exact: true })
+      .waitFor();
   }
   await defaultFolder.getByText("Default conversation 65").waitFor();
   expect(await page.evaluate(() => (window as any).renameQa.pageCalls)).toEqual(

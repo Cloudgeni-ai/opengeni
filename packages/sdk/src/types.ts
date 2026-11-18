@@ -2104,6 +2104,11 @@ export type Session = {
   description?: string | null | undefined;
   /** Display-only avatar. Never sent to the model. */
   avatar?: SessionAvatar | null | undefined;
+  /**
+   * The agent this chat was started with; null for an ordinary chat. Fixed at
+   * create. Omitted by older servers.
+   */
+  agentId?: string | null | undefined;
   instructions: string | null;
   /** Immutable normalized prompt-policy role; distinct from membership roles. */
   policyRole: string | null;
@@ -2302,6 +2307,7 @@ export type SessionListEntry = Pick<
   | "titleSource"
   | "description"
   | "avatar"
+  | "agentId"
   | "createdBy"
   | "channelId"
   | "parentSessionId"

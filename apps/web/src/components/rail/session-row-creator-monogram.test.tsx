@@ -66,20 +66,19 @@ describe("rail creator monogram", () => {
     expect(metadata.children[2]?.textContent).toBe("3h");
   });
 
-  test("falls back to the subject id when a creator has no label", () => {
+  test("shows no chip, never an id fragment, for a person without a known name", () => {
     const host = parse(
       renderToStaticMarkup(
         <RailTrailingMetadata
           summary={neutral}
           relativeTime="3h"
-          creator={{ kind: "subject", subjectId: "user:iuliia" }}
+          creator={{ kind: "subject", subjectId: "user:3b61b5c7" }}
         />,
       ),
     );
 
-    const monogram = host.querySelector("[data-creator-monogram]");
-    expect(monogram?.textContent).toBe("IU");
-    expect(monogram?.getAttribute("title")).toBeNull();
+    expect(host.querySelector("[data-creator-monogram]")).toBeNull();
+    expect(host.textContent).not.toContain("3B");
   });
 
   test("renders a creator-only metadata block when a row has nothing else", () => {

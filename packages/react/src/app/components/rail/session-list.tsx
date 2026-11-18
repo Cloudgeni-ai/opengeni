@@ -58,7 +58,7 @@ import {
   UsersIcon,
   LinkIcon,
 } from "lucide-react";
-import { SessionAvatar } from "../session/session-avatar";
+import { ChatAvatar } from "../session/chat-avatar";
 import { ProjectGlyph } from "./project-glyph";
 import { ProjectProfileDialog } from "./project-profile";
 import {
@@ -249,6 +249,11 @@ import {
   writeSessionBrowsePreferences,
 } from "../../lib/session-browse-preferences";
 import { creatorPageIdentity, railRowCreator } from "../../lib/creator-initials";
+import {
+  creatorNeedsLabel,
+  useCreatorLabelResolver,
+  useResolvedCreator,
+} from "../../lib/creator-labels";
 import { formatWaitingSince } from "../../lib/format";
 import {
   sessionDescendantCountAria,
@@ -1407,7 +1412,26 @@ export function SessionList() {
       (session) => !session.parentSessionId || !loadedIds.has(session.parentSessionId),
     );
   }, [allSessions, hierarchyMode]);
-  const creatorLabels = useMemo(() => sessionCreatorLabelMap(creatorSessions), [creatorSessions]);
+  // Name people frozen without a label, so creator groups never show an id.
+  const resolveCreator = useCreatorLabelResolver(
+    rail.workspaceId,
+    browseGroupBy === "creator" &&
+      creatorSessions.some((session) => creatorNeedsLabel(session.createdBy)),
+  );
+  const creatorLabels = useMemo(
+    () =>
+      sessionCreatorLabelMap(
+        creatorSessions.map((session) =>
+          creatorNeedsLabel(session.createdBy)
+            ? {
+                ...session,
+                createdBy: { ...session.createdBy, ...resolveCreator(session.createdBy) },
+              }
+            : session,
+        ),
+      ),
+    [creatorSessions, resolveCreator],
+  );
   const paginationBrowseFilter = useMemo<SessionPaginationBrowseFilter>(
     () => ({
       creator: null,
@@ -5202,7 +5226,7 @@ function SessionRow(props: {
   const pinKeys = useActionShortcut("chat.pin");
   const hasChildren = props.hasChildren;
   const focusEvents = useUiEventTarget("window");
-  const creator = railRowCreator(props.session);
+  const creator = useResolvedCreator(props.session.workspaceId, railRowCreator(props.session));
   const jumpKey = usePinnedJumpKey(props.session.id, props.depth, rail.isMobile);
   const pinnedParentTitles = useContext(PinnedParentTitles);
   const parentTitle =
@@ -5454,18 +5478,7 @@ function SessionRow(props: {
               >
                 <SessionRowContent
                   quickActionSlots={Number(!props.session.archived) + 1}
-                  leading={
-                    props.session.avatar ? (
-                      <SessionAvatar
-                        avatar={props.session.avatar}
-                        name={title}
-                        workspaceId={props.session.workspaceId}
-                        seed={props.session.id}
-                        size="xs"
-                        className="mr-0.5"
-                      />
-                    ) : null
-                  }
+                  leading={<ChatAvatar chat={props.session} name={title} className="mr-0.5" />}
                   title={title}
                   parentTitle={parentTitle}
                   stateLabel={stateLabel}

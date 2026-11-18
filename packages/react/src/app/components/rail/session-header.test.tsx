@@ -613,7 +613,7 @@ test("a chat with an agent names it beside its title, says where it started, and
   const context = agentContext;
   const root = createReactRoot(container);
   const agentId = "11111111-1111-4111-8111-111111111111";
-  const render = (patch: Partial<Session> & { agentId?: string | null }) => (
+  const render = (patch: Partial<Session>) => (
     <MemoryHost>
       <AppContext.Provider value={context}>
         <SessionHeader

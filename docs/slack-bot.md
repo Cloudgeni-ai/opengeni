@@ -187,7 +187,7 @@ with an avatar, see [Bots](bots.md)) post its own replies under its name and
 avatar instead of the app's. Slack still labels those posts as the app's, and
 approvals, limits and other notices stay the app's. The manifest requests it,
 so new installs have it; an existing install gets it when a Slack admin
-reinstalls the app. Without the grant, every post is the app's as before. The avatar picture is served from a signed
+reinstalls the app. Without the grant, every post is the app's as before; the Slack integration page and each agent's "Available in" Slack row then say replies show as Opengeni, with one Update action that starts the same reinstall. The avatar picture is served from a signed
 `/v1/public/session-avatars/` URL that Slack fetches without credentials; it
 draws only the avatar it was signed for. Slack refuses a post whose picture URL
 is 256 characters or longer, so new URLs carry a 128-bit signature (older,

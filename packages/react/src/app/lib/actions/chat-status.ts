@@ -21,6 +21,8 @@ export type ChatStatus = {
   /** What that automation waits for, in words ("Waiting for deploy.finished from Deploys"). */
   automationWaitLabel: string | null;
   creator: CreatorRef | null;
+  /** The chat's workspace, where a creator frozen without a name is looked up. */
+  workspaceId: string;
 };
 
 /** Exactly the sidebar row's marker: the chat and everything it started. */
@@ -35,6 +37,7 @@ export function chatRowStatus(row: SessionListRow, now: Date = new Date()): Chat
     automationWait: automationWait?.kind ?? null,
     automationWaitLabel: automationWait?.label ?? null,
     creator: railRowCreator(row),
+    workspaceId: row.workspaceId,
   };
 }
 

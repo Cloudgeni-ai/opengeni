@@ -17571,6 +17571,7 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     titleSource: true,
     description: true,
     avatar: true,
+    agentId: true,
     createdBy: true,
     channelId: true,
     parentSessionId: true,

@@ -150,7 +150,10 @@ let root: Root | null = null;
 let host: HTMLElement | null = null;
 
 beforeAll(async () => {
-  mock.module("../../app-context", () => ({ useAppContext: () => ({ client }) }));
+  mock.module("../../app-context", () => ({
+    useAppContext: () => ({ client }),
+    useOptionalAppContext: () => ({ client }),
+  }));
   mock.module("../../lib/actions/actions-provider", () => ({
     useAppActions: () => ({
       env: currentEnv,
