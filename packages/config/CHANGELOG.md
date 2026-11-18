@@ -1,5 +1,15 @@
 # @opengeni/config
 
+## 6.30.0
+
+### Patch Changes
+
+- Updated dependencies [133db2c]
+- Updated dependencies [df0c5ac]
+  - @opengeni/contracts@6.30.0
+  - @opengeni/codex@6.30.0
+  - @opengeni/xai-subscription@6.30.0
+
 ## 6.29.2
 
 ### Patch Changes
