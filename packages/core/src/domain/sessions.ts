@@ -123,6 +123,7 @@ import {
   currentAgentLearningToolSelection,
   DraftTimelineAnnotations,
   FIRST_PARTY_MCP_TOOL_NAMES,
+  renamedFirstPartyMcpToolSuccessor,
   OPENGENI_SLACK_BOT_SESSION_METADATA_KEY,
   SessionSkills,
   resolveBundledSkillSelection,
@@ -518,6 +519,8 @@ export function resolveFirstPartyMcpToolsForCreate(
  * `retained` names tools the caller may echo from its stored selection; those
  * stay deployment-filtered like any default, so a later policy change never
  * blocks an unrelated edit.
+ * A tool's old name from before a one-to-one rename stands for its successor,
+ * so clients built against an older contract keep working.
  */
 export function requireDeploymentFirstPartyMcpTools(
   requested: readonly FirstPartyMcpToolName[],
@@ -526,7 +529,15 @@ export function requireDeploymentFirstPartyMcpTools(
   hint = "",
 ): void {
   const permitted = new Set([...allowed, ...retained]);
-  const disallowed = [...new Set(requested.filter((tool) => !permitted.has(tool)))];
+  const disallowed = [
+    ...new Set(
+      requested.filter((tool) => {
+        if (permitted.has(tool)) return false;
+        const successor = renamedFirstPartyMcpToolSuccessor(tool);
+        return successor === undefined || !permitted.has(successor);
+      }),
+    ),
+  ];
   if (disallowed.length > 0) {
     throw new HTTPException(422, {
       message: `first-party MCP tools are disabled by deployment policy: ${disallowed.join(", ")}. Allowed tools: ${allowed.join(", ") || "(none)"}.${hint ? ` ${hint}` : ""}`,
@@ -2039,7 +2050,7 @@ export async function requireQueuedTurnForApi(
  * Appends a `user.message` to an existing session and enqueues the resulting
  * turn, merging requested resources/tools into the session and waking the
  * workflow. Shared by the public events route and the first-party MCP
- * `session_send_message` tool so the two surfaces cannot drift. Callers own
+ * `session_queue_message` tool so the two surfaces cannot drift. Callers own
  * resource/tool validation and the per-message usage limit before calling.
  */
 type PostUserMessageTurnResult = {
@@ -4610,7 +4621,7 @@ function sessionPromptBoundaryRequestHash(input: {
 
 /**
  * Full accept-user-message flow shared by the `user.message` branch of
- * `POST /sessions/:id/events` and the first-party MCP `session_send_message`
+ * `POST /sessions/:id/events` and the first-party MCP `session_queue_message`
  * tool: resource/tool validation, usage limits, the locked append + turn
  * enqueue, and usage recording. `toolsProvided: false` durably preserves an
  * Tool selection is durable session state and never rides a follow-up prompt.

@@ -28,6 +28,7 @@ import { Switch } from "@opengeni/react/ui/switch";
 import { markScheduledTaskAttentionSeen } from "@/components/rail/use-scheduled-task-attention";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import { useSimplifiedInterface } from "@opengeni/react/app/lib/simplified-interface";
 import { listViewState } from "@/lib/load-state";
 import { sessionDisplayTitle } from "@opengeni/react/app/lib/session-rename";
 import { scheduledTaskDriftDismissal } from "@/lib/scheduled-task-drift-dismissals";
@@ -159,6 +160,7 @@ export function SchedulesListPage({
   const isAdmin = hasWorkspacePermission(accessContext, workspaceId, "workspace:admin");
   const go = useScheduleNavigation(workspaceId);
   const eventTriggers = useEventTriggersEnabled();
+  const { simplified } = useSimplifiedInterface();
   // Source names for the rows' "When" words; rows read without them meanwhile.
   const { sources } = useEventSources(workspaceId, eventTriggers);
   const [list, setList] = useState<ScheduleListSnapshot>(EMPTY_LIST);
@@ -451,8 +453,9 @@ export function SchedulesListPage({
           <SchedulesEmpty
             canCreate={canCreate}
             filtered={Boolean(targetSessionId)}
-            templates={scheduleTemplates(eventTriggers)}
+            templates={scheduleTemplates(eventTriggers, simplified)}
             eventTriggers={eventTriggers}
+            simplified={simplified}
             now={clock}
             onNew={() =>
               go.create(targetSessionId ? { sourceSessionId: targetSessionId } : undefined)
@@ -649,6 +652,7 @@ function SchedulesEmpty({
   filtered,
   templates,
   eventTriggers,
+  simplified,
   now,
   onNew,
   onAsk,
@@ -659,9 +663,11 @@ function SchedulesEmpty({
   /** The templates this deployment can create. */
   templates: readonly AutomationTemplate[];
   eventTriggers: boolean;
+  /** The simplified interface: its examples come from its own templates. */
+  simplified: boolean;
   now: Date;
   onNew: () => void;
-  /** "Create with Opengeni"; absent without the permissions to start it. */
+  /** "Create with Opengeni" (or Geni); absent without the permissions to start it. */
   onAsk?: () => void;
   onTemplate: (templateId: string) => void;
 }) {
@@ -692,9 +698,11 @@ function SchedulesEmpty({
       title="No automations yet"
       description={
         canCreate
-          ? eventTriggers
-            ? "Have the agent work on a rhythm, like a morning brief, or when something happens, like a new pull request."
-            : "Have the agent do something on a rhythm, like a morning brief or a weekly dependency PR."
+          ? simplified
+            ? "Have the agent do something on a rhythm, like a brief of your day each morning or an update for each client every Monday."
+            : eventTriggers
+              ? "Have the agent work on a rhythm, like a morning brief, or when something happens, like a new pull request."
+              : "Have the agent do something on a rhythm, like a morning brief or a weekly dependency PR."
           : "Automations run agent work on their own. Ask a workspace admin for access to create one."
       }
       action={

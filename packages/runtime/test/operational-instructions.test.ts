@@ -255,7 +255,7 @@ describe("provider-neutral operational instructions", () => {
       "Explicit user requests and applicable Skill guidance for delegation, independent review, or fresh workers override that default within existing authority",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "send a related follow-up to a child you already spawned with `session_send_message`",
+      "queue a related follow-up to a child you already spawned with `session_queue_message`",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "call `wait_for_input` right after spawning instead of alternating `session_wait` and `session_get`",

@@ -47,6 +47,7 @@ import {
   windowBarRowActive,
 } from "@opengeni/react/app/components/window-bar";
 import { desktopPlatform } from "@opengeni/react/app/lib/desktop";
+import { useSimplifiedInterface } from "@opengeni/react/app/lib/simplified-interface";
 import { cn } from "@opengeni/react/app/lib/utils";
 import { SettingsActionsSlotContext } from "./settings-header-actions";
 import { searchSettings, settingsSearchEntries, type SettingsSearchEntry } from "./settings-search";
@@ -253,6 +254,7 @@ function SettingsRail({
   onNavigate?: () => void;
 }) {
   const ref = useRef<HTMLElement>(null);
+  const { productName } = useSimplifiedInterface();
   const [query, setQuery] = useState("");
   const entries = useMemo(() => settingsSearchEntries(sections), [sections]);
   const results = useMemo(() => searchSettings(entries, query), [entries, query]);
@@ -322,7 +324,11 @@ function SettingsRail({
           <div className="flex min-w-0 flex-col gap-3">
             {/* The nav's own 8px inset stands in for the row's. */}
             <RailBrandRow className="px-0">
-              <LinkShell link={home} aria-label="Opengeni home" className={RAIL_BRAND_LINK_CLASS}>
+              <LinkShell
+                link={home}
+                aria-label={`${productName} home`}
+                className={RAIL_BRAND_LINK_CLASS}
+              >
                 <RailBrandMark />
               </LinkShell>
             </RailBrandRow>

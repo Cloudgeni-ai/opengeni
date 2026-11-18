@@ -734,7 +734,15 @@ describe("Claude full-history Messages adapter", () => {
       "system",
       "assistant",
     ]);
-    expect(messages[1]!.content[0]).toMatchObject({ type: "tool_use", id: "a" });
+    // The reply ends with its tool call; the searches' four records move before it.
+    expect(messages[1]!.content.map((block) => block.type)).toEqual([
+      "text",
+      "text",
+      "text",
+      "text",
+      "tool_use",
+    ]);
+    expect(messages[1]!.content.at(-1)).toMatchObject({ type: "tool_use", id: "a" });
     expect(messages[2]!.content).toEqual([
       { type: "tool_result", tool_use_id: "a", content: [{ type: "text", text: "listed" }] },
     ]);

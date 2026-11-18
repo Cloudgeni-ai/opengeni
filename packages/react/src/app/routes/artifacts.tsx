@@ -57,6 +57,7 @@ import { readyNewChat } from "../lib/ready-new-chat";
 import { userErrorText } from "../../ui/api-error";
 import { newArtifactPrompt } from "../lib/site-edit-prompt";
 import { hasWorkspacePermission, lacksWorkspacePermission } from "../lib/permissions";
+import { useSimplifiedInterface } from "../lib/simplified-interface";
 import {
   artifactLibraryFilters,
   artifactLibraryPositionKey,
@@ -150,6 +151,7 @@ function ArtifactListRoute({
   fromSession?: string | undefined;
 }) {
   const context = useAppContext();
+  const { productName } = useSimplifiedInterface();
   const navigate = useNavigate();
   const search = useSearch({ strict: false });
   const filters = artifactLibraryFilters(search);
@@ -243,7 +245,7 @@ function ArtifactListRoute({
         <PageHeader
           icon={<PanelsTopLeftIcon />}
           title="Artifacts"
-          description="Sites, images, documents and files made with Opengeni"
+          description={`Sites, images, documents and files made with ${productName}`}
           actions={empty && filters.kind === "all" ? null : newArtifact}
           tabs={
             <LineTabsList aria-label="Artifact types">
@@ -277,6 +279,16 @@ function ArtifactListRoute({
                     await context.client.updateArtifactPin(workspaceId, item.kind, item.id, pinned);
                     invalidateAfterMutation();
                     await catalog.refresh();
+                  }
+                : undefined
+            }
+            onArchive={
+              canPin
+                ? async (item) => {
+                    await context.client.archiveEditableArtifact(workspaceId, item.id);
+                    invalidateAfterMutation();
+                    // The delete already succeeded; a failed refresh must not report it failed.
+                    void catalog.refresh().catch(() => undefined);
                   }
                 : undefined
             }

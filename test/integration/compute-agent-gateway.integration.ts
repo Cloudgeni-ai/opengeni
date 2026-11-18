@@ -771,6 +771,7 @@ describe("compute agent gateway (real NATS, Postgres and WebSocket)", () => {
         sandboxGroupId: session.sandboxGroupId,
       };
       await acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         ...group,
         kind: "turn",
         holderId: `turn-${id}`,

@@ -28,7 +28,7 @@ const STAGES = [
   "sandbox_retained_processes.proof",
   "sandbox_retained_processes.observation",
   "mcp.session_create",
-  "mcp.session_send_message",
+  "mcp.session_queue_message",
   "mcp.session_steer",
 ] as const;
 const RETRIES = ["not_retryable", "exhausted", "unknown"] as const;

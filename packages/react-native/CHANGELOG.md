@@ -1,5 +1,108 @@
 # @opengeni/react-native
 
+## 6.28.0
+
+### Patch Changes
+
+- d5cadac: Artifacts in the phone app. A bottom bar moves between Chats, Artifacts, Meetings and Inbox (with a count of what waits on you; Automations stays in the chats menu), and on iOS a swipe right from the left edge opens the chats menu. Artifacts lists the workspace's Sites, documents, presentations, spreadsheets, images and files as cards with a still, with search and type chips; a card opens a full-screen viewer with Share and the web library's menu (Open chat, Pin, Duplicate, Copy link, Download, Delete…). An artifact linked on its own line in a chat is a card that opens the same viewer.
+
+  `createWebMarkdownRenderer` takes `renderOpenGeniLink` to draw a standalone Opengeni object link as a block. The native icon set adds `presentation`, `share` and `link`. `SiteViewRoute` takes `embedded` to show the Site alone, without its toolbar or chat. The inbox row's snooze fade no longer crashes dev builds with a non-increasing range, and `useNativeInbox` starts empty when its client changes (another account) instead of showing the last account's items, and takes `enabled` to read nothing while signed out. The client page list adds `native-view`.
+
+- Updated dependencies [d5cadac]
+- Updated dependencies [515bc72]
+  - @opengeni/react@6.28.0
+  - @opengeni/contracts@6.28.0
+  - @opengeni/sdk@6.28.0
+
+## 6.27.1
+
+### Patch Changes
+
+- Updated dependencies [02804ec]
+  - @opengeni/contracts@6.27.1
+  - @opengeni/react@6.27.1
+  - @opengeni/sdk@6.27.1
+
+## 6.27.0
+
+### Patch Changes
+
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+  - @opengeni/react@6.27.0
+  - @opengeni/contracts@6.27.0
+  - @opengeni/sdk@6.27.0
+
+## 6.26.0
+
+### Patch Changes
+
+- Updated dependencies [6d7ea1e]
+- Updated dependencies [8fae328]
+- Updated dependencies [c8efcb0]
+- Updated dependencies [20e4937]
+  - @opengeni/contracts@6.26.0
+  - @opengeni/sdk@6.26.0
+  - @opengeni/react@6.26.0
+
+## 6.25.0
+
+### Patch Changes
+
+- Updated dependencies [e126cb5]
+- Updated dependencies [61abc98]
+- Updated dependencies [81570f9]
+- Updated dependencies [f99f940]
+- Updated dependencies [e126cb5]
+- Updated dependencies [f99f940]
+- Updated dependencies [bfd2970]
+  - @opengeni/contracts@6.25.0
+  - @opengeni/sdk@6.25.0
+  - @opengeni/react@6.25.0
+
+## 6.24.1
+
+### Patch Changes
+
+- Updated dependencies [f041392]
+- Updated dependencies [e5ce845]
+- Updated dependencies [5fd2c21]
+  - @opengeni/react@6.24.1
+  - @opengeni/sdk@6.24.1
+  - @opengeni/contracts@6.24.1
+
+## 6.24.0
+
+### Patch Changes
+
+- Updated dependencies [c0248a5]
+- Updated dependencies [0d981bd]
+  - @opengeni/contracts@6.24.0
+  - @opengeni/react@6.24.0
+  - @opengeni/sdk@6.24.0
+
+## 6.23.0
+
+### Patch Changes
+
+- f6f8c51: Links in chat replies are easy to see. A new `link` color token (`--og-color-link` on web, `link` in the native theme) colors every text link a calm blue in both themes, readable on every chat surface. The native chat now underlines links like the web chat, announces them as links and shows a soft wash while one is pressed. Web URLs, autolinked URLs, artifact, Site, chat and file links, and links in lists and tables all share the style. Hosts that rebranded links through `--og-color-accent-strong` set `--og-color-link` instead.
+- bce18b7: The native chat shows the animated thinking orb again while a reply is being prepared, next to the status text, as the web chat does. It had been replaced by a small spinner. The orb still disappears on the first useful output, the status stays stable and says when a start takes longer than usual, a failed preparation stays visible, and a host's `renderPreparing` still replaces the default visual.
+- Updated dependencies [c0089e1]
+- Updated dependencies [9dd96b0]
+- Updated dependencies [adc2409]
+- Updated dependencies [f6f8c51]
+- Updated dependencies [f6a7c28]
+- Updated dependencies [c0089e1]
+  - @opengeni/contracts@6.23.0
+  - @opengeni/react@6.23.0
+  - @opengeni/sdk@6.23.0
+
 ## 6.22.0
 
 ### Patch Changes

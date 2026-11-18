@@ -2,6 +2,7 @@ import { Link } from "../lib/navigation";
 import type { ReactNode } from "react";
 import {
   Blocks,
+  CalendarDays,
   Clock3,
   CookingPot,
   GraduationCap,
@@ -15,6 +16,7 @@ import {
 } from "lucide-react";
 import { linearLogo, slackLogo } from "./new-session-starter-logos";
 import { Button } from "../../ui/button";
+import { useSimplifiedInterface } from "../lib/simplified-interface";
 
 // Plain editable prompts, not service identifiers or a connector resolver.
 export const NEW_SESSION_STARTERS = [
@@ -120,6 +122,38 @@ export const EVERYDAY_SESSION_STARTERS = [
   },
 ] as const;
 
+/**
+ * The simplified interface's six: work from Slack, the inbox and the calendar
+ * first, then the general asks that need nothing connected. No code hosting or
+ * issue trackers. `{product}` is the name people know the product by.
+ */
+export const SIMPLIFIED_INTERFACE_STARTERS = [
+  {
+    id: "slack",
+    title: "Work with {product} from Slack",
+    description: "Install the bot. Start tasks and follow up on the go.",
+    prompt:
+      "Help me install the Slack bot so I can ask questions, start work, and follow up from Slack, including on my phone.",
+  },
+  {
+    id: "enquiries",
+    title: "Answer new enquiries",
+    description: "Connect your inbox and get a drafted reply to each one.",
+    prompt:
+      "Help me connect my email. Then find the new enquiries that still need an answer and draft a reply to each one. Show me the drafts and don't send anything until I say so.",
+  },
+  {
+    id: "meetings",
+    title: "Prep my meetings",
+    description: "A short brief before each one on your calendar.",
+    prompt:
+      "Help me connect my calendar. Then look at my meetings for the next few days and write a short brief for each: who it is with, what we last discussed, and what I should prepare.",
+  },
+  NEW_SESSION_STARTERS[3],
+  NEW_SESSION_STARTERS[4],
+  NEW_SESSION_STARTERS[5],
+] as const;
+
 /** For people who said they build a product: their agent first, then a demo. */
 export const ADD_AGENT_STARTER = {
   id: "add-agent",
@@ -185,6 +219,7 @@ export function NewSessionStarters({
   /** Where the playground demo opens (product set). */
   workspaceId?: string | undefined;
 }) {
+  const { simplified, productName } = useSimplifiedInterface();
   if (hostStarters) {
     if (hostStarters.length === 0) return null;
     return (
@@ -233,6 +268,50 @@ export function NewSessionStarters({
             <StarterText title={starter.title} description={starter.description} />
           </Button>
         ))}
+      </StarterSection>
+    );
+  }
+  if (simplified) {
+    return (
+      <StarterSection>
+        {SIMPLIFIED_INTERFACE_STARTERS.map((starter) => {
+          const Icon =
+            starter.id === "enquiries"
+              ? Mail
+              : starter.id === "meetings"
+                ? CalendarDays
+                : starter.id === "schedule"
+                  ? Clock3
+                  : starter.id === "research"
+                    ? Search
+                    : PanelsTopLeft;
+          return (
+            <Button
+              key={starter.id}
+              type="button"
+              variant="outline"
+              disabled={disabled}
+              className={STARTER_CLASS}
+              data-starter={starter.id}
+              onClick={() => onSelect(starter.prompt)}
+            >
+              {starter.id === "slack" ? (
+                <img
+                  src={slackLogo}
+                  alt=""
+                  aria-hidden="true"
+                  className="size-8 shrink-0 rounded-sm object-contain"
+                />
+              ) : (
+                <Icon aria-hidden="true" className="size-5 shrink-0 text-fg-subtle" />
+              )}
+              <StarterText
+                title={starter.title.replace("{product}", productName)}
+                description={starter.description}
+              />
+            </Button>
+          );
+        })}
       </StarterSection>
     );
   }

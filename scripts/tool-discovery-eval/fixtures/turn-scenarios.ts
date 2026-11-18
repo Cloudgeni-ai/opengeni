@@ -20,7 +20,7 @@ export const DEFAULT_TURN_SCENARIOS: TurnScenario[] = [
   {
     id: "worker",
     task: "Start a separate worker chat that audits the README for broken links, then send it a follow-up asking it to also check the docs folder.",
-    needs: [["session_create"], ["session_send_message", "session_steer"]],
+    needs: [["session_create"], ["session_queue_message", "session_steer"]],
   },
   {
     id: "remember",

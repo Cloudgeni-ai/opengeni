@@ -77,6 +77,7 @@ export function PluginPage({
   busy,
   error,
   canManage,
+  cannotConnectHosts,
   connections,
   onInstall,
   onConnect,
@@ -90,6 +91,8 @@ export function PluginPage({
   busy: boolean;
   error: string | null;
   canManage: boolean;
+  /** MCP hosts this deployment cannot start a connection to (no operator OAuth client). */
+  cannotConnectHosts?: ReadonlySet<string> | undefined;
   /** Connected state by MCP endpoint. */
   connections: Record<string, boolean>;
   onInstall?: (() => void) | undefined;
@@ -292,7 +295,9 @@ export function PluginPage({
           <ul className="m-0 list-none divide-y divide-border p-0">
             {servers.map((server) => {
               const connected = Boolean(server.endpoint && connections[server.endpoint]);
-              const unavailable = connected ? null : pluginMcpUnavailableReason(server);
+              const unavailable = connected
+                ? null
+                : pluginMcpUnavailableReason(server, { cannotConnectHosts });
               return (
                 <li
                   key={server.name}

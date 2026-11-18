@@ -1,5 +1,97 @@
 # @opengeni/contracts
 
+## 6.28.0
+
+### Patch Changes
+
+- d5cadac: Artifacts in the phone app. A bottom bar moves between Chats, Artifacts, Meetings and Inbox (with a count of what waits on you; Automations stays in the chats menu), and on iOS a swipe right from the left edge opens the chats menu. Artifacts lists the workspace's Sites, documents, presentations, spreadsheets, images and files as cards with a still, with search and type chips; a card opens a full-screen viewer with Share and the web library's menu (Open chat, Pin, Duplicate, Copy link, Download, Delete…). An artifact linked on its own line in a chat is a card that opens the same viewer.
+
+  `createWebMarkdownRenderer` takes `renderOpenGeniLink` to draw a standalone Opengeni object link as a block. The native icon set adds `presentation`, `share` and `link`. `SiteViewRoute` takes `embedded` to show the Site alone, without its toolbar or chat. The inbox row's snooze fade no longer crashes dev builds with a non-increasing range, and `useNativeInbox` starts empty when its client changes (another account) instead of showing the last account's items, and takes `enabled` to read nothing while signed out. The client page list adds `native-view`.
+
+- 515bc72: Connector tools have readable names: `<connector>_<account tag>__<tool>` (a configured server's readable id instead of the connector), decided by the tool's identity alone, instead of a name with a different hash per tool. Every tool of one server shares a guessable prefix, and a name never comes to mean another account's or connector's tool. Codemode paths use the same namespace. `tool_search` names, `ogtool show` and Codemode accept a tool's published `server.tool` or its own name, while a call needs a name carrying its server; a query naming several tools loads all of them whatever its limit, and a miss suggests the closest tools. `ogtool show` and the native client's `codemode show` accept several names. A Skill can list the tools it uses in a `tools:` frontmatter key, and reading it loads them. A call to a tool's former name runs nothing and returns its current name; approvals stay keyed by the tool's identity.
+
+## 6.27.1
+
+### Patch Changes
+
+- 02804ec: Creating or updating a session with a first-party tool's old name from before a one-to-one rename (for example `session_send_message`, now `session_queue_message`) selects the new name again instead of failing with "disabled by deployment policy". Clients built against an older contract kept sending the old name and every such session was refused at creation. The old name is still never offered to models.
+
+## 6.27.0
+
+### Minor Changes
+
+- 5d63995: Sites can ask what each of their tools needs for the current viewer before a click: `site.tools.$readiness(targets)` (`POST /v1/workspaces/:id/tools/readiness`) answers `ready`, `confirm`, `choose_account`, `connect`, `reconnect`, `blocked`, `open_in_opengeni` or `unavailable`, with the account the tool runs as, and `site.tools.$onReadinessChange` fires after a connect, a reconnect, an "Always allow" or a reset. It reads the same authority as a call and never reaches the provider; calls still enforce everything.
+
+  The Site tool confirmation shows which account the action runs as ("Shared with workspace" for a workspace account, "You" when none is involved). The checkbox now reads "Always allow on this Site from this account". The Site menu has "Reset allowed actions" (`POST /v1/workspaces/:id/tools/site-allowances/reset`).
+
+  Typed failures: a tool set to Block answers 403 with `details.code` `tool_blocked` (Site code: `site_tool_blocked`); a confirmation a published address can't show is `site_tool_open_in_opengeni`. A tool server that couldn't be reached before anything was sent (refused connection, DNS failure, a tunnel that is gone, decided only at the MCP transport's own request) now answers 503 `upstream_unavailable` with `details.code` `tool_server_unreachable`, `retryable: true` and `outcomeUnknown: false` for every gateway caller instead of a 500 (Site code: `site_tool_upstream_unavailable`).
+
+### Patch Changes
+
+- 5d63995: A connected account that needs more access for a tool now shows "Give {provider} more access" with Allow in the chat instead of a connect card, and Allow finds the account even when it is homed in another workspace. Site tool readiness reports `grant` (with the scopes needed) for such tools, and `unavailable` with reason `account` when the account's access is fixed and cannot be extended.
+- 5d63995: An active account on either backend of a connector (its own sign-in or Nango) now counts as that connector's account. Connection health, the connector's account list and `GET /connect/accounts` match a Nango account to the connector it serves, so a working Nango account reads Connected, and removed or replaced native accounts no longer raise "Needs attention". `GET /connect/accounts` also lists Nango accounts and reads native accounts of a Nango-backed connector as needing sign-in, as the account inventory does. Your own account from another workspace that is off here and signed out now reads "Signed out" with Reconnect instead of offering a new sign-in.
+- 5d63995: When a tool needs access that a fixed-access account (for example one managed through Nango) cannot be given, the chat now shows "{provider} can't do this with the connected account" with no step-up. The `tool.auth_needed` notice keeps the legacy-safe reason `unsupported_auth`, so older clients show the tools as unavailable, and adds `accountReason: "account_scope_fixed"` with the scopes the tool needs.
+- 5d63995: Accounts held by Nango are listed by `GET /connect/accounts` with `backend: "nango"`, and the chat and Settings never start a native reconnect for them; a chat Reconnect opens the connector's own Connect instead. A workspace-shared Nango Google account reads as connected.
+
+## 6.26.0
+
+### Patch Changes
+
+- 6d7ea1e: A context checkpoint that failed before any provider answer, including one refused because the sandbox moved to another machine just before it was sent, now retries the same turn instead of failing it. When a checkpoint does fail for good, a goal's continuation reports `blocked` with the new reason `compaction_failed`, and the goal pill says a message or Compact continues it, rather than claiming the goal will continue automatically.
+- 8fae328: When a chat can use several accounts of one connector or integration, the person's own account is now the default for writes. When several accounts' copies of a tool match a search equally, the default's copy loads, every account's tools say which account is the default and why, and the agent asks only when no account is a clear default (several of the person's own, or only shared ones).
+
+## 6.25.0
+
+### Minor Changes
+
+- 61abc98: Opengeni Console on its own host now signs in with the person's Opengeni account on the app host: signed in to the app, they reach Console without a second sign-in; signed out, the app's sign-in runs first (email, Google, GitHub and passkeys) and brings them back to the Console page and organization they were opening. The app hands Console a single-use code that expires in sixty seconds, is stored only as a hash, and is bound to the person, a verifier in a host-only Console cookie and a configured Console origin; Console redeems it for its own session (`/v1/console-sign-in/start`, `/authorize`, `/callback`) and records each handoff in the audit log as `auth.console_sign_in_handoff`. Console's Sign out waits on a signed-out page with Continue, so it never signs straight back in. Console's own email and Google sign-in stay available as a fallback. No new settings; the handoff is off in the `dual` and `broker` browser session-set modes.
+- 81570f9: Several connections to the same tool server can now be told apart by people and agents. A connection has an optional `label`, a name its owner sets when connecting (`label` on create, an optional Name field in the key form and Connect's credential step) and changes or clears later (`PATCH .../connections/{id}` with `{ "label": … }`, or Rename on the connector page). Labels follow one rule everywhere: the provider's verified identity, else the person's name, else `<domain> account`; when two accounts with the same scope would still read the same, agents and account lists add when each was connected (then the time, then a short ID). A rename is display only: it changes neither the connection's version nor its authority, and reaches agents from the next turn.
+
+### Patch Changes
+
+- e126cb5: Documents, spreadsheets and presentations can now be deleted from the Artifacts list. Their ⋯ menu has **Delete…**, which asks first. Deleting archives the artifact: it leaves the Artifacts list and the chat's artifact panel and no longer opens. The new `POST /v1/workspaces/:workspaceId/editable-artifacts/:artifactId/archive` route and `client.archiveEditableArtifact` do the same and need `artifacts:publish`.
+- f99f940: Connecting an integration no longer gets stuck on a sign-in client the provider has forgotten. Opengeni reuses the OAuth client it registered with a provider such as Supabase, and when that provider has since deleted it, Connect ended on the provider's "Unrecognized client_id" page every time. Opengeni now checks that the provider still knows the client before reusing it, and registers a new one when the provider says it doesn't.
+
+  A connection this deployment can't connect, because the provider only accepts apps it has approved (Dropbox, for one) and no client is registered with it here, now shows up when you search Capabilities for it. It's marked Unavailable and its page says why, instead of the search saying nothing matches. Other listings of the same provider, such as a server a plugin brings, are marked the same way and no longer offer a Connect that can't finish, and a provider that refuses to let apps register now gets a plain explanation instead of "dynamic client registration failed with HTTP 403".
+
+- f99f940: Sentry and Apollo connections now show the signed-in account (email or name, plus the Sentry organization when there is only one) instead of a generic "Sentry account" or "Apollo.io account", and you can connect more than one account of each. Stripe connections are recognised again with Stripe's current account answer and are labelled with the account's email and business name when it has them. When an Atlassian tool needs a site and several are available, the message the agent gets now lists each site's URL next to its name and cloud ID.
+- bfd2970: Boxes kept warm only by open session pages are now also bounded after admission. A box a turn, process or readiness hold kept warm becomes viewer-only when that holder leaves, and a viewer-only hold had no end. The sandbox reaper now drains a warm box whose every holder is a viewer and whose sessions have no open work after 30 minutes without use (`OPENGENI_SANDBOX_VIEWER_IDLE_DRAIN_MS`, `0` disables): the server measures use from viewer attaches and turns, and the web client extends it by reporting on each attach and heartbeat how long ago the person last used the page (`lastInteractionAgeMs`), so an active person with an open tab keeps their box. Only a person's own signed-in session can report interaction; the API ignores it from API keys (including personal ones) and delegated or service callers, so their viewers are bounded by server-observed activity. For one more idle window after an idle drain, a re-attach without newer interaction or session activity is refused, so an unattended page cannot keep a box warm; the person's next interaction re-attaches and the box resumes from its saved workspace. The reaper also drains the least recently active viewer-only boxes over `OPENGENI_SANDBOX_MAX_VIEWER_ONLY_BOXES_PER_WORKSPACE` or the plan tier's `viewerOnlyBoxesPerOrganization`, taking only boxes nobody used for five minutes. Drains are logged with their reason and counted in `opengeni_sandbox_viewer_only_drains_total{reason}`.
+
+  Organizations a host provisioned (the organization's own external source is set and is not a signup one; a workspace's external source never counts, since members can set it) resolve to a new `embedded` plan tier, unbounded by default and configurable in `OPENGENI_SANDBOX_PLAN_LIMITS_JSON`. `embedded` and `enterprise` organizations are also outside the per-workspace viewer-only limit and the reaper's drains; operators put other organizations that must not be bounded on `enterprise`. The `restricted` tier now applies only while promotion enforcement is on. A new `new` tier covers Free self-serve organizations in their first three days (`organizationsYoungerThanMs` in the tier; 1 viewer-only box per organization and per member, 3 running boxes), and tiers apply whatever credential the caller uses. Joining a box that a live process or Browser/ComputerSession keeps warm no longer counts as one more viewer-only box, and a 429 for a computer limit gets its own message in the web client instead of the viewer-limit one. Viewer attach refusals (429) now carry a machine-readable `details.viewerRefusal` (`viewer_idle`, `computer_limit`, `warm_allowance`), which the web client uses instead of the message.
+
+## 6.24.1
+
+### Patch Changes
+
+- 5fd2c21: Prompt-cache warm-miss diagnostics no longer label a miss `thinking_dropped` just because Claude dropped signed thinking blocks. A long conversation can drop the same old blocks on every request, including warm hits, which leaves the prompt unchanged; such misses were hiding plain cache expiries. The class now needs more blocks dropped than for the previous call, so a steady drop count falls through to `account_changed`, `idle_gap` or `unexplained`.
+
+## 6.24.0
+
+### Patch Changes
+
+- c0248a5: A `git commit` or `git push` run through `exec_command` or `run_on` that would carry a secret value Opengeni filled in for a reference earlier in that sandbox is no longer run. The result names the file and line (and commit) and says how to write the reference literally instead. Matching is exact against a keyed ledger of resolved values kept in the sandbox; files that are not committed never block, and the command runs if the check itself fails. See "Keeping values out of commits" in `docs/secrets.md`.
+
+  The prompt, the `secrets` Skill and secret-resolution hints now say the backslash escape keeps a reference as literal text in files as well as commands. `apply_patch` resolves references only in added lines, so context and removed lines match files that hold a literal reference.
+
+## 6.23.0
+
+### Minor Changes
+
+- c0089e1: The agent editor shows an agent's image icon and keeps it when other fields are saved, instead of clearing it.
+
+  An agent's Slack rows (`GET /agents/:id/slack`) carry the Opengeni app's name in each Slack workspace as optional `botDisplayName`, so the agent page shows how people really ask it there (for example `@Opengeni Staging Release Scribe`); without it, clients use `@Opengeni`.
+
+- f6a7c28: Connect cards can ask for connect-time inputs. An integration whose connections each need a value first (Microsoft Dynamics: the environment's address) declares those inputs in `@opengeni/contracts/capability-connect-inputs`. `capability_authorization_request` and tool discovery now post its Connect card, which asks the person for the value in one field with one Connect action, instead of answering `input_required` with no card. The agent can prefill a value with the tool's new `inputs` argument; it is used only when it follows the entry's rule. Catalog matches list the inputs as `setup.connectInputs`, the card payload carries them as `capability.inputs`, and capability creation takes `connectFor` with `connectInputs`, so the API applies the same rule to what the person entered and returns the connection already in the workspace for the same endpoint.
+
+  A runtime guard stops repeated identical tool calls. Once one exact call has returned the same result 8 times in a row in a turn, an identical call started within 30 seconds of the last one returns a short notice instead of running, and the run continues. Calls whose results change, and polling slower than 30 seconds, are unaffected.
+
+### Patch Changes
+
+- 9dd96b0: Restoring a large workspace archive no longer multiplies worker memory. Byte copies used `Uint8Array.from(buffer)`, which Bun runs element by element through its generic iterator path when the source is a Node Buffer (the result of base64 decoding, file reads, object storage and Postgres bytea). That used about 16 times the archive size in transient memory and was about 100 times slower. A cold restore did it at least twice, so restoring a workspace archive of a few hundred MB could take a worker past 15 GB and kill it. Byte copies now use `new Uint8Array(buffer)`, which makes the same copy at native speed. Archive base64 is decoded once into a view of the decoded bytes. Canonical form is now checked from the decoded length and the final four characters instead of re-encoding the whole archive. Object-storage restores verify the fetched bytes directly instead of decoding the base64 copy again. Native snapshot receipts are recognised from their ASCII prefix without decoding a whole tar archive as text. Restoring a 48 MB archive now raises peak memory by about 2 times the archive size instead of 37 times, and takes 0.2 seconds instead of 3.4 seconds.
+- adc2409: A Business Central address is never read by dropping part of its path. An address such as `businesscentral.dynamics.com/opengenitest2026/Production`, whose first segment is neither a tenant ID nor a domain, used to connect an environment named `opengenitest2026` and ignore `Production`, so every query failed with "Environment does not exist". Such addresses, and addresses with more after the environment than a web client page, are now refused with what to paste instead: the address bar while Business Central is open, or `businesscentral.dynamics.com/<tenant>.onmicrosoft.com/<environment>`. Tenant ID or domain with environment, environment only, and `?company=` addresses work as before. `microsoftDynamicsAddressProblem` returns that explanation; `custom_mcp_setup_request` answers with it and adding such an address as an MCP server is refused with 422.
+
+  When an agent publishes a Site and its turn's account bindings can't be read, the publication is now refused with a clear error instead of declaring only the publisher's own account routes (which left the Site's tools working only for the publisher).
+
 ## 6.22.0
 
 ### Minor Changes

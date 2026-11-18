@@ -1409,6 +1409,23 @@ describe("SessionChrome goal pill reasons", () => {
     );
   });
 
+  test("explains a goal held by a failed context compaction", () => {
+    const record = goal({
+      continuation: {
+        state: "blocked",
+        reason: "compaction_failed",
+        wakeRevision: 2,
+        observedRevision: 1,
+        nextAttemptAt: null,
+        lastError: null,
+      },
+    }).goal;
+    expect(sessionChromeGoalPillState("active", record!.continuation, "idle")).toBe("blocked");
+    expect(sessionChromeGoalPillExplanation(englishText, "blocked", record)).toBe(
+      "Stopped because the conversation history could not be compacted. Send a message or run Compact to continue.",
+    );
+  });
+
   test("explains an agent wait_for_input hold with its reason and deadline", () => {
     const record = goal({
       continuation: {

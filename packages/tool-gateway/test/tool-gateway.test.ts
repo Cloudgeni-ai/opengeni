@@ -7,6 +7,7 @@ import {
   ToolGatewayBlockedError,
   ToolGatewayCatalogIntegrityError,
   ToolGatewayInputValidationError,
+  ToolGatewayToolNotFoundError,
   createWorkspaceToolGateway,
   parseVerifiedToolGatewayCatalog,
   type ToolGatewayDefinition,
@@ -252,6 +253,40 @@ describe("ToolGateway", () => {
     ).resolves.toMatchObject({ structuredContent: { ok: true } });
   });
 
+  test("a call with invalid arguments to an always-approve tool reports the arguments, not approval", async () => {
+    let effects = 0;
+    const { catalog, gateway } = createWorkspaceToolGateway({
+      accountId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      generation: 1,
+      definitions: [
+        {
+          ...definition,
+          approval: "human",
+          execute: () => {
+            effects++;
+            return { content: [] };
+          },
+        },
+      ],
+      requireApproval: (entry) => entry.approval === "human",
+    });
+    const call = (argumentsValue: Record<string, unknown>) =>
+      gateway.call({
+        operationId: crypto.randomUUID(),
+        catalogDigest: catalog.digest,
+        identity: definition.identity,
+        arguments: argumentsValue,
+        caller: { kind: "codemode", subjectId: "agent:test" },
+      });
+    // Approving this call could never make it run.
+    await expect(call({})).rejects.toBeInstanceOf(ToolGatewayInputValidationError);
+    await expect(call({ query: 1 })).rejects.toBeInstanceOf(ToolGatewayInputValidationError);
+    // A call that could run still needs its approval.
+    await expect(call({ query: "ok" })).rejects.toBeInstanceOf(ToolGatewayApprovalRequiredError);
+    expect(effects).toBe(0);
+  });
+
   test("owns prepare, execution-boundary begin, and terminal lifecycle settlement", async () => {
     const phases: string[] = [];
     const { catalog, gateway } = createWorkspaceToolGateway({
@@ -444,7 +479,7 @@ describe("ToolGateway argument validation errors", () => {
         arguments: argumentsValue,
         subjectId: "agent:test",
       });
-    return { callModel, executed };
+    return { callModel, executed, gateway };
   }
 
   async function rejection(promise: Promise<unknown>): Promise<ToolGatewayInputValidationError> {
@@ -626,6 +661,54 @@ describe("ToolGateway argument validation errors", () => {
         note: '{"kind":"click"}',
       },
     ]);
+  });
+
+  test("admits model arguments exactly as a model call would, without running anything", async () => {
+    const { callModel, executed, gateway } = gatewayFor({
+      type: "object",
+      properties: {
+        id: { type: "string" },
+        body: {
+          type: "object",
+          properties: { role: { type: "string" } },
+          required: ["role"],
+        },
+      },
+      required: ["id", "body"],
+      additionalProperties: false,
+    });
+    const admit = (argumentsValue: Record<string, unknown>) =>
+      gateway.admitModelArguments({ modelName: "analytics__exec", arguments: argumentsValue });
+    const valid = { id: "a", body: { role: "read" } };
+    expect(admit(valid)).toBe(valid);
+    // The repaired arguments are the ones the call then executes with.
+    const encoded = { id: "a", body: '{"role":"write"}' };
+    expect(admit(encoded)).toEqual({ id: "a", body: { role: "write" } });
+    await callModel(encoded);
+    expect(executed).toEqual([admit(encoded)]);
+    // The same rejection a call returns, with the same named problems.
+    let admitted: unknown;
+    try {
+      admit({});
+    } catch (error) {
+      admitted = error;
+    }
+    expect(admitted).toBeInstanceOf(ToolGatewayInputValidationError);
+    const called = await rejection(callModel({}));
+    expect((admitted as ToolGatewayInputValidationError).summary).toBe(called.summary);
+    expect(called.summary).toContain('missing required property "body"');
+    expect(executed).toHaveLength(1);
+    // A name the catalog binds to another tool is not found, as for a call.
+    expect(() =>
+      gateway.admitModelArguments({
+        modelName: "analytics__exec",
+        arguments: valid,
+        expectedIdentity: { serverId: "other", toolName: "exec" },
+      }),
+    ).toThrow(ToolGatewayToolNotFoundError);
+    expect(() => gateway.admitModelArguments({ modelName: "missing", arguments: valid })).toThrow(
+      ToolGatewayToolNotFoundError,
+    );
   });
 
   test("keeps rejecting JSON text of the wrong shape or that still breaks the schema", async () => {

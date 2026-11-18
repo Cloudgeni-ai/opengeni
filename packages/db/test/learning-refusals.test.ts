@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   classifyLearningRefusal,
+  isAgentAttemptLivenessFence,
   LEARNING_REFUSAL_MESSAGES,
   learningRefusalClass,
   learningSaveCorrection,
@@ -119,5 +120,26 @@ describe("classifyLearningRefusal", () => {
     };
     expect(nestedAuthorityRefusalMessage(wrapped)).toBe("Instruction learning is Off");
     expect(nestedAuthorityRefusalMessage({ code: "40001", message: "retry" })).toBe(null);
+  });
+
+  test("only the attempt's own liveness fences say its attempt is no longer live", () => {
+    for (const message of [
+      "Knowledge attempt is stale",
+      "Knowledge attempt is interrupted",
+      "Knowledge session attempt is stale",
+      "Knowledge turn attempt is stale",
+    ]) {
+      expect(learningRefusalClass(message)).toEqual({ kind: "fence" });
+      expect(isAgentAttemptLivenessFence(message)).toBe(true);
+    }
+    for (const message of [
+      "Knowledge workspace unavailable",
+      "Learning scope changed after acceptance",
+      "Knowledge learning is Off for this task",
+      "Knowledge unavailable",
+      "Some other policy refusal",
+    ]) {
+      expect(isAgentAttemptLivenessFence(message)).toBe(false);
+    }
   });
 });

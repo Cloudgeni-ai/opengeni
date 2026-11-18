@@ -164,8 +164,8 @@ export function ExcelAddinRoute() {
                 n={3}
                 title={
                   <>
-                    Open the <Menu>wef</Menu> folder there (make a new folder named <Menu>wef</Menu>{" "}
-                    if there isn't one) and drag the downloaded file into it.
+                    The <Menu>wef</Menu> folder usually doesn't exist yet: create a new folder named{" "}
+                    <Menu>wef</Menu> there, then drag the downloaded file into it.
                   </>
                 }
               />

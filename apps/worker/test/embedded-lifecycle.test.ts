@@ -566,11 +566,13 @@ describe("embedded worker lifecycle contract", () => {
           "session_attempt_model_context_snapshots",
           "session_attempt_tool_catalogs",
           "session_content_blobs",
+          "session_goals",
           "session_human_input_requests",
           "session_tenancy_activations",
           "session_turn_attempts",
           "session_turns",
           "sessions",
+          "subscription_capacity_waiters",
           "workspace_memberships",
           "workspaces",
         ].map((name) => ({
@@ -844,6 +846,29 @@ describe("embedded worker lifecycle contract", () => {
             has_dependents: false,
             configuration: ["search_path=pg_catalog, public, pg_temp"],
           })),
+          // Migration 1482: the deployment-wide Nango in-use check, created
+          // without runtime EXECUTE until a later migration grants it.
+          {
+            name: "nango_connections_in_use_v1(text[])",
+            owner: "opengeni_migrator",
+            can_execute: false,
+            public_execute: false,
+            security_definer: true,
+            trigger_callable: false,
+            has_dependents: false,
+            configuration: ["search_path=pg_catalog, public, pg_temp"],
+          },
+          // Migration 1487: the live Nango connection owners listing, likewise.
+          {
+            name: "nango_live_connection_owners_v1(text, text, text, integer)",
+            owner: "opengeni_migrator",
+            can_execute: false,
+            public_execute: false,
+            security_definer: true,
+            trigger_callable: false,
+            has_dependents: false,
+            configuration: ["search_path=pg_catalog, public, pg_temp"],
+          },
           // Migration 1103: the subscription account-administrator grant,
           // created without runtime EXECUTE; 1149 granted it.
           {

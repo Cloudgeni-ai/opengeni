@@ -89,7 +89,16 @@ test("the remote compaction boundary admits an unreached limit and never hides a
   }
 });
 
-test("a between-request call (and the compaction summarizer) checks the task limit before any allowance", async () => {
+function exhaustedAllowance() {
+  return {
+    code: "allowance_exhausted",
+    scope: "workspace",
+    resetsAt: "2026-12-01T00:00:00.000Z",
+    message: "The workspace usage allowance is exhausted.",
+  };
+}
+
+test("a between-request call (and the compaction summarizer) reports the task limit ahead of any allowance", async () => {
   const input = scope();
   const refusal = reachedRefusal(input.sessionId);
   const check = spyOn(db, "checkSessionUsageLimitAdmission").mockResolvedValue({
@@ -97,7 +106,11 @@ test("a between-request call (and the compaction summarizer) checks the task lim
     refusal,
     state: null,
   } as never);
-  const allowance = fresh(spyOn(db, "checkWorkspaceAllowance").mockResolvedValue(null));
+  // The allowance is read alongside the task limit and also refuses; the task
+  // limit is still the refusal reported.
+  const allowance = fresh(
+    spyOn(db, "checkWorkspaceAllowance").mockResolvedValue(exhaustedAllowance() as never),
+  );
   try {
     let error: unknown;
     try {
@@ -120,7 +133,7 @@ test("a between-request call (and the compaction summarizer) checks the task lim
       allowance: null,
       serializedRunState: "serialized-run-state",
     });
-    expect(allowance).not.toHaveBeenCalled();
+    expect(allowance).toHaveBeenCalled();
   } finally {
     check.mockRestore();
     allowance.mockRestore();
@@ -153,7 +166,11 @@ test("a reached limit refuses the first request and the parallel title request b
       state: null,
     } as never),
   );
-  const allowance = fresh(spyOn(db, "checkWorkspaceAllowance").mockResolvedValue(null));
+  // The allowance is read alongside the task limit and also refuses; the task
+  // limit is still the refusal reported.
+  const allowance = fresh(
+    spyOn(db, "checkWorkspaceAllowance").mockResolvedValue(exhaustedAllowance() as never),
+  );
   const metrics = {
     histogram: () => ({ record() {}, observe() {} }),
     counter: () => ({ add() {}, inc() {} }),
@@ -217,7 +234,7 @@ test("a reached limit refuses the first request and the parallel title request b
     expect(error).toMatchObject({ sessionUsageLimit: refusal, allowance: null });
     expect(check).toHaveBeenCalled();
     expect(check.mock.calls[0]![1]).toMatchObject({ sessionId: input.sessionId });
-    expect(allowance).not.toHaveBeenCalled();
+    expect(allowance).toHaveBeenCalled();
     expect(paidDispatches).toBe(0);
   } finally {
     prepared.mockRestore();

@@ -132,6 +132,11 @@ import { isIP } from "node:net";
 import { z } from "zod";
 import { errorMessage } from "@opengeni/contracts/values";
 
+/** Parsed settings JSON per parser, keyed by raw text (see memoizedSettingsJson). */
+const settingsJsonParseCaches = new Map<(raw: string) => unknown, Map<string, unknown>>();
+/** Distinct deployment and workspace catalog texts a process keeps parsed, per parser. */
+const SETTINGS_JSON_PARSE_CACHE_ENTRIES = 64;
+
 /**
  * Default maximum provider silence on a generic OpenAI-compatible model stream
  * while the worker is waiting for the next chunk. Matches the Codex transport
@@ -1690,6 +1695,34 @@ const SettingsSchema = z.object({
   // resume cannot silently change the reservation.
   modalSandboxCpu: z.coerce.number().positive().optional(),
   modalSandboxMemoryMiB: z.coerce.number().int().positive().optional(),
+  // Hard CPU (physical cores, may be fractional) and memory (MiB) ceilings
+  // sent on every new Modal sandbox. Modal applies no ceiling when a create
+  // omits them, so one box could use a whole host. Required and positive:
+  // the Modal provider refuses to create a box without both. Paid,
+  // Enterprise and host-provisioned organizations get these; a Free or
+  // unpaid organization's box gets the lower unpaid ceilings below.
+  // Knobs: OPENGENI_MODAL_SANDBOX_CPU_LIMIT, OPENGENI_MODAL_SANDBOX_MEMORY_LIMIT_MIB.
+  modalSandboxCpuLimit: z.coerce.number().positive().max(128).default(16),
+  modalSandboxMemoryLimitMiB: z.coerce.number().int().positive().max(1_048_576).default(32_768),
+  // The same ceilings for a box of a Free, new, plan-less or restricted
+  // organization (sandboxResourceClass "unpaid"). A reservation above the
+  // ceiling is lowered to it. Knobs: OPENGENI_MODAL_UNPAID_SANDBOX_CPU_LIMIT,
+  // OPENGENI_MODAL_UNPAID_SANDBOX_MEMORY_LIMIT_MIB.
+  modalUnpaidSandboxCpuLimit: z.coerce.number().positive().max(128).default(2),
+  modalUnpaidSandboxMemoryLimitMiB: z.coerce.number().int().positive().max(1_048_576).default(4096),
+  // Optional outbound allowlists for an unpaid organization's Modal box.
+  // Modal can only allow destinations (CIDRs or domains); it has no deny rule
+  // and no port rule, so outbound SMTP cannot be blocked by port on Modal.
+  // Empty (the default) leaves egress open; setting either list confines an
+  // unpaid box to the listed destinations. Comma-separated. Knobs:
+  // OPENGENI_MODAL_UNPAID_OUTBOUND_CIDR_ALLOWLIST,
+  // OPENGENI_MODAL_UNPAID_OUTBOUND_DOMAIN_ALLOWLIST.
+  modalUnpaidOutboundCidrAllowlist: z.string().default(""),
+  modalUnpaidOutboundDomainAllowlist: z.string().default(""),
+  // Which resource ceilings a box gets. Not an environment setting: the
+  // caller that creates a box rebinds it from the organization's plan tier
+  // (sandboxResourceClassForPlanTier). "standard" is the paid ceiling.
+  sandboxResourceClass: z.enum(["standard", "unpaid"]).default("standard"),
   // Optional Modal placement for every new physical box (fresh create and
   // snapshot restore alike). Every setup step and tool call is a round trip from
   // the worker to the box, so placing boxes near the workers cuts per-command
@@ -2028,6 +2061,18 @@ const SettingsSchema = z.object({
   // snapshotted before the box dies (sandbox-file-persistence).
   sandboxLeaseReaperPeriodMs: z.coerce.number().int().positive().default(30_000),
   sandboxViewerHolderTtlMs: z.coerce.number().int().positive().default(90_000),
+  // Viewer-only idle drain. A viewer holder (an open session page heartbeating
+  // the desktop/terminal/files planes) keeps its box warm for as long as
+  // heartbeats arrive. When every holder of a warm box is a viewer, no session
+  // of its sandbox group has an open turn, and for this long there was no
+  // reported viewer interaction, viewer attach, message or turn, the reaper
+  // releases those viewers and drains the box through the ordinary drain
+  // (workspace saved, box stopped). A viewer that comes back re-attaches and
+  // the box resumes. Clients that do not report interaction fall back to the
+  // attach time and session activity. Host-provisioned (`embedded`) and
+  // `enterprise` organizations are exempt. Default 30min; 0 disables.
+  // Knob: OPENGENI_SANDBOX_VIEWER_IDLE_DRAIN_MS.
+  sandboxViewerIdleDrainMs: z.coerce.number().int().nonnegative().default(1_800_000),
   // A BrowserSession controller refreshes its durable resource and exact
   // interaction lease holder together. This longer crash horizon tolerates API
   // replacement while still releasing a placement whose controller died.
@@ -2161,6 +2206,19 @@ const SettingsSchema = z.object({
   // default (a rig may compile/install heavy tooling on first cold create).
   // Env: OPENGENI_RIG_SETUP_TIMEOUT_MS. Default 10min.
   rigSetupTimeoutMs: z.coerce.number().int().positive().default(600_000),
+  // Provider budget for the one filesystem snapshot that turns a verified
+  // Sandbox Environment into its prebuilt image. A whole set-up filesystem
+  // takes much longer to snapshot than a turn's best-effort workspace save, so
+  // it does not share OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS. Keep it well inside
+  // the 15-minute verification activity (setup, the snapshot and the cold
+  // boot check share it), so it is capped at 10 minutes. Env:
+  // OPENGENI_RIG_PROVIDER_IMAGE_SNAPSHOT_TIMEOUT_MS. Default 5min.
+  rigProviderImageSnapshotTimeoutMs: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(600_000)
+    .default(300_000),
   // --- sandbox warm-time billing (P2.1) ---
   // Per-backend warm rate (usd_micros/sec), like modelPricingJson: an empty {}
   // means warm-cost is not debited (warm-seconds are still metered for audit).
@@ -2173,6 +2231,19 @@ const SettingsSchema = z.object({
   // cap force-drains its VIEWER-ONLY boxes (guarded AND turn_holders=0 — a paying
   // turn is never killed); the reaper then stop()s at refcount 0.
   sandboxMaxWarmSecondsPerWorkspace: z.coerce.number().int().nonnegative().default(0),
+  // Most sandboxes one workspace may keep warm with only a viewer attached (no
+  // turn holder). Opening a desktop, terminal or file editor starts a box and a
+  // heartbeating viewer keeps it running indefinitely; this bounds that free
+  // compute per workspace. Boxes a turn holds never count. 0 = unbounded.
+  sandboxMaxViewerOnlyBoxesPerWorkspace: z.coerce.number().int().nonnegative().default(3),
+  // Organization-wide sandbox limits by subscription plan (see
+  // parseSandboxPlanLimitsJson). Empty = DEFAULT_SANDBOX_PLAN_LIMITS (without
+  // subscription plans, DEFAULT_SANDBOX_PLAN_LIMITS_WITHOUT_SUBSCRIPTION_PLANS);
+  // "{}" = none.
+  sandboxPlanLimitsJson: z.string().default(""),
+  // Fleet-wide bounds on unpaid sandbox compute (see
+  // parseSandboxFleetLimitsJson). Empty = DEFAULT_SANDBOX_FLEET_LIMITS.
+  sandboxFleetLimitsJson: z.string().default(""),
   sandboxPreparationProfiles: z.string().default("none"),
   sandboxEnvAllowlist: z.string().default(""),
   // Comma-separated image references a workspace may select as its default
@@ -4150,7 +4221,101 @@ const ModelNote = z
     message: "model notes must not contain newlines or the | field separator",
   });
 
+/**
+ * Parse settings JSON (model providers, pricing, cost policy) once per raw
+ * text. These are re-read on every model call and their schema validation is
+ * the expensive part. Each call still gets its own deep copy, so a caller
+ * that changes its result cannot affect another caller. A failure is never
+ * cached: invalid text throws afresh, with the parser's own error, every time.
+ * Only plain data is kept (what JSON text parses to); anything else is parsed
+ * on every call as before.
+ */
+function memoizedSettingsJson<T>(parse: (raw: string) => T, raw: string): T {
+  if (typeof raw !== "string") return parse(raw);
+  let parsed = settingsJsonParseCaches.get(parse) as Map<string, T> | undefined;
+  if (!parsed) {
+    parsed = new Map<string, T>();
+    settingsJsonParseCaches.set(parse, parsed);
+  }
+  const known = parsed.get(raw);
+  if (known !== undefined) {
+    // Refresh recency; the least recently used text is evicted first.
+    parsed.delete(raw);
+    parsed.set(raw, known);
+    return copyPlainData(known, new Map(), false) as T;
+  }
+  const value = parse(raw);
+  const retained = copyPlainData(value, new Map(), true);
+  if (retained === NOT_PLAIN_DATA) return value;
+  parsed.set(raw, retained as T);
+  if (parsed.size > SETTINGS_JSON_PARSE_CACHE_ENTRIES) {
+    parsed.delete(parsed.keys().next().value!);
+  }
+  return value;
+}
+
+const NOT_PLAIN_DATA: unique symbol = Symbol("not plain data");
+
+/**
+ * Deep copy of ordinary objects with writable, configurable, enumerable data
+ * properties, dense arrays and primitives, keeping shared references shared.
+ * When `check` is set, returns NOT_PLAIN_DATA for anything else (a class
+ * instance, accessor, function, symbol, sparse array); a value that passed
+ * the check once and was never handed out is copied without it.
+ */
+function copyPlainData(value: unknown, copies: Map<object, unknown>, check: boolean): unknown {
+  if (typeof value === "function" || typeof value === "symbol") return NOT_PLAIN_DATA;
+  if (typeof value !== "object" || value === null) return value;
+  const known = copies.get(value);
+  if (known !== undefined) return known;
+  if (Array.isArray(value)) {
+    if (check && Object.getPrototypeOf(value) !== Array.prototype) return NOT_PLAIN_DATA;
+    const out: unknown[] = new Array(value.length);
+    copies.set(value, out);
+    for (let index = 0; index < value.length; index += 1) {
+      if (check && !Object.hasOwn(value, index)) return NOT_PLAIN_DATA;
+      const entry = copyPlainData(value[index], copies, check);
+      if (entry === NOT_PLAIN_DATA) return NOT_PLAIN_DATA;
+      out[index] = entry;
+    }
+    if (check && Reflect.ownKeys(value).length !== value.length + 1) return NOT_PLAIN_DATA;
+    return out;
+  }
+  if (check && Object.getPrototypeOf(value) !== Object.prototype) return NOT_PLAIN_DATA;
+  const out: Record<string, unknown> = {};
+  copies.set(value, out);
+  const keys = check ? Reflect.ownKeys(value) : Object.keys(value);
+  for (const key of keys) {
+    if (check) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key)!;
+      if (
+        typeof key !== "string" ||
+        !("value" in descriptor) ||
+        !descriptor.enumerable ||
+        !descriptor.writable ||
+        !descriptor.configurable
+      )
+        return NOT_PLAIN_DATA;
+    }
+    const entry = copyPlainData((value as Record<string, unknown>)[key as string], copies, check);
+    if (entry === NOT_PLAIN_DATA) return NOT_PLAIN_DATA;
+    if (key === "__proto__")
+      Object.defineProperty(out, key, {
+        value: entry,
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
+    else out[key as string] = entry;
+  }
+  return out;
+}
+
 export function parseModelCostPolicyJson(raw: string): Record<string, ModelCostClass> {
+  return memoizedSettingsJson(parseModelCostPolicyJsonOnce, raw);
+}
+
+function parseModelCostPolicyJsonOnce(raw: string): Record<string, ModelCostClass> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -6432,6 +6597,12 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     modalTimeoutSeconds: optional("OPENGENI_MODAL_TIMEOUT_SECONDS"),
     modalSandboxCpu: optional("OPENGENI_MODAL_SANDBOX_CPU"),
     modalSandboxMemoryMiB: optional("OPENGENI_MODAL_SANDBOX_MEMORY_MIB"),
+    modalSandboxCpuLimit: optional("OPENGENI_MODAL_SANDBOX_CPU_LIMIT"),
+    modalSandboxMemoryLimitMiB: optional("OPENGENI_MODAL_SANDBOX_MEMORY_LIMIT_MIB"),
+    modalUnpaidSandboxCpuLimit: optional("OPENGENI_MODAL_UNPAID_SANDBOX_CPU_LIMIT"),
+    modalUnpaidSandboxMemoryLimitMiB: optional("OPENGENI_MODAL_UNPAID_SANDBOX_MEMORY_LIMIT_MIB"),
+    modalUnpaidOutboundCidrAllowlist: optional("OPENGENI_MODAL_UNPAID_OUTBOUND_CIDR_ALLOWLIST"),
+    modalUnpaidOutboundDomainAllowlist: optional("OPENGENI_MODAL_UNPAID_OUTBOUND_DOMAIN_ALLOWLIST"),
     modalRegions: optional("OPENGENI_MODAL_REGIONS"),
     modalTokenId: optional("OPENGENI_MODAL_TOKEN_ID"),
     modalTokenSecret: optional("OPENGENI_MODAL_TOKEN_SECRET"),
@@ -6545,6 +6716,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     sandboxSelfhostedControlTimeoutMs: optional("OPENGENI_SANDBOX_SELFHOSTED_CONTROL_TIMEOUT_MS"),
     sandboxLeaseReaperPeriodMs: optional("OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS"),
     sandboxViewerHolderTtlMs: optional("OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS"),
+    sandboxViewerIdleDrainMs: optional("OPENGENI_SANDBOX_VIEWER_IDLE_DRAIN_MS"),
     sandboxInteractionHolderTtlMs: optional("OPENGENI_SANDBOX_INTERACTION_HOLDER_TTL_MS"),
     sandboxIdleGraceMs: optional("OPENGENI_SANDBOX_IDLE_GRACE_MS"),
     sandboxIdleCommandContainmentMs: optional("OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS"),
@@ -6561,11 +6733,17 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     sandboxWarmingTimeoutMs: optional("OPENGENI_SANDBOX_WARMING_TIMEOUT_MS"),
     workspaceControlLockTimeoutMs: optional("OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS"),
     rigSetupTimeoutMs: optional("OPENGENI_RIG_SETUP_TIMEOUT_MS"),
+    rigProviderImageSnapshotTimeoutMs: optional("OPENGENI_RIG_PROVIDER_IMAGE_SNAPSHOT_TIMEOUT_MS"),
     sandboxWarmRateMicrosPerSecondJson: optional(
       "OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON",
     ),
     sandboxWarmBillingMode: optional("OPENGENI_SANDBOX_WARM_BILLING_MODE"),
     sandboxMaxWarmSecondsPerWorkspace: optional("OPENGENI_SANDBOX_MAX_WARM_SECONDS_PER_WORKSPACE"),
+    sandboxMaxViewerOnlyBoxesPerWorkspace: optional(
+      "OPENGENI_SANDBOX_MAX_VIEWER_ONLY_BOXES_PER_WORKSPACE",
+    ),
+    sandboxPlanLimitsJson: optional("OPENGENI_SANDBOX_PLAN_LIMITS_JSON"),
+    sandboxFleetLimitsJson: optional("OPENGENI_SANDBOX_FLEET_LIMITS_JSON"),
     sandboxPreparationProfiles: optional("OPENGENI_SANDBOX_PREPARATION_PROFILES"),
     sandboxEnvAllowlist: optional("OPENGENI_SANDBOX_ENV_ALLOWLIST"),
     sandboxImageAllowlist: optional("OPENGENI_SANDBOX_IMAGE_ALLOWLIST"),
@@ -12187,6 +12365,12 @@ export function parseMcpServers(raw: string | undefined): unknown[] | undefined 
 export function parseModelPricingJson(
   raw: string,
 ): Record<string, ModelPricing | ModelPricingScheduleV1> {
+  return memoizedSettingsJson(parseModelPricingJsonOnce, raw);
+}
+
+function parseModelPricingJsonOnce(
+  raw: string,
+): Record<string, ModelPricing | ModelPricingScheduleV1> {
   if (!raw.trim() || raw.trim() === "{}") {
     return {};
   }
@@ -12251,6 +12435,484 @@ export function parseSandboxWarmRateJson(raw: string): Record<string, number> {
   return out;
 }
 
+/**
+ * Organization-wide sandbox limits for one plan tier. An omitted field is
+ * unbounded; 0 refuses every such box.
+ *
+ * - `viewerOnlyBoxesPerOrganization`: boxes kept warm by a viewer with no
+ *   turn holder, across all of the organization's workspaces.
+ * - `viewerOnlyBoxesPerMember`: the same, kept warm by one person's viewer.
+ * - `runningBoxesPerOrganization`: every running managed box (warming, warm or
+ *   draining; Connected Machines never count), including boxes agent turns
+ *   hold. A new box beyond it waits for a slot instead of starting. It is one
+ *   budget for every kind of holder (turn, terminal, process, browser or
+ *   desktop session, viewer). 0 closes the tier: no box starts, an already
+ *   running box is not kept warm for anything but an in-flight turn, and a
+ *   turn that needs a new box fails with a clear message instead of waiting.
+ * - `runningBoxesPerPerson`: the same count across every limited
+ *   organization the acting person owns or administers (paid, Enterprise and
+ *   host-provisioned organizations never count).
+ * - `boxSecondsPerOrganizationPerDay` / `boxSecondsPerPersonPerDay`: metered
+ *   box time since the start of the UTC day, for the organization and across
+ *   the acting person's limited organizations. Beyond it no new box starts
+ *   and the reaper drains running boxes no turn holds; an in-flight turn
+ *   finishes.
+ * - `idleDrainAllHolders`: the reaper drains a box no turn holds after the
+ *   viewer idle window (OPENGENI_SANDBOX_VIEWER_IDLE_DRAIN_MS) without
+ *   activity, whatever holds it (terminal, process, browser or desktop
+ *   session, viewer), not only a viewer-only box.
+ * - `organizationsYoungerThanMs`: only for the `new` tier, which applies to a
+ *   Free self-serve organization created less than this long
+ *   ago. Omitted or 0 turns the `new` tier off.
+ */
+export type SandboxPlanLimit = {
+  viewerOnlyBoxesPerOrganization?: number;
+  viewerOnlyBoxesPerMember?: number;
+  runningBoxesPerOrganization?: number;
+  runningBoxesPerPerson?: number;
+  boxSecondsPerOrganizationPerDay?: number;
+  boxSecondsPerPersonPerDay?: number;
+  idleDrainAllHolders?: boolean;
+  organizationsYoungerThanMs?: number;
+};
+
+/**
+ * Limits by tier. Tiers are subscription plan keys (`free`, `pro`, `max`,
+ * `enterprise`, or any operator-defined key), plus `none` for an organization
+ * with no plan row, `restricted` for a Free or plan-less
+ * organization whose promotion decision is `held` or `denied` while promotion
+ * enforcement is on (or whose acting person holds such an organization), and
+ * that has neither bought credit nor an active paid plan, `new` for a Free
+ * self-serve organization
+ * younger than the `new` tier's `organizationsYoungerThanMs`, and `embedded`
+ * for an organization a host provisioned (its own external source is not a
+ * signup one). A tier absent from the table is unbounded.
+ *
+ * What `none` means depends on OPENGENI_SUBSCRIPTION_PLANS_ENABLED. With
+ * subscription plans on, subscription maintenance enrolls every organization
+ * in Free, so a plan-less organization is an unpaid one not yet enrolled and
+ * is bounded like Free. Without them no organization ever gets a plan row, so
+ * `none` is every organization's ordinary tier: it is not unpaid
+ * (sandboxPlanTierUnpaid) and the defaults leave it unbounded
+ * (DEFAULT_SANDBOX_PLAN_LIMITS_WITHOUT_SUBSCRIPTION_PLANS).
+ */
+export type SandboxPlanLimits = Readonly<Record<string, SandboxPlanLimit>>;
+
+const SANDBOX_PLAN_LIMIT_COUNT_FIELDS = [
+  "viewerOnlyBoxesPerOrganization",
+  "viewerOnlyBoxesPerMember",
+  "runningBoxesPerOrganization",
+  "runningBoxesPerPerson",
+  "boxSecondsPerOrganizationPerDay",
+  "boxSecondsPerPersonPerDay",
+  "organizationsYoungerThanMs",
+] as const;
+
+/** 12 box-hours: the daily box-time budget of an unpaid organization and person. */
+const UNPAID_BOX_SECONDS_PER_DAY = 12 * 60 * 60;
+
+/** The running, per-person, daily and idle bounds every unpaid tier shares. */
+const UNPAID_SANDBOX_BOUNDS = {
+  runningBoxesPerOrganization: 2,
+  runningBoxesPerPerson: 2,
+  boxSecondsPerOrganizationPerDay: UNPAID_BOX_SECONDS_PER_DAY,
+  boxSecondsPerPersonPerDay: UNPAID_BOX_SECONDS_PER_DAY,
+  idleDrainAllHolders: true,
+} as const satisfies SandboxPlanLimit;
+
+export const DEFAULT_SANDBOX_PLAN_LIMITS: SandboxPlanLimits = {
+  free: {
+    viewerOnlyBoxesPerOrganization: 2,
+    viewerOnlyBoxesPerMember: 1,
+    ...UNPAID_SANDBOX_BOUNDS,
+  },
+  // A Free self-serve organization in its first three days.
+  new: {
+    organizationsYoungerThanMs: 3 * 24 * 60 * 60 * 1000,
+    viewerOnlyBoxesPerOrganization: 1,
+    viewerOnlyBoxesPerMember: 1,
+    ...UNPAID_SANDBOX_BOUNDS,
+  },
+  // Held or denied, with no bought credit and no paid plan: no sandbox of
+  // any kind.
+  restricted: {
+    viewerOnlyBoxesPerOrganization: 0,
+    viewerOnlyBoxesPerMember: 0,
+    runningBoxesPerOrganization: 0,
+    runningBoxesPerPerson: 0,
+    boxSecondsPerOrganizationPerDay: 0,
+    boxSecondsPerPersonPerDay: 0,
+    idleDrainAllHolders: true,
+  },
+  // No plan row yet, with subscription plans on. A new self-serve
+  // organization has none until subscription maintenance enrolls it in Free
+  // (and one with an unexpired credit period but no plan row is not
+  // enrolled), so `none` is bounded like Free rather than closed: closing it
+  // would refuse a brand-new person's first sandbox. Without subscription
+  // plans this entry is absent (see SandboxPlanLimits).
+  none: {
+    viewerOnlyBoxesPerOrganization: 1,
+    viewerOnlyBoxesPerMember: 1,
+    ...UNPAID_SANDBOX_BOUNDS,
+  },
+  pro: {
+    viewerOnlyBoxesPerOrganization: 10,
+    viewerOnlyBoxesPerMember: 3,
+    runningBoxesPerOrganization: 20,
+  },
+  max: {
+    viewerOnlyBoxesPerOrganization: 30,
+    viewerOnlyBoxesPerMember: 5,
+    runningBoxesPerOrganization: 50,
+  },
+  // An organization a host provisioned (a configured deployment, an
+  // embedding host or the SDK bootstrap): unbounded unless an operator sets
+  // limits.
+  embedded: {},
+};
+
+/** The defaults on a deployment without subscription plans: no organization
+ * has a plan row, so `none` is every organization's tier and is unbounded. */
+export const DEFAULT_SANDBOX_PLAN_LIMITS_WITHOUT_SUBSCRIPTION_PLANS: SandboxPlanLimits =
+  Object.fromEntries(
+    Object.entries(DEFAULT_SANDBOX_PLAN_LIMITS).filter(([tier]) => tier !== "none"),
+  );
+
+/** Parse OPENGENI_SANDBOX_PLAN_LIMITS_JSON; blank keeps the defaults for
+ * whether subscription plans are on (default: on). */
+export function parseSandboxPlanLimitsJson(
+  raw: string,
+  options: { subscriptionPlansEnabled?: boolean } = {},
+): SandboxPlanLimits {
+  if (!raw.trim()) {
+    return options.subscriptionPlansEnabled === false
+      ? DEFAULT_SANDBOX_PLAN_LIMITS_WITHOUT_SUBSCRIPTION_PLANS
+      : DEFAULT_SANDBOX_PLAN_LIMITS;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(
+      `OPENGENI_SANDBOX_PLAN_LIMITS_JSON must be valid JSON: ${errorMessage(error)}`,
+      {
+        cause: error,
+      },
+    );
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("OPENGENI_SANDBOX_PLAN_LIMITS_JSON must be a JSON object keyed by plan tier");
+  }
+  const out: Record<string, SandboxPlanLimit> = {};
+  for (const [tier, value] of Object.entries(parsed)) {
+    if (!tier.trim()) {
+      throw new Error("OPENGENI_SANDBOX_PLAN_LIMITS_JSON contains an empty plan tier");
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error(`OPENGENI_SANDBOX_PLAN_LIMITS_JSON tier ${tier} must be an object`);
+    }
+    const limit: SandboxPlanLimit = {};
+    for (const [field, amount] of Object.entries(value)) {
+      if (field === "idleDrainAllHolders") {
+        if (amount === null) continue;
+        if (typeof amount !== "boolean") {
+          throw new Error(
+            `OPENGENI_SANDBOX_PLAN_LIMITS_JSON ${tier}.${field} must be a boolean or null`,
+          );
+        }
+        limit.idleDrainAllHolders = amount;
+        continue;
+      }
+      if (!(SANDBOX_PLAN_LIMIT_COUNT_FIELDS as readonly string[]).includes(field)) {
+        throw new Error(
+          `OPENGENI_SANDBOX_PLAN_LIMITS_JSON tier ${tier} has unknown field ${field}`,
+        );
+      }
+      if (amount === null) continue;
+      if (typeof amount !== "number" || !Number.isSafeInteger(amount) || amount < 0) {
+        throw new Error(
+          `OPENGENI_SANDBOX_PLAN_LIMITS_JSON ${tier}.${field} must be a non-negative integer or null`,
+        );
+      }
+      limit[field as (typeof SANDBOX_PLAN_LIMIT_COUNT_FIELDS)[number]] = amount;
+    }
+    out[tier] = limit;
+  }
+  return out;
+}
+
+export function sandboxPlanLimits(
+  settings: Pick<Settings, "sandboxPlanLimitsJson" | "subscriptionPlansEnabled">,
+): SandboxPlanLimits {
+  return parseSandboxPlanLimitsJson(settings.sandboxPlanLimitsJson, {
+    subscriptionPlansEnabled: settings.subscriptionPlansEnabled,
+  });
+}
+
+/**
+ * Fleet-wide bounds on the sandbox compute of unpaid organizations (tiers
+ * `free`, `new`, `none` and `restricted` with no bought credit and no paid
+ * subscription), on top of the per-organization and per-person plan limits.
+ * Paid plans, `enterprise` and `embedded` are never counted or limited. An
+ * absent field is unbounded.
+ *
+ * - `unpaidRunningBoxes`: the most boxes all unpaid organizations together
+ *   keep running (warming or warm). A new unpaid box past it is refused
+ *   (`sandbox_capacity_unpaid_busy`); joining a running box is not.
+ * - `unpaidBoxSecondsPerDay`: metered box seconds of all unpaid organizations
+ *   since 00:00 UTC. Past it no unpaid box starts until the next UTC day.
+ * - `youngOrganizationAgeMs` / `youngOrganizationRunningBoxes` /
+ *   `youngOrganizationBoxSeconds`: an unpaid organization younger than the
+ *   age runs at most that many boxes, and once it has used that many metered
+ *   box seconds since it was created it gets no box until it is older (like
+ *   a spent daily budget).
+ * - `pressureEngageWarmBoxes` / `pressureReleaseWarmBoxes` /
+ *   `pressureReleaseAfterMs` / `pressureUnpaidRunningBoxes`: when more than
+ *   `pressureEngageWarmBoxes` boxes of every plan are warm, the unpaid cap
+ *   drops to `pressureUnpaidRunningBoxes` (0: no new unpaid box) until the
+ *   warm count has stayed below `pressureReleaseWarmBoxes` for
+ *   `pressureReleaseAfterMs`.
+ */
+export type SandboxFleetLimits = {
+  unpaidRunningBoxes?: number;
+  unpaidBoxSecondsPerDay?: number;
+  youngOrganizationAgeMs?: number;
+  youngOrganizationRunningBoxes?: number;
+  youngOrganizationBoxSeconds?: number;
+  pressureEngageWarmBoxes?: number;
+  pressureReleaseWarmBoxes?: number;
+  pressureReleaseAfterMs?: number;
+  pressureUnpaidRunningBoxes?: number;
+};
+
+const SANDBOX_FLEET_LIMIT_FIELDS = [
+  "unpaidRunningBoxes",
+  "unpaidBoxSecondsPerDay",
+  "youngOrganizationAgeMs",
+  "youngOrganizationRunningBoxes",
+  "youngOrganizationBoxSeconds",
+  "pressureEngageWarmBoxes",
+  "pressureReleaseWarmBoxes",
+  "pressureReleaseAfterMs",
+  "pressureUnpaidRunningBoxes",
+] as const satisfies readonly (keyof SandboxFleetLimits)[];
+
+/** Sized from hosted production's unpaid traffic: legitimate Free use peaked
+ * at 15 concurrent boxes and 112 box-hours a day, and new organizations'
+ * first day at a p90 of under two box-hours. Pressure engages at the same 50
+ * warm boxes as the warm-fleet page. */
+export const DEFAULT_SANDBOX_FLEET_LIMITS: SandboxFleetLimits = {
+  unpaidRunningBoxes: 40,
+  unpaidBoxSecondsPerDay: 300 * 60 * 60,
+  youngOrganizationAgeMs: 24 * 60 * 60 * 1000,
+  youngOrganizationRunningBoxes: 1,
+  youngOrganizationBoxSeconds: 6 * 60 * 60,
+  pressureEngageWarmBoxes: 50,
+  pressureReleaseWarmBoxes: 40,
+  pressureReleaseAfterMs: 15 * 60 * 1000,
+  pressureUnpaidRunningBoxes: 15,
+};
+
+/**
+ * Parse OPENGENI_SANDBOX_FLEET_LIMITS_JSON over DEFAULT_SANDBOX_FLEET_LIMITS:
+ * blank keeps the defaults, a field set to null removes that bound. It never
+ * throws, so a typo cannot stop a deployment: unknown fields (for example
+ * ones a newer release added) are ignored, and malformed JSON or a malformed
+ * value keeps the default, each reported in `issues`.
+ */
+export function parseSandboxFleetLimitsJson(raw: string): {
+  limits: SandboxFleetLimits;
+  issues: string[];
+} {
+  const limits: SandboxFleetLimits = { ...DEFAULT_SANDBOX_FLEET_LIMITS };
+  const issues: string[] = [];
+  if (!raw.trim()) return { limits, issues };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    issues.push(`OPENGENI_SANDBOX_FLEET_LIMITS_JSON is not valid JSON: ${errorMessage(error)}`);
+    return { limits, issues };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    issues.push("OPENGENI_SANDBOX_FLEET_LIMITS_JSON must be a JSON object");
+    return { limits, issues };
+  }
+  for (const [field, amount] of Object.entries(parsed)) {
+    if (!(SANDBOX_FLEET_LIMIT_FIELDS as readonly string[]).includes(field)) {
+      issues.push(`OPENGENI_SANDBOX_FLEET_LIMITS_JSON field ${field} is not known and is ignored`);
+      continue;
+    }
+    const key = field as (typeof SANDBOX_FLEET_LIMIT_FIELDS)[number];
+    if (amount === null) {
+      delete limits[key];
+      continue;
+    }
+    if (typeof amount !== "number" || !Number.isSafeInteger(amount) || amount < 0) {
+      issues.push(
+        `OPENGENI_SANDBOX_FLEET_LIMITS_JSON ${field} must be a non-negative integer or null; the default applies`,
+      );
+      continue;
+    }
+    limits[key] = amount;
+  }
+  return { limits, issues };
+}
+
+let reportedSandboxFleetLimitIssues: string | null = null;
+
+/** The fleet limits of `settings`; parse issues are logged once per value. */
+export function sandboxFleetLimits(settings: Pick<Settings, "sandboxFleetLimitsJson">) {
+  const { limits, issues } = parseSandboxFleetLimitsJson(settings.sandboxFleetLimitsJson);
+  if (issues.length > 0 && reportedSandboxFleetLimitIssues !== settings.sandboxFleetLimitsJson) {
+    reportedSandboxFleetLimitIssues = settings.sandboxFleetLimitsJson;
+    console.warn("sandbox fleet limits: configuration issues", { issues });
+  }
+  return limits;
+}
+
+/** Plan tiers whose organization has not paid: Free, a young Free, no plan
+ * row yet, or restricted. Their boxes get the unpaid resource ceilings and
+ * egress allowlists. Paid plans, `enterprise` and `embedded` never do, nor
+ * does `none` without subscription plans (sandboxPlanTierUnpaid). */
+export const UNPAID_SANDBOX_PLAN_TIERS: readonly string[] = ["free", "new", "none", "restricted"];
+
+/**
+ * Whether an organization on `tier` is unpaid: its boxes get the unpaid
+ * ceilings and egress allowlists, the unpaid-only plan-limit fields and the
+ * fleet limits. `none` is unpaid only with subscription plans on (default:
+ * on), where it is an organization not yet enrolled in Free; without them it
+ * is every organization's ordinary tier.
+ */
+export function sandboxPlanTierUnpaid(
+  tier: string | null | undefined,
+  options: { subscriptionPlansEnabled?: boolean | undefined } = {},
+): boolean {
+  if (!tier || !UNPAID_SANDBOX_PLAN_TIERS.includes(tier)) return false;
+  return tier !== "none" || options.subscriptionPlansEnabled !== false;
+}
+
+/** Plan-limit fields that bound only organizations that have never paid. An
+ * unpaid-tier organization that bought credit or had a paid subscription
+ * (`paidHistory`) is a paying customer: it keeps its tier's viewer-only and
+ * running-box limits but none of these. */
+export const UNPAID_ONLY_SANDBOX_PLAN_LIMIT_FIELDS = [
+  "runningBoxesPerPerson",
+  "boxSecondsPerOrganizationPerDay",
+  "boxSecondsPerPersonPerDay",
+  "idleDrainAllHolders",
+] as const satisfies readonly (keyof SandboxPlanLimit)[];
+
+/** `limit` for an organization that has paid: without the unpaid-only bounds. */
+export function paidSandboxPlanLimit(limit: SandboxPlanLimit): SandboxPlanLimit {
+  if (!UNPAID_ONLY_SANDBOX_PLAN_LIMIT_FIELDS.some((field) => limit[field] !== undefined)) {
+    return limit;
+  }
+  const paid: SandboxPlanLimit = { ...limit };
+  for (const field of UNPAID_ONLY_SANDBOX_PLAN_LIMIT_FIELDS) delete paid[field];
+  return paid;
+}
+
+/** The resource class for a box of an organization on `tier`; an unknown
+ * tier (null) and an organization that has paid keep the standard ceilings. */
+export function sandboxResourceClassForPlanTier(
+  tier: string | null | undefined,
+  options: {
+    paidHistory?: boolean | undefined;
+    subscriptionPlansEnabled?: boolean | undefined;
+  } = {},
+): Settings["sandboxResourceClass"] {
+  return sandboxPlanTierUnpaid(tier, options) && options.paidHistory !== true
+    ? "unpaid"
+    : "standard";
+}
+
+/** `settings` rebound to the resource class of the creating organization. */
+export function settingsForSandboxPlanTier<
+  T extends Pick<Settings, "sandboxResourceClass" | "subscriptionPlansEnabled">,
+>(
+  settings: T,
+  tier: string | null | undefined,
+  options: { paidHistory?: boolean | undefined } = {},
+): T {
+  const resourceClass = sandboxResourceClassForPlanTier(tier, {
+    ...options,
+    subscriptionPlansEnabled: settings.subscriptionPlansEnabled,
+  });
+  return settings.sandboxResourceClass === resourceClass
+    ? settings
+    : { ...settings, sandboxResourceClass: resourceClass };
+}
+
+/** Modal's documented default reservation for a container that sets none. */
+const MODAL_DEFAULT_CPU_RESERVATION = 0.125;
+const MODAL_DEFAULT_MEMORY_RESERVATION_MIB = 128;
+
+/** Hard ceilings and egress allowlists for one new Modal box. Throws when a
+ * ceiling is missing or not positive, so no box is created without one. */
+export function modalSandboxResourceBounds(
+  settings: Pick<
+    Settings,
+    | "sandboxResourceClass"
+    | "modalSandboxCpu"
+    | "modalSandboxMemoryMiB"
+    | "modalSandboxCpuLimit"
+    | "modalSandboxMemoryLimitMiB"
+    | "modalUnpaidSandboxCpuLimit"
+    | "modalUnpaidSandboxMemoryLimitMiB"
+    | "modalUnpaidOutboundCidrAllowlist"
+    | "modalUnpaidOutboundDomainAllowlist"
+  >,
+): {
+  cpu: number;
+  cpuLimit: number;
+  memoryMiB: number;
+  memoryLimitMiB: number;
+  outboundCidrAllowlist?: string[];
+  outboundDomainAllowlist?: string[];
+} {
+  const unpaid = settings.sandboxResourceClass === "unpaid";
+  const cpuLimit = unpaid ? settings.modalUnpaidSandboxCpuLimit : settings.modalSandboxCpuLimit;
+  const memoryLimitMiB = unpaid
+    ? settings.modalUnpaidSandboxMemoryLimitMiB
+    : settings.modalSandboxMemoryLimitMiB;
+  if (
+    typeof cpuLimit !== "number" ||
+    !Number.isFinite(cpuLimit) ||
+    Math.trunc(cpuLimit * 1000) < 1 ||
+    typeof memoryLimitMiB !== "number" ||
+    !Number.isSafeInteger(memoryLimitMiB) ||
+    memoryLimitMiB < 1
+  ) {
+    throw new Error("Modal sandbox CPU and memory ceilings must be set and positive");
+  }
+  // A reservation never exceeds its ceiling. Without a configured
+  // reservation, Modal's own default reservation (0.125 cores, 128 MiB) is
+  // sent explicitly: Modal needs a reservation with a ceiling, and a larger
+  // one would raise what every idle box is billed.
+  const cpu = Math.min(settings.modalSandboxCpu ?? MODAL_DEFAULT_CPU_RESERVATION, cpuLimit);
+  const memoryMiB = Math.min(
+    settings.modalSandboxMemoryMiB ?? MODAL_DEFAULT_MEMORY_RESERVATION_MIB,
+    memoryLimitMiB,
+  );
+  const list = (raw: string) =>
+    raw
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean);
+  const cidrs = unpaid ? list(settings.modalUnpaidOutboundCidrAllowlist) : [];
+  const domains = unpaid ? list(settings.modalUnpaidOutboundDomainAllowlist) : [];
+  return {
+    cpu,
+    cpuLimit,
+    memoryMiB,
+    memoryLimitMiB,
+    ...(cidrs.length > 0 || domains.length > 0
+      ? { outboundCidrAllowlist: cidrs, outboundDomainAllowlist: domains }
+      : {}),
+  };
+}
+
 // Resolve the warm rate (usd_micros/sec) for a backend; 0 when the backend has no
 // configured rate (the box is metered in seconds but not cost-debited).
 export function sandboxWarmRateMicrosPerSecond(settings: Settings, backend: string): number {
@@ -12264,6 +12926,10 @@ export function sandboxWarmRateMicrosPerSecond(settings: Settings, backend: stri
  * name so a malformed registry fails fast at boot (validateSettings calls this).
  */
 export function parseModelProvidersJson(raw: string): RegistryProvider[] {
+  return memoizedSettingsJson(parseModelProvidersJsonOnce, raw);
+}
+
+function parseModelProvidersJsonOnce(raw: string): RegistryProvider[] {
   if (!raw.trim() || raw.trim() === "[]") {
     return [];
   }
@@ -13321,6 +13987,8 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
   // workers. The provider is withheld and the API logs voiceInputPricingIssues.
   sandboxEnvironmentVariableNames(settings);
   sandboxLifecycleHookIds(settings);
+  // Fail fast on a malformed plan-limit table.
+  parseSandboxPlanLimitsJson(settings.sandboxPlanLimitsJson);
   // Fail fast on a malformed warm-rate table (P2.1).
   const warmRates = parseSandboxWarmRateJson(settings.sandboxWarmRateMicrosPerSecondJson);
   // The meter rounds each settled interval to whole USD micros. Fractional

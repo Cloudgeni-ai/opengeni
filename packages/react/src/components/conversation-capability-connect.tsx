@@ -49,6 +49,7 @@ const UNAVAILABLE_REASONS = new Set([
   "personal_authority_unavailable",
   "unsupported_auth",
   "resource_scope_unavailable",
+  "account_scope_fixed",
 ]);
 
 /** Cards that finish through their own flows, never the shared connect card. */

@@ -72,10 +72,15 @@ describe("model-response progress for the shared capacity breaker", () => {
     expect(normalized).toContain(
       "...(subscriptionCoreTurnOf(providerTurn) ? { meaningfulOutput: sdkResponseHasMeaningfulOutput(event) } : {})",
     );
-    // The completed-event builder is always given the streamed provider response.
+    // The completed-event builder is always given the streamed provider
+    // response: directly, or as captured for its (possibly overlapped)
+    // settlement before the stream advances.
     expect(normalized.match(/fallbackProviderCompletionEvents\(([^)]*)\)/g)).toEqual([
       "fallbackProviderCompletionEvents(next.value)",
-      "fallbackProviderCompletionEvents(next.value)",
+      "fallbackProviderCompletionEvents(settledEvent)",
+    ]);
+    expect(normalized.match(/const settledEvent = [^;]*;/g)).toEqual([
+      "const settledEvent = next.value;",
     ]);
   });
 });

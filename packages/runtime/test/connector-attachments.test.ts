@@ -389,7 +389,7 @@ describe("connector attachment MCP projection", () => {
         async connect() {},
         async close() {},
         async listTools() {
-          return [];
+          return [{ name: "download_attachment", inputSchema: { type: "object" } }];
         },
         async callTool() {
           throw uncertain;

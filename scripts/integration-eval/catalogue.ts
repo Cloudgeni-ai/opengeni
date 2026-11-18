@@ -48,6 +48,8 @@ export const DEFAULT_SCOPE: readonly IntegrationId[] = [
   "gmail",
   "slack",
   "outlook_mail",
+  "outlook_calendar",
+  "outlook_contacts",
   "onedrive",
   "sharepoint",
   "apollo",
@@ -641,11 +643,102 @@ export const CASES: readonly EvalCase[] = [
     core: true,
     prompt:
       'Create an Outlook draft to ravi.tern@example.com with subject "Halcyon eval {RUN}" and body "Drill notes received." Don\'t send it.',
-    verify: "receipts_only",
+    verify: "outlook_draft_correct",
+  },
+  {
+    id: "outlook_mail.read.search-invoice",
+    integration: "outlook_mail",
+    kind: "read",
+    prompt:
+      "Search my Outlook mail for the Copperleaf Dental invoice. What's the invoice number and amount?",
+    expectAnswer: [i("INV-?58213"), i("7[ ,.\u00a0]?450")],
+  },
+  {
+    id: "outlook_mail.write.send",
+    integration: "outlook_mail",
+    kind: "write",
+    prompt:
+      'Send an email from my Outlook to it-inbox@opengenitest2026.onmicrosoft.com with subject "Halcyon eval {RUN}" and body "Send test from the integration eval."',
+    verify: "outlook_mail_sent_correct",
+    note: "The recipient is a synthetic mailbox in the test tenant. Needs the connection's change tools set to Ask first.",
+  },
+  {
+    id: "outlook_mail.write.send-denied",
+    integration: "outlook_mail",
+    kind: "write",
+    decision: "reject",
+    prompt:
+      'Send an email from my Outlook to it-inbox@opengenitest2026.onmicrosoft.com with subject "Halcyon eval {RUN} denied" and body "This send should be denied."',
+    verify: "outlook_mail_sent_exists",
+  },
+  {
+    id: "outlook_mail.read.account",
+    integration: "outlook_mail",
+    kind: "read",
+    prompt: "Which email address is my connected Outlook mailbox?",
+    expectAnswer: [i("iris\\.tenley@opengenitest2026")],
+    answerFromAccountLine: true,
+    note: "Account identity: the connected test mailbox is Iris Tenley's.",
   },
   ...notConnected("outlook_calendar", [
-    { slug: "meetings", prompt: "What meetings do I have in Outlook Calendar this week?" },
+    {
+      slug: "meetings",
+      prompt: "What meetings do I have in Outlook Calendar this week?",
+      core: true,
+    },
   ]),
+  {
+    id: "outlook_calendar.read.review",
+    integration: "outlook_calendar",
+    kind: "read",
+    core: true,
+    prompt: "When is the Halcyon launch review on my Outlook Calendar?",
+    expectAnswer: [i("wed|18"), i("\\b(10|0?9)[:.]00\\b|\\b(10|9) ?(a\\.?m|am)\\b")],
+  },
+  {
+    id: "outlook_calendar.write.event",
+    integration: "outlook_calendar",
+    kind: "write",
+    prompt:
+      'Add an event to my Outlook Calendar called "Halcyon eval {RUN}" on Friday 20 November 2026 from 15:00 to 15:30 Oslo time, and invite it-inbox@opengenitest2026.onmicrosoft.com.',
+    verify: "outlook_event_correct",
+    note: "Run only when no demo user's calendar is shared into the connected workspace.",
+  },
+  {
+    id: "outlook_calendar.read.account",
+    integration: "outlook_calendar",
+    kind: "read",
+    prompt:
+      "Whose Microsoft account is my own Outlook Calendar connection signed in as? Give the email address.",
+    expectAnswer: [i("iris\\.tenley@opengenitest2026")],
+    answerFromAccountLine: true,
+  },
+
+  // ── Outlook Contacts ─────────────────────────────────────────────────────
+  ...notConnected("outlook_contacts", [
+    {
+      slug: "lookup",
+      prompt: "What's Ada Quill's phone number in my Outlook contacts?",
+      core: true,
+    },
+  ]),
+  {
+    id: "outlook_contacts.read.phone",
+    integration: "outlook_contacts",
+    kind: "read",
+    core: true,
+    prompt:
+      "What's Ada Quill's mobile number in my Outlook contacts, and which company is she with?",
+    expectAnswer: [i("400 ?12 ?345"), i("bluefin")],
+  },
+  {
+    id: "outlook_contacts.write.create",
+    integration: "outlook_contacts",
+    kind: "write",
+    prompt:
+      'Add an Outlook contact named "Halcyon eval {RUN}" with email halcyon.eval@bluefin.example and company "Bluefin Logistics".',
+    verify: "outlook_contact_correct",
+  },
   ...notConnected("onedrive", [
     { slug: "files", prompt: "Find the Kestrel runbook in my OneDrive.", core: true },
   ]),
@@ -658,6 +751,15 @@ export const CASES: readonly EvalCase[] = [
     expectAnswer: [i("15 ?min")],
     servedBy: ["sharepoint"],
   },
+  {
+    id: "onedrive.write.file",
+    integration: "onedrive",
+    kind: "write",
+    prompt:
+      'In my OneDrive, create a text file named "Halcyon eval {RUN}.txt" in the Runbooks folder containing the text "Eval file content."',
+    verify: "onedrive_file_correct",
+    servedBy: ["sharepoint"],
+  },
   ...notConnected("sharepoint", [
     { slug: "sites", prompt: "Search our SharePoint for the Kestrel vendor contacts.", core: true },
   ]),
@@ -668,6 +770,15 @@ export const CASES: readonly EvalCase[] = [
     core: true,
     prompt: "On our SharePoint, which vendor is listed in the Kestrel vendor contacts list?",
     expectAnswer: [i("marlow")],
+    servedBy: ["onedrive"],
+  },
+  {
+    id: "sharepoint.write.file",
+    integration: "sharepoint",
+    kind: "write",
+    prompt:
+      'On our SharePoint site Opengeni acceptance lab, create a text file named "Halcyon eval {RUN}.txt" in the "Eval uploads" folder of its document library, containing the text "Eval upload content."',
+    verify: "sharepoint_file_correct",
     servedBy: ["onedrive"],
   },
 

@@ -622,7 +622,7 @@ const SCENARIO_WORKER_FLEET: StreamScenario = {
     },
     {
       kind: "message",
-      text: "Three workers are up. The **Messaging worker** row is `session_send_message` — same bot card as spawn, different title, prompt under it, deep-link into the child.\n\nWaiting on inbound completions…\n",
+      text: "Three workers are up. The **Messaging worker** row is `session_queue_message` — same bot card as spawn, different title, prompt under it, deep-link into the child.\n\nWaiting on inbound completions…\n",
       stream: true,
       pacing: "yank",
     },

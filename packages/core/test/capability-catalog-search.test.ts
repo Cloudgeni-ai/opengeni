@@ -8,6 +8,7 @@ import { connectableIntegrationsNamedIn } from "@opengeni/runtime";
 import sharedCatalog from "../../../data/catalog/integrations-snapshot.json";
 import {
   capabilityCatalogSearchProviderDomain,
+  connectedFirstCatalogMatchOrder,
   excelAddinCatalogItem,
   integrationDefinitionIdFromCapabilityId,
   nativeConnectionCapabilityRecommendations,
@@ -115,6 +116,68 @@ describe("agent capability catalog search", () => {
         expect({ query, top: top(query) }).toEqual({ query, top: ["microsoft-outlook-mail"] });
       }
       expect(top("Outlook", 3)).toContain("microsoft-outlook-mail");
+    });
+
+    test("a connected service comes before a same-category one still to connect, unless the query names it", () => {
+      const ids = (query: string) =>
+        searchCapabilityCatalogItems(catalog, query).map(
+          (result) => integrationDefinitionIdFromCapabilityId(result.item.id) ?? result.item.id,
+        );
+      const presented = (query: string, connected: readonly string[]) => {
+        const ranked = ids(query);
+        return connectedFirstCatalogMatchOrder(
+          searchCapabilityCatalogItems(catalog, query),
+          ranked.map((id) => connected.includes(id)),
+        ).map((index) => ranked[index]);
+      };
+      for (const query of ["email", "send an email", "read my email"]) {
+        // Ranked by words alone, a generic mail request finds Gmail first.
+        expect({ query, first: ids(query)[0] }).toEqual({ query, first: "mcp:gmail" });
+        expect(ids(query)).toContain("microsoft-outlook-mail");
+        // With Outlook Mail connected and Gmail not, Outlook Mail comes first.
+        expect({ query, first: presented(query, ["microsoft-outlook-mail"])[0] }).toEqual({
+          query,
+          first: "microsoft-outlook-mail",
+        });
+        // Nothing connected: unchanged. A connected service of another
+        // category does not move ahead of Gmail.
+        expect(presented(query, [])).toEqual(ids(query));
+        expect(presented(query, ["mcp:google-calendar", "microsoft-onedrive"])[0]).toBe(
+          "mcp:gmail",
+        );
+      }
+      // Naming the unconnected service keeps it first.
+      expect(presented("send an email from my Gmail", ["microsoft-outlook-mail"])[0]).toBe(
+        "mcp:gmail",
+      );
+    });
+
+    test("connected-first order never groups generic categories and keeps named matches first", () => {
+      const match = (category: string, named = false) => ({
+        item: item({ id: `x:${category}:${String(named)}`, name: "X", category }),
+        named,
+      });
+      // Generic categories name no kind: a ready custom server stays behind.
+      expect(
+        connectedFirstCatalogMatchOrder(
+          [match("custom"), match("integrations"), match("custom")],
+          [false, false, true],
+        ),
+      ).toEqual([0, 1, 2]);
+      // A named match comes first, before a ready alternative pulled forward.
+      expect(
+        connectedFirstCatalogMatchOrder(
+          [match("communication"), match("communication", true), match("communication")],
+          [false, false, true],
+        ),
+      ).toEqual([1, 2, 0]);
+      // Every index appears once.
+      const order = connectedFirstCatalogMatchOrder(
+        [match("files"), match("communication"), match("files"), match("communication")],
+        [false, false, true, true],
+      );
+      expect([...order].sort()).toEqual([0, 1, 2, 3]);
+      expect(order).toEqual([2, 0, 3, 1]);
     });
 
     test("calendar, contacts, OneDrive and Teams requests find their own definition", () => {
@@ -593,6 +656,32 @@ describe("agent capability catalog search", () => {
       );
     });
 
+    test("a product word of a multi-word name names it among task words", () => {
+      const dynamics = nativeConnectionCapabilityRecommendations({
+        microsoftDynamics: true,
+      }).filter((entry) => entry.id === "api:microsoft-dynamics");
+      const withDynamics = [...catalog, ...dynamics];
+      const lookup = (query: string) =>
+        searchCapabilityCatalogItems(withDynamics, query, 5).map(({ item: entry }) => ({
+          capabilityId: entry.id,
+          name: entry.name,
+          providerDomain: capabilityCatalogSearchProviderDomain(entry) ?? undefined,
+        }));
+      // Search queries models wrote for "What open opportunities do we have
+      // in Dynamics 365?": the task words outranked the name before.
+      for (const query of [
+        "Read/list Dynamics 365 CRM sales opportunities records, filter opportunity status open; retrieve opportunity names and amounts",
+        "What open opportunities do we have in Dynamics 365?",
+        "Read open opportunity records from Dynamics 365 CRM, including name, estimated value, close date and owner; use connected integration tools.",
+      ]) {
+        const matches = lookup(query);
+        expect({ query, first: matches[0]?.name }).toEqual({ query, first: "Microsoft Dynamics" });
+        expect(connectableIntegrationsNamedIn(query, matches, true).map((m) => m.name)).toEqual([
+          "Microsoft Dynamics",
+        ]);
+      }
+    });
+
     test("entries whose names agree with a named one share its boost", () => {
       const github = [
         item({
@@ -656,5 +745,33 @@ describe("agent capability catalog search", () => {
         expect(named(query)).toContain(name);
       });
     }
+  });
+});
+
+describe("connected-first catalog match order", () => {
+  const match = (id: string, category: string, named = false) => ({
+    item: item({ id, name: id, category }),
+    named,
+  });
+
+  test("moves a ready match ahead of an unready, unnamed match of its category only", () => {
+    const matches = [
+      match("a", "mail"),
+      match("b", "calendar"),
+      match("c", "mail"),
+      match("d", "mail"),
+    ];
+    expect(connectedFirstCatalogMatchOrder(matches, [false, false, false, true])).toEqual([
+      3, 0, 1, 2,
+    ]);
+    // A ready match already ahead, or of another category, stays put.
+    expect(connectedFirstCatalogMatchOrder(matches, [true, true, false, false])).toEqual([
+      0, 1, 2, 3,
+    ]);
+  });
+
+  test("a named unready match keeps its place", () => {
+    const matches = [match("a", "mail", true), match("b", "mail"), match("c", "mail")];
+    expect(connectedFirstCatalogMatchOrder(matches, [false, false, true])).toEqual([0, 2, 1]);
   });
 });

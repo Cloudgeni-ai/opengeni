@@ -32,6 +32,8 @@ import {
   CapabilityCatalogItem,
   capabilityCatalogItemIsTrustedForExposure,
   nangoToolsMcpUrl,
+  nativeNangoIntegrationForMcpUrl,
+  NANGO_REPLACEABLE_NATIVE_SOCIAL_PROVIDERS,
   type EffectiveNangoIntegration,
   FIKEN_PROVIDER_DOMAIN,
   FIRST_PARTY_MCP_TOOL_NAMES,
@@ -246,7 +248,7 @@ export async function buildCapabilityCatalog(input: {
   const codexApps = input.settings.codexConnectedAppsEnabled
     ? codexAppsCatalogItem(codexAppsDesignation !== null)
     : null;
-  const ownItems = dedupeCatalogItems([
+  const mergedItems = dedupeCatalogItems([
     ...builtIns,
     ...persistedItems.filter(
       (item) =>
@@ -258,7 +260,9 @@ export async function buildCapabilityCatalog(input: {
     // Keep the reserved, server-derived item authoritative over any stale
     // legacy catalog row with the same id.
     ...(codexApps ? [codexApps] : []),
-  ]).map((item) => {
+  ]);
+  const requirementsByHost = oauthClientRequirementsByHost(mergedItems);
+  const ownItems = mergedItems.map((item) => {
     const projected =
       item.kind === "skill"
         ? applyInstalledSkillEnablement(item, installedSkillById.get(item.id))
@@ -282,9 +286,12 @@ export async function buildCapabilityCatalog(input: {
           }
         : projected;
     return applyCapabilityLifecycle(
-      applyGoogleConnectorSetupAvailability(
-        applyOperatorOAuthClientRequirement(runtimeProjected, operatorOAuthClientConfigured),
+      applyConnectorSetupGates(
+        runtimeProjected,
         input.settings,
+        operatorOAuthClientConfigured,
+        nangoBackends,
+        requirementsByHost,
       ),
     );
   });
@@ -457,6 +464,25 @@ function operatorOAuthClientResolver(settings: Settings): (issuer: string) => bo
     findIntegrationsOauthClient(configured, [issuer]) !== null;
 }
 
+/**
+ * Whether this deployment can start a new connection to the item: its
+ * operator OAuth client and Google setup gates. A Google connector Nango
+ * serves signs in through Nango's own app, so neither gate applies to it.
+ */
+export function applyConnectorSetupGates(
+  item: CapabilityCatalogItem,
+  settings: Settings,
+  operatorOAuthClientConfigured: (issuer: string) => boolean,
+  nangoBackends: NangoBackends,
+  requirementsByHost?: ReadonlyMap<string, string>,
+): CapabilityCatalogItem {
+  if (servedByNango(item, nangoBackends)) return item;
+  return applyGoogleConnectorSetupAvailability(
+    applyOperatorOAuthClientRequirement(item, operatorOAuthClientConfigured, requirementsByHost),
+    settings,
+  );
+}
+
 export function applyGoogleConnectorSetupAvailability(
   item: CapabilityCatalogItem,
   settings: Settings,
@@ -484,17 +510,55 @@ export function applyGoogleConnectorSetupAvailability(
   };
 }
 
-export function applyOperatorOAuthClientRequirement(
-  item: CapabilityCatalogItem,
-  configured: (issuer: string) => boolean,
-): CapabilityCatalogItem {
-  if (item.kind !== "mcp") return item;
+function oauthClientRequirementIssuer(item: CapabilityCatalogItem): string | null {
   const requirement = item.metadata.oauthClientRequirement;
   const issuer =
     requirement && typeof requirement === "object" && !Array.isArray(requirement)
       ? (requirement as Record<string, unknown>).issuer
       : undefined;
-  if (typeof issuer !== "string" || !issuer) return item;
+  return typeof issuer === "string" && issuer ? issuer : null;
+}
+
+function mcpHost(item: Pick<CapabilityCatalogItem, "mcpUrl" | "endpointUrl">): string | null {
+  const url = item.mcpUrl ?? item.endpointUrl;
+  if (!url) return null;
+  try {
+    return new URL(url).host.toLowerCase() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The issuer each MCP host's catalog row records an operator-client
+ * requirement for. The requirement is a fact about the provider's
+ * authorization server, not about one URL: the same provider is often listed
+ * again under another path (a plugin's bundled server, a registry duplicate),
+ * and those rows refuse self-registration just the same.
+ */
+export function oauthClientRequirementsByHost(
+  items: readonly CapabilityCatalogItem[],
+): ReadonlyMap<string, string> {
+  const byHost = new Map<string, string>();
+  for (const item of items) {
+    if (item.kind !== "mcp") continue;
+    const issuer = oauthClientRequirementIssuer(item);
+    const host = issuer ? mcpHost(item) : null;
+    if (issuer && host && !byHost.has(host)) byHost.set(host, issuer);
+  }
+  return byHost;
+}
+
+export function applyOperatorOAuthClientRequirement(
+  item: CapabilityCatalogItem,
+  configured: (issuer: string) => boolean,
+  requirementsByHost?: ReadonlyMap<string, string>,
+): CapabilityCatalogItem {
+  if (item.kind !== "mcp") return item;
+  const host = mcpHost(item);
+  const issuer =
+    oauthClientRequirementIssuer(item) ?? (host ? requirementsByHost?.get(host) : undefined);
+  if (!issuer) return item;
   const isConfigured = configured(issuer);
   // An installed row keeps its own status note; the setup note is for rows
   // that are not on yet.
@@ -2499,6 +2563,7 @@ function nangoConfiguredCatalogItem(
 ): CapabilityCatalogItem {
   if (!integration) return item;
   const definition = integration.definition;
+  const serviceDomain = nangoServiceDomain(integration);
   return CapabilityCatalogItem.parse({
     ...item,
     name: definition.displayName ?? item.name,
@@ -2517,9 +2582,44 @@ function nangoConfiguredCatalogItem(
       integrationBackend: "nango",
       nangoIntegrationKey: integration.integrationKey,
       personalOnly: true,
+      ...(serviceDomain ? { serviceDomain } : {}),
       ...(definition.logoUrl ? { logoUrl: definition.logoUrl } : {}),
     },
   });
+}
+
+/**
+ * The provider domain of the service a config-only Nango integration
+ * connects, so a registry entry for that service is known to duplicate it:
+ * the native connector's domain when Nango replaces one (X), else the domain
+ * of the read-only call that names the connected account when that call goes
+ * to the domain itself or its api. host; null otherwise.
+ */
+function nangoServiceDomain(integration: EffectiveNangoIntegration): string | null {
+  const replaced = NANGO_REPLACEABLE_NATIVE_SOCIAL_PROVIDERS[integration.integrationKey];
+  const social = SOCIAL_PROVIDER_INTEGRATIONS.find(
+    (definition) => definition.provider === replaced,
+  );
+  if (social) return social.providerDomain;
+  const identityUrl = integration.definition.accountIdentity?.url;
+  if (!identityUrl) return null;
+  try {
+    const host = new URL(identityUrl).hostname.toLowerCase();
+    const domain = registrableHostDomain(host);
+    // Only a host that is the service's own domain, or its api. host, names
+    // the service: shared API hosts (graph.microsoft.com, www.googleapis.com)
+    // serve many unrelated products under one domain.
+    return domain && (host === domain || host === `api.${domain}`) ? domain : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether Nango serves this reviewed Google connector here (docs/nango.md). */
+function servedByNango(item: CapabilityCatalogItem, nangoBackends: NangoBackends): boolean {
+  if (item.kind !== "mcp") return false;
+  const native = nativeNangoIntegrationForMcpUrl(item.mcpUrl ?? item.endpointUrl);
+  return !!native && nangoBackends.has(native.integrationKey);
 }
 
 export function withoutNangoReplacedSocialItems(
@@ -3679,6 +3779,11 @@ export type CapabilityCatalogSearchMatch = {
    * distance hit), never through an exact, prefix, or substring hit.
    */
   approximate: boolean;
+  /**
+   * The query names this entry (or one whose name agrees with it), not just
+   * words it shares with the entry.
+   */
+  named: boolean;
 };
 
 export type CapabilityCatalogSuggestion = {
@@ -3811,7 +3916,8 @@ export function searchCapabilityCatalogItems(
       // vendor's domain word) ranks above entries that only share ordinary
       // words with a sentence. So do entries whose names agree with a named
       // one ("GitHub App" when "GitHub" is named), keeping their usual order.
-      if (namedNames.some((name) => integrationNamesAgree(name, item.name))) {
+      const named = namedNames.some((name) => integrationNamesAgree(name, item.name));
+      if (named) {
         if (score === 0) matchedOn.add("name");
         score += NAMED_ENTRY_BONUS;
       }
@@ -3819,7 +3925,7 @@ export function searchCapabilityCatalogItems(
       if (item.enabled) score += 12;
       if (item.tier === "verified") score += 8;
       if (item.source === "built_in") score += 6;
-      return [{ item, score, matchedOn: [...matchedOn], approximate }];
+      return [{ item, score, matchedOn: [...matchedOn], approximate, named }];
     })
     .sort(
       (left, right) =>
@@ -3830,6 +3936,48 @@ export function searchCapabilityCatalogItems(
     )
     .slice(0, boundedLimit);
 }
+
+/**
+ * The order to present catalog matches in once their setup in this chat is
+ * known, as indexes into `matches`. Matches the query names come first, in
+ * ranked order: asking for a service by name still finds it first. After
+ * them, a match the person can already use (ready) comes before a match of
+ * the same specific kind they would still have to connect, so a request for a
+ * kind of service ("read my email") reaches the connected service before a
+ * Connect card for an unconnected alternative. Generic categories
+ * ("integrations", "custom") name no kind and are never grouped. Everything
+ * else keeps the ranked order.
+ */
+export function connectedFirstCatalogMatchOrder(
+  matches: readonly Pick<CapabilityCatalogSearchMatch, "item" | "named">[],
+  ready: readonly boolean[],
+): number[] {
+  const kindOf = (index: number) => {
+    const category = matches[index]!.item.category;
+    return category && !GENERIC_MATCH_CATEGORIES.has(category) ? category : undefined;
+  };
+  const order: number[] = [];
+  const placed = new Set<number>();
+  const place = (index: number) => {
+    if (placed.has(index)) return;
+    placed.add(index);
+    order.push(index);
+  };
+  for (const [index, match] of matches.entries()) if (match.named) place(index);
+  for (const index of matches.keys()) {
+    const kind = kindOf(index);
+    if (!ready[index] && kind && !placed.has(index)) {
+      for (const other of matches.keys()) {
+        if (other > index && ready[other] && kindOf(other) === kind) place(other);
+      }
+    }
+    place(index);
+  }
+  return order;
+}
+
+/** Catalog categories that name no particular need (see connectedAccountKind). */
+const GENERIC_MATCH_CATEGORIES: ReadonlySet<string> = new Set(["integrations", "custom"]);
 
 /**
  * Closest catalog names for a query that matched nothing. A miss must never

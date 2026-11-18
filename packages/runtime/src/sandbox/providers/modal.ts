@@ -6,7 +6,7 @@ import {
 } from "@openai/agents-extensions/sandbox/modal";
 import { imageOutputFromBytes } from "@openai/agents-core/sandbox/internal";
 import { posix } from "node:path";
-import { effectiveModalIdleTimeoutSeconds } from "@opengeni/config";
+import { effectiveModalIdleTimeoutSeconds, modalSandboxResourceBounds } from "@opengeni/config";
 import type { Settings } from "@opengeni/config";
 import {
   canonicalModalCheckpointProviderBinding,
@@ -807,6 +807,14 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
   return session;
 }
 
+/** A create with no durable admission callback (cold starts from the viewer,
+ * Channel A, rematerialization and rig verification) still takes the bounded
+ * path; it simply records nothing before dispatch. */
+const UNRECORDED_MODAL_CREATE: ModalCreateLifecycle = {
+  beforeDispatch: async () => {},
+  onCreated: async () => {},
+};
+
 export class OpenGeniModalSandboxClient extends ModalSandboxClient {
   readonly #snapshotFilesystemTimeoutMs: number | undefined;
   readonly #createOptions: OpenGeniModalSandboxClientOptions;
@@ -817,12 +825,29 @@ export class OpenGeniModalSandboxClient extends ModalSandboxClient {
     this.#createOptions = { ...options };
   }
 
+  /**
+   * Every Modal box starts through Opengeni's own create. The pinned Agents
+   * adapter's create builds its own Modal client: it sends only the CPU and
+   * memory reservation, never the ceilings or egress allowlists, and it
+   * bypasses the create boundary that refuses a SandboxCreate without
+   * ceilings, so a box it started could use a whole host.
+   */
   override async create(
     args?: Parameters<ModalSandboxClient["create"]>[0],
     manifestOptions?: Parameters<ModalSandboxClient["create"]>[1],
   ): Promise<ModalSandboxSession> {
-    const session = await super.create(args, manifestOptions);
-    return installOpenGeniModalSnapshotPolicy(session);
+    if (manifestOptions !== undefined) {
+      throw new SandboxConfigError(
+        "modal",
+        "Modal create does not take positional manifest options",
+      );
+    }
+    return await createModalSessionWithLifecycle(
+      this.#createOptions,
+      args,
+      UNRECORDED_MODAL_CREATE,
+      installOpenGeniModalSnapshotPolicy,
+    );
   }
 
   async createWithLifecycle(
@@ -958,11 +983,26 @@ export const modalProvider: ProviderRegistration = {
     // and the reaper — not Modal's idle-reap — governs teardown (and snapshots
     // /workspace first).
     options.idleTimeoutMs = effectiveModalIdleTimeoutSeconds(settings) * 1000;
-    if (settings.modalSandboxCpu !== undefined) {
-      options.cpu = settings.modalSandboxCpu;
+    // Every new box carries hard CPU and memory ceilings (and an unpaid
+    // organization's box its lower ceilings and optional egress allowlists).
+    // Missing or zero ceilings throw here, and the create boundary refuses a
+    // SandboxCreate without them, so no box starts unbounded.
+    let bounds: ReturnType<typeof modalSandboxResourceBounds>;
+    try {
+      bounds = modalSandboxResourceBounds(settings);
+    } catch (error) {
+      throw new SandboxConfigError(
+        "modal",
+        error instanceof Error ? error.message : "Modal sandbox ceilings are invalid",
+      );
     }
-    if (settings.modalSandboxMemoryMiB !== undefined) {
-      options.memoryMiB = settings.modalSandboxMemoryMiB;
+    options.cpu = bounds.cpu;
+    options.cpuLimit = bounds.cpuLimit;
+    options.memoryMiB = bounds.memoryMiB;
+    options.memoryLimitMiB = bounds.memoryLimitMiB;
+    if (bounds.outboundCidrAllowlist || bounds.outboundDomainAllowlist) {
+      options.outboundCidrAllowlist = bounds.outboundCidrAllowlist ?? [];
+      options.outboundDomainAllowlist = bounds.outboundDomainAllowlist ?? [];
     }
     if (settings.modalRegions !== undefined) {
       options.regions = [...settings.modalRegions];

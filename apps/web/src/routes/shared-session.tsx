@@ -8,7 +8,8 @@
 // as text. It never loads images or files.
 import type { SharedSession } from "@opengeni/sdk";
 import { Markdown } from "@opengeni/react";
-import { BrandMark, Wordmark } from "@opengeni/react/app/components/brand-mark";
+import { Wordmark, WordmarkMark } from "@opengeni/react/app/components/brand-mark";
+import { useSimplifiedInterface } from "@opengeni/react/app/lib/simplified-interface";
 import { Button } from "@opengeni/react/ui/button";
 import { formatDate } from "@opengeni/react/ui/relative-time";
 import { Skeleton } from "@opengeni/react/ui/skeleton";
@@ -62,13 +63,18 @@ function useSharedPageHead(title: string | null) {
 }
 
 function Shell(props: { children: ReactNode }) {
+  const { productName } = useSimplifiedInterface();
   return (
     <div className="min-h-0 flex-1 overflow-y-auto bg-canvas text-fg">
       <div className="flex min-h-full flex-col">
         <header className="border-b border-border">
           <div className="mx-auto flex w-full max-w-[760px] items-center gap-2 px-4 py-3 sm:px-6">
-            <a href="/" className="flex items-center gap-2 text-fg" aria-label="Opengeni home">
-              <BrandMark className="w-[22px]" />
+            <a
+              href="/"
+              className="flex items-center gap-2 text-fg"
+              aria-label={`${productName} home`}
+            >
+              <WordmarkMark className="w-[22px]" tileClassName="size-6" />
               <Wordmark className="text-[17px]" />
             </a>
           </div>

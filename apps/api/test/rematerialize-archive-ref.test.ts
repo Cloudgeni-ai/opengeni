@@ -198,6 +198,7 @@ async function setupColdArchiveLease(oldFailure?: "unrecoverable" | "degraded") 
     [accountId, workspaceId, groupId, JSON.stringify(envelope), backend, backendId],
   );
   const acquired = await acquireLease(db!, {
+    sandboxPlanLimits: "unbounded_test_fixture",
     accountId,
     workspaceId,
     sandboxGroupId: groupId,
@@ -545,6 +546,7 @@ test("API cold spawner fulfils an audited empty-workspace decision without resto
   expect(decision).toMatchObject({ status: "authorized", lane: "fresh_workspace" });
 
   const acquired = await acquireLease(db!, {
+    sandboxPlanLimits: "unbounded_test_fixture",
     accountId,
     workspaceId,
     sandboxGroupId: session.sandboxGroupId,

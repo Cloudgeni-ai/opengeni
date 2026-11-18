@@ -218,6 +218,100 @@ describe("interaction family disclosure", () => {
     },
   );
 
+  test.each(["openai_native", "generic_dispatch"] as const)(
+    "%s: reading a Skill loads the tools it declares, by reference name, after its result",
+    async (transport) => {
+      const executions: string[] = [];
+      const agent = new Agent({
+        name: "skill-tools-test",
+        instructions: "Use tools.",
+        model: "scripted",
+        tools: [
+          interactionTool("skill_read", executions),
+          interactionTool("records_swap", executions),
+          interactionTool("records_get_line", executions),
+          interactionTool("unrelated_tool", executions),
+        ],
+      });
+      const references = new Map(
+        ["records_swap", "records_get_line"].map((wireName) => [
+          wireName,
+          {
+            wireName,
+            namespace: "records",
+            namespaceBase: "records",
+            registryId: "account-0123",
+            toolName: wireName.replace("records_", "records-"),
+          },
+        ]),
+      );
+      const runtime = installLazyToolRuntime(
+        agent,
+        transport,
+        new Set(),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        false,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        () => references,
+      );
+      const asked: unknown[] = [];
+      runtime.callDisclosure = (name) =>
+        name === "skill_read"
+          ? async (args) => {
+              asked.push(args);
+              return ["records.records-swap", "records__records-get_line", "missing.tool"];
+            }
+          : undefined;
+      const read = {
+        type: "function_call" as const,
+        callId: "read-1",
+        name: "skill_read",
+        arguments: JSON.stringify({ skill: "records-help" }),
+        status: "completed" as const,
+      };
+      const model = new ScriptedModel([[read], [call("swap-1", "records_swap")], [done]]);
+      const runner = new Runner({
+        modelProvider: new LazyToolModelProvider(
+          { getModel: () => model } satisfies ModelProvider,
+          runtime,
+        ),
+      });
+      const result = await runner.run(agent, "Swap the record", {
+        stream: true,
+        historyOwnership: "external",
+        maxTurns: 6,
+        toolNotFoundBehavior: "return_error_to_model",
+        resolveMissingFunctionTool: createResolveMissingFunctionTool(runtime),
+        callModelInputFilter: baseModelInputFilterForSettings(
+          testSettings({ sandboxBackend: "none" }),
+        ),
+      });
+      for await (const _event of result.toStream()) void _event;
+      await result.completed;
+
+      expect(asked).toEqual([{ skill: "records-help" }]);
+      expect(executions).toEqual(["skill_read", "records_swap"]);
+      const second = model.requests[1]!.input as Array<Record<string, unknown>>;
+      expect(itemTypes(second).slice(-2)).toEqual(["function_call_result:skill_read", "message"]);
+      expect(disclosedNames(second.at(-1)!)).toEqual(["records_swap", "records_get_line"]);
+      const third = model.requests[2]!.input;
+      expect(JSON.stringify((third as unknown[]).slice(0, second.length))).toBe(
+        JSON.stringify(second),
+      );
+    },
+  );
+
   test("does not repeat tools the history already disclosed", () => {
     const marker = {
       version: 1,

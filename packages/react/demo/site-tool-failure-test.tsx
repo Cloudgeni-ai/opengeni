@@ -1,7 +1,8 @@
 // Preview harness: the Opengeni frame's real messages when a Site's tool call
 // stops, over a sample Site. Catalog and connection come from a synthetic
 // client, so nothing reaches an API or Microsoft.
-//   ?state=connect|reconnect|denied|retry|not_available|unknown   ?theme=light|dark
+//   ?state=connect|reconnect|denied|retry|not_available|unknown|blocked|open_in_opengeni|
+//          upstream_unavailable   ?theme=light|dark
 import { useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { ConnectTransport } from "@opengeni/connect";
@@ -102,15 +103,27 @@ const failure = (code: SiteToolFailure["code"], retryable: boolean): SiteToolFai
   detail:
     code === "site_tool_permission_denied"
       ? "Dataverse returned 403: Principal user is missing prvReadAccount privilege."
-      : "API 404: tool_unavailable Reference: req_sample.",
-  sourceCode: code === "site_tool_permission_denied" ? "provider_permission_denied" : "not_found",
+      : `API: ${TYPED_SOURCE[code] ?? "tool_unavailable"} Reference: req_sample.`,
+  sourceCode:
+    code === "site_tool_permission_denied"
+      ? "provider_permission_denied"
+      : (TYPED_SOURCE[code] ?? "not_found"),
 });
+/** The API's `details.code` behind each typed answer. */
+const TYPED_SOURCE: Partial<Record<SiteToolFailure["code"], string>> = {
+  site_tool_blocked: "tool_blocked",
+  site_tool_open_in_opengeni: "site_tool_consent_requires_opengeni",
+  site_tool_upstream_unavailable: "tool_server_unreachable",
+};
 const FAILURES: Record<string, SiteToolFailure> = {
   reconnect: failure("site_tool_reconnect_required", false),
   denied: failure("site_tool_permission_denied", false),
   retry: failure("site_tool_unavailable", true),
   not_available: failure("site_tool_not_available_for_viewer", false),
   unknown: failure("site_tool_outcome_unknown", false),
+  blocked: failure("site_tool_blocked", false),
+  open_in_opengeni: failure("site_tool_open_in_opengeni", false),
+  upstream_unavailable: failure("site_tool_upstream_unavailable", true),
 };
 
 function Harness() {

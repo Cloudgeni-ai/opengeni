@@ -1,7 +1,7 @@
 import type { ApiRouteDeps } from "@opengeni/core";
 import { failureDiagnostic, type FailureDiagnosticInput } from "@opengeni/observability";
 
-type OrchestrationTool = "session_create" | "session_send_message" | "session_steer";
+type OrchestrationTool = "session_create" | "session_queue_message" | "session_steer";
 type CallerAttempt = {
   sessionId: string;
   turnId: string;

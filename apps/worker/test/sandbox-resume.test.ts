@@ -1231,6 +1231,7 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     const admissions = await Promise.all(
       Array.from({ length: 10 }, (_, index) =>
         acquireLease(db, {
+          sandboxPlanLimits: "unbounded_test_fixture",
           accountId,
           workspaceId,
           sandboxGroupId: groupId,
@@ -1289,6 +1290,7 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     const keeperId = sandboxLeaseHolderIdForAttempt("keeper-null-resume");
     const acquired = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -1375,6 +1377,7 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     await admin`delete from sandbox_lease_holders
                 where lease_id = (select id from sandbox_leases where workspace_id=${workspaceId} and sandbox_group_id=${groupId})`;
     const reacquire = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
@@ -2440,6 +2443,7 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
       sessionState: { providerState: { sandboxId: instanceId } },
     };
     await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId,
       workspaceId,
       sandboxGroupId: groupId,

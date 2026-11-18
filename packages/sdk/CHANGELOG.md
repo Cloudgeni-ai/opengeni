@@ -1,5 +1,119 @@
 # @opengeni/sdk
 
+## 6.28.0
+
+### Patch Changes
+
+- Updated dependencies [d5cadac]
+- Updated dependencies [515bc72]
+  - @opengeni/contracts@6.28.0
+  - @opengeni/connect@6.28.0
+
+## 6.27.1
+
+### Patch Changes
+
+- Updated dependencies [02804ec]
+  - @opengeni/contracts@6.27.1
+  - @opengeni/connect@6.27.1
+
+## 6.27.0
+
+### Minor Changes
+
+- 5d63995: Site tools now run on a person's own account that was added in another workspace and turned on here ("Use it here"), the same account a chat in this workspace uses. Before, the Site's tool gateway read that credential in the current workspace, found nothing, and the call failed with `tool_unavailable`.
+
+  When the provider can't read what an action would do because the account must allow more access, the confirmation now answers 409 with `details.code` `tool_connection_needs_more_access` (with the connection and scopes) instead of a generic 422; signing in again answers `tool_connection_needs_attention`, and a provider refusal for that account answers 403 `tool_unavailable_for_account`. Site code receives the new typed code `site_tool_grant_required`, or `site_tool_reconnect_required` and `site_tool_permission_denied`.
+
+- 5d63995: Sites can ask what each of their tools needs for the current viewer before a click: `site.tools.$readiness(targets)` (`POST /v1/workspaces/:id/tools/readiness`) answers `ready`, `confirm`, `choose_account`, `connect`, `reconnect`, `blocked`, `open_in_opengeni` or `unavailable`, with the account the tool runs as, and `site.tools.$onReadinessChange` fires after a connect, a reconnect, an "Always allow" or a reset. It reads the same authority as a call and never reaches the provider; calls still enforce everything.
+
+  The Site tool confirmation shows which account the action runs as ("Shared with workspace" for a workspace account, "You" when none is involved). The checkbox now reads "Always allow on this Site from this account". The Site menu has "Reset allowed actions" (`POST /v1/workspaces/:id/tools/site-allowances/reset`).
+
+  Typed failures: a tool set to Block answers 403 with `details.code` `tool_blocked` (Site code: `site_tool_blocked`); a confirmation a published address can't show is `site_tool_open_in_opengeni`. A tool server that couldn't be reached before anything was sent (refused connection, DNS failure, a tunnel that is gone, decided only at the MCP transport's own request) now answers 503 `upstream_unavailable` with `details.code` `tool_server_unreachable`, `retryable: true` and `outcomeUnknown: false` for every gateway caller instead of a 500 (Site code: `site_tool_upstream_unavailable`).
+
+### Patch Changes
+
+- 5d63995: A connected account that needs more access for a tool now shows "Give {provider} more access" with Allow in the chat instead of a connect card, and Allow finds the account even when it is homed in another workspace. Site tool readiness reports `grant` (with the scopes needed) for such tools, and `unavailable` with reason `account` when the account's access is fixed and cannot be extended.
+- 5d63995: When a tool needs access that a fixed-access account (for example one managed through Nango) cannot be given, the chat now shows "{provider} can't do this with the connected account" with no step-up. The `tool.auth_needed` notice keeps the legacy-safe reason `unsupported_auth`, so older clients show the tools as unavailable, and adds `accountReason: "account_scope_fixed"` with the scopes the tool needs.
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+  - @opengeni/contracts@6.27.0
+  - @opengeni/connect@6.27.0
+
+## 6.26.0
+
+### Minor Changes
+
+- c8efcb0: The Excel add-in on Mac and Windows now signs in through the person's own browser, where their saved sign-ins, passwords and passkeys work, instead of Office's embedded window. The pane shows "Continue in your browser" with a short code; the person types it on the browser page and chooses Allow. The new `/v1/native-app/relays` routes carry the sign-in back to the pane: relays last five minutes, are single-use and rate-limited, release the code only to the pane's PKCE verifier, and are approved only with the pane's code. The SDK adds `createNativeAppRelay`, `approveNativeAppRelay` and `pollNativeAppRelay`. Excel on the web keeps its sign-in window. The Mac install steps on `/excel` now say that the `wef` folder usually has to be created.
+- 20e4937: Agents can run code in the Excel add-in again (`excel_run`). The add-in's task pane page now allows `'unsafe-eval'`, which the add-in kit needs to run the agent's Office.js code; the console and the add-in's other pages keep the strict policy. `@opengeni/sdk/office` exports `OFFICE_RUN_SCRIPT_SOURCES`, the script sources a product's own pane page must allow. In the pane, Excel for Mac's add-in info button no longer covers the header's buttons, and the workspace picker groups workspaces under their organization.
+
+### Patch Changes
+
+- 6d7ea1e: A context checkpoint that failed before any provider answer, including one refused because the sandbox moved to another machine just before it was sent, now retries the same turn instead of failing it. When a checkpoint does fail for good, a goal's continuation reports `blocked` with the new reason `compaction_failed`, and the goal pill says a message or Compact continues it, rather than claiming the goal will continue automatically.
+- Updated dependencies [6d7ea1e]
+- Updated dependencies [8fae328]
+  - @opengeni/contracts@6.26.0
+  - @opengeni/connect@6.26.0
+
+## 6.25.0
+
+### Minor Changes
+
+- e126cb5: Documents, spreadsheets and presentations can now be deleted from the Artifacts list. Their ⋯ menu has **Delete…**, which asks first. Deleting archives the artifact: it leaves the Artifacts list and the chat's artifact panel and no longer opens. The new `POST /v1/workspaces/:workspaceId/editable-artifacts/:artifactId/archive` route and `client.archiveEditableArtifact` do the same and need `artifacts:publish`.
+- 81570f9: Several connections to the same tool server can now be told apart by people and agents. A connection has an optional `label`, a name its owner sets when connecting (`label` on create, an optional Name field in the key form and Connect's credential step) and changes or clears later (`PATCH .../connections/{id}` with `{ "label": … }`, or Rename on the connector page). Labels follow one rule everywhere: the provider's verified identity, else the person's name, else `<domain> account`; when two accounts with the same scope would still read the same, agents and account lists add when each was connected (then the time, then a short ID). A rename is display only: it changes neither the connection's version nor its authority, and reaches agents from the next turn.
+
+### Patch Changes
+
+- bfd2970: Boxes kept warm only by open session pages are now also bounded after admission. A box a turn, process or readiness hold kept warm becomes viewer-only when that holder leaves, and a viewer-only hold had no end. The sandbox reaper now drains a warm box whose every holder is a viewer and whose sessions have no open work after 30 minutes without use (`OPENGENI_SANDBOX_VIEWER_IDLE_DRAIN_MS`, `0` disables): the server measures use from viewer attaches and turns, and the web client extends it by reporting on each attach and heartbeat how long ago the person last used the page (`lastInteractionAgeMs`), so an active person with an open tab keeps their box. Only a person's own signed-in session can report interaction; the API ignores it from API keys (including personal ones) and delegated or service callers, so their viewers are bounded by server-observed activity. For one more idle window after an idle drain, a re-attach without newer interaction or session activity is refused, so an unattended page cannot keep a box warm; the person's next interaction re-attaches and the box resumes from its saved workspace. The reaper also drains the least recently active viewer-only boxes over `OPENGENI_SANDBOX_MAX_VIEWER_ONLY_BOXES_PER_WORKSPACE` or the plan tier's `viewerOnlyBoxesPerOrganization`, taking only boxes nobody used for five minutes. Drains are logged with their reason and counted in `opengeni_sandbox_viewer_only_drains_total{reason}`.
+
+  Organizations a host provisioned (the organization's own external source is set and is not a signup one; a workspace's external source never counts, since members can set it) resolve to a new `embedded` plan tier, unbounded by default and configurable in `OPENGENI_SANDBOX_PLAN_LIMITS_JSON`. `embedded` and `enterprise` organizations are also outside the per-workspace viewer-only limit and the reaper's drains; operators put other organizations that must not be bounded on `enterprise`. The `restricted` tier now applies only while promotion enforcement is on. A new `new` tier covers Free self-serve organizations in their first three days (`organizationsYoungerThanMs` in the tier; 1 viewer-only box per organization and per member, 3 running boxes), and tiers apply whatever credential the caller uses. Joining a box that a live process or Browser/ComputerSession keeps warm no longer counts as one more viewer-only box, and a 429 for a computer limit gets its own message in the web client instead of the viewer-limit one. Viewer attach refusals (429) now carry a machine-readable `details.viewerRefusal` (`viewer_idle`, `computer_limit`, `warm_allowance`), which the web client uses instead of the message.
+
+- Updated dependencies [e126cb5]
+- Updated dependencies [61abc98]
+- Updated dependencies [81570f9]
+- Updated dependencies [f99f940]
+- Updated dependencies [f99f940]
+- Updated dependencies [bfd2970]
+  - @opengeni/contracts@6.25.0
+  - @opengeni/connect@6.25.0
+
+## 6.24.1
+
+### Patch Changes
+
+- e5ce845: Deleting a slide no longer makes a presentation unopenable. The editor sent a bare `slide.delete` for slides that still had objects, which the kernel always rejects; the SDK saved that edit to the browser's local pending queue before validating it, so every later open replayed it and failed with `[ARTIFACT_PRESENTATION_BATCH_REJECTED] presentation scene is not empty`. Document and presentation edits are now checked against the current state before they are saved, a retained edit the kernel rejects is discarded on open so affected presentations open again, and slide deletion removes the slide's own objects first. The editor's two unlabelled trash buttons are replaced by one labelled Delete control with a tooltip that targets the selected object, or the current slide when nothing is selected, and asks for confirmation.
+- Updated dependencies [5fd2c21]
+  - @opengeni/contracts@6.24.1
+  - @opengeni/connect@6.24.1
+
+## 6.24.0
+
+### Patch Changes
+
+- Updated dependencies [c0248a5]
+  - @opengeni/contracts@6.24.0
+  - @opengeni/connect@6.24.0
+
+## 6.23.0
+
+### Minor Changes
+
+- f6a7c28: Connect cards can ask for connect-time inputs. An integration whose connections each need a value first (Microsoft Dynamics: the environment's address) declares those inputs in `@opengeni/contracts/capability-connect-inputs`. `capability_authorization_request` and tool discovery now post its Connect card, which asks the person for the value in one field with one Connect action, instead of answering `input_required` with no card. The agent can prefill a value with the tool's new `inputs` argument; it is used only when it follows the entry's rule. Catalog matches list the inputs as `setup.connectInputs`, the card payload carries them as `capability.inputs`, and capability creation takes `connectFor` with `connectInputs`, so the API applies the same rule to what the person entered and returns the connection already in the workspace for the same endpoint.
+
+  A runtime guard stops repeated identical tool calls. Once one exact call has returned the same result 8 times in a row in a turn, an identical call started within 30 seconds of the last one returns a short notice instead of running, and the run continues. Calls whose results change, and polling slower than 30 seconds, are unaffected.
+
+### Patch Changes
+
+- Updated dependencies [c0089e1]
+- Updated dependencies [9dd96b0]
+- Updated dependencies [adc2409]
+- Updated dependencies [f6a7c28]
+  - @opengeni/contracts@6.23.0
+  - @opengeni/connect@6.23.0
+
 ## 6.22.0
 
 ### Minor Changes

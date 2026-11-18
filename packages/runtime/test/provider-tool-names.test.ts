@@ -6,17 +6,18 @@ import {
   providerValidCallName,
 } from "../src/provider-tool-names";
 
-const QUERY = "mcp_0123456789abcdef01234567__query_pelicans";
+const QUERY = "birds_0a1b2c__query_pelicans";
 const GOAL_SET = "opengeni__goal_set";
 const KNOWN = [GOAL_SET, QUERY, "opengeni__goal_complete"];
 
 describe("model-written tool names", () => {
   test("a dotted server.tool name maps to the one authorized tool it denotes", () => {
     expect(knownToolNameFor("opengeni.goal_set", KNOWN)).toBe(GOAL_SET);
-    // The published name of an aliased MCP tool.
-    expect(knownToolNameFor("query.pelicans", KNOWN)).toBe(QUERY);
+    expect(knownToolNameFor("birds_0a1b2c.query_pelicans", KNOWN)).toBe(QUERY);
     expect(knownToolNameFor("other.unknown_tool", KNOWN)).toBeNull();
-    // Only the leaf after the last `__` counts.
+    // A published name alone names no server or account, so it reaches no
+    // tool: it could mean another account's tool of the same name.
+    expect(knownToolNameFor("query.pelicans", KNOWN)).toBeNull();
     expect(knownToolNameFor("github.create_issue", ["github_enterprise__create_issue"])).toBeNull();
     // Any other invalid character is never guessed from.
     expect(knownToolNameFor("opengeni goal_set", KNOWN)).toBeNull();

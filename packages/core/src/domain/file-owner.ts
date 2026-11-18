@@ -1,8 +1,13 @@
-import { requireLiveAgentAttemptAuthorization } from "../session-authorization";
+import {
+  requireLiveAgentAttemptAuthorization,
+  SessionAuthorizationDeniedError,
+} from "../session-authorization";
 import {
   freezeAgentLearningPolicy,
   getSessionAuthorityProjection,
   getSlackPrivateSessionOwnerSubjectId,
+  isAgentAttemptLivenessFence,
+  nestedAuthorityRefusalMessage,
   type SessionRlsActorContext,
 } from "@opengeni/db";
 import type { AccessGrant, Permission } from "@opengeni/contracts";
@@ -79,6 +84,9 @@ export async function fileOwnerContextForAgent(
   if (grant.principalKind !== "agent_attempt" || typeof sessionId !== "string")
     throw new Error("File access requires an exact agent attempt");
   const attempt = await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
+  // The policy read goes through the database's own attempt fence. When the
+  // turn moves on after the liveness check above passed, that fence refuses
+  // instead: the same stale attempt, so the same refusal.
   const snapshot = await freezeAgentLearningPolicy(deps.db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
@@ -89,6 +97,12 @@ export async function fileOwnerContextForAgent(
       attemptId: attempt.attemptId,
       executionGeneration: attempt.executionGeneration,
     },
+  }).catch((error: unknown) => {
+    const message = nestedAuthorityRefusalMessage(error);
+    if (message !== null && isAgentAttemptLivenessFence(message)) {
+      throw new SessionAuthorizationDeniedError("caller_stale", { cause: error });
+    }
+    throw error;
   });
   const sessionAuthority = await getSessionAuthorityProjection(
     deps.db,

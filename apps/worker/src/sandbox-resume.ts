@@ -29,6 +29,9 @@ import {
   sandboxProviderMaxRemainingLifetimeMs,
   sandboxArchiveCaptureTimeoutMs,
   sandboxLifecycleTransitionWaitMs,
+  sandboxFleetLimits,
+  sandboxPlanLimits,
+  settingsForSandboxPlanTier,
   sandboxWarmRateMicrosPerSecond,
   type Settings,
 } from "@opengeni/config";
@@ -214,6 +217,8 @@ function bindComputeTurn(
 export type ResumeBoxIds = {
   accountId: string;
   workspaceId: string;
+  /** The human who started the turn (`user:<id>`), when one did. */
+  actingSubjectId?: string | null;
   sandboxGroupId: string;
   /** The attributing session within the group (holders carry session_id for
    *  disclosure/attribution). For a singleton group this == sandboxGroupId. */
@@ -1445,6 +1450,20 @@ async function resumeBoxForTurnOnce(
     leaseTtlMs,
     warmingLeaseTtlMs: settings.sandboxLeaseWarmingTtlMs,
     captureWaitMs: sandboxLifecycleTransitionWaitMs(settings),
+    // A new box counts against the organization's running-box limit for its
+    // plan; at the limit the turn parks (organization_sandbox_capacity).
+    sandboxPlanLimits: sandboxPlanLimits(settings),
+    subscriptionPlansEnabled: settings.subscriptionPlansEnabled,
+    sandboxFleetLimits: sandboxFleetLimits(settings),
+    // The person who started the turn: their other organizations count
+    // toward the per-person bounds.
+    ...(ids.actingSubjectId ? { actingSubjectId: ids.actingSubjectId } : {}),
+    // A failed standing read fails open to the organization's own bounds.
+    onComputeStandingFallback: (error, part) =>
+      services.observability?.warn("sandbox compute standing read failed; admission fell back", {
+        part,
+        error: errorMessage(error),
+      }),
     ...(cancellationSignal ? { waitSignal: cancellationSignal } : {}),
   });
 
@@ -1638,6 +1657,7 @@ async function resumeBoxForTurnOnce(
         acquired.lease.backend,
         acquired.lease.instanceId,
         acquired.lease.liveness,
+        acquired.organizationBoxLimit,
       );
     }
     throw new SandboxLeaseSupersededError(ids.sandboxGroupId, acquired.lease.leaseEpoch, {
@@ -1794,7 +1814,11 @@ async function resumeBoxForTurnOnce(
         hydrateEnvelopeRaw && typeof hydrateEnvelopeRaw === "object"
           ? (hydrateEnvelopeRaw as Record<string, unknown>)
           : null;
-      const established = await establishSandboxSessionFromEnvelope(settings, hydrateEnvelope, {
+      // A Free or unpaid organization's box gets the unpaid resource ceilings.
+      const boxSettings = settingsForSandboxPlanTier(settings, acquired.sandboxPlanTier, {
+        paidHistory: acquired.sandboxPaidHistory,
+      });
+      const established = await establishSandboxSessionFromEnvelope(boxSettings, hydrateEnvelope, {
         sessionId: ids.sessionId,
         recovery: "create-or-restore",
         ...(services.objectStorage

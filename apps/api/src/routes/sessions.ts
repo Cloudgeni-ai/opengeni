@@ -391,6 +391,8 @@ import {
   readGroupLease,
   resolveActiveDesktopTransport,
   viewerHeartbeatIntervalMs,
+  viewerIdleDrainMs,
+  viewerInteractionAgeFor,
   type DesktopStreamMint,
   type TerminalStreamMint,
   type ViewerServices,
@@ -5345,6 +5347,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         archiveComplete: false,
         sandboxGroupId: session.sandboxGroupId,
         viewerHeartbeatIntervalMs: viewerHeartbeatIntervalMs(settings),
+        viewerIdleDrainMs: viewerIdleDrainMs(settings),
         dataPlaneUrl: null,
       };
       if (
@@ -5387,6 +5390,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         grant,
         waitSignal: c.req.raw.signal,
         ...(parsed.viewerId ? { viewerId: parsed.viewerId } : {}),
+        ...viewerInteractionAgeFor(c.req.raw, grant, parsed.lastInteractionAgeMs),
       });
 
       // P4.2 — the viewer now holds a WARM box; mint the real pixel cell IN-PROCESS
@@ -5489,6 +5493,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           sandboxGroupId: session.sandboxGroupId,
           viewerId: c.req.param("viewerId"),
           expectedEpoch: parsed.leaseEpoch,
+          ...viewerInteractionAgeFor(c.req.raw, grant, parsed.lastInteractionAgeMs),
         },
       );
       return c.json({ alive });

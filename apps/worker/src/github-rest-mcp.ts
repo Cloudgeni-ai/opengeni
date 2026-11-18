@@ -38,7 +38,6 @@ import {
   type AttemptConnectorActionBinding,
   ConnectorActionBindingRejectedError,
   type LocalMcpServerRegistration,
-  prefixedMcpToolName,
 } from "@opengeni/runtime";
 import {
   GITHUB_REST_API_ORIGIN,
@@ -962,7 +961,7 @@ function githubConnectorBindings(
   const repositoryless = new Set<string>(GITHUB_REST_REPOSITORYLESS_TOOL_NAMES);
   return GITHUB_REST_TOOL_NAMES.filter((toolName) => !repositoryless.has(toolName)).map(
     (toolName) => ({
-      modelName: prefixedMcpToolName(serverId, toolName),
+      identity: { serverId, toolName },
       resultOutcome: githubRestConnectorActionOutcome,
       call: (approvalId, arguments_) => {
         const args = objectRecord(arguments_);

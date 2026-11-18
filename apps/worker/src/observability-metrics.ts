@@ -16,8 +16,11 @@ import {
 } from "@opengeni/contracts";
 import {
   ACTIVE_USER_WINDOWS,
+  CAPACITY_WAITING_TURN_PROVIDERS,
   QUEUED_TURN_HOLDS,
   type ActiveUserWindow,
+  type CapacityWaitingTurnProvider,
+  type CapacityWaitingTurnSummary,
   type CreditGrantTotals,
   type IdleInteractionInspection,
   type ModelCallTiming,
@@ -65,7 +68,9 @@ export type TurnOutcome = "completed" | "failed" | "cancelled" | "recovering";
  * Why a turn attempt ended recovering. A closed set chosen at each recovery
  * site: `provider` (the model provider or its subscription lease), `route_change`
  * (the session's active sandbox was deliberately moved mid-turn, so the turn
- * continues on its new machine in a fresh attempt), `sandbox`,
+ * continues on its new machine in a fresh attempt), `organization_limit` (the
+ * organization already runs as many boxes as its plan allows, so the turn
+ * parks until one drains), `sandbox`,
  * `tool` (MCP and first-party tool setup), `worker` (shutdown or death),
  * `database` (settlement could not be written), `control` (admission holds)
  * and `other`.
@@ -73,6 +78,7 @@ export type TurnOutcome = "completed" | "failed" | "cancelled" | "recovering";
 export type TurnRecoveryCause =
   | "provider"
   | "route_change"
+  | "organization_limit"
   | "sandbox"
   | "tool"
   | "worker"
@@ -138,6 +144,7 @@ const TURN_OUTCOMES: readonly TurnOutcome[] = ["completed", "failed", "cancelled
 const TURN_RECOVERY_CAUSES: readonly TurnRecoveryCause[] = [
   "provider",
   "route_change",
+  "organization_limit",
   "sandbox",
   "tool",
   "worker",
@@ -560,6 +567,17 @@ export function turnLifecycleMetricsFor(observability: Observability): TurnLifec
   return tracker;
 }
 
+const UNPAID_SANDBOX_FLEET_STATES: readonly UnpaidSandboxFleetState[] = [
+  "normal",
+  "pressure",
+  "daily_budget_exhausted",
+];
+
+const UNPAID_SANDBOX_FLEET_CHECKS_METRIC = {
+  name: "opengeni_sandbox_unpaid_fleet_checks_total",
+  help: "Sandbox reaper passes by the unpaid fleet's state (normal, fleet pressure engaged, or today's unpaid box time exhausted).",
+} as const;
+
 export function initializeWorkerOutcomeMetrics(observability: Observability): void {
   for (const outcome of TURN_OUTCOMES) {
     observability.incrementCounter({
@@ -571,6 +589,15 @@ export function initializeWorkerOutcomeMetrics(observability: Observability): vo
   }
   for (const cause of TURN_RECOVERY_CAUSES) {
     observability.incrementCounter({ ...TURN_RECOVERIES_METRIC, labels: { cause }, amount: 0 });
+  }
+  // Every unpaid fleet state exists from start, so an alert on its increase
+  // fires on the first pass in that state.
+  for (const state of UNPAID_SANDBOX_FLEET_STATES) {
+    observability.incrementCounter({
+      ...UNPAID_SANDBOX_FLEET_CHECKS_METRIC,
+      labels: { state },
+      amount: 0,
+    });
   }
   observability.incrementCounter({
     name: "opengeni_turns_total",
@@ -906,7 +933,7 @@ export function recordQueuedTurnHoldGauges(
     const entry = summary[hold];
     observability.setGauge({
       name: "opengeni_turns_queued_by_hold",
-      help: "Durable queued session turns by what holds them: ready (waiting for dispatch), behind_active_turn, paused, failed (resumes on the next message), requires_action, waiting_capacity or cancelled.",
+      help: "Durable queued session turns by what holds them: ready (waiting for dispatch), behind_active_turn, paused, failed (resumes on the next message), requires_action, waiting_capacity (queued behind a turn parked on capacity; the parked turn itself is opengeni_turns_waiting_capacity) or cancelled.",
       labels: { hold },
       value: nonnegativeFinite(entry?.count ?? 0),
     });
@@ -914,6 +941,35 @@ export function recordQueuedTurnHoldGauges(
       name: "opengeni_turns_queued_oldest_age_seconds",
       help: "Age in seconds of the oldest durable queued session turn in each hold class; 0 when the class is empty.",
       labels: { hold },
+      value: nonnegativeFinite(entry?.oldestAgeSeconds ?? 0),
+    });
+  }
+}
+
+/**
+ * Turns parked waiting for subscription capacity right now that run as soon
+ * as capacity returns, by the provider they wait on: a paused or stopped
+ * chat's wait, or a waiter the reconcile would supersede, is not counted. A
+ * parked turn is its session's active turn, so the queued hold split above
+ * never counts it. Every provider is always published so an emptied provider
+ * drops to 0.
+ */
+export function recordCapacityWaitingTurnGauges(
+  observability: Observability,
+  summary: Record<CapacityWaitingTurnProvider, CapacityWaitingTurnSummary>,
+): void {
+  for (const provider of CAPACITY_WAITING_TURN_PROVIDERS) {
+    const entry = summary[provider];
+    observability.setGauge({
+      name: "opengeni_turns_waiting_capacity",
+      help: "Turns parked right now waiting for subscription capacity (usage limit or no eligible account) that run as soon as it returns, by the provider they wait on. Each is its session's active turn; waits in a paused or stopped chat are not counted.",
+      labels: { provider },
+      value: nonnegativeFinite(entry?.count ?? 0),
+    });
+    observability.setGauge({
+      name: "opengeni_turns_waiting_capacity_oldest_age_seconds",
+      help: "Seconds since the oldest turn now waiting for subscription capacity parked, by provider; 0 when none waits. A resumption that finds no capacity parks again and starts a new wait.",
+      labels: { provider },
       value: nonnegativeFinite(entry?.oldestAgeSeconds ?? 0),
     });
   }
@@ -1747,6 +1803,92 @@ export function recordSandboxCommandContainment(
   });
 }
 
+/** Fixed reasons the reaper drains a warm box held only by viewers
+ * (docs/run-lifecycle.md, "Boxes held only by viewers"). */
+export const SANDBOX_VIEWER_ONLY_DRAIN_REASONS = [
+  "viewer_idle",
+  "viewer_workspace_limit",
+  "viewer_organization_limit",
+] as const;
+
+export type SandboxViewerOnlyDrainReason = (typeof SANDBOX_VIEWER_ONLY_DRAIN_REASONS)[number];
+
+/** One drained viewer-only box, by fixed reason. */
+export function recordSandboxViewerOnlyDrain(
+  observability: Observability,
+  reason: SandboxViewerOnlyDrainReason,
+): void {
+  observability.incrementCounter({
+    name: "opengeni_sandbox_viewer_only_drains_total",
+    help: "Warm boxes held only by viewers that the reaper released and drained, by fixed reason.",
+    labels: { reason },
+  });
+}
+
+/** Fixed reasons the reaper drains a warm box no turn holds under the plan's
+ * compute bounds (docs/deployment.md, "Free compute bounds"). */
+export const SANDBOX_COMPUTE_BOUNDS_DRAIN_REASONS = [
+  "compute_closed",
+  "compute_daily_budget",
+  "compute_idle",
+] as const;
+
+export type SandboxComputeBoundsDrainReason = (typeof SANDBOX_COMPUTE_BOUNDS_DRAIN_REASONS)[number];
+
+/** One box drained (`drained`) or asked to stop its commands
+ * (`stop_requested`) under the plan's compute bounds, by fixed reason. */
+export function recordSandboxComputeBoundsDrain(
+  observability: Observability,
+  reason: SandboxComputeBoundsDrainReason,
+  mode: "drained" | "stop_requested",
+): void {
+  observability.incrementCounter({
+    name: "opengeni_sandbox_compute_bounds_drains_total",
+    help: "Warm boxes no turn holds that the reaper drained or stopped under the plan's compute bounds, by fixed reason and mode.",
+    labels: { reason, mode },
+  });
+}
+
+/** The unpaid sandbox fleet as one reaper pass saw it (docs/deployment.md,
+ * "Unpaid fleet limits"). `state` counts passes, so an alert on its increase
+ * stops on its own when the reaper moves to another replica. */
+export type UnpaidSandboxFleetState = "normal" | "pressure" | "daily_budget_exhausted";
+
+export function recordUnpaidSandboxFleet(
+  observability: Observability,
+  input: {
+    state: UnpaidSandboxFleetState;
+    warmBoxes: number | null;
+    unpaidRunningBoxes: number | null;
+    unpaidBoxSecondsToday: number | null;
+  },
+): void {
+  observability.incrementCounter({
+    ...UNPAID_SANDBOX_FLEET_CHECKS_METRIC,
+    labels: { state: input.state },
+  });
+  const gauges: Array<[string, string, number | null]> = [
+    [
+      "opengeni_sandbox_fleet_warm_boxes",
+      "Boxes of every plan starting or warm, as fleet pressure reads them.",
+      input.warmBoxes,
+    ],
+    [
+      "opengeni_sandbox_unpaid_fleet_running_boxes",
+      "Boxes of unpaid organizations starting or warm.",
+      input.unpaidRunningBoxes,
+    ],
+    [
+      "opengeni_sandbox_unpaid_fleet_box_seconds_today",
+      "Metered box seconds of unpaid organizations since 00:00 UTC.",
+      input.unpaidBoxSecondsToday,
+    ],
+  ];
+  for (const [name, help, value] of gauges) {
+    if (value !== null) observability.setGauge({ name, help, value });
+  }
+}
+
 /** Only call after the exact draining->cold commit reports wentCold. The
  * backend is validated against the closed contract so provider IDs and other
  * per-sandbox values can never become metric labels. */
@@ -2520,6 +2662,7 @@ export type TurnStartupPhase =
   | "history_generated_image_materialization"
   | "history_position_load"
   | "owned_sandbox_setup"
+  | "earlier_attempt_usage_settlement"
   | "runtime_stream_initialization"
   | "model_request_preparation"
   | "model_sdk_serialization"
@@ -3184,6 +3327,17 @@ export class StreamTimingMetrics {
   private readonly stageMs = new Map<ModelRequestPreDispatchStage, number>();
   private dispatchedAt: number | null = null;
   private readonly providerFirstRecorded = new Set<ProviderFirstContent>();
+  /** When the previous call's terminal response was read, until the next model entry. */
+  private responseEndedAt: number | null = null;
+  /** Response end to model entry of the request now in preparation. */
+  private beforeModelEntryMs: number | null = null;
+  /**
+   * Set when the previous response's end was read after the request now in
+   * preparation had already entered (the SDK starts the next request before
+   * the terminal event is read): the gap starts at that read, and each stage
+   * counts only its time after it.
+   */
+  private lateResponseEnd: { at: number; stageMsBefore: Map<string, number> } | null = null;
   /** The model call awaiting its terminal response, if one was dispatched. */
   private openCall: {
     dispatchedAt: number;
@@ -3207,6 +3361,9 @@ export class StreamTimingMetrics {
     if (point !== "model_entry") return;
     if (this.modelEntryAt !== null) return;
     this.modelEntryAt = this.now();
+    this.beforeModelEntryMs =
+      this.responseEndedAt === null ? null : Math.max(0, this.modelEntryAt - this.responseEndedAt);
+    this.responseEndedAt = null;
     this.stageMs.clear();
     this.stage = { name: "settlement_wait", since: this.modelEntryAt };
   }
@@ -3254,10 +3411,34 @@ export class StreamTimingMetrics {
           value: ms / 1000,
         });
       }
+      if (this.beforeModelEntryMs !== null) {
+        // The whole gap from the previous response to this dispatch, split
+        // into the time before the SDK asked for this request (tools and the
+        // run loop) and this request's own pre-dispatch stages.
+        const gap = (phase: string, ms: number) =>
+          this.observability.observeHistogram({
+            name: "opengeni_model_response_to_next_dispatch_seconds",
+            help: "Seconds from a model response's end to the next request's literal provider dispatch in the same stream, by phase; total is the whole gap.",
+            buckets: MODEL_REQUEST_PRE_DISPATCH_BUCKETS,
+            labels: { provider: this.options.provider, phase },
+            value: ms / 1000,
+          });
+        const late = this.lateResponseEnd;
+        gap("total", late ? Math.max(0, at - late.at) : this.beforeModelEntryMs + preDispatchMs);
+        gap("before_model_entry", this.beforeModelEntryMs);
+        for (const [stage, ms] of this.stageMs) {
+          gap(stage, Math.max(0, ms - (late?.stageMsBefore.get(stage) ?? 0)));
+        }
+      }
+      this.beforeModelEntryMs = null;
+      this.lateResponseEnd = null;
       this.stageMs.clear();
       this.stage = null;
       this.modelEntryAt = null;
     }
+    // A response end not yet claimed by a model entry never carries over a
+    // dispatch into a later request's gap.
+    this.responseEndedAt = null;
     // A transport retry re-dispatches the same request; the first delta then
     // belongs to the latest dispatch.
     this.dispatchedAt = at;
@@ -3319,6 +3500,22 @@ export class StreamTimingMetrics {
     const call = this.openCall;
     if (!call) return null;
     this.openCall = null;
+    const endedAt = this.now();
+    if (this.modelEntryAt === null) {
+      this.responseEndedAt = endedAt;
+    } else {
+      // The next request already entered: its gap starts now, with nothing
+      // before its model entry, and its stages count only from here.
+      const stageMsBefore = new Map<string, number>(this.stageMs);
+      if (this.stage) {
+        stageMsBefore.set(
+          this.stage.name,
+          (stageMsBefore.get(this.stage.name) ?? 0) + Math.max(0, endedAt - this.stage.since),
+        );
+      }
+      this.beforeModelEntryMs = 0;
+      this.lateResponseEnd = { at: endedAt, stageMsBefore };
+    }
     const since = (at: number | null) =>
       at === null ? null : Math.round(Math.max(0, at - call.dispatchedAt));
     return {
@@ -3377,6 +3574,10 @@ const MODEL_STEP_PHASE_BUCKETS = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.
  *     the moment the next model request is allowed to proceed (`settle`).
  *   - `response_usage` — the part of settlement that meters the response
  *     (lease renewal, usage and credit recording, the usage event).
+ *   - `response_usage_lease`, `response_usage_billing`, `response_usage_cache`,
+ *     `response_usage_checkpoint` — the serial parts of `response_usage`:
+ *     serving lease renewal, usage and credit recording, the prompt cache
+ *     observation, and the usage event with its history checkpoint.
  *   - `response_history` — the part that retains media and reconciles history.
  *   - `settlement_wait` — producer: a model request entered and waited this
  *     long for the previous response's settlement.
@@ -3387,9 +3588,16 @@ const MODEL_STEP_PHASE_BUCKETS = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.
  * with settlement; only `settlement_wait` and `admission` delay the next
  * request beyond the tools themselves.
  */
+export type ResponseUsageStepPhase =
+  | "response_usage_lease"
+  | "response_usage_billing"
+  | "response_usage_cache"
+  | "response_usage_checkpoint";
+
 export type ModelStepPhase =
   | "response_settlement"
   | "response_usage"
+  | ResponseUsageStepPhase
   | "response_history"
   | "settlement_wait"
   | "admission";

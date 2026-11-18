@@ -407,13 +407,20 @@ describe("installed API Integration worker adapters", () => {
         connector: "Inventory API",
         providerDomain: item.providerDomain,
         account: "Alice",
+        // The person's own account is the integration's default for writes,
+        // and the shared account's route names it.
+        defaultAccount: "Inventory API — Alice · Yours",
       });
+      expect(labels.get(bindings[1]!.serverId)?.defaultAccount).toBe(
+        "Inventory API — Alice · Yours",
+      );
       const single = apiIntegrationAccountLabels({
         integrations: [item],
         bindings: bindings.slice(0, 1),
         tools: routed.tools,
       });
       expect(single.get(bindings[0]!.serverId)).not.toHaveProperty("account");
+      expect(single.get(bindings[0]!.serverId)).not.toHaveProperty("defaultAccount");
       expect(
         apiIntegrationAccountLabels({ integrations: [item], bindings: null, tools: routed.tools }),
       ).toEqual(new Map());
@@ -438,6 +445,68 @@ describe("installed API Integration worker adapters", () => {
         tools: routed.tools,
       });
       expect(uncategorized.get(bindings[0]!.serverId)).not.toHaveProperty("kind");
+      // Two installs of one definition (a second account added as its own
+      // install) are accounts of one connector: both carry the definition's
+      // name and their account, so neither reads as an unrelated connector.
+      const second = {
+        ...item,
+        serverId: "inventory_api_account_2",
+        instanceKey: "account-2",
+        name: "Inventory API - Account 2",
+        displayName: "Inventory API - Account 2",
+      };
+      const [own, shared] = bindings;
+      const installs = apiIntegrationAccountLabels({
+        integrations: [item, second],
+        bindings: [
+          { ...shared!, canonicalServerId: item.serverId },
+          { ...own!, canonicalServerId: second.serverId },
+        ],
+        tools: routed.tools,
+      });
+      expect(installs.get(shared!.serverId)).toEqual({
+        model: "Inventory API — Team · Shared",
+        connector: "Inventory API",
+        providerDomain: item.providerDomain,
+        account: "Team",
+        defaultAccount: "Inventory API — Alice · Yours",
+      });
+      expect(installs.get(own!.serverId)).toEqual({
+        model: "Inventory API — Alice · Yours",
+        connector: "Inventory API",
+        providerDomain: item.providerDomain,
+        account: "Alice",
+        defaultAccount: "Inventory API — Alice · Yours",
+      });
+      // A reviewed definition's installs take its reviewed name.
+      const calendars = apiIntegrationAccountLabels({
+        integrations: [
+          { ...item, definitionId: "microsoft-outlook-calendar", definitionProvenance: "curated" },
+          {
+            ...second,
+            definitionId: "microsoft-outlook-calendar",
+            definitionProvenance: "curated",
+          },
+        ],
+        bindings: [
+          { ...shared!, canonicalServerId: item.serverId },
+          { ...own!, canonicalServerId: second.serverId },
+        ],
+        tools: routed.tools,
+      });
+      expect(calendars.get(own!.serverId)?.model).toBe("Outlook Calendar — Alice · Yours");
+      expect(calendars.get(shared!.serverId)?.connector).toBe("Outlook Calendar");
+      // Installs of different definitions stay separate connectors.
+      const unrelated = apiIntegrationAccountLabels({
+        integrations: [item, { ...second, definitionId: "billing" }],
+        bindings: [
+          { ...shared!, canonicalServerId: item.serverId },
+          { ...own!, canonicalServerId: second.serverId },
+        ],
+        tools: routed.tools,
+      });
+      expect(unrelated.get(own!.serverId)?.connector).toBe("Inventory API - Account 2");
+      expect(unrelated.get(own!.serverId)).not.toHaveProperty("account");
       // Connector routes take their catalog category; the default and the
       // custom-server category say nothing.
       for (const [category, kind] of [

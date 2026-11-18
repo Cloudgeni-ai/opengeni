@@ -19,6 +19,7 @@ never exposes Nango's whole catalog or Nango's own MCP server.
 | Switch, usage, export (DB)  | `packages/db/drizzle/1406_nango_integrations.sql`, `packages/db/src/nango-integrations.ts`          |
 | Credential resolution       | `packages/db/src/connection-token-resolver.ts`                                                      |
 | Catalog and projection      | `packages/core/src/domain/nango-integrations.ts`, `packages/core/src/domain/capabilities.ts`        |
+| Sharing, release, sweep     | `packages/core/src/domain/nango-connection-sharing.ts`, `apps/worker/src/activities/nango-connection-sweep.ts` |
 | Proxy transport             | `packages/runtime/src/nango-transport.ts`                                                           |
 | Google bridges              | `gmail-rest-mcp.ts`, `google-calendar-rest-mcp.ts`, `drive-mcp.ts`, `drive-nango-read-tools.ts`     |
 | Generic tools bridge        | `packages/runtime/src/nango-tools-mcp.ts`                                                           |
@@ -52,6 +53,15 @@ flight finishes on the credential it already resolved.
   by its definition.
 - When `x` is Nango-backed, the native X social card and the first-party
   `x_*` tools are hidden, and calls to them are refused at call time.
+- Agent catalog search leaves out a public-registry entry that duplicates a
+  built-in integration the deployment offers (by the reviewed endpoint's policy
+  key, or the service's provider domain), and a card requested for it is the
+  built-in's. A built-in whose organization policy key is not allowed gets no
+  card; the agent is told it is turned off for the organization
+  (`packages/core/src/domain/built-in-integration-duplicates.ts`).
+- A Google connector Nango serves is not gated by this deployment's own Google
+  sign-in setup (`OPENGENI_GOOGLE_CONNECTOR_SETUP_ENABLED`, operator OAuth
+  client): it signs in through Nango's app.
 
 ### Connections
 
@@ -73,17 +83,163 @@ and shows Nango Connect. On completion it calls
 `POST /v1/integrations/nango/connect/complete`, which finds the connection by
 attempt tags and integration through `GET /connections`, verifies the
 identity call, and stores it. Reconnecting the same verified account updates
-its row; a connection without a verified identity is always stored as a new
-account. The recorded grants are the scopes Nango reports for the connection
+its row and deletes the Nango connection it replaced; a connection without a
+verified identity is always stored as a new account. The recorded grants are
+the scopes Nango reports for the connection
 (`credentials.raw.scope`), falling back to the managed app's fixed scopes when
 Nango reports none. The organization integration acquisition policy
 and setup permissions apply as for native connectors; in allowlist mode the
 policy key is the integration key (`gmail`, `linkedin`, `x`, …).
 
-Disconnect deletes the connection in Nango too, so its billing stops. Rows
-removed by SQL cascades (workspace or organization deletion, member removal)
-are not deleted in Nango at that moment; `integrations:nango orphans` finds and
-deletes them (below).
+### One Nango connection per account
+
+Nango bills every connection, so Opengeni keeps at most one per person,
+verified account and Nango integration. Gmail, Calendar and Drive are separate
+Nango integrations, so one Google account connected to all three is three
+connections; that is not a duplicate.
+
+- Rows stay per organization (organizations never share rows, and a Nango
+  row is always personal), but the same person's rows for the same verified
+  account in every organization they belong to stand for one Nango
+  connection: the newest verified one, unless an existing healthy one of
+  the account already covers every row's scopes (a narrower connect
+  elsewhere), which is then kept instead. When a connect stores a
+  connection, the person's other rows for that account are pointed at the
+  shared one (credential and status active; each row keeps its own granted
+  scopes, so no organization gains access it did not consent to) and the
+  connections they stood for are deleted. A reconnect in one organization
+  therefore also repairs the same account in the others. A row is not
+  pointed at a connection whose grant lacks one of the row's scopes, or when
+  its organization no longer allows the integration; such a row keeps its
+  own connection.
+- A Nango connection is deleted only when no live (not revoked) row of that
+  person still stands for it: disconnecting in one organization keeps the
+  connection the others use, and the last disconnect deletes it.
+- Refresh failures, recoveries and deletions reported by the webhook apply
+  to every row that stands for the connection.
+- Every decision reads the person's rows in each organization they are an
+  active member of (through their Personal workspace there) and holds a
+  deployment-wide lock per person and integration, so concurrent connects,
+  disconnects and the sweep converge; deletes happen under that lock.
+  Whether a Nango connection is still used is decided deployment-wide by
+  `opengeni_private.nango_connections_in_use_v1` (migration 1482: any
+  non-revoked Nango row that names it, whatever its membership or authority
+  state; it opens the one-transaction tenancy inventory window for its own
+  query only, since `connections` forces row-level security on its owner
+  too). 1482 withholds its runtime grant (the previous release rejects a
+  grant on a definer it does not know); until a later migration grants it,
+  the person's own reads decide, and a membership that is not active or an
+  organization that cannot be read means nothing is deleted. Those reads
+  cannot see a row without bound authority, so until the grant such a row's
+  Nango connection can still be deleted (Nango rows made since the
+  16 November launch all bind authority). The exception is a
+  refused or failed attempt's own connection that Nango made within the
+  last two hours and no readable row names (never after a failed read).
+  An existing connection replaces a fresh one only while Nango reports it
+  without auth errors.
+- A row's scopes count as a grant only when its metadata carries
+  `nangoScopesConfirmed` naming the row's own Nango connection: Nango reported
+  them at connect time, or the row was moved onto a connection whose confirmed
+  grant covers them. A marker naming another connection (an older release
+  moved the row, copying its metadata) vouches for nothing. When Nango
+  reports no scopes the row records the app's default scopes without the
+  marker (and with the older `nangoScopesUnconfirmed`, which the previous
+  release reads), and so does every row saved before the marker existed. No other
+  organization's row is moved onto a connection on the strength of unmarked
+  scopes; for a connection no marked row vouches for, the scopes Nango
+  reports for it now count instead (none when Nango cannot read it), so
+  older duplicates are still merged. Email accounts are compared case-insensitively.
+- A legacy duplicate row of the same owner and account (saved before account
+  keys) shares the connection without the key, so it is billed once. It is
+  the same verified account, so its `authority_generation` is kept too.
+- Connections without a verified account are never merged. Config-only
+  integrations (LinkedIn, X) without an `accountIdentity` therefore add a
+  Nango connection on each connect, and each stays billed until its row is
+  disconnected; give them an `accountIdentity` to merge them.
+- Reconnecting the same verified account into its row keeps the row's
+  `authority_generation` when the new grant includes every scope the row had,
+  so turns already running on it keep working; the Nango connection id may
+  change. A row saved before account keys counts as the same account when
+  it was matched on the verified account. A different account, fewer
+  scopes, a revoke or a status change still advance it.
+- Within one organization the database holds it too: each row carries its
+  account's `account_identity_key` (the Nango integration and the verified
+  account), unique among one person's live rows (see
+  [Remote MCP credentials](remote-mcp-credentials.md)). A store that would
+  add a second live row is refused, and the attempt's Nango connection is
+  deleted.
+
+Disconnect deletes the connection in Nango too (unless another of the
+person's rows stands for it), so its billing stops. It does not revoke the
+grant at Google for Nango-managed apps (`google-mail`, `google-calendar`,
+`google-drive`): their OAuth client is Nango's and shared. Google keeps one
+grant per OAuth client and account, so revoking it would also end every
+other connection that Google account has through Nango's client (its other
+Nango integrations, and any other connection still standing for it).
+Deleting the Nango connection stops our access and billing. Native Google
+connections keep revoking at Google on disconnect (#7692), since that client
+is our own.
+
+### Automatic cleanup
+
+The worker's maintenance sweep (every 15 minutes, with the file-upload
+reaper) lists every Nango connection and, for each person and integration
+among the ones this deployment made (they carry the `opengeni_attempt_id`
+tag and an `opengeni_deployment` tag naming this deployment's public base
+URL, so deployments sharing one Nango environment never sweep each other's):
+
+- shares duplicate connections of one verified account (left by an older
+  release or a failed share) onto the newest healthy one and deletes the rest;
+- deletes connections no live row stands for and at least two hours old,
+  longer than a connect attempt lives: abandoned or refused connects, rows
+  removed by SQL cascades (workspace or organization deletion, member
+  removal) and deletions that failed at disconnect or reconnect time. If more
+  than half of the tagged connections (and more than ten) look unused at
+  once, it deletes none and logs a warning instead;
+- deletes connections whose rows have all needed reconnection because Nango
+  could not refresh them (`nango_refresh_failed`) for 24 hours, while Nango
+  still reports the failure. Those rows keep asking to reconnect, and a
+  reconnect stores a new connection;
+- marks active rows whose Nango connection Nango no longer has
+  (`nango_connection_missing`, for example deleted by an older release during
+  a rollout or rollback) as needing reconnection, after Nango confirms the
+  connection is gone (a 404 for that very connection; any other answer keeps
+  the row). A row with a healthy connection of the same account that covers
+  its scopes is moved onto that one instead. People are found through
+  Nango's tags and, once a later migration grants it,
+  `opengeni_private.nango_live_connection_owners_v1` (migration 1487: the
+  owner, integration and Nango connection id of every active Nango row), so
+  a person whose only connection is gone is visited too. Until that grant,
+  only people with at least one connection this deployment tagged are
+  visited.
+
+Repoints are committed first. Every deletion in Nango happens afterwards
+under the person's lock, in a transaction that writes no connection rows,
+after the rows are read again. Marking a row first confirms the 404 with
+Nango, then re-reads under the lock and marks only active rows still on that
+connection. When more of the connections live rows stand for are missing than half of
+the connections the pass knows (and more than ten), as with a wrong Nango
+environment, it marks none and logs a warning. A pass that ran out of time
+before planning everyone marks none either, so a deployment too large to
+plan within one pass never marks missing rows. When nothing listed carries
+this deployment's tag (another deployment's tags, or an empty environment),
+the deployment-wide listing is not used at all. A
+worker whose public base URL tags none of the listed connections while others
+carry another deployment's tag logs once that its tag is possibly mismatched
+(it then cleans up nothing, unless it is a new deployment sharing the Nango
+environment).
+
+Connections made outside Opengeni or before the deployment tag (untagged)
+are left to the operator's `integrations:nango orphans` command; that
+includes duplicates and failed deletions of such connections, which are
+otherwise merged only when the person connects that account again. A pass stops
+starting people after three minutes (the rest wait for the next pass, in
+shuffled order) and heartbeats its activity. A connect refused for good
+(authority, policy or an account already connected), a connection whose
+identity Nango answers is not readable and one Nango cannot refresh (424) are
+deleted at once, by the page or by the webhook finalizer, through the same
+reference check; a network error, rate limit or server error on the identity
+read deletes nothing and the attempt can be retried.
 
 ### Webhook
 
@@ -96,14 +252,19 @@ signature).
   requires the signed webhook's attempt tags (and the tags Nango reports for
   the connection, when present) to match. `GET /connections/{id}` refreshes the
   token; Nango's 424 (refresh exhausted) means the connection is not stored,
-  here or on the page's completion (which also deletes it in Nango).
+  here or on the page's completion; both delete it in Nango. So do a failed
+  identity read and a refused store (authority or policy), unless a row
+  already stands for the connection.
 - `auth` refresh failure: re-reads the connection from the list
   (`GET /connections?connectionId=…`, matched on id and provider config key),
   which reports errors without refreshing, and marks it
   `needs_reauth` only if Nango still reports an auth error; a later successful
   refresh (or a re-check without errors) marks it active again. Replays of an
-  old event are therefore harmless.
-- `auth` deletion: revokes the Opengeni connection.
+  old event are therefore harmless. It applies to every row, in any of the
+  person's organizations, that stands for the connection.
+- `auth` deletion: revokes the active rows that stand for the connection.
+  Rows already asking to reconnect keep asking (the sweep deletes a
+  connection Nango can no longer refresh).
 
 ### Tool execution
 
@@ -220,8 +381,10 @@ column. `--delete` deletes only connections Opengeni made (they carry the
 connect attempt lives, so an in-progress connect is never deleted. Untagged
 connections (made outside Opengeni) are listed but deleted only with
 `--include-untagged`, and never one whose age Nango does not report. Run it
-after a flip back, and periodically to catch rows removed by
-workspace/organization deletion or member removal.
+after a flip back. The worker sweep (see Automatic cleanup) already deletes
+the tagged orphans this lists, including those left by workspace or
+organization deletion and member removal; the command remains for inspection
+and for untagged connections.
 
 ### Export affected users
 
@@ -257,7 +420,8 @@ per compute-hour with every action run counted as at least one second.
 Reconcile against the Nango invoice and the dashboard usage page: compare
 total connection-months, GB and compute-hours for the same period. Expected
 differences: Nango's own plan credit ($50/month), connections created outside
-Opengeni, Nango-side retries and syncs, and transfer Nango measures at its
+Opengeni, one connection shared by a person's rows in several organizations
+(each organization's estimate counts it), Nango-side retries and syncs, and transfer Nango measures at its
 edge (headers, provider-side traffic) that Opengeni does not see. Connections
 not deleted after a flip back keep accruing Nango cost but show as inactive in
 Opengeni; use the export to find them.

@@ -1,5 +1,66 @@
 # @opengeni/agent-host
 
+## 6.28.0
+
+### Patch Changes
+
+- @opengeni/sdk@6.28.0
+
+## 6.27.1
+
+### Patch Changes
+
+- @opengeni/sdk@6.27.1
+
+## 6.27.0
+
+### Patch Changes
+
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+  - @opengeni/sdk@6.27.0
+
+## 6.26.0
+
+### Patch Changes
+
+- Updated dependencies [6d7ea1e]
+- Updated dependencies [c8efcb0]
+- Updated dependencies [20e4937]
+  - @opengeni/sdk@6.26.0
+
+## 6.25.0
+
+### Patch Changes
+
+- Updated dependencies [e126cb5]
+- Updated dependencies [81570f9]
+- Updated dependencies [bfd2970]
+  - @opengeni/sdk@6.25.0
+
+## 6.24.1
+
+### Patch Changes
+
+- Updated dependencies [e5ce845]
+  - @opengeni/sdk@6.24.1
+
+## 6.24.0
+
+### Patch Changes
+
+- e6c9e45: A Connected Machine background command no longer reads as running for minutes after it finished when its session switched to another machine and back, and its output keeps flowing to the session after such a switch. When a reader attached to a command that had produced a large backlog (thousands of output frames, for example a test run that finished while the session was elsewhere), the agent sent the whole backlog into its 1,024-frame output queue at once and dropped every frame past the queue's depth, including the exit frame. Nothing re-sent them until the reader's 30-second silence check, which recovered about one queue's worth per check, so collecting a 6,600-frame command took more than three minutes, and a large enough backlog could never be collected within one collector's claim. The agent now holds its next frame while the queue is full and sends it as soon as the queue drains, so nothing is dropped for want of room. Collectors store replayed output a batch per transaction instead of one transaction per frame, so a retry that replays frames an earlier collector already stored gets further each time. A look at a running command now follows its attachment until it holds everything the machine had retained when it attached, instead of stopping after a quarter of a second with the same prefix every time, and `command_read`/`command_wait` in a later attempt read a running command from the machine its ledger names (not the session's current machine). `readExisting` takes an `untilCaughtUp` option, `appendSessionCommandOutputs` stores several chunks of one command in one transaction, and `connectedCommandOutputLook` reads a session's running command from its ledger locator.
+  - @opengeni/sdk@6.24.0
+
+## 6.23.0
+
+### Patch Changes
+
+- Updated dependencies [f6a7c28]
+  - @opengeni/sdk@6.23.0
+
 ## 6.22.0
 
 ### Patch Changes

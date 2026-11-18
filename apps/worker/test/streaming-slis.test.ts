@@ -429,6 +429,107 @@ describe("StreamTimingMetrics — TTFT + inter-delta gaps", () => {
     expect(metrics).not.toContain("opengeni_model_request_pre_dispatch_seconds_count{");
   });
 
+  test("response end to next dispatch splits into before-model-entry and pre-dispatch stages", async () => {
+    const observability = worker();
+    let now = 0;
+    const timing = new StreamTimingMetrics(observability, { provider: "openai", now: () => now });
+
+    // First call: no previous response, so no gap sample.
+    timing.onModelRequestEntry();
+    now = 100;
+    timing.onProviderDispatch();
+    now = 2_000;
+    timing.completeResponse();
+
+    // Tools run, then the SDK asks for the next request.
+    now = 2_300;
+    timing.onModelRequestEntry();
+    timing.enterPreDispatchStage("admission");
+    now = 2_350;
+    timing.enterPreDispatchStage("request_build");
+    now = 2_450;
+    timing.onProviderDispatch();
+
+    const metrics = await observability.prometheusMetrics();
+    const sum = (phase: string) =>
+      Number(
+        metrics.match(
+          new RegExp(
+            `opengeni_model_response_to_next_dispatch_seconds_sum\\{[^}]*phase="${phase}"[^}]*\\} ([0-9.e-]+)`,
+          ),
+        )?.[1],
+      );
+    expect(sum("total")).toBeCloseTo(0.45, 6);
+    expect(sum("before_model_entry")).toBeCloseTo(0.3, 6);
+    expect(sum("admission")).toBeCloseTo(0.05, 6);
+    expect(sum("request_build")).toBeCloseTo(0.1, 6);
+    expect(metrics).toMatch(
+      /opengeni_model_response_to_next_dispatch_seconds_count\{[^}]*phase="total"[^}]*provider="openai"[^}]*\} 1\b/,
+    );
+  });
+
+  test("a response read after the next request entered starts that request's gap at the read", async () => {
+    const observability = worker();
+    let now = 0;
+    const timing = new StreamTimingMetrics(observability, { provider: "openai", now: () => now });
+
+    // Call 1.
+    timing.onModelRequestEntry();
+    now = 10;
+    timing.onProviderDispatch();
+
+    // Call 2 enters before call 1's terminal event is read (twice in a row).
+    now = 1_000;
+    timing.onModelRequestEntry();
+    now = 1_100;
+    timing.completeResponse(); // call 1 read during call 2's settlement wait
+    now = 1_150;
+    timing.enterPreDispatchStage("request_build");
+    now = 1_200;
+    timing.onProviderDispatch();
+
+    // Call 2 runs for 60 s; call 3 enters before its terminal event is read.
+    now = 61_000;
+    timing.onModelRequestEntry();
+    now = 61_040;
+    timing.completeResponse();
+    now = 61_100;
+    timing.onProviderDispatch();
+
+    const metrics = await observability.prometheusMetrics();
+    const series = (phase: string, kind: "sum" | "count") =>
+      Number(
+        metrics.match(
+          new RegExp(
+            `opengeni_model_response_to_next_dispatch_seconds_${kind}\\{[^}]*phase="${phase}"[^}]*\\} ([0-9.e-]+)`,
+          ),
+        )?.[1],
+      );
+    // Gaps: 1,100 → 1,200 (0.1 s) and 61,040 → 61,100 (0.06 s); never call 2's 60 s.
+    expect(series("total", "count")).toBe(2);
+    expect(series("total", "sum")).toBeCloseTo(0.16, 6);
+    expect(series("before_model_entry", "sum")).toBe(0);
+    expect(series("settlement_wait", "sum")).toBeCloseTo(0.05 + 0.06, 6);
+    expect(series("request_build", "sum")).toBeCloseTo(0.05, 6);
+  });
+
+  test("a response end with no following model entry never carries over a dispatch", async () => {
+    const observability = worker();
+    let now = 0;
+    const timing = new StreamTimingMetrics(observability, { provider: "openai", now: () => now });
+    timing.onProviderDispatch(); // a provider without a model-entry hook
+    now = 1_000;
+    timing.completeResponse();
+    now = 2_000;
+    timing.onProviderDispatch(); // claims no model entry; the response end is dropped
+    now = 50_000;
+    timing.onModelRequestEntry();
+    now = 50_100;
+    timing.onProviderDispatch();
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).not.toContain("opengeni_model_response_to_next_dispatch_seconds_count{");
+  });
+
   test("completeResponse returns each dispatched call's timing exactly once", () => {
     const observability = worker();
     let now = 0;

@@ -2800,6 +2800,19 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     });
   }
 
+  /**
+   * Write one file of the secret leak guard's ledger (docs/secrets.md,
+   * "Keeping values out of commits"). Like a secret file it is private, but
+   * it belongs to no attempt scope, so attempt-end cleanup keeps it.
+   */
+  async writeSecretLedger(file: { path: string; content: Uint8Array }): Promise<void> {
+    await this.dispatch("writeSecretLedger", false, async (session, backend) => {
+      await withoutProviderCommandHandle(() =>
+        writeSecretFileOnBackend(session, file, backend.kind),
+      );
+    });
+  }
+
   private noteSecretScope(session: RoutableBackendSession, scope: string): void {
     let scopes = this.secretScopes.get(session);
     if (!scopes) this.secretScopes.set(session, (scopes = new Set()));

@@ -18,6 +18,7 @@ import {
 } from "@opengeni/contracts";
 import type { AccessGrant } from "@opengeni/contracts";
 import {
+  assertOrganizationNotSuspended,
   currentSiteSessionOrigin,
   hasLiteralPermission,
   siteViewerForGrant,
@@ -1035,6 +1036,12 @@ export async function upsertSitePublicationForManager(
 ): Promise<{ publication: SitePublication; created: boolean }> {
   requireSitesDomain(deps.settings);
   requireSiteManager(management);
+  // A suspended organization cannot publish (docs/deployment.md, "Free
+  // compute bounds").
+  await assertOrganizationNotSuspended(deps.db, {
+    accountId: grant.accountId,
+    subjectId: grant.subjectId,
+  });
   const { scope } = management;
   const record = management.record;
   const existing = await getSitePublication(deps.db, scope, record.id);

@@ -153,6 +153,13 @@ export const INTEGRATIONS: readonly IntegrationSpec[] = [
     toolNamePatterns: [/^outlook_calendar/, /^microsoft_outlook_calendar/],
   },
   {
+    id: "outlook_contacts",
+    label: "Outlook Contacts",
+    families: [],
+    labelWords: ["outlook contacts"],
+    toolNamePatterns: [/^outlook_contacts/, /^microsoft_outlook_contacts/],
+  },
+  {
     id: "onedrive",
     label: "OneDrive",
     families: [],

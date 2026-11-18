@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <style>rect{fill:#111311}path{fill:#FFFFFF}@media (prefers-color-scheme:dark){rect{fill:#F4F3EE}path{fill:#111311}}</style>
+  <rect width="64" height="64" rx="15"/>
+  <path transform="translate(12.16 17) scale(0.22545) translate(-75 -39.6)" d="M251 83.5966L207 109L163 83.5966L119 109L75 83.5966L141 45.4915A44 44 0 0 1 185 45.4915ZM185.25 172.3642A44.5 44.5 0 0 1 140.75 172.3642L75 134.4034L119 109L163 134.4034L207 109L251 134.4034Z"/>
+</svg>

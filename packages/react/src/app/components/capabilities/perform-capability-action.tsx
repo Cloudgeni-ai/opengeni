@@ -19,6 +19,7 @@ import {
 import { beginDriveConnect, DRIVE_MCP_URL } from "../../lib/drive-connect-return";
 import { startMcpOAuthWithTimeout } from "../../lib/mcp-oauth";
 import { toast } from "../../lib/toast";
+import { turnOnOwnLoginHere } from "./own-login-turned-on";
 
 type PerformCapabilityActionOptions = Parameters<typeof performCapabilityActionUntracked>[0];
 
@@ -412,6 +413,29 @@ async function performCapabilityActionUntracked(
     return;
   }
 
+  if (action.type === "turn_on_here") {
+    // The same standing grant as the account list's switch; the API checks
+    // that the account is the caller's own.
+    await turnOnOwnLoginHere(client, workspaceId, action.connection);
+    await refresh();
+    onRuntimeChanged();
+    await onComplete();
+    return;
+  }
+
+  if (action.type === "rename_connection") {
+    // The account's own workspace owns the row, as for removal. A rename
+    // changes only the name people and agents see when the service can't
+    // say which account it is.
+    await client.updateConnection(action.connection.workspaceId, action.connection.id, {
+      label: action.label,
+    });
+    await refresh();
+    await onComplete();
+    toast.success(action.label ? "Account renamed" : "Account name removed");
+    return;
+  }
+
   if (action.type === "reconnect_api_key") {
     if (action.connectionId) {
       // The existing row went inactive - rewrite its credential and
@@ -479,6 +503,7 @@ async function performCapabilityActionUntracked(
       plan.providerDomain,
       action.ownership,
     );
+    const label = action.label?.trim() || null;
     const connection = reuseId
       ? await client.updateConnection(workspaceId, reuseId, {
           credential: { headers: action.headers },
@@ -489,7 +514,10 @@ async function performCapabilityActionUntracked(
           kind: "api_key",
           ownership: action.ownership,
           credential: { headers: action.headers },
+          ...(label ? { label } : {}),
         });
+    // A rename goes on its own request; it never rides with a credential.
+    if (reuseId && label) await client.updateConnection(workspaceId, reuseId, { label });
     // Build the enable ref from the connection row the API returns, never the
     // catalog domain - the API may canonicalize providerDomain, and the row
     // is the authoritative match the enable path validates against.

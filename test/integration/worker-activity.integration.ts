@@ -202,7 +202,7 @@ describe("worker activities integration", () => {
         attemptConnectorActionBindings: [
           ...(options.attemptConnectorActionBindings ?? []),
           {
-            modelName: "fixture__change",
+            identity: { serverId: "fixture", toolName: "change" },
             call: (approvalId, args) => ({
               approvalId,
               connectionId: "session-mcp:fixture:synthetic",
@@ -1912,7 +1912,7 @@ describe("worker activities integration", () => {
           {
             type: "function_call",
             callId,
-            name: "opengeni__session_send_message",
+            name: "opengeni__session_queue_message",
             arguments: "{}",
             status: "completed",
           },
@@ -1949,7 +1949,7 @@ describe("worker activities integration", () => {
                     rawItem: {
                       callId,
                       type: "function_call",
-                      name: "opengeni__session_send_message",
+                      name: "opengeni__session_queue_message",
                       arguments: "{}",
                     },
                   },

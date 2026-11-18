@@ -742,6 +742,7 @@ describe("file upload crash, concurrency, RLS, and object cleanup", () => {
         recoverVideoGenerationWorkflows: async () => ({}),
         reconcileRecentModelCallFacts: async () => ({}),
         recordRecentTurnTimingProfiles: async () => ({}),
+        sweepUnusedNangoConnections: async () => ({}),
       },
     });
     const run = worker.run();

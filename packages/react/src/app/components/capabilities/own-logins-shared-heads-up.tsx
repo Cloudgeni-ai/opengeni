@@ -48,6 +48,8 @@ const EMAIL_KEYS = [
   "notionEmail",
   "asanaEmail",
   "stripeEmail",
+  "sentryEmail",
+  "apolloEmail",
   "oidcEmail",
 ] as const;
 

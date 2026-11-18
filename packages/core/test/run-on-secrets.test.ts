@@ -35,6 +35,8 @@ const decoder = new TextDecoder();
 class CapturingMachine implements ControlRpc {
   readonly execs: ExecRequest[] = [];
   readonly writes: Array<{ path: string; content: string; mode: number }> = [];
+  /** Files of the secret leak guard's ledger, kept apart from the operation's writes. */
+  readonly ledgerWrites: Array<{ path: string; content: string; mode: number }> = [];
   readonly reads: string[] = [];
   readonly removes: Array<{ path: string; recursive: boolean }> = [];
   readonly transport = new InMemoryOpStreamTransport();
@@ -44,6 +46,8 @@ class CapturingMachine implements ControlRpc {
   constructor(
     readonly workspaceRoot: string,
     live = false,
+    /** Output for a command, instead of "ok" (the leak guard's helper). */
+    stdoutFor?: (exec: ExecRequest) => string | null,
   ) {
     this.runner = new FakeOpRunner({
       transport: this.transport,
@@ -55,7 +59,7 @@ class CapturingMachine implements ControlRpc {
         this.execs.push(exec);
         return {
           ...(live ? { live: true, holdUntilCancel: true } : {}),
-          frames: [{ channel: "stdout", bytes: "ok" }],
+          frames: [{ channel: "stdout", bytes: stdoutFor?.(exec) ?? "ok" }],
           exit: { exitCode: 0, timedOut: false, durationMs: "1" },
         };
       },
@@ -69,7 +73,10 @@ class CapturingMachine implements ControlRpc {
   ): Promise<ControlResponse> {
     const op = req.op;
     if (op?.$case === "fsWrite") {
-      this.writes.push({
+      (op.fsWrite.path.startsWith("/tmp/opengeni-private/secret-ledger/")
+        ? this.ledgerWrites
+        : this.writes
+      ).push({
         path: op.fsWrite.path,
         content: decoder.decode(op.fsWrite.content),
         mode: op.fsWrite.mode,
@@ -556,5 +563,55 @@ describe("run_on credential profiles", () => {
       "[Note: credential profile skipped AZURE_TENANT_ID (secret not found)]",
     );
     expect(JSON.stringify(result)).not.toContain("ghp_fake");
+  });
+
+  test("a value run_on delivers joins the machine's ledger, and a commit carrying it is refused", async () => {
+    const writer = new CapturingMachine("/home/user/project");
+    const written = await runOn(writer, {
+      kind: "write",
+      path: "out.env",
+      content: "TOKEN={{secret:Canary}}\n",
+    });
+    expect(written.ok).toBe(true);
+    expect(writer.ledgerWrites).toHaveLength(1);
+    const ledger = writer.ledgerWrites[0]!;
+    expect(ledger.mode).toBe(0o600);
+    expect(ledger.content).not.toContain("OGCANARY");
+
+    // The guard's helper on the machine prints the ledger and what git takes.
+    const firstLine = CANARY.split("\n")[0]!;
+    const committer = new CapturingMachine("/home/user/project", false, (exec) =>
+      exec.command.join(" ").includes("OPENGENI-LEAK-LEDGER")
+        ? [
+            "OPENGENI-LEAK-LEDGER",
+            ledger.content.trimEnd(),
+            "OPENGENI-LEAK-CONTENT",
+            "OPENGENI-LEAK-REPO /home/user/project",
+            "diff --git a/out.env b/out.env",
+            "+++ b/out.env",
+            "@@ -0,0 +1 @@",
+            `+TOKEN=${firstLine}`,
+            "",
+          ].join("\n")
+        : null,
+    );
+    const refused = await runOn(committer, {
+      kind: "exec",
+      cmd: "git add -A && git commit -m config",
+    });
+    expect(refused.ok).toBe(false);
+    expect(refused.reason).toContain("Nothing was run");
+    expect(refused.reason).toContain("out.env line 1");
+    expect(refused.reason).toContain("{{secret:Canary}}");
+    expect(refused.reason).not.toContain("OGCANARY");
+    // Only the read-only helper ran; the commit never did.
+    expect(committer.execs).toHaveLength(1);
+    expect(committer.execs[0]!.command.join(" ")).not.toContain("git commit -m config");
+
+    // Without a match the command runs as usual.
+    const clean = new CapturingMachine("/home/user/project");
+    const ran = await runOn(clean, { kind: "exec", cmd: "git add -A && git commit -m config" });
+    expect(ran.ok).toBe(true);
+    expect(clean.execs.at(-1)!.command.join(" ")).toContain("git commit -m config");
   });
 });

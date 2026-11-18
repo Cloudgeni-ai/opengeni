@@ -424,6 +424,7 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   session_events: "subagents",
   session_wait: "subagents",
   session_create: "subagents",
+  session_queue_message: "subagents",
   session_send_message: "subagents",
   session_message_status: "subagents",
   session_target_get: "subagents",

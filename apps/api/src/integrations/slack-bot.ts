@@ -799,6 +799,29 @@ export async function sendSlackBotPost(input: {
   slackFetch?: typeof fetch;
   authorizeProviderRequest?: SlackProviderAuthorization;
 }) {
+  return { ...(await sendPreparedSlackBotPost(input)), postedAs: SLACK_BOT_POSTED_AS };
+}
+
+/**
+ * Who a bot send was posted as. A personal Slack send states its own sender
+ * the same way, so the two can't be confused when telling someone what was
+ * posted.
+ */
+const SLACK_BOT_POSTED_AS = {
+  identity: "opengeni_slack_bot",
+  summary:
+    "Posted by the Opengeni Slack app's bot, not by any person's Slack account. Slack shows the app, or the agent name it posted under, as the sender.",
+} as const;
+
+async function sendPreparedSlackBotPost(input: {
+  db: Database;
+  settings: Settings;
+  grant: AccessGrant;
+  sessionId: string | null;
+  messageId: string;
+  slackFetch?: typeof fetch;
+  authorizeProviderRequest?: SlackProviderAuthorization;
+}) {
   if (!input.sessionId) throw new Error("Bot posting requires a chat");
   const message = await readPreparedBotMessage(input.db, {
     accountId: input.grant.accountId,
@@ -3157,12 +3180,69 @@ function projectMessage(value: unknown) {
     timestamp: boundedSlackString(message.ts, 64),
     userId: boundedSlackString(message.user, 64),
     botId: boundedSlackString(message.bot_id, 64),
+    /** The app or bot name Slack shows for an app-posted message; empty otherwise. */
+    botName: slackMessageBotName(message),
     threadTimestamp: boundedSlackString(message.thread_ts, 64),
-    text: boundedSlackString(message.text, MAX_PROJECTED_TEXT),
+    text: slackMessageText(message).slice(0, MAX_PROJECTED_TEXT),
     files: slackArray(message.files)
       .map(projectFile)
       .filter((file): file is NonNullable<typeof file> => file !== null),
   };
+}
+
+const MAX_SLACK_BOT_NAME = 80;
+
+/** A bot message's own name (`username`), else its app's profile name, on one line. */
+export function slackMessageBotName(message: Record<string, unknown>): string {
+  const name =
+    slackString(message.username).trim() || slackString(slackRecord(message.bot_profile)?.name);
+  return name.replace(/\s+/gu, " ").trim().slice(0, MAX_SLACK_BOT_NAME);
+}
+
+/**
+ * What a message says. Apps often put their content in attachments or blocks
+ * and leave `text` empty or as a short fallback, so those parts are added when
+ * they say something the text doesn't.
+ */
+export function slackMessageText(message: Record<string, unknown>): string {
+  const text = slackString(message.text).trim();
+  const parts = text ? [text] : slackBlockTexts(message.blocks);
+  for (const value of slackArray(message.attachments)) {
+    const attachment = slackRecord(value);
+    if (!attachment) continue;
+    const fields = slackArray(attachment.fields).flatMap((entry) => {
+      const field = slackRecord(entry);
+      const title = slackString(field?.title).trim();
+      const fieldValue = slackString(field?.value).trim();
+      return fieldValue ? [title ? `${title}: ${fieldValue}` : fieldValue] : [];
+    });
+    const content = [
+      slackString(attachment.pretext).trim(),
+      slackString(attachment.title).trim(),
+      slackString(attachment.text).trim(),
+      ...fields,
+      ...slackBlockTexts(attachment.blocks),
+    ].filter(Boolean);
+    const fallback = slackString(attachment.fallback).trim();
+    parts.push(...(content.length > 0 ? content : fallback ? [fallback] : []));
+  }
+  const unique: string[] = [];
+  for (const part of parts) if (!unique.includes(part)) unique.push(part);
+  return unique.join("\n");
+}
+
+/** The readable text of section, header and context blocks. */
+function slackBlockTexts(value: unknown): string[] {
+  const blockText = (entry: unknown) => slackString(slackRecord(entry)?.text).trim();
+  return slackArray(value).flatMap((entry) => {
+    const block = slackRecord(entry);
+    if (!block) return [];
+    const own = slackRecord(block.text) ? blockText(block.text) : "";
+    const fields = slackArray(block.fields).map(blockText);
+    const elements =
+      block.type === "context" ? slackArray(block.elements).map(blockText) : ([] as string[]);
+    return [own, ...fields, ...elements].filter(Boolean);
+  });
 }
 
 function assertSlackReactionCheckpointBinding(

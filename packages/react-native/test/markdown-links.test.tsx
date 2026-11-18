@@ -177,6 +177,61 @@ describe("native Markdown links are recognisable", () => {
   });
 });
 
+describe("standalone Opengeni object links", () => {
+  const href = "artifact:0123456789abcdef0123456789abcdef";
+  const link = { type: "link", key: "link-1", attributes: { href } };
+  const textgroup = (children: object[]) => ({ type: "textgroup", key: "group-1", children });
+  const paragraph = (group: object) => ({ type: "paragraph", key: "p-1", children: [group] });
+
+  async function rulesFor(
+    renderOpenGeniLink: (link: { target: unknown; children: ReactNode }) => ReactNode,
+  ) {
+    rendered = undefined;
+    const shell = await renderComponent(
+      <NativeTimelineThemeProvider scheme="dark">
+        {createWebMarkdownRenderer({ renderOpenGeniLink })(`[Demo](${href})`, { tone: "body" })}
+      </NativeTimelineThemeProvider>,
+    );
+    return { ...rendered!, shell };
+  }
+
+  test("a link on its own line becomes the host's card", async () => {
+    const seen: unknown[] = [];
+    const { rules, style, onLinkPress, shell } = await rulesFor(({ target, children }) => {
+      seen.push(target);
+      return createElement("article", null, children);
+    });
+    const group = textgroup([link]);
+    const view = await renderComponent(
+      <NativeTimelineThemeProvider scheme="dark">
+        {rules.link!(link, "Demo-presentasjon", [group, paragraph(group)], style, onLinkPress)}
+      </NativeTimelineThemeProvider>,
+    );
+    expect(view.container.querySelector("article")?.textContent).toBe("Demo-presentasjon");
+    expect(seen).toEqual([
+      { kind: "editable-artifact", artifactId: href.slice(9), workspaceId: null },
+    ]);
+    await view.unmount();
+    await shell.unmount();
+  });
+
+  test("a link inside a sentence stays a link", async () => {
+    const { rules, style, onLinkPress, shell } = await rulesFor(() =>
+      createElement("article", null, "card"),
+    );
+    const group = textgroup([{ type: "text", content: "See " }, link]);
+    const view = await renderComponent(
+      <NativeTimelineThemeProvider scheme="dark">
+        {rules.link!(link, "Demo", [group, paragraph(group)], style, onLinkPress)}
+      </NativeTimelineThemeProvider>,
+    );
+    expect(view.container.querySelector("article")).toBeNull();
+    expect(view.container.querySelector("span")?.getAttribute("role")).toBe("link");
+    await view.unmount();
+    await shell.unmount();
+  });
+});
+
 describe("the native link token matches the web stylesheet", () => {
   const tokens = readFileSync(join(import.meta.dir, "../../react/styles/tokens.css"), "utf8");
   const declared = Array.from(

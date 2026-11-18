@@ -1,5 +1,269 @@
 # @opengeni/runtime
 
+## 6.28.0
+
+### Patch Changes
+
+- 515bc72: Connector tools have readable names: `<connector>_<account tag>__<tool>` (a configured server's readable id instead of the connector), decided by the tool's identity alone, instead of a name with a different hash per tool. Every tool of one server shares a guessable prefix, and a name never comes to mean another account's or connector's tool. Codemode paths use the same namespace. `tool_search` names, `ogtool show` and Codemode accept a tool's published `server.tool` or its own name, while a call needs a name carrying its server; a query naming several tools loads all of them whatever its limit, and a miss suggests the closest tools. `ogtool show` and the native client's `codemode show` accept several names. A Skill can list the tools it uses in a `tools:` frontmatter key, and reading it loads them. A call to a tool's former name runs nothing and returns its current name; approvals stay keyed by the tool's identity.
+- Updated dependencies [d5cadac]
+- Updated dependencies [515bc72]
+- Updated dependencies [e09a38b]
+  - @opengeni/contracts@6.28.0
+  - @opengeni/codemode@6.28.0
+  - @opengeni/tool-gateway@6.28.0
+  - @opengeni/config@6.28.0
+  - @opengeni/capabilities@6.28.0
+  - @opengeni/codex@6.28.0
+  - @opengeni/decisions@6.28.0
+  - @opengeni/interaction@6.28.0
+  - @opengeni/observability@6.28.0
+  - @opengeni/sdk@6.28.0
+  - @opengeni/vaults@6.28.0
+  - @opengeni/jev@6.28.0
+  - @opengeni/agent-proto@6.28.0
+  - @opengeni/network@6.28.0
+  - @opengeni/xai-subscription@6.28.0
+
+## 6.27.1
+
+### Patch Changes
+
+- Updated dependencies [02804ec]
+  - @opengeni/contracts@6.27.1
+  - @opengeni/capabilities@6.27.1
+  - @opengeni/codemode@6.27.1
+  - @opengeni/codex@6.27.1
+  - @opengeni/config@6.27.1
+  - @opengeni/decisions@6.27.1
+  - @opengeni/interaction@6.27.1
+  - @opengeni/observability@6.27.1
+  - @opengeni/sdk@6.27.1
+  - @opengeni/tool-gateway@6.27.1
+  - @opengeni/vaults@6.27.1
+  - @opengeni/jev@6.27.1
+  - @opengeni/agent-proto@6.27.1
+  - @opengeni/network@6.27.1
+  - @opengeni/xai-subscription@6.27.1
+
+## 6.27.0
+
+### Minor Changes
+
+- 5d63995: Sites can ask what each of their tools needs for the current viewer before a click: `site.tools.$readiness(targets)` (`POST /v1/workspaces/:id/tools/readiness`) answers `ready`, `confirm`, `choose_account`, `connect`, `reconnect`, `blocked`, `open_in_opengeni` or `unavailable`, with the account the tool runs as, and `site.tools.$onReadinessChange` fires after a connect, a reconnect, an "Always allow" or a reset. It reads the same authority as a call and never reaches the provider; calls still enforce everything.
+
+  The Site tool confirmation shows which account the action runs as ("Shared with workspace" for a workspace account, "You" when none is involved). The checkbox now reads "Always allow on this Site from this account". The Site menu has "Reset allowed actions" (`POST /v1/workspaces/:id/tools/site-allowances/reset`).
+
+  Typed failures: a tool set to Block answers 403 with `details.code` `tool_blocked` (Site code: `site_tool_blocked`); a confirmation a published address can't show is `site_tool_open_in_opengeni`. A tool server that couldn't be reached before anything was sent (refused connection, DNS failure, a tunnel that is gone, decided only at the MCP transport's own request) now answers 503 `upstream_unavailable` with `details.code` `tool_server_unreachable`, `retryable: true` and `outcomeUnknown: false` for every gateway caller instead of a 500 (Site code: `site_tool_upstream_unavailable`).
+
+### Patch Changes
+
+- 5d63995: A connected account that needs more access for a tool now shows "Give {provider} more access" with Allow in the chat instead of a connect card, and Allow finds the account even when it is homed in another workspace. Site tool readiness reports `grant` (with the scopes needed) for such tools, and `unavailable` with reason `account` when the account's access is fixed and cannot be extended.
+- 5d63995: When a tool needs access that a fixed-access account (for example one managed through Nango) cannot be given, the chat now shows "{provider} can't do this with the connected account" with no step-up. The `tool.auth_needed` notice keeps the legacy-safe reason `unsupported_auth`, so older clients show the tools as unavailable, and adds `accountReason: "account_scope_fixed"` with the scopes the tool needs.
+- 8f1f5e2: Free compute is bounded for every kind of sandbox use, not only viewers. A held or denied Free or plan-less organization that has not bought credit or paid for a plan gets no sandbox at all: terminals, commands, background processes, browser and desktop sessions, viewers and new boxes for agent turns are refused, a turn that needs a box fails with a clear message instead of waiting forever, an already running box stays usable only while a turn holds it, and the reaper drains boxes no turn holds. A person who owns or administers such an organization carries the restriction into their other unpaid organizations.
+
+  Free, young Free and plan-less organizations share one running-box budget of 2 across every holder kind, plus 2 running boxes and 12 box-hours per UTC day per organization and per person across their organizations. Past the daily budget no box starts and the reaper drains boxes no turn holds, while an in-flight turn finishes. Boxes that nothing uses drain after the viewer idle window, whatever holds them. All values are plan-limit settings (`OPENGENI_SANDBOX_PLAN_LIMITS_JSON`).
+
+  Every new Modal box carries hard CPU and memory ceilings (2 cores / 4096 MiB for unpaid organizations, 16 cores / 32768 MiB for paid, Enterprise, host-provisioned and credit-buying organizations), and a create without them is refused. Unpaid boxes can be limited to an outbound CIDR/domain allowlist; Modal has no per-port egress rule, so SMTP cannot be blocked by port alone.
+
+  A denied Free organization with no paid history is suspended from sandboxes, Site publishing, invitations, uploads and API keys until the decision is reversed or it buys credit; sign-in keeps working. Creating an additional organization now goes through the signup network checks and rate limit, and inherits its owner's review hold.
+
+  An unpaid organization that bought credit is treated as paying: no per-person, daily or all-holder idle bounds. Paid, Enterprise and host-provisioned organizations are unaffected.
+
+  Rollout: set the new plan-limit fields in `OPENGENI_SANDBOX_PLAN_LIMITS_JSON` only after this release runs everywhere, because older pods reject unknown fields. Defaults for `free`, `new` and `none`: `runningBoxesPerOrganization` 2, `runningBoxesPerPerson` 2, `boxSecondsPerOrganizationPerDay` 43200, `boxSecondsPerPersonPerDay` 43200, `idleDrainAllHolders` true; `restricted` is 0 for every count.
+
+- 5d63995: Accounts held by Nango are listed by `GET /connect/accounts` with `backend: "nango"`, and the chat and Settings never start a native reconnect for them; a chat Reconnect opens the connector's own Connect instead. A workspace-shared Nango Google account reads as connected.
+- 5d63995: Site tools now run on a person's own account that was added in another workspace and turned on here ("Use it here"), the same account a chat in this workspace uses. Before, the Site's tool gateway read that credential in the current workspace, found nothing, and the call failed with `tool_unavailable`.
+
+  When the provider can't read what an action would do because the account must allow more access, the confirmation now answers 409 with `details.code` `tool_connection_needs_more_access` (with the connection and scopes) instead of a generic 422; signing in again answers `tool_connection_needs_attention`, and a provider refusal for that account answers 403 `tool_unavailable_for_account`. Site code receives the new typed code `site_tool_grant_required`, or `site_tool_reconnect_required` and `site_tool_permission_denied`.
+
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [8f1f5e2]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+  - @opengeni/capabilities@6.27.0
+  - @opengeni/contracts@6.27.0
+  - @opengeni/sdk@6.27.0
+  - @opengeni/config@6.27.0
+  - @opengeni/codemode@6.27.0
+  - @opengeni/codex@6.27.0
+  - @opengeni/decisions@6.27.0
+  - @opengeni/interaction@6.27.0
+  - @opengeni/observability@6.27.0
+  - @opengeni/tool-gateway@6.27.0
+  - @opengeni/vaults@6.27.0
+  - @opengeni/jev@6.27.0
+  - @opengeni/agent-proto@6.27.0
+  - @opengeni/network@6.27.0
+  - @opengeni/xai-subscription@6.27.0
+
+## 6.26.0
+
+### Patch Changes
+
+- 8fae328: Connected tools that can do a task now win over a Connect card for an unconnected alternative. Tool search no longer shows an integration's Connect card by itself when the chat already has a connected account of the same kind (Outlook Mail beside an unconnected Gmail); the search result still names the integration, and the agent can show its card when the person asked for it. In the agent's integration catalog search, a service the person can already use in the chat comes before a same-category service they would still have to connect, unless the request names the unconnected service. The per-turn connector availability notice now says that a configured but unavailable connector is needed only when the person named it or no loaded tool can do the task.
+- 8fae328: When a chat can use several accounts of one connector or integration, the person's own account is now the default for writes. When several accounts' copies of a tool match a search equally, the default's copy loads, every account's tools say which account is the default and why, and the agent asks only when no account is a clear default (several of the person's own, or only shared ones).
+- c8efcb0: Tools of a connector or integration with only one connected account now say which account they use (for example "Account: Outlook Calendar — iris@example.com · Yours. Use only this account."), as tools of a connector with several accounts already did. The agent no longer has to guess whose account a connector is signed in as.
+- 33dd6da: Sites guidance: page or cap data that grows over time (Site Data, Site SQL and workspace tool results) instead of failing the whole page once it passes a fixed size.
+- c8efcb0: A tool call whose arguments do not match the tool's input schema no longer asks anyone to approve it. Connector and other approval-gated tool calls are now checked against the schema before the approval check, so the model gets the usual "not called, correct the arguments" error at once instead of a person getting an Ask card for a call that could never run. When string-encoded arguments are repaired, the approval card and its action fingerprint now show the repaired arguments, which are the ones the call runs with. The tool gateway gains `admitModelArguments`, which runs the same argument check as a model call without calling the tool.
+- Updated dependencies [6d7ea1e]
+- Updated dependencies [8fae328]
+- Updated dependencies [c8efcb0]
+- Updated dependencies [20e4937]
+- Updated dependencies [c8efcb0]
+- Updated dependencies [e1199c0]
+  - @opengeni/contracts@6.26.0
+  - @opengeni/sdk@6.26.0
+  - @opengeni/tool-gateway@6.26.0
+  - @opengeni/codemode@6.26.0
+  - @opengeni/xai-subscription@6.26.0
+  - @opengeni/capabilities@6.26.0
+  - @opengeni/codex@6.26.0
+  - @opengeni/config@6.26.0
+  - @opengeni/decisions@6.26.0
+  - @opengeni/interaction@6.26.0
+  - @opengeni/observability@6.26.0
+  - @opengeni/vaults@6.26.0
+  - @opengeni/jev@6.26.0
+  - @opengeni/agent-proto@6.26.0
+  - @opengeni/network@6.26.0
+
+## 6.25.0
+
+### Patch Changes
+
+- 43435d5: Agent turns with long histories use less worker CPU per model request. The history prefix check compares canonical items instead of hashing the whole history, model context snapshots reuse unchanged content from the previous request, request copies avoid `structuredClone` for plain data, model provider and pricing settings are parsed once per value, and the row-level security scope statement is built once per shape. Outputs, stored snapshots and history rejections are unchanged.
+- f99f940: Sentry and Apollo connections now show the signed-in account (email or name, plus the Sentry organization when there is only one) instead of a generic "Sentry account" or "Apollo.io account", and you can connect more than one account of each. Stripe connections are recognised again with Stripe's current account answer and are labelled with the account's email and business name when it has them. When an Atlassian tool needs a site and several are available, the message the agent gets now lists each site's URL next to its name and cloud ID.
+- f99f940: Opengeni now says correctly who sent a Slack message. A message sent with your own Slack account is posted under your name, but Slack also marks the Opengeni app it went through, so Opengeni sometimes said the bot had sent it. The send result now says which account a message was posted as (`postedAs`: your own account, naming the app only as the route it went through, or the Opengeni Slack bot). Channel and thread reads with your own account mark your own messages with `postedByYou`.
+
+  When you mention Opengeni, it now sees messages that apps and bots posted. The surrounding channel or thread messages, and the `slack_bot_*` history reads, name the app that posted each message and include text an app put in attachments or blocks. Replies that apps post in a thread, and posts people send through an app, are kept as context for the next mention in that thread. They never start or stop a task, and Opengeni's own posts are still left out.
+
+- 43435d5: A tool call the model asks for is saved before its tool starts, so a worker that stops mid-step can always recover it: the call is closed as interrupted instead of being lost and run again. The response's usage is saved in the same write as its tool calls, before any of them runs; its billing runs alongside the tools, and the next model request still waits for it. If the worker stops, is replaced or its billing fails before billing finishes, recovery, the attempt's failure handling or the session's next idle point finishes it exactly once, at the price recorded with the usage. Recovery only looks at responses whose billing is still unfinished.
+- Updated dependencies [e126cb5]
+- Updated dependencies [61abc98]
+- Updated dependencies [81570f9]
+- Updated dependencies [f99f940]
+- Updated dependencies [bb55e5d]
+- Updated dependencies [43435d5]
+- Updated dependencies [f99f940]
+- Updated dependencies [bfd2970]
+  - @opengeni/contracts@6.25.0
+  - @opengeni/sdk@6.25.0
+  - @opengeni/capabilities@6.25.0
+  - @opengeni/config@6.25.0
+  - @opengeni/codemode@6.25.0
+  - @opengeni/codex@6.25.0
+  - @opengeni/decisions@6.25.0
+  - @opengeni/interaction@6.25.0
+  - @opengeni/observability@6.25.0
+  - @opengeni/tool-gateway@6.25.0
+  - @opengeni/vaults@6.25.0
+  - @opengeni/jev@6.25.0
+  - @opengeni/agent-proto@6.25.0
+  - @opengeni/network@6.25.0
+  - @opengeni/xai-subscription@6.25.0
+
+## 6.24.1
+
+### Patch Changes
+
+- Updated dependencies [f041392]
+- Updated dependencies [e5ce845]
+- Updated dependencies [5fd2c21]
+  - @opengeni/config@6.24.1
+  - @opengeni/sdk@6.24.1
+  - @opengeni/contracts@6.24.1
+  - @opengeni/codemode@6.24.1
+  - @opengeni/capabilities@6.24.1
+  - @opengeni/codex@6.24.1
+  - @opengeni/decisions@6.24.1
+  - @opengeni/interaction@6.24.1
+  - @opengeni/observability@6.24.1
+  - @opengeni/tool-gateway@6.24.1
+  - @opengeni/vaults@6.24.1
+  - @opengeni/jev@6.24.1
+  - @opengeni/agent-proto@6.24.1
+  - @opengeni/network@6.24.1
+  - @opengeni/xai-subscription@6.24.1
+
+## 6.24.0
+
+### Patch Changes
+
+- e6c9e45: A Connected Machine background command no longer reads as running for minutes after it finished when its session switched to another machine and back, and its output keeps flowing to the session after such a switch. When a reader attached to a command that had produced a large backlog (thousands of output frames, for example a test run that finished while the session was elsewhere), the agent sent the whole backlog into its 1,024-frame output queue at once and dropped every frame past the queue's depth, including the exit frame. Nothing re-sent them until the reader's 30-second silence check, which recovered about one queue's worth per check, so collecting a 6,600-frame command took more than three minutes, and a large enough backlog could never be collected within one collector's claim. The agent now holds its next frame while the queue is full and sends it as soon as the queue drains, so nothing is dropped for want of room. Collectors store replayed output a batch per transaction instead of one transaction per frame, so a retry that replays frames an earlier collector already stored gets further each time. A look at a running command now follows its attachment until it holds everything the machine had retained when it attached, instead of stopping after a quarter of a second with the same prefix every time, and `command_read`/`command_wait` in a later attempt read a running command from the machine its ledger names (not the session's current machine). `readExisting` takes an `untilCaughtUp` option, `appendSessionCommandOutputs` stores several chunks of one command in one transaction, and `connectedCommandOutputLook` reads a session's running command from its ledger locator.
+- b9baad4: A query names a multi-word integration by the word of its name that is also its own domain's word ("Dynamics 365" names Microsoft Dynamics at dynamics.com); written with a capital mid-sentence it names it distinctively, so tool search shows its Connect card. When a search names one integration distinctively, integrations named only by ordinary words of the same request ("close date" for Close) no longer stop the card. The repeated-call guard now compares command results without the per-call metadata the runtime adds (output receipt ids, chunk ids, wall times), so a command that prints the same output every time is recognised as repeating.
+- c0248a5: A `git commit` or `git push` run through `exec_command` or `run_on` that would carry a secret value Opengeni filled in for a reference earlier in that sandbox is no longer run. The result names the file and line (and commit) and says how to write the reference literally instead. Matching is exact against a keyed ledger of resolved values kept in the sandbox; files that are not committed never block, and the command runs if the check itself fails. See "Keeping values out of commits" in `docs/secrets.md`.
+
+  The prompt, the `secrets` Skill and secret-resolution hints now say the backslash escape keeps a reference as literal text in files as well as commands. `apply_patch` resolves references only in added lines, so context and removed lines match files that hold a literal reference.
+
+- 477f1db: Agent turns spend less time before each model request. The checks run before every model request (task usage limit, funding, workspace allowance and monthly limits) now read in parallel and still report the same refusal as before. Packaged Skills and interaction tool schemas are prepared once per process instead of on every turn.
+
+  New latency metrics: `opengeni_model_response_to_next_dispatch_seconds` (the gap from one model response to the next request, by phase) and the parts of response metering (`response_usage_lease`, `_billing`, `_cache`, `_checkpoint` on `opengeni_model_step_phase_duration_seconds`). A small sample of agent turns also exports its database statement spans when OTLP tracing is configured.
+
+  Prebuilt Sandbox Environment images on Modal are rebuilt again after a build stops for more than 20 minutes or fails with a retryable error, and the image snapshot has its own timeout (`OPENGENI_RIG_PROVIDER_IMAGE_SNAPSHOT_TIMEOUT_MS`, default 5 minutes) instead of the 60-second workspace snapshot timeout.
+
+- Updated dependencies [24104b1]
+- Updated dependencies [b9baad4]
+- Updated dependencies [8924854]
+- Updated dependencies [c0248a5]
+- Updated dependencies [477f1db]
+  - @opengeni/codex@6.24.0
+  - @opengeni/capabilities@6.24.0
+  - @opengeni/contracts@6.24.0
+  - @opengeni/config@6.24.0
+  - @opengeni/sdk@6.24.0
+  - @opengeni/codemode@6.24.0
+  - @opengeni/decisions@6.24.0
+  - @opengeni/interaction@6.24.0
+  - @opengeni/observability@6.24.0
+  - @opengeni/tool-gateway@6.24.0
+  - @opengeni/vaults@6.24.0
+  - @opengeni/jev@6.24.0
+  - @opengeni/agent-proto@6.24.0
+  - @opengeni/network@6.24.0
+  - @opengeni/xai-subscription@6.24.0
+
+## 6.23.0
+
+### Minor Changes
+
+- f6a7c28: Connect cards can ask for connect-time inputs. An integration whose connections each need a value first (Microsoft Dynamics: the environment's address) declares those inputs in `@opengeni/contracts/capability-connect-inputs`. `capability_authorization_request` and tool discovery now post its Connect card, which asks the person for the value in one field with one Connect action, instead of answering `input_required` with no card. The agent can prefill a value with the tool's new `inputs` argument; it is used only when it follows the entry's rule. Catalog matches list the inputs as `setup.connectInputs`, the card payload carries them as `capability.inputs`, and capability creation takes `connectFor` with `connectInputs`, so the API applies the same rule to what the person entered and returns the connection already in the workspace for the same endpoint.
+
+  A runtime guard stops repeated identical tool calls. Once one exact call has returned the same result 8 times in a row in a turn, an identical call started within 30 seconds of the last one returns a short notice instead of running, and the run continues. Calls whose results change, and polling slower than 30 seconds, are unaffected.
+
+### Patch Changes
+
+- 982cce9: An organization's pooled Anthropic API key that Anthropic refuses for lack of credits after its response has begun streaming now moves the request to the chat's next key, the same as a refusal before the stream. Anthropic reports such a refusal as an error event inside an HTTP 200 stream, which previously failed the turn with `anthropic_stream_error` and left the key unmarked, so later turns kept trying it. The key is now marked out of credits and the same request is sent again on the next key, including while continuing a paused response. The turn fails only when no key with credits remains. A connection with a single key fails as before.
+- 9dd96b0: Restoring a large workspace archive no longer multiplies worker memory. Byte copies used `Uint8Array.from(buffer)`, which Bun runs element by element through its generic iterator path when the source is a Node Buffer (the result of base64 decoding, file reads, object storage and Postgres bytea). That used about 16 times the archive size in transient memory and was about 100 times slower. A cold restore did it at least twice, so restoring a workspace archive of a few hundred MB could take a worker past 15 GB and kill it. Byte copies now use `new Uint8Array(buffer)`, which makes the same copy at native speed. Archive base64 is decoded once into a view of the decoded bytes. Canonical form is now checked from the decoded length and the final four characters instead of re-encoding the whole archive. Object-storage restores verify the fetched bytes directly instead of decoding the base64 copy again. Native snapshot receipts are recognised from their ASCII prefix without decoding a whole tar archive as text. Restoring a 48 MB archive now raises peak memory by about 2 times the archive size instead of 37 times, and takes 0.2 seconds instead of 3.4 seconds.
+- 5ba261b: Saving a browser download (and any other routed workspace file import) into a Modal sandbox works again. The import's internal steps ran through a wrapper of the Modal session, and Modal's lossless output collection only recognised the session itself, so every save failed at once as "completion is pending or unknown" without starting the transfer. A forwarding wrapper now shares its session's output collection.
+- 92a5650: A turn interrupted by a turn worker shutdown, such as a rolling deploy, now resumes on another worker within seconds instead of stalling for about five minutes. This fixes two separate causes.
+
+  First, when the shutdown cancelled the turn while a Connected Machine command was still running (for example a generated-file download or a slow `exec_command`), finalization waited for the machine to prove the command had exited. A slow or silent machine could not do that before the worker's force stop. The worker then died without settling the activity, writing its quiescence receipt or releasing its subscription lease, and recovery waited for the two-minute heartbeat timeout. Now, when the turn ends because its worker is shutting down, each still-running machine command goes to the session's command ledger with a stop request (the custody already used for machines that stop answering), and finalization continues without waiting. Pause, Steer and normal completion still wait for exact exit proof.
+
+  Second, a dead attempt's subscription turn lease was held until its five-minute TTL expired, so the next generation was refused with `subscription_lease_busy`. A newer generation of the same turn can now take over the lease once the holder's attempt has written its quiescence receipt, which proves it can no longer use the account. Renewal, current-lease checks and usage finalization still use the lease's own expiry.
+
+- Updated dependencies [c0089e1]
+- Updated dependencies [9dd96b0]
+- Updated dependencies [adc2409]
+- Updated dependencies [f6a7c28]
+  - @opengeni/contracts@6.23.0
+  - @opengeni/capabilities@6.23.0
+  - @opengeni/sdk@6.23.0
+  - @opengeni/codemode@6.23.0
+  - @opengeni/codex@6.23.0
+  - @opengeni/config@6.23.0
+  - @opengeni/decisions@6.23.0
+  - @opengeni/interaction@6.23.0
+  - @opengeni/observability@6.23.0
+  - @opengeni/tool-gateway@6.23.0
+  - @opengeni/vaults@6.23.0
+  - @opengeni/jev@6.23.0
+  - @opengeni/agent-proto@6.23.0
+  - @opengeni/network@6.23.0
+  - @opengeni/xai-subscription@6.23.0
+
 ## 6.22.0
 
 ### Patch Changes

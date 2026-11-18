@@ -75,9 +75,32 @@ function deps(): ApiRouteDeps {
         githubRepository(43, "service"),
         githubRepository(46, "retired", { archived: true, sizeKb: 90 }),
         githubRepository(47, "blank", { sizeKb: 0 }),
+        // Pushed to, but GitHub has not computed its size yet.
+        githubRepository(48, "fresh", { sizeKb: 0 }),
+        // GitHub fails to list its branches.
+        githubRepository(49, "unlisted", { sizeKb: 0 }),
         // Visible to the App through an installation this workspace never bound.
         githubRepository(99, "unbound", { installationId: 72 }),
       ],
+      // A repository nobody pushed to has no branch; size says nothing.
+      listRepositoryBranches: async ({
+        installationId,
+        repositoryId,
+        page,
+      }: {
+        installationId: number;
+        repositoryId: number;
+        page: number;
+      }) => {
+        if (repositoryId === 49) throw new Error("GitHub is unavailable");
+        return {
+          installationId,
+          repositoryId,
+          defaultBranch: "main",
+          branches: repositoryId === 47 ? [] : ["main"],
+          nextPage: repositoryId === 47 ? null : page + 1,
+        };
+      },
     },
   } as unknown as ApiRouteDeps;
 }
@@ -116,7 +139,7 @@ beforeAll(async () => {
     authorityCheckedAt: checkedAt,
     authorityExpiresAt: new Date(checkedAt.getTime() + 600000),
     authorityNonce: crypto.randomUUID(),
-    repositoryIds: [42, 43, 46, 47],
+    repositoryIds: [42, 43, 46, 47, 48, 49],
     eventRouteSecret: null,
   });
 }, 180_000);
@@ -476,6 +499,31 @@ describe("github_repository_attach (real PostgreSQL)", () => {
       "https://github.com/example-owner/gone.git",
       "https://github.com/example-owner/service.git",
       "https://github.com/example-owner/project.git",
+    ]);
+  });
+
+  test("a pushed repository attaches although GitHub still reports size 0", async () => {
+    if (!shared) return;
+    const turn = await claimedTurn();
+    await decideAndBegin(turn, "fresh", { repository: "example-owner/fresh" });
+    await decideAndBegin(turn, "unlisted", { repository: "example-owner/unlisted" });
+    await withMcp(turn, ["github:use"], async (mcp) => {
+      for (const repository of ["example-owner/fresh", "example-owner/unlisted"]) {
+        const result = await mcp.callTool({
+          name: "github_repository_attach",
+          arguments: { repository },
+        });
+        expect(result.isError, resultText(result)).not.toBe(true);
+        expect(JSON.parse(resultText(result))).toMatchObject({
+          status: "attached",
+          repository,
+          ref: "main",
+        });
+      }
+    });
+    expect(await sessionResources(turn)).toEqual([
+      expect.objectContaining({ githubRepositoryId: 48, ref: "main", optional: true }),
+      expect.objectContaining({ githubRepositoryId: 49, ref: "main", optional: true }),
     ]);
   });
 

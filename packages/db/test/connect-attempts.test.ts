@@ -571,6 +571,74 @@ describe("durable Connect attempts", () => {
     expect(effects).toBe(1);
   });
 
+  test("a read-only operation that failed frees its claim so the attempt can advance again", async () => {
+    const value = await begin();
+    const failing = {
+      db: client.db,
+      scope,
+      attemptId: value.id,
+      expectedRevision: 1,
+      operationId: crypto.randomUUID(),
+      inputDigest: digest,
+      releaseClaimOnFailure: true,
+      authorize: async () => {},
+      execute: async () => ({
+        commit: async (): Promise<ConnectAttempt> => {
+          throw new Error("Test install refused by the database");
+        },
+      }),
+    };
+    await expect(executeConnectOperation(failing)).rejects.toThrow(
+      "Test install refused by the database",
+    );
+    const stored = await getConnectAttempt(client.db, scope, value.id);
+    expect(stored.operationInFlight).toBe(false);
+    expect(stored.attempt.revision).toBe(1);
+
+    // A failure inside execute frees it too.
+    await expect(
+      executeConnectOperation({
+        ...failing,
+        operationId: crypto.randomUUID(),
+        execute: async () => {
+          throw new Error("Test source unreadable");
+        },
+      }),
+    ).rejects.toThrow("Test source unreadable");
+
+    const advanced = await executeConnectOperation({
+      ...failing,
+      operationId: crypto.randomUUID(),
+      execute: async () => ({
+        commit: async (_tx, current) => ({ ...current, revision: current.revision + 1 }),
+      }),
+    });
+    expect(advanced.revision).toBe(2);
+    expect((await getConnectAttempt(client.db, scope, value.id)).operationInFlight).toBe(false);
+  });
+
+  test("a failed duplicate request never frees the claim of the request still running", async () => {
+    const value = await begin();
+    const input = {
+      attemptId: value.id,
+      expectedRevision: 1,
+      operationId: crypto.randomUUID(),
+      inputDigest: digest,
+    };
+    await claimConnectOperation(client.db, scope, input);
+    await expect(
+      executeConnectOperation({
+        db: client.db,
+        scope,
+        ...input,
+        releaseClaimOnFailure: true,
+        authorize: async () => {},
+        execute: async () => ({ commit: async (_tx, current) => current }),
+      }),
+    ).rejects.toThrow("in flight or uncertain");
+    expect((await getConnectAttempt(client.db, scope, value.id)).operationInFlight).toBe(true);
+  });
+
   test("FORCE RLS denies another actor even without application actor predicates", async () => {
     const value = await begin();
     const rows = await withWorkspaceSubjectRls(

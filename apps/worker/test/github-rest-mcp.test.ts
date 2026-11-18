@@ -1,7 +1,6 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import type { ResourceRef, SessionTurn } from "@opengeni/contracts";
 import type { Database } from "@opengeni/db";
-import { prefixedMcpToolName } from "@opengeni/runtime";
 import {
   GITHUB_REST_MCP_APP_SERVER_ID,
   GITHUB_REST_MCP_PERSONAL_SERVER_ID,
@@ -45,11 +44,13 @@ describe("buildGitHubRestMcpForTurn", () => {
 
     const read = result.connectorBindings.find(
       (binding) =>
-        binding.modelName === prefixedMcpToolName(GITHUB_REST_MCP_APP_SERVER_ID, "repository_get"),
+        binding.identity.serverId === GITHUB_REST_MCP_APP_SERVER_ID &&
+        binding.identity.toolName === "repository_get",
     );
     const write = result.connectorBindings.find(
       (binding) =>
-        binding.modelName === prefixedMcpToolName(GITHUB_REST_MCP_APP_SERVER_ID, "issue_create"),
+        binding.identity.serverId === GITHUB_REST_MCP_APP_SERVER_ID &&
+        binding.identity.toolName === "issue_create",
     );
     expect(read?.call("read-call", { repository: "Cloudgeni-ai/opengeni" })).toMatchObject({
       connectionId: "github-app:71",
@@ -65,8 +66,8 @@ describe("buildGitHubRestMcpForTurn", () => {
     expect(
       result.connectorBindings.some(
         (binding) =>
-          binding.modelName ===
-          prefixedMcpToolName(GITHUB_REST_MCP_APP_SERVER_ID, "repositories_list"),
+          binding.identity.serverId === GITHUB_REST_MCP_APP_SERVER_ID &&
+          binding.identity.toolName === "repositories_list",
       ),
     ).toBe(false);
     expect(
@@ -145,8 +146,8 @@ describe("buildGitHubRestMcpForTurn", () => {
     expect(result.tools).toEqual([{ kind: "mcp", id: GITHUB_REST_MCP_PERSONAL_SERVER_ID }]);
     const write = result.connectorBindings.find(
       (binding) =>
-        binding.modelName ===
-        prefixedMcpToolName(GITHUB_REST_MCP_PERSONAL_SERVER_ID, "pull_request_create"),
+        binding.identity.serverId === GITHUB_REST_MCP_PERSONAL_SERVER_ID &&
+        binding.identity.toolName === "pull_request_create",
     );
     expect(write?.call("write-call", { repository: "Cloudgeni-ai/opengeni" })).toMatchObject({
       connectionId,
@@ -204,8 +205,8 @@ describe("buildGitHubRestMcpForTurn", () => {
     // Any repository name binds to the person's connection; the bridge checks it.
     const runs = result.connectorBindings.find(
       (binding) =>
-        binding.modelName ===
-        prefixedMcpToolName(GITHUB_REST_MCP_PERSONAL_SERVER_ID, "workflow_runs_list"),
+        binding.identity.serverId === GITHUB_REST_MCP_PERSONAL_SERVER_ID &&
+        binding.identity.toolName === "workflow_runs_list",
     );
     expect(runs?.call("read-call", { repository: "acme/anything" })).toMatchObject({
       connectionId,
@@ -217,8 +218,8 @@ describe("buildGitHubRestMcpForTurn", () => {
     expect(
       result.connectorBindings.some(
         (binding) =>
-          binding.modelName ===
-          prefixedMcpToolName(GITHUB_REST_MCP_PERSONAL_SERVER_ID, "organizations_list"),
+          binding.identity.serverId === GITHUB_REST_MCP_PERSONAL_SERVER_ID &&
+          binding.identity.toolName === "organizations_list",
       ),
     ).toBe(false);
   });
@@ -271,8 +272,8 @@ describe("buildGitHubRestMcpForTurn", () => {
         ),
       ).toBe(false);
       expect(
-        result.connectorBindings.some((binding) =>
-          binding.modelName.startsWith(prefixedMcpToolName(GITHUB_REST_MCP_PERSONAL_SERVER_ID, "")),
+        result.connectorBindings.some(
+          (binding) => binding.identity.serverId === GITHUB_REST_MCP_PERSONAL_SERVER_ID,
         ),
       ).toBe(false);
     };

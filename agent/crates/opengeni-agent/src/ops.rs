@@ -3,9 +3,10 @@
 //!
 //! Transport stance: handlers receive an already-decoded request and a
 //! `publish` closure bound to the op's frame subject (the supervisor owns the
-//! bulk connection behind it). Frames ride fire-and-forget — a frame the
-//! publish path drops (bulk blip, full channel) is healed by gap-detection +
-//! `OpAttach` replay, never retried here.
+//! bulk connection behind it). The publish path never blocks: a full channel
+//! refuses the frame and the pump sends it again once the channel has room;
+//! a frame lost with a connection is healed by gap-detection + `OpAttach`
+//! replay, never retried here.
 //!
 //! Serving rules:
 //! * `OpStart` is idempotent by op id (= request id, ruling B1): the engine's
@@ -37,11 +38,11 @@ use prost::Message as _;
 use tracing::{debug, warn};
 
 use crate::engine::{scoped_op_id, scoped_origin, Engine, OpHandles, StartOutcome};
-use crate::job::{ChannelStats, JobCommand, JobExit, JobFailure, JobOutcome};
+use crate::job::{ChannelStats, Delivery, JobCommand, JobExit, JobFailure, JobOutcome};
 
-/// A publish sink already bound to one op's frame subject. Fire-and-forget:
-/// the pump never blocks on it and a dropped frame heals via replay.
-pub type FrameSink = Arc<dyn Fn(Vec<u8>) + Send + Sync>;
+/// A publish sink already bound to one op's frame subject. It never blocks;
+/// it reports whether its lane took the frame (see [`Delivery`]).
+pub type FrameSink = Arc<dyn Fn(Vec<u8>) -> Delivery + Send + Sync>;
 
 /// The initial send-credit window when `OpStart.window_bytes` is 0 — a pacing
 /// SETPOINT (rule P), not a limit: the server resizes it freely via OpAck's
@@ -476,7 +477,7 @@ pub fn handle_op_ack_scoped(engine: &Arc<Engine>, scope: &str, ack: &v1::OpAck) 
 pub(crate) fn frame_publisher(
     publish: FrameSink,
     op_id: String,
-) -> impl Fn(Frame) + Send + 'static {
+) -> impl Fn(Frame) -> Delivery + Send + 'static {
     move |frame| {
         let body = match frame.body {
             FrameBody::Data { channel, bytes } => v1::op_frame::Body::Data(v1::OpData {
@@ -488,7 +489,7 @@ pub(crate) fn frame_publisher(
                 Ok(exit) => v1::op_frame::Body::Exit(exit),
                 Err(error) => {
                     warn!(%error, "retained exit payload undecodable; frame not published");
-                    return;
+                    return Delivery::Taken;
                 }
             },
         };
@@ -497,7 +498,7 @@ pub(crate) fn frame_publisher(
             seq: frame.seq,
             body: Some(body),
         };
-        publish(wire.encode_to_vec());
+        publish(wire.encode_to_vec())
     }
 }
 
@@ -510,7 +511,8 @@ pub(crate) fn completion_publisher(
 ) -> impl FnOnce(Option<u64>, &JobExit) + Send + 'static {
     move |_, exit| {
         if let Some(publish) = publish {
-            publish(completion_event(op_id, exit).encode_to_vec());
+            // Completion notices ride the control lane, which never refuses.
+            let _ = publish(completion_event(op_id, exit).encode_to_vec());
         }
     }
 }
@@ -831,6 +833,7 @@ mod tests {
             Arc::new(move |bytes: Vec<u8>| {
                 let frame = v1::OpFrame::decode(bytes.as_slice()).expect("wire frame decodes");
                 frames.lock().expect("frames").push(frame);
+                Delivery::Taken
             })
         }
 
@@ -1641,6 +1644,7 @@ mod tests {
         let completion_sink: FrameSink = Arc::new(move |bytes| {
             tx.send(v1::AgentEvent::decode(bytes.as_slice()).expect("completion event"))
                 .expect("completion receiver");
+            Delivery::Taken
         });
         let response = serve_op_start_scoped_with_policy(
             &rig.engine,
@@ -1692,7 +1696,10 @@ mod tests {
     fn completion_publication_does_not_require_a_retained_exit_frame() {
         let events = Arc::new(Mutex::new(Vec::new()));
         let captured = events.clone();
-        let sink: FrameSink = Arc::new(move |bytes| captured.lock().unwrap().push(bytes));
+        let sink: FrameSink = Arc::new(move |bytes| {
+            captured.lock().unwrap().push(bytes);
+            Delivery::Taken
+        });
         completion_publisher(Some(sink), "overflow".into())(
             None,
             &JobExit {
@@ -1917,7 +1924,7 @@ mod tests {
             successor.engine.adopt_job(
                 op,
                 Err("not adopted in this test".to_string()),
-                |_| {},
+                |_| crate::job::Delivery::Taken,
                 |_| Vec::new(),
                 |_, _| {},
             );

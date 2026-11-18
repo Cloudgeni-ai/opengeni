@@ -1,5 +1,0 @@
----
-"@opengeni/db": patch
----
-
-A turn whose worker dies while it is restoring a workspace from an object-storage archive now gets the same workspace back on retry. The global lease reaper resets such an expired warming lease with `opengeni_private.warming_reset_resume_state_v2`, which only recognised archives held inline in the resume state. Portable tar archives are stored in object storage and referenced by `workspaceArchiveRef`, so the reset erased the archive pointer and the next turn silently started on an empty workspace while the archive object was still intact. Migration 1407 makes the routine keep inline and object-referenced archives, both archive slots and every recovery marker, matching the workspace-scoped reaper, which now shares one helper (`warmingResetResumeState`). A lease that records a published archive generation but has lost its archive pointer now fails closed as unrecoverable, so the next turn is blocked with the workspace recovery choices instead of continuing on an empty workspace.

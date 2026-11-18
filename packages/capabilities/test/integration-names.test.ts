@@ -32,6 +32,38 @@ describe("integration names in a query", () => {
     ]);
   });
 
+  test("a later name word that is the name's own domain word is the product's brand", () => {
+    const dynamics = (query: string) =>
+      integrationMentionsIn(query, {
+        name: "Microsoft Dynamics",
+        providerDomain: "dynamics.com",
+      });
+    expect(dynamics("open opportunities in Dynamics 365")).toEqual([
+      { kind: "product_word", capitalised: true },
+    ]);
+    expect(
+      dynamics("open opportunities in Dynamics 365").some((mention) =>
+        isDistinctiveIntegrationMention(mention, "Microsoft Dynamics"),
+      ),
+    ).toBe(true);
+    // In lower case it is an ordinary word.
+    const plain = dynamics("notes on team dynamics");
+    expect(plain.map((mention) => mention.kind)).toEqual(["product_word"]);
+    expect(
+      plain.some((mention) => isDistinctiveIntegrationMention(mention, "Microsoft Dynamics")),
+    ).toBe(false);
+    // A vendor word that opens the name names no product of it, and a domain
+    // several products share names none.
+    expect(kinds("open my Google inbox", "Google Calendar", "google.com")).toEqual([]);
+    expect(
+      integrationMentionsIn(
+        "open Dynamics",
+        { name: "Microsoft Dynamics", providerDomain: "dynamics.com" },
+        { sharedDomains: new Set(["dynamics.com"]) },
+      ),
+    ).toEqual([]);
+  });
+
   test("spacing, case and near spellings name the integration", () => {
     for (const query of [
       "dictate with whisperflow",

@@ -101,6 +101,7 @@ type PersonalGitHubFailureReason =
   | "missing_code"
   | "not_authorized"
   | "provider_denied"
+  | "provider_error"
   | "scope_not_granted"
   | "state_replayed"
   | "token_exchange_failed";
@@ -558,12 +559,21 @@ export async function completePersonalGitHubOAuthCallback(
     };
   } catch (error) {
     if (exactReturnUrl) return { redirectTo: exactReturnUrl, exactReturn: true };
+    // A provider refusal can arrive without state; report the refusal.
+    const failure = state
+      ? null
+      : oauthStateFailureReturn(deps.settings, input.state, { providerError: input.error });
     return {
       redirectTo: personalGitHubCallbackReturnUrl(
         returnBaseUrl,
-        state?.returnPath ?? oauthStateFailureReturn(deps.settings, input.state).returnPath,
+        state?.returnPath ?? failure!.returnPath,
         "error",
-        { reason: personalGitHubFailureReason(error) },
+        {
+          reason:
+            failure?.reason === "provider_denied" || failure?.reason === "provider_error"
+              ? failure.reason
+              : personalGitHubFailureReason(error),
+        },
       ),
     };
   }

@@ -672,6 +672,101 @@ function abortableQuery<T extends postgres.Row[]>(
 }
 
 /**
+ * Postgres refuses to reuse a prepared statement whose result columns changed
+ * since it was prepared: SQLSTATE 0A000, "cached plan must not change result
+ * type", raised from `RevalidateCachedQuery` before the statement runs. A
+ * rolling migration that adds a column causes it for every statement that
+ * expands the table's row (`select *`, `table.*`, `returning *`, a CTE or
+ * function over that row) on connections the running release prepared earlier.
+ * Found directly or through a wrapping error's `cause` (Drizzle wraps query
+ * failures). Other 0A000 errors are unrelated features and do not match.
+ */
+export function isStalePreparedResultError(error: unknown): boolean {
+  let current = error;
+  for (let depth = 0; depth < 5 && current && typeof current === "object"; depth += 1) {
+    const candidate = current as { code?: unknown; routine?: unknown; message?: unknown };
+    if (
+      candidate.code === "0A000" &&
+      (candidate.routine === "RevalidateCachedQuery" ||
+        (typeof candidate.message === "string" &&
+          candidate.message.includes("cached plan must not change result type")))
+    ) {
+      return true;
+    }
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+/** Whether a statement in one transaction attempt was refused as stale. */
+type StaleResultRefusals = { refused: boolean };
+
+/**
+ * Note a transaction's stale-result refusal even when the caller never sees it:
+ * with statements in flight together (`Promise.all`), a sibling's "current
+ * transaction is aborted" (25P02) can reject first and become the callback's
+ * error, while the refusal that aborted the transaction settles later.
+ */
+function observingStaleRefusal<T extends postgres.Row[]>(
+  query: postgres.PendingQuery<T>,
+  refusals: StaleResultRefusals,
+): postgres.PendingQuery<T> {
+  const observe = query.then.bind(query);
+  Object.defineProperty(query, "then", {
+    configurable: true,
+    writable: true,
+    value: (...[onFulfilled, onRejected]: Parameters<Promise<unknown>["then"]>) =>
+      observe(onFulfilled as never, (error: unknown) => {
+        if (isStalePreparedResultError(error)) refusals.refused = true;
+        if (onRejected) return onRejected(error);
+        throw error;
+      }),
+  });
+  return query;
+}
+
+/**
+ * Run a pool transaction again when it failed only because a statement in it
+ * was prepared against an older row type (see {@link isStalePreparedResultError}).
+ *
+ * Outside a transaction postgres.js re-prepares and repeats such a statement
+ * (our patch keeps that working with other statements in flight). Inside one
+ * the refusal aborts the transaction, so only the whole transaction can be
+ * repeated. That is safe for its database work: the refused statement never
+ * ran and the transaction rolled back, so nothing it wrote remains. As with any
+ * repeated attempt (an activity retry, a client retry), work the callback does
+ * outside the database runs again.
+ *
+ * The attempt is repeated when its error is the refusal, or when any statement
+ * in it was refused (see {@link observingStaleRefusal}): the transaction was
+ * aborted by then, so every later error in it follows from the refusal.
+ *
+ * Our postgres.js patch makes a connection forget every statement it prepared
+ * on its first such refusal, not just the refused one, so each connection
+ * refuses at most once per schema change. One attempt per pool connection
+ * plus one is therefore enough for any transaction to reach a refreshed
+ * connection; another schema change in the meantime can only add a refusal,
+ * which surfaces unchanged once the attempts are spent.
+ */
+async function retryingStalePreparedResults<T>(
+  attempts: number,
+  run: (refusals: StaleResultRefusals) => Promise<T>,
+): Promise<T> {
+  for (let attempt = 1; ; attempt += 1) {
+    const refusals: StaleResultRefusals = { refused: false };
+    try {
+      return await run(refusals);
+    } catch (error) {
+      if (attempt >= attempts || !(refusals.refused || isStalePreparedResultError(error))) {
+        throw error;
+      }
+      // A maintenance stop that arrived meanwhile ends the retries.
+      databaseQuerySignal.getStore()?.throwIfAborted();
+    }
+  }
+}
+
+/**
  * Drizzle sends every query through `sql.unsafe(text, params)`, and postgres-js
  * never prepares `unsafe` queries unless asked per call, whatever the pool's
  * `prepare` option says. Ask on every call, including inside transactions and
@@ -692,14 +787,16 @@ function preparingUnsafe<T extends PostgresSql>(
   prepare = true,
   reserved = false,
   credential?: RotatingDatabasePassword,
+  staleResultAttempts = 1,
+  staleRefusals?: StaleResultRefusals,
 ): T {
-  const wrapScoped = (args: unknown[]) =>
+  const wrapScoped = (args: unknown[], refusals: StaleResultRefusals | undefined) =>
     args.map((arg) =>
       typeof arg === "function"
         ? async (scoped: postgres.TransactionSql) => {
             databaseQuerySignal.getStore()?.throwIfAborted();
             const result = await (arg as (scoped: postgres.TransactionSql) => unknown)(
-              preparingUnsafe(scoped, prepare, true),
+              preparingUnsafe(scoped, prepare, true, undefined, 1, refusals),
             );
             databaseQuerySignal.getStore()?.throwIfAborted();
             return result;
@@ -716,41 +813,53 @@ function preparingUnsafe<T extends PostgresSql>(
             traceQuery(base.unsafe(query, parameters as never, { prepare, ...options }), query);
           const pending =
             credential && !reserved ? retryingAuthentication(send(), send, credential) : send();
-          return signal ? abortableQuery(pending, signal) : pending;
+          const observed = staleRefusals ? observingStaleRefusal(pending, staleRefusals) : pending;
+          return signal ? abortableQuery(observed, signal) : observed;
         };
       }
       if (property === "begin" || property === "savepoint") {
         const method = Reflect.get(base, property) as unknown;
         if (typeof method !== "function") return method;
+        // Only the pool's own BEGIN repeats a transaction; a savepoint's
+        // failure belongs to its enclosing transaction, which it reports to.
+        const repeatable = (run: (refusals: StaleResultRefusals | undefined) => Promise<unknown>) =>
+          property === "begin" && !reserved && staleResultAttempts > 1
+            ? retryingStalePreparedResults(staleResultAttempts, run)
+            : run(staleRefusals);
         if (property === "begin" && credential && !reserved) {
           return (...args: unknown[]) =>
-            traceTransaction("transaction", async () => {
-              let entered = false;
-              const tracked = args.map((arg) =>
-                typeof arg === "function"
-                  ? (scoped: unknown) => {
-                      entered = true;
-                      return (arg as (scoped: unknown) => unknown)(scoped);
-                    }
-                  : arg,
-              );
-              // Only BEGIN's own connection attempt can be repeated: once the
-              // callback ran, its work is the caller's to judge.
-              let attempts = 0;
-              return withDatabaseAuthenticationRetry(
-                credential,
-                () => {
-                  // A maintenance stop that arrived meanwhile ends the retries.
-                  if (attempts++ > 0) databaseQuerySignal.getStore()?.throwIfAborted();
-                  return method.apply(base, wrapScoped(tracked)) as Promise<unknown>;
-                },
-                () => !entered,
-              );
-            });
+            repeatable((refusals) =>
+              traceTransaction("transaction", async () => {
+                let entered = false;
+                const tracked = args.map((arg) =>
+                  typeof arg === "function"
+                    ? (scoped: unknown) => {
+                        entered = true;
+                        return (arg as (scoped: unknown) => unknown)(scoped);
+                      }
+                    : arg,
+                );
+                // Only BEGIN's own connection attempt can be repeated for
+                // authentication: once the callback ran, its work is the
+                // caller's to judge.
+                let attempts = 0;
+                return withDatabaseAuthenticationRetry(
+                  credential,
+                  () => {
+                    // A maintenance stop that arrived meanwhile ends the retries.
+                    if (attempts++ > 0) databaseQuerySignal.getStore()?.throwIfAborted();
+                    return method.apply(base, wrapScoped(tracked, refusals)) as Promise<unknown>;
+                  },
+                  () => !entered,
+                );
+              }),
+            );
         }
         return (...args: unknown[]) =>
-          traceTransaction(property === "begin" ? "transaction" : "savepoint", () =>
-            method.apply(base, wrapScoped(args)),
+          repeatable((refusals) =>
+            traceTransaction(property === "begin" ? "transaction" : "savepoint", () =>
+              method.apply(base, wrapScoped(args, refusals)),
+            ),
           );
       }
       return Reflect.get(base, property);
@@ -827,7 +936,10 @@ export function createDb(databaseUrl: string, options: CreateDbOptions = {}): Db
   });
   // Registering the full schema eagerly allocates one relational query builder
   // per table on every transaction/savepoint, even for a single raw SQL query.
-  const db = drizzle(preparingUnsafe(client, preparedStatements, false, credential));
+  // One attempt per pool connection plus one: see retryingStalePreparedResults.
+  const db = drizzle(
+    preparingUnsafe(client, preparedStatements, false, credential, (options.max ?? 10) + 1),
+  );
   const notificationDatabaseUrl = options.notificationDatabaseUrl;
   // The LISTEN connection is its own pool with its own sticky candidate. The
   // files hold one login's password, so they apply only to that same login.
@@ -951,13 +1063,13 @@ export async function setRlsContext(db: Database, context: RlsContext): Promise<
 
 /** An advisory transaction lock taken while a scope is established. `key` is
  * either a literal key or a prefix completed with the scope's account id. */
-type RlsScopeLock = {
+export type RlsScopeLock = {
   key: string | { accountPrefix: string };
   mode: "shared" | "exclusive";
   hash: "extended" | "text";
 };
 
-type RlsScopeInput = {
+export type RlsScopeInput = {
   /** The tenant account, or null to resolve it from `workspaceId` within the
    * same statement. */
   accountId: string | null;
@@ -980,16 +1092,215 @@ function sessionTenancyLock(workspaceId: string): RlsScopeLock {
   return { key: `session-tenancy:${workspaceId}`, mode: "shared", hash: "extended" };
 }
 
-function rlsScopeLockCall(lock: RlsScopeLock): SQL {
+function rlsScopeLockCall(lock: RlsScopeLock, keyValue: unknown): SQL {
   const key =
     typeof lock.key === "string"
-      ? sql`${lock.key}::text`
-      : sql`(${lock.key.accountPrefix}::text || resolved.account_id)`;
+      ? sql`${keyValue}::text`
+      : sql`(${keyValue}::text || resolved.account_id)`;
   const hashed =
     lock.hash === "extended" ? sql`hashtextextended(${key}, 0)` : sql`hashtext(${key})`;
   return lock.mode === "shared"
     ? sql`pg_advisory_xact_lock_shared(${hashed})`
     : sql`pg_advisory_xact_lock(${hashed})`;
+}
+
+/** Every value an RLS scope statement binds; the rest of its text is its shape. */
+export type RlsScopeValues = {
+  accountId: string | null;
+  workspaceId: string | null;
+  settingsWorkspaceId: string;
+  agentRootSessionId: string;
+  siteId: string;
+  siteViewerPrincipal: string;
+  /** Defined exactly when the subject GUC is set. */
+  subjectId: string | undefined;
+  /** Defined exactly when a session actor is in scope. */
+  privateFileOwner: string | undefined;
+  initiatingHumanSubjectId: string | undefined;
+  /** Each lock's literal key or account prefix, in lock order. */
+  lockKeys: string[];
+};
+
+type RlsScopeSlots = { [K in Exclude<keyof RlsScopeValues, "lockKeys">]: unknown } & {
+  lockKeys: unknown[];
+};
+
+/** @internal The reference builder; exported for statement equivalence tests. */
+export function buildRlsScopeStatement(input: RlsScopeInput, values: RlsScopeSlots): SQL {
+  const account =
+    input.accountId !== null
+      ? sql`${values.accountId}::text`
+      : sql`(select ${schema.workspaces.accountId}::text from ${schema.workspaces} where ${schema.workspaces.id} = ${values.workspaceId}::uuid)`;
+  const settings: SQL[] = [
+    sql`set_config('opengeni.account_id', resolved.account_id, true)`,
+    sql`set_config('opengeni.workspace_id', ${values.settingsWorkspaceId}::text, true)`,
+    sql`set_config('opengeni.lossless_content_writer', '1', true)`,
+    sql`set_config('opengeni.sandbox_recovery_protocol_v2', '1', true)`,
+    sql`set_config('opengeni.pending_tool_event_output_v1', '1', true)`,
+    sql`set_config('opengeni.session_variable_set_attachments_v1', '1', true)`,
+    sql`set_config('opengeni.shared_personal_choice_v1', '1', true)`,
+    sql`set_config('opengeni.site_session_audience_v1', '1', true)`,
+    sql`set_config('jit', 'off', true)`,
+    sql`set_config('opengeni.agent_root_session_id', ${values.agentRootSessionId}::text, true)`,
+    sql`set_config('opengeni.site_id', ${values.siteId}::text, true)`,
+    sql`set_config('opengeni.site_viewer_principal', ${values.siteViewerPrincipal}::text, true)`,
+  ];
+  if (values.subjectId !== undefined) {
+    settings.push(sql`set_config('opengeni.subject_id', ${values.subjectId}::text, true)`);
+  }
+  if (values.privateFileOwner !== undefined) {
+    settings.push(
+      sql`set_config('opengeni.private_file_owner', ${values.privateFileOwner}::text, true)`,
+      sql`set_config('opengeni.initiating_human_subject_id', ${values.initiatingHumanSubjectId}::text, true)`,
+    );
+  }
+  const steps: SQL[] = [
+    sql`parent as materialized (select
+      current_setting('opengeni.account_id', true) as account_id,
+      current_setting('opengeni.workspace_id', true) as workspace_id,
+      current_setting('opengeni.subject_id', true) as subject_id,
+      current_setting('opengeni.private_file_owner', true) as private_file_owner,
+      current_setting('opengeni.initiating_human_subject_id', true) as initiating_human_subject_id,
+      current_setting('opengeni.personal_resource_human_subject_id', true) as personal_resource_human_subject_id,
+      current_setting('opengeni.personal_resource_actor_subject_id', true) as personal_resource_actor_subject_id,
+      current_setting('opengeni.agent_root_session_id', true) as agent_root_session_id,
+      current_setting('opengeni.site_id', true) as site_id,
+      current_setting('opengeni.site_viewer_principal', true) as site_viewer_principal)`,
+    sql`resolved as materialized (select ${account} as account_id from parent)`,
+    sql`scope as materialized (select ${sql.join(
+      settings.map((setting, index) => sql`${setting} as ${sql.raw(`s${index}`)}`),
+      sql`, `,
+    )} from resolved where resolved.account_id is not null and resolved.account_id <> '')`,
+  ];
+  let last = "scope";
+  input.locks.forEach((lock, index) => {
+    const name = `lock_${index}`;
+    steps.push(
+      sql`${sql.raw(name)} as materialized (select ${rlsScopeLockCall(lock, values.lockKeys[index])} as locked from ${sql.raw(last)}, resolved)`,
+    );
+    last = name;
+  });
+  return sql`with ${sql.join(steps, sql`, `)}
+      select
+        resolved.account_id as resolved_account_id,
+        current_setting('opengeni.account_id', true) as account_id,
+        current_setting('opengeni.workspace_id', true) as workspace_id,
+        current_setting('opengeni.subject_id', true) as subject_id,
+        parent.account_id as parent_account_id,
+        parent.workspace_id as parent_workspace_id,
+        parent.subject_id as parent_subject_id,
+        parent.private_file_owner as parent_private_file_owner,
+        parent.initiating_human_subject_id as parent_initiating_human_subject_id,
+        parent.personal_resource_human_subject_id as parent_personal_resource_human_subject_id,
+        parent.personal_resource_actor_subject_id as parent_personal_resource_actor_subject_id,
+        parent.agent_root_session_id as parent_agent_root_session_id,
+        parent.site_id as parent_site_id,
+        parent.site_viewer_principal as parent_site_viewer_principal
+      from ${sql.raw(last)}, resolved, parent`;
+}
+
+type RlsScopeTemplate = { text: string[]; slots: Array<(values: RlsScopeValues) => unknown> };
+/**
+ * Compiled RLS scope statements per database dialect and shape. This
+ * statement runs at the start of nearly every transaction, and building and
+ * rendering its few hundred SQL chunks dominated its cost. Its text depends
+ * only on its shape (account given or resolved, subject, actor, lock kinds);
+ * every value is a bound parameter. A shape is rendered once with a marker in
+ * every value position, so the template records exactly which value each
+ * parameter is; later scopes of that shape bind their values into the
+ * rendered text, producing the identical statement and parameters.
+ */
+const rlsScopeTemplates = new WeakMap<object, Map<string, RlsScopeTemplate | null>>();
+
+function rlsScopeShape(input: RlsScopeInput, values: RlsScopeValues): string {
+  return [
+    input.accountId === null ? "resolve" : "account",
+    values.subjectId === undefined ? "-" : "subject",
+    values.privateFileOwner === undefined ? "-" : "actor",
+    ...input.locks.map(
+      (lock) => `${typeof lock.key === "string" ? "key" : "prefix"}:${lock.hash}:${lock.mode}`,
+    ),
+  ].join("|");
+}
+
+/** @internal The statement `applyRlsScope` runs; exported for equivalence tests. */
+export function rlsScopeStatement(db: Database, input: RlsScopeInput, values: RlsScopeValues): SQL {
+  const dialect = (db as unknown as { dialect?: { sqlToQuery?: unknown } }).dialect;
+  if (!dialect || typeof dialect.sqlToQuery !== "function") {
+    return buildRlsScopeStatement(input, values);
+  }
+  let templates = rlsScopeTemplates.get(dialect);
+  if (!templates) {
+    templates = new Map();
+    rlsScopeTemplates.set(dialect, templates);
+  }
+  const shape = rlsScopeShape(input, values);
+  let template = templates.get(shape);
+  if (template === undefined) {
+    template = compileRlsScopeTemplate(
+      input,
+      values,
+      dialect as { sqlToQuery(query: SQL): { sql: string; params: unknown[] } },
+    );
+    templates.set(shape, template);
+  }
+  if (!template) return buildRlsScopeStatement(input, values);
+  return sql(
+    template.text as unknown as TemplateStringsArray,
+    ...template.slots.map((slot) => slot(values)),
+  );
+}
+
+function compileRlsScopeTemplate(
+  input: RlsScopeInput,
+  values: RlsScopeValues,
+  dialect: { sqlToQuery(query: SQL): { sql: string; params: unknown[] } },
+): RlsScopeTemplate | null {
+  const readers = new Map<unknown, (values: RlsScopeValues) => unknown>();
+  const marker = (name: string, read: (values: RlsScopeValues) => unknown) => {
+    const value = `\u0000opengeni-rls-scope-slot:${name}\u0000`;
+    readers.set(value, read);
+    return value;
+  };
+  const query = dialect.sqlToQuery(
+    buildRlsScopeStatement(input, {
+      accountId: marker("accountId", (v) => v.accountId),
+      workspaceId: marker("workspaceId", (v) => v.workspaceId),
+      settingsWorkspaceId: marker("settingsWorkspaceId", (v) => v.settingsWorkspaceId),
+      agentRootSessionId: marker("agentRootSessionId", (v) => v.agentRootSessionId),
+      siteId: marker("siteId", (v) => v.siteId),
+      siteViewerPrincipal: marker("siteViewerPrincipal", (v) => v.siteViewerPrincipal),
+      subjectId:
+        values.subjectId === undefined ? undefined : marker("subjectId", (v) => v.subjectId),
+      privateFileOwner:
+        values.privateFileOwner === undefined
+          ? undefined
+          : marker("privateFileOwner", (v) => v.privateFileOwner),
+      initiatingHumanSubjectId:
+        values.privateFileOwner === undefined
+          ? undefined
+          : marker("initiatingHumanSubjectId", (v) => v.initiatingHumanSubjectId),
+      lockKeys: input.locks.map((_lock, index) => marker(`lock${index}`, (v) => v.lockKeys[index])),
+    }),
+  );
+  // The rendered text numbers each bound parameter in order. Anything else
+  // (an unexpected placeholder, a value that is not one of the markers) keeps
+  // this shape on the ordinary builder.
+  const text = query.sql.split(/\$\d+/);
+  const placeholders = query.sql.match(/\$\d+/g) ?? [];
+  if (
+    placeholders.length !== query.params.length ||
+    placeholders.some((placeholder, index) => placeholder !== `$${index + 1}`)
+  ) {
+    return null;
+  }
+  const slots: RlsScopeTemplate["slots"] = [];
+  for (const param of query.params) {
+    const read = readers.get(param);
+    if (!read) return null;
+    slots.push(read);
+  }
+  return { text, slots };
 }
 
 /**
@@ -1026,59 +1337,6 @@ async function applyRlsScope(db: Database, input: RlsScopeInput): Promise<Applie
   const actor = sessionRlsActorContext.getStore();
   const siteViewer = siteViewerRlsContext.getStore();
   const subjectId = input.subjectId ?? actor?.subjectId;
-  const account =
-    input.accountId !== null
-      ? sql`${input.accountId}::text`
-      : sql`(select ${schema.workspaces.accountId}::text from ${schema.workspaces} where ${schema.workspaces.id} = ${input.workspaceId}::uuid)`;
-  const settings: SQL[] = [
-    sql`set_config('opengeni.account_id', resolved.account_id, true)`,
-    sql`set_config('opengeni.workspace_id', ${input.workspaceId ?? ""}::text, true)`,
-    sql`set_config('opengeni.lossless_content_writer', '1', true)`,
-    sql`set_config('opengeni.sandbox_recovery_protocol_v2', '1', true)`,
-    sql`set_config('opengeni.pending_tool_event_output_v1', '1', true)`,
-    sql`set_config('opengeni.session_variable_set_attachments_v1', '1', true)`,
-    sql`set_config('opengeni.shared_personal_choice_v1', '1', true)`,
-    sql`set_config('opengeni.site_session_audience_v1', '1', true)`,
-    sql`set_config('jit', 'off', true)`,
-    sql`set_config('opengeni.agent_root_session_id', ${actor?.agentRootSessionId ?? ""}::text, true)`,
-    sql`set_config('opengeni.site_id', ${siteViewer?.siteId ?? ""}::text, true)`,
-    sql`set_config('opengeni.site_viewer_principal', ${siteViewer?.principal ?? ""}::text, true)`,
-  ];
-  if (subjectId !== undefined) {
-    settings.push(sql`set_config('opengeni.subject_id', ${subjectId}::text, true)`);
-  }
-  if (actor) {
-    settings.push(
-      sql`set_config('opengeni.private_file_owner', ${actor.privateFileOwnerSubjectId ?? ""}::text, true)`,
-      sql`set_config('opengeni.initiating_human_subject_id', ${actor.initiatingHumanSubjectId ?? ""}::text, true)`,
-    );
-  }
-  const steps: SQL[] = [
-    sql`parent as materialized (select
-      current_setting('opengeni.account_id', true) as account_id,
-      current_setting('opengeni.workspace_id', true) as workspace_id,
-      current_setting('opengeni.subject_id', true) as subject_id,
-      current_setting('opengeni.private_file_owner', true) as private_file_owner,
-      current_setting('opengeni.initiating_human_subject_id', true) as initiating_human_subject_id,
-      current_setting('opengeni.personal_resource_human_subject_id', true) as personal_resource_human_subject_id,
-      current_setting('opengeni.personal_resource_actor_subject_id', true) as personal_resource_actor_subject_id,
-      current_setting('opengeni.agent_root_session_id', true) as agent_root_session_id,
-      current_setting('opengeni.site_id', true) as site_id,
-      current_setting('opengeni.site_viewer_principal', true) as site_viewer_principal)`,
-    sql`resolved as materialized (select ${account} as account_id from parent)`,
-    sql`scope as materialized (select ${sql.join(
-      settings.map((setting, index) => sql`${setting} as ${sql.raw(`s${index}`)}`),
-      sql`, `,
-    )} from resolved where resolved.account_id is not null and resolved.account_id <> '')`,
-  ];
-  let last = "scope";
-  input.locks.forEach((lock, index) => {
-    const name = `lock_${index}`;
-    steps.push(
-      sql`${sql.raw(name)} as materialized (select ${rlsScopeLockCall(lock)} as locked from ${sql.raw(last)}, resolved)`,
-    );
-    last = name;
-  });
   const [row] = await rawRows<{
     resolved_account_id: string;
     account_id: string | null;
@@ -1096,23 +1354,20 @@ async function applyRlsScope(db: Database, input: RlsScopeInput): Promise<Applie
     parent_site_viewer_principal: string | null;
   }>(
     db,
-    sql`with ${sql.join(steps, sql`, `)}
-      select
-        resolved.account_id as resolved_account_id,
-        current_setting('opengeni.account_id', true) as account_id,
-        current_setting('opengeni.workspace_id', true) as workspace_id,
-        current_setting('opengeni.subject_id', true) as subject_id,
-        parent.account_id as parent_account_id,
-        parent.workspace_id as parent_workspace_id,
-        parent.subject_id as parent_subject_id,
-        parent.private_file_owner as parent_private_file_owner,
-        parent.initiating_human_subject_id as parent_initiating_human_subject_id,
-        parent.personal_resource_human_subject_id as parent_personal_resource_human_subject_id,
-        parent.personal_resource_actor_subject_id as parent_personal_resource_actor_subject_id,
-        parent.agent_root_session_id as parent_agent_root_session_id,
-        parent.site_id as parent_site_id,
-        parent.site_viewer_principal as parent_site_viewer_principal
-      from ${sql.raw(last)}, resolved, parent`,
+    rlsScopeStatement(db, input, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      settingsWorkspaceId: input.workspaceId ?? "",
+      agentRootSessionId: actor?.agentRootSessionId ?? "",
+      siteId: siteViewer?.siteId ?? "",
+      siteViewerPrincipal: siteViewer?.principal ?? "",
+      subjectId,
+      privateFileOwner: actor ? (actor.privateFileOwnerSubjectId ?? "") : undefined,
+      initiatingHumanSubjectId: actor ? (actor.initiatingHumanSubjectId ?? "") : undefined,
+      lockKeys: input.locks.map((lock) =>
+        typeof lock.key === "string" ? lock.key : lock.key.accountPrefix,
+      ),
+    }),
   );
   if (!row) {
     if (input.accountId === null) throw new WorkspaceNotFoundError(input.workspaceId!);

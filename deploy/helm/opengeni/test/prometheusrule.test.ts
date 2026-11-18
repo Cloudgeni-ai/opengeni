@@ -265,7 +265,7 @@ describe("turn-capacity Prometheus alerts", () => {
       ["OpenGeniTurnFailureRatioHigh", ["opengeni_turns_total", 'outcome="failed"']],
       [
         "OpenGeniTurnRecoveryRatioHigh",
-        ["opengeni_turn_recoveries_total", 'cause!~"provider|route_change"'],
+        ["opengeni_turn_recoveries_total", 'cause!~"provider|route_change|organization_limit"'],
       ],
       [
         "OpenGeniTurnWorkerDeathRecovered",

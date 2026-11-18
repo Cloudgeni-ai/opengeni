@@ -41,6 +41,8 @@ export type CodexAdditionalLimit = {
   weekly: CodexUsageWindow | null;
   /** Unknown-duration feature caps still block repair of a prior quota refusal. */
   unknownWindowExhausted: boolean;
+  /** The provider flags this feature limit as spent (`limit_reached` or `allowed: false`). */
+  limitReached?: boolean | undefined;
 };
 
 export type CodexUsageStatus = "ok" | "limit_reached" | "error" | "no-data";
@@ -105,44 +107,60 @@ export function buildCodexUsageWindowFromCache(
   };
 }
 
+// The provider's own model marks most of these fields optional AND nullable
+// (`balance: null` is what an account without purchased credits reports), so
+// every optional field accepts null. Quota-bearing sections (rate_limit and
+// the feature limits) still fail closed when malformed: dropping one of them
+// could hide an exhausted window. Display-only sections (plan label and the
+// credit balance) fall back to unknown instead of sinking the whole read.
 const windowSchema = z
   .object({
-    used_percent: z.number().optional(),
-    reset_after_seconds: z.number().optional(),
-    reset_at: z.number().optional(),
-    limit_window_seconds: z.number().optional(),
+    used_percent: z.number().nullish(),
+    reset_after_seconds: z.number().nullish(),
+    reset_at: z.number().nullish(),
+    limit_window_seconds: z.number().nullish(),
   })
   .nullish();
 
 const rateLimitSchema = z
   .object({
-    allowed: z.boolean().optional(),
-    limit_reached: z.boolean().optional(),
+    allowed: z.boolean().nullish(),
+    limit_reached: z.boolean().nullish(),
     primary_window: windowSchema,
     secondary_window: windowSchema,
   })
   .nullish();
 
+/** Legacy flat feature-limit shape: windows directly on the entry. */
 const additionalLimitSchema = z.object({
-  limit_name: z.string().optional(),
-  metered_feature: z.string().optional(),
+  limit_name: z.string().nullish(),
+  metered_feature: z.string().nullish(),
   primary_window: windowSchema,
   secondary_window: windowSchema,
 });
 
+/** Current feature-limit shape: windows nested under `rate_limit`. */
+const additionalRateLimitSchema = z.object({
+  limit_name: z.string().nullish(),
+  metered_feature: z.string().nullish(),
+  rate_limit: rateLimitSchema,
+});
+
 const creditsSchema = z
   .object({
-    has_credits: z.boolean().optional(),
-    unlimited: z.boolean().optional(),
-    overage_limit_reached: z.boolean().optional(),
-    balance: z.union([z.string(), z.number()]).optional(),
+    has_credits: z.boolean().nullish(),
+    unlimited: z.boolean().nullish(),
+    overage_limit_reached: z.boolean().nullish(),
+    balance: z.union([z.string(), z.number()]).nullish(),
   })
-  .nullish();
+  .nullish()
+  .catch(null);
 
 const usageBodySchema = z.object({
-  plan_type: z.string().nullish(),
+  plan_type: z.string().nullish().catch(null),
   rate_limit: rateLimitSchema,
   additional_limits: z.array(additionalLimitSchema).nullish(),
+  additional_rate_limits: z.array(additionalRateLimitSchema).nullish(),
   credits: creditsSchema,
 });
 
@@ -240,24 +258,42 @@ export function normalizeCodexUsage(httpStatus: number, rawPayload: unknown): Co
       (window) => (window?.used_percent ?? 0) >= 100,
     );
 
-  const additionalLimits: CodexAdditionalLimit[] | undefined = body.additional_limits
-    ? body.additional_limits.map((al) => {
-        const windows = pickWindows(al.primary_window ?? null, al.secondary_window ?? null);
-        return {
-          limitName: al.limit_name ?? "",
-          meteredFeature: al.metered_feature ?? "",
-          fiveHour: windows.fiveHour,
-          weekly: windows.weekly,
-          unknownWindowExhausted: [al.primary_window, al.secondary_window].some(
-            (window) =>
-              window != null &&
-              window.limit_window_seconds !== CODEX_FIVE_HOUR_WINDOW_SECONDS &&
-              window.limit_window_seconds !== CODEX_WEEKLY_WINDOW_SECONDS &&
-              (window.used_percent ?? 0) >= 100,
-          ),
-        };
-      })
-    : undefined;
+  const featureLimits = [
+    ...(body.additional_limits ?? []).map((al) => ({
+      limitName: al.limit_name,
+      meteredFeature: al.metered_feature,
+      primary: al.primary_window ?? null,
+      secondary: al.secondary_window ?? null,
+      limitReached: false,
+    })),
+    ...(body.additional_rate_limits ?? []).map((al) => ({
+      limitName: al.limit_name,
+      meteredFeature: al.metered_feature,
+      primary: al.rate_limit?.primary_window ?? null,
+      secondary: al.rate_limit?.secondary_window ?? null,
+      limitReached: al.rate_limit?.limit_reached === true || al.rate_limit?.allowed === false,
+    })),
+  ];
+  const additionalLimits: CodexAdditionalLimit[] | undefined =
+    body.additional_limits || body.additional_rate_limits
+      ? featureLimits.map((al) => {
+          const windows = pickWindows(al.primary, al.secondary);
+          return {
+            limitName: al.limitName ?? "",
+            meteredFeature: al.meteredFeature ?? "",
+            fiveHour: windows.fiveHour,
+            weekly: windows.weekly,
+            unknownWindowExhausted: [al.primary, al.secondary].some(
+              (window) =>
+                window != null &&
+                window.limit_window_seconds !== CODEX_FIVE_HOUR_WINDOW_SECONDS &&
+                window.limit_window_seconds !== CODEX_WEEKLY_WINDOW_SECONDS &&
+                (window.used_percent ?? 0) >= 100,
+            ),
+            ...(al.limitReached ? { limitReached: true } : {}),
+          };
+        })
+      : undefined;
 
   const credits = body.credits
     ? {
@@ -303,6 +339,7 @@ export function codexUsageConfirmsQuotaAvailable(payload: CodexUsagePayload): bo
     (limit) =>
       (limit.fiveHour?.percent ?? 0) >= 100 ||
       (limit.weekly?.percent ?? 0) >= 100 ||
-      limit.unknownWindowExhausted,
+      limit.unknownWindowExhausted ||
+      limit.limitReached === true,
   );
 }

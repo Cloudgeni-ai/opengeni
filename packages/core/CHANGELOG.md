@@ -1,5 +1,282 @@
 # @opengeni/core
 
+## 6.28.0
+
+### Patch Changes
+
+- Updated dependencies [d5cadac]
+- Updated dependencies [515bc72]
+- Updated dependencies [4ef5ef6]
+- Updated dependencies [e09a38b]
+  - @opengeni/contracts@6.28.0
+  - @opengeni/runtime@6.28.0
+  - @opengeni/tool-gateway@6.28.0
+  - @opengeni/db@6.28.0
+  - @opengeni/config@6.28.0
+  - @opengeni/capabilities@6.28.0
+  - @opengeni/codex@6.28.0
+  - @opengeni/documents@6.28.0
+  - @opengeni/events@6.28.0
+  - @opengeni/observability@6.28.0
+  - @opengeni/storage@6.28.0
+  - @opengeni/vaults@6.28.0
+  - @opengeni/network@6.28.0
+  - @opengeni/xai-subscription@6.28.0
+
+## 6.27.1
+
+### Patch Changes
+
+- 02804ec: Creating or updating a session with a first-party tool's old name from before a one-to-one rename (for example `session_send_message`, now `session_queue_message`) selects the new name again instead of failing with "disabled by deployment policy". Clients built against an older contract kept sending the old name and every such session was refused at creation. The old name is still never offered to models.
+- Updated dependencies [afcb2d6]
+- Updated dependencies [02804ec]
+  - @opengeni/db@6.27.1
+  - @opengeni/contracts@6.27.1
+  - @opengeni/documents@6.27.1
+  - @opengeni/events@6.27.1
+  - @opengeni/capabilities@6.27.1
+  - @opengeni/codex@6.27.1
+  - @opengeni/config@6.27.1
+  - @opengeni/observability@6.27.1
+  - @opengeni/runtime@6.27.1
+  - @opengeni/storage@6.27.1
+  - @opengeni/tool-gateway@6.27.1
+  - @opengeni/vaults@6.27.1
+  - @opengeni/network@6.27.1
+  - @opengeni/xai-subscription@6.27.1
+
+## 6.27.0
+
+### Patch Changes
+
+- 5d63995: When a tool needs access that a fixed-access account (for example one managed through Nango) cannot be given, the chat now shows "{provider} can't do this with the connected account" with no step-up. The `tool.auth_needed` notice keeps the legacy-safe reason `unsupported_auth`, so older clients show the tools as unavailable, and adds `accountReason: "account_scope_fixed"` with the scopes the tool needs.
+- 8f1f5e2: Free compute is bounded for every kind of sandbox use, not only viewers. A held or denied Free or plan-less organization that has not bought credit or paid for a plan gets no sandbox at all: terminals, commands, background processes, browser and desktop sessions, viewers and new boxes for agent turns are refused, a turn that needs a box fails with a clear message instead of waiting forever, an already running box stays usable only while a turn holds it, and the reaper drains boxes no turn holds. A person who owns or administers such an organization carries the restriction into their other unpaid organizations.
+
+  Free, young Free and plan-less organizations share one running-box budget of 2 across every holder kind, plus 2 running boxes and 12 box-hours per UTC day per organization and per person across their organizations. Past the daily budget no box starts and the reaper drains boxes no turn holds, while an in-flight turn finishes. Boxes that nothing uses drain after the viewer idle window, whatever holds them. All values are plan-limit settings (`OPENGENI_SANDBOX_PLAN_LIMITS_JSON`).
+
+  Every new Modal box carries hard CPU and memory ceilings (2 cores / 4096 MiB for unpaid organizations, 16 cores / 32768 MiB for paid, Enterprise, host-provisioned and credit-buying organizations), and a create without them is refused. Unpaid boxes can be limited to an outbound CIDR/domain allowlist; Modal has no per-port egress rule, so SMTP cannot be blocked by port alone.
+
+  A denied Free organization with no paid history is suspended from sandboxes, Site publishing, invitations, uploads and API keys until the decision is reversed or it buys credit; sign-in keeps working. Creating an additional organization now goes through the signup network checks and rate limit, and inherits its owner's review hold.
+
+  An unpaid organization that bought credit is treated as paying: no per-person, daily or all-holder idle bounds. Paid, Enterprise and host-provisioned organizations are unaffected.
+
+  Rollout: set the new plan-limit fields in `OPENGENI_SANDBOX_PLAN_LIMITS_JSON` only after this release runs everywhere, because older pods reject unknown fields. Defaults for `free`, `new` and `none`: `runningBoxesPerOrganization` 2, `runningBoxesPerPerson` 2, `boxSecondsPerOrganizationPerDay` 43200, `boxSecondsPerPersonPerDay` 43200, `idleDrainAllHolders` true; `restricted` is 0 for every count.
+
+- Updated dependencies [5d63995]
+- Updated dependencies [c3ca657]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [8f1f5e2]
+- Updated dependencies [5d63995]
+- Updated dependencies [d85f57f]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [d51e6e5]
+  - @opengeni/runtime@6.27.0
+  - @opengeni/capabilities@6.27.0
+  - @opengeni/contracts@6.27.0
+  - @opengeni/db@6.27.0
+  - @opengeni/config@6.27.0
+  - @opengeni/codex@6.27.0
+  - @opengeni/documents@6.27.0
+  - @opengeni/events@6.27.0
+  - @opengeni/observability@6.27.0
+  - @opengeni/storage@6.27.0
+  - @opengeni/tool-gateway@6.27.0
+  - @opengeni/vaults@6.27.0
+  - @opengeni/network@6.27.0
+  - @opengeni/xai-subscription@6.27.0
+
+## 6.26.0
+
+### Patch Changes
+
+- 8fae328: Connected tools that can do a task now win over a Connect card for an unconnected alternative. Tool search no longer shows an integration's Connect card by itself when the chat already has a connected account of the same kind (Outlook Mail beside an unconnected Gmail); the search result still names the integration, and the agent can show its card when the person asked for it. In the agent's integration catalog search, a service the person can already use in the chat comes before a same-category service they would still have to connect, unless the request names the unconnected service. The per-turn connector availability notice now says that a configured but unavailable connector is needed only when the person named it or no loaded tool can do the task.
+- 8fae328: When a chat can use several accounts of one connector or integration, the person's own account is now the default for writes. When several accounts' copies of a tool match a search equally, the default's copy loads, every account's tools say which account is the default and why, and the agent asks only when no account is a clear default (several of the person's own, or only shared ones).
+- 47eb375: One verified account is now one connection, on every backend. Connections record a server-owned `account_identity_key` (the integration and the verified provider account), and the database allows one live connection per organization, owner and key, so a racing or legacy writer can no longer save a second connection to the same account; it fails as "already connected" instead. OAuth MCP logins, Nango connections and provider OAuth connections (personal GitHub and others) set it.
+
+  Opengeni also no longer pays for two Nango connections for the same account. When a person connects the same verified account to the same Nango integration in several organizations, every organization's row now points at one shared Nango connection, and that connection is deleted in Nango only when the last row referencing it is gone. Reconnects, refused or failed connect attempts and disconnects release the replaced connection through the same reference check, and the worker now sweeps Nango every 15 minutes: for connections this release made (tagged with the deployment), it merges leftover duplicates, deletes abandoned and cascade-orphaned connections, and deletes connections whose refresh has failed for 24 hours. Older, untagged connections are left to `integrations:nango orphans`. Disconnecting a Nango-managed Google app still does not revoke the grant at Google, because Nango's OAuth client is shared across the person's connections.
+
+  Email accounts are matched case-insensitively, and scopes Nango could not report never move another organization's connection onto a narrower one.
+
+  Reconnecting the same verified account no longer breaks running turns: the connection keeps its authority generation when the new grant includes every scope it had, so tool calls in a turn accepted before the reconnect no longer fail with "Authentication required". A different account, fewer scopes, a revoke or a status change still end that authority.
+
+  While a release rolls out, or after a rollback to an older release, pods of the older release still delete a replaced Nango connection directly; a connection shared by this release can then be revoked in another organization and must be reconnected there.
+
+- Updated dependencies [6d7ea1e]
+- Updated dependencies [b6b3579]
+- Updated dependencies [8fae328]
+- Updated dependencies [8fae328]
+- Updated dependencies [47eb375]
+- Updated dependencies [c8efcb0]
+- Updated dependencies [33dd6da]
+- Updated dependencies [5e3441a]
+- Updated dependencies [c8efcb0]
+- Updated dependencies [e1199c0]
+  - @opengeni/contracts@6.26.0
+  - @opengeni/db@6.26.0
+  - @opengeni/runtime@6.26.0
+  - @opengeni/tool-gateway@6.26.0
+  - @opengeni/xai-subscription@6.26.0
+  - @opengeni/capabilities@6.26.0
+  - @opengeni/codex@6.26.0
+  - @opengeni/config@6.26.0
+  - @opengeni/documents@6.26.0
+  - @opengeni/events@6.26.0
+  - @opengeni/observability@6.26.0
+  - @opengeni/storage@6.26.0
+  - @opengeni/vaults@6.26.0
+  - @opengeni/network@6.26.0
+
+## 6.25.0
+
+### Patch Changes
+
+- e126cb5: Documents, spreadsheets and presentations can now be deleted from the Artifacts list. Their ⋯ menu has **Delete…**, which asks first. Deleting archives the artifact: it leaves the Artifacts list and the chat's artifact panel and no longer opens. The new `POST /v1/workspaces/:workspaceId/editable-artifacts/:artifactId/archive` route and `client.archiveEditableArtifact` do the same and need `artifacts:publish`.
+- f99f940: The agent offers each service's Connect card once. When the deployment has its own integration for a service (Gmail, Google Calendar, Google Drive, Slack, X, Reddit, or one served through Nango), a public-registry entry for the same service is no longer listed beside it, and a card requested for that entry is the built-in's card. When the organization's integration policy turns a built-in integration off, the agent gets no card for it or its registry duplicate and is told the integration is turned off for the organization. The same applies to a marketplace plugin that adds nothing but such an integration's own MCP endpoint (for example the Gmail plugin). Signing in to Gmail's, Google Calendar's, Google Drive's or Slack's own MCP endpoint as a custom MCP server is refused the same way while the organization has that integration turned off. Google connectors served through Nango can be connected even when this deployment's own Google sign-in setup is unavailable. Registry entries for other services, entries already turned on in a workspace, and deployments without the built-in integration are unchanged.
+- 81570f9: Several connections to the same tool server can now be told apart by people and agents. A connection has an optional `label`, a name its owner sets when connecting (`label` on create, an optional Name field in the key form and Connect's credential step) and changes or clears later (`PATCH .../connections/{id}` with `{ "label": … }`, or Rename on the connector page). Labels follow one rule everywhere: the provider's verified identity, else the person's name, else `<domain> account`; when two accounts with the same scope would still read the same, agents and account lists add when each was connected (then the time, then a short ID). A rename is display only: it changes neither the connection's version nor its authority, and reaches agents from the next turn.
+- f99f940: Connecting an integration no longer gets stuck on a sign-in client the provider has forgotten. Opengeni reuses the OAuth client it registered with a provider such as Supabase, and when that provider has since deleted it, Connect ended on the provider's "Unrecognized client_id" page every time. Opengeni now checks that the provider still knows the client before reusing it, and registers a new one when the provider says it doesn't.
+
+  A connection this deployment can't connect, because the provider only accepts apps it has approved (Dropbox, for one) and no client is registered with it here, now shows up when you search Capabilities for it. It's marked Unavailable and its page says why, instead of the search saying nothing matches. Other listings of the same provider, such as a server a plugin brings, are marked the same way and no longer offer a Connect that can't finish, and a provider that refuses to let apps register now gets a plain explanation instead of "dynamic client registration failed with HTTP 403".
+
+- 43435d5: A tool call the model asks for is saved before its tool starts, so a worker that stops mid-step can always recover it: the call is closed as interrupted instead of being lost and run again. The response's usage is saved in the same write as its tool calls, before any of them runs; its billing runs alongside the tools, and the next model request still waits for it. If the worker stops, is replaced or its billing fails before billing finishes, recovery, the attempt's failure handling or the session's next idle point finishes it exactly once, at the price recorded with the usage. Recovery only looks at responses whose billing is still unfinished.
+- Updated dependencies [e126cb5]
+- Updated dependencies [43435d5]
+- Updated dependencies [61abc98]
+- Updated dependencies [81570f9]
+- Updated dependencies [f99f940]
+- Updated dependencies [bb55e5d]
+- Updated dependencies [43435d5]
+- Updated dependencies [7f09ad6]
+- Updated dependencies [f99f940]
+- Updated dependencies [f99f940]
+- Updated dependencies [43435d5]
+- Updated dependencies [bfd2970]
+  - @opengeni/contracts@6.25.0
+  - @opengeni/db@6.25.0
+  - @opengeni/capabilities@6.25.0
+  - @opengeni/config@6.25.0
+  - @opengeni/runtime@6.25.0
+  - @opengeni/codex@6.25.0
+  - @opengeni/documents@6.25.0
+  - @opengeni/events@6.25.0
+  - @opengeni/observability@6.25.0
+  - @opengeni/storage@6.25.0
+  - @opengeni/tool-gateway@6.25.0
+  - @opengeni/vaults@6.25.0
+  - @opengeni/network@6.25.0
+  - @opengeni/xai-subscription@6.25.0
+
+## 6.24.1
+
+### Patch Changes
+
+- Updated dependencies [f041392]
+- Updated dependencies [5fd2c21]
+- Updated dependencies [e4c5c29]
+  - @opengeni/db@6.24.1
+  - @opengeni/config@6.24.1
+  - @opengeni/contracts@6.24.1
+  - @opengeni/documents@6.24.1
+  - @opengeni/events@6.24.1
+  - @opengeni/runtime@6.24.1
+  - @opengeni/storage@6.24.1
+  - @opengeni/capabilities@6.24.1
+  - @opengeni/codex@6.24.1
+  - @opengeni/observability@6.24.1
+  - @opengeni/tool-gateway@6.24.1
+  - @opengeni/vaults@6.24.1
+  - @opengeni/network@6.24.1
+  - @opengeni/xai-subscription@6.24.1
+
+## 6.24.0
+
+### Patch Changes
+
+- 8924854: Separate installs of one API integration definition (a second account added as its own install) are now labelled as accounts of one connector: they share the definition's name and each names its account, so the model can tell them apart and a tool search reaching one names the others.
+- 8924854: Connecting an API integration (OpenAPI, GraphQL or built-in definition) no longer fails with a 500 when another person in the workspace already has a personal instance of it at an older revision. A new revision moves every instance to it, and the facet binding check looked up the other person's personal Connection as the caller, who cannot see it; an update that keeps a binding's Connection and tenant is no longer checked again (migration 1453). Inserts and Connection changes are checked as before.
+
+  A failed preview or install in Connect now frees the attempt, so "Add selected tools" can be tried again instead of answering 409 "in flight or uncertain". Only operations that read their source and write in one transaction opt in (`releaseClaimOnFailure`); operations with provider effects keep their claim.
+
+- e6c9e45: A Connected Machine background command no longer reads as running for minutes after it finished when its session switched to another machine and back, and its output keeps flowing to the session after such a switch. When a reader attached to a command that had produced a large backlog (thousands of output frames, for example a test run that finished while the session was elsewhere), the agent sent the whole backlog into its 1,024-frame output queue at once and dropped every frame past the queue's depth, including the exit frame. Nothing re-sent them until the reader's 30-second silence check, which recovered about one queue's worth per check, so collecting a 6,600-frame command took more than three minutes, and a large enough backlog could never be collected within one collector's claim. The agent now holds its next frame while the queue is full and sends it as soon as the queue drains, so nothing is dropped for want of room. Collectors store replayed output a batch per transaction instead of one transaction per frame, so a retry that replays frames an earlier collector already stored gets further each time. A look at a running command now follows its attachment until it holds everything the machine had retained when it attached, instead of stopping after a quarter of a second with the same prefix every time, and `command_read`/`command_wait` in a later attempt read a running command from the machine its ledger names (not the session's current machine). `readExisting` takes an `untilCaughtUp` option, `appendSessionCommandOutputs` stores several chunks of one command in one transaction, and `connectedCommandOutputLook` reads a session's running command from its ledger locator.
+- c0248a5: A `git commit` or `git push` run through `exec_command` or `run_on` that would carry a secret value Opengeni filled in for a reference earlier in that sandbox is no longer run. The result names the file and line (and commit) and says how to write the reference literally instead. Matching is exact against a keyed ledger of resolved values kept in the sandbox; files that are not committed never block, and the command runs if the check itself fails. See "Keeping values out of commits" in `docs/secrets.md`.
+
+  The prompt, the `secrets` Skill and secret-resolution hints now say the backslash escape keeps a reference as literal text in files as well as commands. `apply_patch` resolves references only in added lines, so context and removed lines match files that hold a literal reference.
+
+- 477f1db: Agent turns spend less time before each model request. The checks run before every model request (task usage limit, funding, workspace allowance and monthly limits) now read in parallel and still report the same refusal as before. Packaged Skills and interaction tool schemas are prepared once per process instead of on every turn.
+
+  New latency metrics: `opengeni_model_response_to_next_dispatch_seconds` (the gap from one model response to the next request, by phase) and the parts of response metering (`response_usage_lease`, `_billing`, `_cache`, `_checkpoint` on `opengeni_model_step_phase_duration_seconds`). A small sample of agent turns also exports its database statement spans when OTLP tracing is configured.
+
+  Prebuilt Sandbox Environment images on Modal are rebuilt again after a build stops for more than 20 minutes or fails with a retryable error, and the image snapshot has its own timeout (`OPENGENI_RIG_PROVIDER_IMAGE_SNAPSHOT_TIMEOUT_MS`, default 5 minutes) instead of the 60-second workspace snapshot timeout.
+
+- Updated dependencies [0ad29b9]
+- Updated dependencies [24104b1]
+- Updated dependencies [8924854]
+- Updated dependencies [e6c9e45]
+- Updated dependencies [b9baad4]
+- Updated dependencies [8924854]
+- Updated dependencies [c0248a5]
+- Updated dependencies [1b544b0]
+- Updated dependencies [477f1db]
+  - @opengeni/db@6.24.0
+  - @opengeni/codex@6.24.0
+  - @opengeni/runtime@6.24.0
+  - @opengeni/capabilities@6.24.0
+  - @opengeni/contracts@6.24.0
+  - @opengeni/config@6.24.0
+  - @opengeni/documents@6.24.0
+  - @opengeni/events@6.24.0
+  - @opengeni/observability@6.24.0
+  - @opengeni/storage@6.24.0
+  - @opengeni/tool-gateway@6.24.0
+  - @opengeni/vaults@6.24.0
+  - @opengeni/network@6.24.0
+  - @opengeni/xai-subscription@6.24.0
+
+## 6.23.0
+
+### Patch Changes
+
+- 9dd96b0: Restoring a large workspace archive no longer multiplies worker memory. Byte copies used `Uint8Array.from(buffer)`, which Bun runs element by element through its generic iterator path when the source is a Node Buffer (the result of base64 decoding, file reads, object storage and Postgres bytea). That used about 16 times the archive size in transient memory and was about 100 times slower. A cold restore did it at least twice, so restoring a workspace archive of a few hundred MB could take a worker past 15 GB and kill it. Byte copies now use `new Uint8Array(buffer)`, which makes the same copy at native speed. Archive base64 is decoded once into a view of the decoded bytes. Canonical form is now checked from the decoded length and the final four characters instead of re-encoding the whole archive. Object-storage restores verify the fetched bytes directly instead of decoding the base64 copy again. Native snapshot receipts are recognised from their ASCII prefix without decoding a whole tar archive as text. Restoring a 48 MB archive now raises peak memory by about 2 times the archive size instead of 37 times, and takes 0.2 seconds instead of 3.4 seconds.
+- adc2409: A Business Central address is never read by dropping part of its path. An address such as `businesscentral.dynamics.com/opengenitest2026/Production`, whose first segment is neither a tenant ID nor a domain, used to connect an environment named `opengenitest2026` and ignore `Production`, so every query failed with "Environment does not exist". Such addresses, and addresses with more after the environment than a web client page, are now refused with what to paste instead: the address bar while Business Central is open, or `businesscentral.dynamics.com/<tenant>.onmicrosoft.com/<environment>`. Tenant ID or domain with environment, environment only, and `?company=` addresses work as before. `microsoftDynamicsAddressProblem` returns that explanation; `custom_mcp_setup_request` answers with it and adding such an address as an MCP server is refused with 422.
+
+  When an agent publishes a Site and its turn's account bindings can't be read, the publication is now refused with a clear error instead of declaring only the publisher's own account routes (which left the Site's tools working only for the publisher).
+
+- f6a7c28: Connect cards can ask for connect-time inputs. An integration whose connections each need a value first (Microsoft Dynamics: the environment's address) declares those inputs in `@opengeni/contracts/capability-connect-inputs`. `capability_authorization_request` and tool discovery now post its Connect card, which asks the person for the value in one field with one Connect action, instead of answering `input_required` with no card. The agent can prefill a value with the tool's new `inputs` argument; it is used only when it follows the entry's rule. Catalog matches list the inputs as `setup.connectInputs`, the card payload carries them as `capability.inputs`, and capability creation takes `connectFor` with `connectInputs`, so the API applies the same rule to what the person entered and returns the connection already in the workspace for the same endpoint.
+
+  A runtime guard stops repeated identical tool calls. Once one exact call has returned the same result 8 times in a row in a turn, an identical call started within 30 seconds of the last one returns a short notice instead of running, and the run continues. Calls whose results change, and polling slower than 30 seconds, are unaffected.
+
+- 892b27b: An agent attempt's request no longer fails with HTTP 500 when the attempt's turn moves on while the request is in flight. This covers the first-party MCP routes (`/mcp`, `/mcp/docs`, `/mcp/files`), the `/files/*` and artifact routes, and every other workspace route that enters the agent's request context. The live-attempt check passed, but the attempt's learning-policy read then went through the database's own attempt fence, which refused ("Knowledge turn attempt is stale"), and that refusal escaped as an internal error. The same happened when a route's own file-owner check found the attempt stale after the request context was entered. These cases now get the same 403 `agent_attempt_caller_stale` answer as any other stale attempt.
+- Updated dependencies [c0089e1]
+- Updated dependencies [c0089e1]
+- Updated dependencies [982cce9]
+- Updated dependencies [9dd96b0]
+- Updated dependencies [adc2409]
+- Updated dependencies [f6a7c28]
+- Updated dependencies [1d7e007]
+- Updated dependencies [892b27b]
+- Updated dependencies [5ba261b]
+- Updated dependencies [cfde5ba]
+- Updated dependencies [37c35ed]
+- Updated dependencies [32a19a3]
+- Updated dependencies [621f4d2]
+- Updated dependencies [92a5650]
+- Updated dependencies [f0cc559]
+  - @opengeni/contracts@6.23.0
+  - @opengeni/db@6.23.0
+  - @opengeni/runtime@6.23.0
+  - @opengeni/capabilities@6.23.0
+  - @opengeni/codex@6.23.0
+  - @opengeni/config@6.23.0
+  - @opengeni/documents@6.23.0
+  - @opengeni/events@6.23.0
+  - @opengeni/observability@6.23.0
+  - @opengeni/storage@6.23.0
+  - @opengeni/tool-gateway@6.23.0
+  - @opengeni/vaults@6.23.0
+  - @opengeni/network@6.23.0
+  - @opengeni/xai-subscription@6.23.0
+
 ## 6.22.0
 
 ### Patch Changes

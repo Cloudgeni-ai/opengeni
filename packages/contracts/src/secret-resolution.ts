@@ -154,7 +154,7 @@ function failureHint(
   if (askCard !== null) {
     hints.push(
       failures.some((failure) => failure.code === "not_found")
-        ? "Nothing was run. A secret is missing. If the reference was meant to reach another workspace, chat or later work unresolved, write it as \\{{secret:…}} and retry. Otherwise call request_human_input with askCard exactly as given, then retry with the returned references."
+        ? "Nothing was run. A secret is missing. If the reference was meant to stay literal text, in a file, a command or work it is passed on to, write it as \\{{secret:…}} and retry. Otherwise call request_human_input with askCard exactly as given, then retry with the returned references."
         : "Nothing was run. A secret is missing: call request_human_input with askCard exactly as given, then retry with the returned references.",
     );
   }
@@ -172,7 +172,7 @@ function failureHint(
   }
   if (failures.some((failure) => failure.code === "invalid_reference")) {
     hints.push(
-      "Nothing was run. Fix the reference syntax: {{secret:Item}}, {{secret:Item/field}}, {{secret:Vault/Item/field}}, {{secret:id:<uuid>}}, optional /otp and #previous. Escape a literal reference as \\{{secret:…}}.",
+      "Nothing was run. Fix the reference syntax: {{secret:Item}}, {{secret:Item/field}}, {{secret:Vault/Item/field}}, {{secret:id:<uuid>}}, optional /otp and #previous. Write a reference meant as literal text, in files as well as commands, as \\{{secret:…}}.",
     );
   }
   if (hints.length === 0) hints.push("Nothing was run. See each failure's message.");

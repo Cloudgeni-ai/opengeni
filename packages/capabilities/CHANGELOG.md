@@ -1,5 +1,102 @@
 # @opengeni/capabilities
 
+## 6.28.0
+
+### Patch Changes
+
+- Updated dependencies [d5cadac]
+- Updated dependencies [515bc72]
+  - @opengeni/contracts@6.28.0
+  - @opengeni/network@6.28.0
+
+## 6.27.1
+
+### Patch Changes
+
+- Updated dependencies [02804ec]
+  - @opengeni/contracts@6.27.1
+  - @opengeni/network@6.27.1
+
+## 6.27.0
+
+### Patch Changes
+
+- 5d63995: A connected account that needs more access for a tool now shows "Give {provider} more access" with Allow in the chat instead of a connect card, and Allow finds the account even when it is homed in another workspace. Site tool readiness reports `grant` (with the scopes needed) for such tools, and `unavailable` with reason `account` when the account's access is fixed and cannot be extended.
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+- Updated dependencies [5d63995]
+  - @opengeni/contracts@6.27.0
+  - @opengeni/network@6.27.0
+
+## 6.26.0
+
+### Patch Changes
+
+- Updated dependencies [6d7ea1e]
+- Updated dependencies [8fae328]
+  - @opengeni/contracts@6.26.0
+  - @opengeni/network@6.26.0
+
+## 6.25.0
+
+### Patch Changes
+
+- bb55e5d: SharePoint can now read a document library file's content (`GET /drives/{drive-id}/items/{driveItem-id}/content`, read-only, the same reviewed operation OneDrive has), so a SharePoint-only connection no longer stops at a file's metadata. Like every safe read, its redirect to Microsoft's pre-authenticated download URL is followed without credentials.
+
+  A reviewed Microsoft Graph search body with several entries in `requests` now runs each entry as its own call and answers with their results in one `value` list. Graph v1.0 refuses such a body ("Multiple entity search is not supported in v1.0"), although one request may combine entity types. The SharePoint search description now says that one request may combine driveItem, listItem, list, site and drive (Graph accepts it), that list rows are listItem results, and its example searches files, list items, lists and sites together. The SharePoint list tool says it lists a site's lists and libraries.
+
+  The Outlook Mail create-draft tool's description now starts "Create a new email draft", so a search for an email draft ranks it above the reply and forward draft tools.
+
+- Updated dependencies [e126cb5]
+- Updated dependencies [61abc98]
+- Updated dependencies [81570f9]
+- Updated dependencies [f99f940]
+- Updated dependencies [f99f940]
+- Updated dependencies [bfd2970]
+  - @opengeni/contracts@6.25.0
+  - @opengeni/network@6.25.0
+
+## 6.24.1
+
+### Patch Changes
+
+- Updated dependencies [5fd2c21]
+  - @opengeni/contracts@6.24.1
+  - @opengeni/network@6.24.1
+
+## 6.24.0
+
+### Minor Changes
+
+- 8924854: Outlook Mail, Outlook Calendar, Outlook Contacts and OneDrive now offer a reviewed set of tools with hand-written names and descriptions (25, 20, 13 and 19 operations, down from 150, 177, 76 and 452), instead of every Graph operation under their path prefixes. Retained operations keep their tool ids. When an install moves to a new revision (including other people's instances moved by someone else's install), one that had every tool gets every tool of the new revision, and one whose chosen tools left the set gets the generic tools so those operations stay reachable; other choices are kept as they were. Free/busy schedules no longer need approval (they only read).
+
+  A reviewed definition can opt in to `genericPathScope`: a find tool searches the reviewed document's operations under its prefixes, and a read tool (GET) and a change tool (other methods, Ask by default) call one of them by its concrete path, which must match an in-scope operation segment by segment. The four Graph definitions above opt in with their earlier prefixes, so rare operations stay reachable.
+
+  Reviewed allowlist entries accept `put` and `delete`, a reviewed `summary` and `operationId`, and a `requestPath` naming other path parameters than the provider's (unnamed ones are dropped, new ones described with `pathParameterDescriptions`).
+
+  Every Microsoft Graph definition now reads a commit-pinned Graph OpenAPI document checked against its SHA-256 (`source.pinned`), not msgraph-metadata's moving master branch, so upstream changes no longer create new revisions on their own. `bun scripts/graph-openapi-pin.ts --diff <commit>` shows the operation changes before the pin is moved.
+
+### Patch Changes
+
+- b9baad4: A query names a multi-word integration by the word of its name that is also its own domain's word ("Dynamics 365" names Microsoft Dynamics at dynamics.com); written with a capital mid-sentence it names it distinctively, so tool search shows its Connect card. When a search names one integration distinctively, integrations named only by ordinary words of the same request ("close date" for Close) no longer stop the card. The repeated-call guard now compares command results without the per-call metadata the runtime adds (output receipt ids, chunk ids, wall times), so a command that prints the same output every time is recognised as repeating.
+- Updated dependencies [c0248a5]
+  - @opengeni/contracts@6.24.0
+  - @opengeni/network@6.24.0
+
+## 6.23.0
+
+### Patch Changes
+
+- 9dd96b0: Restoring a large workspace archive no longer multiplies worker memory. Byte copies used `Uint8Array.from(buffer)`, which Bun runs element by element through its generic iterator path when the source is a Node Buffer (the result of base64 decoding, file reads, object storage and Postgres bytea). That used about 16 times the archive size in transient memory and was about 100 times slower. A cold restore did it at least twice, so restoring a workspace archive of a few hundred MB could take a worker past 15 GB and kill it. Byte copies now use `new Uint8Array(buffer)`, which makes the same copy at native speed. Archive base64 is decoded once into a view of the decoded bytes. Canonical form is now checked from the decoded length and the final four characters instead of re-encoding the whole archive. Object-storage restores verify the fetched bytes directly instead of decoding the base64 copy again. Native snapshot receipts are recognised from their ASCII prefix without decoding a whole tar archive as text. Restoring a 48 MB archive now raises peak memory by about 2 times the archive size instead of 37 times, and takes 0.2 seconds instead of 3.4 seconds.
+- Updated dependencies [c0089e1]
+- Updated dependencies [9dd96b0]
+- Updated dependencies [adc2409]
+- Updated dependencies [f6a7c28]
+  - @opengeni/contracts@6.23.0
+  - @opengeni/network@6.23.0
+
 ## 6.22.0
 
 ### Patch Changes

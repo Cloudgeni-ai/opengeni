@@ -357,6 +357,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "workspace:read"
   },
   {
+    "id": "archiveEditableArtifact",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/editable-artifacts/:artifactId/archive",
+    "request": [],
+    "response": [],
+    "permission": "artifacts:publish"
+  },
+  {
     "id": "archiveKnowledgeEntry",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/knowledge/entries/:entryId/archive",
@@ -506,6 +514,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ToolGatewayCatalog",
       "ToolGatewayDeclarationsResponse",
       "ToolGatewaySiteConsentResponse",
+      "ToolGatewaySiteReadinessResponse",
       "ToolGatewayTargetApprovalResponse"
     ],
     "permission": "workspace:read",
@@ -2557,6 +2566,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/config/content-security",
     "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/console-sign-in/start",
+    "method": "GET",
+    "path": "/v1/console-sign-in/start",
+    "request": [],
+    "query": [
+      "return"
+    ],
     "response": []
   },
   {
@@ -7193,6 +7212,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "sessions:control"
   },
   {
+    "id": "POST /v1/console-sign-in/authorize",
+    "method": "POST",
+    "path": "/v1/console-sign-in/authorize",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "POST /v1/organizations/:organizationId/codex/accounts/:accountId/activate",
     "method": "POST",
     "path": "/v1/organizations/:organizationId/codex/accounts/:accountId/activate",
@@ -7537,6 +7563,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ToolGatewayCatalog",
       "ToolGatewayDeclarationsResponse",
       "ToolGatewaySiteConsentResponse",
+      "ToolGatewaySiteReadinessResponse",
       "ToolGatewayTargetApprovalResponse"
     ],
     "permission": "workspace:read",
@@ -7554,6 +7581,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ToolGatewayManifestResponse",
       "ToolGatewayResolvedTool",
       "ToolGatewaySiteConsentResponse",
+      "ToolGatewaySiteReadinessResponse",
       "ToolGatewayTargetApprovalResponse"
     ],
     "permission": "workspace:read",
@@ -7572,6 +7600,21 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "workspace:read"
   },
   {
+    "id": "POST /v1/workspaces/:workspaceId/tools/readiness",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/tools/readiness",
+    "request": [],
+    "response": [
+      "ToolGatewaySiteConsentResponse",
+      "ToolGatewaySiteReadinessResponse",
+      "ToolGatewayTargetApprovalResponse"
+    ],
+    "permission": "workspace:read",
+    "secretFields": [
+      "response.approvalToken"
+    ]
+  },
+  {
     "id": "POST /v1/workspaces/:workspaceId/tools/resolve",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/tools/resolve",
@@ -7579,6 +7622,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "ToolGatewayResolvedTool"
     ],
+    "permission": "workspace:read"
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/tools/site-allowances/reset",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/tools/site-allowances/reset",
+    "request": [
+      "ToolGatewaySiteAllowancesResetRequest"
+    ],
+    "response": [],
     "permission": "workspace:read"
   },
   {
@@ -7603,6 +7656,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ToolGatewayManifestResponse",
       "ToolGatewayResolvedTool",
       "ToolGatewaySiteConsentResponse",
+      "ToolGatewaySiteReadinessResponse",
       "ToolGatewayTargetApprovalResponse"
     ],
     "permission": "workspace:read",

@@ -48,6 +48,7 @@ import { Notice } from "@opengeni/react/ui/notice";
 import { SegmentedControl, type SegmentedControlProps } from "@opengeni/react/ui/segmented-control";
 import { SelectMenu, type SelectOption } from "@opengeni/react/ui/select-menu";
 import { useAppContext } from "@opengeni/react/app/app-context";
+import { useSimplifiedInterface } from "@opengeni/react/app/lib/simplified-interface";
 import {
   apiErrorAdvice,
   apiErrorDetails,
@@ -453,15 +454,20 @@ function AgentScheduleForm({
     context.managedSelfContext,
   );
 
+  const { simplified, productName } = useSimplifiedInterface();
   // The draft is built once. New schedules follow the workspace's resolved
   // default model until someone picks one, and are then saved without a model
   // so each run resolves the default afresh.
   const [initial] = useState<ScheduleDraft>(() => {
     const defaults: DraftDefaults = {
       includeOpenGeniTool: canAttachOpenGeniTool,
-      model: modelCatalog.defaultSelection?.model ?? context.model,
-      reasoningEffort: modelCatalog.defaultSelection?.reasoningEffort ?? context.reasoningEffort,
-      modelFollowsDefault: true,
+      // The simplified interface has one model policy: a new schedule names it instead of
+      // following a default that could resolve to something else later.
+      model: simplified ? context.model : (modelCatalog.defaultSelection?.model ?? context.model),
+      reasoningEffort: simplified
+        ? context.reasoningEffort
+        : (modelCatalog.defaultSelection?.reasoningEffort ?? context.reasoningEffort),
+      modelFollowsDefault: !simplified,
       defaultSandboxBackend: context.clientConfig.defaultSandboxBackend,
       defaultMachineSandboxId,
       workspaceDefaultToolIds: context.workspaceDefaultToolIds,
@@ -469,7 +475,7 @@ function AgentScheduleForm({
     const formDefaults = {
       model: defaults.model,
       reasoningEffort: defaults.reasoningEffort,
-      modelFollowsDefault: true,
+      modelFollowsDefault: !simplified,
       defaultSandboxBackend: context.clientConfig.defaultSandboxBackend,
       defaultMachineSandboxId,
       workspaceDefaultToolIds: context.workspaceDefaultToolIds,
@@ -1232,7 +1238,7 @@ function AgentScheduleForm({
             task?.name
           ) : offerAgent ? (
             <>
-              Rather describe it? <HelpLink onClick={ask.open}>Create with Opengeni</HelpLink>
+              Rather describe it? <HelpLink onClick={ask.open}>Create with {productName}</HelpLink>
             </>
           ) : undefined
         }

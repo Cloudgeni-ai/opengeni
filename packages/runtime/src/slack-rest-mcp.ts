@@ -164,7 +164,7 @@ export class SlackRestMcpServer implements LocalMcpBridgeServer {
   readonly cacheToolsList = false;
   readonly bridge: LocalMcpBridgeDescriptor = SLACK_REST_MCP_BRIDGE_DESCRIPTOR;
   private readonly fetchImpl: FetchLike;
-  private identity: { teamId: string; userId: string; connectionId: string } | undefined;
+  private identity: SlackRestIdentity | undefined;
 
   constructor(private readonly options: SlackRestMcpServerOptions) {
     this.name = `opengeni-slack-rest-${options.serverId.replace(/[^a-zA-Z0-9._-]/gu, "-").slice(0, 80)}`;
@@ -248,7 +248,7 @@ export class SlackRestMcpServer implements LocalMcpBridgeServer {
       const output =
         toolName === "slack_download_file"
           ? await this.downloadFile(String(plan.params.file), payload, operationId!, options)
-          : projectResult(toolName, payload);
+          : projectResult(toolName, payload, this.identity!);
       return {
         content: [{ type: "text", text: JSON.stringify(output) }],
         structuredContent: output,
@@ -416,6 +416,7 @@ export class SlackRestMcpServer implements LocalMcpBridgeServer {
     this.identity = {
       teamId: payload.team_id,
       userId: payload.user_id,
+      ...(typeof payload.user === "string" && payload.user ? { userName: payload.user } : {}),
       connectionId: credential.connectionId,
     };
   }
@@ -885,10 +886,90 @@ function trustedOperationId(meta: Record<string, unknown> | null | undefined): s
 function normalizedContentType(value: string | null): string {
   return (value ?? "application/octet-stream").split(";", 1)[0]!.trim().toLowerCase();
 }
-function projectResult(toolName: string, payload: Payload): Record<string, unknown> {
-  if (toolName === "slack_send_message")
-    return { channel: payload.channel, ts: payload.ts, message: payload.message };
+type SlackRestIdentity = {
+  teamId: string;
+  userId: string;
+  /** The account's Slack username from auth.test, when Slack gave one. */
+  userName?: string;
+  connectionId: string;
+};
+
+function slackObject(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+/**
+ * Who a message sent with this connection was posted as. A user token's post
+ * belongs to the person, but Slack also tags it with the OAuth app it went
+ * through (`bot_id`, `app_id`, `bot_profile`). Left raw, that app's name reads
+ * like a bot sender, so the result states the sender and names the app apart.
+ */
+function personalPostedAs(
+  message: Record<string, unknown> | undefined,
+  identity: SlackRestIdentity,
+) {
+  const userId = typeof message?.user === "string" && message.user ? message.user : identity.userId;
+  const profile = slackObject(message?.bot_profile);
+  const appName = typeof profile?.name === "string" && profile.name ? profile.name : undefined;
+  const appId =
+    typeof message?.app_id === "string" && message.app_id
+      ? message.app_id
+      : typeof profile?.app_id === "string" && profile.app_id
+        ? profile.app_id
+        : undefined;
+  const who = identity.userName ? `${identity.userName} (<@${userId}>)` : `<@${userId}>`;
+  return {
+    identity: "personal_slack_account" as const,
+    userId,
+    ...(identity.userName ? { userName: identity.userName } : {}),
+    ...(appName || appId
+      ? {
+          sentThroughApp: {
+            ...(appName ? { name: appName } : {}),
+            ...(appId ? { id: appId } : {}),
+          },
+        }
+      : {}),
+    summary: `Posted as ${who}, the person's own connected Slack account, not as a bot. Slack shows the person as the sender${
+      appName ? `; ${appName} is only the app the message was sent through` : ""
+    }.`,
+  };
+}
+
+function projectResult(
+  toolName: string,
+  payload: Payload,
+  identity: SlackRestIdentity,
+): Record<string, unknown> {
+  if (toolName === "slack_send_message") {
+    const message = slackObject(payload.message);
+    // The app fields move to postedAs.sentThroughApp.
+    const {
+      bot_id: _botId,
+      app_id: _appId,
+      bot_profile: _botProfile,
+      ...shownMessage
+    } = message ?? {};
+    return {
+      channel: payload.channel,
+      ts: payload.ts,
+      postedAs: personalPostedAs(message, identity),
+      ...(message ? { message: shownMessage } : {}),
+    };
+  }
   const { ok: _ok, ...result } = payload;
+  if (
+    (toolName === "slack_read_channel" || toolName === "slack_read_thread") &&
+    Array.isArray(result.messages)
+  ) {
+    // The connected account's own posts, including ones sent through an app.
+    result.messages = result.messages.map((entry) => {
+      const message = slackObject(entry);
+      return message?.user === identity.userId ? { ...message, postedByYou: true } : entry;
+    });
+  }
   return result;
 }
 class SlackInputError extends Error {}

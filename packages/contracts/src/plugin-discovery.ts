@@ -1,5 +1,5 @@
 /** Public discovery metadata; listing does not imply runtime compatibility. */
-export { pluginMcpUnavailableReason } from "./mcp-endpoint";
+export { mcpHostsDeploymentCannotConnect, pluginMcpUnavailableReason } from "./mcp-endpoint";
 
 export type PluginDiscoveryItem = {
   id: string;

@@ -365,7 +365,7 @@ describe("agent-access scope stays enforced at every session entry point", () =>
       "session_get",
       "session_events",
       "session_wait",
-      "session_send_message",
+      "session_queue_message",
       "session_human_input_respond",
       "set_other_session_title",
       ...Object.keys(MCP_DELEGATED_TOOLS),

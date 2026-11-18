@@ -6,7 +6,11 @@ import {
   type CapabilityCatalogItem as CatalogItem,
 } from "@opengeni/contracts";
 import { deploymentCannotConnect } from "@opengeni/contracts/personal-integration-setup";
-import { applyOperatorOAuthClientRequirement, builtInConnectorCatalogItems } from "../src";
+import {
+  applyOperatorOAuthClientRequirement,
+  builtInConnectorCatalogItems,
+  oauthClientRequirementsByHost,
+} from "../src";
 
 function item(input: Partial<CatalogItem> = {}): CatalogItem {
   return CapabilityCatalogItem.parse({
@@ -79,6 +83,48 @@ describe("operator OAuth client connectability", () => {
     expect(applyOperatorOAuthClientRequirement(plain, none)).toBe(plain);
     const api = item({ kind: "api" });
     expect(applyOperatorOAuthClientRequirement(api, none)).toBe(api);
+  });
+
+  test("another listing of the same provider's MCP host carries its requirement", () => {
+    // Dropbox's reviewed row is /chatgpt_app_mcp; its plugins bundle /mcp.
+    // Both use https://www.dropbox.com, which refuses self-registration.
+    const reviewed = item({
+      id: "registry:dropbox",
+      name: "Dropbox",
+      mcpUrl: "https://mcp.dropbox.com/chatgpt_app_mcp",
+      metadata: {
+        oauthClientRequirement: {
+          issuer: "https://www.dropbox.com",
+          reason: "registration_refused",
+        },
+      },
+    });
+    const pluginServer = item({
+      id: "mcp:plugin-dropbox",
+      name: "dropbox",
+      source: "manual",
+      mcpUrl: null,
+      endpointUrl: "https://MCP.dropbox.com/mcp",
+      metadata: {},
+    });
+    const otherHost = item({
+      id: "mcp:other",
+      mcpUrl: "https://mcp.example.com/mcp",
+      metadata: {},
+    });
+    const byHost = oauthClientRequirementsByHost([reviewed, pluginServer, otherHost]);
+    expect([...byHost]).toEqual([["mcp.dropbox.com", "https://www.dropbox.com"]]);
+
+    const missing = applyOperatorOAuthClientRequirement(pluginServer, resolver("{}"), byHost);
+    expect(missing.runtime.operatorOAuthClient).toEqual({ configured: false });
+    expect(deploymentCannotConnect(missing)).toBe(true);
+    const configured = applyOperatorOAuthClientRequirement(
+      pluginServer,
+      resolver(JSON.stringify({ "https://www.dropbox.com": { clientId: "dropbox" } })),
+      byHost,
+    );
+    expect(configured.runtime.operatorOAuthClient).toEqual({ configured: true });
+    expect(applyOperatorOAuthClientRequirement(otherHost, resolver("{}"), byHost)).toBe(otherHost);
   });
 });
 

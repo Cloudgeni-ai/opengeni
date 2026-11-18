@@ -254,6 +254,17 @@ revision, not another place to edit or shorten the description. There is no
 independent "short description". Storage identity (UUID/source binding) is
 separate from the authored name; renaming does not create another Skill.
 
+An optional `tools:` key (a YAML list, or one comma- or space-separated
+string, at most 20 names) declares the tools a Skill uses, by reference name:
+`server.tool`, `server__tool` or a tool's own name
+([MCP surfaces](../mcp-surfaces.md#tool-names-the-name-to-call-and-the-name-to-ask-by)).
+It is not index metadata and grants nothing. A model's full `skill_read` of the
+Skill (no `paths`, no `listFiles`) loads the declared tools the turn is
+authorized for, after the read's result, exactly as a `tool_search` names load
+would (`skillDeclaredTools` in `packages/contracts/src/skill-metadata.ts`; the
+`discloses` hook of the `skill_read` definition). Names that resolve to no
+tool are skipped.
+
 All save, publish, import, and activation paths must use the same parser and
 validation. The API and agent save requests accept files, not a competing
 title/description pair. The simple editor edits frontmatter in the file. A future

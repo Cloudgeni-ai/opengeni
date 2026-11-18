@@ -571,6 +571,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       sandboxGroupId: ids.groupId,
     };
     const acquired = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       ...identity,
       kind: "turn",
       holderId: "dead-create",
@@ -1542,6 +1543,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       let successorCaptureId: string | undefined;
       const assertAdmissionFenced = async () => {
         const arrival = await acquireLease(db, {
+          sandboxPlanLimits: "unbounded_test_fixture",
           accountId: ids.accountId,
           workspaceId: ids.workspaceId,
           sandboxGroupId: ids.groupId,
@@ -2371,6 +2373,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect((immediate as SandboxWorkspaceMutationFencedError).code).toBe("capture_in_progress");
 
     const blockedAcquire = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
       sandboxGroupId: ids.groupId,
@@ -2382,6 +2385,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(blockedAcquire.role).toBe("fenced");
     let acquireWaitSettled = false;
     const waitingAcquire = acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
       sandboxGroupId: ids.groupId,
@@ -5924,6 +5928,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     });
     expect(cold.wentCold).toBe(true);
     const successor = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
       sandboxGroupId: ids.groupId,
@@ -6799,6 +6804,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     ).toBeGreaterThanOrEqual(1);
     // The cold row now elects an archive-free spawner for this decision.
     const elected = await acquireLease(db, {
+      sandboxPlanLimits: "unbounded_test_fixture",
       accountId: ws.accountId,
       workspaceId: ws.workspaceId,
       sandboxGroupId: ws.groupId,
@@ -7004,6 +7010,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       persistArchive,
     ) => {
       const successor = await acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         accountId: ws.accountId,
         workspaceId: ws.workspaceId,
         sandboxGroupId: ws.groupId,
@@ -7646,6 +7653,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
           await admin`update audit_events set target_id = ${crypto.randomUUID()} where id = ${authorization.operationId}`;
         expect(
           await acquireLease(db, {
+            sandboxPlanLimits: "unbounded_test_fixture",
             ...scope,
             kind: "viewer",
             holderId: "recovery-negative",
@@ -7668,6 +7676,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         authorized: true,
       });
       const elected = await acquireLease(db, {
+        sandboxPlanLimits: "unbounded_test_fixture",
         ...scope,
         kind: "viewer",
         holderId: "recovery-verification",

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { agentPrivateFileOwnerSubjectId, unboundGitHubRepositoryResources } from "@opengeni/core";
 import {
   getSessionAuthorityProjection,
@@ -165,6 +166,7 @@ import { dropUnavailableOptionalRepositories } from "./optional-repositories";
 import { buildTurnAgent } from "./agent-build";
 import { assertTurnSandboxBackendServed, shouldDeferRepositorySkillIndex } from "./sandbox-route";
 import { runAuxiliaryProviderDispatch } from "../auxiliary-provider-dispatch";
+import { untilWorkerShutdown } from "./worker-shutdown-handoff";
 
 /**
  * Retain subscription credential/account authority for the title sidecar
@@ -520,7 +522,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       assertRecoveryWindow();
     };
 
-    try {
+    const runClaimedTurn = async (): Promise<RunAgentTurnResult> => {
       const claimed = await claimTurnAttempt({
         input,
         settings,
@@ -2341,6 +2343,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           }
         },
       );
+    };
+    try {
+      // A worker shutdown hands the attempt off even when the run is parked in
+      // a wait that never observes cancellation; see untilWorkerShutdown.
+      return await untilWorkerShutdown(cancellationSignal, runClaimedTurn());
     } catch (error) {
       // Stop new external wait mutations before asynchronous failure
       // persistence. Do not drain here: the original failure/cancellation and
@@ -2423,7 +2430,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         "opengeni.trigger_kind": input.trigger.kind,
         correlationId,
       },
-      { parent: null },
+      {
+        parent: null,
+        ...(sampleSegmentDatabaseSpans(input.attemptId)
+          ? { childSpanLimit: SEGMENT_DATABASE_CHILD_SPAN_LIMIT }
+          : {}),
+      },
     );
     try {
       return await withMcpTelemetry(resolvedServices.observability, correlationId, () =>
@@ -2456,4 +2468,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       span.end();
     }
   };
+}
+
+/**
+ * Child (database) spans for a deterministic sample of segments: the same
+ * statement names the API's request spans export, so heavy queries map to the
+ * worker code path that ran them. Only exported when OTLP is configured.
+ */
+const SEGMENT_DATABASE_SPAN_SAMPLE_PERCENT = 5;
+const SEGMENT_DATABASE_CHILD_SPAN_LIMIT = 2_048;
+
+export function sampleSegmentDatabaseSpans(attemptId: string): boolean {
+  const bucket = createHash("sha256").update(attemptId).digest().readUInt16BE(0) % 100;
+  return bucket < SEGMENT_DATABASE_SPAN_SAMPLE_PERCENT;
 }

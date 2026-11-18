@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import { RunContext, type MCPServer } from "@openai/agents";
 import { testSettings } from "@opengeni/testing/settings";
-import { buildOpenGeniAgent, prepareAgentTools, prefixedMcpToolName } from "../src/index";
+import { buildOpenGeniAgent, prepareAgentTools } from "../src/index";
+import { mcpToolWireName } from "../src/mcp-model-tool-name";
 import { lazyToolRuntimeForAgent } from "../src/lazy-tool-transport";
 import { isSearchableMcpFunctionTool } from "../src/codex-tool-search";
 
@@ -55,7 +56,7 @@ for (const transport of ["codex_native", "openai_native", "generic_dispatch"] as
           const visible = await agent.getAllTools(new RunContext());
           const runtime = lazyToolRuntimeForAgent(agent)!;
           for (const id of ids) {
-            const name = prefixedMcpToolName(id, "send");
+            const name = mcpToolWireName(id, "send");
             expect(visible.some((tool) => tool.type === "function" && tool.name === name)).toBe(
               eager,
             );
@@ -83,7 +84,7 @@ for (const transport of ["codex_native", "openai_native", "generic_dispatch"] as
 
 test("exact hashed classification cannot widen the selected server set", () => {
   const server = `account-${"a".repeat(64)}`;
-  const name = prefixedMcpToolName(server, "send");
+  const name = mcpToolWireName(server, "send");
   const tool = { type: "function", name };
   const identities = new Map([[name, server]]);
   expect(isSearchableMcpFunctionTool(tool, new Set([server]), identities)).toBe(true);

@@ -244,18 +244,24 @@ export async function settleHostedWebSearchUsage(
     requests: number;
     /** The response's funding origin; omitted uses the turn's frozen origin. */
     billingOrigin?: BillingOrigin;
+    /**
+     * The charge planned when the response's usage was recorded (it already
+     * passed the checks below); settled as is instead of repriced.
+     */
+    charge?: { providerMicros: number; creditMicros: number; marginBps: number };
   },
 ): Promise<{ creditMicros: number }> {
   if (
     input.requests <= 0 ||
-    !paidHostedToolsChargeCredits(settings, {
-      accountId: input.accountId,
-      chargesOpenGeniCredits: true,
-    })
+    (!input.charge &&
+      !paidHostedToolsChargeCredits(settings, {
+        accountId: input.accountId,
+        chargesOpenGeniCredits: true,
+      }))
   ) {
     return { creditMicros: 0 };
   }
-  const charge = hostedWebSearchCharge(settings, input.requests);
+  const charge = input.charge ?? hostedWebSearchCharge(settings, input.requests);
   const shared = {
     accountId: input.accountId,
     workspaceId: input.workspaceId,

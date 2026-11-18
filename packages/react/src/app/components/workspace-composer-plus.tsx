@@ -10,7 +10,11 @@ import { userErrorText } from "../../ui/api-error";
 import { hasWorkspacePermission, isWorkspacePermissionDenied } from "../lib/permissions";
 import type { CapabilityCatalogItem, ConnectionMetadata } from "../types";
 import { composerConnectorOptions } from "../lib/composer-connectors";
-import { capabilityReconnectPlan, connectionHealth } from "../lib/capabilities";
+import {
+  capabilityReconnectPlan,
+  connectionHealth,
+  loadConnectionHealthAccounts,
+} from "../lib/capabilities";
 import { startMcpOAuthWithTimeout } from "../lib/mcp-oauth";
 import { usePage } from "../lib/navigation";
 
@@ -119,7 +123,8 @@ export function WorkspaceComposerPlus(
     try {
       const connectionLoad = (
         canReadConnections === true
-          ? client.listConnections(workspaceId).then(
+          ? // Health reads the account inventory the tool runtime resolves.
+            loadConnectionHealthAccounts(client, workspaceId).then(
               (connections) => ({ connections, denied: false }),
               (failure: unknown) => ({
                 connections: null,
@@ -286,17 +291,22 @@ export function WorkspaceComposerPlus(
     try {
       const returnUrl = new URL(page.href());
       returnUrl.searchParams.set("composer_connector", item.id);
-      const response = await startMcpOAuthWithTimeout(client, workspaceId, {
-        connectionId,
-        ownership: plan.ownership,
-        ...((item.mcpUrl ?? item.endpointUrl)
-          ? { mcpUrl: (item.mcpUrl ?? item.endpointUrl)! }
-          : {}),
-        ...(item.connectionRef?.providerDomain
-          ? { providerDomain: item.connectionRef.providerDomain }
-          : {}),
-        returnPath: returnUrl.pathname + returnUrl.search,
-      });
+      // A personal account can come from another workspace, which owns its row.
+      const response = await startMcpOAuthWithTimeout(
+        client,
+        plan.connectionWorkspaceId ?? workspaceId,
+        {
+          connectionId,
+          ownership: plan.ownership,
+          ...((item.mcpUrl ?? item.endpointUrl)
+            ? { mcpUrl: (item.mcpUrl ?? item.endpointUrl)! }
+            : {}),
+          ...(item.connectionRef?.providerDomain
+            ? { providerDomain: item.connectionRef.providerDomain }
+            : {}),
+          returnPath: returnUrl.pathname + returnUrl.search,
+        },
+      );
       if (
         scope.current.client !== client ||
         scope.current.workspaceId !== workspaceId ||

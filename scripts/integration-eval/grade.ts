@@ -251,6 +251,22 @@ function noIntegrationTool(testCase: EvalCase, receipts: Receipts, reasons: stri
   if (ownCard)
     return fail("no_tool", [...reasons, "showed a connect card although it is connected"]);
   const expected = testCase.expectAnswer ?? [];
+  if (
+    testCase.answerFromAccountLine &&
+    expected.length > 0 &&
+    matchesAll(receipts.finalAnswer, expected).length === 0 &&
+    receipts.accountLines.some(
+      (line) =>
+        line.integration === testCase.integration &&
+        matchesAll(line.account, expected).length === 0,
+    )
+  ) {
+    return {
+      pass: true,
+      category: null,
+      reasons: [...reasons, "answered from the tool account line"],
+    };
+  }
   if (expected.length > 0 && matchesAll(receipts.finalAnswer, expected).length === 0) {
     return fail("hallucinated_result", [
       ...reasons,

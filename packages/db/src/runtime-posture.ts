@@ -51,7 +51,8 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * due inventory (0935), the recording retention sweep's due inventory (0946),
  * the lookup of whose personal machine a chat runs on (0978), the re-arm of
  * the running commands a returning runner did not answer for (0984), the
- * control worker's content-free queued-turn hold summary (0988), the API's
+ * control worker's content-free queued-turn hold summary (0988; since 1485
+ * also the turns parked waiting for subscription capacity), the API's
  * inventory of browsers an agent session holds (1002), the only writer of
  * the EU-only inference setting and its history (1060), the secret history
  * scrub's reader and cell writer (1091), the subscription
@@ -66,7 +67,12 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * compact (1240), and the session storage pass's inventory of sessions with
  * content to collect and its collector of unreferenced content blobs (1359),
  * and the sandbox reaper's inventory of cold sandboxes whose chats are all
- * archived (1404).
+ * archived (1404), the organization-wide sandbox counts behind
+ * plan-tiered sandbox limits (1475), and the deployment-wide check of
+ * which Nango connections a live connection still stands for (1482), the
+ * unpaid sandbox fleet counts behind the fleet limits (1486), and the
+ * deployment-wide listing of live Nango rows' owners for the Nango sweep
+ * (1487).
  * Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
@@ -103,6 +109,10 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "session_content_garbage_candidates_v1(integer)",
   "collect_session_content_garbage_v1(uuid, uuid, integer)",
   "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
+  "organization_warm_sandbox_counts_v1(uuid, text, uuid)",
+  "nango_connections_in_use_v1(text[])",
+  "nango_live_connection_owners_v1(text, text, text, integer)",
+  "sandbox_unpaid_fleet_v1(uuid, boolean)",
 ] as const;
 
 /**
@@ -142,6 +152,16 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * 1404 withholds the inventory of cold sandboxes whose chats are all
  * archived; until it is granted, such a non-compute sandbox keeps its saved
  * workspace until its chats are deleted (as before).
+ * 1475 withheld the organization-wide sandbox counts and 1479 granted them.
+ * 1482 withholds the check of which Nango connections a live connection
+ * stands for; until it is granted, deleting a Nango connection is decided
+ * from the person's own reads, and nothing is deleted when one of their
+ * organizations cannot be fully read.
+ * 1487 withholds the listing of live Nango rows' owners; until it is
+ * granted, the Nango sweep only visits people Nango lists a connection for.
+ * 1486 withholds the unpaid sandbox fleet counts; until they are granted, the
+ * unpaid fleet running cap and box-time budget are inactive (fleet pressure
+ * and the young-organization limit still apply).
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -153,6 +173,9 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_content_garbage_candidates_v1(integer)",
   "collect_session_content_garbage_v1(uuid, uuid, integer)",
   "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)",
+  "nango_connections_in_use_v1(text[])",
+  "nango_live_connection_owners_v1(text, text, text, integer)",
+  "sandbox_unpaid_fleet_v1(uuid, boolean)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -180,7 +203,14 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "organization_memberships",
   ],
   "rearm_unanswered_connected_commands(uuid, uuid, text)": ["session_background_commands"],
-  "summarize_queued_turns_by_hold()": ["session_turns", "sessions", "workspace_inference_controls"],
+  "summarize_queued_turns_by_hold()": [
+    "session_turns",
+    "sessions",
+    "workspace_inference_controls",
+    "subscription_capacity_waiters",
+    "session_turn_attempts",
+    "session_goals",
+  ],
   "list_agent_held_browser_sessions(integer, bigint)": [
     "browser_sessions",
     "browser_session_associations",
@@ -272,6 +302,18 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
   "cold_sandboxes_of_archived_chats_v1(integer, uuid, uuid, integer)": [
     "sandbox_leases",
     "sessions",
+  ],
+  "organization_warm_sandbox_counts_v1(uuid, text, uuid)": [
+    "sandbox_leases",
+    "sandbox_lease_holders",
+    "workspaces",
+  ],
+  "nango_connections_in_use_v1(text[])": ["connections"],
+  "nango_live_connection_owners_v1(text, text, text, integer)": ["connections"],
+  "sandbox_unpaid_fleet_v1(uuid, boolean)": [
+    "sandbox_leases",
+    "usage_events",
+    "opengeni_private.modal_inventory_read_capabilities",
   ],
 };
 

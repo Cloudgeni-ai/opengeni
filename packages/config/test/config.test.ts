@@ -7,6 +7,14 @@ import {
 } from "@opengeni/contracts";
 import {
   DEFAULT_MODAL_IMAGE_REF,
+  DEFAULT_SANDBOX_PLAN_LIMITS,
+  modalSandboxResourceBounds,
+  paidSandboxPlanLimit,
+  parseSandboxPlanLimitsJson,
+  sandboxResourceClassForPlanTier,
+  sandboxPlanLimits,
+  sandboxPlanTierUnpaid,
+  settingsForSandboxPlanTier,
   FIRST_PARTY_MCP_CALL_TIMEOUT_MS,
   FIRST_PARTY_MCP_SETUP_TIMEOUT_MS,
   DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS,
@@ -1400,6 +1408,26 @@ describe("sandbox preparation profiles", () => {
     expect(
       withEnv({ OPENGENI_RIG_SETUP_TIMEOUT_MS: "2000" }, () => getSettings()).rigSetupTimeoutMs,
     ).toBe(2_000);
+  });
+
+  test("the Sandbox Environment image snapshot has its own longer timeout", () => {
+    const defaults = withEnv({}, () => getSettings());
+    expect(defaults.rigProviderImageSnapshotTimeoutMs).toBe(300_000);
+    expect(defaults.sandboxSnapshotTimeoutMs).toBe(60_000);
+    const configured = withEnv(
+      {
+        OPENGENI_RIG_PROVIDER_IMAGE_SNAPSHOT_TIMEOUT_MS: "540000",
+        OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS: "45000",
+      },
+      () => getSettings(),
+    );
+    expect(configured.rigProviderImageSnapshotTimeoutMs).toBe(540_000);
+    expect(configured.sandboxSnapshotTimeoutMs).toBe(45_000);
+    // It must leave room for setup and the cold boot check in the
+    // 15-minute verification activity.
+    expect(() =>
+      withEnv({ OPENGENI_RIG_PROVIDER_IMAGE_SNAPSHOT_TIMEOUT_MS: "900000" }, () => getSettings()),
+    ).toThrow();
   });
 
   test("selfhosted exec defaults to unbounded while control stays at 30s", () => {
@@ -2961,6 +2989,206 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
       () => getSettings(),
     );
     expect(settings.sandboxRotationLeadMs).toBe(290_001);
+  });
+
+  test("viewer-only idle drain defaults to 30 minutes and 0 disables it", () => {
+    const defaults = withEnv({}, () => getSettings());
+    expect(defaults.sandboxViewerIdleDrainMs).toBe(1_800_000);
+    const tuned = withEnv({ OPENGENI_SANDBOX_VIEWER_IDLE_DRAIN_MS: "600000" }, () => getSettings());
+    expect(tuned.sandboxViewerIdleDrainMs).toBe(600_000);
+    const off = withEnv({ OPENGENI_SANDBOX_VIEWER_IDLE_DRAIN_MS: "0" }, () => getSettings());
+    expect(off.sandboxViewerIdleDrainMs).toBe(0);
+  });
+
+  test("host-provisioned organizations have an unbounded embedded plan tier", () => {
+    expect(DEFAULT_SANDBOX_PLAN_LIMITS.embedded).toEqual({});
+    expect(
+      parseSandboxPlanLimitsJson('{"embedded":{"viewerOnlyBoxesPerOrganization":40}}').embedded,
+    ).toEqual({ viewerOnlyBoxesPerOrganization: 40 });
+  });
+
+  test("young Free self-serve organizations have a new plan tier with one viewer-only box", () => {
+    expect(DEFAULT_SANDBOX_PLAN_LIMITS.new).toEqual({
+      organizationsYoungerThanMs: 259_200_000,
+      viewerOnlyBoxesPerOrganization: 1,
+      viewerOnlyBoxesPerMember: 1,
+      ...unpaidBounds,
+    });
+    expect(
+      parseSandboxPlanLimitsJson('{"new":{"organizationsYoungerThanMs":3600000}}').new,
+    ).toEqual({ organizationsYoungerThanMs: 3_600_000 });
+  });
+
+  const unpaidBounds = {
+    runningBoxesPerOrganization: 2,
+    runningBoxesPerPerson: 2,
+    boxSecondsPerOrganizationPerDay: 43_200,
+    boxSecondsPerPersonPerDay: 43_200,
+    idleDrainAllHolders: true,
+  };
+
+  test("unpaid tiers share two running boxes, two per person and 12 box-hours a day", () => {
+    expect(DEFAULT_SANDBOX_PLAN_LIMITS.free).toEqual({
+      viewerOnlyBoxesPerOrganization: 2,
+      viewerOnlyBoxesPerMember: 1,
+      ...unpaidBounds,
+    });
+    // An organization with no plan row yet (a new signup before enrollment)
+    // is bounded like Free, never unbounded and never closed.
+    expect(DEFAULT_SANDBOX_PLAN_LIMITS.none).toEqual({
+      viewerOnlyBoxesPerOrganization: 1,
+      viewerOnlyBoxesPerMember: 1,
+      ...unpaidBounds,
+    });
+  });
+
+  test("a plan-less organization is unpaid and bounded like Free only with subscription plans on", () => {
+    const plansOn = withEnv({ OPENGENI_SUBSCRIPTION_PLANS_ENABLED: "true" }, () => getSettings());
+    const plansOff = withEnv({}, () => getSettings());
+    expect(plansOff.subscriptionPlansEnabled).toBe(false);
+    // With plans on, a plan-less organization is waiting for Free enrollment.
+    expect(sandboxPlanLimits(plansOn).none).toEqual(DEFAULT_SANDBOX_PLAN_LIMITS.none);
+    expect(sandboxPlanTierUnpaid("none", { subscriptionPlansEnabled: true })).toBe(true);
+    expect(sandboxPlanTierUnpaid("none")).toBe(true);
+    expect(sandboxResourceClassForPlanTier("none", { subscriptionPlansEnabled: true })).toBe(
+      "unpaid",
+    );
+    expect(settingsForSandboxPlanTier(plansOn, "none").sandboxResourceClass).toBe("unpaid");
+    // Without plans no organization ever gets a plan row: `none` is every
+    // organization's ordinary tier, unbounded and on the standard ceilings.
+    const withoutPlans = sandboxPlanLimits(plansOff);
+    expect(Object.hasOwn(withoutPlans, "none")).toBe(false);
+    expect(withoutPlans).toEqual(
+      Object.fromEntries(
+        Object.entries(DEFAULT_SANDBOX_PLAN_LIMITS).filter(([tier]) => tier !== "none"),
+      ),
+    );
+    expect(sandboxPlanTierUnpaid("none", { subscriptionPlansEnabled: false })).toBe(false);
+    expect(sandboxResourceClassForPlanTier("none", { subscriptionPlansEnabled: false })).toBe(
+      "standard",
+    );
+    expect(settingsForSandboxPlanTier(plansOff, "none")).toBe(plansOff);
+    // Every other tier keeps its meaning either way, and an operator's own
+    // table still applies.
+    for (const subscriptionPlansEnabled of [true, false]) {
+      for (const tier of ["free", "new", "restricted"]) {
+        expect(sandboxPlanTierUnpaid(tier, { subscriptionPlansEnabled })).toBe(true);
+      }
+      for (const tier of ["pro", "max", "enterprise", "embedded", null]) {
+        expect(sandboxPlanTierUnpaid(tier, { subscriptionPlansEnabled })).toBe(false);
+      }
+    }
+    expect(
+      sandboxPlanLimits({
+        ...plansOff,
+        sandboxPlanLimitsJson: '{"none":{"runningBoxesPerOrganization":4}}',
+      }).none,
+    ).toEqual({ runningBoxesPerOrganization: 4 });
+  });
+
+  test("a held or denied organization that has not paid gets no sandbox at all", () => {
+    expect(DEFAULT_SANDBOX_PLAN_LIMITS.restricted).toMatchObject({
+      viewerOnlyBoxesPerOrganization: 0,
+      viewerOnlyBoxesPerMember: 0,
+      runningBoxesPerOrganization: 0,
+      runningBoxesPerPerson: 0,
+      boxSecondsPerOrganizationPerDay: 0,
+      boxSecondsPerPersonPerDay: 0,
+      idleDrainAllHolders: true,
+    });
+  });
+
+  test("paid and host-provisioned tiers get none of the unpaid bounds", () => {
+    for (const tier of ["pro", "max", "enterprise", "embedded"]) {
+      const limit = DEFAULT_SANDBOX_PLAN_LIMITS[tier] ?? {};
+      expect(limit.runningBoxesPerPerson).toBeUndefined();
+      expect(limit.boxSecondsPerOrganizationPerDay).toBeUndefined();
+      expect(limit.boxSecondsPerPersonPerDay).toBeUndefined();
+      expect(limit.idleDrainAllHolders).toBeUndefined();
+    }
+  });
+
+  test("plan limits JSON parses the new counts and the idle-drain flag", () => {
+    expect(
+      parseSandboxPlanLimitsJson(
+        '{"free":{"runningBoxesPerPerson":3,"boxSecondsPerOrganizationPerDay":3600,"boxSecondsPerPersonPerDay":7200,"idleDrainAllHolders":false}}',
+      ).free,
+    ).toEqual({
+      runningBoxesPerPerson: 3,
+      boxSecondsPerOrganizationPerDay: 3600,
+      boxSecondsPerPersonPerDay: 7200,
+      idleDrainAllHolders: false,
+    });
+    expect(() => parseSandboxPlanLimitsJson('{"free":{"idleDrainAllHolders":"yes"}}')).toThrow(
+      "must be a boolean",
+    );
+    expect(() => parseSandboxPlanLimitsJson('{"free":{"runningBoxesPerPerson":-1}}')).toThrow();
+  });
+
+  test("every Modal box gets CPU and memory ceilings by its organization's resource class", () => {
+    const settings = withEnv({}, () => getSettings());
+    expect(settings.sandboxResourceClass).toBe("standard");
+    expect(modalSandboxResourceBounds(settings)).toEqual({
+      cpu: 0.125,
+      cpuLimit: 16,
+      memoryMiB: 128,
+      memoryLimitMiB: 32_768,
+    });
+    for (const tier of ["free", "new", "none", "restricted"]) {
+      expect(sandboxResourceClassForPlanTier(tier)).toBe("unpaid");
+    }
+    for (const tier of ["pro", "max", "enterprise", "embedded", null, undefined]) {
+      expect(sandboxResourceClassForPlanTier(tier)).toBe("standard");
+    }
+    const unpaid = settingsForSandboxPlanTier(settings, "free");
+    expect(modalSandboxResourceBounds(unpaid)).toEqual({
+      cpu: 0.125,
+      cpuLimit: 2,
+      memoryMiB: 128,
+      memoryLimitMiB: 4096,
+    });
+    expect(settingsForSandboxPlanTier(settings, "pro")).toBe(settings);
+    // An unpaid-tier organization that bought credit keeps the paid ceilings
+    // and loses only the unpaid-only bounds, not its running-box limits.
+    expect(sandboxResourceClassForPlanTier("free", { paidHistory: true })).toBe("standard");
+    expect(settingsForSandboxPlanTier(settings, "free", { paidHistory: true })).toBe(settings);
+    const paidFree = paidSandboxPlanLimit(DEFAULT_SANDBOX_PLAN_LIMITS.free!);
+    expect(paidFree).toEqual({
+      viewerOnlyBoxesPerOrganization: 2,
+      viewerOnlyBoxesPerMember: 1,
+      runningBoxesPerOrganization: 2,
+    });
+    expect(paidSandboxPlanLimit(DEFAULT_SANDBOX_PLAN_LIMITS.pro!)).toBe(
+      DEFAULT_SANDBOX_PLAN_LIMITS.pro!,
+    );
+    // A reservation never exceeds its ceiling.
+    expect(
+      modalSandboxResourceBounds({ ...unpaid, modalSandboxCpu: 4, modalSandboxMemoryMiB: 8192 }),
+    ).toMatchObject({ cpu: 2, memoryMiB: 4096 });
+    expect(() => modalSandboxResourceBounds({ ...settings, modalSandboxCpuLimit: 0 })).toThrow(
+      "ceilings must be set",
+    );
+    expect(() =>
+      modalSandboxResourceBounds({ ...unpaid, modalUnpaidSandboxMemoryLimitMiB: 0 }),
+    ).toThrow("ceilings must be set");
+  });
+
+  test("unpaid outbound allowlists apply only to unpaid boxes and are off by default", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_MODAL_UNPAID_OUTBOUND_CIDR_ALLOWLIST: "10.0.0.0/8, 192.168.0.0/16",
+        OPENGENI_MODAL_UNPAID_OUTBOUND_DOMAIN_ALLOWLIST: "github.com,registry.npmjs.org",
+      },
+      () => getSettings(),
+    );
+    expect(modalSandboxResourceBounds(settings).outboundCidrAllowlist).toBeUndefined();
+    expect(modalSandboxResourceBounds(settingsForSandboxPlanTier(settings, "free"))).toMatchObject({
+      outboundCidrAllowlist: ["10.0.0.0/8", "192.168.0.0/16"],
+      outboundDomainAllowlist: ["github.com", "registry.npmjs.org"],
+    });
+    expect(() =>
+      withEnv({ OPENGENI_MODAL_UNPAID_SANDBOX_CPU_LIMIT: "0" }, () => getSettings()),
+    ).toThrow();
   });
 
   test("idle command containment defaults to 30 minutes between idle grace and rotation lead", () => {

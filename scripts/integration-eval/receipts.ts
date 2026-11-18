@@ -4,7 +4,14 @@ import {
   integrationForToolName,
   shortToolName,
 } from "./integrations";
-import type { ApprovalReceipt, CardReceipt, IntegrationId, Receipts, ToolReceipt } from "./types";
+import type {
+  AccountLine,
+  ApprovalReceipt,
+  CardReceipt,
+  IntegrationId,
+  Receipts,
+  ToolReceipt,
+} from "./types";
 
 /** The subset of a public session event the parser reads. */
 export type EventLike = {
@@ -132,6 +139,27 @@ function accountLabelsFromOutputs(outputs: readonly string[]): Map<string, Integ
 }
 
 const OGTOOL_CALL = /\bogtool\s+call\s+([A-Za-z0-9_.:/-]+)/;
+
+const ACCOUNT_LINE = /Account: ([^—·\n"\\]+?) — ([^\s·"\\]+) · (Yours|Shared)/g;
+
+/** Account lines in discovery text (tool search results, close-candidate notices, tool lists). */
+export function accountLinesFrom(texts: readonly string[]): AccountLine[] {
+  const lines: AccountLine[] = [];
+  const seen = new Set<string>();
+  for (const value of texts) {
+    for (const match of value.matchAll(ACCOUNT_LINE)) {
+      const integration = integrationForLabel(match[1]);
+      const account = match[2];
+      if (!integration || !account) continue;
+      const owner = match[3] === "Yours" ? "yours" : "shared";
+      const key = `${integration} ${account} ${owner}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      lines.push({ integration, account, owner });
+    }
+  }
+  return lines;
+}
 
 /**
  * The MCP server's own name from a tool result (`_meta` serverInfo), such as
@@ -266,6 +294,12 @@ export function parseReceipts(events: readonly EventLike[]): Receipts {
 
   const outputTexts = [...outputs.values()].map((payload) => text(payload.output) ?? "");
   const labelled = accountLabelsFromOutputs(outputTexts);
+  // Discovery results can reach the model in the call itself (native tool
+  // search returns them with the call), not only in the output event.
+  const accountLines = accountLinesFrom([
+    ...outputTexts,
+    ...[...created.values()].map(({ payload }) => text(record(payload.raw).providerData) ?? ""),
+  ]);
 
   const tools: ToolReceipt[] = [];
   for (const [callId, { event, payload }] of created) {
@@ -332,6 +366,7 @@ export function parseReceipts(events: readonly EventLike[]): Receipts {
     tools,
     approvals,
     cards,
+    accountLines,
     humanInputRequests,
     finalAnswer: answers.join("\n\n"),
     turnStatuses,

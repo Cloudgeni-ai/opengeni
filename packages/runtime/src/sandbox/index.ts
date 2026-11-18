@@ -457,6 +457,18 @@ export {
   type SecretStdinCarry,
 } from "./secret-delivery";
 
+// Secret leak guard: no git commit or push of a value Opengeni delivered.
+export {
+  SecretLeakGuard,
+  SecretLedgerKey,
+  gitLeakPlan,
+  secretLedgerKeyFor,
+  secretLeakMessage,
+  type SecretLeak,
+  type SecretLeakGuardRunner,
+  type SecretLedgerWriter,
+} from "./secret-leak-guard";
+
 // Credential profiles: per-command environment variables resolved from secret
 // references at the same exec boundary (docs/secrets.md).
 export {

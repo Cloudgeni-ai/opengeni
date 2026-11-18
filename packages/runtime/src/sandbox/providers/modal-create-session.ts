@@ -44,6 +44,13 @@ export type ModalCreateLifecycle = {
  * pinned adapter never sees or persists it, and resume keeps a box's placement. */
 export type OpenGeniModalSandboxClientOptions = Partial<ModalSandboxClientOptions> & {
   regions?: string[];
+  /** Hard ceilings sent on every create; the create boundary refuses a
+   * SandboxCreate without positive ceilings. */
+  cpuLimit?: number;
+  memoryLimitMiB?: number;
+  /** Outbound destinations the box may reach; omitted leaves egress open. */
+  outboundCidrAllowlist?: string[];
+  outboundDomainAllowlist?: string[];
 };
 
 /** Release local transport after a failed create, but never stop a box whose
@@ -207,6 +214,8 @@ export async function createModalSessionWithLifecycle(
     "idleTimeoutMs",
     "cpu",
     "memoryMiB",
+    "cpuLimit",
+    "memoryLimitMiB",
   ] as const) {
     const value = options[key];
     if (value !== undefined && (!Number.isFinite(value) || value <= 0))
@@ -341,9 +350,17 @@ export async function createModalSessionWithLifecycle(
           timeoutMs: options.timeoutMs,
           idleTimeoutMs: options.idleTimeoutMs,
           cpu: options.cpu,
+          cpuLimit: options.cpuLimit,
           memoryMiB: options.memoryMiB,
+          memoryLimitMiB: options.memoryLimitMiB,
           gpu: options.gpu,
           encryptedPorts: options.exposedPorts,
+          outboundCidrAllowlist: options.outboundCidrAllowlist
+            ? [...options.outboundCidrAllowlist]
+            : undefined,
+          outboundDomainAllowlist: options.outboundDomainAllowlist
+            ? [...options.outboundDomainAllowlist]
+            : undefined,
           cloudBucketMounts,
           regions: options.regions ? [...options.regions] : undefined,
         }),

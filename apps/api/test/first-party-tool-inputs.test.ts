@@ -41,7 +41,7 @@ describe("first-party tool input discovery and validation", () => {
       expect(schemas.get("scheduled_tasks_update")).toContain("everySeconds");
       expect(schemas.get("session_create")).toContain("allowedTools");
       expect(schemas.get("session_create")).toContain("fileId");
-      expect(schemas.get("session_send_message")).toContain("headers");
+      expect(schemas.get("session_queue_message")).toContain("headers");
       expect(schemas.get("session_human_input_respond")).toContain("questionId");
     });
   });
@@ -277,7 +277,7 @@ describe("first-party tool input discovery and validation", () => {
     ["session_create", { initialMessage: "Work", tools: [{ kind: "mcp" }] }, "id"],
     ["session_create", { initialMessage: "Work", mcpServers: [{ id: "test" }] }, "url"],
     [
-      "session_send_message",
+      "session_queue_message",
       {
         sessionId: grant.metadata!.sessionId,
         text: "Work",

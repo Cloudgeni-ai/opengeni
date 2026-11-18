@@ -89,7 +89,7 @@ import { startTestMcpServer } from "@opengeni/testing/mcp";
 import { startTestServices, type TestServices } from "@opengeni/testing/compose";
 import { testSettings } from "@opengeni/testing/settings";
 import { waitFor } from "@opengeni/testing/process";
-import { prefixedMcpToolName, prepareAgentTools } from "@opengeni/runtime";
+import { mcpToolWireName, prepareAgentTools } from "@opengeni/runtime";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
 import { buildTimeline } from "../../packages/react/src/timeline";
 import { createOpenGeniText } from "../../packages/react/src/messages/runtime";
@@ -3878,7 +3878,7 @@ describe("API component integration", () => {
         const tools = await prepared.mcpServers[0]!.listTools();
         expect(tools.map((tool) => tool.name).sort()).toEqual(
           ["search_documents", "fetch_document"]
-            .map((name) => prefixedMcpToolName(mcpServerId, name))
+            .map((name) => mcpToolWireName(mcpServerId, name))
             .sort(),
         );
       } finally {
@@ -4056,11 +4056,11 @@ describe("API component integration", () => {
         const tools = await prepared.mcpServers[0]!.listTools();
         expect(tools.map((tool) => tool.name).sort()).toEqual(
           ["search_documents", "fetch_document"]
-            .map((name) => prefixedMcpToolName(mcpServerId, name))
+            .map((name) => mcpToolWireName(mcpServerId, name))
             .sort(),
         );
         const result = await prepared.mcpServers[0]!.callTool(
-          prefixedMcpToolName(mcpServerId, "search_documents"),
+          mcpToolWireName(mcpServerId, "search_documents"),
           { query: "broker" },
         );
         expect(JSON.stringify(result)).toContain("found document for broker");
@@ -6833,17 +6833,18 @@ describe("API component integration", () => {
       boundedForensic.events.every((event) => event.id !== "00000000-0000-0000-0000-000000000000"),
     ).toBeTrue();
 
-    const sent = await callMcpTool<McpMutationReceiptType>(mcp, "session_send_message", {
+    const sent = await callMcpTool<McpMutationReceiptType>(mcp, "session_queue_message", {
       sessionId: created.id,
       text: "also enable the health alerts",
       idempotencyKey: crypto.randomUUID(),
     });
     expect(sent).toMatchObject({
-      operation: "session_send_message",
-      outcome: "accepted",
+      operation: "session_queue_message",
+      outcome: "queued",
       resource: { type: "session_turn", state: "queued" },
       idempotency: { status: "applied" },
     });
+    expect(sent.summary).toStartWith("Queued: the target session");
     expect(JSON.stringify(sent)).not.toContain("also enable the health alerts");
     await waitFor(() => wf.wakeups.length === 2);
     const turns = await listSessionTurns(dbClient.db, grant.workspaceId, created.id);
@@ -6872,7 +6873,7 @@ describe("API component integration", () => {
         attemptId: callerAttemptId,
         executionGeneration: callerClaim.turn.executionGeneration,
         firstPartyMcpTools: [
-          "session_send_message",
+          "session_queue_message",
           "session_create",
           "session_pause",
           "session_resume",
@@ -6887,18 +6888,22 @@ describe("API component integration", () => {
       .sort();
     const internal = await callMcpTool<McpMutationReceiptType>(
       workerMcpWithIdentity,
-      "session_send_message",
+      "session_queue_message",
       {
         sessionId: created.id,
         text: "child result one of several",
         idempotencyKey: crypto.randomUUID(),
       },
     );
+    // The caller messages its own running session: Queue, read after this turn.
     expect(internal).toMatchObject({
-      outcome: "accepted",
-      resource: { type: "session_system_update", state: "active" },
-      facts: { delivery: "coalesced_internal_update" },
+      outcome: "queued",
+      summary:
+        "Queued: the target session is mid-turn and will read this after its current turn ends. It does not change what it is doing now; use session_steer to change its direction now.",
+      resource: { type: "session_system_update", state: "pending" },
+      updateId: internal.resource.id,
     });
+    expect(internal.facts).toBeUndefined();
     expect(JSON.stringify(internal)).not.toContain("child result one of several");
     expect(
       (await listSessionTurns(dbClient.db, grant.workspaceId, created.id))
@@ -6998,12 +7003,11 @@ describe("API component integration", () => {
       },
     );
     expect(agentSteer).toMatchObject({
-      outcome: "updated",
+      outcome: "steered",
       resource: { type: "session_system_update" },
-      // An Agent Steer never interrupts the child's live attempt: it is read
-      // at that attempt's next model step.
-      facts: { interruptionCount: 0, stoppingPreviousAttempt: false },
+      updateId: agentSteer.resource.id,
     });
+    expect(agentSteer.summary).toStartWith("Steered: the target session");
     expect(JSON.stringify(agentSteer)).not.toContain(
       "Inspect the new control-plane evidence first",
     );
@@ -7040,7 +7044,7 @@ describe("API component integration", () => {
       "session_get",
       "session_events",
       "session_create",
-      "session_send_message",
+      "session_queue_message",
       "session_pause",
       "session_resume",
       "session_steer",
@@ -8338,12 +8342,12 @@ describe("API component integration", () => {
     );
     await expectMcpOrchestrationFailure(
       limitedMcp,
-      "session_send_message",
+      "session_queue_message",
       {
         sessionId: attached.id,
         text: "over the cap",
       },
-      "session_send_message_limit_exceeded",
+      "session_queue_message_limit_exceeded",
       "monthly agent run limit reached",
     );
   });
@@ -8945,7 +8949,7 @@ async function callMcpTool<T = unknown>(
 
 async function expectMcpOrchestrationFailure(
   server: unknown,
-  name: "session_create" | "session_send_message",
+  name: "session_create" | "session_queue_message",
   args: Record<string, unknown>,
   code: string,
   message: string,

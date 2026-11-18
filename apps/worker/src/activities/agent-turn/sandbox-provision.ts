@@ -3,6 +3,7 @@ import {
   SandboxLeaseSupersededError,
   SandboxLeaseTransitionError,
   SandboxImageConflictError,
+  SandboxOrganizationBoxLimitError,
   SandboxRigConflictError,
 } from "@opengeni/db";
 import {
@@ -432,6 +433,9 @@ export function isLazySandboxProvisionRetryable(error: unknown): boolean {
       (value) =>
         value instanceof SandboxLeaseTransitionError &&
         (value.reason === "rotation_in_progress" ||
+          // A plan's running-box limit frees on the scale of minutes; the
+          // turn parks durably instead of retrying here.
+          value.reason === "organization_sandbox_capacity" ||
           (value.reason === "provider_recovery_in_progress" && value.liveness === "warming")),
     )
   )
@@ -441,7 +445,9 @@ export function isLazySandboxProvisionRetryable(error: unknown): boolean {
       (value) =>
         value instanceof SandboxImageConflictError ||
         value instanceof SandboxRigConflictError ||
-        value instanceof SandboxLeaseRecoveryBlockedError,
+        value instanceof SandboxLeaseRecoveryBlockedError ||
+        // The plan allows no sandbox now; a retry gives the same answer.
+        value instanceof SandboxOrganizationBoxLimitError,
     )
   ) {
     return false;
@@ -467,6 +473,15 @@ export function isLazySandboxProvisionRetryable(error: unknown): boolean {
   // typed, ownership-fenced lifecycle outcomes above are safe to replay.
   return false;
 }
+
+/**
+ * How long a turn parked at its organization's running-box limit waits before
+ * its replacement attempt checks for a free slot again. Slots free as other
+ * boxes drain (idle grace plus capture), so a shorter wait only repeats the
+ * model call that asks for the sandbox. The park holds no turn worker and has
+ * no retry budget: it is pacing, never a run-length limit.
+ */
+export const ORGANIZATION_SANDBOX_CAPACITY_RETRY_MS = 60_000;
 
 /** Short workflow-visible anti-churn pacing after a lifecycle transition. The
  * next acquire waits on the exact durable claim itself, so this is deliberately

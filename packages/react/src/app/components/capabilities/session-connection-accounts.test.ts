@@ -178,6 +178,26 @@ test("native refs expose matching accounts across scopes; host refs are not nati
   );
 });
 
+test("a Nango account matches its native connector's ref", () => {
+  const gmail = {
+    ...item,
+    connectionRef: {
+      subjectScope: "subject",
+      providerDomain: "gmailmcp.googleapis.com",
+      kind: "oauth2",
+    },
+  } as CapabilityCatalogItem;
+  const accounts = [
+    { ...account, id: "nango", providerDomain: "nango:gmail", kind: "oauth2" },
+    { ...account, id: "calendar", providerDomain: "nango:google-calendar", kind: "oauth2" },
+  ] as ConnectionMetadata[];
+  expect(
+    connectedAccountGroups(selectedNativeConnectorRefs([gmail]), accounts)[0]?.accounts.map(
+      (value) => value.id,
+    ),
+  ).toEqual(["nango"]);
+});
+
 test("account-specific resource restrictions do not transfer to sibling accounts", () => {
   const accounts = [account, { ...account, id: "other" }] as ConnectionMetadata[];
   const restricted = {

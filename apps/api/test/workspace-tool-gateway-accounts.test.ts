@@ -236,7 +236,13 @@ test("agent-authored Grafana account identities survive the live Site catalog an
         ),
     });
     const catalog = await bridge.catalog({ signal: new AbortController().signal });
-    expect(catalog.entries.map((entry) => entry.identity)).toEqual(authored);
+    // Every authored identity survives; the person's own account is listed first.
+    const byServer = (left: { serverId: string }, right: { serverId: string }) =>
+      left.serverId.localeCompare(right.serverId);
+    expect(catalog.entries.map((entry) => entry.identity).sort(byServer)).toEqual(
+      [...authored].sort(byServer),
+    );
+    expect(catalog.entries[0]!.identity).toEqual(f.identity(f.personal));
     expect(catalog.entries).toHaveLength(2);
     expect(catalog.entries.some((entry) => entry.identity.serverId === "grafana")).toBe(false);
     expect(
@@ -308,9 +314,10 @@ test("a saved Allow makes a connection's recommended-Ask tool callable from a Si
     const catalog = await bridge.catalog({ signal: new AbortController().signal });
     // The shared account keeps the recommended Ask: it stays listed, and the
     // Opengeni frame asks the viewer before it runs. The saved Allow runs at once.
+    // The person's own account is listed first.
     expect(catalog.entries.map((entry) => [entry.identity, entry.approval])).toEqual([
-      [f.identity(f.shared), "human"],
       [f.identity(f.personal), "policy"],
+      [f.identity(f.shared), "human"],
     ]);
     const result = await bridge.call(
       { catalogDigest: catalog.digest, identity: f.identity(f.personal), arguments: {} },

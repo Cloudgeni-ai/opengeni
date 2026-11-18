@@ -115,6 +115,11 @@ struct Serve {
     /// The runners' work folder.
     #[arg(long, default_value = "/home/runner/_work")]
     warm_work: String,
+    /// How many commits of history the clone keeps: the workflows'
+    /// `actions/checkout` `fetch-depth`. 0 keeps every branch and tag in
+    /// full, so a checkout of depth 0 only fetches what is newer.
+    #[arg(long, default_value_t = 1)]
+    warm_fetch_depth: u32,
     /// At most one refresh in this many seconds.
     #[arg(long, default_value_t = 3600)]
     warm_every_s: u64,
@@ -306,6 +311,7 @@ fn warm_settings(serve: &Serve, key: &str, repo: &str) -> warm::Settings {
         prepare: serve.warm_prepare.clone(),
         user: serve.warm_user.clone(),
         work: serve.warm_work.clone(),
+        fetch_depth: serve.warm_fetch_depth,
         web: serve.github_url.clone(),
         every: Duration::from_secs(serve.warm_every_s),
         within: Duration::from_secs(serve.warm_within_s),

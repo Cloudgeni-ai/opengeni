@@ -12,9 +12,14 @@ import {
   ConnectOperationRequest,
   ConnectProvider,
   ConnectAccount,
+  CONNECT_CONNECTION_LABEL_FIELD,
   connectProviderAcceptsRequestedScopes,
   preparedMcpHeaders,
 } from "@opengeni/contracts/connect";
+import {
+  connectionAccountLabel,
+  normalizeConnectionLabel,
+} from "@opengeni/contracts/connection-account-label";
 import {
   API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
   InstallApiIntegrationRequest,
@@ -23,6 +28,7 @@ import {
   stableJson,
   assertOrganizationIntegrationAllowed,
   OPENGENI_PERSONAL_SLACK_MCP_URL,
+  connectorProviderDomain,
 } from "@opengeni/contracts";
 import {
   CORE_INTEGRATION_DEFINITIONS,
@@ -61,6 +67,8 @@ import {
   MissingPermissionRefusal,
   WORKSPACE_SETTINGS_REFUSAL,
   workspaceSettingsAuthorized,
+  nangoBackendsFor,
+  projectConnectionsForBackends,
   type AccessGrantAuthorization,
   type ApiRouteDeps,
 } from "@opengeni/core";
@@ -100,6 +108,7 @@ import {
   googleDriveOAuthClientConfigured,
   googleCalendarOAuthClientConfigured,
 } from "../integrations/oauth-client";
+import { nangoIntegrationForConnectTarget } from "../integrations/nango-connect";
 import { CONNECT_FINISHED_PATH, connectFinishedPage } from "../integrations/connect-finished-page";
 import {
   OFFICIAL_GMAIL_MCP_URL,
@@ -510,8 +519,13 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/connect/accounts", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const { grant } = await requireAccessGrantAuthorization(c, deps, workspaceId, "workspace:read");
+    // Read as the inventory does while an integration's backend is switched:
+    // a native account of a Nango-backed connector needs its Nango account.
     const connections = hasPermission(grant.permissions, "connections:read")
-      ? await listConnectionsMetadata(deps.db, workspaceId, grant.subjectId)
+      ? projectConnectionsForBackends(
+          await listConnectionsMetadata(deps.db, workspaceId, grant.subjectId),
+          await nangoBackendsFor(deps.db, deps.settings),
+        )
       : [];
     const githubInstallations =
       hasPermission(grant.permissions, "github:use") ||
@@ -611,7 +625,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               id: connection.id,
               version: connection.version,
               providerId: connection.metadata.connectAdapter,
-              label: connection.providerDomain,
+              label: connectionAccountLabel(connection, connection.providerDomain).slice(0, 256),
               ownership: connection.subjectId === null ? "workspace" : "personal",
               status:
                 connection.status === "revoked"
@@ -621,15 +635,20 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                     : "auth_needed",
             }),
           ];
+        // A Nango connection serves its connector's MCP endpoint like a
+        // discovered OAuth sign-in does, but is signed in again through its
+        // connector's own Connect: marked, so no native reconnect starts.
+        const nango = connection.metadata.integrationBackend === "nango";
         if (
           connection.kind === "oauth2" &&
-          connection.metadata.oauthDiscovery &&
+          (connection.metadata.oauthDiscovery || nango) &&
           typeof connection.metadata.mcpUrl === "string"
         )
           return [
             ConnectAccount.parse({
               id: connection.id,
               version: connection.version,
+              ...(nango ? { backend: "nango" as const } : {}),
               providerId:
                 connection.metadata.mcpUrl === OPENGENI_PERSONAL_SLACK_MCP_URL
                   ? "slack-personal"
@@ -640,16 +659,25 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                       : connection.metadata.mcpUrl === OFFICIAL_GOOGLE_CALENDAR_MCP_URL
                         ? "google-calendar"
                         : "mcp-oauth",
-              label: connection.providerDomain,
+              // A Nango row is named by the connector it serves, not the
+              // integration platform's domain.
+              label: connectionAccountLabel(
+                connection,
+                connectorProviderDomain(connection.providerDomain),
+              ).slice(0, 256),
               ownership: connection.subjectId === null ? "workspace" : "personal",
               status:
                 connection.status === "revoked"
                   ? "disabled"
-                  : [
+                  : // A native shared Google sign-in is not supported; a
+                    // shared Nango account is.
+                    !nango &&
+                      [
                         OFFICIAL_GMAIL_MCP_URL,
                         OFFICIAL_DRIVE_MCP_URL,
                         OFFICIAL_GOOGLE_CALENDAR_MCP_URL,
-                      ].includes(connection.metadata.mcpUrl) && connection.subjectId === null
+                      ].includes(connection.metadata.mcpUrl) &&
+                      connection.subjectId === null
                     ? "auth_needed"
                     : connection.status === "active"
                       ? "connected"
@@ -828,6 +856,8 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           expectedRevision: input.expectedRevision,
           operationId: input.idempotencyKey,
           inputDigest: createHash("sha256").update(stableJson(input)).digest("hex"),
+          // Resolving the source only reads it; the preview is saved in commit.
+          releaseClaimOnFailure: true,
           authorize: (tx, _attempt, origin) =>
             requireConnectOwnerAuthority(tx, scope, "connections:write", origin),
           execute: async (attempt) => {
@@ -963,12 +993,16 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (["mcp-bearer", "mcp-headers"].includes(before.providerId)) {
       if (action.type !== "credentials")
         throw new HTTPException(422, { message: "MCP credentials required" });
+      // The optional name is not a credential: take it out before the
+      // credential values are checked, and keep the current name when blank.
+      const { [CONNECT_CONNECTION_LABEL_FIELD]: labelValue, ...credentialValues } = action.values;
+      const label = normalizeConnectionLabel(labelValue);
       let values: { mcpUrl: string; headers: string } | { mcpUrl: string; token: string };
       if (before.mcpSetup) {
         try {
           values = {
             mcpUrl: before.mcpSetup.endpointUrl,
-            headers: JSON.stringify(preparedMcpHeaders(before.mcpSetup, action.values)),
+            headers: JSON.stringify(preparedMcpHeaders(before.mcpSetup, credentialValues)),
           };
         } catch {
           throw new HTTPException(422, { message: "Supply exactly the requested secret fields" });
@@ -982,7 +1016,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                   headers: z.string().min(2).max(65_536),
                 })
                 .strict()
-                .parse(action.values)
+                .parse(credentialValues)
             : z
                 .object({
                   mcpUrl: z.string().url().max(4096),
@@ -993,7 +1027,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                     .regex(/^[^\u0000-\u0020\u007f]+$/),
                 })
                 .strict()
-                .parse(action.values);
+                .parse(credentialValues);
       }
       let credentialHeaders: Record<string, string>;
       try {
@@ -1124,6 +1158,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                       grantedScopes: [],
                       expiresAt: null,
                       metadata,
+                      ...(label ? { label } : {}),
                       updatedBySubjectId: scope.subjectId,
                     })
                   : await createConnection(tx, {
@@ -1136,6 +1171,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                       grantedScopes: [],
                       expiresAt: null,
                       metadata,
+                      ...(label ? { label } : {}),
                       createdBySubjectId: scope.subjectId,
                     });
                 if (!connection) throw new HTTPException(409, { message: "MCP account changed" });
@@ -1158,7 +1194,10 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                     id: connection.id,
                     version: connection.version,
                     providerId: current.providerId,
-                    label: connection.providerDomain,
+                    label: connectionAccountLabel(connection, connection.providerDomain).slice(
+                      0,
+                      256,
+                    ),
                     ownership: current.ownership,
                     status: "connected",
                   },
@@ -1279,6 +1318,12 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         expectedRevision: input.expectedRevision,
         operationId: input.idempotencyKey,
         inputDigest: createHash("sha256").update(stableJson(input)).digest("hex"),
+        // Preview and install have no non-repeatable remote effects (they read
+        // the source and may refresh the saved account's token); the install
+        // is written in commit's one transaction. A failure (for example the
+        // install refused by the database) leaves the attempt ready to advance
+        // again rather than refused as in flight.
+        releaseClaimOnFailure: true,
         authorize: (tx, _attempt, origin) =>
           requireConnectOwnerAuthority(tx, scope, advancePermission, origin),
         execute: async (attempt) => {
@@ -1877,6 +1922,18 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                 scope.subjectId,
               )
             : null;
+          // A Nango row reconnects only while its integration is still served
+          // through Nango; after a switch back to native it is not this
+          // connector's account any more.
+          const nangoBacked =
+            existing?.metadata.integrationBackend === "nango" &&
+            typeof existing.metadata.mcpUrl === "string" &&
+            (
+              await nangoIntegrationForConnectTarget(
+                { db: deps.db, settings: deps.settings },
+                existing.metadata.mcpUrl,
+              )
+            )?.integrationKey === existing.metadata.nangoIntegrationKey;
           if (
             input.reconnectAccountId &&
             (!existing ||
@@ -1890,7 +1947,9 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                       "google-calendar",
                     ].includes(input.providerId)
                   ? existing.kind !== "oauth2" ||
-                    !existing.metadata.oauthDiscovery ||
+                    // A Nango-backed account has no OAuth discovery of its own;
+                    // startMcpOAuth reconnects it through Nango Connect.
+                    (!existing.metadata.oauthDiscovery && !nangoBacked) ||
                     (input.providerId === "slack-personal" &&
                       existing.metadata.mcpUrl !== OPENGENI_PERSONAL_SLACK_MCP_URL) ||
                     (input.providerId === "gmail" &&
@@ -1929,7 +1988,10 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                       id: existing.id,
                       version: existing.version,
                       providerId: input.providerId,
-                      label: existing.providerDomain,
+                      label: connectionAccountLabel(existing, existing.providerDomain).slice(
+                        0,
+                        256,
+                      ),
                       ownership: input.ownership,
                       status: "auth_needed" as const,
                     },
@@ -1937,59 +1999,76 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                 : {}),
               nextAction: {
                 type: "credentials",
-                fields: input.mcpSetup
-                  ? input.mcpSetup.secretFields.map((field) => ({
-                      name: field.id,
-                      label: field.label,
-                      required: true,
-                      secret: true,
-                    }))
-                  : ["slack-personal", "gmail", "google-drive", "google-calendar"].includes(
-                        input.providerId,
-                      )
-                    ? []
-                    : input.providerId === "fiken-token"
-                      ? [
-                          {
-                            name: "apiToken",
-                            label: "Fiken API token",
-                            required: true,
-                            secret: true,
-                          },
-                          {
-                            name: "defaultCompanySlug",
-                            label: "Default company slug (optional)",
-                            required: false,
-                            secret: false,
-                          },
-                        ]
-                      : [
-                          {
-                            name: "mcpUrl",
-                            label: "MCP server URL",
-                            required: true,
-                            secret: false,
-                          },
-                          ...(input.providerId === "mcp-bearer"
-                            ? [
-                                {
-                                  name: "token",
-                                  label: "Bearer credential",
-                                  required: true,
-                                  secret: true,
-                                },
-                              ]
-                            : input.providerId === "mcp-headers"
+                fields: [
+                  ...(input.mcpSetup
+                    ? input.mcpSetup.secretFields.map((field) => ({
+                        name: field.id,
+                        label: field.label,
+                        required: true,
+                        secret: true,
+                      }))
+                    : ["slack-personal", "gmail", "google-drive", "google-calendar"].includes(
+                          input.providerId,
+                        )
+                      ? []
+                      : input.providerId === "fiken-token"
+                        ? [
+                            {
+                              name: "apiToken",
+                              label: "Fiken API token",
+                              required: true,
+                              secret: true,
+                            },
+                            {
+                              name: "defaultCompanySlug",
+                              label: "Default company slug (optional)",
+                              required: false,
+                              secret: false,
+                            },
+                          ]
+                        : [
+                            {
+                              name: "mcpUrl",
+                              label: "MCP server URL",
+                              required: true,
+                              secret: false,
+                            },
+                            ...(input.providerId === "mcp-bearer"
                               ? [
                                   {
-                                    name: "headers",
-                                    label: "Credential headers (JSON)",
+                                    name: "token",
+                                    label: "Bearer credential",
                                     required: true,
                                     secret: true,
                                   },
                                 ]
-                              : []),
-                        ],
+                              : input.providerId === "mcp-headers"
+                                ? [
+                                    {
+                                      name: "headers",
+                                      label: "Credential headers (JSON)",
+                                      required: true,
+                                      secret: true,
+                                    },
+                                  ]
+                                : []),
+                          ]),
+                  // A key tells nobody which account it is, so the person
+                  // may name it: people and agents then tell it apart from
+                  // another key for the same server.
+                  ...(["mcp-bearer", "mcp-headers"].includes(input.providerId)
+                    ? [
+                        {
+                          name: CONNECT_CONNECTION_LABEL_FIELD,
+                          label: existing
+                            ? "Name (optional, keeps the current one)"
+                            : "Name (optional)",
+                          required: false,
+                          secret: false,
+                        },
+                      ]
+                    : []),
+                ],
               },
               expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
             },

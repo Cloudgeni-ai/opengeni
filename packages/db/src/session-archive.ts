@@ -269,6 +269,7 @@ export async function beginSessionArchive(
       await scoped.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
         await lockSessionEventWriteRows(tx, {
+          rowProjection: "event",
           workspaceId: scope.workspaceId,
           controlLock: "share",
           sessionIds: [scope.sessionId],
@@ -1020,6 +1021,7 @@ async function lockSessionTree(
   );
   const sessionIds = tree.map((row) => row.id);
   await lockSessionEventWriteRows(tx, {
+    rowProjection: "event",
     workspaceId: scope.workspaceId,
     controlLock: "share",
     sessionIds,
@@ -1665,6 +1667,7 @@ export async function restoreArchivedSessionContent(
       await scoped.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
         await lockSessionEventWriteRows(tx, {
+          rowProjection: "event",
           workspaceId: scope.workspaceId,
           controlLock: "share",
           sessionIds: [scope.sessionId],

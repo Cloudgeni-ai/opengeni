@@ -1,9 +1,11 @@
+import { CONNECTION_LABEL_MAX_LENGTH } from "@opengeni/contracts/connection-account-label";
 import { OwnershipSelector } from "./connection-ownership-selector";
 export { OwnershipSelector } from "./connection-ownership-selector";
 import {
   ExternalLinkIcon,
   Loader2Icon,
   PlugIcon,
+  PowerIcon,
   RefreshCwIcon,
   SparklesIcon,
   TrashIcon,
@@ -49,6 +51,8 @@ import {
   capabilityConnectPlan,
   capabilityItemKindLabel,
   capabilityReconnectPlan,
+  connectionAttentionLabel,
+  connectionRepairLabel,
   defaultCapabilityConnectionOwnership,
   capabilitySourceLabel,
   curatedSkillProvenance,
@@ -115,6 +119,8 @@ export type ConnectAction =
       item: CapabilityCatalogItem;
       ownership: ConnectionOwnership;
       headers: Record<string, string>;
+      /** The person's name for the new account, shown when the service can't say which it is. */
+      label?: string | null | undefined;
     }
   // connectionId is the existing row to reuse, or null when the row was deleted
   // (reconnect then mints a fresh connection and re-enables with its ref).
@@ -137,6 +143,19 @@ export type ConnectAction =
       type: "remove_connection";
       item: CapabilityCatalogItem;
       connection: Pick<ConnectionMetadata, "id" | "workspaceId">;
+    }
+  // Turn on here your own working account connected in another workspace.
+  | {
+      type: "turn_on_here";
+      item: CapabilityCatalogItem;
+      connection: Pick<ConnectionMetadata, "authorityId">;
+    }
+  // Name exactly one account (null removes the name); nothing else changes.
+  | {
+      type: "rename_connection";
+      item: CapabilityCatalogItem;
+      connection: Pick<ConnectionMetadata, "id" | "workspaceId">;
+      label: string | null;
     }
   | {
       type: "reconnect_api_key";
@@ -517,7 +536,20 @@ export function DetailBody({
               <ConnectionStatus item={item} health={health} />
               {/* Reconnect is the primary repair action when the connection broke;
                 Disable drops to secondary. Healthy items show only Disable. */}
-              {reconnect ? (
+              {health.state === "attention" && health.reason === "off_here" && health.connection ? (
+                <Button
+                  type="button"
+                  className="w-full"
+                  disabled={busy}
+                  onClick={() =>
+                    health.connection &&
+                    onAction({ type: "turn_on_here", item, connection: health.connection })
+                  }
+                >
+                  {busy ? <Loader2Icon className="animate-spin" /> : <PowerIcon />}
+                  {connectionRepairLabel("turn_on_here", item.name)}
+                </Button>
+              ) : reconnect ? (
                 reconnect.kind === "oauth" ? (
                   <Button
                     type="button"
@@ -529,6 +561,9 @@ export function DetailBody({
                         item,
                         connectionId: reconnect.connectionId,
                         ownership: reconnect.ownership,
+                        ...(reconnect.connectionWorkspaceId
+                          ? { connectionWorkspaceId: reconnect.connectionWorkspaceId }
+                          : {}),
                       })
                     }
                   >
@@ -620,12 +655,14 @@ export function DetailBody({
                 }
                 submitIcon={<PlugIcon />}
                 busy={busy}
-                onSubmit={(next) =>
+                nameField
+                onSubmit={(next, label) =>
                   onAction({
                     type: "api_key",
                     item,
                     ownership: connectionOwnership,
                     headers: next,
+                    label,
                   })
                 }
               />
@@ -1222,6 +1259,7 @@ export function CredentialForm({
   onCancel,
   compact = false,
   analytics,
+  nameField = false,
 }: {
   fields: { name: string; label: string }[];
   itemName: string;
@@ -1233,10 +1271,13 @@ export function CredentialForm({
   compact?: boolean | undefined;
   /** Closed analytics label for the submit control; omit for reconnects. */
   analytics?: AnalyticsAction | undefined;
-  onSubmit: (headers: Record<string, string>) => void;
+  /** Offer an optional name for a new account: a key doesn't say which account it is. */
+  nameField?: boolean | undefined;
+  onSubmit: (headers: Record<string, string>, label: string | null) => void;
 }) {
   const inputId = useId();
   const [headers, setHeaders] = useState<Record<string, string>>({});
+  const [label, setLabel] = useState("");
   const ready = fields.every((field) => headers[field.name]?.trim());
 
   return (
@@ -1244,7 +1285,7 @@ export function CredentialForm({
       className="space-y-3"
       onSubmit={(event) => {
         event.preventDefault();
-        if (ready && !busy) onSubmit(headers);
+        if (ready && !busy) onSubmit(headers, label.trim() || null);
       }}
     >
       {fields.map((field) => (
@@ -1267,6 +1308,24 @@ export function CredentialForm({
           />
         </div>
       ))}
+      {nameField ? (
+        <div className="space-y-1.5">
+          <Label htmlFor={`${inputId}-name`} className="text-xs text-fg-muted">
+            Name (optional)
+          </Label>
+          <Input
+            id={`${inputId}-name`}
+            autoComplete="off"
+            maxLength={CONNECTION_LABEL_MAX_LENGTH}
+            value={label}
+            onChange={(event) => setLabel(event.target.value)}
+            placeholder="For example: Team inbox"
+          />
+          <p className="text-xs text-fg-subtle">
+            Tells this key apart from others for {itemName}, for you and your agents.
+          </p>
+        </div>
+      ) : null}
       {keyPageUrl ? (
         <a
           href={keyPageUrl}
@@ -1338,11 +1397,11 @@ export function ConnectionStatus({
         <span
           className={cn("size-2 rounded-full", attention ? "bg-status-waiting" : "bg-status-idle")}
         />
-        {attention ? "Needs attention" : "Connected"}
+        {attention ? connectionAttentionLabel(health.reason) : "Connected"}
       </div>
       <p className="text-xs text-fg-subtle">
         {attention
-          ? `${personal ? "Personal" : "Workspace"} connection needs to be reconnected.`
+          ? `${personal ? "Personal" : "Workspace"} connection.`
           : personal
             ? `Personal connection to ${health.connection.providerDomain}. Your messages and personal automations can use this account.`
             : `Workspace connection to ${health.connection.providerDomain}. Shared with agents and automations here.`}

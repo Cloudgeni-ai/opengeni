@@ -21,10 +21,18 @@ import {
   applyGitAuthPointerEnvironment,
   hasGitCredentialRepositorySelection,
   sandboxLifecycleTransitionWaitMs,
+  sandboxFleetLimits,
+  sandboxPlanLimits,
+  settingsForSandboxPlanTier,
   sandboxWarmRateMicrosPerSecond,
   stableSandboxEnvironmentForRun,
   type Settings,
 } from "@opengeni/config";
+import {
+  sandboxActingPerson,
+  sandboxComputeRefusal,
+  sandboxComputeStandingFallbackObserver,
+} from "./compute-bounds";
 import type { AccessGrant, Session } from "@opengeni/contracts";
 import {
   acquireLease,
@@ -39,6 +47,7 @@ import {
   SandboxProviderReadLockUnavailableError,
   SandboxRigConflictError,
   SandboxPaidComputeAdmissionError,
+  SandboxOrganizationBoxLimitError,
   waitWhileLeaseWarming,
   withSandboxProviderReadLock,
   type Database,
@@ -1084,6 +1093,15 @@ async function withChannelAOperation<T>(
       leaseTtlMs,
       warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
       captureWaitMs: sandboxLifecycleTransitionWaitMs(settings),
+      // A direct operation that would start a new box counts against the
+      // organization's running-box limit (429 at the limit).
+      sandboxPlanLimits: sandboxPlanLimits(settings),
+      subscriptionPlansEnabled: settings.subscriptionPlansEnabled,
+      sandboxFleetLimits: sandboxFleetLimits(settings),
+      // The person behind the operation (an agent attempt's initiating
+      // human): their other organizations count toward the per-person bounds.
+      actingSubjectId: sandboxActingPerson((await machineAuthority()).subjectId),
+      onComputeStandingFallback: sandboxComputeStandingFallbackObserver(services.observability),
       ...(ctx.waitSignal ? { waitSignal: ctx.waitSignal } : {}),
     });
     // Close the commit/abort race before any provider handle is established.
@@ -1289,7 +1307,10 @@ async function withChannelAOperation<T>(
         );
         const result = await establishApiSandboxSpawner({
           db,
-          settings: providerSettings,
+          // A Free or unpaid organization's box gets the unpaid ceilings.
+          settings: settingsForSandboxPlanTier(providerSettings, acquired.sandboxPlanTier, {
+            paidHistory: acquired.sandboxPaidHistory,
+          }),
           accountId,
           workspaceId,
           sandboxGroupId,
@@ -1509,6 +1530,7 @@ export function mapChannelAError(error: unknown, waitSignal?: AbortSignal): unkn
   if (error instanceof HTTPException) return error;
   if (error instanceof SandboxPaidComputeAdmissionError)
     return new HTTPException(402, { message: error.message, cause: error });
+  if (error instanceof SandboxOrganizationBoxLimitError) return sandboxComputeRefusal(error);
   if (isChannelARequestCancellation(error, waitSignal))
     return new HTTPException(499 as never, {
       message: "request cancelled",
@@ -1634,6 +1656,20 @@ export function channelAOperationFailureDiagnostic(
     return {
       reason: "request_rejected",
       status: error.reasonCode === "authority_revoked" ? 403 : 409,
+      errorCode: "sandbox_channel_a_operation_failed",
+    };
+  }
+  // Compute admission refusals (insufficient credits as 402, the organization's
+  // running-box limit as 403 or 429) are deliberate answers, not server faults.
+  // Report the status the route returns so the log and metric match the response.
+  if (
+    error instanceof SandboxPaidComputeAdmissionError ||
+    error instanceof SandboxOrganizationBoxLimitError
+  ) {
+    const mapped = mapChannelAError(error, waitSignal);
+    return {
+      reason: "request_rejected",
+      status: mapped instanceof HTTPException ? mapped.status : 500,
       errorCode: "sandbox_channel_a_operation_failed",
     };
   }

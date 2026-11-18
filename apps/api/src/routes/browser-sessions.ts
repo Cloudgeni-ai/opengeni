@@ -11,8 +11,15 @@ import {
   environmentsEncryptionKeyBytes,
   resolveFirstPartyDelegationSecret,
   resolveStreamTokenSecret,
+  sandboxFleetLimits,
+  sandboxPlanLimits,
   sandboxWarmRateMicrosPerSecond,
 } from "@opengeni/config";
+import {
+  sandboxActingPerson,
+  sandboxComputeRefusal,
+  sandboxComputeStandingFallbackObserver,
+} from "../sandbox/compute-bounds";
 import {
   BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX,
   EPHEMERAL_CHROMIUM_DRIVER_ID,
@@ -4076,6 +4083,12 @@ export function registerBrowserSessionRoutes(
   ): Promise<T> {
     if (expectedPlacement?.kind === "attached_device") {
       waitSignal.throwIfAborted();
+      // A renewal is the control plane's own best-effort keepalive, which no
+      // agent or person waits on; a browser it cannot reach just keeps its
+      // plain idle release. Only refusals someone sees count as unavailable.
+      const unavailable = (reason: AttachedBrowserUnavailableReason) => {
+        if (!("hold" in caller)) recordAttachedBrowserUnavailable(deps.observability, reason);
+      };
       // Personal machines are controlled only for their owner, as everywhere else.
       const viewer =
         "hold" in caller
@@ -4091,16 +4104,16 @@ export function registerBrowserSessionRoutes(
         deviceWorkspaceId: expectedDeviceWorkspaceId,
       });
       if (device.state !== "connected") {
-        recordAttachedBrowserUnavailable(deps.observability, "disconnected");
+        unavailable("disconnected");
         throw new BrowserSessionStateError("Attached browser is disconnected");
       }
       const enrollment = await getLiveEnrollmentConnection(deps.db, viewer, device.enrollmentId);
       if (!enrollment || enrollment.status !== "active" || !enrollment.connectionInstanceId) {
-        recordAttachedBrowserUnavailable(deps.observability, "machine_unavailable");
+        unavailable("machine_unavailable");
         throw new BrowserSessionStateError("Attached browser machine is unavailable");
       }
       if (!enrollment.workspaceRoot) {
-        recordAttachedBrowserUnavailable(deps.observability, "no_workspace_root");
+        unavailable("no_workspace_root");
         throw new BrowserSessionStateError(
           "Attached browser machine has not reported an absolute workspace root",
         );
@@ -5997,7 +6010,16 @@ async function ensureInteractionHolder(
     rigVersionId: sourceSession.rigVersionId,
     leaseTtlMs: deps.settings.sandboxLeaseTtlMs,
     expectedEpoch: placement.lease.leaseEpoch,
+    // The plan's compute bounds apply to a browser session's box like any
+    // other holder's (a held or denied organization, a spent daily budget).
+    sandboxPlanLimits: sandboxPlanLimits(deps.settings),
+    subscriptionPlansEnabled: deps.settings.subscriptionPlansEnabled,
+    sandboxFleetLimits: sandboxFleetLimits(deps.settings),
+    actingSubjectId: sandboxActingPerson(grant.subjectId),
+    onComputeStandingFallback: sandboxComputeStandingFallbackObserver(deps.observability),
     waitSignal,
+  }).catch((error: unknown) => {
+    throw sandboxComputeRefusal(error) ?? error;
   });
   if (acquired.role === "blocked" || acquired.role === "fenced") {
     throw new BrowserSessionStateError("BrowserSession placement is transitioning; retry");
@@ -7156,10 +7178,16 @@ async function recordBrowserDownloadFileUsage(
   });
 }
 
-/** A user's own attached browser could not be reached for an operation. */
+type AttachedBrowserUnavailableReason =
+  | "disconnected"
+  | "machine_unavailable"
+  | "no_workspace_root";
+
+/** A user's own attached browser could not be reached for an operation an
+ *  agent or person asked for. */
 function recordAttachedBrowserUnavailable(
   observability: ApiRouteDeps["observability"],
-  reason: "disconnected" | "machine_unavailable" | "no_workspace_root",
+  reason: AttachedBrowserUnavailableReason,
 ): void {
   try {
     observability?.incrementCounter({

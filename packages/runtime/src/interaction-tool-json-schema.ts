@@ -13,6 +13,26 @@ const MEANINGFUL_MAX_ITEMS = 64;
 const MEANINGFUL_PATTERN_LENGTH = 32;
 
 /**
+ * Cache a Zod to JSON Schema conversion per schema object. The result depends
+ * only on the (immutable) schema, so each schema converts once per process
+ * instead of on every turn; every caller gets its own copy, which it may change.
+ * Inline schemas built per call never hit the cache but stay correct.
+ */
+export function cachedJsonSchemaConversion(
+  convert: (schema: z.ZodType) => AttemptToolJsonSchema,
+): (schema: z.ZodType) => AttemptToolJsonSchema {
+  const cache = new WeakMap<z.ZodType, AttemptToolJsonSchema>();
+  return (schema) => {
+    let converted = cache.get(schema);
+    if (!converted) {
+      converted = convert(schema);
+      cache.set(schema, converted);
+    }
+    return structuredClone(converted);
+  };
+}
+
+/**
  * The JSON Schema an interaction tool shows the model.
  *
  * Model providers expand every `$ref` when they render a tool, so a tagged

@@ -7,9 +7,10 @@ import {
   type AccessGrantAuthorization,
   type ApiRouteDeps,
 } from "@opengeni/core";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 import { userContentSignedGetUrlOptions } from "../http/user-content";
+import { FirstPartyMcpServer } from "./database-tool-failure";
 
 /** Dedicated file MCP surface. The broad `opengeni` server never registers it. */
 export function buildFilesMcpServer(
@@ -18,10 +19,10 @@ export function buildFilesMcpServer(
 ): McpServer {
   const access = "grant" in authority ? authority : undefined;
   const grant = access ? access.grant : (authority as AccessGrant);
-  const server = new McpServer({
-    name: "opengeni-files",
-    version: "1.0.0",
-  });
+  const server = new FirstPartyMcpServer(
+    { name: "opengeni-files", version: "1.0.0" },
+    deps.observability,
+  );
 
   if (!hasPermission(grant.permissions, "files:read")) {
     server

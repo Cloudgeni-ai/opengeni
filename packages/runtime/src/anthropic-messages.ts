@@ -835,13 +835,14 @@ export function anthropicMessages(
  * readable text. Every decision depends only on the messages themselves, so a
  * later request reproduces the same prefix.
  *
- * A reply with thinking must end with its tool calls: when it carries anything
- * after its first tool call and is followed only by tool results, Claude reads
- * the request as an assistant prefill and rejects it. Claude itself can emit a
- * search after our tool call in such a reply, so that search (and a result
- * after the call) becomes readable text, and text after the first tool call
- * moves to just before it, keeping its order. Replies without thinking keep
- * their exact shape, where a deferred search does continue.
+ * A reply must end with its tool calls: when it carries anything after its
+ * first tool call and is followed only by tool results (a system message after
+ * them does not count), Claude reads the request as an assistant prefill, which
+ * Claude 4.6 and later reject, with or without thinking. Claude itself can emit
+ * a search after our tool call, so that search (and a result after the call)
+ * becomes readable text, and text after the first tool call moves to just
+ * before it, keeping its order. This depends only on the reply itself, so every
+ * later request sends it in the same shape.
  */
 function withoutUncontinuableSearches(messages: Message[]): void {
   const nativeCalls = new Set<string>();
@@ -869,10 +870,7 @@ function withoutUncontinuableSearches(messages: Message[]): void {
   let convertedResult = false;
   for (const [index, message] of messages.entries()) {
     if (message.role !== "assistant") continue;
-    const thinks = message.content.some(
-      (block) => block.type === "thinking" || block.type === "redacted_thinking",
-    );
-    const firstCall = thinks ? message.content.findIndex((block) => block.type === "tool_use") : -1;
+    const firstCall = message.content.findIndex((block) => block.type === "tool_use");
     const afterCall = (position: number) => firstCall >= 0 && position > firstCall;
     message.content = message.content.map((block, position) => {
       if (block.type === "server_tool_use" && block.name === ANTHROPIC_WEB_SEARCH_TOOL_NAME) {
