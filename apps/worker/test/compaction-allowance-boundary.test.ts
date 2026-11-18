@@ -35,10 +35,6 @@ test("stream component retains the completed compaction checkpoint before refusi
   // The completed checkpoint contains no stored programmatic operations.
   const operations = spyOn(db, "listTurnCodemodeApprovals").mockResolvedValue([]);
   const gatewayRequests = spyOn(db, "listTurnGitHubGatewayApprovals").mockResolvedValue([]);
-  const governance = spyOn(db, "refreshSessionWorkspaceGovernance").mockResolvedValue(null);
-  const governanceCurrent = spyOn(db, "workspaceGovernanceSnapshotsAreCurrent").mockResolvedValue(
-    true,
-  );
   const allowance = spyOn(db, "checkWorkspaceAllowance").mockImplementation(async (_db, input) => {
     order.push("admission");
     expect(input.subjectId).toBe("user:frozen-initiator");
@@ -125,8 +121,6 @@ test("stream component retains the completed compaction checkpoint before refusi
     recoveryNotice.mockRestore();
     operations.mockRestore();
     gatewayRequests.mockRestore();
-    governance.mockRestore();
-    governanceCurrent.mockRestore();
     allowance.mockRestore();
   }
 });

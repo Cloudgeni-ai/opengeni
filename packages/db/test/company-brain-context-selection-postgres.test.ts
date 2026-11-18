@@ -2,8 +2,10 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import {
+  activateWorkspaceInstructionPolicyRevision,
   createDb,
   createSession,
+  createWorkspaceInstructionPolicyDraft,
   ensureManagedAccessForUser,
   getOrganizationPrivateSessionSettings,
   getOrCreateCompanyProfileSnapshot,
@@ -14,10 +16,7 @@ import {
   nestedPostgresSqlState,
   resolveCompanyBrainContextSelection,
   transitionSessionVisibility,
-  activateWorkspaceInstructionPolicyRevision,
-  createWorkspaceInstructionPolicyDraft,
   updateCompanyProfile,
-  workspaceGovernanceSnapshotsAreCurrent,
   updateOrganizationPrivateSessionSettings,
   withSessionRlsActorContext,
   type DbClient,
@@ -145,6 +144,8 @@ async function seedAttempt(input: {
   turnId?: string;
   generation?: number;
   source?: "user" | "compaction";
+  /** How the previous attempt of `turnId` ended. */
+  previousOutcome?: "interrupted_recoverable" | "waiting_capacity";
 }): Promise<Attempt> {
   if (!shared) throw new Error("test database unavailable");
   const turnId = input.turnId ?? crypto.randomUUID();
@@ -154,8 +155,8 @@ async function seedAttempt(input: {
     await sql`select set_config('opengeni.session_inference_claim', '1', true)`;
     if (input.turnId) {
       await sql`
-        update session_turn_attempts set state = 'closed', outcome = 'interrupted_recoverable',
-          closed_at = now() where workspace_id = ${input.workspaceId} and turn_id = ${turnId}
+        update session_turn_attempts set state = 'closed',
+          outcome = ${input.previousOutcome ?? "interrupted_recoverable"}, closed_at = now() where workspace_id = ${input.workspaceId} and turn_id = ${turnId}
           and state in ('claimed','running')
       `;
       await sql`
@@ -242,7 +243,6 @@ async function resolve(attempt: Attempt) {
   );
 }
 
-/** The attempt's governance snapshots, as the worker takes them. */
 async function governanceSnapshots(attempt: Attempt) {
   return await withSessionRlsActorContext(
     {
@@ -256,19 +256,6 @@ async function governanceSnapshots(attempt: Attempt) {
   );
 }
 
-async function governanceIsCurrent(
-  attempt: Attempt,
-  snapshots: Awaited<ReturnType<typeof governanceSnapshots>>,
-) {
-  return await workspaceGovernanceSnapshotsAreCurrent(client!.db, {
-    accountId: attempt.accountId,
-    workspaceId: attempt.workspaceId,
-    policyRole: snapshots.policy.policyRole,
-    instructionPolicyEntryHash: snapshots.policy.entryHash,
-    companyProfileSnapshotHash: snapshots.profile.snapshotHash,
-  });
-}
-
 async function expectSqlState(action: () => Promise<unknown>, state: string): Promise<void> {
   let failure: unknown;
   try {
@@ -280,14 +267,12 @@ async function expectSqlState(action: () => Promise<unknown>, state: string): Pr
 }
 
 describe("accepted-turn Company Brain context selection", () => {
-  test("an attempt snapshots the governance active when it runs, not when its turn was accepted", async () => {
+  test("a turn resolves governance when it starts running and keeps it for its later attempts", async () => {
     if (!shared || !client) return;
     const f = await fixture({ mode: "retrieval_only" });
     const scope = { accountId: f.grant.accountId, workspaceId: f.grant.workspaceId };
-    const activatePolicy = async (
-      content: string,
-      current: { id: string; version: number } | null,
-    ) => {
+    let current: { id: string; version: number } | null = null;
+    const activatePolicy = async (content: string) => {
       const draft = await createWorkspaceInstructionPolicyDraft(client!.db, {
         ...scope,
         kind: "policy",
@@ -307,91 +292,25 @@ describe("accepted-turn Company Brain context selection", () => {
         actorSubjectId: f.ownerSubjectId,
         reason: "Governance test",
       });
-      return { id: draft.id, version: (current?.version ?? 0) + 1 };
+      current = { id: draft.id, version: (current?.version ?? 0) + 1 };
+      return draft.id;
     };
-    // The turn is accepted, then waits (for capacity, say) while an owner
-    // activates a policy. Its attempt runs under that policy.
-    const first = await seedAttempt({
+    const policyRevisions = async (attempt: Attempt) =>
+      (await governanceSnapshots(attempt)).policy.entries.map((entry) => entry.revisionId);
+
+    // Accepted under rule A; the first attempt is claimed (claim snapshots the
+    // policy) and parks the turn waiting for capacity, sending nothing.
+    const ruleA = await activatePolicy("Rule A.");
+    const parked = await seedAttempt({
       ...scope,
       sessionId: f.root.id,
       ownerSubjectId: f.ownerSubjectId,
     });
-    const ruleA = await activatePolicy("Keep production stable.", null);
-    const firstSnapshots = await governanceSnapshots(first);
-    expect(firstSnapshots.policy.entries.map((entry) => entry.revisionId)).toEqual([ruleA.id]);
-    expect(firstSnapshots.policy.entries[0]).toMatchObject({ content: "Keep production stable." });
-    await prepareSnapshots(first);
-    const firstReceipt = (await resolve(first)).receipt;
-    expect(firstReceipt.instructionPolicyEntryHash).toBe(firstSnapshots.policy.entryHash);
-    // The detector agrees with the snapshot byte for byte while nothing changes.
-    expect(await governanceIsCurrent(first, firstSnapshots)).toBe(true);
+    expect(await policyRevisions(parked)).toEqual([ruleA]);
 
-    // A change during the attempt is detected before its next model request.
-    const ruleB = await activatePolicy("Keep production very stable.", ruleA);
-    expect(await governanceIsCurrent(first, firstSnapshots)).toBe(false);
-
-    // The same attempt rebinds: its snapshot row is refreshed in place to the
-    // new rule, and the receipt keeps the record it made first.
-    const rebound = await governanceSnapshots(first);
-    expect(rebound.policy.id).toBe(firstSnapshots.policy.id);
-    expect(rebound.policy.entries.map((entry) => entry.revisionId)).toEqual([ruleB.id]);
-    expect(rebound.policy.entryHash).not.toBe(firstSnapshots.policy.entryHash);
-    expect(await governanceIsCurrent(first, rebound)).toBe(true);
-    const [stamps] = await shared.admin<Array<{ rows: number; refreshed: boolean }>>`
-      select count(*)::int as "rows", bool_and(created_at > ${firstSnapshots.policy.createdAt}) as "refreshed"
-      from workspace_instruction_policy_snapshots
-      where attempt_id = ${first.attemptId}
-    `;
-    expect(stamps).toEqual({ rows: 1, refreshed: true });
-    expect((await resolve(first)).receipt).toMatchObject({
-      id: firstReceipt.id,
-      instructionPolicyEntryHash: firstSnapshots.policy.entryHash,
-    });
-    // Asking again with nothing changed keeps the row exactly as it is.
-    expect(await governanceSnapshots(first)).toEqual(rebound);
-    // Only the routine may refresh: any other update stays refused, even by
-    // the table owner, and so does one that would move the row to another
-    // attempt.
-    await expectSqlState(
-      async () =>
-        await shared!.admin`
-          update workspace_instruction_policy_snapshots set created_at = now()
-          where attempt_id = ${first.attemptId}
-        `,
-      "55000",
-    );
-    await expectSqlState(
-      async () =>
-        await shared!.admin.begin(async (tx) => {
-          await tx`select set_config('opengeni.governance_snapshot_refresh', ${first.attemptId}, true)`;
-          await tx`
-            update company_profile_snapshots set turn_id = gen_random_uuid(), created_at = now()
-            where attempt_id = ${first.attemptId}
-          `;
-        }),
-      "55000",
-    );
-
-    // The turn continues in a recovery attempt, which snapshots the current
-    // rule; the turn's Company Brain receipt keeps its first attempt's record.
-    const second = await seedAttempt({
-      ...scope,
-      sessionId: f.root.id,
-      ownerSubjectId: f.ownerSubjectId,
-      turnId: first.turnId,
-      generation: 2,
-    });
-    const secondSnapshots = await governanceSnapshots(second);
-    expect(secondSnapshots.policy.entries.map((entry) => entry.revisionId)).toEqual([ruleB.id]);
-    await prepareSnapshots(second);
-    expect((await resolve(second)).receipt).toMatchObject({
-      id: firstReceipt.id,
-      instructionPolicyEntryHash: firstSnapshots.policy.entryHash,
-    });
-    expect(await governanceIsCurrent(second, secondSnapshots)).toBe(true);
-
-    // The organization profile follows the attempt the same way.
-    expect(secondSnapshots.profile.profile).toBeNull();
+    // An owner activates rule B and fills in the organization profile while
+    // the turn waits. The attempt that resumes it runs under both.
+    const ruleB = await activatePolicy("Rule B.");
     const profile = await updateCompanyProfile(client!.db, {
       ...scope,
       profile: {
@@ -408,24 +327,58 @@ describe("accepted-turn Company Brain context selection", () => {
       principalKind: "human_session",
       reason: "Governance test",
     });
-    expect(await governanceIsCurrent(second, secondSnapshots)).toBe(false);
-    const reboundProfile = await governanceSnapshots(second);
-    expect(reboundProfile.profile.id).toBe(secondSnapshots.profile.id);
-    expect(reboundProfile.profile.profile?.id).toBe(profile.revision!.id);
-    expect(reboundProfile.policy).toEqual(secondSnapshots.policy);
-    expect(await governanceIsCurrent(second, reboundProfile)).toBe(true);
-    const third = await seedAttempt({
+    const running = await seedAttempt({
       ...scope,
       sessionId: f.root.id,
       ownerSubjectId: f.ownerSubjectId,
-      turnId: first.turnId,
+      turnId: parked.turnId,
+      generation: 2,
+      previousOutcome: "waiting_capacity",
+    });
+    const runningSnapshots = await governanceSnapshots(running);
+    expect(runningSnapshots.policy.entries.map((entry) => entry.revisionId)).toEqual([ruleB]);
+    expect(runningSnapshots.profile.profile?.id).toBe(profile.revision!.id);
+    await prepareSnapshots(running);
+    const receipt = (await resolve(running)).receipt;
+
+    // Rule C arrives while the turn runs, then the worker is lost. The
+    // recovery attempt keeps what the turn's requests already saw, and the
+    // turn's receipt still matches it; rule C waits for the next turn.
+    const ruleC = await activatePolicy("Rule C.");
+    const recovered = await seedAttempt({
+      ...scope,
+      sessionId: f.root.id,
+      ownerSubjectId: f.ownerSubjectId,
+      turnId: parked.turnId,
       generation: 3,
     });
-    const thirdSnapshots = await governanceSnapshots(third);
-    expect(thirdSnapshots.profile.profile?.id).toBe(profile.revision!.id);
-    await prepareSnapshots(third);
-    expect((await resolve(third)).receipt.id).toBe(firstReceipt.id);
-    expect(await governanceIsCurrent(third, thirdSnapshots)).toBe(true);
+    const recoveredSnapshots = await governanceSnapshots(recovered);
+    expect(recoveredSnapshots.policy.entryHash).toBe(runningSnapshots.policy.entryHash);
+    expect(recoveredSnapshots.profile.snapshotHash).toBe(runningSnapshots.profile.snapshotHash);
+    await prepareSnapshots(recovered);
+    expect((await resolve(recovered)).receipt.id).toBe(receipt.id);
+
+    await shared.admin.begin(async (sql) => {
+      await sql`select set_config('opengeni.session_inference_claim', '1', true)`;
+      await sql`
+        update session_turn_attempts set state = 'closed', outcome = 'completed', closed_at = now()
+        where workspace_id = ${scope.workspaceId} and id = ${recovered.attemptId}
+      `;
+      await sql`
+        update session_turns set status = 'completed', active_attempt_id = null
+        where workspace_id = ${scope.workspaceId} and id = ${recovered.turnId}
+      `;
+      await sql`
+        update sessions set active_turn_id = null, status = 'idle'
+        where workspace_id = ${scope.workspaceId} and id = ${f.root.id}
+      `;
+    });
+    const nextTurn = await seedAttempt({
+      ...scope,
+      sessionId: f.root.id,
+      ownerSubjectId: f.ownerSubjectId,
+    });
+    expect(await policyRevisions(nextTurn)).toEqual([ruleC]);
   }, 180_000);
 
   test("keeps both context-selection routines security definer with a pinned search path", async () => {

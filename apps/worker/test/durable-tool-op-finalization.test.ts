@@ -53,8 +53,6 @@ for (const scenario of [
       spyOn(db, "listTurnCodemodeApprovals").mockResolvedValue([]),
       spyOn(db, "listTurnGitHubGatewayApprovals").mockResolvedValue([]),
       spyOn(db, "sessionTurnHasFinalReplyNudge").mockResolvedValue(false),
-      spyOn(db, "refreshSessionWorkspaceGovernance").mockResolvedValue(null),
-      spyOn(db, "workspaceGovernanceSnapshotsAreCurrent").mockResolvedValue(true),
       spyOn(db, "registerPendingSessionToolCallInTransaction").mockResolvedValue({
         accepted: true,
         registered: true,

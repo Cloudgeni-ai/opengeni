@@ -14,7 +14,6 @@ import {
   claimSessionWorkForAttempt,
   ensureSessionSkillCatalog,
   ensureSessionWorkspaceGovernance,
-  refreshSessionWorkspaceGovernance,
   getActiveSessionHistoryItems,
   applySessionTurnSettlement,
   ensureManagedAccessForUser,
@@ -150,8 +149,6 @@ async function fixture(forkable = false) {
       .filter((value) => value !== null);
   const govern = (turn: Turn, governance: string | null) =>
     ensureSessionWorkspaceGovernance(client.db, { ...identity(turn), governance });
-  const refresh = (turn: Turn, governance: string | null) =>
-    refreshSessionWorkspaceGovernance(client.db, { ...identity(turn), governance });
   const catalog = (turn: Turn, text: string) =>
     ensureSessionSkillCatalog(client.db, { ...identity(turn), catalog: text });
   return {
@@ -160,7 +157,6 @@ async function fixture(forkable = false) {
     history,
     governed,
     govern,
-    refresh,
     catalog,
     subjectId: grant.subjectId,
     workspaceId,
@@ -220,57 +216,6 @@ test("governance is a history item before the turn that first sees it; changes a
   const fifth = await f.claim();
   expect(await f.govern(fifth, null)).toBeNull();
   expect(await f.governed()).toEqual(["Rule A", "Rule B", WORKSPACE_GOVERNANCE_NONE]);
-}, 180_000);
-
-test("governance that changed during a turn is appended at the end; earlier items stay identical", async () => {
-  const f = await fixture();
-  const turn = await f.claim();
-  expect(await f.govern(turn, "Rule A")).toBe("Rule A");
-  const original = await f.history();
-  // Unchanged governance writes nothing.
-  expect(await f.refresh(turn, "Rule A")).toBe("Rule A");
-  expect(await f.history()).toEqual(original);
-
-  // Governance activated while the turn waited or between two of its model
-  // requests is appended before the next request.
-  expect(await f.refresh(turn, "Rule B")).toBe("Rule B");
-  const updated = await f.history();
-  expect(updated.slice(0, original.length)).toEqual(original);
-  expect(updated).toHaveLength(original.length + 1);
-  expect(readWorkspaceGovernanceContext(updated.at(-1)!.item)).toBe("Rule B");
-  expect(updated.at(-1)!.position).toBeGreaterThan(original.at(-1)!.position);
-  // A later attempt of the turn reuses the appended item, not the first one.
-  expect(await f.govern(turn, "Rule C")).toBe("Rule B");
-  expect(await f.refresh(turn, "Rule B")).toBe("Rule B");
-  expect(await f.history()).toEqual(updated);
-
-  // Withdrawn governance is stated explicitly.
-  expect(await f.refresh(turn, null)).toBeNull();
-  const withdrawn = await f.history();
-  expect(withdrawn.slice(0, updated.length)).toEqual(updated);
-  expect(await f.governed()).toEqual(["Rule A", "Rule B", WORKSPACE_GOVERNANCE_NONE]);
-  expect(await f.refresh(turn, null)).toBeNull();
-  expect(await f.history()).toEqual(withdrawn);
-  await f.settle(turn);
-
-  // The next turn starts from the refreshed state.
-  const next = await f.claim();
-  expect(await f.govern(next, null)).toBeNull();
-  expect(await f.governed()).toEqual(["Rule A", "Rule B", WORKSPACE_GOVERNANCE_NONE]);
-}, 180_000);
-
-test("a turn frozen without governance gets governance activated later at the end", async () => {
-  const f = await fixture();
-  const turn = await f.claim();
-  expect(await f.govern(turn, null)).toBeNull();
-  expect(await f.refresh(turn, null)).toBeNull();
-  const original = await f.history();
-  expect(original.map((row) => row.item.role)).toEqual(["user"]);
-  expect(await f.refresh(turn, "Rule A")).toBe("Rule A");
-  const updated = await f.history();
-  expect(updated.slice(0, original.length)).toEqual(original);
-  expect(updated.map((row) => readWorkspaceGovernanceContext(row.item))).toEqual([null, "Rule A"]);
-  expect(await f.govern(turn, "Rule B")).toBe("Rule A");
 }, 180_000);
 
 test("message forks keep governance history items", async () => {

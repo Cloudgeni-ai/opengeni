@@ -1085,19 +1085,8 @@ prompt. The rendered governance (organization/workspace/user preference
 descriptors plus organization/global, workspace, and role policy) is not part
 of the system prompt: it differs by initiator and changes between turns, so it
 is a durable developer history item written before the first turn that sees a
-new value and replaced by appending a newer item (see
-`docs/context-compaction.md`, "Prompt-cache stability"). Each attempt
-snapshots the instruction policies and organization profile active when it
-runs, not when its turn was accepted. An attempt that sees other governance
-than the newest governance item (the turn waited for capacity or recovered)
-appends the current governance at the end of the history before its first
-request. Model-call admission compares the attempt's snapshots with the
-active governance before every request. On a change made during the
-attempt, the request is not sent: inside a stream the stream ends at that
-model-step boundary (like a Steer handover, with every event of the
-completed step kept), the attempt refreshes its snapshot rows in place,
-appends the new governance, rebuilds its input from the durable history and
-samples on. There is no restart, recovery event or status change.
+new value, frozen for every attempt of that turn, and replaced by appending a
+newer item (see `docs/context-compaction.md`, "Prompt-cache stability").
 Optional application `modelContext` is not part of
 that prefix: claim stores it as a separate leading `input_text` part of the
 exact chronological user message. Standard timeline rendering omits it, while
@@ -1188,16 +1177,19 @@ See [`knowledge.md`](knowledge.md) for storage, migration and review.
 
 Approval, capacity wait, worker recovery, and Pause/Resume create newer
 attempts for the **same logical turn**, so they must replay the original policy
-rather than resolve or overwrite it. Learning modes and Skill descriptor
-snapshots stay frozen for the turn; instruction policies and the organization
-profile are snapshotted again by every attempt, so a turn always runs its next
-model request under the governance active when that request is built (see
-above). A new user/API turn or a newly materialized goal, system,
+rather than resolve or overwrite it; they also keep the turn's governance
+snapshots. Instruction policies and the organization profile are resolved when
+the turn starts running, not when it was accepted: an attempt resolves them as
+of the earliest snapshot an earlier attempt of the turn took, unless that
+attempt only parked the turn for capacity (it sends no model request), and
+otherwise as of its own snapshot time. A turn that waited in the queue or for
+capacity therefore runs under governance activated while it waited, and a
+change made while it runs reaches the next turn. A new user/API turn or a newly materialized goal, system,
 child-result, scheduled, or compaction turn is a new logical turn and resolves
 fresh execution and governance policy. Thus a per-turn model/provider switch
 persists through recovery without accidentally becoming a permanent session
-default, while later preference or learning-mode changes affect only later
-accepted turns.
+default, while later policy or preference changes affect only later accepted
+turns.
 
 **Runs have no default length limits, by design.** What the SDK calls "turns" are model
 calls; `OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN` exists but defaults to

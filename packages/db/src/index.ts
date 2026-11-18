@@ -45184,123 +45184,6 @@ export async function ensureSessionWorkspaceGovernance(
 }
 
 /**
- * Bring the model-visible governance up to date before a running turn builds
- * its next model request. `ensureSessionWorkspaceGovernance` froze the item a
- * turn first saw; an attempt that starts later (after a capacity wait, a
- * recovery, or a governance change during the turn) can see newer
- * governance. When the newest governance item in the session shows other
- * text, the current text is appended as a new item at the end of the
- * history, and every earlier item stays exactly as it was sent. The turn's
- * metadata then names the new item, so later attempts reuse it. Null means
- * no governance applies: an earlier item is withdrawn explicitly, and
- * nothing is written when the session never showed any. Returns the
- * model-visible governance, or null when none is visible.
- *
- * Call it only where the end of the history is a model-request boundary: no
- * tool call waits for its output, and nothing of the coming request was
- * loaded yet.
- */
-export async function refreshSessionWorkspaceGovernance(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-    turnId: string;
-    expectedExecutionGeneration: number;
-    expectedAttemptId: string;
-    governance: string | null;
-  },
-): Promise<string | null> {
-  const channel = WORKSPACE_GOVERNANCE_CHANNEL;
-  return withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) =>
-      scopedDb.transaction(async (tx) => {
-        const fence = await lockTurnAttemptWriteFenceTx(tx, {
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: input.turnId,
-          executionGeneration: input.expectedExecutionGeneration,
-          attemptId: input.expectedAttemptId,
-        });
-        if (!fence.allowed) throw new Error(`${channel.label} attempt is fenced`);
-        const scope = and(
-          eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
-          eq(schema.sessionHistoryItems.sessionId, input.sessionId),
-        );
-        const [previous] = await tx
-          .select({
-            id: schema.sessionHistoryItems.id,
-            item: schema.sessionHistoryItems.item,
-            itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
-          })
-          .from(schema.sessionHistoryItems)
-          .where(
-            and(
-              scope,
-              eq(schema.sessionHistoryItems.active, true),
-              sql`${schema.sessionHistoryItems.item}->>'type' = 'message'`,
-              sql`${schema.sessionHistoryItems.item}->>'role' = 'developer'`,
-              sql`starts_with(${schema.sessionHistoryItems.item}->>'content', ${channel.contentPrefix})`,
-            ),
-          )
-          .orderBy(desc(schema.sessionHistoryItems.position))
-          .limit(1);
-        const previousText = previous
-          ? channel.read(fromPostgresLosslessJson(previous.item, previous.itemCodecVersion))
-          : null;
-        const visible = (text: string | null) =>
-          text === null || text === WORKSPACE_GOVERNANCE_NONE ? null : text;
-        if (input.governance === null && previousText === null) return null;
-        const text = input.governance ?? WORKSPACE_GOVERNANCE_NONE;
-        let historyId: string;
-        if (previous && previousText === text) {
-          if (fence.turn.metadata[channel.metadataKey] === previous.id) return visible(text);
-          historyId = previous.id;
-        } else {
-          const [tail] = await tx
-            .select({ position: schema.sessionHistoryItems.position })
-            .from(schema.sessionHistoryItems)
-            .where(scope)
-            .orderBy(desc(schema.sessionHistoryItems.position))
-            .limit(1);
-          historyId = crypto.randomUUID();
-          await tx.insert(schema.sessionHistoryItems).values(
-            withLosslessContentWriteVersion(
-              {
-                id: historyId,
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: input.turnId,
-                position: tail ? Math.floor(tail.position) + 1 : 0,
-                item: channel.item(text),
-              },
-              "item",
-              "itemCodecVersion",
-            ),
-          );
-        }
-        await tx
-          .update(schema.sessionTurns)
-          .set({
-            metadata: { ...fence.turn.metadata, [channel.metadataKey]: historyId },
-            updatedAt: new Date(),
-          })
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              eq(schema.sessionTurns.id, input.turnId),
-            ),
-          );
-        return visible(text);
-      }),
-  );
-}
-
-/**
  * The agent revision baked into a chat's system prompt
  * (`sessions.agent_prompt_revision`) and its instructions. Null for every chat
  * not bound to an agent revision, which never gets the agent layer. A deleted
@@ -81304,12 +81187,12 @@ export async function claimSessionWorkForAttempt(
                 connectorActionPolicies: connectorPolicyRows,
               }),
           );
-          // Snapshot governance only after this exact attempt is durably
-          // claimed, while the claim transaction still owns the
-          // session/turn/attempt locks. A later policy activation reaches the
-          // running attempt only through its own in-place snapshot refresh
-          // before a model request; preference activation applies to a
-          // future turn.
+          // Freeze governance only after this exact attempt is durably claimed,
+          // while the claim transaction still owns the session/turn/attempt
+          // locks. Policies resolve as the turn starts running (a queued turn
+          // sees what was activated while it waited); once a turn has run,
+          // its later attempts keep that snapshot and later activation
+          // applies to the next turn.
           await tx.execute(sql`
             SELECT snapshot.id
             FROM workspace_instruction_policy_get_or_create_snapshot(

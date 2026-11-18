@@ -10,26 +10,30 @@ import { ScriptedModel, functionCall, assistantMessage } from "@opengeni/testing
 import { readWorkspaceGovernanceContext } from "@opengeni/contracts";
 import {
   activateWorkspaceInstructionPolicyRevision,
+  appendSessionEvents,
   bootstrapWorkspace,
   createDb,
   createSession,
   createWorkspaceInstructionPolicyDraft,
+  enqueueSessionTurn,
   getActiveSessionHistoryItemsPaged,
   initializeSessionStartAtomically,
   listSessionEvents,
+  withSessionRlsActorContext,
 } from "@opengeni/db";
 import { createProductionAgentRuntime, type OpenGeniRuntime } from "@opengeni/runtime";
 import { createActivityTestHarness } from "../src/activities";
 
 // Workspace governance through the real worker turn path: real PostgreSQL in
 // the production posture and the real SDK call flow over an offline
-// ScriptedModel. A turn runs each model request under the governance active
-// when the request is built, and never changes what an earlier request sent.
+// ScriptedModel. A turn runs under the governance active when it starts
+// running, keeps it for every request of the turn, and a change made meanwhile
+// reaches the next turn without changing what earlier requests sent.
 setDefaultTimeout(120_000);
 let shared: RestrictedRuntimeTestDatabase;
 let app: ReturnType<typeof createDb>;
 beforeAll(async () => {
-  const acquired = await acquireRestrictedRuntimeTestDatabase("workspace-governance-current");
+  const acquired = await acquireRestrictedRuntimeTestDatabase("workspace-governance-turn-start");
   if (!acquired) throw new Error("Native PostgreSQL required for workspace governance tests");
   shared = acquired;
   app = createDb(shared.appUrl, { searchPath: shared.schema });
@@ -207,36 +211,60 @@ test("a turn that waited after acceptance sends its first request under the gove
   expect(scripted.sent[0]).not.toContain("RULE_BEFORE_ACCEPTANCE");
 });
 
-test("governance activated between two model requests is appended before the next one in the same attempt; what was sent stays identical", async () => {
+test("governance activated during a turn reaches the next turn, never a request of the running one", async () => {
   const f = await fixture();
   await f.activatePolicy("RULE_A");
   await start(f);
   const scripted = new RecordingModel([
     { output: [functionCall("local_fixture", {}, "call-governance")] },
     { output: [assistantMessage("done")] },
+    { output: [assistantMessage("next done")] },
   ]);
   // The tool runs between the two requests; the owner changes the policy then.
-  // The attempt rebinds and samples on: no restart, no recovery.
+  // The running turn keeps the rules it started with.
   expect((await runTurn(f, scripted, async () => await f.activatePolicy("RULE_B"))).status).toBe(
     "idle",
   );
   expect(scripted.sent).toHaveLength(2);
+  for (const sent of scripted.sent) {
+    expect(sent).toContain("RULE_A");
+    expect(sent).not.toContain("RULE_B");
+  }
   const events = await listSessionEvents(app.db, f.workspaceId, f.session.id, {
     after: 0,
     limit: 200,
   });
   expect(events.filter((event) => event.type.startsWith("turn.recovery"))).toEqual([]);
-  expect(events.filter((event) => event.type === "turn.started")).toHaveLength(1);
-  const [before, after] = scripted.sent.map((sent) => JSON.parse(sent) as unknown[]);
-  // Every item the first request sent is sent again unchanged, first.
-  expect(after!.slice(0, before!.length)).toEqual(before!);
+
+  // The next turn runs under the new policy, shown after everything the
+  // earlier requests sent, which is sent again unchanged.
+  const [trigger] = await appendSessionEvents(app.db, f.workspaceId, f.session.id, [
+    { type: "user.message", payload: { text: "NEXT_QUESTION" } },
+  ]);
+  await withSessionRlsActorContext({ subjectId: f.subjectId }, () =>
+    enqueueSessionTurn(app.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      sessionId: f.session.id,
+      triggerEventId: trigger!.id,
+      temporalWorkflowId: `session-${f.session.id}`,
+      source: "user",
+      prompt: "NEXT_QUESTION",
+      resources: [],
+      tools: [],
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      sandboxBackend: "none",
+      metadata: {},
+      initiator: { kind: "subject", subjectId: f.subjectId },
+    }),
+  );
+  expect((await runTurn(f, scripted)).status).toBe("idle");
+  expect(scripted.sent).toHaveLength(3);
+  const [, before, after] = scripted.sent.map((sent) => JSON.parse(sent) as unknown[]);
   expect(JSON.stringify(after!.slice(0, before!.length))).toBe(JSON.stringify(before));
-  expect(JSON.stringify(before)).toContain("RULE_A");
-  expect(JSON.stringify(before)).not.toContain("RULE_B");
-  // The new governance is the last item, after the tool call and its output.
   const tail = JSON.stringify(after!.slice(before!.length));
-  expect(tail).toContain("call-governance");
-  expect(tail.lastIndexOf("RULE_B")).toBeGreaterThan(tail.lastIndexOf("local result"));
+  expect(tail).toContain("RULE_B");
+  expect(tail.indexOf("RULE_B")).toBeLessThan(tail.indexOf("NEXT_QUESTION"));
   expect(await governanceHistory(f)).toHaveLength(2);
-  expect((await governanceHistory(f))[1]).toContain("RULE_B");
 });
