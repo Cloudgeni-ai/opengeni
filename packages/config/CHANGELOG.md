@@ -1,5 +1,41 @@
 # @opengeni/config
 
+## 6.29.0
+
+### Minor Changes
+
+- c5a628c: Decision models can run on Azure AI Foundry (for example Microsoft-Decision-1.1). `OPENGENI_DECISION_MODEL_ENDPOINT` (and `OPENGENI_PUBLIC_DECISION_MODEL_ENDPOINT`) sets the exact URL an `openai` or `openrouter` decision model posts to, `OPENGENI_DECISION_MODEL_AUTH=deployment_identity` now works for `openrouter` as well as `openai`, and an `openrouter` decision model at the operator's own endpoint can be declared EU in `OPENGENI_SIDE_FEATURE_RESIDENCY_JSON` under `decision_model.openrouter` (OpenRouter's own host keeps its global rule). `OPENGENI_TOOL_SEARCH_LOAD_THRESHOLD` sets the probability above which tool search loads a judged tool; unset keeps 0.5. `selectFromJudgments` takes an optional threshold, `createToolSelector` an optional `loadThreshold`, and `BuildAgentOptions` an optional `toolSearchLoadThreshold`.
+- 6581a0f: GPT-6.2 Astra (`gpt-6.2-astra`) and GPT-6.2 Sol (`gpt-6.2-sol`) replace GPT-6 Astra as Opengeni's default models. The built-in OpenAI defaults are now `OPENGENI_OPENAI_MODEL=gpt-6.2-astra` and `OPENGENI_OPENAI_ALLOWED_MODELS=gpt-6.2-astra,gpt-6.2-sol,gpt-6-sol,gpt-6-luna`, and the built-in Codex subscription models are GPT-6.2 Astra, GPT-6.2 Sol, GPT-6 Sol and GPT-6 Luna. Both new models offer Fast and, where OpenAI serves it, Ultrafast, and get compact labels ("6.2 Astra", "6.2 Sol").
+
+  Their OpenAI list prices per million tokens: GPT-6.2 Astra $8 input, $0.40 cached input, $10 cache write and $40 output; GPT-6.2 Sol $2, $0.10, $2.50 and $10. Above 272K input tokens the whole request pays twice the input and cache rates and 1.5 times the output rate. Ultrafast is priced at OpenAI's launch rate of 3 times Standard, which OpenAI raises to 6 times on 1 March 2027.
+
+  GPT-6 Astra is no longer offered by default. Deployments that list it explicitly keep it, and it keeps its price, so Azure deployments of it, accepted turns and recorded usage stay priced. Chats on it keep their history and ask for another model on the next message; database-mode catalogs retire it with `retired: true` as before. GPT-6.1 Sol is unchanged.
+
+### Patch Changes
+
+- 60f6dea: Plan-less organizations on a deployment without subscription plans are no longer bounded like Free, and turns parked at an organization's running-box limit no longer count as sandbox recoveries.
+
+  - **`none` without subscription plans:** with `OPENGENI_SUBSCRIPTION_PLANS_ENABLED` off, no organization ever gets a plan row, so `none` is every organization's ordinary tier. It is no longer unpaid: the default plan limits leave it unbounded (`DEFAULT_SANDBOX_PLAN_LIMITS_WITHOUT_SUBSCRIPTION_PLANS`), and none of the free compute bounds, unpaid fleet limits or unpaid Modal ceilings apply to it. With subscription plans on, `none` is still a self-serve organization waiting for Free enrollment and stays bounded like Free. Promotion decisions (`restricted`, linked restriction, suspension) apply either way. Operators can still bound `none` in `OPENGENI_SANDBOX_PLAN_LIMITS_JSON`. New `sandboxPlanTierUnpaid`; `parseSandboxPlanLimitsJson` takes `{ subscriptionPlansEnabled }`, `settingsForSandboxPlanTier` reads `subscriptionPlansEnabled` from its settings, and `acquireLease` accepts `subscriptionPlansEnabled` (omitted means on).
+  - **Recovery cause `organization_limit`:** a turn parked because its organization already runs as many boxes as its plan allows counts in `opengeni_turn_recoveries_total` as `cause="organization_limit"` instead of `sandbox`, and `OpenGeniTurnRecoveryRatioHigh` excludes it like `route_change`.
+
+- 7b590d3: New self-serve organizations (first and additional) start held when they arrive as a farm (rule `email-cluster-v1`, migration 1489), with a mode per leg in the signup network velocity settings:
+
+  - Burst (`burstMode`, enforce): four setups within ten seconds through the same shared relay, or with the same mail domain group and the same signup network. Bursts that share only a network, or only a company or academic domain (a workshop, classroom or office onboarding), and bursts of unrelated domains are only observed.
+  - Denied domain (`deniedDomainMode`, enforce): two denied organizations in the last 30 days on the same company or personal-relay domain; an academic domain is only observed.
+  - Domain (`emailDomainMode`, observe): three owners with one company or personal-relay domain within an hour.
+
+  Per-person subdomains of addy.io, anonaddy, 33mail and dynamic DNS hosts (DuckDNS, No-IP, Dynu, FreeDDNS and similar) group on the full subdomain; a burst through one such provider counts like one shared relay, and one denied organization on such a name holds the next.
+
+  Only a keyed hash of the domain is stored. Public providers and shared relays (Apple private relay, DuckDuckGo, Firefox Relay, SimpleLogin) never group on the domain or denied legs, academic domains never group on the domain leg, and reserved test domains never count.
+
+  An unpaid organization in its first day in which no turn was ever started gets 15 box-minutes (`youngTurnlessBoxSeconds` in `OPENGENI_SANDBOX_FLEET_LIMITS_JSON`). Past it, the reaper drains a box no turn holds once nothing on it was active for `youngTurnlessIdleMs` (5 minutes; `compute_turnless`). Running commands and Browser/ComputerSessions are never cut off. A box that is not running does not start again without a turn (`young_turnless`), and starting a chat always works and lifts the bound.
+
+- Updated dependencies [6581a0f]
+- Updated dependencies [ea75565]
+  - @opengeni/codex@6.29.0
+  - @opengeni/xai-subscription@6.29.0
+  - @opengeni/contracts@6.29.0
+
 ## 6.28.0
 
 ### Patch Changes

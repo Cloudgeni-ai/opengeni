@@ -1,5 +1,12 @@
 # @opengeni/vaults-keeper
 
+## 6.29.0
+
+### Patch Changes
+
+- @opengeni/contracts@6.29.0
+- @opengeni/vaults@6.29.0
+
 ## 6.28.0
 
 ### Patch Changes
