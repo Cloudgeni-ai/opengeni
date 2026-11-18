@@ -511,23 +511,36 @@ the `checkout.session.completed` webhook or by the page Checkout returns to
 (`POST /v1/billing/card-verification/confirm`), whichever comes first. Both
 check the SetupIntent and card with Stripe and that the person still owns the
 organization, then record the card (`billing_card_verifications`: brand, last
-four digits and Stripe's card fingerprint). `GET /v1/billing/card-verification`
-says whether an organization needs one. The console shows one Add a card
-action where a box was refused and continues the refused chat once the card
-is added.
+four digits and Stripe's card fingerprint). Prepaid cards and cards whose
+security code check failed are refused; the webhook logs such a refusal and
+acknowledges the event, since retrying would not change it. A late webhook
+for an older SetupIntent never replaces a newer card.
+`GET /v1/billing/card-verification` says whether an organization needs one
+and whether the caller (its owner) can add it. The console shows one Add a
+card action where a box was refused and continues the refused chat once the
+card is added; other members are asked to have the owner add it.
 
 One Free grant per card and per person: the first organization whose verified
 card reaches Free issuance claims the card's fingerprint and the owner who
-verified it (`opengeni_private.free_trial_card_claims`). Another organization
-with the same card, or verified by the same person, gets no Free credit.
-Another organization of the same owner inherits their card for sandboxes (when
-that owner acts), never for Free credit. Existing Free organizations without
+verified it together (`opengeni_private.free_trial_card_claims`); an
+organization refused for either claims neither. Only Free issuance claims;
+model-call admission and sweeps only read the claims. Another organization
+with the same card, or verified by the same person, gets no Free credit. To
+release a claim (for example after a support review), the database owner
+deletes its rows for that organization from
+`opengeni_private.free_trial_card_claims`. Another organization of the same
+owner inherits their card for sandboxes when that owner acts, never for Free
+credit; work without an acting owner (for example a schedule another member
+created) needs the organization's own card. The gate covers the Free monthly
+credit; a nonzero signup trial grant, where configured, stays spendable. Existing Free organizations without
 a card hit the gate at their next box start or Free grant; nothing is deleted,
 no ledger is rewritten, and the Free amount is unchanged.
 
-Switch it with the audited, revision-fenced network velocity setter
-(appends a `card_verification_gate_revisions` row; processes pick it up
-within 15 seconds):
+Turn it on only after the release that carries it has finished rolling out:
+older processes do not refuse boxes, while the database applies the Free
+credit check at once. Switch it with the audited, revision-fenced network
+velocity setter (appends a `card_verification_gate_revisions` row; processes
+pick it up within 15 seconds):
 
 ```sh
 bun scripts/operator/promotion-decisions.ts --network-velocity-set --card-verification-mode enforce \

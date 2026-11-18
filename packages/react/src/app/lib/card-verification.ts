@@ -11,7 +11,9 @@ export { SANDBOX_CARD_REQUIRED_CODE };
 
 export type CardVerificationClient = Pick<
   ChatClient<OpenGeniBrowserClient>,
-  "createBillingCardVerificationSession" | "confirmBillingCardVerification"
+  | "getBillingCardVerification"
+  | "createBillingCardVerificationSession"
+  | "confirmBillingCardVerification"
 >;
 
 /** Raised (on `window`) when a surface is refused for a missing card. */

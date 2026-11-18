@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   Dialog,
@@ -19,23 +19,26 @@ import {
   type CardRequiredDetail,
 } from "../lib/card-verification";
 import { usePage } from "../lib/navigation";
-import { hasAccountPermission } from "../lib/permissions";
 import { toast } from "../lib/toast";
-import type { AccessContext } from "../types";
 
 /**
  * Mounted once beside the routes (with CreditRequiredGate): asks for a card
  * when a surface is refused for one, and confirms the card when checkout
  * returns to this page.
  */
-export function CardRequiredGate(props: { accessContext: AccessContext | null }) {
+export function CardRequiredGate() {
   const [required, setRequired] = useState<CardRequiredDetail | null>(null);
+  // Each workspace asks once per page: a viewer refused again does not
+  // reopen the dialog (the session's banner keeps Add a card).
+  const asked = useRef(new Set<string>());
   const { workspaces, client } = useAppContext();
   useCardVerificationReturn();
   useEffect(() => {
     const listener = (event: Event) => {
       const detail = (event as CustomEvent<CardRequiredDetail>).detail;
-      if (detail?.workspaceId) setRequired(detail);
+      if (!detail?.workspaceId || asked.current.has(detail.workspaceId)) return;
+      asked.current.add(detail.workspaceId);
+      setRequired(detail);
     };
     window.addEventListener(CARD_REQUIRED_EVENT, listener);
     return () => window.removeEventListener(CARD_REQUIRED_EVENT, listener);
@@ -45,9 +48,6 @@ export function CardRequiredGate(props: { accessContext: AccessContext | null })
     required.accountId ??
     workspaces.find((workspace) => workspace.id === required.workspaceId)?.accountId ??
     null;
-  const canManage = Boolean(
-    accountId && hasAccountPermission(props.accessContext, accountId, "billing:manage"),
-  );
   return (
     <Dialog open onOpenChange={(open) => (open ? undefined : setRequired(null))}>
       <DialogContent>
@@ -58,7 +58,7 @@ export function CardRequiredGate(props: { accessContext: AccessContext | null })
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
-          <AddCardButton client={client} accountId={accountId} canManage={canManage} />
+          <AddCardButton client={client} accountId={accountId} />
         </DialogFooter>
       </DialogContent>
     </Dialog>

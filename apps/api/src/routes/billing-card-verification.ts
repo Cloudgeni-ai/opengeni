@@ -36,6 +36,16 @@ import {
 const CARD_VERIFICATION_METADATA = "opengeni_card_verification";
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
+/**
+ * A card verification Stripe completed but this deployment does not accept
+ * (a prepaid card, a failed CVC check, a session that does not match, an
+ * owner who left). Retrying never changes the answer, so the webhook logs it
+ * and acknowledges the event.
+ */
+export class CardVerificationRejectedError extends Error {
+  override readonly name = "CardVerificationRejectedError";
+}
+
 function enabled(deps: ApiRouteDeps): void {
   if (deps.settings.billingMode !== "stripe") {
     throw new HTTPException(404, {
@@ -76,7 +86,8 @@ async function requireOwner(c: Context, deps: ApiRouteDeps, accountId: string): 
 /**
  * Records the card of a completed card verification checkout session.
  * Returns false for any other session. Throws when the session claims to be a
- * card verification but Stripe does not confirm it.
+ * card verification but Stripe does not confirm it, or the card is not
+ * accepted ({@link CardVerificationRejectedError}).
  */
 export async function completeCardVerificationSession(
   deps: ApiRouteDeps,
@@ -99,11 +110,11 @@ export async function completeCardVerificationSession(
     !stripeId(session.setup_intent) ||
     !stripeId(session.customer)
   ) {
-    throw new Error("Invalid card verification session");
+    throw new CardVerificationRejectedError("Invalid card verification session");
   }
   const setup = await stripe.setupIntents.retrieve(stripeId(session.setup_intent)!);
   const methodId = stripeId(setup.payment_method);
-  if (!methodId) throw new Error("Card verification has no payment method");
+  if (!methodId) throw new CardVerificationRejectedError("Card verification has no payment method");
   const method = await stripe.paymentMethods.retrieve(methodId);
   if (
     setup.status !== "succeeded" ||
@@ -114,11 +125,21 @@ export async function completeCardVerificationSession(
     !method.card?.fingerprint ||
     method.livemode !== session.livemode
   ) {
-    throw new Error("Card verification does not match this organization's card");
+    throw new CardVerificationRejectedError(
+      "Card verification does not match this organization's card",
+    );
+  }
+  // One Free trial per card: prepaid and single-use virtual cards each have
+  // their own fingerprint, and a card whose security code failed is not
+  // the person's card.
+  if (method.card.funding === "prepaid" || method.card.checks?.cvc_check === "fail") {
+    throw new CardVerificationRejectedError("Card verification needs a credit or debit card");
   }
   // The person who verified must still own the organization.
   if (!(await ownsOrganization(deps, subjectId, accountId))) {
-    throw new Error("Card verification subject no longer owns the organization");
+    throw new CardVerificationRejectedError(
+      "Card verification subject no longer owns the organization",
+    );
   }
   await recordCardVerification(deps.db, {
     accountId,
@@ -127,6 +148,7 @@ export async function completeCardVerificationSession(
     customerId: stripeId(session.customer)!,
     paymentMethodId: method.id,
     setupIntentId: setup.id,
+    setupIntentCreatedAt: new Date(setup.created * 1000),
     fingerprint: method.card.fingerprint,
     brand: method.card.brand,
     last4: method.card.last4,
@@ -134,12 +156,32 @@ export async function completeCardVerificationSession(
   return true;
 }
 
+/** The webhook's card verification step: a rejected card is logged and the
+ * event acknowledged; Stripe and database failures still throw, so Stripe
+ * retries them. */
+export async function handleCardVerificationWebhookSession(
+  deps: ApiRouteDeps,
+  stripe: Stripe,
+  session: Stripe.Checkout.Session,
+): Promise<boolean> {
+  try {
+    return await completeCardVerificationSession(deps, stripe, session);
+  } catch (error) {
+    if (!(error instanceof CardVerificationRejectedError)) throw error;
+    console.warn("card verification rejected", {
+      checkoutSession: session.id.slice(0, 11),
+      reason: error.message,
+    });
+    return true;
+  }
+}
+
 async function cardVerificationStatus(
   deps: ApiRouteDeps,
   accountId: string,
   subjectId: string,
 ): Promise<BillingCardVerificationStatus> {
-  const [card, standing] = await Promise.all([
+  const [card, standing, owner] = await Promise.all([
     readCardVerification(deps.db, accountId),
     resolveSandboxComputeStanding(deps.db, {
       accountId,
@@ -147,11 +189,15 @@ async function cardVerificationStatus(
       actingSubjectId: subjectId,
       subscriptionPlansEnabled: deps.settings.subscriptionPlansEnabled,
     }),
+    subjectId.startsWith("user:")
+      ? ownsOrganization(deps, subjectId, accountId).catch(() => false)
+      : Promise.resolve(false),
   ]);
   return BillingCardVerificationStatus.parse({
     accountId,
     required: standing.cardRequired,
     verified: card !== null,
+    canVerify: owner,
     card: card ? { brand: card.brand, last4: card.last4 } : null,
   });
 }

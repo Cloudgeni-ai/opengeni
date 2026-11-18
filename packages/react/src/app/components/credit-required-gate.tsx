@@ -36,7 +36,7 @@ export function CreditRequiredGate(props: {
   useCheckoutPageReturn();
   return (
     <>
-      <CardRequiredGate accessContext={accessContext} />
+      <CardRequiredGate />
       {creditRequired ? (
         <Suspense fallback={null}>
           <CreditRequiredPrompt

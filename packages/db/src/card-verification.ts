@@ -26,6 +26,8 @@ export type RecordCardVerificationInput = {
   customerId: string;
   paymentMethodId: string;
   setupIntentId: string;
+  /** The SetupIntent's creation time: an older one never replaces a newer card. */
+  setupIntentCreatedAt: Date;
   fingerprint: string;
   brand: string;
   last4: string;
@@ -131,7 +133,8 @@ export async function subjectVerifiedCardInTransaction(
 }
 
 /** Records (or replaces) the organization's verified card. Idempotent for the
- * same SetupIntent. */
+ * same SetupIntent; a late webhook for an older SetupIntent leaves the newer
+ * card in place (and returns it). */
 export async function recordCardVerification(
   db: Database,
   input: RecordCardVerificationInput,
@@ -147,19 +150,25 @@ export async function recordCardVerification(
     }>(
       tx,
       sql`insert into billing_card_verifications (account_id, subject_id, provider, customer_id,
-          payment_method_id, setup_intent_id, fingerprint, brand, last4)
+          payment_method_id, setup_intent_id, setup_intent_created_at, fingerprint, brand, last4)
         values (${input.accountId}::uuid, ${input.subjectId}, ${input.provider}, ${input.customerId},
-          ${input.paymentMethodId}, ${input.setupIntentId}, ${input.fingerprint},
+          ${input.paymentMethodId}, ${input.setupIntentId},
+          ${input.setupIntentCreatedAt.toISOString()}::timestamptz, ${input.fingerprint},
           ${input.brand.slice(0, 64) || "card"}, ${input.last4})
         on conflict (account_id) do update set subject_id = excluded.subject_id,
           provider = excluded.provider, customer_id = excluded.customer_id,
           payment_method_id = excluded.payment_method_id, setup_intent_id = excluded.setup_intent_id,
+          setup_intent_created_at = excluded.setup_intent_created_at,
           fingerprint = excluded.fingerprint, brand = excluded.brand, last4 = excluded.last4,
           verified_at = case when billing_card_verifications.setup_intent_id = excluded.setup_intent_id
             then billing_card_verifications.verified_at else clock_timestamp() end
+        where billing_card_verifications.setup_intent_id = excluded.setup_intent_id
+          or billing_card_verifications.setup_intent_created_at <= excluded.setup_intent_created_at
         returning account_id, subject_id, provider, brand, last4, verified_at`,
     );
-    if (!row) throw new Error("Card verification was not recorded");
-    return cardVerificationFromRow(row);
+    if (row) return cardVerificationFromRow(row);
+    const current = await readCardVerificationInTransaction(tx, input.accountId);
+    if (!current) throw new Error("Card verification was not recorded");
+    return current;
   });
 }

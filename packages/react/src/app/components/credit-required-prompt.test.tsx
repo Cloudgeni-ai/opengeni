@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act, type ReactNode } from "react";
+import { act, createContext, useContext, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { BillingPlanBalance } from "@opengeni/sdk";
 
@@ -47,10 +47,12 @@ mock.module("../lib/navigation", () => ({
   ),
 }));
 
+// Complete: bun shares module mocks across the test files of one process.
+const MockAppContext = createContext<unknown>(null);
 mock.module("../app-context", () => ({
-  useAppContext: () => ({
-    client,
-  }),
+  AppContext: MockAppContext,
+  useAppContext: () => useContext(MockAppContext) ?? { client },
+  useOptionalAppContext: () => useContext(MockAppContext),
 }));
 
 mock.module("../../ui/dialog", () => ({
@@ -106,7 +108,7 @@ describe("credit required prompt", () => {
       cancelAtPeriodEnd: false,
     };
     getBilling.mockResolvedValue({ mode: "stripe", balance: { balanceMicros: 0, plan } });
-    const card = { required: true, verified: false };
+    const card = { required: true, verified: false, canVerify: true };
     const getBillingCardVerification = mock(async () => ({
       accountId: "account-a",
       card: null,
@@ -135,7 +137,7 @@ describe("credit required prompt", () => {
       );
     await render();
     expect(getBillingCardVerification).toHaveBeenCalledWith({ accountId: "account-a" });
-    expect(container.textContent).toContain("Add a card to get your Free credit.");
+    expect(container.textContent).toContain("Add a card so this organization can get Free credit.");
     expect([...container.querySelectorAll("button")].map((b) => b.textContent)).toContain(
       "Add a card",
     );

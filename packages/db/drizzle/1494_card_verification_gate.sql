@@ -14,8 +14,10 @@
 --    Stripe fingerprint. FORCE-RLS, account scoped, like 1257.
 -- 3. opengeni_private.free_trial_card_claims: owner-only. The first
 --    organization whose verified card reaches Free issuance claims the card's
---    fingerprint and the verifying person; no other organization gets Free
---    credit through either.
+--    fingerprint and the verifying person together (both or neither); no
+--    other organization gets Free credit through either. Only Free issuance
+--    (opengeni.free_credit_card_claim set for its transaction) claims;
+--    admission and sweeps only read the claims.
 -- 4. free_plan_credit_eligible and the subscription maintenance inventory
 --    apply it while the gate is on, for organizations that never bought
 --    credit or had a Stripe subscription. Nothing is deleted, no ledger is
@@ -45,6 +47,9 @@ CREATE TABLE billing_card_verifications (
   customer_id text NOT NULL CHECK (char_length(customer_id) BETWEEN 1 AND 255),
   payment_method_id text NOT NULL CHECK (char_length(payment_method_id) BETWEEN 1 AND 255),
   setup_intent_id text NOT NULL CHECK (char_length(setup_intent_id) BETWEEN 1 AND 255),
+  -- Stripe's creation time of the SetupIntent: a late webhook for an older
+  -- one never replaces a newer card.
+  setup_intent_created_at timestamptz NOT NULL,
   fingerprint text NOT NULL CHECK (char_length(fingerprint) BETWEEN 1 AND 255),
   brand text NOT NULL CHECK (char_length(brand) BETWEEN 1 AND 64),
   last4 text NOT NULL CHECK (last4 ~ '^[0-9]{4}$'),
@@ -91,8 +96,10 @@ BEGIN
   -- off and for an organization that bought credit or had a Stripe
   -- subscription; otherwise it needs its own verified card, and neither the
   -- card nor the person who verified it may have been claimed by another
-  -- organization. With p_claim the organization claims both first (the
-  -- first one wins). Owner-only; called by the owner's definers.
+  -- organization. With p_claim the organization claims both together, under
+  -- transaction locks taken card first, then person (the first one wins, and
+  -- a refused organization claims neither). Owner-only; called by the
+  -- owner's definers.
   EXECUTE format($create$
     CREATE OR REPLACE FUNCTION opengeni_private.free_credit_card_ok(p_account_id uuid, p_claim boolean)
     RETURNS boolean LANGUAGE plpgsql SECURITY INVOKER SET search_path = pg_catalog AS $body$
@@ -111,13 +118,17 @@ BEGIN
       SELECT * INTO card FROM %1$I.billing_card_verifications v WHERE v.account_id = p_account_id;
       IF NOT FOUND THEN RETURN false; END IF;
       card_key := card.provider || ':' || card.fingerprint;
-      IF p_claim AND NOT EXISTS (SELECT 1 FROM opengeni_private.free_trial_card_claims claim
-          WHERE claim.data_schema = %2$L AND claim.account_id = p_account_id
-            AND ((claim.claim_kind = 'card' AND claim.claim_key = card_key)
-              OR (claim.claim_kind = 'person' AND claim.claim_key = card.subject_id))) THEN
-        INSERT INTO opengeni_private.free_trial_card_claims (data_schema, claim_kind, claim_key, account_id)
-          VALUES (%2$L, 'card', card_key, p_account_id), (%2$L, 'person', card.subject_id, p_account_id)
-          ON CONFLICT DO NOTHING;
+      IF p_claim THEN
+        PERFORM pg_advisory_xact_lock(hashtextextended('free-trial-card-claim:card:' || %2$L || ':' || card_key, 0));
+        PERFORM pg_advisory_xact_lock(hashtextextended('free-trial-card-claim:person:' || %2$L || ':' || card.subject_id, 0));
+        IF NOT EXISTS (SELECT 1 FROM opengeni_private.free_trial_card_claims claim
+            WHERE claim.data_schema = %2$L AND claim.account_id <> p_account_id
+              AND ((claim.claim_kind = 'card' AND claim.claim_key = card_key)
+                OR (claim.claim_kind = 'person' AND claim.claim_key = card.subject_id))) THEN
+          INSERT INTO opengeni_private.free_trial_card_claims (data_schema, claim_kind, claim_key, account_id)
+            VALUES (%2$L, 'card', card_key, p_account_id), (%2$L, 'person', card.subject_id, p_account_id)
+            ON CONFLICT DO NOTHING;
+        END IF;
       END IF;
       RETURN NOT EXISTS (SELECT 1 FROM opengeni_private.free_trial_card_claims claim
         WHERE claim.data_schema = %2$L AND claim.account_id <> p_account_id
@@ -328,7 +339,9 @@ BEGIN
       WHERE signup_owner.id = trial.source_id AND signup_owner.created_at >= signup_not_before))) THEN
     RETURN false;
   END IF;
-  RETURN opengeni_private.free_credit_card_ok(p_account_id, true);
+  -- Only Free issuance claims the card (packages/db/src/subscription-plans.ts).
+  RETURN opengeni_private.free_credit_card_ok(p_account_id,
+    coalesce(pg_catalog.current_setting('opengeni.free_credit_card_claim', true), '') = 'on');
 END $body$;
 
 -- CREATE OR REPLACE keeps owners and ACLs. Pin the search paths, as 1493.

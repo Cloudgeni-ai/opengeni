@@ -50182,6 +50182,8 @@ function reportSandboxComputeStandingFallback(
 
 /** The most other organizations of one person the standing reads. */
 const SANDBOX_STANDING_PERSON_ORGANIZATION_LIMIT = 25;
+/** The most further owned organizations searched for the owner's card. */
+const SANDBOX_STANDING_CARD_ORGANIZATION_LIMIT = 500;
 
 function sandboxDailyBoxTimeSpent(limit: SandboxPlanLimit, standing: SandboxComputeStanding) {
   return (
@@ -50558,6 +50560,29 @@ async function readSandboxPersonStanding(
     if (other.restricted && administersThis) result.linkedRestricted = true;
     result.otherRunningBoxes += other.runningBoxes;
     result.otherBoxSecondsToday += other.seconds;
+  }
+  // The card follows its owner into every organization they own, not only
+  // the ones the bounded loop above read.
+  if (cardGate && !result.cardVerifiedElsewhere) {
+    const remaining = administered
+      .filter(
+        (membership) =>
+          membership.organizationId !== input.accountId &&
+          membership.role === "owner" &&
+          !others.includes(membership),
+      )
+      .slice(0, SANDBOX_STANDING_CARD_ORGANIZATION_LIMIT);
+    for (const membership of remaining) {
+      const organizationId = membership.organizationId as string;
+      if (
+        await withAccountRls(db, organizationId, (tx) =>
+          subjectVerifiedCardInTransaction(tx, organizationId, subjectId),
+        )
+      ) {
+        result.cardVerifiedElsewhere = true;
+        break;
+      }
+    }
   }
   return result;
 }

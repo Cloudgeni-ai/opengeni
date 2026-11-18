@@ -8,7 +8,9 @@ import {
   completeSelfServiceOrganizationSetup,
   createDb,
   freePlanCreditEligible,
+  getSpendableCreditBalance,
   listSubscriptionPlanMaintenanceAccounts,
+  readCardVerification,
   maintainSubscriptionPlans,
   recordCardVerification,
   resetCardVerificationGateCache,
@@ -74,6 +76,7 @@ function card(accountId: string, subjectId: string, fingerprint: string) {
     customerId: "cus_test",
     paymentMethodId: `pm_${crypto.randomUUID()}`,
     setupIntentId: `seti_${crypto.randomUUID()}`,
+    setupIntentCreatedAt: new Date(),
     fingerprint,
     brand: "visa",
     last4: "4242",
@@ -111,11 +114,18 @@ test("while the gate is on, Free credit needs the organization's own unclaimed v
   expect(await freePlanCreditEligible(client.db, sameCard.accountId)).toBe(false);
   // Nor does another organization of the same person, with another card.
   const samePerson = await organization();
-  await card(samePerson.accountId, first.subjectId, `fp_${crypto.randomUUID()}`);
+  const otherCard = `fp_${crypto.randomUUID()}`;
+  await card(samePerson.accountId, first.subjectId, otherCard);
   expect(await freePlanCreditEligible(client.db, samePerson.accountId)).toBe(false);
+  // A refused organization claims neither: its card stays free for its
+  // holder's own organization.
+  const holder = await organization();
+  await card(holder.accountId, holder.subjectId, otherCard);
+  expect(await freePlanCreditEligible(client.db, holder.accountId)).toBe(true);
   expect((await maintainSubscriptionPlans(client.db)).failedAccounts).toBe(0);
   expect(await freeReceipts(sameCard.accountId)).toHaveLength(0);
   expect(await freeReceipts(samePerson.accountId)).toHaveLength(0);
+  expect(await freeReceipts(holder.accountId)).toHaveLength(1);
   // The first organization keeps its claim.
   expect(await freePlanCreditEligible(client.db, first.accountId)).toBe(true);
 }, 180_000);
@@ -138,4 +148,52 @@ test("an organization that bought credit, or any organization while the gate is 
   expect(await freePlanCreditEligible(client.db, unverified.accountId)).toBe(true);
   expect((await maintainSubscriptionPlans(client.db)).failedAccounts).toBe(0);
   expect(await freeReceipts(unverified.accountId)).toHaveLength(1);
+}, 180_000);
+
+test("only Free issuance claims a card, and a late older card never replaces a newer one", async () => {
+  if (!shared || !client) return;
+  await setGate(true);
+  const fingerprint = `fp_${crypto.randomUUID()}`;
+  const first = await organization();
+  await card(first.accountId, first.subjectId, fingerprint);
+  // A model-call admission reads the claims but does not take them.
+  await getSpendableCreditBalance(client.db, first.accountId);
+  const claims = async () =>
+    await shared!.admin<{ account_id: string }[]>`
+      select account_id from opengeni_private.free_trial_card_claims
+      where claim_kind = 'card' and claim_key = ${`stripe:test:${fingerprint}`}`;
+  expect(await claims()).toHaveLength(0);
+  const second = await organization();
+  await card(second.accountId, second.subjectId, fingerprint);
+  expect(await freePlanCreditEligible(client.db, second.accountId)).toBe(true);
+  expect((await claims()).map((claim) => claim.account_id)).toEqual([second.accountId]);
+
+  // A webhook for an older SetupIntent arrives after the newer card.
+  const newer = new Date();
+  await recordCardVerification(client.db, {
+    accountId: first.accountId,
+    subjectId: first.subjectId,
+    provider: "stripe:test",
+    customerId: "cus_test",
+    paymentMethodId: "pm_newer",
+    setupIntentId: "seti_newer",
+    setupIntentCreatedAt: newer,
+    fingerprint: `fp_${crypto.randomUUID()}`,
+    brand: "visa",
+    last4: "1111",
+  });
+  const kept = await recordCardVerification(client.db, {
+    accountId: first.accountId,
+    subjectId: first.subjectId,
+    provider: "stripe:test",
+    customerId: "cus_test",
+    paymentMethodId: "pm_older",
+    setupIntentId: "seti_older",
+    setupIntentCreatedAt: new Date(newer.getTime() - 60_000),
+    fingerprint,
+    brand: "visa",
+    last4: "4242",
+  });
+  expect(kept.last4).toBe("1111");
+  expect((await readCardVerification(client.db, first.accountId))?.last4).toBe("1111");
 }, 180_000);

@@ -13278,6 +13278,7 @@
       "shape": {
         "$": "object",
         "$.accountId": "string!",
+        "$.canVerify": "boolean!",
         "$.card": "object! null",
         "$.card.brand": "string!",
         "$.card.last4": "string!",

@@ -4,7 +4,11 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import { SandboxOrganizationBoxLimitError } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing/settings";
 import { ApiHttpError } from "../src/http/api-error";
-import { completeCardVerificationSession } from "../src/routes/billing-card-verification";
+import {
+  CardVerificationRejectedError,
+  completeCardVerificationSession,
+  handleCardVerificationWebhookSession,
+} from "../src/routes/billing-card-verification";
 import { sandboxComputeRefusal } from "../src/sandbox/compute-bounds";
 
 const accountId = "6f0b3f0e-2b9a-4c1e-9d3f-1a2b3c4d5e6f";
@@ -37,6 +41,7 @@ function stripe(setup: Partial<Stripe.SetupIntent>, method: Partial<Stripe.Payme
     setupIntents: {
       retrieve: async () => ({
         id: "seti_1",
+        created: 1_763_000_000,
         status: "succeeded",
         livemode: false,
         customer: "cus_1",
@@ -50,7 +55,13 @@ function stripe(setup: Partial<Stripe.SetupIntent>, method: Partial<Stripe.Payme
         id: "pm_1",
         type: "card",
         livemode: false,
-        card: { fingerprint: "fp_1", brand: "visa", last4: "4242" },
+        card: {
+          fingerprint: "fp_1",
+          brand: "visa",
+          last4: "4242",
+          funding: "credit",
+          checks: { cvc_check: "pass" },
+        },
         ...method,
       }),
     },
@@ -89,11 +100,32 @@ describe("card verification", () => {
       [{}, { metadata: { opengeni_account_id: "another" } }, {}],
       [{}, {}, { type: "us_bank_account" } as Partial<Stripe.PaymentMethod>],
       [{}, {}, { card: undefined }],
+      // One Free trial per card: no prepaid cards, no failed security code.
+      [
+        {},
+        {},
+        {
+          card: { fingerprint: "fp_1", brand: "visa", last4: "4242", funding: "prepaid" },
+        } as Partial<Stripe.PaymentMethod>,
+      ],
+      [
+        {},
+        {},
+        {
+          card: {
+            fingerprint: "fp_1",
+            brand: "visa",
+            last4: "4242",
+            funding: "debit",
+            checks: { cvc_check: "fail" },
+          },
+        } as Partial<Stripe.PaymentMethod>,
+      ],
     ];
     for (const [sessionOverrides, setup, method] of cases) {
       await expect(
         completeCardVerificationSession(deps(), stripe(setup, method), session(sessionOverrides)),
-      ).rejects.toThrow();
+      ).rejects.toBeInstanceOf(CardVerificationRejectedError);
     }
     // A session for another organization than the one confirming it.
     await expect(
@@ -104,5 +136,25 @@ describe("card verification", () => {
         "00000000-0000-4000-8000-000000000000",
       ),
     ).rejects.toThrow("Invalid card verification session");
+  });
+
+  test("the webhook acknowledges a rejected card and lets Stripe retry other failures", async () => {
+    const prepaid = stripe({}, {
+      card: { fingerprint: "fp_1", brand: "visa", last4: "4242", funding: "prepaid" },
+    } as Partial<Stripe.PaymentMethod>);
+    expect(await handleCardVerificationWebhookSession(deps(), prepaid, session())).toBe(true);
+    const down = {
+      setupIntents: {
+        retrieve: async () => {
+          throw new Error("Stripe is unavailable");
+        },
+      },
+    } as unknown as Stripe;
+    await expect(handleCardVerificationWebhookSession(deps(), down, session())).rejects.toThrow(
+      "Stripe is unavailable",
+    );
+    expect(
+      await handleCardVerificationWebhookSession(deps(), prepaid, session({ metadata: {} })),
+    ).toBe(false);
   });
 });

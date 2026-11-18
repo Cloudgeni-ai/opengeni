@@ -232,6 +232,7 @@ export async function checkForbiddenProviderImports(
         "apps/api/src/routes/billing-auto-top-up.ts",
         "apps/api/src/routes/billing-card-verification.ts",
         "apps/api/test/billing-auto-top-up.test.ts",
+        "apps/api/test/billing-card-verification.test.ts",
         "apps/api/test/billing-auto-top-up-adjustments-postgres.test.ts",
         "apps/api/test/billing-auto-top-up-integration-postgres.test.ts",
         "apps/api/test/billing-auto-top-up.stripe-proof.ts",

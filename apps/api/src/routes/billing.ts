@@ -68,7 +68,7 @@ import {
   registerBillingAutoTopUpRoutes,
 } from "./billing-auto-top-up";
 import {
-  completeCardVerificationSession,
+  handleCardVerificationWebhookSession,
   registerBillingCardVerificationRoutes,
 } from "./billing-card-verification";
 
@@ -760,7 +760,7 @@ export async function handleStripeWebhookEvent(
     case "checkout.session.completed":
     case "checkout.session.async_payment_succeeded":
       if (
-        await completeCardVerificationSession(
+        await handleCardVerificationWebhookSession(
           deps,
           stripe,
           event.data.object as Stripe.Checkout.Session,

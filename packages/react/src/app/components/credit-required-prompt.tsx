@@ -229,13 +229,8 @@ export function CreditRequiredPromptView({
         </DialogHeader>
         {offerCard ? (
           <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border p-3 text-sm">
-            <span>Add a card to get your Free credit. You won't be charged.</span>
-            <AddCardButton
-              client={client}
-              accountId={accountId}
-              canManage={canBuyCredits}
-              variant="outline"
-            />
+            <span>Add a card so this organization can get Free credit. You won't be charged.</span>
+            <AddCardButton client={client} accountId={accountId} variant="outline" />
           </div>
         ) : null}
         {canBuyCredits && stripeEnabled ? (

@@ -193,11 +193,7 @@ export function FailedSessionBanner({
   const retryActions = machineAllow ? (
     <AllowMachineButton action={machineAllow} />
   ) : cardRequired ? (
-    <AddCardButton
-      client={appContext?.client}
-      accountId={cardAccountId}
-      canManage={canBuyCredits}
-    />
+    <AddCardButton client={appContext?.client} accountId={cardAccountId} />
   ) : codexUsageFailure ? (
     <>
       <ContinueAtResetSwitch {...codexUsageFailure} />

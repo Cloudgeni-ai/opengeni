@@ -8,11 +8,13 @@ export const SANDBOX_CARD_REQUIRED_CODE = "sandbox_card_required";
  * An organization's card verification (docs/signup-abuse-protection.md, "Card
  * verification"). `required`: the gate is on and this unpaid organization
  * needs a verified card before it starts a sandbox or gets Free credit.
+ * `canVerify`: the caller is the organization's owner, who alone adds its card.
  */
 export const BillingCardVerificationStatus = z.object({
   accountId: primitives.uuid,
   required: z.boolean(),
   verified: z.boolean(),
+  canVerify: z.boolean(),
   card: z.object({ brand: z.string(), last4: z.string().regex(/^[0-9]{4}$/u) }).nullable(),
 });
 export type BillingCardVerificationStatus = z.infer<typeof BillingCardVerificationStatus>;

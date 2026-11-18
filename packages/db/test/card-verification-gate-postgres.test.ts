@@ -91,6 +91,7 @@ function card(accountId: string, subjectId: string, fingerprint = crypto.randomU
     customerId: "cus_test",
     paymentMethodId: `pm_${crypto.randomUUID()}`,
     setupIntentId: `seti_${crypto.randomUUID()}`,
+    setupIntentCreatedAt: new Date(),
     fingerprint,
     brand: "visa",
     last4: "4242",
