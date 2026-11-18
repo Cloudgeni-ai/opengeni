@@ -223,8 +223,12 @@ chat context in the workspace are deleted, so nothing leaks into the new
 tenant, and the old tenant gets the setup prompt again instead of reaching the
 workspace. The workspace gets a `connection.disconnected` audit record with
 reason `released_for_another_organization`, the removed counts, and the Opengeni
-administrator who completed setup. If the old tenant reconnects meanwhile, the
-release changes nothing and setup is refused with `connection_changed`.
+administrator who completed setup, and `newTenantId`. If the old tenant
+reconnects meanwhile, the release changes nothing and setup is refused with
+`connection_changed`. Released, the old tenant is unbound like a new one: any
+of its Teams or Global Administrators can connect it to a workspace they
+administer. Disconnect only ever acts on the binding it read (tenant and
+workspace), so a stale disconnect never touches the new tenant.
 
 A setup proof is single-use (its nonce is recorded at install), and Microsoft
 codes are single-use and PKCE-bound.

@@ -446,6 +446,7 @@ export async function installTeamsBot(
           old,
           input.releaseWorkspaceInactive.audit,
           "released_for_another_organization",
+          input,
         ))
       )
         throw new Error("teams_installation_changed");
@@ -460,6 +461,7 @@ export async function installTeamsBot(
           old,
           input.replaceInactive.audit,
           "released_by_tenant_administrator",
+          input,
         ))
       )
         throw new Error("teams_installation_changed");
@@ -513,6 +515,8 @@ async function releaseInactiveTeamsInstallation(
   i: TeamsInstallation,
   audit: DisconnectAuditActor,
   reason: "released_by_tenant_administrator" | "released_for_another_organization",
+  /** The binding that replaces it. */
+  next: { tenantId: string },
 ): Promise<boolean> {
   return teamsScoped(tx, i, async (scoped) => {
     const [held] = await rawRows<{ tenant_id: string }>(
@@ -541,6 +545,9 @@ async function releaseInactiveTeamsInstallation(
       target: { type: "teams_bot_installation", id: i.tenant_id, provider: "microsoft_teams" },
       details: {
         reason,
+        // The workspace's own new organization. A move names nothing of the
+        // workspace it went to, which may belong to someone else.
+        ...(reason === "released_for_another_organization" ? { newTenantId: next.tenantId } : {}),
         removedLinks: counts?.links ?? 0,
         removedRoutes: counts?.routes ?? 0,
       },
@@ -650,12 +657,16 @@ export async function disconnectTeamsBot(
   } = {},
 ) {
   return teamsScoped(db, i, async (tx) => {
+    // Only this tenant's binding to this workspace: a disconnect read before
+    // the workspace was connected to another organization (or the tenant
+    // moved) must not clean up the binding that replaced it.
     const [prior] = await rawRows<{ active: boolean }>(
       tx,
-      sql`select active from teams_bot_installations where tenant_id=${i.tenant_id}::uuid for update`,
+      sql`select active from teams_bot_installations where tenant_id=${i.tenant_id}::uuid and workspace_id=${i.workspace_id}::uuid for update`,
     );
+    if (!prior) return;
     await tx.execute(
-      sql`update teams_bot_installations set active=false,generation=gen_random_uuid() where tenant_id=${i.tenant_id}::uuid`,
+      sql`update teams_bot_installations set active=false,generation=gen_random_uuid() where tenant_id=${i.tenant_id}::uuid and workspace_id=${i.workspace_id}::uuid`,
     );
     await tx.execute(
       sql`update teams_bot_inbox set state='failed',error_code='installation_disconnected' where workspace_id=${i.workspace_id}::uuid and state='pending'`,

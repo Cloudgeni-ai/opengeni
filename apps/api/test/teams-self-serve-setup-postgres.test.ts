@@ -632,9 +632,19 @@ describe("Teams self-serve setup", () => {
     // After "Disconnect bot", the workspace's administrator connects another
     // organization (no Global Administrator needed: the workspace is theirs).
     await disconnectTeamsBot(client.db, (await getTeamsInstallation(client.db, oldTenant))!);
-    // Chat context recorded for the old organization before it was disconnected.
+    // Old-organization rows that disconnect itself leaves or that arrive
+    // after it: chat context and a parked switch card.
     await shared.admin`insert into teams_bot_context_cutoffs(account_id,workspace_id,tenant_id,conversation_id,cutoff_at)
       values(${admin.grant.accountId},${workspaceId},${oldTenant},'19:old',now())`;
+    await shared.admin`insert into teams_bot_context_messages(account_id,workspace_id,tenant_id,conversation_id,thread_id,message_id,actor_id,actor_name,text,has_attachments,mentioned,occurred_at)
+      values(${admin.grant.accountId},${workspaceId},${oldTenant},'19:old','','m1',${oldActor},null,'old',false,false,now())`;
+    await shared.admin`insert into teams_bot_route_prompts(account_id,workspace_id,tenant_id,actor_id,subject_id,generation)
+      values(${admin.grant.accountId},${workspaceId},${oldTenant},${oldActor},${admin.subject},gen_random_uuid())`;
+    const [seeded] = await shared.admin<Array<Record<string, number>>>`select
+      (select count(*)::int from teams_bot_context_messages where tenant_id=${oldTenant}) context,
+      (select count(*)::int from teams_bot_route_prompts where tenant_id=${oldTenant}) prompts,
+      (select count(*)::int from teams_bot_inbox where route_id=${routeId}) inbox`;
+    expect(seeded).toEqual({ context: 1, prompts: 1, inbox: 1 });
     const relinkToken = setupProof(newTenant, newActor);
     const status = await completeTeamsSetup(d, admin.grant, {
       setupToken: relinkToken,
@@ -680,12 +690,37 @@ describe("Teams self-serve setup", () => {
         subject_id: admin.subject,
         metadata: expect.objectContaining({
           reason: "released_for_another_organization",
+          newTenantId: newTenant,
           principalKind: "human_session",
           removedLinks: 1,
           removedRoutes: 1,
         }),
       },
     ]);
+
+    // A disconnect read before the relink touches only the old binding,
+    // which is gone: the new organization stays connected with its messages.
+    const newRoute = `route:${crypto.randomUUID()}`;
+    await enqueueTeamsMessage(client.db, current, {
+      routeId: newRoute,
+      actorId: newActor,
+      subjectId: admin.subject,
+      personal: false,
+      channelId: "19:new",
+      conversationId: "19:new",
+      threadId: "message",
+      serviceUrl: "https://smba.trafficmanager.net/emea/",
+      botId: "28:bot",
+      eventId: `event:${crypto.randomUUID()}`,
+      payload: { text: "hello" },
+    });
+    await disconnectTeamsBot(client.db, old, {
+      audit: { subjectId: admin.subject, source: "app", principalKind: "human_session" },
+    });
+    expect(await getTeamsInstallation(client.db, newTenant)).toEqual(current);
+    expect(
+      await shared.admin`select state from teams_bot_inbox where route_id=${newRoute}`,
+    ).toEqual([{ state: "pending" }]);
 
     // The old organization can't take the workspace back while the new one is connected.
     const back = setupProof(oldTenant, oldActor);
