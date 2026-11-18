@@ -6,6 +6,7 @@ import { reverifyLoginsBlockingNewAccount } from "./oauth-account-reverify";
 import {
   builtInIntegrationDuplicatedByEndpoint,
   builtInIntegrationTurnedOffMessage,
+  carryConnectorToolChoices,
 } from "@opengeni/core";
 import { OrganizationIntegrationDeniedError } from "@opengeni/contracts";
 import {
@@ -1349,6 +1350,15 @@ async function completeMcpOAuthCallbackWithinDeadline(
           error: error instanceof Error ? error.message : String(error),
         });
       }
+      // The same account connected under the other integration backend
+      // keeps its tool choices. Best effort: opening its approvals carries
+      // them too.
+      await carryConnectorToolChoices(db, connection).catch((error: unknown) =>
+        console.warn("[api] could not carry tool choices to a login", {
+          connectionId: connection.id,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
     };
     const persistConnection = async (scopedDb: Database) => {
       await requireOAuthCallbackGrant(scopedDb, state!, ownerPermission);
