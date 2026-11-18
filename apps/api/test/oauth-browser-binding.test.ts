@@ -353,15 +353,42 @@ describe("integration OAuth is bound to the browser that started it", () => {
     const started = await startOneDrive(app, human, { [OPENGENI_DESKTOP_APP_HEADER]: "macos" });
     expect(started.setCookie ?? "").not.toContain(OAUTH_BROWSER_BINDING_COOKIE);
 
-    expect((await finish(app, started.state)).searchParams.get("reason")).toBe("browser_mismatch");
+    // A browser signed in to no one is sent to sign in first, then back to
+    // this same callback; nothing is exchanged before that.
+    const signIn = await finish(app, started.state);
+    expect(`${signIn.origin}${signIn.pathname}`).toBe(`${PUBLIC_BASE_URL}/connect-continue`);
+    const resume = new URL(signIn.searchParams.get("next")!, PUBLIC_BASE_URL);
+    expect(resume.pathname).toBe("/v1/integrations/provider-oauth/callback");
+    expect(resume.searchParams.get("state")).toBe(started.state);
+    expect(resume.searchParams.get("code")).toBe("fixture-code");
+    // Signed in as someone else, it is refused.
     expect((await finish(app, started.state, someoneElse.cookie)).searchParams.get("reason")).toBe(
       "browser_mismatch",
     );
     expect(provider.tokenRequests).toHaveLength(0);
+    expect(await connectionCount(human)).toBe(0);
 
-    const owner = await finish(app, started.state, human.cookie);
+    // Signed in as the starter, the resumed callback finishes.
+    const resumed = await app.request(resume.toString(), { headers: { cookie: human.cookie } });
+    expect(resumed.status).toBe(302);
+    const owner = new URL(resumed.headers.get("location")!);
     expect(owner.searchParams.get("integration_oauth")).toBe("success");
     expect(await connectionCount(human)).toBe(1);
+  });
+
+  test("a provider's refusal in a signed-out browser is not sent to sign in", async () => {
+    if (!shared) return;
+    const human = await provisionManagedHuman();
+    const app = buildApp(microsoftFixture().fetch);
+    const started = await startOneDrive(app, human, { [OPENGENI_DESKTOP_APP_HEADER]: "macos" });
+    const response = await app.request(
+      `${PUBLIC_BASE_URL}/v1/integrations/provider-oauth/callback?${new URLSearchParams({
+        error: "access_denied",
+        state: started.state,
+      })}`,
+    );
+    expect(response.status).toBe(302);
+    expect(new URL(response.headers.get("location")!).pathname).not.toBe("/connect-continue");
   });
 
   test("MCP OAuth (the Gmail connector's flow) refuses another browser and finishes in the starter's", async () => {
@@ -410,6 +437,76 @@ describe("integration OAuth is bound to the browser that started it", () => {
       const accepted = await callback(`${OAUTH_BROWSER_BINDING_SECURE_COOKIE}=${binding}`);
       const acceptedLocation = new URL(accepted.headers.get("location")!, PUBLIC_BASE_URL);
       expect(acceptedLocation.searchParams.get("integration_oauth")).toBe("success");
+      expect(as.tokenRequests).toHaveLength(1);
+      expect(await connectionCount(human)).toBe(1);
+    } finally {
+      mcp.close();
+      as.close();
+    }
+  });
+});
+
+describe("a sign-in started in the desktop app finishes in a signed-out browser after it signs in", () => {
+  test("MCP OAuth (the Gmail connector's flow) asks the browser to sign in, then finishes as the starter", async () => {
+    if (!shared) return;
+    const human = await provisionManagedHuman();
+    const someoneElse = await provisionManagedHuman();
+    const as = startAuthorizationServer();
+    const mcp = startTestMcpServer({
+      requiredAuthorization: "Bearer mcp-access-token",
+      unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource", scope="documents:read"`,
+    });
+    try {
+      const app = buildApp();
+      const response = await app.request(
+        `${PUBLIC_BASE_URL}/v1/workspaces/${human.personalWorkspaceId}/connections/oauth/start`,
+        {
+          method: "POST",
+          headers: {
+            cookie: human.cookie,
+            "content-type": "application/json",
+            [OPENGENI_DESKTOP_APP_HEADER]: "macos",
+          },
+          body: JSON.stringify({
+            providerDomain: "mcp.example.com",
+            mcpUrl: mcp.url,
+            ownership: "personal",
+            returnPath: "/integrations",
+          }),
+        },
+      );
+      const body = (await response.json()) as { state?: string };
+      expect(response.status, JSON.stringify(body)).toBe(200);
+      const callbackUrl = `${PUBLIC_BASE_URL}/v1/integrations/oauth/callback?${new URLSearchParams({
+        code: "abc",
+        state: body.state!,
+      })}`;
+
+      // The person's browser, signed in to no one.
+      const signedOut = await app.request(callbackUrl);
+      expect(signedOut.status).toBe(302);
+      const signIn = new URL(signedOut.headers.get("location")!, PUBLIC_BASE_URL);
+      expect(signIn.pathname).toBe("/connect-continue");
+      const next = signIn.searchParams.get("next")!;
+      expect(new URL(next, PUBLIC_BASE_URL).toString()).toBe(callbackUrl);
+      expect(as.tokenRequests).toHaveLength(0);
+
+      // Signed in as someone else: refused, still nothing exchanged.
+      const other = await app.request(callbackUrl, { headers: { cookie: someoneElse.cookie } });
+      const otherLocation = new URL(other.headers.get("location")!, PUBLIC_BASE_URL);
+      expect(otherLocation.searchParams.get("reason")).toBe("browser_mismatch");
+      expect(as.tokenRequests).toHaveLength(0);
+
+      // After signing in as the starter, the same step finishes.
+      const resumed = await app.request(new URL(next, PUBLIC_BASE_URL).toString(), {
+        headers: { cookie: human.cookie },
+      });
+      const resumedLocation = new URL(resumed.headers.get("location")!, PUBLIC_BASE_URL);
+      expect(resumedLocation.pathname).toBe("/desktop-return");
+      expect(new URL(resumedLocation.searchParams.get("url")!, PUBLIC_BASE_URL).pathname).toBe(
+        "/integrations",
+      );
+      expect(resumedLocation.searchParams.get("integration_oauth")).toBe("success");
       expect(as.tokenRequests).toHaveLength(1);
       expect(await connectionCount(human)).toBe(1);
     } finally {

@@ -171,3 +171,22 @@ export function oauthCallbackBrowserAccepted(
       return false;
   }
 }
+
+/**
+ * Whether a refused callback can still finish once its browser signs in: the
+ * sign-in was started in the desktop app or a native app (`session`), and the
+ * browser the provider returned to is signed in to no one. That is the usual
+ * case for someone who uses the app and rarely opens Opengeni in their
+ * browser. The browser then signs in and the same callback runs again; it
+ * finishes only if the person who signs in is the one who started it, so
+ * nothing about the binding is relaxed. A browser signed in as someone else is
+ * refused as before.
+ */
+export function oauthCallbackNeedsSignIn(
+  state: Partial<OAuthStateBrowserBinding>,
+  browser: OAuthCallbackBrowser | undefined,
+): boolean {
+  return (
+    state.browserProof === "session" && browser !== undefined && browser.signedInSubjectId === null
+  );
+}

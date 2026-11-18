@@ -276,6 +276,36 @@ describe("Nango Connect", () => {
     ).toBe(false);
   });
 
+  test("a desktop start opened in a signed-out browser signs in first, then opens again", async () => {
+    const { createSignedState } = await import("@opengeni/github");
+    const token = createSignedState(settings.integrationsStateSecret!, {
+      ...readNangoConnectState(settings, await startedState()),
+      browserProof: "session",
+    });
+    const requestUrl = `https://app.example.test/v1/integrations/nango/connect?state=${encodeURIComponent(token)}`;
+    const response = await nangoConnectPage(
+      { db: unreachableDb, settings, nangoBackends: async () => backends },
+      { state: token, browser: { bindingDigests: [], signedInSubjectId: null }, requestUrl },
+    );
+    expect(response.status).toBe(302);
+    const signIn = new URL(response.headers.get("location")!);
+    // The console signs the browser in; the step itself stays on the API.
+    expect(signIn.origin).toBe("https://app.opengeni.test");
+    expect(signIn.pathname).toBe("/connect-continue");
+    expect(new URL(signIn.searchParams.get("next")!, requestUrl).toString()).toBe(requestUrl);
+    // Signed in as someone else, it is refused as before.
+    await expect(
+      nangoConnectPage(
+        { db: unreachableDb, settings, nangoBackends: async () => backends },
+        {
+          state: token,
+          browser: { bindingDigests: [], signedInSubjectId: "user:someone-else" },
+          requestUrl,
+        },
+      ),
+    ).rejects.toMatchObject({ status: 403 });
+  });
+
   test("a completion from another browser is refused", async () => {
     const { createSignedState } = await import("@opengeni/github");
     const token = createSignedState(settings.integrationsStateSecret!, {

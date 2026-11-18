@@ -49,9 +49,11 @@
 //   /device?user_code=…                      → self-hosted enrollment approve page
 //   /account-auth?transaction=…              → isolated browser-slot authentication popup
 //   /desktop-return?url=…                    → hands a finished browser sign-in back to the desktop app
+//   /connect-continue?next=…                 → signs the browser in, then finishes a desktop sign-in
 //   /dev/composer-chrome                     → DEV-only SessionChrome harness (mocked)
 //   /dev/composer-stack                      → DEV-only session column preview (mocked)
 //   /dev/onboarding                          → DEV-only production onboarding components
+//   /dev/connect-return                      → DEV-only browser pages a desktop sign-in ends on
 //   /dev/ui-kit                              → DEV-only component studio (src/dev/ui-kit)
 // The shared session UI renders through this app's router and API helpers.
 import "./app-host";
@@ -67,7 +69,7 @@ import {
   useSearch,
 } from "@tanstack/react-router";
 import { ProblemPanel } from "@opengeni/react/app/components/common";
-import { DESKTOP_APP_RETURN_PATH } from "@opengeni/contracts";
+import { DESKTOP_APP_RETURN_PATH, OAUTH_SIGN_IN_TO_FINISH_PATH } from "@opengeni/contracts";
 import { PASSKEY_STEP_UP_HANDOFF_PATH } from "@opengeni/contracts/managed-sign-in-methods";
 import { EXCEL_ADDIN_PATH } from "@/lib/excel-addin";
 import { NotFoundPanel, RootRouteErrorPanel, routerErrorOptions } from "@/components/route-error";
@@ -213,6 +215,10 @@ const LazyDesktopReturnRoute = lazyRouteComponent(
   () => import("@/routes/desktop-return"),
   "DesktopReturnRoute",
 );
+const LazyConnectContinueRoute = lazyRouteComponent(
+  () => import("@/routes/connect-continue"),
+  "ConnectContinueRoute",
+);
 const LazySetupAccountRoute = lazyRouteComponent(
   () => import("@/routes/setup-account"),
   "SetupAccountRoute",
@@ -252,6 +258,10 @@ const LazySubscriptionPlansPreview = lazyRouteComponent(
 const LazyOwnSubscriptionPlanPreview = lazyRouteComponent(
   () => import("@/dev/own-subscription-plan-preview"),
   "OwnSubscriptionPlanPreview",
+);
+const LazyConnectReturnPreview = lazyRouteComponent(
+  () => import("@/dev/connect-return-preview"),
+  "ConnectReturnPreview",
 );
 const LazyRigsRoute = lazyRouteComponent(() => import("@/routes/rigs"), "RigsRoute");
 const LazyReadOnlyChatsRoute = lazyRouteComponent(
@@ -521,6 +531,13 @@ const desktopReturnRoute = createRoute({
   path: DESKTOP_APP_RETURN_PATH.slice(1),
   component: LazyDesktopReturnRoute,
 });
+// A sign-in started in the desktop app that came back to a browser signed in
+// to no one: the auth gate signs the browser in, then it finishes. NOT public.
+const connectContinueRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: OAUTH_SIGN_IN_TO_FINISH_PATH.slice(1),
+  component: LazyConnectContinueRoute,
+});
 const setupAccountRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "setup-account",
@@ -620,6 +637,11 @@ const ownSubscriptionPlanPreviewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "dev/own-subscription-plan",
   component: LazyOwnSubscriptionPlanPreview,
+});
+const connectReturnPreviewRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "dev/connect-return",
+  component: LazyConnectReturnPreview,
 });
 // DEV-only: production MessageTimeline replaying deterministic scenarios (native parity reference).
 const devSessionTimelineRoute = createRoute({
@@ -1264,6 +1286,7 @@ const routeTree = rootRoute.addChildren([
   sharedSessionRoute,
   excelAddinRoute,
   desktopReturnRoute,
+  connectContinueRoute,
   identityLinkRoute,
   setupAccountRoute,
   accountAuthRoute,
@@ -1280,6 +1303,7 @@ const routeTree = rootRoute.addChildren([
         onboardingPreviewRoute,
         subscriptionPlansPreviewRoute,
         ownSubscriptionPlanPreviewRoute,
+        connectReturnPreviewRoute,
         devSessionTimelineRoute,
       ]
     : []),
