@@ -707,7 +707,7 @@ export async function getSpendableCreditBalance(
   // only for admission, never for settlement of an already-dispatched call.
   await withAccountRls(db, accountId, async (tx) => {
     // A model-call admission: the signup checks record this organization's
-    // first use (migration 1492). Transaction-local.
+    // first use (migration 1493). Transaction-local.
     await tx.execute(
       sql`select pg_catalog.set_config('opengeni.signup_usage_admission', 'on', true)`,
     );

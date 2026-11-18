@@ -138,6 +138,9 @@ export function registerManagedOnboardingRoutes(
       });
     }
     const organizationName = parsed.data.organizationName.trim();
+    // Bounded and failing open (migration 1493): only the flag is recorded.
+    // Started now so the MX lookup overlaps the fingerprint; never throws.
+    const pendingSignupMailSignal = requestSignupMailSignal(session.user.email, deps.settings);
     try {
       const requestFingerprint = await selfServiceOrganizationSetupRequestFingerprint({
         authUserId: session.user.id,
@@ -146,8 +149,6 @@ export function registerManagedOnboardingRoutes(
       // Keyed hashes only; the receipt trigger records them for a new
       // organization and applies the per-network rate limit (migration 1354).
       const signupNetwork = requestSignupNetworkSource(context, deps.settings);
-      // Bounded and failing open (migration 1492): only the flag is recorded.
-      const signupMailSignal = await requestSignupMailSignal(session.user.email, deps.settings);
       const { setup, evaluateAccountIds } =
         await completeSelfServiceOrganizationSetupWithSignupNetwork(deps.db, {
           authUserId: session.user.id,
@@ -160,7 +161,7 @@ export function registerManagedOnboardingRoutes(
             deps.settings.productAccessMode === "managed" &&
             deps.settings.verifiedSignupTrialCreditsEnabled,
           signupNetwork,
-          signupMailSignal,
+          signupMailSignal: await pendingSignupMailSignal,
         });
       const completed = CompleteSelfServiceOrganizationSetupResponse.parse(setup);
       // Committed. Evaluate this organization and recent same-network ones,

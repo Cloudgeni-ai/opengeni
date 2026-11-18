@@ -426,7 +426,8 @@ off`), then release with
   itself and its subdomains). Only the flag reaches the database
   (`mail_signal`: `disposable` or `clear`); a slow or failed lookup records
   nothing (fail open). Anyone can read such an inbox, so the address proves no
-  person; the list never names general mail hosts that real companies use.
+  person; the list never names general mail hosts that real companies use, or
+  forwarders that deliver to the person's own inbox.
 - Slow domain (`email-slow-domain-v1`, `slowDomainMode`, `enforce`):
   `slowDomainHoldThreshold` (3) distinct owners on the same company or
   personal relay domain within `slowDomainWindowHours` (24), and none of those
@@ -435,7 +436,13 @@ off`), then release with
   working, its group is not held. Public providers, shared relays and academic
   domains never group here. Use is stamped once per organization
   (`first_admitted_at`) by a model-call admission; nothing reads other
-  organizations' usage.
+  organizations' usage. The hold lifts itself: when a held colleague sends a
+  model call, that admission stamps the use, finds the group used and
+  releases its own slow hold (`email-slow-domain-released-v1`) before the
+  eligibility check, so the call proceeds. Every other organization of the
+  group releases the same way at its own next evaluation. Only a detector
+  hold whose current rule is `email-slow-domain-v1` is released; manual
+  decisions and holds from other rules are never touched.
 
 Sizing (hosted production person lifecycle since June 2026, about 720
 non-public owner domains): 3 or more owners on one non-public domain within 24

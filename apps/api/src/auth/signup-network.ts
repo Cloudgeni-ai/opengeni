@@ -11,7 +11,7 @@ import type { Context } from "hono";
 import { ApiHttpError } from "../http/api-error";
 import { requestSourceNetwork, trustedRequestSourceAddress } from "../http/request-source";
 
-/** The owner's disposable-inbox signal for a new organization (migration 1492). */
+/** The owner's disposable-inbox signal for a new organization (migration 1493). */
 export { signupMailSignal as requestSignupMailSignal } from "./signup-mail";
 
 /** User-facing refusal for the per-network rate limit on new self-serve organizations. */

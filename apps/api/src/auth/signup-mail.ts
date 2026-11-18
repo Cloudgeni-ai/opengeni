@@ -1,4 +1,4 @@
-import { resolveMx } from "node:dns/promises";
+import { Resolver } from "node:dns/promises";
 import type { Settings } from "@opengeni/config";
 import type { SignupMailSignal } from "@opengeni/db";
 
@@ -8,8 +8,9 @@ import type { SignupMailSignal } from "@opengeni/db";
  * this list, or a custom domain whose MX points at one of these hosts, is a
  * throwaway address. A name matches itself and its subdomains. Operators add
  * more with OPENGENI_SIGNUP_DISPOSABLE_MAIL_DOMAINS. Never list a general
- * mail host (Google, Microsoft, Yandex, Cloudflare routing, forwarding
- * services): custom domains of real companies point there too.
+ * mail host (Google, Microsoft, Yandex, Cloudflare routing) or a forwarding
+ * service that delivers to the person's real inbox (burner/alias forwarders):
+ * custom domains of real companies and real people use those too.
  */
 export const DISPOSABLE_MAIL_PROVIDERS: readonly string[] = [
   // Temporary inboxes on many custom domains (receive-only MX hosts).
@@ -42,10 +43,6 @@ export const DISPOSABLE_MAIL_PROVIDERS: readonly string[] = [
   "maildrop.cc",
   "getnada.com",
   "nada.email",
-  "burnermail.io",
-  "trashmail.com",
-  "trashmail.de",
-  "trashmail.net",
   "mailnesia.com",
   "tempmail.net",
   "tempail.com",
@@ -61,7 +58,6 @@ export const DISPOSABLE_MAIL_PROVIDERS: readonly string[] = [
   "mailsac.com",
   "moakt.com",
   "tmail.ws",
-  "spamgourmet.com",
   "mailcatch.com",
   "mytemp.email",
   "inboxkitten.com",
@@ -81,9 +77,7 @@ export const DISPOSABLE_MAIL_PROVIDERS: readonly string[] = [
   "catchmail.io",
   "mailpoof.com",
   "getairmail.com",
-  "33mailbox.com",
   "fakeinbox.com",
-  "spambox.us",
   "mintemail.com",
   "tempinbox.com",
   "dispostable.com",
@@ -122,16 +116,42 @@ export function isDisposableMailHost(name: string, providers: ReadonlySet<string
   return false;
 }
 
-export type MxResolver = (domain: string) => Promise<readonly { exchange: string }[]>;
+/** Resolves MX records; aborting `signal` cancels the outstanding query. */
+export type MxResolver = (
+  domain: string,
+  signal: AbortSignal,
+) => Promise<readonly { exchange: string }[]>;
+
+/** A dedicated resolver per lookup, so a timed-out query is cancelled. */
+const systemMxResolver: MxResolver = (domain, signal) => {
+  const resolver = new Resolver({ tries: 1 });
+  signal.addEventListener("abort", () => resolver.cancel(), { once: true });
+  return resolver.resolveMx(domain);
+};
 
 const MX_CACHE_TTL_MS = 60 * 60 * 1000;
 const MX_CACHE_MAX = 5_000;
 // Answered lookups only: a timeout or a DNS failure is retried next time.
 const mxCache = new Map<string, { hosts: string[]; expiresAt: number }>();
 
+function cacheMx(domain: string, hosts: string[], now: number): void {
+  mxCache.delete(domain);
+  while (mxCache.size >= MX_CACHE_MAX) {
+    const oldest = mxCache.keys().next().value;
+    if (oldest === undefined) break;
+    mxCache.delete(oldest);
+  }
+  mxCache.set(domain, { hosts, expiresAt: now + MX_CACHE_TTL_MS });
+}
+
 /** Test seam: forget cached MX answers. */
 export function resetSignupMailMxCache(): void {
   mxCache.clear();
+}
+
+/** Test seam: cached MX answers (bounded). */
+export function signupMailMxCacheSize(): number {
+  return mxCache.size;
 }
 
 async function mailExchangers(
@@ -142,27 +162,28 @@ async function mailExchangers(
 ): Promise<string[] | null> {
   const cached = mxCache.get(domain);
   if (cached && cached.expiresAt > now) return cached.hosts;
+  const abort = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const records = await Promise.race([
-      resolver(domain),
+      resolver(domain, abort.signal),
       new Promise<null>((resolve) => {
-        timer = setTimeout(() => resolve(null), timeoutMs);
+        timer = setTimeout(() => {
+          abort.abort();
+          resolve(null);
+        }, timeoutMs);
       }),
     ]);
     if (records === null) return null;
     const hosts = records.map((record) => record.exchange.toLowerCase());
-    if (mxCache.size >= MX_CACHE_MAX) {
-      const oldest = mxCache.keys().next().value;
-      if (oldest !== undefined) mxCache.delete(oldest);
-    }
-    mxCache.set(domain, { hosts, expiresAt: now + MX_CACHE_TTL_MS });
+    cacheMx(domain, hosts, now);
     return hosts;
   } catch (error) {
+    if (abort.signal.aborted) return null;
     // No MX record (NODATA/ENOTFOUND) is an answer too: nothing to match.
     const code = (error as { code?: unknown } | null)?.code;
     if (code === "ENODATA" || code === "ENOTFOUND") {
-      mxCache.set(domain, { hosts: [], expiresAt: now + MX_CACHE_TTL_MS });
+      cacheMx(domain, [], now);
       return [];
     }
     return null;
@@ -181,7 +202,7 @@ async function mailExchangers(
 export async function signupMailSignal(
   email: string | null | undefined,
   settings: Pick<Settings, "signupDisposableMailDomains" | "signupMailMxLookupTimeoutMs">,
-  resolver: MxResolver = resolveMx,
+  resolver: MxResolver = systemMxResolver,
 ): Promise<SignupMailSignal | null> {
   try {
     const at = (email ?? "").lastIndexOf("@");

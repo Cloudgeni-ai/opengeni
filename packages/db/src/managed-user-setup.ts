@@ -96,14 +96,14 @@ export type SignupNetworkSource = { addressHash: string; prefixHash: string };
 
 /**
  * Whether the owner's mail address is a disposable inbox (its domain or MX
- * host is a temporary-inbox service, migration 1492), as the API found at
+ * host is a temporary-inbox service, migration 1493), as the API found at
  * setup. Only this flag is recorded, never the domain or the MX host.
  */
 export type SignupMailSignal = "disposable" | "clear";
 
 /**
  * Hands the setup trigger the owner's mail signal for this transaction
- * (migration 1492). Transaction-local and set by the trusted API; null
+ * (migration 1493). Transaction-local and set by the trusted API; null
  * records nothing (unknown).
  */
 export async function setSignupMailSignalForSetup(

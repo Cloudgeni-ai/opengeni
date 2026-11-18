@@ -510,6 +510,8 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
   });
   app.post("/v1/organizations", async (context) => {
     const { session, subjectId } = await requireManagedHuman(context, deps);
+    // Started now, awaited at setup: bounded and never throws (migration 1493).
+    const signupMailSignal = requestSignupMailSignal(session.user.email, deps.settings);
     const payload = await parseBody(context, CreateOrganizationRequest);
     // This legacy first-organization route writes the same self-serve setup
     // receipt and Free eligibility as organization onboarding, so it records
@@ -526,7 +528,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
           deps.settings.productAccessMode === "managed" &&
           deps.settings.verifiedSignupTrialCreditsEnabled,
         signupNetwork: requestSignupNetworkSource(context, deps.settings),
-        signupMailSignal: await requestSignupMailSignal(session.user.email, deps.settings),
+        signupMailSignal: await signupMailSignal,
       });
     } catch (error) {
       if (nestedPostgresSqlState(error) === SIGNUP_NETWORK_RATE_LIMIT_SQLSTATE) {
@@ -541,6 +543,8 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
 
   app.post("/v1/organizations/additional", async (context) => {
     const { session, subjectId } = await requireManagedHuman(context, deps);
+    // Started now, awaited at setup: bounded and never throws (migration 1493).
+    const signupMailSignal = requestSignupMailSignal(session.user.email, deps.settings);
     const payload = await parseBody(context, CreateAdditionalOrganizationRequest);
     // An additional organization records the signup network, applies its
     // rate limit and is evaluated like a first organization (migration 1484).
@@ -551,7 +555,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         subjectLabel: accountContactEmail(session.user.email) || session.user.name,
         ...payload,
         signupNetwork: requestSignupNetworkSource(context, deps.settings),
-        signupMailSignal: await requestSignupMailSignal(session.user.email, deps.settings),
+        signupMailSignal: await signupMailSignal,
       });
     } catch (error) {
       if (nestedPostgresSqlState(error) === SIGNUP_NETWORK_RATE_LIMIT_SQLSTATE) {

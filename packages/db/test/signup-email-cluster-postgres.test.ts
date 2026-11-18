@@ -775,6 +775,70 @@ test("slow domain leg: three unused owners of one company domain within a day ar
   await configure(DEFAULTS);
 }, 180_000);
 
+test("slow domain leg: once a held colleague sends a model call, the group's slow holds release; other holds stay", async () => {
+  if (!shared || !client) return;
+  await configure(ONLY_SLOW);
+  // Real colleagues who signed up over a day before anyone used the product.
+  const domain = `colleagues-${unique()}.com`;
+  const team: Owner[] = [];
+  for (let index = 0; index < 5; index += 1) {
+    if (team.length > 0) await age(team, 2 * 3600);
+    team.push(await owner(domain));
+  }
+  for (const one of team) expect(await decision(one.accountId)).toMatchObject(HELD);
+  const [caller, second, third, operatorHeld, otherRuleHeld] = team as [
+    Owner,
+    Owner,
+    Owner,
+    Owner,
+    Owner,
+  ];
+  // A manual operator hold, and a detector hold from another rule, are never lifted here.
+  await decide(operatorHeld.accountId, "held");
+  const otherRevision = (await decision(otherRuleHeld.accountId))!.revision;
+  await shared.admin`select opengeni_private.set_promotion_decision(${otherRuleHeld.accountId}::uuid,
+    'held', 'ip-velocity-v1', 'ip-velocity-v1', '{"reason":"test"}'::jsonb,
+    'service:promotion-detector', ${otherRevision}::bigint)`;
+
+  // The first model call's admission stamps the use and releases the
+  // caller's own hold in the same evaluation, before the eligibility check,
+  // so that very call proceeds.
+  await getSpendableCreditBalance(client.db, caller.accountId);
+  expect((await mailRecord(caller.accountId))?.first_admitted_at).not.toBeNull();
+  expect(await decision(caller.accountId)).toMatchObject({
+    decision: "eligible",
+    actor: "service:promotion-detector",
+  });
+  expect(await lastHistory(caller.accountId)).toMatchObject({
+    policy_version: "email-cluster-v1",
+    rule_id: "email-slow-domain-released-v1",
+    evidence: { slowDomainGroupUsed: true },
+  });
+  // Each colleague's organization releases on its own next evaluation (its
+  // first admission or any check), without using the product itself.
+  await evaluate([
+    second.accountId,
+    third.accountId,
+    operatorHeld.accountId,
+    otherRuleHeld.accountId,
+  ]);
+  for (const one of [second, third]) {
+    expect(await decision(one.accountId)).toMatchObject({ decision: "eligible" });
+    expect((await mailRecord(one.accountId))?.first_admitted_at).toBeNull();
+  }
+  expect(await decision(operatorHeld.accountId)).toMatchObject({
+    decision: "held",
+    actor: "operator:test",
+  });
+  expect(await decision(otherRuleHeld.accountId)).toMatchObject(HELD);
+  expect(await lastHistory(otherRuleHeld.accountId)).toMatchObject({ rule_id: "ip-velocity-v1" });
+  // Released organizations are not held again by the used group.
+  await evaluate([caller.accountId, second.accountId]);
+  expect(await decision(second.accountId)).toMatchObject({ decision: "eligible" });
+  await age(team, 86_400 * 2);
+  await configure(DEFAULTS);
+}, 180_000);
+
 test("with the shipped defaults, two denied organizations on a custom domain hold the next signup there", async () => {
   if (!shared || !client) return;
   await configure(DEFAULTS);

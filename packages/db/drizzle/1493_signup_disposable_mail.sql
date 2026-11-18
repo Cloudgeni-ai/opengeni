@@ -231,7 +231,7 @@ DECLARE
   burst_enforceable boolean; denied_enforceable boolean;
   disposable_mode text; slow_mode text; slow_window interval; slow_threshold integer;
   slow_count integer := 0; slow_used boolean := false; disposable_match boolean; slow_match boolean;
-  facts jsonb; decision_row record;
+  facts jsonb; decision_row promotion_decisions%ROWTYPE; slow_held boolean := false;
 BEGIN
   IF p_account_id IS DISTINCT FROM opengeni_private.current_account_id() THEN
     RAISE EXCEPTION 'Signup email cluster scope mismatch' USING ERRCODE = '42501';
@@ -242,6 +242,16 @@ BEGIN
       SET first_admitted_at = statement_timestamp()
       WHERE data_schema = target AND account_id = p_account_id AND first_admitted_at IS NULL;
   END IF;
+  -- Is this organization held by this detector's slow domain leg alone (its
+  -- current decision is that hold)? Such a hold is lifted below once the
+  -- domain group is used, so real colleagues are never stuck.
+  SELECT * INTO decision_row FROM promotion_decisions WHERE account_id = p_account_id;
+  IF FOUND AND decision_row.decision = 'held' AND decision_row.actor = 'service:promotion-detector' THEN
+    slow_held := EXISTS (SELECT 1 FROM opengeni_private.promotion_decision_history h
+      WHERE h.data_schema = target AND h.account_id = p_account_id
+        AND h.revision = decision_row.revision AND h.policy_version = 'email-cluster-v1'
+        AND h.rule_id = 'email-slow-domain-v1');
+  END IF;
   settings := opengeni_private.signup_network_velocity_settings(target);
   domain_mode := coalesce(settings->>'emailDomainMode', 'observe');
   burst_mode := coalesce(settings->>'burstMode', 'enforce');
@@ -249,11 +259,11 @@ BEGIN
   disposable_mode := coalesce(settings->>'disposableMailMode', 'enforce');
   slow_mode := coalesce(settings->>'slowDomainMode', 'enforce');
   IF domain_mode = 'off' AND burst_mode = 'off' AND denied_mode = 'off' AND disposable_mode = 'off'
-    AND slow_mode = 'off' THEN RETURN; END IF;
+    AND slow_mode = 'off' AND NOT slow_held THEN RETURN; END IF;
   SELECT * INTO own FROM opengeni_private.signup_owner_email_domains
     WHERE data_schema = target AND account_id = p_account_id;
   IF NOT FOUND OR own.domain_kind = 'reserved'
-    OR own.set_up_at < statement_timestamp() - interval '7 days' THEN RETURN; END IF;
+    OR (own.set_up_at < statement_timestamp() - interval '7 days' AND NOT slow_held) THEN RETURN; END IF;
   domain_window := make_interval(mins => (settings->>'emailDomainWindowMinutes')::integer);
   burst_window := make_interval(secs => (settings->>'burstWindowSeconds')::integer);
   lookback := make_interval(days => (settings->>'deniedDomainLookbackDays')::integer);
@@ -313,7 +323,7 @@ BEGIN
   -- Slow domain leg: company and personal relay domains only; distinct
   -- owners within the slow window, and whether any of those organizations
   -- (this one included) ever admitted a model call.
-  IF slow_mode <> 'off' AND own.domain_kind IN ('company', 'personal_relay') THEN
+  IF (slow_mode <> 'off' OR slow_held) AND own.domain_kind IN ('company', 'personal_relay') THEN
     slow_window := make_interval(hours => (settings->>'slowDomainWindowHours')::integer);
     SELECT count(DISTINCT coalesce(peer.owner_auth_user_id, peer.account_id::text))::integer,
         coalesce(bool_or(peer.first_admitted_at IS NOT NULL), false)
@@ -327,9 +337,9 @@ BEGIN
   END IF;
   disposable_match := own.mail_signal IS NOT DISTINCT FROM 'disposable';
   IF domain_count < 2 AND burst_count < 2 AND denied_count = 0 AND slow_count < 2
-    AND NOT disposable_match THEN RETURN; END IF;
+    AND NOT disposable_match AND NOT slow_held THEN RETURN; END IF;
   slow_threshold := (settings->>'slowDomainHoldThreshold')::integer;
-  slow_match := slow_count >= slow_threshold AND NOT slow_used;
+  slow_match := slow_mode <> 'off' AND slow_count >= slow_threshold AND NOT slow_used;
   domain_match := domain_count >= domain_threshold;
   burst_match := related_burst_count >= burst_threshold;
   -- A per-person relay or dynamic DNS name is one person: one of their
@@ -382,11 +392,18 @@ BEGIN
   IF enforced THEN
     -- Manual decisions (including an operator release) are never
     -- overwritten, and a detector hold is kept.
-    SELECT * INTO decision_row FROM promotion_decisions WHERE account_id = p_account_id;
-    IF NOT FOUND OR (decision_row.actor = 'service:promotion-detector' AND decision_row.decision = 'eligible') THEN
+    IF decision_row.account_id IS NULL OR (decision_row.actor = 'service:promotion-detector' AND decision_row.decision = 'eligible') THEN
       PERFORM opengeni_private.set_promotion_decision(p_account_id, 'held', 'email-cluster-v1',
         facts->>'ruleId', facts, 'service:promotion-detector', coalesce(decision_row.revision, 0));
     END IF;
+  ELSIF slow_held THEN
+    -- The slow domain hold no longer applies (the group was used, e.g. by
+    -- this very admission, or the leg was turned off) and no other leg holds:
+    -- release it, so this admission proceeds. Each colleague's organization
+    -- releases itself the same way on its own next evaluation; holds from
+    -- other rules and manual decisions are never touched.
+    PERFORM opengeni_private.set_promotion_decision(p_account_id, 'eligible', 'email-cluster-v1',
+      'email-slow-domain-released-v1', facts, 'service:promotion-detector', decision_row.revision);
   END IF;
 END $$;
 REVOKE ALL ON FUNCTION opengeni_private.evaluate_signup_email_cluster(uuid) FROM PUBLIC;
