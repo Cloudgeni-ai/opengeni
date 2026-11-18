@@ -738,6 +738,8 @@ import {
   type RetainableSessionImageOutputHook,
 } from "./retained-session-image";
 import { withCodexAddFileApplyPatchInput, withCodexAddFileEditor } from "./apply-patch-add-file";
+import { APPLY_PATCH_THEN_PARAMETER, linkApplyPatchThen } from "./apply-patch-then";
+import { APPLY_PATCH_THEN_GUIDANCE } from "./agent-instructions/modules/sandbox";
 import type { McpToolCallOutcome, RuntimeMetricsHooks } from "./metrics";
 import { mcpToolMetricLabel } from "./metrics";
 import {
@@ -3436,9 +3438,31 @@ export function repositoryIdentitiesFor(
 export function agentPromptExperimentsFor(settings: Settings): {
   experiments?: AgentPromptExperiments;
 } {
-  return settings.experimentKnowledgeRetrievalGuidance
-    ? { experiments: { knowledgeRetrievalGuidance: true } }
-    : {};
+  const experiments: AgentPromptExperiments = {
+    ...(settings.experimentKnowledgeRetrievalGuidance ? { knowledgeRetrievalGuidance: true } : {}),
+    ...(settings.experimentApplyPatchThen && settings.experimentApplyPatchThenGuidance
+      ? { applyPatchThenGuidance: true }
+      : {}),
+  };
+  return Object.keys(experiments).length > 0 ? { experiments } : {};
+}
+
+const LEGACY_APPLY_PATCH_RULE = "Use `apply_patch` for local file edits.";
+
+/**
+ * The legacy operational contract, with the apply_patch `then` sentence
+ * appended to its file-editing paragraph under the same prompt experiment the
+ * modular `sandbox` module reads. Off renders the constant byte for byte.
+ */
+function legacyOperationalInstructions(settings: Settings): string {
+  if (agentPromptExperimentsFor(settings).experiments?.applyPatchThenGuidance !== true) {
+    return OPENGENI_OPERATIONAL_INSTRUCTIONS;
+  }
+  const start = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf(LEGACY_APPLY_PATCH_RULE);
+  if (start < 0) return OPENGENI_OPERATIONAL_INSTRUCTIONS;
+  const end = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf("\n", start);
+  const at = end < 0 ? OPENGENI_OPERATIONAL_INSTRUCTIONS.length : end;
+  return `${OPENGENI_OPERATIONAL_INSTRUCTIONS.slice(0, at)} ${APPLY_PATCH_THEN_GUIDANCE}${OPENGENI_OPERATIONAL_INSTRUCTIONS.slice(at)}`;
 }
 
 function appendDeploymentAgentInstructions(content: string, settings: Settings): string {
@@ -3496,6 +3520,7 @@ export function inspectPersistentAgentInstructions(
     return inspectModularAgentInstructions(settings, options.agentConfig, options);
   }
   const personaTemplate = options.instructionsTemplate ?? settings.agentInstructionsTemplate;
+  const operationalInstructions = legacyOperationalInstructions(settings);
   const personaAndCore = appendDeploymentAgentInstructions(
     composeAgentInstructions(
       personaTemplate,
@@ -3515,7 +3540,7 @@ export function inspectPersistentAgentInstructions(
     {
       id: "operational_contract",
       title: "Operational contract",
-      content: OPENGENI_OPERATIONAL_INSTRUCTIONS,
+      content: operationalInstructions,
     },
     { id: "persona_and_core", title: "Persona and CORE", content: personaAndCore },
   ];
@@ -3601,8 +3626,8 @@ export function inspectPersistentAgentInstructions(
     // persona is not. An agent chat extends it through the agent's
     // instructions, which every chat of that agent shares.
     let stable = sharedPersona
-      ? `${OPENGENI_OPERATIONAL_INSTRUCTIONS}\n\n${personaAndCore}`
-      : OPENGENI_OPERATIONAL_INSTRUCTIONS;
+      ? `${operationalInstructions}\n\n${personaAndCore}`
+      : operationalInstructions;
     if (sharedPersona && agentLayer) {
       const through = layers.findIndex((layer) => layer.id === "agent_instructions");
       const directives = layers.slice(2, through);
@@ -5965,23 +5990,41 @@ const STATIC_NEVER_APPROVAL: Extract<Tool<unknown>, { type: "function" }>["needs
 const APPLY_PATCH_EXAMPLE =
   "*** Begin Patch\n*** Add File: notes/example.txt\n+first line\n+second line\n*** End Patch";
 
+const APPLY_PATCH_FILE_SECTIONS =
+  'File sections: "*** Add File: <path>" followed by lines each prefixed with "+"; "*** Delete File: <path>"; "*** Update File: <path>" (optionally followed by "*** Move to: <path>") with "@@" hunks whose lines start with " " (context), "-" (remove), or "+" (add).';
+
 const APPLY_PATCH_DESCRIPTION = [
   "Create, update, move, or delete files in the sandbox workspace.",
   'Pass exactly one argument, `patch`: a single string in apply_patch format that starts with "*** Begin Patch" and ends with "*** End Patch".',
-  'File sections: "*** Add File: <path>" followed by lines each prefixed with "+"; "*** Delete File: <path>"; "*** Update File: <path>" (optionally followed by "*** Move to: <path>") with "@@" hunks whose lines start with " " (context), "-" (remove), or "+" (add).',
+  APPLY_PATCH_FILE_SECTIONS,
   `Example arguments: ${JSON.stringify({ patch: APPLY_PATCH_EXAMPLE })}`,
 ].join(" ");
 
+/** The description when the tool also offers `then` (see apply-patch-then.ts). */
+const APPLY_PATCH_WITH_THEN_DESCRIPTION = [
+  "Create, update, move, or delete files in the sandbox workspace.",
+  'Pass `patch`: a single string in apply_patch format that starts with "*** Begin Patch" and ends with "*** End Patch".',
+  APPLY_PATCH_FILE_SECTIONS,
+  `Example arguments: ${JSON.stringify({ patch: APPLY_PATCH_EXAMPLE })}`,
+].join(" ");
+
+const APPLY_PATCH_PATCH_PARAMETER = {
+  type: "string",
+  description: `The whole patch as one string, from "*** Begin Patch" to "*** End Patch". Example: ${JSON.stringify(APPLY_PATCH_EXAMPLE)}`,
+} as const;
+
 const APPLY_PATCH_PARAMETERS = {
   type: "object",
-  properties: {
-    patch: {
-      type: "string",
-      description: `The whole patch as one string, from "*** Begin Patch" to "*** End Patch". Example: ${JSON.stringify(APPLY_PATCH_EXAMPLE)}`,
-    },
-  },
+  properties: { patch: APPLY_PATCH_PATCH_PARAMETER },
   required: ["patch"],
   // The SDK parser still accepts its legacy structured/tuple forms at runtime.
+  additionalProperties: true,
+} as const;
+
+const APPLY_PATCH_WITH_THEN_PARAMETERS = {
+  type: "object",
+  properties: { patch: APPLY_PATCH_PATCH_PARAMETER, then: APPLY_PATCH_THEN_PARAMETER },
+  required: ["patch"],
   additionalProperties: true,
 } as const;
 
@@ -6015,7 +6058,10 @@ function unrecognizedApplyPatchArgumentsError(input: string): string | null {
  * never-approval policy, and answer unrecognized argument objects with a
  * corrective tool error the model can retry from.
  */
-function withModelFacingApplyPatchFunction(tools: Tool<unknown>[]): Tool<unknown>[] {
+function withModelFacingApplyPatchFunction(
+  tools: Tool<unknown>[],
+  options: { then?: boolean } = {},
+): Tool<unknown>[] {
   return tools.map((capabilityTool) => {
     if (capabilityTool.type !== "function" || capabilityTool.name !== "apply_patch") {
       return capabilityTool;
@@ -6023,8 +6069,10 @@ function withModelFacingApplyPatchFunction(tools: Tool<unknown>[]): Tool<unknown
     const invoke = capabilityTool.invoke;
     return {
       ...capabilityTool,
-      description: APPLY_PATCH_DESCRIPTION,
-      parameters: APPLY_PATCH_PARAMETERS as unknown as typeof capabilityTool.parameters,
+      description: options.then ? APPLY_PATCH_WITH_THEN_DESCRIPTION : APPLY_PATCH_DESCRIPTION,
+      parameters: (options.then
+        ? APPLY_PATCH_WITH_THEN_PARAMETERS
+        : APPLY_PATCH_PARAMETERS) as unknown as typeof capabilityTool.parameters,
       strict: false,
       needsApproval: STATIC_NEVER_APPROVAL,
       invoke: async (runContext, input, details) => {
@@ -6149,7 +6197,9 @@ function buildAgentCapabilitiesFromComposition(
   // results below; text-only/unproven wires remove the image tool entirely.
   // Scoped to filesystem: shell() is always a function-tool transport.
   const configureFilesystemTools = (tools: Tool<unknown>[]): Tool<unknown>[] => {
-    const typedTools = withModelFacingApplyPatchFunction(withCodexAddFileApplyPatch(tools));
+    const typedTools = withModelFacingApplyPatchFunction(withCodexAddFileApplyPatch(tools), {
+      then: settings.experimentApplyPatchThen,
+    });
     const transportTools =
       options.structuredToolTransport === false
         ? withStructuredViewImageFunctionResults(typedTools)
@@ -6286,6 +6336,15 @@ function buildAgentCapabilitiesFromComposition(
         return withLeanExecCommandArguments(original.call(this), { finishFloor });
       };
     }
+  }
+  // `then` on the function apply_patch runs through the final exec_command
+  // above, so this link is installed after every other tool wrapper.
+  const shellCapability = caps.find((capability) => capability.type === "shell");
+  if (settings.experimentApplyPatchThen && shellCapability) {
+    linkApplyPatchThen(
+      filesystemCapability as unknown as Parameters<typeof linkApplyPatchThen>[0],
+      shellCapability as unknown as Parameters<typeof linkApplyPatchThen>[1],
+    );
   }
   return caps;
 }

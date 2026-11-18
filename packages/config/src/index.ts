@@ -1396,6 +1396,13 @@ const SettingsSchema = z.object({
   // Lean non-strict `exec_command` schema: only `cmd` and `max_output_tokens`
   // are required (on by default after an A/B; set false to disable).
   experimentOutputCost: EnvBoolean.default(true), // OPENGENI_EXPERIMENT_OUTPUT_COST
+  // Optional `then` command on the function `apply_patch` tool: run once after
+  // the patch applies, through exec_command, with its result in the same tool
+  // output (on by default; set false to remove the argument).
+  experimentApplyPatchThen: EnvBoolean.default(true), // OPENGENI_EXPERIMENT_APPLY_PATCH_THEN
+  // One system-prompt sentence next to the apply_patch guidance that suggests
+  // `then` for the check after an edit (off by default; for A/B evaluation).
+  experimentApplyPatchThenGuidance: EnvBoolean.default(false), // OPENGENI_EXPERIMENT_APPLY_PATCH_THEN_GUIDANCE
   // Explicit operator opt-in for active turns to continue using provider extra credits.
   // Default: re-admit each model request against included subscription usage.
   // SuperGrok/xAI connected subscription. This is a workspace-scoped OAuth
@@ -6591,6 +6598,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     experimentSystemPromptCacheSplit: optional("OPENGENI_EXPERIMENT_SYSTEM_PROMPT_CACHE_SPLIT"),
     experimentCutPolling: optional("OPENGENI_EXPERIMENT_CUT_POLLING"),
     experimentOutputCost: optional("OPENGENI_EXPERIMENT_OUTPUT_COST"),
+    experimentApplyPatchThen: optional("OPENGENI_EXPERIMENT_APPLY_PATCH_THEN"),
+    experimentApplyPatchThenGuidance: optional("OPENGENI_EXPERIMENT_APPLY_PATCH_THEN_GUIDANCE"),
     supergrokSubscriptionEnabled: optional("OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED"),
     claudeSubscriptionEnabled: optional("OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED"),
     claudeCodeApiKeyEnabled: optional("OPENGENI_CLAUDE_CODE_API_KEY_ENABLED"),

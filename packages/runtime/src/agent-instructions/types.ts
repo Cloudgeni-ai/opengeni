@@ -110,6 +110,8 @@ export type AgentPromptContext = {
 export type AgentPromptExperiments = {
   /** OPENGENI_EXPERIMENT_KNOWLEDGE_RETRIEVAL_GUIDANCE */
   knowledgeRetrievalGuidance?: boolean | undefined;
+  /** OPENGENI_EXPERIMENT_APPLY_PATCH_THEN_GUIDANCE (with OPENGENI_EXPERIMENT_APPLY_PATCH_THEN) */
+  applyPatchThenGuidance?: boolean | undefined;
 };
 
 /**

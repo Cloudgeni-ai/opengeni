@@ -3103,6 +3103,21 @@ omitted `login`, `tty` or `yield_time_ms` is filled with `false`, `false` and
 `10000` before every inner layer, so execution matches the values models chose
 under the strict schema; `shell` and `workdir` keep their absent meaning.
 
+The function `apply_patch` tool offers an optional `then` shell command
+(settings.experimentApplyPatchThen, on by default;
+`OPENGENI_EXPERIMENT_APPLY_PATCH_THEN=false` removes the argument). It runs once,
+only when every patch operation applied, through the same capability set's
+outermost `exec_command` tool (lean defaults, turn cancellation, finish floor,
+secret references and leak guard, routing, provider truncation and approval
+policy), under its own call id `<callId>:then`, and its result follows the patch
+result in the same tool output. It runs inside the exclusive `apply_patch` call,
+so the batch ordering is unchanged. A thrown shell failure is rendered into the
+result rather than propagated, so the edit call is never settled as not started
+and replayed; turn cancellation still propagates. The hosted `apply_patch` tool
+type has no `then`. `OPENGENI_EXPERIMENT_APPLY_PATCH_THEN_GUIDANCE=true` adds one
+system-prompt sentence about it (off by default). See
+`packages/runtime/src/apply-patch-then.ts`.
+
 Internal synchronous filesystem commands use `sandbox/synchronous-command.ts`
 to collect complete output from the same invocation until provider terminal/EOF
 proof. Routing retains and atomically captures the raw initial receipt before
